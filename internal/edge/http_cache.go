@@ -173,7 +173,7 @@ func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBindin
 		if strings.TrimSpace(policy.ID) == "" {
 			continue
 		}
-		if !edgeCachePathMatches(policy.PathPatterns, r.URL.Path) {
+		if !edgeCachePolicyMatchesPath(policy, r.URL.Path) {
 			if decision.Reason == "no cache policy" {
 				decision.Reason = "path not covered by cache policy"
 			}
@@ -368,8 +368,42 @@ func edgeCachePathMatches(patterns []string, path string) bool {
 	return false
 }
 
+func edgeCachePolicyMatchesPath(policy model.CachePolicy, path string) bool {
+	if edgeCachePathMatches(policy.PathPatterns, path) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(policy.Kind), model.CachePolicyKindHTMLDocuments) {
+		return edgeCachePathLooksLikeHTMLDocument(path)
+	}
+	return false
+}
+
 func pathMatch(pattern, name string) (bool, error) {
 	return filepath.Match(strings.TrimSpace(pattern), strings.TrimSpace(name))
+}
+
+func edgeCachePathLooksLikeHTMLDocument(path string) bool {
+	path = edgeCacheNormalizePath(path)
+	lower := strings.ToLower(path)
+	switch {
+	case path == "/" || strings.EqualFold(path, "/index.html") || strings.HasSuffix(lower, ".html"):
+		return true
+	case lower == "/api" || strings.HasPrefix(lower, "/api/"):
+		return false
+	case lower == "/v1" || strings.HasPrefix(lower, "/v1/"):
+		return false
+	case lower == "/v2" || strings.HasPrefix(lower, "/v2/"):
+		return false
+	case lower == "/graphql" || strings.HasPrefix(lower, "/graphql/"):
+		return false
+	case lower == "/healthz" || lower == "/readyz" || lower == "/metrics":
+		return false
+	case strings.HasPrefix(lower, "/_next/"):
+		return false
+	case strings.HasPrefix(lower, "/assets/"), strings.HasPrefix(lower, "/static/"):
+		return false
+	}
+	return filepath.Ext(path) == ""
 }
 
 func edgeAssetClassForRequest(r *http.Request) string {
@@ -377,9 +411,10 @@ func edgeAssetClassForRequest(r *http.Request) string {
 		return "other"
 	}
 	path := edgeCacheNormalizePath(r.URL.Path)
-	switch {
-	case path == "/" || strings.EqualFold(path, "/index.html") || strings.HasSuffix(strings.ToLower(path), ".html"):
+	if edgeCachePathLooksLikeHTMLDocument(path) {
 		return "html_document"
+	}
+	switch {
 	case strings.HasPrefix(path, "/_next/static/"):
 		return "next_static"
 	case strings.HasPrefix(path, "/assets/"), strings.HasPrefix(path, "/static/"):

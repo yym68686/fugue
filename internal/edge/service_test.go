@@ -1868,7 +1868,7 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 
 	var upstreamHits atomic.Int64
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+		if r.URL.Path != "/" && r.URL.Path != "/zh-CN" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		if r.Header.Get("RSC") != "" {
@@ -1968,6 +1968,18 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 	if upstreamHits.Load() != 2 {
 		t.Fatalf("expected stale response to trigger one background revalidation, hits=%d", upstreamHits.Load())
 	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entry, ok = service.edgeCacheLoad(decision)
+		if ok && strings.Contains(string(entry.Body), "shell 2") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entry, ok = service.edgeCacheLoad(decision)
+	if !ok || !strings.Contains(string(entry.Body), "shell 2") {
+		t.Fatalf("expected background revalidation to refresh cached shell, ok=%t body=%q", ok, string(entry.Body))
+	}
 	refreshed := httptest.NewRecorder()
 	refreshedReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
 	service.ProxyHandler().ServeHTTP(refreshed, refreshedReq)
@@ -1997,10 +2009,36 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 		t.Fatalf("expected cookie request to bypass HTML cache, status=%d cache=%q hits=%d body=%q", cookie.Code, cookie.Header().Get("X-Fugue-Cache"), upstreamHits.Load(), cookie.Body.String())
 	}
 
+	localizedFirst := httptest.NewRecorder()
+	localizedFirstReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/zh-CN", nil)
+	service.ProxyHandler().ServeHTTP(localizedFirst, localizedFirstReq)
+	if localizedFirst.Code != http.StatusOK || localizedFirst.Header().Get("X-Fugue-Cache") != "miss" {
+		t.Fatalf("expected extensionless localized HTML request to miss cache, got status=%d cache=%q body=%q", localizedFirst.Code, localizedFirst.Header().Get("X-Fugue-Cache"), localizedFirst.Body.String())
+	}
+
+	localizedSecond := httptest.NewRecorder()
+	localizedSecondReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/zh-CN", nil)
+	service.ProxyHandler().ServeHTTP(localizedSecond, localizedSecondReq)
+	if localizedSecond.Code != http.StatusOK || localizedSecond.Header().Get("X-Fugue-Cache") != "hit" {
+		t.Fatalf("expected extensionless localized HTML request to hit cache, got status=%d cache=%q body=%q", localizedSecond.Code, localizedSecond.Header().Get("X-Fugue-Cache"), localizedSecond.Body.String())
+	}
+	if localizedFirst.Body.String() != localizedSecond.Body.String() || upstreamHits.Load() != 5 {
+		t.Fatalf("expected cached localized HTML shell, hits=%d first=%q second=%q", upstreamHits.Load(), localizedFirst.Body.String(), localizedSecond.Body.String())
+	}
+
+	apiDecision := service.edgeCacheDecision(httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/api/status", nil), bundle.Routes[0])
+	if apiDecision.Enabled || apiDecision.AssetClass == "html_document" {
+		t.Fatalf("expected common API path to stay outside HTML document cache, enabled=%v asset=%q reason=%q", apiDecision.Enabled, apiDecision.AssetClass, apiDecision.Reason)
+	}
+	v1Decision := service.edgeCacheDecision(httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/v1/chat/completions", nil), bundle.Routes[0])
+	if v1Decision.Enabled || v1Decision.AssetClass == "html_document" {
+		t.Fatalf("expected common versioned API path to stay outside HTML document cache, enabled=%v asset=%q reason=%q", v1Decision.Enabled, v1Decision.AssetClass, v1Decision.Reason)
+	}
+
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 2`,
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 3`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 2`,
 		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="stale",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
