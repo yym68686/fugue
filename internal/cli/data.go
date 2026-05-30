@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ const (
 	dataControlPlaneRequestTimeout            = 10 * time.Minute
 	dataTransferBlobPageLimit                 = 1024
 	defaultDataTransferConcurrency            = 32
+	defaultDataHashConcurrency                = 4
 	dataCheckpointBlobThreshold               = 1024
 	dataCheckpointByteThreshold         int64 = 1 << 30
 	dataObjectTransferMaxAttempts             = 5
@@ -57,6 +59,30 @@ var defaultDataIgnore = []string{
 
 var dataHashCacheNow = time.Now
 var dataControlPlaneRetrySleep = time.Sleep
+
+func defaultDataHashWorkerCount() int {
+	cpus := runtime.NumCPU()
+	if cpus <= 0 {
+		return defaultDataHashConcurrency
+	}
+	if cpus < defaultDataHashConcurrency {
+		return cpus
+	}
+	return defaultDataHashConcurrency
+}
+
+func normalizeDataConcurrency(value, fallback, max int) int {
+	if value <= 0 {
+		value = fallback
+	}
+	if value <= 0 {
+		value = 1
+	}
+	if max > 0 && value > max {
+		value = max
+	}
+	return value
+}
 
 type dataConfig struct {
 	Version   int               `json:"version" yaml:"version"`
@@ -410,6 +436,7 @@ func (c *CLI) newDataUntrackCommand() *cobra.Command {
 
 func (c *CLI) newDataStatusCommand() *cobra.Command {
 	var noProgress bool
+	hashConcurrency := defaultDataHashWorkerCount()
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show local or account-level data workspace status",
@@ -435,7 +462,7 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 				return err
 			}
 			scanProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Hashing local data", estimate.Bytes)
-			manifest, pathsByDigest, err := scanDataManifestWithProgress(".", cfg, "", scanProgress.advance)
+			manifest, pathsByDigest, err := scanDataManifestWithConcurrency(".", cfg, "", scanProgress.advance, hashConcurrency)
 			if err != nil {
 				return err
 			}
@@ -512,6 +539,7 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
+	cmd.Flags().IntVar(&hashConcurrency, "hash-concurrency", hashConcurrency, "Local file hashing concurrency")
 	return cmd
 }
 
@@ -566,6 +594,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 	var version, message, assetName string
 	var dryRun, noResume, noProgress bool
 	var concurrency int
+	hashConcurrency := defaultDataHashWorkerCount()
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Upload changed data assets and create a new data version",
@@ -595,7 +624,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 				return err
 			}
 			scanProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Hashing local data", estimate.Bytes)
-			manifest, pathsByDigest, err := scanDataManifestWithProgress(".", cfg, assetName, scanProgress.advance)
+			manifest, pathsByDigest, err := scanDataManifestWithConcurrency(".", cfg, assetName, scanProgress.advance, hashConcurrency)
 			if err != nil {
 				return err
 			}
@@ -704,6 +733,7 @@ func (c *CLI) newDataPushCommand() *cobra.Command {
 	cmd.Flags().StringVar(&assetName, "asset", "", "Only push one asset")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show upload plan without uploading")
 	cmd.Flags().IntVar(&concurrency, "concurrency", defaultDataTransferConcurrency, "Transfer concurrency")
+	cmd.Flags().IntVar(&hashConcurrency, "hash-concurrency", hashConcurrency, "Local file hashing concurrency")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Ignore local transfer resume state")
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	return cmd
@@ -713,6 +743,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 	var version, assetName, toPath string
 	var verify, dryRun, keepLocal, overwrite, prune, confirm, noResume, noProgress bool
 	var concurrency int
+	hashConcurrency := defaultDataHashWorkerCount()
 	cmd := &cobra.Command{
 		Use:   "pull",
 		Short: "Download a data workspace version into the current project",
@@ -760,7 +791,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 				return err
 			}
 			preflightProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Checking local files", preflightBytes)
-			pullPlan, err := buildPullPlanWithProgress(".", targetCfg, planResp.Manifest, overwrite, keepLocal, prune, preflightProgress.advance)
+			pullPlan, err := buildPullPlanWithConcurrency(".", targetCfg, planResp.Manifest, overwrite, keepLocal, prune, preflightProgress.advance, hashConcurrency)
 			if err != nil {
 				return err
 			}
@@ -787,24 +818,6 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 				return err
 			}
 			progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
-			var downloadedBytes int64
-			var downloadedFiles int
-			var lastCheckpointBytes int64
-			var lastCheckpointFiles int
-			flushDownloadCheckpoint := func(force bool) error {
-				if downloadedFiles == 0 {
-					return nil
-				}
-				if !force && downloadedFiles-lastCheckpointFiles < dataCheckpointBlobThreshold && downloadedBytes-lastCheckpointBytes < dataCheckpointByteThreshold {
-					return nil
-				}
-				if err := client.CheckpointDataTransfer(planResp.Transfer.ID, downloadedBytes, downloadedFiles, nil); err != nil {
-					return err
-				}
-				lastCheckpointBytes = downloadedBytes
-				lastCheckpointFiles = downloadedFiles
-				return nil
-			}
 			for _, removePath := range pullPlan.Prune {
 				if prune && confirm {
 					if err := os.Remove(removePath); err != nil && !os.IsNotExist(err) {
@@ -825,68 +838,13 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 					return err
 				}
 			}
-			for _, entry := range pullPlan.Download {
-				target, err := targetPathForEntry(".", targetCfg, entry)
-				if err != nil {
-					return err
-				}
-				if entry.Kind == model.DataManifestEntryKindDir {
-					if err := os.MkdirAll(target, os.FileMode(entry.Mode)); err != nil {
-						return err
-					}
-					continue
-				}
-				if entry.Kind == model.DataManifestEntryKindSymlink {
-					if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-						return err
-					}
-					if overwrite {
-						_ = os.Remove(target)
-					}
-					if err := os.Symlink(entry.LinkTarget, target); err != nil && !os.IsExist(err) {
-						return err
-					}
-					continue
-				}
-				blob := blobByDigest[entry.SHA256]
-				if blob.DownloadURL == "" {
-					return fmt.Errorf("download url missing for %s", entry.SHA256)
-				}
-				if noProgress && !c.wantsJSON() {
-					fmt.Fprintf(c.stdout, "Downloading %s  %s\n", target, formatBytes(entry.Size))
-				}
-				if err := retryDataAuthorization(func() error {
-					return client.DownloadDataBlobWithProgress(blob.DownloadURL, target, entry.SHA256, entry.Size, !noResume, overwrite, concurrency, progress.advance)
-				}, func() error {
-					refresh, err := client.RefreshDataTransferAuthorization(planResp.Transfer.ID)
-					if err != nil {
-						return err
-					}
-					for _, refreshed := range refresh.Blobs {
-						blobByDigest[refreshed.SHA256] = refreshed
-					}
-					refreshed, ok := blobByDigest[entry.SHA256]
-					if !ok {
-						return fmt.Errorf("refreshed transfer plan is missing blob %s", entry.SHA256)
-					}
-					blob = refreshed
-					return nil
-				}); err != nil {
-					return err
-				}
-				downloadedBytes += entry.Size
-				downloadedFiles++
-				if err := flushDownloadCheckpoint(false); err != nil {
-					return err
-				}
-			}
-			if err := flushDownloadCheckpoint(true); err != nil {
+			if _, _, err := c.downloadDataManifestEntries(client, planResp.Transfer.ID, ".", targetCfg, pullPlan.Download, blobByDigest, !noResume, overwrite, noProgress, concurrency, progress); err != nil {
 				return err
 			}
 			progress.finish()
 			if verify {
 				verifyProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Verifying local data", totalManifestFileBytes(planResp.Manifest.Entries))
-				if err := verifyPulledManifestWithProgress(".", targetCfg, planResp.Manifest, verifyProgress.advance); err != nil {
+				if err := verifyPulledManifestWithConcurrency(".", targetCfg, planResp.Manifest, verifyProgress.advance, hashConcurrency); err != nil {
 					return err
 				}
 				verifyProgress.finish()
@@ -923,12 +881,15 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Ignore local transfer resume state")
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 8, "Transfer concurrency")
+	cmd.Flags().IntVar(&hashConcurrency, "hash-concurrency", hashConcurrency, "Local file hashing concurrency")
 	return cmd
 }
 
 func (c *CLI) newDataCloneCommand() *cobra.Command {
 	var toPath, version, assetName, grant string
 	var noProgress bool
+	var concurrency int
+	hashConcurrency := defaultDataHashWorkerCount()
 	cmd := &cobra.Command{
 		Use:   "clone <workspace>",
 		Short: "Clone a data workspace into a target directory",
@@ -972,7 +933,7 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 					return err
 				}
 				preflightProgress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Checking local files", preflightBytes)
-				pullPlan, err := buildPullPlanWithProgress(target, cfg, planResp.Manifest, false, false, false, preflightProgress.advance)
+				pullPlan, err := buildPullPlanWithConcurrency(target, cfg, planResp.Manifest, false, false, false, preflightProgress.advance, hashConcurrency)
 				if err != nil {
 					return err
 				}
@@ -989,24 +950,8 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 					return err
 				}
 				progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
-				for _, entry := range pullPlan.Download {
-					targetPath, err := targetPathForEntry(target, cfg, entry)
-					if err != nil {
-						return err
-					}
-					if entry.Kind == model.DataManifestEntryKindDir {
-						if err := os.MkdirAll(targetPath, os.FileMode(entry.Mode)); err != nil {
-							return err
-						}
-						continue
-					}
-					if entry.Kind != model.DataManifestEntryKindFile {
-						continue
-					}
-					blob := blobByDigest[entry.SHA256]
-					if err := client.DownloadDataBlobWithProgress(blob.DownloadURL, targetPath, entry.SHA256, entry.Size, true, false, 8, progress.advance); err != nil {
-						return err
-					}
+				if _, _, err := c.downloadDataManifestEntries(client, planResp.Transfer.ID, target, cfg, pullPlan.Download, blobByDigest, true, false, noProgress, concurrency, progress); err != nil {
+					return err
 				}
 				progress.finish()
 				if _, err := client.CompleteDataTransfer(planResp.Transfer.ID, map[string]any{"snapshot_id": planResp.Snapshot.ID, "bytes_done": planResp.Manifest.TotalBytes, "files_done": planResp.Manifest.FileCount}); err != nil {
@@ -1030,6 +975,8 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 	cmd.Flags().StringVar(&assetName, "asset", "", "Only pull one asset after cloning")
 	cmd.Flags().StringVar(&grant, "grant", "", "Data grant secret")
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 8, "Transfer concurrency")
+	cmd.Flags().IntVar(&hashConcurrency, "hash-concurrency", hashConcurrency, "Local file hashing concurrency")
 	return cmd
 }
 
@@ -1546,6 +1493,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 	}}
 	cmd.AddCommand(watch)
 	var resumeConcurrency int
+	resumeHashConcurrency := defaultDataHashWorkerCount()
 	resume := &cobra.Command{Use: "resume <transfer-id>", Short: "Resume a data transfer", Example: strings.TrimSpace(`
   fugue data transfer resume data_transfer_123
 `), Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -1572,7 +1520,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				return err
 			}
 			scanProgress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Hashing local data", estimate.Bytes)
-			manifest, pathsByDigest, err := scanDataManifestWithProgress(".", cfg, "", scanProgress.advance)
+			manifest, pathsByDigest, err := scanDataManifestWithConcurrency(".", cfg, "", scanProgress.advance, resumeHashConcurrency)
 			if err != nil {
 				return err
 			}
@@ -1638,7 +1586,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				return err
 			}
 			preflightProgress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Checking local files", preflightBytes)
-			pullPlan, err := buildPullPlanWithProgress(".", cfg, manifest, false, false, false, preflightProgress.advance)
+			pullPlan, err := buildPullPlanWithConcurrency(".", cfg, manifest, false, false, false, preflightProgress.advance, resumeHashConcurrency)
 			if err != nil {
 				return err
 			}
@@ -1655,18 +1603,8 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				return err
 			}
 			progress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
-			for _, entry := range pullPlan.Download {
-				if entry.Kind != model.DataManifestEntryKindFile {
-					continue
-				}
-				target, err := targetPathForEntry(".", cfg, entry)
-				if err != nil {
-					return err
-				}
-				blob := blobByDigest[entry.SHA256]
-				if err := client.DownloadDataBlobWithProgress(blob.DownloadURL, target, entry.SHA256, entry.Size, true, false, 8, progress.advance); err != nil {
-					return err
-				}
+			if _, _, err := c.downloadDataManifestEntries(client, refresh.Transfer.ID, ".", cfg, pullPlan.Download, blobByDigest, true, false, false, resumeConcurrency, progress); err != nil {
+				return err
 			}
 			progress.finish()
 			complete, err := client.CompleteDataTransfer(refresh.Transfer.ID, map[string]any{
@@ -1692,6 +1630,7 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 		}
 	}}
 	resume.Flags().IntVar(&resumeConcurrency, "concurrency", defaultDataTransferConcurrency, "Transfer concurrency")
+	resume.Flags().IntVar(&resumeHashConcurrency, "hash-concurrency", resumeHashConcurrency, "Local file hashing concurrency")
 	cmd.AddCommand(resume)
 	return cmd
 }
@@ -2296,11 +2235,30 @@ func scanDataManifest(root string, cfg dataConfig, onlyAsset string) (model.Data
 }
 
 func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress) (model.DataManifest, map[string]string, error) {
+	return scanDataManifestWithConcurrency(root, cfg, onlyAsset, progress, defaultDataHashWorkerCount())
+}
+
+type dataManifestHashJob struct {
+	EntryIndex int
+	Path       string
+	Info       os.FileInfo
+}
+
+type dataManifestHashResult struct {
+	EntryIndex int
+	Path       string
+	SHA256     string
+	CacheEntry dataHashCacheEntry
+	Err        error
+}
+
+func scanDataManifestWithConcurrency(root string, cfg dataConfig, onlyAsset string, progress dataTransferProgress, hashConcurrency int) (model.DataManifest, map[string]string, error) {
 	entries := []model.DataManifestEntry{}
 	pathsByDigest := map[string]string{}
 	cache, _ := loadDataHashCache(root)
 	cacheLookup := newDataHashCacheLookup(cache)
 	nextCacheEntries := []dataHashCacheEntry{}
+	hashJobs := []dataManifestHashJob{}
 	for _, asset := range cfg.Assets {
 		if onlyAsset != "" && asset.Name != onlyAsset {
 			continue
@@ -2352,18 +2310,13 @@ func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string,
 				} else if info.Mode().IsRegular() {
 					entry.Kind = model.DataManifestEntryKindFile
 					entry.Size = info.Size()
-					sum, cacheEntry, err := sha256LocalFileWithCache(root, current, info, cacheLookup, progress)
-					if err != nil {
-						return err
-					}
-					entry.SHA256 = sum
-					entry.ObjectKey = model.DataObjectKey(sum)
-					pathsByDigest[sum] = current
-					nextCacheEntries = append(nextCacheEntries, cacheEntry)
 				} else {
 					return nil
 				}
 				entries = append(entries, entry)
+				if entry.Kind == model.DataManifestEntryKindFile {
+					hashJobs = append(hashJobs, dataManifestHashJob{EntryIndex: len(entries) - 1, Path: current, Info: info})
+				}
 				return nil
 			})
 			if err != nil {
@@ -2372,19 +2325,81 @@ func scanDataManifestWithProgress(root string, cfg dataConfig, onlyAsset string,
 			continue
 		}
 		if info.Mode().IsRegular() {
-			sum, cacheEntry, err := sha256LocalFileWithCache(root, assetPath, info, cacheLookup, progress)
-			if err != nil {
-				return model.DataManifest{}, nil, err
-			}
-			entry := model.DataManifestEntry{AssetName: asset.Name, RelativePath: ".", Kind: model.DataManifestEntryKindFile, Size: info.Size(), Mode: int64(info.Mode()), MTime: info.ModTime().UTC(), SHA256: sum, ObjectKey: model.DataObjectKey(sum)}
+			entry := model.DataManifestEntry{AssetName: asset.Name, RelativePath: ".", Kind: model.DataManifestEntryKindFile, Size: info.Size(), Mode: int64(info.Mode()), MTime: info.ModTime().UTC()}
 			entries = append(entries, entry)
-			pathsByDigest[sum] = assetPath
-			nextCacheEntries = append(nextCacheEntries, cacheEntry)
+			hashJobs = append(hashJobs, dataManifestHashJob{EntryIndex: len(entries) - 1, Path: assetPath, Info: info})
 		}
+	}
+	hashResults, err := hashDataManifestFiles(root, cacheLookup, hashJobs, progress, hashConcurrency)
+	if err != nil {
+		return model.DataManifest{}, nil, err
+	}
+	for _, result := range hashResults {
+		entries[result.EntryIndex].SHA256 = result.SHA256
+		entries[result.EntryIndex].ObjectKey = model.DataObjectKey(result.SHA256)
+		pathsByDigest[result.SHA256] = result.Path
+		nextCacheEntries = append(nextCacheEntries, result.CacheEntry)
 	}
 	_ = saveDataHashCache(root, cfg, onlyAsset, cache, nextCacheEntries)
 	manifest := model.NormalizeDataManifest(model.DataManifest{Entries: entries})
 	return manifest, pathsByDigest, nil
+}
+
+func hashDataManifestFiles(root string, cache dataHashCacheLookup, jobs []dataManifestHashJob, progress dataTransferProgress, concurrency int) ([]dataManifestHashResult, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	workerCount := normalizeDataConcurrency(concurrency, defaultDataHashWorkerCount(), len(jobs))
+	results := make([]dataManifestHashResult, len(jobs))
+	if workerCount <= 1 {
+		for idx, job := range jobs {
+			sum, cacheEntry, err := sha256LocalFileWithCache(root, job.Path, job.Info, cache, progress)
+			if err != nil {
+				return nil, err
+			}
+			results[idx] = dataManifestHashResult{EntryIndex: job.EntryIndex, Path: job.Path, SHA256: sum, CacheEntry: cacheEntry}
+		}
+		return results, nil
+	}
+	jobCh := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobCh {
+			job := jobs[idx]
+			sum, cacheEntry, err := sha256LocalFileWithCache(root, job.Path, job.Info, cache, progress)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			results[idx] = dataManifestHashResult{EntryIndex: job.EntryIndex, Path: job.Path, SHA256: sum, CacheEntry: cacheEntry}
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for idx := range jobs {
+		select {
+		case err := <-errCh:
+			close(jobCh)
+			wg.Wait()
+			return nil, err
+		case jobCh <- idx:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return nil, err
+	default:
+		return results, nil
+	}
 }
 
 func shouldIgnoreDataPath(rel, base string, patterns []string) bool {
@@ -2606,7 +2621,11 @@ func findUntrackedLargeDataDirectories(root string, cfg dataConfig, threshold in
 	if err != nil {
 		return nil, err
 	}
-	var out []untrackedDataDirectory
+	type untrackedDirJob struct {
+		name     string
+		fullPath string
+	}
+	jobs := []untrackedDirJob{}
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -2620,31 +2639,65 @@ func findUntrackedLargeDataDirectories(root string, cfg dataConfig, threshold in
 		if _, ok := tracked[fullPath]; ok {
 			continue
 		}
-		var bytes int64
-		err := filepath.WalkDir(fullPath, func(current string, dirEntry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if dirEntry.IsDir() {
-				if current != fullPath && shouldIgnoreDataPath(filepath.ToSlash(strings.TrimPrefix(current, fullPath+string(os.PathSeparator))), dirEntry.Name(), cfg.Ignore) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			info, err := dirEntry.Info()
+		jobs = append(jobs, untrackedDirJob{name: name, fullPath: fullPath})
+	}
+	var out []untrackedDataDirectory
+	if len(jobs) == 0 {
+		return out, nil
+	}
+	workerCount := normalizeDataConcurrency(defaultDataHashWorkerCount(), defaultDataHashConcurrency, len(jobs))
+	if workerCount <= 1 {
+		for _, job := range jobs {
+			dir, err := scanUntrackedLargeDataDirectory(job.fullPath, job.name, cfg, threshold)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			if info.Mode().IsRegular() {
-				bytes += info.Size()
+			if dir.Bytes >= threshold {
+				out = append(out, dir)
 			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
 		}
-		if bytes >= threshold {
-			out = append(out, untrackedDataDirectory{Path: "./" + filepath.ToSlash(name), Bytes: bytes})
+	} else {
+		jobCh := make(chan untrackedDirJob)
+		errCh := make(chan error, 1)
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		worker := func() {
+			defer wg.Done()
+			for job := range jobCh {
+				dir, err := scanUntrackedLargeDataDirectory(job.fullPath, job.name, cfg, threshold)
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+				if dir.Bytes >= threshold {
+					mu.Lock()
+					out = append(out, dir)
+					mu.Unlock()
+				}
+			}
+		}
+		for i := 0; i < workerCount; i++ {
+			wg.Add(1)
+			go worker()
+		}
+		for _, job := range jobs {
+			select {
+			case err := <-errCh:
+				close(jobCh)
+				wg.Wait()
+				return nil, err
+			case jobCh <- job:
+			}
+		}
+		close(jobCh)
+		wg.Wait()
+		select {
+		case err := <-errCh:
+			return nil, err
+		default:
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -2654,6 +2707,36 @@ func findUntrackedLargeDataDirectories(root string, cfg dataConfig, threshold in
 		return out[i].Bytes > out[j].Bytes
 	})
 	return out, nil
+}
+
+func scanUntrackedLargeDataDirectory(fullPath, name string, cfg dataConfig, threshold int64) (untrackedDataDirectory, error) {
+	var bytes int64
+	err := filepath.WalkDir(fullPath, func(current string, dirEntry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if dirEntry.IsDir() {
+			if current != fullPath && shouldIgnoreDataPath(filepath.ToSlash(strings.TrimPrefix(current, fullPath+string(os.PathSeparator))), dirEntry.Name(), cfg.Ignore) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := dirEntry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			bytes += info.Size()
+		}
+		return nil
+	})
+	if err != nil {
+		return untrackedDataDirectory{}, err
+	}
+	if bytes < threshold {
+		return untrackedDataDirectory{}, nil
+	}
+	return untrackedDataDirectory{Path: "./" + filepath.ToSlash(name), Bytes: bytes}, nil
 }
 
 func sha256LocalFile(filePath string) (string, error) {
@@ -2695,8 +2778,28 @@ func buildPullPlan(root string, cfg dataConfig, manifest model.DataManifest, ove
 }
 
 func buildPullPlanWithProgress(root string, cfg dataConfig, manifest model.DataManifest, overwrite, keepLocal, prune bool, progress dataTransferProgress) (pullPlan, error) {
+	return buildPullPlanWithConcurrency(root, cfg, manifest, overwrite, keepLocal, prune, progress, defaultDataHashWorkerCount())
+}
+
+type pullPlanHashJob struct {
+	Index  int
+	Entry  model.DataManifestEntry
+	Target string
+}
+
+type pullPlanHashResult struct {
+	Index  int
+	Entry  model.DataManifestEntry
+	Target string
+	SHA256 string
+	Err    error
+}
+
+func buildPullPlanWithConcurrency(root string, cfg dataConfig, manifest model.DataManifest, overwrite, keepLocal, prune bool, progress dataTransferProgress, hashConcurrency int) (pullPlan, error) {
 	var plan pullPlan
 	expectedByAsset := map[string]map[string]struct{}{}
+	hashJobs := []pullPlanHashJob{}
+	hashJobIndex := 0
 	for _, entry := range manifest.Entries {
 		target, err := targetPathForEntry(root, cfg, entry)
 		if err != nil {
@@ -2731,19 +2834,8 @@ func buildPullPlanWithProgress(root string, cfg dataConfig, manifest model.DataM
 			continue
 		}
 		if entry.Kind == model.DataManifestEntryKindFile && info.Mode().IsRegular() {
-			localDigest, err := sha256LocalFileWithProgress(target, progress)
-			if err != nil {
-				return plan, err
-			}
-			if localDigest == entry.SHA256 {
-				plan.Skip = append(plan.Skip, entry)
-			} else if overwrite {
-				plan.Download = append(plan.Download, entry)
-			} else if keepLocal {
-				plan.Warnings = append(plan.Warnings, pullConflict{"changed", target, "checksum differs from version manifest, keeping local file"})
-			} else {
-				plan.Conflicts = append(plan.Conflicts, pullConflict{"changed", target, "checksum differs from version manifest"})
-			}
+			hashJobs = append(hashJobs, pullPlanHashJob{Index: hashJobIndex, Entry: entry, Target: target})
+			hashJobIndex++
 			continue
 		}
 		if entry.Kind == model.DataManifestEntryKindSymlink {
@@ -2758,6 +2850,21 @@ func buildPullPlanWithProgress(root string, cfg dataConfig, manifest model.DataM
 			} else {
 				plan.Conflicts = append(plan.Conflicts, pullConflict{"changed", target, "symlink target differs from version manifest"})
 			}
+		}
+	}
+	hashResults, err := hashPullPlanFiles(hashJobs, progress, hashConcurrency)
+	if err != nil {
+		return plan, err
+	}
+	for _, result := range hashResults {
+		if result.SHA256 == result.Entry.SHA256 {
+			plan.Skip = append(plan.Skip, result.Entry)
+		} else if overwrite {
+			plan.Download = append(plan.Download, result.Entry)
+		} else if keepLocal {
+			plan.Warnings = append(plan.Warnings, pullConflict{"changed", result.Target, "checksum differs from version manifest, keeping local file"})
+		} else {
+			plan.Conflicts = append(plan.Conflicts, pullConflict{"changed", result.Target, "checksum differs from version manifest"})
 		}
 	}
 	for _, asset := range cfg.Assets {
@@ -2791,6 +2898,63 @@ func buildPullPlanWithProgress(root string, cfg dataConfig, manifest model.DataM
 		return plan, err
 	}
 	return plan, nil
+}
+
+func hashPullPlanFiles(jobs []pullPlanHashJob, progress dataTransferProgress, concurrency int) ([]pullPlanHashResult, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	workerCount := normalizeDataConcurrency(concurrency, defaultDataHashWorkerCount(), len(jobs))
+	results := make([]pullPlanHashResult, len(jobs))
+	if workerCount <= 1 {
+		for idx, job := range jobs {
+			sum, err := sha256LocalFileWithProgress(job.Target, progress)
+			if err != nil {
+				return nil, err
+			}
+			results[idx] = pullPlanHashResult{Index: job.Index, Entry: job.Entry, Target: job.Target, SHA256: sum}
+		}
+		return results, nil
+	}
+	jobCh := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobCh {
+			job := jobs[idx]
+			sum, err := sha256LocalFileWithProgress(job.Target, progress)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			results[idx] = pullPlanHashResult{Index: job.Index, Entry: job.Entry, Target: job.Target, SHA256: sum}
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for idx := range jobs {
+		select {
+		case err := <-errCh:
+			close(jobCh)
+			wg.Wait()
+			return nil, err
+		case jobCh <- idx:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return nil, err
+	default:
+		return results, nil
+	}
 }
 
 func estimatePullPreflightHashBytes(root string, cfg dataConfig, manifest model.DataManifest) (int64, error) {
@@ -2925,6 +3089,205 @@ func nearestExistingDir(dir string) (string, error) {
 	}
 }
 
+type dataDownloadFileJob struct {
+	Entry  model.DataManifestEntry
+	Target string
+}
+
+type dataDownloadCheckpointRecorder struct {
+	mu                sync.Mutex
+	client            *Client
+	transferID        string
+	bytesDone         int64
+	filesDone         int
+	lastCheckpointB   int64
+	lastCheckpointF   int
+	checkpointEnabled bool
+}
+
+func (r *dataDownloadCheckpointRecorder) add(size int64) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	r.bytesDone += size
+	r.filesDone++
+	shouldCheckpoint := r.checkpointEnabled &&
+		(r.filesDone-r.lastCheckpointF >= dataCheckpointBlobThreshold || r.bytesDone-r.lastCheckpointB >= dataCheckpointByteThreshold)
+	bytesDone := r.bytesDone
+	filesDone := r.filesDone
+	if shouldCheckpoint {
+		r.lastCheckpointB = bytesDone
+		r.lastCheckpointF = filesDone
+	}
+	r.mu.Unlock()
+	if shouldCheckpoint {
+		return r.client.CheckpointDataTransfer(r.transferID, bytesDone, filesDone, nil)
+	}
+	return nil
+}
+
+func (r *dataDownloadCheckpointRecorder) flush() (int64, int, error) {
+	if r == nil {
+		return 0, 0, nil
+	}
+	r.mu.Lock()
+	bytesDone := r.bytesDone
+	filesDone := r.filesDone
+	shouldCheckpoint := r.checkpointEnabled && filesDone > 0 && (bytesDone != r.lastCheckpointB || filesDone != r.lastCheckpointF)
+	if shouldCheckpoint {
+		r.lastCheckpointB = bytesDone
+		r.lastCheckpointF = filesDone
+	}
+	r.mu.Unlock()
+	if shouldCheckpoint {
+		if err := r.client.CheckpointDataTransfer(r.transferID, bytesDone, filesDone, nil); err != nil {
+			return bytesDone, filesDone, err
+		}
+	}
+	return bytesDone, filesDone, nil
+}
+
+func (c *CLI) downloadDataManifestEntries(client *Client, transferID, root string, cfg dataConfig, entries []model.DataManifestEntry, blobByDigest map[string]dataBlobPlan, resume, overwrite, noProgress bool, concurrency int, progress *dataProgressRenderer) (int64, int, error) {
+	fileJobs := []dataDownloadFileJob{}
+	for _, entry := range entries {
+		target, err := targetPathForEntry(root, cfg, entry)
+		if err != nil {
+			return 0, 0, err
+		}
+		switch entry.Kind {
+		case model.DataManifestEntryKindDir:
+			if err := os.MkdirAll(target, os.FileMode(entry.Mode)); err != nil {
+				return 0, 0, err
+			}
+		case model.DataManifestEntryKindSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return 0, 0, err
+			}
+			if overwrite {
+				_ = os.Remove(target)
+			}
+			if err := os.Symlink(entry.LinkTarget, target); err != nil && !os.IsExist(err) {
+				return 0, 0, err
+			}
+		case model.DataManifestEntryKindFile:
+			fileJobs = append(fileJobs, dataDownloadFileJob{Entry: entry, Target: target})
+		}
+	}
+	recorder := &dataDownloadCheckpointRecorder{
+		client:            client,
+		transferID:        transferID,
+		checkpointEnabled: strings.TrimSpace(transferID) != "",
+	}
+	if len(fileJobs) == 0 {
+		return recorder.flush()
+	}
+	totalConcurrency := normalizeDataConcurrency(concurrency, 8, 0)
+	workerCount := normalizeDataConcurrency(totalConcurrency, 8, len(fileJobs))
+	perFileConcurrency := totalConcurrency / workerCount
+	if perFileConcurrency < 1 {
+		perFileConcurrency = 1
+	}
+	blobMu := sync.Mutex{}
+	refreshMu := sync.Mutex{}
+	printMu := sync.Mutex{}
+	digestLocks := map[string]*sync.Mutex{}
+	digestLockMu := sync.Mutex{}
+	digestLock := func(digest string) *sync.Mutex {
+		digestLockMu.Lock()
+		defer digestLockMu.Unlock()
+		lock := digestLocks[digest]
+		if lock == nil {
+			lock = &sync.Mutex{}
+			digestLocks[digest] = lock
+		}
+		return lock
+	}
+	jobCh := make(chan dataDownloadFileJob)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for job := range jobCh {
+			entry := job.Entry
+			blobMu.Lock()
+			blob := blobByDigest[entry.SHA256]
+			blobMu.Unlock()
+			if blob.DownloadURL == "" {
+				select {
+				case errCh <- fmt.Errorf("download url missing for %s", entry.SHA256):
+				default:
+				}
+				return
+			}
+			if noProgress && !c.wantsJSON() {
+				printMu.Lock()
+				fmt.Fprintf(c.stdout, "Downloading %s  %s\n", job.Target, formatBytes(entry.Size))
+				printMu.Unlock()
+			}
+			lock := digestLock(entry.SHA256)
+			lock.Lock()
+			if err := retryDataAuthorization(func() error {
+				return client.DownloadDataBlobWithProgress(blob.DownloadURL, job.Target, entry.SHA256, entry.Size, resume, overwrite, perFileConcurrency, progress.advance)
+			}, func() error {
+				refreshMu.Lock()
+				defer refreshMu.Unlock()
+				refresh, err := client.RefreshDataTransferAuthorization(transferID)
+				if err != nil {
+					return err
+				}
+				blobMu.Lock()
+				for _, refreshed := range refresh.Blobs {
+					blobByDigest[refreshed.SHA256] = refreshed
+				}
+				refreshed, ok := blobByDigest[entry.SHA256]
+				blobMu.Unlock()
+				if !ok {
+					return fmt.Errorf("refreshed transfer plan is missing blob %s", entry.SHA256)
+				}
+				blob = refreshed
+				return nil
+			}); err != nil {
+				lock.Unlock()
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			lock.Unlock()
+			if err := recorder.add(entry.Size); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for _, job := range fileJobs {
+		select {
+		case err := <-errCh:
+			close(jobCh)
+			wg.Wait()
+			return 0, 0, err
+		case jobCh <- job:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return 0, 0, err
+	default:
+		return recorder.flush()
+	}
+}
+
 func validatePullBlobs(blobs map[string]dataBlobPlan, entries []model.DataManifestEntry) error {
 	for _, entry := range entries {
 		if entry.Kind != model.DataManifestEntryKindFile {
@@ -2943,6 +3306,15 @@ func verifyPulledManifest(root string, cfg dataConfig, manifest model.DataManife
 }
 
 func verifyPulledManifestWithProgress(root string, cfg dataConfig, manifest model.DataManifest, progress dataTransferProgress) error {
+	return verifyPulledManifestWithConcurrency(root, cfg, manifest, progress, defaultDataHashWorkerCount())
+}
+
+func verifyPulledManifestWithConcurrency(root string, cfg dataConfig, manifest model.DataManifest, progress dataTransferProgress, hashConcurrency int) error {
+	type verifyHashJob struct {
+		Entry  model.DataManifestEntry
+		Target string
+	}
+	jobs := []verifyHashJob{}
 	for _, entry := range manifest.Entries {
 		target, err := targetPathForEntry(root, cfg, entry)
 		if err != nil {
@@ -2972,16 +3344,69 @@ func verifyPulledManifestWithProgress(root string, cfg dataConfig, manifest mode
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("verify %s: expected file", target)
 			}
-			got, err := sha256LocalFileWithProgress(target, progress)
+			jobs = append(jobs, verifyHashJob{Entry: entry, Target: target})
+		}
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	workerCount := normalizeDataConcurrency(hashConcurrency, defaultDataHashWorkerCount(), len(jobs))
+	if workerCount <= 1 {
+		for _, job := range jobs {
+			got, err := sha256LocalFileWithProgress(job.Target, progress)
 			if err != nil {
 				return err
 			}
-			if got != entry.SHA256 {
-				return fmt.Errorf("verify %s: checksum mismatch", target)
+			if got != job.Entry.SHA256 {
+				return fmt.Errorf("verify %s: checksum mismatch", job.Target)
+			}
+		}
+		return nil
+	}
+	jobCh := make(chan verifyHashJob)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for job := range jobCh {
+			got, err := sha256LocalFileWithProgress(job.Target, progress)
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+			if got != job.Entry.SHA256 {
+				select {
+				case errCh <- fmt.Errorf("verify %s: checksum mismatch", job.Target):
+				default:
+				}
+				return
 			}
 		}
 	}
-	return nil
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for _, job := range jobs {
+		select {
+		case err := <-errCh:
+			close(jobCh)
+			wg.Wait()
+			return err
+		case jobCh <- job:
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
 }
 
 func renderPullPreflight(w io.Writer, workspace model.DataWorkspace, snapshot model.DataSnapshot, plan pullPlan) {
@@ -3244,33 +3669,31 @@ func (u *dataUploadExecutor) uploadPage(blobs []dataBlobPlan, pageOffset int) er
 	}
 	if u.concurrency <= 1 {
 		for _, blob := range blobs {
-			if err := u.uploadOne(blob, pageOffset); err != nil {
+			if err := u.uploadOne(blob, pageOffset, 1); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	var singleBlobs []dataBlobPlan
+	var uploadBlobs []dataBlobPlan
 	for _, blob := range blobs {
 		blob = u.mergeBlob(blob)
 		if blob.Exists {
 			u.progress.advance(blob.Size)
 			continue
 		}
-		if blob.UploadMode == model.DataBlobUploadModeMultipart {
-			if err := u.uploadOne(blob, pageOffset); err != nil {
-				return err
-			}
-			continue
-		}
-		singleBlobs = append(singleBlobs, blob)
+		uploadBlobs = append(uploadBlobs, blob)
 	}
-	if len(singleBlobs) == 0 {
+	if len(uploadBlobs) == 0 {
 		return nil
 	}
 	workerCount := u.concurrency
-	if workerCount > len(singleBlobs) {
-		workerCount = len(singleBlobs)
+	if workerCount > len(uploadBlobs) {
+		workerCount = len(uploadBlobs)
+	}
+	perBlobConcurrency := u.concurrency / workerCount
+	if perBlobConcurrency < 1 {
+		perBlobConcurrency = 1
 	}
 	jobs := make(chan dataBlobPlan)
 	errCh := make(chan error, 1)
@@ -3278,7 +3701,7 @@ func (u *dataUploadExecutor) uploadPage(blobs []dataBlobPlan, pageOffset int) er
 	worker := func() {
 		defer wg.Done()
 		for blob := range jobs {
-			if err := u.uploadOne(blob, pageOffset); err != nil {
+			if err := u.uploadOne(blob, pageOffset, perBlobConcurrency); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -3291,7 +3714,7 @@ func (u *dataUploadExecutor) uploadPage(blobs []dataBlobPlan, pageOffset int) er
 		wg.Add(1)
 		go worker()
 	}
-	for _, blob := range singleBlobs {
+	for _, blob := range uploadBlobs {
 		select {
 		case err := <-errCh:
 			close(jobs)
@@ -3310,7 +3733,7 @@ func (u *dataUploadExecutor) uploadPage(blobs []dataBlobPlan, pageOffset int) er
 	}
 }
 
-func (u *dataUploadExecutor) uploadOne(blob dataBlobPlan, pageOffset int) error {
+func (u *dataUploadExecutor) uploadOne(blob dataBlobPlan, pageOffset, blobConcurrency int) error {
 	blob = u.mergeBlob(blob)
 	if blob.Exists {
 		u.progress.advance(blob.Size)
@@ -3325,7 +3748,7 @@ func (u *dataUploadExecutor) uploadOne(blob dataBlobPlan, pageOffset int) error 
 	}
 	u.printUploadLine(blob)
 	if blob.UploadMode == model.DataBlobUploadModeMultipart {
-		return u.uploadMultipart(blob, sourcePath, pageOffset)
+		return u.uploadMultipart(blob, sourcePath, pageOffset, blobConcurrency)
 	}
 	if strings.TrimSpace(blob.UploadURL) == "" {
 		return nil
@@ -3350,11 +3773,11 @@ func (u *dataUploadExecutor) uploadOne(blob dataBlobPlan, pageOffset int) error 
 	return u.recordCompletedBlob(markDataBlobUploaded(blob, nil))
 }
 
-func (u *dataUploadExecutor) uploadMultipart(blob dataBlobPlan, sourcePath string, pageOffset int) error {
+func (u *dataUploadExecutor) uploadMultipart(blob dataBlobPlan, sourcePath string, pageOffset, blobConcurrency int) error {
 	var completed []model.DataTransferPart
 	err := retryDataAuthorization(func() error {
 		var uploadErr error
-		completed, uploadErr = u.cli.uploadMultipartDataBlob(u.client, sourcePath, u.transferID, blob, u.resume, u.concurrency, u.progress.advance)
+		completed, uploadErr = u.cli.uploadMultipartDataBlob(u.client, sourcePath, u.transferID, blob, u.resume, blobConcurrency, u.progress.advance)
 		return uploadErr
 	}, func() error {
 		refresh, err := u.client.RefreshDataTransferAuthorizationPage(u.transferID, pageOffset, u.pageLimit)

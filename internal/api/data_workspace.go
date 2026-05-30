@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/httpx"
@@ -16,6 +17,12 @@ import (
 )
 
 type dataTransferPlanBlob = model.DataTransferPlanBlob
+
+const (
+	dataBackendMigrationConcurrency = 16
+	dataTransferPlanConcurrency     = 16
+	dataTransferPartPlanConcurrency = 16
+)
 
 type dataUploadPlanRequest struct {
 	Version  string             `json:"version"`
@@ -1307,6 +1314,7 @@ func (s *Server) handleGetDataBlob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, manifest model.DataManifest, upload bool) ([]dataTransferPlanBlob, error) {
 	seen := map[string]struct{}{}
 	blobs := []dataTransferPlanBlob{}
+	entries := []model.DataManifestEntry{}
 	storedByDigest := map[string]dataTransferPlanBlob{}
 	for _, stored := range transfer.PlanBlobs {
 		digest := strings.TrimSpace(strings.ToLower(stored.SHA256))
@@ -1348,50 +1356,7 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 		if stored, ok := storedByDigest[strings.ToLower(strings.TrimSpace(entry.SHA256))]; ok {
 			blob = mergeTransferPlanBlobCheckpoint(blob, stored)
 		}
-		if objectBackend != nil {
-			if upload {
-				_, snapshotExists := knownObjectDigests[entry.SHA256]
-				blob.Exists = blob.Exists || snapshotExists
-			} else {
-				exists, err := objectBackend.headObject(ctx, entry.ObjectKey)
-				if err != nil {
-					return nil, err
-				}
-				blob.Exists = exists
-			}
-			if upload && !blob.Exists {
-				if blob.UploadMode == model.DataBlobUploadModeMultipart && blob.UploadID != "" {
-					if len(blob.Parts) == 0 {
-						blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
-					}
-					if blob.PartSize <= 0 {
-						blob.PartSize = dataMultipartPartSize
-					}
-				} else if entry.Size > dataMultipartPartSize {
-					uploadID, err := objectBackend.createMultipartUpload(ctx, entry.ObjectKey)
-					if err != nil {
-						return nil, err
-					}
-					blob.UploadMode = model.DataBlobUploadModeMultipart
-					blob.UploadID = uploadID
-					blob.PartSize = dataMultipartPartSize
-					blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
-				} else {
-					blob.UploadMode = model.DataBlobUploadModeSingle
-				}
-			}
-			if !upload {
-				if !blob.Exists {
-					return nil, fmt.Errorf("remote object missing for %s", entry.ObjectKey)
-				}
-				downloadURL, expiresAt, err := objectBackend.presignGet(ctx, entry.ObjectKey, dataPresignTTL())
-				if err != nil {
-					return nil, err
-				}
-				blob.DownloadURL = downloadURL
-				blob.ExpiresAt = expiresAt
-			}
-		} else {
+		if objectBackend == nil {
 			blob.Exists = s.store.DataBlobExists(entry.SHA256)
 			if upload && !blob.Exists {
 				blob.UploadURL = s.dataBlobURL(r, transfer.ID, entry.SHA256)
@@ -1401,8 +1366,130 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 			}
 		}
 		blobs = append(blobs, blob)
+		entries = append(entries, entry)
+	}
+	if objectBackend != nil {
+		if err := s.enrichDirectDataPlanBlobs(ctx, objectBackend, blobs, entries, knownObjectDigests, upload); err != nil {
+			return nil, err
+		}
 	}
 	return blobs, nil
+}
+
+func (s *Server) enrichDirectDataPlanBlobs(ctx context.Context, objectBackend *dataObjectBackend, blobs []dataTransferPlanBlob, entries []model.DataManifestEntry, knownObjectDigests map[string]struct{}, upload bool) error {
+	if len(blobs) == 0 {
+		return nil
+	}
+	planCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workerCount := dataPlanWorkerCount(len(blobs))
+	jobs := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobs {
+			entry := entries[idx]
+			blob := blobs[idx]
+			if upload {
+				_, snapshotExists := knownObjectDigests[entry.SHA256]
+				blob.Exists = blob.Exists || snapshotExists
+				if !blob.Exists {
+					if blob.UploadMode == model.DataBlobUploadModeMultipart && blob.UploadID != "" {
+						if len(blob.Parts) == 0 {
+							blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
+						}
+						if blob.PartSize <= 0 {
+							blob.PartSize = dataMultipartPartSize
+						}
+					} else if entry.Size > dataMultipartPartSize {
+						uploadID, err := objectBackend.createMultipartUpload(planCtx, entry.ObjectKey)
+						if err != nil {
+							select {
+							case errCh <- err:
+								cancel()
+							default:
+							}
+							return
+						}
+						blob.UploadMode = model.DataBlobUploadModeMultipart
+						blob.UploadID = uploadID
+						blob.PartSize = dataMultipartPartSize
+						blob.Parts = planDataUploadParts(entry.Size, dataMultipartPartSize)
+					} else {
+						blob.UploadMode = model.DataBlobUploadModeSingle
+					}
+				}
+				blobs[idx] = blob
+				continue
+			}
+			exists, err := objectBackend.headObject(planCtx, entry.ObjectKey)
+			if err != nil {
+				select {
+				case errCh <- err:
+					cancel()
+				default:
+				}
+				return
+			}
+			if !exists {
+				select {
+				case errCh <- fmt.Errorf("remote object missing for %s", entry.ObjectKey):
+					cancel()
+				default:
+				}
+				return
+			}
+			downloadURL, expiresAt, err := objectBackend.presignGet(planCtx, entry.ObjectKey, dataPresignTTL())
+			if err != nil {
+				select {
+				case errCh <- err:
+					cancel()
+				default:
+				}
+				return
+			}
+			blob.Exists = true
+			blob.DownloadURL = downloadURL
+			blob.ExpiresAt = expiresAt
+			blobs[idx] = blob
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for idx := range blobs {
+		select {
+		case err := <-errCh:
+			close(jobs)
+			wg.Wait()
+			return err
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
+}
+
+func dataPlanWorkerCount(jobCount int) int {
+	if jobCount <= 1 {
+		return 1
+	}
+	workerCount := dataTransferPlanConcurrency
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if workerCount > jobCount {
+		workerCount = jobCount
+	}
+	return workerCount
 }
 
 func (s *Server) dataWorkspaceSnapshotBlobDigests(workspaceID string) (map[string]struct{}, error) {
@@ -1696,41 +1783,74 @@ func (s *Server) migrateDataWorkspaceBackend(ctx context.Context, workspace mode
 	var copiedBytes int64
 	var copiedFiles int
 	if !dryRun {
-		for _, entry := range manifest.Entries {
-			exists, err := targetObjectBackend.headObject(ctx, entry.ObjectKey)
-			if err != nil {
-				return failDataMigrationTransfer(s.store, transfer, err)
-			}
-			if !exists {
-				body, size, err := sourceObjectBackend.getObject(ctx, entry.ObjectKey)
-				if err != nil {
-					return failDataMigrationTransfer(s.store, transfer, err)
-				}
-				if err := targetObjectBackend.putObject(ctx, entry.ObjectKey, body, size); err != nil {
-					body.Close()
-					return failDataMigrationTransfer(s.store, transfer, err)
-				}
-				if err := body.Close(); err != nil {
-					return failDataMigrationTransfer(s.store, transfer, err)
-				}
-			}
-			info, verified, err := targetObjectBackend.headObjectInfo(ctx, entry.ObjectKey)
-			if err != nil {
-				return failDataMigrationTransfer(s.store, transfer, err)
-			}
-			if !verified {
-				return failDataMigrationTransfer(s.store, transfer, fmt.Errorf("target object missing after migration: %s", entry.ObjectKey))
-			}
-			if entry.Size >= 0 && info.Size != entry.Size {
-				return failDataMigrationTransfer(s.store, transfer, fmt.Errorf("target object size mismatch after migration for %s: got %d expected %d", entry.ObjectKey, info.Size, entry.Size))
-			}
-			copiedBytes += entry.Size
+		migrationCtx, cancel := context.WithCancel(ctx)
+		workerCount := dataBackendMigrationConcurrency
+		if workerCount > len(manifest.Entries) {
+			workerCount = len(manifest.Entries)
+		}
+		if workerCount <= 0 {
+			workerCount = 1
+		}
+		jobs := make(chan model.DataManifestEntry)
+		errCh := make(chan error, 1)
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		recordProgress := func(size int64) error {
+			mu.Lock()
+			defer mu.Unlock()
+			copiedBytes += size
 			copiedFiles++
 			transfer.BytesDone = copiedBytes
 			transfer.FilesDone = copiedFiles
-			if _, err := s.store.UpdateDataTransfer(transfer); err != nil {
-				return model.DataTransfer{}, err
+			updated, err := s.store.UpdateDataTransfer(transfer)
+			if err != nil {
+				return err
 			}
+			transfer = updated
+			return nil
+		}
+		worker := func() {
+			defer wg.Done()
+			for entry := range jobs {
+				if err := copyDataWorkspaceObject(migrationCtx, sourceObjectBackend, targetObjectBackend, entry); err != nil {
+					select {
+					case errCh <- err:
+						cancel()
+					default:
+					}
+					return
+				}
+				if err := recordProgress(entry.Size); err != nil {
+					select {
+					case errCh <- err:
+						cancel()
+					default:
+					}
+					return
+				}
+			}
+		}
+		for i := 0; i < workerCount; i++ {
+			wg.Add(1)
+			go worker()
+		}
+		for _, entry := range manifest.Entries {
+			select {
+			case err := <-errCh:
+				close(jobs)
+				wg.Wait()
+				cancel()
+				return failDataMigrationTransfer(s.store, transfer, err)
+			case jobs <- entry:
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		cancel()
+		select {
+		case err := <-errCh:
+			return failDataMigrationTransfer(s.store, transfer, err)
+		default:
 		}
 		if cutover {
 			backendID := targetBackend.ID
@@ -1749,6 +1869,41 @@ func (s *Server) migrateDataWorkspaceBackend(ctx context.Context, workspace mode
 		transfer.Message = "dry-run"
 	}
 	return s.store.UpdateDataTransfer(transfer)
+}
+
+func copyDataWorkspaceObject(ctx context.Context, sourceObjectBackend, targetObjectBackend *dataObjectBackend, entry model.DataManifestEntry) error {
+	objectKey := strings.TrimSpace(entry.ObjectKey)
+	if objectKey == "" {
+		objectKey = model.DataObjectKey(entry.SHA256)
+	}
+	exists, err := targetObjectBackend.headObject(ctx, objectKey)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		body, size, err := sourceObjectBackend.getObject(ctx, objectKey)
+		if err != nil {
+			return err
+		}
+		if err := targetObjectBackend.putObject(ctx, objectKey, body, size); err != nil {
+			body.Close()
+			return err
+		}
+		if err := body.Close(); err != nil {
+			return err
+		}
+	}
+	info, verified, err := targetObjectBackend.headObjectInfo(ctx, objectKey)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		return fmt.Errorf("target object missing after migration: %s", objectKey)
+	}
+	if entry.Size >= 0 && info.Size != entry.Size {
+		return fmt.Errorf("target object size mismatch after migration for %s: got %d expected %d", objectKey, info.Size, entry.Size)
+	}
+	return nil
 }
 
 func (s *Server) rollbackDataWorkspaceBackendMigration(ctx context.Context, workspace model.DataWorkspace, migrationTransferID string) (model.DataWorkspace, model.DataTransfer, error) {
@@ -1817,15 +1972,75 @@ func (s *Server) presignDataUploadParts(ctx context.Context, objectBackend *data
 		partSize = dataMultipartPartSize
 	}
 	parts := planDataUploadParts(size, partSize)
-	for idx := range parts {
-		uploadURL, expiresAt, err := objectBackend.presignUploadPart(ctx, objectKey, uploadID, parts[idx].PartNumber, dataPresignTTL())
-		if err != nil {
-			return nil, err
-		}
-		parts[idx].UploadURL = uploadURL
-		parts[idx].ExpiresAt = expiresAt
+	if _, err := presignDataUploadPartURLs(ctx, objectBackend, objectKey, uploadID, parts, dataPresignTTL()); err != nil {
+		return nil, err
 	}
 	return parts, nil
+}
+
+func presignDataUploadPartURLs(ctx context.Context, objectBackend *dataObjectBackend, objectKey, uploadID string, parts []model.DataTransferPart, ttl time.Duration) (time.Time, error) {
+	if len(parts) == 0 {
+		return time.Time{}, nil
+	}
+	planCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workerCount := dataTransferPartPlanConcurrency
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if workerCount > len(parts) {
+		workerCount = len(parts)
+	}
+	jobs := make(chan int)
+	errCh := make(chan error, 1)
+	var expiresAt time.Time
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobs {
+			if parts[idx].Completed && strings.TrimSpace(parts[idx].ETag) != "" {
+				continue
+			}
+			uploadURL, partExpiresAt, err := objectBackend.presignUploadPart(planCtx, objectKey, uploadID, parts[idx].PartNumber, ttl)
+			if err != nil {
+				select {
+				case errCh <- err:
+					cancel()
+				default:
+				}
+				return
+			}
+			parts[idx].UploadURL = uploadURL
+			parts[idx].ExpiresAt = partExpiresAt
+			mu.Lock()
+			if partExpiresAt.After(expiresAt) {
+				expiresAt = partExpiresAt
+			}
+			mu.Unlock()
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for idx := range parts {
+		select {
+		case err := <-errCh:
+			close(jobs)
+			wg.Wait()
+			return time.Time{}, err
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return time.Time{}, err
+	default:
+	}
+	return expiresAt, nil
 }
 
 func planDataUploadParts(size, partSize int64) []model.DataTransferPart {
@@ -1875,51 +2090,113 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 	if page.Limit == 0 || end > len(blobs) {
 		end = len(blobs)
 	}
-	for idx := start; idx < end; idx++ {
-		if upload {
-			if blobs[idx].UploadMode == model.DataBlobUploadModeMultipart && blobs[idx].UploadID != "" {
-				completed, err := objectBackend.listMultipartParts(ctx, blobs[idx].ObjectKey, blobs[idx].UploadID)
-				if err != nil {
-					return nil, nil, err
-				}
-				completedByNumber := map[int32]model.DataTransferPart{}
-				for _, part := range completed {
-					completedByNumber[part.PartNumber] = part
-				}
-				for partIdx := range blobs[idx].Parts {
-					if completedPart, ok := completedByNumber[blobs[idx].Parts[partIdx].PartNumber]; ok {
-						blobs[idx].Parts[partIdx].Completed = true
-						blobs[idx].Parts[partIdx].ETag = completedPart.ETag
-						continue
-					}
-					uploadURL, expiresAt, err := objectBackend.presignUploadPart(ctx, blobs[idx].ObjectKey, blobs[idx].UploadID, blobs[idx].Parts[partIdx].PartNumber, dataPresignTTL())
+	if err := s.refreshDirectDataPlanBlobPage(ctx, objectBackend, blobs, upload, start, end); err != nil {
+		return nil, nil, err
+	}
+	return blobs, append([]dataTransferPlanBlob(nil), blobs[start:end]...), nil
+}
+
+func (s *Server) refreshDirectDataPlanBlobPage(ctx context.Context, objectBackend *dataObjectBackend, blobs []dataTransferPlanBlob, upload bool, start, end int) error {
+	if start >= end {
+		return nil
+	}
+	planCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workerCount := dataPlanWorkerCount(end - start)
+	jobs := make(chan int)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for idx := range jobs {
+			blob := blobs[idx]
+			if upload {
+				if blob.UploadMode == model.DataBlobUploadModeMultipart && blob.UploadID != "" {
+					completed, err := objectBackend.listMultipartParts(planCtx, blob.ObjectKey, blob.UploadID)
 					if err != nil {
-						return nil, nil, err
+						select {
+						case errCh <- err:
+							cancel()
+						default:
+						}
+						return
 					}
-					blobs[idx].Parts[partIdx].UploadURL = uploadURL
-					blobs[idx].Parts[partIdx].ExpiresAt = expiresAt
-					blobs[idx].ExpiresAt = expiresAt
+					completedByNumber := map[int32]model.DataTransferPart{}
+					for _, part := range completed {
+						completedByNumber[part.PartNumber] = part
+					}
+					for partIdx := range blob.Parts {
+						if completedPart, ok := completedByNumber[blob.Parts[partIdx].PartNumber]; ok {
+							blob.Parts[partIdx].Completed = true
+							blob.Parts[partIdx].ETag = completedPart.ETag
+						}
+					}
+					expiresAt, err := presignDataUploadPartURLs(planCtx, objectBackend, blob.ObjectKey, blob.UploadID, blob.Parts, dataPresignTTL())
+					if err != nil {
+						select {
+						case errCh <- err:
+							cancel()
+						default:
+						}
+						return
+					}
+					if !expiresAt.IsZero() {
+						blob.ExpiresAt = expiresAt
+					}
+					blobs[idx] = blob
+					continue
+				}
+				if !blob.Exists && blob.UploadMode != model.DataBlobUploadModeMultipart {
+					uploadURL, expiresAt, err := objectBackend.presignPut(planCtx, blob.ObjectKey, dataPresignTTL())
+					if err != nil {
+						select {
+						case errCh <- err:
+							cancel()
+						default:
+						}
+						return
+					}
+					blob.UploadURL = uploadURL
+					blob.ExpiresAt = expiresAt
+					blobs[idx] = blob
 				}
 				continue
 			}
-			if !blobs[idx].Exists && blobs[idx].UploadMode != model.DataBlobUploadModeMultipart {
-				uploadURL, expiresAt, err := objectBackend.presignPut(ctx, blobs[idx].ObjectKey, dataPresignTTL())
-				if err != nil {
-					return nil, nil, err
+			downloadURL, expiresAt, err := objectBackend.presignGet(planCtx, blob.ObjectKey, dataPresignTTL())
+			if err != nil {
+				select {
+				case errCh <- err:
+					cancel()
+				default:
 				}
-				blobs[idx].UploadURL = uploadURL
-				blobs[idx].ExpiresAt = expiresAt
+				return
 			}
-			continue
+			blob.DownloadURL = downloadURL
+			blob.ExpiresAt = expiresAt
+			blobs[idx] = blob
 		}
-		downloadURL, expiresAt, err := objectBackend.presignGet(ctx, blobs[idx].ObjectKey, dataPresignTTL())
-		if err != nil {
-			return nil, nil, err
-		}
-		blobs[idx].DownloadURL = downloadURL
-		blobs[idx].ExpiresAt = expiresAt
 	}
-	return blobs, append([]dataTransferPlanBlob(nil), blobs[start:end]...), nil
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for idx := start; idx < end; idx++ {
+		select {
+		case err := <-errCh:
+			close(jobs)
+			wg.Wait()
+			return err
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
 }
 
 func transferPlanBlobBySHA(blobs []dataTransferPlanBlob, sha256 string) (dataTransferPlanBlob, bool) {

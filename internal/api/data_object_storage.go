@@ -10,6 +10,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -22,10 +23,11 @@ import (
 )
 
 const (
-	defaultDataPresignTTL       = 15 * time.Minute
-	minDataPresignTTL           = 5 * time.Minute
-	maxDataPresignTTL           = 24 * time.Hour
-	dataMultipartPartSize int64 = 64 * 1024 * 1024
+	defaultDataPresignTTL             = 15 * time.Minute
+	minDataPresignTTL                 = 5 * time.Minute
+	maxDataPresignTTL                 = 24 * time.Hour
+	dataMultipartPartSize       int64 = 64 * 1024 * 1024
+	dataObjectDeleteConcurrency       = 8
 )
 
 type dataObjectBackend struct {
@@ -286,23 +288,71 @@ func (b *dataObjectBackend) listObjects(ctx context.Context, prefix string) ([]d
 }
 
 func (b *dataObjectBackend) deleteObjects(ctx context.Context, keys []string) error {
+	batches := make([][]string, 0, (len(keys)+999)/1000)
 	for len(keys) > 0 {
 		batch := keys
 		if len(batch) > 1000 {
 			batch = keys[:1000]
 		}
-		objects := make([]types.ObjectIdentifier, 0, len(batch))
-		for _, key := range batch {
-			objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
-		}
-		_, err := b.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
-			Bucket: aws.String(b.backend.Bucket),
-			Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
-		})
-		if err != nil {
-			return err
-		}
+		batches = append(batches, batch)
 		keys = keys[len(batch):]
+	}
+	if len(batches) == 0 {
+		return nil
+	}
+	workerCount := dataObjectDeleteConcurrency
+	if workerCount > len(batches) {
+		workerCount = len(batches)
+	}
+	jobs := make(chan []string)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for batch := range jobs {
+			if err := b.deleteObjectBatch(ctx, batch); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
+		}
+	}
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for _, batch := range batches {
+		select {
+		case err := <-errCh:
+			close(jobs)
+			wg.Wait()
+			return err
+		case jobs <- batch:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return nil
+	}
+}
+
+func (b *dataObjectBackend) deleteObjectBatch(ctx context.Context, batch []string) error {
+	objects := make([]types.ObjectIdentifier, 0, len(batch))
+	for _, key := range batch {
+		objects = append(objects, types.ObjectIdentifier{Key: aws.String(key)})
+	}
+	_, err := b.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String(b.backend.Bucket),
+		Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+	})
+	if err != nil {
+		return err
 	}
 	return nil
 }
