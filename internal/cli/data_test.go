@@ -602,7 +602,17 @@ func TestDownloadDataBlobMultipartResume(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(partDir, "000001.part"), content[:5], 0o600); err != nil {
 		t.Fatalf("seed completed part: %v", err)
 	}
-	client := &Client{httpClient: http.DefaultClient}
+	apiAttempts := 0
+	client := &Client{
+		httpClient: &http.Client{
+			Transport: retryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				apiAttempts++
+				return nil, fmt.Errorf("API client should not handle ranged data object downloads")
+			}),
+			Timeout: time.Nanosecond,
+		},
+		dataObjectHTTPClient: http.DefaultClient,
+	}
 	targetPath := filepath.Join(root, "data", "sample.bin")
 	if err := client.downloadDataBlobMultipart(blobServer.URL, targetPath, expectedSHA, int64(len(content)), true, true, 3, 5, nil); err != nil {
 		t.Fatalf("download multipart: %v", err)
@@ -619,6 +629,64 @@ func TestDownloadDataBlobMultipartResume(t *testing.T) {
 	}
 	if len(requestedRanges) != 5 {
 		t.Fatalf("expected five missing ranges, got %+v", requestedRanges)
+	}
+	if apiAttempts != 0 {
+		t.Fatalf("expected API client to be skipped, got %d attempts", apiAttempts)
+	}
+}
+
+func TestDownloadDataBlobUsesDedicatedObjectClientWithoutAPITimeout(t *testing.T) {
+	content := []byte("slow-object-download")
+	sum := sha256.Sum256(content)
+	expectedSHA := hex.EncodeToString(sum[:])
+	apiAttempts := 0
+	objectAttempts := 0
+	client := &Client{
+		httpClient: &http.Client{
+			Transport: retryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				apiAttempts++
+				return nil, fmt.Errorf("API client should not handle data object downloads")
+			}),
+			Timeout: time.Nanosecond,
+		},
+		dataObjectHTTPClient: &http.Client{
+			Transport: retryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				objectAttempts++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Length": []string{fmt.Sprintf("%d", len(content))}},
+					Body:       io.NopCloser(bytes.NewReader(content)),
+				}, nil
+			}),
+		},
+	}
+
+	root := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get wd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(previous)
+
+	targetPath := filepath.Join(root, "data", "slow.bin")
+	if err := client.DownloadDataBlobWithProgress("https://r2.example.com/bucket/slow.bin", targetPath, expectedSHA, int64(len(content)), true, true, 1, nil); err != nil {
+		t.Fatalf("download blob: %v", err)
+	}
+	restored, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(restored) != string(content) {
+		t.Fatalf("unexpected restored content %q", restored)
+	}
+	if apiAttempts != 0 {
+		t.Fatalf("expected API client to be skipped, got %d attempts", apiAttempts)
+	}
+	if objectAttempts != 1 {
+		t.Fatalf("expected one data object request, got %d", objectAttempts)
 	}
 }
 

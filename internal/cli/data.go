@@ -5457,7 +5457,7 @@ func (c *Client) DownloadDataBlobWithProgress(downloadURL, targetPath, expectedS
 	if offset > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRawDataObjectRequest(req)
 	if err != nil {
 		tmp.Close()
 		return err
@@ -5679,7 +5679,7 @@ func (c *Client) downloadDataBlobRangePart(downloadURL, partPath string, offset,
 	if isFugueManagedDataBlobURL(downloadURL) {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRawDataObjectRequest(req)
 	if err != nil {
 		return err
 	}
@@ -5726,17 +5726,7 @@ func (c *Client) doDataObjectRequest(req *http.Request) error {
 }
 
 func (c *Client) doDataObjectRequestWithResponse(req *http.Request) (*http.Response, error) {
-	if isFugueManagedDataBlobURL(req.URL.String()) && strings.TrimSpace(req.Header.Get("Authorization")) == "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	httpClient := c.dataObjectHTTPClient
-	if httpClient == nil {
-		httpClient = c.httpClient
-	}
-	if httpClient == nil {
-		return nil, fmt.Errorf("data object http client is not configured")
-	}
-	resp, err := httpClient.Do(req)
+	resp, err := c.doRawDataObjectRequest(req)
 	if err != nil {
 		return nil, err
 	}
@@ -5750,6 +5740,20 @@ func (c *Client) doDataObjectRequestWithResponse(req *http.Request) (*http.Respo
 		return nil, dataObjectTransferError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	return resp, nil
+}
+
+func (c *Client) doRawDataObjectRequest(req *http.Request) (*http.Response, error) {
+	if isFugueManagedDataBlobURL(req.URL.String()) && strings.TrimSpace(req.Header.Get("Authorization")) == "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	httpClient := c.dataObjectHTTPClient
+	if httpClient == nil {
+		httpClient = c.httpClient
+	}
+	if httpClient == nil {
+		return nil, fmt.Errorf("data object http client is not configured")
+	}
+	return httpClient.Do(req)
 }
 
 func newDataObjectHTTPClient() *http.Client {
