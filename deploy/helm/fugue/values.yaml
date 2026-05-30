@@ -49,7 +49,7 @@ api:
     secretAccessKey: ""
     sessionToken: ""
     credentialEncryptionKey: ""
-    presignTTL: 15m
+    presignTTL: 6h
   importWorkDir: /var/lib/fugue/import
   hostNetwork: false
   minReadySeconds: 5

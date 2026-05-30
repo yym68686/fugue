@@ -45,6 +45,9 @@ const (
 	dataCheckpointByteThreshold         int64 = 1 << 30
 	dataObjectTransferMaxAttempts             = 5
 	dataControlPlaneTransferMaxAttempts       = 8
+	dataObjectDialTimeout                     = 30 * time.Second
+	dataObjectTLSHandshakeTimeout             = 30 * time.Second
+	dataObjectResponseHeaderTimeout           = 2 * time.Minute
 )
 
 var defaultDataIgnore = []string{
@@ -5241,7 +5244,14 @@ func (c *Client) doDataObjectRequestWithResponse(req *http.Request) (*http.Respo
 	if isFugueManagedDataBlobURL(req.URL.String()) && strings.TrimSpace(req.Header.Get("Authorization")) == "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	resp, err := c.httpClient.Do(req)
+	httpClient := c.dataObjectHTTPClient
+	if httpClient == nil {
+		httpClient = c.httpClient
+	}
+	if httpClient == nil {
+		return nil, fmt.Errorf("data object http client is not configured")
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -5255,6 +5265,21 @@ func (c *Client) doDataObjectRequestWithResponse(req *http.Request) (*http.Respo
 		return nil, dataObjectTransferError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
 	}
 	return resp, nil
+}
+
+func newDataObjectHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   dataObjectDialTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.TLSHandshakeTimeout = dataObjectTLSHandshakeTimeout
+	transport.ResponseHeaderTimeout = dataObjectResponseHeaderTimeout
+	transport.ExpectContinueTimeout = time.Second
+	transport.MaxIdleConns = 128
+	transport.MaxIdleConnsPerHost = 64
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Transport: transport}
 }
 
 type dataObjectTransferError struct {

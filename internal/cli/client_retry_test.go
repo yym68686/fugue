@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -52,5 +53,60 @@ func TestClientRetriesTransientGetTransportErrors(t *testing.T) {
 	}
 	if app.ID != "app_123" || app.Name != "demo" {
 		t.Fatalf("unexpected app %+v", app)
+	}
+}
+
+func TestDataObjectRequestsUseDedicatedClientWithoutAPITimeout(t *testing.T) {
+	t.Parallel()
+
+	client, err := newClientWithOptions("https://api.example.com", "token", clientOptions{
+		RequireToken:   true,
+		RequestTimeout: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	if client.httpClient == nil || client.httpClient.Timeout != time.Nanosecond {
+		t.Fatalf("expected API client timeout to remain configured, got %#v", client.httpClient)
+	}
+	if client.dataObjectHTTPClient == nil {
+		t.Fatal("expected dedicated data object client")
+	}
+	if client.dataObjectHTTPClient.Timeout != 0 {
+		t.Fatalf("data object client must not use a whole-request timeout, got %s", client.dataObjectHTTPClient.Timeout)
+	}
+
+	apiAttempts := 0
+	objectAttempts := 0
+	client.httpClient = &http.Client{
+		Transport: retryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			apiAttempts++
+			return nil, fmt.Errorf("API client should not handle data object requests")
+		}),
+		Timeout: time.Nanosecond,
+	}
+	client.dataObjectHTTPClient = &http.Client{
+		Transport: retryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			objectAttempts++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}),
+	}
+
+	req, err := http.NewRequest(http.MethodPut, "https://r2.example.com/bucket/object", strings.NewReader("body"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if err := client.doDataObjectRequest(req); err != nil {
+		t.Fatalf("data object request: %v", err)
+	}
+	if apiAttempts != 0 {
+		t.Fatalf("expected API client to be skipped, got %d attempts", apiAttempts)
+	}
+	if objectAttempts != 1 {
+		t.Fatalf("expected one data object attempt, got %d", objectAttempts)
 	}
 }

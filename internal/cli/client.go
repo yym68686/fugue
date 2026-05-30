@@ -16,13 +16,14 @@ import (
 )
 
 type Client struct {
-	baseURL        string
-	token          string
-	cookie         string
-	httpClient     *http.Client
-	observer       requestObserver
-	readRetryCount int
-	readRetryDelay time.Duration
+	baseURL              string
+	token                string
+	cookie               string
+	httpClient           *http.Client
+	dataObjectHTTPClient *http.Client
+	observer             requestObserver
+	readRetryCount       int
+	readRetryDelay       time.Duration
 }
 
 type clientOptions struct {
@@ -471,9 +472,10 @@ func newClientWithOptions(baseURL, token string, opts clientOptions) (*Client, e
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
-		observer:       opts.Observer,
-		readRetryCount: readRetryCount,
-		readRetryDelay: readRetryDelay,
+		dataObjectHTTPClient: newDataObjectHTTPClient(),
+		observer:             opts.Observer,
+		readRetryCount:       readRetryCount,
+		readRetryDelay:       readRetryDelay,
 	}, nil
 }
 
