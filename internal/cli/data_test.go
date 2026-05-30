@@ -117,6 +117,97 @@ func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 	}
 }
 
+func TestDataStatusWithoutLocalBindingShowsAccountOverview(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	backend, err := stateStore.CreateDataBackend(model.DataBackend{
+		TenantID: tenant.ID,
+		Name:     "prod-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{
+		TenantID:         tenant.ID,
+		Name:             "lanyun-tmp",
+		StorageBackendID: backend.ID,
+	})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	backendName := backend.Name
+	workspace, err = stateStore.UpdateDataWorkspace(workspace.ID, tenant.ID, false, store.DataWorkspaceUpdate{StorageBackendID: &backendName})
+	if err != nil {
+		t.Fatalf("update workspace backend: %v", err)
+	}
+	if _, err := stateStore.CreateDataSnapshot(model.DataSnapshot{
+		WorkspaceID: workspace.ID,
+		Version:     "before-provider-move",
+		Manifest: model.DataManifest{Entries: []model.DataManifestEntry{{
+			AssetName:    "data",
+			RelativePath: "sample.bin",
+			Kind:         model.DataManifestEntryKindFile,
+			Size:         42,
+			SHA256:       strings.Repeat("a", 64),
+		}}},
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	server := api.NewServer(stateStore, auth.New(stateStore, ""), nil, api.ServerConfig{})
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	unboundDir := t.TempDir()
+	out := runDataCLIInDir(t, unboundDir, "--base-url", httpServer.URL, "--token", secret, "data", "status")
+	for _, want := range []string{
+		"No local data workspace is bound in this directory.",
+		"Your data workspaces:",
+		"lanyun-tmp",
+		"prod-r2",
+		"before-provider-move",
+		"fugue data workspace use <workspace>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected status output to contain %q, got %s", want, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(unboundDir, dataConfigPath)); !os.IsNotExist(err) {
+		t.Fatalf("expected status not to create %s, stat err=%v", dataConfigPath, err)
+	}
+
+	jsonOut := runDataCLIInDir(t, unboundDir, "--base-url", httpServer.URL, "--token", secret, "data", "status", "--json")
+	if !strings.Contains(jsonOut, `"local_bound": false`) || !strings.Contains(jsonOut, `"before-provider-move"`) {
+		t.Fatalf("expected json account status, got %s", jsonOut)
+	}
+
+	invalidDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(invalidDir, ".fugue"), 0o755); err != nil {
+		t.Fatalf("create .fugue: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, dataConfigPath), []byte("version: 1\n"), 0o644); err != nil {
+		t.Fatalf("write invalid config: %v", err)
+	}
+	stdout, stderr, err := runDataCLIInDirErr(invalidDir, "--base-url", httpServer.URL, "--token", secret, "data", "status")
+	if err == nil {
+		t.Fatalf("expected invalid local config to fail, stdout=%s stderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(err.Error(), "workspace is required") {
+		t.Fatalf("expected invalid config error, stdout=%s stderr=%s err=%v", stdout, stderr, err)
+	}
+}
+
 func TestS3CompatibleDataWorkspacePushPullIntegration(t *testing.T) {
 	for _, provider := range []string{model.DataBackendProviderS3, model.DataBackendProviderMinIO} {
 		provider := provider

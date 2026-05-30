@@ -412,7 +412,7 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 	var noProgress bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show local data workspace status",
+		Short: "Show local or account-level data workspace status",
 		Example: strings.TrimSpace(`
   fugue data status
   fugue data status --json
@@ -421,6 +421,13 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := readDataConfig(".")
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					client, clientErr := c.newClient()
+					if clientErr != nil {
+						return clientErr
+					}
+					return c.renderAccountDataStatus(client)
+				}
 				return err
 			}
 			estimate, err := estimateDataManifestScan(".", cfg, "")
@@ -506,6 +513,73 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress rendering")
 	return cmd
+}
+
+type accountDataWorkspaceStatus struct {
+	Workspace      model.DataWorkspace `json:"workspace"`
+	LatestSnapshot model.DataSnapshot  `json:"latest_snapshot,omitempty"`
+}
+
+func (c *CLI) renderAccountDataStatus(client *Client) error {
+	workspaces, err := client.ListDataWorkspaces()
+	if err != nil {
+		return err
+	}
+	statuses := make([]accountDataWorkspaceStatus, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		status := accountDataWorkspaceStatus{Workspace: workspace}
+		if resp, err := client.GetDataWorkspace(workspace.ID); err == nil {
+			status.Workspace = resp.Workspace
+			status.LatestSnapshot = resp.LatestSnapshot
+		}
+		statuses = append(statuses, status)
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{"local_bound": false, "workspaces": statuses})
+	}
+	fmt.Fprintln(c.stdout, "No local data workspace is bound in this directory.")
+	fmt.Fprintln(c.stdout)
+	if len(statuses) == 0 {
+		fmt.Fprintln(c.stdout, "No data workspaces found.")
+		fmt.Fprintln(c.stdout)
+		fmt.Fprintln(c.stdout, "Use:")
+		fmt.Fprintln(c.stdout, "  fugue data track <path>")
+		return nil
+	}
+	fmt.Fprintln(c.stdout, "Your data workspaces:")
+	rows := make([][]string, 0, len(statuses))
+	for _, status := range statuses {
+		workspace := status.Workspace
+		backend := strings.TrimSpace(workspace.StorageBackendID)
+		if backend == "" {
+			backend = "default"
+		}
+		latestVersion := "none"
+		files := "-"
+		size := formatBytes(workspace.UsedBytes)
+		updated := formatTime(workspace.UpdatedAt)
+		if status.LatestSnapshot.ID != "" {
+			latestVersion = status.LatestSnapshot.Version
+			files = strconv.Itoa(status.LatestSnapshot.FileCount)
+			size = formatBytes(status.LatestSnapshot.TotalBytes)
+			updated = formatTime(status.LatestSnapshot.CreatedAt)
+		}
+		rows = append(rows, []string{workspace.Name, backend, latestVersion, files, size, updated})
+	}
+	renderDataTable(c.stdout, []dataTableColumn{
+		{Title: "Workspace"},
+		{Title: "Backend"},
+		{Title: "Latest version"},
+		{Title: "Files", Align: dataTableAlignRight},
+		{Title: "Size", Align: dataTableAlignRight},
+		{Title: "Updated"},
+	}, rows)
+	fmt.Fprintln(c.stdout)
+	fmt.Fprintln(c.stdout, "Use:")
+	fmt.Fprintln(c.stdout, "  fugue data workspace use <workspace>")
+	fmt.Fprintln(c.stdout, "  fugue data clone <workspace>")
+	fmt.Fprintln(c.stdout, "  fugue data track <path>")
+	return nil
 }
 
 func (c *CLI) newDataPushCommand() *cobra.Command {
