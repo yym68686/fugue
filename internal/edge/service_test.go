@@ -1871,7 +1871,13 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 		if r.URL.Path != "/" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
+		if r.Header.Get("RSC") != "" {
+			w.Header().Set("Content-Type", "text/x-component")
+			_, _ = fmt.Fprintf(w, "rsc shell %d", upstreamHits.Add(1))
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Vary", "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept-Encoding")
 		_, _ = fmt.Fprintf(w, "<!doctype html><title>shell %d</title>", upstreamHits.Add(1))
 	}))
 	defer backend.Close()
@@ -1904,7 +1910,7 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 			EdgeCacheControl:            "public, max-age=60, stale-while-revalidate=300",
 			BypassOnAuthorization:       true,
 			BypassOnCookie:              true,
-			VaryAllowlist:               []string{"Accept-Encoding"},
+			VaryAllowlist:               nextDocumentVaryAllowlist,
 			PurgeMode:                   model.CachePolicyPurgeModeGeneration,
 		},
 	}
@@ -1937,11 +1943,22 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 		t.Fatalf("expected HTML cache hit to expose only cache timing, got %q", timing)
 	}
 
+	rsc := httptest.NewRecorder()
+	rscReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	rscReq.Header.Set("RSC", "1")
+	service.ProxyHandler().ServeHTTP(rsc, rscReq)
+	if rsc.Code != http.StatusOK || rsc.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 2 {
+		t.Fatalf("expected Next RSC request to bypass HTML cache, status=%d cache=%q hits=%d body=%q", rsc.Code, rsc.Header().Get("X-Fugue-Cache"), upstreamHits.Load(), rsc.Body.String())
+	}
+	if rsc.Body.String() != "rsc shell 2" {
+		t.Fatalf("expected uncached RSC response, got %q", rsc.Body.String())
+	}
+
 	cookie := httptest.NewRecorder()
 	cookieReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
 	cookieReq.Header.Set("Cookie", "session=abc")
 	service.ProxyHandler().ServeHTTP(cookie, cookieReq)
-	if cookie.Code != http.StatusOK || cookie.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 2 {
+	if cookie.Code != http.StatusOK || cookie.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 3 {
 		t.Fatalf("expected cookie request to bypass HTML cache, status=%d cache=%q hits=%d body=%q", cookie.Code, cookie.Header().Get("X-Fugue-Cache"), upstreamHits.Load(), cookie.Body.String())
 	}
 

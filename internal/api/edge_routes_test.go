@@ -165,6 +165,11 @@ func TestEdgeRoutesBundleDerivesPlatformAndCustomDomainRoutes(t *testing.T) {
 		bundle.CachePolicies[1].ID != defaultHTMLDocumentCachePolicyID {
 		t.Fatalf("expected route bundle to include default cache policy, got %+v", bundle.CachePolicies)
 	}
+	for _, want := range defaultHTMLDocumentVaryAllowlist {
+		if !testStringSliceContainsFold(bundle.CachePolicies[1].VaryAllowlist, want) {
+			t.Fatalf("expected HTML cache vary allowlist to include %q, got %+v", want, bundle.CachePolicies[1].VaryAllowlist)
+		}
+	}
 	if !strings.Contains(platform.UpstreamURL, ".svc.cluster.local:8080") {
 		t.Fatalf("expected service DNS upstream, got %+v", platform)
 	}
@@ -996,4 +1001,13 @@ func recordHealthyEdgeForRouteTest(t *testing.T, storeState edgeRouteHeartbeatSt
 	}); err != nil {
 		t.Fatalf("record healthy edge node: %v", err)
 	}
+}
+
+func testStringSliceContainsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(want)) {
+			return true
+		}
+	}
+	return false
 }

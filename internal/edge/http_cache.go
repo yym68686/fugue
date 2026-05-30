@@ -29,6 +29,21 @@ const (
 
 const edgeCacheWarmupDiscoveryHeader = "X-Fugue-Cache-Warmup-Discovery"
 
+var nextDocumentVaryAllowlist = []string{
+	"Accept-Encoding",
+	"RSC",
+	"Next-Router-State-Tree",
+	"Next-Router-Prefetch",
+	"Next-Router-Segment-Prefetch",
+}
+
+var nextDocumentVariantRequestHeaders = []string{
+	"RSC",
+	"Next-Router-State-Tree",
+	"Next-Router-Prefetch",
+	"Next-Router-Segment-Prefetch",
+}
+
 type edgeHTTPCacheDecision struct {
 	Enabled            bool
 	Policy             model.CachePolicy
@@ -166,6 +181,10 @@ func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBindin
 		}
 		if len(policy.MethodAllowlist) > 0 && !stringSliceContainsFold(policy.MethodAllowlist, r.Method) {
 			decision.Reason = "method not allowed by cache policy"
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(policy.Kind), model.CachePolicyKindHTMLDocuments) && edgeRequestIsNextDocumentVariant(r) {
+			decision.Reason = "next document variant request"
 			continue
 		}
 		if strings.TrimSpace(r.Header.Get("Authorization")) != "" && policy.BypassOnAuthorization {
@@ -553,6 +572,18 @@ func edgeCacheContentTypeIsHTML(originContentType string, fallback http.Header) 
 func edgeCacheControlDisallowsStore(cacheControl string) bool {
 	cacheControl = strings.ToLower(strings.TrimSpace(cacheControl))
 	return strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private")
+}
+
+func edgeRequestIsNextDocumentVariant(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	for _, name := range nextDocumentVariantRequestHeaders {
+		if strings.TrimSpace(r.Header.Get(name)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func edgeCacheVaryAllowed(varyValues, allowlist []string) bool {

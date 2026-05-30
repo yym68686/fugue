@@ -24,6 +24,14 @@ const (
 	defaultHTMLDocumentCachePolicyID = "html-documents-short-v1"
 )
 
+var defaultHTMLDocumentVaryAllowlist = []string{
+	"Accept-Encoding",
+	"RSC",
+	"Next-Router-State-Tree",
+	"Next-Router-Prefetch",
+	"Next-Router-Segment-Prefetch",
+}
+
 const edgeCaddyRestartCooldown = 2 * time.Minute
 
 type edgeLiveServingState struct {
@@ -1027,7 +1035,7 @@ func defaultEdgeCachePolicies() []model.CachePolicy {
 			EdgeCacheControl:            "public, max-age=60, stale-while-revalidate=300",
 			BypassOnAuthorization:       true,
 			BypassOnCookie:              true,
-			VaryAllowlist:               []string{"Accept-Encoding"},
+			VaryAllowlist:               append([]string(nil), defaultHTMLDocumentVaryAllowlist...),
 			PurgeMode:                   model.CachePolicyPurgeModeGeneration,
 		},
 	}
