@@ -515,31 +515,17 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 	return cmd
 }
 
-type accountDataWorkspaceStatus struct {
-	Workspace      model.DataWorkspace `json:"workspace"`
-	LatestSnapshot model.DataSnapshot  `json:"latest_snapshot,omitempty"`
-}
-
 func (c *CLI) renderAccountDataStatus(client *Client) error {
 	workspaces, err := client.ListDataWorkspaces()
 	if err != nil {
 		return err
 	}
-	statuses := make([]accountDataWorkspaceStatus, 0, len(workspaces))
-	for _, workspace := range workspaces {
-		status := accountDataWorkspaceStatus{Workspace: workspace}
-		if resp, err := client.GetDataWorkspace(workspace.ID); err == nil {
-			status.Workspace = resp.Workspace
-			status.LatestSnapshot = resp.LatestSnapshot
-		}
-		statuses = append(statuses, status)
-	}
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, map[string]any{"local_bound": false, "workspaces": statuses})
+		return writeJSON(c.stdout, map[string]any{"local_bound": false, "workspaces": workspaces})
 	}
 	fmt.Fprintln(c.stdout, "No local data workspace is bound in this directory.")
 	fmt.Fprintln(c.stdout)
-	if len(statuses) == 0 {
+	if len(workspaces) == 0 {
 		fmt.Fprintln(c.stdout, "No data workspaces found.")
 		fmt.Fprintln(c.stdout)
 		fmt.Fprintln(c.stdout, "Use:")
@@ -547,31 +533,25 @@ func (c *CLI) renderAccountDataStatus(client *Client) error {
 		return nil
 	}
 	fmt.Fprintln(c.stdout, "Your data workspaces:")
-	rows := make([][]string, 0, len(statuses))
-	for _, status := range statuses {
-		workspace := status.Workspace
+	rows := make([][]string, 0, len(workspaces))
+	for _, workspace := range workspaces {
 		backend := strings.TrimSpace(workspace.StorageBackendID)
 		if backend == "" {
 			backend = "default"
 		}
-		latestVersion := "none"
-		files := "-"
-		size := formatBytes(workspace.UsedBytes)
-		updated := formatTime(workspace.UpdatedAt)
-		if status.LatestSnapshot.ID != "" {
-			latestVersion = status.LatestSnapshot.Version
-			files = strconv.Itoa(status.LatestSnapshot.FileCount)
-			size = formatBytes(status.LatestSnapshot.TotalBytes)
-			updated = formatTime(status.LatestSnapshot.CreatedAt)
-		}
-		rows = append(rows, []string{workspace.Name, backend, latestVersion, files, size, updated})
+		rows = append(rows, []string{
+			workspace.Name,
+			backend,
+			strconv.Itoa(len(workspace.Assets)),
+			formatBytes(workspace.UsedBytes),
+			formatTime(workspace.UpdatedAt),
+		})
 	}
 	renderDataTable(c.stdout, []dataTableColumn{
 		{Title: "Workspace"},
 		{Title: "Backend"},
-		{Title: "Latest version"},
-		{Title: "Files", Align: dataTableAlignRight},
-		{Title: "Size", Align: dataTableAlignRight},
+		{Title: "Assets", Align: dataTableAlignRight},
+		{Title: "Used", Align: dataTableAlignRight},
 		{Title: "Updated"},
 	}, rows)
 	fmt.Fprintln(c.stdout)

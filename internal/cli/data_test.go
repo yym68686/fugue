@@ -176,7 +176,7 @@ func TestDataStatusWithoutLocalBindingShowsAccountOverview(t *testing.T) {
 		"Your data workspaces:",
 		"lanyun-tmp",
 		"prod-r2",
-		"before-provider-move",
+		"42 B",
 		"fugue data workspace use <workspace>",
 	} {
 		if !strings.Contains(out, want) {
@@ -188,7 +188,7 @@ func TestDataStatusWithoutLocalBindingShowsAccountOverview(t *testing.T) {
 	}
 
 	jsonOut := runDataCLIInDir(t, unboundDir, "--base-url", httpServer.URL, "--token", secret, "data", "status", "--json")
-	if !strings.Contains(jsonOut, `"local_bound": false`) || !strings.Contains(jsonOut, `"before-provider-move"`) {
+	if !strings.Contains(jsonOut, `"local_bound": false`) || !strings.Contains(jsonOut, `"lanyun-tmp"`) {
 		t.Fatalf("expected json account status, got %s", jsonOut)
 	}
 
