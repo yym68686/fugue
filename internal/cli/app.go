@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"fugue/internal/model"
@@ -19,6 +20,7 @@ type appLogsCommandOptions struct {
 	Pod         string
 	TailLines   int
 	Previous    bool
+	Grep        string
 }
 
 type appScaleCommandOptions struct {
@@ -252,6 +254,7 @@ Use "app logs runtime" and "app logs build" for explicit semantics. The bare
 				Pod:       opts.Pod,
 				TailLines: opts.TailLines,
 				Previous:  opts.Previous,
+				Grep:      opts.Grep,
 			}, opts.Follow)
 		},
 	}
@@ -262,6 +265,7 @@ Use "app logs runtime" and "app logs build" for explicit semantics. The bare
 	cmd.Flags().StringVar(&opts.Pod, "pod", "", "Specific pod name")
 	cmd.Flags().IntVar(&opts.TailLines, "tail", opts.TailLines, "Number of log lines to read")
 	cmd.Flags().BoolVar(&opts.Previous, "previous", false, "Read the previous container logs")
+	cmd.Flags().StringVar(&opts.Grep, "grep", "", "Only print log lines matching this regular expression")
 	cmd.AddCommand(
 		c.newAppRuntimeLogsCommand(),
 		c.newAppBuildLogsCommand(),
@@ -592,6 +596,7 @@ func (c *CLI) newAppRuntimeLogsCommand() *cobra.Command {
 				Pod:       opts.Pod,
 				TailLines: opts.TailLines,
 				Previous:  opts.Previous,
+				Grep:      opts.Grep,
 			}, opts.Follow)
 		},
 	}
@@ -600,6 +605,7 @@ func (c *CLI) newAppRuntimeLogsCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Pod, "pod", "", "Specific pod name")
 	cmd.Flags().IntVar(&opts.TailLines, "tail", opts.TailLines, "Number of log lines to read")
 	cmd.Flags().BoolVar(&opts.Previous, "previous", false, "Read the previous container logs")
+	cmd.Flags().StringVar(&opts.Grep, "grep", "", "Only print log lines matching this regular expression")
 	return cmd
 }
 
@@ -624,12 +630,17 @@ func (c *CLI) newAppBuildLogsCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.Follow, "follow", false, "Follow logs in real time")
 	cmd.Flags().StringVar(&opts.OperationID, "operation", "", "Specific build operation ID")
 	cmd.Flags().IntVar(&opts.TailLines, "tail", opts.TailLines, "Number of log lines to read")
+	cmd.Flags().StringVar(&opts.Grep, "grep", "", "Only print log lines matching this regular expression")
 	return cmd
 }
 
 func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandOptions) error {
+	filter, err := newLogLineFilter(opts.Grep)
+	if err != nil {
+		return err
+	}
 	if opts.Follow {
-		return c.streamBuildLogs(client, appID, opts)
+		return c.streamBuildLogs(client, appID, opts, filter)
 	}
 	logs, err := client.GetBuildLogs(appID, opts.OperationID, opts.TailLines)
 	if err != nil {
@@ -637,6 +648,7 @@ func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandO
 	}
 	logs.ArtifactSummary = c.collectBuildArtifactReport(client, appID, logs)
 	c.enrichBuildLogsArtifactReport(client, appID, logs.ArtifactSummary)
+	logs.Logs = filterLogText(logs.Logs, filter)
 	if strings.TrimSpace(logs.JobName) == "" {
 		logs.JobName = buildLogsFallbackJobName(logs)
 	}
@@ -647,13 +659,18 @@ func (c *CLI) renderBuildLogs(client *Client, appID string, opts appLogsCommandO
 }
 
 func (c *CLI) renderRuntimeLogs(client *Client, appID string, opts runtimeLogsOptions, follow bool) error {
+	filter, err := newLogLineFilter(opts.Grep)
+	if err != nil {
+		return err
+	}
 	if follow {
-		return c.streamRuntimeLogs(client, appID, opts)
+		return c.streamRuntimeLogs(client, appID, opts, filter)
 	}
 	logs, err := client.GetRuntimeLogs(appID, opts)
 	if err != nil {
 		return err
 	}
+	logs.Logs = filterLogText(logs.Logs, filter)
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, logs)
 	}
@@ -666,7 +683,46 @@ func (c *CLI) renderRuntimeLogs(client *Client, appID string, opts runtimeLogsOp
 	return err
 }
 
-func (c *CLI) streamBuildLogs(client *Client, appID string, opts appLogsCommandOptions) error {
+type logLineFilter struct {
+	pattern string
+	regex   *regexp.Regexp
+}
+
+func newLogLineFilter(pattern string) (*logLineFilter, error) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return nil, nil
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --grep pattern: %w", err)
+	}
+	return &logLineFilter{pattern: pattern, regex: compiled}, nil
+}
+
+func (f *logLineFilter) matches(line string) bool {
+	return f == nil || f.regex.MatchString(line)
+}
+
+func filterLogText(text string, filter *logLineFilter) string {
+	if filter == nil {
+		return text
+	}
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	matched := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if filter.matches(line) {
+			matched = append(matched, line)
+		}
+	}
+	return strings.Join(matched, "\n")
+}
+
+func (c *CLI) streamBuildLogs(client *Client, appID string, opts appLogsCommandOptions, filter *logLineFilter) error {
 	var end logStreamEndEvent
 	err := client.StreamBuildLogs(appID, opts.OperationID, opts.TailLines, true, func(event sseEvent) error {
 		switch event.Event {
@@ -674,6 +730,9 @@ func (c *CLI) streamBuildLogs(client *Client, appID string, opts appLogsCommandO
 			var payload logStreamLogEvent
 			if err := json.Unmarshal(event.Data, &payload); err != nil {
 				return err
+			}
+			if !filter.matches(payload.Line) {
+				return nil
 			}
 			if c.wantsJSON() {
 				return c.writeStreamJSON(event)
@@ -716,13 +775,16 @@ func (c *CLI) streamBuildLogs(client *Client, appID string, opts appLogsCommandO
 	return nil
 }
 
-func (c *CLI) streamRuntimeLogs(client *Client, appID string, opts runtimeLogsOptions) error {
+func (c *CLI) streamRuntimeLogs(client *Client, appID string, opts runtimeLogsOptions, filter *logLineFilter) error {
 	return client.StreamRuntimeLogs(appID, opts, true, func(event sseEvent) error {
 		switch event.Event {
 		case "log":
 			var payload logStreamLogEvent
 			if err := json.Unmarshal(event.Data, &payload); err != nil {
 				return err
+			}
+			if !filter.matches(payload.Line) {
+				return nil
 			}
 			if c.wantsJSON() {
 				return c.writeStreamJSON(event)

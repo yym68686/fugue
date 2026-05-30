@@ -195,6 +195,7 @@ type runtimeLogsOptions struct {
 	Pod       string
 	TailLines int
 	Previous  bool
+	Grep      string
 }
 
 type runtimeLogsResponse struct {

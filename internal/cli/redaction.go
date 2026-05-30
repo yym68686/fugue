@@ -198,7 +198,7 @@ func cloneStorageMountsForOutput(mounts []model.AppPersistentStorageMount, redac
 	copy(out, mounts)
 	if redactSecrets {
 		for index := range out {
-			if out[index].Secret && out[index].SeedContent != "" {
+			if out[index].SeedContent != "" {
 				out[index].SeedContent = redactedSecretValue
 			}
 		}
