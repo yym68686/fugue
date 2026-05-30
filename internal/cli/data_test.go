@@ -197,6 +197,90 @@ func TestDataEvictFreesAndRestoresTrackedAssets(t *testing.T) {
 	}
 }
 
+func TestDataPullAcceptsPositionalAssetSelectors(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.read", "data.write", "data.delete", "data.grant", "data.admin"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := api.NewServer(stateStore, auth.New(stateStore, ""), nil, api.ServerConfig{})
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	sourceDir := filepath.Join(t.TempDir(), "selector-project")
+	sourceFile := filepath.Join(sourceDir, "kernel.pt")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("create source dir: %v", err)
+	}
+	if err := os.WriteFile(sourceFile, []byte("weights"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "track", "kernel.pt")
+	runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "push", "--version", "weights-v1", "--no-progress")
+
+	if err := os.Remove(sourceFile); err != nil {
+		t.Fatalf("remove source file: %v", err)
+	}
+	pullOut := runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "pull", "kernel.pt", "--verify", "--no-progress")
+	if !strings.Contains(pullOut, "Restored version") {
+		t.Fatalf("expected positional pull output, got %s", pullOut)
+	}
+	if restored, err := os.ReadFile(sourceFile); err != nil || string(restored) != "weights" {
+		t.Fatalf("unexpected restored content %q err=%v", string(restored), err)
+	}
+
+	if err := os.Remove(sourceFile); err != nil {
+		t.Fatalf("remove restored file: %v", err)
+	}
+	runDataCLIInDir(t, sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "pull", "kernel-pt", "--verify", "--no-progress")
+	if restored, err := os.ReadFile(sourceFile); err != nil || string(restored) != "weights" {
+		t.Fatalf("unexpected restored content by asset name %q err=%v", string(restored), err)
+	}
+
+	stdout, stderr, err := runDataCLIInDirErr(sourceDir, "--base-url", httpServer.URL, "--token", secret, "data", "pull", "kernel.pt", "--asset", "kernel-pt", "--no-progress")
+	if err == nil {
+		t.Fatalf("expected --asset plus positional selector to fail, stdout=%s stderr=%s", stdout, stderr)
+	}
+	if !strings.Contains(err.Error(), "either --asset or positional") {
+		t.Fatalf("expected selector conflict error, stdout=%s stderr=%s err=%v", stdout, stderr, err)
+	}
+}
+
+func TestDataAssetSelectorsMatchPathAndReportAmbiguity(t *testing.T) {
+	cfg := dataConfig{Assets: normalizeConfigAssets([]model.DataAsset{
+		{Name: "root-kernel", Path: "./kernel.pt", Required: true},
+		{Name: "a-kernel", Path: "./a/kernel.pt", Required: true},
+		{Name: "b-kernel", Path: "./b/kernel.pt", Required: true},
+	})}
+	selected, err := selectDataAssets(cfg, []string{"kernel.pt", "./a/kernel.pt", "b-kernel"})
+	if err != nil {
+		t.Fatalf("select assets: %v", err)
+	}
+	got := []string{}
+	for _, asset := range selected {
+		got = append(got, asset.Name)
+	}
+	if strings.Join(got, ",") != "root-kernel,a-kernel,b-kernel" {
+		t.Fatalf("unexpected selected assets: %v", got)
+	}
+
+	ambiguousCfg := dataConfig{Assets: normalizeConfigAssets([]model.DataAsset{
+		{Name: "a-kernel", Path: "./a/kernel.pt", Required: true},
+		{Name: "b-kernel", Path: "./b/kernel.pt", Required: true},
+	})}
+	if _, err := selectDataAssets(ambiguousCfg, []string{"kernel.pt"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguous selector error, got %v", err)
+	}
+}
+
 func TestDataStatusWithoutLocalBindingShowsAccountOverview(t *testing.T) {
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {

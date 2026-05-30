@@ -771,10 +771,13 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 	var concurrency int
 	hashConcurrency := defaultDataHashWorkerCount()
 	cmd := &cobra.Command{
-		Use:   "pull",
+		Use:   "pull [asset-or-path...]",
 		Short: "Download a data workspace version into the current project",
 		Example: strings.TrimSpace(`
   fugue data pull
+  fugue data pull kernel.pt
+  fugue data pull kernel-pt
+  fugue data pull ./models/kernel.pt
   fugue data pull --version before-provider-move
   fugue data pull --asset dataset
   fugue data pull --asset checkpoints --to /mnt/nvme/checkpoints
@@ -782,9 +785,13 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
   fugue data pull --overwrite
   fugue data pull --prune --confirm
 `),
-		Args: cobra.NoArgs,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := readDataConfig(".")
+			if err != nil {
+				return err
+			}
+			selectedAssets, err := selectDataPullAssets(cfg, assetName, args)
 			if err != nil {
 				return err
 			}
@@ -797,17 +804,20 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 				return err
 			}
 			assets := []string{}
-			if strings.TrimSpace(assetName) != "" {
-				assets = append(assets, strings.TrimSpace(assetName))
+			for _, asset := range selectedAssets {
+				assets = append(assets, asset.Name)
 			}
 			planResp, err := client.PlanDataDownload(workspace.ID, version, assets)
 			if err != nil {
 				return err
 			}
 			targetCfg := cfg
-			if toPath != "" && assetName != "" {
+			if toPath != "" {
+				if len(selectedAssets) != 1 {
+					return fmt.Errorf("--to requires exactly one asset selector")
+				}
 				for idx := range targetCfg.Assets {
-					if targetCfg.Assets[idx].Name == assetName {
+					if targetCfg.Assets[idx].Name == selectedAssets[0].Name {
 						targetCfg.Assets[idx].Path = toPath
 					}
 				}
@@ -896,7 +906,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&version, "version", "", "Version to pull. Defaults to latest")
-	cmd.Flags().StringVar(&assetName, "asset", "", "Only pull one asset")
+	cmd.Flags().StringVar(&assetName, "asset", "", "Only pull one asset selector")
 	cmd.Flags().StringVar(&toPath, "to", "", "Override target path for a single asset")
 	cmd.Flags().BoolVar(&verify, "verify", false, "Verify restored files after download")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show pull plan without downloading")
@@ -2301,42 +2311,114 @@ func dataConfigAssetIndex(cfg dataConfig, name string) int {
 	return -1
 }
 
+func selectDataPullAssets(cfg dataConfig, assetFlag string, args []string) ([]model.DataAsset, error) {
+	assetFlag = strings.TrimSpace(assetFlag)
+	if assetFlag != "" && len(args) > 0 {
+		return nil, fmt.Errorf("use either --asset or positional asset selectors, not both")
+	}
+	if assetFlag != "" {
+		return selectDataAssets(cfg, []string{assetFlag})
+	}
+	if len(args) == 0 {
+		return nil, nil
+	}
+	return selectDataAssets(cfg, args)
+}
+
 func selectDataEvictAssets(cfg dataConfig, selectors []string) ([]model.DataAsset, error) {
 	if len(selectors) == 0 {
 		return append([]model.DataAsset(nil), cfg.Assets...), nil
 	}
+	return selectDataAssets(cfg, selectors)
+}
+
+func selectDataAssets(cfg dataConfig, selectors []string) ([]model.DataAsset, error) {
 	selected := []model.DataAsset{}
 	seen := map[string]struct{}{}
 	for _, selector := range selectors {
-		selector = strings.TrimSpace(selector)
-		if selector == "" {
+		asset, err := resolveDataAssetSelector(cfg, selector)
+		if err != nil {
+			return nil, err
+		}
+		if asset.Name == "" {
 			continue
 		}
-		var cleanPath string
-		if cleaned, err := cleanConfigPath(selector); err == nil {
-			cleanPath = cleaned
+		if _, ok := seen[asset.Name]; ok {
+			continue
 		}
-		found := false
-		for _, asset := range cfg.Assets {
-			if asset.Name != selector && asset.Path != selector && (cleanPath == "" || asset.Path != cleanPath) {
-				continue
-			}
-			found = true
-			if _, ok := seen[asset.Name]; ok {
-				break
-			}
-			seen[asset.Name] = struct{}{}
-			selected = append(selected, asset)
-			break
-		}
-		if !found {
-			return nil, fmt.Errorf("asset %q is not tracked", selector)
-		}
+		seen[asset.Name] = struct{}{}
+		selected = append(selected, asset)
 	}
 	if len(selected) == 0 {
 		return nil, fmt.Errorf("no assets selected")
 	}
 	return selected, nil
+}
+
+func resolveDataAssetSelector(cfg dataConfig, raw string) (model.DataAsset, error) {
+	selector := strings.TrimSpace(filepath.ToSlash(raw))
+	if selector == "" {
+		return model.DataAsset{}, nil
+	}
+	if matches := dataAssetSelectorMatches(cfg, selector, dataAssetSelectorNameMatch); len(matches) > 0 {
+		return matches[0], nil
+	}
+	if matches := dataAssetSelectorMatches(cfg, selector, dataAssetSelectorPathMatch); len(matches) > 0 {
+		if len(matches) > 1 {
+			return model.DataAsset{}, ambiguousDataAssetSelectorError(selector, matches)
+		}
+		return matches[0], nil
+	}
+	if matches := dataAssetSelectorMatches(cfg, selector, dataAssetSelectorBasenameMatch); len(matches) > 0 {
+		if len(matches) > 1 {
+			return model.DataAsset{}, ambiguousDataAssetSelectorError(selector, matches)
+		}
+		return matches[0], nil
+	}
+	return model.DataAsset{}, fmt.Errorf("asset %q is not tracked", raw)
+}
+
+type dataAssetSelectorMatchMode int
+
+const (
+	dataAssetSelectorNameMatch dataAssetSelectorMatchMode = iota
+	dataAssetSelectorPathMatch
+	dataAssetSelectorBasenameMatch
+)
+
+func dataAssetSelectorMatches(cfg dataConfig, selector string, mode dataAssetSelectorMatchMode) []model.DataAsset {
+	cleanPath := ""
+	if cleaned, err := cleanConfigPath(selector); err == nil {
+		cleanPath = cleaned
+	}
+	matches := []model.DataAsset{}
+	for _, asset := range cfg.Assets {
+		assetPath := filepath.ToSlash(asset.Path)
+		switch mode {
+		case dataAssetSelectorNameMatch:
+			if asset.Name == selector {
+				matches = append(matches, asset)
+			}
+		case dataAssetSelectorPathMatch:
+			if assetPath == selector || (cleanPath != "" && assetPath == cleanPath) {
+				matches = append(matches, asset)
+			}
+		case dataAssetSelectorBasenameMatch:
+			if path.Base(strings.TrimPrefix(assetPath, "./")) == selector {
+				matches = append(matches, asset)
+			}
+		}
+	}
+	return matches
+}
+
+func ambiguousDataAssetSelectorError(selector string, matches []model.DataAsset) error {
+	labels := make([]string, 0, len(matches))
+	for _, asset := range matches {
+		labels = append(labels, fmt.Sprintf("%s (%s)", asset.Name, asset.Path))
+	}
+	sort.Strings(labels)
+	return fmt.Errorf("asset selector %q is ambiguous; use an asset name or tracked path: %s", selector, strings.Join(labels, ", "))
 }
 
 func estimateDataManifestScan(root string, cfg dataConfig, onlyAsset string) (dataScanEstimate, error) {
