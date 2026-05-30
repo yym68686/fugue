@@ -138,9 +138,7 @@ public_data_plane_worker_image_changed() {
     case "${file}" in
       cmd/fugue-edge/*|\
       internal/edge/*|\
-      Dockerfile.edge|\
-      scripts/release_fugue_public_data_plane.sh|\
-      scripts/upgrade_fugue_control_plane.sh)
+      Dockerfile.edge)
         return 0
         ;;
     esac
