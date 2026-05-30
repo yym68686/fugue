@@ -47,6 +47,7 @@ type Service struct {
 	etag                string
 	metrics             telemetry
 	performanceBaseline telemetry
+	cacheRevalidating   map[string]struct{}
 }
 
 type Status struct {
@@ -744,6 +745,9 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		observed.CacheLookup = time.Since(cacheLookupStarted)
 		if ok {
 			if served, status, cacheStatus := s.edgeCacheServeIfFresh(observedWriter, cacheDecision, entry, edgeProxyServerTiming(observed, false)); served {
+				if cacheStatus == edgeCacheStatusStale {
+					s.edgeCacheRevalidateAsync(r, target, route, cacheDecision, host)
+				}
 				observed.Proxied = false
 				observed.StatusCode = status
 				observed.CacheStatus = cacheStatus
@@ -787,6 +791,122 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if !observedWriter.wroteHeader && observed.WebSocket && observed.UpstreamError == "" {
 		observed.StatusCode = http.StatusSwitchingProtocols
 	}
+}
+
+func (s *Service) edgeCacheRevalidateAsync(r *http.Request, target *url.URL, route model.EdgeRouteBinding, decision edgeHTTPCacheDecision, host string) {
+	if s == nil || r == nil || target == nil || strings.TrimSpace(decision.KeyHash) == "" {
+		return
+	}
+	if !s.startEdgeCacheRevalidation(decision.KeyHash) {
+		return
+	}
+	targetCopy := *target
+	routeCopy := route
+	decisionCopy := decision
+	host = strings.TrimSpace(host)
+	go func() {
+		defer s.finishEdgeCacheRevalidation(decisionCopy.KeyHash)
+		if err := s.edgeCacheRevalidate(r, &targetCopy, routeCopy, decisionCopy, host); err != nil && s.Logger != nil {
+			s.Logger.Printf("edge http cache revalidation failed; host=%s policy=%s key=%s error=%v", host, decisionCopy.PolicyID, decisionCopy.KeyHash, err)
+		}
+	}()
+}
+
+func (s *Service) edgeCacheRevalidate(r *http.Request, target *url.URL, route model.EdgeRouteBinding, decision edgeHTTPCacheDecision, host string) error {
+	timeout := s.edgeCacheRevalidationTimeout()
+	ctx := context.Background()
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
+	req := r.Clone(ctx)
+	req.Body = nil
+	req.GetBody = nil
+	req.Header = r.Header.Clone()
+	req.Header.Del("If-None-Match")
+	req.Header.Del("If-Modified-Since")
+	req.Header.Del("If-Range")
+	req.Header.Del("Range")
+
+	observed := edgeProxyObservation{
+		ReceivedAt:    time.Now().UTC(),
+		Host:          host,
+		Route:         route,
+		Method:        req.Method,
+		Path:          safeProxyLogPath(req),
+		CacheStatus:   edgeCacheStatusMiss,
+		CachePolicyID: decision.PolicyID,
+		CacheKeyHash:  decision.KeyHash,
+		AssetClass:    decision.AssetClass,
+	}
+	writer := newEdgeProxyObservationResponseWriter(newEdgeCacheRevalidationResponseWriter(), time.Now(), &observed)
+	maxBytes := s.Config.AssetCacheMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 32 * 1024 * 1024
+	}
+	writer.maxBytes = int64(maxBytes)
+	cacheDecision := decision
+	cacheDecision.Status = edgeCacheStatusMiss
+	cacheDecision.Cacheable = true
+	proxy := s.newEdgeReverseProxy(host, target, route, &observed, false, &cacheDecision)
+	proxy.ServeHTTP(writer, req)
+	if observed.UpstreamError != "" {
+		return fmt.Errorf("origin request failed: %s", observed.UpstreamError)
+	}
+	if !writer.wroteHeader {
+		return fmt.Errorf("origin response did not write headers")
+	}
+	if !s.edgeCacheShouldStore(cacheDecision, writer) {
+		return fmt.Errorf("origin response is not cacheable: status=%d content_type=%q cache_control=%q vary=%q set_cookie=%t", writer.statusCode(), cacheDecision.OriginContentType, cacheDecision.OriginCacheControl, strings.Join(cacheDecision.OriginVary, ","), cacheDecision.OriginSetCookie)
+	}
+	return s.edgeCacheStore(cacheDecision, edgeHTTPCacheEntry{
+		Header:     cloneHTTPHeader(writer.headerSnapshot),
+		StatusCode: writer.statusCode(),
+		Body:       append([]byte(nil), writer.body...),
+		BodySize:   writer.bytesWritten,
+	})
+}
+
+func (s *Service) edgeCacheRevalidationTimeout() time.Duration {
+	if s == nil {
+		return 10 * time.Second
+	}
+	if s.Config.HTTPTimeout > 0 {
+		return s.Config.HTTPTimeout
+	}
+	if s.HTTPClient != nil && s.HTTPClient.Timeout > 0 {
+		return s.HTTPClient.Timeout
+	}
+	return 10 * time.Second
+}
+
+func (s *Service) startEdgeCacheRevalidation(key string) bool {
+	key = strings.TrimSpace(key)
+	if s == nil || key == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cacheRevalidating == nil {
+		s.cacheRevalidating = make(map[string]struct{})
+	}
+	if _, ok := s.cacheRevalidating[key]; ok {
+		return false
+	}
+	s.cacheRevalidating[key] = struct{}{}
+	return true
+}
+
+func (s *Service) finishEdgeCacheRevalidation(key string) {
+	key = strings.TrimSpace(key)
+	if s == nil || key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cacheRevalidating, key)
 }
 
 func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.EdgeRouteBinding, observed *edgeProxyObservation, suppressErrorResponse bool, cacheDecision *edgeHTTPCacheDecision) *httputil.ReverseProxy {
@@ -2562,6 +2682,27 @@ type edgeProxyObservationResponseWriter struct {
 	maxBytes       int64
 	overflow       bool
 	cacheDecision  *edgeHTTPCacheDecision
+}
+
+type edgeCacheRevalidationResponseWriter struct {
+	header http.Header
+}
+
+func newEdgeCacheRevalidationResponseWriter() *edgeCacheRevalidationResponseWriter {
+	return &edgeCacheRevalidationResponseWriter{header: make(http.Header)}
+}
+
+func (w *edgeCacheRevalidationResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *edgeCacheRevalidationResponseWriter) WriteHeader(int) {}
+
+func (w *edgeCacheRevalidationResponseWriter) Write(data []byte) (int, error) {
+	return len(data), nil
 }
 
 func newEdgeProxyObservationResponseWriter(w http.ResponseWriter, startedAt time.Time, observation *edgeProxyObservation) *edgeProxyObservationResponseWriter {

@@ -1943,14 +1943,49 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 		t.Fatalf("expected HTML cache hit to expose only cache timing, got %q", timing)
 	}
 
+	decision := service.edgeCacheDecision(secondReq, bundle.Routes[0])
+	entry, ok := service.edgeCacheLoad(decision)
+	if !ok {
+		t.Fatal("expected cached HTML entry")
+	}
+	entry.ExpiresAt = time.Now().Add(-time.Second)
+	if err := service.edgeCacheStore(decision, entry); err != nil {
+		t.Fatalf("mark cached HTML stale: %v", err)
+	}
+	stale := httptest.NewRecorder()
+	staleReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(stale, staleReq)
+	if stale.Code != http.StatusOK || stale.Header().Get("X-Fugue-Cache") != "stale" {
+		t.Fatalf("expected stale HTML response while revalidating, got status=%d cache=%q body=%q", stale.Code, stale.Header().Get("X-Fugue-Cache"), stale.Body.String())
+	}
+	if stale.Body.String() != second.Body.String() {
+		t.Fatalf("expected stale response to serve previous shell, stale=%q second=%q", stale.Body.String(), second.Body.String())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for upstreamHits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if upstreamHits.Load() != 2 {
+		t.Fatalf("expected stale response to trigger one background revalidation, hits=%d", upstreamHits.Load())
+	}
+	refreshed := httptest.NewRecorder()
+	refreshedReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	service.ProxyHandler().ServeHTTP(refreshed, refreshedReq)
+	if refreshed.Code != http.StatusOK || refreshed.Header().Get("X-Fugue-Cache") != "hit" {
+		t.Fatalf("expected refreshed HTML cache hit, got status=%d cache=%q body=%q", refreshed.Code, refreshed.Header().Get("X-Fugue-Cache"), refreshed.Body.String())
+	}
+	if !strings.Contains(refreshed.Body.String(), "shell 2") {
+		t.Fatalf("expected refreshed cache body from background revalidation, got %q", refreshed.Body.String())
+	}
+
 	rsc := httptest.NewRecorder()
 	rscReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
 	rscReq.Header.Set("RSC", "1")
 	service.ProxyHandler().ServeHTTP(rsc, rscReq)
-	if rsc.Code != http.StatusOK || rsc.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 2 {
+	if rsc.Code != http.StatusOK || rsc.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 3 {
 		t.Fatalf("expected Next RSC request to bypass HTML cache, status=%d cache=%q hits=%d body=%q", rsc.Code, rsc.Header().Get("X-Fugue-Cache"), upstreamHits.Load(), rsc.Body.String())
 	}
-	if rsc.Body.String() != "rsc shell 2" {
+	if rsc.Body.String() != "rsc shell 3" {
 		t.Fatalf("expected uncached RSC response, got %q", rsc.Body.String())
 	}
 
@@ -1958,14 +1993,15 @@ func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 	cookieReq := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
 	cookieReq.Header.Set("Cookie", "session=abc")
 	service.ProxyHandler().ServeHTTP(cookie, cookieReq)
-	if cookie.Code != http.StatusOK || cookie.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 3 {
+	if cookie.Code != http.StatusOK || cookie.Header().Get("X-Fugue-Cache") != "" || upstreamHits.Load() != 4 {
 		t.Fatalf("expected cookie request to bypass HTML cache, status=%d cache=%q hits=%d body=%q", cookie.Code, cookie.Header().Get("X-Fugue-Cache"), upstreamHits.Load(), cookie.Body.String())
 	}
 
 	metrics := renderMetrics(t, service)
 	for _, want := range []string{
-		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="hit",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 2`,
 		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="miss",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
+		`fugue_edge_route_cache_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",cache_status="stale",cache_policy_id="html-documents-short-v1",asset_class="html_document"} 1`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
