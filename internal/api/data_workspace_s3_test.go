@@ -175,6 +175,102 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	}
 }
 
+func TestDataWorkspaceIncompleteDirectBackendDoesNotFallbackToManagedBlobAPI(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	backend, err := stateStore.CreateDataBackend(model.DataBackend{
+		TenantID: tenant.ID,
+		Name:     "incomplete-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{
+		TenantID:         tenant.ID,
+		Name:             "workspace",
+		StorageBackendID: backend.ID,
+	})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	manifest := model.NormalizeDataManifest(model.DataManifest{Entries: []model.DataManifestEntry{{
+		AssetName:    "data",
+		RelativePath: "big.bin",
+		Kind:         model.DataManifestEntryKindFile,
+		Size:         dataMultipartPartSize + 1,
+		SHA256:       strings.Repeat("b", 64),
+	}}})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/data/workspaces/"+workspace.ID+"/transfers/plan-upload", secret, map[string]any{"manifest": manifest})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected incomplete backend to fail with conflict, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "data backend configuration error") || !strings.Contains(body, "no bucket configured") {
+		t.Fatalf("expected precise backend configuration error, got %s", body)
+	}
+	if strings.Contains(body, "/v1/data/blobs") {
+		t.Fatalf("incomplete direct backend should not fall back to managed blob API, got %s", body)
+	}
+}
+
+func TestRefreshDataTransferAuthorizationRejectsFinishedTransfers(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{TenantID: tenant.ID, Name: "workspace"})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	transfer, err := stateStore.CreateDataTransfer(model.DataTransfer{
+		WorkspaceID: workspace.ID,
+		Direction:   model.DataTransferDirectionUpload,
+		Status:      model.DataTransferStatusFailed,
+		BytesTotal:  10,
+		FilesTotal:  1,
+		PlanBlobs: []model.DataTransferPlanBlob{{
+			SHA256:    strings.Repeat("c", 64),
+			Size:      10,
+			ObjectKey: "blobs/sha256/cc/cc/blob",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create transfer: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/data/transfers/"+transfer.ID+"/refresh", secret, nil)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected finished transfer refresh to fail with conflict, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	stored, err := stateStore.GetDataTransfer(transfer.ID)
+	if err != nil {
+		t.Fatalf("get transfer: %v", err)
+	}
+	if stored.Status != model.DataTransferStatusFailed {
+		t.Fatalf("refresh should not revive failed transfer, got %s", stored.Status)
+	}
+}
+
 func TestDataWorkspaceS3UploadPlanUsesSnapshotIndexWithoutHEAD(t *testing.T) {
 	var headCalls, createMultipartCalls int
 	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

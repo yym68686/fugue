@@ -624,8 +624,8 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_data_backend_secrets_backend ON fugue_data_backend_secrets (backend_id)`,
 	`INSERT INTO fugue_data_backends (id, tenant_id, name, slug, provider, status, capabilities_json, credentials_json, created_at, updated_at)
-	 VALUES ('data_backend_fugue_default_r2', NULL, 'fugue-default-r2', 'fugue-default-r2', 'cloudflare-r2', 'active',
-	 '{"multipart_upload":true,"multipart_download":true,"range_download":true,"presigned_upload":true,"presigned_download":true,"strong_resume":true,"s3_compatible":true}'::jsonb,
+	 VALUES ('data_backend_fugue_default_r2', NULL, 'fugue-managed', 'fugue-managed', 'fugue-managed', 'active',
+	 '{"multipart_upload":true,"multipart_download":true,"range_download":true,"presigned_upload":true,"presigned_download":true,"strong_resume":true,"fugue_managed_blob_api":true}'::jsonb,
 	 '{}'::jsonb, NOW(), NOW())
 	 ON CONFLICT (id) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS fugue_data_workspaces (

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -591,6 +592,10 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	blobs, err := s.dataPlanBlobs(r.Context(), r, workspace, transfer, manifest, true)
 	if err != nil {
+		if errors.Is(err, errDataBackendConfiguration) {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -606,6 +611,10 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	blobs, responseBlobs, err := s.refreshDataPlanBlobs(r.Context(), r, workspace, transfer, true, page)
 	if err != nil {
+		if errors.Is(err, errDataBackendConfiguration) {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -674,6 +683,10 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 	}
 	blobs, err := s.dataPlanBlobs(r.Context(), r, workspace, transfer, manifest, false)
 	if err != nil {
+		if errors.Is(err, errDataBackendConfiguration) {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -966,6 +979,12 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 	if !ok {
 		return
 	}
+	switch transfer.Status {
+	case model.DataTransferStatusPlanned, model.DataTransferStatusRunning:
+	default:
+		httpx.WriteError(w, http.StatusConflict, "data transfer is not active")
+		return
+	}
 	upload := transfer.Direction == model.DataTransferDirectionUpload
 	page, err := parseDataTransferBlobPage(r, dataTransferBlobTotal(transfer))
 	if err != nil {
@@ -974,6 +993,10 @@ func (s *Server) handleRefreshDataTransferAuthorization(w http.ResponseWriter, r
 	}
 	blobs, responseBlobs, err := s.refreshDataPlanBlobs(r.Context(), r, workspace, transfer, upload, page)
 	if err != nil {
+		if errors.Is(err, errDataBackendConfiguration) {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -1325,12 +1348,11 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 	}
 	var objectBackend *dataObjectBackend
 	backend, err := s.store.GetDataBackendForUse(workspace.StorageBackendID, workspace.TenantID, true)
-	if err == nil && dataBackendSupportsDirectObjectStorage(backend) {
-		objectBackend, err = newDataObjectBackend(backend)
-		if err != nil {
-			return nil, err
-		}
-	} else if err != nil {
+	if err != nil {
+		return nil, err
+	}
+	objectBackend, err = dataObjectBackendForTransfer(backend)
+	if err != nil {
 		return nil, err
 	}
 	knownObjectDigests := map[string]struct{}{}
@@ -2067,16 +2089,16 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 	if err != nil {
 		return nil, nil, err
 	}
-	if !dataBackendSupportsDirectObjectStorage(backend) {
+	objectBackend, err := dataObjectBackendForTransfer(backend)
+	if err != nil {
+		return nil, nil, err
+	}
+	if objectBackend == nil {
 		blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
 		if err != nil {
 			return nil, nil, err
 		}
 		return blobs, sliceDataTransferBlobs(blobs, page), nil
-	}
-	objectBackend, err := newDataObjectBackend(backend)
-	if err != nil {
-		return nil, nil, err
 	}
 	blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
 	if err != nil {

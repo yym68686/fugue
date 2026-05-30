@@ -7,6 +7,23 @@ import (
 	"fugue/internal/model"
 )
 
+func TestDefaultDataBackendWithoutEnvUsesManagedBlobAPI(t *testing.T) {
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.GetDataBackend(stateStore.DefaultDataBackendID(), "", true)
+	if err != nil {
+		t.Fatalf("get default backend: %v", err)
+	}
+	if backend.Provider != model.DataBackendProviderFugueManaged {
+		t.Fatalf("expected unmanaged local default to be fugue-managed, got %+v", backend)
+	}
+	if !backend.Capabilities.FugueManagedBlobAPI || backend.Capabilities.S3Compatible {
+		t.Fatalf("expected managed blob API capabilities, got %+v", backend.Capabilities)
+	}
+}
+
 func TestSeedDefaultDataBackendFromEnvStoresEncryptedCredentials(t *testing.T) {
 	t.Setenv("FUGUE_DATA_BACKEND_PROVIDER", model.DataBackendProviderCloudflareR2)
 	t.Setenv("FUGUE_DATA_R2_ACCOUNT_ID", "acct123")

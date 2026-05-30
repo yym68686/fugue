@@ -22,6 +22,8 @@ import (
 	smithy "github.com/aws/smithy-go"
 )
 
+var errDataBackendConfiguration = errors.New("data backend configuration error")
+
 const (
 	defaultDataPresignTTL             = 15 * time.Minute
 	minDataPresignTTL                 = 5 * time.Minute
@@ -97,6 +99,24 @@ func dataBackendSupportsDirectObjectStorage(backend model.DataBackend) bool {
 	default:
 		return backend.Capabilities.S3Compatible
 	}
+}
+
+func dataBackendUsesManagedBlobAPI(backend model.DataBackend) bool {
+	provider := model.NormalizeDataBackendProvider(backend.Provider)
+	return provider == model.DataBackendProviderFugueManaged || backend.Capabilities.FugueManagedBlobAPI
+}
+
+func dataObjectBackendForTransfer(backend model.DataBackend) (*dataObjectBackend, error) {
+	if dataBackendSupportsDirectObjectStorage(backend) {
+		return newDataObjectBackend(backend)
+	}
+	if dataBackendUsesManagedBlobAPI(backend) {
+		return nil, nil
+	}
+	if _, err := newDataObjectBackend(backend); err != nil {
+		return nil, fmt.Errorf("%w: %v", errDataBackendConfiguration, err)
+	}
+	return nil, fmt.Errorf("%w: data backend %s is not configured for direct object storage", errDataBackendConfiguration, backend.Name)
 }
 
 func (b *dataObjectBackend) objectKey(objectKey string) string {

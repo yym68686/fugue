@@ -60,11 +60,11 @@ func ensureDataDefaults(state *model.State) {
 		now := time.Now().UTC()
 		state.DataBackends = append(state.DataBackends, model.DataBackend{
 			ID:           defaultDataBackendID,
-			Name:         "fugue-default-r2",
-			Slug:         "fugue-default-r2",
-			Provider:     model.DataBackendProviderCloudflareR2,
+			Name:         "fugue-managed",
+			Slug:         "fugue-managed",
+			Provider:     model.DataBackendProviderFugueManaged,
 			Status:       "active",
-			Capabilities: model.DataBackendCapabilitiesForProvider(model.DataBackendProviderCloudflareR2),
+			Capabilities: model.DataBackendCapabilitiesForProvider(model.DataBackendProviderFugueManaged),
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		})
