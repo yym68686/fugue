@@ -102,7 +102,20 @@ func TestResolveAppReferenceFallsBackToSingleAppInMatchedProject(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
-			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"api","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			if got := r.URL.Query().Get("include_live_status"); got != "false" {
+				t.Fatalf("expected include_live_status=false, got %q", got)
+			}
+			if got := r.URL.Query().Get("include_resource_usage"); got != "false" {
+				t.Fatalf("expected include_resource_usage=false, got %q", got)
+			}
+			switch {
+			case r.URL.Query().Get("q") == "uni-api-web":
+				_, _ = w.Write([]byte(`{"apps":[]}`))
+			case r.URL.Query().Get("project_id") == "project_123":
+				_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"api","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+			default:
+				t.Fatalf("unexpected app list query %s", r.URL.RawQuery)
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
 			if got := r.URL.Query().Get("tenant_id"); got != "" {
 				t.Fatalf("expected cross-tenant project lookup, got %q", got)
@@ -124,6 +137,51 @@ func TestResolveAppReferenceFallsBackToSingleAppInMatchedProject(t *testing.T) {
 	}
 	if app.ID != "app_123" {
 		t.Fatalf("expected app_123, got %+v", app)
+	}
+}
+
+func TestResolveAppReferenceUsesSlugQueryFallback(t *testing.T) {
+	t.Parallel()
+
+	var appListQueries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			if got := r.URL.Query().Get("include_live_status"); got != "false" {
+				t.Fatalf("expected include_live_status=false, got %q", got)
+			}
+			if got := r.URL.Query().Get("include_resource_usage"); got != "false" {
+				t.Fatalf("expected include_resource_usage=false, got %q", got)
+			}
+			query := r.URL.Query().Get("q")
+			appListQueries = append(appListQueries, query)
+			if query == "My App" {
+				_, _ = w.Write([]byte(`{"apps":[]}`))
+				return
+			}
+			if query != "my-app" {
+				t.Fatalf("unexpected app query %q", query)
+			}
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"my-app","spec":{"runtime_id":"runtime_123","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token")
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	app, err := resolveAppReference(client, "My App", "", "")
+	if err != nil {
+		t.Fatalf("resolve app: %v", err)
+	}
+	if app.ID != "app_123" {
+		t.Fatalf("expected app_123, got %+v", app)
+	}
+	if got := strings.Join(appListQueries, ","); got != "My App,my-app" {
+		t.Fatalf("expected ref and slug queries, got %q", got)
 	}
 }
 

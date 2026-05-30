@@ -15,6 +15,15 @@ func TestRunAppRuntimeLogsGrepFiltersFollowOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			if got := r.URL.Query().Get("q"); got != "demo" {
+				t.Fatalf("expected q=demo, got %q", got)
+			}
+			if got := r.URL.Query().Get("include_live_status"); got != "false" {
+				t.Fatalf("expected include_live_status=false, got %q", got)
+			}
+			if got := r.URL.Query().Get("include_resource_usage"); got != "false" {
+				t.Fatalf("expected include_resource_usage=false, got %q", got)
+			}
 			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-20T00:00:00Z","updated_at":"2026-04-20T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-logs/stream":
 			if got := r.URL.Query().Get("follow"); got != "true" {

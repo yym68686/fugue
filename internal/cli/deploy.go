@@ -149,7 +149,7 @@ func resolveAppSelection(client *Client, appID, appName, projectID, tenantID str
 	if appName == "" {
 		return "", nil
 	}
-	apps, err := client.ListApps()
+	apps, err := listAppsForReference(client, appName, projectID, tenantID)
 	if err != nil {
 		return "", err
 	}
@@ -169,7 +169,7 @@ func resolveAppReference(client *Client, appRef, projectID, tenantID string) (mo
 	if appRef == "" {
 		return model.App{}, fmt.Errorf("app is required")
 	}
-	apps, err := client.ListApps()
+	apps, err := listAppsForReference(client, appRef, projectID, tenantID)
 	if err != nil {
 		return model.App{}, err
 	}
@@ -178,6 +178,15 @@ func resolveAppReference(client *Client, appRef, projectID, tenantID string) (mo
 	case 0:
 		projectLookupID, projectErr := resolveProjectReference(client, tenantID, "", appRef)
 		if projectErr == nil && strings.TrimSpace(projectLookupID) != "" {
+			apps, err = client.ListAppsWithOptions(listAppsOptions{
+				IncludeLiveStatus:    false,
+				IncludeResourceUsage: false,
+				TenantID:             tenantID,
+				ProjectID:            projectLookupID,
+			})
+			if err != nil {
+				return model.App{}, err
+			}
 			projectApps := filterApps(apps, tenantID, projectLookupID)
 			switch len(projectApps) {
 			case 1:
@@ -194,6 +203,43 @@ func resolveAppReference(client *Client, appRef, projectID, tenantID string) (mo
 	default:
 		return model.App{}, multipleMatchesError("app", appRef, matches, describeAppMatch)
 	}
+}
+
+func listAppsForReference(client *Client, ref, projectID, tenantID string) ([]model.App, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil, nil
+	}
+	queries := []string{ref}
+	if slug := model.Slugify(ref); slug != "" && !strings.EqualFold(slug, ref) {
+		queries = append(queries, slug)
+	}
+	out := make([]model.App, 0, 4)
+	seen := map[string]struct{}{}
+	for _, query := range queries {
+		apps, err := client.ListAppsWithOptions(listAppsOptions{
+			IncludeLiveStatus:    false,
+			IncludeResourceUsage: false,
+			TenantID:             tenantID,
+			ProjectID:            projectID,
+			Query:                query,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, app := range apps {
+			id := strings.TrimSpace(app.ID)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, app)
+		}
+	}
+	return out, nil
 }
 
 func resolveRuntimeSelection(client *Client, runtimeID, runtimeName string) (string, error) {
