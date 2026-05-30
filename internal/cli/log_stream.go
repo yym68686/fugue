@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,12 +12,29 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type sseEvent struct {
 	Event string
 	ID    string
 	Data  []byte
+}
+
+type streamSSEOptions struct {
+	Follow bool
+}
+
+type sseHandlerError struct {
+	err error
+}
+
+func (e sseHandlerError) Error() string {
+	return e.err.Error()
+}
+
+func (e sseHandlerError) Unwrap() error {
+	return e.err
 }
 
 type logStreamSourceSpec struct {
@@ -95,7 +113,7 @@ func (c *Client) StreamBuildLogs(appID, operationID string, tailLines int, follo
 		query.Set("tail_lines", strconv.Itoa(tailLines))
 	}
 	relative := path.Join("/v1/apps", appID, "build-logs", "stream") + "?" + query.Encode()
-	return c.streamSSE(relative, handler)
+	return c.streamSSEWithOptions(relative, streamSSEOptions{Follow: follow}, handler)
 }
 
 func (c *Client) StreamRuntimeLogs(appID string, opts runtimeLogsOptions, follow bool, handler func(sseEvent) error) error {
@@ -114,36 +132,82 @@ func (c *Client) StreamRuntimeLogs(appID string, opts runtimeLogsOptions, follow
 		query.Set("previous", "true")
 	}
 	relative := path.Join("/v1/apps", appID, "runtime-logs", "stream") + "?" + query.Encode()
-	return c.streamSSE(relative, handler)
+	return c.streamSSEWithOptions(relative, streamSSEOptions{Follow: follow}, handler)
 }
 
 func (c *Client) streamSSE(relative string, handler func(sseEvent) error) error {
+	return c.streamSSEWithOptions(relative, streamSSEOptions{}, handler)
+}
+
+func (c *Client) streamSSEWithOptions(relative string, opts streamSSEOptions, handler func(sseEvent) error) error {
+	httpClient := &http.Client{}
+	retryDelay := 3 * time.Second
+	lastEventID := ""
+	openedStream := false
+
+	for {
+		ended, opened, err := c.streamSSEOnce(httpClient, relative, lastEventID, &retryDelay, func(event sseEvent) error {
+			if event.ID != "" {
+				lastEventID = event.ID
+			} else if cursor := cursorFromSSEData(event.Data); cursor != "" {
+				lastEventID = cursor
+			}
+			if handler == nil {
+				return nil
+			}
+			if err := handler(event); err != nil {
+				return sseHandlerError{err: err}
+			}
+			return nil
+		})
+		if opened {
+			openedStream = true
+		}
+		if err != nil {
+			var handlerErr sseHandlerError
+			if errors.As(err, &handlerErr) {
+				return handlerErr.err
+			}
+			if !opts.Follow || !openedStream || !isRetriableSSEStreamError(err) {
+				return err
+			}
+		} else if ended || !opts.Follow {
+			return nil
+		}
+		time.Sleep(retryDelay)
+	}
+}
+
+func (c *Client) streamSSEOnce(httpClient *http.Client, relative string, lastEventID string, retryDelay *time.Duration, handler func(sseEvent) error) (bool, bool, error) {
 	httpReq, err := http.NewRequest(http.MethodGet, c.resolveURL(relative), nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return false, false, fmt.Errorf("build request: %w", err)
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	if strings.TrimSpace(lastEventID) != "" {
+		httpReq.Header.Set("Last-Event-ID", lastEventID)
+	}
 
-	resp, err := (&http.Client{}).Do(httpReq)
+	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		payload, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			return fmt.Errorf("read response: %w", readErr)
+			return false, false, fmt.Errorf("read response: %w", readErr)
 		}
 		var apiErr apiError
 		if err := json.Unmarshal(payload, &apiErr); err == nil && strings.TrimSpace(apiErr.Error) != "" {
-			return &apiServerError{StatusCode: resp.StatusCode, Response: apiErr}
+			return false, false, &apiServerError{StatusCode: resp.StatusCode, Response: apiErr}
 		}
 		if trimmed := strings.TrimSpace(string(payload)); trimmed != "" {
-			return fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, trimmed)
+			return false, false, fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, trimmed)
 		}
-		return fmt.Errorf("request failed: status=%d", resp.StatusCode)
+		return false, false, fmt.Errorf("request failed: status=%d", resp.StatusCode)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -153,6 +217,7 @@ func (c *Client) streamSSE(relative string, handler func(sseEvent) error) error 
 		eventName string
 		eventID   string
 		dataLines []string
+		ended     bool
 	)
 	dispatch := func() error {
 		if eventName == "" && eventID == "" && len(dataLines) == 0 {
@@ -166,17 +231,26 @@ func (c *Client) streamSSE(relative string, handler func(sseEvent) error) error 
 		eventName = ""
 		eventID = ""
 		dataLines = nil
+		if event.Event == "end" {
+			ended = true
+		}
 		if handler == nil {
 			return nil
 		}
-		return handler(event)
+		if err := handler(event); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			if err := dispatch(); err != nil {
-				return err
+				return false, true, err
+			}
+			if ended {
+				return true, true, nil
 			}
 			continue
 		}
@@ -198,15 +272,22 @@ func (c *Client) streamSSE(relative string, handler func(sseEvent) error) error 
 			eventID = value
 		case "data":
 			dataLines = append(dataLines, value)
+		case "retry":
+			if ms, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && ms >= 0 && retryDelay != nil {
+				*retryDelay = time.Duration(ms) * time.Millisecond
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return err
+		return false, true, err
 	}
 	if err := dispatch(); err != nil {
-		return err
+		return false, true, err
 	}
-	return nil
+	if ended {
+		return true, true, nil
+	}
+	return false, true, nil
 }
 
 func decodeSSEEventData(raw []byte) (any, error) {
@@ -218,4 +299,25 @@ func decodeSSEEventData(raw []byte) (any, error) {
 		return nil, err
 	}
 	return decoded, nil
+}
+
+func cursorFromSSEData(raw []byte) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	var payload struct {
+		Cursor string `json:"cursor"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Cursor)
+}
+
+func isRetriableSSEStreamError(err error) bool {
+	var apiErr *apiServerError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= http.StatusInternalServerError
+	}
+	return true
 }

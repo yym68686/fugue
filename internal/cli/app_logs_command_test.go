@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -72,6 +73,92 @@ func TestRunAppRuntimeLogsGrepFiltersFollowOutput(t *testing.T) {
 	}
 	if strings.Contains(out, "uvicorn") {
 		t.Fatalf("expected grep output to omit non-matching line, got %q", out)
+	}
+}
+
+func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
+	t.Parallel()
+
+	var streamRequests atomic.Int32
+	var sawResume atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-20T00:00:00Z","updated_at":"2026-04-20T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-logs/stream":
+			if got := r.URL.Query().Get("follow"); got != "true" {
+				t.Errorf("expected follow=true, got %q", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			switch req := streamRequests.Add(1); req {
+			case 1:
+				if got := r.Header.Get("Last-Event-ID"); got != "" {
+					t.Errorf("expected first request without Last-Event-ID, got %q", got)
+				}
+				_, _ = fmt.Fprint(w, strings.Join([]string{
+					"retry: 1",
+					"",
+					"id: c0",
+					"event: ready",
+					`data: {"cursor":"c0","stream":"runtime","follow":true,"component":"app","namespace":"tenant-123","selector":"app=demo","container":"app"}`,
+					"",
+					"id: c1",
+					"event: log",
+					`data: {"cursor":"c1","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"first uni-api line"}`,
+					"",
+				}, "\n"))
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			case 2:
+				if got := r.Header.Get("Last-Event-ID"); got != "c1" {
+					t.Errorf("expected resume cursor c1, got %q", got)
+				}
+				sawResume.Store(true)
+				_, _ = fmt.Fprint(w, strings.Join([]string{
+					"id: c2",
+					"event: log",
+					`data: {"cursor":"c2","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:01Z","line":"second uni-api line"}`,
+					"",
+					"id: c2",
+					"event: end",
+					`data: {"cursor":"c2","reason":"snapshot_complete"}`,
+					"",
+				}, "\n"))
+			default:
+				t.Errorf("unexpected stream request #%d", req)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "runtime", "demo",
+		"--follow",
+		"--grep", "uni-api",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app runtime logs --follow: %v stderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	if streamRequests.Load() != 2 {
+		t.Fatalf("expected 2 stream requests, got %d output=%q", streamRequests.Load(), out)
+	}
+	if !sawResume.Load() {
+		t.Fatal("expected the second stream request to resume with Last-Event-ID")
+	}
+	if strings.Count(out, "first uni-api line") != 1 {
+		t.Fatalf("expected first line exactly once, got %q", out)
+	}
+	if strings.Count(out, "second uni-api line") != 1 {
+		t.Fatalf("expected second line exactly once, got %q", out)
 	}
 }
 
