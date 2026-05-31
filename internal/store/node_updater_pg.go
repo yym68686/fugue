@@ -277,6 +277,17 @@ INSERT INTO fugue_node_update_tasks (
 	return redactNodeUpdateTask(task), nil
 }
 
+func (s *Store) pgNodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	updater, err := s.pgFindNodeUpdaterTarget(ctx, s.db, updaterID, clusterNodeName, runtimeID)
+	if err != nil {
+		return false, err
+	}
+	return nodeUpdaterSupportsTask(updater, taskType), nil
+}
+
 func (s *Store) pgListNodeUpdateTasks(tenantID string, platformAdmin bool, updaterID, status string) ([]model.NodeUpdateTask, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

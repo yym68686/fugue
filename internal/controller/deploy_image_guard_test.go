@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -413,5 +414,108 @@ func TestEnsureManagedDeployImageReadyDoesNotInspectPullBaseAliasAfterPushRefMis
 	}
 	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
 		t.Fatalf("expected inspect refs [%q %q], got %v", managedRef, runtimePushRef, inspected)
+	}
+}
+
+func TestScheduleImageHydrationSkipsLegacyUpdaterWithoutWarning(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Image Hydration Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v1",
+		"join-v1",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+
+	var logs bytes.Buffer
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(&logs, "", 0),
+	}
+	app := model.App{ID: "app_1", TenantID: tenant.ID}
+	target := deployImageTarget{RuntimeID: updater.RuntimeID, ClusterNodeName: updater.ClusterNodeName}
+
+	svc.scheduleImageHydration(context.Background(), app, target, "registry.example/app@sha256:abc")
+
+	tasks, err := stateStore.ListNodeUpdateTasks(tenant.ID, false, updater.ID, "")
+	if err != nil {
+		t.Fatalf("list node update tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("expected no hydrate task for legacy updater, got %+v", tasks)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no warning log for unsupported optional hydrate task, got %q", logs.String())
+	}
+}
+
+func TestScheduleImageHydrationCreatesTaskForCapableUpdater(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Image Hydration Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+	app := model.App{ID: "app_1", TenantID: tenant.ID}
+	imageRef := "registry.example/app@sha256:abc"
+
+	svc.scheduleImageHydration(context.Background(), app, deployImageTarget{RuntimeID: updater.RuntimeID, ClusterNodeName: updater.ClusterNodeName}, imageRef)
+
+	tasks, err := stateStore.ListNodeUpdateTasks(tenant.ID, false, updater.ID, "")
+	if err != nil {
+		t.Fatalf("list node update tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one hydrate task, got %+v", tasks)
+	}
+	if tasks[0].Type != model.NodeUpdateTaskTypePrepullAppImages || tasks[0].Payload["images"] != imageRef {
+		t.Fatalf("unexpected hydrate task: %+v", tasks[0])
 	}
 }

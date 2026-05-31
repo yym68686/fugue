@@ -168,6 +168,30 @@ func (s *Store) ListNodeUpdaters(tenantID string, platformAdmin bool) ([]model.N
 	return updaters, nil
 }
 
+func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType string) (bool, error) {
+	taskType = normalizeNodeUpdateTaskType(taskType)
+	if taskType == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgNodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType)
+	}
+
+	var supported bool
+	err := s.withLockedState(false, func(state *model.State) error {
+		updater, err := findNodeUpdaterTarget(state, updaterID, clusterNodeName, runtimeID)
+		if err != nil {
+			return err
+		}
+		supported = nodeUpdaterSupportsTask(updater, taskType)
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return supported, nil
+}
+
 func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
 	taskType = normalizeNodeUpdateTaskType(taskType)
 	if taskType == "" {

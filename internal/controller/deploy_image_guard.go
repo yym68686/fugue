@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"fugue/internal/appimages"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 type deployImageTarget struct {
@@ -274,7 +276,20 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 	if strings.TrimSpace(target.ClusterNodeName) == "" && strings.TrimSpace(target.RuntimeID) == "" {
 		return
 	}
-	_, err := s.Store.CreateNodeUpdateTask(model.Principal{
+	supported, err := s.Store.NodeUpdaterTargetSupportsTask("", target.ClusterNodeName, target.RuntimeID, model.NodeUpdateTaskTypePrepullAppImages)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("inspect image hydrate target app=%s image=%s runtime=%s node=%s failed: %v", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, err)
+		}
+		return
+	}
+	if !supported {
+		return
+	}
+	_, err = s.Store.CreateNodeUpdateTask(model.Principal{
 		ActorType: model.ActorTypeSystem,
 		ActorID:   "fugue-controller/image-hydrate",
 		TenantID:  strings.TrimSpace(app.TenantID),

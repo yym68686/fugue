@@ -407,6 +407,13 @@ func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T)
 	if _, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, nil); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected prepull-app-images to be rejected for legacy updater, got %v", err)
 	}
+	supported, err := s.NodeUpdaterTargetSupportsTask(updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages)
+	if err != nil {
+		t.Fatalf("check legacy updater support: %v", err)
+	}
+	if supported {
+		t.Fatal("expected legacy updater to not support prepull-app-images")
+	}
 	if _, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeUpgradeUpdater, nil); err != nil {
 		t.Fatalf("expected upgrade-node-updater to remain allowed for legacy updater: %v", err)
 	}
@@ -419,6 +426,13 @@ func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T)
 	}
 	if _, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, map[string]string{"images": "registry.example/app@sha256:abc"}); err != nil {
 		t.Fatalf("expected prepull-app-images to be allowed after capability heartbeat: %v", err)
+	}
+	supported, err = s.NodeUpdaterTargetSupportsTask("", updater.ClusterNodeName, "", model.NodeUpdateTaskTypePrepullAppImages)
+	if err != nil {
+		t.Fatalf("check capable updater support: %v", err)
+	}
+	if !supported {
+		t.Fatal("expected capable updater to support prepull-app-images")
 	}
 }
 
