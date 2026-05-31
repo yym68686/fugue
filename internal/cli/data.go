@@ -1208,11 +1208,17 @@ func (c *CLI) newDataWorkspaceShowCommand() *cobra.Command {
 			}
 			if resp.LatestSnapshot.ID != "" {
 				summaryRows = append(summaryRows, []string{"Latest version", resp.LatestSnapshot.Version})
+				summaryRows = append(summaryRows, []string{"Latest files", fmt.Sprintf("%d", dataSnapshotFileCount(resp.LatestSnapshot))})
+				summaryRows = append(summaryRows, []string{"Latest size", formatBytes(dataSnapshotTotalBytes(resp.LatestSnapshot))})
 			}
 			renderDataKeyValueTable(c.stdout, summaryRows)
 			if len(resp.Workspace.Assets) > 0 {
 				fmt.Fprintln(c.stdout, "\nAssets:")
-				renderDataAssetsTable(c.stdout, resp.Workspace.Assets)
+				if resp.LatestSnapshot.ID != "" {
+					renderDataWorkspaceAssetsTable(c.stdout, resp.Workspace.Assets, resp.LatestSnapshot.Manifest)
+				} else {
+					renderDataAssetsTable(c.stdout, resp.Workspace.Assets)
+				}
 			}
 			return nil
 		},
@@ -3841,6 +3847,20 @@ func manifestStatsByAsset(manifest model.DataManifest) map[string]struct {
 	return out
 }
 
+func dataSnapshotFileCount(snapshot model.DataSnapshot) int {
+	if snapshot.FileCount > 0 {
+		return snapshot.FileCount
+	}
+	return snapshot.Manifest.FileCount
+}
+
+func dataSnapshotTotalBytes(snapshot model.DataSnapshot) int64 {
+	if snapshot.TotalBytes > 0 {
+		return snapshot.TotalBytes
+	}
+	return snapshot.Manifest.TotalBytes
+}
+
 func manifestHasAsset(manifest model.DataManifest, assetName string) bool {
 	for _, entry := range manifest.Entries {
 		if entry.AssetName == assetName {
@@ -4618,6 +4638,21 @@ func renderDataAssetsTable(w io.Writer, assets []model.DataAsset) {
 	renderDataTable(w, []dataTableColumn{
 		{Title: "Asset"},
 		{Title: "Local path"},
+	}, rows)
+}
+
+func renderDataWorkspaceAssetsTable(w io.Writer, assets []model.DataAsset, manifest model.DataManifest) {
+	statsByAsset := manifestStatsByAsset(manifest)
+	rows := make([][]string, 0, len(assets))
+	for _, asset := range assets {
+		stats := statsByAsset[asset.Name]
+		rows = append(rows, []string{asset.Name, asset.Path, fmt.Sprintf("%d", stats.Files), formatBytes(stats.Bytes)})
+	}
+	renderDataTable(w, []dataTableColumn{
+		{Title: "Asset"},
+		{Title: "Local path"},
+		{Title: "Files", Align: dataTableAlignRight},
+		{Title: "Latest size", Align: dataTableAlignRight},
 	}, rows)
 }
 

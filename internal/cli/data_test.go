@@ -117,6 +117,55 @@ func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 	}
 }
 
+func TestDataWorkspaceShowRendersLatestAssetSizes(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Data Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := stateStore.CreateAPIKey(tenant.ID, "data", []string{"data.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	workspace, err := stateStore.CreateDataWorkspace(model.DataWorkspace{
+		TenantID: tenant.ID,
+		Name:     "training-project",
+		Assets: []model.DataAsset{
+			{Name: "checkpoints", Path: "./checkpoints"},
+			{Name: "data", Path: "./data"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	_, err = stateStore.CreateDataSnapshot(model.DataSnapshot{
+		WorkspaceID: workspace.ID,
+		Version:     "v1",
+		Manifest: model.NormalizeDataManifest(model.DataManifest{Entries: []model.DataManifestEntry{
+			{AssetName: "data", RelativePath: ".", Kind: model.DataManifestEntryKindDir},
+			{AssetName: "data", RelativePath: "a.txt", Kind: model.DataManifestEntryKindFile, Size: 3, SHA256: strings.Repeat("a", 64)},
+			{AssetName: "data", RelativePath: "b.txt", Kind: model.DataManifestEntryKindFile, Size: 4, SHA256: strings.Repeat("b", 64)},
+			{AssetName: "checkpoints", RelativePath: "model.pt", Kind: model.DataManifestEntryKindFile, Size: 10, SHA256: strings.Repeat("c", 64)},
+		}}),
+	})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	server := api.NewServer(stateStore, auth.New(stateStore, ""), nil, api.ServerConfig{})
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	out := runDataCLIInDir(t, t.TempDir(), "--base-url", httpServer.URL, "--token", secret, "data", "workspace", "show", "training-project")
+	for _, want := range []string{"Latest files", "Latest size", "17 B", "Files", "checkpoints", "10 B", "data", "7 B"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected workspace show output to contain %q, got %s", want, out)
+		}
+	}
+}
+
 func TestDataEvictFreesAndRestoresTrackedAssets(t *testing.T) {
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {
