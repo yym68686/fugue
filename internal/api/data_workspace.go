@@ -414,7 +414,7 @@ func (s *Server) handleGetDataWorkspace(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	latest, _ := s.store.LatestDataSnapshot(workspace.ID)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "latest_snapshot": latest})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "latest_snapshot": summarizeDataSnapshot(latest)})
 }
 
 func (s *Server) handlePatchDataWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -590,7 +590,7 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	blobs, err := s.dataPlanBlobs(r.Context(), r, workspace, transfer, manifest, true)
+	blobs, err := s.dataPlanBlobs(r.Context(), r, workspace, transfer, manifest, true, true)
 	if err != nil {
 		if errors.Is(err, errDataBackendConfiguration) {
 			httpx.WriteError(w, http.StatusConflict, err.Error())
@@ -681,7 +681,7 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 		s.writeStoreError(w, err)
 		return
 	}
-	blobs, err := s.dataPlanBlobs(r.Context(), r, workspace, transfer, manifest, false)
+	blobs, err := s.dataPlanBlobs(r.Context(), r, workspace, transfer, manifest, false, false)
 	if err != nil {
 		if errors.Is(err, errDataBackendConfiguration) {
 			httpx.WriteError(w, http.StatusConflict, err.Error())
@@ -700,12 +700,27 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	blobs, responseBlobs, err := s.refreshDataPlanBlobs(r.Context(), r, workspace, transfer, false, page)
+	if err != nil {
+		if errors.Is(err, errDataBackendConfiguration) {
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
+		s.writeStoreError(w, err)
+		return
+	}
+	transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, blobs)
+	transfer.ExpiresAt = &expiresAt
+	if transfer, err = s.store.UpdateDataTransfer(transfer); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, dataDownloadPlanResponse{
 		Workspace:       workspace,
 		Snapshot:        summarizeDataSnapshot(snapshot),
 		Transfer:        summarizeDataTransfer(transfer),
 		Manifest:        manifest,
-		Blobs:           sliceDataTransferBlobs(blobs, page),
+		Blobs:           responseBlobs,
 		BlobsTotal:      page.Total,
 		BlobsOffset:     page.Offset,
 		BlobsLimit:      page.Limit,
@@ -1334,7 +1349,7 @@ func (s *Server) handleGetDataBlob(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, digest, info.ModTime(), file)
 }
 
-func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, manifest model.DataManifest, upload bool) ([]dataTransferPlanBlob, error) {
+func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, manifest model.DataManifest, upload bool, authorizeDirect bool) ([]dataTransferPlanBlob, error) {
 	seen := map[string]struct{}{}
 	blobs := []dataTransferPlanBlob{}
 	entries := []model.DataManifestEntry{}
@@ -1390,7 +1405,7 @@ func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace m
 		blobs = append(blobs, blob)
 		entries = append(entries, entry)
 	}
-	if objectBackend != nil {
+	if objectBackend != nil && authorizeDirect {
 		if err := s.enrichDirectDataPlanBlobs(ctx, objectBackend, blobs, entries, knownObjectDigests, upload); err != nil {
 			return nil, err
 		}
@@ -2094,13 +2109,13 @@ func (s *Server) refreshDataPlanBlobs(ctx context.Context, r *http.Request, work
 		return nil, nil, err
 	}
 	if objectBackend == nil {
-		blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
+		blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload, true)
 		if err != nil {
 			return nil, nil, err
 		}
 		return blobs, sliceDataTransferBlobs(blobs, page), nil
 	}
-	blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload)
+	blobs, err := s.dataPlanBlobs(ctx, r, workspace, transfer, transfer.Manifest, upload, upload)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2193,6 +2208,7 @@ func (s *Server) refreshDirectDataPlanBlobPage(ctx context.Context, objectBacken
 				}
 				return
 			}
+			blob.Exists = true
 			blob.DownloadURL = downloadURL
 			blob.ExpiresAt = expiresAt
 			blobs[idx] = blob

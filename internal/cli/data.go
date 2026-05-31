@@ -110,11 +110,15 @@ type dataUploadPlanResponse struct {
 }
 
 type dataDownloadPlanResponse struct {
-	Workspace model.DataWorkspace `json:"workspace"`
-	Snapshot  model.DataSnapshot  `json:"snapshot"`
-	Transfer  model.DataTransfer  `json:"transfer"`
-	Manifest  model.DataManifest  `json:"manifest"`
-	Blobs     []dataBlobPlan      `json:"blobs"`
+	Workspace       model.DataWorkspace `json:"workspace"`
+	Snapshot        model.DataSnapshot  `json:"snapshot"`
+	Transfer        model.DataTransfer  `json:"transfer"`
+	Manifest        model.DataManifest  `json:"manifest"`
+	Blobs           []dataBlobPlan      `json:"blobs"`
+	BlobsTotal      int                 `json:"blobs_total"`
+	BlobsOffset     int                 `json:"blobs_offset"`
+	BlobsLimit      int                 `json:"blobs_limit"`
+	BlobsNextOffset *int                `json:"blobs_next_offset"`
 }
 
 type dataWorkspaceEnvelope struct {
@@ -500,6 +504,11 @@ func (c *CLI) newDataStatusCommand() *cobra.Command {
 			latestResp, err := client.GetDataWorkspace(workspace.ID)
 			if err == nil {
 				latest = latestResp.LatestSnapshot
+				if latest.ID != "" {
+					if fullLatest, fullErr := client.GetDataSnapshot(workspace.ID, latest.ID); fullErr == nil {
+						latest = fullLatest.Snapshot
+					}
+				}
 			}
 			untrackedLargeDirs, err := findUntrackedLargeDataDirectories(".", cfg, dataUntrackedLargeDirThreshold())
 			if err != nil {
@@ -845,14 +854,6 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 			if prune && !confirm && len(pullPlan.Prune) > 0 {
 				return fmt.Errorf("--prune requires --confirm before deleting %d local files", len(pullPlan.Prune))
 			}
-			_ = concurrency
-			blobByDigest := map[string]dataBlobPlan{}
-			for _, blob := range planResp.Blobs {
-				blobByDigest[blob.SHA256] = blob
-			}
-			if err := validatePullBlobs(blobByDigest, pullPlan.Download); err != nil {
-				return err
-			}
 			progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
 			for _, removePath := range pullPlan.Prune {
 				if prune && confirm {
@@ -874,7 +875,7 @@ func (c *CLI) newDataPullCommand() *cobra.Command {
 					return err
 				}
 			}
-			if _, _, err := c.downloadDataManifestEntries(client, planResp.Transfer.ID, ".", targetCfg, pullPlan.Download, blobByDigest, !noResume, overwrite, noProgress, concurrency, progress); err != nil {
+			if _, _, err := c.downloadDataManifestEntriesPaged(client, planResp.Transfer.ID, ".", targetCfg, pullPlan.Download, planResp.Blobs, planResp.BlobsOffset, planResp.BlobsLimit, planResp.BlobsNextOffset, !noResume, overwrite, noProgress, concurrency, progress); err != nil {
 				return err
 			}
 			progress.finish()
@@ -955,6 +956,11 @@ func (c *CLI) newDataEvictCommand() *cobra.Command {
 			if latest.ID == "" {
 				return fmt.Errorf("no remote data version exists for workspace %s; run fugue data push first", workspace.Name)
 			}
+			fullLatest, err := client.GetDataSnapshot(workspace.ID, latest.ID)
+			if err != nil {
+				return err
+			}
+			latest = fullLatest.Snapshot
 			selected, err := selectDataEvictAssets(cfg, args)
 			if err != nil {
 				return err
@@ -1082,15 +1088,8 @@ func (c *CLI) newDataCloneCommand() *cobra.Command {
 					renderPullPreflight(c.stdout, workspaceResp.Workspace, planResp.Snapshot, pullPlan)
 					return fmt.Errorf("pull preflight found conflicts")
 				}
-				blobByDigest := map[string]dataBlobPlan{}
-				for _, blob := range planResp.Blobs {
-					blobByDigest[blob.SHA256] = blob
-				}
-				if err := validatePullBlobs(blobByDigest, pullPlan.Download); err != nil {
-					return err
-				}
 				progress := newDataProgressRenderer(c.stdout, !noProgress && !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
-				if _, _, err := c.downloadDataManifestEntries(client, planResp.Transfer.ID, target, cfg, pullPlan.Download, blobByDigest, true, false, noProgress, concurrency, progress); err != nil {
+				if _, _, err := c.downloadDataManifestEntriesPaged(client, planResp.Transfer.ID, target, cfg, pullPlan.Download, planResp.Blobs, planResp.BlobsOffset, planResp.BlobsLimit, planResp.BlobsNextOffset, true, false, noProgress, concurrency, progress); err != nil {
 					return err
 				}
 				progress.finish()
@@ -1198,6 +1197,12 @@ func (c *CLI) newDataWorkspaceShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			latest := resp.LatestSnapshot
+			if !c.wantsJSON() && latest.ID != "" && len(latest.Manifest.Entries) == 0 {
+				if fullLatest, fullErr := client.GetDataSnapshot(resp.Workspace.ID, latest.ID); fullErr == nil {
+					latest = fullLatest.Snapshot
+				}
+			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, resp)
 			}
@@ -1206,16 +1211,16 @@ func (c *CLI) newDataWorkspaceShowCommand() *cobra.Command {
 				{"Backend", resp.Workspace.StorageBackendID},
 				{"Used", formatBytes(resp.Workspace.UsedBytes)},
 			}
-			if resp.LatestSnapshot.ID != "" {
-				summaryRows = append(summaryRows, []string{"Latest version", resp.LatestSnapshot.Version})
-				summaryRows = append(summaryRows, []string{"Latest files", fmt.Sprintf("%d", dataSnapshotFileCount(resp.LatestSnapshot))})
-				summaryRows = append(summaryRows, []string{"Latest size", formatBytes(dataSnapshotTotalBytes(resp.LatestSnapshot))})
+			if latest.ID != "" {
+				summaryRows = append(summaryRows, []string{"Latest version", latest.Version})
+				summaryRows = append(summaryRows, []string{"Latest files", fmt.Sprintf("%d", dataSnapshotFileCount(latest))})
+				summaryRows = append(summaryRows, []string{"Latest size", formatBytes(dataSnapshotTotalBytes(latest))})
 			}
 			renderDataKeyValueTable(c.stdout, summaryRows)
 			if len(resp.Workspace.Assets) > 0 {
 				fmt.Fprintln(c.stdout, "\nAssets:")
-				if resp.LatestSnapshot.ID != "" {
-					renderDataWorkspaceAssetsTable(c.stdout, resp.Workspace.Assets, resp.LatestSnapshot.Manifest)
+				if latest.ID != "" {
+					renderDataWorkspaceAssetsTable(c.stdout, resp.Workspace.Assets, latest.Manifest)
 				} else {
 					renderDataAssetsTable(c.stdout, resp.Workspace.Assets)
 				}
@@ -1741,15 +1746,8 @@ func (c *CLI) newDataTransferCommand() *cobra.Command {
 				renderPullPreflight(c.stdout, refresh.Workspace, model.DataSnapshot{Version: refresh.Transfer.Version, Manifest: manifest}, pullPlan)
 				return fmt.Errorf("pull preflight found conflicts")
 			}
-			blobByDigest := map[string]dataBlobPlan{}
-			for _, blob := range refresh.Blobs {
-				blobByDigest[blob.SHA256] = blob
-			}
-			if err := validatePullBlobs(blobByDigest, pullPlan.Download); err != nil {
-				return err
-			}
 			progress := newDataProgressRenderer(c.stdout, !c.wantsJSON(), "Download", totalManifestFileBytes(pullPlan.Download))
-			if _, _, err := c.downloadDataManifestEntries(client, refresh.Transfer.ID, ".", cfg, pullPlan.Download, blobByDigest, true, false, false, resumeConcurrency, progress); err != nil {
+			if _, _, err := c.downloadDataManifestEntriesPaged(client, refresh.Transfer.ID, ".", cfg, pullPlan.Download, refresh.Blobs, refresh.BlobsOffset, refresh.BlobsLimit, refresh.BlobsNextOffset, true, false, false, resumeConcurrency, progress); err != nil {
 				return err
 			}
 			progress.finish()
@@ -3425,6 +3423,53 @@ type dataDownloadFileJob struct {
 	Target string
 }
 
+func dataBlobPlanMap(blobs []dataBlobPlan) map[string]dataBlobPlan {
+	out := map[string]dataBlobPlan{}
+	for _, blob := range blobs {
+		digest := strings.TrimSpace(strings.ToLower(blob.SHA256))
+		if digest == "" {
+			continue
+		}
+		out[digest] = blob
+	}
+	return out
+}
+
+func splitDataManifestDownloadEntriesByKind(entries []model.DataManifestEntry) ([]model.DataManifestEntry, []model.DataManifestEntry) {
+	nonFiles := []model.DataManifestEntry{}
+	files := []model.DataManifestEntry{}
+	for _, entry := range entries {
+		if entry.Kind == model.DataManifestEntryKindFile {
+			files = append(files, entry)
+		} else {
+			nonFiles = append(nonFiles, entry)
+		}
+	}
+	return nonFiles, files
+}
+
+func filterDataManifestEntriesByBlobPage(entries []model.DataManifestEntry, blobs []dataBlobPlan) []model.DataManifestEntry {
+	digests := map[string]struct{}{}
+	for _, blob := range blobs {
+		digest := strings.TrimSpace(strings.ToLower(blob.SHA256))
+		if digest == "" {
+			continue
+		}
+		digests[digest] = struct{}{}
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+	out := []model.DataManifestEntry{}
+	for _, entry := range entries {
+		digest := strings.TrimSpace(strings.ToLower(entry.SHA256))
+		if _, ok := digests[digest]; ok {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 type dataDownloadCheckpointRecorder struct {
 	mu                sync.Mutex
 	client            *Client
@@ -3479,7 +3524,55 @@ func (r *dataDownloadCheckpointRecorder) flush() (int64, int, error) {
 	return bytesDone, filesDone, nil
 }
 
-func (c *CLI) downloadDataManifestEntries(client *Client, transferID, root string, cfg dataConfig, entries []model.DataManifestEntry, blobByDigest map[string]dataBlobPlan, resume, overwrite, noProgress bool, concurrency int, progress *dataProgressRenderer) (int64, int, error) {
+func (c *CLI) downloadDataManifestEntriesPaged(client *Client, transferID, root string, cfg dataConfig, entries []model.DataManifestEntry, firstBlobs []dataBlobPlan, pageOffset, pageLimit int, nextOffset *int, resume, overwrite, noProgress bool, concurrency int, progress *dataProgressRenderer) (int64, int, error) {
+	nonFiles, fileEntries := splitDataManifestDownloadEntriesByKind(entries)
+	if len(nonFiles) > 0 {
+		if _, _, err := c.downloadDataManifestEntries(client, transferID, root, cfg, nonFiles, nil, resume, overwrite, noProgress, concurrency, progress, pageOffset, pageLimit); err != nil {
+			return 0, 0, err
+		}
+	}
+	if len(fileEntries) == 0 {
+		return 0, 0, nil
+	}
+	if pageLimit <= 0 {
+		pageLimit = dataTransferBlobPageLimit
+	}
+	currentBlobs := firstBlobs
+	currentOffset := pageOffset
+	var totalBytes int64
+	var totalFiles int
+	for {
+		pageEntries := filterDataManifestEntriesByBlobPage(fileEntries, currentBlobs)
+		if len(pageEntries) > 0 {
+			blobByDigest := dataBlobPlanMap(currentBlobs)
+			if err := validatePullBlobs(blobByDigest, pageEntries); err != nil {
+				return totalBytes, totalFiles, err
+			}
+			bytesDone, filesDone, err := c.downloadDataManifestEntries(client, transferID, root, cfg, pageEntries, blobByDigest, resume, overwrite, noProgress, concurrency, progress, currentOffset, pageLimit)
+			totalBytes += bytesDone
+			totalFiles += filesDone
+			if err != nil {
+				return totalBytes, totalFiles, err
+			}
+		}
+		if nextOffset == nil {
+			break
+		}
+		currentOffset = *nextOffset
+		refresh, err := client.RefreshDataTransferAuthorizationPage(transferID, currentOffset, pageLimit)
+		if err != nil {
+			return totalBytes, totalFiles, err
+		}
+		currentBlobs = refresh.Blobs
+		nextOffset = refresh.BlobsNextOffset
+		if len(currentBlobs) == 0 && nextOffset != nil {
+			return totalBytes, totalFiles, fmt.Errorf("transfer blob page at offset %d was empty", currentOffset)
+		}
+	}
+	return totalBytes, totalFiles, nil
+}
+
+func (c *CLI) downloadDataManifestEntries(client *Client, transferID, root string, cfg dataConfig, entries []model.DataManifestEntry, blobByDigest map[string]dataBlobPlan, resume, overwrite, noProgress bool, concurrency int, progress *dataProgressRenderer, refreshOffset, refreshLimit int) (int64, int, error) {
 	fileJobs := []dataDownloadFileJob{}
 	for _, entry := range entries {
 		target, err := targetPathForEntry(root, cfg, entry)
@@ -3563,7 +3656,13 @@ func (c *CLI) downloadDataManifestEntries(client *Client, transferID, root strin
 			}, func() error {
 				refreshMu.Lock()
 				defer refreshMu.Unlock()
-				refresh, err := client.RefreshDataTransferAuthorization(transferID)
+				var refresh dataTransferAuthorizationResponse
+				var err error
+				if refreshLimit > 0 {
+					refresh, err = client.RefreshDataTransferAuthorizationPage(transferID, refreshOffset, refreshLimit)
+				} else {
+					refresh, err = client.RefreshDataTransferAuthorization(transferID)
+				}
 				if err != nil {
 					return err
 				}
@@ -5128,7 +5227,8 @@ func (c *Client) PlanDataUpload(workspaceID, version, message string, manifest m
 
 func (c *Client) PlanDataDownload(workspaceID, version string, assets []string) (dataDownloadPlanResponse, error) {
 	var resp dataDownloadPlanResponse
-	if err := c.doJSONWithTimeout(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-download"), map[string]any{"version": version, "assets": assets}, &resp, dataControlPlaneRequestTimeout); err != nil {
+	relative := path.Join("/v1/data/workspaces", workspaceID, "transfers/plan-download") + "?blob_limit=" + strconv.Itoa(dataTransferBlobPageLimit)
+	if err := c.doJSONWithTimeout(http.MethodPost, relative, map[string]any{"version": version, "assets": assets}, &resp, dataControlPlaneRequestTimeout); err != nil {
 		return dataDownloadPlanResponse{}, err
 	}
 	return resp, nil
