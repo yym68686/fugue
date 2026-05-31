@@ -241,6 +241,51 @@ func TestIsExpectedAppDatabaseTunnelCloseClassifiesConnectionTeardown(t *testing
 	}
 }
 
+func TestRunAppDatabaseAccessJSONRedactsAppSecrets(t *testing.T) {
+	t.Parallel()
+
+	const appJSON = `{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"env":{"DB_PASSWORD":"db-secret-123"},"postgres":{"database":"app","user":"app","password":"service-password-123"}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[` + appJSON + `]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/database/access":
+			_, _ = w.Write([]byte(`{"app":` + appJSON + `,"grants":[{"id":"grant_123","app_id":"app_123","tenant_id":"tenant_123","label":"repair","mode":"read-write","status":"active","token_prefix":"abc123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/access":
+			_, _ = w.Write([]byte(`{"grant":{"id":"grant_123","app_id":"app_123","tenant_id":"tenant_123","label":"repair","mode":"read-write","status":"active","token_prefix":"abc123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"secret":"fugue_db_secret_123"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/apps/app_123/database/access/grant_123":
+			_, _ = w.Write([]byte(`{"removed":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	for _, args := range [][]string{
+		{"app", "db", "access", "show", "demo"},
+		{"app", "db", "access", "create", "demo", "--label", "repair"},
+		{"app", "db", "access", "revoke", "demo", "grant_123"},
+	} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		commandArgs := append([]string{"--base-url", server.URL, "--token", "token", "-o", "json"}, args...)
+		if err := runWithStreams(commandArgs, &stdout, &stderr); err != nil {
+			t.Fatalf("run %v: %v", args, err)
+		}
+		out := stdout.String()
+		for _, want := range []string{`"DB_PASSWORD": "[redacted]"`, `"password": "[redacted]"`} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected output for %v to contain %q, got %q", args, want, out)
+			}
+		}
+		for _, secret := range []string{"db-secret-123", "service-password-123"} {
+			if strings.Contains(out, secret) {
+				t.Fatalf("expected output for %v to redact %q, got %q", args, secret, out)
+			}
+		}
+	}
+}
+
 func TestRunAppDatabaseShowShowSecretsOptIn(t *testing.T) {
 	t.Parallel()
 

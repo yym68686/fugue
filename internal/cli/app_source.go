@@ -43,6 +43,7 @@ func (c *CLI) newAppSourceShowCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
+				app = redactAppForOutput(app)
 				return writeJSON(c.stdout, map[string]any{
 					"source":        app.Source,
 					"origin_source": model.AppOriginSource(app),
@@ -134,6 +135,7 @@ func (c *CLI) newAppSourceBindGitHubCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
+				response.App = redactAppForOutput(response.App)
 				return writeJSON(c.stdout, map[string]any{
 					"app":             response.App,
 					"already_current": response.AlreadyCurrent,

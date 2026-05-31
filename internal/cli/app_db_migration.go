@@ -251,7 +251,7 @@ func (c *CLI) newAppDatabaseAccessRevokeCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
-					"app":      app,
+					"app":      redactAppForOutput(app),
 					"removed":  response.Removed,
 					"grant_id": strings.TrimSpace(args[1]),
 				})
@@ -322,7 +322,7 @@ func (c *CLI) waitForAppDatabaseImportJob(client *Client, appID, jobID string) (
 func (c *CLI) renderAppDatabaseImportStatus(app model.App, job *model.AppDatabaseImportJob, action string) error {
 	if c.wantsJSON() {
 		payload := map[string]any{
-			"app":    app,
+			"app":    redactAppForOutput(app),
 			"job":    job,
 			"action": action,
 		}
@@ -349,7 +349,7 @@ func (c *CLI) renderAppDatabaseImportStatus(app model.App, job *model.AppDatabas
 func (c *CLI) renderAppDatabaseAccessResponse(app model.App, grants []model.AppDatabaseAccessGrant) error {
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app":    app,
+			"app":    redactAppForOutput(app),
 			"grants": grants,
 		})
 	}
@@ -374,7 +374,7 @@ func (c *CLI) renderAppDatabaseAccessGrantCreate(app model.App, response appData
 	tunnelCommand := fmt.Sprintf("fugue app db access tunnel %s --grant-id %s --token %s --listen %s", app.Name, grant.ID, response.Secret, strings.TrimSpace(listen))
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app":            app,
+			"app":            redactAppForOutput(app),
 			"grant":          grant,
 			"secret":         response.Secret,
 			"listen":         strings.TrimSpace(listen),

@@ -4107,6 +4107,49 @@ func TestRunAppOverviewShowSecretsOptIn(t *testing.T) {
 	}
 }
 
+func TestRunAppSourceShowRedactsSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	server := newAppOverviewSecretFixtureServer(t)
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "source", "show", "demo",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app source show: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		`"repo_auth_token": "[redacted]"`,
+		`"DB_PASSWORD": "[redacted]"`,
+		`"content": "[redacted]"`,
+		`"seed_content": "[redacted]"`,
+		`"password": "[redacted]"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected redacted source output to contain %q, got %q", want, out)
+		}
+	}
+	for _, secret := range []string{
+		"repo-token-123",
+		"db-secret-123",
+		"TOKEN=runtime-secret",
+		"seed-secret-123",
+		"service-password-123",
+	} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("expected source output to redact %q, got %q", secret, out)
+		}
+	}
+}
+
 func TestRunOperationListRedactsSecretsByDefault(t *testing.T) {
 	t.Parallel()
 
