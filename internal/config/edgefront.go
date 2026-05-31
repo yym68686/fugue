@@ -24,6 +24,7 @@ func EdgeFrontFromEnv() EdgeFrontConfig {
 		DefaultSlot:     defaultSlot,
 		DialTimeout:     getenvDuration("FUGUE_EDGE_FRONT_DIAL_TIMEOUT", 5*time.Second),
 		ShutdownTimeout: getenvDuration("FUGUE_EDGE_FRONT_SHUTDOWN_TIMEOUT", 10*time.Second),
+		ProxyProtocol:   getenvBool("FUGUE_EDGE_FRONT_PROXY_PROTOCOL", true),
 		Slots: map[string]edgefront.SlotTargets{
 			"a": {
 				HTTPAddress:  edgeFrontTargetAddr("FUGUE_EDGE_FRONT_SLOT_A_HTTP_ADDR", nodeHost, "FUGUE_EDGE_FRONT_SLOT_A_HTTP_PORT", 18080),

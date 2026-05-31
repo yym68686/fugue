@@ -1268,6 +1268,52 @@ func TestBuildCaddyConfigSupportsInternalTLSCanary(t *testing.T) {
 	}
 }
 
+func TestBuildCaddyConfigEnablesProxyProtocolBeforeTLS(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:                         "https://api.example.invalid",
+		EdgeToken:                      "edge-secret",
+		EdgeGroupID:                    "edge-group-default",
+		ListenAddr:                     ":7832",
+		CaddyEnabled:                   true,
+		CaddyAdminURL:                  "http://127.0.0.1:2019",
+		CaddyListenAddr:                ":18443",
+		CaddyTLSMode:                   caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:           "127.0.0.1:7833",
+		CaddyProxyProtocolEnabled:      true,
+		CaddyProxyProtocolTrustedCIDRs: []string{"127.0.0.1/32", "10.0.0.0/8"},
+	}, log.New(ioDiscard{}, "", 0))
+
+	configBody, _, err := service.buildCaddyConfig(testBundle("routegen_caddy_proxy_protocol"))
+	if err != nil {
+		t.Fatalf("build caddy config: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(configBody, &parsed); err != nil {
+		t.Fatalf("decode caddy config: %v", err)
+	}
+	apps := parsed["apps"].(map[string]any)
+	httpApp := apps["http"].(map[string]any)
+	servers := httpApp["servers"].(map[string]any)
+	server := servers["fugue_edge"].(map[string]any)
+	wrappers := server["listener_wrappers"].([]any)
+	if len(wrappers) != 2 {
+		t.Fatalf("expected proxy_protocol and tls listener wrappers, got %#v", wrappers)
+	}
+	proxyWrapper := wrappers[0].(map[string]any)
+	if proxyWrapper["wrapper"] != "proxy_protocol" || proxyWrapper["fallback_policy"] != "USE" {
+		t.Fatalf("unexpected proxy protocol wrapper: %#v", proxyWrapper)
+	}
+	if fmt.Sprint(proxyWrapper["allow"]) != "[127.0.0.1/32 10.0.0.0/8]" {
+		t.Fatalf("unexpected proxy protocol allow list: %#v", proxyWrapper["allow"])
+	}
+	tlsWrapper := wrappers[1].(map[string]any)
+	if tlsWrapper["wrapper"] != "tls" {
+		t.Fatalf("expected tls wrapper after proxy_protocol, got %#v", tlsWrapper)
+	}
+}
+
 func TestBuildCaddyConfigSkipsRouteAOnlyHosts(t *testing.T) {
 	t.Parallel()
 

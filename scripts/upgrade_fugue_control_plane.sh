@@ -74,6 +74,8 @@ release_changed_files_match() {
       public:cmd/fugue-edge-front/*|\
       public:cmd/fugue-dns/*|\
       public:internal/edge/*|\
+      public:internal/edgefront/*|\
+      public:internal/proxyproto/*|\
       public:internal/dnsserver/*|\
       public:Dockerfile.edge|\
       public:deploy/helm/fugue/templates/edge-*|\
@@ -138,6 +140,26 @@ public_data_plane_worker_image_changed() {
     case "${file}" in
       cmd/fugue-edge/*|\
       internal/edge/*|\
+      internal/proxyproto/*|\
+      Dockerfile.edge)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
+public_data_plane_front_image_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      cmd/fugue-edge-front/*|\
+      internal/edgefront/*|\
+      internal/proxyproto/*|\
       Dockerfile.edge)
         return 0
         ;;
@@ -4289,6 +4311,8 @@ prepare_release_domains() {
 
 release_public_data_plane_if_needed() {
   local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
+  local worker_changed="false"
+  local front_changed="false"
 
   if [[ "${FUGUE_EDGE_ENABLED}" != "true" ]]; then
     return 0
@@ -4301,7 +4325,13 @@ release_public_data_plane_if_needed() {
     log "skip public data-plane auto release because release was explicitly allowed during Helm upgrade"
     return 0
   fi
-  if ! public_data_plane_worker_image_changed; then
+  if public_data_plane_worker_image_changed; then
+    worker_changed="true"
+  fi
+  if public_data_plane_front_image_changed; then
+    front_changed="true"
+  fi
+  if [[ "${worker_changed}" != "true" && "${front_changed}" != "true" ]]; then
     return 0
   fi
   if public_data_plane_manifest_changed; then
@@ -4309,10 +4339,18 @@ release_public_data_plane_if_needed() {
     return 0
   fi
 
-  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY:-blue-green}"
   export FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-${FUGUE_SMOKE_URLS:-${FUGUE_SMOKE_URL:-}}}"
-  log "public data-plane worker image changed; starting isolated ${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY} release"
-  bash ./scripts/release_fugue_public_data_plane.sh
+  if [[ "${worker_changed}" == "true" ]]; then
+    export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="blue-green"
+    log "public data-plane worker image changed; starting isolated blue-green release"
+    bash ./scripts/release_fugue_public_data_plane.sh
+  fi
+  if [[ "${front_changed}" == "true" ]]; then
+    export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="front-ondelete"
+    export FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="true"
+    log "public data-plane front image changed; starting isolated front-ondelete release after worker readiness checks"
+    bash ./scripts/release_fugue_public_data_plane.sh
+  fi
 }
 
 main() {

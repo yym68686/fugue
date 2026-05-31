@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/proxyproto"
 )
 
 const (
@@ -175,6 +176,13 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 			"default_logger_name": "fugue_edge_access",
 		},
 	}
+	if s.Config.CaddyProxyProtocolEnabled {
+		listenerWrappers, err := s.caddyListenerWrappers(tlsMode)
+		if err != nil {
+			return nil, 0, err
+		}
+		server["listener_wrappers"] = listenerWrappers
+	}
 	apps := map[string]any{
 		"http": map[string]any{
 			"servers": map[string]any{
@@ -278,6 +286,60 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	return data, len(hosts), nil
 }
 
+func (s *Service) caddyListenerWrappers(tlsMode string) ([]any, error) {
+	trustedCIDRs, err := s.caddyProxyProtocolTrustedCIDRs()
+	if err != nil {
+		return nil, err
+	}
+	wrappers := []any{
+		map[string]any{
+			"wrapper":         "proxy_protocol",
+			"timeout":         2 * time.Second,
+			"fallback_policy": "USE",
+			"allow":           trustedCIDRs,
+		},
+	}
+	if tlsMode != caddyTLSModeOff {
+		wrappers = append(wrappers, map[string]any{"wrapper": "tls"})
+	}
+	return wrappers, nil
+}
+
+func (s *Service) caddyProxyProtocolTrustedCIDRs() ([]string, error) {
+	values := s.Config.CaddyProxyProtocolTrustedCIDRs
+	if len(values) == 0 {
+		values = []string{
+			"127.0.0.1/32",
+			"::1/128",
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+			"100.64.0.0/10",
+			"fc00::/7",
+		}
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(value); err != nil {
+			return nil, fmt.Errorf("invalid FUGUE_EDGE_CADDY_PROXY_PROTOCOL_TRUSTED_CIDRS entry %q", value)
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_TRUSTED_CIDRS must not be empty when proxy protocol is enabled")
+	}
+	return out, nil
+}
+
 func ensureCaddyTLSApp(apps map[string]any) map[string]any {
 	if existing, ok := apps["tls"].(map[string]any); ok {
 		return existing
@@ -379,6 +441,15 @@ func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, er
 		"proxy=" + caddyProxyDialAddress(s.Config.CaddyProxyListenAddr),
 		"tls_mode=" + s.normalizedCaddyTLSMode(),
 	}
+	if s.Config.CaddyProxyProtocolEnabled {
+		trustedCIDRs, err := s.caddyProxyProtocolTrustedCIDRs()
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, "proxy_protocol=true", "proxy_protocol_trusted="+strings.Join(trustedCIDRs, ","))
+	} else {
+		parts = append(parts, "proxy_protocol=false")
+	}
 	if s.normalizedCaddyTLSMode() == caddyTLSModePublicOnDemand {
 		askURL, err := s.normalizedCaddyTLSAskURL()
 		if err != nil {
@@ -440,6 +511,9 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 	warmup := s.caddyWarmup
 	if warmup == nil {
 		warmup = warmupCaddyTLS
+	}
+	if s.Config.CaddyProxyProtocolEnabled {
+		warmup = warmupCaddyTLSWithProxyProtocol
 	}
 	reportHosts := s.customDomainTLSReportHosts(bundle)
 	started := time.Now()
@@ -830,6 +904,32 @@ func warmupCaddyTLS(ctx context.Context, dialAddress, host string) error {
 		return fmt.Errorf("warm SNI %s via %s: %w", host, dialAddress, err)
 	}
 	_ = conn.Close()
+	return nil
+}
+
+func warmupCaddyTLSWithProxyProtocol(ctx context.Context, dialAddress, host string) error {
+	dialAddress = strings.TrimSpace(dialAddress)
+	host = normalizeRouteHost(host)
+	if dialAddress == "" || host == "" {
+		return nil
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	rawConn, err := dialer.DialContext(ctx, "tcp", dialAddress)
+	if err != nil {
+		return fmt.Errorf("warm SNI %s via %s: %w", host, dialAddress, err)
+	}
+	defer rawConn.Close()
+	if _, err := io.WriteString(rawConn, proxyproto.HeaderV1(rawConn.LocalAddr(), rawConn.RemoteAddr())); err != nil {
+		return fmt.Errorf("write PROXY header for SNI warmup %s via %s: %w", host, dialAddress, err)
+	}
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: host,
+	})
+	defer tlsConn.Close()
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("warm SNI %s via %s: %w", host, dialAddress, err)
+	}
 	return nil
 }
 

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"fugue/internal/proxyproto"
 )
 
 const (
@@ -37,6 +39,7 @@ type Config struct {
 	DefaultSlot     string
 	DialTimeout     time.Duration
 	ShutdownTimeout time.Duration
+	ProxyProtocol   bool
 	Slots           map[string]SlotTargets
 }
 
@@ -278,6 +281,12 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 		return
 	}
 	defer upstream.Close()
+	if cfg.ProxyProtocol {
+		if _, err := io.WriteString(upstream, proxyproto.HeaderV1(downstream.RemoteAddr(), downstream.LocalAddr())); err != nil {
+			s.Logger.Printf("edge front %s proxy protocol write failed; slot=%s target=%s error=%v", protocol, slot, target, err)
+			return
+		}
+	}
 	proxyConns(downstream, upstream)
 }
 

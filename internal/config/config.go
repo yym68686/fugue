@@ -112,46 +112,48 @@ type AgentConfig struct {
 }
 
 type EdgeConfig struct {
-	APIURL                     string
-	EdgeToken                  string
-	EdgeID                     string
-	EdgeGroupID                string
-	Region                     string
-	Country                    string
-	PublicHostname             string
-	PublicIPv4                 string
-	PublicIPv6                 string
-	MeshIP                     string
-	Draining                   bool
-	CachePath                  string
-	CacheArchiveLimit          int
-	AssetCachePath             string
-	AssetCacheMaxBytes         int
-	CacheWarmupEnabled         bool
-	CacheWarmupTimeout         time.Duration
-	CacheWarmupMaxTargets      int
-	CacheWarmupMaxDepth        int
-	MaxStale                   time.Duration
-	PeerFallbackEnabled        bool
-	ListenAddr                 string
-	SyncInterval               time.Duration
-	HeartbeatInterval          time.Duration
-	HTTPTimeout                time.Duration
-	CaddyEnabled               bool
-	CaddyAdminURL              string
-	CaddyListenAddr            string
-	CaddyTLSMode               string
-	CaddyTLSAskURL             string
-	CaddyProxyListenAddr       string
-	CaddyDataDir               string
-	CaddySharedTLSEnabled      bool
-	CaddyStaticTLSCertFile     string
-	CaddyStaticTLSKeyFile      string
-	BundleSigningKey           string
-	BundleSigningKeyID         string
-	BundleSigningPreviousKey   string
-	BundleSigningPreviousKeyID string
-	BundleRevokedKeyIDs        []string
+	APIURL                         string
+	EdgeToken                      string
+	EdgeID                         string
+	EdgeGroupID                    string
+	Region                         string
+	Country                        string
+	PublicHostname                 string
+	PublicIPv4                     string
+	PublicIPv6                     string
+	MeshIP                         string
+	Draining                       bool
+	CachePath                      string
+	CacheArchiveLimit              int
+	AssetCachePath                 string
+	AssetCacheMaxBytes             int
+	CacheWarmupEnabled             bool
+	CacheWarmupTimeout             time.Duration
+	CacheWarmupMaxTargets          int
+	CacheWarmupMaxDepth            int
+	MaxStale                       time.Duration
+	PeerFallbackEnabled            bool
+	ListenAddr                     string
+	SyncInterval                   time.Duration
+	HeartbeatInterval              time.Duration
+	HTTPTimeout                    time.Duration
+	CaddyEnabled                   bool
+	CaddyAdminURL                  string
+	CaddyListenAddr                string
+	CaddyTLSMode                   string
+	CaddyTLSAskURL                 string
+	CaddyProxyListenAddr           string
+	CaddyProxyProtocolEnabled      bool
+	CaddyProxyProtocolTrustedCIDRs []string
+	CaddyDataDir                   string
+	CaddySharedTLSEnabled          bool
+	CaddyStaticTLSCertFile         string
+	CaddyStaticTLSKeyFile          string
+	BundleSigningKey               string
+	BundleSigningKeyID             string
+	BundleSigningPreviousKey       string
+	BundleSigningPreviousKeyID     string
+	BundleRevokedKeyIDs            []string
 }
 
 type DNSConfig struct {
@@ -316,37 +318,47 @@ func AgentFromEnv() AgentConfig {
 
 func EdgeFromEnv() EdgeConfig {
 	return EdgeConfig{
-		APIURL:                     getenv("FUGUE_API_URL", ""),
-		EdgeToken:                  strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN")),
-		EdgeID:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
-		EdgeGroupID:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
-		Region:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_REGION")),
-		Country:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_COUNTRY")),
-		PublicHostname:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_HOSTNAME")),
-		PublicIPv4:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV4")),
-		PublicIPv6:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV6")),
-		MeshIP:                     strings.TrimSpace(os.Getenv("FUGUE_EDGE_MESH_IP")),
-		Draining:                   getenvBool("FUGUE_EDGE_DRAINING", false),
-		CachePath:                  getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
-		CacheArchiveLimit:          getenvInt("FUGUE_EDGE_CACHE_ARCHIVE_LIMIT", 5),
-		AssetCachePath:             getenv("FUGUE_EDGE_ASSET_CACHE_PATH", "/var/lib/fugue/edge/http-cache"),
-		AssetCacheMaxBytes:         getenvInt("FUGUE_EDGE_ASSET_CACHE_MAX_BYTES", 32*1024*1024),
-		CacheWarmupEnabled:         getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
-		CacheWarmupTimeout:         getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
-		CacheWarmupMaxTargets:      getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
-		CacheWarmupMaxDepth:        getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
-		MaxStale:                   getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
-		PeerFallbackEnabled:        getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
-		ListenAddr:                 getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
-		SyncInterval:               getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
-		HeartbeatInterval:          getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
-		HTTPTimeout:                getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
-		CaddyEnabled:               getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
-		CaddyAdminURL:              getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
-		CaddyListenAddr:            getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
-		CaddyTLSMode:               getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
-		CaddyTLSAskURL:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
-		CaddyProxyListenAddr:       getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		APIURL:                    getenv("FUGUE_API_URL", ""),
+		EdgeToken:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN")),
+		EdgeID:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
+		EdgeGroupID:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
+		Region:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_REGION")),
+		Country:                   strings.TrimSpace(os.Getenv("FUGUE_EDGE_COUNTRY")),
+		PublicHostname:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_HOSTNAME")),
+		PublicIPv4:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV4")),
+		PublicIPv6:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV6")),
+		MeshIP:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_MESH_IP")),
+		Draining:                  getenvBool("FUGUE_EDGE_DRAINING", false),
+		CachePath:                 getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
+		CacheArchiveLimit:         getenvInt("FUGUE_EDGE_CACHE_ARCHIVE_LIMIT", 5),
+		AssetCachePath:            getenv("FUGUE_EDGE_ASSET_CACHE_PATH", "/var/lib/fugue/edge/http-cache"),
+		AssetCacheMaxBytes:        getenvInt("FUGUE_EDGE_ASSET_CACHE_MAX_BYTES", 32*1024*1024),
+		CacheWarmupEnabled:        getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
+		CacheWarmupTimeout:        getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
+		CacheWarmupMaxTargets:     getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
+		CacheWarmupMaxDepth:       getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
+		MaxStale:                  getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
+		PeerFallbackEnabled:       getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
+		ListenAddr:                getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
+		SyncInterval:              getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
+		HeartbeatInterval:         getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
+		HTTPTimeout:               getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
+		CaddyEnabled:              getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
+		CaddyAdminURL:             getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
+		CaddyListenAddr:           getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
+		CaddyTLSMode:              getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
+		CaddyTLSAskURL:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
+		CaddyProxyListenAddr:      getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		CaddyProxyProtocolEnabled: getenvBool("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_ENABLED", true),
+		CaddyProxyProtocolTrustedCIDRs: getenvListDefault("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_TRUSTED_CIDRS", []string{
+			"127.0.0.1/32",
+			"::1/128",
+			"10.0.0.0/8",
+			"172.16.0.0/12",
+			"192.168.0.0/16",
+			"100.64.0.0/10",
+			"fc00::/7",
+		}),
 		CaddyDataDir:               getenv("FUGUE_EDGE_CADDY_DATA_DIR", "/data/caddy"),
 		CaddySharedTLSEnabled:      getenvBool("FUGUE_EDGE_CADDY_SHARED_TLS_ENABLED", true),
 		CaddyStaticTLSCertFile:     strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE")),
@@ -447,6 +459,14 @@ func getenvList(key string) []string {
 		out = append(out, part)
 	}
 	return out
+}
+
+func getenvListDefault(key string, fallback []string) []string {
+	values := getenvList(key)
+	if len(values) > 0 {
+		return values
+	}
+	return append([]string(nil), fallback...)
 }
 
 func getenvBool(key string, fallback bool) bool {

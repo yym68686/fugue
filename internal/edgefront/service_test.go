@@ -1,6 +1,7 @@
 package edgefront
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"log"
@@ -64,6 +65,49 @@ func TestFrontProxiesHTTPSConnectionsToActiveSlot(t *testing.T) {
 	}
 }
 
+func TestFrontWritesProxyProtocolHeaderWhenEnabled(t *testing.T) {
+	backend := tcpProxyProtocolCaptureServer(t)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen front: %v", err)
+	}
+	frontAddr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close front listener: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := NewService(Config{
+		HTTPSListenAddr: frontAddr,
+		HTTPMode:        HTTPModeDisabled,
+		DefaultSlot:     "a",
+		DialTimeout:     time.Second,
+		ProxyProtocol:   true,
+		Slots: map[string]SlotTargets{
+			"a": {HTTPSAddress: backend},
+			"b": {HTTPSAddress: backend},
+		},
+	}, log.New(io.Discard, "", 0))
+	errCh := make(chan error, 1)
+	go func() { errCh <- service.Run(ctx) }()
+	waitForTCP(t, frontAddr)
+
+	got := roundTripTCP(t, frontAddr, "payload")
+	if !strings.HasPrefix(got, "PROXY TCP4 127.0.0.1 127.0.0.1 ") {
+		t.Fatalf("expected PROXY TCP4 header, got %q", got)
+	}
+	if !strings.HasSuffix(got, "\r\n|payload") {
+		t.Fatalf("expected proxied payload after header, got %q", got)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil && err != context.Canceled {
+		t.Fatalf("front exited with error: %v", err)
+	}
+}
+
 func TestFrontRedirectsHTTPToHTTPS(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -116,6 +160,31 @@ func TestFrontRedirectsHTTPToHTTPS(t *testing.T) {
 	if err := <-errCh; err != nil && err != context.Canceled {
 		t.Fatalf("front exited with error: %v", err)
 	}
+}
+
+func tcpProxyProtocolCaptureServer(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen capture: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				reader := bufio.NewReader(conn)
+				line, _ := reader.ReadString('\n')
+				data, _ := io.ReadAll(reader)
+				_, _ = io.WriteString(conn, line+"|"+string(data))
+			}()
+		}
+	}()
+	return listener.Addr().String()
 }
 
 func tcpEchoServer(t *testing.T, prefix string) string {
