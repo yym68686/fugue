@@ -185,6 +185,27 @@ func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 	}
 }
 
+func TestRuntimeServiceNamesUseDNS1035Labels(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:   "app_1780126966_e0a8316d46cd",
+		Name: "001-fugue-oiuhu89",
+	}
+	if got := RuntimeAppServiceName(app); got != "app-1780126966-e0a8316d46cd" {
+		t.Fatalf("expected app-id scoped service name, got %q", got)
+	}
+	if got := RuntimeServiceName(app.Name); got != "app-001-fugue-oiuhu89" {
+		t.Fatalf("expected numeric app-name service alias to be DNS-1035, got %q", got)
+	}
+	if got := ComposeServiceAliasName("", "001-worker"); got != "service-001-worker" {
+		t.Fatalf("expected numeric compose service alias to be DNS-1035, got %q", got)
+	}
+	if got := ComposeServiceAliasName("project_123", "001-worker"); got != "project-123-001-worker" {
+		t.Fatalf("expected project-scoped compose service alias to remain project-prefixed, got %q", got)
+	}
+}
+
 func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo_123",

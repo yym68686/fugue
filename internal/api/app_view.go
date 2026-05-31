@@ -121,7 +121,7 @@ func buildAppInternalService(app model.App) *model.AppInternalService {
 	if !model.AppHasClusterService(app.Spec) {
 		return nil
 	}
-	serviceName := strings.TrimSpace(runtime.RuntimeAppResourceName(app))
+	serviceName := strings.TrimSpace(runtime.RuntimeAppServiceName(app))
 	namespace := strings.TrimSpace(runtime.NamespaceForTenant(app.TenantID))
 	if serviceName == "" {
 		return nil

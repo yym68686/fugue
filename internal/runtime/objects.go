@@ -960,7 +960,7 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 		"apiVersion": "v1",
 		"kind":       "Service",
 		"metadata": map[string]any{
-			"name":      RuntimeAppResourceName(app),
+			"name":      RuntimeAppServiceName(app),
 			"namespace": namespace,
 			"labels":    labels,
 		},
@@ -1147,7 +1147,7 @@ func buildComposeServiceAliasObject(namespace string, app model.App) map[string]
 	}
 	composeService := strings.TrimSpace(app.Source.ComposeService)
 	aliasName := ComposeServiceAliasName(app.ProjectID, composeService)
-	if aliasName == "" || aliasName == RuntimeAppResourceName(app) {
+	if aliasName == "" || aliasName == RuntimeAppServiceName(app) {
 		return nil
 	}
 	servicePorts := appServicePorts(app.Spec.Ports)
@@ -1178,11 +1178,11 @@ func buildLegacyComposeAppNameAliasObject(namespace string, app model.App) map[s
 	if composeService == "" {
 		return nil
 	}
-	aliasName := RuntimeResourceName(app.Name)
+	aliasName := RuntimeServiceName(app.Name)
 	if aliasName == "" {
 		return nil
 	}
-	if aliasName == RuntimeAppResourceName(app) || aliasName == ComposeServiceAliasName(app.ProjectID, composeService) {
+	if aliasName == RuntimeAppServiceName(app) || aliasName == ComposeServiceAliasName(app.ProjectID, composeService) {
 		return nil
 	}
 	servicePorts := appServicePorts(app.Spec.Ports)
@@ -1217,7 +1217,7 @@ func composeServiceAliasLabels(app model.App, composeService string) map[string]
 func legacyComposeAppNameAliasLabels(app model.App) map[string]string {
 	labels := appLabels(app)
 	labels[FugueLabelComponent] = "legacy-compose-app-name-alias"
-	if name := RuntimeResourceName(app.Name); name != "" {
+	if name := RuntimeServiceName(app.Name); name != "" {
 		labels[FugueLabelName] = name
 	}
 	return labels
@@ -2031,11 +2031,7 @@ func normalizePostgresResourceName(name, baseName string) string {
 	if name == "" {
 		name = postgresResourceName(baseName)
 	}
-	name = model.Slugify(name)
-	if len(name) > 63 {
-		return name[:63]
-	}
-	return name
+	return model.DNS1035Label(name, "postgres")
 }
 
 func normalizePostgresAuxiliaryName(base, suffix string) string {

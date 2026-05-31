@@ -194,6 +194,76 @@ func TestBuildAppObjectsUseAppIDScopedRuntimeNames(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsUseDNS1035ServiceAliases(t *testing.T) {
+	app := model.App{
+		ID:        "app_1780126966_e0a8316d46cd",
+		TenantID:  "tenant_1774720388_5c9ca0db3d42",
+		ProjectID: "project_1780126966_0502785f2fc8",
+		Name:      "001-fugue-oiuhu89",
+		Source: &model.AppSource{
+			ComposeService: "logseq-sync",
+		},
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/logseq-sync:latest",
+			Ports:     []int{8787},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 5 {
+		t.Fatalf("expected namespace + deployment + service + compose alias + legacy alias, got %d", len(objects))
+	}
+
+	appService := objects[2]
+	if got := appService["metadata"].(map[string]any)["name"]; got != "app-1780126966-e0a8316d46cd" {
+		t.Fatalf("expected primary service name to remain app-id scoped, got %#v", got)
+	}
+
+	legacyAlias := objects[4]
+	if got := legacyAlias["kind"]; got != "Service" {
+		t.Fatalf("expected legacy alias service, got %#v", got)
+	}
+	if got := legacyAlias["metadata"].(map[string]any)["name"]; got != "app-001-fugue-oiuhu89" {
+		t.Fatalf("expected DNS-1035 legacy service alias, got %#v", got)
+	}
+}
+
+func TestBuildAppObjectsUseDNS1035PostgresServiceNames(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "001-demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Postgres: &model.AppPostgresSpec{
+				Password: "secret",
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	if len(objects) != 6 {
+		t.Fatalf("expected namespace + postgres secret/service/cluster + app deployment/service, got %d", len(objects))
+	}
+	postgresService := objects[2]
+	if got := postgresService["metadata"].(map[string]any)["name"]; got != "postgres-001-demo-postgres" {
+		t.Fatalf("expected DNS-1035 postgres service name, got %#v", got)
+	}
+	appDeployment := objects[4]
+	containers := appDeployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]map[string]any)
+	if got := envValue(containers[0]["env"].([]map[string]any), "DB_HOST"); got != "postgres-001-demo-postgres-rw" {
+		t.Fatalf("expected app env to point at DNS-1035 postgres service, got %q", got)
+	}
+	appService := objects[5]
+	if got := appService["metadata"].(map[string]any)["name"]; got != "app-001-demo" {
+		t.Fatalf("expected numeric app-name fallback service to be DNS-1035, got %#v", got)
+	}
+}
+
 func TestBuildAppObjectsExplicitlyClearsVolumeFieldsWhenNoMountsRemain(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo_123",

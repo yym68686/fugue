@@ -667,7 +667,7 @@ func appNameForDatabaseService(service *model.BackingService, app *model.App) st
 }
 
 func postgresServiceNameForApp(appName string) string {
-	return serviceResourceName(appName) + "-postgres"
+	return model.DNS1035Label(serviceResourceName(appName)+"-postgres", "postgres")
 }
 
 func serviceResourceName(name string) string {

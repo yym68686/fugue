@@ -127,17 +127,25 @@ func RuntimeAppResourceName(app model.App) string {
 	return name
 }
 
+func RuntimeAppServiceName(app model.App) string {
+	return RuntimeServiceName(RuntimeAppResourceName(app))
+}
+
+func RuntimeServiceName(name string) string {
+	return model.DNS1035Label(RuntimeResourceName(name), "app")
+}
+
 func ComposeServiceAliasName(projectID, composeService string) string {
-	composeService = model.Slugify(strings.TrimSpace(composeService))
+	composeService = model.SlugifyOptional(strings.TrimSpace(composeService))
 	if composeService == "" {
 		return ""
 	}
 
-	projectID = model.Slugify(strings.ReplaceAll(strings.TrimSpace(projectID), "_", "-"))
+	projectID = model.SlugifyOptional(strings.ReplaceAll(strings.TrimSpace(projectID), "_", "-"))
 	if projectID == "" {
-		return composeService
+		return model.DNS1035Label(composeService, "service")
 	}
-	return normalizePostgresAuxiliaryName(projectID, composeService)
+	return model.DNS1035Label(normalizePostgresAuxiliaryName(projectID, composeService), "service")
 }
 
 func RuntimeResourceName(name string) string {

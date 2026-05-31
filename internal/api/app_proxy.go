@@ -414,8 +414,8 @@ func (s *Server) serviceHostForApp(ctx context.Context, app model.App) string {
 
 func (s *Server) resolveServiceHostForApp(ctx context.Context, app model.App) string {
 	namespace := runtime.NamespaceForTenant(app.TenantID)
-	primaryHost := appServiceHost(namespace, runtime.RuntimeAppResourceName(app))
-	legacyHost := appServiceHost(namespace, runtime.RuntimeResourceName(app.Name))
+	primaryHost := appServiceHost(namespace, runtime.RuntimeAppServiceName(app))
+	legacyHost := appServiceHost(namespace, runtime.RuntimeServiceName(app.Name))
 	if legacyHost == "" || legacyHost == primaryHost {
 		return primaryHost
 	}

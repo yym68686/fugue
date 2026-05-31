@@ -61,6 +61,27 @@ func SlugifyOptional(input string) string {
 	return slugify(input)
 }
 
+func DNS1035Label(input, fallbackPrefix string) string {
+	name := slugify(input)
+	prefix := slugify(fallbackPrefix)
+	if prefix == "" || prefix[0] < 'a' || prefix[0] > 'z' {
+		prefix = "app"
+	}
+	if name == "" {
+		name = prefix
+	}
+	if name[0] < 'a' || name[0] > 'z' {
+		name = prefix + "-" + name
+	}
+	if len(name) > 63 {
+		name = strings.TrimRight(name[:63], "-")
+	}
+	if name == "" || name[0] < 'a' || name[0] > 'z' {
+		return prefix
+	}
+	return name
+}
+
 func slugify(input string) string {
 	input = strings.ToLower(strings.TrimSpace(input))
 	var b strings.Builder

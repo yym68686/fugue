@@ -693,7 +693,7 @@ func serviceNameForApp(app model.App) string {
 	if app.InternalService != nil && strings.TrimSpace(app.InternalService.Name) != "" {
 		return strings.TrimSpace(app.InternalService.Name)
 	}
-	return fugueruntime.RuntimeAppResourceName(app)
+	return fugueruntime.RuntimeAppServiceName(app)
 }
 
 func workloadContainerTemplate(manifest map[string]any, containerName string) (appConfigContainerTemplate, error) {
