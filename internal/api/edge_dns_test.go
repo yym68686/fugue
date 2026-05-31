@@ -242,6 +242,46 @@ func TestEdgeDNSBundleUsesDefaultEdgeCustomTargets(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSBundleKeepsCustomDomainTargetWhileTLSIsPending(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	target := server.primaryCustomDomainTarget(app)
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:    "www.example.com",
+		AppID:       app.ID,
+		TenantID:    app.TenantID,
+		Status:      model.AppDomainStatusVerified,
+		DNSStatus:   model.AppDomainDNSStatusReady,
+		TLSStatus:   model.AppDomainTLSStatusPending,
+		RouteTarget: target,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("put verified TLS-pending app domain: %v", err)
+	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&answer_ip=203.0.113.10&ttl=120", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+	if customTarget == nil {
+		t.Fatalf("expected TLS-pending custom-domain target %s to stay in DNS bundle: %+v", target, bundle.Records)
+	}
+	if customTarget.RecordKind != model.EdgeDNSRecordKindCustomDomainTarget || customTarget.AppID != app.ID {
+		t.Fatalf("unexpected TLS-pending custom-domain DNS record: %+v", customTarget)
+	}
+}
+
 func TestEdgeDNSBundleUsesHealthyPolicyEdgeGroupIPsForOptInTargets(t *testing.T) {
 	t.Parallel()
 
