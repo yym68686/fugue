@@ -283,6 +283,7 @@ func (s *Server) handleGetAppDomainDiagnosis(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, store.ErrNotFound)
 		return
 	}
+	domain = s.refreshAppDomainForRead(r.Context(), app, domain)
 	diagnosis := s.buildAppDomainDiagnosis(r.Context(), app, domain)
 	s.appendAudit(principal, "app.domain.diagnose", "app", app.ID, app.TenantID, map[string]string{"hostname": domain.Hostname})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": diagnosis})
@@ -792,19 +793,27 @@ func (s *Server) refreshAppDomainsForRead(ctx context.Context, app model.App, do
 	now := time.Now().UTC()
 	out := append([]model.AppDomain(nil), domains...)
 	for index, domain := range out {
-		if !shouldRefreshAppDomainOnRead(domain, now) {
-			continue
-		}
-		updated, _, err := s.verifyAndPersistAppDomain(ctx, app, domain)
-		if err != nil {
-			if s.log != nil {
-				s.log.Printf("app domain read refresh failed; app_id=%s hostname=%s err=%v", app.ID, domain.Hostname, err)
-			}
-			continue
-		}
-		out[index] = updated
+		out[index] = s.refreshAppDomainForReadAt(ctx, app, domain, now)
 	}
 	return out
+}
+
+func (s *Server) refreshAppDomainForRead(ctx context.Context, app model.App, domain model.AppDomain) model.AppDomain {
+	return s.refreshAppDomainForReadAt(ctx, app, domain, time.Now().UTC())
+}
+
+func (s *Server) refreshAppDomainForReadAt(ctx context.Context, app model.App, domain model.AppDomain, now time.Time) model.AppDomain {
+	if !shouldRefreshAppDomainOnRead(domain, now) {
+		return domain
+	}
+	updated, _, err := s.verifyAndPersistAppDomain(ctx, app, domain)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("app domain read refresh failed; app_id=%s hostname=%s err=%v", app.ID, domain.Hostname, err)
+		}
+		return domain
+	}
+	return updated
 }
 
 func shouldRefreshAppDomainOnRead(domain model.AppDomain, now time.Time) bool {

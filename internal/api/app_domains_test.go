@@ -123,6 +123,59 @@ func TestListAppDomainsRefreshesStalePendingDomain(t *testing.T) {
 	}
 }
 
+func TestGetAppDomainDiagnosisRefreshesStalePendingDomain(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, resolver := setupAppDomainTestServer(t)
+	expectedTarget := server.primaryCustomDomainTarget(app)
+	stale := time.Now().UTC().Add(-2 * appDomainReadVerifyMinInterval)
+	if _, err := s.PutAppDomain(model.AppDomain{
+		Hostname:         "www.example.com",
+		AppID:            app.ID,
+		TenantID:         app.TenantID,
+		Status:           model.AppDomainStatusPending,
+		DNSStatus:        model.AppDomainDNSStatusPending,
+		RouteTarget:      expectedTarget,
+		LastMessage:      "CNAME for www.example.com points to www.example.com; expected " + expectedTarget,
+		DNSLastMessage:   "CNAME for www.example.com points to www.example.com; expected " + expectedTarget,
+		LastCheckedAt:    &stale,
+		DNSLastCheckedAt: &stale,
+		CreatedAt:        stale,
+		UpdatedAt:        stale,
+	}); err != nil {
+		t.Fatalf("put stale pending domain: %v", err)
+	}
+	resolver.cname["www.example.com"] = expectedTarget + "."
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/domains/diagnosis?hostname=www.example.com", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Diagnosis appDomainDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	domain := response.Diagnosis.Domain
+	if domain.Status != model.AppDomainStatusVerified || domain.DNSStatus != model.AppDomainDNSStatusReady || domain.DNSRecordKind != model.AppDomainDNSRecordKindCNAME {
+		t.Fatalf("expected stale pending domain diagnosis to refresh to verified, got %+v", response.Diagnosis)
+	}
+	if response.Diagnosis.DNSObservation.Verified != true {
+		t.Fatalf("expected refreshed diagnosis DNS observation to verify, got %+v", response.Diagnosis)
+	}
+	for _, check := range response.Diagnosis.Checks {
+		if check.Name == "domain_verified" && check.Status != "pass" {
+			t.Fatalf("expected domain_verified check to pass after read refresh, got %+v", response.Diagnosis.Checks)
+		}
+	}
+	persisted, err := s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get refreshed domain: %v", err)
+	}
+	if persisted.Status != model.AppDomainStatusVerified || persisted.DNSStatus != model.AppDomainDNSStatusReady {
+		t.Fatalf("expected refreshed diagnosis domain to persist, got %+v", persisted)
+	}
+}
+
 func TestPutAppDomainVerifiesWithFlattenedTargetIPs(t *testing.T) {
 	t.Parallel()
 
