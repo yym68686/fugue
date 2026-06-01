@@ -364,8 +364,8 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				payload := map[string]any{
-					"app":               finalApp,
-					"operation":         response.Operation,
+					"app":               redactAppForOutput(finalApp),
+					"operation":         redactOperationForOutput(response.Operation),
 					"target_runtime_id": targetRuntimeID,
 				}
 				return writeJSON(c.stdout, payload)
@@ -426,8 +426,8 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				payload := map[string]any{
-					"app":              finalApp,
-					"operation":        response.Operation,
+					"app":              redactAppForOutput(finalApp),
+					"operation":        redactOperationForOutput(response.Operation),
 					"target_node_name": strings.TrimSpace(opts.TargetNodeName),
 				}
 				return writeJSON(c.stdout, payload)

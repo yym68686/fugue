@@ -133,8 +133,8 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
-					"app":       app,
-					"operation": response.Operation,
+					"app":       redactAppForOutput(app),
+					"operation": redactOperationForOutput(response.Operation),
 					"build":     response.Build,
 				})
 			}

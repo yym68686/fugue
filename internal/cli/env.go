@@ -458,9 +458,9 @@ func (c *CLI) renderGeneratedEnvState(app model.App, operation *model.Operation,
 	generated := model.NormalizeAppGeneratedEnvSpecs(app.Spec.GeneratedEnv)
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app":             app,
+			"app":             redactAppForOutput(app),
 			"generated_env":   generated,
-			"operation":       operation,
+			"operation":       redactOperationPtrForOutput(operation),
 			"already_current": alreadyCurrent,
 		})
 	}

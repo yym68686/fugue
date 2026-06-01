@@ -345,7 +345,7 @@ func (c *CLI) renderAppContinuityResult(appID string, result appContinuityRespon
 			"app_failover":    result.AppFailover,
 			"database":        result.Database,
 			"already_current": result.AlreadyCurrent,
-			"operation":       result.Operation,
+			"operation":       redactOperationPtrForOutput(result.Operation),
 		})
 	}
 	pairs := []kvPair{{Key: "app_id", Value: appID}}

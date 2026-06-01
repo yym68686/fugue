@@ -38,6 +38,14 @@ func redactOperationForOutput(op model.Operation) model.Operation {
 	return out
 }
 
+func redactOperationPtrForOutput(op *model.Operation) *model.Operation {
+	if op == nil {
+		return nil
+	}
+	out := redactOperationForOutput(*op)
+	return &out
+}
+
 func redactBackingServiceForOutput(service model.BackingService) model.BackingService {
 	services := cloneBackingServicesForOutput([]model.BackingService{service}, true)
 	if len(services) == 0 {

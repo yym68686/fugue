@@ -211,10 +211,10 @@ func (c *CLI) renderAppNetworkState(app model.App, operation *model.Operation, a
 	}
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app":             app,
+			"app":             redactAppForOutput(app),
 			"network_mode":    mode,
 			"network_policy":  app.Spec.NetworkPolicy,
-			"operation":       operation,
+			"operation":       redactOperationPtrForOutput(operation),
 			"already_current": alreadyCurrent,
 		})
 	}

@@ -110,8 +110,8 @@ func (c *CLI) newAppServiceAttachCommand() *cobra.Command {
 				return writeJSON(c.stdout, map[string]any{
 					"app_id":          app.ID,
 					"binding":         response.Binding,
-					"backing_service": response.BackingService,
-					"operation":       response.Operation,
+					"backing_service": redactBackingServiceForOutput(response.BackingService),
+					"operation":       redactOperationForOutput(response.Operation),
 				})
 			}
 			return writeKeyValues(c.stdout,
@@ -167,8 +167,8 @@ func (c *CLI) newAppServiceDetachCommand() *cobra.Command {
 				return writeJSON(c.stdout, map[string]any{
 					"app_id":          app.ID,
 					"binding":         response.Binding,
-					"backing_service": response.BackingService,
-					"operation":       response.Operation,
+					"backing_service": redactBackingServiceForOutput(response.BackingService),
+					"operation":       redactOperationForOutput(response.Operation),
 				})
 			}
 			return writeKeyValues(c.stdout,

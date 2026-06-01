@@ -532,11 +532,11 @@ func (c *CLI) renderAppStorageReplicationState(app model.App, operation *model.O
 	}
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app":                app,
+			"app":                redactAppForOutput(app),
 			"volume_replication": replication,
 			"mode":               mode,
 			"schedule":           schedule,
-			"operation":          operation,
+			"operation":          redactOperationPtrForOutput(operation),
 			"already_current":    alreadyCurrent,
 		})
 	}

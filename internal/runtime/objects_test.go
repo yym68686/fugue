@@ -519,6 +519,9 @@ func TestBuildPostgresClusterUsesFailoverPlacementsAndAntiAffinity(t *testing.T)
 	})
 
 	clusterSpec := objects[3]["spec"].(map[string]any)
+	if got := clusterSpec["minSyncReplicas"]; got != 0 {
+		t.Fatalf("expected failover postgres to fail open with minSyncReplicas=0, got %#v", got)
+	}
 	if got := clusterSpec["maxSyncReplicas"]; got != 1 {
 		t.Fatalf("expected maxSyncReplicas=1, got %#v", got)
 	}

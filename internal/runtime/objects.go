@@ -246,7 +246,11 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 	if resources := runtimeResourceRequirements(spec.Resources); resources != nil {
 		clusterSpec["resources"] = resources
 	}
-	clusterSpec["minSyncReplicas"] = spec.SynchronousReplicas
+	minSyncReplicas := spec.SynchronousReplicas
+	if strings.TrimSpace(spec.FailoverTargetRuntimeID) != "" {
+		minSyncReplicas = 0
+	}
+	clusterSpec["minSyncReplicas"] = minSyncReplicas
 	clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
 	if affinity := buildPostgresAffinity(spec, placements); len(affinity) > 0 {
 		clusterSpec["affinity"] = affinity

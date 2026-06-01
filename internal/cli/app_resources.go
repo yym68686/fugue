@@ -290,10 +290,10 @@ func bindAppResourcesWindowFlags(cmd *cobra.Command, opts *appResourcesOptions) 
 func (c *CLI) renderAppResourcesState(app model.App, operation *model.Operation, alreadyCurrent bool) error {
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
-			"app":             app,
+			"app":             redactAppForOutput(app),
 			"resources":       app.Spec.Resources,
 			"right_sizing":    app.Spec.RightSizing,
-			"operation":       operation,
+			"operation":       redactOperationPtrForOutput(operation),
 			"already_current": alreadyCurrent,
 		})
 	}

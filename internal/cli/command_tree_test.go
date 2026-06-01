@@ -1584,6 +1584,47 @@ func TestRunAppContinuityEnableUsesSemanticCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppFailoverPolicyClearJSONRedactsOperationDesiredSpec(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_a","env":{"SECRET":"raw-secret"},"replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/continuity":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"database":{"database":"demo","user":"demo","service_name":"demo-postgres","runtime_id":"runtime_a","instances":1},"operation":{"id":"op_123","app_id":"app_123","type":"deploy","status":"pending","desired_spec":{"image":"ghcr.io/example/demo:latest","env":{"SECRET":"raw-secret"},"postgres":{"database":"demo","user":"demo","password":"postgres-secret","service_name":"demo-postgres","instances":1},"restart_token":"restart-secret"}}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--json",
+		"app", "failover", "policy", "clear", "demo",
+		"--db",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app failover policy clear: %v", err)
+	}
+
+	out := stdout.String()
+	for _, leaked := range []string{"raw-secret", "postgres-secret", "restart-secret"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("expected JSON output to redact %q, got %s", leaked, out)
+		}
+	}
+	if !strings.Contains(out, redactedSecretValue) {
+		t.Fatalf("expected JSON output to contain redacted marker, got %s", out)
+	}
+}
+
 func TestRunAppFailoverConfigureUsesNewSemanticCommand(t *testing.T) {
 	t.Parallel()
 

@@ -303,7 +303,7 @@ func (c *CLI) newAppReleaseRebuildCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{
 					"app_id":    app.ID,
-					"operation": response.Operation,
+					"operation": redactOperationForOutput(response.Operation),
 					"build":     response.Build,
 				})
 			}
@@ -411,9 +411,14 @@ func (c *CLI) newAppReleaseRollbackCommand() *cobra.Command {
 				result.App = &app
 			}
 			if c.wantsJSON() {
+				var payloadApp *model.App
+				if result.App != nil {
+					appCopy := redactAppForOutput(*result.App)
+					payloadApp = &appCopy
+				}
 				return writeJSON(c.stdout, map[string]any{
-					"app":       result.App,
-					"operation": result.Operation,
+					"app":       payloadApp,
+					"operation": redactOperationPtrForOutput(result.Operation),
 					"image":     response.Image,
 				})
 			}
