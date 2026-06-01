@@ -604,6 +604,12 @@ func (s *Server) handleEdgeDomainTLSReport(w http.ResponseWriter, r *http.Reques
 				req.TLSLastMessage = "waiting for shared edge certificate bundle"
 			}
 		}
+	} else if _, certErr := s.store.GetEdgeTLSCertificate(hostname); certErr == nil {
+		tlsStatus = model.AppDomainTLSStatusReady
+		req.TLSLastMessage = ""
+	} else if certErr != store.ErrNotFound {
+		s.writeStoreError(w, certErr)
+		return
 	}
 	domain.TLSStatus = tlsStatus
 	domain.TLSLastMessage = strings.TrimSpace(req.TLSLastMessage)

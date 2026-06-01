@@ -503,6 +503,26 @@ func TestEdgeDomainTLSReportUpdatesVerifiedDomainStatus(t *testing.T) {
 	if domain.TLSLastCheckedAt == nil || domain.TLSReadyAt == nil {
 		t.Fatalf("expected ready report timestamps to be set, got %+v", domain)
 	}
+
+	pendingAfterCert := performJSONRequest(t, server, http.MethodPost, "/v1/edge/domains/tls-report?token=edge-secret", "", map[string]any{
+		"hostname":         "www.example.com",
+		"tls_status":       model.AppDomainTLSStatusPending,
+		"tls_last_message": "warmup retry still pending",
+	})
+	if pendingAfterCert.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, pendingAfterCert.Code, pendingAfterCert.Body.String())
+	}
+
+	domain, err = s.GetAppDomain("www.example.com")
+	if err != nil {
+		t.Fatalf("get app domain after pending report with shared cert: %v", err)
+	}
+	if domain.TLSStatus != model.AppDomainTLSStatusReady {
+		t.Fatalf("expected shared certificate to prevent TLS downgrade, got %+v", domain)
+	}
+	if domain.TLSLastMessage != "" || domain.TLSReadyAt == nil {
+		t.Fatalf("expected pending report with shared cert to preserve ready state, got %+v", domain)
+	}
 }
 
 func TestEdgeDomainTLSReportAllowsSubpathRouteOnSameHostname(t *testing.T) {
