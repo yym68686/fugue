@@ -193,8 +193,7 @@ func edgeDNSRecordRequiresRouteReady(record model.EdgeDNSRecord) bool {
 	switch strings.TrimSpace(record.RecordKind) {
 	case model.EdgeDNSRecordKindPlatform,
 		model.EdgeDNSRecordKindPlatformDomain,
-		model.EdgeDNSRecordKindPlatformRoute,
-		model.EdgeDNSRecordKindCustomDomainTarget:
+		model.EdgeDNSRecordKindPlatformRoute:
 		return true
 	default:
 		return false

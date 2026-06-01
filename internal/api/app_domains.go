@@ -24,6 +24,8 @@ type appDomainDNSResolver interface {
 
 type netAppDomainResolver struct{}
 
+const appDomainReadVerifyMinInterval = 30 * time.Second
+
 func (netAppDomainResolver) LookupCNAME(ctx context.Context, host string) (string, error) {
 	return net.DefaultResolver.LookupCNAME(ctx, host)
 }
@@ -105,6 +107,7 @@ func (s *Server) handleListAppDomains(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	domains = s.refreshAppDomainsForRead(r.Context(), app, domains)
 	s.appendAudit(principal, "app.domains.read", "app", app.ID, app.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"domains": domains})
 }
@@ -774,6 +777,44 @@ func (s *Server) verifyAndPersistAppDomain(ctx context.Context, app model.App, d
 		return domain, false, err
 	}
 	return updated, verified, nil
+}
+
+func (s *Server) refreshAppDomainsForRead(ctx context.Context, app model.App, domains []model.AppDomain) []model.AppDomain {
+	if len(domains) == 0 {
+		return domains
+	}
+	now := time.Now().UTC()
+	out := append([]model.AppDomain(nil), domains...)
+	for index, domain := range out {
+		if !shouldRefreshAppDomainOnRead(domain, now) {
+			continue
+		}
+		updated, _, err := s.verifyAndPersistAppDomain(ctx, app, domain)
+		if err != nil {
+			if s.log != nil {
+				s.log.Printf("app domain read refresh failed; app_id=%s hostname=%s err=%v", app.ID, domain.Hostname, err)
+			}
+			continue
+		}
+		out[index] = updated
+	}
+	return out
+}
+
+func shouldRefreshAppDomainOnRead(domain model.AppDomain, now time.Time) bool {
+	if domain.Status == model.AppDomainStatusVerified {
+		return false
+	}
+	var lastChecked *time.Time
+	if domain.DNSLastCheckedAt != nil {
+		lastChecked = domain.DNSLastCheckedAt
+	} else {
+		lastChecked = domain.LastCheckedAt
+	}
+	if lastChecked == nil {
+		return true
+	}
+	return now.Sub(lastChecked.UTC()) >= appDomainReadVerifyMinInterval
 }
 
 func (s *Server) customDomainVerificationResult(ctx context.Context, app model.App, domain model.AppDomain, legacyTarget string) (bool, string, error) {

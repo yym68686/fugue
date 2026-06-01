@@ -321,7 +321,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
-		answerIPs := edgeDNSAnswerIPsForBindings(dnsBindings, options, edgeAnswerIPsByGroup)
+		answerIPs := edgeDNSAnswerIPsForCustomDomainTarget(dnsBindings, options, edgeAnswerIPsByGroup)
 		if len(answerIPs) == 0 {
 			continue
 		}
@@ -884,6 +884,28 @@ func edgeDNSAnswerIPsForBindings(bindings []model.EdgeRouteBinding, options edge
 		}
 	}
 	return out
+}
+
+func edgeDNSAnswerIPsForCustomDomainTarget(bindings []model.EdgeRouteBinding, options edgeDNSBundleOptions, edgeAnswerIPsByGroup map[string][]string) []string {
+	out := []string{}
+	for _, binding := range bindings {
+		if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) {
+			for _, ip := range edgeAnswerIPsByGroup[strings.TrimSpace(binding.EdgeGroupID)] {
+				out = appendEdgeDNSUniqueIP(out, ip)
+			}
+			for _, ip := range edgeAnswerIPsByGroup[strings.TrimSpace(binding.FallbackEdgeGroupID)] {
+				out = appendEdgeDNSUniqueIP(out, ip)
+			}
+			continue
+		}
+		for _, ip := range edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup) {
+			out = appendEdgeDNSUniqueIP(out, ip)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return append([]string(nil), options.AnswerIPs...)
 }
 
 func edgeDNSAnswerIPsForPlatformRoute(route model.PlatformRoute, options edgeDNSBundleOptions, edgeAnswerIPsByGroup map[string][]string) []string {
