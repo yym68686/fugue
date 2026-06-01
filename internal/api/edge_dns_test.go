@@ -569,67 +569,74 @@ func TestEdgeDNSBundleDoesNotFallbackToRouteAForUnavailableEdgeTraffic(t *testin
 func TestEdgeDNSBundlePublishesCustomDomainTargetForDisabledEdgeEnabledApp(t *testing.T) {
 	t.Parallel()
 
-	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
-	disabledSpec := app.Spec
-	disabledSpec.Replicas = 0
-	disableOp, err := storeState.CreateOperation(model.Operation{
-		TenantID:        app.TenantID,
-		Type:            model.OperationTypeDeploy,
-		RequestedByType: model.ActorTypeAPIKey,
-		RequestedByID:   "test-key",
-		AppID:           app.ID,
-		DesiredSpec:     &disabledSpec,
-		ExecutionMode:   model.ExecutionModeManaged,
-	})
-	if err != nil {
-		t.Fatalf("create disable operation: %v", err)
-	}
-	if _, err := storeState.CompleteManagedOperationWithResult(disableOp.ID, "", "disabled", &disabledSpec, nil); err != nil {
-		t.Fatalf("complete disable operation: %v", err)
-	}
-	reloaded, err := storeState.GetApp(app.ID)
-	if err != nil {
-		t.Fatalf("reload disabled app: %v", err)
-	}
-	app = reloaded
-	target := server.primaryCustomDomainTarget(app)
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	if _, err := storeState.PutAppDomain(model.AppDomain{
-		Hostname:    "www.example.com",
-		AppID:       app.ID,
-		TenantID:    app.TenantID,
-		Status:      model.AppDomainStatusVerified,
-		DNSStatus:   model.AppDomainDNSStatusReady,
-		TLSStatus:   model.AppDomainTLSStatusPending,
-		RouteTarget: target,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}); err != nil {
-		t.Fatalf("put verified TLS-pending app domain: %v", err)
-	}
-	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
-	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/demo.fugue.pro", platformAdminKey, map[string]any{
-		"edge_group_id": "edge-group-country-us",
-		"route_policy":  model.EdgeRoutePolicyEnabled,
-	})
-	if put.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
-	}
+	for _, tlsStatus := range []string{model.AppDomainTLSStatusPending, model.AppDomainTLSStatusReady} {
+		tlsStatus := tlsStatus
+		t.Run(tlsStatus, func(t *testing.T) {
+			t.Parallel()
 
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
-	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
-	}
-	var bundle model.EdgeDNSBundle
-	mustDecodeJSON(t, recorder, &bundle)
-	customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
-	if customTarget == nil {
-		t.Fatalf("expected disabled edge-enabled app to keep custom-domain target %s in DNS bundle: %+v", target, bundle.Records)
-	}
-	if customTarget.RecordKind != model.EdgeDNSRecordKindCustomDomainTarget || strings.Join(customTarget.Values, ",") != "15.204.94.71" {
-		t.Fatalf("unexpected custom-domain target record: %+v", customTarget)
+			storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+			disabledSpec := app.Spec
+			disabledSpec.Replicas = 0
+			disableOp, err := storeState.CreateOperation(model.Operation{
+				TenantID:        app.TenantID,
+				Type:            model.OperationTypeDeploy,
+				RequestedByType: model.ActorTypeAPIKey,
+				RequestedByID:   "test-key",
+				AppID:           app.ID,
+				DesiredSpec:     &disabledSpec,
+				ExecutionMode:   model.ExecutionModeManaged,
+			})
+			if err != nil {
+				t.Fatalf("create disable operation: %v", err)
+			}
+			if _, err := storeState.CompleteManagedOperationWithResult(disableOp.ID, "", "disabled", &disabledSpec, nil); err != nil {
+				t.Fatalf("complete disable operation: %v", err)
+			}
+			reloaded, err := storeState.GetApp(app.ID)
+			if err != nil {
+				t.Fatalf("reload disabled app: %v", err)
+			}
+			app = reloaded
+			target := server.primaryCustomDomainTarget(app)
+			now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+			if _, err := storeState.PutAppDomain(model.AppDomain{
+				Hostname:    "www.example.com",
+				AppID:       app.ID,
+				TenantID:    app.TenantID,
+				Status:      model.AppDomainStatusVerified,
+				DNSStatus:   model.AppDomainDNSStatusReady,
+				TLSStatus:   tlsStatus,
+				RouteTarget: target,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}); err != nil {
+				t.Fatalf("put verified app domain: %v", err)
+			}
+			recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+			put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/demo.fugue.pro", platformAdminKey, map[string]any{
+				"edge_group_id": "edge-group-country-us",
+				"route_policy":  model.EdgeRoutePolicyEnabled,
+			})
+			if put.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+			}
+
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71&route_a_answer_ip=136.112.185.40", nil)
+			server.Handler().ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+			}
+			var bundle model.EdgeDNSBundle
+			mustDecodeJSON(t, recorder, &bundle)
+			customTarget := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+			if customTarget == nil {
+				t.Fatalf("expected disabled edge-enabled app to keep custom-domain target %s in DNS bundle: %+v", target, bundle.Records)
+			}
+			if customTarget.RecordKind != model.EdgeDNSRecordKindCustomDomainTarget || strings.Join(customTarget.Values, ",") != "15.204.94.71" {
+				t.Fatalf("unexpected custom-domain target record: %+v", customTarget)
+			}
+		})
 	}
 }
 

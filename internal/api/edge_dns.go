@@ -372,7 +372,10 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		binding = applyCustomDomainReadiness(binding, domain)
 		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
-		if routeKind == model.EdgeRouteKindCustomDomain && binding.Status != model.EdgeRouteStatusActive {
+		if routeKind == model.EdgeRouteKindCustomDomain &&
+			(domain.Status != model.AppDomainStatusVerified ||
+				domain.DNSStatus != model.AppDomainDNSStatusReady ||
+				domain.TLSStatus != model.AppDomainTLSStatusReady) {
 			continue
 		}
 		target := hostname
@@ -386,6 +389,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		answerIPs := edgeDNSAnswerIPsForBindings(dnsBindings, options, edgeAnswerIPsByGroup)
+		if routeKind == model.EdgeRouteKindCustomDomain {
+			answerIPs = edgeDNSAnswerIPsForCustomDomainTarget(dnsBindings, options, edgeAnswerIPsByGroup)
+		}
 		if len(answerIPs) == 0 {
 			continue
 		}
