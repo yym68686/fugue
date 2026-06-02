@@ -356,13 +356,16 @@ func discoverBuildLogSources(ctx context.Context, client appLogsClient, operatio
 	return jobName, sources, buildLogPodNames(pods), nil
 }
 
-func discoverRuntimeLogSources(ctx context.Context, client appLogsClient, namespace, selector, component, containerName, requestedPod string, previous bool) ([]logStreamSourceSpec, []string, error) {
+func discoverRuntimeLogSources(ctx context.Context, client appLogsClient, namespace, selector, component, containerName, requestedPod string, previous, currentOnly bool) ([]logStreamSourceSpec, []string, error) {
 	pods, err := client.listPodsBySelector(ctx, namespace, selector)
 	if err != nil {
 		return nil, nil, err
 	}
 	sortPodsByCreation(pods)
 	pods = filterPodsByName(pods, requestedPod)
+	if currentOnly {
+		pods = currentRuntimeLogPods(pods)
+	}
 	sources := make([]logStreamSourceSpec, 0, len(pods))
 	for _, pod := range pods {
 		sources = append(sources, logStreamSourceSpec{
@@ -376,6 +379,87 @@ func discoverRuntimeLogSources(ctx context.Context, client appLogsClient, namesp
 		})
 	}
 	return sources, runtimeLogPodNames(pods), nil
+}
+
+func currentRuntimeLogPods(pods []kubePodInfo) []kubePodInfo {
+	if len(pods) <= 1 {
+		return pods
+	}
+
+	type podGroup struct {
+		key           string
+		pods          []kubePodInfo
+		sortTimestamp time.Time
+		hasOwner      bool
+	}
+
+	groups := map[string]*podGroup{}
+	hasOwnedGroup := false
+	for _, pod := range pods {
+		owner := ownerReferenceFromLogPod(pod)
+		key := appRuntimePodGroupKey("Pod", pod.Metadata.Name)
+		hasOwner := false
+		if owner != nil && strings.TrimSpace(owner.Name) != "" {
+			key = appRuntimePodGroupKey(owner.Kind, owner.Name)
+			hasOwner = true
+			hasOwnedGroup = true
+		}
+		group, ok := groups[key]
+		if !ok {
+			group = &podGroup{key: key, hasOwner: hasOwner}
+			groups[key] = group
+		}
+		group.pods = append(group.pods, pod)
+		timestamp := runtimeLogPodSortTime(pod)
+		if timestamp.After(group.sortTimestamp) {
+			group.sortTimestamp = timestamp
+		}
+	}
+	if !hasOwnedGroup || len(groups) <= 1 {
+		return pods
+	}
+
+	var selected *podGroup
+	for _, group := range groups {
+		if !group.hasOwner {
+			continue
+		}
+		if selected == nil ||
+			group.sortTimestamp.After(selected.sortTimestamp) ||
+			(group.sortTimestamp.Equal(selected.sortTimestamp) && group.key < selected.key) {
+			selected = group
+		}
+	}
+	if selected == nil {
+		return pods
+	}
+	out := append([]kubePodInfo(nil), selected.pods...)
+	sortPodsByCreation(out)
+	return out
+}
+
+func runtimeLogPodSortTime(pod kubePodInfo) time.Time {
+	if pod.Status.StartTime != nil && !pod.Status.StartTime.IsZero() {
+		return pod.Status.StartTime.UTC()
+	}
+	return pod.Metadata.CreationTimestamp.UTC()
+}
+
+func pruneInactiveLogSources(active map[string]context.CancelFunc, sources []logStreamSourceSpec) {
+	if len(active) == 0 {
+		return
+	}
+	desired := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		desired[source.ID()] = struct{}{}
+	}
+	for sourceID, cancel := range active {
+		if _, ok := desired[sourceID]; ok {
+			continue
+		}
+		cancel()
+		delete(active, sourceID)
+	}
 }
 
 func parseTimedLogLine(raw string) (time.Time, string) {
@@ -776,7 +860,8 @@ func (s *Server) handleStreamAppRuntimeLogs(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	initialSources, initialPods, err := discoverRuntimeLogSources(r.Context(), client, namespace, selector, component, containerName, requestedPod, previous)
+	currentOnly := follow && requestedPod == "" && !previous
+	initialSources, initialPods, err := discoverRuntimeLogSources(r.Context(), client, namespace, selector, component, containerName, requestedPod, previous, currentOnly)
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -898,7 +983,7 @@ func (s *Server) handleStreamAppRuntimeLogs(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		case <-ticker.C:
-			sources, pods, err := discoverRuntimeLogSources(r.Context(), client, namespace, selector, component, containerName, requestedPod, previous)
+			sources, pods, err := discoverRuntimeLogSources(r.Context(), client, namespace, selector, component, containerName, requestedPod, previous, currentOnly)
 			if err != nil {
 				if err := stream.writeEvent("warning", cursorID, logStreamWarningEvent{
 					Cursor:  cursorID,
@@ -924,6 +1009,7 @@ func (s *Server) handleStreamAppRuntimeLogs(w http.ResponseWriter, r *http.Reque
 					return
 				}
 			}
+			pruneInactiveLogSources(active, sources)
 			attachSources(sources)
 		case <-heartbeatTicker.C:
 			if err := stream.writeEvent("heartbeat", cursorID, logStreamHeartbeatEvent{

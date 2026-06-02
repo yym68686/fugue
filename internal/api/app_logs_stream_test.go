@@ -148,6 +148,71 @@ func TestRuntimeLogsStreamResumesFromLastEventID(t *testing.T) {
 	}
 }
 
+func TestDiscoverRuntimeLogSourcesCurrentOnlyUsesNewestOwnerGroup(t *testing.T) {
+	t.Parallel()
+
+	namespace := "tenant-123"
+	selector := "app=demo"
+	containerName := "app"
+	fake := newFakeAppLogsClient()
+	oldPod := fakePod("demo-old-abc12", "Running", time.Date(2026, 6, 2, 15, 29, 0, 0, time.UTC), containerName)
+	oldPod.Metadata.OwnerReferences = []struct {
+		Kind string `json:"kind,omitempty"`
+		Name string `json:"name,omitempty"`
+	}{{Kind: "ReplicaSet", Name: "demo-old"}}
+	newPod := fakePod("demo-new-def34", "Running", time.Date(2026, 6, 2, 15, 35, 40, 0, time.UTC), containerName)
+	newPod.Metadata.OwnerReferences = []struct {
+		Kind string `json:"kind,omitempty"`
+		Name string `json:"name,omitempty"`
+	}{{Kind: "ReplicaSet", Name: "demo-new"}}
+	fake.setPods(selector, []kubePodInfo{oldPod, newPod})
+
+	sources, pods, err := discoverRuntimeLogSources(context.Background(), fake, namespace, selector, "app", containerName, "", false, true)
+	if err != nil {
+		t.Fatalf("discover current runtime log sources: %v", err)
+	}
+	if len(sources) != 1 || sources[0].Pod != "demo-new-def34" {
+		t.Fatalf("expected only newest owner group source, got %+v", sources)
+	}
+	if len(pods) != 1 || pods[0] != "demo-new-def34" {
+		t.Fatalf("expected current pod inventory to include only newest pod, got %+v", pods)
+	}
+
+	allSources, _, err := discoverRuntimeLogSources(context.Background(), fake, namespace, selector, "app", containerName, "", false, false)
+	if err != nil {
+		t.Fatalf("discover all runtime log sources: %v", err)
+	}
+	if len(allSources) != 2 {
+		t.Fatalf("expected non-current-only discovery to keep both pods, got %+v", allSources)
+	}
+}
+
+func TestPruneInactiveLogSourcesCancelsDroppedSources(t *testing.T) {
+	t.Parallel()
+
+	oldSource := logStreamSourceSpec{Stream: "runtime", Namespace: "tenant-123", Pod: "demo-old", Container: "app"}
+	newSource := logStreamSourceSpec{Stream: "runtime", Namespace: "tenant-123", Pod: "demo-new", Container: "app"}
+	canceled := map[string]bool{}
+	active := map[string]context.CancelFunc{
+		oldSource.ID(): func() { canceled[oldSource.ID()] = true },
+		newSource.ID(): func() { canceled[newSource.ID()] = true },
+	}
+
+	pruneInactiveLogSources(active, []logStreamSourceSpec{newSource})
+	if !canceled[oldSource.ID()] {
+		t.Fatal("expected dropped source to be canceled")
+	}
+	if canceled[newSource.ID()] {
+		t.Fatal("expected retained source to stay active")
+	}
+	if _, ok := active[oldSource.ID()]; ok {
+		t.Fatal("expected dropped source to be removed from active map")
+	}
+	if _, ok := active[newSource.ID()]; !ok {
+		t.Fatal("expected retained source to remain active")
+	}
+}
+
 func TestRuntimeLogTargetUsesCNPGSelectorForManagedPostgres(t *testing.T) {
 	t.Parallel()
 
