@@ -776,7 +776,14 @@ func (c *CLI) streamBuildLogs(client *Client, appID string, opts appLogsCommandO
 }
 
 func (c *CLI) streamRuntimeLogs(client *Client, appID string, opts runtimeLogsOptions, filter *logLineFilter) error {
-	return client.StreamRuntimeLogs(appID, opts, true, func(event sseEvent) error {
+	if c.wantsJSON() {
+		return client.StreamRuntimeLogs(appID, opts, true, func(event sseEvent) error {
+			return c.writeStreamJSON(event)
+		})
+	}
+
+	out := newRuntimeFollowTextOutput(c.stdout, c.progressf)
+	err := client.StreamRuntimeLogs(appID, opts, true, func(event sseEvent) error {
 		switch event.Event {
 		case "log":
 			var payload logStreamLogEvent
@@ -786,27 +793,20 @@ func (c *CLI) streamRuntimeLogs(client *Client, appID string, opts runtimeLogsOp
 			if !filter.matches(payload.Line) {
 				return nil
 			}
-			if c.wantsJSON() {
-				return c.writeStreamJSON(event)
-			}
-			_, err := fmt.Fprintln(c.stdout, payload.Line)
-			return err
+			return out.enqueue(payload.Line)
 		case "warning":
-			if c.wantsJSON() {
-				return c.writeStreamJSON(event)
-			}
 			var payload logStreamWarningEvent
 			if err := json.Unmarshal(event.Data, &payload); err != nil {
 				return err
 			}
 			c.progressf("warning=%s", payload.Message)
-		default:
-			if c.wantsJSON() {
-				return c.writeStreamJSON(event)
-			}
 		}
 		return nil
 	})
+	if closeErr := out.close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func (c *CLI) writeStreamJSON(event sseEvent) error {

@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRunAppRuntimeLogsGrepFiltersFollowOutput(t *testing.T) {
@@ -162,6 +164,66 @@ func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
 	}
 }
 
+func TestRunAppRuntimeLogsFollowDoesNotBlockOnSlowTextOutput(t *testing.T) {
+	t.Parallel()
+
+	const logEvents = runtimeFollowOutputBuffer + 64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-20T00:00:00Z","updated_at":"2026-04-20T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-logs/stream":
+			if got := r.URL.Query().Get("follow"); got != "true" {
+				t.Errorf("expected follow=true, got %q", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, strings.Join([]string{
+				"event: ready",
+				`data: {"cursor":"c0","stream":"runtime","follow":true,"component":"app","namespace":"tenant-123","selector":"app=demo","container":"app"}`,
+				"",
+				"event: state",
+				`data: {"cursor":"c0","component":"app","namespace":"tenant-123","selector":"app=demo","container":"app","pods":["demo-abc"],"follow":true}`,
+				"",
+			}, "\n")+"\n")
+			for i := range logEvents {
+				_, _ = fmt.Fprintf(w, "event: log\n")
+				_, _ = fmt.Fprintf(w, `data: {"cursor":"c%d","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"uni-api line %d"}`+"\n\n", i+1, i)
+			}
+			_, _ = fmt.Fprint(w, "event: end\n")
+			_, _ = fmt.Fprint(w, `data: {"cursor":"c-end","reason":"snapshot_complete"}`+"\n\n")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	stdout := newBlockingWriter()
+	defer stdout.release()
+	var stderr bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithStreams([]string{
+			"--base-url", server.URL,
+			"--token", "token",
+			"app", "logs", "runtime", "demo",
+			"--follow",
+			"--grep", "uni-api",
+		}, stdout, &stderr)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run app runtime logs --follow: %v stderr=%s", err, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime log follow blocked on slow stdout")
+	}
+	if !strings.Contains(stderr.String(), "dropped_queued_lines=") {
+		t.Fatalf("expected slow-consumer warning, got stderr=%q", stderr.String())
+	}
+}
+
 func TestRunAppStatusRedactsUnmarkedSeedContentByDefault(t *testing.T) {
 	t.Parallel()
 
@@ -199,4 +261,24 @@ func TestRunAppStatusRedactsUnmarkedSeedContentByDefault(t *testing.T) {
 	if strings.Contains(out, "seed-secret-123") {
 		t.Fatalf("expected seed content secret to be absent, got %q", out)
 	}
+}
+
+type blockingWriter struct {
+	releaseOnce sync.Once
+	released    chan struct{}
+}
+
+func newBlockingWriter() *blockingWriter {
+	return &blockingWriter{released: make(chan struct{})}
+}
+
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	<-w.released
+	return len(p), nil
+}
+
+func (w *blockingWriter) release() {
+	w.releaseOnce.Do(func() {
+		close(w.released)
+	})
 }
