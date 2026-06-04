@@ -1727,7 +1727,7 @@ api:
   strategy:
     rollingUpdate:
       maxUnavailable: 0
-      maxSurge: 2
+      maxSurge: 1
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -1752,10 +1752,10 @@ api:
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 768Mi
     limits:
       cpu: "1"
-      memory: 2Gi
+      memory: 1536Mi
   podDisruptionBudget:
     enabled: true
     minAvailable: 2
@@ -1791,6 +1791,13 @@ controller:
                 app.kubernetes.io/name: fugue
                 app.kubernetes.io/instance: fugue
                 app.kubernetes.io/component: controller
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
 snapshotController:
   nodeSelector:
     node-role.kubernetes.io/control-plane: "true"

@@ -27,6 +27,12 @@ assert_contains "${UPGRADE_SCRIPT}" "restore_local_control_plane_automation_bund
 assert_contains "${UPGRADE_SCRIPT}" "recovered control-plane automation SSH bundle from"
 assert_contains "${UPGRADE_SCRIPT}" "bootstrap_local_control_plane_automation_bundle"
 assert_contains "${UPGRADE_SCRIPT}" "bootstrapping control-plane automation SSH bundle on this server"
+assert_contains "${UPGRADE_SCRIPT}" 'FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-2}"'
+assert_contains "${UPGRADE_SCRIPT}" "maxSurge: 1"
+assert_contains "${UPGRADE_SCRIPT}" "memory: 768Mi"
+assert_contains "${UPGRADE_SCRIPT}" "memory: 1536Mi"
+assert_contains "${UPGRADE_SCRIPT}" "memory: 256Mi"
+assert_contains "${UPGRADE_SCRIPT}" "memory: 512Mi"
 assert_contains "${UPGRADE_SCRIPT}" "OnUnitActiveSec=30s"
 assert_contains "${UPGRADE_SCRIPT}" "fugue-k3s-incident-snapshot"
 assert_contains "${UPGRADE_SCRIPT}" "OnFailure=fugue-k3s-failure@%n.service"
