@@ -213,6 +213,9 @@ func ExcessManagedImageRefs(
 	staleExisting := make([]managedImageCandidate, 0, len(imageRefs))
 	currentExistingCount := 0
 	for _, imageRef := range imageRefs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		exists, _, err := inspect(ctx, imageRef)
 		if err != nil {
 			return nil, fmt.Errorf("inspect image %s: %w", imageRef, err)
@@ -305,6 +308,9 @@ func MeasureTenantStorageBytes(
 
 	totalBlobSizes := make(map[string]int64)
 	for _, imageRef := range sortedImageRefs {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		exists, blobSizes, err := inspect(ctx, imageRef)
 		if err != nil {
 			return 0, fmt.Errorf("inspect image %s: %w", imageRef, err)

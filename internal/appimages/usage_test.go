@@ -2,6 +2,7 @@ package appimages
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -82,6 +83,62 @@ func TestExcessManagedImageRefsDeletesOldestExistingStaleImagesBeyondLimit(t *te
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("expected excess refs %v, got %v", want, got)
+	}
+}
+
+func TestExcessManagedImageRefsStopsWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pushBase = "registry.push.example"
+		pullBase = "registry.pull.example"
+	)
+
+	app := model.App{
+		ID:   "app-cancel",
+		Name: "demo",
+		Spec: model.AppSpec{
+			Image:            pullBase + "/fugue-apps/example-demo:git-current",
+			ImageMirrorLimit: 1,
+		},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeGitHubPublic,
+			ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-current",
+		},
+	}
+	ops := []model.Operation{
+		{
+			AppID: "app-cancel",
+			DesiredSpec: &model.AppSpec{
+				Image: pullBase + "/fugue-apps/example-demo:git-old",
+			},
+			DesiredSource: &model.AppSource{
+				Type:             model.AppSourceTypeGitHubPublic,
+				ResolvedImageRef: pushBase + "/fugue-apps/example-demo:git-old",
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	inspectCalls := 0
+	_, err := ExcessManagedImageRefs(
+		ctx,
+		func(ctx context.Context, _ string) (bool, map[string]int64, error) {
+			inspectCalls++
+			cancel()
+			return false, nil, ctx.Err()
+		},
+		app,
+		ops,
+		pushBase,
+		pullBase,
+		app.Spec.ImageMirrorLimit,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if inspectCalls != 1 {
+		t.Fatalf("expected one inspect before cancellation, got %d", inspectCalls)
 	}
 }
 

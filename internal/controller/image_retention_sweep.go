@@ -53,21 +53,42 @@ func (s *Service) sweepManagedAppImageRetention(ctx context.Context) error {
 	tenantIDs := make(map[string]struct{})
 	var errs []error
 	for _, app := range apps {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("stop app image retention sweep: %w", err))
+			break
+		}
 		if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
 			tenantIDs[tenantID] = struct{}{}
 		}
 		if err := s.pruneExcessManagedAppImagesWithSnapshot(ctx, app, opsByAppID[app.ID], apps, ops, liveRefs); err != nil {
 			errs = append(errs, fmt.Errorf("prune app %s images: %w", strings.TrimSpace(app.ID), err))
+			if isContextStopped(ctx, err) {
+				break
+			}
 		}
 	}
 
 	if s.syncBillingImageStorage {
 		for tenantID := range tenantIDs {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, fmt.Errorf("stop tenant billing image storage sync: %w", err))
+				break
+			}
 			if err := s.syncTenantBillingImageStorage(ctx, tenantID); err != nil {
 				errs = append(errs, fmt.Errorf("sync tenant %s billing image storage: %w", tenantID, err))
+				if isContextStopped(ctx, err) {
+					break
+				}
 			}
 		}
 	}
 
 	return errors.Join(errs...)
+}
+
+func isContextStopped(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

@@ -68,6 +68,10 @@ func (s *Service) pruneExcessManagedAppImagesWithSnapshot(
 
 	var errs []error
 	for _, imageRef := range imageRefs {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if _, inUse := remainingRefs[imageRef]; inUse {
 			continue
 		}
