@@ -21,6 +21,23 @@ import (
 	"fugue/internal/store"
 )
 
+func TestConfiguredDataTransferBlobPageLimit(t *testing.T) {
+	t.Setenv("FUGUE_DATA_BLOB_PAGE_LIMIT", "64")
+	if got := configuredDataTransferBlobPageLimit(); got != 64 {
+		t.Fatalf("expected env-configured page limit 64, got %d", got)
+	}
+
+	t.Setenv("FUGUE_DATA_BLOB_PAGE_LIMIT", "not-a-number")
+	if got := configuredDataTransferBlobPageLimit(); got != defaultDataTransferBlobPageLimit {
+		t.Fatalf("expected invalid env to fall back to %d, got %d", defaultDataTransferBlobPageLimit, got)
+	}
+
+	t.Setenv("FUGUE_DATA_BLOB_PAGE_LIMIT", "0")
+	if got := configuredDataTransferBlobPageLimit(); got != defaultDataTransferBlobPageLimit {
+		t.Fatalf("expected non-positive env to fall back to %d, got %d", defaultDataTransferBlobPageLimit, got)
+	}
+}
+
 func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {

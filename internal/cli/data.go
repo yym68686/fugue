@@ -38,7 +38,7 @@ const (
 	dataDownloadPartSize                      = 64 * 1024 * 1024
 	defaultUntrackedLargeDirThreshold   int64 = 1 << 30
 	dataControlPlaneRequestTimeout            = 10 * time.Minute
-	dataTransferBlobPageLimit                 = 1024
+	defaultDataTransferBlobPageLimit          = 1024
 	defaultDataTransferConcurrency            = 32
 	defaultDataHashConcurrency                = 4
 	dataCheckpointBlobThreshold               = 1024
@@ -50,6 +50,8 @@ const (
 	dataObjectResponseHeaderTimeout           = 2 * time.Minute
 )
 
+var dataTransferBlobPageLimit = configuredDataTransferBlobPageLimit()
+
 var defaultDataIgnore = []string{
 	".fugue",
 	".git",
@@ -58,6 +60,18 @@ var defaultDataIgnore = []string{
 	"*.tmp",
 	"*.lock",
 	".DS_Store",
+}
+
+func configuredDataTransferBlobPageLimit() int {
+	raw := strings.TrimSpace(os.Getenv("FUGUE_DATA_BLOB_PAGE_LIMIT"))
+	if raw == "" {
+		return defaultDataTransferBlobPageLimit
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 {
+		return defaultDataTransferBlobPageLimit
+	}
+	return limit
 }
 
 var dataHashCacheNow = time.Now
