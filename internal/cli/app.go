@@ -666,6 +666,9 @@ func (c *CLI) renderRuntimeLogs(client *Client, appID string, opts runtimeLogsOp
 	if follow {
 		return c.streamRuntimeLogs(client, appID, opts, filter)
 	}
+	if filter != nil && !c.wantsJSON() {
+		return c.streamRuntimeLogsSnapshot(client, appID, opts, filter)
+	}
 	logs, err := client.GetRuntimeLogs(appID, opts)
 	if err != nil {
 		return err
@@ -784,6 +787,34 @@ func (c *CLI) streamRuntimeLogs(client *Client, appID string, opts runtimeLogsOp
 
 	out := newRuntimeFollowTextOutput(c.stdout, c.progressf)
 	err := client.StreamRuntimeLogs(appID, opts, true, func(event sseEvent) error {
+		switch event.Event {
+		case "log":
+			var payload logStreamLogEvent
+			if err := json.Unmarshal(event.Data, &payload); err != nil {
+				return err
+			}
+			if !filter.matches(payload.Line) {
+				return nil
+			}
+			return out.enqueue(payload.Line)
+		case "warning":
+			var payload logStreamWarningEvent
+			if err := json.Unmarshal(event.Data, &payload); err != nil {
+				return err
+			}
+			c.progressf("warning=%s", payload.Message)
+		}
+		return nil
+	})
+	if closeErr := out.close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func (c *CLI) streamRuntimeLogsSnapshot(client *Client, appID string, opts runtimeLogsOptions, filter *logLineFilter) error {
+	out := newRuntimeFollowTextOutput(c.stdout, c.progressf)
+	err := client.StreamRuntimeLogs(appID, opts, false, func(event sseEvent) error {
 		switch event.Event {
 		case "log":
 			var payload logStreamLogEvent

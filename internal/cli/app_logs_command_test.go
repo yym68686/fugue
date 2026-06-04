@@ -78,6 +78,68 @@ func TestRunAppRuntimeLogsGrepFiltersFollowOutput(t *testing.T) {
 	}
 }
 
+func TestRunAppRuntimeLogsGrepUsesStreamingSnapshot(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-20T00:00:00Z","updated_at":"2026-04-20T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-logs/stream":
+			if got := r.URL.Query().Get("follow"); got != "false" {
+				t.Fatalf("expected follow=false, got %q", got)
+			}
+			if got := r.URL.Query().Get("tail_lines"); got != "5000" {
+				t.Fatalf("expected tail_lines=5000, got %q", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, strings.Join([]string{
+				"event: ready",
+				`data: {"cursor":"c0","stream":"runtime","follow":false,"component":"app","namespace":"tenant-123","selector":"app=demo","container":"app"}`,
+				"",
+				"event: state",
+				`data: {"cursor":"c0","component":"app","namespace":"tenant-123","selector":"app=demo","container":"app","pods":["demo-abc"],"follow":false}`,
+				"",
+				"event: log",
+				`data: {"cursor":"c1","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":"INFO uvicorn access log"}`,
+				"",
+				"event: log",
+				`data: {"cursor":"c2","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:01Z","line":"trace_span request_id=abc"}`,
+				"",
+				"event: end",
+				`data: {"cursor":"c2","reason":"snapshot_complete"}`,
+				"",
+			}, "\n"))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-logs":
+			t.Fatalf("expected grep snapshot to use runtime log stream endpoint")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "runtime", "demo",
+		"--tail", "5000",
+		"--grep", "trace_span",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app runtime logs snapshot --grep: %v stderr=%s", err, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "trace_span request_id=abc") {
+		t.Fatalf("expected grep output to include matching line, got %q", out)
+	}
+	if strings.Contains(out, "uvicorn") {
+		t.Fatalf("expected grep output to omit non-matching line, got %q", out)
+	}
+}
+
 func TestRunAppRuntimeLogsFollowReconnectsWithCursor(t *testing.T) {
 	t.Parallel()
 
