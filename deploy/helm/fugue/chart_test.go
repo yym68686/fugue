@@ -319,11 +319,12 @@ func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 
 	manifest := string(output)
 	for _, tc := range []struct {
-		kind string
-		name string
+		kind     string
+		name     string
+		maxSurge string
 	}{
-		{kind: "Deployment", name: "fugue-fugue-api"},
-		{kind: "Deployment", name: "fugue-fugue-controller"},
+		{kind: "Deployment", name: "fugue-fugue-api", maxSurge: "maxSurge: 1"},
+		{kind: "Deployment", name: "fugue-fugue-controller", maxSurge: "maxSurge: 2"},
 	} {
 		doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name)
 		if doc == "" {
@@ -340,7 +341,7 @@ func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 		}
 		for _, want := range []string{
 			"maxUnavailable: 0",
-			"maxSurge: 2",
+			tc.maxSurge,
 		} {
 			if !strings.Contains(doc, want) {
 				t.Fatalf("%s should allow surge-first HA rollouts; missing %q:\n%s", tc.name, want, doc)
