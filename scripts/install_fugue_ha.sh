@@ -2260,7 +2260,7 @@ write_values_override() {
 bootstrapAdminKey: "${BOOTSTRAP_KEY}"
 
 api:
-  replicaCount: 3
+  replicaCount: 2
   image:
     repository: fugue-api
     tag: "${IMAGE_TAG}"
@@ -2300,10 +2300,10 @@ api:
   resources:
     requests:
       cpu: 250m
-      memory: 512Mi
+      memory: 768Mi
     limits:
       cpu: "1"
-      memory: 2Gi
+      memory: 1536Mi
   podDisruptionBudget:
     enabled: true
     minAvailable: 2
@@ -2328,6 +2328,13 @@ controller:
   migrationGuard:
     legacyControllerContainerName: "controller"
     checkInterval: "2s"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
   nodeSelector:
     "node-role.kubernetes.io/control-plane": "true"
   tolerations:

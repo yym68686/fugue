@@ -214,6 +214,57 @@ func TestAPIAndControllerEvictQuicklyOnNodeFailure(t *testing.T) {
 	}
 }
 
+func TestDefaultControlPlaneResourceEnvelopeKeepsK3SHeadroom(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if apiDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-api deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"replicas: 2",
+		"maxSurge: 1",
+		"cpu: 250m",
+		"memory: 768Mi",
+		`cpu: "1"`,
+		"memory: 1536Mi",
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment should keep conservative single-node defaults; missing %q:\n%s", want, apiDoc)
+		}
+	}
+
+	controllerDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if controllerDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-controller deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"replicas: 2",
+		"cpu: 100m",
+		"memory: 256Mi",
+		`cpu: "1"`,
+		"memory: 512Mi",
+	} {
+		if !strings.Contains(controllerDoc, want) {
+			t.Fatalf("controller deployment should have resource boundaries; missing %q:\n%s", want, controllerDoc)
+		}
+	}
+}
+
 func TestAPIAndControllerReceivePublicAPIDomain(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

@@ -331,6 +331,14 @@ cgroup_flat() {
   fi
 }
 
+top_processes_flat() {
+  local sort_key="$1"
+  local value_key="$2"
+  ps -eo pid=,"${value_key}"=,comm= --sort="${sort_key}" 2>/dev/null |
+    head -12 |
+    awk '{printf "%s:%s:%s%s", $1, $2, $3, (NR == 12 ? "" : "|")}' || true
+}
+
 timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
 uptime_seconds="$(awk '{print int($1); exit}' /proc/uptime 2>/dev/null || true)"
@@ -353,6 +361,8 @@ k3s_memory_events="$(cgroup_flat "${cgroup_dir}/memory.events")"
 k3s_cpu_stat="$(cgroup_flat "${cgroup_dir}/cpu.stat")"
 k3s_io_stat="$(cgroup_flat "${cgroup_dir}/io.stat")"
 k3s_systemd="$(systemd_show_flat)"
+top_rss_processes="$(top_processes_flat -rss rss)"
+top_cpu_processes="$(top_processes_flat -pcpu pcpu)"
 
 {
   printf 'timestamp_utc=%s ' "${timestamp}"
@@ -365,8 +375,10 @@ k3s_systemd="$(systemd_show_flat)"
     "${cpu_psi_some_avg10}" "${io_psi_some_avg10}" "${io_psi_full_avg10}" "${mem_psi_some_avg10}" "${mem_psi_full_avg10}"
   printf 'k3s_memory_current_bytes=%s k3s_memory_peak_bytes=%s k3s_pids_current=%s ' \
     "${k3s_memory_current_bytes}" "${k3s_memory_peak_bytes}" "${k3s_pids_current}"
-  printf 'k3s_memory_events="%s" k3s_cpu_stat="%s" k3s_io_stat="%s" k3s_systemd="%s"\n' \
+  printf 'k3s_memory_events="%s" k3s_cpu_stat="%s" k3s_io_stat="%s" k3s_systemd="%s" ' \
     "${k3s_memory_events}" "${k3s_cpu_stat}" "${k3s_io_stat}" "${k3s_systemd}"
+  printf 'top_rss_processes="%s" top_cpu_processes="%s"\n' \
+    "${top_rss_processes}" "${top_cpu_processes}"
 } >>"${out}"
 
 if [[ "${max_lines}" =~ ^[0-9]+$ ]] && (( max_lines > 0 )); then
@@ -547,6 +559,7 @@ run_capture dmesg-tail sh -c 'dmesg --ctime --color=never 2>/dev/null | tail -40
 run_capture memory free -h
 run_capture filesystems df -h
 run_capture processes sh -c 'ps -eo pid,ppid,stat,pcpu,pmem,rss,comm,args --sort=-pcpu | head -80'
+run_capture processes-by-rss sh -c 'ps -eo pid,ppid,stat,pcpu,pmem,rss,comm,args --sort=-rss | head -80'
 run_capture sockets sh -c 'ss -s; ss -tanp | head -120'
 run_capture network sh -c 'ip -s link; echo; ip route; echo; command -v nstat >/dev/null 2>&1 && nstat -az || true; command -v conntrack >/dev/null 2>&1 && conntrack -S || true'
 run_capture pressure sh -c 'for f in /proc/pressure/*; do echo "===== $f ====="; cat "$f"; done'
@@ -579,6 +592,7 @@ if command -v k3s >/dev/null 2>&1; then
   run_capture crictl-stats k3s crictl stats
   run_capture kubectl-nodes k3s kubectl get nodes -o wide
   run_capture kubectl-pods k3s kubectl get pods -A -o wide
+  run_capture kubectl-top-containers k3s kubectl top pods -A --containers
   run_capture kubectl-leases k3s kubectl get leases -A
   run_capture kube-readyz k3s kubectl get --raw=/readyz?verbose
   run_capture kube-livez k3s kubectl get --raw=/livez?verbose
@@ -4401,7 +4415,7 @@ main() {
   FUGUE_ROLLOUT_TIMEOUT="${FUGUE_ROLLOUT_TIMEOUT:-600s}"
   FUGUE_SMOKE_RETRIES="${FUGUE_SMOKE_RETRIES:-12}"
   FUGUE_SMOKE_DELAY_SECONDS="${FUGUE_SMOKE_DELAY_SECONDS:-5}"
-  FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-3}"
+  FUGUE_API_REPLICA_COUNT="${FUGUE_API_REPLICA_COUNT:-2}"
   FUGUE_CONTROLLER_REPLICA_COUNT="${FUGUE_CONTROLLER_REPLICA_COUNT:-2}"
   FUGUE_API_DATABASE_URL="${FUGUE_API_DATABASE_URL:-}"
   FUGUE_DATA_BACKEND_PROVIDER="${FUGUE_DATA_BACKEND_PROVIDER:-cloudflare-r2}"
