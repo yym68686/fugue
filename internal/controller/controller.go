@@ -267,12 +267,6 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerBackgroundOps()
 		}
 	}
-	if s.Config.ImageRetentionSweepInterval > 0 {
-		if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			s.Logger.Printf("initial managed app image retention sweep error: %v", err)
-		}
-	}
-
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
