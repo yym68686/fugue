@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/golang/snappy"
 )
 
 const defaultClickHouseDatabase = "fugue_observability"
@@ -29,6 +32,12 @@ func NewConfiguredExporter(cfg Config, client *http.Client) Exporter {
 		client = &http.Client{Timeout: cfg.ExportTimeout}
 	}
 	exporters := []Exporter{}
+	if cfg.MetricsRemoteWriteURL != "" {
+		exporters = append(exporters, PrometheusRemoteWriteExporter{
+			Client:         client,
+			RemoteWriteURL: cfg.MetricsRemoteWriteURL,
+		})
+	}
 	if cfg.LokiURL != "" {
 		exporters = append(exporters, LokiExporter{
 			Client:  client,
@@ -65,6 +74,177 @@ func (e MultiExporter) Export(ctx context.Context, events []Event) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+type PrometheusRemoteWriteExporter struct {
+	Client         *http.Client
+	RemoteWriteURL string
+}
+
+type prometheusTimeSeries struct {
+	Labels    map[string]string
+	Value     float64
+	Timestamp int64
+}
+
+func (e PrometheusRemoteWriteExporter) Name() string {
+	return "metrics"
+}
+
+func (e PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Event) error {
+	if strings.TrimSpace(e.RemoteWriteURL) == "" {
+		return nil
+	}
+	series := make([]prometheusTimeSeries, 0, len(events))
+	for _, event := range events {
+		if event.Kind != EventKindMetric {
+			continue
+		}
+		item, ok := prometheusTimeSeriesForEvent(event)
+		if ok {
+			series = append(series, item)
+		}
+	}
+	if len(series) == 0 {
+		return nil
+	}
+	body := snappy.Encode(nil, encodePrometheusWriteRequest(series))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSpace(e.RemoteWriteURL), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create Prometheus remote write request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "snappy")
+	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+	resp, err := e.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("push Prometheus remote write payload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("push Prometheus remote write payload returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+	return nil
+}
+
+func prometheusTimeSeriesForEvent(event Event) (prometheusTimeSeries, bool) {
+	metricName := firstNonEmpty(
+		event.Attributes["__name__"],
+		event.Attributes["metric"],
+		event.Attributes["name"],
+		"fugue_telemetry_metric_event",
+	)
+	labels := map[string]string{"__name__": sanitizePrometheusLabelValue(metricName)}
+	for key, value := range event.Attributes {
+		key = strings.TrimSpace(key)
+		if key == "" || key == "__name__" || key == "metric" || key == "name" || key == "value" || key == "sample_count" {
+			continue
+		}
+		if !IsAllowedMetricLabel(key) || IsDeniedMetricLabel(key) {
+			continue
+		}
+		if clean := sanitizePrometheusLabelValue(value); clean != "" {
+			labels[key] = clean
+		}
+	}
+	value := 1.0
+	if parsed, ok := parseFloatAttribute(event.Attributes, "value"); ok {
+		value = parsed
+	} else if parsed, ok := parseFloatAttribute(event.Attributes, "sample_count"); ok {
+		value = parsed
+	}
+	timestamp := event.Timestamp
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	return prometheusTimeSeries{
+		Labels:    labels,
+		Value:     value,
+		Timestamp: timestamp.UTC().UnixMilli(),
+	}, true
+}
+
+func parseFloatAttribute(attrs map[string]string, key string) (float64, bool) {
+	raw := strings.TrimSpace(attrs[key])
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func sanitizePrometheusLabelValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 256 {
+		return value[:256]
+	}
+	return value
+}
+
+func encodePrometheusWriteRequest(series []prometheusTimeSeries) []byte {
+	var out []byte
+	for _, item := range series {
+		var ts []byte
+		labels := make([]string, 0, len(item.Labels))
+		for key := range item.Labels {
+			labels = append(labels, key)
+		}
+		sort.Strings(labels)
+		for _, key := range labels {
+			label := encodeProtoStringField(1, key)
+			label = append(label, encodeProtoStringField(2, item.Labels[key])...)
+			ts = append(ts, encodeProtoBytesField(1, label)...)
+		}
+		var sample []byte
+		sample = append(sample, encodeProtoFixed64Field(1, math.Float64bits(item.Value))...)
+		sample = append(sample, encodeProtoVarintField(2, uint64(item.Timestamp))...)
+		ts = append(ts, encodeProtoBytesField(2, sample)...)
+		out = append(out, encodeProtoBytesField(1, ts)...)
+	}
+	return out
+}
+
+func encodeProtoStringField(fieldNumber int, value string) []byte {
+	return encodeProtoBytesField(fieldNumber, []byte(value))
+}
+
+func encodeProtoBytesField(fieldNumber int, value []byte) []byte {
+	out := encodeProtoTag(fieldNumber, 2)
+	out = append(out, encodeProtoVarint(uint64(len(value)))...)
+	out = append(out, value...)
+	return out
+}
+
+func encodeProtoFixed64Field(fieldNumber int, value uint64) []byte {
+	out := encodeProtoTag(fieldNumber, 1)
+	for i := 0; i < 8; i++ {
+		out = append(out, byte(value>>(8*i)))
+	}
+	return out
+}
+
+func encodeProtoVarintField(fieldNumber int, value uint64) []byte {
+	out := encodeProtoTag(fieldNumber, 0)
+	out = append(out, encodeProtoVarint(value)...)
+	return out
+}
+
+func encodeProtoTag(fieldNumber int, wireType int) []byte {
+	return encodeProtoVarint(uint64(fieldNumber<<3 | wireType))
+}
+
+func encodeProtoVarint(value uint64) []byte {
+	out := []byte{}
+	for value >= 0x80 {
+		out = append(out, byte(value)|0x80)
+		value >>= 7
+	}
+	out = append(out, byte(value))
+	return out
 }
 
 type LokiExporter struct {
@@ -191,6 +371,15 @@ func stableLabelKey(labels map[string]string) string {
 		parts = append(parts, key+"="+labels[key])
 	}
 	return strings.Join(parts, "\xff")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func normalizeLokiPushURL(raw string) string {

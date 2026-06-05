@@ -111,6 +111,9 @@ func (c Config) Normalize() Config {
 func (c Config) Exporters() []string {
 	c = c.Normalize()
 	exporters := []string{}
+	if c.MetricsRemoteWriteURL != "" {
+		exporters = append(exporters, "metrics")
+	}
 	if c.LokiURL != "" {
 		exporters = append(exporters, "logs")
 	}

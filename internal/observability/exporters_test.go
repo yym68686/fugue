@@ -10,9 +10,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang/snappy"
 )
 
-func TestNewConfiguredExporterUsesOnlyImplementedExporters(t *testing.T) {
+func TestNewConfiguredExporterUsesConfiguredExporters(t *testing.T) {
 	cfg := Config{
 		Enabled:               true,
 		MetricsRemoteWriteURL: "https://metrics.example.test/api/v1/write",
@@ -22,11 +24,72 @@ func TestNewConfiguredExporterUsesOnlyImplementedExporters(t *testing.T) {
 	}.Normalize()
 
 	exporters := cfg.Exporters()
-	if strings.Join(exporters, ",") != "analytics,logs" {
-		t.Fatalf("expected only implemented exporters to be active, got %+v", exporters)
+	if strings.Join(exporters, ",") != "analytics,logs,metrics" {
+		t.Fatalf("expected configured exporters to be active, got %+v", exporters)
 	}
-	if got := NewConfiguredExporter(cfg, nil).Name(); got != "analytics,logs" {
+	if got := NewConfiguredExporter(cfg, nil).Name(); got != "analytics,logs,metrics" {
 		t.Fatalf("unexpected configured exporter name: %s", got)
+	}
+}
+
+func TestPrometheusRemoteWriteExporterPushesMetricEventsWithAllowedLabels(t *testing.T) {
+	var compressed []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/write" {
+			t.Fatalf("unexpected remote write path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/x-protobuf" {
+			t.Fatalf("unexpected content type: %s", got)
+		}
+		if got := r.Header.Get("Content-Encoding"); got != "snappy" {
+			t.Fatalf("unexpected content encoding: %s", got)
+		}
+		if got := r.Header.Get("X-Prometheus-Remote-Write-Version"); got != "0.1.0" {
+			t.Fatalf("unexpected remote write version: %s", got)
+		}
+		compressed = readAllBytes(t, r)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	exporter := PrometheusRemoteWriteExporter{Client: server.Client(), RemoteWriteURL: server.URL + "/api/v1/write"}
+	err := exporter.Export(context.Background(), []Event{
+		{
+			Timestamp: time.Unix(10, 20).UTC(),
+			Kind:      EventKindMetric,
+			Source:    "scrape",
+			Attributes: map[string]string{
+				"metric":       "fugue_telemetry_scrape_samples",
+				"sample_count": "2",
+				"tenant_id":    "tenant_123",
+				"project_id":   "project_123",
+				"app_id":       "app_123",
+				"runtime_id":   "runtime_123",
+				"component":    "runtime",
+				"status_class": "2xx",
+				"trace_id":     "trace-high-cardinality",
+				"user_id":      "user-secret",
+			},
+		},
+		{Timestamp: time.Unix(11, 0).UTC(), Kind: EventKindLog, Message: "ignored by metrics"},
+	})
+	if err != nil {
+		t.Fatalf("export remote write payload: %v", err)
+	}
+	decoded, err := snappy.Decode(nil, compressed)
+	if err != nil {
+		t.Fatalf("decode remote write payload: %v", err)
+	}
+	text := string(decoded)
+	for _, want := range []string{"fugue_telemetry_scrape_samples", "tenant_123", "project_123", "app_123", "runtime_123", "runtime", "2xx"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("remote write payload missing %q in %q", want, text)
+		}
+	}
+	for _, denied := range []string{"trace-high-cardinality", "user-secret"} {
+		if strings.Contains(text, denied) {
+			t.Fatalf("remote write payload retained denied label %q in %q", denied, text)
+		}
 	}
 }
 
@@ -203,6 +266,15 @@ func readAllString(t *testing.T, r *http.Request) string {
 		t.Fatalf("read request body: %v", err)
 	}
 	return string(body)
+}
+
+func readAllBytes(t *testing.T, r *http.Request) []byte {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+	return body
 }
 
 func TestNormalizeLokiPushURLPreservesExplicitPushPath(t *testing.T) {

@@ -99,8 +99,8 @@ POST /v1/traces
 - `degraded` when enabled but no exporters are configured.
 - `degraded` when configured exporter endpoints are syntactically invalid.
 - `ok` when at least one implemented exporter is configured and configuration
-  validates. The current implemented exporters are `logs` and `analytics`;
-  metrics remote write and OTLP outbound forwarding remain pending.
+  validates. The current implemented exporters are `metrics`, `logs`, and
+  `analytics`; OTLP outbound forwarding remains pending.
 
 The control-plane API mirrors the same non-critical observability status in
 its `/readyz` checks. A degraded observability status does not make the API
@@ -137,6 +137,9 @@ The first pipeline implementation is a guarded local pipeline:
 - The memory limiter and bounded queue drop telemetry instead of blocking.
 - The batch/retry exporter uses a no-op exporter when no implemented backend is
   configured.
+- The Prometheus remote-write exporter pushes metric events to a configured
+  remote-write endpoint with snappy-compressed protobuf payloads and metric
+  label allowlist filtering.
 - The Loki exporter pushes log events to `/loki/api/v1/push` and only uses the
   low-cardinality label allowlist.
 - The ClickHouse exporter writes only structured diagnostic events: request
@@ -151,7 +154,6 @@ observability outages or disabled mode into request-path failures.
 ## Next Implementation Steps
 
 - Enable and verify the internal Loki trial instance.
-- Add Prometheus remote-write exporter for scraped metrics.
 - Enable and verify the internal ClickHouse trial instance.
 - Add edge request facts and operation/deploy/runtime event producers.
 - Wire the disabled-safe query API contract to Loki, Prometheus, and
