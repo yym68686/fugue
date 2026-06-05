@@ -29,6 +29,30 @@ observability:
     appID: ""
     runtimeID: ""
     component: telemetry-agent
+  metrics:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: prom/prometheus
+      tag: latest
+      digest: ""
+      pullPolicy: IfNotPresent
+    port: 9090
+    retention: 24h
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    extraScrapeConfigs: []
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    extraArgs: []
   agent:
     enabled: false
     replicaCount: 1

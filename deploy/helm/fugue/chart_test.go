@@ -409,6 +409,83 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 	}
 }
 
+func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	for _, tc := range []struct {
+		kind string
+		name string
+	}{
+		{"Deployment", "fugue-fugue-observability-prometheus"},
+		{"Service", "fugue-fugue-observability-prometheus"},
+		{"ConfigMap", "fugue-fugue-observability-prometheus"},
+	} {
+		if doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name); doc != "" {
+			t.Fatalf("%s/%s should not render by default:\n%s", tc.kind, tc.name, doc)
+		}
+	}
+
+	cmd = exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.metrics.enabled=true",
+		"--set", "observability.agent.enabled=true",
+		"--set-string", "observability.metrics.image.repository=prom/prometheus",
+		"--set-string", "observability.metrics.image.tag=test",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest = string(output)
+	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-observability-prometheus")
+	serviceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-observability-prometheus")
+	configDoc := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-prometheus")
+	agentServiceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-telemetry-agent")
+	for name, doc := range map[string]string{
+		"prometheus deployment": deploymentDoc,
+		"prometheus service":    serviceDoc,
+		"prometheus config":     configDoc,
+		"agent service":         agentServiceDoc,
+	} {
+		if doc == "" {
+			t.Fatalf("expected %s to render:\n%s", name, manifest)
+		}
+	}
+	for _, want := range []string{
+		`image: "prom/prometheus:test"`,
+		"--storage.tsdb.retention.time=24h",
+		"path: /-/ready",
+		"path: /-/healthy",
+	} {
+		if !strings.Contains(deploymentDoc, want) {
+			t.Fatalf("prometheus deployment missing %q:\n%s", want, deploymentDoc)
+		}
+	}
+	for _, want := range []string{
+		"job_name: fugue-observability-prometheus",
+		"job_name: fugue-telemetry-agent",
+		"fugue-fugue-telemetry-agent:7834",
+	} {
+		if !strings.Contains(configDoc, want) {
+			t.Fatalf("prometheus config missing %q:\n%s", want, configDoc)
+		}
+	}
+}
+
 func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

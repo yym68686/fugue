@@ -61,6 +61,12 @@ FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
 FUGUE_OBSERVABILITY_OTLP_ENDPOINT
 ```
 
+The chart also includes a default-disabled Prometheus trial deployment under
+`observability.metrics`. When explicitly enabled, it stores data in an
+`emptyDir` and uses the same 24 hour diagnostic-retention default. It is meant
+for platform-internal trials before a production multi-tenant metrics backend
+is selected.
+
 ## Current Runtime Contract
 
 `fugue-telemetry-agent` currently exposes:

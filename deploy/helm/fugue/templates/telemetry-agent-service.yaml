@@ -1,0 +1,17 @@
+{{- if .Values.observability.agent.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-telemetry-agent" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "telemetry-agent") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "telemetry-agent") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.observability.agent.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

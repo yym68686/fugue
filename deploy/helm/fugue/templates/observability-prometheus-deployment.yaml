@@ -1,0 +1,91 @@
+{{- if .Values.observability.metrics.enabled }}
+{{- $metricsNodeSelector := .Values.observability.metrics.nodeSelector -}}
+{{- $metricsTolerations := default .Values.tolerations .Values.observability.metrics.tolerations -}}
+{{- $metricsAffinity := default .Values.affinity .Values.observability.metrics.affinity -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-observability-prometheus" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-prometheus") | nindent 4 }}
+spec:
+  replicas: {{ .Values.observability.metrics.replicaCount }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-prometheus") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-prometheus") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: prometheus
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.observability.metrics.image.repository "tag" .Values.observability.metrics.image.tag "digest" .Values.observability.metrics.image.digest) | quote }}
+          imagePullPolicy: {{ .Values.observability.metrics.image.pullPolicy }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.observability.metrics.retention }}
+            - --web.listen-address=:{{ .Values.observability.metrics.port }}
+            {{- with .Values.observability.metrics.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.observability.metrics.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 6
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.observability.metrics.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: {{ printf "%s-observability-prometheus" (include "fugue.fullname" .) }}
+        - name: data
+          emptyDir: {}
+      {{- with $metricsNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $metricsAffinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $metricsTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

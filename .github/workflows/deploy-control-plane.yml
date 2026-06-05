@@ -292,6 +292,12 @@ jobs:
           FUGUE_OBSERVABILITY_APP_ID: ${{ vars.FUGUE_OBSERVABILITY_APP_ID || '' }}
           FUGUE_OBSERVABILITY_RUNTIME_ID: ${{ vars.FUGUE_OBSERVABILITY_RUNTIME_ID || '' }}
           FUGUE_OBSERVABILITY_COMPONENT: ${{ vars.FUGUE_OBSERVABILITY_COMPONENT || 'telemetry-agent' }}
+          FUGUE_OBSERVABILITY_METRICS_ENABLED: ${{ vars.FUGUE_OBSERVABILITY_METRICS_ENABLED || 'false' }}
+          FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY: ${{ vars.FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY || 'prom/prometheus' }}
+          FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG: ${{ vars.FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG || 'latest' }}
+          FUGUE_OBSERVABILITY_METRICS_RETENTION: ${{ vars.FUGUE_OBSERVABILITY_METRICS_RETENTION || '24h' }}
+          FUGUE_OBSERVABILITY_METRICS_SCRAPE_INTERVAL: ${{ vars.FUGUE_OBSERVABILITY_METRICS_SCRAPE_INTERVAL || '30s' }}
+          FUGUE_OBSERVABILITY_METRICS_EVALUATION_INTERVAL: ${{ vars.FUGUE_OBSERVABILITY_METRICS_EVALUATION_INTERVAL || '30s' }}
           FUGUE_TELEMETRY_AGENT_ENABLED: ${{ vars.FUGUE_TELEMETRY_AGENT_ENABLED || 'false' }}
           FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-image-cache', github.repository_owner)) || needs.build.outputs.image_cache_image_repository }}
           FUGUE_IMAGE_CACHE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}

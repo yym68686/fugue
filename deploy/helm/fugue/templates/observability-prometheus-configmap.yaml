@@ -1,0 +1,29 @@
+{{- if .Values.observability.metrics.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-observability-prometheus" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-prometheus") | nindent 4 }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.observability.metrics.scrapeInterval }}
+      evaluation_interval: {{ .Values.observability.metrics.evaluationInterval }}
+    scrape_configs:
+      - job_name: fugue-observability-prometheus
+        metrics_path: /metrics
+        static_configs:
+          - targets:
+              - {{ printf "127.0.0.1:%v" .Values.observability.metrics.port | quote }}
+      {{ if .Values.observability.agent.enabled }}
+      - job_name: fugue-telemetry-agent
+        metrics_path: /metrics
+        static_configs:
+          - targets:
+              - {{ printf "%s-telemetry-agent:%v" (include "fugue.fullname" .) .Values.observability.agent.port | quote }}
+      {{ end }}
+      {{ with .Values.observability.metrics.extraScrapeConfigs }}
+{{ toYaml . | nindent 6 }}
+      {{ end }}
+{{- end }}
