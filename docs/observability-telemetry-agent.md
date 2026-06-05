@@ -98,7 +98,9 @@ POST /v1/traces
 - `skipped` when disabled.
 - `degraded` when enabled but no exporters are configured.
 - `degraded` when configured exporter endpoints are syntactically invalid.
-- `ok` when at least one exporter is configured and configuration validates.
+- `ok` when at least one implemented exporter is configured and configuration
+  validates. The current implemented exporters are `logs` and `analytics`;
+  metrics remote write and OTLP outbound forwarding remain pending.
 
 The control-plane API mirrors the same non-critical observability status in
 its `/readyz` checks. A degraded observability status does not make the API
@@ -118,8 +120,14 @@ The first pipeline implementation is a guarded local pipeline:
 - The redaction processor drops secret fields and masks common secret
   assignments in log text.
 - The memory limiter and bounded queue drop telemetry instead of blocking.
-- The batch/retry exporter currently uses a no-op exporter until real backends
-  are configured in a later stage.
+- The batch/retry exporter uses a no-op exporter when no implemented backend is
+  configured.
+- The Loki exporter pushes log events to `/loki/api/v1/push` and only uses the
+  low-cardinality label allowlist.
+- The ClickHouse exporter writes only structured diagnostic events: request
+  summaries to `request_facts`, span events to `request_spans`, and explicit
+  platform/app events to `app_events`. Plain stdout/stderr is not copied into
+  ClickHouse.
 
 When observability is disabled, ingestion endpoints return accepted responses
 but do not export data. This keeps app-side telemetry exporters from turning
@@ -127,8 +135,8 @@ observability outages or disabled mode into request-path failures.
 
 ## Next Implementation Steps
 
-- Add Secret/ExternalSecret-backed exporter configuration.
-- Add Loki exporter for runtime logs.
+- Enable and verify the internal Loki trial instance.
 - Add Prometheus remote-write exporter for scraped metrics.
-- Add ClickHouse exporter for request facts and spans.
-- Replace the no-op exporter with typed exporters selected by data kind.
+- Enable and verify the internal ClickHouse trial instance.
+- Add edge request facts and operation/deploy/runtime event producers.
+- Add Fugue Observability query APIs and CLI commands.

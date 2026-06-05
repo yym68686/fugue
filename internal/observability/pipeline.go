@@ -107,14 +107,15 @@ func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
+	httpClient := &http.Client{
+		Timeout: cfg.ExportTimeout,
+	}
 	return &Pipeline{
-		cfg:      cfg,
-		logger:   logger,
-		queue:    make(chan Event, cfg.QueueSize),
-		exporter: NoopExporter{},
-		httpClient: &http.Client{
-			Timeout: cfg.ExportTimeout,
-		},
+		cfg:        cfg,
+		logger:     logger,
+		queue:      make(chan Event, cfg.QueueSize),
+		exporter:   NewConfiguredExporter(cfg, httpClient),
+		httpClient: httpClient,
 	}
 }
 
@@ -339,7 +340,9 @@ func EventFromLogLine(source string, line string) (Event, int) {
 	redacted := 0
 
 	var raw map[string]any
+	kind := EventKindLog
 	if err := json.Unmarshal([]byte(line), &raw); err == nil {
+		kind = eventKindFromStructuredLog(raw)
 		for key, value := range raw {
 			if IsSecretField(key) {
 				redacted++
@@ -368,11 +371,37 @@ func EventFromLogLine(source string, line string) (Event, int) {
 
 	return Event{
 		Timestamp:  time.Now().UTC(),
-		Kind:       EventKindLog,
+		Kind:       kind,
 		Source:     source,
 		Message:    message,
 		Attributes: attrs,
 	}, redacted
+}
+
+func eventKindFromStructuredLog(raw map[string]any) EventKind {
+	for _, key := range []string{"kind", "event_kind"} {
+		value, ok := raw[key].(string)
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case string(EventKindLog):
+			return EventKindLog
+		case string(EventKindMetric), "metrics":
+			return EventKindMetric
+		case string(EventKindSpan), "trace":
+			return EventKindSpan
+		}
+	}
+	if value, ok := raw["event_type"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "request_span", "span", "trace_span":
+			return EventKindSpan
+		case "metric", "metrics", "metric_scrape":
+			return EventKindMetric
+		}
+	}
+	return EventKindLog
 }
 
 func (p *Pipeline) runBatchExporter() {

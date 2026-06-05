@@ -111,17 +111,11 @@ func (c Config) Normalize() Config {
 func (c Config) Exporters() []string {
 	c = c.Normalize()
 	exporters := []string{}
-	if c.MetricsRemoteWriteURL != "" {
-		exporters = append(exporters, "metrics")
-	}
 	if c.LokiURL != "" {
 		exporters = append(exporters, "logs")
 	}
 	if c.ClickHouseDSN != "" {
 		exporters = append(exporters, "analytics")
-	}
-	if c.OTLPEndpoint != "" {
-		exporters = append(exporters, "otlp")
 	}
 	sort.Strings(exporters)
 	return exporters
@@ -161,7 +155,7 @@ func (c Config) Mode() string {
 	if !c.HasExporters() {
 		return "enabled_without_exporters"
 	}
-	if c.OTLPEndpoint != "" || c.ClickHouseDSN != "" {
+	if c.ClickHouseDSN != "" {
 		return "instrumented"
 	}
 	return "baseline"
@@ -173,6 +167,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateOptionalHTTPURL("Loki URL", c.LokiURL); err != nil {
+		return err
+	}
+	if err := validateOptionalClickHouseDSN("ClickHouse DSN", c.ClickHouseDSN); err != nil {
 		return err
 	}
 	if err := validateOptionalEndpoint("OTLP endpoint", c.OTLPEndpoint); err != nil {
@@ -235,6 +232,23 @@ func validateOptionalHTTPURL(name, raw string) error {
 		return fmt.Errorf("%s must use http or https", name)
 	}
 	return nil
+}
+
+func validateOptionalClickHouseDSN(name, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid %s", name)
+	}
+	switch parsed.Scheme {
+	case "http", "https", "clickhouse":
+		return nil
+	default:
+		return fmt.Errorf("%s must use http, https, or clickhouse", name)
+	}
 }
 
 func validateOptionalEndpoint(name, raw string) error {

@@ -42,8 +42,35 @@ func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 	if status.Retention != "24h0m0s" {
 		t.Fatalf("expected normalized retention, got %s", status.Retention)
 	}
-	if len(status.Exporters) != 4 {
-		t.Fatalf("expected four exporter names, got %+v", status.Exporters)
+	if len(status.Exporters) != 2 {
+		t.Fatalf("expected implemented exporter names only, got %+v", status.Exporters)
+	}
+	if status.Exporters[0] != "analytics" || status.Exporters[1] != "logs" {
+		t.Fatalf("unexpected implemented exporters: %+v", status.Exporters)
+	}
+}
+
+func TestConfigModeDoesNotTreatPendingExportersAsActive(t *testing.T) {
+	cfg := Config{
+		Enabled:               true,
+		MetricsRemoteWriteURL: "https://metrics.example.test/api/v1/write",
+		OTLPEndpoint:          "otel.example.test:4317",
+	}.Normalize()
+	if cfg.HasExporters() {
+		t.Fatalf("pending exporters should not be active yet: %+v", cfg.Exporters())
+	}
+	if got := cfg.Mode(); got != "enabled_without_exporters" {
+		t.Fatalf("expected enabled_without_exporters mode, got %s", got)
+	}
+
+	cfg.LokiURL = "https://loki.example.test"
+	if got := cfg.Mode(); got != "baseline" {
+		t.Fatalf("expected Loki-only mode to be baseline, got %s", got)
+	}
+
+	cfg.ClickHouseDSN = "http://clickhouse.example.test:8123?database=fugue_observability"
+	if got := cfg.Mode(); got != "instrumented" {
+		t.Fatalf("expected ClickHouse mode to be instrumented, got %s", got)
 	}
 }
 
@@ -51,6 +78,7 @@ func TestConfigValidateRejectsBadURLs(t *testing.T) {
 	for _, cfg := range []Config{
 		{Enabled: true, MetricsRemoteWriteURL: "ftp://metrics.example.test"},
 		{Enabled: true, LokiURL: "://bad"},
+		{Enabled: true, ClickHouseDSN: "postgres://clickhouse.example.test"},
 		{Enabled: true, OTLPEndpoint: "missing-port"},
 		{Enabled: true, PrometheusScrapeURLs: []string{"ftp://127.0.0.1/metrics"}},
 	} {
