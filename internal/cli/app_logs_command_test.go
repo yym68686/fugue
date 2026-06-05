@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -137,6 +138,53 @@ func TestRunAppRuntimeLogsGrepUsesStreamingSnapshot(t *testing.T) {
 	}
 	if strings.Contains(out, "uvicorn") {
 		t.Fatalf("expected grep output to omit non-matching line, got %q", out)
+	}
+}
+
+func TestRunAppRuntimeLogsFollowHandlesLargeSSELogEvent(t *testing.T) {
+	t.Parallel()
+
+	largeLine := "large-sentinel " + strings.Repeat("x", 2*1024*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-20T00:00:00Z","updated_at":"2026-04-20T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-logs/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, strings.Join([]string{
+				"event: ready",
+				`data: {"cursor":"c0","stream":"runtime","follow":true,"component":"app","namespace":"tenant-123","selector":"app=demo","container":"app"}`,
+				"",
+				"event: log",
+				fmt.Sprintf(`data: {"cursor":"c1","source":{"stream":"runtime","namespace":"tenant-123","component":"app","pod":"demo-abc","container":"app"},"timestamp":"2026-04-20T00:00:00Z","line":%s}`, strconv.Quote(largeLine)),
+				"",
+				"event: end",
+				`data: {"cursor":"c1","reason":"snapshot_complete"}`,
+				"",
+			}, "\n"))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "logs", "runtime", "demo",
+		"--follow",
+		"--grep", "large-sentinel",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app runtime logs --follow: %v stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "large-sentinel") {
+		t.Fatalf("expected large log event to be printed")
+	}
+	if strings.Contains(stderr.String(), "token too long") {
+		t.Fatalf("did not expect scanner warning, got stderr=%q", stderr.String())
 	}
 }
 

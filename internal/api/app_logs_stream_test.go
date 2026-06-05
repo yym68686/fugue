@@ -85,6 +85,60 @@ func TestRuntimeLogsStreamReturnsSSESnapshot(t *testing.T) {
 	}
 }
 
+func TestRuntimeLogsStreamTruncatesOversizedRecordAndContinues(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	fake.setPods(selector, []kubePodInfo{fakePod("demo-6b9c9d7d8f-long", "Running", time.Date(2026, 3, 26, 1, 0, 0, 0, time.UTC), containerName)})
+	fake.setLogLines(namespace, "demo-6b9c9d7d8f-long", containerName, false,
+		"2026-03-26T01:00:00Z oversized "+strings.Repeat("x", logStreamMaxLineBytes+1024),
+		"2026-03-26T01:00:01Z after oversized line",
+	)
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+
+	recorder := performStreamRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/runtime-logs/stream?follow=false", apiKey, "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	events := parseSSEEvents(t, recorder.Body.String())
+	logs := make([]logStreamLogEvent, 0, 2)
+	for _, event := range events {
+		if event.Event == "warning" {
+			t.Fatalf("expected oversized log record to be truncated as a log line, got warning event data=%s", event.Data)
+		}
+		if event.Event != "log" {
+			continue
+		}
+		var payload logStreamLogEvent
+		event.decode(t, &payload)
+		logs = append(logs, payload)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("expected oversized record and following line, got %d logs events=%+v", len(logs), events)
+	}
+	if !strings.Contains(logs[0].Line, "[truncated: log line exceeded") {
+		t.Fatalf("expected first log line to be marked truncated, got %q", logs[0].Line[len(logs[0].Line)-128:])
+	}
+	if logs[1].Line != "after oversized line" {
+		t.Fatalf("expected stream to continue after oversized record, got %+v", logs[1])
+	}
+}
+
 func TestRuntimeLogsStreamResumesFromLastEventID(t *testing.T) {
 	t.Parallel()
 

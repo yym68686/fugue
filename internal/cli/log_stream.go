@@ -25,6 +25,8 @@ type streamSSEOptions struct {
 	Follow bool
 }
 
+const sseScanBuffer = 32 * 1024 * 1024
+
 type sseHandlerError struct {
 	err error
 }
@@ -211,7 +213,7 @@ func (c *Client) streamSSEOnce(httpClient *http.Client, relative string, lastEve
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), sseScanBuffer)
 
 	var (
 		eventName string

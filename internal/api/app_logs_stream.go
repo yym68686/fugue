@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -18,7 +20,8 @@ import (
 const (
 	logStreamCursorVersion = 1
 	logStreamRetryMS       = 3000
-	logStreamScanBuffer    = 1024 * 1024
+	logStreamReadBuffer    = 64 * 1024
+	logStreamMaxLineBytes  = 1024 * 1024
 )
 
 type logStreamTuning struct {
@@ -520,10 +523,23 @@ func pumpLogSource(ctx context.Context, client appLogsClient, source logStreamSo
 	}
 	defer body.Close()
 
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), logStreamScanBuffer)
-	for scanner.Scan() {
-		timestamp, line := parseTimedLogLine(scanner.Text())
+	reader := bufio.NewReaderSize(body, logStreamReadBuffer)
+	for {
+		raw, err := readLogStreamRecord(reader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				err = nil
+			}
+			if ctx.Err() != nil {
+				err = nil
+			}
+			select {
+			case done <- logStreamSourceDone{Source: source, Err: err}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		timestamp, line := parseTimedLogLine(raw)
 		if ok {
 			if !timestamp.IsZero() {
 				if timestamp.Before(cursorTimestamp) {
@@ -545,13 +561,51 @@ func pumpLogSource(ctx context.Context, client appLogsClient, source logStreamSo
 		}
 	}
 
-	err = scanner.Err()
-	if ctx.Err() != nil {
-		err = nil
-	}
-	select {
-	case done <- logStreamSourceDone{Source: source, Err: err}:
-	case <-ctx.Done():
+}
+
+func readLogStreamRecord(reader *bufio.Reader) (string, error) {
+	var (
+		buf       []byte
+		truncated bool
+	)
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(fragment) > 0 && !truncated {
+			remaining := logStreamMaxLineBytes - len(buf)
+			if remaining > 0 {
+				if len(fragment) <= remaining {
+					buf = append(buf, fragment...)
+				} else {
+					buf = append(buf, fragment[:remaining]...)
+					truncated = true
+				}
+			} else {
+				truncated = true
+			}
+		}
+		switch {
+		case err == nil:
+			line := strings.TrimSuffix(string(buf), "\n")
+			line = strings.TrimSuffix(line, "\r")
+			if truncated {
+				line += fmt.Sprintf(" [truncated: log line exceeded %d bytes]", logStreamMaxLineBytes)
+			}
+			return line, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			if len(buf) == 0 && !truncated {
+				return "", io.EOF
+			}
+			line := strings.TrimSuffix(string(buf), "\n")
+			line = strings.TrimSuffix(line, "\r")
+			if truncated {
+				line += fmt.Sprintf(" [truncated: log line exceeded %d bytes]", logStreamMaxLineBytes)
+			}
+			return line, nil
+		default:
+			return "", err
+		}
 	}
 }
 
