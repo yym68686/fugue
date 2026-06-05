@@ -506,6 +506,9 @@ func (e ClickHouseExporter) QueryJSONEachRow(ctx context.Context, queryText stri
 		query.Set("database", e.Target.Database)
 	}
 	query.Set("query", queryText)
+	query.Set("max_execution_time", "5")
+	query.Set("max_result_bytes", strconv.FormatInt(maxPayloadBytes, 10))
+	query.Set("result_overflow_mode", "break")
 	endpoint.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), nil)

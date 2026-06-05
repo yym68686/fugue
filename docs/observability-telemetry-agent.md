@@ -123,8 +123,9 @@ These endpoints enforce app authorization, parse bounded query windows, and
 return source availability metadata. The logs endpoint can query a
 Loki-compatible backend, and the requests/traces endpoints can query
 ClickHouse `request_facts` and `request_spans`. Metrics summary can query a
-Prometheus-compatible `/api/v1/query` backend. Automated diagnosis still
-returns disabled-safe empty responses until its query client is implemented.
+Prometheus-compatible `/api/v1/query` backend. Automated diagnosis can query
+ClickHouse `diagnosis_windows_1m`; when no diagnosis row exists for the window,
+it returns an explicit unavailable diagnosis instead of inventing a bottleneck.
 
 ## Pipeline Contract
 
@@ -161,6 +162,5 @@ observability outages or disabled mode into request-path failures.
 - Enable and verify the internal Loki trial instance.
 - Enable and verify the internal ClickHouse trial instance.
 - Add edge request facts and operation/deploy/runtime event producers.
-- Wire the disabled-safe metrics and diagnosis API contract to backend query
-  clients.
-- Add Fugue Observability CLI commands.
+- Build first-pass diagnosis window aggregation and rule producers.
+- Add request summary streaming and alerting surfaces.

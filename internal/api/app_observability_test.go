@@ -334,6 +334,53 @@ func TestAppObservabilityTraceQueriesClickHouse(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityDiagnosisQueriesClickHouse(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var clickHouseQuery string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clickHouseQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"minute":"2026-06-05 23:00:00","rpm":1200,"p95_ttfb_ms":450,"p95_duration_ms":900,"error_rate":0.02,"top_bottleneck_stage":"runtime_pool_wait","top_bottleneck_confidence":0.82}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/diagnosis?since=15m", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source    appObservabilitySourceStatus `json:"source"`
+		Diagnosis appObservabilityDiagnosis    `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" {
+		t.Fatalf("expected available analytics source, got %+v", response.Source)
+	}
+	for _, want := range []string{
+		"FROM diagnosis_windows_1m",
+		"app_id = '" + app.ID + "'",
+		"ORDER BY minute DESC",
+		"LIMIT 1",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(clickHouseQuery, want) {
+			t.Fatalf("expected ClickHouse query to contain %q, got %q", want, clickHouseQuery)
+		}
+	}
+	if response.Diagnosis.Bottleneck != "runtime_pool_wait" || response.Diagnosis.Confidence != 0.82 {
+		t.Fatalf("unexpected diagnosis: %+v", response.Diagnosis)
+	}
+	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
+	for _, want := range []string{"rpm=1200", "p95_ttfb_ms=450ms", "p95_duration_ms=900ms", "error_rate=0.02"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence %q in %+v", want, response.Diagnosis.Evidence)
+		}
+	}
+}
+
 func TestAppObservabilityTraceReturnsTraceIDAndEmptySpans(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 

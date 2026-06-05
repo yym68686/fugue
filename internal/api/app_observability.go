@@ -222,17 +222,22 @@ func (s *Server) handleGetAppObservabilityDiagnosis(w http.ResponseWriter, r *ht
 		return
 	}
 	source := s.appObservabilitySourceStatus("analytics", "diagnosis query backend is not wired yet")
-	diagnosis := appObservabilityDiagnosis{
-		Bottleneck: "unavailable",
-		Confidence: 0,
-		Evidence: []string{
-			source.Reason,
-		},
-		NextActions: []string{
-			"enable and verify Fugue Observability query backends before relying on automated bottleneck diagnosis",
-		},
-	}
+	diagnosis := appObservabilityUnavailableDiagnosis(source.Reason)
 	s.appendAudit(principal, "app.observability.diagnosis.read", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
+	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
+		resolvedDiagnosis, err := s.queryAppObservabilityDiagnosis(r.Context(), app.ID, window)
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			diagnosis = appObservabilityUnavailableDiagnosis(source.Reason)
+		} else {
+			source.Status = "available"
+			source.Available = true
+			source.Reason = "diagnosis query backend returned data"
+			diagnosis = resolvedDiagnosis
+		}
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"source":    source,
 		"window":    window,
@@ -329,6 +334,19 @@ func appObservabilityAuditMetadata(window appObservabilityWindow) map[string]str
 	return map[string]string{
 		"since": window.Since,
 		"until": window.Until,
+	}
+}
+
+func appObservabilityUnavailableDiagnosis(reason string) appObservabilityDiagnosis {
+	return appObservabilityDiagnosis{
+		Bottleneck: "unavailable",
+		Confidence: 0,
+		Evidence: []string{
+			firstNonEmpty(reason, "observability diagnosis data is unavailable"),
+		},
+		NextActions: []string{
+			"enable and verify Fugue Observability query backends before relying on automated bottleneck diagnosis",
+		},
 	}
 }
 
@@ -725,6 +743,21 @@ func (s *Server) queryAppObservabilityClickHouse(ctx context.Context, queryText 
 	return exporter.QueryJSONEachRow(ctx, queryText, cfg.MaxPayloadBytes)
 }
 
+func (s *Server) queryAppObservabilityDiagnosis(ctx context.Context, appID string, window appObservabilityWindow) (appObservabilityDiagnosis, error) {
+	queryText, err := buildAppObservabilityDiagnosisQuery(appID, window)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+	rows, err := s.queryAppObservabilityClickHouse(ctx, queryText)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+	if len(rows) == 0 {
+		return appObservabilityUnavailableDiagnosis("no diagnosis window rows in the selected range"), nil
+	}
+	return appObservabilityDiagnosisFromClickHouseRow(rows[0]), nil
+}
+
 func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWindow, query url.Values) (string, error) {
 	since, until, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
@@ -786,6 +819,21 @@ func buildAppObservabilityTraceQuery(appID string, traceID string, window appObs
 		" ORDER BY ts ASC, stage_ms ASC LIMIT 1000 FORMAT JSONEachRow", nil
 }
 
+func buildAppObservabilityDiagnosisQuery(appID string, window appObservabilityWindow) (string, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"minute >= " + clickHouseDateTimeLiteral(since),
+		"minute <= " + clickHouseDateTimeLiteral(until),
+	}
+	return "SELECT minute, rpm, p50_ttfb_ms, p95_ttfb_ms, p99_ttfb_ms, p50_duration_ms, p95_duration_ms, p99_duration_ms, error_rate, top_bottleneck_stage, top_bottleneck_confidence " +
+		"FROM diagnosis_windows_1m WHERE " + strings.Join(conditions, " AND ") +
+		" ORDER BY minute DESC LIMIT 1 FORMAT JSONEachRow", nil
+}
+
 func validStatusClass(value string) bool {
 	if len(value) != 3 || value[1:] != "xx" {
 		return false
@@ -801,6 +849,10 @@ func quoteClickHouseString(value string) string {
 
 func clickHouseDateTime64Literal(value time.Time) string {
 	return "parseDateTime64BestEffort(" + quoteClickHouseString(value.UTC().Format(time.RFC3339Nano)) + ")"
+}
+
+func clickHouseDateTimeLiteral(value time.Time) string {
+	return "parseDateTimeBestEffort(" + quoteClickHouseString(value.UTC().Format(time.RFC3339Nano)) + ")"
 }
 
 func appObservabilityRequestFromClickHouseRow(row map[string]any) map[string]any {
@@ -833,6 +885,43 @@ func appObservabilitySpanFromClickHouseRow(row map[string]any) map[string]any {
 	}
 }
 
+func appObservabilityDiagnosisFromClickHouseRow(row map[string]any) appObservabilityDiagnosis {
+	bottleneck := firstNonEmpty(stringField(row, "top_bottleneck_stage"), "unavailable")
+	confidence := floatField(row, "top_bottleneck_confidence")
+	evidence := []string{}
+	for _, item := range []struct {
+		key   string
+		label string
+		unit  string
+	}{
+		{key: "rpm", label: "rpm"},
+		{key: "p95_ttfb_ms", label: "p95_ttfb_ms", unit: "ms"},
+		{key: "p95_duration_ms", label: "p95_duration_ms", unit: "ms"},
+		{key: "error_rate", label: "error_rate"},
+	} {
+		if value, ok := optionalFloatField(row, item.key); ok {
+			evidence = append(evidence, formatAppObservabilityEvidence(item.label, value, item.unit))
+		}
+	}
+	if len(evidence) == 0 {
+		evidence = append(evidence, "diagnosis window row did not contain aggregate evidence")
+	}
+	nextActions := []string{
+		"inspect app requests, traces, logs, and runtime metrics for the same window before changing capacity",
+	}
+	if bottleneck == "unavailable" {
+		nextActions = []string{
+			"verify diagnosis window aggregation and app telemetry ingestion before changing capacity",
+		}
+	}
+	return appObservabilityDiagnosis{
+		Bottleneck:  bottleneck,
+		Confidence:  confidence,
+		Evidence:    evidence,
+		NextActions: nextActions,
+	}
+}
+
 func stringField(row map[string]any, key string) string {
 	value, ok := row[key]
 	if !ok || value == nil {
@@ -844,6 +933,43 @@ func stringField(row map[string]any, key string) string {
 	default:
 		return fmt.Sprint(typed)
 	}
+}
+
+func floatField(row map[string]any, key string) float64 {
+	value, _ := optionalFloatField(row, key)
+	return value
+}
+
+func optionalFloatField(row map[string]any, key string) (float64, bool) {
+	value, ok := row[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func formatAppObservabilityEvidence(label string, value float64, unit string) string {
+	if unit == "" {
+		return fmt.Sprintf("%s=%.4g", label, value)
+	}
+	return fmt.Sprintf("%s=%.4g%s", label, value, unit)
 }
 
 func parseJSONMapField(value any) map[string]any {
