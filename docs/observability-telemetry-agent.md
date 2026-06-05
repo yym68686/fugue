@@ -106,6 +106,21 @@ The control-plane API mirrors the same non-critical observability status in
 its `/readyz` checks. A degraded observability status does not make the API
 return HTTP 503; only critical store readiness failures do that.
 
+The control-plane API also exposes the first disabled-safe app observability
+query contract:
+
+```text
+GET /v1/apps/{id}/observability/metrics/summary
+GET /v1/apps/{id}/observability/logs/query
+GET /v1/apps/{id}/observability/requests
+GET /v1/apps/{id}/observability/traces/{trace_id}
+GET /v1/apps/{id}/observability/diagnosis
+```
+
+These endpoints currently enforce app authorization, parse bounded query
+windows, and return stable empty responses with source availability metadata.
+They do not yet query Loki, Prometheus, or ClickHouse.
+
 ## Pipeline Contract
 
 The first pipeline implementation is a guarded local pipeline:
@@ -139,4 +154,6 @@ observability outages or disabled mode into request-path failures.
 - Add Prometheus remote-write exporter for scraped metrics.
 - Enable and verify the internal ClickHouse trial instance.
 - Add edge request facts and operation/deploy/runtime event producers.
-- Add Fugue Observability query APIs and CLI commands.
+- Wire the disabled-safe query API contract to Loki, Prometheus, and
+  ClickHouse-backed query clients.
+- Add Fugue Observability CLI commands.

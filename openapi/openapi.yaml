@@ -3592,6 +3592,139 @@ paths:
                 $ref: "#/components/schemas/AppRuntimePodInventoryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/metrics/summary:
+    get:
+      operationId: getAppObservabilityMetricsSummary
+      summary: Get App Observability Metrics Summary
+      tags: [Apps]
+      x-fugue-handler: handleGetAppObservabilityMetricsSummary
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppObservabilityMetricsSummaryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/logs/query:
+    get:
+      operationId: queryAppObservabilityLogs
+      summary: Query App Observability Logs
+      tags: [Apps]
+      x-fugue-handler: handleQueryAppObservabilityLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+        - $ref: "#/components/parameters/LimitQueryParam"
+        - $ref: "#/components/parameters/TraceIdQueryParam"
+        - in: query
+          name: grep
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: level
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppObservabilityLogsQueryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/requests:
+    get:
+      operationId: listAppObservabilityRequests
+      summary: List App Observability Requests
+      tags: [Apps]
+      x-fugue-handler: handleListAppObservabilityRequests
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+        - $ref: "#/components/parameters/LimitQueryParam"
+        - $ref: "#/components/parameters/TraceIdQueryParam"
+        - in: query
+          name: status_class
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: slow
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: errors
+          required: false
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppObservabilityRequestsResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/traces/{trace_id}:
+    get:
+      operationId: getAppObservabilityTrace
+      summary: Get App Observability Trace
+      tags: [Apps]
+      x-fugue-handler: handleGetAppObservabilityTrace
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/TraceIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppObservabilityTraceResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/diagnosis:
+    get:
+      operationId: getAppObservabilityDiagnosis
+      summary: Get App Observability Diagnosis
+      tags: [Apps]
+      x-fugue-handler: handleGetAppObservabilityDiagnosis
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppObservabilityDiagnosisResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/env:
     get:
       operationId: getAppEnv
@@ -6282,6 +6415,32 @@ components:
       in: query
       name: pod
       required: false
+      schema:
+        type: string
+    SinceQueryParam:
+      in: query
+      name: since
+      required: false
+      schema:
+        type: string
+        description: Relative duration such as 1h or an RFC3339 timestamp.
+    UntilQueryParam:
+      in: query
+      name: until
+      required: false
+      schema:
+        type: string
+        description: RFC3339 timestamp. Defaults to now.
+    TraceIdQueryParam:
+      in: query
+      name: trace_id
+      required: false
+      schema:
+        type: string
+    TraceIdPathParam:
+      in: path
+      name: trace_id
+      required: true
       schema:
         type: string
     NamespaceQueryParam:
@@ -14199,6 +14358,211 @@ components:
           type: array
           items:
             type: string
+    ObservabilitySourceStatus:
+      type: object
+      additionalProperties: false
+      required: [available, status, mode, retention, active_exporters, reason]
+      properties:
+        available:
+          type: boolean
+        status:
+          type: string
+          enum: [disabled, degraded, available]
+        mode:
+          type: string
+        retention:
+          type: string
+        active_exporters:
+          type: array
+          items:
+            type: string
+        reason:
+          type: string
+        freshness:
+          type: string
+    ObservabilityWindow:
+      type: object
+      additionalProperties: false
+      required: [since, until]
+      properties:
+        since:
+          type: string
+        until:
+          type: string
+    ObservabilityMetricSample:
+      type: object
+      additionalProperties: false
+      required: [name, value]
+      properties:
+        name:
+          type: string
+        value:
+          type: number
+          format: double
+        unit:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+    ObservabilityLogEntry:
+      type: object
+      additionalProperties: false
+      required: [timestamp, message]
+      properties:
+        timestamp:
+          type: string
+        pod:
+          type: string
+        container:
+          type: string
+        level:
+          type: string
+        trace_id:
+          type: string
+        message:
+          type: string
+        attributes:
+          type: object
+          additionalProperties: true
+    ObservabilityRequestSummary:
+      type: object
+      additionalProperties: false
+      required: [timestamp]
+      properties:
+        timestamp:
+          type: string
+        trace_id:
+          type: string
+        request_id:
+          type: string
+        route:
+          type: string
+        method:
+          type: string
+        status_code:
+          type: integer
+          format: int32
+        duration_ms:
+          type: integer
+          format: int64
+        ttft_ms:
+          type: integer
+          format: int64
+        summary:
+          type: object
+          additionalProperties: true
+    ObservabilityTraceSpan:
+      type: object
+      additionalProperties: false
+      required: [timestamp, trace_id, stage]
+      properties:
+        timestamp:
+          type: string
+        service:
+          type: string
+        trace_id:
+          type: string
+        span_id:
+          type: string
+        parent_span_id:
+          type: string
+        request_id:
+          type: string
+        stage:
+          type: string
+        stage_ms:
+          type: integer
+          format: int64
+        status_code:
+          type: integer
+          format: int32
+        error_type:
+          type: string
+        attributes:
+          type: object
+          additionalProperties: true
+    ObservabilityDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [bottleneck, confidence, evidence, next_actions]
+      properties:
+        bottleneck:
+          type: string
+        confidence:
+          type: number
+          format: double
+        evidence:
+          type: array
+          items:
+            type: string
+        next_actions:
+          type: array
+          items:
+            type: string
+    AppObservabilityMetricsSummaryResponse:
+      type: object
+      additionalProperties: false
+      required: [source, window, metrics]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservabilityMetricSample"
+    AppObservabilityLogsQueryResponse:
+      type: object
+      additionalProperties: false
+      required: [source, window, logs]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservabilityLogEntry"
+    AppObservabilityRequestsResponse:
+      type: object
+      additionalProperties: false
+      required: [source, window, requests]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservabilityRequestSummary"
+    AppObservabilityTraceResponse:
+      type: object
+      additionalProperties: false
+      required: [source, trace_id, spans]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        trace_id:
+          type: string
+        spans:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservabilityTraceSpan"
+    AppObservabilityDiagnosisResponse:
+      type: object
+      additionalProperties: false
+      required: [source, window, diagnosis]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        diagnosis:
+          $ref: "#/components/schemas/ObservabilityDiagnosis"
     AppDiagnosisResponse:
       type: object
       additionalProperties: false
