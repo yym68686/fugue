@@ -175,6 +175,65 @@ func TestRunAppRequestsAndTracesUseObservabilityEndpoints(t *testing.T) {
 	}
 }
 
+func TestRunAppRequestsFollowUsesObservabilityStream(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			writeObservabilityTestApp(w)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/requests/stream":
+			if got := r.URL.Query().Get("follow"); got != "true" {
+				t.Fatalf("expected follow=true, got %q", got)
+			}
+			if got := r.URL.Query().Get("limit"); got != "200" {
+				t.Fatalf("expected limit=200, got %q", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			events := []string{
+				`id: c0`,
+				`event: ready`,
+				`data: {"cursor":"c0","source":{"available":true,"status":"available","mode":"instrumented","retention":"24h0m0s","active_exporters":["analytics"],"reason":"request analytics stream is available"},"window":{"since":"2026-04-20T00:00:00Z","until":"2026-04-20T00:01:00Z"},"follow":true}`,
+				``,
+				`id: c1`,
+				`event: request`,
+				`data: {"cursor":"c1","request":{"timestamp":"2026-04-20T00:00:01Z","status_code":503,"duration_ms":1200,"summary":{"stage":"retry"},"route":"/v1/items"}}`,
+				``,
+				`id: c2`,
+				`event: end`,
+				`data: {"cursor":"c2","reason":"snapshot complete"}`,
+				``,
+			}
+			_, _ = w.Write([]byte(strings.Join(events, "\n")))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "requests", "demo",
+		"--follow",
+		"--fields", "timestamp,status,duration,summary.stage",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app requests --follow: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"TIMESTAMP\tSTATUS_CODE\tDURATION_MS\tSUMMARY_STAGE", "2026-04-20T00:00:01Z\t503\t1200\tretry"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, out)
+		}
+	}
+	if !strings.Contains(stderr.String(), "observability_status=available") {
+		t.Fatalf("expected status on stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunAppDiagnoseWindowUsesObservabilityEndpoint(t *testing.T) {
 	t.Parallel()
 

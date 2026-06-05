@@ -54,6 +54,8 @@ type appObservabilityRequestsOptions struct {
 	StatusClass string
 	Slow        bool
 	Errors      bool
+	Follow      bool
+	Fields      string
 }
 
 type appObservabilityDiagnosisOptions struct {
@@ -131,19 +133,7 @@ func (c *Client) QueryAppObservabilityLogs(id string, opts appObservabilityLogsO
 func (c *Client) ListAppObservabilityRequests(id string, opts appObservabilityRequestsOptions) (appObservabilityRequestsResponse, error) {
 	values := url.Values{}
 	appendAppObservabilityWindowValues(values, opts.appObservabilityWindowOptions)
-	appendPositiveIntQueryValue(values, "limit", opts.Limit)
-	if value := strings.TrimSpace(opts.TraceID); value != "" {
-		values.Set("trace_id", value)
-	}
-	if value := strings.TrimSpace(opts.StatusClass); value != "" {
-		values.Set("status_class", value)
-	}
-	if opts.Slow {
-		values.Set("slow", "true")
-	}
-	if opts.Errors {
-		values.Set("errors", "true")
-	}
+	appendAppObservabilityRequestFilterValues(values, opts)
 	relative := appObservabilityPath(id, "requests")
 	if encoded := values.Encode(); encoded != "" {
 		relative += "?" + encoded
@@ -153,6 +143,15 @@ func (c *Client) ListAppObservabilityRequests(id string, opts appObservabilityRe
 		return appObservabilityRequestsResponse{}, err
 	}
 	return response, nil
+}
+
+func (c *Client) StreamAppObservabilityRequests(id string, opts appObservabilityRequestsOptions, handler func(sseEvent) error) error {
+	values := url.Values{}
+	appendAppObservabilityWindowValues(values, opts.appObservabilityWindowOptions)
+	appendAppObservabilityRequestFilterValues(values, opts)
+	values.Set("follow", "true")
+	relative := appObservabilityPath(id, "requests", "stream") + "?" + values.Encode()
+	return c.streamSSEWithOptions(relative, streamSSEOptions{Follow: true}, handler)
 }
 
 func (c *Client) GetAppObservabilityTrace(id, traceID string) (appObservabilityTraceResponse, error) {
@@ -200,5 +199,21 @@ func appendAppObservabilityWindowValues(values url.Values, opts appObservability
 func appendPositiveIntQueryValue(values url.Values, key string, value int) {
 	if value > 0 {
 		values.Set(key, fmt.Sprintf("%d", value))
+	}
+}
+
+func appendAppObservabilityRequestFilterValues(values url.Values, opts appObservabilityRequestsOptions) {
+	appendPositiveIntQueryValue(values, "limit", opts.Limit)
+	if value := strings.TrimSpace(opts.TraceID); value != "" {
+		values.Set("trace_id", value)
+	}
+	if value := strings.TrimSpace(opts.StatusClass); value != "" {
+		values.Set("status_class", value)
+	}
+	if opts.Slow {
+		values.Set("slow", "true")
+	}
+	if opts.Errors {
+		values.Set("errors", "true")
 	}
 }

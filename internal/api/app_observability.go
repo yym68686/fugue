@@ -16,8 +16,11 @@ import (
 )
 
 const (
-	appObservabilityDefaultWindow = time.Hour
-	appObservabilityMaxWindow     = 24 * time.Hour
+	appObservabilityDefaultWindow              = time.Hour
+	appObservabilityRequestStreamDefaultWindow = time.Minute
+	appObservabilityRequestStreamPollInterval  = 2 * time.Second
+	appObservabilityRequestStreamRetryMS       = 3000
+	appObservabilityMaxWindow                  = 24 * time.Hour
 )
 
 type appObservabilitySourceStatus struct {
@@ -40,6 +43,28 @@ type appObservabilityDiagnosis struct {
 	Confidence  float64  `json:"confidence"`
 	Evidence    []string `json:"evidence"`
 	NextActions []string `json:"next_actions"`
+}
+
+type appObservabilityRequestStreamReadyEvent struct {
+	Cursor string                       `json:"cursor"`
+	Source appObservabilitySourceStatus `json:"source"`
+	Window appObservabilityWindow       `json:"window"`
+	Follow bool                         `json:"follow"`
+}
+
+type appObservabilityRequestStreamRequestEvent struct {
+	Cursor  string         `json:"cursor"`
+	Request map[string]any `json:"request"`
+}
+
+type appObservabilityRequestStreamWarningEvent struct {
+	Cursor  string `json:"cursor"`
+	Message string `json:"message"`
+}
+
+type appObservabilityRequestStreamEndEvent struct {
+	Cursor string `json:"cursor"`
+	Reason string `json:"reason"`
 }
 
 func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, r *http.Request) {
@@ -168,6 +193,115 @@ func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *ht
 	})
 }
 
+func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
+	if !allowed {
+		return
+	}
+	follow, err := parseFollowQuery(r.URL.Query().Get("follow"), true)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	window, ok := readAppObservabilityStreamWindow(w, r, follow)
+	if !ok {
+		return
+	}
+	const queryPendingReason = "request analytics query backend is not wired yet"
+	source := s.appObservabilitySourceStatus("analytics", queryPendingReason)
+	if source.Status != "disabled" && source.Reason == queryPendingReason && observabilityExporterActive(source.ActiveExporters, "analytics") {
+		source.Status = "available"
+		source.Available = true
+		source.Reason = "request analytics stream is available"
+	}
+	auditMetadata := appObservabilityAuditMetadata(window)
+	auditMetadata["follow"] = strconv.FormatBool(follow)
+	s.appendAudit(principal, "app.observability.requests.stream", "app", app.ID, app.TenantID, auditMetadata)
+
+	stream, err := newSSEWriter(w)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := stream.writeRetry(appObservabilityRequestStreamRetryMS); err != nil {
+		return
+	}
+	cursor := appObservabilityStreamCursorFromWindow(window)
+	if err := stream.writeEvent("ready", cursor, appObservabilityRequestStreamReadyEvent{
+		Cursor: cursor,
+		Source: source,
+		Window: window,
+		Follow: follow,
+	}); err != nil {
+		return
+	}
+	if source.Status == "disabled" || !observabilityExporterActive(source.ActiveExporters, "analytics") {
+		_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{
+			Cursor: cursor,
+			Reason: source.Reason,
+		})
+		return
+	}
+
+	currentSince, _, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		_ = stream.writeEvent("warning", cursor, appObservabilityRequestStreamWarningEvent{Cursor: cursor, Message: err.Error()})
+		_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{Cursor: cursor, Reason: err.Error()})
+		return
+	}
+	if resume, ok := parseAppObservabilityRequestTimestamp(r.Header.Get("Last-Event-ID")); ok && resume.After(currentSince) {
+		currentSince = resume.Add(time.Nanosecond)
+	}
+
+	query := cloneURLValues(r.URL.Query())
+	query.Del("follow")
+	ticker := time.NewTicker(appObservabilityRequestStreamPollInterval)
+	defer ticker.Stop()
+	for {
+		pollUntil := time.Now().UTC()
+		pollWindow := appObservabilityWindow{
+			Since: currentSince.UTC().Format(time.RFC3339Nano),
+			Until: pollUntil.Format(time.RFC3339Nano),
+		}
+		requests, err := s.queryAppObservabilityRequests(r.Context(), app.ID, pollWindow, query)
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			_ = stream.writeEvent("warning", cursor, appObservabilityRequestStreamWarningEvent{Cursor: cursor, Message: err.Error()})
+			_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{Cursor: cursor, Reason: err.Error()})
+			return
+		}
+		for index := len(requests) - 1; index >= 0; index-- {
+			item := requests[index]
+			if ts, ok := parseAppObservabilityRequestTimestamp(stringField(item, "timestamp")); ok {
+				if !ts.Before(currentSince) {
+					currentSince = ts.Add(time.Nanosecond)
+				}
+				cursor = ts.UTC().Format(time.RFC3339Nano)
+			} else {
+				cursor = pollUntil.Format(time.RFC3339Nano)
+			}
+			if err := stream.writeEvent("request", cursor, appObservabilityRequestStreamRequestEvent{
+				Cursor:  cursor,
+				Request: item,
+			}); err != nil {
+				return
+			}
+		}
+		if !follow {
+			_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{Cursor: cursor, Reason: "snapshot complete"})
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func (s *Server) handleGetAppObservabilityTrace(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
@@ -285,7 +419,7 @@ func observabilityExporterActive(exporters []string, want string) bool {
 func readAppObservabilityWindow(w http.ResponseWriter, r *http.Request) (appObservabilityWindow, bool) {
 	until := time.Now().UTC()
 	if rawUntil := strings.TrimSpace(r.URL.Query().Get("until")); rawUntil != "" {
-		parsed, err := time.Parse(time.RFC3339, rawUntil)
+		parsed, err := parseAppObservabilityTimestamp(rawUntil)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, "until must be an RFC3339 timestamp")
 			return appObservabilityWindow{}, false
@@ -316,6 +450,23 @@ func readAppObservabilityWindow(w http.ResponseWriter, r *http.Request) (appObse
 	}, true
 }
 
+func readAppObservabilityStreamWindow(w http.ResponseWriter, r *http.Request, follow bool) (appObservabilityWindow, bool) {
+	window, ok := readAppObservabilityWindow(w, r)
+	if !ok {
+		return appObservabilityWindow{}, false
+	}
+	if !follow || strings.TrimSpace(r.URL.Query().Get("since")) != "" {
+		return window, true
+	}
+	_, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return appObservabilityWindow{}, false
+	}
+	window.Since = until.Add(-appObservabilityRequestStreamDefaultWindow).UTC().Format(time.RFC3339)
+	return window, true
+}
+
 func parseAppObservabilitySince(raw string, until time.Time) (time.Time, error) {
 	if duration, err := time.ParseDuration(raw); err == nil {
 		if duration < 0 {
@@ -323,11 +474,53 @@ func parseAppObservabilitySince(raw string, until time.Time) (time.Time, error) 
 		}
 		return until.Add(-duration), nil
 	}
-	parsed, err := time.Parse(time.RFC3339, raw)
+	parsed, err := parseAppObservabilityTimestamp(raw)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("since must be a duration or RFC3339 timestamp")
 	}
 	return parsed, nil
+}
+
+func parseAppObservabilityTimestamp(raw string) (time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return time.Time{}, fmt.Errorf("timestamp is required")
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05.999",
+		"2006-01-02 15:04:05",
+	} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid timestamp %q", value)
+}
+
+func parseAppObservabilityRequestTimestamp(raw string) (time.Time, bool) {
+	parsed, err := parseAppObservabilityTimestamp(raw)
+	return parsed, err == nil
+}
+
+func appObservabilityStreamCursorFromWindow(window appObservabilityWindow) string {
+	since, _, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return since.UTC().Format(time.RFC3339Nano)
+}
+
+func cloneURLValues(values url.Values) url.Values {
+	out := make(url.Values, len(values))
+	for key, items := range values {
+		copied := append([]string(nil), items...)
+		out[key] = copied
+	}
+	return out
 }
 
 func appObservabilityAuditMetadata(window appObservabilityWindow) map[string]string {
@@ -592,11 +785,11 @@ func (s *Server) queryAppObservabilityLogs(ctx context.Context, appID string, wi
 }
 
 func parseAppObservabilityWindowTimes(window appObservabilityWindow) (time.Time, time.Time, error) {
-	since, err := time.Parse(time.RFC3339, strings.TrimSpace(window.Since))
+	since, err := parseAppObservabilityTimestamp(window.Since)
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid observability window since: %w", err)
 	}
-	until, err := time.Parse(time.RFC3339, strings.TrimSpace(window.Until))
+	until, err := parseAppObservabilityTimestamp(window.Until)
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("invalid observability window until: %w", err)
 	}

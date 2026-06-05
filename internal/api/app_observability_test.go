@@ -287,6 +287,70 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityRequestsStreamDisabledEnds(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests/stream?follow=false", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"event: ready",
+		`"status":"disabled"`,
+		"event: end",
+		"observability is disabled",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected stream body to contain %q, got %q", want, body)
+		}
+	}
+}
+
+func TestAppObservabilityRequestsStreamQueriesClickHouse(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var clickHouseQuery string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clickHouseQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:01.000","trace_id":"trace_2","request_id":"request_2","path_template":"/v1/items","method":"POST","status_code":200,"duration_ms":80,"ttfb_ms":20,"summary_json":"{\"stage\":\"ok\"}"}` + "\n"))
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_1","request_id":"request_1","path_template":"/v1/items","method":"POST","status_code":503,"duration_ms":1200,"ttfb_ms":240,"summary_json":"{\"stage\":\"retry\"}"}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests/stream?follow=false&since=15m&limit=10", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"event: ready",
+		`"status":"available"`,
+		"event: request",
+		`"trace_id":"trace_1"`,
+		`"trace_id":"trace_2"`,
+		"event: end",
+		"snapshot complete",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected stream body to contain %q, got %q", want, body)
+		}
+	}
+	for _, want := range []string{
+		"FROM request_facts",
+		"app_id = '" + app.ID + "'",
+		"LIMIT 10",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(clickHouseQuery, want) {
+			t.Fatalf("expected ClickHouse query to contain %q, got %q", want, clickHouseQuery)
+		}
+	}
+}
+
 func TestAppObservabilityTraceQueriesClickHouse(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 	var clickHouseQuery string

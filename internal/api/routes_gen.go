@@ -93,6 +93,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/apps/{id}/observability/logs/query", s.auth.RequireAPI(http.HandlerFunc(s.handleQueryAppObservabilityLogs)))
 	mux.Handle("GET /v1/apps/{id}/observability/metrics/summary", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppObservabilityMetricsSummary)))
 	mux.Handle("GET /v1/apps/{id}/observability/requests", s.auth.RequireAPI(http.HandlerFunc(s.handleListAppObservabilityRequests)))
+	mux.Handle("GET /v1/apps/{id}/observability/requests/stream", s.auth.RequireAPI(http.HandlerFunc(s.handleStreamAppObservabilityRequests)))
 	mux.Handle("GET /v1/apps/{id}/observability/traces/{trace_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppObservabilityTrace)))
 	mux.Handle("POST /v1/apps/{id}/rebuild", s.auth.RequireAPI(http.HandlerFunc(s.handleRebuildApp)))
 	mux.Handle("POST /v1/apps/{id}/request", s.auth.RequireAPI(http.HandlerFunc(s.handleRequestAppInternalHTTP)))

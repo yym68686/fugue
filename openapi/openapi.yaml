@@ -3684,6 +3684,49 @@ paths:
                 $ref: "#/components/schemas/AppObservabilityRequestsResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/requests/stream:
+    get:
+      operationId: streamAppObservabilityRequests
+      summary: Stream App Observability Requests
+      tags: [Apps]
+      x-fugue-handler: handleStreamAppObservabilityRequests
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+        - $ref: "#/components/parameters/LimitQueryParam"
+        - $ref: "#/components/parameters/TraceIdQueryParam"
+        - in: query
+          name: status_class
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: slow
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: errors
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: follow
+          required: false
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Server-sent request summary stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/observability/traces/{trace_id}:
     get:
       operationId: getAppObservabilityTrace
