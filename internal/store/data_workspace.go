@@ -53,6 +53,9 @@ func ensureDataDefaults(state *model.State) {
 	if state.DataGrants == nil {
 		state.DataGrants = []model.DataGrant{}
 	}
+	if state.DataWorkspaceAccessGrants == nil {
+		state.DataWorkspaceAccessGrants = []model.DataWorkspaceAccessGrant{}
+	}
 	if state.DataRuntimeCaches == nil {
 		state.DataRuntimeCaches = []model.RuntimeDataCacheMetadata{}
 	}
@@ -382,6 +385,52 @@ func (s *Store) GetDataWorkspace(idOrName, tenantID string, platformAdmin bool) 
 	return workspace, err
 }
 
+func (s *Store) ListDataWorkspacesForPrincipal(tenantID, projectID, actorType, actorID string, platformAdmin bool) ([]model.DataWorkspace, error) {
+	if s.usingDatabase() {
+		return s.pgListDataWorkspacesForPrincipal(tenantID, projectID, actorType, actorID, platformAdmin)
+	}
+	var workspaces []model.DataWorkspace
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, workspace := range state.DataWorkspaces {
+			if projectID != "" && workspace.ProjectID != projectID {
+				continue
+			}
+			if platformAdmin || dataWorkspaceOwnedByTenant(workspace, tenantID) || dataWorkspaceGrantVisibleToPrincipal(state, workspace.ID, tenantID, actorType, actorID) {
+				workspaces = append(workspaces, normalizeDataWorkspace(workspace))
+			}
+		}
+		sort.Slice(workspaces, func(i, j int) bool {
+			return workspaces[i].UpdatedAt.After(workspaces[j].UpdatedAt)
+		})
+		return nil
+	})
+	return workspaces, err
+}
+
+func (s *Store) GetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, actorID string, platformAdmin bool) (model.DataWorkspace, error) {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" {
+		return model.DataWorkspace{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, actorID, platformAdmin)
+	}
+	var workspace model.DataWorkspace
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findDataWorkspaceByIDNameOrSlug(state, idOrName, "", true)
+		if index < 0 {
+			return ErrNotFound
+		}
+		candidate := normalizeDataWorkspace(state.DataWorkspaces[index])
+		if !platformAdmin && !dataWorkspaceOwnedByTenant(candidate, tenantID) && !dataWorkspaceGrantVisibleToPrincipal(state, candidate.ID, tenantID, actorType, actorID) {
+			return ErrNotFound
+		}
+		workspace = candidate
+		return nil
+	})
+	return workspace, err
+}
+
 func (s *Store) CreateDataWorkspace(workspace model.DataWorkspace) (model.DataWorkspace, error) {
 	workspace = normalizeDataWorkspace(workspace)
 	if workspace.Name == "" {
@@ -669,7 +718,9 @@ func (s *Store) CreateDataTransfer(transfer model.DataTransfer) (model.DataTrans
 		if transfer.Status == "" {
 			transfer.Status = model.DataTransferStatusPlanned
 		}
-		transfer.TenantID = workspace.TenantID
+		if strings.TrimSpace(transfer.TenantID) == "" {
+			transfer.TenantID = workspace.TenantID
+		}
 		if transfer.PartSize == 0 {
 			transfer.PartSize = defaultDataMultipartPartSize
 		}
@@ -927,6 +978,163 @@ func (s *Store) AuthenticateDataGrant(secret string) (model.DataGrant, error) {
 	return grant, err
 }
 
+func (s *Store) ListDataWorkspaceAccessGrants(workspaceID string) ([]model.DataWorkspaceAccessGrant, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgListDataWorkspaceAccessGrants(workspaceID)
+	}
+	var grants []model.DataWorkspaceAccessGrant
+	err := s.withLockedState(false, func(state *model.State) error {
+		if findDataWorkspace(state, workspaceID) < 0 {
+			return ErrNotFound
+		}
+		for _, grant := range state.DataWorkspaceAccessGrants {
+			if grant.WorkspaceID == workspaceID {
+				grants = append(grants, normalizeDataWorkspaceAccessGrant(grant))
+			}
+		}
+		sort.Slice(grants, func(i, j int) bool {
+			return grants[i].CreatedAt.Before(grants[j].CreatedAt)
+		})
+		return nil
+	})
+	return grants, err
+}
+
+func (s *Store) GrantDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID, role, createdBy string) (model.DataWorkspaceAccessGrant, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	ownerTenantID = strings.TrimSpace(ownerTenantID)
+	subjectType = normalizeDataWorkspaceAccessSubjectType(subjectType)
+	subjectID = strings.TrimSpace(subjectID)
+	role = normalizeDataWorkspaceAccessRole(role)
+	if workspaceID == "" || subjectType == "" || subjectID == "" || role == "" {
+		return model.DataWorkspaceAccessGrant{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGrantDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID, role, createdBy)
+	}
+	var grant model.DataWorkspaceAccessGrant
+	err := s.withLockedState(true, func(state *model.State) error {
+		workspaceIndex := findDataWorkspace(state, workspaceID)
+		if workspaceIndex < 0 {
+			return ErrNotFound
+		}
+		workspace := normalizeDataWorkspace(state.DataWorkspaces[workspaceIndex])
+		if !platformAdmin && !dataWorkspaceOwnedByTenant(workspace, ownerTenantID) {
+			return ErrNotFound
+		}
+		if subjectType == model.DataWorkspaceAccessSubjectTenant {
+			if dataWorkspaceOwnedByTenant(workspace, subjectID) {
+				return ErrInvalidInput
+			}
+			if findTenant(state, subjectID) < 0 {
+				return ErrNotFound
+			}
+		}
+		if subjectType == model.DataWorkspaceAccessSubjectAPIKey {
+			index := findAPIKey(state, subjectID)
+			if index < 0 || normalizeAPIKeyStatus(state.APIKeys[index].Status) != model.APIKeyStatusActive {
+				return ErrNotFound
+			}
+			if dataWorkspaceOwnedByTenant(workspace, state.APIKeys[index].TenantID) {
+				return ErrInvalidInput
+			}
+		}
+		now := time.Now().UTC()
+		grant = model.DataWorkspaceAccessGrant{
+			WorkspaceID: workspace.ID,
+			SubjectType: subjectType,
+			SubjectID:   subjectID,
+			Role:        role,
+			CreatedBy:   strings.TrimSpace(createdBy),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if index := findDataWorkspaceAccessGrant(state, workspace.ID, subjectType, subjectID); index >= 0 {
+			grant.CreatedAt = state.DataWorkspaceAccessGrants[index].CreatedAt
+			if grant.CreatedBy == "" {
+				grant.CreatedBy = state.DataWorkspaceAccessGrants[index].CreatedBy
+			}
+			state.DataWorkspaceAccessGrants[index] = grant
+			return nil
+		}
+		state.DataWorkspaceAccessGrants = append(state.DataWorkspaceAccessGrants, grant)
+		return nil
+	})
+	return grant, err
+}
+
+func (s *Store) RevokeDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID string) (bool, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	ownerTenantID = strings.TrimSpace(ownerTenantID)
+	subjectType = normalizeDataWorkspaceAccessSubjectType(subjectType)
+	subjectID = strings.TrimSpace(subjectID)
+	if workspaceID == "" || subjectType == "" || subjectID == "" {
+		return false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgRevokeDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID)
+	}
+	var removed bool
+	err := s.withLockedState(true, func(state *model.State) error {
+		workspaceIndex := findDataWorkspace(state, workspaceID)
+		if workspaceIndex < 0 {
+			return ErrNotFound
+		}
+		workspace := normalizeDataWorkspace(state.DataWorkspaces[workspaceIndex])
+		if !platformAdmin && !dataWorkspaceOwnedByTenant(workspace, ownerTenantID) {
+			return ErrNotFound
+		}
+		index := findDataWorkspaceAccessGrant(state, workspace.ID, subjectType, subjectID)
+		if index < 0 {
+			return nil
+		}
+		state.DataWorkspaceAccessGrants = append(state.DataWorkspaceAccessGrants[:index], state.DataWorkspaceAccessGrants[index+1:]...)
+		removed = true
+		return nil
+	})
+	return removed, err
+}
+
+func (s *Store) DataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorID string, platformAdmin bool) (string, bool, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return "", false, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorID, platformAdmin)
+	}
+	var role string
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findDataWorkspace(state, workspaceID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		workspace := normalizeDataWorkspace(state.DataWorkspaces[index])
+		if platformAdmin || dataWorkspaceOwnedByTenant(workspace, tenantID) {
+			role = model.DataWorkspaceAccessRoleAdmin
+			return nil
+		}
+		for _, grant := range state.DataWorkspaceAccessGrants {
+			grant = normalizeDataWorkspaceAccessGrant(grant)
+			if grant.WorkspaceID != workspace.ID || !dataWorkspaceAccessGrantMatches(grant, tenantID, actorType, actorID) {
+				continue
+			}
+			if dataWorkspaceAccessRoleRank(grant.Role) > dataWorkspaceAccessRoleRank(role) {
+				role = grant.Role
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return role, role != "", nil
+}
+
 func (s *Store) DataBlobExists(sha256Digest string) bool {
 	_, err := os.Stat(s.dataBlobPath(sha256Digest))
 	return err == nil
@@ -1106,6 +1314,85 @@ func dataTenantAllowed(resourceTenantID, tenantID string, platformAdmin bool) bo
 	return strings.TrimSpace(resourceTenantID) == strings.TrimSpace(tenantID)
 }
 
+func normalizeDataWorkspaceAccessSubjectType(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case model.DataWorkspaceAccessSubjectTenant, "workspace", "user":
+		return model.DataWorkspaceAccessSubjectTenant
+	case model.DataWorkspaceAccessSubjectAPIKey, "api_key", "apikey", "token":
+		return model.DataWorkspaceAccessSubjectAPIKey
+	default:
+		return ""
+	}
+}
+
+func normalizeDataWorkspaceAccessRole(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", model.DataWorkspaceAccessRoleReader, "read", "read-only", "readonly":
+		return model.DataWorkspaceAccessRoleReader
+	case model.DataWorkspaceAccessRoleWriter, "write", "read-write", "readwrite":
+		return model.DataWorkspaceAccessRoleWriter
+	case model.DataWorkspaceAccessRoleAdmin:
+		return model.DataWorkspaceAccessRoleAdmin
+	default:
+		return ""
+	}
+}
+
+func normalizeDataWorkspaceAccessGrant(grant model.DataWorkspaceAccessGrant) model.DataWorkspaceAccessGrant {
+	grant.WorkspaceID = strings.TrimSpace(grant.WorkspaceID)
+	grant.SubjectType = normalizeDataWorkspaceAccessSubjectType(grant.SubjectType)
+	grant.SubjectID = strings.TrimSpace(grant.SubjectID)
+	grant.Role = normalizeDataWorkspaceAccessRole(grant.Role)
+	if grant.Role == "" {
+		grant.Role = model.DataWorkspaceAccessRoleReader
+	}
+	return grant
+}
+
+func dataWorkspaceOwnedByTenant(workspace model.DataWorkspace, tenantID string) bool {
+	workspaceTenantID := strings.TrimSpace(workspace.TenantID)
+	tenantID = strings.TrimSpace(tenantID)
+	return workspaceTenantID != "" && tenantID != "" && workspaceTenantID == tenantID
+}
+
+func dataWorkspaceAccessGrantMatches(grant model.DataWorkspaceAccessGrant, tenantID, actorType, actorID string) bool {
+	grant = normalizeDataWorkspaceAccessGrant(grant)
+	switch grant.SubjectType {
+	case model.DataWorkspaceAccessSubjectTenant:
+		return strings.TrimSpace(tenantID) != "" && grant.SubjectID == strings.TrimSpace(tenantID)
+	case model.DataWorkspaceAccessSubjectAPIKey:
+		return actorType == model.ActorTypeAPIKey && strings.TrimSpace(actorID) != "" && grant.SubjectID == strings.TrimSpace(actorID)
+	default:
+		return false
+	}
+}
+
+func dataWorkspaceGrantVisibleToPrincipal(state *model.State, workspaceID, tenantID, actorType, actorID string) bool {
+	for _, grant := range state.DataWorkspaceAccessGrants {
+		grant = normalizeDataWorkspaceAccessGrant(grant)
+		if grant.WorkspaceID == workspaceID && dataWorkspaceAccessGrantMatches(grant, tenantID, actorType, actorID) {
+			return true
+		}
+	}
+	return false
+}
+
+func dataWorkspaceAccessRoleRank(role string) int {
+	if strings.TrimSpace(role) == "" {
+		return 0
+	}
+	switch normalizeDataWorkspaceAccessRole(role) {
+	case model.DataWorkspaceAccessRoleAdmin:
+		return 3
+	case model.DataWorkspaceAccessRoleWriter:
+		return 2
+	case model.DataWorkspaceAccessRoleReader:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func findDataBackend(state *model.State, id string) int {
 	for idx, backend := range state.DataBackends {
 		if backend.ID == id {
@@ -1215,6 +1502,16 @@ func findDataTransfer(state *model.State, id string) int {
 func findDataGrant(state *model.State, id string) int {
 	for idx, grant := range state.DataGrants {
 		if grant.ID == id {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findDataWorkspaceAccessGrant(state *model.State, workspaceID, subjectType, subjectID string) int {
+	for idx, grant := range state.DataWorkspaceAccessGrants {
+		grant = normalizeDataWorkspaceAccessGrant(grant)
+		if grant.WorkspaceID == workspaceID && grant.SubjectType == subjectType && grant.SubjectID == subjectID {
 			return idx
 		}
 	}
@@ -1487,6 +1784,14 @@ func scanDataGrant(scanner sqlRowScanner) (model.DataGrant, error) {
 		return model.DataGrant{}, mapDBErr(err)
 	}
 	return grant, nil
+}
+
+func scanDataWorkspaceAccessGrant(scanner sqlRowScanner) (model.DataWorkspaceAccessGrant, error) {
+	var grant model.DataWorkspaceAccessGrant
+	if err := scanner.Scan(&grant.WorkspaceID, &grant.SubjectType, &grant.SubjectID, &grant.Role, &grant.CreatedBy, &grant.CreatedAt, &grant.UpdatedAt); err != nil {
+		return model.DataWorkspaceAccessGrant{}, mapDBErr(err)
+	}
+	return normalizeDataWorkspaceAccessGrant(grant), nil
 }
 
 func (s *Store) pgListDataBackends(tenantID string, platformAdmin bool) ([]model.DataBackend, error) {
@@ -1817,6 +2122,68 @@ func (s *Store) pgGetDataWorkspace(idOrName, tenantID string, platformAdmin bool
 	return scanDataWorkspace(s.db.QueryRowContext(ctx, query, args...))
 }
 
+func (s *Store) pgListDataWorkspacesForPrincipal(tenantID, projectID, actorType, actorID string, platformAdmin bool) ([]model.DataWorkspace, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if platformAdmin {
+		return s.pgListDataWorkspaces(tenantID, projectID, true)
+	}
+	query := `SELECT id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at FROM fugue_data_workspaces`
+	args := []any{tenantID, actorType, actorID}
+	conds := []string{`(tenant_id = $1 OR EXISTS (
+		SELECT 1 FROM fugue_data_workspace_access_grants AS g
+		WHERE g.workspace_id = fugue_data_workspaces.id
+		  AND (
+			(g.subject_type = 'tenant' AND g.subject_id = $1)
+			OR (g.subject_type = 'api-key' AND $2 = 'api-key' AND g.subject_id = $3)
+		  )
+	))`}
+	if projectID != "" {
+		args = append(args, projectID)
+		conds = append(conds, fmt.Sprintf(`project_id = $%d`, len(args)))
+	}
+	query += ` WHERE ` + strings.Join(conds, ` AND `) + ` ORDER BY updated_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	workspaces := []model.DataWorkspace{}
+	for rows.Next() {
+		workspace, err := scanDataWorkspace(rows)
+		if err != nil {
+			return nil, err
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	return workspaces, mapDBErr(rows.Err())
+}
+
+func (s *Store) pgGetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, actorID string, platformAdmin bool) (model.DataWorkspace, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if platformAdmin {
+		return s.pgGetDataWorkspace(idOrName, "", true)
+	}
+	slug := model.Slugify(idOrName)
+	return scanDataWorkspace(s.db.QueryRowContext(ctx, `
+SELECT id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at
+FROM fugue_data_workspaces
+WHERE (id = $1 OR name = $1 OR slug = $2)
+  AND (
+	tenant_id = $3
+	OR EXISTS (
+		SELECT 1 FROM fugue_data_workspace_access_grants AS g
+		WHERE g.workspace_id = fugue_data_workspaces.id
+		  AND (
+			(g.subject_type = 'tenant' AND g.subject_id = $3)
+			OR (g.subject_type = 'api-key' AND $4 = 'api-key' AND g.subject_id = $5)
+		  )
+	)
+  )
+`, idOrName, slug, tenantID, actorType, actorID))
+}
+
 func (s *Store) pgCreateDataWorkspace(workspace model.DataWorkspace) (model.DataWorkspace, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2073,7 +2440,9 @@ func (s *Store) pgCreateDataTransfer(transfer model.DataTransfer) (model.DataTra
 	if transfer.Status == "" {
 		transfer.Status = model.DataTransferStatusPlanned
 	}
-	transfer.TenantID = workspace.TenantID
+	if strings.TrimSpace(transfer.TenantID) == "" {
+		transfer.TenantID = workspace.TenantID
+	}
 	if transfer.PartSize == 0 {
 		transfer.PartSize = defaultDataMultipartPartSize
 	}
@@ -2261,6 +2630,180 @@ FROM fugue_data_grants WHERE token_hash = $1
 		return model.DataGrant{}, err
 	}
 	return redactDataGrant(grant), nil
+}
+
+func (s *Store) pgListDataWorkspaceAccessGrants(workspaceID string) ([]model.DataWorkspaceAccessGrant, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_data_workspaces WHERE id = $1)`, workspaceID).Scan(&exists); err != nil {
+		return nil, mapDBErr(err)
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT workspace_id, subject_type, subject_id, role, created_by, created_at, updated_at
+FROM fugue_data_workspace_access_grants
+WHERE workspace_id = $1
+ORDER BY created_at ASC
+`, workspaceID)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	grants := []model.DataWorkspaceAccessGrant{}
+	for rows.Next() {
+		grant, err := scanDataWorkspaceAccessGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	return grants, mapDBErr(rows.Err())
+}
+
+func (s *Store) pgGrantDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID, role, createdBy string) (model.DataWorkspaceAccessGrant, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.DataWorkspaceAccessGrant{}, err
+	}
+	defer tx.Rollback()
+	workspace, err := scanDataWorkspace(tx.QueryRowContext(ctx, `
+SELECT id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at
+FROM fugue_data_workspaces
+WHERE id = $1
+`, workspaceID))
+	if err != nil {
+		return model.DataWorkspaceAccessGrant{}, mapDBErr(err)
+	}
+	if !platformAdmin && !dataWorkspaceOwnedByTenant(workspace, ownerTenantID) {
+		return model.DataWorkspaceAccessGrant{}, ErrNotFound
+	}
+	if subjectType == model.DataWorkspaceAccessSubjectTenant {
+		if dataWorkspaceOwnedByTenant(workspace, subjectID) {
+			return model.DataWorkspaceAccessGrant{}, ErrInvalidInput
+		}
+		exists, err := s.pgTenantExistsTx(ctx, tx, subjectID)
+		if err != nil {
+			return model.DataWorkspaceAccessGrant{}, err
+		}
+		if !exists {
+			return model.DataWorkspaceAccessGrant{}, ErrNotFound
+		}
+	}
+	if subjectType == model.DataWorkspaceAccessSubjectAPIKey {
+		key, err := scanAPIKey(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, label, prefix, hash, status, scopes_json, created_at, last_used_at, disabled_at
+FROM fugue_api_keys
+WHERE id = $1
+`, subjectID))
+		if err != nil {
+			return model.DataWorkspaceAccessGrant{}, mapDBErr(err)
+		}
+		if normalizeAPIKeyStatus(key.Status) != model.APIKeyStatusActive {
+			return model.DataWorkspaceAccessGrant{}, ErrNotFound
+		}
+		if dataWorkspaceOwnedByTenant(workspace, key.TenantID) {
+			return model.DataWorkspaceAccessGrant{}, ErrInvalidInput
+		}
+	}
+	now := time.Now().UTC()
+	grant, err := scanDataWorkspaceAccessGrant(tx.QueryRowContext(ctx, `
+INSERT INTO fugue_data_workspace_access_grants (workspace_id, subject_type, subject_id, role, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $6)
+ON CONFLICT (workspace_id, subject_type, subject_id) DO UPDATE SET
+	role = EXCLUDED.role,
+	created_by = CASE WHEN fugue_data_workspace_access_grants.created_by = '' THEN EXCLUDED.created_by ELSE fugue_data_workspace_access_grants.created_by END,
+	updated_at = EXCLUDED.updated_at
+RETURNING workspace_id, subject_type, subject_id, role, created_by, created_at, updated_at
+`, workspace.ID, subjectType, subjectID, role, strings.TrimSpace(createdBy), now))
+	if err != nil {
+		return model.DataWorkspaceAccessGrant{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.DataWorkspaceAccessGrant{}, err
+	}
+	return grant, nil
+}
+
+func (s *Store) pgRevokeDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	workspace, err := scanDataWorkspace(tx.QueryRowContext(ctx, `
+SELECT id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at
+FROM fugue_data_workspaces
+WHERE id = $1
+`, workspaceID))
+	if err != nil {
+		return false, mapDBErr(err)
+	}
+	if !platformAdmin && !dataWorkspaceOwnedByTenant(workspace, ownerTenantID) {
+		return false, ErrNotFound
+	}
+	result, err := tx.ExecContext(ctx, `
+DELETE FROM fugue_data_workspace_access_grants
+WHERE workspace_id = $1 AND subject_type = $2 AND subject_id = $3
+`, workspace.ID, subjectType, subjectID)
+	if err != nil {
+		return false, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	rowsAffected, _ := result.RowsAffected()
+	return rowsAffected > 0, nil
+}
+
+func (s *Store) pgDataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorID string, platformAdmin bool) (string, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	workspace, err := scanDataWorkspace(s.db.QueryRowContext(ctx, `
+SELECT id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at
+FROM fugue_data_workspaces
+WHERE id = $1
+`, workspaceID))
+	if err != nil {
+		return "", false, mapDBErr(err)
+	}
+	if platformAdmin || dataWorkspaceOwnedByTenant(workspace, tenantID) {
+		return model.DataWorkspaceAccessRoleAdmin, true, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT role
+FROM fugue_data_workspace_access_grants
+WHERE workspace_id = $1
+  AND (
+	(subject_type = 'tenant' AND subject_id = $2)
+	OR (subject_type = 'api-key' AND $3 = 'api-key' AND subject_id = $4)
+  )
+`, workspace.ID, tenantID, actorType, actorID)
+	if err != nil {
+		return "", false, mapDBErr(err)
+	}
+	defer rows.Close()
+	role := ""
+	for rows.Next() {
+		var candidate string
+		if err := rows.Scan(&candidate); err != nil {
+			return "", false, mapDBErr(err)
+		}
+		candidate = normalizeDataWorkspaceAccessRole(candidate)
+		if dataWorkspaceAccessRoleRank(candidate) > dataWorkspaceAccessRoleRank(role) {
+			role = candidate
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, mapDBErr(err)
+	}
+	return role, role != "", nil
 }
 
 func IsDataNotFound(err error) bool {

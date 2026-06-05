@@ -358,7 +358,7 @@ func (s *Server) handleListDataWorkspaces(w http.ResponseWriter, r *http.Request
 		return
 	}
 	projectID := projectIDForPrincipal(principal, r.URL.Query().Get("project_id"))
-	workspaces, err := s.store.ListDataWorkspaces(tenantID, projectID, principal.IsPlatformAdmin())
+	workspaces, err := s.store.ListDataWorkspacesForPrincipal(tenantID, projectID, principal.ActorType, principal.ActorID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -409,7 +409,7 @@ func (s *Server) handleCreateDataWorkspace(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleGetDataWorkspace(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleReader)
 	if !allowed {
 		return
 	}
@@ -435,7 +435,7 @@ func (s *Server) handlePatchDataWorkspace(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !allowed {
 		return
 	}
@@ -461,7 +461,7 @@ func (s *Server) handleDeleteDataWorkspace(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, http.StatusForbidden, "missing data.delete scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !allowed {
 		return
 	}
@@ -476,7 +476,7 @@ func (s *Server) handleDeleteDataWorkspace(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleListDataSnapshots(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleReader)
 	if !allowed {
 		return
 	}
@@ -494,7 +494,7 @@ func (s *Server) handleCreateDataSnapshot(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusForbidden, "missing data.write scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleWriter)
 	if !allowed {
 		return
 	}
@@ -509,6 +509,7 @@ func (s *Server) handleCreateDataSnapshot(w http.ResponseWriter, r *http.Request
 	}
 	snapshot, err := s.store.CreateDataSnapshot(model.DataSnapshot{
 		WorkspaceID: workspace.ID,
+		TenantID:    principal.TenantID,
 		Version:     strings.TrimSpace(req.Version),
 		Message:     strings.TrimSpace(req.Message),
 		Manifest:    req.Manifest,
@@ -524,7 +525,7 @@ func (s *Server) handleCreateDataSnapshot(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleGetDataSnapshot(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleReader)
 	if !allowed {
 		return
 	}
@@ -542,7 +543,7 @@ func (s *Server) handleDeleteDataSnapshot(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusForbidden, "missing data.delete scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !allowed {
 		return
 	}
@@ -561,7 +562,7 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing data.write scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleWriter)
 	if !allowed {
 		return
 	}
@@ -574,6 +575,7 @@ func (s *Server) handlePlanDataUpload(w http.ResponseWriter, r *http.Request) {
 	expiresAt := time.Now().UTC().Add(dataPresignTTL())
 	transfer, err := s.store.CreateDataTransfer(model.DataTransfer{
 		WorkspaceID: workspace.ID,
+		TenantID:    principal.TenantID,
 		Version:     strings.TrimSpace(req.Version),
 		Message:     strings.TrimSpace(req.Message),
 		Direction:   model.DataTransferDirectionUpload,
@@ -642,7 +644,7 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusForbidden, "missing data.read scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleReader)
 	if !allowed {
 		return
 	}
@@ -664,6 +666,7 @@ func (s *Server) handlePlanDataDownload(w http.ResponseWriter, r *http.Request) 
 	expiresAt := time.Now().UTC().Add(dataPresignTTL())
 	transfer, err := s.store.CreateDataTransfer(model.DataTransfer{
 		WorkspaceID: workspace.ID,
+		TenantID:    principal.TenantID,
 		SnapshotID:  snapshot.ID,
 		Version:     snapshot.Version,
 		Message:     snapshot.Message,
@@ -734,7 +737,7 @@ func (s *Server) handleCreateDataPrewarm(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusForbidden, "missing data.write scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleWriter)
 	if !allowed {
 		return
 	}
@@ -759,6 +762,7 @@ func (s *Server) handleCreateDataPrewarm(w http.ResponseWriter, r *http.Request)
 	manifest := filterDataManifestAssets(snapshot.Manifest, req.Assets)
 	transfer, err := s.store.CreateDataTransfer(model.DataTransfer{
 		WorkspaceID: workspace.ID,
+		TenantID:    principal.TenantID,
 		SnapshotID:  snapshot.ID,
 		Version:     snapshot.Version,
 		Direction:   model.DataTransferDirectionPrewarm,
@@ -798,13 +802,16 @@ func (s *Server) handleCompleteDataTransfer(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
-	workspace, err := s.store.GetDataWorkspace(transfer.WorkspaceID, principal.TenantID, principal.IsPlatformAdmin())
+	workspace, err := s.store.GetDataWorkspaceForPrincipal(transfer.WorkspaceID, principal.TenantID, principal.ActorType, principal.ActorID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	if !principalAllowsDataWorkspace(principal, workspace) {
-		httpx.WriteError(w, http.StatusForbidden, "data workspace is not visible to this tenant")
+	requiredRole := model.DataWorkspaceAccessRoleReader
+	if transfer.Direction == model.DataTransferDirectionUpload {
+		requiredRole = model.DataWorkspaceAccessRoleWriter
+	}
+	if !s.principalAllowsDataWorkspaceRole(w, principal, workspace, requiredRole) {
 		return
 	}
 	now := time.Now().UTC()
@@ -905,7 +912,7 @@ func (s *Server) handleSweepDataWorkspaceGC(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "missing data.delete scope")
 		return
 	}
-	workspace, ok := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, ok := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !ok {
 		return
 	}
@@ -937,7 +944,7 @@ func (s *Server) handleCreateDataBackendMigration(w http.ResponseWriter, r *http
 		httpx.WriteError(w, http.StatusForbidden, "missing data.admin scope")
 		return
 	}
-	workspace, ok := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, ok := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !ok {
 		return
 	}
@@ -975,7 +982,7 @@ func (s *Server) handleRollbackDataBackendMigration(w http.ResponseWriter, r *ht
 		httpx.WriteError(w, http.StatusForbidden, "missing data.admin scope")
 		return
 	}
-	workspace, ok := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, ok := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !ok {
 		return
 	}
@@ -1233,7 +1240,7 @@ func (s *Server) handleCreateDataGrant(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing data.grant scope")
 		return
 	}
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !allowed {
 		return
 	}
@@ -1274,7 +1281,7 @@ func (s *Server) handleCreateDataGrant(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListDataGrants(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	workspace, allowed := s.loadAuthorizedDataWorkspace(w, r, principal)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
 	if !allowed {
 		return
 	}
@@ -1284,6 +1291,94 @@ func (s *Server) handleListDataGrants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "grants": grants})
+}
+
+func (s *Server) handleListDataWorkspaceAccess(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
+	if !allowed {
+		return
+	}
+	grants, err := s.store.ListDataWorkspaceAccessGrants(workspace.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "grants": grants})
+}
+
+func (s *Server) handleGrantDataWorkspaceAccess(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("data.grant") && !principal.HasScope("data.admin") {
+		httpx.WriteError(w, http.StatusForbidden, "missing data.grant scope")
+		return
+	}
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
+	if !allowed {
+		return
+	}
+	var req struct {
+		SubjectType string `json:"subject_type"`
+		SubjectID   string `json:"subject_id"`
+		TenantID    string `json:"tenant_id"`
+		APIKeyID    string `json:"api_key_id"`
+		Role        string `json:"role"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	subjectType, subjectID, ok := normalizeDataWorkspaceAccessSubjectRequest(req.SubjectType, req.SubjectID, req.TenantID, req.APIKeyID)
+	if !ok {
+		httpx.WriteError(w, http.StatusBadRequest, "exactly one data workspace access subject is required")
+		return
+	}
+	role := normalizeDataWorkspaceAccessRoleRequest(req.Role)
+	if role == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid data workspace access role")
+		return
+	}
+	grant, err := s.store.GrantDataWorkspaceAccess(workspace.ID, workspace.TenantID, true, subjectType, subjectID, role, principal.ActorID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "data.workspace.access.grant", "data_workspace", workspace.ID, workspace.TenantID, map[string]string{
+		"subject_type": grant.SubjectType,
+		"subject_id":   grant.SubjectID,
+		"role":         grant.Role,
+	})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "grant": grant})
+}
+
+func (s *Server) handleRevokeDataWorkspaceAccess(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() && !principal.HasScope("data.grant") && !principal.HasScope("data.admin") {
+		httpx.WriteError(w, http.StatusForbidden, "missing data.grant scope")
+		return
+	}
+	workspace, allowed := s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleAdmin)
+	if !allowed {
+		return
+	}
+	subjectType := normalizeDataWorkspaceAccessSubjectTypeRequest(r.PathValue("subject_type"))
+	subjectID := strings.TrimSpace(r.PathValue("subject_id"))
+	if subjectType == "" || subjectID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "subject_type and subject_id are required")
+		return
+	}
+	removed, err := s.store.RevokeDataWorkspaceAccess(workspace.ID, workspace.TenantID, true, subjectType, subjectID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if removed {
+		s.appendAudit(principal, "data.workspace.access.revoke", "data_workspace", workspace.ID, workspace.TenantID, map[string]string{
+			"subject_type": subjectType,
+			"subject_id":   subjectID,
+		})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workspace": workspace, "removed": removed})
 }
 
 func (s *Server) handleRevokeDataGrant(w http.ResponseWriter, r *http.Request) {
@@ -1297,8 +1392,7 @@ func (s *Server) handleRevokeDataGrant(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if !principal.IsPlatformAdmin() && grant.TenantID != principal.TenantID {
-		httpx.WriteError(w, http.StatusForbidden, "data grant is not visible to this tenant")
+	if _, ok := s.loadAuthorizedDataWorkspaceForRoleValue(w, principal, grant.WorkspaceID, model.DataWorkspaceAccessRoleAdmin); !ok {
 		return
 	}
 	grant, err = s.store.RevokeDataGrant(grant.ID)
@@ -2398,13 +2492,20 @@ func (s *Server) authorizeDataBlobTransfer(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) loadAuthorizedDataWorkspace(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.DataWorkspace, bool) {
-	workspace, err := s.store.GetDataWorkspace(r.PathValue("workspace_id"), principal.TenantID, principal.IsPlatformAdmin())
+	return s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleReader)
+}
+
+func (s *Server) loadAuthorizedDataWorkspaceForRole(w http.ResponseWriter, r *http.Request, principal model.Principal, requiredRole string) (model.DataWorkspace, bool) {
+	return s.loadAuthorizedDataWorkspaceForRoleValue(w, principal, r.PathValue("workspace_id"), requiredRole)
+}
+
+func (s *Server) loadAuthorizedDataWorkspaceForRoleValue(w http.ResponseWriter, principal model.Principal, workspaceID string, requiredRole string) (model.DataWorkspace, bool) {
+	workspace, err := s.store.GetDataWorkspaceForPrincipal(workspaceID, principal.TenantID, principal.ActorType, principal.ActorID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return model.DataWorkspace{}, false
 	}
-	if !principalAllowsDataWorkspace(principal, workspace) {
-		httpx.WriteError(w, http.StatusForbidden, "data workspace is not visible to this tenant")
+	if !s.principalAllowsDataWorkspaceRole(w, principal, workspace, requiredRole) {
 		return model.DataWorkspace{}, false
 	}
 	return workspace, true
@@ -2420,26 +2521,97 @@ func (s *Server) loadAuthorizedDataTransfer(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "data transfer is not visible to this tenant")
 		return model.DataTransfer{}, model.DataWorkspace{}, false
 	}
-	workspace, err := s.store.GetDataWorkspace(transfer.WorkspaceID, principal.TenantID, principal.IsPlatformAdmin())
+	workspace, err := s.store.GetDataWorkspaceForPrincipal(transfer.WorkspaceID, principal.TenantID, principal.ActorType, principal.ActorID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return model.DataTransfer{}, model.DataWorkspace{}, false
 	}
-	if !principalAllowsDataWorkspace(principal, workspace) {
-		httpx.WriteError(w, http.StatusForbidden, "data workspace is not visible to this tenant")
+	requiredRole := model.DataWorkspaceAccessRoleReader
+	if transfer.Direction == model.DataTransferDirectionUpload {
+		requiredRole = model.DataWorkspaceAccessRoleWriter
+	}
+	if !s.principalAllowsDataWorkspaceRole(w, principal, workspace, requiredRole) {
 		return model.DataTransfer{}, model.DataWorkspace{}, false
 	}
 	return transfer, workspace, true
 }
 
-func principalAllowsDataWorkspace(principal model.Principal, workspace model.DataWorkspace) bool {
-	if principal.IsPlatformAdmin() {
-		return true
-	}
-	if strings.TrimSpace(workspace.TenantID) != "" && workspace.TenantID != principal.TenantID {
+func (s *Server) principalAllowsDataWorkspaceRole(w http.ResponseWriter, principal model.Principal, workspace model.DataWorkspace, requiredRole string) bool {
+	if !principal.IsPlatformAdmin() && workspace.TenantID == principal.TenantID && !principal.AllowsProject(workspace.ProjectID) {
+		httpx.WriteError(w, http.StatusForbidden, "data workspace is not visible to this project")
 		return false
 	}
-	return principal.AllowsProject(workspace.ProjectID)
+	role, ok, err := s.store.DataWorkspaceAccessRole(workspace.ID, principal.TenantID, principal.ActorType, principal.ActorID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return false
+	}
+	if !ok || dataWorkspaceAPIRoleRank(role) < dataWorkspaceAPIRoleRank(requiredRole) {
+		httpx.WriteError(w, http.StatusForbidden, "data workspace access role is insufficient")
+		return false
+	}
+	return true
+}
+
+func dataWorkspaceAPIRoleRank(role string) int {
+	switch strings.TrimSpace(strings.ToLower(role)) {
+	case model.DataWorkspaceAccessRoleAdmin:
+		return 3
+	case model.DataWorkspaceAccessRoleWriter:
+		return 2
+	case model.DataWorkspaceAccessRoleReader:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func normalizeDataWorkspaceAccessSubjectTypeRequest(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case model.DataWorkspaceAccessSubjectTenant, "user", "workspace":
+		return model.DataWorkspaceAccessSubjectTenant
+	case model.DataWorkspaceAccessSubjectAPIKey, "api_key", "apikey", "token":
+		return model.DataWorkspaceAccessSubjectAPIKey
+	default:
+		return ""
+	}
+}
+
+func normalizeDataWorkspaceAccessSubjectRequest(subjectType, subjectID, tenantID, apiKeyID string) (string, string, bool) {
+	candidates := []struct {
+		subjectType string
+		subjectID   string
+	}{
+		{subjectType: normalizeDataWorkspaceAccessSubjectTypeRequest(subjectType), subjectID: strings.TrimSpace(subjectID)},
+		{subjectType: model.DataWorkspaceAccessSubjectTenant, subjectID: strings.TrimSpace(tenantID)},
+		{subjectType: model.DataWorkspaceAccessSubjectAPIKey, subjectID: strings.TrimSpace(apiKeyID)},
+	}
+	resolvedType := ""
+	resolvedID := ""
+	for _, candidate := range candidates {
+		if candidate.subjectType == "" || candidate.subjectID == "" {
+			continue
+		}
+		if resolvedType != "" && (resolvedType != candidate.subjectType || resolvedID != candidate.subjectID) {
+			return "", "", false
+		}
+		resolvedType = candidate.subjectType
+		resolvedID = candidate.subjectID
+	}
+	return resolvedType, resolvedID, resolvedType != "" && resolvedID != ""
+}
+
+func normalizeDataWorkspaceAccessRoleRequest(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", model.DataWorkspaceAccessRoleReader, "read", "read-only", "readonly":
+		return model.DataWorkspaceAccessRoleReader
+	case model.DataWorkspaceAccessRoleWriter, "write", "read-write", "readwrite":
+		return model.DataWorkspaceAccessRoleWriter
+	case model.DataWorkspaceAccessRoleAdmin:
+		return model.DataWorkspaceAccessRoleAdmin
+	default:
+		return ""
+	}
 }
 
 func filterDataManifestAssets(manifest model.DataManifest, assets []string) model.DataManifest {

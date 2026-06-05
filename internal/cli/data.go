@@ -1144,7 +1144,15 @@ func (c *CLI) newDataWorkspaceCommand() *cobra.Command {
   fugue data workspace set-backend my-training-project prod-r2
 `),
 	}
-	cmd.AddCommand(c.newDataWorkspaceListCommand(), c.newDataWorkspaceShowCommand(), c.newDataWorkspaceUseCommand(), c.newDataWorkspaceSetBackendCommand())
+	cmd.AddCommand(
+		c.newDataWorkspaceListCommand(),
+		c.newDataWorkspaceShowCommand(),
+		c.newDataWorkspaceUseCommand(),
+		c.newDataWorkspaceSetBackendCommand(),
+		c.newDataWorkspaceAccessCommand(),
+		c.newDataWorkspaceShareCommand(),
+		c.newDataWorkspaceUnshareCommand(),
+	)
 	return cmd
 }
 
@@ -1305,6 +1313,225 @@ func (c *CLI) newDataWorkspaceSetBackendCommand() *cobra.Command {
 			}
 			return renderDataWorkspace(c, workspace.Workspace)
 		},
+	}
+}
+
+type dataWorkspaceAccessTargetOptions struct {
+	User   string
+	Tenant string
+	APIKey string
+	Role   string
+}
+
+func (c *CLI) newDataWorkspaceAccessCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "access",
+		Short: "List persistent data workspace access",
+	}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "ls <workspace>",
+		Short: "List persistent access grants for a data workspace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			resp, err := client.GetDataWorkspace(args[0])
+			if err != nil {
+				return err
+			}
+			grants, err := client.ListDataWorkspaceAccessGrants(resp.Workspace.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "grants": grants})
+			}
+			renderDataKeyValueTable(c.stdout, [][]string{
+				{"Data workspace", resp.Workspace.Name},
+				{"Access grants", strconv.Itoa(len(grants))},
+			})
+			if len(grants) == 0 {
+				return nil
+			}
+			rows := make([][]string, 0, len(grants))
+			for _, grant := range grants {
+				rows = append(rows, []string{grant.SubjectType, grant.SubjectID, grant.Role, formatTime(grant.UpdatedAt)})
+			}
+			renderDataTable(c.stdout, []dataTableColumn{
+				{Title: "Subject"},
+				{Title: "ID"},
+				{Title: "Role"},
+				{Title: "Updated"},
+			}, rows)
+			return nil
+		},
+	})
+	return cmd
+}
+
+func (c *CLI) newDataWorkspaceShareCommand() *cobra.Command {
+	var opts dataWorkspaceAccessTargetOptions
+	cmd := &cobra.Command{
+		Use:   "share <workspace>",
+		Short: "Grant persistent access to a data workspace",
+		Example: strings.TrimSpace(`
+  fugue data workspace share saebench-eval-weights --user user@example.com --role reader
+  fugue data workspace share saebench-eval-weights --tenant my-workspace --role reader
+  fugue data workspace share saebench-eval-weights --api-key apikey_123 --role reader
+`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			resp, err := client.GetDataWorkspace(args[0])
+			if err != nil {
+				return err
+			}
+			subjectType, subjectID, label, err := c.resolveDataWorkspaceAccessTarget(client, opts)
+			if err != nil {
+				return err
+			}
+			role := normalizeCLIDataWorkspaceAccessRole(opts.Role)
+			if role == "" {
+				return fmt.Errorf("invalid role %q; use reader, writer, or admin", opts.Role)
+			}
+			grant, err := client.GrantDataWorkspaceAccess(resp.Workspace.ID, subjectType, subjectID, role)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "grant": grant})
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "data_workspace", Value: resp.Workspace.Name},
+				kvPair{Key: "subject", Value: label},
+				kvPair{Key: "role", Value: grant.Role},
+				kvPair{Key: "updated_at", Value: formatTime(grant.UpdatedAt)},
+			)
+		},
+	}
+	addDataWorkspaceAccessTargetFlags(cmd, &opts, true)
+	return cmd
+}
+
+func (c *CLI) newDataWorkspaceUnshareCommand() *cobra.Command {
+	var opts dataWorkspaceAccessTargetOptions
+	cmd := &cobra.Command{
+		Use:     "unshare <workspace>",
+		Aliases: []string{"revoke-access"},
+		Short:   "Revoke persistent access to a data workspace",
+		Example: strings.TrimSpace(`
+  fugue data workspace unshare saebench-eval-weights --user user@example.com
+  fugue data workspace unshare saebench-eval-weights --tenant my-workspace
+  fugue data workspace unshare saebench-eval-weights --api-key apikey_123
+`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			resp, err := client.GetDataWorkspace(args[0])
+			if err != nil {
+				return err
+			}
+			subjectType, subjectID, label, err := c.resolveDataWorkspaceAccessTarget(client, opts)
+			if err != nil {
+				return err
+			}
+			removed, err := client.RevokeDataWorkspaceAccess(resp.Workspace.ID, subjectType, subjectID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"workspace": resp.Workspace, "removed": removed})
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "data_workspace", Value: resp.Workspace.Name},
+				kvPair{Key: "subject", Value: label},
+				kvPair{Key: "removed", Value: fmt.Sprintf("%t", removed)},
+			)
+		},
+	}
+	addDataWorkspaceAccessTargetFlags(cmd, &opts, false)
+	return cmd
+}
+
+func addDataWorkspaceAccessTargetFlags(cmd *cobra.Command, opts *dataWorkspaceAccessTargetOptions, includeRole bool) {
+	cmd.Flags().StringVar(&opts.User, "user", "", "Fugue user email for a tenant-level subject")
+	cmd.Flags().StringVar(&opts.Tenant, "tenant", "", "Tenant/workspace name or id for a tenant-level subject")
+	cmd.Flags().StringVar(&opts.APIKey, "api-key", "", "API key id or label for a token-level subject")
+	if includeRole {
+		cmd.Flags().StringVar(&opts.Role, "role", model.DataWorkspaceAccessRoleReader, "Access role: reader, writer, or admin")
+	}
+}
+
+func (c *CLI) resolveDataWorkspaceAccessTarget(client *Client, opts dataWorkspaceAccessTargetOptions) (string, string, string, error) {
+	count := 0
+	if strings.TrimSpace(opts.User) != "" {
+		count++
+	}
+	if strings.TrimSpace(opts.Tenant) != "" {
+		count++
+	}
+	if strings.TrimSpace(opts.APIKey) != "" {
+		count++
+	}
+	if count != 1 {
+		return "", "", "", fmt.Errorf("pass exactly one of --user, --tenant, or --api-key")
+	}
+	if email := strings.TrimSpace(opts.User); email != "" {
+		context, err := client.GetAuthContext()
+		if err != nil {
+			return "", "", "", fmt.Errorf("verify admin user targeting: %w", err)
+		}
+		if !context.Principal.PlatformAdmin {
+			return "", "", "", fmt.Errorf("--user requires a platform-admin or bootstrap key; use --tenant when you already know the tenant id")
+		}
+		webClient, err := c.newWebClient("")
+		if err != nil {
+			return "", "", "", err
+		}
+		resolved, err := webClient.ResolveAdminWorkspace(email)
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve account workspace: %w", err)
+		}
+		tenantID := strings.TrimSpace(resolved.Workspace.TenantID)
+		if tenantID == "" {
+			return "", "", "", fmt.Errorf("account %s resolved without a tenant id", email)
+		}
+		return model.DataWorkspaceAccessSubjectTenant, tenantID, email, nil
+	}
+	if tenantRef := strings.TrimSpace(opts.Tenant); tenantRef != "" {
+		tenant, err := c.resolveNamedTenant(client, tenantRef)
+		if err != nil {
+			return "", "", "", err
+		}
+		label := formatDisplayName(firstNonEmptyTrimmed(tenant.Name, tenant.Slug, tenant.ID), tenant.ID, c.showIDs())
+		return model.DataWorkspaceAccessSubjectTenant, tenant.ID, label, nil
+	}
+	key, err := c.resolveNamedAPIKey(client, strings.TrimSpace(opts.APIKey))
+	if err != nil {
+		return "", "", "", err
+	}
+	label := formatDisplayName(firstNonEmptyTrimmed(key.Label, key.ID), key.ID, c.showIDs())
+	return model.DataWorkspaceAccessSubjectAPIKey, key.ID, label, nil
+}
+
+func normalizeCLIDataWorkspaceAccessRole(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "", model.DataWorkspaceAccessRoleReader, "read", "read-only", "readonly":
+		return model.DataWorkspaceAccessRoleReader
+	case model.DataWorkspaceAccessRoleWriter, "write", "read-write", "readwrite":
+		return model.DataWorkspaceAccessRoleWriter
+	case model.DataWorkspaceAccessRoleAdmin:
+		return model.DataWorkspaceAccessRoleAdmin
+	default:
+		return ""
 	}
 }
 
@@ -6107,6 +6334,41 @@ func (c *Client) RevokeDataGrant(id string) (map[string]any, error) {
 		return nil, err
 	}
 	return resp, nil
+}
+
+func (c *Client) ListDataWorkspaceAccessGrants(workspaceID string) ([]model.DataWorkspaceAccessGrant, error) {
+	var resp struct {
+		Grants []model.DataWorkspaceAccessGrant `json:"grants"`
+	}
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/data/workspaces", workspaceID, "access"), nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Grants, nil
+}
+
+func (c *Client) GrantDataWorkspaceAccess(workspaceID, subjectType, subjectID, role string) (model.DataWorkspaceAccessGrant, error) {
+	var resp struct {
+		Grant model.DataWorkspaceAccessGrant `json:"grant"`
+	}
+	req := map[string]any{
+		"subject_type": subjectType,
+		"subject_id":   subjectID,
+		"role":         role,
+	}
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/data/workspaces", workspaceID, "access"), req, &resp); err != nil {
+		return model.DataWorkspaceAccessGrant{}, err
+	}
+	return resp.Grant, nil
+}
+
+func (c *Client) RevokeDataWorkspaceAccess(workspaceID, subjectType, subjectID string) (bool, error) {
+	var resp struct {
+		Removed bool `json:"removed"`
+	}
+	if err := c.doJSON(http.MethodDelete, path.Join("/v1/data/workspaces", workspaceID, "access", subjectType, subjectID), nil, &resp); err != nil {
+		return false, err
+	}
+	return resp.Removed, nil
 }
 
 func dataURLJoin(rawBase, rawPath string) string {

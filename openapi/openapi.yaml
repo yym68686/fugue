@@ -5682,6 +5682,82 @@ paths:
                 $ref: "#/components/schemas/DataTransferActionResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/access:
+    get:
+      operationId: listDataWorkspaceAccess
+      summary: List Data Workspace Access
+      tags: [Data Workspaces]
+      x-fugue-handler: handleListDataWorkspaceAccess
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: grantDataWorkspaceAccess
+      summary: Grant Data Workspace Access
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGrantDataWorkspaceAccess
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataWorkspaceAccessGrantRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/data/workspaces/{workspace_id}/access/{subject_type}/{subject_id}:
+    delete:
+      operationId: revokeDataWorkspaceAccess
+      summary: Revoke Data Workspace Access
+      tags: [Data Workspaces]
+      x-fugue-handler: handleRevokeDataWorkspaceAccess
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/DataWorkspaceIdPathParam"
+        - in: path
+          name: subject_type
+          required: true
+          schema:
+            type: string
+            enum: [tenant, api-key]
+        - in: path
+          name: subject_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/data/workspaces/{workspace_id}/grants:
     get:
       operationId: listDataGrants
@@ -6914,6 +6990,25 @@ components:
         expires_in_minutes:
           type: integer
           format: int32
+    DataWorkspaceAccessGrantRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        subject_type:
+          type: string
+          enum: [tenant, api-key]
+        subject_id:
+          type: string
+        tenant_id:
+          type: string
+          description: Tenant subject to grant. Equivalent to subject_type=tenant plus subject_id.
+        api_key_id:
+          type: string
+          description: API key subject to grant. Equivalent to subject_type=api-key plus subject_id.
+        role:
+          type: string
+          enum: [reader, writer, admin]
+          default: reader
     DataGCSweepRequest:
       type: object
       additionalProperties: false

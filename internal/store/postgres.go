@@ -707,6 +707,17 @@ var postgresSchemaStatements = []string{
 		last_used_at TIMESTAMPTZ NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_data_grants_workspace_created ON fugue_data_grants (workspace_id, created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_data_workspace_access_grants (
+		workspace_id TEXT NOT NULL REFERENCES fugue_data_workspaces(id) ON DELETE CASCADE,
+		subject_type TEXT NOT NULL,
+		subject_id TEXT NOT NULL,
+		role TEXT NOT NULL,
+		created_by TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (workspace_id, subject_type, subject_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_data_workspace_access_subject ON fugue_data_workspace_access_grants (subject_type, subject_id, updated_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_app_database_import_jobs (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

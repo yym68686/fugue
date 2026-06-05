@@ -32,6 +32,13 @@ const (
 	DataGrantStatusRevoked = "revoked"
 	DataGrantStatusExpired = "expired"
 
+	DataWorkspaceAccessSubjectTenant = "tenant"
+	DataWorkspaceAccessSubjectAPIKey = "api-key"
+
+	DataWorkspaceAccessRoleReader = "reader"
+	DataWorkspaceAccessRoleWriter = "writer"
+	DataWorkspaceAccessRoleAdmin  = "admin"
+
 	DataAssetModeReadMostly = "read-mostly"
 	DataAssetModeAppend     = "append"
 
@@ -219,6 +226,16 @@ type DataGrant struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
 	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
+}
+
+type DataWorkspaceAccessGrant struct {
+	WorkspaceID string    `json:"workspace_id"`
+	SubjectType string    `json:"subject_type"`
+	SubjectID   string    `json:"subject_id"`
+	Role        string    `json:"role"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type DataGCSweepCandidate struct {

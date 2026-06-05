@@ -2254,5 +2254,6 @@ type State struct {
 	DataSnapshots              []DataSnapshot              `json:"data_snapshots,omitempty"`
 	DataTransfers              []DataTransfer              `json:"data_transfers,omitempty"`
 	DataGrants                 []DataGrant                 `json:"data_grants,omitempty"`
+	DataWorkspaceAccessGrants  []DataWorkspaceAccessGrant  `json:"data_workspace_access_grants,omitempty"`
 	DataRuntimeCaches          []RuntimeDataCacheMetadata  `json:"data_runtime_caches,omitempty"`
 }
