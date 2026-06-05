@@ -91,7 +91,7 @@ func TestAppObservabilityLogsQueriesLoki(t *testing.T) {
 		Logs   []map[string]any             `json:"logs"`
 	}
 	mustDecodeJSON(t, recorder, &response)
-	if !response.Source.Available || response.Source.Status != "ok" {
+	if !response.Source.Available || response.Source.Status != "available" {
 		t.Fatalf("expected available logs source, got %+v", response.Source)
 	}
 	if strings.Join(response.Source.ActiveExporters, ",") != "logs" {
@@ -114,8 +114,15 @@ func TestAppObservabilityLogsQueriesLoki(t *testing.T) {
 	if response.Logs[0]["message"] != "timeout" || response.Logs[0]["trace_id"] != "trace_123" {
 		t.Fatalf("expected parsed log fields, got %+v", response.Logs[0])
 	}
-	if response.Logs[0]["line"] == "" || response.Logs[0]["timestamp"] == "" {
-		t.Fatalf("expected raw line and timestamp, got %+v", response.Logs[0])
+	if response.Logs[0]["timestamp"] == "" {
+		t.Fatalf("expected timestamp, got %+v", response.Logs[0])
+	}
+	if _, ok := response.Logs[0]["line"]; ok {
+		t.Fatalf("line should not be a top-level observability log field: %+v", response.Logs[0])
+	}
+	attributes, ok := response.Logs[0]["attributes"].(map[string]any)
+	if !ok || attributes["stage"] != "db" || attributes["app_id"] != app.ID {
+		t.Fatalf("expected merged log attributes, got %+v", response.Logs[0])
 	}
 }
 
@@ -150,6 +157,108 @@ func TestAppObservabilityLogsLokiFailureIsNonBlocking(t *testing.T) {
 	}
 	if len(response.Logs) != 0 {
 		t.Fatalf("expected empty logs on Loki failure, got %+v", response.Logs)
+	}
+}
+
+func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var clickHouseQuery string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clickHouseQuery = r.URL.Query().Get("query")
+		if r.URL.Query().Get("database") != "fugue_observability" {
+			t.Errorf("expected database query parameter, got %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_123","request_id":"request_123","path_template":"/v1/items","method":"POST","status_code":503,"duration_ms":1200,"ttfb_ms":240,"summary_json":"{\"provider\":\"example\"}"}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests?since=15m&trace_id=trace_123&status_class=5xx&errors=true&slow=true&limit=10", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source   appObservabilitySourceStatus `json:"source"`
+		Requests []map[string]any             `json:"requests"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" {
+		t.Fatalf("expected available analytics source, got %+v", response.Source)
+	}
+	for _, want := range []string{
+		"FROM request_facts",
+		"app_id = '" + app.ID + "'",
+		"trace_id = 'trace_123'",
+		"status_class = '5xx'",
+		"(status_code >= 400 OR error_type != '')",
+		"duration_ms >= 1000",
+		"LIMIT 10",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(clickHouseQuery, want) {
+			t.Fatalf("expected ClickHouse query to contain %q, got %q", want, clickHouseQuery)
+		}
+	}
+	if len(response.Requests) != 1 {
+		t.Fatalf("expected one request, got %+v", response.Requests)
+	}
+	request := response.Requests[0]
+	if request["trace_id"] != "trace_123" || request["request_id"] != "request_123" || request["route"] != "/v1/items" || request["ttft_ms"] == nil {
+		t.Fatalf("expected request summary fields, got %+v", request)
+	}
+	summary, ok := request["summary"].(map[string]any)
+	if !ok || summary["provider"] != "example" {
+		t.Fatalf("expected parsed request summary, got %+v", request)
+	}
+}
+
+func TestAppObservabilityTraceQueriesClickHouse(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var clickHouseQuery string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clickHouseQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","service":"api","trace_id":"trace_123","span_id":"span_1","parent_span_id":"","request_id":"request_123","stage":"db","stage_ms":12,"status_code":200,"error_type":"","attributes_json":"{\"pool\":\"main\"}"}` + "\n"))
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.010","service":"api","trace_id":"trace_123","span_id":"span_2","parent_span_id":"span_1","request_id":"request_123","stage":"stream","stage_ms":34,"status_code":200,"error_type":"","attributes_json":"{}"}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/traces/trace_123", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source appObservabilitySourceStatus `json:"source"`
+		Spans  []map[string]any             `json:"spans"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" {
+		t.Fatalf("expected available analytics source, got %+v", response.Source)
+	}
+	for _, want := range []string{
+		"FROM request_spans",
+		"app_id = '" + app.ID + "'",
+		"trace_id = 'trace_123'",
+		"ORDER BY ts ASC, stage_ms ASC",
+		"LIMIT 1000",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(clickHouseQuery, want) {
+			t.Fatalf("expected ClickHouse query to contain %q, got %q", want, clickHouseQuery)
+		}
+	}
+	if len(response.Spans) != 2 {
+		t.Fatalf("expected two spans, got %+v", response.Spans)
+	}
+	attributes, ok := response.Spans[0]["attributes"].(map[string]any)
+	if response.Spans[0]["stage"] != "db" || !ok || attributes["pool"] != "main" {
+		t.Fatalf("expected parsed span fields, got %+v", response.Spans[0])
 	}
 }
 

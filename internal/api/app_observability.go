@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/observability"
 )
 
 const (
@@ -85,7 +86,7 @@ func (s *Server) handleQueryAppObservabilityLogs(w http.ResponseWriter, r *http.
 			})
 			return
 		}
-		source.Status = "ok"
+		source.Status = "available"
 		source.Available = true
 		source.Reason = "logs query backend returned data"
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
@@ -114,6 +115,29 @@ func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *ht
 	}
 	source := s.appObservabilitySourceStatus("analytics", "request analytics query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.requests.list", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
+	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
+		requests, err := s.queryAppObservabilityRequests(r.Context(), app.ID, window, r.URL.Query())
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"source":   source,
+				"window":   window,
+				"requests": []any{},
+			})
+			return
+		}
+		source.Status = "available"
+		source.Available = true
+		source.Reason = "request analytics query backend returned data"
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"source":   source,
+			"window":   window,
+			"requests": requests,
+		})
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"source":   source,
 		"window":   window,
@@ -134,6 +158,29 @@ func (s *Server) handleGetAppObservabilityTrace(w http.ResponseWriter, r *http.R
 	}
 	source := s.appObservabilitySourceStatus("analytics", "trace query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.trace.read", "app", app.ID, app.TenantID, map[string]string{"trace_id_present": "true"})
+	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
+		spans, err := s.queryAppObservabilityTrace(r.Context(), app.ID, traceID)
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"source":   source,
+				"trace_id": traceID,
+				"spans":    []any{},
+			})
+			return
+		}
+		source.Status = "available"
+		source.Available = true
+		source.Reason = "trace query backend returned data"
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"source":   source,
+			"trace_id": traceID,
+			"spans":    spans,
+		})
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"source":   source,
 		"trace_id": traceID,
@@ -391,14 +438,38 @@ func escapeLogQLString(value string) string {
 func lokiValueToAppObservabilityLog(labels map[string]string, value [2]string) map[string]any {
 	entry := map[string]any{
 		"timestamp": formatLokiTimestamp(value[0]),
-		"line":      value[1],
-		"labels":    labels,
+		"message":   value[1],
+	}
+	attributes := map[string]any{}
+	for key, label := range labels {
+		switch key {
+		case "pod", "container", "level":
+			entry[key] = label
+		default:
+			attributes[key] = label
+		}
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(value[1]), &parsed); err == nil {
 		for key, parsedValue := range parsed {
-			entry[key] = parsedValue
+			switch key {
+			case "timestamp", "pod", "container", "level", "trace_id", "message":
+				entry[key] = parsedValue
+			case "attributes":
+				if parsedAttributes, ok := parsedValue.(map[string]any); ok {
+					for attrKey, attrValue := range parsedAttributes {
+						attributes[attrKey] = attrValue
+					}
+				} else {
+					attributes[key] = parsedValue
+				}
+			default:
+				attributes[key] = parsedValue
+			}
 		}
+	}
+	if len(attributes) > 0 {
+		entry["attributes"] = attributes
 	}
 	return entry
 }
@@ -409,4 +480,181 @@ func formatLokiTimestamp(raw string) string {
 		return strings.TrimSpace(raw)
 	}
 	return time.Unix(0, ns).UTC().Format(time.RFC3339Nano)
+}
+
+func (s *Server) queryAppObservabilityRequests(ctx context.Context, appID string, window appObservabilityWindow, query url.Values) ([]map[string]any, error) {
+	queryText, err := buildAppObservabilityRequestsQuery(appID, window, query)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queryAppObservabilityClickHouse(ctx, queryText)
+	if err != nil {
+		return nil, err
+	}
+	requests := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		requests = append(requests, appObservabilityRequestFromClickHouseRow(row))
+	}
+	return requests, nil
+}
+
+func (s *Server) queryAppObservabilityTrace(ctx context.Context, appID string, traceID string) ([]map[string]any, error) {
+	until := time.Now().UTC()
+	window := appObservabilityWindow{
+		Since: until.Add(-appObservabilityMaxWindow).Format(time.RFC3339),
+		Until: until.Format(time.RFC3339),
+	}
+	queryText, err := buildAppObservabilityTraceQuery(appID, traceID, window)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queryAppObservabilityClickHouse(ctx, queryText)
+	if err != nil {
+		return nil, err
+	}
+	spans := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		spans = append(spans, appObservabilitySpanFromClickHouseRow(row))
+	}
+	return spans, nil
+}
+
+func (s *Server) queryAppObservabilityClickHouse(ctx context.Context, queryText string) ([]map[string]any, error) {
+	cfg := s.observabilityConfig.Normalize()
+	client := &http.Client{Timeout: cfg.ExportTimeout}
+	exporter := observability.NewClickHouseExporter(cfg.ClickHouseDSN, client)
+	return exporter.QueryJSONEachRow(ctx, queryText, cfg.MaxPayloadBytes)
+}
+
+func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWindow, query url.Values) (string, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	if traceID := strings.TrimSpace(query.Get("trace_id")); traceID != "" {
+		conditions = append(conditions, "trace_id = "+quoteClickHouseString(traceID))
+	}
+	if requestID := strings.TrimSpace(query.Get("request_id")); requestID != "" {
+		conditions = append(conditions, "request_id = "+quoteClickHouseString(requestID))
+	}
+	if statusClass := strings.TrimSpace(query.Get("status_class")); statusClass != "" {
+		if !validStatusClass(statusClass) {
+			return "", fmt.Errorf("status_class must look like 2xx, 4xx, or 5xx")
+		}
+		conditions = append(conditions, "status_class = "+quoteClickHouseString(statusClass))
+	}
+	if statusCode := strings.TrimSpace(query.Get("status_code")); statusCode != "" {
+		parsed, err := strconv.Atoi(statusCode)
+		if err != nil || parsed < 100 || parsed > 599 {
+			return "", fmt.Errorf("status_code must be between 100 and 599")
+		}
+		conditions = append(conditions, fmt.Sprintf("status_code = %d", parsed))
+	}
+	if strings.EqualFold(strings.TrimSpace(query.Get("errors")), "true") {
+		conditions = append(conditions, "(status_code >= 400 OR error_type != '')")
+	}
+	if strings.EqualFold(strings.TrimSpace(query.Get("slow")), "true") {
+		conditions = append(conditions, "duration_ms >= 1000")
+	}
+	limit := boundedAppObservabilityLimit(query.Get("limit"), 200, 1000)
+	return "SELECT ts, trace_id, request_id, route_id, hostname, path_template, method, status_code, status_class, duration_ms, ttfb_ms, summary_json " +
+		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
+		fmt.Sprintf(" ORDER BY ts DESC LIMIT %d FORMAT JSONEachRow", limit), nil
+}
+
+func buildAppObservabilityTraceQuery(appID string, traceID string, window appObservabilityWindow) (string, error) {
+	traceID = strings.TrimSpace(traceID)
+	if traceID == "" {
+		return "", fmt.Errorf("trace_id is required")
+	}
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"trace_id = " + quoteClickHouseString(traceID),
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	return "SELECT ts, service, trace_id, span_id, parent_span_id, request_id, stage, stage_ms, status_code, error_type, attributes_json " +
+		"FROM request_spans WHERE " + strings.Join(conditions, " AND ") +
+		" ORDER BY ts ASC, stage_ms ASC LIMIT 1000 FORMAT JSONEachRow", nil
+}
+
+func validStatusClass(value string) bool {
+	if len(value) != 3 || value[1:] != "xx" {
+		return false
+	}
+	return value[0] >= '1' && value[0] <= '5'
+}
+
+func quoteClickHouseString(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `'`, `\'`)
+	return "'" + value + "'"
+}
+
+func clickHouseDateTime64Literal(value time.Time) string {
+	return "parseDateTime64BestEffort(" + quoteClickHouseString(value.UTC().Format(time.RFC3339Nano)) + ")"
+}
+
+func appObservabilityRequestFromClickHouseRow(row map[string]any) map[string]any {
+	return map[string]any{
+		"timestamp":   stringField(row, "ts"),
+		"trace_id":    stringField(row, "trace_id"),
+		"request_id":  stringField(row, "request_id"),
+		"route":       firstNonEmpty(stringField(row, "path_template"), stringField(row, "route_id"), stringField(row, "hostname")),
+		"method":      stringField(row, "method"),
+		"status_code": row["status_code"],
+		"duration_ms": row["duration_ms"],
+		"ttft_ms":     row["ttfb_ms"],
+		"summary":     parseJSONMapField(row["summary_json"]),
+	}
+}
+
+func appObservabilitySpanFromClickHouseRow(row map[string]any) map[string]any {
+	return map[string]any{
+		"timestamp":      stringField(row, "ts"),
+		"service":        stringField(row, "service"),
+		"trace_id":       stringField(row, "trace_id"),
+		"span_id":        stringField(row, "span_id"),
+		"parent_span_id": stringField(row, "parent_span_id"),
+		"request_id":     stringField(row, "request_id"),
+		"stage":          stringField(row, "stage"),
+		"stage_ms":       row["stage_ms"],
+		"status_code":    row["status_code"],
+		"error_type":     stringField(row, "error_type"),
+		"attributes":     parseJSONMapField(row["attributes_json"]),
+	}
+}
+
+func stringField(row map[string]any, key string) string {
+	value, ok := row[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func parseJSONMapField(value any) map[string]any {
+	raw, ok := value.(string)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return map[string]any{}
+	}
+	parsed := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return map[string]any{}
+	}
+	return parsed
 }

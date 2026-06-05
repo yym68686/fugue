@@ -488,6 +488,60 @@ func (e ClickHouseExporter) insertRows(ctx context.Context, table string, rows [
 	return nil
 }
 
+func (e ClickHouseExporter) QueryJSONEachRow(ctx context.Context, queryText string, maxPayloadBytes int64) ([]map[string]any, error) {
+	if e.parseErr != nil {
+		return nil, e.parseErr
+	}
+	queryText = strings.TrimSpace(queryText)
+	if queryText == "" {
+		return nil, errors.New("empty ClickHouse query")
+	}
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = DefaultMaxPayloadBytes
+	}
+
+	endpoint := *e.Target.URL
+	query := endpoint.Query()
+	if e.Target.Database != "" {
+		query.Set("database", e.Target.Database)
+	}
+	query.Set("query", queryText)
+	endpoint.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create ClickHouse query request: %w", err)
+	}
+	if e.Target.Username != "" {
+		req.SetBasicAuth(e.Target.Username, e.Target.Password)
+	}
+	resp, err := e.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query ClickHouse: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPayloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read ClickHouse query response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("query ClickHouse returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	rows := []map[string]any{}
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		row := map[string]any{}
+		if err := json.Unmarshal(line, &row); err != nil {
+			return nil, fmt.Errorf("decode ClickHouse JSONEachRow response: %w", err)
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
 func clickHouseQualifiedTable(database string, table string) string {
 	database = sanitizeClickHouseIdentifier(database)
 	if database == "" {

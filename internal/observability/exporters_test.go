@@ -243,6 +243,39 @@ func TestParseClickHouseTargetSupportsClickHouseScheme(t *testing.T) {
 	}
 }
 
+func TestClickHouseExporterQueriesJSONEachRow(t *testing.T) {
+	var queryText string
+	var database string
+	var username string
+	var password string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queryText = r.URL.Query().Get("query")
+		database = r.URL.Query().Get("database")
+		username, password, _ = r.BasicAuth()
+		_, _ = w.Write([]byte(`{"trace_id":"trace_123","stage":"db","stage_ms":12}` + "\n"))
+		_, _ = w.Write([]byte(`{"trace_id":"trace_123","stage":"stream","stage_ms":34}` + "\n"))
+	}))
+	defer server.Close()
+
+	exporter := NewClickHouseExporter("http://user:pass@"+strings.TrimPrefix(server.URL, "http://")+"?database=fugue_observability", server.Client())
+	rows, err := exporter.QueryJSONEachRow(context.Background(), "SELECT * FROM request_spans FORMAT JSONEachRow", DefaultMaxPayloadBytes)
+	if err != nil {
+		t.Fatalf("query ClickHouse rows: %v", err)
+	}
+	if queryText != "SELECT * FROM request_spans FORMAT JSONEachRow" {
+		t.Fatalf("unexpected ClickHouse query: %q", queryText)
+	}
+	if database != "fugue_observability" {
+		t.Fatalf("unexpected database: %q", database)
+	}
+	if username != "user" || password != "pass" {
+		t.Fatalf("expected basic auth credentials to be forwarded")
+	}
+	if len(rows) != 2 || rows[0]["stage"] != "db" || rows[1]["stage"] != "stream" {
+		t.Fatalf("unexpected rows: %+v", rows)
+	}
+}
+
 func TestStructuredLogCanBecomeSpanEvent(t *testing.T) {
 	event, redacted := EventFromLogLine("runtime", `{"event_type":"request_span","stage":"db","stage_ms":12,"token":"secret"}`)
 	if redacted == 0 {
