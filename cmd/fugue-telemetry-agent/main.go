@@ -20,8 +20,9 @@ func main() {
 	cfg := config.TelemetryAgentFromEnv()
 	logger := log.Default()
 	agent := telemetryAgent{
-		cfg:    cfg.Observability.Normalize(),
-		logger: logger,
+		cfg:      cfg.Observability.Normalize(),
+		logger:   logger,
+		pipeline: observability.NewPipeline(cfg.Observability, logger),
 	}
 	if err := agent.cfg.Validate(); err != nil {
 		logger.Printf("observability configuration degraded: %v", err)
@@ -31,9 +32,15 @@ func main() {
 	mux.HandleFunc("GET /healthz", agent.handleHealthz)
 	mux.HandleFunc("GET /readyz", agent.handleReadyz)
 	mux.HandleFunc("GET /metrics", agent.handleMetrics)
+	mux.HandleFunc("POST /v1/logs", agent.pipeline.HandleOTLPHTTP)
+	mux.HandleFunc("POST /v1/metrics", agent.pipeline.HandleOTLPHTTP)
+	mux.HandleFunc("POST /v1/traces", agent.pipeline.HandleOTLPHTTP)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := agent.pipeline.Start(ctx); err != nil {
+		logger.Printf("telemetry pipeline degraded: %v", err)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.BindAddr,
@@ -44,6 +51,9 @@ func main() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if err := agent.pipeline.Stop(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Printf("pipeline shutdown error: %v", err)
+		}
 		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("shutdown error: %v", err)
 		}
@@ -56,8 +66,9 @@ func main() {
 }
 
 type telemetryAgent struct {
-	cfg    observability.Config
-	logger *log.Logger
+	cfg      observability.Config
+	logger   *log.Logger
+	pipeline *observability.Pipeline
 }
 
 func (a telemetryAgent) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +98,7 @@ func (a telemetryAgent) handleReadyz(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"observability": cfg.Status(),
+		"pipeline":      a.pipeline.Snapshot(),
 	})
 }
 
@@ -111,6 +123,7 @@ func (a telemetryAgent) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = fmt.Fprintf(w, "fugue_telemetry_agent_exporter_configured{exporter=\"%s\"} %d\n", exporter, configured)
 	}
+	_, _ = fmt.Fprint(w, a.pipeline.PrometheusMetrics())
 }
 
 func writeAgentJSON(w http.ResponseWriter, status int, payload any) {

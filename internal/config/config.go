@@ -273,6 +273,20 @@ func ObservabilityFromEnv() observability.Config {
 		ExportTimeout:         getenvDuration("FUGUE_OBSERVABILITY_EXPORT_TIMEOUT", observability.DefaultExportTimeout),
 		QueueSize:             getenvInt("FUGUE_OBSERVABILITY_QUEUE_SIZE", observability.DefaultQueueSize),
 		SampleRate:            getenvFloat("FUGUE_OBSERVABILITY_SAMPLE_RATE", observability.DefaultSampleRate),
+		RuntimeLogPaths:       getenvList("FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS"),
+		PrometheusScrapeURLs:  getenvList("FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS"),
+		ScrapeInterval:        getenvDuration("FUGUE_OBSERVABILITY_SCRAPE_INTERVAL", observability.DefaultScrapeInterval),
+		BatchSize:             getenvInt("FUGUE_OBSERVABILITY_BATCH_SIZE", observability.DefaultBatchSize),
+		MaxPayloadBytes:       int64(getenvInt("FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES", observability.DefaultMaxPayloadBytes)),
+		MemoryLimitBytes:      int64(getenvInt("FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES", observability.DefaultMemoryLimit)),
+		RetryMaxAttempts:      getenvInt("FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS", observability.DefaultRetryAttempts),
+		Identity: observability.Identity{
+			TenantID:  strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_TENANT_ID")),
+			ProjectID: strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_PROJECT_ID")),
+			AppID:     strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_APP_ID")),
+			RuntimeID: strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_RUNTIME_ID")),
+			Component: getenv("FUGUE_OBSERVABILITY_COMPONENT", "telemetry-agent"),
+		},
 	}.Normalize()
 }
 

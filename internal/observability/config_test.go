@@ -16,6 +16,9 @@ func TestConfigNormalizeKeepsObservabilityDisabledByDefault(t *testing.T) {
 	if cfg.Mode() != "disabled" {
 		t.Fatalf("expected disabled mode, got %s", cfg.Mode())
 	}
+	if cfg.QueueSize != DefaultQueueSize || cfg.BatchSize != DefaultBatchSize || cfg.MaxPayloadBytes != DefaultMaxPayloadBytes {
+		t.Fatalf("expected telemetry pipeline defaults, got %+v", cfg.Status())
+	}
 }
 
 func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
@@ -25,10 +28,16 @@ func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 		LokiURL:               "https://loki.example.test",
 		ClickHouseDSN:         "clickhouse://user:secret@example.test/fugue",
 		OTLPEndpoint:          "otel.example.test:4317",
+		RuntimeLogPaths:       []string{"/var/log/pods/app.log"},
+		PrometheusScrapeURLs:  []string{"http://127.0.0.1:9100/metrics"},
+		Identity:              Identity{TenantID: "tenant_123", Component: "runtime"},
 	}.Normalize()
 	status := cfg.Status()
 	if !status.Enabled || !status.MetricsConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
 		t.Fatalf("expected all exporters to be marked configured, got %+v", status)
+	}
+	if !status.RuntimeLogPipelineConfigured || !status.PrometheusScrapeConfigured || !status.IdentityConfigured {
+		t.Fatalf("expected input pipelines and identity to be marked configured, got %+v", status)
 	}
 	if status.Retention != "24h0m0s" {
 		t.Fatalf("expected normalized retention, got %s", status.Retention)
@@ -43,6 +52,7 @@ func TestConfigValidateRejectsBadURLs(t *testing.T) {
 		{Enabled: true, MetricsRemoteWriteURL: "ftp://metrics.example.test"},
 		{Enabled: true, LokiURL: "://bad"},
 		{Enabled: true, OTLPEndpoint: "missing-port"},
+		{Enabled: true, PrometheusScrapeURLs: []string{"ftp://127.0.0.1/metrics"}},
 	} {
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("expected validation error for %+v", cfg)

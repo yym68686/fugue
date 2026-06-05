@@ -1,6 +1,9 @@
 package observability
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMetricLabelPolicy(t *testing.T) {
 	if !IsAllowedMetricLabel("app_id") || !IsAllowedMetricLabel("status_class") {
@@ -46,5 +49,17 @@ func TestRedactFieldsPreservesShape(t *testing.T) {
 	}
 	if redacted["access_token"] != "[REDACTED]" {
 		t.Fatalf("expected token to be redacted, got %+v", redacted)
+	}
+}
+
+func TestRedactTextMasksCommonSecretAssignments(t *testing.T) {
+	clean, changed := RedactText("status=ok authorization=BearerSecret token=my-token database_url=postgres://user:pass@host/db")
+	if !changed {
+		t.Fatal("expected text to be redacted")
+	}
+	for _, leaked := range []string{"BearerSecret", "my-token", "postgres://user:pass@host/db"} {
+		if strings.Contains(clean, leaked) {
+			t.Fatalf("secret %q leaked in %q", leaked, clean)
+		}
 	}
 }

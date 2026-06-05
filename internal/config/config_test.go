@@ -31,6 +31,9 @@ func TestObservabilityFromEnvDefaultsToDisabledTwentyFourHourRetention(t *testin
 		"FUGUE_OBSERVABILITY_LOKI_URL",
 		"FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
 		"FUGUE_OBSERVABILITY_OTLP_ENDPOINT",
+		"FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS",
+		"FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS",
+		"FUGUE_OBSERVABILITY_COMPONENT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -54,6 +57,13 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_OBSERVABILITY_LOKI_URL", "https://loki.example.test")
 	t.Setenv("FUGUE_OBSERVABILITY_CLICKHOUSE_DSN", "clickhouse://user:secret@example.test/fugue")
 	t.Setenv("FUGUE_OBSERVABILITY_OTLP_ENDPOINT", "otel.example.test:4317")
+	t.Setenv("FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS", "/var/log/pods/app.log,/var/log/pods/app.log")
+	t.Setenv("FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS", "http://127.0.0.1:9100/metrics")
+	t.Setenv("FUGUE_OBSERVABILITY_TENANT_ID", "tenant_123")
+	t.Setenv("FUGUE_OBSERVABILITY_PROJECT_ID", "project_123")
+	t.Setenv("FUGUE_OBSERVABILITY_APP_ID", "app_123")
+	t.Setenv("FUGUE_OBSERVABILITY_RUNTIME_ID", "runtime_123")
+	t.Setenv("FUGUE_OBSERVABILITY_COMPONENT", "runtime")
 
 	cfg := ObservabilityFromEnv()
 	if !cfg.Enabled {
@@ -65,5 +75,11 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	status := cfg.Status()
 	if !status.MetricsConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
 		t.Fatalf("expected all exporters configured, got %+v", status)
+	}
+	if !status.RuntimeLogPipelineConfigured || !status.PrometheusScrapeConfigured || !status.IdentityConfigured {
+		t.Fatalf("expected pipeline inputs and identity configured, got %+v", status)
+	}
+	if len(cfg.RuntimeLogPaths) != 1 || cfg.RuntimeLogPaths[0] != "/var/log/pods/app.log" {
+		t.Fatalf("expected runtime log paths to be normalized, got %+v", cfg.RuntimeLogPaths)
 	}
 }

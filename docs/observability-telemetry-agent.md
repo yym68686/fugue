@@ -1,8 +1,8 @@
 # Fugue Telemetry Agent
 
-This document captures the first implementation slice for Fugue Observability.
-The agent is intentionally a safe, no-op skeleton until the Prometheus, Loki,
-and ClickHouse backends are deployed behind explicit configuration.
+This document captures the first implementation slices for Fugue Observability.
+The agent is intentionally safe-by-default until the Prometheus, Loki, and
+ClickHouse backends are deployed behind explicit configuration.
 
 ## Boundaries
 
@@ -30,6 +30,18 @@ FUGUE_OBSERVABILITY_OTLP_ENDPOINT=
 FUGUE_OBSERVABILITY_EXPORT_TIMEOUT=5s
 FUGUE_OBSERVABILITY_QUEUE_SIZE=4096
 FUGUE_OBSERVABILITY_SAMPLE_RATE=1
+FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS=
+FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS=
+FUGUE_OBSERVABILITY_SCRAPE_INTERVAL=30s
+FUGUE_OBSERVABILITY_BATCH_SIZE=128
+FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES=1048576
+FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES=67108864
+FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS=3
+FUGUE_OBSERVABILITY_TENANT_ID=
+FUGUE_OBSERVABILITY_PROJECT_ID=
+FUGUE_OBSERVABILITY_APP_ID=
+FUGUE_OBSERVABILITY_RUNTIME_ID=
+FUGUE_OBSERVABILITY_COMPONENT=telemetry-agent
 ```
 
 The telemetry agent also reads:
@@ -46,6 +58,9 @@ FUGUE_TELEMETRY_AGENT_BIND_ADDR=:7834
 GET /healthz
 GET /readyz
 GET /metrics
+POST /v1/logs
+POST /v1/metrics
+POST /v1/traces
 ```
 
 `/readyz` reports observability as:
@@ -59,12 +74,31 @@ The control-plane API mirrors the same non-critical observability status in
 its `/readyz` checks. A degraded observability status does not make the API
 return HTTP 503; only critical store readiness failures do that.
 
+## Pipeline Contract
+
+The first pipeline implementation is a guarded local pipeline:
+
+- Runtime log input tails configured file paths only. It starts at end of file
+  so enabling it does not ingest old logs by surprise.
+- Prometheus input scrapes configured HTTP(S) URLs and records sample counts.
+- OTLP HTTP input accepts `/v1/logs`, `/v1/metrics`, and `/v1/traces`. It does
+  not persist raw payload bodies in the skeleton path.
+- The identity processor injects configured tenant/project/app/runtime/component
+  attributes.
+- The redaction processor drops secret fields and masks common secret
+  assignments in log text.
+- The memory limiter and bounded queue drop telemetry instead of blocking.
+- The batch/retry exporter currently uses a no-op exporter until real backends
+  are configured in a later stage.
+
+When observability is disabled, ingestion endpoints return accepted responses
+but do not export data. This keeps app-side telemetry exporters from turning
+observability outages or disabled mode into request-path failures.
+
 ## Next Implementation Steps
 
-- Add optional Helm deployment for `fugue-telemetry-agent`.
 - Add Secret/ExternalSecret-backed exporter configuration.
-- Add runtime log collection pipeline.
-- Add Prometheus scrape and remote-write pipeline.
-- Add OTLP receiver.
-- Add identity and secret-redaction processors.
-- Add batch, retry, and memory limiter processors.
+- Add Loki exporter for runtime logs.
+- Add Prometheus remote-write exporter for scraped metrics.
+- Add ClickHouse exporter for request facts and spans.
+- Replace the no-op exporter with typed exporters selected by data kind.

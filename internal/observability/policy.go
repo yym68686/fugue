@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -48,6 +49,16 @@ var secretFieldTokens = []string{
 	"database_url",
 	"private_key",
 	"credential",
+}
+
+var secretTextPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*[:=]\s*)([^,\s]+)`),
+	regexp.MustCompile(`(?i)(cookie\s*[:=]\s*)([^,\s]+)`),
+	regexp.MustCompile(`(?i)(set-cookie\s*[:=]\s*)([^,\s]+)`),
+	regexp.MustCompile(`(?i)(x-api-key\s*[:=]\s*)([^,\s]+)`),
+	regexp.MustCompile(`(?i)((?:access_|refresh_)?token\s*[:=]\s*)([^,\s]+)`),
+	regexp.MustCompile(`(?i)(password\s*[:=]\s*)([^,\s]+)`),
+	regexp.MustCompile(`(?i)(database_url\s*[:=]\s*)([^,\s]+)`),
 }
 
 type SummaryPolicy struct {
@@ -103,6 +114,19 @@ func RedactFields(fields map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func RedactText(value string) (string, bool) {
+	redacted := value
+	changed := false
+	for _, pattern := range secretTextPatterns {
+		next := pattern.ReplaceAllString(redacted, "${1}[REDACTED]")
+		if next != redacted {
+			changed = true
+			redacted = next
+		}
+	}
+	return redacted, changed
 }
 
 func SanitizeSummaryFields(fields map[string]string, policy SummaryPolicy) (map[string]string, []string) {
