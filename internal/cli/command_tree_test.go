@@ -319,7 +319,6 @@ func TestVisibleHelpDocsDoNotMentionDeprecatedPrimaryCommands(t *testing.T) {
 	unwanted := []string{
 		"fugue app rebuild ",
 		"fugue app redeploy ",
-		"fugue app logs query ",
 		"fugue runtime access ",
 		"fugue runtime pool ",
 		"fugue runtime offer ",

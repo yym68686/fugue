@@ -74,10 +74,13 @@ in more than one visible project or tenant.
 		c.newAppOverviewCommand(),
 		c.newAppWatchCommand(),
 		c.newAppDiagnosisCommand(),
+		c.newAppMetricsCommand(),
 		c.newAppSourceCommand(),
 		hideCompatCommand(c.newAppSyncCommand(), "fugue app source show or fugue app build"),
 		c.newAppLogsCommand(),
 		c.newAppRequestCommand(),
+		c.newAppRequestsCommand(),
+		c.newAppTracesCommand(),
 		c.newEnvCommand(),
 		c.newFilesCommand(),
 		c.newFilesystemCommand(),
@@ -270,6 +273,7 @@ Use "app logs runtime" and "app logs build" for explicit semantics. The bare
 		c.newAppRuntimeLogsCommand(),
 		c.newAppBuildLogsCommand(),
 		c.newAppLogsQueryCommand(),
+		c.newAppLogsTableCommand(),
 		c.newAppLogsPodsCommand(),
 	)
 	return cmd

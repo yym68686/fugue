@@ -32,22 +32,19 @@ type appLogQueryOptions struct {
 var sqlIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (c *CLI) newAppLogsQueryCommand() *cobra.Command {
-	opts := appLogQueryOptions{
-		TimeColumn: "created_at",
-		SortOrder:  "desc",
-		Limit:      200,
-		Timeout:    10 * time.Second,
-	}
+	obsOpts := appObservabilityLogsOptions{Limit: defaultAppObservabilityLimit}
+	tableOpts := defaultAppLogQueryOptions()
 	cmd := &cobra.Command{
-		Use:     "table <app>",
-		Aliases: []string{"query"},
-		Short:   "Query business log tables with time-window filters",
-		Args:    cobra.ExactArgs(1),
+		Use:   "query <app>",
+		Short: "Query Fugue Observability logs for an app",
+		Long: strings.TrimSpace(`
+Query Fugue Observability logs for an app.
+
+For app-owned business log tables, prefer "app logs table". The old
+"app logs query --table/--sql/--file" form is still accepted for compatibility.
+`),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			statement, err := buildAppLogQueryStatement(opts, time.Now().UTC())
-			if err != nil {
-				return err
-			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
@@ -56,30 +53,120 @@ func (c *CLI) newAppLogsQueryCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := client.QueryAppDatabase(app.ID, statement, opts.Limit, opts.Timeout)
+			if appLogsQueryUsesBusinessTable(cmd, tableOpts) {
+				if appLogsQueryHasObservabilityOnlyFlags(cmd) {
+					return fmt.Errorf("--grep, --level, and --trace cannot be combined with app-owned business log table query flags")
+				}
+				tableOpts.Since = obsOpts.Since
+				tableOpts.Until = obsOpts.Until
+				tableOpts.Limit = obsOpts.Limit
+				return c.runAppLogsTableQuery(client, app.ID, tableOpts)
+			}
+			response, err := client.QueryAppObservabilityLogs(app.ID, obsOpts)
 			if err != nil {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, result)
+				return writeJSON(c.stdout, response)
 			}
-			return renderAppDatabaseQueryResult(c.stdout, result)
+			return renderAppObservabilityLogs(c.stdout, response)
 		},
 	}
+	addAppObservabilityWindowFlags(cmd, &obsOpts.appObservabilityWindowOptions)
+	cmd.Flags().IntVar(&obsOpts.Limit, "limit", obsOpts.Limit, "Maximum log entries to return")
+	cmd.Flags().StringVar(&obsOpts.Grep, "grep", "", "Filter log messages by substring or backend-supported pattern")
+	cmd.Flags().StringVar(&obsOpts.Level, "level", "", "Filter log entries by severity level")
+	cmd.Flags().StringVar(&obsOpts.TraceID, "trace", "", "Filter log entries by trace identifier")
+	addAppLogTableQueryFlags(cmd, &tableOpts, false)
+	return cmd
+}
+
+func (c *CLI) newAppLogsTableCommand() *cobra.Command {
+	opts := appLogQueryOptions{
+		TimeColumn: "created_at",
+		SortOrder:  "desc",
+		Limit:      200,
+		Timeout:    10 * time.Second,
+	}
+	cmd := &cobra.Command{
+		Use:   "table <app>",
+		Short: "Query app-owned business log tables with time-window filters",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			return c.runAppLogsTableQuery(client, app.ID, opts)
+		},
+	}
+	addAppLogTableQueryFlags(cmd, &opts, true)
+	return cmd
+}
+
+func defaultAppLogQueryOptions() appLogQueryOptions {
+	return appLogQueryOptions{
+		TimeColumn: "created_at",
+		SortOrder:  "desc",
+		Limit:      200,
+		Timeout:    10 * time.Second,
+	}
+}
+
+func addAppLogTableQueryFlags(cmd *cobra.Command, opts *appLogQueryOptions, includeSharedWindowFlags bool) {
 	cmd.Flags().StringVar(&opts.SQL, "sql", "", "Run an explicit SQL query instead of the structured log-table builder")
 	cmd.Flags().StringVar(&opts.File, "file", "", "Read SQL from a local path or '-' for stdin")
 	cmd.Flags().StringVar(&opts.Table, "table", "", "Business log table name, for example gateway_request_logs")
 	cmd.Flags().StringArrayVar(&opts.Columns, "column", nil, "Column to select (repeatable, defaults to *)")
 	cmd.Flags().StringVar(&opts.TimeColumn, "time-column", opts.TimeColumn, "Timestamp column used by --since/--until and default sorting")
-	cmd.Flags().StringVar(&opts.Since, "since", "", "Lower time bound as RFC3339 or relative duration like 1h")
-	cmd.Flags().StringVar(&opts.Until, "until", "", "Upper time bound as RFC3339 or relative duration like 15m")
 	cmd.Flags().StringArrayVar(&opts.Match, "match", nil, "Exact match in column=value form (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.Contains, "contains", nil, "Substring match in column=value form (repeatable)")
 	cmd.Flags().StringVar(&opts.SortColumn, "sort-column", "", "Column used for ORDER BY; defaults to --time-column")
 	cmd.Flags().StringVar(&opts.SortOrder, "sort-order", opts.SortOrder, "Sort order: asc or desc")
-	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum rows to return")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Query timeout")
-	return cmd
+	if includeSharedWindowFlags {
+		cmd.Flags().StringVar(&opts.Since, "since", "", "Lower time bound as RFC3339 or relative duration like 1h")
+		cmd.Flags().StringVar(&opts.Until, "until", "", "Upper time bound as RFC3339 or relative duration like 15m")
+		cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum rows to return")
+	}
+}
+
+func (c *CLI) runAppLogsTableQuery(client *Client, appID string, opts appLogQueryOptions) error {
+	statement, err := buildAppLogQueryStatement(opts, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	result, err := client.QueryAppDatabase(appID, statement, opts.Limit, opts.Timeout)
+	if err != nil {
+		return err
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, result)
+	}
+	return renderAppDatabaseQueryResult(c.stdout, result)
+}
+
+func appLogsQueryUsesBusinessTable(cmd *cobra.Command, opts appLogQueryOptions) bool {
+	return strings.TrimSpace(opts.SQL) != "" ||
+		strings.TrimSpace(opts.File) != "" ||
+		strings.TrimSpace(opts.Table) != "" ||
+		len(opts.Columns) > 0 ||
+		len(opts.Match) > 0 ||
+		len(opts.Contains) > 0 ||
+		cmd.Flags().Changed("time-column") ||
+		cmd.Flags().Changed("sort-column") ||
+		cmd.Flags().Changed("sort-order") ||
+		cmd.Flags().Changed("timeout")
+}
+
+func appLogsQueryHasObservabilityOnlyFlags(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed("grep") ||
+		cmd.Flags().Changed("level") ||
+		cmd.Flags().Changed("trace")
 }
 
 func (c *CLI) newAppLogsPodsCommand() *cobra.Command {

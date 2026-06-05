@@ -89,8 +89,20 @@ fugue app watch my-app --interval 10s --show-secrets --output json
 		Example: strings.TrimSpace(`
 fugue app logs runtime my-app --follow
 fugue app logs build my-app --tail 200
+fugue app logs query my-app --since 1h --grep timeout
 fugue app logs table my-app --table gateway_request_logs --since 1h --match status=500
 fugue app logs pods my-app
+`),
+	},
+	"fugue app metrics": {
+		Long: strings.TrimSpace(`
+Show Fugue Observability metric summaries for one app.
+
+This command reads the platform observability API. When Fugue Observability is disabled or its metric backend is not active, it returns source status and an empty result instead of falling back to app runtime requests.
+`),
+		Example: strings.TrimSpace(`
+fugue app metrics my-app --since 1h
+fugue app metrics my-app --since 15m --json
 `),
 	},
 	"fugue app logs build": {
@@ -104,6 +116,17 @@ When the current key can see cluster diagnostics, the same command also annotate
 		Example: strings.TrimSpace(`
 fugue app logs build my-app
 fugue app logs build my-app --operation op_import_123 --tail 500
+`),
+	},
+	"fugue app logs query": {
+		Long: strings.TrimSpace(`
+Query Fugue Observability logs for one app by time window and low-risk filters.
+
+Use this for platform-retained runtime logs and structured diagnostic log entries. For app-owned business log tables stored in the app database, use "app logs table".
+`),
+		Example: strings.TrimSpace(`
+fugue app logs query my-app --since 1h --grep timeout
+fugue app logs query my-app --level error --trace trace_123 --json
 `),
 	},
 	"fugue app logs table": {
@@ -126,6 +149,28 @@ This is the CLI path for inspecting old rollout context when current runtime log
 		Example: strings.TrimSpace(`
 fugue app logs pods my-app
 fugue app logs pods my-app --component postgres
+`),
+	},
+	"fugue app requests": {
+		Long: strings.TrimSpace(`
+List Fugue Observability request summaries for one app.
+
+This command reads request facts from the platform observability API. It is for operator diagnostics and should not be used as the source of truth for app-owned, user-visible product request history.
+`),
+		Example: strings.TrimSpace(`
+fugue app requests my-app --since 10m
+fugue app requests my-app --slow --errors --json
+`),
+	},
+	"fugue app traces": {
+		Long: strings.TrimSpace(`
+Show Fugue Observability spans for one trace identifier.
+
+Trace data is diagnostic data with platform observability retention. It is not a substitute for app-owned billing, audit, or user-facing request records.
+`),
+		Example: strings.TrimSpace(`
+fugue app traces my-app trace_123
+fugue app traces my-app trace_123 --json
 `),
 	},
 	"fugue app request": {
@@ -166,10 +211,13 @@ fugue app request stream my-app GET /stream --timeout 15s --accept text/event-st
 Summarize the most likely runtime root cause for one app by combining pod state, scheduling events, and node pressure signals.
 
 Use this when app request or runtime logs only tell you "connection refused" or "pod pending" but you need the CLI to explain the likely scheduling, eviction, or storage-affinity cause.
+
+Pass --window to use Fugue Observability diagnosis for a recent time window instead of runtime pod diagnosis.
 `),
 		Example: strings.TrimSpace(`
 fugue app diagnose my-app
 fugue app diagnose my-app --component postgres
+fugue app diagnose my-app --window 5m
 `),
 	},
 	"fugue app command": {

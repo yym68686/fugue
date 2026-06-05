@@ -11,10 +11,11 @@ import (
 func (c *CLI) newAppDiagnosisCommand() *cobra.Command {
 	opts := struct {
 		Component string
+		Window    string
 	}{Component: "app"}
 	cmd := &cobra.Command{
 		Use:   "diagnose <app>",
-		Short: "Explain the most likely runtime root cause for an app",
+		Short: "Explain the most likely runtime or observability root cause for an app",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -24,6 +25,21 @@ func (c *CLI) newAppDiagnosisCommand() *cobra.Command {
 			app, err := c.resolveNamedApp(client, args[0])
 			if err != nil {
 				return err
+			}
+			if strings.TrimSpace(opts.Window) != "" {
+				if cmd.Flags().Changed("component") {
+					return fmt.Errorf("--component cannot be combined with --window")
+				}
+				diagnosis, err := client.GetAppObservabilityDiagnosis(app.ID, appObservabilityDiagnosisOptions{
+					appObservabilityWindowOptions: appObservabilityWindowOptions{Since: opts.Window},
+				})
+				if err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, diagnosis)
+				}
+				return renderAppObservabilityDiagnosis(c.stdout, diagnosis)
 			}
 			diagnosis, err := client.GetAppDiagnosis(app.ID, opts.Component)
 			if err != nil {
@@ -36,6 +52,7 @@ func (c *CLI) newAppDiagnosisCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Component, "component", opts.Component, "Runtime component: app or postgres")
+	cmd.Flags().StringVar(&opts.Window, "window", "", "Use Fugue Observability diagnosis for a relative window like 5m")
 	return cmd
 }
 
