@@ -72,6 +72,10 @@ spec:
               mountPath: /etc/clickhouse-server/config.d/fugue-observability.xml
               subPath: fugue-observability.xml
               readOnly: true
+            - name: config
+              mountPath: /docker-entrypoint-initdb.d/init-observability.sql
+              subPath: init-observability.sql
+              readOnly: true
             - name: data
               mountPath: /var/lib/clickhouse
       volumes:

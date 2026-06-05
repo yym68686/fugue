@@ -18,4 +18,104 @@ data:
         </default>
       </profiles>
     </clickhouse>
+  init-observability.sql: |
+    CREATE DATABASE IF NOT EXISTS fugue_observability;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.request_facts
+    (
+      ts DateTime64(3, 'UTC'),
+      tenant_id String,
+      project_id String,
+      app_id String,
+      runtime_id String,
+      edge_id String,
+      pod String,
+      trace_id String,
+      request_id String,
+      route_id String,
+      hostname String,
+      path_template String,
+      method LowCardinality(String),
+      status_code UInt16,
+      status_class LowCardinality(String),
+      duration_ms UInt32,
+      ttfb_ms UInt32,
+      upstream_ms UInt32,
+      bytes_in UInt64,
+      bytes_out UInt64,
+      streaming Bool,
+      error_type LowCardinality(String),
+      deployment_id String,
+      operation_id String,
+      summary_json String
+    )
+    ENGINE = MergeTree
+    PARTITION BY toDate(ts)
+    ORDER BY (tenant_id, project_id, app_id, ts, trace_id, request_id)
+    TTL ts + INTERVAL 1 DAY DELETE;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.request_spans
+    (
+      ts DateTime64(3, 'UTC'),
+      tenant_id String,
+      project_id String,
+      app_id String,
+      runtime_id String,
+      service LowCardinality(String),
+      trace_id String,
+      span_id String,
+      parent_span_id String,
+      request_id String,
+      stage LowCardinality(String),
+      stage_ms UInt32,
+      status_code UInt16,
+      error_type LowCardinality(String),
+      attributes_json String
+    )
+    ENGINE = MergeTree
+    PARTITION BY toDate(ts)
+    ORDER BY (tenant_id, project_id, app_id, trace_id, ts, stage)
+    TTL ts + INTERVAL 1 DAY DELETE;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.app_events
+    (
+      ts DateTime64(3, 'UTC'),
+      tenant_id String,
+      project_id String,
+      app_id String,
+      event_type LowCardinality(String),
+      severity LowCardinality(String),
+      operation_id String,
+      deployment_id String,
+      runtime_id String,
+      pod String,
+      message String,
+      attributes_json String
+    )
+    ENGINE = MergeTree
+    PARTITION BY toDate(ts)
+    ORDER BY (tenant_id, project_id, app_id, ts, event_type)
+    TTL ts + INTERVAL 1 DAY DELETE;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.diagnosis_windows_1m
+    (
+      minute DateTime('UTC'),
+      tenant_id String,
+      project_id String,
+      app_id String,
+      rpm UInt32,
+      p50_ttfb_ms Float64,
+      p95_ttfb_ms Float64,
+      p99_ttfb_ms Float64,
+      p50_duration_ms Float64,
+      p95_duration_ms Float64,
+      p99_duration_ms Float64,
+      error_rate Float64,
+      top_bottleneck_stage String,
+      top_bottleneck_confidence Float64
+    )
+    ENGINE = MergeTree
+    PARTITION BY toDate(minute)
+    ORDER BY (tenant_id, project_id, app_id, minute)
+    TTL minute + INTERVAL 1 DAY DELETE;
 {{- end }}

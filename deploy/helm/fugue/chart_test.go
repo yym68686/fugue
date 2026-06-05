@@ -619,6 +619,7 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"path: /ping",
 		"name: native",
 		"containerPort: 9000",
+		"mountPath: /docker-entrypoint-initdb.d/init-observability.sql",
 	} {
 		if !strings.Contains(deploymentDoc, want) {
 			t.Fatalf("clickhouse deployment missing %q:\n%s", want, deploymentDoc)
@@ -627,6 +628,11 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 	for _, want := range []string{
 		"<clickhouse>",
 		"<console>true</console>",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.request_facts",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.request_spans",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.app_events",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.diagnosis_windows_1m",
+		"TTL ts + INTERVAL 1 DAY DELETE",
 	} {
 		if !strings.Contains(configDoc, want) {
 			t.Fatalf("clickhouse config missing %q:\n%s", want, configDoc)

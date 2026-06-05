@@ -76,6 +76,9 @@ The chart includes a default-disabled ClickHouse trial deployment under
 `observability.analytics` with `emptyDir` storage. It is only a platform
 internal analytics trial path; it is not a business database and does not
 replace app-owned product logs or billing data.
+When enabled, the trial deployment initializes these diagnostic tables:
+`request_facts`, `request_spans`, `app_events`, and `diagnosis_windows_1m`,
+each with a 1 day TTL in the trial schema.
 
 ## Current Runtime Contract
 
