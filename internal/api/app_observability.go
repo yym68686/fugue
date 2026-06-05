@@ -1,8 +1,13 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +72,29 @@ func (s *Server) handleQueryAppObservabilityLogs(w http.ResponseWriter, r *http.
 	}
 	source := s.appObservabilitySourceStatus("logs", "logs query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.logs.query", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
+	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "logs") {
+		logs, err := s.queryAppObservabilityLogs(r.Context(), app.ID, window, r.URL.Query())
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"source": source,
+				"window": window,
+				"logs":   []any{},
+			})
+			return
+		}
+		source.Status = "ok"
+		source.Available = true
+		source.Reason = "logs query backend returned data"
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"source": source,
+			"window": window,
+			"logs":   logs,
+		})
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"source": source,
 		"window": window,
@@ -232,4 +260,153 @@ func appObservabilityAuditMetadata(window appObservabilityWindow) map[string]str
 		"since": window.Since,
 		"until": window.Until,
 	}
+}
+
+type lokiQueryRangeResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		Result []struct {
+			Stream map[string]string `json:"stream"`
+			Values [][2]string       `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+	Error string `json:"error,omitempty"`
+}
+
+func (s *Server) queryAppObservabilityLogs(ctx context.Context, appID string, window appObservabilityWindow, query url.Values) ([]map[string]any, error) {
+	cfg := s.observabilityConfig.Normalize()
+	endpoint, err := normalizeLokiQueryRangeURL(cfg.LokiURL)
+	if err != nil {
+		return nil, err
+	}
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return nil, err
+	}
+	limit := boundedAppObservabilityLimit(query.Get("limit"), 200, 1000)
+	values := url.Values{}
+	values.Set("query", buildAppObservabilityLokiQuery(appID, query))
+	values.Set("start", strconv.FormatInt(since.UnixNano(), 10))
+	values.Set("end", strconv.FormatInt(until.UnixNano(), 10))
+	values.Set("limit", strconv.Itoa(limit))
+	endpoint.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Loki query request: %w", err)
+	}
+	client := &http.Client{Timeout: cfg.ExportTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query Loki logs: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxPayloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read Loki logs response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("query Loki logs returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var payload lokiQueryRangeResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode Loki logs response: %w", err)
+	}
+	if payload.Status != "" && payload.Status != "success" {
+		return nil, fmt.Errorf("query Loki logs failed: %s", firstNonEmpty(payload.Error, payload.Status))
+	}
+	logs := make([]map[string]any, 0, limit)
+	for _, stream := range payload.Data.Result {
+		for _, value := range stream.Values {
+			entry := lokiValueToAppObservabilityLog(stream.Stream, value)
+			logs = append(logs, entry)
+			if len(logs) >= limit {
+				return logs, nil
+			}
+		}
+	}
+	return logs, nil
+}
+
+func parseAppObservabilityWindowTimes(window appObservabilityWindow) (time.Time, time.Time, error) {
+	since, err := time.Parse(time.RFC3339, strings.TrimSpace(window.Since))
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid observability window since: %w", err)
+	}
+	until, err := time.Parse(time.RFC3339, strings.TrimSpace(window.Until))
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid observability window until: %w", err)
+	}
+	return since.UTC(), until.UTC(), nil
+}
+
+func boundedAppObservabilityLimit(raw string, defaultLimit, maxLimit int) int {
+	limit := defaultLimit
+	if parsed, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && parsed > 0 {
+		limit = parsed
+	}
+	if limit > maxLimit {
+		return maxLimit
+	}
+	return limit
+}
+
+func normalizeLokiQueryRangeURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid Loki URL")
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	if !strings.HasSuffix(cleanPath, "/loki/api/v1/query_range") {
+		if strings.HasSuffix(cleanPath, "/loki/api/v1/push") {
+			cleanPath = strings.TrimSuffix(cleanPath, "/push") + "/query_range"
+		} else {
+			cleanPath = strings.TrimRight(cleanPath, "/") + "/loki/api/v1/query_range"
+		}
+	}
+	parsed.Path = cleanPath
+	parsed.RawQuery = ""
+	return parsed, nil
+}
+
+func buildAppObservabilityLokiQuery(appID string, query url.Values) string {
+	labels := []string{`app_id="` + escapeLogQLString(appID) + `"`}
+	if level := strings.TrimSpace(query.Get("level")); level != "" {
+		labels = append(labels, `level="`+escapeLogQLString(level)+`"`)
+	}
+	parts := []string{"{" + strings.Join(labels, ",") + "}"}
+	for _, key := range []string{"grep", "trace_id"} {
+		if value := strings.TrimSpace(query.Get(key)); value != "" {
+			parts = append(parts, `|= "`+escapeLogQLString(value)+`"`)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func escapeLogQLString(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	return value
+}
+
+func lokiValueToAppObservabilityLog(labels map[string]string, value [2]string) map[string]any {
+	entry := map[string]any{
+		"timestamp": formatLokiTimestamp(value[0]),
+		"line":      value[1],
+		"labels":    labels,
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(value[1]), &parsed); err == nil {
+		for key, parsedValue := range parsed {
+			entry[key] = parsedValue
+		}
+	}
+	return entry
+}
+
+func formatLokiTimestamp(raw string) string {
+	ns, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	return time.Unix(0, ns).UTC().Format(time.RFC3339Nano)
 }

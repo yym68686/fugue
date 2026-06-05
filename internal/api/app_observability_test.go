@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -39,12 +41,93 @@ func TestAppObservabilityMetricsSummaryDisabledIsStable(t *testing.T) {
 	}
 }
 
-func TestAppObservabilityLogsShowsActiveExporterButQueryPending(t *testing.T) {
+func TestAppObservabilityLogsQueriesLoki(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var lokiPath string
+	var lokiQuery string
+	var lokiLimit string
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lokiPath = r.URL.Path
+		lokiQuery = r.URL.Query().Get("query")
+		lokiLimit = r.URL.Query().Get("limit")
+		if r.URL.Query().Get("start") == "" || r.URL.Query().Get("end") == "" {
+			t.Errorf("expected query_range start and end parameters, got %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"result": []any{
+					map[string]any{
+						"stream": map[string]string{
+							"app_id": app.ID,
+							"level":  "error",
+						},
+						"values": [][2]string{
+							{
+								"1713571200000000000",
+								`{"message":"timeout","trace_id":"trace_123","attributes":{"stage":"db"}}`,
+							},
+						},
+					},
+				},
+			},
+		}); err != nil {
+			t.Errorf("write Loki response: %v", err)
+		}
+	}))
+	t.Cleanup(loki.Close)
 	server.observabilityConfig = observability.Config{
-		Enabled:       true,
-		LokiURL:       "https://loki.example.test",
-		ClickHouseDSN: "http://clickhouse.example.test:8123?database=fugue_observability",
+		Enabled: true,
+		LokiURL: loki.URL,
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/logs/query?since=15m&level=error&grep=timeout&trace_id=trace_123&limit=10", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source appObservabilitySourceStatus `json:"source"`
+		Logs   []map[string]any             `json:"logs"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "ok" {
+		t.Fatalf("expected available logs source, got %+v", response.Source)
+	}
+	if strings.Join(response.Source.ActiveExporters, ",") != "logs" {
+		t.Fatalf("expected active logs exporter, got %+v", response.Source.ActiveExporters)
+	}
+	if lokiPath != "/loki/api/v1/query_range" {
+		t.Fatalf("expected Loki query_range path, got %q", lokiPath)
+	}
+	for _, want := range []string{`app_id="` + app.ID + `"`, `level="error"`, `|= "timeout"`, `|= "trace_123"`} {
+		if !strings.Contains(lokiQuery, want) {
+			t.Fatalf("expected Loki query to contain %q, got %q", want, lokiQuery)
+		}
+	}
+	if lokiLimit != "10" {
+		t.Fatalf("expected Loki limit=10, got %q", lokiLimit)
+	}
+	if len(response.Logs) != 1 {
+		t.Fatalf("expected one log, got %+v", response.Logs)
+	}
+	if response.Logs[0]["message"] != "timeout" || response.Logs[0]["trace_id"] != "trace_123" {
+		t.Fatalf("expected parsed log fields, got %+v", response.Logs[0])
+	}
+	if response.Logs[0]["line"] == "" || response.Logs[0]["timestamp"] == "" {
+		t.Fatalf("expected raw line and timestamp, got %+v", response.Logs[0])
+	}
+}
+
+func TestAppObservabilityLogsLokiFailureIsNonBlocking(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	loki := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(loki.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled: true,
+		LokiURL: loki.URL,
 	}.Normalize()
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/logs/query?since=15m&level=error", apiKey, nil)
@@ -57,16 +140,16 @@ func TestAppObservabilityLogsShowsActiveExporterButQueryPending(t *testing.T) {
 	}
 	mustDecodeJSON(t, recorder, &response)
 	if response.Source.Available {
-		t.Fatalf("query backend should not be marked available yet: %+v", response.Source)
+		t.Fatalf("query backend failure should not be marked available: %+v", response.Source)
 	}
-	if response.Source.Status != "degraded" || !strings.Contains(response.Source.Reason, "logs query backend is not wired yet") {
+	if response.Source.Status != "degraded" || !strings.Contains(response.Source.Reason, "query Loki logs returned 503") {
 		t.Fatalf("unexpected source status: %+v", response.Source)
 	}
-	if strings.Join(response.Source.ActiveExporters, ",") != "analytics,logs" {
-		t.Fatalf("expected active logs and analytics exporters, got %+v", response.Source.ActiveExporters)
+	if strings.Join(response.Source.ActiveExporters, ",") != "logs" {
+		t.Fatalf("expected active logs exporter, got %+v", response.Source.ActiveExporters)
 	}
 	if len(response.Logs) != 0 {
-		t.Fatalf("expected empty logs until query backend is wired, got %+v", response.Logs)
+		t.Fatalf("expected empty logs on Loki failure, got %+v", response.Logs)
 	}
 }
 
