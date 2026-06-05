@@ -4379,6 +4379,16 @@ main() {
   require_env FUGUE_API_IMAGE_TAG
   require_env FUGUE_CONTROLLER_IMAGE_REPOSITORY
   require_env FUGUE_CONTROLLER_IMAGE_TAG
+  FUGUE_OBSERVABILITY_ENABLED="${FUGUE_OBSERVABILITY_ENABLED:-false}"
+  FUGUE_OBSERVABILITY_RETENTION="${FUGUE_OBSERVABILITY_RETENTION:-24h}"
+  FUGUE_TELEMETRY_AGENT_ENABLED="${FUGUE_TELEMETRY_AGENT_ENABLED:-false}"
+  if [[ "${FUGUE_TELEMETRY_AGENT_ENABLED}" == "true" ]]; then
+    require_env FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY
+    require_env FUGUE_TELEMETRY_AGENT_IMAGE_TAG
+  else
+    FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY:-fugue-telemetry-agent}"
+    FUGUE_TELEMETRY_AGENT_IMAGE_TAG="${FUGUE_TELEMETRY_AGENT_IMAGE_TAG:-latest}"
+  fi
   FUGUE_IMAGE_CACHE_ENABLED="${FUGUE_IMAGE_CACHE_ENABLED:-true}"
   FUGUE_IMAGE_CACHE_PORT="${FUGUE_IMAGE_CACHE_PORT:-5000}"
   if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
@@ -4594,6 +4604,14 @@ main() {
     true|false) ;;
     *) fail "FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED must be true or false" ;;
   esac
+  case "${FUGUE_OBSERVABILITY_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_OBSERVABILITY_ENABLED must be true or false" ;;
+  esac
+  case "${FUGUE_TELEMETRY_AGENT_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_TELEMETRY_AGENT_ENABLED must be true or false" ;;
+  esac
   if [[ "${FUGUE_POSTGRES_ENABLED}" != "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" != "true" && -z "$(trim_field "${FUGUE_API_DATABASE_URL}")" ]]; then
     fail "FUGUE_API_DATABASE_URL or FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true is required when FUGUE_POSTGRES_ENABLED=false"
   fi
@@ -4716,6 +4734,7 @@ PY
   log "upgrading ${FUGUE_RELEASE_NAME} in namespace ${FUGUE_NAMESPACE}"
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
+  log "telemetry agent image: ${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}:${FUGUE_TELEMETRY_AGENT_IMAGE_TAG} enabled=${FUGUE_TELEMETRY_AGENT_ENABLED} observability=${FUGUE_OBSERVABILITY_ENABLED} retention=${FUGUE_OBSERVABILITY_RETENTION}"
   log "image cache image: ${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}:${FUGUE_IMAGE_CACHE_IMAGE_TAG} enabled=${FUGUE_IMAGE_CACHE_ENABLED}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
@@ -4781,6 +4800,11 @@ PY
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
+    --set observability.enabled="${FUGUE_OBSERVABILITY_ENABLED}" \
+    --set-string observability.retention="${FUGUE_OBSERVABILITY_RETENTION}" \
+    --set observability.agent.enabled="${FUGUE_TELEMETRY_AGENT_ENABLED}" \
+    --set-string observability.agent.image.repository="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}" \
+    --set-string observability.agent.image.tag="${FUGUE_TELEMETRY_AGENT_IMAGE_TAG}" \
     --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
     --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
     --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \

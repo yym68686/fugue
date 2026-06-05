@@ -301,6 +301,84 @@ func TestAPIAndControllerReceivePublicAPIDomain(t *testing.T) {
 	}
 }
 
+func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	if doc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-telemetry-agent"); doc != "" {
+		t.Fatalf("telemetry agent should not render by default:\n%s", doc)
+	}
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if apiDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-api deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_ENABLED",
+		"value: \"false\"",
+		"name: FUGUE_OBSERVABILITY_RETENTION",
+		"value: \"24h\"",
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment missing observability default %q:\n%s", want, apiDoc)
+		}
+	}
+}
+
+func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.enabled=true",
+		"--set", "observability.agent.enabled=true",
+		"--set-string", "observability.agent.image.repository=ghcr.io/example/fugue-telemetry-agent",
+		"--set-string", "observability.agent.image.tag=agent-test",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-telemetry-agent")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing telemetry-agent deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`image: "ghcr.io/example/fugue-telemetry-agent:agent-test"`,
+		"name: FUGUE_OBSERVABILITY_ENABLED",
+		"value: \"true\"",
+		"name: FUGUE_OBSERVABILITY_RETENTION",
+		"value: \"24h\"",
+		"path: /readyz",
+		"path: /healthz",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("telemetry agent deployment missing %q:\n%s", want, doc)
+		}
+	}
+}
+
 func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

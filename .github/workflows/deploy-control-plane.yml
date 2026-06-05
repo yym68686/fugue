@@ -9,6 +9,7 @@ on:
       - 'assets/**'
       - 'cmd/fugue-api/**'
       - 'cmd/fugue-controller/**'
+      - 'cmd/fugue-telemetry-agent/**'
       - 'cmd/fugue-image-cache/**'
       - 'cmd/fugue-edge/**'
       - 'cmd/fugue-edge-front/**'
@@ -24,6 +25,7 @@ on:
       - 'deploy/helm/fugue/templates/**'
       - 'Dockerfile.api'
       - 'Dockerfile.controller'
+      - 'Dockerfile.telemetry-agent'
       - 'Dockerfile.image-cache'
       - 'Dockerfile.edge'
       - 'go.mod'
@@ -61,6 +63,7 @@ jobs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       api_image_repository: ${{ steps.meta.outputs.api_image_repository }}
       controller_image_repository: ${{ steps.meta.outputs.controller_image_repository }}
+      telemetry_agent_image_repository: ${{ steps.meta.outputs.telemetry_agent_image_repository }}
       image_cache_image_repository: ${{ steps.meta.outputs.image_cache_image_repository }}
       edge_image_repository: ${{ steps.meta.outputs.edge_image_repository }}
     steps:
@@ -82,6 +85,7 @@ jobs:
           echo "image_tag=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
           echo "api_image_repository=ghcr.io/${owner_lc}/fugue-api" >> "${GITHUB_OUTPUT}"
           echo "controller_image_repository=ghcr.io/${owner_lc}/fugue-controller" >> "${GITHUB_OUTPUT}"
+          echo "telemetry_agent_image_repository=ghcr.io/${owner_lc}/fugue-telemetry-agent" >> "${GITHUB_OUTPUT}"
           echo "image_cache_image_repository=ghcr.io/${owner_lc}/fugue-image-cache" >> "${GITHUB_OUTPUT}"
           echo "edge_image_repository=ghcr.io/${owner_lc}/fugue-edge" >> "${GITHUB_OUTPUT}"
 
@@ -114,6 +118,17 @@ jobs:
           push: true
           tags: |
             ${{ steps.meta.outputs.controller_image_repository }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push fugue-telemetry-agent
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          file: ./Dockerfile.telemetry-agent
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.telemetry_agent_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -260,6 +275,11 @@ jobs:
           FUGUE_API_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-controller', github.repository_owner)) || needs.build.outputs.controller_image_repository }}
           FUGUE_CONTROLLER_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
+          FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-telemetry-agent', github.repository_owner)) || needs.build.outputs.telemetry_agent_image_repository }}
+          FUGUE_TELEMETRY_AGENT_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
+          FUGUE_OBSERVABILITY_ENABLED: ${{ vars.FUGUE_OBSERVABILITY_ENABLED || 'false' }}
+          FUGUE_OBSERVABILITY_RETENTION: ${{ vars.FUGUE_OBSERVABILITY_RETENTION || '24h' }}
+          FUGUE_TELEMETRY_AGENT_ENABLED: ${{ vars.FUGUE_TELEMETRY_AGENT_ENABLED || 'false' }}
           FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-image-cache', github.repository_owner)) || needs.build.outputs.image_cache_image_repository }}
           FUGUE_IMAGE_CACHE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '' && format('ghcr.io/{0}/fugue-edge', github.repository_owner)) || needs.build.outputs.edge_image_repository }}

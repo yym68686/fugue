@@ -1,0 +1,82 @@
+{{- if .Values.observability.agent.enabled }}
+{{- $agentNodeSelector := .Values.observability.agent.nodeSelector -}}
+{{- $agentTolerations := default .Values.tolerations .Values.observability.agent.tolerations -}}
+{{- $agentAffinity := default .Values.affinity .Values.observability.agent.affinity -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-telemetry-agent" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "telemetry-agent") | nindent 4 }}
+spec:
+  replicas: {{ .Values.observability.agent.replicaCount }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "telemetry-agent") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "telemetry-agent") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.observability.agent.terminationGracePeriodSeconds }}
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: telemetry-agent
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.observability.agent.image.repository "tag" .Values.observability.agent.image.tag "digest" .Values.observability.agent.image.digest) | quote }}
+          imagePullPolicy: {{ .Values.observability.agent.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.observability.agent.port }}
+              protocol: TCP
+          env:
+            - name: FUGUE_TELEMETRY_AGENT_BIND_ADDR
+              value: {{ .Values.observability.agent.bindAddr | quote }}
+            - name: FUGUE_OBSERVABILITY_ENABLED
+              value: {{ .Values.observability.enabled | quote }}
+            - name: FUGUE_OBSERVABILITY_RETENTION
+              value: {{ .Values.observability.retention | quote }}
+            {{- with .Values.observability.agent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.observability.agent.resources | nindent 12 }}
+      {{- with $agentNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $agentAffinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $agentTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

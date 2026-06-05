@@ -171,6 +171,10 @@ spec:
               value: {{ .Values.api.shutdownDrainDelay | quote }}
             - name: FUGUE_API_SHUTDOWN_TIMEOUT
               value: {{ .Values.api.shutdownTimeout | quote }}
+            - name: FUGUE_OBSERVABILITY_ENABLED
+              value: {{ .Values.observability.enabled | quote }}
+            - name: FUGUE_OBSERVABILITY_RETENTION
+              value: {{ .Values.observability.retention | quote }}
             - name: FUGUE_BOOTSTRAP_ADMIN_KEY
               valueFrom:
                 secretKeyRef:

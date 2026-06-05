@@ -14,6 +14,32 @@ bundle:
 configSecret:
   existingSecretName: ""
 
+observability:
+  enabled: false
+  retention: 24h
+  agent:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: fugue-telemetry-agent
+      tag: latest
+      digest: ""
+      pullPolicy: IfNotPresent
+    port: 7834
+    bindAddr: ":7834"
+    terminationGracePeriodSeconds: 20
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    extraEnv: []
+
 api:
   replicaCount: 2
   image:
