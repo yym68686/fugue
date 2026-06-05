@@ -175,6 +175,32 @@ spec:
               value: {{ .Values.observability.enabled | quote }}
             - name: FUGUE_OBSERVABILITY_RETENTION
               value: {{ .Values.observability.retention | quote }}
+            {{- if .Values.observability.exporterSecret.existingSecretName }}
+            - name: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.metricsRemoteWriteURLKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_LOKI_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.lokiURLKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.clickHouseDSNKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_OTLP_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.otlpEndpointKey | quote }}
+                  optional: true
+            {{- end }}
             - name: FUGUE_BOOTSTRAP_ADMIN_KEY
               valueFrom:
                 secretKeyRef:

@@ -50,6 +50,17 @@ The telemetry agent also reads:
 FUGUE_TELEMETRY_AGENT_BIND_ADDR=:7834
 ```
 
+In Kubernetes, exporter endpoints and DSNs should be injected through an
+existing Secret referenced by Helm `observability.exporterSecret`, not stored in
+plain values files. The chart maps these optional secret keys into:
+
+```text
+FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+FUGUE_OBSERVABILITY_LOKI_URL
+FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+FUGUE_OBSERVABILITY_OTLP_ENDPOINT
+```
+
 ## Current Runtime Contract
 
 `fugue-telemetry-agent` currently exposes:

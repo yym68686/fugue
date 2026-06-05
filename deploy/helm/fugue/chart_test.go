@@ -335,6 +335,9 @@ func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t 
 			t.Fatalf("api deployment missing observability default %q:\n%s", want, apiDoc)
 		}
 	}
+	if strings.Contains(apiDoc, "FUGUE_OBSERVABILITY_LOKI_URL") {
+		t.Fatalf("api deployment should not render exporter secret envs by default:\n%s", apiDoc)
+	}
 }
 
 func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
@@ -352,6 +355,14 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"--set", "observability.agent.enabled=true",
 		"--set-string", "observability.agent.image.repository=ghcr.io/example/fugue-telemetry-agent",
 		"--set-string", "observability.agent.image.tag=agent-test",
+		"--set-string", "observability.exporterSecret.existingSecretName=fugue-observability-exporters",
+		"--set-string", "observability.identity.tenantID=tenant_test",
+		"--set-string", "observability.identity.projectID=project_test",
+		"--set-string", "observability.identity.appID=app_test",
+		"--set-string", "observability.identity.runtimeID=runtime_test",
+		"--set-string", "observability.identity.component=telemetry-agent",
+		"--set-string", "observability.agent.runtimeLogPaths=/var/log/pods/app.log",
+		"--set-string", "observability.agent.prometheusScrapeURLs=http://127.0.0.1:9100/metrics",
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -370,11 +381,30 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"value: \"true\"",
 		"name: FUGUE_OBSERVABILITY_RETENTION",
 		"value: \"24h\"",
+		"name: FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS",
+		"value: \"/var/log/pods/app.log\"",
+		"name: FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS",
+		"value: \"http://127.0.0.1:9100/metrics\"",
+		"name: FUGUE_OBSERVABILITY_TENANT_ID",
+		"value: \"tenant_test\"",
+		"name: FUGUE_OBSERVABILITY_LOKI_URL",
+		"name: \"fugue-observability-exporters\"",
+		"key: \"FUGUE_OBSERVABILITY_LOKI_URL\"",
 		"path: /readyz",
 		"path: /healthz",
 	} {
 		if !strings.Contains(doc, want) {
 			t.Fatalf("telemetry agent deployment missing %q:\n%s", want, doc)
+		}
+	}
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
+		"name: \"fugue-observability-exporters\"",
+		"key: \"FUGUE_OBSERVABILITY_CLICKHOUSE_DSN\"",
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment missing exporter secret env %q:\n%s", want, apiDoc)
 		}
 	}
 }

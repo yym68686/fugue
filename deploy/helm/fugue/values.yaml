@@ -17,6 +17,18 @@ configSecret:
 observability:
   enabled: false
   retention: 24h
+  exporterSecret:
+    existingSecretName: ""
+    metricsRemoteWriteURLKey: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+    lokiURLKey: FUGUE_OBSERVABILITY_LOKI_URL
+    clickHouseDSNKey: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+    otlpEndpointKey: FUGUE_OBSERVABILITY_OTLP_ENDPOINT
+  identity:
+    tenantID: ""
+    projectID: ""
+    appID: ""
+    runtimeID: ""
+    component: telemetry-agent
   agent:
     enabled: false
     replicaCount: 1
@@ -27,6 +39,13 @@ observability:
       pullPolicy: IfNotPresent
     port: 7834
     bindAddr: ":7834"
+    runtimeLogPaths: ""
+    prometheusScrapeURLs: ""
+    scrapeInterval: 30s
+    batchSize: 128
+    maxPayloadBytes: 1048576
+    memoryLimitBytes: 67108864
+    retryMaxAttempts: 3
     terminationGracePeriodSeconds: 20
     resources:
       requests:

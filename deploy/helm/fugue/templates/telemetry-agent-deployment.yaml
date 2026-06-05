@@ -49,6 +49,56 @@ spec:
               value: {{ .Values.observability.enabled | quote }}
             - name: FUGUE_OBSERVABILITY_RETENTION
               value: {{ .Values.observability.retention | quote }}
+            - name: FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS
+              value: {{ .Values.observability.agent.runtimeLogPaths | quote }}
+            - name: FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS
+              value: {{ .Values.observability.agent.prometheusScrapeURLs | quote }}
+            - name: FUGUE_OBSERVABILITY_SCRAPE_INTERVAL
+              value: {{ .Values.observability.agent.scrapeInterval | quote }}
+            - name: FUGUE_OBSERVABILITY_BATCH_SIZE
+              value: {{ .Values.observability.agent.batchSize | quote }}
+            - name: FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES
+              value: {{ .Values.observability.agent.maxPayloadBytes | quote }}
+            - name: FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES
+              value: {{ .Values.observability.agent.memoryLimitBytes | quote }}
+            - name: FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS
+              value: {{ .Values.observability.agent.retryMaxAttempts | quote }}
+            - name: FUGUE_OBSERVABILITY_TENANT_ID
+              value: {{ .Values.observability.identity.tenantID | quote }}
+            - name: FUGUE_OBSERVABILITY_PROJECT_ID
+              value: {{ .Values.observability.identity.projectID | quote }}
+            - name: FUGUE_OBSERVABILITY_APP_ID
+              value: {{ .Values.observability.identity.appID | quote }}
+            - name: FUGUE_OBSERVABILITY_RUNTIME_ID
+              value: {{ .Values.observability.identity.runtimeID | quote }}
+            - name: FUGUE_OBSERVABILITY_COMPONENT
+              value: {{ .Values.observability.identity.component | quote }}
+            {{- if .Values.observability.exporterSecret.existingSecretName }}
+            - name: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.metricsRemoteWriteURLKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_LOKI_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.lokiURLKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.clickHouseDSNKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_OTLP_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.otlpEndpointKey | quote }}
+                  optional: true
+            {{- end }}
             {{- with .Values.observability.agent.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

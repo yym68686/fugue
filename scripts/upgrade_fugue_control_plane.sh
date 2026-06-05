@@ -4381,6 +4381,19 @@ main() {
   require_env FUGUE_CONTROLLER_IMAGE_TAG
   FUGUE_OBSERVABILITY_ENABLED="${FUGUE_OBSERVABILITY_ENABLED:-false}"
   FUGUE_OBSERVABILITY_RETENTION="${FUGUE_OBSERVABILITY_RETENTION:-24h}"
+  FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME="${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME:-}"
+  FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS="${FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS:-}"
+  FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS="${FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS:-}"
+  FUGUE_OBSERVABILITY_SCRAPE_INTERVAL="${FUGUE_OBSERVABILITY_SCRAPE_INTERVAL:-30s}"
+  FUGUE_OBSERVABILITY_BATCH_SIZE="${FUGUE_OBSERVABILITY_BATCH_SIZE:-128}"
+  FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES="${FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES:-1048576}"
+  FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES="${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES:-67108864}"
+  FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS="${FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS:-3}"
+  FUGUE_OBSERVABILITY_TENANT_ID="${FUGUE_OBSERVABILITY_TENANT_ID:-}"
+  FUGUE_OBSERVABILITY_PROJECT_ID="${FUGUE_OBSERVABILITY_PROJECT_ID:-}"
+  FUGUE_OBSERVABILITY_APP_ID="${FUGUE_OBSERVABILITY_APP_ID:-}"
+  FUGUE_OBSERVABILITY_RUNTIME_ID="${FUGUE_OBSERVABILITY_RUNTIME_ID:-}"
+  FUGUE_OBSERVABILITY_COMPONENT="${FUGUE_OBSERVABILITY_COMPONENT:-telemetry-agent}"
   FUGUE_TELEMETRY_AGENT_ENABLED="${FUGUE_TELEMETRY_AGENT_ENABLED:-false}"
   if [[ "${FUGUE_TELEMETRY_AGENT_ENABLED}" == "true" ]]; then
     require_env FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY
@@ -4612,6 +4625,16 @@ main() {
     true|false) ;;
     *) fail "FUGUE_TELEMETRY_AGENT_ENABLED must be true or false" ;;
   esac
+  for numeric_var in \
+    FUGUE_OBSERVABILITY_BATCH_SIZE \
+    FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES \
+    FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES \
+    FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS; do
+    numeric_value="${!numeric_var}"
+    if ! [[ "${numeric_value}" =~ ^[0-9]+$ ]] || (( numeric_value < 1 )); then
+      fail "${numeric_var} must be an integer >= 1"
+    fi
+  done
   if [[ "${FUGUE_POSTGRES_ENABLED}" != "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" != "true" && -z "$(trim_field "${FUGUE_API_DATABASE_URL}")" ]]; then
     fail "FUGUE_API_DATABASE_URL or FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true is required when FUGUE_POSTGRES_ENABLED=false"
   fi
@@ -4735,6 +4758,7 @@ PY
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
   log "telemetry agent image: ${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}:${FUGUE_TELEMETRY_AGENT_IMAGE_TAG} enabled=${FUGUE_TELEMETRY_AGENT_ENABLED} observability=${FUGUE_OBSERVABILITY_ENABLED} retention=${FUGUE_OBSERVABILITY_RETENTION}"
+  log "observability exporter secret: $([[ -n "$(trim_field "${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}")" ]] && printf '%s' "${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}" || printf '<none>')"
   log "image cache image: ${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}:${FUGUE_IMAGE_CACHE_IMAGE_TAG} enabled=${FUGUE_IMAGE_CACHE_ENABLED}"
   log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
   log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
@@ -4802,9 +4826,22 @@ PY
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
     --set observability.enabled="${FUGUE_OBSERVABILITY_ENABLED}" \
     --set-string observability.retention="${FUGUE_OBSERVABILITY_RETENTION}" \
+    --set-string observability.exporterSecret.existingSecretName="${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}" \
+    --set-string observability.identity.tenantID="${FUGUE_OBSERVABILITY_TENANT_ID}" \
+    --set-string observability.identity.projectID="${FUGUE_OBSERVABILITY_PROJECT_ID}" \
+    --set-string observability.identity.appID="${FUGUE_OBSERVABILITY_APP_ID}" \
+    --set-string observability.identity.runtimeID="${FUGUE_OBSERVABILITY_RUNTIME_ID}" \
+    --set-string observability.identity.component="${FUGUE_OBSERVABILITY_COMPONENT}" \
     --set observability.agent.enabled="${FUGUE_TELEMETRY_AGENT_ENABLED}" \
     --set-string observability.agent.image.repository="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}" \
     --set-string observability.agent.image.tag="${FUGUE_TELEMETRY_AGENT_IMAGE_TAG}" \
+    --set-string observability.agent.runtimeLogPaths="${FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS}" \
+    --set-string observability.agent.prometheusScrapeURLs="${FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS}" \
+    --set-string observability.agent.scrapeInterval="${FUGUE_OBSERVABILITY_SCRAPE_INTERVAL}" \
+    --set-string observability.agent.batchSize="${FUGUE_OBSERVABILITY_BATCH_SIZE}" \
+    --set-string observability.agent.maxPayloadBytes="${FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES}" \
+    --set-string observability.agent.memoryLimitBytes="${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES}" \
+    --set-string observability.agent.retryMaxAttempts="${FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS}" \
     --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
     --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
     --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
