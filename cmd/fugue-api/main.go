@@ -57,6 +57,7 @@ func main() {
 		BundleRevokedKeyIDs:          cfg.BundleRevokedKeyIDs,
 		BundleValidFor:               cfg.BundleValidFor,
 		ImportWorkDir:                cfg.ImportWorkDir,
+		Observability:                cfg.Observability,
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

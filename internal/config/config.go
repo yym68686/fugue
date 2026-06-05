@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"fugue/internal/observability"
 )
 
 type APIConfig struct {
@@ -48,6 +50,12 @@ type APIConfig struct {
 	ImportWorkDir                string
 	ShutdownDrainDelay           time.Duration
 	ShutdownTimeout              time.Duration
+	Observability                observability.Config
+}
+
+type TelemetryAgentConfig struct {
+	BindAddr      string
+	Observability observability.Config
 }
 
 type ControllerConfig struct {
@@ -236,6 +244,7 @@ func APIFromEnv() APIConfig {
 		ImportWorkDir:                getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		ShutdownDrainDelay:           getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
 		ShutdownTimeout:              getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
+		Observability:                ObservabilityFromEnv(),
 	}
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase
@@ -244,6 +253,27 @@ func APIFromEnv() APIConfig {
 		cfg.ClusterJoinRegistryEndpoint = cfg.RegistryPullBase
 	}
 	return cfg
+}
+
+func TelemetryAgentFromEnv() TelemetryAgentConfig {
+	return TelemetryAgentConfig{
+		BindAddr:      getenv("FUGUE_TELEMETRY_AGENT_BIND_ADDR", ":7834"),
+		Observability: ObservabilityFromEnv(),
+	}
+}
+
+func ObservabilityFromEnv() observability.Config {
+	return observability.Config{
+		Enabled:               getenvBool("FUGUE_OBSERVABILITY_ENABLED", false),
+		Retention:             getenvDuration("FUGUE_OBSERVABILITY_RETENTION", observability.DefaultRetention),
+		MetricsRemoteWriteURL: strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL")),
+		LokiURL:               strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_LOKI_URL")),
+		ClickHouseDSN:         strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_CLICKHOUSE_DSN")),
+		OTLPEndpoint:          strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_OTLP_ENDPOINT")),
+		ExportTimeout:         getenvDuration("FUGUE_OBSERVABILITY_EXPORT_TIMEOUT", observability.DefaultExportTimeout),
+		QueueSize:             getenvInt("FUGUE_OBSERVABILITY_QUEUE_SIZE", observability.DefaultQueueSize),
+		SampleRate:            getenvFloat("FUGUE_OBSERVABILITY_SAMPLE_RATE", observability.DefaultSampleRate),
+	}.Normalize()
 }
 
 func ControllerFromEnv() ControllerConfig {
@@ -503,6 +533,19 @@ func getenvInt(key string, fallback int) int {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		log.Printf("invalid integer in %s=%q, using fallback %d", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func getenvFloat(key string, fallback float64) float64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		log.Printf("invalid float in %s=%q, using fallback %f", key, value, fallback)
 		return fallback
 	}
 	return parsed

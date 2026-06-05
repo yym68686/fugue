@@ -18,6 +18,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/observability"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -160,6 +161,65 @@ func TestReadyzReportsKubernetesDependencyAsDegradedWithoutFailingReadiness(t *t
 		`"status":"degraded"`,
 		`"store":{"status":"ok"}`,
 		`"kubernetes_api":{"status":"degraded","message":"cluster unavailable"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
+		}
+	}
+}
+
+func TestReadyzObservabilityDisabledIsSkipped(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"status":"ok"`,
+		`"observability":{"status":"skipped","message":"observability exporters are disabled"}`,
+		`"kubernetes_api":{"status":"skipped","message":"control plane namespace is not configured"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
+		}
+	}
+}
+
+func TestReadyzObservabilityEnabledWithoutExportersIsNonCriticalDegradation(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		Observability: observability.Config{Enabled: true},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"status":"degraded"`,
+		`"observability":{"status":"degraded","message":"observability is enabled but no exporters are configured"}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected readyz response to contain %q, got %s", want, body)

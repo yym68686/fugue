@@ -1,6 +1,10 @@
 package api
 
-import "time"
+import (
+	"time"
+
+	"fugue/internal/observability"
+)
 
 type ServerConfig struct {
 	ControlPlaneNamespace        string
@@ -33,4 +37,5 @@ type ServerConfig struct {
 	BundleRevokedKeyIDs          []string
 	BundleValidFor               time.Duration
 	ImportWorkDir                string
+	Observability                observability.Config
 }

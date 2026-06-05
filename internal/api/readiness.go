@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -32,6 +33,7 @@ func (s *Server) readinessCheckResults(ctx context.Context) map[string]readiness
 	} else {
 		results["store"] = readinessCheckResult{Status: "ok"}
 	}
+	results["observability"] = s.observabilityReadinessResult()
 
 	namespace := strings.TrimSpace(s.controlPlaneNamespace)
 	if namespace == "" {
@@ -44,6 +46,33 @@ func (s *Server) readinessCheckResults(ctx context.Context) map[string]readiness
 
 	results["kubernetes_api"] = s.readinessKubernetesAPIResult(ctx, namespace)
 	return results
+}
+
+func (s *Server) observabilityReadinessResult() readinessCheckResult {
+	cfg := s.observabilityConfig.Normalize()
+	if !cfg.Enabled {
+		return readinessCheckResult{
+			Status:  "skipped",
+			Message: "observability exporters are disabled",
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return readinessCheckResult{
+			Status:  "degraded",
+			Message: err.Error(),
+		}
+	}
+	exporters := cfg.Exporters()
+	if len(exporters) == 0 {
+		return readinessCheckResult{
+			Status:  "degraded",
+			Message: "observability is enabled but no exporters are configured",
+		}
+	}
+	return readinessCheckResult{
+		Status:  "ok",
+		Message: fmt.Sprintf("configured exporters: %s; retention: %s", strings.Join(exporters, ","), cfg.Retention.String()),
+	}
 }
 
 func (s *Server) readinessKubernetesAPIResult(ctx context.Context, namespace string) readinessCheckResult {

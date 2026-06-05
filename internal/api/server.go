@@ -19,6 +19,7 @@ import (
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/observability"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
@@ -60,6 +61,7 @@ type Server struct {
 	bundleSigningPreviousKeyID   string
 	bundleRevokedKeyIDs          []string
 	bundleValidFor               time.Duration
+	observabilityConfig          observability.Config
 	importer                     *sourceimport.Importer
 	resolveRemoteImageDigest     func(context.Context, string) (string, error)
 	inspectBuilderPlacement      builderPlacementInspector
@@ -130,6 +132,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		bundleSigningPreviousKeyID:   strings.TrimSpace(cfg.BundleSigningPreviousKeyID),
 		bundleRevokedKeyIDs:          append([]string(nil), cfg.BundleRevokedKeyIDs...),
 		bundleValidFor:               cfg.BundleValidFor,
+		observabilityConfig:          cfg.Observability.Normalize(),
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
 		inspectBuilderPlacement:      sourceimport.InspectBuilderPlacementForProfile,
