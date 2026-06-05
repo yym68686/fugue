@@ -1331,7 +1331,10 @@ func (c *CLI) newDataWorkspaceAccessCommand() *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use:   "ls <workspace>",
 		Short: "List persistent access grants for a data workspace",
-		Args:  cobra.ExactArgs(1),
+		Example: strings.TrimSpace(`
+  fugue data workspace access ls saebench-eval-weights
+`),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
