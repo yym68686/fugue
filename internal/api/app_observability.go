@@ -54,6 +54,29 @@ func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, 
 	}
 	source := s.appObservabilitySourceStatus("metrics", "metrics query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.metrics.read", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
+	if source.Status != "disabled" {
+		metrics, err := s.queryAppObservabilityMetricsSummary(r.Context(), app.ID, window)
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"source":  source,
+				"window":  window,
+				"metrics": []any{},
+			})
+			return
+		}
+		source.Status = "available"
+		source.Available = true
+		source.Reason = "metrics query backend returned data"
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"source":  source,
+			"window":  window,
+			"metrics": metrics,
+		})
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"source":  source,
 		"window":  window,
@@ -318,6 +341,182 @@ type lokiQueryRangeResponse struct {
 		} `json:"result"`
 	} `json:"data"`
 	Error string `json:"error,omitempty"`
+}
+
+type prometheusQueryResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Metric map[string]string `json:"metric"`
+			Value  []any             `json:"value"`
+		} `json:"result"`
+	} `json:"data"`
+	Error string `json:"error,omitempty"`
+}
+
+type appObservabilityMetricQuery struct {
+	Name  string
+	Unit  string
+	Query string
+}
+
+func (s *Server) queryAppObservabilityMetricsSummary(ctx context.Context, appID string, window appObservabilityWindow) ([]map[string]any, error) {
+	cfg := s.observabilityConfig.Normalize()
+	endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
+	if err != nil {
+		return nil, err
+	}
+	_, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: cfg.ExportTimeout}
+	metrics := []map[string]any{}
+	for _, item := range buildAppObservabilityMetricQueries(appID, window) {
+		samples, err := queryPrometheusInstant(ctx, client, endpoint, item, until, cfg.MaxPayloadBytes)
+		if err != nil {
+			return nil, err
+		}
+		metrics = append(metrics, samples...)
+	}
+	return metrics, nil
+}
+
+func normalizePrometheusQueryURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("metrics query URL is not configured")
+	}
+	cleanPath := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(cleanPath, "/api/v1/query"):
+	case strings.HasSuffix(cleanPath, "/api/v1/query_range"):
+		cleanPath = strings.TrimSuffix(cleanPath, "/query_range") + "/query"
+	case strings.HasSuffix(cleanPath, "/api/v1/write"):
+		cleanPath = strings.TrimSuffix(cleanPath, "/write") + "/query"
+	default:
+		cleanPath = strings.TrimRight(cleanPath, "/") + "/api/v1/query"
+	}
+	parsed.Path = cleanPath
+	parsed.RawQuery = ""
+	return parsed, nil
+}
+
+func buildAppObservabilityMetricQueries(appID string, window appObservabilityWindow) []appObservabilityMetricQuery {
+	selector := `{app_id="` + escapePromQLString(appID) + `"}`
+	errorSelector := `{app_id="` + escapePromQLString(appID) + `",status_class=~"4xx|5xx"}`
+	rangeSelector := prometheusRangeSelector(window)
+	return []appObservabilityMetricQuery{
+		{
+			Name:  "rpm",
+			Unit:  "rpm",
+			Query: "sum(rate(fugue_app_requests_total" + selector + "[" + rangeSelector + "])) * 60",
+		},
+		{
+			Name:  "error_rate",
+			Unit:  "ratio",
+			Query: "sum(rate(fugue_app_response_status_total" + errorSelector + "[" + rangeSelector + "])) / sum(rate(fugue_app_requests_total" + selector + "[" + rangeSelector + "]))",
+		},
+		{
+			Name:  "p95_ttfb_ms",
+			Unit:  "ms",
+			Query: "histogram_quantile(0.95, sum(rate(fugue_app_ttfb_seconds_bucket" + selector + "[" + rangeSelector + "])) by (le)) * 1000",
+		},
+		{
+			Name:  "p95_duration_ms",
+			Unit:  "ms",
+			Query: "histogram_quantile(0.95, sum(rate(fugue_app_duration_seconds_bucket" + selector + "[" + rangeSelector + "])) by (le)) * 1000",
+		},
+	}
+}
+
+func prometheusRangeSelector(window appObservabilityWindow) string {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "300s"
+	}
+	seconds := int(until.Sub(since).Seconds())
+	if seconds < 60 {
+		seconds = 60
+	}
+	if seconds > int(appObservabilityMaxWindow.Seconds()) {
+		seconds = int(appObservabilityMaxWindow.Seconds())
+	}
+	return fmt.Sprintf("%ds", seconds)
+}
+
+func queryPrometheusInstant(ctx context.Context, client *http.Client, endpoint *url.URL, metricQuery appObservabilityMetricQuery, at time.Time, maxPayloadBytes int64) ([]map[string]any, error) {
+	queryURL := *endpoint
+	values := queryURL.Query()
+	values.Set("query", metricQuery.Query)
+	values.Set("time", strconv.FormatInt(at.UTC().Unix(), 10))
+	queryURL.RawQuery = values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build Prometheus query request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("query Prometheus metrics: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPayloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read Prometheus query response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("query Prometheus metrics returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var payload prometheusQueryResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode Prometheus query response: %w", err)
+	}
+	if payload.Status != "" && payload.Status != "success" {
+		return nil, fmt.Errorf("query Prometheus metrics failed: %s", firstNonEmpty(payload.Error, payload.Status))
+	}
+	return prometheusMetricSamples(metricQuery, payload), nil
+}
+
+func prometheusMetricSamples(metricQuery appObservabilityMetricQuery, payload prometheusQueryResponse) []map[string]any {
+	samples := []map[string]any{}
+	for _, result := range payload.Data.Result {
+		if len(result.Value) < 2 {
+			continue
+		}
+		rawValue, ok := result.Value[1].(string)
+		if !ok {
+			continue
+		}
+		value, err := strconv.ParseFloat(rawValue, 64)
+		if err != nil {
+			continue
+		}
+		labels := map[string]string{}
+		for key, label := range result.Metric {
+			if key == "__name__" || key == "app_id" {
+				continue
+			}
+			labels[key] = label
+		}
+		sample := map[string]any{
+			"name":  metricQuery.Name,
+			"value": value,
+			"unit":  metricQuery.Unit,
+		}
+		if len(labels) > 0 {
+			sample["labels"] = labels
+		}
+		samples = append(samples, sample)
+	}
+	return samples
+}
+
+func escapePromQLString(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	return value
 }
 
 func (s *Server) queryAppObservabilityLogs(ctx context.Context, appID string, window appObservabilityWindow, query url.Values) ([]map[string]any, error) {

@@ -267,6 +267,7 @@ func ObservabilityFromEnv() observability.Config {
 		Enabled:               getenvBool("FUGUE_OBSERVABILITY_ENABLED", false),
 		Retention:             getenvDuration("FUGUE_OBSERVABILITY_RETENTION", observability.DefaultRetention),
 		MetricsRemoteWriteURL: strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL")),
+		MetricsQueryURL:       strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_METRICS_QUERY_URL")),
 		LokiURL:               strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_LOKI_URL")),
 		ClickHouseDSN:         strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_CLICKHOUSE_DSN")),
 		OTLPEndpoint:          strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_OTLP_ENDPOINT")),

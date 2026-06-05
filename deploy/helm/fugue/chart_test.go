@@ -390,6 +390,8 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"name: FUGUE_OBSERVABILITY_LOKI_URL",
 		"name: \"fugue-observability-exporters\"",
 		"key: \"FUGUE_OBSERVABILITY_LOKI_URL\"",
+		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
+		"key: \"FUGUE_OBSERVABILITY_METRICS_QUERY_URL\"",
 		"path: /readyz",
 		"path: /healthz",
 	} {
@@ -399,6 +401,8 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 	}
 	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
 	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
+		"key: \"FUGUE_OBSERVABILITY_METRICS_QUERY_URL\"",
 		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
 		"name: \"fugue-observability-exporters\"",
 		"key: \"FUGUE_OBSERVABILITY_CLICKHOUSE_DSN\"",

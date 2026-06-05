@@ -24,6 +24,7 @@ type Config struct {
 	Enabled               bool
 	Retention             time.Duration
 	MetricsRemoteWriteURL string
+	MetricsQueryURL       string
 	LokiURL               string
 	ClickHouseDSN         string
 	OTLPEndpoint          string
@@ -53,6 +54,7 @@ type Status struct {
 	Mode                         string   `json:"mode"`
 	Retention                    string   `json:"retention"`
 	MetricsConfigured            bool     `json:"metrics_configured"`
+	MetricsQueryConfigured       bool     `json:"metrics_query_configured"`
 	LogsConfigured               bool     `json:"logs_configured"`
 	AnalyticsConfigured          bool     `json:"analytics_configured"`
 	OTLPConfigured               bool     `json:"otlp_configured"`
@@ -69,6 +71,7 @@ type Status struct {
 
 func (c Config) Normalize() Config {
 	c.MetricsRemoteWriteURL = strings.TrimSpace(c.MetricsRemoteWriteURL)
+	c.MetricsQueryURL = strings.TrimSpace(c.MetricsQueryURL)
 	c.LokiURL = strings.TrimSpace(c.LokiURL)
 	c.ClickHouseDSN = strings.TrimSpace(c.ClickHouseDSN)
 	c.OTLPEndpoint = strings.TrimSpace(c.OTLPEndpoint)
@@ -135,6 +138,7 @@ func (c Config) Status() Status {
 		Mode:                         c.Mode(),
 		Retention:                    c.Retention.String(),
 		MetricsConfigured:            c.MetricsRemoteWriteURL != "",
+		MetricsQueryConfigured:       c.MetricsQueryURL != "",
 		LogsConfigured:               c.LokiURL != "",
 		AnalyticsConfigured:          c.ClickHouseDSN != "",
 		OTLPConfigured:               c.OTLPEndpoint != "",
@@ -167,6 +171,9 @@ func (c Config) Mode() string {
 func (c Config) Validate() error {
 	c = c.Normalize()
 	if err := validateOptionalHTTPURL("metrics remote write URL", c.MetricsRemoteWriteURL); err != nil {
+		return err
+	}
+	if err := validateOptionalHTTPURL("metrics query URL", c.MetricsQueryURL); err != nil {
 		return err
 	}
 	if err := validateOptionalHTTPURL("Loki URL", c.LokiURL); err != nil {

@@ -41,6 +41,78 @@ func TestAppObservabilityMetricsSummaryDisabledIsStable(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityMetricsSummaryQueriesPrometheus(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	queries := []string{}
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query" {
+			t.Fatalf("expected Prometheus query path, got %q", r.URL.Path)
+		}
+		query := r.URL.Query().Get("query")
+		queries = append(queries, query)
+		value := "1"
+		switch {
+		case strings.Contains(query, "fugue_app_response_status_total"):
+			value = "0.05"
+		case strings.Contains(query, "fugue_app_requests_total"):
+			value = "120"
+		case strings.Contains(query, "fugue_app_ttfb_seconds_bucket"):
+			value = "250"
+		case strings.Contains(query, "fugue_app_duration_seconds_bucket"):
+			value = "900"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "vector",
+				"result": []any{
+					map[string]any{
+						"metric": map[string]string{"app_id": app.ID},
+						"value":  []any{float64(1713571200), value},
+					},
+				},
+			},
+		}); err != nil {
+			t.Errorf("write Prometheus response: %v", err)
+		}
+	}))
+	t.Cleanup(prometheus.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:         true,
+		MetricsQueryURL: prometheus.URL + "/api/v1/write",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/summary?since=5m", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source  appObservabilitySourceStatus `json:"source"`
+		Metrics []map[string]any             `json:"metrics"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" {
+		t.Fatalf("expected available metrics source, got %+v", response.Source)
+	}
+	if len(response.Metrics) != 4 {
+		t.Fatalf("expected four metric samples, got %+v", response.Metrics)
+	}
+	joined := strings.Join(queries, "\n")
+	for _, want := range []string{
+		`app_id="` + app.ID + `"`,
+		"[300s]",
+		"fugue_app_requests_total",
+		"fugue_app_response_status_total",
+		"fugue_app_ttfb_seconds_bucket",
+		"fugue_app_duration_seconds_bucket",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected Prometheus queries to contain %q, got %q", want, joined)
+		}
+	}
+}
+
 func TestAppObservabilityLogsQueriesLoki(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 	var lokiPath string

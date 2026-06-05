@@ -80,6 +80,12 @@ spec:
                   name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
                   key: {{ .Values.observability.exporterSecret.metricsRemoteWriteURLKey | quote }}
                   optional: true
+            - name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.metricsQueryURLKey | quote }}
+                  optional: true
             - name: FUGUE_OBSERVABILITY_LOKI_URL
               valueFrom:
                 secretKeyRef:

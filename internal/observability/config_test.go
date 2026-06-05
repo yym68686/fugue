@@ -25,6 +25,7 @@ func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 	cfg := Config{
 		Enabled:               true,
 		MetricsRemoteWriteURL: "https://metrics.example.test/api/v1/write",
+		MetricsQueryURL:       "https://metrics.example.test/api/v1/query",
 		LokiURL:               "https://loki.example.test",
 		ClickHouseDSN:         "clickhouse://user:secret@example.test/fugue",
 		OTLPEndpoint:          "otel.example.test:4317",
@@ -33,7 +34,7 @@ func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 		Identity:              Identity{TenantID: "tenant_123", Component: "runtime"},
 	}.Normalize()
 	status := cfg.Status()
-	if !status.Enabled || !status.MetricsConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
+	if !status.Enabled || !status.MetricsConfigured || !status.MetricsQueryConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
 		t.Fatalf("expected all exporters to be marked configured, got %+v", status)
 	}
 	if !status.RuntimeLogPipelineConfigured || !status.PrometheusScrapeConfigured || !status.IdentityConfigured {
@@ -77,6 +78,7 @@ func TestConfigModeTreatsMetricsAsBaselineExporter(t *testing.T) {
 func TestConfigValidateRejectsBadURLs(t *testing.T) {
 	for _, cfg := range []Config{
 		{Enabled: true, MetricsRemoteWriteURL: "ftp://metrics.example.test"},
+		{Enabled: true, MetricsQueryURL: "ftp://metrics.example.test"},
 		{Enabled: true, LokiURL: "://bad"},
 		{Enabled: true, ClickHouseDSN: "postgres://clickhouse.example.test"},
 		{Enabled: true, OTLPEndpoint: "missing-port"},

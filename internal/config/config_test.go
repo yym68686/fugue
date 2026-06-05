@@ -28,6 +28,7 @@ func TestObservabilityFromEnvDefaultsToDisabledTwentyFourHourRetention(t *testin
 		"FUGUE_OBSERVABILITY_ENABLED",
 		"FUGUE_OBSERVABILITY_RETENTION",
 		"FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL",
+		"FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
 		"FUGUE_OBSERVABILITY_LOKI_URL",
 		"FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
 		"FUGUE_OBSERVABILITY_OTLP_ENDPOINT",
@@ -54,6 +55,7 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_OBSERVABILITY_ENABLED", "true")
 	t.Setenv("FUGUE_OBSERVABILITY_RETENTION", "2h")
 	t.Setenv("FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL", "https://metrics.example.test/api/v1/write")
+	t.Setenv("FUGUE_OBSERVABILITY_METRICS_QUERY_URL", "https://metrics.example.test/api/v1/query")
 	t.Setenv("FUGUE_OBSERVABILITY_LOKI_URL", "https://loki.example.test")
 	t.Setenv("FUGUE_OBSERVABILITY_CLICKHOUSE_DSN", "clickhouse://user:secret@example.test/fugue")
 	t.Setenv("FUGUE_OBSERVABILITY_OTLP_ENDPOINT", "otel.example.test:4317")
@@ -73,7 +75,7 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 		t.Fatalf("expected configured retention, got %s", cfg.Retention)
 	}
 	status := cfg.Status()
-	if !status.MetricsConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
+	if !status.MetricsConfigured || !status.MetricsQueryConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
 		t.Fatalf("expected all exporters configured, got %+v", status)
 	}
 	if !status.RuntimeLogPipelineConfigured || !status.PrometheusScrapeConfigured || !status.IdentityConfigured {

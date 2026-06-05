@@ -24,6 +24,7 @@ The shared configuration is read from environment variables:
 FUGUE_OBSERVABILITY_ENABLED=false
 FUGUE_OBSERVABILITY_RETENTION=24h
 FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL=
+FUGUE_OBSERVABILITY_METRICS_QUERY_URL=
 FUGUE_OBSERVABILITY_LOKI_URL=
 FUGUE_OBSERVABILITY_CLICKHOUSE_DSN=
 FUGUE_OBSERVABILITY_OTLP_ENDPOINT=
@@ -56,6 +57,7 @@ plain values files. The chart maps these optional secret keys into:
 
 ```text
 FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+FUGUE_OBSERVABILITY_METRICS_QUERY_URL
 FUGUE_OBSERVABILITY_LOKI_URL
 FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
 FUGUE_OBSERVABILITY_OTLP_ENDPOINT
@@ -120,9 +122,9 @@ GET /v1/apps/{id}/observability/diagnosis
 These endpoints enforce app authorization, parse bounded query windows, and
 return source availability metadata. The logs endpoint can query a
 Loki-compatible backend, and the requests/traces endpoints can query
-ClickHouse `request_facts` and `request_spans`. Metrics summary and automated
-diagnosis still return disabled-safe empty responses until their query clients
-are implemented.
+ClickHouse `request_facts` and `request_spans`. Metrics summary can query a
+Prometheus-compatible `/api/v1/query` backend. Automated diagnosis still
+returns disabled-safe empty responses until its query client is implemented.
 
 ## Pipeline Contract
 

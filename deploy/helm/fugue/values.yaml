@@ -20,6 +20,7 @@ observability:
   exporterSecret:
     existingSecretName: ""
     metricsRemoteWriteURLKey: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+    metricsQueryURLKey: FUGUE_OBSERVABILITY_METRICS_QUERY_URL
     lokiURLKey: FUGUE_OBSERVABILITY_LOKI_URL
     clickHouseDSNKey: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
     otlpEndpointKey: FUGUE_OBSERVABILITY_OTLP_ENDPOINT
