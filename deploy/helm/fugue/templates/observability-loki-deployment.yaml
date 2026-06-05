@@ -1,0 +1,88 @@
+{{- if .Values.observability.logs.enabled }}
+{{- $logsNodeSelector := .Values.observability.logs.nodeSelector -}}
+{{- $logsTolerations := default .Values.tolerations .Values.observability.logs.tolerations -}}
+{{- $logsAffinity := default .Values.affinity .Values.observability.logs.affinity -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-observability-loki" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-loki") | nindent 4 }}
+spec:
+  replicas: {{ .Values.observability.logs.replicaCount }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-loki") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-loki") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: loki
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.observability.logs.image.repository "tag" .Values.observability.logs.image.tag "digest" .Values.observability.logs.image.digest) | quote }}
+          imagePullPolicy: {{ .Values.observability.logs.image.pullPolicy }}
+          args:
+            - -config.file=/etc/loki/loki.yml
+            {{- with .Values.observability.logs.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.observability.logs.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 6
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.observability.logs.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+              readOnly: true
+            - name: data
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: {{ printf "%s-observability-loki" (include "fugue.fullname" .) }}
+        - name: data
+          emptyDir: {}
+      {{- with $logsNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $logsAffinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $logsTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

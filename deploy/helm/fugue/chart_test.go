@@ -486,6 +486,79 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 	}
 }
 
+func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	for _, tc := range []struct {
+		kind string
+		name string
+	}{
+		{"Deployment", "fugue-fugue-observability-loki"},
+		{"Service", "fugue-fugue-observability-loki"},
+		{"ConfigMap", "fugue-fugue-observability-loki"},
+	} {
+		if doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name); doc != "" {
+			t.Fatalf("%s/%s should not render by default:\n%s", tc.kind, tc.name, doc)
+		}
+	}
+
+	cmd = exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.logs.enabled=true",
+		"--set-string", "observability.logs.image.repository=grafana/loki",
+		"--set-string", "observability.logs.image.tag=test",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest = string(output)
+	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-observability-loki")
+	serviceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-observability-loki")
+	configDoc := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-loki")
+	for name, doc := range map[string]string{
+		"loki deployment": deploymentDoc,
+		"loki service":    serviceDoc,
+		"loki config":     configDoc,
+	} {
+		if doc == "" {
+			t.Fatalf("expected %s to render:\n%s", name, manifest)
+		}
+	}
+	for _, want := range []string{
+		`image: "grafana/loki:test"`,
+		"- -config.file=/etc/loki/loki.yml",
+		"path: /ready",
+	} {
+		if !strings.Contains(deploymentDoc, want) {
+			t.Fatalf("loki deployment missing %q:\n%s", want, deploymentDoc)
+		}
+	}
+	for _, want := range []string{
+		"auth_enabled: false",
+		"retention_period: 24h",
+		"schema: v13",
+	} {
+		if !strings.Contains(configDoc, want) {
+			t.Fatalf("loki config missing %q:\n%s", want, configDoc)
+		}
+	}
+}
+
 func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

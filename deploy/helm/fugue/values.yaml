@@ -53,6 +53,27 @@ observability:
     tolerations: []
     affinity: {}
     extraArgs: []
+  logs:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: grafana/loki
+      tag: latest
+      digest: ""
+      pullPolicy: IfNotPresent
+    port: 3100
+    retention: 24h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1
+        memory: 1Gi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    extraArgs: []
   agent:
     enabled: false
     replicaCount: 1

@@ -67,6 +67,11 @@ The chart also includes a default-disabled Prometheus trial deployment under
 for platform-internal trials before a production multi-tenant metrics backend
 is selected.
 
+The chart includes a default-disabled Loki trial deployment under
+`observability.logs` with filesystem storage and the same 24 hour diagnostic
+retention default. It is also intended for internal trials before production
+multi-tenant log storage is enabled.
+
 ## Current Runtime Contract
 
 `fugue-telemetry-agent` currently exposes:
