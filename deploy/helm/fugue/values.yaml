@@ -74,6 +74,28 @@ observability:
     tolerations: []
     affinity: {}
     extraArgs: []
+  analytics:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: clickhouse/clickhouse-server
+      tag: latest
+      digest: ""
+      pullPolicy: IfNotPresent
+    httpPort: 8123
+    nativePort: 9000
+    retention: 24h
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 2
+        memory: 2Gi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    extraEnv: []
   agent:
     enabled: false
     replicaCount: 1

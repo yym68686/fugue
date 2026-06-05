@@ -1,0 +1,21 @@
+{{- if .Values.observability.analytics.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-observability-clickhouse" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-clickhouse") | nindent 4 }}
+data:
+  fugue-observability.xml: |
+    <clickhouse>
+      <logger>
+        <level>information</level>
+        <console>true</console>
+      </logger>
+      <profiles>
+        <default>
+          <max_memory_usage>1073741824</max_memory_usage>
+        </default>
+      </profiles>
+    </clickhouse>
+{{- end }}

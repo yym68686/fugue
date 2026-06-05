@@ -559,6 +559,84 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 	}
 }
 
+func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	for _, tc := range []struct {
+		kind string
+		name string
+	}{
+		{"Deployment", "fugue-fugue-observability-clickhouse"},
+		{"Service", "fugue-fugue-observability-clickhouse"},
+		{"ConfigMap", "fugue-fugue-observability-clickhouse"},
+	} {
+		if doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name); doc != "" {
+			t.Fatalf("%s/%s should not render by default:\n%s", tc.kind, tc.name, doc)
+		}
+	}
+
+	cmd = exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.analytics.enabled=true",
+		"--set-string", "observability.analytics.image.repository=clickhouse/clickhouse-server",
+		"--set-string", "observability.analytics.image.tag=test",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest = string(output)
+	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-observability-clickhouse")
+	serviceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-observability-clickhouse")
+	configDoc := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-clickhouse")
+	for name, doc := range map[string]string{
+		"clickhouse deployment": deploymentDoc,
+		"clickhouse service":    serviceDoc,
+		"clickhouse config":     configDoc,
+	} {
+		if doc == "" {
+			t.Fatalf("expected %s to render:\n%s", name, manifest)
+		}
+	}
+	for _, want := range []string{
+		`image: "clickhouse/clickhouse-server:test"`,
+		"name: CLICKHOUSE_DB",
+		"value: fugue_observability",
+		"path: /ping",
+		"name: native",
+		"containerPort: 9000",
+	} {
+		if !strings.Contains(deploymentDoc, want) {
+			t.Fatalf("clickhouse deployment missing %q:\n%s", want, deploymentDoc)
+		}
+	}
+	for _, want := range []string{
+		"<clickhouse>",
+		"<console>true</console>",
+	} {
+		if !strings.Contains(configDoc, want) {
+			t.Fatalf("clickhouse config missing %q:\n%s", want, configDoc)
+		}
+	}
+	if !strings.Contains(serviceDoc, "port: 8123") || !strings.Contains(serviceDoc, "port: 9000") {
+		t.Fatalf("clickhouse service missing expected ports:\n%s", serviceDoc)
+	}
+}
+
 func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

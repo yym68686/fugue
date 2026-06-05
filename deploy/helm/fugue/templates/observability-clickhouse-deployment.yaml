@@ -1,0 +1,95 @@
+{{- if .Values.observability.analytics.enabled }}
+{{- $analyticsNodeSelector := .Values.observability.analytics.nodeSelector -}}
+{{- $analyticsTolerations := default .Values.tolerations .Values.observability.analytics.tolerations -}}
+{{- $analyticsAffinity := default .Values.affinity .Values.observability.analytics.affinity -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-observability-clickhouse" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-clickhouse") | nindent 4 }}
+spec:
+  replicas: {{ .Values.observability.analytics.replicaCount }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-clickhouse") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-clickhouse") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: clickhouse
+          image: {{ include "fugue.imageRef" (dict "repository" .Values.observability.analytics.image.repository "tag" .Values.observability.analytics.image.tag "digest" .Values.observability.analytics.image.digest) | quote }}
+          imagePullPolicy: {{ .Values.observability.analytics.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.observability.analytics.httpPort }}
+              protocol: TCP
+            - name: native
+              containerPort: {{ .Values.observability.analytics.nativePort }}
+              protocol: TCP
+          env:
+            - name: CLICKHOUSE_DB
+              value: fugue_observability
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+            {{- with .Values.observability.analytics.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.observability.analytics.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d/fugue-observability.xml
+              subPath: fugue-observability.xml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/clickhouse
+      volumes:
+        - name: config
+          configMap:
+            name: {{ printf "%s-observability-clickhouse" (include "fugue.fullname" .) }}
+        - name: data
+          emptyDir: {}
+      {{- with $analyticsNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $analyticsAffinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $analyticsTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

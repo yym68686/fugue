@@ -72,6 +72,11 @@ The chart includes a default-disabled Loki trial deployment under
 retention default. It is also intended for internal trials before production
 multi-tenant log storage is enabled.
 
+The chart includes a default-disabled ClickHouse trial deployment under
+`observability.analytics` with `emptyDir` storage. It is only a platform
+internal analytics trial path; it is not a business database and does not
+replace app-owned product logs or billing data.
+
 ## Current Runtime Contract
 
 `fugue-telemetry-agent` currently exposes:
