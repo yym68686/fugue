@@ -145,12 +145,13 @@ func (s *Server) handleGetAppObservabilityDiagnosis(w http.ResponseWriter, r *ht
 func (s *Server) appObservabilitySourceStatus(requiredExporter string, queryPendingReason string) appObservabilitySourceStatus {
 	cfg := s.observabilityConfig.Normalize()
 	status := cfg.Status()
+	activeExporters := append([]string{}, status.Exporters...)
 	source := appObservabilitySourceStatus{
 		Available:       false,
 		Status:          "disabled",
 		Mode:            status.Mode,
 		Retention:       status.Retention,
-		ActiveExporters: append([]string(nil), status.Exporters...),
+		ActiveExporters: activeExporters,
 		Reason:          "observability is disabled",
 	}
 	if !cfg.Enabled {

@@ -28,6 +28,9 @@ func TestAppObservabilityMetricsSummaryDisabledIsStable(t *testing.T) {
 	if response.Source.Reason != "observability is disabled" {
 		t.Fatalf("unexpected disabled reason: %+v", response.Source)
 	}
+	if response.Source.ActiveExporters == nil {
+		t.Fatalf("active_exporters should be an empty array, got nil")
+	}
 	if len(response.Metrics) != 0 {
 		t.Fatalf("expected empty metrics, got %+v", response.Metrics)
 	}
