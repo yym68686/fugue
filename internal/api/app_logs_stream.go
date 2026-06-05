@@ -21,7 +21,7 @@ const (
 	logStreamCursorVersion = 1
 	logStreamRetryMS       = 3000
 	logStreamReadBuffer    = 64 * 1024
-	logStreamMaxLineBytes  = 1024 * 1024
+	logStreamMaxLineBytes  = 256 * 1024
 )
 
 type logStreamTuning struct {
