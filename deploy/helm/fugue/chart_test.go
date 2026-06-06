@@ -842,6 +842,7 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"name: native",
 		"containerPort: 9000",
 		"mountPath: /docker-entrypoint-initdb.d/init-observability.sql",
+		"checksum/clickhouse-config:",
 	} {
 		if !strings.Contains(deploymentDoc, want) {
 			t.Fatalf("clickhouse deployment missing %q:\n%s", want, deploymentDoc)
