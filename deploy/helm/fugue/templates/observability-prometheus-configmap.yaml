@@ -10,6 +10,15 @@ data:
     global:
       scrape_interval: {{ .Values.observability.metrics.scrapeInterval }}
       evaluation_interval: {{ .Values.observability.metrics.evaluationInterval }}
+    rule_files:
+      - /etc/prometheus/fugue-alerts.yml
+    {{ if .Values.observability.alerts.enabled }}
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+                - {{ printf "%s-observability-alertmanager:%v" (include "fugue.fullname" .) .Values.observability.alerts.port | quote }}
+    {{ end }}
     scrape_configs:
       - job_name: fugue-observability-prometheus
         metrics_path: /metrics
@@ -23,7 +32,75 @@ data:
           - targets:
               - {{ printf "%s-telemetry-agent:%v" (include "fugue.fullname" .) .Values.observability.agent.port | quote }}
       {{ end }}
+      - job_name: fugue-control-plane-pods
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - {{ .Release.Namespace | quote }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+            regex: {{ .Release.Name | quote }}
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            regex: "edge|dns|telemetry-agent|observability-prometheus"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: "http"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            target_label: component
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - target_label: namespace
+            replacement: {{ .Release.Namespace | quote }}
       {{ with .Values.observability.metrics.extraScrapeConfigs }}
 {{ toYaml . | nindent 6 }}
       {{ end }}
+  fugue-alerts.yml: |
+    groups:
+      - name: fugue-default-app-health
+        rules:
+          - alert: FugueAppNoReadyPods
+            expr: fugue_app_ready == 0
+            for: 5m
+            labels:
+              severity: page
+            annotations:
+              summary: "Fugue app has no ready pods"
+              description: "An app reported no ready pods for more than 5 minutes."
+          - alert: FugueAppHighErrorRate
+            expr: |
+              (
+                sum by (tenant_id, project_id, app_id) (rate(fugue_app_response_status_total{status_class=~"5xx"}[5m]))
+                /
+                sum by (tenant_id, project_id, app_id) (rate(fugue_app_requests_total[5m]))
+              ) > 0.05
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue app 5xx rate is high"
+              description: "An app exceeded 5% 5xx responses for more than 5 minutes."
+          - alert: FugueAppHighP95Duration
+            expr: |
+              histogram_quantile(
+                0.95,
+                sum by (tenant_id, project_id, app_id, le) (rate(fugue_app_duration_seconds_bucket[5m]))
+              ) > 5
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue app p95 duration is high"
+              description: "An app exceeded 5 seconds p95 duration for more than 10 minutes."
+          - alert: FugueAppRestartBurst
+            expr: increase(fugue_app_restarts_total[10m]) > 3
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue app restarted repeatedly"
+              description: "An app restarted more than 3 times in 10 minutes."
 {{- end }}

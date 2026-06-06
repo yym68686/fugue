@@ -472,6 +472,7 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 	for _, want := range []string{
 		`image: "prom/prometheus:test"`,
 		"--storage.tsdb.retention.time=24h",
+		"--web.enable-remote-write-receiver",
 		"path: /-/ready",
 		"path: /-/healthy",
 	} {
@@ -480,12 +481,160 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
+		"rule_files:",
+		"/etc/prometheus/fugue-alerts.yml",
 		"job_name: fugue-observability-prometheus",
 		"job_name: fugue-telemetry-agent",
+		"job_name: fugue-control-plane-pods",
+		"kubernetes_sd_configs:",
+		"regex: \"edge|dns|telemetry-agent|observability-prometheus\"",
 		"fugue-fugue-telemetry-agent:7834",
+		"FugueAppNoReadyPods",
+		"FugueAppHighErrorRate",
 	} {
 		if !strings.Contains(configDoc, want) {
 			t.Fatalf("prometheus config missing %q:\n%s", want, configDoc)
+		}
+	}
+}
+
+func TestObservabilityInternalBackendsInjectLocalEndpoints(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.enabled=true",
+		"--set", "observability.agent.enabled=true",
+		"--set-string", "observability.agent.image.repository=ghcr.io/example/fugue-telemetry-agent",
+		"--set-string", "observability.agent.image.tag=agent-test",
+		"--set", "observability.metrics.enabled=true",
+		"--set", "observability.logs.enabled=true",
+		"--set", "observability.analytics.enabled=true",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	agentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-telemetry-agent")
+	for name, doc := range map[string]string{
+		"api":             apiDoc,
+		"telemetry-agent": agentDoc,
+	} {
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s deployment:\n%s", name, manifest)
+		}
+	}
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
+		"value: \"http://fugue-fugue-observability-prometheus:9090/api/v1/query\"",
+		"name: FUGUE_OBSERVABILITY_LOKI_URL",
+		"value: \"http://fugue-fugue-observability-loki:3100/loki/api/v1/push\"",
+		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
+		"value: \"http://fugue-fugue-observability-clickhouse:8123?database=fugue_observability\"",
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment missing local observability endpoint %q:\n%s", want, apiDoc)
+		}
+	}
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL",
+		"value: \"http://fugue-fugue-observability-prometheus:9090/api/v1/write\"",
+		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
+		"value: \"http://fugue-fugue-observability-prometheus:9090/api/v1/query\"",
+		"name: FUGUE_OBSERVABILITY_LOKI_URL",
+		"value: \"http://fugue-fugue-observability-loki:3100/loki/api/v1/push\"",
+		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
+		"value: \"http://fugue-fugue-observability-clickhouse:8123?database=fugue_observability\"",
+	} {
+		if !strings.Contains(agentDoc, want) {
+			t.Fatalf("telemetry agent deployment missing local observability endpoint %q:\n%s", want, agentDoc)
+		}
+	}
+}
+
+func TestObservabilityAlertmanagerIsDisabledByDefaultAndCanRender(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	for _, tc := range []struct {
+		kind string
+		name string
+	}{
+		{"Deployment", "fugue-fugue-observability-alertmanager"},
+		{"Service", "fugue-fugue-observability-alertmanager"},
+		{"ConfigMap", "fugue-fugue-observability-alertmanager"},
+	} {
+		if doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name); doc != "" {
+			t.Fatalf("%s/%s should not render by default:\n%s", tc.kind, tc.name, doc)
+		}
+	}
+
+	cmd = exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.metrics.enabled=true",
+		"--set", "observability.alerts.enabled=true",
+		"--set-string", "observability.alerts.image.repository=prom/alertmanager",
+		"--set-string", "observability.alerts.image.tag=test",
+		"--set-string", "observability.alerts.webhookURL=https://alerts.example.test/hook",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest = string(output)
+	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-observability-alertmanager")
+	serviceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-observability-alertmanager")
+	configDoc := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-alertmanager")
+	for name, doc := range map[string]string{
+		"alertmanager deployment": deploymentDoc,
+		"alertmanager service":    serviceDoc,
+		"alertmanager config":     configDoc,
+	} {
+		if doc == "" {
+			t.Fatalf("expected %s to render:\n%s", name, manifest)
+		}
+	}
+	for _, want := range []string{
+		`image: "prom/alertmanager:test"`,
+		"--config.file=/etc/alertmanager/alertmanager.yml",
+		"path: /-/ready",
+		"path: /-/healthy",
+	} {
+		if !strings.Contains(deploymentDoc, want) {
+			t.Fatalf("alertmanager deployment missing %q:\n%s", want, deploymentDoc)
+		}
+	}
+	for _, want := range []string{
+		"receiver: default",
+		"group_by: [\"tenant_id\", \"project_id\", \"app_id\", \"alertname\"]",
+		"url: \"https://alerts.example.test/hook\"",
+		"send_resolved: true",
+	} {
+		if !strings.Contains(configDoc, want) {
+			t.Fatalf("alertmanager config missing %q:\n%s", want, configDoc)
 		}
 	}
 }

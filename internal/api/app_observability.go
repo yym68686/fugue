@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/model"
 	"fugue/internal/observability"
 )
 
@@ -69,6 +70,10 @@ type appObservabilityRequestStreamEndEvent struct {
 
 func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
@@ -109,8 +114,68 @@ func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, 
 	})
 }
 
+func (s *Server) handleQueryAppObservabilityMetrics(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
+	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
+	if !allowed {
+		return
+	}
+	window, ok := readAppObservabilityWindow(w, r)
+	if !ok {
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	if query == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+	source := s.appObservabilitySourceStatus("metrics", "metrics query backend is not wired yet")
+	auditMetadata := appObservabilityAuditMetadata(window)
+	auditMetadata["query_present"] = "true"
+	s.appendAudit(principal, "app.observability.metrics.query", "app", app.ID, app.TenantID, auditMetadata)
+	if source.Status != "disabled" {
+		metrics, err := s.queryAppObservabilityMetrics(r.Context(), app.ID, window, query)
+		if err != nil {
+			source.Status = "degraded"
+			source.Available = false
+			source.Reason = err.Error()
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"source":  source,
+				"window":  window,
+				"query":   query,
+				"metrics": []any{},
+			})
+			return
+		}
+		source.Status = "available"
+		source.Available = true
+		source.Reason = "metrics query backend returned data"
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"source":  source,
+			"window":  window,
+			"query":   query,
+			"metrics": metrics,
+		})
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"source":  source,
+		"window":  window,
+		"query":   query,
+		"metrics": []any{},
+	})
+}
+
 func (s *Server) handleQueryAppObservabilityLogs(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
@@ -153,6 +218,10 @@ func (s *Server) handleQueryAppObservabilityLogs(w http.ResponseWriter, r *http.
 
 func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
@@ -195,6 +264,10 @@ func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *ht
 
 func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
@@ -304,6 +377,10 @@ func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *
 
 func (s *Server) handleGetAppObservabilityTrace(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
@@ -347,6 +424,10 @@ func (s *Server) handleGetAppObservabilityTrace(w http.ResponseWriter, r *http.R
 
 func (s *Server) handleGetAppObservabilityDiagnosis(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	if !principalCanReadAppObservability(principal) {
+		httpx.WriteError(w, http.StatusForbidden, "missing app.observability.read scope")
+		return
+	}
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
 	if !allowed {
 		return
@@ -377,6 +458,14 @@ func (s *Server) handleGetAppObservabilityDiagnosis(w http.ResponseWriter, r *ht
 		"window":    window,
 		"diagnosis": diagnosis,
 	})
+}
+
+func principalCanReadAppObservability(principal model.Principal) bool {
+	return principal.IsPlatformAdmin() ||
+		principal.HasScope("app.observability.read") ||
+		principal.HasScope("app.read") ||
+		principal.HasScope("app.write") ||
+		principal.HasScope("app.deploy")
 }
 
 func (s *Server) appObservabilitySourceStatus(requiredExporter string, queryPendingReason string) appObservabilitySourceStatus {
@@ -594,6 +683,24 @@ func (s *Server) queryAppObservabilityMetricsSummary(ctx context.Context, appID 
 	return metrics, nil
 }
 
+func (s *Server) queryAppObservabilityMetrics(ctx context.Context, appID string, window appObservabilityWindow, rawQuery string) ([]map[string]any, error) {
+	cfg := s.observabilityConfig.Normalize()
+	endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
+	if err != nil {
+		return nil, err
+	}
+	_, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return nil, err
+	}
+	metricQuery, err := buildAppObservabilityAdhocMetricQuery(appID, window, rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: cfg.ExportTimeout}
+	return queryPrometheusInstant(ctx, client, endpoint, metricQuery, until, cfg.MaxPayloadBytes)
+}
+
 func normalizePrometheusQueryURL(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -612,6 +719,43 @@ func normalizePrometheusQueryURL(raw string) (*url.URL, error) {
 	parsed.Path = cleanPath
 	parsed.RawQuery = ""
 	return parsed, nil
+}
+
+func buildAppObservabilityAdhocMetricQuery(appID string, window appObservabilityWindow, rawQuery string) (appObservabilityMetricQuery, error) {
+	normalized := strings.ToLower(strings.TrimSpace(rawQuery))
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	if normalized == "" {
+		return appObservabilityMetricQuery{}, fmt.Errorf("query is required")
+	}
+	queries := buildAppObservabilityMetricQueries(appID, window)
+	for _, query := range queries {
+		name := strings.ReplaceAll(strings.ToLower(query.Name), "_", " ")
+		if normalized == name {
+			return query, nil
+		}
+	}
+	aliases := map[string]string{
+		"requests":     "rpm",
+		"request rate": "rpm",
+		"rpm":          "rpm",
+		"errors":       "error_rate",
+		"error rate":   "error_rate",
+		"p95 latency":  "p95_duration_ms",
+		"latency":      "p95_duration_ms",
+		"duration":     "p95_duration_ms",
+		"p95 duration": "p95_duration_ms",
+		"ttfb":         "p95_ttfb_ms",
+		"p95 ttfb":     "p95_ttfb_ms",
+	}
+	if target, ok := aliases[normalized]; ok {
+		for _, query := range queries {
+			if query.Name == target {
+				return query, nil
+			}
+		}
+	}
+	return appObservabilityMetricQuery{}, fmt.Errorf("unsupported metrics query %q; use rpm, error_rate, p95_ttfb_ms, p95_duration_ms, or a supported alias", rawQuery)
 }
 
 func buildAppObservabilityMetricQueries(appID string, window appObservabilityWindow) []appObservabilityMetricQuery {

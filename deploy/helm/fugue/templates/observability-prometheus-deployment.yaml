@@ -42,6 +42,7 @@ spec:
             - --storage.tsdb.path=/prometheus
             - --storage.tsdb.retention.time={{ .Values.observability.metrics.retention }}
             - --web.listen-address=:{{ .Values.observability.metrics.port }}
+            - --web.enable-remote-write-receiver
             {{- with .Values.observability.metrics.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

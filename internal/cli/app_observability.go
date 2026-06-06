@@ -27,6 +27,16 @@ func (c *CLI) newAppMetricsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if strings.TrimSpace(opts.Query) != "" {
+				response, err := client.QueryAppObservabilityMetrics(app.ID, opts)
+				if err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, response)
+				}
+				return renderAppObservabilityMetricsQuery(c.stdout, response)
+			}
 			response, err := client.GetAppObservabilityMetricsSummary(app.ID, opts)
 			if err != nil {
 				return err
@@ -38,6 +48,7 @@ func (c *CLI) newAppMetricsCommand() *cobra.Command {
 		},
 	}
 	addAppObservabilityWindowFlags(cmd, &opts.appObservabilityWindowOptions)
+	cmd.Flags().StringVar(&opts.Query, "query", "", "Supported metrics query or alias, such as rpm, error_rate, p95_ttfb_ms, or p95 latency")
 	return cmd
 }
 
@@ -116,6 +127,25 @@ func renderAppObservabilityMetricsSummary(w io.Writer, response appObservability
 		return err
 	}
 	if err := writeKeyValues(w, kvPair{Key: "metrics", Value: formatInt(len(response.Metrics))}); err != nil {
+		return err
+	}
+	if len(response.Metrics) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeGenericMapTable(w, response.Metrics)
+}
+
+func renderAppObservabilityMetricsQuery(w io.Writer, response appObservabilityMetricsQueryResponse) error {
+	if err := renderAppObservabilityHeader(w, response.Source, response.Window); err != nil {
+		return err
+	}
+	if err := writeKeyValues(w,
+		kvPair{Key: "query", Value: strings.TrimSpace(response.Query)},
+		kvPair{Key: "metrics", Value: formatInt(len(response.Metrics))},
+	); err != nil {
 		return err
 	}
 	if len(response.Metrics) == 0 {

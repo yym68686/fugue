@@ -46,6 +46,47 @@ func TestRunAppMetricsUsesObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunAppMetricsQueryUsesObservabilityEndpoint(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			writeObservabilityTestApp(w)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/metrics/query":
+			if got := r.URL.Query().Get("since"); got != "5m" {
+				t.Fatalf("expected since=5m, got %q", got)
+			}
+			if got := r.URL.Query().Get("query"); got != "p95 latency" {
+				t.Fatalf("expected query=p95 latency, got %q", got)
+			}
+			writeDisabledObservabilityResponse(w, `{"query":"p95 latency","metrics":[]}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "metrics", "demo",
+		"--since", "5m",
+		"--query", "p95 latency",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app metrics --query: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"observability_status=disabled", "query=p95 latency", "metrics=0"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAppLogsQueryUsesObservabilityEndpoint(t *testing.T) {
 	t.Parallel()
 

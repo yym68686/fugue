@@ -113,6 +113,82 @@ func TestAppObservabilityMetricsSummaryQueriesPrometheus(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityMetricsQueryUsesSupportedAlias(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var prometheusQuery string
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query" {
+			t.Fatalf("expected Prometheus query path, got %q", r.URL.Path)
+		}
+		prometheusQuery = r.URL.Query().Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "vector",
+				"result": []any{
+					map[string]any{
+						"metric": map[string]string{"app_id": app.ID},
+						"value":  []any{float64(1713571200), "900"},
+					},
+				},
+			},
+		}); err != nil {
+			t.Errorf("write Prometheus response: %v", err)
+		}
+	}))
+	t.Cleanup(prometheus.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:         true,
+		MetricsQueryURL: prometheus.URL,
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/query?since=5m&query=p95+latency", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source  appObservabilitySourceStatus `json:"source"`
+		Query   string                       `json:"query"`
+		Metrics []map[string]any             `json:"metrics"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" {
+		t.Fatalf("expected available metrics source, got %+v", response.Source)
+	}
+	if response.Query != "p95 latency" {
+		t.Fatalf("expected echoed query, got %+v", response)
+	}
+	for _, want := range []string{
+		`app_id="` + app.ID + `"`,
+		"fugue_app_duration_seconds_bucket",
+		"[300s]",
+	} {
+		if !strings.Contains(prometheusQuery, want) {
+			t.Fatalf("expected Prometheus query to contain %q, got %q", want, prometheusQuery)
+		}
+	}
+	if len(response.Metrics) != 1 || response.Metrics[0]["name"] != "p95_duration_ms" {
+		t.Fatalf("expected p95 duration metric, got %+v", response.Metrics)
+	}
+}
+
+func TestAppObservabilityRequiresReadScope(t *testing.T) {
+	stateStore, server, _, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	_, apiKey, err := stateStore.CreateAPIKey(app.TenantID, "no-observability", []string{"billing.write"})
+	if err != nil {
+		t.Fatalf("create restricted api key: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/summary?since=30m", apiKey, nil)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "app.observability.read") {
+		t.Fatalf("expected missing scope message, got %s", recorder.Body.String())
+	}
+}
+
 func TestAppObservabilityLogsQueriesLoki(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 	var lokiPath string

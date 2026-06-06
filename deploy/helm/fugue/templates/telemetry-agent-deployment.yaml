@@ -104,6 +104,21 @@ spec:
                   name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
                   key: {{ .Values.observability.exporterSecret.otlpEndpointKey | quote }}
                   optional: true
+            {{- else }}
+            {{- if .Values.observability.metrics.enabled }}
+            - name: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL
+              value: {{ printf "http://%s-observability-prometheus:%v/api/v1/write" (include "fugue.fullname" .) .Values.observability.metrics.port | quote }}
+            - name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL
+              value: {{ printf "http://%s-observability-prometheus:%v/api/v1/query" (include "fugue.fullname" .) .Values.observability.metrics.port | quote }}
+            {{- end }}
+            {{- if .Values.observability.logs.enabled }}
+            - name: FUGUE_OBSERVABILITY_LOKI_URL
+              value: {{ printf "http://%s-observability-loki:%v/loki/api/v1/push" (include "fugue.fullname" .) .Values.observability.logs.port | quote }}
+            {{- end }}
+            {{- if .Values.observability.analytics.enabled }}
+            - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+              value: {{ printf "http://%s-observability-clickhouse:%v?database=fugue_observability" (include "fugue.fullname" .) .Values.observability.analytics.httpPort | quote }}
+            {{- end }}
             {{- end }}
             {{- with .Values.observability.agent.extraEnv }}
             {{- toYaml . | nindent 12 }}

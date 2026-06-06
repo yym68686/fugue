@@ -54,6 +54,27 @@ observability:
     tolerations: []
     affinity: {}
     extraArgs: []
+  alerts:
+    enabled: false
+    replicaCount: 1
+    image:
+      repository: prom/alertmanager
+      tag: latest
+      digest: ""
+      pullPolicy: IfNotPresent
+    port: 9093
+    webhookURL: ""
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 250m
+        memory: 256Mi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    extraArgs: []
   logs:
     enabled: false
     replicaCount: 1

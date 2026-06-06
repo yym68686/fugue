@@ -37,6 +37,7 @@ type appObservabilityWindowOptions struct {
 
 type appObservabilityMetricsOptions struct {
 	appObservabilityWindowOptions
+	Query string
 }
 
 type appObservabilityLogsOptions struct {
@@ -65,6 +66,13 @@ type appObservabilityDiagnosisOptions struct {
 type appObservabilityMetricsSummaryResponse struct {
 	Source  appObservabilitySourceStatus `json:"source"`
 	Window  appObservabilityWindow       `json:"window"`
+	Metrics []map[string]any             `json:"metrics"`
+}
+
+type appObservabilityMetricsQueryResponse struct {
+	Source  appObservabilitySourceStatus `json:"source"`
+	Window  appObservabilityWindow       `json:"window"`
+	Query   string                       `json:"query"`
 	Metrics []map[string]any             `json:"metrics"`
 }
 
@@ -102,6 +110,23 @@ func (c *Client) GetAppObservabilityMetricsSummary(id string, opts appObservabil
 	var response appObservabilityMetricsSummaryResponse
 	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return appObservabilityMetricsSummaryResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) QueryAppObservabilityMetrics(id string, opts appObservabilityMetricsOptions) (appObservabilityMetricsQueryResponse, error) {
+	values := url.Values{}
+	appendAppObservabilityWindowValues(values, opts.appObservabilityWindowOptions)
+	if query := strings.TrimSpace(opts.Query); query != "" {
+		values.Set("query", query)
+	}
+	relative := appObservabilityPath(id, "metrics", "query")
+	if encoded := values.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appObservabilityMetricsQueryResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appObservabilityMetricsQueryResponse{}, err
 	}
 	return response, nil
 }

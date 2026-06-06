@@ -1,0 +1,26 @@
+{{- if .Values.observability.alerts.enabled }}
+{{- if not .Values.observability.metrics.enabled }}
+{{- fail "observability.metrics.enabled must be true when observability.alerts.enabled=true" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-observability-alertmanager" (include "fugue.fullname" .) }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-alertmanager") | nindent 4 }}
+data:
+  alertmanager.yml: |
+    route:
+      receiver: default
+      group_by: ["tenant_id", "project_id", "app_id", "alertname"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+    receivers:
+      - name: default
+        {{- if .Values.observability.alerts.webhookURL }}
+        webhook_configs:
+          - url: {{ .Values.observability.alerts.webhookURL | quote }}
+            send_resolved: true
+        {{- end }}
+{{- end }}

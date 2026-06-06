@@ -3613,6 +3613,33 @@ paths:
                 $ref: "#/components/schemas/AppObservabilityMetricsSummaryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/observability/metrics/query:
+    get:
+      operationId: queryAppObservabilityMetrics
+      summary: Query App Observability Metrics
+      tags: [Apps]
+      x-fugue-handler: handleQueryAppObservabilityMetrics
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/SinceQueryParam"
+        - $ref: "#/components/parameters/UntilQueryParam"
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+          description: Supported Fugue metrics query or alias, such as rpm, error_rate, p95_ttfb_ms, or p95 latency.
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppObservabilityMetricsQueryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/observability/logs/query:
     get:
       operationId: queryAppObservabilityLogs
@@ -14552,6 +14579,21 @@ components:
           $ref: "#/components/schemas/ObservabilitySourceStatus"
         window:
           $ref: "#/components/schemas/ObservabilityWindow"
+        metrics:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObservabilityMetricSample"
+    AppObservabilityMetricsQueryResponse:
+      type: object
+      additionalProperties: false
+      required: [source, window, query, metrics]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        query:
+          type: string
         metrics:
           type: array
           items:
