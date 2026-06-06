@@ -118,6 +118,7 @@ func TestLokiExporterPushesLogEventsWithAllowedLabels(t *testing.T) {
 				"project_id": "project_123",
 				"app_id":     "app_123",
 				"runtime_id": "runtime_123",
+				"namespace":  "fg-tenant",
 				"component":  "runtime",
 				"level":      "info",
 				"trace_id":   "trace-high-cardinality",
@@ -132,7 +133,7 @@ func TestLokiExporterPushesLogEventsWithAllowedLabels(t *testing.T) {
 		t.Fatalf("unexpected Loki streams: %+v", payload)
 	}
 	labels := payload.Streams[0].Stream
-	for _, key := range []string{"tenant_id", "project_id", "app_id", "runtime_id", "component", "level"} {
+	for _, key := range []string{"tenant_id", "project_id", "app_id", "runtime_id", "namespace", "component", "level"} {
 		if labels[key] == "" {
 			t.Fatalf("expected Loki label %s in %+v", key, labels)
 		}

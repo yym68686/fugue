@@ -131,6 +131,15 @@ observability:
     runtimeLogPaths: ""
     prometheusScrapeURLs: ""
     scrapeInterval: 30s
+    kubernetesLogs:
+      enabled: true
+      namespaces: ""
+      namespacePrefixes: "fg-"
+      labelSelector: ""
+      pollInterval: 15s
+      tailLines: 200
+      maxPods: 500
+      maxLinesPerCycle: 5000
     batchSize: 128
     maxPayloadBytes: 1048576
     memoryLimitBytes: 67108864

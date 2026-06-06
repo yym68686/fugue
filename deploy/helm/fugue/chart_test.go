@@ -363,6 +363,9 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"--set-string", "observability.identity.component=telemetry-agent",
 		"--set-string", "observability.agent.runtimeLogPaths=/var/log/pods/app.log",
 		"--set-string", "observability.agent.prometheusScrapeURLs=http://127.0.0.1:9100/metrics",
+		"--set-string", "observability.agent.kubernetesLogs.namespaces=fugue-system,fg-tenant",
+		"--set-string", "observability.agent.kubernetesLogs.namespacePrefixes=fg-",
+		"--set-string", "observability.agent.kubernetesLogs.labelSelector=app.kubernetes.io/managed-by=fugue",
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -385,6 +388,14 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"value: \"/var/log/pods/app.log\"",
 		"name: FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS",
 		"value: \"http://127.0.0.1:9100/metrics\"",
+		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED",
+		"value: \"true\"",
+		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES",
+		"value: \"fugue-system,fg-tenant\"",
+		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES",
+		"value: \"fg-\"",
+		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR",
+		"value: \"app.kubernetes.io/managed-by=fugue\"",
 		"name: FUGUE_OBSERVABILITY_TENANT_ID",
 		"value: \"tenant_test\"",
 		"name: FUGUE_OBSERVABILITY_LOKI_URL",

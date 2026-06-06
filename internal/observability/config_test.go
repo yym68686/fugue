@@ -23,15 +23,18 @@ func TestConfigNormalizeKeepsObservabilityDisabledByDefault(t *testing.T) {
 
 func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 	cfg := Config{
-		Enabled:               true,
-		MetricsRemoteWriteURL: "https://metrics.example.test/api/v1/write",
-		MetricsQueryURL:       "https://metrics.example.test/api/v1/query",
-		LokiURL:               "https://loki.example.test",
-		ClickHouseDSN:         "clickhouse://user:secret@example.test/fugue",
-		OTLPEndpoint:          "otel.example.test:4317",
-		RuntimeLogPaths:       []string{"/var/log/pods/app.log"},
-		PrometheusScrapeURLs:  []string{"http://127.0.0.1:9100/metrics"},
-		Identity:              Identity{TenantID: "tenant_123", Component: "runtime"},
+		Enabled:                        true,
+		MetricsRemoteWriteURL:          "https://metrics.example.test/api/v1/write",
+		MetricsQueryURL:                "https://metrics.example.test/api/v1/query",
+		LokiURL:                        "https://loki.example.test",
+		ClickHouseDSN:                  "clickhouse://user:secret@example.test/fugue",
+		OTLPEndpoint:                   "otel.example.test:4317",
+		RuntimeLogPaths:                []string{"/var/log/pods/app.log"},
+		PrometheusScrapeURLs:           []string{"http://127.0.0.1:9100/metrics"},
+		KubernetesLogsEnabled:          true,
+		KubernetesLogNamespaces:        []string{"fugue-system"},
+		KubernetesLogNamespacePrefixes: []string{"fg-"},
+		Identity:                       Identity{TenantID: "tenant_123", Component: "runtime"},
 	}.Normalize()
 	status := cfg.Status()
 	if !status.Enabled || !status.MetricsConfigured || !status.MetricsQueryConfigured || !status.LogsConfigured || !status.AnalyticsConfigured || !status.OTLPConfigured {
@@ -39,6 +42,9 @@ func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 	}
 	if !status.RuntimeLogPipelineConfigured || !status.PrometheusScrapeConfigured || !status.IdentityConfigured {
 		t.Fatalf("expected input pipelines and identity to be marked configured, got %+v", status)
+	}
+	if !status.KubernetesLogsConfigured {
+		t.Fatalf("expected Kubernetes log pipeline to be marked configured, got %+v", status)
 	}
 	if status.Retention != "24h0m0s" {
 		t.Fatalf("expected normalized retention, got %s", status.Retention)

@@ -34,6 +34,10 @@ func TestObservabilityFromEnvDefaultsToDisabledTwentyFourHourRetention(t *testin
 		"FUGUE_OBSERVABILITY_OTLP_ENDPOINT",
 		"FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS",
 		"FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS",
+		"FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED",
+		"FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES",
+		"FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES",
+		"FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR",
 		"FUGUE_OBSERVABILITY_COMPONENT",
 	} {
 		t.Setenv(key, "")
@@ -61,6 +65,14 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_OBSERVABILITY_OTLP_ENDPOINT", "otel.example.test:4317")
 	t.Setenv("FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS", "/var/log/pods/app.log,/var/log/pods/app.log")
 	t.Setenv("FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS", "http://127.0.0.1:9100/metrics")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED", "true")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES", "fugue-system,fg-tenant")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES", "fg-")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR", "app.kubernetes.io/managed-by=fugue")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL", "7s")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES", "33")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS", "44")
+	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE", "55")
 	t.Setenv("FUGUE_OBSERVABILITY_TENANT_ID", "tenant_123")
 	t.Setenv("FUGUE_OBSERVABILITY_PROJECT_ID", "project_123")
 	t.Setenv("FUGUE_OBSERVABILITY_APP_ID", "app_123")
@@ -81,8 +93,17 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	if !status.RuntimeLogPipelineConfigured || !status.PrometheusScrapeConfigured || !status.IdentityConfigured {
 		t.Fatalf("expected pipeline inputs and identity configured, got %+v", status)
 	}
+	if !status.KubernetesLogsConfigured {
+		t.Fatalf("expected Kubernetes logs configured, got %+v", status)
+	}
 	if len(cfg.RuntimeLogPaths) != 1 || cfg.RuntimeLogPaths[0] != "/var/log/pods/app.log" {
 		t.Fatalf("expected runtime log paths to be normalized, got %+v", cfg.RuntimeLogPaths)
+	}
+	if len(cfg.KubernetesLogNamespaces) != 2 || cfg.KubernetesLogNamespaces[0] != "fugue-system" || cfg.KubernetesLogNamespaces[1] != "fg-tenant" {
+		t.Fatalf("expected Kubernetes log namespaces to be parsed, got %+v", cfg.KubernetesLogNamespaces)
+	}
+	if cfg.KubernetesLogLabelSelector != "app.kubernetes.io/managed-by=fugue" || cfg.KubernetesLogPollInterval != 7*time.Second || cfg.KubernetesLogTailLines != 33 || cfg.KubernetesLogMaxPods != 44 || cfg.KubernetesLogMaxLinesPerCycle != 55 {
+		t.Fatalf("expected Kubernetes log settings from env, got %+v", cfg)
 	}
 }
 

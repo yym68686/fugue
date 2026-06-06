@@ -55,6 +55,22 @@ spec:
               value: {{ .Values.observability.agent.prometheusScrapeURLs | quote }}
             - name: FUGUE_OBSERVABILITY_SCRAPE_INTERVAL
               value: {{ .Values.observability.agent.scrapeInterval | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED
+              value: {{ .Values.observability.agent.kubernetesLogs.enabled | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES
+              value: {{ default .Release.Namespace .Values.observability.agent.kubernetesLogs.namespaces | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES
+              value: {{ .Values.observability.agent.kubernetesLogs.namespacePrefixes | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR
+              value: {{ .Values.observability.agent.kubernetesLogs.labelSelector | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL
+              value: {{ .Values.observability.agent.kubernetesLogs.pollInterval | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES
+              value: {{ .Values.observability.agent.kubernetesLogs.tailLines | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS
+              value: {{ .Values.observability.agent.kubernetesLogs.maxPods | quote }}
+            - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE
+              value: {{ .Values.observability.agent.kubernetesLogs.maxLinesPerCycle | quote }}
             - name: FUGUE_OBSERVABILITY_BATCH_SIZE
               value: {{ .Values.observability.agent.batchSize | quote }}
             - name: FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES

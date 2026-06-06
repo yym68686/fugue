@@ -9,36 +9,48 @@ import (
 )
 
 const (
-	DefaultRetention       = 24 * time.Hour
-	DefaultExportTimeout   = 5 * time.Second
-	DefaultQueueSize       = 4096
-	DefaultSampleRate      = 1.0
-	DefaultScrapeInterval  = 30 * time.Second
-	DefaultBatchSize       = 128
-	DefaultMaxPayloadBytes = 1 << 20
-	DefaultMemoryLimit     = 64 << 20
-	DefaultRetryAttempts   = 3
+	DefaultRetention                     = 24 * time.Hour
+	DefaultExportTimeout                 = 5 * time.Second
+	DefaultQueueSize                     = 4096
+	DefaultSampleRate                    = 1.0
+	DefaultScrapeInterval                = 30 * time.Second
+	DefaultBatchSize                     = 128
+	DefaultMaxPayloadBytes               = 1 << 20
+	DefaultMemoryLimit                   = 64 << 20
+	DefaultRetryAttempts                 = 3
+	DefaultKubernetesLogPollInterval     = 15 * time.Second
+	DefaultKubernetesLogTailLines        = 200
+	DefaultKubernetesLogMaxPods          = 500
+	DefaultKubernetesLogMaxLinesPerCycle = 5000
 )
 
 type Config struct {
-	Enabled               bool
-	Retention             time.Duration
-	MetricsRemoteWriteURL string
-	MetricsQueryURL       string
-	LokiURL               string
-	ClickHouseDSN         string
-	OTLPEndpoint          string
-	ExportTimeout         time.Duration
-	QueueSize             int
-	SampleRate            float64
-	RuntimeLogPaths       []string
-	PrometheusScrapeURLs  []string
-	ScrapeInterval        time.Duration
-	BatchSize             int
-	MaxPayloadBytes       int64
-	MemoryLimitBytes      int64
-	RetryMaxAttempts      int
-	Identity              Identity
+	Enabled                        bool
+	Retention                      time.Duration
+	MetricsRemoteWriteURL          string
+	MetricsQueryURL                string
+	LokiURL                        string
+	ClickHouseDSN                  string
+	OTLPEndpoint                   string
+	ExportTimeout                  time.Duration
+	QueueSize                      int
+	SampleRate                     float64
+	RuntimeLogPaths                []string
+	PrometheusScrapeURLs           []string
+	ScrapeInterval                 time.Duration
+	KubernetesLogsEnabled          bool
+	KubernetesLogNamespaces        []string
+	KubernetesLogNamespacePrefixes []string
+	KubernetesLogLabelSelector     string
+	KubernetesLogPollInterval      time.Duration
+	KubernetesLogTailLines         int64
+	KubernetesLogMaxPods           int
+	KubernetesLogMaxLinesPerCycle  int
+	BatchSize                      int
+	MaxPayloadBytes                int64
+	MemoryLimitBytes               int64
+	RetryMaxAttempts               int
+	Identity                       Identity
 }
 
 type Identity struct {
@@ -60,6 +72,7 @@ type Status struct {
 	OTLPConfigured               bool     `json:"otlp_configured"`
 	RuntimeLogPipelineConfigured bool     `json:"runtime_log_pipeline_configured"`
 	PrometheusScrapeConfigured   bool     `json:"prometheus_scrape_configured"`
+	KubernetesLogsConfigured     bool     `json:"kubernetes_logs_configured"`
 	IdentityConfigured           bool     `json:"identity_configured"`
 	QueueSize                    int      `json:"queue_size"`
 	BatchSize                    int      `json:"batch_size"`
@@ -77,6 +90,9 @@ func (c Config) Normalize() Config {
 	c.OTLPEndpoint = strings.TrimSpace(c.OTLPEndpoint)
 	c.RuntimeLogPaths = normalizeStringList(c.RuntimeLogPaths)
 	c.PrometheusScrapeURLs = normalizeStringList(c.PrometheusScrapeURLs)
+	c.KubernetesLogNamespaces = normalizeStringList(c.KubernetesLogNamespaces)
+	c.KubernetesLogNamespacePrefixes = normalizeStringList(c.KubernetesLogNamespacePrefixes)
+	c.KubernetesLogLabelSelector = strings.TrimSpace(c.KubernetesLogLabelSelector)
 	c.Identity = c.Identity.Normalize()
 	if c.Retention <= 0 {
 		c.Retention = DefaultRetention
@@ -92,6 +108,18 @@ func (c Config) Normalize() Config {
 	}
 	if c.ScrapeInterval <= 0 {
 		c.ScrapeInterval = DefaultScrapeInterval
+	}
+	if c.KubernetesLogPollInterval <= 0 {
+		c.KubernetesLogPollInterval = DefaultKubernetesLogPollInterval
+	}
+	if c.KubernetesLogTailLines <= 0 {
+		c.KubernetesLogTailLines = DefaultKubernetesLogTailLines
+	}
+	if c.KubernetesLogMaxPods <= 0 {
+		c.KubernetesLogMaxPods = DefaultKubernetesLogMaxPods
+	}
+	if c.KubernetesLogMaxLinesPerCycle <= 0 {
+		c.KubernetesLogMaxLinesPerCycle = DefaultKubernetesLogMaxLinesPerCycle
 	}
 	if c.BatchSize <= 0 {
 		c.BatchSize = DefaultBatchSize
@@ -163,6 +191,7 @@ func (c Config) Status() Status {
 		OTLPConfigured:               c.OTLPEndpoint != "",
 		RuntimeLogPipelineConfigured: len(c.RuntimeLogPaths) > 0,
 		PrometheusScrapeConfigured:   len(c.PrometheusScrapeURLs) > 0,
+		KubernetesLogsConfigured:     c.KubernetesLogsEnabled,
 		IdentityConfigured:           c.Identity.HasResourceIdentity(),
 		QueueSize:                    c.QueueSize,
 		BatchSize:                    c.BatchSize,

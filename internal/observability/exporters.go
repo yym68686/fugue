@@ -341,7 +341,7 @@ func lokiLogLine(event Event) lokiLine {
 
 func lokiLabels(event Event) map[string]string {
 	labels := map[string]string{}
-	for _, key := range []string{"tenant_id", "project_id", "app_id", "runtime_id", "pod", "container", "component", "level"} {
+	for _, key := range []string{"tenant_id", "project_id", "app_id", "runtime_id", "namespace", "pod", "container", "component", "level"} {
 		if value := strings.TrimSpace(event.Attributes[key]); value != "" {
 			labels[key] = sanitizeLokiLabelValue(value)
 		}

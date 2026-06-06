@@ -48,12 +48,16 @@ type PipelineSnapshot struct {
 	ExportErrors            uint64 `json:"export_errors"`
 	RuntimeLogLines         uint64 `json:"runtime_log_lines"`
 	RuntimeLogErrors        uint64 `json:"runtime_log_errors"`
+	KubernetesLogLines      uint64 `json:"kubernetes_log_lines"`
+	KubernetesLogErrors     uint64 `json:"kubernetes_log_errors"`
+	KubernetesLogPods       int64  `json:"kubernetes_log_pods"`
 	PrometheusScrapes       uint64 `json:"prometheus_scrapes"`
 	PrometheusScrapeErrors  uint64 `json:"prometheus_scrape_errors"`
 	OTLPRequests            uint64 `json:"otlp_requests"`
 	OTLPBytes               uint64 `json:"otlp_bytes"`
 	LastError               string `json:"last_error,omitempty"`
 	RuntimeLogPipelineCount int    `json:"runtime_log_pipeline_count"`
+	KubernetesLogPipeline   bool   `json:"kubernetes_log_pipeline"`
 	PrometheusScrapeCount   int    `json:"prometheus_scrape_count"`
 }
 
@@ -95,6 +99,9 @@ type Pipeline struct {
 	exportErrors           atomic.Uint64
 	runtimeLogLines        atomic.Uint64
 	runtimeLogErrors       atomic.Uint64
+	kubernetesLogLines     atomic.Uint64
+	kubernetesLogErrors    atomic.Uint64
+	kubernetesLogPods      atomic.Int64
 	prometheusScrapes      atomic.Uint64
 	prometheusScrapeErrors atomic.Uint64
 	otlpRequests           atomic.Uint64
@@ -142,6 +149,10 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		path := path
 		p.wg.Add(1)
 		go p.runRuntimeLogTail(path)
+	}
+	if p.cfg.KubernetesLogsEnabled {
+		p.wg.Add(1)
+		go p.runKubernetesLogCollection()
 	}
 	for _, scrapeURL := range p.cfg.PrometheusScrapeURLs {
 		scrapeURL := scrapeURL
@@ -193,12 +204,16 @@ func (p *Pipeline) Snapshot() PipelineSnapshot {
 		ExportErrors:            p.exportErrors.Load(),
 		RuntimeLogLines:         p.runtimeLogLines.Load(),
 		RuntimeLogErrors:        p.runtimeLogErrors.Load(),
+		KubernetesLogLines:      p.kubernetesLogLines.Load(),
+		KubernetesLogErrors:     p.kubernetesLogErrors.Load(),
+		KubernetesLogPods:       p.kubernetesLogPods.Load(),
 		PrometheusScrapes:       p.prometheusScrapes.Load(),
 		PrometheusScrapeErrors:  p.prometheusScrapeErrors.Load(),
 		OTLPRequests:            p.otlpRequests.Load(),
 		OTLPBytes:               p.otlpBytes.Load(),
 		LastError:               p.lastErrorString(),
 		RuntimeLogPipelineCount: len(p.cfg.RuntimeLogPaths),
+		KubernetesLogPipeline:   p.cfg.KubernetesLogsEnabled,
 		PrometheusScrapeCount:   len(p.cfg.PrometheusScrapeURLs),
 	}
 }
@@ -320,7 +335,14 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_errors_total counter")
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_errors_total{source=\"export\"} %d\n", snap.ExportErrors)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_errors_total{source=\"runtime_log\"} %d\n", snap.RuntimeLogErrors)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_errors_total{source=\"kubernetes_log\"} %d\n", snap.KubernetesLogErrors)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_errors_total{source=\"prometheus_scrape\"} %d\n", snap.PrometheusScrapeErrors)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_lines_total Kubernetes pod log lines ingested by the telemetry pipeline.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_lines_total counter")
+	writeMetric("fugue_telemetry_pipeline_kubernetes_log_lines_total", snap.KubernetesLogLines)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_kubernetes_log_pods Last Kubernetes pod count considered by the log collector.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_kubernetes_log_pods gauge")
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_kubernetes_log_pods %d\n", snap.KubernetesLogPods)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_otlp_requests_total OTLP HTTP requests received by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_otlp_requests_total counter")
 	writeMetric("fugue_telemetry_pipeline_otlp_requests_total", snap.OTLPRequests)
@@ -328,8 +350,26 @@ func (p *Pipeline) PrometheusMetrics() string {
 }
 
 func (p *Pipeline) IngestLogLine(ctx context.Context, source string, line string) bool {
+	return p.IngestLogLineWithAttributes(ctx, source, line, nil, time.Time{})
+}
+
+func (p *Pipeline) IngestLogLineWithAttributes(ctx context.Context, source string, line string, attrs map[string]string, timestamp time.Time) bool {
 	event, redacted := EventFromLogLine(source, line)
 	p.redacted.Add(uint64(redacted))
+	if !timestamp.IsZero() {
+		event.Timestamp = timestamp.UTC()
+	}
+	if len(attrs) > 0 {
+		if event.Attributes == nil {
+			event.Attributes = map[string]string{}
+		}
+		for key, value := range attrs {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			event.Attributes[key] = value
+		}
+	}
 	return p.Ingest(ctx, event)
 }
 
