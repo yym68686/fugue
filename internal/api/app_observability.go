@@ -1366,14 +1366,18 @@ func buildAppObservabilityRuleRequestStatsQuery(appID string, window appObservab
 		"countIf(JSONExtractBool(summary_json, 'peer_fallback')) AS peer_fallback_count, " +
 		"countIf(JSONExtractBool(summary_json, 'fallback_hit') AND " + appObservabilityActionableFallbackPredicate() + ") AS actionable_edge_fallback_count, " +
 		"countIf(JSONExtractBool(summary_json, 'peer_fallback') AND " + appObservabilityActionableFallbackPredicate() + ") AS actionable_peer_fallback_count, " +
-		"countIf(JSONExtractBool(summary_json, 'sse')) AS stream_count " +
+		"countIf(" + appObservabilityStreamingSummaryPredicate() + ") AS stream_count " +
 		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
 		" FORMAT JSONEachRow", nil
 }
 
+func appObservabilityStreamingSummaryPredicate() string {
+	return "(JSONExtractBool(summary_json, 'sse') OR JSONExtractBool(summary_json, 'stream') OR JSONExtractBool(summary_json, 'streaming'))"
+}
+
 func appObservabilityActionableFallbackPredicate() string {
 	path := "JSONExtractString(summary_json, 'path')"
-	return "NOT JSONExtractBool(summary_json, 'sse') AND " +
+	return "NOT " + appObservabilityStreamingSummaryPredicate() + " AND " +
 		"NOT startsWith(" + path + ", '/assets/') AND " +
 		path + " NOT IN ('/', '/favicon.ico', '/healthz', '/livez')"
 }
@@ -1516,6 +1520,7 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 	maxDuration := floatField(requestStats, "max_duration_ms")
 	edgeFallbackCount := floatField(requestStats, "edge_fallback_count")
 	peerFallbackCount := floatField(requestStats, "peer_fallback_count")
+	streamCount := floatField(requestStats, "stream_count")
 	actionableEdgeFallbackCount := edgeFallbackCount
 	if value, ok := optionalFloatField(requestStats, "actionable_edge_fallback_count"); ok {
 		actionableEdgeFallbackCount = value
@@ -1614,7 +1619,7 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 				"verify the active edge worker slot and route generation before scaling the app",
 			},
 		}
-	case appObservabilityRecentDeployEvent(eventRows) != nil && (error4xxRate >= 0.15 || error5xxRate >= 0.03 || p95Duration >= 3000):
+	case appObservabilityRecentDeployEvent(eventRows) != nil && (error4xxRate >= 0.15 || error5xxRate >= 0.03 || (p95Duration >= 3000 && !appObservabilityLooksLikeSuccessfulStreamingTail(requestCount, error5xxCount, streamCount, topSpan))):
 		return appObservabilityDiagnosis{
 			Bottleneck: "release_regression_candidate",
 			Confidence: 0.72,
@@ -1658,6 +1663,17 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 			},
 		}
 	}
+}
+
+func appObservabilityLooksLikeSuccessfulStreamingTail(requestCount, error5xxCount, streamCount float64, topSpan map[string]any) bool {
+	if requestCount <= 0 || error5xxCount > 0 || topSpan == nil {
+		return false
+	}
+	stage := strings.ToLower(strings.TrimSpace(stringField(topSpan, "stage")))
+	if stage != "stream_end" && stage != "response_stream_end" {
+		return false
+	}
+	return streamCount/requestCount >= 0.5
 }
 
 func appObservabilityTopSpanRuleRow(rows []map[string]any) map[string]any {
