@@ -64,6 +64,48 @@ func TestPipelineInjectsIdentityAndDropsMetricSecrets(t *testing.T) {
 	}
 }
 
+func TestPipelineIdentityDoesNotOverrideEventResourceAttributes(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:          true,
+		QueueSize:        2,
+		MemoryLimitBytes: 4096,
+		Identity: Identity{
+			TenantID:  "tenant_agent",
+			ProjectID: "project_agent",
+			AppID:     "app_agent",
+			RuntimeID: "runtime_agent",
+			Component: "telemetry-agent",
+		},
+	}, nil)
+
+	if !pipeline.Ingest(context.Background(), Event{
+		Kind:   EventKindLog,
+		Source: "kubernetes://fg-tenant/app-pod/app",
+		Attributes: map[string]string{
+			"tenant_id":  "tenant_app",
+			"project_id": "project_app",
+			"app_id":     "app_app",
+			"runtime_id": "runtime_app",
+			"component":  "app-container",
+		},
+	}) {
+		t.Fatal("expected event to be queued")
+	}
+
+	event := <-pipeline.queue
+	for key, want := range map[string]string{
+		"tenant_id":  "tenant_app",
+		"project_id": "project_app",
+		"app_id":     "app_app",
+		"runtime_id": "runtime_app",
+		"component":  "app-container",
+	} {
+		if got := event.Attributes[key]; got != want {
+			t.Fatalf("expected %s=%q, got %q in %+v", key, want, got, event.Attributes)
+		}
+	}
+}
+
 func TestPipelineQueueAndMemoryLimitDropsWithoutBlocking(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,

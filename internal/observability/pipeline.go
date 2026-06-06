@@ -628,7 +628,9 @@ func (p *Pipeline) prepareEvent(event Event) (Event, int) {
 		}
 	}
 	for key, value := range p.cfg.Identity.Attributes() {
-		attrs[key] = value
+		if attrs[key] == "" {
+			attrs[key] = value
+		}
 	}
 	event.Attributes = attrs
 	return event, redacted
