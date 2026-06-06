@@ -97,3 +97,39 @@ func TestKubernetesLogAttributesUseOwnerAppForBackingService(t *testing.T) {
 		t.Fatalf("expected owner app and component attrs, got %+v", attrs)
 	}
 }
+
+func TestKubernetesContainerHasLogsSkipsTerminatedContainers(t *testing.T) {
+	pod := corev1.Pod{
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "app",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{Reason: "Completed"},
+					},
+				},
+			},
+		},
+	}
+	if kubernetesContainerHasLogs(pod, "app") {
+		t.Fatal("expected terminated container to be skipped by the live log collector")
+	}
+}
+
+func TestBenignKubernetesLogReadErrorsAreIgnored(t *testing.T) {
+	for _, message := range []string{
+		`pods "old-pod" not found`,
+		`container "app" in pod "old-pod" is terminated`,
+		`container "app" is waiting to start`,
+	} {
+		if !isBenignKubernetesLogReadError(errString(message)) {
+			t.Fatalf("expected benign error to be recognized: %s", message)
+		}
+	}
+}
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
+}

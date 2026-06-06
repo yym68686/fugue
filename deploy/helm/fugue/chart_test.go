@@ -771,6 +771,7 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 	for _, want := range []string{
 		"auth_enabled: false",
 		"retention_period: 24h",
+		"delete_request_store: filesystem",
 		"schema: v13",
 	} {
 		if !strings.Contains(configDoc, want) {

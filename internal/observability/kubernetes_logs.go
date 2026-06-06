@@ -156,6 +156,9 @@ func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod c
 	defer cancel()
 	stream, err := request.Stream(logCtx)
 	if err != nil {
+		if isBenignKubernetesLogReadError(err) {
+			return 0
+		}
 		c.pipeline.kubernetesLogErrors.Add(1)
 		c.pipeline.recordError(fmt.Errorf("read Kubernetes logs for %s/%s/%s: %w", pod.Namespace, pod.Name, container, err))
 		return 0
@@ -257,9 +260,19 @@ func kubernetesContainerHasLogs(pod corev1.Pod, container string) bool {
 		if status.Name != container {
 			continue
 		}
-		return status.State.Running != nil || status.State.Terminated != nil || status.LastTerminationState.Terminated != nil
+		return status.State.Running != nil
 	}
 	return false
+}
+
+func isBenignKubernetesLogReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") ||
+		strings.Contains(message, "is terminated") ||
+		strings.Contains(message, "is waiting to start")
 }
 
 func kubernetesLogAttributes(pod corev1.Pod, container string) map[string]string {
