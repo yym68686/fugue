@@ -696,6 +696,45 @@ func TestAppObservabilityDiagnosisFallsBackToRuleRows(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityBottleneckFromTopSpanClassifiesCommonStages(t *testing.T) {
+	cases := []struct {
+		name       string
+		service    string
+		stage      string
+		bottleneck string
+	}{
+		{name: "db pool", service: "web-api", stage: "db_pool_acquire", bottleneck: "db_lock_or_query_wait"},
+		{name: "api key", service: "api", stage: "api_key_checked", bottleneck: "auth_or_api_key_wait"},
+		{name: "balance", service: "api", stage: "balance_checked", bottleneck: "billing_or_balance_wait"},
+		{name: "channel", service: "api", stage: "channel_selected", bottleneck: "routing_or_provider_selection_wait"},
+		{name: "event loop", service: "worker", stage: "event_loop_lag_ms", bottleneck: "event_loop_lag"},
+		{name: "retry", service: "proxy", stage: "retry_started", bottleneck: "upstream_retry_or_cooldown"},
+		{name: "cooldown", service: "proxy", stage: "provider_cooldown_wait", bottleneck: "upstream_retry_or_cooldown"},
+		{name: "token pool", service: "gateway", stage: "token_acquired", bottleneck: "token_pool_wait"},
+		{name: "http connect", service: "gateway", stage: "http_connect_done", bottleneck: "upstream_network_connect_wait"},
+		{name: "http tls", service: "gateway", stage: "http_tls_done", bottleneck: "upstream_network_connect_wait"},
+		{name: "client pool", service: "proxy", stage: "client_pool_acquired", bottleneck: "upstream_connection_pool_wait"},
+		{name: "request log", service: "gateway", stage: "request_log_queue_wait_ms", bottleneck: "request_log_write_wait"},
+		{name: "usage write", service: "api", stage: "usage_write_ms", bottleneck: "request_log_write_wait"},
+		{name: "upstream response", service: "proxy", stage: "upstream_headers_received", bottleneck: "upstream_response_wait"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, actions := appObservabilityBottleneckFromTopSpan(map[string]any{
+				"service": tt.service,
+				"stage":   tt.stage,
+			})
+			if got != tt.bottleneck {
+				t.Fatalf("expected bottleneck %q, got %q", tt.bottleneck, got)
+			}
+			if len(actions) == 0 || strings.TrimSpace(actions[0]) == "" {
+				t.Fatalf("expected next actions for %s.%s", tt.service, tt.stage)
+			}
+		})
+	}
+}
+
 func TestAppObservabilityRuleDiagnosisDetectsTracebackErrorBurst(t *testing.T) {
 	diagnosis := appObservabilityRuleDiagnosisFromRows(
 		[]map[string]any{{
@@ -846,7 +885,7 @@ func TestAppObservabilityRuleDiagnosisPrefersTopSpanOverLatencyOnlyReleaseRegres
 	if diagnosis.Bottleneck == "release_regression_candidate" {
 		t.Fatalf("expected top span to take precedence over latency-only release regression, got %+v", diagnosis)
 	}
-	if diagnosis.Bottleneck != "uni-api-ember.upstream_headers_received" {
+	if diagnosis.Bottleneck != "upstream_response_wait" {
 		t.Fatalf("expected upstream headers span diagnosis, got %+v", diagnosis)
 	}
 }

@@ -1691,10 +1691,67 @@ func appObservabilityBottleneckFromTopSpan(row map[string]any) (string, []string
 			"inspect database lock waiters, slow queries, and transaction scope",
 			"do not scale app workers until database wait is separated from runtime wait",
 		}
+	case strings.Contains(stage, "request_log") ||
+		strings.Contains(stage, "log_queue") ||
+		strings.Contains(stage, "log_write") ||
+		strings.Contains(stage, "usage_write") ||
+		strings.Contains(stage, "usage_record"):
+		return "request_log_write_wait", []string{
+			"inspect request log queue depth, write latency, and dropped log counters",
+			"move diagnostic writes off the request path before scaling application workers",
+		}
+	case strings.Contains(stage, "event_loop"):
+		return "event_loop_lag", []string{
+			"inspect event loop lag, blocking code paths, and worker saturation",
+			"scale workers only after confirming the dominant wait is runtime execution and not upstream I/O",
+		}
+	case strings.Contains(stage, "retry") ||
+		strings.Contains(stage, "cooldown"):
+		return "upstream_retry_or_cooldown", []string{
+			"inspect retry count, provider cooldowns, and upstream failure classes",
+			"fix provider health or routing before increasing concurrency",
+		}
+	case strings.Contains(stage, "api_key") ||
+		strings.Contains(stage, "auth"):
+		return "auth_or_api_key_wait", []string{
+			"inspect API key lookup, auth cache hit rate, and database pool wait",
+			"separate auth storage latency from upstream latency before scaling workers",
+		}
+	case strings.Contains(stage, "balance") ||
+		strings.Contains(stage, "billing") ||
+		strings.Contains(stage, "quota") ||
+		strings.Contains(stage, "credit"):
+		return "billing_or_balance_wait", []string{
+			"inspect balance checks, billing transactions, and lock waiters",
+			"keep billing correctness ahead of throughput changes",
+		}
+	case strings.Contains(stage, "channel") ||
+		strings.Contains(stage, "provider_selected") ||
+		strings.Contains(stage, "provider_key_selected"):
+		return "routing_or_provider_selection_wait", []string{
+			"inspect route selection, provider selection, and configuration lookup latency",
+			"cache or precompute selection state only after confirming this span dominates",
+		}
+	case strings.Contains(stage, "token_pool") ||
+		strings.Contains(stage, "token_acquire") ||
+		strings.Contains(stage, "token_acquired"):
+		return "token_pool_wait", []string{
+			"inspect token availability, account cooldowns, and token selection latency",
+			"add tokens or split traffic only after confirming upstream connection wait is low",
+		}
+	case strings.Contains(stage, "http_connect") ||
+		strings.Contains(stage, "connect_done") ||
+		strings.Contains(stage, "http_tls") ||
+		strings.Contains(stage, "tls_done") ||
+		strings.Contains(stage, "dns"):
+		return "upstream_network_connect_wait", []string{
+			"inspect upstream DNS, connect, TLS, and regional network latency",
+			"reuse connections or adjust upstream placement before increasing request concurrency",
+		}
 	case strings.Contains(stage, "pool") ||
 		strings.Contains(stage, "acquire") ||
 		strings.Contains(stage, "connection"):
-		return "connection_pool_wait", []string{
+		return "upstream_connection_pool_wait", []string{
 			"inspect client pool size, pending acquire count, and upstream concurrency",
 			"increase pool or replicas only after confirming event loop lag is low",
 		}
@@ -1712,6 +1769,14 @@ func appObservabilityBottleneckFromTopSpan(row map[string]any) (string, []string
 		return "runtime_resource_wait", []string{
 			"inspect runtime CPU, memory, event loop lag, and worker saturation",
 			"scale runtime capacity only if resource gauges align with this span evidence",
+		}
+	case strings.Contains(stage, "upstream") ||
+		strings.Contains(stage, "headers_received") ||
+		strings.Contains(stage, "first_chunk") ||
+		strings.Contains(stage, "first_token"):
+		return "upstream_response_wait", []string{
+			"inspect upstream service latency, streaming behavior, and provider status",
+			"compare upstream response wait against local pool and event loop wait before scaling",
 		}
 	default:
 		if key == "" {
