@@ -133,3 +133,12 @@ func TestControlPlaneMetricsBindAddrFromEnv(t *testing.T) {
 		t.Fatalf("expected controller metrics bind addr from env, got %q", controllerCfg.MetricsBindAddr)
 	}
 }
+
+func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
+	t.Setenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", "http://telemetry-agent.fugue-system.svc.cluster.local:7834")
+
+	cfg := ControllerFromEnv()
+	if cfg.AppObservabilityEndpoint != "http://telemetry-agent.fugue-system.svc.cluster.local:7834" {
+		t.Fatalf("expected app observability endpoint from env, got %q", cfg.AppObservabilityEndpoint)
+	}
+}

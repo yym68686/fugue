@@ -1847,6 +1847,9 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 				APIBaseURL: "api.example.com",
 				SigningKey: "signing-secret",
 			},
+			AppObservability: runtime.AppObservabilityConfig{
+				Endpoint: "telemetry-agent.fugue-system.svc.cluster.local:7834",
+			},
 		},
 		newKubeClient: func(namespace string) (*kubeClient, error) {
 			return &kubeClient{
@@ -1875,7 +1878,19 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 	if got := managedEnv["FUGUE_ONLY"]; got != "user-defined" {
 		t.Fatalf("expected managed app user env FUGUE_ONLY=user-defined, got %q", got)
 	}
-	for _, key := range []string{"FUGUE_PROJECT_ID", "FUGUE_RUNTIME_ID", "FUGUE_API_URL", "FUGUE_APP_URL", "FUGUE_TOKEN"} {
+	for _, key := range []string{
+		"FUGUE_PROJECT_ID",
+		"FUGUE_RUNTIME_ID",
+		"FUGUE_API_URL",
+		"FUGUE_APP_URL",
+		"FUGUE_TOKEN",
+		"FUGUE_OBSERVABILITY_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"FUGUE_OBSERVABILITY_PROJECT_ID",
+		"FUGUE_OBSERVABILITY_APP_ID",
+		"FUGUE_OBSERVABILITY_RUNTIME_ID",
+		"FUGUE_OBSERVABILITY_SERVICE_NAME",
+	} {
 		if got := managedEnv[key]; got != "" {
 			t.Fatalf("expected managed app snapshot to omit injected %s, got %q", key, got)
 		}
@@ -1890,6 +1905,24 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 	}
 	if got := deploymentEnv["FUGUE_APP_URL"]; got != "https://gateway.example.com" {
 		t.Fatalf("expected deployment FUGUE_APP_URL to be injected, got %q", got)
+	}
+	if got := deploymentEnv["FUGUE_OBSERVABILITY_ENDPOINT"]; got != "http://telemetry-agent.fugue-system.svc.cluster.local:7834" {
+		t.Fatalf("expected deployment FUGUE_OBSERVABILITY_ENDPOINT to be injected, got %q", got)
+	}
+	if got := deploymentEnv["OTEL_EXPORTER_OTLP_ENDPOINT"]; got != "http://telemetry-agent.fugue-system.svc.cluster.local:7834" {
+		t.Fatalf("expected deployment OTEL_EXPORTER_OTLP_ENDPOINT to be injected, got %q", got)
+	}
+	if got := deploymentEnv["FUGUE_OBSERVABILITY_PROJECT_ID"]; got != project.ID {
+		t.Fatalf("expected deployment FUGUE_OBSERVABILITY_PROJECT_ID %q, got %q", project.ID, got)
+	}
+	if got := deploymentEnv["FUGUE_OBSERVABILITY_APP_ID"]; got != app.ID {
+		t.Fatalf("expected deployment FUGUE_OBSERVABILITY_APP_ID %q, got %q", app.ID, got)
+	}
+	if got := deploymentEnv["FUGUE_OBSERVABILITY_RUNTIME_ID"]; got != app.Spec.RuntimeID {
+		t.Fatalf("expected deployment FUGUE_OBSERVABILITY_RUNTIME_ID %q, got %q", app.Spec.RuntimeID, got)
+	}
+	if got := deploymentEnv["FUGUE_OBSERVABILITY_SERVICE_NAME"]; got != app.Name {
+		t.Fatalf("expected deployment FUGUE_OBSERVABILITY_SERVICE_NAME %q, got %q", app.Name, got)
 	}
 	deploymentClaims, err := workloadidentity.Parse("signing-secret", deploymentEnv["FUGUE_TOKEN"])
 	if err != nil {

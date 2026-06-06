@@ -78,6 +78,10 @@ spec:
               value: {{ include "fugue.registryPullBase" . | quote }}
             - name: FUGUE_SOURCE_UPLOAD_BASE_URL
               value: {{ printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port | quote }}
+            {{- if and .Values.observability.enabled .Values.observability.agent.enabled }}
+            - name: FUGUE_APP_OBSERVABILITY_ENDPOINT
+              value: {{ printf "http://%s-telemetry-agent.%s.svc.cluster.local:%v" (include "fugue.fullname" .) .Release.Namespace .Values.observability.agent.port | quote }}
+            {{- end }}
             - name: FUGUE_IMPORT_WORK_DIR
               value: {{ .Values.api.importWorkDir | quote }}
             - name: FUGUE_RENDER_DIR

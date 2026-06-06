@@ -325,6 +325,10 @@ func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t 
 	if apiDoc == "" {
 		t.Fatalf("rendered manifest missing fugue-fugue-api deployment:\n%s", manifest)
 	}
+	controllerDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if controllerDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-controller deployment:\n%s", manifest)
+	}
 	for _, want := range []string{
 		"name: FUGUE_OBSERVABILITY_ENABLED",
 		"value: \"false\"",
@@ -337,6 +341,24 @@ func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t 
 	}
 	if strings.Contains(apiDoc, "FUGUE_OBSERVABILITY_LOKI_URL") {
 		t.Fatalf("api deployment should not render exporter secret envs by default:\n%s", apiDoc)
+	}
+	if strings.Contains(controllerDoc, "FUGUE_APP_OBSERVABILITY_ENDPOINT") {
+		t.Fatalf("controller deployment should not inject app observability endpoint by default:\n%s", controllerDoc)
+	}
+
+	cmd = exec.Command("helm", "template", "fugue", chartDir, "--set", "observability.enabled=true")
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest = string(output)
+	controllerDoc = manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if controllerDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-controller deployment:\n%s", manifest)
+	}
+	if strings.Contains(controllerDoc, "FUGUE_APP_OBSERVABILITY_ENDPOINT") {
+		t.Fatalf("controller deployment should not inject app observability endpoint without telemetry-agent:\n%s", controllerDoc)
 	}
 }
 
@@ -411,6 +433,10 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		}
 	}
 	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	controllerDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if controllerDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-controller deployment:\n%s", manifest)
+	}
 	for _, want := range []string{
 		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
 		"key: \"FUGUE_OBSERVABILITY_METRICS_QUERY_URL\"",
@@ -420,6 +446,14 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 	} {
 		if !strings.Contains(apiDoc, want) {
 			t.Fatalf("api deployment missing exporter secret env %q:\n%s", want, apiDoc)
+		}
+	}
+	for _, want := range []string{
+		"name: FUGUE_APP_OBSERVABILITY_ENDPOINT",
+		"value: \"http://fugue-fugue-telemetry-agent.default.svc.cluster.local:7834\"",
+	} {
+		if !strings.Contains(controllerDoc, want) {
+			t.Fatalf("controller deployment missing app observability endpoint %q:\n%s", want, controllerDoc)
 		}
 	}
 }

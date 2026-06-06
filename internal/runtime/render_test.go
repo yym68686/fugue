@@ -15,6 +15,9 @@ func TestRendererInjectsWorkloadIdentityEnv(t *testing.T) {
 			APIBaseURL: "api.example.com",
 			SigningKey: "signing-secret",
 		},
+		AppObservability: AppObservabilityConfig{
+			Endpoint: "fugue-telemetry-agent.fugue-system.svc.cluster.local:7834",
+		},
 	}
 	app := model.App{
 		ID:        "app_demo",
@@ -57,6 +60,27 @@ func TestRendererInjectsWorkloadIdentityEnv(t *testing.T) {
 	}
 	if got := rendered.Spec.Env["FUGUE_APP_URL"]; got != "https://demo.example.com" {
 		t.Fatalf("expected FUGUE_APP_URL, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_OBSERVABILITY_ENDPOINT"]; got != "http://fugue-telemetry-agent.fugue-system.svc.cluster.local:7834" {
+		t.Fatalf("expected FUGUE_OBSERVABILITY_ENDPOINT, got %q", got)
+	}
+	if got := rendered.Spec.Env["OTEL_EXPORTER_OTLP_ENDPOINT"]; got != "http://fugue-telemetry-agent.fugue-system.svc.cluster.local:7834" {
+		t.Fatalf("expected OTEL_EXPORTER_OTLP_ENDPOINT, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_OBSERVABILITY_TENANT_ID"]; got != "tenant_demo" {
+		t.Fatalf("expected FUGUE_OBSERVABILITY_TENANT_ID, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_OBSERVABILITY_PROJECT_ID"]; got != "project_demo" {
+		t.Fatalf("expected FUGUE_OBSERVABILITY_PROJECT_ID, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_OBSERVABILITY_APP_ID"]; got != "app_demo" {
+		t.Fatalf("expected FUGUE_OBSERVABILITY_APP_ID, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_OBSERVABILITY_RUNTIME_ID"]; got != "runtime_hk" {
+		t.Fatalf("expected FUGUE_OBSERVABILITY_RUNTIME_ID, got %q", got)
+	}
+	if got := rendered.Spec.Env["FUGUE_OBSERVABILITY_SERVICE_NAME"]; got != "demo" {
+		t.Fatalf("expected FUGUE_OBSERVABILITY_SERVICE_NAME, got %q", got)
 	}
 	token := rendered.Spec.Env["FUGUE_TOKEN"]
 	if token == "" {

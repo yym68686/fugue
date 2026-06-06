@@ -204,11 +204,18 @@ func TestAppEnvReservesFugueInjectedNames(t *testing.T) {
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
 		Env: map[string]string{
-			"APP_ENV":        "prod",
-			"FUGUE_API_URL":  "https://api.internal",
-			"FUGUE_TOKEN":    "runtime-token",
-			"FUGUE_ONLY":     "user-defined",
-			"FUGUE_APP_NAME": "runtime-name",
+			"APP_ENV":                          "prod",
+			"FUGUE_API_URL":                    "https://api.internal",
+			"FUGUE_TOKEN":                      "runtime-token",
+			"FUGUE_OBSERVABILITY_ENDPOINT":     "http://telemetry-agent:7834",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":      "http://telemetry-agent:7834",
+			"FUGUE_OBSERVABILITY_TENANT_ID":    "tenant_demo",
+			"FUGUE_OBSERVABILITY_PROJECT_ID":   "project_demo",
+			"FUGUE_OBSERVABILITY_APP_ID":       "app_demo",
+			"FUGUE_OBSERVABILITY_RUNTIME_ID":   "runtime_demo",
+			"FUGUE_OBSERVABILITY_SERVICE_NAME": "demo",
+			"FUGUE_ONLY":                       "user-defined",
+			"FUGUE_APP_NAME":                   "runtime-name",
 		},
 	})
 
@@ -227,7 +234,18 @@ func TestAppEnvReservesFugueInjectedNames(t *testing.T) {
 	if got := envResponse.Env["FUGUE_ONLY"]; got != "user-defined" {
 		t.Fatalf("expected user-defined FUGUE_ONLY to remain visible, got %q", got)
 	}
-	for _, key := range []string{"FUGUE_API_URL", "FUGUE_TOKEN", "FUGUE_APP_NAME"} {
+	for _, key := range []string{
+		"FUGUE_API_URL",
+		"FUGUE_TOKEN",
+		"FUGUE_APP_NAME",
+		"FUGUE_OBSERVABILITY_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"FUGUE_OBSERVABILITY_TENANT_ID",
+		"FUGUE_OBSERVABILITY_PROJECT_ID",
+		"FUGUE_OBSERVABILITY_APP_ID",
+		"FUGUE_OBSERVABILITY_RUNTIME_ID",
+		"FUGUE_OBSERVABILITY_SERVICE_NAME",
+	} {
 		if got := envResponse.Env[key]; got != "" {
 			t.Fatalf("expected injected env %s to be hidden, got %q", key, got)
 		}
@@ -272,16 +290,30 @@ func TestStripFugueInjectedAppEnvDetailsOmitsLegacyEntries(t *testing.T) {
 
 	details := stripFugueInjectedAppEnvDetails(appEnvDetails{
 		Env: map[string]string{
-			"APP_ENV":        "prod",
-			"FUGUE_API_URL":  "https://api.internal",
-			"FUGUE_TOKEN":    "runtime-token",
-			"FUGUE_ONLY":     "user-defined",
-			"FUGUE_APP_NAME": "demo",
+			"APP_ENV":                          "prod",
+			"FUGUE_API_URL":                    "https://api.internal",
+			"FUGUE_TOKEN":                      "runtime-token",
+			"FUGUE_OBSERVABILITY_ENDPOINT":     "http://telemetry-agent:7834",
+			"OTEL_EXPORTER_OTLP_ENDPOINT":      "http://telemetry-agent:7834",
+			"FUGUE_OBSERVABILITY_TENANT_ID":    "tenant_demo",
+			"FUGUE_OBSERVABILITY_PROJECT_ID":   "project_demo",
+			"FUGUE_OBSERVABILITY_APP_ID":       "app_demo",
+			"FUGUE_OBSERVABILITY_RUNTIME_ID":   "runtime_demo",
+			"FUGUE_OBSERVABILITY_SERVICE_NAME": "demo",
+			"FUGUE_ONLY":                       "user-defined",
+			"FUGUE_APP_NAME":                   "demo",
 		},
 		Entries: []model.AppEnvEntry{
 			{Key: "APP_ENV", Value: "prod", Source: "app", SourceRef: "spec.env"},
 			{Key: "FUGUE_API_URL", Value: "https://api.internal", Source: "app", SourceRef: "spec.env"},
 			{Key: "FUGUE_TOKEN", Value: "runtime-token", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_OBSERVABILITY_ENDPOINT", Value: "http://telemetry-agent:7834", Source: "app", SourceRef: "spec.env"},
+			{Key: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "http://telemetry-agent:7834", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_OBSERVABILITY_TENANT_ID", Value: "tenant_demo", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_OBSERVABILITY_PROJECT_ID", Value: "project_demo", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_OBSERVABILITY_APP_ID", Value: "app_demo", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_OBSERVABILITY_RUNTIME_ID", Value: "runtime_demo", Source: "app", SourceRef: "spec.env"},
+			{Key: "FUGUE_OBSERVABILITY_SERVICE_NAME", Value: "demo", Source: "app", SourceRef: "spec.env"},
 			{Key: "FUGUE_ONLY", Value: "user-defined", Source: "app", SourceRef: "spec.env"},
 			{Key: "FUGUE_APP_NAME", Value: "demo", Source: "app", SourceRef: "spec.env"},
 		},
@@ -293,7 +325,18 @@ func TestStripFugueInjectedAppEnvDetailsOmitsLegacyEntries(t *testing.T) {
 	if got := details.Env["FUGUE_ONLY"]; got != "user-defined" {
 		t.Fatalf("expected FUGUE_ONLY=user-defined, got %q", got)
 	}
-	for _, key := range []string{"FUGUE_API_URL", "FUGUE_TOKEN", "FUGUE_APP_NAME"} {
+	for _, key := range []string{
+		"FUGUE_API_URL",
+		"FUGUE_TOKEN",
+		"FUGUE_APP_NAME",
+		"FUGUE_OBSERVABILITY_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"FUGUE_OBSERVABILITY_TENANT_ID",
+		"FUGUE_OBSERVABILITY_PROJECT_ID",
+		"FUGUE_OBSERVABILITY_APP_ID",
+		"FUGUE_OBSERVABILITY_RUNTIME_ID",
+		"FUGUE_OBSERVABILITY_SERVICE_NAME",
+	} {
 		if got := details.Env[key]; got != "" {
 			t.Fatalf("expected injected env %s to be omitted, got %q", key, got)
 		}

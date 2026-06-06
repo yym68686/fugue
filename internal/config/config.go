@@ -64,6 +64,7 @@ type ControllerConfig struct {
 	StorePath                     string
 	DatabaseURL                   string
 	APIPublicDomain               string
+	AppObservabilityEndpoint      string
 	WorkloadIdentitySigningKey    string
 	RegistryPushBase              string
 	RegistryPullBase              string
@@ -312,6 +313,7 @@ func ControllerFromEnv() ControllerConfig {
 		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
 		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
+		AppObservabilityEndpoint:      getenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", ""),
 		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),

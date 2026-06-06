@@ -17,11 +17,16 @@ import (
 type Renderer struct {
 	BaseDir          string
 	WorkloadIdentity WorkloadIdentityConfig
+	AppObservability AppObservabilityConfig
 }
 
 type WorkloadIdentityConfig struct {
 	APIBaseURL string
 	SigningKey string
+}
+
+type AppObservabilityConfig struct {
+	Endpoint string
 }
 
 type Bundle struct {
@@ -103,10 +108,10 @@ func (r Renderer) RenderManagedAppBundleWithPlacements(app model.App, scheduling
 }
 
 func (r Renderer) PrepareApp(app model.App) model.App {
-	return r.withWorkloadIdentity(app)
+	return r.withPlatformEnv(app)
 }
 
-func (r Renderer) withWorkloadIdentity(app model.App) model.App {
+func (r Renderer) withPlatformEnv(app model.App) model.App {
 	env := make(map[string]string)
 	for key, value := range app.Spec.Env {
 		env[key] = value
@@ -127,6 +132,15 @@ func (r Renderer) withWorkloadIdentity(app model.App) model.App {
 				injected["FUGUE_APP_URL"] = "https://" + hostname
 			}
 		}
+	}
+	if endpoint := NormalizeAppObservabilityEndpoint(r.AppObservability.Endpoint); endpoint != "" {
+		injected["FUGUE_OBSERVABILITY_ENDPOINT"] = endpoint
+		injected["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
+		injected["FUGUE_OBSERVABILITY_TENANT_ID"] = strings.TrimSpace(app.TenantID)
+		injected["FUGUE_OBSERVABILITY_PROJECT_ID"] = strings.TrimSpace(app.ProjectID)
+		injected["FUGUE_OBSERVABILITY_APP_ID"] = strings.TrimSpace(app.ID)
+		injected["FUGUE_OBSERVABILITY_RUNTIME_ID"] = strings.TrimSpace(app.Spec.RuntimeID)
+		injected["FUGUE_OBSERVABILITY_SERVICE_NAME"] = strings.TrimSpace(app.Name)
 	}
 	if apiBaseURL := NormalizeWorkloadIdentityAPIBaseURL(r.WorkloadIdentity.APIBaseURL); apiBaseURL != "" {
 		injected["FUGUE_API_URL"] = apiBaseURL
@@ -154,6 +168,17 @@ func (r Renderer) withWorkloadIdentity(app model.App) model.App {
 	}
 	app.Spec.Env = env
 	return app
+}
+
+func NormalizeAppObservabilityEndpoint(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		return strings.TrimRight(raw, "/")
+	}
+	return "http://" + strings.TrimRight(raw, "/")
 }
 
 func NormalizeWorkloadIdentityAPIBaseURL(raw string) string {

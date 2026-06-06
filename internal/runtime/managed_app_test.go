@@ -109,10 +109,12 @@ func TestBuildManagedAppObjectOmitsInjectedFugueEnvFromSnapshot(t *testing.T) {
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
 			Env: map[string]string{
-				"APP_ENV":          "prod",
-				"FUGUE_TOKEN":      "injected-token",
-				"FUGUE_PROJECT_ID": "project_demo",
-				"FUGUE_ONLY":       "user-defined",
+				"APP_ENV":                      "prod",
+				"FUGUE_TOKEN":                  "injected-token",
+				"FUGUE_PROJECT_ID":             "project_demo",
+				"FUGUE_OBSERVABILITY_ENDPOINT": "http://telemetry-agent:7834",
+				"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://telemetry-agent:7834",
+				"FUGUE_ONLY":                   "user-defined",
 			},
 		},
 	}
@@ -129,7 +131,7 @@ func TestBuildManagedAppObjectOmitsInjectedFugueEnvFromSnapshot(t *testing.T) {
 	if got := env["FUGUE_ONLY"]; got != "user-defined" {
 		t.Fatalf("expected non-injected FUGUE_ONLY to be preserved, got %q", got)
 	}
-	for _, key := range []string{"FUGUE_TOKEN", "FUGUE_PROJECT_ID"} {
+	for _, key := range []string{"FUGUE_TOKEN", "FUGUE_PROJECT_ID", "FUGUE_OBSERVABILITY_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"} {
 		if got := env[key]; got != "" {
 			t.Fatalf("expected injected env %s to be omitted, got %q", key, got)
 		}

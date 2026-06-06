@@ -3,16 +3,23 @@ package model
 import "strings"
 
 var fugueInjectedAppEnvNames = map[string]struct{}{
-	"FUGUE_API_URL":      {},
-	"FUGUE_APP_HOSTNAME": {},
-	"FUGUE_APP_ID":       {},
-	"FUGUE_APP_NAME":     {},
-	"FUGUE_APP_URL":      {},
-	"FUGUE_BASE_URL":     {},
-	"FUGUE_PROJECT_ID":   {},
-	"FUGUE_RUNTIME_ID":   {},
-	"FUGUE_TENANT_ID":    {},
-	"FUGUE_TOKEN":        {},
+	"FUGUE_API_URL":                    {},
+	"FUGUE_APP_HOSTNAME":               {},
+	"FUGUE_APP_ID":                     {},
+	"FUGUE_APP_NAME":                   {},
+	"FUGUE_APP_URL":                    {},
+	"FUGUE_BASE_URL":                   {},
+	"FUGUE_OBSERVABILITY_APP_ID":       {},
+	"FUGUE_OBSERVABILITY_ENDPOINT":     {},
+	"FUGUE_OBSERVABILITY_PROJECT_ID":   {},
+	"FUGUE_OBSERVABILITY_RUNTIME_ID":   {},
+	"FUGUE_OBSERVABILITY_SERVICE_NAME": {},
+	"FUGUE_OBSERVABILITY_TENANT_ID":    {},
+	"FUGUE_PROJECT_ID":                 {},
+	"FUGUE_RUNTIME_ID":                 {},
+	"FUGUE_TENANT_ID":                  {},
+	"FUGUE_TOKEN":                      {},
+	"OTEL_EXPORTER_OTLP_ENDPOINT":      {},
 }
 
 func IsFugueInjectedAppEnvName(name string) bool {

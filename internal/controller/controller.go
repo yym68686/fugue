@@ -68,6 +68,9 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 				APIBaseURL: runtimeAPIBaseURL(cfg.APIPublicDomain),
 				SigningKey: strings.TrimSpace(cfg.WorkloadIdentitySigningKey),
 			},
+			AppObservability: runtime.AppObservabilityConfig{
+				Endpoint: strings.TrimSpace(cfg.AppObservabilityEndpoint),
+			},
 		},
 		Logger:                       logger,
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
