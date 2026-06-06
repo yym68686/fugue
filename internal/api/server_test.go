@@ -230,7 +230,7 @@ func TestReadyzObservabilityDisabledIsSkipped(t *testing.T) {
 	}
 }
 
-func TestReadyzObservabilityEnabledWithoutExportersIsNonCriticalDegradation(t *testing.T) {
+func TestReadyzObservabilityEnabledWithoutBackendsIsNonCriticalDegradation(t *testing.T) {
 	t.Parallel()
 
 	s := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -252,7 +252,40 @@ func TestReadyzObservabilityEnabledWithoutExportersIsNonCriticalDegradation(t *t
 	body := recorder.Body.String()
 	for _, want := range []string{
 		`"status":"degraded"`,
-		`"observability":{"status":"degraded","message":"observability is enabled but no exporters are configured"}`,
+		`"observability":{"status":"degraded","message":"observability is enabled but no backend endpoints are configured"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected readyz response to contain %q, got %s", want, body)
+		}
+	}
+}
+
+func TestReadyzObservabilityMetricsQueryBackendIsHealthy(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		Observability: observability.Config{
+			Enabled:         true,
+			MetricsQueryURL: "https://metrics.example.test/api/v1/query",
+		},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"status":"ok"`,
+		`"observability":{"status":"ok","message":"configured backends: metrics; retention: 24h0m0s"}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected readyz response to contain %q, got %s", want, body)

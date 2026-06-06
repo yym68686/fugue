@@ -62,16 +62,21 @@ func (s *Server) observabilityReadinessResult() readinessCheckResult {
 			Message: err.Error(),
 		}
 	}
-	exporters := cfg.Exporters()
-	if len(exporters) == 0 {
+	backends := cfg.Backends()
+	if len(backends) == 0 {
 		return readinessCheckResult{
 			Status:  "degraded",
-			Message: "observability is enabled but no exporters are configured",
+			Message: "observability is enabled but no backend endpoints are configured",
 		}
+	}
+	exporters := cfg.Exporters()
+	message := fmt.Sprintf("configured backends: %s; retention: %s", strings.Join(backends, ","), cfg.Retention.String())
+	if len(exporters) > 0 {
+		message = fmt.Sprintf("%s; exporters: %s", message, strings.Join(exporters, ","))
 	}
 	return readinessCheckResult{
 		Status:  "ok",
-		Message: fmt.Sprintf("configured exporters: %s; retention: %s", strings.Join(exporters, ","), cfg.Retention.String()),
+		Message: message,
 	}
 }
 

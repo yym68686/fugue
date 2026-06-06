@@ -127,6 +127,25 @@ func (c Config) Exporters() []string {
 	return exporters
 }
 
+func (c Config) Backends() []string {
+	c = c.Normalize()
+	backends := []string{}
+	if c.MetricsRemoteWriteURL != "" || c.MetricsQueryURL != "" {
+		backends = append(backends, "metrics")
+	}
+	if c.LokiURL != "" {
+		backends = append(backends, "logs")
+	}
+	if c.ClickHouseDSN != "" {
+		backends = append(backends, "analytics")
+	}
+	if c.OTLPEndpoint != "" {
+		backends = append(backends, "otlp")
+	}
+	sort.Strings(backends)
+	return backends
+}
+
 func (c Config) HasExporters() bool {
 	return len(c.Exporters()) > 0
 }

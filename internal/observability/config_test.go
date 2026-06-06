@@ -49,6 +49,24 @@ func TestConfigStatusDoesNotExposeBackendSecrets(t *testing.T) {
 	if status.Exporters[0] != "analytics" || status.Exporters[1] != "logs" || status.Exporters[2] != "metrics" {
 		t.Fatalf("unexpected implemented exporters: %+v", status.Exporters)
 	}
+	backends := cfg.Backends()
+	if len(backends) != 4 || backends[0] != "analytics" || backends[1] != "logs" || backends[2] != "metrics" || backends[3] != "otlp" {
+		t.Fatalf("unexpected configured backends: %+v", backends)
+	}
+}
+
+func TestConfigBackendsIncludeMetricsQueryWithoutExporter(t *testing.T) {
+	cfg := Config{
+		Enabled:         true,
+		MetricsQueryURL: "https://metrics.example.test/api/v1/query",
+	}.Normalize()
+	if cfg.HasExporters() {
+		t.Fatalf("metrics query URL should not be treated as a write exporter: %+v", cfg.Exporters())
+	}
+	backends := cfg.Backends()
+	if len(backends) != 1 || backends[0] != "metrics" {
+		t.Fatalf("expected metrics backend from query URL, got %+v", backends)
+	}
 }
 
 func TestConfigModeTreatsMetricsAsBaselineExporter(t *testing.T) {
