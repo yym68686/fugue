@@ -762,6 +762,7 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 	for _, want := range []string{
 		`image: "grafana/loki:test"`,
 		"- -config.file=/etc/loki/loki.yml",
+		"checksum/loki-config:",
 		"path: /ready",
 	} {
 		if !strings.Contains(deploymentDoc, want) {
