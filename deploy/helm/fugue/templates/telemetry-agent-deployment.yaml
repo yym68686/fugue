@@ -49,6 +49,14 @@ spec:
               value: {{ .Values.observability.enabled | quote }}
             - name: FUGUE_OBSERVABILITY_RETENTION
               value: {{ .Values.observability.retention | quote }}
+            - name: FUGUE_OBSERVABILITY_TENANT_EVENT_QUOTA_PER_MINUTE
+              value: {{ .Values.observability.tenantEventQuotaPerMinute | quote }}
+            - name: FUGUE_OBSERVABILITY_APP_EVENT_QUOTA_PER_MINUTE
+              value: {{ .Values.observability.appEventQuotaPerMinute | quote }}
+            - name: FUGUE_OBSERVABILITY_TENANT_EVENT_QUOTA_OVERRIDES
+              value: {{ .Values.observability.tenantEventQuotaOverrides | quote }}
+            - name: FUGUE_OBSERVABILITY_APP_RETENTION_OVERRIDES
+              value: {{ .Values.observability.appRetentionOverrides | quote }}
             - name: FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS
               value: {{ .Values.observability.agent.runtimeLogPaths | quote }}
             - name: FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS

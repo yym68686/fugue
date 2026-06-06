@@ -55,6 +55,7 @@ type PipelineSnapshot struct {
 	PrometheusScrapeErrors  uint64 `json:"prometheus_scrape_errors"`
 	OTLPRequests            uint64 `json:"otlp_requests"`
 	OTLPBytes               uint64 `json:"otlp_bytes"`
+	QuotaDropped            uint64 `json:"quota_dropped"`
 	LastError               string `json:"last_error,omitempty"`
 	RuntimeLogPipelineCount int    `json:"runtime_log_pipeline_count"`
 	KubernetesLogPipeline   bool   `json:"kubernetes_log_pipeline"`
@@ -76,6 +77,11 @@ func (NoopExporter) Export(context.Context, []Event) error {
 	return nil
 }
 
+type telemetryQuotaBucket struct {
+	WindowStart time.Time
+	Count       int
+}
+
 type Pipeline struct {
 	cfg        Config
 	logger     *log.Logger
@@ -89,12 +95,17 @@ type Pipeline struct {
 	wg      sync.WaitGroup
 	running bool
 
+	quotaMu            sync.Mutex
+	tenantQuotaBuckets map[string]telemetryQuotaBucket
+	appQuotaBuckets    map[string]telemetryQuotaBucket
+
 	queueDepth             atomic.Int64
 	queuedBytes            atomic.Int64
 	received               atomic.Uint64
 	exported               atomic.Uint64
 	dropped                atomic.Uint64
 	redacted               atomic.Uint64
+	quotaDropped           atomic.Uint64
 	batches                atomic.Uint64
 	exportErrors           atomic.Uint64
 	runtimeLogLines        atomic.Uint64
@@ -118,11 +129,13 @@ func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
 		Timeout: cfg.ExportTimeout,
 	}
 	return &Pipeline{
-		cfg:        cfg,
-		logger:     logger,
-		queue:      make(chan Event, cfg.QueueSize),
-		exporter:   NewConfiguredExporter(cfg, httpClient),
-		httpClient: httpClient,
+		cfg:                cfg,
+		logger:             logger,
+		queue:              make(chan Event, cfg.QueueSize),
+		exporter:           NewConfiguredExporter(cfg, httpClient),
+		httpClient:         httpClient,
+		tenantQuotaBuckets: map[string]telemetryQuotaBucket{},
+		appQuotaBuckets:    map[string]telemetryQuotaBucket{},
 	}
 }
 
@@ -211,6 +224,7 @@ func (p *Pipeline) Snapshot() PipelineSnapshot {
 		PrometheusScrapeErrors:  p.prometheusScrapeErrors.Load(),
 		OTLPRequests:            p.otlpRequests.Load(),
 		OTLPBytes:               p.otlpBytes.Load(),
+		QuotaDropped:            p.quotaDropped.Load(),
 		LastError:               p.lastErrorString(),
 		RuntimeLogPipelineCount: len(p.cfg.RuntimeLogPaths),
 		KubernetesLogPipeline:   p.cfg.KubernetesLogsEnabled,
@@ -230,6 +244,11 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 
 	event, redacted := p.prepareEvent(event)
 	p.redacted.Add(uint64(redacted))
+	if !p.allowWithinTelemetryQuota(event) {
+		p.dropped.Add(1)
+		p.quotaDropped.Add(1)
+		return false
+	}
 	size := eventSize(event)
 	if p.cfg.MemoryLimitBytes > 0 {
 		nextSize := p.queuedBytes.Add(size)
@@ -343,6 +362,7 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"received\"} %d\n", snap.Received)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"exported\"} %d\n", snap.Exported)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"dropped\"} %d\n", snap.Dropped)
+	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"quota_dropped\"} %d\n", snap.QuotaDropped)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"redacted\"} %d\n", snap.Redacted)
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_batches_total Export batches attempted by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_batches_total counter")
@@ -650,6 +670,78 @@ func (p *Pipeline) prepareEvent(event Event) (Event, int) {
 	}
 	event.Attributes = attrs
 	return event, redacted
+}
+
+func (p *Pipeline) allowWithinTelemetryQuota(event Event) bool {
+	tenantID := strings.TrimSpace(event.Attributes["tenant_id"])
+	appID := strings.TrimSpace(event.Attributes["app_id"])
+	tenantLimit := 0
+	if tenantID != "" {
+		tenantLimit = p.cfg.TenantEventQuotaPerMinute
+		if quota := p.cfg.TenantEventQuotaOverrides[tenantID]; quota > 0 {
+			tenantLimit = quota
+		}
+	}
+	appLimit := 0
+	if appID != "" {
+		appLimit = p.cfg.AppEventQuotaPerMinute
+	}
+	if tenantLimit <= 0 && appLimit <= 0 {
+		return true
+	}
+
+	windowStart := time.Now().UTC().Truncate(time.Minute)
+	p.quotaMu.Lock()
+	defer p.quotaMu.Unlock()
+	p.pruneTelemetryQuotaBuckets(windowStart)
+
+	if tenantLimit > 0 && quotaBucketCount(p.tenantQuotaBuckets, tenantID, windowStart) >= tenantLimit {
+		return false
+	}
+	if appLimit > 0 && quotaBucketCount(p.appQuotaBuckets, appID, windowStart) >= appLimit {
+		return false
+	}
+	if tenantLimit > 0 {
+		incrementQuotaBucket(p.tenantQuotaBuckets, tenantID, windowStart)
+	}
+	if appLimit > 0 {
+		incrementQuotaBucket(p.appQuotaBuckets, appID, windowStart)
+	}
+	return true
+}
+
+func (p *Pipeline) pruneTelemetryQuotaBuckets(windowStart time.Time) {
+	if len(p.tenantQuotaBuckets)+len(p.appQuotaBuckets) < 2048 {
+		return
+	}
+	cutoff := windowStart.Add(-2 * time.Minute)
+	for key, bucket := range p.tenantQuotaBuckets {
+		if bucket.WindowStart.Before(cutoff) {
+			delete(p.tenantQuotaBuckets, key)
+		}
+	}
+	for key, bucket := range p.appQuotaBuckets {
+		if bucket.WindowStart.Before(cutoff) {
+			delete(p.appQuotaBuckets, key)
+		}
+	}
+}
+
+func quotaBucketCount(buckets map[string]telemetryQuotaBucket, key string, windowStart time.Time) int {
+	bucket := buckets[key]
+	if !bucket.WindowStart.Equal(windowStart) {
+		return 0
+	}
+	return bucket.Count
+}
+
+func incrementQuotaBucket(buckets map[string]telemetryQuotaBucket, key string, windowStart time.Time) {
+	bucket := buckets[key]
+	if !bucket.WindowStart.Equal(windowStart) {
+		bucket = telemetryQuotaBucket{WindowStart: windowStart}
+	}
+	bucket.Count++
+	buckets[key] = bucket
 }
 
 func (p *Pipeline) recordError(err error) {

@@ -75,6 +75,46 @@ func TestConfigBackendsIncludeMetricsQueryWithoutExporter(t *testing.T) {
 	}
 }
 
+func TestConfigNormalizesQuotaAndRetentionPolicies(t *testing.T) {
+	cfg := Config{
+		Retention:                 24 * time.Hour,
+		TenantEventQuotaPerMinute: -1,
+		AppEventQuotaPerMinute:    50,
+		TenantEventQuotaOverrides: map[string]int{
+			" tenant_a ": 10,
+			"tenant_b":   0,
+			"":           20,
+		},
+		AppRetentionOverrides: map[string]time.Duration{
+			" app_a ": 6 * time.Hour,
+			"app_b":   0,
+		},
+	}.Normalize()
+
+	if cfg.TenantEventQuotaPerMinute != 0 {
+		t.Fatalf("expected negative tenant quota to be disabled, got %d", cfg.TenantEventQuotaPerMinute)
+	}
+	if cfg.AppEventQuotaPerMinute != 50 {
+		t.Fatalf("expected app quota to be retained, got %d", cfg.AppEventQuotaPerMinute)
+	}
+	if got := cfg.TenantEventQuotaFor("tenant_a"); got != 10 {
+		t.Fatalf("expected tenant override quota, got %d", got)
+	}
+	if got := cfg.TenantEventQuotaFor("tenant_b"); got != 0 {
+		t.Fatalf("expected invalid tenant override to be dropped, got %d", got)
+	}
+	if got := cfg.RetentionForApp("app_a"); got != 6*time.Hour {
+		t.Fatalf("expected app retention override, got %s", got)
+	}
+	if got := cfg.RetentionForApp("app_b"); got != 24*time.Hour {
+		t.Fatalf("expected invalid app retention override to fall back, got %s", got)
+	}
+	status := cfg.Status()
+	if status.TenantEventQuotaOverrideCount != 1 || status.AppRetentionOverrideCount != 1 {
+		t.Fatalf("expected policy override counts in status, got %+v", status)
+	}
+}
+
 func TestConfigModeTreatsMetricsAsBaselineExporter(t *testing.T) {
 	cfg := Config{
 		Enabled:               true,

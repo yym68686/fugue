@@ -78,11 +78,11 @@ func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, 
 	if !allowed {
 		return
 	}
-	window, ok := readAppObservabilityWindow(w, r)
+	window, ok := s.readAppObservabilityWindow(w, r, app.ID)
 	if !ok {
 		return
 	}
-	source := s.appObservabilitySourceStatus("metrics", "metrics query backend is not wired yet")
+	source := s.appObservabilitySourceStatus(app.ID, "metrics", "metrics query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.metrics.read", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
 	if source.Status != "disabled" {
 		metrics, err := s.queryAppObservabilityMetricsSummary(r.Context(), app.ID, window)
@@ -124,7 +124,7 @@ func (s *Server) handleQueryAppObservabilityMetrics(w http.ResponseWriter, r *ht
 	if !allowed {
 		return
 	}
-	window, ok := readAppObservabilityWindow(w, r)
+	window, ok := s.readAppObservabilityWindow(w, r, app.ID)
 	if !ok {
 		return
 	}
@@ -133,7 +133,7 @@ func (s *Server) handleQueryAppObservabilityMetrics(w http.ResponseWriter, r *ht
 		httpx.WriteError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	source := s.appObservabilitySourceStatus("metrics", "metrics query backend is not wired yet")
+	source := s.appObservabilitySourceStatus(app.ID, "metrics", "metrics query backend is not wired yet")
 	auditMetadata := appObservabilityAuditMetadata(window)
 	auditMetadata["query_present"] = "true"
 	s.appendAudit(principal, "app.observability.metrics.query", "app", app.ID, app.TenantID, auditMetadata)
@@ -180,11 +180,11 @@ func (s *Server) handleQueryAppObservabilityLogs(w http.ResponseWriter, r *http.
 	if !allowed {
 		return
 	}
-	window, ok := readAppObservabilityWindow(w, r)
+	window, ok := s.readAppObservabilityWindow(w, r, app.ID)
 	if !ok {
 		return
 	}
-	source := s.appObservabilitySourceStatus("logs", "logs query backend is not wired yet")
+	source := s.appObservabilitySourceStatus(app.ID, "logs", "logs query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.logs.query", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
 	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "logs") {
 		logs, err := s.queryAppObservabilityLogs(r.Context(), app.ID, window, r.URL.Query())
@@ -226,11 +226,11 @@ func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *ht
 	if !allowed {
 		return
 	}
-	window, ok := readAppObservabilityWindow(w, r)
+	window, ok := s.readAppObservabilityWindow(w, r, app.ID)
 	if !ok {
 		return
 	}
-	source := s.appObservabilitySourceStatus("analytics", "request analytics query backend is not wired yet")
+	source := s.appObservabilitySourceStatus(app.ID, "analytics", "request analytics query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.requests.list", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
 	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
 		requests, err := s.queryAppObservabilityRequests(r.Context(), app.ID, window, r.URL.Query())
@@ -277,12 +277,12 @@ func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	window, ok := readAppObservabilityStreamWindow(w, r, follow)
+	window, ok := s.readAppObservabilityStreamWindow(w, r, follow, app.ID)
 	if !ok {
 		return
 	}
 	const queryPendingReason = "request analytics query backend is not wired yet"
-	source := s.appObservabilitySourceStatus("analytics", queryPendingReason)
+	source := s.appObservabilitySourceStatus(app.ID, "analytics", queryPendingReason)
 	if source.Status != "disabled" && source.Reason == queryPendingReason && observabilityExporterActive(source.ActiveExporters, "analytics") {
 		source.Status = "available"
 		source.Available = true
@@ -390,7 +390,7 @@ func (s *Server) handleGetAppObservabilityTrace(w http.ResponseWriter, r *http.R
 		httpx.WriteError(w, http.StatusBadRequest, "trace_id is required")
 		return
 	}
-	source := s.appObservabilitySourceStatus("analytics", "trace query backend is not wired yet")
+	source := s.appObservabilitySourceStatus(app.ID, "analytics", "trace query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.trace.read", "app", app.ID, app.TenantID, map[string]string{"trace_id_present": "true"})
 	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
 		spans, err := s.queryAppObservabilityTrace(r.Context(), app.ID, traceID)
@@ -432,11 +432,11 @@ func (s *Server) handleGetAppObservabilityDiagnosis(w http.ResponseWriter, r *ht
 	if !allowed {
 		return
 	}
-	window, ok := readAppObservabilityWindow(w, r)
+	window, ok := s.readAppObservabilityWindow(w, r, app.ID)
 	if !ok {
 		return
 	}
-	source := s.appObservabilitySourceStatus("analytics", "diagnosis query backend is not wired yet")
+	source := s.appObservabilitySourceStatus(app.ID, "analytics", "diagnosis query backend is not wired yet")
 	diagnosis := appObservabilityUnavailableDiagnosis(source.Reason)
 	s.appendAudit(principal, "app.observability.diagnosis.read", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
 	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
@@ -468,15 +468,16 @@ func principalCanReadAppObservability(principal model.Principal) bool {
 		principal.HasScope("app.deploy")
 }
 
-func (s *Server) appObservabilitySourceStatus(requiredExporter string, queryPendingReason string) appObservabilitySourceStatus {
+func (s *Server) appObservabilitySourceStatus(appID string, requiredExporter string, queryPendingReason string) appObservabilitySourceStatus {
 	cfg := s.observabilityConfig.Normalize()
 	status := cfg.Status()
+	retention := cfg.RetentionForApp(appID)
 	activeExporters := append([]string{}, status.Exporters...)
 	source := appObservabilitySourceStatus{
 		Available:       false,
 		Status:          "disabled",
 		Mode:            status.Mode,
-		Retention:       status.Retention,
+		Retention:       retention.String(),
 		ActiveExporters: activeExporters,
 		Reason:          "observability is disabled",
 	}
@@ -505,8 +506,13 @@ func observabilityExporterActive(exporters []string, want string) bool {
 	return false
 }
 
-func readAppObservabilityWindow(w http.ResponseWriter, r *http.Request) (appObservabilityWindow, bool) {
-	until := time.Now().UTC()
+func (s *Server) readAppObservabilityWindow(w http.ResponseWriter, r *http.Request, appID string) (appObservabilityWindow, bool) {
+	return readAppObservabilityWindow(w, r, s.observabilityConfig.RetentionForApp(appID))
+}
+
+func readAppObservabilityWindow(w http.ResponseWriter, r *http.Request, retention time.Duration) (appObservabilityWindow, bool) {
+	now := time.Now().UTC()
+	until := now
 	if rawUntil := strings.TrimSpace(r.URL.Query().Get("until")); rawUntil != "" {
 		parsed, err := parseAppObservabilityTimestamp(rawUntil)
 		if err != nil {
@@ -516,7 +522,14 @@ func readAppObservabilityWindow(w http.ResponseWriter, r *http.Request) (appObse
 		until = parsed.UTC()
 	}
 
-	since := until.Add(-appObservabilityDefaultWindow)
+	if retention <= 0 {
+		retention = observability.DefaultRetention
+	}
+	defaultWindow := appObservabilityDefaultWindow
+	if retention < defaultWindow {
+		defaultWindow = retention
+	}
+	since := until.Add(-defaultWindow)
 	if rawSince := strings.TrimSpace(r.URL.Query().Get("since")); rawSince != "" {
 		parsed, err := parseAppObservabilitySince(rawSince, until)
 		if err != nil {
@@ -533,14 +546,22 @@ func readAppObservabilityWindow(w http.ResponseWriter, r *http.Request) (appObse
 		httpx.WriteError(w, http.StatusBadRequest, "observability query window cannot exceed 24h")
 		return appObservabilityWindow{}, false
 	}
+	if until.Sub(since) > retention {
+		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("observability query window cannot exceed app retention %s", retention))
+		return appObservabilityWindow{}, false
+	}
+	if since.Before(now.Add(-retention)) {
+		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("observability query starts before app retention %s", retention))
+		return appObservabilityWindow{}, false
+	}
 	return appObservabilityWindow{
 		Since: since.Format(time.RFC3339),
 		Until: until.Format(time.RFC3339),
 	}, true
 }
 
-func readAppObservabilityStreamWindow(w http.ResponseWriter, r *http.Request, follow bool) (appObservabilityWindow, bool) {
-	window, ok := readAppObservabilityWindow(w, r)
+func (s *Server) readAppObservabilityStreamWindow(w http.ResponseWriter, r *http.Request, follow bool, appID string) (appObservabilityWindow, bool) {
+	window, ok := s.readAppObservabilityWindow(w, r, appID)
 	if !ok {
 		return appObservabilityWindow{}, false
 	}
@@ -552,7 +573,11 @@ func readAppObservabilityStreamWindow(w http.ResponseWriter, r *http.Request, fo
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return appObservabilityWindow{}, false
 	}
-	window.Since = until.Add(-appObservabilityRequestStreamDefaultWindow).UTC().Format(time.RFC3339)
+	streamWindow := appObservabilityRequestStreamDefaultWindow
+	if retention := s.observabilityConfig.RetentionForApp(appID); retention > 0 && retention < streamWindow {
+		streamWindow = retention
+	}
+	window.Since = until.Add(-streamWindow).UTC().Format(time.RFC3339)
 	return window, true
 }
 

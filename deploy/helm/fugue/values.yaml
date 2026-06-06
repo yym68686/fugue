@@ -17,6 +17,10 @@ configSecret:
 observability:
   enabled: false
   retention: 24h
+  tenantEventQuotaPerMinute: 0
+  appEventQuotaPerMinute: 0
+  tenantEventQuotaOverrides: ""
+  appRetentionOverrides: ""
   exporterSecret:
     existingSecretName: ""
     metricsRemoteWriteURLKey: FUGUE_OBSERVABILITY_METRICS_REMOTE_WRITE_URL

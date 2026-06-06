@@ -50,6 +50,10 @@ type Config struct {
 	MaxPayloadBytes                int64
 	MemoryLimitBytes               int64
 	RetryMaxAttempts               int
+	TenantEventQuotaPerMinute      int
+	AppEventQuotaPerMinute         int
+	TenantEventQuotaOverrides      map[string]int
+	AppRetentionOverrides          map[string]time.Duration
 	Identity                       Identity
 }
 
@@ -62,24 +66,28 @@ type Identity struct {
 }
 
 type Status struct {
-	Enabled                      bool     `json:"enabled"`
-	Mode                         string   `json:"mode"`
-	Retention                    string   `json:"retention"`
-	MetricsConfigured            bool     `json:"metrics_configured"`
-	MetricsQueryConfigured       bool     `json:"metrics_query_configured"`
-	LogsConfigured               bool     `json:"logs_configured"`
-	AnalyticsConfigured          bool     `json:"analytics_configured"`
-	OTLPConfigured               bool     `json:"otlp_configured"`
-	RuntimeLogPipelineConfigured bool     `json:"runtime_log_pipeline_configured"`
-	PrometheusScrapeConfigured   bool     `json:"prometheus_scrape_configured"`
-	KubernetesLogsConfigured     bool     `json:"kubernetes_logs_configured"`
-	IdentityConfigured           bool     `json:"identity_configured"`
-	QueueSize                    int      `json:"queue_size"`
-	BatchSize                    int      `json:"batch_size"`
-	MaxPayloadBytes              int64    `json:"max_payload_bytes"`
-	MemoryLimitBytes             int64    `json:"memory_limit_bytes"`
-	RetryMaxAttempts             int      `json:"retry_max_attempts"`
-	Exporters                    []string `json:"exporters,omitempty"`
+	Enabled                       bool     `json:"enabled"`
+	Mode                          string   `json:"mode"`
+	Retention                     string   `json:"retention"`
+	MetricsConfigured             bool     `json:"metrics_configured"`
+	MetricsQueryConfigured        bool     `json:"metrics_query_configured"`
+	LogsConfigured                bool     `json:"logs_configured"`
+	AnalyticsConfigured           bool     `json:"analytics_configured"`
+	OTLPConfigured                bool     `json:"otlp_configured"`
+	RuntimeLogPipelineConfigured  bool     `json:"runtime_log_pipeline_configured"`
+	PrometheusScrapeConfigured    bool     `json:"prometheus_scrape_configured"`
+	KubernetesLogsConfigured      bool     `json:"kubernetes_logs_configured"`
+	IdentityConfigured            bool     `json:"identity_configured"`
+	QueueSize                     int      `json:"queue_size"`
+	BatchSize                     int      `json:"batch_size"`
+	MaxPayloadBytes               int64    `json:"max_payload_bytes"`
+	MemoryLimitBytes              int64    `json:"memory_limit_bytes"`
+	RetryMaxAttempts              int      `json:"retry_max_attempts"`
+	TenantEventQuotaPerMinute     int      `json:"tenant_event_quota_per_minute,omitempty"`
+	AppEventQuotaPerMinute        int      `json:"app_event_quota_per_minute,omitempty"`
+	TenantEventQuotaOverrideCount int      `json:"tenant_event_quota_override_count,omitempty"`
+	AppRetentionOverrideCount     int      `json:"app_retention_override_count,omitempty"`
+	Exporters                     []string `json:"exporters,omitempty"`
 }
 
 func (c Config) Normalize() Config {
@@ -136,6 +144,14 @@ func (c Config) Normalize() Config {
 	if c.RetryMaxAttempts <= 0 {
 		c.RetryMaxAttempts = DefaultRetryAttempts
 	}
+	if c.TenantEventQuotaPerMinute < 0 {
+		c.TenantEventQuotaPerMinute = 0
+	}
+	if c.AppEventQuotaPerMinute < 0 {
+		c.AppEventQuotaPerMinute = 0
+	}
+	c.TenantEventQuotaOverrides = normalizePositiveIntMap(c.TenantEventQuotaOverrides)
+	c.AppRetentionOverrides = normalizeDurationMap(c.AppRetentionOverrides)
 	return c
 }
 
@@ -181,25 +197,51 @@ func (c Config) HasExporters() bool {
 func (c Config) Status() Status {
 	c = c.Normalize()
 	return Status{
-		Enabled:                      c.Enabled,
-		Mode:                         c.Mode(),
-		Retention:                    c.Retention.String(),
-		MetricsConfigured:            c.MetricsRemoteWriteURL != "",
-		MetricsQueryConfigured:       c.MetricsQueryURL != "",
-		LogsConfigured:               c.LokiURL != "",
-		AnalyticsConfigured:          c.ClickHouseDSN != "",
-		OTLPConfigured:               c.OTLPEndpoint != "",
-		RuntimeLogPipelineConfigured: len(c.RuntimeLogPaths) > 0,
-		PrometheusScrapeConfigured:   len(c.PrometheusScrapeURLs) > 0,
-		KubernetesLogsConfigured:     c.KubernetesLogsEnabled,
-		IdentityConfigured:           c.Identity.HasResourceIdentity(),
-		QueueSize:                    c.QueueSize,
-		BatchSize:                    c.BatchSize,
-		MaxPayloadBytes:              c.MaxPayloadBytes,
-		MemoryLimitBytes:             c.MemoryLimitBytes,
-		RetryMaxAttempts:             c.RetryMaxAttempts,
-		Exporters:                    c.Exporters(),
+		Enabled:                       c.Enabled,
+		Mode:                          c.Mode(),
+		Retention:                     c.Retention.String(),
+		MetricsConfigured:             c.MetricsRemoteWriteURL != "",
+		MetricsQueryConfigured:        c.MetricsQueryURL != "",
+		LogsConfigured:                c.LokiURL != "",
+		AnalyticsConfigured:           c.ClickHouseDSN != "",
+		OTLPConfigured:                c.OTLPEndpoint != "",
+		RuntimeLogPipelineConfigured:  len(c.RuntimeLogPaths) > 0,
+		PrometheusScrapeConfigured:    len(c.PrometheusScrapeURLs) > 0,
+		KubernetesLogsConfigured:      c.KubernetesLogsEnabled,
+		IdentityConfigured:            c.Identity.HasResourceIdentity(),
+		QueueSize:                     c.QueueSize,
+		BatchSize:                     c.BatchSize,
+		MaxPayloadBytes:               c.MaxPayloadBytes,
+		MemoryLimitBytes:              c.MemoryLimitBytes,
+		RetryMaxAttempts:              c.RetryMaxAttempts,
+		TenantEventQuotaPerMinute:     c.TenantEventQuotaPerMinute,
+		AppEventQuotaPerMinute:        c.AppEventQuotaPerMinute,
+		TenantEventQuotaOverrideCount: len(c.TenantEventQuotaOverrides),
+		AppRetentionOverrideCount:     len(c.AppRetentionOverrides),
+		Exporters:                     c.Exporters(),
 	}
+}
+
+func (c Config) RetentionForApp(appID string) time.Duration {
+	c = c.Normalize()
+	appID = strings.TrimSpace(appID)
+	if appID != "" {
+		if retention := c.AppRetentionOverrides[appID]; retention > 0 {
+			return retention
+		}
+	}
+	return c.Retention
+}
+
+func (c Config) TenantEventQuotaFor(tenantID string) int {
+	c = c.Normalize()
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID != "" {
+		if quota := c.TenantEventQuotaOverrides[tenantID]; quota > 0 {
+			return quota
+		}
+	}
+	return c.TenantEventQuotaPerMinute
 }
 
 func (c Config) Mode() string {
@@ -339,6 +381,42 @@ func normalizeStringList(values []string) []string {
 		}
 		seen[value] = struct{}{}
 		out = append(out, value)
+	}
+	return out
+}
+
+func normalizePositiveIntMap(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" || value <= 0 {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeDurationMap(values map[string]time.Duration) map[string]time.Duration {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]time.Duration, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" || value <= 0 {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

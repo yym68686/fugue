@@ -126,6 +126,59 @@ func TestPipelineQueueAndMemoryLimitDropsWithoutBlocking(t *testing.T) {
 	}
 }
 
+func TestPipelineEnforcesTenantTelemetryQuota(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:                   true,
+		QueueSize:                 4,
+		MemoryLimitBytes:          4096,
+		TenantEventQuotaPerMinute: 1,
+	}, nil)
+	event := Event{
+		Kind:   EventKindLog,
+		Source: "unit",
+		Attributes: map[string]string{
+			"tenant_id": "tenant_123",
+			"app_id":    "app_123",
+		},
+	}
+	if !pipeline.Ingest(context.Background(), event) {
+		t.Fatal("expected first tenant event to be queued")
+	}
+	if pipeline.Ingest(context.Background(), event) {
+		t.Fatal("expected second tenant event to be quota dropped")
+	}
+	snap := pipeline.Snapshot()
+	if snap.QueueDepth != 1 || snap.QuotaDropped != 1 || snap.Dropped != 1 {
+		t.Fatalf("unexpected quota snapshot: %+v", snap)
+	}
+}
+
+func TestPipelineEnforcesAppTelemetryQuota(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:                true,
+		QueueSize:              4,
+		MemoryLimitBytes:       4096,
+		AppEventQuotaPerMinute: 1,
+	}, nil)
+	event := Event{
+		Kind:   EventKindLog,
+		Source: "unit",
+		Attributes: map[string]string{
+			"tenant_id": "tenant_123",
+			"app_id":    "app_123",
+		},
+	}
+	if !pipeline.Ingest(context.Background(), event) {
+		t.Fatal("expected first app event to be queued")
+	}
+	if pipeline.Ingest(context.Background(), event) {
+		t.Fatal("expected second app event to be quota dropped")
+	}
+	if !strings.Contains(pipeline.PrometheusMetrics(), `fugue_telemetry_pipeline_events_total{outcome="quota_dropped"} 1`) {
+		t.Fatalf("expected quota drop metric, got:\n%s", pipeline.PrometheusMetrics())
+	}
+}
+
 func TestOTLPHTTPReceiverAcceptsJSONWithoutStoringPayload(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,

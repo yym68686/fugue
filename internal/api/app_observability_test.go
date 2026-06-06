@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/observability"
@@ -186,6 +187,46 @@ func TestAppObservabilityRequiresReadScope(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "app.observability.read") {
 		t.Fatalf("expected missing scope message, got %s", recorder.Body.String())
+	}
+}
+
+func TestAppObservabilityRejectsWindowBeyondAppRetention(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	server.observabilityConfig = observability.Config{
+		Enabled: true,
+		AppRetentionOverrides: map[string]time.Duration{
+			app.ID: 30 * time.Minute,
+		},
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/summary?since=45m", apiKey, nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "app retention 30m0s") {
+		t.Fatalf("expected retention error, got %s", recorder.Body.String())
+	}
+}
+
+func TestAppObservabilityDefaultWindowHonorsShortAppRetention(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	server.observabilityConfig = observability.Config{
+		Enabled: true,
+		AppRetentionOverrides: map[string]time.Duration{
+			app.ID: 30 * time.Minute,
+		},
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/summary", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source appObservabilitySourceStatus `json:"source"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Source.Retention != "30m0s" {
+		t.Fatalf("expected app retention in source, got %+v", response.Source)
 	}
 }
 

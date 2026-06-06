@@ -292,6 +292,10 @@ func ObservabilityFromEnv() observability.Config {
 		MaxPayloadBytes:                int64(getenvInt("FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES", observability.DefaultMaxPayloadBytes)),
 		MemoryLimitBytes:               int64(getenvInt("FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES", observability.DefaultMemoryLimit)),
 		RetryMaxAttempts:               getenvInt("FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS", observability.DefaultRetryAttempts),
+		TenantEventQuotaPerMinute:      getenvInt("FUGUE_OBSERVABILITY_TENANT_EVENT_QUOTA_PER_MINUTE", 0),
+		AppEventQuotaPerMinute:         getenvInt("FUGUE_OBSERVABILITY_APP_EVENT_QUOTA_PER_MINUTE", 0),
+		TenantEventQuotaOverrides:      getenvIntMap("FUGUE_OBSERVABILITY_TENANT_EVENT_QUOTA_OVERRIDES"),
+		AppRetentionOverrides:          getenvDurationMap("FUGUE_OBSERVABILITY_APP_RETENTION_OVERRIDES"),
 		Identity: observability.Identity{
 			TenantID:  strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_TENANT_ID")),
 			ProjectID: strings.TrimSpace(os.Getenv("FUGUE_OBSERVABILITY_PROJECT_ID")),
@@ -524,6 +528,68 @@ func getenvListDefault(key string, fallback []string) []string {
 		return values
 	}
 	return append([]string(nil), fallback...)
+}
+
+func getenvIntMap(key string) map[string]int {
+	raw := os.Getenv(key)
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := map[string]int{}
+	for _, item := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t'
+	}) {
+		name, value, ok := strings.Cut(strings.TrimSpace(item), "=")
+		if !ok {
+			log.Printf("invalid integer map item in %s=%q, expected key=value", key, item)
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || parsed <= 0 {
+			log.Printf("invalid integer map value in %s=%q, ignoring", key, item)
+			continue
+		}
+		out[name] = parsed
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func getenvDurationMap(key string) map[string]time.Duration {
+	raw := os.Getenv(key)
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := map[string]time.Duration{}
+	for _, item := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t'
+	}) {
+		name, value, ok := strings.Cut(strings.TrimSpace(item), "=")
+		if !ok {
+			log.Printf("invalid duration map item in %s=%q, expected key=value", key, item)
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(strings.TrimSpace(value))
+		if err != nil || parsed <= 0 {
+			log.Printf("invalid duration map value in %s=%q, ignoring", key, item)
+			continue
+		}
+		out[name] = parsed
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func getenvBool(key string, fallback bool) bool {
