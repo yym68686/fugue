@@ -85,3 +85,17 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 		t.Fatalf("expected runtime log paths to be normalized, got %+v", cfg.RuntimeLogPaths)
 	}
 }
+
+func TestControlPlaneMetricsBindAddrFromEnv(t *testing.T) {
+	t.Setenv("FUGUE_API_METRICS_BIND_ADDR", ":19090")
+	t.Setenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR", ":19091")
+
+	apiCfg := APIFromEnv()
+	if apiCfg.MetricsBindAddr != ":19090" {
+		t.Fatalf("expected API metrics bind addr from env, got %q", apiCfg.MetricsBindAddr)
+	}
+	controllerCfg := ControllerFromEnv()
+	if controllerCfg.MetricsBindAddr != ":19091" {
+		t.Fatalf("expected controller metrics bind addr from env, got %q", controllerCfg.MetricsBindAddr)
+	}
+}

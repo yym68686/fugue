@@ -133,6 +133,39 @@ func TestReadyzReportsHealthyDependencies(t *testing.T) {
 	}
 }
 
+func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	recorder := httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`fugue_component_info{component="api"} 1.000000`,
+		`fugue_api_ready 1.000000`,
+		`fugue_go_goroutines{component="api"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output missing %q:\n%s", want, body)
+		}
+	}
+
+	server.SetReady(false)
+	recorder = httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(recorder.Body.String(), `fugue_api_ready 0.000000`) {
+		t.Fatalf("expected not-ready gauge after SetReady(false), got:\n%s", recorder.Body.String())
+	}
+}
+
 func TestReadyzReportsKubernetesDependencyAsDegradedWithoutFailingReadiness(t *testing.T) {
 	t.Parallel()
 

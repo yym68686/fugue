@@ -14,6 +14,7 @@ import (
 
 type APIConfig struct {
 	BindAddr                     string
+	MetricsBindAddr              string
 	StorePath                    string
 	DatabaseURL                  string
 	BootstrapAdminKey            string
@@ -59,6 +60,7 @@ type TelemetryAgentConfig struct {
 }
 
 type ControllerConfig struct {
+	MetricsBindAddr               string
 	StorePath                     string
 	DatabaseURL                   string
 	APIPublicDomain               string
@@ -208,6 +210,7 @@ type DNSGeoIPOverride struct {
 func APIFromEnv() APIConfig {
 	cfg := APIConfig{
 		BindAddr:                     getenv("FUGUE_BIND_ADDR", ":8080"),
+		MetricsBindAddr:              strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
 		StorePath:                    getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                  getenv("FUGUE_DATABASE_URL", ""),
 		BootstrapAdminKey:            getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
@@ -293,6 +296,7 @@ func ObservabilityFromEnv() observability.Config {
 
 func ControllerFromEnv() ControllerConfig {
 	cfg := ControllerConfig{
+		MetricsBindAddr:               strings.TrimSpace(os.Getenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR")),
 		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
 		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),

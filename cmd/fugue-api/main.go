@@ -64,6 +64,21 @@ func main() {
 	server.StartBackgroundWarmers(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 
+	var metricsServer *http.Server
+	if cfg.MetricsBindAddr != "" {
+		metricsServer = &http.Server{
+			Addr:              cfg.MetricsBindAddr,
+			Handler:           server.MetricsHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		go func() {
+			logger.Printf("fugue-api metrics listening on %s", cfg.MetricsBindAddr)
+			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Fatalf("metrics listen and serve: %v", err)
+			}
+		}()
+	}
+
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddr,
 		Handler:           server.Handler(),
@@ -80,6 +95,11 @@ func main() {
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Printf("shutdown error: %v", err)
+		}
+		if metricsServer != nil {
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Printf("metrics shutdown error: %v", err)
+			}
 		}
 	}()
 

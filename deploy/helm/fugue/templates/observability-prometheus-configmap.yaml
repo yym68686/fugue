@@ -44,10 +44,10 @@ data:
             regex: {{ .Release.Name | quote }}
             action: keep
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
-            regex: "edge|dns|telemetry-agent|observability-prometheus"
+            regex: "api|controller|edge|dns|telemetry-agent|observability-prometheus"
             action: keep
           - source_labels: [__meta_kubernetes_pod_container_port_name]
-            regex: "http"
+            regex: "http|metrics"
             action: keep
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
             target_label: component
@@ -55,6 +55,62 @@ data:
             target_label: pod
           - target_label: namespace
             replacement: {{ .Release.Namespace | quote }}
+      - job_name: fugue-kubernetes-nodes
+        scheme: https
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+      - job_name: fugue-kubernetes-cadvisor
+        scheme: https
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+      - job_name: fugue-managed-postgres-pods
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_managed_by]
+            regex: cloudnative-pg
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+            regex: .+
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: "metrics|http-metrics|prometheus"
+            action: keep
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_label_cnpg_io_cluster]
+            target_label: postgres_cluster
       {{ with .Values.observability.metrics.extraScrapeConfigs }}
 {{ toYaml . | nindent 6 }}
       {{ end }}

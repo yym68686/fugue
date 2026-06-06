@@ -38,6 +38,7 @@ type Service struct {
 	importImageInspectRetryDelay  time.Duration
 	importImageInspectMaxAttempts int
 	now                           func() time.Time
+	metricsStartedAt              time.Time
 }
 
 type sourceImporter interface {
@@ -77,6 +78,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		latestGitHubCommit:           sourceimport.LatestGitHubCommit,
 		newKubeClient:                newKubeClient,
 		now:                          time.Now,
+		metricsStartedAt:             time.Now().UTC(),
 	}
 }
 

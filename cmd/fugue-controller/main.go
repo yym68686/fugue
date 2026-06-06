@@ -24,6 +24,9 @@ func main() {
 	defer stop()
 
 	service := controller.New(store, cfg, logger)
+	if err := service.StartMetricsServer(ctx, cfg.MetricsBindAddr); err != nil {
+		logger.Fatalf("start controller metrics server: %v", err)
+	}
 	if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Fatalf("controller exited: %v", err)
 	}

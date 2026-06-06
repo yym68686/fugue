@@ -29,6 +29,7 @@ type Server struct {
 	store                        *store.Store
 	auth                         *auth.Authenticator
 	log                          *log.Logger
+	metricsStartedAt             time.Time
 	controlPlaneNamespace        string
 	controlPlaneReleaseInstance  string
 	controlPlaneGitHubRepository string
@@ -101,6 +102,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		store:                        store,
 		auth:                         authn,
 		log:                          logger,
+		metricsStartedAt:             time.Now().UTC(),
 		controlPlaneNamespace:        strings.TrimSpace(cfg.ControlPlaneNamespace),
 		controlPlaneReleaseInstance:  strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
 		controlPlaneGitHubRepository: strings.TrimSpace(cfg.ControlPlaneGitHubRepository),
@@ -225,11 +227,35 @@ func (s *Server) SetReady(ready bool) {
 	s.ready.Store(ready)
 }
 
+func (s *Server) IsReady() bool {
+	return s.ready.Load()
+}
+
+func (s *Server) MetricsHandler() http.Handler {
+	return http.HandlerFunc(s.handleMetrics)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	observability.WriteComponentRuntimeMetrics(w, "api", s.metricsStartedAt)
+	observability.WriteGaugeMetric(w, "fugue_api_ready", "Whether the Fugue API is ready to serve traffic.", nil, boolMetric(s.IsReady()))
+	status := s.observabilityConfig.Normalize().Status()
+	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
+	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
+}
+
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"principal": authContextFromPrincipal(principal),
 	})
+}
+
+func boolMetric(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func authContextFromPrincipal(principal model.Principal) map[string]any {

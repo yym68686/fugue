@@ -185,6 +185,9 @@ api:
     credentialEncryptionKey: ""
     presignTTL: 6h
   importWorkDir: /var/lib/fugue/import
+  metrics:
+    enabled: true
+    port: 9090
   hostNetwork: false
   minReadySeconds: 5
   terminationGracePeriodSeconds: 40
@@ -228,6 +231,9 @@ controller:
   fallbackPollInterval: 30s
   runtimeOfflineAfter: 90s
   kubectlApply: true
+  metrics:
+    enabled: true
+    port: 9090
   terminationGracePeriodSeconds: 30
   strategy:
     rollingUpdate:

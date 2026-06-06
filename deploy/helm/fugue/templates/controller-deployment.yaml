@@ -44,7 +44,17 @@ spec:
         - name: controller
           image: {{ include "fugue.imageRef" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "digest" .Values.controller.image.digest) | quote }}
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- if .Values.controller.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.controller.metrics.port }}
+              protocol: TCP
+          {{- end }}
           env:
+            {{- if .Values.controller.metrics.enabled }}
+            - name: FUGUE_CONTROLLER_METRICS_BIND_ADDR
+              value: {{ printf ":%v" .Values.controller.metrics.port | quote }}
+            {{- end }}
             - name: FUGUE_DATABASE_URL
               valueFrom:
                 secretKeyRef:

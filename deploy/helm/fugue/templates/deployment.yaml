@@ -54,9 +54,18 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if .Values.api.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.api.metrics.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: FUGUE_BIND_ADDR
               value: ":8080"
+            {{- if .Values.api.metrics.enabled }}
+            - name: FUGUE_API_METRICS_BIND_ADDR
+              value: {{ printf ":%v" .Values.api.metrics.port | quote }}
+            {{- end }}
             - name: FUGUE_CONTROL_PLANE_NAMESPACE
               valueFrom:
                 fieldRef:

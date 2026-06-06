@@ -486,14 +486,70 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"job_name: fugue-observability-prometheus",
 		"job_name: fugue-telemetry-agent",
 		"job_name: fugue-control-plane-pods",
+		"job_name: fugue-kubernetes-nodes",
+		"job_name: fugue-kubernetes-cadvisor",
+		"job_name: fugue-managed-postgres-pods",
 		"kubernetes_sd_configs:",
-		"regex: \"edge|dns|telemetry-agent|observability-prometheus\"",
+		"regex: \"api|controller|edge|dns|telemetry-agent|observability-prometheus\"",
+		"regex: \"http|metrics\"",
+		"replacement: /api/v1/nodes/$1/proxy/metrics",
+		"replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor",
+		"target_label: postgres_cluster",
 		"fugue-fugue-telemetry-agent:7834",
 		"FugueAppNoReadyPods",
 		"FugueAppHighErrorRate",
 	} {
 		if !strings.Contains(configDoc, want) {
 			t.Fatalf("prometheus config missing %q:\n%s", want, configDoc)
+		}
+	}
+}
+
+func TestControlPlaneMetricsPortsRender(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	controllerDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	for name, doc := range map[string]string{
+		"api":        apiDoc,
+		"controller": controllerDoc,
+	} {
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s deployment:\n%s", name, manifest)
+		}
+	}
+	for _, want := range []string{
+		"name: metrics",
+		"containerPort: 9090",
+		"name: FUGUE_API_METRICS_BIND_ADDR",
+		"value: \":9090\"",
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment missing metrics fragment %q:\n%s", want, apiDoc)
+		}
+	}
+	for _, want := range []string{
+		"name: metrics",
+		"containerPort: 9090",
+		"name: FUGUE_CONTROLLER_METRICS_BIND_ADDR",
+		"value: \":9090\"",
+	} {
+		if !strings.Contains(controllerDoc, want) {
+			t.Fatalf("controller deployment missing metrics fragment %q:\n%s", want, controllerDoc)
 		}
 	}
 }
