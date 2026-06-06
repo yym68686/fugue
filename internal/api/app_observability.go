@@ -1253,6 +1253,15 @@ func (s *Server) queryAppObservabilityRuleDiagnosis(ctx context.Context, appID s
 		return appObservabilityDiagnosis{}, err
 	}
 
+	peerTTFBQuery, err := buildAppObservabilityRulePeerTTFBQuery(appID, window)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+	peerTTFBRows, err := s.queryAppObservabilityClickHouse(ctx, peerTTFBQuery)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+
 	eventQuery, err := buildAppObservabilityRuleEventQuery(appID, window)
 	if err != nil {
 		return appObservabilityDiagnosis{}, err
@@ -1262,7 +1271,7 @@ func (s *Server) queryAppObservabilityRuleDiagnosis(ctx context.Context, appID s
 		return appObservabilityDiagnosis{}, err
 	}
 
-	return appObservabilityRuleDiagnosisFromRows(requestRows, spanRows, eventRows), nil
+	return appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows, spanRows, peerTTFBRows, eventRows), nil
 }
 
 func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWindow, query url.Values) (string, error) {
@@ -1400,6 +1409,49 @@ func buildAppObservabilityRuleSpanStatsQuery(appID string, window appObservabili
 		" GROUP BY service, stage ORDER BY p95_stage_ms DESC LIMIT 10 FORMAT JSONEachRow", nil
 }
 
+func buildAppObservabilityRulePeerTTFBQuery(appID string, window appObservabilityWindow) (string, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	currentConditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"trace_id != ''",
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	peerConditions := []string{
+		"app_id != " + quoteClickHouseString(appID),
+		"trace_id != ''",
+		"ts >= " + clickHouseDateTime64Literal(since.Add(-30*time.Second)),
+		"ts <= " + clickHouseDateTime64Literal(until.Add(30*time.Second)),
+		"trace_id IN (SELECT trace_id FROM request_facts WHERE " + strings.Join(currentConditions, " AND ") + ")",
+	}
+	deltaPredicate := "current_ttfb_ms >= 1000 AND peer_ttfb_ms <= 1000 AND delta_ms >= 500"
+	return "SELECT " +
+		"count() AS peer_correlated_trace_count, " +
+		"countIf(" + deltaPredicate + ") AS peer_delta_trace_count, " +
+		"if(count() = 0, 0, countIf(" + deltaPredicate + ") / count()) AS peer_delta_trace_rate, " +
+		"quantileTDigestIf(0.95)(current_ttfb_ms, " + deltaPredicate + ") AS current_peer_delta_p95_ttfb_ms, " +
+		"quantileTDigestIf(0.95)(peer_ttfb_ms, " + deltaPredicate + ") AS peer_p95_ttfb_ms, " +
+		"quantileTDigestIf(0.95)(delta_ms, " + deltaPredicate + ") AS peer_delta_p95_ms, " +
+		"maxIf(delta_ms, " + deltaPredicate + ") AS peer_delta_max_ms, " +
+		"anyIf(peer_sample_app_id, " + deltaPredicate + ") AS peer_sample_app_id " +
+		"FROM (" +
+		"SELECT current_requests.trace_id, current_ttfb_ms, peer_ttfb_ms, current_ttfb_ms - peer_ttfb_ms AS delta_ms, peer_sample_app_id " +
+		"FROM (" +
+		"SELECT trace_id, quantileTDigest(0.95)(toFloat64(ttfb_ms)) AS current_ttfb_ms " +
+		"FROM request_facts WHERE " + strings.Join(currentConditions, " AND ") +
+		" GROUP BY trace_id" +
+		") AS current_requests " +
+		"INNER JOIN (" +
+		"SELECT trace_id, quantileTDigest(0.95)(toFloat64(ttfb_ms)) AS peer_ttfb_ms, any(app_id) AS peer_sample_app_id " +
+		"FROM request_facts WHERE " + strings.Join(peerConditions, " AND ") +
+		" GROUP BY trace_id" +
+		") AS peer_requests USING trace_id" +
+		") FORMAT JSONEachRow", nil
+}
+
 func buildAppObservabilityRuleEventQuery(appID string, window appObservabilityWindow) (string, error) {
 	since, until, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
@@ -1504,6 +1556,10 @@ func appObservabilityDiagnosisFromClickHouseRow(row map[string]any) appObservabi
 }
 
 func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRows []map[string]any, eventRows []map[string]any) appObservabilityDiagnosis {
+	return appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows, spanRows, nil, eventRows)
+}
+
+func appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows []map[string]any, spanRows []map[string]any, peerTTFBRows []map[string]any, eventRows []map[string]any) appObservabilityDiagnosis {
 	requestStats := map[string]any{}
 	if len(requestRows) > 0 {
 		requestStats = requestRows[0]
@@ -1558,6 +1614,23 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 			fmt.Sprintf("top_span=%s.%s", stringField(topSpan, "service"), stringField(topSpan, "stage")),
 			formatAppObservabilityEvidence("top_span_p95_stage_ms", floatField(topSpan, "p95_stage_ms"), "ms"),
 		)
+	}
+	peerTTFBStats := map[string]any{}
+	if len(peerTTFBRows) > 0 {
+		peerTTFBStats = peerTTFBRows[0]
+	}
+	if floatField(peerTTFBStats, "peer_correlated_trace_count") > 0 {
+		evidence = append(evidence,
+			formatAppObservabilityEvidence("peer_correlated_trace_count", floatField(peerTTFBStats, "peer_correlated_trace_count"), ""),
+			formatAppObservabilityEvidence("peer_delta_trace_count", floatField(peerTTFBStats, "peer_delta_trace_count"), ""),
+			formatAppObservabilityEvidence("peer_delta_trace_rate", floatField(peerTTFBStats, "peer_delta_trace_rate"), ""),
+			formatAppObservabilityEvidence("current_peer_delta_p95_ttfb_ms", floatField(peerTTFBStats, "current_peer_delta_p95_ttfb_ms"), "ms"),
+			formatAppObservabilityEvidence("peer_p95_ttfb_ms", floatField(peerTTFBStats, "peer_p95_ttfb_ms"), "ms"),
+			formatAppObservabilityEvidence("peer_delta_p95_ms", floatField(peerTTFBStats, "peer_delta_p95_ms"), "ms"),
+		)
+		if peerAppID := strings.TrimSpace(stringField(peerTTFBStats, "peer_sample_app_id")); peerAppID != "" {
+			evidence = append(evidence, "peer_sample_app_id="+truncateAppObservabilityEvidence(peerAppID, 80))
+		}
 	}
 	if event := appObservabilityFirstEventMatching(eventRows, appObservabilityEventLooksLikeError); event != nil {
 		evidence = append(evidence,
@@ -1635,6 +1708,16 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 				"inspect the latest operation logs and roll back only if the regression aligns with the deploy window",
 			},
 		}
+	case appObservabilityPeerTTFBDeltaLikely(requestCount, p95TTFB, peerTTFBStats) && !appObservabilityTopSpanGivesSpecificLocalCause(topSpan):
+		return appObservabilityDiagnosis{
+			Bottleneck: "pre_peer_service_wait",
+			Confidence: appObservabilityPeerTTFBDeltaConfidence(peerTTFBStats),
+			Evidence:   evidence,
+			NextActions: []string{
+				"open trace waterfall for correlated trace_ids and compare caller spans against peer app TTFB",
+				"inspect caller-side auth, routing, connection-pool, retry, and response-forwarding stages before scaling the peer app",
+			},
+		}
 	case topSpan != nil:
 		if appObservabilityIsResponseStreamEndStage(topSpan) {
 			if requestCount > 0 && streamCount/requestCount >= 0.5 {
@@ -1681,6 +1764,50 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 				"run a short stepped load test and watch requests, spans, logs, and metrics together",
 			},
 		}
+	}
+}
+
+func appObservabilityPeerTTFBDeltaLikely(requestCount float64, p95TTFB float64, peerTTFBStats map[string]any) bool {
+	if requestCount <= 0 || p95TTFB < 1000 {
+		return false
+	}
+	correlatedCount := floatField(peerTTFBStats, "peer_correlated_trace_count")
+	deltaCount := floatField(peerTTFBStats, "peer_delta_trace_count")
+	deltaRate := floatField(peerTTFBStats, "peer_delta_trace_rate")
+	peerP95 := floatField(peerTTFBStats, "peer_p95_ttfb_ms")
+	deltaP95 := floatField(peerTTFBStats, "peer_delta_p95_ms")
+	if correlatedCount < 3 || deltaCount < 2 {
+		return false
+	}
+	return deltaRate >= 0.35 && peerP95 > 0 && peerP95 <= 1000 && deltaP95 >= 500
+}
+
+func appObservabilityPeerTTFBDeltaConfidence(peerTTFBStats map[string]any) float64 {
+	deltaRate := floatField(peerTTFBStats, "peer_delta_trace_rate")
+	deltaP95 := floatField(peerTTFBStats, "peer_delta_p95_ms")
+	return appObservabilityConfidence(0.62+deltaRate*0.2+math.Min(deltaP95/5000, 0.12), 0.9)
+}
+
+func appObservabilityTopSpanGivesSpecificLocalCause(row map[string]any) bool {
+	if row == nil {
+		return false
+	}
+	bottleneck, _ := appObservabilityBottleneckFromTopSpan(row)
+	switch bottleneck {
+	case "auth_or_api_key_wait",
+		"billing_or_balance_wait",
+		"routing_or_provider_selection_wait",
+		"db_lock_or_query_wait",
+		"request_log_write_wait",
+		"event_loop_lag",
+		"upstream_retry_or_cooldown",
+		"token_pool_wait",
+		"upstream_network_connect_wait",
+		"upstream_connection_pool_wait",
+		"runtime_resource_wait":
+		return true
+	default:
+		return false
 	}
 }
 

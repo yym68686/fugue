@@ -696,6 +696,30 @@ func TestAppObservabilityDiagnosisFallsBackToRuleRows(t *testing.T) {
 	}
 }
 
+func TestBuildAppObservabilityRulePeerTTFBQuery(t *testing.T) {
+	query, err := buildAppObservabilityRulePeerTTFBQuery("app_123", appObservabilityWindow{
+		Since: "2026-06-05T23:00:00Z",
+		Until: "2026-06-05T23:05:00Z",
+	})
+	if err != nil {
+		t.Fatalf("build peer TTFB query: %v", err)
+	}
+	for _, want := range []string{
+		"app_id = 'app_123'",
+		"app_id != 'app_123'",
+		"trace_id IN (SELECT trace_id FROM request_facts",
+		"current_ttfb_ms >= 1000",
+		"peer_ttfb_ms <= 1000",
+		"delta_ms >= 500",
+		"peer_delta_p95_ms",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("expected peer TTFB query to contain %q, got %s", want, query)
+		}
+	}
+}
+
 func TestAppObservabilityBottleneckFromTopSpanClassifiesCommonStages(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -733,6 +757,98 @@ func TestAppObservabilityBottleneckFromTopSpanClassifiesCommonStages(t *testing.
 				t.Fatalf("expected next actions for %s.%s", tt.service, tt.stage)
 			}
 		})
+	}
+}
+
+func TestAppObservabilityRuleDiagnosisDetectsPrePeerServiceWait(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRowsWithPeers(
+		[]map[string]any{{
+			"request_count":                  12,
+			"error_5xx_count":                0,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    2600,
+			"p95_duration_ms":                3100,
+			"max_duration_ms":                4600,
+			"edge_fallback_count":            0,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   0,
+		}},
+		[]map[string]any{{
+			"service":      "api",
+			"stage":        "upstream_headers_received",
+			"span_count":   11,
+			"p95_stage_ms": 2400,
+			"max_stage_ms": 4100,
+			"error_count":  0,
+		}},
+		[]map[string]any{{
+			"peer_correlated_trace_count":    10,
+			"peer_delta_trace_count":         8,
+			"peer_delta_trace_rate":          0.8,
+			"current_peer_delta_p95_ttfb_ms": 2600,
+			"peer_p95_ttfb_ms":               350,
+			"peer_delta_p95_ms":              2250,
+			"peer_delta_max_ms":              3100,
+			"peer_sample_app_id":             "peer_app",
+		}},
+		nil,
+	)
+	if diagnosis.Bottleneck != "pre_peer_service_wait" {
+		t.Fatalf("expected pre-peer service wait, got %+v", diagnosis)
+	}
+	joinedEvidence := strings.Join(diagnosis.Evidence, "\n")
+	for _, want := range []string{"peer_correlated_trace_count=10", "peer_p95_ttfb_ms=350ms", "peer_delta_p95_ms=2250ms", "peer_sample_app_id=peer_app"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence %q in %+v", want, diagnosis.Evidence)
+		}
+	}
+}
+
+func TestAppObservabilityRuleDiagnosisKeepsSpecificSpanOverPeerDelta(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRowsWithPeers(
+		[]map[string]any{{
+			"request_count":                  12,
+			"error_5xx_count":                0,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    2600,
+			"p95_duration_ms":                3100,
+			"max_duration_ms":                4600,
+			"edge_fallback_count":            0,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   0,
+		}},
+		[]map[string]any{{
+			"service":      "api",
+			"stage":        "db_pool_acquire",
+			"span_count":   11,
+			"p95_stage_ms": 2400,
+			"max_stage_ms": 4100,
+			"error_count":  0,
+		}},
+		[]map[string]any{{
+			"peer_correlated_trace_count":    10,
+			"peer_delta_trace_count":         8,
+			"peer_delta_trace_rate":          0.8,
+			"current_peer_delta_p95_ttfb_ms": 2600,
+			"peer_p95_ttfb_ms":               350,
+			"peer_delta_p95_ms":              2250,
+		}},
+		nil,
+	)
+	if diagnosis.Bottleneck != "db_lock_or_query_wait" {
+		t.Fatalf("expected specific DB span to win over peer delta, got %+v", diagnosis)
 	}
 }
 
