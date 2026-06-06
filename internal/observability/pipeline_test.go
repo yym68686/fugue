@@ -151,6 +151,75 @@ func TestOTLPHTTPReceiverAcceptsJSONWithoutStoringPayload(t *testing.T) {
 	}
 }
 
+func TestOTLPHTTPReceiverParsesJSONSpans(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:          true,
+		QueueSize:        4,
+		MaxPayloadBytes:  4096,
+		MemoryLimitBytes: 4096,
+	}, nil)
+	payload := bytes.NewBufferString(`{
+		"resourceSpans": [{
+			"resource": {"attributes": [
+				{"key": "service.name", "value": {"stringValue": "checkout-api"}},
+				{"key": "fugue.tenant_id", "value": {"stringValue": "tenant_123"}},
+				{"key": "fugue.project_id", "value": {"stringValue": "project_123"}},
+				{"key": "fugue.app_id", "value": {"stringValue": "app_123"}}
+			]},
+			"scopeSpans": [{
+				"spans": [{
+					"traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+					"spanId": "00f067aa0ba902b7",
+					"parentSpanId": "0000000000000001",
+					"name": "db_wait",
+					"startTimeUnixNano": "1717632000000000000",
+					"endTimeUnixNano": "1717632000017000000",
+					"attributes": [
+						{"key": "fugue.request_id", "value": {"stringValue": "req_123"}},
+						{"key": "http.response.status_code", "value": {"intValue": "503"}},
+						{"key": "Authorization", "value": {"stringValue": "Bearer secret"}}
+					],
+					"status": {"code": "STATUS_CODE_ERROR", "message": "upstream timeout"}
+				}]
+			}]
+		}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/traces", payload)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	pipeline.HandleOTLPHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	event := <-pipeline.queue
+	for key, want := range map[string]string{
+		"event_type":     "request_span",
+		"service":        "checkout-api",
+		"tenant_id":      "tenant_123",
+		"project_id":     "project_123",
+		"app_id":         "app_123",
+		"trace_id":       "4bf92f3577b34da6a3ce929d0e0e4736",
+		"span_id":        "00f067aa0ba902b7",
+		"parent_span_id": "0000000000000001",
+		"stage":          "db_wait",
+		"stage_ms":       "17",
+		"request_id":     "req_123",
+		"status_code":    "503",
+		"error_type":     "upstream timeout",
+	} {
+		if got := event.Attributes[key]; got != want {
+			t.Fatalf("expected %s=%q, got %q in %+v", key, want, got, event.Attributes)
+		}
+	}
+	if _, ok := event.Attributes["Authorization"]; ok {
+		t.Fatalf("secret-like OTLP attribute was retained: %+v", event.Attributes)
+	}
+	if event.Kind != EventKindSpan || event.Message != "otlp span accepted" {
+		t.Fatalf("unexpected event: %+v", event)
+	}
+}
+
 func TestOTLPHTTPReceiverRejectsLargePayload(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,

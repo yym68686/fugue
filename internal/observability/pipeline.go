@@ -296,17 +296,24 @@ func (p *Pipeline) HandleOTLPHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.Ingest(r.Context(), Event{
-		Timestamp: time.Now().UTC(),
-		Kind:      kind,
-		Source:    "otlp_http",
-		Message:   "otlp payload accepted",
-		Attributes: map[string]string{
-			"path":          r.URL.Path,
-			"content_type":  r.Header.Get("Content-Type"),
-			"payload_bytes": strconv.Itoa(len(body)),
-		},
-	})
+	events, redacted := eventsFromOTLPJSON(kind, r.URL.Path, r.Header.Get("Content-Type"), body, time.Now().UTC())
+	p.redacted.Add(uint64(redacted))
+	if len(events) == 0 {
+		events = []Event{{
+			Timestamp: time.Now().UTC(),
+			Kind:      kind,
+			Source:    "otlp_http",
+			Message:   "otlp payload accepted",
+			Attributes: map[string]string{
+				"path":          r.URL.Path,
+				"content_type":  r.Header.Get("Content-Type"),
+				"payload_bytes": strconv.Itoa(len(body)),
+			},
+		}}
+	}
+	for _, event := range events {
+		p.Ingest(r.Context(), event)
+	}
 	writePipelineJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 

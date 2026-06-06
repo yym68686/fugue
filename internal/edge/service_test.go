@@ -31,6 +31,54 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T) {
+	t.Parallel()
+	observed := edgeProxyObservation{
+		ReceivedAt:    time.Date(2026, 6, 6, 1, 2, 3, 0, time.UTC),
+		Host:          "demo.fugue.pro",
+		Method:        http.MethodPost,
+		Path:          "/v1/chat?...",
+		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:     "req_123",
+		StatusCode:    http.StatusServiceUnavailable,
+		Duration:      1500 * time.Millisecond,
+		TTFB:          200 * time.Millisecond,
+		Upstream:      1200 * time.Millisecond,
+		RequestBytes:  123,
+		ResponseBytes: 456,
+		Streaming:     true,
+		CacheStatus:   edgeCacheStatusBypass,
+		Upload:        true,
+		Route: model.EdgeRouteBinding{
+			Hostname:             "demo.fugue.pro",
+			PathPrefix:           "/v1",
+			RouteKind:            model.EdgeRouteKindPlatform,
+			AppID:                "app_123",
+			TenantID:             "tenant_123",
+			RuntimeID:            "runtime_123",
+			EdgeGroupID:          "edge-group-us",
+			RuntimeEdgeGroupID:   "edge-group-us",
+			RouteGeneration:      "routegen_123",
+			DeploymentGeneration: "deploygen_123",
+		},
+	}
+
+	fields := edgeProxyObservationRequestFactFields(observed, config.EdgeConfig{EdgeID: "edge_123"})
+	if fields["event_type"] != "request_fact" || fields["app_id"] != "app_123" || fields["status_class"] != "5xx" {
+		t.Fatalf("unexpected request fact fields: %+v", fields)
+	}
+	if fields["path_template"] != "/v1" || fields["trace_id"] == "" || fields["request_id"] != "req_123" {
+		t.Fatalf("missing route or trace fields: %+v", fields)
+	}
+	summary := fmt.Sprint(fields["summary_json"])
+	if strings.Contains(summary, "token=") || strings.Contains(summary, "Authorization") || strings.Contains(summary, "upstream_url") {
+		t.Fatalf("summary leaked sensitive data: %s", summary)
+	}
+	if !strings.Contains(summary, `"path":"/v1/chat?..."`) || !strings.Contains(summary, `"upload":true`) {
+		t.Fatalf("summary missing expected safe details: %s", summary)
+	}
+}
+
 func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	t.Parallel()
 

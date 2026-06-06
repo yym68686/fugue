@@ -525,13 +525,17 @@ func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Ope
 				if s.Logger != nil {
 					s.Logger.Printf("operation %s failed before claim: %s", op.ID, terminalReason)
 				}
-				if _, failErr := s.Store.FailOperation(op.ID, terminalReason); failErr != nil {
+				failed, failErr := s.Store.FailOperation(op.ID, terminalReason)
+				if failErr != nil {
 					if errors.Is(failErr, store.ErrConflict) || errors.Is(failErr, store.ErrNotFound) {
 						restartScan = true
 						break
 					}
 					return model.Operation{}, false, fmt.Errorf("fail blocked pending operation %s: %w", op.ID, failErr)
 				}
+				s.logOperationAppEvent("failed_before_claim", "error", failed, app, terminalReason, map[string]any{
+					"lane": lane.String(),
+				})
 				restartScan = true
 				break
 			}
@@ -546,6 +550,9 @@ func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Ope
 				restartScan = true
 				break
 			}
+			s.logOperationAppEvent("claimed", "info", claimed, app, "operation claimed", map[string]any{
+				"lane": lane.String(),
+			})
 			return claimed, true, nil
 		}
 		if restartScan {
@@ -585,8 +592,12 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				return nil
 			}
 			s.Logger.Printf("operation %s failed: %v", op.ID, err)
-			if _, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
+			if failed, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
 				s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
+			} else {
+				s.logOperationAppEvent("failed", "error", failed, s.appForOperationEvent(failed), err.Error(), map[string]any{
+					"elapsed_ms": operationElapsedMilliseconds(failed, time.Now().UTC()),
+				})
 			}
 		}
 	case model.ExecutionModeAgent:
@@ -770,15 +781,19 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	if op.Type == model.OperationTypeDelete {
 		message = fmt.Sprintf("managed app deleted from namespace %s", bundle.TenantNamespace)
 	}
+	var completed model.Operation
 	if completionDesiredSpec != nil {
-		_, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, completionDesiredSpec, op.DesiredSource)
+		completed, err = s.Store.CompleteManagedOperationWithResult(op.ID, bundle.ManifestPath, message, completionDesiredSpec, op.DesiredSource)
 	} else {
-		_, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
+		completed, err = s.Store.CompleteManagedOperation(op.ID, bundle.ManifestPath, message)
 	}
 	if err != nil {
 		return fmt.Errorf("complete operation %s: %w", op.ID, err)
 	}
 	timer.Mark("complete_operation")
+	s.logOperationAppEvent("completed", "info", completed, app, message, map[string]any{
+		"elapsed_ms": operationElapsedMilliseconds(completed, time.Now().UTC()),
+	})
 	if op.Type == model.OperationTypeDeploy {
 		deployedApp, appErr := s.Store.GetApp(app.ID)
 		if appErr != nil {

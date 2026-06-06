@@ -224,10 +224,15 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	s.updateOperationProgress(op.ID, fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID))
 
 	message := fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID)
-	if _, err := s.Store.CompleteManagedOperationWithResult(op.ID, "", message, &finalSpec, &finalSource); err != nil {
+	completed, err := s.Store.CompleteManagedOperationWithResult(op.ID, "", message, &finalSpec, &finalSource)
+	if err != nil {
 		return fmt.Errorf("complete import operation %s: %w", op.ID, err)
 	}
 	timer.Mark("complete_import")
+	s.logOperationAppEvent("completed", "info", completed, app, message, map[string]any{
+		"queued_deploy_operation_id": strings.TrimSpace(deployOp.ID),
+		"elapsed_ms":                 operationElapsedMilliseconds(completed, time.Now().UTC()),
+	})
 	runPostOperationMaintenance(s.Logger, fmt.Sprintf("billing image storage sync after import op=%s tenant=%s", op.ID, app.TenantID), func(ctx context.Context) error {
 		return s.syncTenantBillingImageStorage(ctx, app.TenantID)
 	})

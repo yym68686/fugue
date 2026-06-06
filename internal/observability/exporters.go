@@ -769,7 +769,7 @@ func clickHouseAppEventRow(event Event) appEventRow {
 		RuntimeID:      eventAttr(event, "runtime_id"),
 		Pod:            eventAttr(event, "pod"),
 		Message:        event.Message,
-		AttributesJSON: attributesJSON(event),
+		AttributesJSON: appEventAttributesJSON(event),
 	}
 }
 
@@ -840,6 +840,13 @@ func attributesJSON(event Event) string {
 		return "{}"
 	}
 	return string(body)
+}
+
+func appEventAttributesJSON(event Event) string {
+	if raw := eventAttr(event, "attributes_json"); raw != "" && json.Valid([]byte(raw)) {
+		return raw
+	}
+	return attributesJSON(event)
 }
 
 func summaryJSON(event Event) string {

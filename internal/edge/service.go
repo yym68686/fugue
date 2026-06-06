@@ -184,6 +184,8 @@ type edgeProxyObservation struct {
 	Route                  model.EdgeRouteBinding
 	Method                 string
 	Path                   string
+	TraceID                string
+	RequestID              string
 	StatusCode             int
 	Duration               time.Duration
 	TTFB                   time.Duration
@@ -206,6 +208,7 @@ type edgeProxyObservation struct {
 	CachePolicyID          string
 	CacheKeyHash           string
 	AssetClass             string
+	RequestBytes           int64
 	ResponseBytes          int64
 }
 
@@ -692,10 +695,15 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Route:       route,
 		Method:      r.Method,
 		Path:        safeProxyLogPath(r),
+		TraceID:     edgeTraceIDFromRequest(r),
+		RequestID:   edgeRequestIDFromRequest(r),
 		FallbackHit: fallbackHit,
 		WebSocket:   edgeRequestIsWebSocket(r),
 		SSE:         edgeRequestWantsSSE(r),
 		Upload:      edgeRequestHasUpload(r),
+	}
+	if r.ContentLength > 0 {
+		observed.RequestBytes = r.ContentLength
 	}
 	observed.Streaming = observed.WebSocket || observed.SSE
 	cacheDecision := s.edgeCacheDecision(r, route)
@@ -836,6 +844,8 @@ func (s *Service) edgeCacheRevalidate(r *http.Request, target *url.URL, route mo
 		Route:         route,
 		Method:        req.Method,
 		Path:          safeProxyLogPath(req),
+		TraceID:       edgeTraceIDFromRequest(req),
+		RequestID:     edgeRequestIDFromRequest(req),
 		CacheStatus:   edgeCacheStatusMiss,
 		CachePolicyID: decision.PolicyID,
 		CacheKeyHash:  decision.KeyHash,
@@ -2558,6 +2568,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.Streaming,
 		observed.Upload,
 	)
+	s.logProxyObservationFact(observed)
 }
 
 func (s *Service) syncInterval() time.Duration {

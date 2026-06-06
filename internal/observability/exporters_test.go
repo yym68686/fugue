@@ -202,11 +202,12 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 			Kind:      EventKindLog,
 			Message:   "deployment finished",
 			Attributes: map[string]string{
-				"event_type": "deploy_event",
-				"tenant_id":  "tenant_123",
-				"project_id": "project_123",
-				"app_id":     "app_123",
-				"severity":   "info",
+				"event_type":      "deploy_event",
+				"tenant_id":       "tenant_123",
+				"project_id":      "project_123",
+				"app_id":          "app_123",
+				"severity":        "info",
+				"attributes_json": `{"phase":"rollout"}`,
 			},
 		},
 	})
@@ -224,6 +225,7 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 		`"duration_ms":42`,
 		`"stage_ms":17`,
 		`"event_type":"deploy_event"`,
+		`"attributes_json":"{\"phase\":\"rollout\"}"`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("ClickHouse export missing %q in:\n%s", want, joined)
