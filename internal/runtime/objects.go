@@ -87,7 +87,9 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 		objects = append(objects, buildManagedPostgresObjects(namespace, postgres)...)
 	}
 
-	objects = append(objects, buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources))
+	if appRuntimeDeploymentRequired(app) {
+		objects = append(objects, buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources))
+	}
 	if serviceObject := buildAppServiceObject(namespace, app, labels); serviceObject != nil {
 		objects = append(objects, serviceObject)
 	}
@@ -102,6 +104,10 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	}
 	attachOwnerReference(objects, ownerRef)
 	return objects
+}
+
+func appRuntimeDeploymentRequired(app model.App) bool {
+	return app.Spec.Replicas > 0 || strings.TrimSpace(app.Spec.Image) != ""
 }
 
 func buildNamespaceObject(namespace string) map[string]any {

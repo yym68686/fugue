@@ -1900,6 +1900,146 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 	}
 }
 
+func TestApplyManagedAppDesiredStateOmitsDeploymentForDisabledAppWithoutImage(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Disabled Source Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeUpload,
+		UploadID:      "upload_demo",
+		ArchiveSHA256: "sha256-demo",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+		CommitSHA:     "sha256-demo",
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+	app.Spec.Replicas = 0
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managedName := runtime.ManagedAppResourceName(app)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+
+	var (
+		recordedManagedApp map[string]any
+		recordedStatus     map[string]any
+		appliedDeployment  bool
+		appliedService     bool
+		deletedDeployment  bool
+	)
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
+			if err := json.NewDecoder(req.Body).Decode(&recordedStatus); err != nil {
+				t.Fatalf("decode managed app status: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodPatch &&
+			req.URL.Path == managedAppAPIPath(namespace, managedName) &&
+			strings.HasPrefix(req.Header.Get("Content-Type"), "application/json-patch+json"):
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodPatch:
+			var body map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode apply object %s: %v", req.URL.Path, err)
+			}
+			switch strings.TrimSpace(body["kind"].(string)) {
+			case runtime.ManagedAppKind:
+				recordedManagedApp = body
+			case "Deployment":
+				appliedDeployment = true
+			case "Service":
+				appliedService = true
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
+			if recordedManagedApp == nil {
+				t.Fatalf("managed app was requested before apply")
+			}
+			data, err := json.Marshal(recordedManagedApp)
+			if err != nil {
+				t.Fatalf("marshal recorded managed app: %v", err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(data))), Header: make(http.Header)}, nil
+		case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, deploymentName):
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/"+namespace+"/leases/"+managedName+"-fence":
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","status":"Failure","message":"not found","reason":"NotFound","code":404}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments" && req.URL.RawQuery != "":
+			items := `[]`
+			if !deletedDeployment {
+				items = `[{"metadata":{"name":"` + deploymentName + `"}}]`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"items":` + items + `}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodDelete && req.URL.Path == deploymentAPIPath(namespace, deploymentName):
+			deletedDeployment = true
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		case req.Method == http.MethodGet && req.URL.RawQuery != "":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"items":[]}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	svc := &Service{
+		Store:    stateStore,
+		Renderer: runtime.Renderer{},
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      &http.Client{Transport: transport},
+				baseURL:     "http://kube.test",
+				bearerToken: "token",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	if err := svc.applyManagedAppDesiredState(context.Background(), app, runtime.SchedulingConstraints{}); err != nil {
+		t.Fatalf("apply managed app desired state: %v", err)
+	}
+	if recordedManagedApp == nil {
+		t.Fatal("expected managed app desired state to be applied")
+	}
+	if appliedDeployment {
+		t.Fatal("disabled app without image must not apply a deployment")
+	}
+	if !appliedService {
+		t.Fatal("expected service object to remain applied")
+	}
+	if !deletedDeployment {
+		t.Fatal("expected stale deployment to be deleted")
+	}
+	statusSpec, _ := recordedStatus["status"].(map[string]any)
+	if got := statusSpec["phase"]; got != runtime.ManagedAppPhaseDisabled {
+		t.Fatalf("expected disabled status, got %#v", got)
+	}
+}
+
 func TestApplyManagedAppDesiredStateUsesRequestedSchedulingWhenManagedAppReadIsStale(t *testing.T) {
 	t.Parallel()
 

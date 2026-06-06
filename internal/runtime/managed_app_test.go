@@ -185,6 +185,34 @@ func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 	}
 }
 
+func TestBuildManagedAppChildObjectsOmitsDeploymentForDisabledAppWithoutImage(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Ports:     []int{8080},
+			Replicas:  0,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := BuildManagedAppChildObjects(app, SchedulingConstraints{}, nil)
+
+	hasService := false
+	for _, obj := range objects {
+		switch obj["kind"] {
+		case "Deployment":
+			t.Fatalf("disabled app without image must not render an invalid deployment: %#v", obj)
+		case "Service":
+			hasService = true
+		}
+	}
+	if !hasService {
+		t.Fatalf("expected service object to remain for disabled app, got %#v", objects)
+	}
+}
+
 func TestRuntimeServiceNamesUseDNS1035Labels(t *testing.T) {
 	t.Parallel()
 
