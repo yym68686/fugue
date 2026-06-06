@@ -1796,6 +1796,13 @@ func appObservabilityBottleneckFromTopSpan(row map[string]any) (string, []string
 			"inspect client pool size, pending acquire count, and upstream concurrency",
 			"increase pool or replicas only after confirming event loop lag is low",
 		}
+	case strings.Contains(stage, "downstream") ||
+		strings.Contains(stage, "response_start") ||
+		strings.Contains(stage, "response_send"):
+		return "downstream_response_wait", []string{
+			"inspect downstream response writing, client disconnects, and backpressure",
+			"compare downstream response wait against upstream wait before increasing worker capacity",
+		}
 	case strings.Contains(service, "edge") ||
 		strings.Contains(stage, "route") ||
 		strings.Contains(stage, "routing"):

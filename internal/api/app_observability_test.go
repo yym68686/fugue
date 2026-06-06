@@ -717,6 +717,7 @@ func TestAppObservabilityBottleneckFromTopSpanClassifiesCommonStages(t *testing.
 		{name: "request log", service: "gateway", stage: "request_log_queue_wait_ms", bottleneck: "request_log_write_wait"},
 		{name: "usage write", service: "api", stage: "usage_write_ms", bottleneck: "request_log_write_wait"},
 		{name: "upstream response", service: "proxy", stage: "upstream_headers_received", bottleneck: "upstream_response_wait"},
+		{name: "downstream response", service: "proxy", stage: "downstream_response_start", bottleneck: "downstream_response_wait"},
 	}
 
 	for _, tt := range cases {
