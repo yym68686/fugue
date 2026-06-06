@@ -220,6 +220,120 @@ func TestOTLPHTTPReceiverParsesJSONSpans(t *testing.T) {
 	}
 }
 
+func TestOTLPHTTPReceiverParsesStructuredJSONRequestSummary(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:          true,
+		QueueSize:        4,
+		MaxPayloadBytes:  4096,
+		MemoryLimitBytes: 4096,
+	}, nil)
+	payload := bytes.NewBufferString(`{
+		"events": [{
+			"timestamp": "2026-06-06T00:00:00Z",
+			"event_type": "request_summary",
+			"message": "request finished token=secret",
+			"attributes": {
+				"tenant_id": "tenant_123",
+				"project_id": "project_123",
+				"app_id": "app_123",
+				"trace_id": "trace_123",
+				"request_id": "request_123",
+				"status_code": 200,
+				"duration_ms": 42,
+				"Authorization": "Bearer secret"
+			},
+			"summary": {
+				"scenario": "pilot",
+				"mode": "streaming"
+			}
+		}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", payload)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	pipeline.HandleOTLPHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	event := <-pipeline.queue
+	if event.Kind != EventKindLog {
+		t.Fatalf("expected log event, got %+v", event)
+	}
+	for key, want := range map[string]string{
+		"event_type":       "request_summary",
+		"tenant_id":        "tenant_123",
+		"project_id":       "project_123",
+		"app_id":           "app_123",
+		"trace_id":         "trace_123",
+		"request_id":       "request_123",
+		"status_code":      "200",
+		"duration_ms":      "42",
+		"summary.scenario": "pilot",
+		"summary.mode":     "streaming",
+		"otlp_path":        "/v1/logs",
+	} {
+		if got := event.Attributes[key]; got != want {
+			t.Fatalf("expected %s=%q, got %q in %+v", key, want, got, event.Attributes)
+		}
+	}
+	if _, ok := event.Attributes["Authorization"]; ok {
+		t.Fatalf("secret-like structured attribute was retained: %+v", event.Attributes)
+	}
+	if event.Message != "request finished token=[REDACTED]" {
+		t.Fatalf("message was not redacted: %q", event.Message)
+	}
+}
+
+func TestOTLPHTTPReceiverParsesStructuredJSONMetrics(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:          true,
+		QueueSize:        4,
+		MaxPayloadBytes:  4096,
+		MemoryLimitBytes: 4096,
+	}, nil)
+	payload := bytes.NewBufferString(`{
+		"metric": "app_inflight_requests",
+		"value": 7,
+		"attributes": {
+			"tenant_id": "tenant_123",
+			"project_id": "project_123",
+			"app_id": "app_123",
+			"runtime_id": "runtime_123",
+			"component": "pilot",
+			"trace_id": "trace-high-cardinality"
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", payload)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	pipeline.HandleOTLPHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	event := <-pipeline.queue
+	if event.Kind != EventKindMetric {
+		t.Fatalf("expected metric event, got %+v", event)
+	}
+	for key, want := range map[string]string{
+		"metric":     "app_inflight_requests",
+		"value":      "7",
+		"tenant_id":  "tenant_123",
+		"project_id": "project_123",
+		"app_id":     "app_123",
+		"runtime_id": "runtime_123",
+		"component":  "pilot",
+	} {
+		if got := event.Attributes[key]; got != want {
+			t.Fatalf("expected %s=%q, got %q in %+v", key, want, got, event.Attributes)
+		}
+	}
+	if _, ok := event.Attributes["trace_id"]; ok {
+		t.Fatalf("metric retained high-cardinality trace_id: %+v", event.Attributes)
+	}
+}
+
 func TestOTLPHTTPReceiverRejectsLargePayload(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:          true,

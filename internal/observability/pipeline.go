@@ -297,6 +297,15 @@ func (p *Pipeline) HandleOTLPHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	events, redacted := eventsFromOTLPJSON(kind, r.URL.Path, r.Header.Get("Content-Type"), body, time.Now().UTC())
+	if len(events) == 0 {
+		var structuredEvents []Event
+		var structuredRedacted int
+		structuredEvents, structuredRedacted = eventsFromStructuredTelemetryJSON(kind, r.URL.Path, r.Header.Get("Content-Type"), body, time.Now().UTC())
+		if len(structuredEvents) > 0 {
+			events = structuredEvents
+			redacted += structuredRedacted
+		}
+	}
 	p.redacted.Add(uint64(redacted))
 	if len(events) == 0 {
 		events = []Event{{
