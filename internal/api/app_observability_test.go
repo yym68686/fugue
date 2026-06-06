@@ -642,6 +642,42 @@ func TestAppObservabilityRuleDiagnosisDetectsTracebackErrorBurst(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityRuleDiagnosisIgnoresNonActionableFallback(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRows(
+		[]map[string]any{{
+			"request_count":                  46,
+			"error_5xx_count":                0,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    5155,
+			"p95_duration_ms":                19820,
+			"max_duration_ms":                34350,
+			"edge_fallback_count":            10,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   20,
+		}},
+		nil,
+		nil,
+	)
+	if diagnosis.Bottleneck == "edge_routing_fallback" {
+		t.Fatalf("expected non-actionable fallback to be ignored, got %+v", diagnosis)
+	}
+	if diagnosis.Bottleneck != "app_latency" {
+		t.Fatalf("expected latency diagnosis after ignoring static fallback, got %+v", diagnosis)
+	}
+	joinedEvidence := strings.Join(diagnosis.Evidence, "\n")
+	for _, want := range []string{"edge_fallback_count=10", "actionable_edge_fallback_count=0"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence %q in %+v", want, diagnosis.Evidence)
+		}
+	}
+}
+
 func TestAppObservabilityTraceReturnsTraceIDAndEmptySpans(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 

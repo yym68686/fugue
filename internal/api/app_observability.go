@@ -1250,9 +1250,18 @@ func buildAppObservabilityRuleRequestStatsQuery(appID string, window appObservab
 		"max(duration_ms) AS max_duration_ms, " +
 		"countIf(JSONExtractBool(summary_json, 'fallback_hit')) AS edge_fallback_count, " +
 		"countIf(JSONExtractBool(summary_json, 'peer_fallback')) AS peer_fallback_count, " +
+		"countIf(JSONExtractBool(summary_json, 'fallback_hit') AND " + appObservabilityActionableFallbackPredicate() + ") AS actionable_edge_fallback_count, " +
+		"countIf(JSONExtractBool(summary_json, 'peer_fallback') AND " + appObservabilityActionableFallbackPredicate() + ") AS actionable_peer_fallback_count, " +
 		"countIf(JSONExtractBool(summary_json, 'sse')) AS stream_count " +
 		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
 		" FORMAT JSONEachRow", nil
+}
+
+func appObservabilityActionableFallbackPredicate() string {
+	path := "JSONExtractString(summary_json, 'path')"
+	return "NOT JSONExtractBool(summary_json, 'sse') AND " +
+		"NOT startsWith(" + path + ", '/assets/') AND " +
+		path + " NOT IN ('/', '/favicon.ico', '/healthz', '/livez')"
 }
 
 func buildAppObservabilityRuleSpanStatsQuery(appID string, window appObservabilityWindow) (string, error) {
@@ -1393,6 +1402,14 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 	maxDuration := floatField(requestStats, "max_duration_ms")
 	edgeFallbackCount := floatField(requestStats, "edge_fallback_count")
 	peerFallbackCount := floatField(requestStats, "peer_fallback_count")
+	actionableEdgeFallbackCount := edgeFallbackCount
+	if value, ok := optionalFloatField(requestStats, "actionable_edge_fallback_count"); ok {
+		actionableEdgeFallbackCount = value
+	}
+	actionablePeerFallbackCount := peerFallbackCount
+	if value, ok := optionalFloatField(requestStats, "actionable_peer_fallback_count"); ok {
+		actionablePeerFallbackCount = value
+	}
 
 	evidence := []string{
 		formatAppObservabilityEvidence("request_count", requestCount, ""),
@@ -1405,6 +1422,12 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 			formatAppObservabilityEvidence("edge_fallback_count", edgeFallbackCount, ""),
 			formatAppObservabilityEvidence("peer_fallback_count", peerFallbackCount, ""),
 		)
+		if actionableEdgeFallbackCount != edgeFallbackCount || actionablePeerFallbackCount != peerFallbackCount {
+			evidence = append(evidence,
+				formatAppObservabilityEvidence("actionable_edge_fallback_count", actionableEdgeFallbackCount, ""),
+				formatAppObservabilityEvidence("actionable_peer_fallback_count", actionablePeerFallbackCount, ""),
+			)
+		}
 	}
 
 	topSpan := appObservabilityTopSpanRuleRow(spanRows)
@@ -1467,10 +1490,10 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 				"compare affected hostnames and path templates in request_facts",
 			},
 		}
-	case requestCount > 0 && (edgeFallbackCount/requestCount >= 0.05 || peerFallbackCount/requestCount >= 0.05):
+	case requestCount > 0 && (actionableEdgeFallbackCount/requestCount >= 0.05 || actionablePeerFallbackCount/requestCount >= 0.05):
 		return appObservabilityDiagnosis{
 			Bottleneck: "edge_routing_fallback",
-			Confidence: appObservabilityConfidence(0.62+(edgeFallbackCount+peerFallbackCount)/requestCount, 0.9),
+			Confidence: appObservabilityConfidence(0.62+(actionableEdgeFallbackCount+actionablePeerFallbackCount)/requestCount, 0.9),
 			Evidence:   evidence,
 			NextActions: []string{
 				"inspect edge group placement and runtime availability for fallback traffic",
