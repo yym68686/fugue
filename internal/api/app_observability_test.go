@@ -696,6 +696,26 @@ func TestAppObservabilityDiagnosisFallsBackToRuleRows(t *testing.T) {
 	}
 }
 
+func TestBuildAppObservabilityRuleRequestStatsQueryIncludesEdgeUpstreamError(t *testing.T) {
+	query, err := buildAppObservabilityRuleRequestStatsQuery("app_123", appObservabilityWindow{
+		Since: "2026-06-05T23:00:00Z",
+		Until: "2026-06-05T23:05:00Z",
+	})
+	if err != nil {
+		t.Fatalf("build request stats query: %v", err)
+	}
+	for _, want := range []string{
+		"edge_upstream_error_count",
+		"edge_upstream_error_rate",
+		"status_code >= 500 AND JSONExtractBool(summary_json, 'upstream_error')",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("expected request stats query to contain %q, got %s", want, query)
+		}
+	}
+}
+
 func TestBuildAppObservabilityRulePeerTTFBQuery(t *testing.T) {
 	query, err := buildAppObservabilityRulePeerTTFBQuery("app_123", appObservabilityWindow{
 		Since: "2026-06-05T23:00:00Z",
@@ -880,6 +900,83 @@ func TestAppObservabilityRuleDiagnosisDetectsTracebackErrorBurst(t *testing.T) {
 	}
 	if diagnosis.Confidence < 0.9 {
 		t.Fatalf("expected high confidence, got %+v", diagnosis)
+	}
+}
+
+func TestAppObservabilityRuleDiagnosisDetectsEdgeUpstreamErrorBeforeGenericErrorBurst(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRows(
+		[]map[string]any{{
+			"request_count":                  100,
+			"error_5xx_count":                5,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0.05,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    320,
+			"p95_duration_ms":                900,
+			"max_duration_ms":                2000,
+			"edge_upstream_error_count":      5,
+			"edge_upstream_error_rate":       0.05,
+			"edge_fallback_count":            0,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   0,
+		}},
+		nil,
+		nil,
+	)
+	if diagnosis.Bottleneck != "edge_upstream_error" {
+		t.Fatalf("expected edge upstream error, got %+v", diagnosis)
+	}
+	joinedEvidence := strings.Join(diagnosis.Evidence, "\n")
+	for _, want := range []string{"edge_upstream_error_count=5", "edge_upstream_error_rate=0.05", "error_5xx_rate=0.05"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence %q in %+v", want, diagnosis.Evidence)
+		}
+	}
+}
+
+func TestAppObservabilityRuleDiagnosisKeepsSparseEdgeUpstreamErrorAsEvidence(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRows(
+		[]map[string]any{{
+			"request_count":                  486,
+			"error_5xx_count":                1,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0.002057613,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    2063,
+			"p95_duration_ms":                7455,
+			"max_duration_ms":                15000,
+			"edge_upstream_error_count":      1,
+			"edge_upstream_error_rate":       0.002057613,
+			"edge_fallback_count":            0,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   0,
+		}},
+		[]map[string]any{{
+			"service":      "api",
+			"stage":        "response_stream_end",
+			"span_count":   10,
+			"p95_stage_ms": 7455,
+			"max_stage_ms": 15000,
+			"error_count":  0,
+		}},
+		nil,
+	)
+	if diagnosis.Bottleneck != "non_streaming_response_collection" {
+		t.Fatalf("expected sparse edge error not to override span diagnosis, got %+v", diagnosis)
+	}
+	joinedEvidence := strings.Join(diagnosis.Evidence, "\n")
+	for _, want := range []string{"edge_upstream_error_count=1", "edge_upstream_error_rate=0.002058", "top_span=api.response_stream_end"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence %q in %+v", want, diagnosis.Evidence)
+		}
 	}
 }
 

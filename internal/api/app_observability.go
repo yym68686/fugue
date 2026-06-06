@@ -1371,6 +1371,8 @@ func buildAppObservabilityRuleRequestStatsQuery(appID string, window appObservab
 		"quantileTDigest(0.95)(ttfb_ms) AS p95_ttfb_ms, " +
 		"quantileTDigest(0.95)(duration_ms) AS p95_duration_ms, " +
 		"max(duration_ms) AS max_duration_ms, " +
+		"countIf(status_code >= 500 AND JSONExtractBool(summary_json, 'upstream_error')) AS edge_upstream_error_count, " +
+		"if(count() = 0, 0, countIf(status_code >= 500 AND JSONExtractBool(summary_json, 'upstream_error')) / count()) AS edge_upstream_error_rate, " +
 		"countIf(JSONExtractBool(summary_json, 'fallback_hit')) AS edge_fallback_count, " +
 		"countIf(JSONExtractBool(summary_json, 'peer_fallback')) AS peer_fallback_count, " +
 		"countIf(JSONExtractBool(summary_json, 'fallback_hit') AND " + appObservabilityActionableFallbackPredicate() + ") AS actionable_edge_fallback_count, " +
@@ -1559,6 +1561,13 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 	return appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows, spanRows, nil, eventRows)
 }
 
+func appObservabilityEdgeUpstreamErrorLikely(count float64, rate float64) bool {
+	if count < 3 {
+		return false
+	}
+	return rate >= 0.01 || count >= 10
+}
+
 func appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows []map[string]any, spanRows []map[string]any, peerTTFBRows []map[string]any, eventRows []map[string]any) appObservabilityDiagnosis {
 	requestStats := map[string]any{}
 	if len(requestRows) > 0 {
@@ -1575,6 +1584,14 @@ func appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows []map[string]any
 	p95Duration := floatField(requestStats, "p95_duration_ms")
 	maxDuration := floatField(requestStats, "max_duration_ms")
 	streamCount := floatField(requestStats, "stream_count")
+	edgeUpstreamErrorCount := floatField(requestStats, "edge_upstream_error_count")
+	edgeUpstreamErrorRate := 0.0
+	if requestCount > 0 {
+		edgeUpstreamErrorRate = edgeUpstreamErrorCount / requestCount
+	}
+	if value, ok := optionalFloatField(requestStats, "edge_upstream_error_rate"); ok {
+		edgeUpstreamErrorRate = value
+	}
 	edgeFallbackCount := floatField(requestStats, "edge_fallback_count")
 	peerFallbackCount := floatField(requestStats, "peer_fallback_count")
 	actionableEdgeFallbackCount := edgeFallbackCount
@@ -1606,6 +1623,12 @@ func appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows []map[string]any
 	}
 	if streamCount > 0 {
 		evidence = append(evidence, formatAppObservabilityEvidence("stream_count", streamCount, ""))
+	}
+	if edgeUpstreamErrorCount > 0 {
+		evidence = append(evidence,
+			formatAppObservabilityEvidence("edge_upstream_error_count", edgeUpstreamErrorCount, ""),
+			formatAppObservabilityEvidence("edge_upstream_error_rate", edgeUpstreamErrorRate, ""),
+		)
 	}
 
 	topSpan := appObservabilityTopSpanRuleRow(spanRows)
@@ -1658,6 +1681,18 @@ func appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows []map[string]any
 			NextActions: []string{
 				"inspect logs around the traceback burst before scaling workers",
 				"compare the latest release events against the first error timestamp",
+			},
+		}
+	case appObservabilityEdgeUpstreamErrorLikely(edgeUpstreamErrorCount, edgeUpstreamErrorRate):
+		return appObservabilityDiagnosis{
+			Bottleneck: "edge_upstream_error",
+			Confidence: appObservabilityConfidence(0.68+edgeUpstreamErrorRate, 0.92),
+			Evidence: append(evidence,
+				formatAppObservabilityEvidence("error_5xx_rate", error5xxRate, ""),
+			),
+			NextActions: []string{
+				"open edge request samples with upstream_error=true and compare runtime readiness, route generation, and upstream duration",
+				"inspect app runtime logs around the edge 502 timestamps; avoid scaling the app until the edge-to-runtime failure mode is separated from app latency",
 			},
 		}
 	case error5xxCount >= 3 && error5xxRate >= 0.05:
