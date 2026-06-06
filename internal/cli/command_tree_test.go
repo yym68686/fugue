@@ -1419,6 +1419,51 @@ func TestRunAppScaleByNameUsesSemanticCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppScaleWaitJSONRendersFinalOperation(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/scale":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","status":"pending"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_123":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","status":"completed","result_message":"done"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":0},"status":{"phase":"disabled","current_replicas":0},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--json",
+		"app", "scale", "demo",
+		"--replicas", "0",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app scale --json: %v", err)
+	}
+
+	var output appCommandResult
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if output.Operation == nil || output.Operation.Status != model.OperationStatusCompleted {
+		t.Fatalf("expected completed operation in output, got %+v", output.Operation)
+	}
+	if output.App == nil || output.App.Spec.Replicas != 0 {
+		t.Fatalf("expected final app replicas=0, got %+v", output.App)
+	}
+}
+
 func TestRunAppSourceBindGitHubUsesRepairEndpoint(t *testing.T) {
 	t.Parallel()
 

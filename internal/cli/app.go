@@ -337,11 +337,12 @@ func (c *CLI) newAppScaleCommand() *cobra.Command {
 			}
 			result := appCommandResult{Operation: &response.Operation}
 			if opts.Wait {
-				finalApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				finalApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				result.App = finalApp
+				result.Operation = finalOp
 			} else {
 				result.App = &app
 			}
@@ -521,11 +522,12 @@ func (c *CLI) newAppStartCommand() *cobra.Command {
 			}
 			result := appCommandResult{Operation: &response.Operation}
 			if opts.Wait {
-				finalApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				finalApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				result.App = finalApp
+				result.Operation = finalOp
 			} else {
 				result.App = &app
 			}
@@ -564,11 +566,12 @@ func (c *CLI) newAppStopCommand() *cobra.Command {
 				AlreadyDisabled: response.AlreadyDisabled,
 			}
 			if response.Operation != nil && opts.Wait {
-				finalApp, err := c.waitForSingleApp(client, app.ID, *response.Operation, true)
+				finalApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, *response.Operation, true)
 				if err != nil {
 					return err
 				}
 				result.App = finalApp
+				result.Operation = finalOp
 			}
 			return c.renderAppCommandResult(result)
 		},
@@ -879,25 +882,31 @@ func (c *CLI) resolveNamedApp(client *Client, appRef string) (model.App, error) 
 }
 
 func (c *CLI) waitForSingleApp(client *Client, appID string, op model.Operation, wait bool) (*model.App, error) {
+	app, _, err := c.waitForSingleAppOperation(client, appID, op, wait)
+	return app, err
+}
+
+func (c *CLI) waitForSingleAppOperation(client *Client, appID string, op model.Operation, wait bool) (*model.App, *model.Operation, error) {
+	finalOp := op
 	if !wait {
 		app, err := client.GetApp(appID)
 		if err != nil {
-			return nil, err
+			return nil, &finalOp, err
 		}
-		return &app, nil
+		return &app, &finalOp, nil
 	}
 	finalOps, err := c.waitForOperations(client, []model.Operation{op})
 	if err != nil {
-		return nil, err
+		return nil, &finalOp, err
 	}
 	if len(finalOps) > 0 {
-		op = finalOps[0]
+		finalOp = finalOps[0]
 	}
 	app, err := client.GetApp(appID)
 	if err != nil {
-		return nil, err
+		return nil, &finalOp, err
 	}
-	return &app, nil
+	return &app, &finalOp, nil
 }
 
 func loadActiveAppOperations(client *Client, appID string) ([]model.Operation, error) {
