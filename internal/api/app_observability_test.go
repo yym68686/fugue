@@ -521,6 +521,86 @@ func TestAppObservabilityDiagnosisQueriesClickHouse(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityDiagnosisFallsBackToRuleRows(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	queries := []string{}
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queryText := r.URL.Query().Get("query")
+		queries = append(queries, queryText)
+		switch {
+		case strings.Contains(queryText, "FROM diagnosis_windows_1m"):
+			_, _ = w.Write([]byte(""))
+		case strings.Contains(queryText, "FROM request_facts"):
+			_, _ = w.Write([]byte(`{"request_count":120,"error_5xx_count":0,"error_4xx_count":0,"not_found_count":0,"error_5xx_rate":0,"error_4xx_rate":0,"not_found_rate":0,"p95_ttfb_ms":1600,"p95_duration_ms":2200,"max_duration_ms":4100,"edge_fallback_count":0,"peer_fallback_count":0,"stream_count":12}` + "\n"))
+		case strings.Contains(queryText, "FROM request_spans"):
+			_, _ = w.Write([]byte(`{"service":"web-api","stage":"db_pool_acquire","span_count":80,"p95_stage_ms":1400,"max_stage_ms":2200,"error_count":0}` + "\n"))
+		case strings.Contains(queryText, "FROM app_events"):
+			_, _ = w.Write([]byte(""))
+		default:
+			t.Fatalf("unexpected ClickHouse query: %s", queryText)
+		}
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/diagnosis?since=15m", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Diagnosis appObservabilityDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Bottleneck != "db_lock_or_query_wait" {
+		t.Fatalf("expected DB/pool bottleneck, got %+v", response.Diagnosis)
+	}
+	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
+	for _, want := range []string{"request_count=120", "top_span=web-api.db_pool_acquire", "top_span_p95_stage_ms=1400ms"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence %q in %+v", want, response.Diagnosis.Evidence)
+		}
+	}
+	for _, want := range []string{"FROM diagnosis_windows_1m", "FROM request_facts", "FROM request_spans", "FROM app_events"} {
+		if !strings.Contains(strings.Join(queries, "\n"), want) {
+			t.Fatalf("expected fallback query %q in %+v", want, queries)
+		}
+	}
+}
+
+func TestAppObservabilityRuleDiagnosisDetectsTracebackErrorBurst(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRows(
+		[]map[string]any{{
+			"request_count":       50,
+			"error_5xx_count":     10,
+			"error_4xx_count":     12,
+			"not_found_count":     0,
+			"error_5xx_rate":      0.2,
+			"error_4xx_rate":      0.24,
+			"not_found_rate":      0,
+			"p95_ttfb_ms":         320,
+			"p95_duration_ms":     900,
+			"max_duration_ms":     2000,
+			"edge_fallback_count": 0,
+			"peer_fallback_count": 0,
+		}},
+		nil,
+		[]map[string]any{{
+			"event_type": "runtime_event",
+			"severity":   "error",
+			"message":    "Traceback: connection refused",
+		}},
+	)
+	if diagnosis.Bottleneck != "traceback_error_burst" {
+		t.Fatalf("expected traceback bottleneck, got %+v", diagnosis)
+	}
+	if diagnosis.Confidence < 0.9 {
+		t.Fatalf("expected high confidence, got %+v", diagnosis)
+	}
+}
+
 func TestAppObservabilityTraceReturnsTraceIDAndEmptySpans(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 

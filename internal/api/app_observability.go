@@ -1090,9 +1090,40 @@ func (s *Server) queryAppObservabilityDiagnosis(ctx context.Context, appID strin
 		return appObservabilityDiagnosis{}, err
 	}
 	if len(rows) == 0 {
-		return appObservabilityUnavailableDiagnosis("no diagnosis window rows in the selected range"), nil
+		return s.queryAppObservabilityRuleDiagnosis(ctx, appID, window)
 	}
 	return appObservabilityDiagnosisFromClickHouseRow(rows[0]), nil
+}
+
+func (s *Server) queryAppObservabilityRuleDiagnosis(ctx context.Context, appID string, window appObservabilityWindow) (appObservabilityDiagnosis, error) {
+	requestQuery, err := buildAppObservabilityRuleRequestStatsQuery(appID, window)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+	requestRows, err := s.queryAppObservabilityClickHouse(ctx, requestQuery)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+
+	spanQuery, err := buildAppObservabilityRuleSpanStatsQuery(appID, window)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+	spanRows, err := s.queryAppObservabilityClickHouse(ctx, spanQuery)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+
+	eventQuery, err := buildAppObservabilityRuleEventQuery(appID, window)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+	eventRows, err := s.queryAppObservabilityClickHouse(ctx, eventQuery)
+	if err != nil {
+		return appObservabilityDiagnosis{}, err
+	}
+
+	return appObservabilityRuleDiagnosisFromRows(requestRows, spanRows, eventRows), nil
 }
 
 func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWindow, query url.Values) (string, error) {
@@ -1169,6 +1200,67 @@ func buildAppObservabilityDiagnosisQuery(appID string, window appObservabilityWi
 	return "SELECT minute, rpm, p50_ttfb_ms, p95_ttfb_ms, p99_ttfb_ms, p50_duration_ms, p95_duration_ms, p99_duration_ms, error_rate, top_bottleneck_stage, top_bottleneck_confidence " +
 		"FROM diagnosis_windows_1m WHERE " + strings.Join(conditions, " AND ") +
 		" ORDER BY minute DESC LIMIT 1 FORMAT JSONEachRow", nil
+}
+
+func buildAppObservabilityRuleRequestStatsQuery(appID string, window appObservabilityWindow) (string, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	return "SELECT " +
+		"count() AS request_count, " +
+		"countIf(status_code >= 500) AS error_5xx_count, " +
+		"countIf(status_code >= 400) AS error_4xx_count, " +
+		"countIf(status_code = 404) AS not_found_count, " +
+		"if(count() = 0, 0, countIf(status_code >= 500) / count()) AS error_5xx_rate, " +
+		"if(count() = 0, 0, countIf(status_code >= 400) / count()) AS error_4xx_rate, " +
+		"if(count() = 0, 0, countIf(status_code = 404) / count()) AS not_found_rate, " +
+		"quantileTDigest(0.95)(ttfb_ms) AS p95_ttfb_ms, " +
+		"quantileTDigest(0.95)(duration_ms) AS p95_duration_ms, " +
+		"max(duration_ms) AS max_duration_ms, " +
+		"countIf(JSONExtractBool(summary_json, 'fallback_hit')) AS edge_fallback_count, " +
+		"countIf(JSONExtractBool(summary_json, 'peer_fallback')) AS peer_fallback_count, " +
+		"countIf(JSONExtractBool(summary_json, 'sse')) AS stream_count " +
+		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
+		" FORMAT JSONEachRow", nil
+}
+
+func buildAppObservabilityRuleSpanStatsQuery(appID string, window appObservabilityWindow) (string, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	return "SELECT service, stage, count() AS span_count, " +
+		"quantileTDigest(0.95)(stage_ms) AS p95_stage_ms, " +
+		"max(stage_ms) AS max_stage_ms, " +
+		"countIf(status_code >= 500 OR error_type != '') AS error_count " +
+		"FROM request_spans WHERE " + strings.Join(conditions, " AND ") +
+		" GROUP BY service, stage ORDER BY p95_stage_ms DESC LIMIT 10 FORMAT JSONEachRow", nil
+}
+
+func buildAppObservabilityRuleEventQuery(appID string, window appObservabilityWindow) (string, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return "", err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	return "SELECT ts, event_type, severity, operation_id, runtime_id, message, attributes_json " +
+		"FROM app_events WHERE " + strings.Join(conditions, " AND ") +
+		" ORDER BY ts DESC LIMIT 20 FORMAT JSONEachRow", nil
 }
 
 func validStatusClass(value string) bool {
@@ -1257,6 +1349,287 @@ func appObservabilityDiagnosisFromClickHouseRow(row map[string]any) appObservabi
 		Evidence:    evidence,
 		NextActions: nextActions,
 	}
+}
+
+func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRows []map[string]any, eventRows []map[string]any) appObservabilityDiagnosis {
+	requestStats := map[string]any{}
+	if len(requestRows) > 0 {
+		requestStats = requestRows[0]
+	}
+	requestCount := floatField(requestStats, "request_count")
+	error5xxCount := floatField(requestStats, "error_5xx_count")
+	error4xxCount := floatField(requestStats, "error_4xx_count")
+	notFoundCount := floatField(requestStats, "not_found_count")
+	error5xxRate := floatField(requestStats, "error_5xx_rate")
+	error4xxRate := floatField(requestStats, "error_4xx_rate")
+	notFoundRate := floatField(requestStats, "not_found_rate")
+	p95TTFB := floatField(requestStats, "p95_ttfb_ms")
+	p95Duration := floatField(requestStats, "p95_duration_ms")
+	maxDuration := floatField(requestStats, "max_duration_ms")
+	edgeFallbackCount := floatField(requestStats, "edge_fallback_count")
+	peerFallbackCount := floatField(requestStats, "peer_fallback_count")
+
+	evidence := []string{
+		formatAppObservabilityEvidence("request_count", requestCount, ""),
+		formatAppObservabilityEvidence("error_5xx_count", error5xxCount, ""),
+		formatAppObservabilityEvidence("p95_ttfb_ms", p95TTFB, "ms"),
+		formatAppObservabilityEvidence("p95_duration_ms", p95Duration, "ms"),
+	}
+	if edgeFallbackCount > 0 || peerFallbackCount > 0 {
+		evidence = append(evidence,
+			formatAppObservabilityEvidence("edge_fallback_count", edgeFallbackCount, ""),
+			formatAppObservabilityEvidence("peer_fallback_count", peerFallbackCount, ""),
+		)
+	}
+
+	topSpan := appObservabilityTopSpanRuleRow(spanRows)
+	if topSpan != nil {
+		evidence = append(evidence,
+			fmt.Sprintf("top_span=%s.%s", stringField(topSpan, "service"), stringField(topSpan, "stage")),
+			formatAppObservabilityEvidence("top_span_p95_stage_ms", floatField(topSpan, "p95_stage_ms"), "ms"),
+		)
+	}
+	if event := appObservabilityFirstEventMatching(eventRows, appObservabilityEventLooksLikeError); event != nil {
+		evidence = append(evidence,
+			"recent_error_event="+firstNonEmpty(stringField(event, "event_type"), "app_event"),
+			"recent_error_message="+truncateAppObservabilityEvidence(stringField(event, "message"), 160),
+		)
+	}
+
+	switch {
+	case requestCount == 0:
+		return appObservabilityDiagnosis{
+			Bottleneck: "no_recent_requests",
+			Confidence: 0.35,
+			Evidence:   evidence,
+			NextActions: []string{
+				"send a small canary request or widen the diagnosis window before changing capacity",
+				"verify edge request_facts ingestion if traffic was expected in this window",
+			},
+		}
+	case appObservabilityHasTracebackEvent(eventRows):
+		return appObservabilityDiagnosis{
+			Bottleneck: "traceback_error_burst",
+			Confidence: appObservabilityConfidence(0.8+error5xxRate, 0.95),
+			Evidence:   evidence,
+			NextActions: []string{
+				"inspect logs around the traceback burst before scaling workers",
+				"compare the latest release events against the first error timestamp",
+			},
+		}
+	case error5xxCount >= 3 && error5xxRate >= 0.05:
+		return appObservabilityDiagnosis{
+			Bottleneck: "error_burst",
+			Confidence: appObservabilityConfidence(0.72+error5xxRate, 0.95),
+			Evidence: append(evidence,
+				formatAppObservabilityEvidence("error_5xx_rate", error5xxRate, ""),
+			),
+			NextActions: []string{
+				"open request samples and trace waterfall for the 5xx window",
+				"inspect recent app events and runtime logs before changing capacity",
+			},
+		}
+	case notFoundCount >= 5 && notFoundRate >= 0.2:
+		return appObservabilityDiagnosis{
+			Bottleneck: "edge_routing_not_found",
+			Confidence: appObservabilityConfidence(0.62+notFoundRate, 0.9),
+			Evidence: append(evidence,
+				formatAppObservabilityEvidence("not_found_count", notFoundCount, ""),
+				formatAppObservabilityEvidence("not_found_rate", notFoundRate, ""),
+			),
+			NextActions: []string{
+				"inspect route table, custom domains, and path prefixes for this app",
+				"compare affected hostnames and path templates in request_facts",
+			},
+		}
+	case requestCount > 0 && (edgeFallbackCount/requestCount >= 0.05 || peerFallbackCount/requestCount >= 0.05):
+		return appObservabilityDiagnosis{
+			Bottleneck: "edge_routing_fallback",
+			Confidence: appObservabilityConfidence(0.62+(edgeFallbackCount+peerFallbackCount)/requestCount, 0.9),
+			Evidence:   evidence,
+			NextActions: []string{
+				"inspect edge group placement and runtime availability for fallback traffic",
+				"verify the active edge worker slot and route generation before scaling the app",
+			},
+		}
+	case appObservabilityRecentDeployEvent(eventRows) != nil && (error4xxRate >= 0.15 || error5xxRate >= 0.03 || p95Duration >= 3000):
+		return appObservabilityDiagnosis{
+			Bottleneck: "release_regression_candidate",
+			Confidence: 0.72,
+			Evidence: append(evidence,
+				formatAppObservabilityEvidence("error_4xx_count", error4xxCount, ""),
+				formatAppObservabilityEvidence("max_duration_ms", maxDuration, "ms"),
+			),
+			NextActions: []string{
+				"compare request failures before and after the latest deploy_event",
+				"inspect the latest operation logs and roll back only if the regression aligns with the deploy window",
+			},
+		}
+	case topSpan != nil:
+		bottleneck, nextActions := appObservabilityBottleneckFromTopSpan(topSpan)
+		return appObservabilityDiagnosis{
+			Bottleneck:  bottleneck,
+			Confidence:  appObservabilitySpanConfidence(topSpan, p95Duration),
+			Evidence:    evidence,
+			NextActions: nextActions,
+		}
+	case p95TTFB >= 1000 || p95Duration >= 3000:
+		return appObservabilityDiagnosis{
+			Bottleneck: "app_latency",
+			Confidence: 0.58,
+			Evidence: append(evidence,
+				formatAppObservabilityEvidence("max_duration_ms", maxDuration, "ms"),
+			),
+			NextActions: []string{
+				"add or verify request_spans to split runtime, pool, database, and upstream wait",
+				"inspect requests and runtime metrics in the same window before scaling",
+			},
+		}
+	default:
+		return appObservabilityDiagnosis{
+			Bottleneck: "no_clear_bottleneck",
+			Confidence: 0.45,
+			Evidence:   evidence,
+			NextActions: []string{
+				"keep the current capacity unchanged until one signal dominates",
+				"run a short stepped load test and watch requests, spans, logs, and metrics together",
+			},
+		}
+	}
+}
+
+func appObservabilityTopSpanRuleRow(rows []map[string]any) map[string]any {
+	var selected map[string]any
+	var selectedP95 float64
+	for _, row := range rows {
+		p95 := floatField(row, "p95_stage_ms")
+		if selected == nil || p95 > selectedP95 {
+			selected = row
+			selectedP95 = p95
+		}
+	}
+	return selected
+}
+
+func appObservabilityBottleneckFromTopSpan(row map[string]any) (string, []string) {
+	service := strings.ToLower(stringField(row, "service"))
+	stage := strings.ToLower(stringField(row, "stage"))
+	key := strings.Trim(strings.Join([]string{service, stage}, "."), ".")
+
+	switch {
+	case strings.Contains(stage, "db") ||
+		strings.Contains(stage, "postgres") ||
+		strings.Contains(stage, "sql") ||
+		strings.Contains(stage, "lock"):
+		return "db_lock_or_query_wait", []string{
+			"inspect database lock waiters, slow queries, and transaction scope",
+			"do not scale app workers until database wait is separated from runtime wait",
+		}
+	case strings.Contains(stage, "pool") ||
+		strings.Contains(stage, "acquire") ||
+		strings.Contains(stage, "connection"):
+		return "connection_pool_wait", []string{
+			"inspect client pool size, pending acquire count, and upstream concurrency",
+			"increase pool or replicas only after confirming event loop lag is low",
+		}
+	case strings.Contains(service, "edge") ||
+		strings.Contains(stage, "route") ||
+		strings.Contains(stage, "routing"):
+		return "edge_routing_wait", []string{
+			"inspect edge route generation, fallback count, and active edge slot",
+			"verify runtime readiness before scaling application workers",
+		}
+	case strings.Contains(stage, "cpu") ||
+		strings.Contains(stage, "memory") ||
+		strings.Contains(stage, "event_loop") ||
+		strings.Contains(stage, "worker"):
+		return "runtime_resource_wait", []string{
+			"inspect runtime CPU, memory, event loop lag, and worker saturation",
+			"scale runtime capacity only if resource gauges align with this span evidence",
+		}
+	default:
+		if key == "" {
+			key = "app_span_wait"
+		}
+		return key, []string{
+			"inspect the dominant span stage before changing capacity",
+			"add lower-level spans if this stage still hides multiple waits",
+		}
+	}
+}
+
+func appObservabilitySpanConfidence(row map[string]any, p95Duration float64) float64 {
+	p95Stage := floatField(row, "p95_stage_ms")
+	if p95Stage <= 0 {
+		return 0.55
+	}
+	if p95Duration <= 0 {
+		return 0.68
+	}
+	return appObservabilityConfidence(0.55+(p95Stage/p95Duration)*0.45, 0.92)
+}
+
+func appObservabilityFirstEventMatching(rows []map[string]any, match func(map[string]any) bool) map[string]any {
+	for _, row := range rows {
+		if match(row) {
+			return row
+		}
+	}
+	return nil
+}
+
+func appObservabilityHasTracebackEvent(rows []map[string]any) bool {
+	return appObservabilityFirstEventMatching(rows, func(row map[string]any) bool {
+		text := strings.ToLower(strings.Join([]string{
+			stringField(row, "message"),
+			stringField(row, "event_type"),
+			stringField(row, "severity"),
+			stringField(row, "attributes_json"),
+		}, " "))
+		return strings.Contains(text, "traceback") ||
+			strings.Contains(text, "panic") ||
+			strings.Contains(text, "exception")
+	}) != nil
+}
+
+func appObservabilityEventLooksLikeError(row map[string]any) bool {
+	text := strings.ToLower(strings.Join([]string{
+		stringField(row, "message"),
+		stringField(row, "event_type"),
+		stringField(row, "severity"),
+		stringField(row, "attributes_json"),
+	}, " "))
+	return strings.Contains(text, "error") ||
+		strings.Contains(text, "failed") ||
+		strings.Contains(text, "traceback") ||
+		strings.Contains(text, "panic") ||
+		strings.Contains(text, "exception")
+}
+
+func appObservabilityRecentDeployEvent(rows []map[string]any) map[string]any {
+	return appObservabilityFirstEventMatching(rows, func(row map[string]any) bool {
+		eventType := strings.ToLower(stringField(row, "event_type"))
+		message := strings.ToLower(stringField(row, "message"))
+		return strings.Contains(eventType, "deploy") || strings.Contains(message, "deploy")
+	})
+}
+
+func appObservabilityConfidence(value float64, maxValue float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func truncateAppObservabilityEvidence(value string, maxLength int) string {
+	value = strings.TrimSpace(value)
+	if maxLength <= 0 || len(value) <= maxLength {
+		return value
+	}
+	return value[:maxLength] + "..."
 }
 
 func stringField(row map[string]any, key string) string {
