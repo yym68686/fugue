@@ -838,14 +838,52 @@ func TestAppObservabilityRuleDiagnosisDoesNotTreatStreamingTailAsReleaseRegressi
 	if diagnosis.Bottleneck == "release_regression_candidate" {
 		t.Fatalf("expected streaming tail not to be treated as release regression, got %+v", diagnosis)
 	}
-	if diagnosis.Bottleneck != "oaix.response_stream_end" {
-		t.Fatalf("expected dominant streaming span diagnosis, got %+v", diagnosis)
+	if diagnosis.Bottleneck != "streaming_response_tail" {
+		t.Fatalf("expected streaming tail diagnosis, got %+v", diagnosis)
 	}
 	joinedEvidence := strings.Join(diagnosis.Evidence, "\n")
-	for _, want := range []string{"top_span=oaix.response_stream_end", "top_span_p95_stage_ms=1.298e+05ms"} {
+	for _, want := range []string{"stream_count=20", "top_span=oaix.response_stream_end", "top_span_p95_stage_ms=1.298e+05ms"} {
 		if !strings.Contains(joinedEvidence, want) {
 			t.Fatalf("expected evidence %q in %+v", want, diagnosis.Evidence)
 		}
+	}
+}
+
+func TestAppObservabilityRuleDiagnosisDetectsNonStreamingResponseCollection(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRows(
+		[]map[string]any{{
+			"request_count":                  40,
+			"error_5xx_count":                0,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    34000,
+			"p95_duration_ms":                35100,
+			"max_duration_ms":                52000,
+			"edge_fallback_count":            0,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   0,
+		}},
+		[]map[string]any{{
+			"service":      "api",
+			"stage":        "stream_end",
+			"span_count":   40,
+			"p95_stage_ms": 34200,
+			"max_stage_ms": 52000,
+			"error_count":  0,
+		}},
+		nil,
+	)
+	if diagnosis.Bottleneck != "non_streaming_response_collection" {
+		t.Fatalf("expected non-streaming collection diagnosis, got %+v", diagnosis)
+	}
+	joinedActions := strings.Join(diagnosis.NextActions, "\n")
+	if !strings.Contains(joinedActions, "non-streaming") {
+		t.Fatalf("expected non-streaming next action, got %+v", diagnosis.NextActions)
 	}
 }
 

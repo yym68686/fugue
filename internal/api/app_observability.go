@@ -1518,6 +1518,7 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 	p95TTFB := floatField(requestStats, "p95_ttfb_ms")
 	p95Duration := floatField(requestStats, "p95_duration_ms")
 	maxDuration := floatField(requestStats, "max_duration_ms")
+	streamCount := floatField(requestStats, "stream_count")
 	edgeFallbackCount := floatField(requestStats, "edge_fallback_count")
 	peerFallbackCount := floatField(requestStats, "peer_fallback_count")
 	actionableEdgeFallbackCount := edgeFallbackCount
@@ -1546,6 +1547,9 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 				formatAppObservabilityEvidence("actionable_peer_fallback_count", actionablePeerFallbackCount, ""),
 			)
 		}
+	}
+	if streamCount > 0 {
+		evidence = append(evidence, formatAppObservabilityEvidence("stream_count", streamCount, ""))
 	}
 
 	topSpan := appObservabilityTopSpanRuleRow(spanRows)
@@ -1632,6 +1636,22 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 			},
 		}
 	case topSpan != nil:
+		if appObservabilityIsResponseStreamEndStage(topSpan) {
+			if requestCount > 0 && streamCount/requestCount >= 0.5 {
+				return appObservabilityDiagnosis{
+					Bottleneck:  "streaming_response_tail",
+					Confidence:  appObservabilitySpanConfidence(topSpan, p95Duration),
+					Evidence:    evidence,
+					NextActions: appObservabilityStreamingTailNextActions(),
+				}
+			}
+			return appObservabilityDiagnosis{
+				Bottleneck:  "non_streaming_response_collection",
+				Confidence:  appObservabilitySpanConfidence(topSpan, p95Duration),
+				Evidence:    evidence,
+				NextActions: appObservabilityNonStreamingCollectionNextActions(),
+			}
+		}
 		bottleneck, nextActions := appObservabilityBottleneckFromTopSpan(topSpan)
 		return appObservabilityDiagnosis{
 			Bottleneck:  bottleneck,
@@ -1675,6 +1695,27 @@ func appObservabilityTopSpanRuleRow(rows []map[string]any) map[string]any {
 		}
 	}
 	return selected
+}
+
+func appObservabilityIsResponseStreamEndStage(row map[string]any) bool {
+	stage := strings.ToLower(strings.TrimSpace(stringField(row, "stage")))
+	return stage == "stream_end" ||
+		stage == "response_stream_end" ||
+		strings.HasSuffix(stage, "_stream_end")
+}
+
+func appObservabilityStreamingTailNextActions() []string {
+	return []string{
+		"treat the long tail as response lifetime, not first-byte or worker acquisition latency",
+		"inspect upstream_headers_received and upstream_first_chunk spans before changing capacity",
+	}
+}
+
+func appObservabilityNonStreamingCollectionNextActions() []string {
+	return []string{
+		"confirm whether these requests are intentionally non-streaming and wait for the full upstream response",
+		"inspect upstream response duration before increasing worker or connection-pool capacity",
+	}
 }
 
 func appObservabilityBottleneckFromTopSpan(row map[string]any) (string, []string) {
