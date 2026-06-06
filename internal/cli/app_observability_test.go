@@ -312,6 +312,25 @@ func TestRunAppDiagnoseWindowUsesObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityRequestFieldsFallbackToSummary(t *testing.T) {
+	t.Parallel()
+
+	row := map[string]any{
+		"timestamp":   "2026-04-20T00:00:01Z",
+		"status_code": 200,
+		"summary": map[string]any{
+			"model":    "gpt-5.5",
+			"provider": "primary",
+			"role":     "reader",
+		},
+	}
+
+	line := appObservabilityRequestFieldLine(row, appObservabilityRequestFields("timestamp,status,model,provider,role"))
+	if line != "2026-04-20T00:00:01Z\t200\tgpt-5.5\tprimary\treader" {
+		t.Fatalf("unexpected field line: %q", line)
+	}
+}
+
 func TestRunAppObservabilityExportBundlesExistingEndpoints(t *testing.T) {
 	t.Parallel()
 

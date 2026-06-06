@@ -698,6 +698,22 @@ type appEventRow struct {
 	AttributesJSON string `json:"attributes_json"`
 }
 
+var requestSummaryDimensionKeys = map[string]struct{}{
+	"channel":        {},
+	"cooldown_count": {},
+	"error_type":     {},
+	"method":         {},
+	"model":          {},
+	"provider":       {},
+	"request_kind":   {},
+	"retry_count":    {},
+	"role":           {},
+	"route":          {},
+	"status_class":   {},
+	"stream":         {},
+	"streaming":      {},
+}
+
 func clickHouseRequestFactRow(event Event) requestFactRow {
 	return requestFactRow{
 		Timestamp:    clickHouseTime(event.Timestamp),
@@ -855,6 +871,10 @@ func summaryJSON(event Event) string {
 	}
 	summary := map[string]string{}
 	for key, value := range event.Attributes {
+		if _, ok := requestSummaryDimensionKeys[key]; ok {
+			summary[key] = value
+			continue
+		}
 		if strings.HasPrefix(key, "summary.") {
 			summary[strings.TrimPrefix(key, "summary.")] = value
 		}

@@ -564,13 +564,21 @@ func appObservabilityRequestFieldValue(row map[string]any, field string) (any, b
 		return nil, false
 	}
 	var current any = row
-	for _, part := range parts {
+	for index, part := range parts {
 		object, ok := current.(map[string]any)
 		if !ok {
 			return nil, false
 		}
 		current, ok = object[part]
 		if !ok {
+			if index == 0 && len(parts) == 1 {
+				if summary, ok := row["summary"].(map[string]any); ok {
+					current, ok = summary[part]
+					if ok {
+						return current, true
+					}
+				}
+			}
 			return nil, false
 		}
 	}
