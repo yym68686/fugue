@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,6 +112,80 @@ func TestAppObservabilityMetricsSummaryQueriesPrometheus(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("expected Prometheus queries to contain %q, got %q", want, joined)
 		}
+	}
+}
+
+func TestAppObservabilityMetricsSummaryFallsBackToClickHouse(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	prometheus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query" {
+			t.Fatalf("expected Prometheus query path, got %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "vector",
+				"result":     []any{},
+			},
+		}); err != nil {
+			t.Errorf("write Prometheus response: %v", err)
+		}
+	}))
+	t.Cleanup(prometheus.Close)
+	var clickHouseQuery string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clickHouseQuery = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"app_request_count":10,"total_request_count":20,"app_error_count":2,"total_error_count":8,"app_p95_ttfb_ms":321,"total_p95_ttfb_ms":999,"app_p95_duration_ms":654,"total_p95_duration_ms":1999}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:         true,
+		MetricsQueryURL: prometheus.URL,
+		ClickHouseDSN:   clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/metrics/summary?since=5m", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source  appObservabilitySourceStatus `json:"source"`
+		Metrics []map[string]any             `json:"metrics"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" {
+		t.Fatalf("expected available metrics source, got %+v", response.Source)
+	}
+	for _, want := range []string{
+		"FROM request_facts",
+		"countIf(edge_id = '') AS app_request_count",
+		"app_id = '" + app.ID + "'",
+		"FORMAT JSONEachRow",
+	} {
+		if !strings.Contains(clickHouseQuery, want) {
+			t.Fatalf("expected ClickHouse query to contain %q, got %q", want, clickHouseQuery)
+		}
+	}
+	if len(response.Metrics) != 4 {
+		t.Fatalf("expected four fallback metric samples, got %+v", response.Metrics)
+	}
+	metricsByName := map[string]map[string]any{}
+	for _, metric := range response.Metrics {
+		metricsByName[fmt.Sprint(metric["name"])] = metric
+	}
+	if metricsByName["error_rate"]["value"] != 0.2 {
+		t.Fatalf("expected app error_rate=0.2, got %+v", metricsByName["error_rate"])
+	}
+	if metricsByName["p95_ttfb_ms"]["value"] != float64(321) {
+		t.Fatalf("expected app p95_ttfb_ms=321, got %+v", metricsByName["p95_ttfb_ms"])
+	}
+	if metricsByName["p95_duration_ms"]["value"] != float64(654) {
+		t.Fatalf("expected app p95_duration_ms=654, got %+v", metricsByName["p95_duration_ms"])
+	}
+	labels, ok := metricsByName["rpm"]["labels"].(map[string]any)
+	if !ok || labels["source"] != "app" {
+		t.Fatalf("expected fallback metrics to prefer app rows, got %+v", metricsByName["rpm"])
 	}
 }
 

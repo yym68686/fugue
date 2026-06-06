@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -688,32 +689,42 @@ type appObservabilityMetricQuery struct {
 
 func (s *Server) queryAppObservabilityMetricsSummary(ctx context.Context, appID string, window appObservabilityWindow) ([]map[string]any, error) {
 	cfg := s.observabilityConfig.Normalize()
-	endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
-	if err != nil {
-		return nil, err
-	}
 	_, until, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: cfg.ExportTimeout}
-	metrics := []map[string]any{}
-	for _, item := range buildAppObservabilityMetricQueries(appID, window) {
-		samples, err := queryPrometheusInstant(ctx, client, endpoint, item, until, cfg.MaxPayloadBytes)
+	var prometheusErr error
+	if strings.TrimSpace(cfg.MetricsQueryURL) != "" {
+		endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
 		if err != nil {
-			return nil, err
+			prometheusErr = err
+		} else {
+			client := &http.Client{Timeout: cfg.ExportTimeout}
+			metrics := []map[string]any{}
+			for _, item := range buildAppObservabilityMetricQueries(appID, window) {
+				samples, err := queryPrometheusInstant(ctx, client, endpoint, item, until, cfg.MaxPayloadBytes)
+				if err != nil {
+					prometheusErr = err
+					break
+				}
+				metrics = append(metrics, samples...)
+			}
+			if prometheusErr == nil && len(metrics) > 0 {
+				return metrics, nil
+			}
 		}
-		metrics = append(metrics, samples...)
 	}
-	return metrics, nil
+	if strings.TrimSpace(cfg.ClickHouseDSN) != "" {
+		return s.queryAppObservabilityMetricsSummaryFromClickHouse(ctx, appID, window)
+	}
+	if prometheusErr != nil {
+		return nil, prometheusErr
+	}
+	return []map[string]any{}, nil
 }
 
 func (s *Server) queryAppObservabilityMetrics(ctx context.Context, appID string, window appObservabilityWindow, rawQuery string) ([]map[string]any, error) {
 	cfg := s.observabilityConfig.Normalize()
-	endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
-	if err != nil {
-		return nil, err
-	}
 	_, until, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
 		return nil, err
@@ -722,8 +733,111 @@ func (s *Server) queryAppObservabilityMetrics(ctx context.Context, appID string,
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: cfg.ExportTimeout}
-	return queryPrometheusInstant(ctx, client, endpoint, metricQuery, until, cfg.MaxPayloadBytes)
+	var prometheusErr error
+	if strings.TrimSpace(cfg.MetricsQueryURL) != "" {
+		endpoint, err := normalizePrometheusQueryURL(cfg.MetricsQueryURL)
+		if err != nil {
+			prometheusErr = err
+		} else {
+			client := &http.Client{Timeout: cfg.ExportTimeout}
+			metrics, err := queryPrometheusInstant(ctx, client, endpoint, metricQuery, until, cfg.MaxPayloadBytes)
+			if err != nil {
+				prometheusErr = err
+			} else if len(metrics) > 0 {
+				return metrics, nil
+			}
+		}
+	}
+	if strings.TrimSpace(cfg.ClickHouseDSN) != "" {
+		metrics, err := s.queryAppObservabilityMetricsSummaryFromClickHouse(ctx, appID, window)
+		if err != nil {
+			return nil, err
+		}
+		filtered := make([]map[string]any, 0, 1)
+		for _, metric := range metrics {
+			if strings.EqualFold(strings.TrimSpace(fmt.Sprint(metric["name"])), metricQuery.Name) {
+				filtered = append(filtered, metric)
+			}
+		}
+		return filtered, nil
+	}
+	if prometheusErr != nil {
+		return nil, prometheusErr
+	}
+	return []map[string]any{}, nil
+}
+
+func (s *Server) queryAppObservabilityMetricsSummaryFromClickHouse(ctx context.Context, appID string, window appObservabilityWindow) ([]map[string]any, error) {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return nil, err
+	}
+	conditions := []string{
+		"app_id = " + quoteClickHouseString(appID),
+		"ts >= " + clickHouseDateTime64Literal(since),
+		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	queryText := "" +
+		"SELECT " +
+		"countIf(edge_id = '') AS app_request_count, " +
+		"count() AS total_request_count, " +
+		"countIf(edge_id = '' AND status_code >= 400) AS app_error_count, " +
+		"countIf(status_code >= 400) AS total_error_count, " +
+		"quantileTDigestIf(0.95)(toFloat64(ttfb_ms), edge_id = '') AS app_p95_ttfb_ms, " +
+		"quantileTDigest(0.95)(toFloat64(ttfb_ms)) AS total_p95_ttfb_ms, " +
+		"quantileTDigestIf(0.95)(toFloat64(duration_ms), edge_id = '') AS app_p95_duration_ms, " +
+		"quantileTDigest(0.95)(toFloat64(duration_ms)) AS total_p95_duration_ms " +
+		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
+		" FORMAT JSONEachRow"
+	rows, err := s.queryAppObservabilityClickHouse(ctx, queryText)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []map[string]any{}, nil
+	}
+	return clickHouseRequestFactMetrics(rows[0], window), nil
+}
+
+func clickHouseRequestFactMetrics(row map[string]any, window appObservabilityWindow) []map[string]any {
+	appRequestCount := finiteFloatField(row, "app_request_count")
+	totalRequestCount := finiteFloatField(row, "total_request_count")
+	prefix := "total_"
+	requestCount := totalRequestCount
+	if appRequestCount > 0 {
+		prefix = "app_"
+		requestCount = appRequestCount
+	}
+	errorCount := finiteFloatField(row, prefix+"error_count")
+	p95TTFB := finiteFloatField(row, prefix+"p95_ttfb_ms")
+	p95Duration := finiteFloatField(row, prefix+"p95_duration_ms")
+	windowMinutes := appObservabilityWindowMinutes(window)
+	rpm := 0.0
+	if windowMinutes > 0 {
+		rpm = requestCount / windowMinutes
+	}
+	errorRate := 0.0
+	if requestCount > 0 {
+		errorRate = errorCount / requestCount
+	}
+	return []map[string]any{
+		{"name": "rpm", "value": rpm, "unit": "rpm", "labels": map[string]string{"source": strings.TrimSuffix(prefix, "_")}},
+		{"name": "error_rate", "value": errorRate, "unit": "ratio", "labels": map[string]string{"source": strings.TrimSuffix(prefix, "_")}},
+		{"name": "p95_ttfb_ms", "value": p95TTFB, "unit": "ms", "labels": map[string]string{"source": strings.TrimSuffix(prefix, "_")}},
+		{"name": "p95_duration_ms", "value": p95Duration, "unit": "ms", "labels": map[string]string{"source": strings.TrimSuffix(prefix, "_")}},
+	}
+}
+
+func appObservabilityWindowMinutes(window appObservabilityWindow) float64 {
+	since, until, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		return 0
+	}
+	seconds := until.Sub(since).Seconds()
+	if seconds <= 0 {
+		return 0
+	}
+	return seconds / 60
 }
 
 func normalizePrometheusQueryURL(raw string) (*url.URL, error) {
@@ -1695,6 +1809,14 @@ func stringField(row map[string]any, key string) string {
 
 func floatField(row map[string]any, key string) float64 {
 	value, _ := optionalFloatField(row, key)
+	return value
+}
+
+func finiteFloatField(row map[string]any, key string) float64 {
+	value := floatField(row, key)
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
 	return value
 }
 
