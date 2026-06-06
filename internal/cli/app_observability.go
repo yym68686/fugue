@@ -6,11 +6,137 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
 const defaultAppObservabilityLimit = 200
+
+type appObservabilityExportOptions struct {
+	appObservabilityWindowOptions
+	Limit            int
+	TraceID          string
+	IncludeMetrics   bool
+	IncludeLogs      bool
+	IncludeRequests  bool
+	IncludeDiagnosis bool
+}
+
+type appObservabilityExportBundle struct {
+	Schema     string                                  `json:"schema"`
+	ExportedAt string                                  `json:"exported_at"`
+	AppID      string                                  `json:"app_id"`
+	AppName    string                                  `json:"app_name"`
+	Window     appObservabilityWindowOptions           `json:"window"`
+	Metrics    *appObservabilityMetricsSummaryResponse `json:"metrics,omitempty"`
+	Logs       *appObservabilityLogsQueryResponse      `json:"logs,omitempty"`
+	Requests   *appObservabilityRequestsResponse       `json:"requests,omitempty"`
+	Trace      *appObservabilityTraceResponse          `json:"trace,omitempty"`
+	Diagnosis  *appObservabilityDiagnosisResponse      `json:"diagnosis,omitempty"`
+	Warnings   []string                                `json:"warnings,omitempty"`
+}
+
+func (c *CLI) newAppObservabilityCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "observability",
+		Aliases: []string{"observe"},
+		Short:   "Inspect and export app observability data",
+	}
+	cmd.AddCommand(c.newAppObservabilityExportCommand())
+	return cmd
+}
+
+func (c *CLI) newAppObservabilityExportCommand() *cobra.Command {
+	opts := appObservabilityExportOptions{
+		Limit:            defaultAppObservabilityLimit,
+		IncludeMetrics:   true,
+		IncludeLogs:      true,
+		IncludeRequests:  true,
+		IncludeDiagnosis: true,
+	}
+	cmd := &cobra.Command{
+		Use:   "export <app>",
+		Short: "Export one app observability bundle as JSON",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			bundle := appObservabilityExportBundle{
+				Schema:     "fugue.app_observability_export.v1",
+				ExportedAt: time.Now().UTC().Format(time.RFC3339),
+				AppID:      app.ID,
+				AppName:    app.Name,
+				Window:     opts.appObservabilityWindowOptions,
+			}
+			if opts.IncludeMetrics {
+				response, err := client.GetAppObservabilityMetricsSummary(app.ID, appObservabilityMetricsOptions{
+					appObservabilityWindowOptions: opts.appObservabilityWindowOptions,
+				})
+				if err != nil {
+					bundle.Warnings = append(bundle.Warnings, "metrics: "+err.Error())
+				} else {
+					bundle.Metrics = &response
+				}
+			}
+			if opts.IncludeLogs {
+				response, err := client.QueryAppObservabilityLogs(app.ID, appObservabilityLogsOptions{
+					appObservabilityWindowOptions: opts.appObservabilityWindowOptions,
+					Limit:                         opts.Limit,
+				})
+				if err != nil {
+					bundle.Warnings = append(bundle.Warnings, "logs: "+err.Error())
+				} else {
+					bundle.Logs = &response
+				}
+			}
+			if opts.IncludeRequests {
+				response, err := client.ListAppObservabilityRequests(app.ID, appObservabilityRequestsOptions{
+					appObservabilityWindowOptions: opts.appObservabilityWindowOptions,
+					Limit:                         opts.Limit,
+				})
+				if err != nil {
+					bundle.Warnings = append(bundle.Warnings, "requests: "+err.Error())
+				} else {
+					bundle.Requests = &response
+				}
+			}
+			if traceID := strings.TrimSpace(opts.TraceID); traceID != "" {
+				response, err := client.GetAppObservabilityTrace(app.ID, traceID)
+				if err != nil {
+					bundle.Warnings = append(bundle.Warnings, "trace: "+err.Error())
+				} else {
+					bundle.Trace = &response
+				}
+			}
+			if opts.IncludeDiagnosis {
+				response, err := client.GetAppObservabilityDiagnosis(app.ID, appObservabilityDiagnosisOptions{
+					appObservabilityWindowOptions: opts.appObservabilityWindowOptions,
+				})
+				if err != nil {
+					bundle.Warnings = append(bundle.Warnings, "diagnosis: "+err.Error())
+				} else {
+					bundle.Diagnosis = &response
+				}
+			}
+			return writeJSON(c.stdout, bundle)
+		},
+	}
+	addAppObservabilityWindowFlags(cmd, &opts.appObservabilityWindowOptions)
+	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum logs and request summaries to include")
+	cmd.Flags().StringVar(&opts.TraceID, "trace", "", "Include one trace waterfall by trace identifier")
+	cmd.Flags().BoolVar(&opts.IncludeMetrics, "metrics", opts.IncludeMetrics, "Include metrics summary")
+	cmd.Flags().BoolVar(&opts.IncludeLogs, "logs", opts.IncludeLogs, "Include logs")
+	cmd.Flags().BoolVar(&opts.IncludeRequests, "requests", opts.IncludeRequests, "Include request summaries")
+	cmd.Flags().BoolVar(&opts.IncludeDiagnosis, "diagnosis", opts.IncludeDiagnosis, "Include automatic diagnosis")
+	return cmd
+}
 
 func (c *CLI) newAppMetricsCommand() *cobra.Command {
 	opts := appObservabilityMetricsOptions{}

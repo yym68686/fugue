@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,6 +83,19 @@ type telemetryQuotaBucket struct {
 	Count       int
 }
 
+type telemetryTenantMeter struct {
+	Received     uint64
+	Dropped      uint64
+	QuotaDropped uint64
+}
+
+type telemetryTenantMeterSnapshot struct {
+	TenantID     string
+	Received     uint64
+	Dropped      uint64
+	QuotaDropped uint64
+}
+
 type Pipeline struct {
 	cfg        Config
 	logger     *log.Logger
@@ -98,6 +112,8 @@ type Pipeline struct {
 	quotaMu            sync.Mutex
 	tenantQuotaBuckets map[string]telemetryQuotaBucket
 	appQuotaBuckets    map[string]telemetryQuotaBucket
+	meterMu            sync.Mutex
+	tenantMeters       map[string]telemetryTenantMeter
 
 	queueDepth             atomic.Int64
 	queuedBytes            atomic.Int64
@@ -136,6 +152,7 @@ func NewPipeline(cfg Config, logger *log.Logger) *Pipeline {
 		httpClient:         httpClient,
 		tenantQuotaBuckets: map[string]telemetryQuotaBucket{},
 		appQuotaBuckets:    map[string]telemetryQuotaBucket{},
+		tenantMeters:       map[string]telemetryTenantMeter{},
 	}
 }
 
@@ -247,6 +264,8 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 	if !p.allowWithinTelemetryQuota(event) {
 		p.dropped.Add(1)
 		p.quotaDropped.Add(1)
+		p.recordTenantMeter(event, "dropped")
+		p.recordTenantMeter(event, "quota_dropped")
 		return false
 	}
 	size := eventSize(event)
@@ -255,6 +274,7 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 		if nextSize > p.cfg.MemoryLimitBytes {
 			p.queuedBytes.Add(-size)
 			p.dropped.Add(1)
+			p.recordTenantMeter(event, "dropped")
 			p.recordError(errors.New("telemetry memory limiter dropped event"))
 			return false
 		}
@@ -264,12 +284,14 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 	case p.queue <- event:
 		p.received.Add(1)
 		p.queueDepth.Add(1)
+		p.recordTenantMeter(event, "received")
 		return true
 	case <-ctx.Done():
 		if p.cfg.MemoryLimitBytes > 0 {
 			p.queuedBytes.Add(-size)
 		}
 		p.dropped.Add(1)
+		p.recordTenantMeter(event, "dropped")
 		p.recordError(ctx.Err())
 		return false
 	default:
@@ -277,6 +299,7 @@ func (p *Pipeline) Ingest(ctx context.Context, event Event) bool {
 			p.queuedBytes.Add(-size)
 		}
 		p.dropped.Add(1)
+		p.recordTenantMeter(event, "dropped")
 		p.recordError(errors.New("telemetry queue full"))
 		return false
 	}
@@ -364,6 +387,14 @@ func (p *Pipeline) PrometheusMetrics() string {
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"dropped\"} %d\n", snap.Dropped)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"quota_dropped\"} %d\n", snap.QuotaDropped)
 	_, _ = fmt.Fprintf(&b, "fugue_telemetry_pipeline_events_total{outcome=\"redacted\"} %d\n", snap.Redacted)
+	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_tenant_events_total Telemetry events observed by tenant for platform observability metering.")
+	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_tenant_events_total counter")
+	for _, meter := range p.tenantMeterSnapshot() {
+		tenantID := EscapePrometheusLabelValue(meter.TenantID)
+		_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{tenant_id=\"%s\",outcome=\"received\"} %d\n", tenantID, meter.Received)
+		_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{tenant_id=\"%s\",outcome=\"dropped\"} %d\n", tenantID, meter.Dropped)
+		_, _ = fmt.Fprintf(&b, "fugue_telemetry_tenant_events_total{tenant_id=\"%s\",outcome=\"quota_dropped\"} %d\n", tenantID, meter.QuotaDropped)
+	}
 	_, _ = fmt.Fprintln(&b, "# HELP fugue_telemetry_pipeline_batches_total Export batches attempted by the telemetry pipeline.")
 	_, _ = fmt.Fprintln(&b, "# TYPE fugue_telemetry_pipeline_batches_total counter")
 	writeMetric("fugue_telemetry_pipeline_batches_total", snap.Batches)
@@ -742,6 +773,46 @@ func incrementQuotaBucket(buckets map[string]telemetryQuotaBucket, key string, w
 	}
 	bucket.Count++
 	buckets[key] = bucket
+}
+
+func (p *Pipeline) recordTenantMeter(event Event, outcome string) {
+	tenantID := strings.TrimSpace(event.Attributes["tenant_id"])
+	if tenantID == "" {
+		return
+	}
+	p.meterMu.Lock()
+	defer p.meterMu.Unlock()
+	if _, ok := p.tenantMeters[tenantID]; !ok && len(p.tenantMeters) >= 4096 {
+		return
+	}
+	meter := p.tenantMeters[tenantID]
+	switch outcome {
+	case "received":
+		meter.Received++
+	case "dropped":
+		meter.Dropped++
+	case "quota_dropped":
+		meter.QuotaDropped++
+	}
+	p.tenantMeters[tenantID] = meter
+}
+
+func (p *Pipeline) tenantMeterSnapshot() []telemetryTenantMeterSnapshot {
+	p.meterMu.Lock()
+	defer p.meterMu.Unlock()
+	items := make([]telemetryTenantMeterSnapshot, 0, len(p.tenantMeters))
+	for tenantID, meter := range p.tenantMeters {
+		items = append(items, telemetryTenantMeterSnapshot{
+			TenantID:     tenantID,
+			Received:     meter.Received,
+			Dropped:      meter.Dropped,
+			QuotaDropped: meter.QuotaDropped,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].TenantID < items[j].TenantID
+	})
+	return items
 }
 
 func (p *Pipeline) recordError(err error) {

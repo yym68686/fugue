@@ -105,6 +105,24 @@ fugue app metrics my-app --since 1h
 fugue app metrics my-app --since 15m --json
 `),
 	},
+	"fugue app observability": {
+		Example: strings.TrimSpace(`
+fugue app observability export my-app --since 30m
+fugue app observability export my-app --since 30m --trace trace_123
+`),
+	},
+	"fugue app observability export": {
+		Long: strings.TrimSpace(`
+Export one app-scoped Fugue Observability bundle as JSON.
+
+The bundle is assembled from the existing metrics, logs, requests, traces, and diagnosis APIs, so app RBAC, retention, query limits, and audit behavior remain enforced by the control plane. This is an operator diagnostic export, not an app-owned business log, billing, audit, or user-visible request-history export.
+`),
+		Example: strings.TrimSpace(`
+fugue app observability export my-app --since 30m
+fugue app observability export my-app --since 30m --limit 500 --trace trace_123
+fugue app observability export my-app --metrics=false --logs=false --requests --diagnosis
+`),
+	},
 	"fugue app logs build": {
 		Long: strings.TrimSpace(`
 Read build logs and the derived artifact pipeline summary for one app build operation.

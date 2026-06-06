@@ -312,6 +312,78 @@ func TestRunAppDiagnoseWindowUsesObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunAppObservabilityExportBundlesExistingEndpoints(t *testing.T) {
+	t.Parallel()
+
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			writeObservabilityTestApp(w)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/metrics/summary":
+			seen["metrics"] = true
+			if got := r.URL.Query().Get("since"); got != "10m" {
+				t.Fatalf("expected since=10m, got %q", got)
+			}
+			writeDisabledObservabilityResponse(w, `{"metrics":[{"name":"rpm","value":1}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/logs/query":
+			seen["logs"] = true
+			if got := r.URL.Query().Get("limit"); got != "3" {
+				t.Fatalf("expected logs limit=3, got %q", got)
+			}
+			writeDisabledObservabilityResponse(w, `{"logs":[{"message":"hello"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/requests":
+			seen["requests"] = true
+			if got := r.URL.Query().Get("limit"); got != "3" {
+				t.Fatalf("expected requests limit=3, got %q", got)
+			}
+			writeDisabledObservabilityResponse(w, `{"requests":[{"request_id":"req_123"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/traces/trace_123":
+			seen["trace"] = true
+			writeDisabledObservabilityResponse(w, `{"trace_id":"trace_123","spans":[{"stage":"db"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/observability/diagnosis":
+			seen["diagnosis"] = true
+			writeDisabledObservabilityResponse(w, `{"diagnosis":{"bottleneck":"none","confidence":0,"evidence":[],"next_actions":[]}}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "observability", "export", "demo",
+		"--since", "10m",
+		"--limit", "3",
+		"--trace", "trace_123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app observability export: %v stderr=%s", err, stderr.String())
+	}
+	for _, key := range []string{"metrics", "logs", "requests", "trace", "diagnosis"} {
+		if !seen[key] {
+			t.Fatalf("expected %s endpoint to be queried", key)
+		}
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		`"schema": "fugue.app_observability_export.v1"`,
+		`"app_id": "app_123"`,
+		`"since": "10m"`,
+		`"message": "hello"`,
+		`"request_id": "req_123"`,
+		`"trace_id": "trace_123"`,
+		`"bottleneck": "none"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected export output to contain %q, got %s", want, out)
+		}
+	}
+}
+
 func writeObservabilityTestApp(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-20T00:00:00Z","updated_at":"2026-04-20T00:00:00Z"}]}`))

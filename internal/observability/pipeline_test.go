@@ -174,8 +174,16 @@ func TestPipelineEnforcesAppTelemetryQuota(t *testing.T) {
 	if pipeline.Ingest(context.Background(), event) {
 		t.Fatal("expected second app event to be quota dropped")
 	}
-	if !strings.Contains(pipeline.PrometheusMetrics(), `fugue_telemetry_pipeline_events_total{outcome="quota_dropped"} 1`) {
-		t.Fatalf("expected quota drop metric, got:\n%s", pipeline.PrometheusMetrics())
+	metrics := pipeline.PrometheusMetrics()
+	for _, want := range []string{
+		`fugue_telemetry_pipeline_events_total{outcome="quota_dropped"} 1`,
+		`fugue_telemetry_tenant_events_total{tenant_id="tenant_123",outcome="received"} 1`,
+		`fugue_telemetry_tenant_events_total{tenant_id="tenant_123",outcome="dropped"} 1`,
+		`fugue_telemetry_tenant_events_total{tenant_id="tenant_123",outcome="quota_dropped"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("expected quota meter %q, got:\n%s", want, metrics)
+		}
 	}
 }
 

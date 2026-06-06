@@ -31,8 +31,8 @@ type appObservabilityDiagnosis struct {
 }
 
 type appObservabilityWindowOptions struct {
-	Since string
-	Until string
+	Since string `json:"since,omitempty"`
+	Until string `json:"until,omitempty"`
 }
 
 type appObservabilityMetricsOptions struct {
