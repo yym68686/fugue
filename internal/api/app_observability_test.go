@@ -810,6 +810,47 @@ func TestAppObservabilityRuleDiagnosisDoesNotTreatStreamingTailAsReleaseRegressi
 	}
 }
 
+func TestAppObservabilityRuleDiagnosisPrefersTopSpanOverLatencyOnlyReleaseRegression(t *testing.T) {
+	diagnosis := appObservabilityRuleDiagnosisFromRows(
+		[]map[string]any{{
+			"request_count":                  17,
+			"error_5xx_count":                0,
+			"error_4xx_count":                0,
+			"not_found_count":                0,
+			"error_5xx_rate":                 0,
+			"error_4xx_rate":                 0,
+			"not_found_rate":                 0,
+			"p95_ttfb_ms":                    28310,
+			"p95_duration_ms":                28320,
+			"max_duration_ms":                28320,
+			"edge_fallback_count":            0,
+			"peer_fallback_count":            0,
+			"actionable_edge_fallback_count": 0,
+			"actionable_peer_fallback_count": 0,
+			"stream_count":                   17,
+		}},
+		[]map[string]any{{
+			"service":      "uni-api-ember",
+			"stage":        "upstream_headers_received",
+			"span_count":   17,
+			"p95_stage_ms": 28040,
+			"max_stage_ms": 28040,
+			"error_count":  0,
+		}},
+		[]map[string]any{{
+			"event_type": "deploy_event",
+			"severity":   "info",
+			"message":    "deploy completed",
+		}},
+	)
+	if diagnosis.Bottleneck == "release_regression_candidate" {
+		t.Fatalf("expected top span to take precedence over latency-only release regression, got %+v", diagnosis)
+	}
+	if diagnosis.Bottleneck != "uni-api-ember.upstream_headers_received" {
+		t.Fatalf("expected upstream headers span diagnosis, got %+v", diagnosis)
+	}
+}
+
 func TestAppObservabilityTraceReturnsTraceIDAndEmptySpans(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 

@@ -1520,7 +1520,6 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 	maxDuration := floatField(requestStats, "max_duration_ms")
 	edgeFallbackCount := floatField(requestStats, "edge_fallback_count")
 	peerFallbackCount := floatField(requestStats, "peer_fallback_count")
-	streamCount := floatField(requestStats, "stream_count")
 	actionableEdgeFallbackCount := edgeFallbackCount
 	if value, ok := optionalFloatField(requestStats, "actionable_edge_fallback_count"); ok {
 		actionableEdgeFallbackCount = value
@@ -1619,7 +1618,7 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 				"verify the active edge worker slot and route generation before scaling the app",
 			},
 		}
-	case appObservabilityRecentDeployEvent(eventRows) != nil && (error4xxRate >= 0.15 || error5xxRate >= 0.03 || (p95Duration >= 3000 && !appObservabilityLooksLikeSuccessfulStreamingTail(requestCount, error5xxCount, streamCount, topSpan))):
+	case appObservabilityRecentDeployEvent(eventRows) != nil && (error4xxRate >= 0.15 || error5xxRate >= 0.03 || (p95Duration >= 3000 && topSpan == nil)):
 		return appObservabilityDiagnosis{
 			Bottleneck: "release_regression_candidate",
 			Confidence: 0.72,
@@ -1663,17 +1662,6 @@ func appObservabilityRuleDiagnosisFromRows(requestRows []map[string]any, spanRow
 			},
 		}
 	}
-}
-
-func appObservabilityLooksLikeSuccessfulStreamingTail(requestCount, error5xxCount, streamCount float64, topSpan map[string]any) bool {
-	if requestCount <= 0 || error5xxCount > 0 || topSpan == nil {
-		return false
-	}
-	stage := strings.ToLower(strings.TrimSpace(stringField(topSpan, "stage")))
-	if stage != "stream_end" && stage != "response_stream_end" {
-		return false
-	}
-	return streamCount/requestCount >= 0.5
 }
 
 func appObservabilityTopSpanRuleRow(rows []map[string]any) map[string]any {
