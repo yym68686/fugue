@@ -288,6 +288,31 @@ func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *test
 	}
 }
 
+func TestDeploymentSchedulingReadyForRolloutSkipsDisabledApp(t *testing.T) {
+	t.Parallel()
+
+	deployment := kubeDeployment{}
+	expected := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.RuntimeIDLabelKey: "runtime_agent",
+			runtime.TenantIDLabelKey:  "tenant_owner",
+		},
+		Tolerations: []runtime.Toleration{
+			{
+				Key:      runtime.TenantTaintKey,
+				Operator: "Equal",
+				Value:    "tenant_owner",
+				Effect:   "NoSchedule",
+			},
+		},
+	}
+
+	ready, message := deploymentSchedulingReadyForRollout(deployment, 0, expected)
+	if !ready {
+		t.Fatalf("expected disabled app rollout to skip deployment scheduling checks, got %q", message)
+	}
+}
+
 func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppError(t *testing.T) {
 	t.Parallel()
 

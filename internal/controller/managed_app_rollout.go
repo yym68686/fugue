@@ -66,7 +66,7 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 			return err
 		}
 		if ready {
-			if schedulingReady, schedulingMessage := deploymentSchedulingReady(deployment, scheduling); !schedulingReady {
+			if schedulingReady, schedulingMessage := deploymentSchedulingReadyForRollout(deployment, app.Spec.Replicas, scheduling); !schedulingReady {
 				ready = false
 				message = schedulingMessage
 			}
@@ -501,6 +501,13 @@ func deploymentSchedulingReady(deployment kubeDeployment, expected runtime.Sched
 		return false, fmt.Sprintf("waiting for deployment %s tolerations to match runtime scheduling", strings.TrimSpace(deployment.Metadata.Name))
 	}
 	return true, ""
+}
+
+func deploymentSchedulingReadyForRollout(deployment kubeDeployment, desiredReplicas int, expected runtime.SchedulingConstraints) (bool, string) {
+	if desiredReplicas <= 0 {
+		return true, ""
+	}
+	return deploymentSchedulingReady(deployment, expected)
 }
 
 func managedAppRuntimeSchedulingReady(managed runtime.ManagedAppObject, found bool, app model.App, expected runtime.SchedulingConstraints) (bool, string) {
