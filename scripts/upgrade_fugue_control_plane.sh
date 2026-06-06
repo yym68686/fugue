@@ -4914,9 +4914,9 @@ PY
     --set-string observability.agent.prometheusScrapeURLs="${FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS}" \
     --set-string observability.agent.scrapeInterval="${FUGUE_OBSERVABILITY_SCRAPE_INTERVAL}" \
     --set observability.agent.kubernetesLogs.enabled="${FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED}" \
-    --set-string observability.agent.kubernetesLogs.namespaces="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES}" \
-    --set-string observability.agent.kubernetesLogs.namespacePrefixes="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES}" \
-    --set-string observability.agent.kubernetesLogs.labelSelector="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR}" \
+    --set-string observability.agent.kubernetesLogs.namespaces="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES}")" \
+    --set-string observability.agent.kubernetesLogs.namespacePrefixes="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES}")" \
+    --set-string observability.agent.kubernetesLogs.labelSelector="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR}")" \
     --set-string observability.agent.kubernetesLogs.pollInterval="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL}" \
     --set-string observability.agent.kubernetesLogs.tailLines="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES}" \
     --set-string observability.agent.kubernetesLogs.maxPods="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS}" \

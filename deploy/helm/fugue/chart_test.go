@@ -363,7 +363,7 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"--set-string", "observability.identity.component=telemetry-agent",
 		"--set-string", "observability.agent.runtimeLogPaths=/var/log/pods/app.log",
 		"--set-string", "observability.agent.prometheusScrapeURLs=http://127.0.0.1:9100/metrics",
-		"--set-string", "observability.agent.kubernetesLogs.namespaces=fugue-system,fg-tenant",
+		"--set-string", `observability.agent.kubernetesLogs.namespaces=fugue-system\,fg-tenant`,
 		"--set-string", "observability.agent.kubernetesLogs.namespacePrefixes=fg-",
 		"--set-string", "observability.agent.kubernetesLogs.labelSelector=app.kubernetes.io/managed-by=fugue",
 	)
