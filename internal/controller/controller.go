@@ -18,27 +18,29 @@ import (
 )
 
 type Service struct {
-	Store                         *store.Store
-	Config                        config.ControllerConfig
-	Renderer                      runtime.Renderer
-	Logger                        *log.Logger
-	importer                      sourceImporter
-	registryPushBase              string
-	registryPullBase              string
-	inspectManagedImage           appimages.InspectFunc
-	inspectManagedImageConfig     imageConfigInspector
-	deleteManagedImage            func(context.Context, string) (appimages.DeleteResult, error)
-	resolveManagedImageDigestRef  func(context.Context, string) (string, error)
-	resolveRemoteImageDigest      func(context.Context, string) (string, error)
-	syncBillingImageStorage       bool
-	latestGitHubCommit            func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	newKubeClient                 func(namespace string) (*kubeClient, error)
-	kubeClientMu                  sync.Mutex
-	kubeClients                   map[string]*kubeClient
-	importImageInspectRetryDelay  time.Duration
-	importImageInspectMaxAttempts int
-	now                           func() time.Time
-	metricsStartedAt              time.Time
+	Store                          *store.Store
+	Config                         config.ControllerConfig
+	Renderer                       runtime.Renderer
+	Logger                         *log.Logger
+	importer                       sourceImporter
+	registryPushBase               string
+	registryPullBase               string
+	inspectManagedImage            appimages.InspectFunc
+	inspectManagedImageConfig      imageConfigInspector
+	deleteManagedImage             func(context.Context, string) (appimages.DeleteResult, error)
+	resolveManagedImageDigestRef   func(context.Context, string) (string, error)
+	resolveRemoteImageDigest       func(context.Context, string) (string, error)
+	syncBillingImageStorage        bool
+	latestGitHubCommit             func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	newKubeClient                  func(namespace string) (*kubeClient, error)
+	kubeClientMu                   sync.Mutex
+	kubeClients                    map[string]*kubeClient
+	managedPostgresStorageNoticeMu sync.Mutex
+	managedPostgresStorageNotices  map[string]struct{}
+	importImageInspectRetryDelay   time.Duration
+	importImageInspectMaxAttempts  int
+	now                            func() time.Time
+	metricsStartedAt               time.Time
 }
 
 type sourceImporter interface {

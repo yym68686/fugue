@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -333,6 +335,22 @@ func TestStabilizeManagedPostgresStorageSpecsDoesNotShrinkRecordedClusterSpec(t 
 	storage := spec["storage"].(map[string]any)
 	if got := storage["size"]; got != "5Gi" {
 		t.Fatalf("expected desired storage size to avoid CNPG shrink, got %#v", got)
+	}
+}
+
+func TestLogManagedPostgresStorageMigrationRequiredDedupe(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	svc := &Service{
+		Logger: log.New(&out, "", 0),
+	}
+
+	svc.logManagedPostgresStorageMigrationRequired("tenant-demo", "demo-postgres", "demo-postgres-1", "5Gi", "1Gi")
+	svc.logManagedPostgresStorageMigrationRequired("tenant-demo", "demo-postgres", "demo-postgres-1", "5Gi", "1Gi")
+
+	if got := strings.Count(out.String(), "explicit data migration is required"); got != 1 {
+		t.Fatalf("expected one migration-required log, got %d: %s", got, out.String())
 	}
 }
 

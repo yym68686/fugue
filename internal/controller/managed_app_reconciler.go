@@ -1211,16 +1211,7 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 				continue
 			}
 			if currentClusterFound && managedPostgresClusterStorageSpecExceedsSize(currentCluster, preserveSize) {
-				if s != nil && s.Logger != nil {
-					s.Logger.Printf(
-						"managed postgres storage expansion for %s/%s is already recorded at %s but existing PVC %s remains %s on non-expandable storage; explicit data migration is required",
-						namespace,
-						name,
-						strings.TrimSpace(currentCluster.Spec.Storage.Size),
-						pvcName,
-						preserveSize,
-					)
-				}
+				s.logManagedPostgresStorageMigrationRequired(namespace, name, pvcName, currentCluster.Spec.Storage.Size, preserveSize)
 				break
 			}
 			storage["size"] = preserveSize
@@ -1239,6 +1230,37 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 		}
 	}
 	return stabilized, nil
+}
+
+func (s *Service) logManagedPostgresStorageMigrationRequired(namespace, clusterName, pvcName, recordedSize, pvcSize string) {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	namespace = strings.TrimSpace(namespace)
+	clusterName = strings.TrimSpace(clusterName)
+	pvcName = strings.TrimSpace(pvcName)
+	recordedSize = strings.TrimSpace(recordedSize)
+	pvcSize = strings.TrimSpace(pvcSize)
+	key := strings.Join([]string{namespace, clusterName, pvcName, recordedSize, pvcSize}, "\x00")
+	s.managedPostgresStorageNoticeMu.Lock()
+	if s.managedPostgresStorageNotices == nil {
+		s.managedPostgresStorageNotices = make(map[string]struct{})
+	}
+	if _, ok := s.managedPostgresStorageNotices[key]; ok {
+		s.managedPostgresStorageNoticeMu.Unlock()
+		return
+	}
+	s.managedPostgresStorageNotices[key] = struct{}{}
+	s.managedPostgresStorageNoticeMu.Unlock()
+
+	s.Logger.Printf(
+		"managed postgres storage expansion for %s/%s is already recorded at %s but existing PVC %s remains %s on non-expandable storage; explicit data migration is required",
+		namespace,
+		clusterName,
+		recordedSize,
+		pvcName,
+		pvcSize,
+	)
 }
 
 func managedPostgresClusterStorageSpecExceedsSize(cluster kubeCloudNativePGCluster, size string) bool {
