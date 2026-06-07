@@ -228,6 +228,114 @@ func TestStabilizeManagedPostgresStorageSpecsPreservesNonExpandablePVCSize(t *te
 	}
 }
 
+func TestStabilizeManagedPostgresStorageSpecsDoesNotShrinkRecordedClusterSpec(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	const pvcName = "demo-postgres-1"
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected request method %s for %s", r.Method, r.URL.String())
+		}
+		switch r.URL.Path {
+		case "/apis/postgresql.cnpg.io/v1/namespaces/" + namespace + "/clusters/" + clusterName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name":      clusterName,
+					"namespace": namespace,
+				},
+				"spec": map[string]any{
+					"storage": map[string]string{
+						"size": "5Gi",
+					},
+				},
+			})
+		case "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims":
+			if got := r.URL.Query().Get("labelSelector"); got != "cnpg.io/cluster="+clusterName+",cnpg.io/pvcRole=PG_DATA" {
+				t.Fatalf("unexpected pvc label selector %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{
+							"name": pvcName,
+						},
+					},
+				},
+			})
+		case "/api/v1/namespaces/" + namespace + "/persistentvolumeclaims/" + pvcName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": pvcName,
+				},
+				"spec": map[string]any{
+					"storageClassName": "local-path",
+					"resources": map[string]any{
+						"requests": map[string]string{
+							"storage": "1Gi",
+						},
+					},
+				},
+				"status": map[string]any{
+					"capacity": map[string]string{
+						"storage": "1Gi",
+					},
+				},
+			})
+		case "/apis/storage.k8s.io/v1/storageclasses/local-path":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name": "local-path",
+				},
+				"allowVolumeExpansion": false,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	objects := []map[string]any{
+		{
+			"apiVersion": runtime.CloudNativePGAPIVersion,
+			"kind":       runtime.CloudNativePGClusterKind,
+			"metadata": map[string]any{
+				"name":      clusterName,
+				"namespace": namespace,
+			},
+			"spec": map[string]any{
+				"instances": 1,
+				"storage": map[string]any{
+					"size": "5Gi",
+				},
+			},
+		},
+	}
+
+	svc := &Service{}
+	stabilized, err := svc.stabilizeManagedPostgresStorageSpecs(context.Background(), client, namespace, objects)
+	if err != nil {
+		t.Fatalf("stabilize managed postgres storage specs: %v", err)
+	}
+	if stabilized {
+		t.Fatal("expected recorded cluster storage spec to remain unchanged")
+	}
+
+	spec := objects[0]["spec"].(map[string]any)
+	storage := spec["storage"].(map[string]any)
+	if got := storage["size"]; got != "5Gi" {
+		t.Fatalf("expected desired storage size to avoid CNPG shrink, got %#v", got)
+	}
+}
+
 func TestManagedPostgresMissingClusterShouldBlockOnlyWhenServiceHasRuntimeHistory(t *testing.T) {
 	t.Parallel()
 

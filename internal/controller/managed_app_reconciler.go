@@ -1193,6 +1193,10 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 		if err != nil {
 			continue
 		}
+		currentCluster, currentClusterFound, err := client.getCloudNativePGCluster(ctx, namespace, name)
+		if err != nil {
+			return false, fmt.Errorf("read managed postgres cluster %s/%s before storage stabilization: %w", namespace, name, err)
+		}
 
 		pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(name)+",cnpg.io/pvcRole=PG_DATA")
 		if err != nil {
@@ -1205,6 +1209,19 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 			}
 			if !preserve {
 				continue
+			}
+			if currentClusterFound && managedPostgresClusterStorageSpecExceedsSize(currentCluster, preserveSize) {
+				if s != nil && s.Logger != nil {
+					s.Logger.Printf(
+						"managed postgres storage expansion for %s/%s is already recorded at %s but existing PVC %s remains %s on non-expandable storage; explicit data migration is required",
+						namespace,
+						name,
+						strings.TrimSpace(currentCluster.Spec.Storage.Size),
+						pvcName,
+						preserveSize,
+					)
+				}
+				break
 			}
 			storage["size"] = preserveSize
 			stabilized = true
@@ -1222,6 +1239,23 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 		}
 	}
 	return stabilized, nil
+}
+
+func managedPostgresClusterStorageSpecExceedsSize(cluster kubeCloudNativePGCluster, size string) bool {
+	currentSpecSize := strings.TrimSpace(cluster.Spec.Storage.Size)
+	size = strings.TrimSpace(size)
+	if currentSpecSize == "" || size == "" {
+		return false
+	}
+	currentQuantity, err := resource.ParseQuantity(currentSpecSize)
+	if err != nil {
+		return false
+	}
+	sizeQuantity, err := resource.ParseQuantity(size)
+	if err != nil {
+		return false
+	}
+	return currentQuantity.Cmp(sizeQuantity) > 0
 }
 
 func (s *Service) managedPostgresPVCStorageSizeToPreserve(
