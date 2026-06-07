@@ -1599,12 +1599,6 @@ func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.E
 	case model.DNSAnswerPolicyKindPinned:
 		return 1
 	case model.DNSAnswerPolicyKindLatencyAware:
-		if edgeHealthProbeEnabled {
-			return 2
-		}
-		if edgeDNSCandidateWeightGap(ordered) >= edgeDNSLatencyAwareSingleAnswerMinGap(ordered[0].Weight) {
-			return 1
-		}
 		return 2
 	case model.DNSAnswerPolicyKindGeo, model.DNSAnswerPolicyKindWeighted, model.DNSAnswerPolicyKindGlobal, "":
 		return 2
@@ -1613,21 +1607,6 @@ func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.E
 	default:
 		return 2
 	}
-}
-
-func edgeDNSCandidateWeightGap(ordered []model.EdgeDNSAnswerCandidate) int {
-	if len(ordered) < 2 {
-		return 0
-	}
-	return ordered[0].Weight - ordered[1].Weight
-}
-
-func edgeDNSLatencyAwareSingleAnswerMinGap(topWeight int) int {
-	threshold := topWeight / 5
-	if threshold < 40 {
-		return 40
-	}
-	return threshold
 }
 
 func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint) []model.EdgeDNSAnswerCandidate {

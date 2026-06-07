@@ -212,7 +212,7 @@ func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
 	}
 }
 
-func TestServiceLatencyAwareWeightsOverrideGeoButRespectGates(t *testing.T) {
+func TestServiceLatencyAwareWeightsOrderAnswersButKeepFallback(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.DNSConfig{
@@ -251,12 +251,16 @@ func TestServiceLatencyAwareWeightsOverrideGeoButRespectGates(t *testing.T) {
 	if answer.Rcode != miekgdns.RcodeSuccess {
 		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
 	}
-	if len(answer.Answer) != 1 {
-		t.Fatalf("expected clear latency winner to be the only answer, got %+v", answer.Answer)
+	if len(answer.Answer) != 2 {
+		t.Fatalf("expected clear latency winner plus fallback answer, got %+v", answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
 	if !ok || first.A.String() != "15.204.94.71" {
 		t.Fatalf("expected latency weight to beat local geo hint, got %+v", answer.Answer)
+	}
+	second, ok := answer.Answer[1].(*miekgdns.A)
+	if !ok || second.A.String() != "51.38.126.103" {
+		t.Fatalf("expected healthy route-ready fallback answer, got %+v", answer.Answer)
 	}
 }
 
