@@ -79,6 +79,26 @@ for name in sorted(n for n in names if n):
 '
 }
 
+dns_daemonset_names() {
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get ds -o json | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+names = []
+for item in doc.get("items", []):
+    labels = item.get("metadata", {}).get("labels") or {}
+    component = (labels.get("app.kubernetes.io/component") or "").strip()
+    subsystem = (labels.get("fugue.io/rollout-subsystem") or "").strip()
+    if subsystem != "public-data-plane":
+        continue
+    if component == "dns" or component.startswith("dns-"):
+        names.append(item.get("metadata", {}).get("name", ""))
+for name in sorted(n for n in names if n):
+    print(name)
+'
+}
+
 bluegreen_worker_bases() {
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get ds -o json | python3 -c '
 import json
@@ -1132,6 +1152,69 @@ patch_front_template() {
   wait_daemonset_observed "${daemonset_name}"
 }
 
+container_patch_for_dns() {
+  local daemonset_name="$1"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import json
+import os
+import sys
+
+doc = json.load(sys.stdin)
+release_id = os.environ["FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID"]
+dns_resources = json.loads(os.environ["FUGUE_DNS_RESOURCES_JSON"])
+edge_repo = os.environ.get("FUGUE_EDGE_IMAGE_REPOSITORY", "").strip()
+edge_tag = os.environ.get("FUGUE_EDGE_IMAGE_TAG", "").strip()
+if not edge_repo or not edge_tag:
+    raise SystemExit("FUGUE_EDGE_IMAGE_REPOSITORY and FUGUE_EDGE_IMAGE_TAG are required for dns-ondelete")
+
+containers = []
+for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    if container.get("name") != "dns":
+        continue
+    containers.append({
+        "name": "dns",
+        "image": f"{edge_repo}:{edge_tag}",
+        "resources": dns_resources,
+    })
+if not containers:
+    raise SystemExit("dns daemonset has no dns container")
+patch = {
+    "spec": {
+        "updateStrategy": {
+            "type": "OnDelete",
+            "rollingUpdate": None,
+        },
+        "template": {
+            "metadata": {
+                "annotations": {
+                    "fugue.io/public-data-plane-release-id": release_id,
+                    "fugue.io/public-data-plane-release-mode": "dns-ondelete",
+                },
+            },
+            "spec": {
+                "containers": containers,
+            },
+        },
+    },
+}
+print(json.dumps(patch, separators=(",", ":")))
+'
+}
+
+patch_dns_template() {
+  local daemonset_name="$1"
+  local patch
+
+  patch="$(container_patch_for_dns "${daemonset_name}")"
+  log "patching dns ${daemonset_name} template"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    printf '%s\n' "${patch}"
+    return 0
+  fi
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null
+  wait_daemonset_observed "${daemonset_name}"
+}
+
 check_public_smoke_on_front_nodes() {
   local front_daemonset="$1"
   local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
@@ -1245,6 +1328,32 @@ run_front_ondelete_release() {
   FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="$(collect_current_active_slots_json "${bases[@]}")"
 }
 
+run_dns_ondelete_release() {
+  local daemonsets=()
+  local daemonset_name
+  local before_uids
+
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    daemonsets+=("${daemonset_name}")
+  done < <(dns_daemonset_names)
+  if (( ${#daemonsets[@]} == 0 )); then
+    fail "no DNS public data-plane DaemonSets found in namespace ${FUGUE_NAMESPACE}"
+  fi
+
+  log "dns-ondelete release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} daemonsets=${daemonsets[*]}"
+  for daemonset_name in "${daemonsets[@]}"; do
+    wait_daemonset_ready "${daemonset_name}"
+  done
+  for daemonset_name in "${daemonsets[@]}"; do
+    patch_dns_template "${daemonset_name}"
+    before_uids="$(daemonset_pod_uids "${daemonset_name}")"
+    delete_daemonset_pods_no_wait "${daemonset_name}" "dns"
+    wait_daemonset_replaced_and_ready "${daemonset_name}" "${before_uids}"
+  done
+}
+
 write_release_record() {
   local daemonsets_csv="$1"
   local release_record_name="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_RECORD_NAME:-${FUGUE_RELEASE_FULLNAME}-public-data-plane-release}"
@@ -1326,8 +1435,8 @@ main() {
     *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN must be true or false" ;;
   esac
   case "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" in
-    blue-green|front-ondelete|legacy-template-ondelete) ;;
-    *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY must be blue-green, front-ondelete, or legacy-template-ondelete" ;;
+    blue-green|front-ondelete|dns-ondelete|legacy-template-ondelete) ;;
+    *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY must be blue-green, front-ondelete, dns-ondelete, or legacy-template-ondelete" ;;
   esac
   case "${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN}" in
     true|false) ;;
@@ -1371,6 +1480,20 @@ main() {
       return 0
     fi
     log "public edge front release complete; use only for explicit front changes"
+    return 0
+  fi
+
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" ]]; then
+    FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="dns-ondelete"
+    run_dns_ondelete_release
+    daemonsets_csv="$(dns_daemonset_names | paste -sd, -)"
+    write_release_record "${daemonsets_csv}"
+    run_smoke_urls
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+      log "dry-run complete; DNS pods would be replaced one DaemonSet at a time"
+      return 0
+    fi
+    log "public DNS release complete; DNS DaemonSets were replaced one at a time"
     return 0
   fi
 

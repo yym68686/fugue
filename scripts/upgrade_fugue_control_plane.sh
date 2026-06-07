@@ -169,6 +169,24 @@ public_data_plane_front_image_changed() {
   return 1
 }
 
+public_data_plane_dns_image_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      cmd/fugue-dns/*|\
+      internal/dnsserver/*|\
+      Dockerfile.edge)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
 node_local_build_plane_changed() {
   release_changed_files_match build
 }
@@ -4334,6 +4352,7 @@ release_public_data_plane_if_needed() {
   local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   local worker_changed="false"
   local front_changed="false"
+  local dns_changed="false"
 
   if [[ "${FUGUE_EDGE_ENABLED}" != "true" ]]; then
     return 0
@@ -4352,7 +4371,10 @@ release_public_data_plane_if_needed() {
   if public_data_plane_front_image_changed; then
     front_changed="true"
   fi
-  if [[ "${worker_changed}" != "true" && "${front_changed}" != "true" ]]; then
+  if public_data_plane_dns_image_changed; then
+    dns_changed="true"
+  fi
+  if [[ "${worker_changed}" != "true" && "${front_changed}" != "true" && "${dns_changed}" != "true" ]]; then
     return 0
   fi
   if public_data_plane_manifest_changed; then
@@ -4370,6 +4392,11 @@ release_public_data_plane_if_needed() {
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="front-ondelete"
     export FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="true"
     log "public data-plane front image changed; starting isolated front-ondelete release after worker readiness checks"
+    bash ./scripts/release_fugue_public_data_plane.sh
+  fi
+  if [[ "${dns_changed}" == "true" ]]; then
+    export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="dns-ondelete"
+    log "public data-plane DNS image changed; starting isolated dns-ondelete release"
     bash ./scripts/release_fugue_public_data_plane.sh
   fi
 }

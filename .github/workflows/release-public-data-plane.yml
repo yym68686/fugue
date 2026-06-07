@@ -21,6 +21,7 @@ on:
         options:
           - blue-green
           - front-ondelete
+          - dns-ondelete
           - legacy-template-ondelete
       confirm_front_restart:
         description: Confirm that front pods may be restarted. Required only for strategy=front-ondelete.

@@ -38,6 +38,17 @@ fi
 
 FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
+public_data_plane_worker_image_changed || fail "edge code changes must mark worker image changed"
+
+FUGUE_RELEASE_CHANGED_FILES=$'internal/dnsserver/service.go'
+public_data_plane_changed || fail "dnsserver code changes must mark public data-plane changed"
+public_data_plane_dns_image_changed || fail "dnsserver code changes must mark DNS image changed"
+if public_data_plane_worker_image_changed; then
+  fail "dnsserver-only changes must not mark worker image changed"
+fi
+if public_data_plane_front_image_changed; then
+  fail "dnsserver-only changes must not mark front image changed"
+fi
 
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/dns-daemonset.yaml'
 public_data_plane_changed || fail "dns daemonset changes must mark public data-plane changed"
