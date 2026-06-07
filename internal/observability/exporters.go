@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/snappy"
@@ -33,7 +34,7 @@ func NewConfiguredExporter(cfg Config, client *http.Client) Exporter {
 	}
 	exporters := []Exporter{}
 	if cfg.MetricsRemoteWriteURL != "" {
-		exporters = append(exporters, PrometheusRemoteWriteExporter{
+		exporters = append(exporters, &PrometheusRemoteWriteExporter{
 			Client:         client,
 			RemoteWriteURL: cfg.MetricsRemoteWriteURL,
 		})
@@ -70,7 +71,37 @@ func (e MultiExporter) Export(ctx context.Context, events []Event) error {
 	var errs []error
 	for _, exporter := range e.exporters {
 		if err := exporter.Export(ctx, events); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: %w", exporter.Name(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (e MultiExporter) ExportWithRetry(ctx context.Context, events []Event, attempts int) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	remaining := append([]Exporter(nil), e.exporters...)
+	var errs []error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		errs = nil
+		failed := remaining[:0]
+		for _, exporter := range remaining {
+			if err := exporter.Export(ctx, events); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", exporter.Name(), err))
+				failed = append(failed, exporter)
+			}
+		}
+		if len(failed) == 0 {
+			return nil
+		}
+		remaining = append([]Exporter(nil), failed...)
+		if attempt < attempts {
+			select {
+			case <-ctx.Done():
+				return errors.Join(errs...)
+			case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -79,6 +110,8 @@ func (e MultiExporter) Export(ctx context.Context, events []Event) error {
 type PrometheusRemoteWriteExporter struct {
 	Client         *http.Client
 	RemoteWriteURL string
+	mu             sync.Mutex
+	lastTimestamp  map[string]int64
 }
 
 type prometheusTimeSeries struct {
@@ -87,11 +120,14 @@ type prometheusTimeSeries struct {
 	Timestamp int64
 }
 
-func (e PrometheusRemoteWriteExporter) Name() string {
+func (e *PrometheusRemoteWriteExporter) Name() string {
 	return "metrics"
 }
 
-func (e PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Event) error {
+func (e *PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Event) error {
+	if e == nil {
+		return nil
+	}
 	if strings.TrimSpace(e.RemoteWriteURL) == "" {
 		return nil
 	}
@@ -105,6 +141,8 @@ func (e PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Even
 			series = append(series, item)
 		}
 	}
+	var commit func()
+	series, commit = e.filterPrometheusTimeSeries(series)
 	if len(series) == 0 {
 		return nil
 	}
@@ -125,7 +163,57 @@ func (e PrometheusRemoteWriteExporter) Export(ctx context.Context, events []Even
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("push Prometheus remote write payload returned %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
 	}
+	commit()
 	return nil
+}
+
+func (e *PrometheusRemoteWriteExporter) filterPrometheusTimeSeries(series []prometheusTimeSeries) ([]prometheusTimeSeries, func()) {
+	if len(series) == 0 {
+		return nil, func() {}
+	}
+	sort.SliceStable(series, func(i, j int) bool {
+		leftKey := stableLabelKey(series[i].Labels)
+		rightKey := stableLabelKey(series[j].Labels)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return series[i].Timestamp < series[j].Timestamp
+	})
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.lastTimestamp == nil {
+		e.lastTimestamp = map[string]int64{}
+	}
+
+	filtered := make([]prometheusTimeSeries, 0, len(series))
+	pendingMax := map[string]int64{}
+	for _, item := range series {
+		key := stableLabelKey(item.Labels)
+		last := e.lastTimestamp[key]
+		if pending := pendingMax[key]; pending > last {
+			last = pending
+		}
+		if item.Timestamp <= last {
+			continue
+		}
+		pendingMax[key] = item.Timestamp
+		filtered = append(filtered, item)
+	}
+
+	commit := func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.lastTimestamp == nil {
+			e.lastTimestamp = map[string]int64{}
+		}
+		for key, timestamp := range pendingMax {
+			if timestamp > e.lastTimestamp[key] {
+				e.lastTimestamp[key] = timestamp
+			}
+		}
+	}
+	return filtered, commit
 }
 
 func prometheusTimeSeriesForEvent(event Event) (prometheusTimeSeries, bool) {

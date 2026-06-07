@@ -552,17 +552,25 @@ func (p *Pipeline) exportBatch(batch []Event) {
 		attempts = 1
 	}
 	var err error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		err = p.exporter.Export(ctx, batch)
+	if multi, ok := p.exporter.(MultiExporter); ok {
+		err = multi.ExportWithRetry(ctx, batch, attempts)
 		if err == nil {
 			p.exported.Add(uint64(len(batch)))
 			return
 		}
-		if attempt < attempts {
-			select {
-			case <-ctx.Done():
-				break
-			case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
+	} else {
+		for attempt := 1; attempt <= attempts; attempt++ {
+			err = p.exporter.Export(ctx, batch)
+			if err == nil {
+				p.exported.Add(uint64(len(batch)))
+				return
+			}
+			if attempt < attempts {
+				select {
+				case <-ctx.Done():
+					break
+				case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
+				}
 			}
 		}
 	}

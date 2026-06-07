@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -90,6 +91,66 @@ func TestPrometheusRemoteWriteExporterPushesMetricEventsWithAllowedLabels(t *tes
 		if strings.Contains(text, denied) {
 			t.Fatalf("remote write payload retained denied label %q in %q", denied, text)
 		}
+	}
+}
+
+func TestPrometheusRemoteWriteExporterDropsDuplicateAndOutOfOrderSamples(t *testing.T) {
+	requests := 0
+	sampleCounts := []int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		decoded, err := snappy.Decode(nil, readAllBytes(t, r))
+		if err != nil {
+			t.Fatalf("decode remote write payload: %v", err)
+		}
+		sampleCounts = append(sampleCounts, strings.Count(string(decoded), "app_request_duration_ms"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	exporter := PrometheusRemoteWriteExporter{Client: server.Client(), RemoteWriteURL: server.URL}
+	base := time.Unix(100, 0).UTC()
+	events := []Event{
+		prometheusMetricEvent(base.Add(time.Second), "10"),
+		prometheusMetricEvent(base.Add(time.Second), "20"),
+		prometheusMetricEvent(base, "5"),
+		prometheusMetricEvent(base.Add(2*time.Second), "30"),
+	}
+	if err := exporter.Export(context.Background(), events); err != nil {
+		t.Fatalf("export remote write payload: %v", err)
+	}
+	if requests != 1 || len(sampleCounts) != 1 || sampleCounts[0] != 3 {
+		t.Fatalf("expected one request with three deduplicated monotonic samples, requests=%d samples=%+v", requests, sampleCounts)
+	}
+
+	if err := exporter.Export(context.Background(), events); err != nil {
+		t.Fatalf("export stale remote write payload: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("expected stale samples to be skipped without a second request, got %d requests", requests)
+	}
+
+	if err := exporter.Export(context.Background(), []Event{prometheusMetricEvent(base.Add(3*time.Second), "40")}); err != nil {
+		t.Fatalf("export newer remote write payload: %v", err)
+	}
+	if requests != 2 || len(sampleCounts) != 2 || sampleCounts[1] != 1 {
+		t.Fatalf("expected newer sample to be sent once, requests=%d samples=%+v", requests, sampleCounts)
+	}
+}
+
+func TestMultiExporterRetriesOnlyFailedExporters(t *testing.T) {
+	success := &recordingExporter{name: "analytics"}
+	flaky := &recordingExporter{name: "metrics", failures: 1}
+	multi := MultiExporter{exporters: []Exporter{success, flaky}}
+
+	if err := multi.ExportWithRetry(context.Background(), []Event{{Kind: EventKindLog}}, 3); err != nil {
+		t.Fatalf("export with retry: %v", err)
+	}
+	if success.calls != 1 {
+		t.Fatalf("successful exporter should not be retried, got %d calls", success.calls)
+	}
+	if flaky.calls != 2 {
+		t.Fatalf("failed exporter should be retried until success, got %d calls", flaky.calls)
 	}
 }
 
@@ -300,6 +361,44 @@ func TestStructuredLogCanBecomeSpanEvent(t *testing.T) {
 	if _, ok := event.Attributes["token"]; ok {
 		t.Fatalf("secret field was retained: %+v", event.Attributes)
 	}
+}
+
+func prometheusMetricEvent(timestamp time.Time, value string) Event {
+	return Event{
+		Timestamp: timestamp,
+		Kind:      EventKindMetric,
+		Source:    "unit",
+		Attributes: map[string]string{
+			"metric":       "app_request_duration_ms",
+			"value":        value,
+			"tenant_id":    "tenant_123",
+			"project_id":   "project_123",
+			"app_id":       "app_123",
+			"runtime_id":   "runtime_123",
+			"component":    "api",
+			"method":       "POST",
+			"route_id":     "/v1/responses",
+			"status_class": "2xx",
+		},
+	}
+}
+
+type recordingExporter struct {
+	name     string
+	failures int
+	calls    int
+}
+
+func (e *recordingExporter) Name() string {
+	return e.name
+}
+
+func (e *recordingExporter) Export(context.Context, []Event) error {
+	e.calls++
+	if e.calls <= e.failures {
+		return errors.New("temporary exporter failure")
+	}
+	return nil
 }
 
 func readAllString(t *testing.T, r *http.Request) string {
