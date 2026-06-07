@@ -213,8 +213,12 @@ func TestStabilizeManagedPostgresStorageSpecsPreservesNonExpandablePVCSize(t *te
 	}
 
 	svc := &Service{}
-	if err := svc.stabilizeManagedPostgresStorageSpecs(context.Background(), client, namespace, objects); err != nil {
+	stabilized, err := svc.stabilizeManagedPostgresStorageSpecs(context.Background(), client, namespace, objects)
+	if err != nil {
 		t.Fatalf("stabilize managed postgres storage specs: %v", err)
+	}
+	if !stabilized {
+		t.Fatal("expected managed postgres storage spec to be stabilized")
 	}
 
 	spec := objects[0]["spec"].(map[string]any)

@@ -247,16 +247,21 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.ensureManagedPostgresDataSafety(ctx, client, namespace, managed, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	if err := s.stabilizeManagedPostgresStorageSpecs(ctx, client, namespace, childObjects); err != nil {
+	stabilizedPostgresStorage, err := s.stabilizeManagedPostgresStorageSpecs(ctx, client, namespace, childObjects)
+	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	if err := client.applyObjects(ctx, childObjects); err != nil {
+	applyCtx := ctx
+	if stabilizedPostgresStorage {
+		applyCtx = withoutSkipExistingCloudNativePGWrites(ctx)
+	}
+	if err := client.applyObjects(applyCtx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
 	if err := client.replaceObjectSpecsByKind(ctx, childObjects, "apps/v1", "Deployment"); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed app deployment desired spec: %w", err))
 	}
-	if err := client.replaceObjectSpecsByKind(ctx, childObjects, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind); err != nil {
+	if err := client.replaceObjectSpecsByKind(applyCtx, childObjects, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed postgres desired spec: %w", err))
 	}
 	if err := s.reconcileManagedAppPlatformEnvDrift(ctx, client, namespace, childObjects); err != nil {
@@ -1166,7 +1171,8 @@ func desiredManagedPostgresClustersByServiceID(objects []map[string]any) map[str
 	return out
 }
 
-func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, client *kubeClient, defaultNamespace string, desiredObjects []map[string]any) error {
+func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, client *kubeClient, defaultNamespace string, desiredObjects []map[string]any) (bool, error) {
+	stabilized := false
 	for _, obj := range desiredObjects {
 		if strings.TrimSpace(objectStringField(obj, "apiVersion")) != runtime.CloudNativePGAPIVersion ||
 			strings.TrimSpace(objectStringField(obj, "kind")) != runtime.CloudNativePGClusterKind {
@@ -1190,17 +1196,18 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 
 		pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(name)+",cnpg.io/pvcRole=PG_DATA")
 		if err != nil {
-			return fmt.Errorf("list managed postgres PVCs for %s/%s: %w", namespace, name, err)
+			return false, fmt.Errorf("list managed postgres PVCs for %s/%s: %w", namespace, name, err)
 		}
 		for _, pvcName := range pvcNames {
 			preserveSize, preserve, err := s.managedPostgresPVCStorageSizeToPreserve(ctx, client, namespace, pvcName, desiredQuantity)
 			if err != nil {
-				return fmt.Errorf("check managed postgres PVC resize for %s/%s: %w", namespace, pvcName, err)
+				return false, fmt.Errorf("check managed postgres PVC resize for %s/%s: %w", namespace, pvcName, err)
 			}
 			if !preserve {
 				continue
 			}
 			storage["size"] = preserveSize
+			stabilized = true
 			if s != nil && s.Logger != nil {
 				s.Logger.Printf(
 					"preserving managed postgres storage size for %s/%s at %s because existing PVC %s cannot be resized in-place to %s",
@@ -1214,7 +1221,7 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 			break
 		}
 	}
-	return nil
+	return stabilized, nil
 }
 
 func (s *Service) managedPostgresPVCStorageSizeToPreserve(

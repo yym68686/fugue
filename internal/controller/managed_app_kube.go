@@ -128,6 +128,10 @@ func withSkipExistingCloudNativePGWrites(ctx context.Context) context.Context {
 	return context.WithValue(ctx, skipExistingCloudNativePGWritesContextKey{}, true)
 }
 
+func withoutSkipExistingCloudNativePGWrites(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipExistingCloudNativePGWritesContextKey{}, false)
+}
+
 func skipExistingCloudNativePGWrites(ctx context.Context) bool {
 	value, _ := ctx.Value(skipExistingCloudNativePGWritesContextKey{}).(bool)
 	return value
