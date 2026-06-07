@@ -242,6 +242,52 @@ func TestOverlayManagedAppStatusesUsesTTLCache(t *testing.T) {
 	}
 }
 
+func TestFetchManagedAppStatusesClosesIdleKubeConnections(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Status: model.AppStatus{
+			Phase: "deployed",
+		},
+	}
+
+	managed := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	server := newManagedAppTestServer(t, map[string]any{
+		"items": []map[string]any{managed},
+	})
+	defer server.Close()
+
+	kubeClient := server.Client()
+	tracker := &closeTrackingTransport{base: kubeClient.Transport}
+	kubeClient.Transport = tracker
+
+	apiServer := &Server{
+		log:                   log.New(io.Discard, "", 0),
+		managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second),
+		newManagedAppStatusClient: func() (*managedAppStatusClient, error) {
+			return &managedAppStatusClient{
+				client:      kubeClient,
+				baseURL:     server.URL,
+				bearerToken: "test",
+			}, nil
+		},
+	}
+
+	entry, err := apiServer.fetchManagedAppStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("fetch managed app statuses: %v", err)
+	}
+	if !entry.ok || len(entry.items) != 1 {
+		t.Fatalf("expected fetched managed app status entry, got %#v", entry)
+	}
+	if tracker.closeCount.Load() == 0 {
+		t.Fatal("expected managed app status refresh to close idle kubernetes connections")
+	}
+}
+
 func TestOverlayManagedAppStatusFallsBackToStaleCacheOnRefreshError(t *testing.T) {
 	t.Parallel()
 

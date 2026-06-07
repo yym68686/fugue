@@ -178,7 +178,11 @@ func newKubeLogsClient(namespace string) (*kubeLogsClient, error) {
 		}
 	}
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: rootCAs},
+		TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
+		MaxIdleConns:        clusterNodeHTTPMaxIdleConns,
+		MaxIdleConnsPerHost: clusterNodeHTTPMaxIdleConnsPerHost,
+		IdleConnTimeout:     clusterNodeHTTPIdleConnTimeout,
+		TLSHandshakeTimeout: clusterNodeHTTPTLSHandshakeTimeout,
 	}
 
 	return &kubeLogsClient{

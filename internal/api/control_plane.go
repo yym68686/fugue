@@ -107,6 +107,7 @@ func (s *Server) handleGetControlPlaneStatus(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	controlPlane, err := client.readControlPlaneStatus(
 		r.Context(),

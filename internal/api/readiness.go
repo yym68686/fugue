@@ -117,6 +117,7 @@ func (s *Server) fetchReadinessKubernetesAPIResult(ctx context.Context, namespac
 			Message: err.Error(),
 		}
 	}
+	defer client.closeIdleConnections()
 
 	kubeCtx, cancelKube := context.WithTimeout(ctx, readinessKubernetesAPITimeout)
 	defer cancelKube()

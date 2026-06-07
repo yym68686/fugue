@@ -249,6 +249,7 @@ func (s *Server) reconcileMachineClusterNode(ctx context.Context, machine model.
 	if err != nil {
 		return false, err
 	}
+	defer client.closeIdleConnections()
 	return client.reconcileMachineNode(ctx, nodeName, machine, runtimeObj)
 }
 

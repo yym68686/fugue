@@ -46,6 +46,7 @@ func (s *Server) handleListClusterPods(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	includeTerminated, err := readBoolQuery(r, "include_terminated", false)
 	if err != nil {
@@ -97,6 +98,7 @@ func (s *Server) handleListClusterEvents(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	limit, err := readIntQuery(r, "limit", 0)
 	if err != nil {
@@ -435,6 +437,7 @@ func (s *Server) handleGetClusterWorkload(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	workload, err := client.readClusterWorkloadDetail(
 		r.Context(),
@@ -462,6 +465,7 @@ func (s *Server) handleGetClusterService(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	service, err := client.readClusterServiceDetail(
 		r.Context(),
@@ -488,6 +492,7 @@ func (s *Server) handleGetClusterRolloutStatus(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	workload, err := client.readClusterWorkloadDetail(
 		r.Context(),

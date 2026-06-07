@@ -149,6 +149,7 @@ func (s *Server) handleGetClusterNodeDiagnosis(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	snapshots, err := s.loadClusterNodeInventory(r.Context())
 	if err != nil {

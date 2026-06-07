@@ -569,6 +569,7 @@ func (s *Server) headscaleKubernetesStateCheck(ctx context.Context) (bool, strin
 	if err != nil {
 		return true, "headscale kubernetes state skipped: " + err.Error()
 	}
+	defer client.closeIdleConnections()
 	deployments, err := client.listDeployments(ctx, namespace)
 	if err != nil {
 		return false, "headscale kubernetes state unavailable: " + err.Error()

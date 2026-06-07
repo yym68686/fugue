@@ -233,13 +233,24 @@ func newManagedAppStatusClient() (*managedAppStatusClient, error) {
 	return &managedAppStatusClient{
 		client: &http.Client{
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: rootCAs},
+				TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
+				MaxIdleConns:        clusterNodeHTTPMaxIdleConns,
+				MaxIdleConnsPerHost: clusterNodeHTTPMaxIdleConnsPerHost,
+				IdleConnTimeout:     clusterNodeHTTPIdleConnTimeout,
+				TLSHandshakeTimeout: clusterNodeHTTPTLSHandshakeTimeout,
 			},
 			Timeout: 10 * time.Second,
 		},
 		baseURL:     "https://" + host + ":" + port,
 		bearerToken: strings.TrimSpace(string(token)),
 	}, nil
+}
+
+func (c *managedAppStatusClient) closeIdleConnections() {
+	if c == nil || c.client == nil {
+		return
+	}
+	c.client.CloseIdleConnections()
 }
 
 func (c *managedAppStatusClient) getManagedApp(ctx context.Context, app model.App) (runtime.ManagedAppObject, bool, error) {
@@ -452,6 +463,7 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (mana
 	if err != nil {
 		return managedAppStatusCacheEntry{}, err
 	}
+	defer client.closeIdleConnections()
 
 	refreshCtx, cancel := s.managedAppStatusRefreshContext(ctx)
 	defer cancel()
@@ -495,6 +507,7 @@ func (s *Server) fetchManagedAppStatuses(ctx context.Context) (managedAppStatusL
 	if err != nil {
 		return managedAppStatusListCacheEntry{}, err
 	}
+	defer client.closeIdleConnections()
 
 	refreshCtx, cancel := s.managedAppStatusRefreshContext(ctx)
 	defer cancel()

@@ -194,6 +194,7 @@ func (s *Server) handleJoinClusterCleanup(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	defer client.closeIdleConnections()
 
 	currentNodeSeen := false
 	staleSnapshots := make([]clusterNodeSnapshot, 0)
@@ -289,6 +290,7 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 	if err != nil {
 		return model.NodeKey{}, model.Machine{}, nil, joinClusterPlan{}, err
 	}
+	defer client.closeIdleConnections()
 	runtimeID := ""
 	if runtimeObj != nil {
 		runtimeID = runtimeObj.ID
@@ -384,6 +386,7 @@ func (s *Server) cleanupRevokedNodeKey(ctx context.Context, key model.NodeKey) r
 		if clientErr != nil {
 			result.Warnings = append(result.Warnings, "connect to kubernetes for node key cleanup: "+clientErr.Error())
 		} else {
+			defer client.closeIdleConnections()
 			deletedTokenIDs, err := client.deleteBootstrapTokensByNodeKey(ctx, key.ID)
 			if err != nil {
 				result.Warnings = append(result.Warnings, "delete bootstrap tokens for node key cleanup: "+err.Error())

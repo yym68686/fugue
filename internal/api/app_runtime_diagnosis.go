@@ -121,6 +121,8 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	clusterClient, clusterErr := s.requireClusterNodeClient()
 	if clusterErr != nil {
 		diagnosis.Warnings = append(diagnosis.Warnings, fmt.Sprintf("cluster diagnostics unavailable: %v", clusterErr))
+	} else {
+		defer clusterClient.closeIdleConnections()
 	}
 
 	namespaceEvents := []model.ClusterEvent{}

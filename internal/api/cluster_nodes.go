@@ -406,6 +406,7 @@ func (s *Server) reconcileLegacyBuildTierLabelsFromSnapshots(snapshots []cluster
 	if err != nil {
 		return snapshots, false, err
 	}
+	defer client.closeIdleConnections()
 
 	changed := false
 	for nodeName := range legacyNodeNames {
@@ -463,6 +464,7 @@ func (s *Server) reconcileSharedPoolPolicyDriftFromSnapshots(snapshots []cluster
 	if err != nil {
 		return snapshots, false, err
 	}
+	defer client.closeIdleConnections()
 
 	changed := false
 	for _, snapshot := range snapshots {

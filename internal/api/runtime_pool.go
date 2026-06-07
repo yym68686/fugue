@@ -90,6 +90,7 @@ func (s *Server) reconcileRuntimeClusterNode(ctx context.Context, runtimeObj mod
 	if err != nil {
 		return false, err
 	}
+	defer client.closeIdleConnections()
 	return client.reconcileRuntimeNode(ctx, runtimeObj)
 }
 

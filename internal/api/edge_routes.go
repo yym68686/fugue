@@ -716,6 +716,7 @@ func (s *Server) edgeLiveServingByNode(ctx context.Context, now time.Time) map[s
 		if err != nil {
 			return nil, err
 		}
+		defer client.closeIdleConnections()
 		pods, err := client.listControlPlaneNamespacePods(ctx, namespace)
 		if err != nil {
 			return nil, err

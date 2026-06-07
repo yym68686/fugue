@@ -37,6 +37,7 @@ func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.Ap
 		}
 		return nil
 	}
+	defer client.closeIdleConnections()
 
 	var out []liveManagedImageReference
 	for _, app := range apps {
