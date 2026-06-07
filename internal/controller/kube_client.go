@@ -97,7 +97,13 @@ type kubePersistentVolumeClaim struct {
 	Spec struct {
 		VolumeName       string `json:"volumeName,omitempty"`
 		StorageClassName string `json:"storageClassName,omitempty"`
+		Resources        struct {
+			Requests map[string]string `json:"requests,omitempty"`
+		} `json:"resources,omitempty"`
 	} `json:"spec"`
+	Status struct {
+		Capacity map[string]string `json:"capacity,omitempty"`
+	} `json:"status,omitempty"`
 }
 
 type kubePersistentVolume struct {
@@ -117,6 +123,13 @@ type kubePersistentVolume struct {
 			} `json:"required,omitempty"`
 		} `json:"nodeAffinity,omitempty"`
 	} `json:"spec"`
+}
+
+type kubeStorageClass struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	AllowVolumeExpansion *bool `json:"allowVolumeExpansion,omitempty"`
 }
 
 type kubeJobList struct {
@@ -496,6 +509,18 @@ func (c *kubeClient) getPersistentVolume(ctx context.Context, name string) (kube
 		return kubePersistentVolume{}, false, err
 	}
 	return pv, true, nil
+}
+
+func (c *kubeClient) getStorageClass(ctx context.Context, name string) (kubeStorageClass, bool, error) {
+	var storageClass kubeStorageClass
+	status, err := c.doJSON(ctx, http.MethodGet, "/apis/storage.k8s.io/v1/storageclasses/"+url.PathEscape(strings.TrimSpace(name)), nil, &storageClass)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubeStorageClass{}, false, nil
+		}
+		return kubeStorageClass{}, false, err
+	}
+	return storageClass, true, nil
 }
 
 func (c *kubeClient) doJSON(ctx context.Context, method, apiPath string, body any, out any) (int, error) {

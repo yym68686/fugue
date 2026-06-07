@@ -11,6 +11,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const managedPostgresExistingServiceInitGracePeriod = 15 * time.Minute
@@ -243,6 +245,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	}
 	decorateManagedAppObjectsWithFenceEpoch(childObjects, app, fenceEpoch)
 	if err := s.ensureManagedPostgresDataSafety(ctx, client, namespace, managed, app, childObjects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
+	if err := s.stabilizeManagedPostgresStorageSpecs(ctx, client, namespace, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	if err := client.applyObjects(ctx, childObjects); err != nil {
@@ -1159,6 +1164,108 @@ func desiredManagedPostgresClustersByServiceID(objects []map[string]any) map[str
 		out[serviceID] = strings.TrimSpace(name)
 	}
 	return out
+}
+
+func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, client *kubeClient, defaultNamespace string, desiredObjects []map[string]any) error {
+	for _, obj := range desiredObjects {
+		if strings.TrimSpace(objectStringField(obj, "apiVersion")) != runtime.CloudNativePGAPIVersion ||
+			strings.TrimSpace(objectStringField(obj, "kind")) != runtime.CloudNativePGClusterKind {
+			continue
+		}
+		name, namespace := objectNameAndNamespace(defaultNamespace, obj)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		spec, _ := obj["spec"].(map[string]any)
+		storage, _ := spec["storage"].(map[string]any)
+		desiredSize, _ := storage["size"].(string)
+		desiredSize = strings.TrimSpace(desiredSize)
+		if spec == nil || storage == nil || desiredSize == "" {
+			continue
+		}
+		desiredQuantity, err := resource.ParseQuantity(desiredSize)
+		if err != nil {
+			continue
+		}
+
+		pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(name)+",cnpg.io/pvcRole=PG_DATA")
+		if err != nil {
+			return fmt.Errorf("list managed postgres PVCs for %s/%s: %w", namespace, name, err)
+		}
+		for _, pvcName := range pvcNames {
+			preserveSize, preserve, err := s.managedPostgresPVCStorageSizeToPreserve(ctx, client, namespace, pvcName, desiredQuantity)
+			if err != nil {
+				return fmt.Errorf("check managed postgres PVC resize for %s/%s: %w", namespace, pvcName, err)
+			}
+			if !preserve {
+				continue
+			}
+			storage["size"] = preserveSize
+			if s != nil && s.Logger != nil {
+				s.Logger.Printf(
+					"preserving managed postgres storage size for %s/%s at %s because existing PVC %s cannot be resized in-place to %s",
+					namespace,
+					name,
+					preserveSize,
+					pvcName,
+					desiredSize,
+				)
+			}
+			break
+		}
+	}
+	return nil
+}
+
+func (s *Service) managedPostgresPVCStorageSizeToPreserve(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	pvcName string,
+	desiredQuantity resource.Quantity,
+) (string, bool, error) {
+	pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+	if err != nil || !found {
+		return "", false, err
+	}
+	currentSize := strings.TrimSpace(pvc.Status.Capacity["storage"])
+	if currentSize == "" {
+		currentSize = strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
+	}
+	if currentSize == "" {
+		return "", false, nil
+	}
+	currentQuantity, err := resource.ParseQuantity(currentSize)
+	if err != nil {
+		return "", false, nil
+	}
+	comparison := desiredQuantity.Cmp(currentQuantity)
+	if comparison == 0 {
+		return "", false, nil
+	}
+	if comparison < 0 {
+		return currentSize, true, nil
+	}
+	expandable, err := s.persistentVolumeClaimAllowsExpansion(ctx, client, pvc)
+	if err != nil {
+		return "", false, err
+	}
+	if expandable {
+		return "", false, nil
+	}
+	return currentSize, true, nil
+}
+
+func (s *Service) persistentVolumeClaimAllowsExpansion(ctx context.Context, client *kubeClient, pvc kubePersistentVolumeClaim) (bool, error) {
+	storageClassName := strings.TrimSpace(pvc.Spec.StorageClassName)
+	if storageClassName == "" {
+		return false, nil
+	}
+	storageClass, found, err := client.getStorageClass(ctx, storageClassName)
+	if err != nil || !found || storageClass.AllowVolumeExpansion == nil {
+		return false, err
+	}
+	return *storageClass.AllowVolumeExpansion, nil
 }
 
 func managedPostgresMissingClusterShouldBlock(app model.App, service model.BackingService, status runtime.ManagedBackingServiceStatus, now time.Time) bool {

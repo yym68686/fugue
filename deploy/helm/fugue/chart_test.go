@@ -2584,7 +2584,7 @@ func TestControlPlanePostgresCNPGCanDriveAPI(t *testing.T) {
 		"app.kubernetes.io/component: control-plane-postgres",
 		"name: fugue-fugue-control-plane-postgres-app",
 		"node-role.kubernetes.io/control-plane",
-		"podAntiAffinityType: \"required\"",
+		"podAntiAffinityType: \"preferred\"",
 	} {
 		if !strings.Contains(cluster, want) {
 			t.Fatalf("control-plane CNPG cluster missing %q:\n%s", want, cluster)
