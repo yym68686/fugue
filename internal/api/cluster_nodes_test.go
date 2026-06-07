@@ -1607,6 +1607,58 @@ func TestStartBackgroundWarmersPreloadsClusterNodeInventory(t *testing.T) {
 	t.Fatal("expected background warmers to preload cluster inventory")
 }
 
+func TestFetchClusterNodeInventoryClosesIdleKubeConnections(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	kubeServer := newClusterNodeInventoryTestServer("close-idle-node", nil)
+	defer kubeServer.Close()
+
+	kubeClient := kubeServer.Client()
+	tracker := &closeTrackingTransport{base: kubeClient.Transport}
+	kubeClient.Transport = tracker
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeClient,
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	snapshots, err := server.fetchClusterNodeInventory(context.Background())
+	if err != nil {
+		t.Fatalf("fetch cluster node inventory: %v", err)
+	}
+	if len(snapshots) != 1 || snapshots[0].node.Name != "close-idle-node" {
+		t.Fatalf("expected fetched node snapshot, got %#v", snapshots)
+	}
+	if tracker.closeCount.Load() == 0 {
+		t.Fatal("expected cluster node inventory refresh to close idle kubernetes connections")
+	}
+}
+
+type closeTrackingTransport struct {
+	base       http.RoundTripper
+	closeCount atomic.Int32
+}
+
+func (t *closeTrackingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(r)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.closeCount.Add(1)
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 func newClusterNodeInventoryTestServer(nodeName string, summaryCalls *atomic.Int32) *httptest.Server {
 	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

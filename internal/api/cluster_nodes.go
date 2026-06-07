@@ -49,6 +49,10 @@ const (
 	clusterNodeInventoryMaxStale        = 5 * time.Minute
 	clusterNodeInventoryRefreshTimeout  = 5 * time.Second
 	clusterNodeInventoryWarmInterval    = 25 * time.Second
+	clusterNodeHTTPIdleConnTimeout      = 30 * time.Second
+	clusterNodeHTTPMaxIdleConns         = 16
+	clusterNodeHTTPMaxIdleConnsPerHost  = 8
+	clusterNodeHTTPTLSHandshakeTimeout  = 5 * time.Second
 	tenantSharedClusterNodeName         = "internal-cluster"
 	tenantSharedClusterRegion           = "Multiple countries"
 	tenantSharedRuntimeID               = "runtime_managed_shared"
@@ -319,6 +323,7 @@ func (s *Server) fetchClusterNodeInventory(ctx context.Context) ([]clusterNodeSn
 	if err != nil {
 		return nil, err
 	}
+	defer client.closeIdleConnections()
 
 	refreshCtx, cancel := s.clusterNodeInventoryRefreshContext(ctx)
 	defer cancel()
@@ -939,13 +944,24 @@ func newClusterNodeClient() (*clusterNodeClient, error) {
 	return &clusterNodeClient{
 		client: &http.Client{
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: rootCAs},
+				TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
+				MaxIdleConns:        clusterNodeHTTPMaxIdleConns,
+				MaxIdleConnsPerHost: clusterNodeHTTPMaxIdleConnsPerHost,
+				IdleConnTimeout:     clusterNodeHTTPIdleConnTimeout,
+				TLSHandshakeTimeout: clusterNodeHTTPTLSHandshakeTimeout,
 			},
 			Timeout: 10 * time.Second,
 		},
 		baseURL:     "https://" + host + ":" + port,
 		bearerToken: strings.TrimSpace(string(token)),
 	}, nil
+}
+
+func (c *clusterNodeClient) closeIdleConnections() {
+	if c == nil || c.client == nil {
+		return
+	}
+	c.client.CloseIdleConnections()
 }
 
 func (c *clusterNodeClient) listClusterNodeInventory(ctx context.Context) ([]clusterNodeSnapshot, error) {
