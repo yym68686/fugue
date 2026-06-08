@@ -1015,6 +1015,12 @@ openebs:
         enabled: false
   localpv-provisioner:
     enabled: false
+  lvm-localpv:
+    lvmNode:
+      tolerations:
+        - key: fugue.io/tenant
+          operator: Exists
+          effect: NoSchedule
   zfs-localpv:
     crds:
       zfsLocalPv:
