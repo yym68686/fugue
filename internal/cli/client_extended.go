@@ -1015,13 +1015,33 @@ func (c *Client) SwitchoverAppDatabase(id, targetRuntimeID string) (operationRes
 	return response, nil
 }
 
+type databaseLocalizeRequest struct {
+	TargetNodeName   string
+	TargetRuntimeID  string
+	StorageSize      string
+	StorageClassName string
+}
+
 func (c *Client) LocalizeAppDatabase(id, targetNodeName, targetRuntimeID string) (operationResponse, error) {
+	return c.LocalizeAppDatabaseWithOptions(id, databaseLocalizeRequest{
+		TargetNodeName:  targetNodeName,
+		TargetRuntimeID: targetRuntimeID,
+	})
+}
+
+func (c *Client) LocalizeAppDatabaseWithOptions(id string, opts databaseLocalizeRequest) (operationResponse, error) {
 	request := map[string]string{}
-	if strings.TrimSpace(targetNodeName) != "" {
-		request["target_node_name"] = strings.TrimSpace(targetNodeName)
+	if strings.TrimSpace(opts.TargetNodeName) != "" {
+		request["target_node_name"] = strings.TrimSpace(opts.TargetNodeName)
 	}
-	if strings.TrimSpace(targetRuntimeID) != "" {
-		request["target_runtime_id"] = strings.TrimSpace(targetRuntimeID)
+	if strings.TrimSpace(opts.TargetRuntimeID) != "" {
+		request["target_runtime_id"] = strings.TrimSpace(opts.TargetRuntimeID)
+	}
+	if strings.TrimSpace(opts.StorageSize) != "" {
+		request["storage_size"] = strings.TrimSpace(opts.StorageSize)
+	}
+	if strings.TrimSpace(opts.StorageClassName) != "" {
+		request["storage_class_name"] = strings.TrimSpace(opts.StorageClassName)
 	}
 	var response operationResponse
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "database", "localize"), request, &response); err != nil {
@@ -1082,10 +1102,23 @@ func (c *Client) MoveBackingServiceProject(id string, request serviceProjectMove
 }
 
 func (c *Client) LocalizeBackingService(id, targetRuntimeID, targetNodeName string) (backingServiceMigrateResponse, error) {
+	return c.LocalizeBackingServiceWithOptions(id, databaseLocalizeRequest{
+		TargetRuntimeID: targetRuntimeID,
+		TargetNodeName:  targetNodeName,
+	})
+}
+
+func (c *Client) LocalizeBackingServiceWithOptions(id string, opts databaseLocalizeRequest) (backingServiceMigrateResponse, error) {
 	var response backingServiceMigrateResponse
-	request := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
-	if strings.TrimSpace(targetNodeName) != "" {
-		request["target_node_name"] = strings.TrimSpace(targetNodeName)
+	request := map[string]string{"target_runtime_id": strings.TrimSpace(opts.TargetRuntimeID)}
+	if strings.TrimSpace(opts.TargetNodeName) != "" {
+		request["target_node_name"] = strings.TrimSpace(opts.TargetNodeName)
+	}
+	if strings.TrimSpace(opts.StorageSize) != "" {
+		request["storage_size"] = strings.TrimSpace(opts.StorageSize)
+	}
+	if strings.TrimSpace(opts.StorageClassName) != "" {
+		request["storage_class_name"] = strings.TrimSpace(opts.StorageClassName)
 	}
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "localize"), request, &response); err != nil {
 		return backingServiceMigrateResponse{}, err

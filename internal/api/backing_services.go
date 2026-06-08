@@ -39,6 +39,7 @@ func (s *Server) handleCreateBackingService(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	req.Spec = s.applyManagedPostgresDefaultsToBackingServiceSpec(req.Spec)
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create backing service for another tenant")
@@ -174,8 +175,10 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 	}
 
 	var req struct {
-		TargetRuntimeID string `json:"target_runtime_id"`
-		TargetNodeName  string `json:"target_node_name"`
+		TargetRuntimeID  string `json:"target_runtime_id"`
+		TargetNodeName   string `json:"target_node_name"`
+		StorageSize      string `json:"storage_size"`
+		StorageClassName string `json:"storage_class_name"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -193,17 +196,19 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 
 	desiredSpec := app.Spec
 	if service.Spec.Postgres != nil {
-		postgresCopy := *service.Spec.Postgres
-		if service.Spec.Postgres.Resources != nil {
-			resources := *service.Spec.Postgres.Resources
-			postgresCopy.Resources = &resources
-		}
+		postgresCopy := *cloneAppPostgresSpec(service.Spec.Postgres)
 		postgresCopy.RuntimeID = targetRuntimeID
 		postgresCopy.FailoverTargetRuntimeID = ""
 		postgresCopy.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
 		postgresCopy.PrimaryPlacementPendingRebalance = false
 		postgresCopy.Instances = 1
 		postgresCopy.SynchronousReplicas = 0
+		if storageSize := strings.TrimSpace(req.StorageSize); storageSize != "" {
+			postgresCopy.StorageSize = storageSize
+		}
+		if storageClassName := strings.TrimSpace(req.StorageClassName); storageClassName != "" {
+			postgresCopy.StorageClassName = storageClassName
+		}
 		desiredSpec.Postgres = &postgresCopy
 	}
 
@@ -230,6 +235,12 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 	}
 	if nodeName := strings.TrimSpace(req.TargetNodeName); nodeName != "" {
 		metadata["target_node_name"] = nodeName
+	}
+	if storageSize := strings.TrimSpace(req.StorageSize); storageSize != "" {
+		metadata["storage_size"] = storageSize
+	}
+	if storageClassName := strings.TrimSpace(req.StorageClassName); storageClassName != "" {
+		metadata["storage_class_name"] = storageClassName
 	}
 	s.appendAudit(principal, "backing_service.localize", "operation", op.ID, service.TenantID, metadata)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{

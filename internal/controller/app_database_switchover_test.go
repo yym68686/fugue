@@ -104,6 +104,35 @@ func TestDatabaseLocalizeSpecClearsFailoverAndPinsTargetNode(t *testing.T) {
 	}
 }
 
+func TestDatabaseLocalizeStorageMigrationForcesExtraReplica(t *testing.T) {
+	t.Parallel()
+
+	current := &model.AppPostgresSpec{
+		StorageSize:         "1Gi",
+		StorageClassName:    "fugue-local-rwo",
+		Instances:           2,
+		SynchronousReplicas: 1,
+	}
+	desired := &model.AppPostgresSpec{
+		StorageSize:      "5Gi",
+		StorageClassName: "fugue-postgres-rwo",
+		Instances:        1,
+	}
+	merged := databaseLocalizeDesiredPostgresSpec(current, desired)
+	if !managedPostgresStorageMigrationRequired(current, merged) {
+		t.Fatal("expected storage migration to be required")
+	}
+
+	stage := databaseLocalizeStagePostgresSpec(merged, "runtime_app", "runtime_app", "")
+	ensureDatabaseLocalizeStorageMigrationCapacity(&stage, current)
+	if stage.StorageSize != "5Gi" || stage.StorageClassName != "fugue-postgres-rwo" {
+		t.Fatalf("expected stage to use target storage, got %+v", stage)
+	}
+	if stage.Instances != 3 {
+		t.Fatalf("expected storage migration to force one extra replica, got %+v", stage)
+	}
+}
+
 func TestSelectManagedPostgresSwitchoverTargetMatchesManagedSharedLocationNode(t *testing.T) {
 	t.Parallel()
 
@@ -191,7 +220,7 @@ func TestSelectManagedPostgresSwitchoverTargetMatchesManagedSharedLocationNode(t
 		Logger: log.New(io.Discard, "", 0),
 	}
 
-	got, err := svc.selectManagedPostgresSwitchoverTarget(context.Background(), client, namespace, clusterName, targetRuntimeID, currentPrimary)
+	got, err := svc.selectManagedPostgresSwitchoverTarget(context.Background(), client, namespace, clusterName, targetRuntimeID, currentPrimary, managedPostgresStorageTarget{})
 	if err != nil {
 		t.Fatalf("select switchover target: %v", err)
 	}

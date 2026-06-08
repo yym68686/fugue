@@ -43,6 +43,7 @@ func main() {
 		RegistryPullBase:             cfg.RegistryPullBase,
 		ClusterJoinRegistryEndpoint:  cfg.ClusterJoinRegistryEndpoint,
 		MovableRWOStorageClass:       cfg.MovableRWOStorageClass,
+		ManagedPostgresStorageClass:  cfg.ManagedPostgresStorageClass,
 		ClusterJoinServer:            cfg.ClusterJoinServer,
 		ClusterJoinServerFallbacks:   cfg.ClusterJoinServerFallbacks,
 		ClusterJoinCAHash:            cfg.ClusterJoinCAHash,

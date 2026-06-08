@@ -23,6 +23,7 @@ type ServerConfig struct {
 	RegistryPullBase             string
 	ClusterJoinRegistryEndpoint  string
 	MovableRWOStorageClass       string
+	ManagedPostgresStorageClass  string
 	ClusterJoinServer            string
 	ClusterJoinServerFallbacks   string
 	ClusterJoinCAHash            string

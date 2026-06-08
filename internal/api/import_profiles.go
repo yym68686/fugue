@@ -7,11 +7,13 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 const (
 	defaultImportedConfigPath                 = "/home/api.yaml"
 	defaultImportedMovableRWOStorageClassName = "fugue-local-rwo"
+	defaultManagedPostgresStorageClassName    = "fugue-postgres-rwo"
 )
 
 func normalizeBuildStrategy(raw string) string {
@@ -83,6 +85,7 @@ func (s *Server) buildImportedAppSpec(buildStrategy, appName, imageRef, runtimeI
 		if err != nil {
 			return model.AppSpec{}, err
 		}
+		s.applyManagedPostgresDefaults(&pgSpec)
 		normalizedPostgres = &pgSpec
 	}
 	return model.AppSpec{
@@ -118,6 +121,63 @@ func (s *Server) effectiveDefaultMovableRWOStorageClassName() string {
 		return defaultImportedMovableRWOStorageClassName
 	}
 	return normalizeDefaultMovableRWOStorageClassName(s.movableRWOStorageClass)
+}
+
+func normalizeDefaultManagedPostgresStorageClassName(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return defaultManagedPostgresStorageClassName
+	}
+	return value
+}
+
+func (s *Server) effectiveDefaultManagedPostgresStorageClassName() string {
+	if s == nil {
+		return defaultManagedPostgresStorageClassName
+	}
+	return normalizeDefaultManagedPostgresStorageClassName(s.managedPostgresStorageClass)
+}
+
+func (s *Server) applyManagedPostgresDefaults(spec *model.AppPostgresSpec) {
+	if spec == nil || strings.TrimSpace(spec.StorageClassName) != "" {
+		return
+	}
+	spec.StorageClassName = s.effectiveDefaultManagedPostgresStorageClassName()
+}
+
+func (s *Server) applyManagedPostgresDefaultsToAppSpec(spec model.AppSpec) model.AppSpec {
+	if spec.Postgres == nil {
+		return spec
+	}
+	out := cloneAppSpec(spec)
+	s.applyManagedPostgresDefaults(out.Postgres)
+	return out
+}
+
+func (s *Server) applyManagedPostgresDefaultsForDeploy(app model.App, spec model.AppSpec) model.AppSpec {
+	if spec.Postgres == nil {
+		return spec
+	}
+	out := cloneAppSpec(spec)
+	if strings.TrimSpace(out.Postgres.StorageClassName) != "" {
+		return out
+	}
+	current := store.OwnedManagedPostgresSpec(app)
+	if current != nil {
+		out.Postgres.StorageClassName = strings.TrimSpace(current.StorageClassName)
+		return out
+	}
+	s.applyManagedPostgresDefaults(out.Postgres)
+	return out
+}
+
+func (s *Server) applyManagedPostgresDefaultsToBackingServiceSpec(spec model.BackingServiceSpec) model.BackingServiceSpec {
+	if spec.Postgres == nil {
+		return spec
+	}
+	out := cloneBackingServiceSpec(spec)
+	s.applyManagedPostgresDefaults(out.Postgres)
+	return out
 }
 
 func (s *Server) normalizeImportedPersistentStorage(storage *model.AppPersistentStorageSpec, files []model.AppFile) (*model.AppPersistentStorageSpec, error) {

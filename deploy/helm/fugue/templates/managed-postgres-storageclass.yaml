@@ -1,0 +1,21 @@
+{{- if .Values.managedPostgresStorage.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.managedPostgresStorage.storageClassName | quote }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "managed-postgres-storage") | nindent 4 }}
+    fugue.pro/managed-postgres: "true"
+provisioner: {{ .Values.managedPostgresStorage.provisionerName | quote }}
+reclaimPolicy: {{ .Values.managedPostgresStorage.reclaimPolicy }}
+volumeBindingMode: {{ .Values.managedPostgresStorage.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.managedPostgresStorage.allowVolumeExpansion }}
+{{- with .Values.managedPostgresStorage.parameters }}
+parameters:
+{{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.managedPostgresStorage.allowedTopologies }}
+allowedTopologies:
+{{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}

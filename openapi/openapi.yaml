@@ -10994,6 +10994,10 @@ components:
           type: string
         target_runtime_id:
           type: string
+        storage_size:
+          type: string
+        storage_class_name:
+          type: string
     AppContinuityAppFailoverRequest:
       type: object
       additionalProperties: false

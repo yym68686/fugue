@@ -166,6 +166,134 @@ func TestLocalizeAppDatabaseCreatesSingleInstanceOperationOnAppRuntime(t *testin
 	}
 }
 
+func TestDeployAppDefaultsManagedPostgresStorageWhenEnablingDatabase(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Database Enable Storage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{ManagedPostgresStorageClass: "fugue-postgres-rwo"})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/deploy", apiKey, map[string]any{
+		"spec": map[string]any{
+			"image":      "ghcr.io/example/demo:latest",
+			"replicas":   1,
+			"runtime_id": "runtime_managed_shared",
+			"postgres": map[string]any{
+				"database": "demo",
+				"user":     "demo",
+				"password": "secret",
+			},
+		},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec, got %+v", op.DesiredSpec)
+	}
+	if got := op.DesiredSpec.Postgres.StorageClassName; got != "fugue-postgres-rwo" {
+		t.Fatalf("expected default managed postgres storage class, got %q", got)
+	}
+}
+
+func TestDeployAppPreservesExistingManagedPostgresStorageClass(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Database Preserve Storage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database:         "demo",
+			User:             "demo",
+			Password:         "secret",
+			StorageClassName: "legacy-local",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{ManagedPostgresStorageClass: "fugue-postgres-rwo"})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/deploy", apiKey, map[string]any{
+		"spec": map[string]any{
+			"image":      "ghcr.io/example/demo:latest",
+			"replicas":   1,
+			"runtime_id": "runtime_managed_shared",
+			"postgres": map[string]any{
+				"database": "demo",
+				"user":     "demo",
+				"password": "secret",
+			},
+		},
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec, got %+v", op.DesiredSpec)
+	}
+	if got := op.DesiredSpec.Postgres.StorageClassName; got != "legacy-local" {
+		t.Fatalf("expected existing managed postgres storage class to be preserved, got %q", got)
+	}
+}
+
 func TestLocalizeAppDatabaseCanTargetRuntimeBeforeAppMove(t *testing.T) {
 	t.Parallel()
 
@@ -254,6 +382,83 @@ func TestLocalizeAppDatabaseCanTargetRuntimeBeforeAppMove(t *testing.T) {
 	}
 	if postgres.Instances != 1 || postgres.SynchronousReplicas != 0 {
 		t.Fatalf("expected single async desired postgres, got %+v", postgres)
+	}
+}
+
+func TestLocalizeAppDatabaseAcceptsStorageMigrationTarget(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Database Storage Localize Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appRuntime, _, err := s.CreateRuntime(tenant.ID, "app-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create app runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: appRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:         "demo",
+			RuntimeID:        appRuntime.ID,
+			StorageSize:      "1Gi",
+			StorageClassName: "fugue-local-rwo",
+			Instances:        1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/localize", apiKey, map[string]any{
+		"storage_size":       "5Gi",
+		"storage_class_name": "fugue-postgres-rwo",
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation struct {
+			ID string `json:"id"`
+		} `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	op, err := s.GetOperation(response.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		t.Fatalf("expected desired postgres spec, got %+v", op.DesiredSpec)
+	}
+	postgres := op.DesiredSpec.Postgres
+	if postgres.StorageSize != "5Gi" || postgres.StorageClassName != "fugue-postgres-rwo" {
+		t.Fatalf("expected storage migration target in desired postgres, got %+v", postgres)
+	}
+	persisted, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get persisted app: %v", err)
+	}
+	persistedPostgres := store.OwnedManagedPostgresSpec(persisted)
+	if persistedPostgres == nil || persistedPostgres.StorageClassName != "fugue-local-rwo" {
+		t.Fatalf("expected persisted app to remain on old storage before controller completion, got %+v", persistedPostgres)
 	}
 }
 

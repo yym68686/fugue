@@ -2,9 +2,12 @@ package api
 
 import (
 	"net/http"
+	"path/filepath"
 	"testing"
 
+	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func TestCreateAppStagesGitHubSource(t *testing.T) {
@@ -68,5 +71,58 @@ func TestCreateAppStagesGitHubSource(t *testing.T) {
 	}
 	if storedApp.Route != nil {
 		t.Fatalf("expected no auto route without app base domain, got %+v", storedApp.Route)
+	}
+}
+
+func TestCreateAppDefaultsManagedPostgresStorageClass(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Managed Postgres Storage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{ManagedPostgresStorageClass: "fugue-postgres-rwo"})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps", apiKey, map[string]any{
+		"tenant_id":  tenant.ID,
+		"project_id": project.ID,
+		"name":       "api",
+		"spec": map[string]any{
+			"image":    "ghcr.io/example/api:latest",
+			"replicas": 1,
+			"postgres": map[string]any{
+				"database": "api",
+				"user":     "api",
+				"password": "secret",
+			},
+		},
+	})
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		App model.App `json:"app"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	postgres := store.OwnedManagedPostgresSpec(response.App)
+	if postgres == nil {
+		t.Fatalf("expected managed postgres spec, got %+v", response.App)
+	}
+	if got := postgres.StorageClassName; got != "fugue-postgres-rwo" {
+		t.Fatalf("expected default managed postgres storage class, got %q", got)
 	}
 }

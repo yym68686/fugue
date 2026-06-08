@@ -13,3 +13,7 @@ dependencies:
     version: 0.15.0
     repository: https://backube.github.io/helm-charts
     condition: volsync.enabled
+  - name: openebs
+    version: 4.5.0
+    repository: https://openebs.github.io/openebs
+    condition: openebs.enabled

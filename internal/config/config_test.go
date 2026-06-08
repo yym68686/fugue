@@ -134,6 +134,15 @@ func TestControlPlaneMetricsBindAddrFromEnv(t *testing.T) {
 	}
 }
 
+func TestAPIFromEnvReadsDefaultManagedPostgresStorageClass(t *testing.T) {
+	t.Setenv("FUGUE_DEFAULT_MANAGED_POSTGRES_STORAGE_CLASS_NAME", "fugue-postgres-rwo")
+
+	cfg := APIFromEnv()
+	if cfg.ManagedPostgresStorageClass != "fugue-postgres-rwo" {
+		t.Fatalf("expected managed postgres storage class from env, got %q", cfg.ManagedPostgresStorageClass)
+	}
+}
+
 func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	t.Setenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", "http://telemetry-agent.fugue-system.svc.cluster.local:7834")
 

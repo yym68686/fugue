@@ -48,6 +48,7 @@ type Server struct {
 	registryPullBase             string
 	clusterJoinRegistryEndpoint  string
 	movableRWOStorageClass       string
+	managedPostgresStorageClass  string
 	reservedAppHosts             map[string]struct{}
 	clusterJoinServer            string
 	clusterJoinServerFallbacks   []string
@@ -121,6 +122,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
 		clusterJoinRegistryEndpoint:  strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
 		movableRWOStorageClass:       normalizeDefaultMovableRWOStorageClassName(cfg.MovableRWOStorageClass),
+		managedPostgresStorageClass:  normalizeDefaultManagedPostgresStorageClassName(cfg.ManagedPostgresStorageClass),
 		clusterJoinServer:            strings.TrimSpace(cfg.ClusterJoinServer),
 		clusterJoinServerFallbacks:   parseCSVValues(cfg.ClusterJoinServerFallbacks),
 		clusterJoinCAHash:            normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),
@@ -1067,6 +1069,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	req.Spec = s.applyManagedPostgresDefaultsToAppSpec(req.Spec)
 	tenantID, ok := s.resolveTenantID(principal, req.TenantID)
 	if !ok {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create app for another tenant")
@@ -1173,6 +1176,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.Workspace = &workspace
 	}
+	spec = s.applyManagedPostgresDefaultsForDeploy(app, spec)
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,

@@ -35,6 +35,7 @@ type APIConfig struct {
 	RegistryPullBase             string
 	ClusterJoinRegistryEndpoint  string
 	MovableRWOStorageClass       string
+	ManagedPostgresStorageClass  string
 	ClusterJoinServer            string
 	ClusterJoinServerFallbacks   string
 	ClusterJoinCAHash            string
@@ -232,6 +233,7 @@ func APIFromEnv() APIConfig {
 		RegistryPullBase:             strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		ClusterJoinRegistryEndpoint:  strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),
 		MovableRWOStorageClass:       strings.TrimSpace(os.Getenv("FUGUE_DEFAULT_MOVABLE_RWO_STORAGE_CLASS_NAME")),
+		ManagedPostgresStorageClass:  strings.TrimSpace(os.Getenv("FUGUE_DEFAULT_MANAGED_POSTGRES_STORAGE_CLASS_NAME")),
 		ClusterJoinServer:            getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
 		ClusterJoinServerFallbacks:   strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS")),
 		ClusterJoinCAHash:            strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_CA_HASH")),

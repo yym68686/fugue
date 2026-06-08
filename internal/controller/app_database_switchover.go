@@ -301,6 +301,8 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if sourceRuntimeID == "" || targetRuntimeID == "" {
 		return fmt.Errorf("database localize operation %s missing source or target runtime", op.ID)
 	}
+	desiredDatabase := databaseLocalizeDesiredPostgresSpec(currentDatabase, desiredPostgresSpec(op))
+	storageMigrationRequired := managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 
 	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
 	if clusterName == "" {
@@ -326,17 +328,21 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return err
 	}
-	if alreadyLocalized {
+	if alreadyLocalized && !storageMigrationRequired {
 		targetPrimary = currentPrimary
 	} else {
-		stageSpec := databaseLocalizeStageSpec(app.Spec, currentDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
+		stageSpec := databaseLocalizeStageSpec(app.Spec, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
+		if storageMigrationRequired && stageSpec.Postgres != nil {
+			ensureDatabaseLocalizeStorageMigrationCapacity(stageSpec.Postgres, currentDatabase)
+		}
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			return fmt.Errorf("prepare localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
 		}
+		storageTarget := databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 		if targetNodeName != "" {
-			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID)
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID, storageTarget)
 		} else {
-			targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID)
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID, storageTarget)
 		}
 		if err != nil {
 			return fmt.Errorf("wait for localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
@@ -359,7 +365,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		}
 	}
 
-	finalSpec := databaseLocalizeSpec(app.Spec, currentDatabase, targetRuntimeID, targetNodeName, true, false)
+	finalSpec := databaseLocalizeSpec(app.Spec, desiredDatabase, targetRuntimeID, targetNodeName, true, false)
 	finalBundle, err := s.applyManagedDesiredAppState(ctx, op.ID, app, finalSpec)
 	if err != nil {
 		return fmt.Errorf("finalize localized managed postgres state: %w", err)
@@ -422,6 +428,8 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if sourceRuntimeID == "" || targetRuntimeID == "" {
 		return fmt.Errorf("database localize operation %s missing source or target runtime", op.ID)
 	}
+	desiredDatabase := databaseLocalizeDesiredPostgresSpec(currentDatabase, desiredPostgresSpec(op))
+	storageMigrationRequired := managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
 
 	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
 	if clusterName == "" {
@@ -447,10 +455,13 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return err
 	}
-	if alreadyLocalized {
+	if alreadyLocalized && !storageMigrationRequired {
 		targetPrimary = currentPrimary
 	} else {
-		stagePostgres := databaseLocalizeStagePostgresSpec(currentDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
+		stagePostgres := databaseLocalizeStagePostgresSpec(desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
+		if storageMigrationRequired {
+			ensureDatabaseLocalizeStorageMigrationCapacity(&stagePostgres, currentDatabase)
+		}
 		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
 		if err != nil {
 			return fmt.Errorf("prepare localized managed postgres service %s state: %w", target.ServiceID, err)
@@ -458,10 +469,11 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, stageApp, stageApp.Spec); err != nil {
 			return fmt.Errorf("prepare localized managed postgres service %s standby on runtime %s: %w", target.ServiceID, targetRuntimeID, err)
 		}
+		storageTarget := databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 		if targetNodeName != "" {
-			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID)
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID, storageTarget)
 		} else {
-			targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID)
+			targetPrimary, err = s.waitForManagedPostgresReplicaOnRuntime(ctx, client, namespace, clusterName, targetRuntimeID, op.ID, storageTarget)
 		}
 		if err != nil {
 			return fmt.Errorf("wait for localized managed postgres service %s standby on runtime %s: %w", target.ServiceID, targetRuntimeID, err)
@@ -484,7 +496,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		}
 	}
 
-	finalPostgres := databaseLocalizePostgresSpec(currentDatabase, targetRuntimeID, targetNodeName, true, false)
+	finalPostgres := databaseLocalizePostgresSpec(desiredDatabase, targetRuntimeID, targetNodeName, true, false)
 	finalApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, finalPostgres)
 	if err != nil {
 		return fmt.Errorf("finalize localized managed postgres service %s state: %w", target.ServiceID, err)
@@ -526,6 +538,88 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		finalBundle.ManifestPath,
 	)
 	return nil
+}
+
+type managedPostgresStorageTarget struct {
+	StorageClassName string
+	StorageSize      string
+}
+
+func (target managedPostgresStorageTarget) isZero() bool {
+	return strings.TrimSpace(target.StorageClassName) == "" && strings.TrimSpace(target.StorageSize) == ""
+}
+
+func desiredPostgresSpec(op model.Operation) *model.AppPostgresSpec {
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		return nil
+	}
+	return op.DesiredSpec.Postgres
+}
+
+func databaseLocalizeDesiredPostgresSpec(current, desired *model.AppPostgresSpec) *model.AppPostgresSpec {
+	if current == nil {
+		return clonePostgresForDatabaseOperation(desired)
+	}
+	if desired == nil {
+		return clonePostgresForDatabaseOperation(current)
+	}
+	out := clonePostgresForDatabaseOperation(desired)
+	if out == nil {
+		return clonePostgresForDatabaseOperation(current)
+	}
+	if strings.TrimSpace(out.StorageSize) == "" {
+		out.StorageSize = strings.TrimSpace(current.StorageSize)
+	}
+	if strings.TrimSpace(out.StorageClassName) == "" {
+		out.StorageClassName = strings.TrimSpace(current.StorageClassName)
+	}
+	return out
+}
+
+func clonePostgresForDatabaseOperation(spec *model.AppPostgresSpec) *model.AppPostgresSpec {
+	if spec == nil {
+		return nil
+	}
+	out := *spec
+	if spec.Resources != nil {
+		resources := *spec.Resources
+		out.Resources = &resources
+	}
+	return &out
+}
+
+func managedPostgresStorageMigrationRequired(current, desired *model.AppPostgresSpec) bool {
+	if current == nil || desired == nil {
+		return false
+	}
+	return strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) ||
+		strings.TrimSpace(current.StorageSize) != strings.TrimSpace(desired.StorageSize)
+}
+
+func databaseLocalizeStorageTarget(required bool, postgres *model.AppPostgresSpec) managedPostgresStorageTarget {
+	if !required || postgres == nil {
+		return managedPostgresStorageTarget{}
+	}
+	return managedPostgresStorageTarget{
+		StorageClassName: strings.TrimSpace(postgres.StorageClassName),
+		StorageSize:      strings.TrimSpace(postgres.StorageSize),
+	}
+}
+
+func ensureDatabaseLocalizeStorageMigrationCapacity(postgres, current *model.AppPostgresSpec) {
+	if postgres == nil {
+		return
+	}
+	minInstances := 2
+	if current != nil && current.Instances > 0 {
+		minInstances = current.Instances + 1
+	}
+	if postgres.Instances < minInstances {
+		postgres.Instances = minInstances
+	}
+	if postgres.SynchronousReplicas >= postgres.Instances {
+		postgres.SynchronousReplicas = postgres.Instances - 1
+	}
 }
 
 func databaseSwitchoverSpec(
@@ -753,6 +847,7 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName, targetRuntimeID, operationID string,
+	storageTargets ...managedPostgresStorageTarget,
 ) (string, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
@@ -786,7 +881,7 @@ func (s *Service) waitForManagedPostgresReplicaOnRuntime(
 				max(cluster.Spec.Instances, 1),
 			)
 		} else {
-			targetPrimary, err := s.selectManagedPostgresSwitchoverTarget(waitCtx, client, namespace, clusterName, targetRuntimeID, cluster.Status.CurrentPrimary)
+			targetPrimary, err := s.selectManagedPostgresSwitchoverTarget(waitCtx, client, namespace, clusterName, targetRuntimeID, cluster.Status.CurrentPrimary, firstStorageTarget(storageTargets))
 			if err != nil {
 				return "", err
 			}
@@ -811,6 +906,7 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName, targetNodeName, operationID string,
+	storageTargets ...managedPostgresStorageTarget,
 ) (string, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
@@ -844,7 +940,7 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 				max(cluster.Spec.Instances, 1),
 			)
 		} else {
-			targetPrimary, err := s.selectManagedPostgresSwitchoverTargetOnNode(waitCtx, client, namespace, clusterName, targetNodeName, cluster.Status.CurrentPrimary)
+			targetPrimary, err := s.selectManagedPostgresSwitchoverTargetOnNode(waitCtx, client, namespace, clusterName, targetNodeName, cluster.Status.CurrentPrimary, firstStorageTarget(storageTargets))
 			if err != nil {
 				return "", err
 			}
@@ -925,6 +1021,7 @@ func (s *Service) selectManagedPostgresSwitchoverTarget(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName, targetRuntimeID, currentPrimary string,
+	storageTarget managedPostgresStorageTarget,
 ) (string, error) {
 	pods, err := client.listPodsBySelector(
 		ctx,
@@ -951,6 +1048,13 @@ func (s *Service) selectManagedPostgresSwitchoverTarget(
 		if strings.TrimSpace(runtimeID) != targetRuntimeID {
 			continue
 		}
+		matches, err := s.managedPostgresPodMatchesStorageTarget(ctx, client, namespace, pod, storageTarget)
+		if err != nil {
+			return "", err
+		}
+		if !matches {
+			continue
+		}
 		return podName, nil
 	}
 	return "", nil
@@ -960,6 +1064,7 @@ func (s *Service) selectManagedPostgresSwitchoverTargetOnNode(
 	ctx context.Context,
 	client *kubeClient,
 	namespace, clusterName, targetNodeName, currentPrimary string,
+	storageTarget managedPostgresStorageTarget,
 ) (string, error) {
 	pods, err := client.listPodsBySelector(
 		ctx,
@@ -983,9 +1088,65 @@ func (s *Service) selectManagedPostgresSwitchoverTargetOnNode(
 		if strings.TrimSpace(pod.Spec.NodeName) != targetNodeName {
 			continue
 		}
+		matches, err := s.managedPostgresPodMatchesStorageTarget(ctx, client, namespace, pod, storageTarget)
+		if err != nil {
+			return "", err
+		}
+		if !matches {
+			continue
+		}
 		return podName, nil
 	}
 	return "", nil
+}
+
+func firstStorageTarget(targets []managedPostgresStorageTarget) managedPostgresStorageTarget {
+	if len(targets) == 0 {
+		return managedPostgresStorageTarget{}
+	}
+	return targets[0]
+}
+
+func (s *Service) managedPostgresPodMatchesStorageTarget(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	pod kubePod,
+	target managedPostgresStorageTarget,
+) (bool, error) {
+	if target.isZero() {
+		return true, nil
+	}
+	pvcName := managedPostgresPVCNameForPod(pod)
+	if pvcName == "" {
+		pvcName = strings.TrimSpace(pod.Metadata.Name)
+	}
+	if pvcName == "" {
+		return false, nil
+	}
+	pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+	if err != nil {
+		return false, fmt.Errorf("read postgres pvc %s/%s for storage migration target: %w", namespace, pvcName, err)
+	}
+	if !found {
+		return false, nil
+	}
+	if storageClassName := strings.TrimSpace(target.StorageClassName); storageClassName != "" &&
+		strings.TrimSpace(pvc.Spec.StorageClassName) != storageClassName {
+		return false, nil
+	}
+	if storageSize := strings.TrimSpace(target.StorageSize); storageSize != "" &&
+		managedPostgresPVCStorageSize(pvc) != storageSize {
+		return false, nil
+	}
+	return true, nil
+}
+
+func managedPostgresPVCStorageSize(pvc kubePersistentVolumeClaim) string {
+	if size := strings.TrimSpace(pvc.Status.Capacity["storage"]); size != "" {
+		return size
+	}
+	return strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
 }
 
 func (s *Service) managedPostgresPrimaryMatchesTarget(

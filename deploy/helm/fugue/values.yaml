@@ -709,6 +709,18 @@ movableRWOStorage:
   volumeBindingMode: WaitForFirstConsumer
   allowVolumeExpansion: false
 
+managedPostgresStorage:
+  enabled: true
+  storageClassName: fugue-postgres-rwo
+  provisionerName: local.csi.openebs.io
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  allowVolumeExpansion: true
+  parameters:
+    storage: "lvm"
+    volgroup: "fugue-vg"
+  allowedTopologies: []
+
 registryJanitor:
   enabled: true
   schedule: "23 4 * * *"
@@ -980,6 +992,44 @@ cloudnative-pg:
 volsync:
   enabled: true
   manageCRDs: true
+
+openebs:
+  enabled: true
+  openebs-crds:
+    csi:
+      volumeSnapshots:
+        enabled: false
+        keep: true
+  engines:
+    local:
+      lvm:
+        enabled: true
+      zfs:
+        enabled: false
+      rawfile:
+        enabled: false
+      hostpath:
+        enabled: false
+    replicated:
+      mayastor:
+        enabled: false
+  localpv-provisioner:
+    enabled: false
+  zfs-localpv:
+    crds:
+      zfsLocalPv:
+        enabled: false
+  rawfile-localpv:
+    crds:
+      csi:
+        volumeSnapshots:
+          enabled: false
+  mayastor:
+    enabled: false
+  loki:
+    enabled: false
+  preUpgradeHook:
+    enabled: false
 
 snapshotController:
   enabled: true

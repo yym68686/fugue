@@ -386,13 +386,16 @@ func (c *CLI) newAppDatabaseSwitchoverCommand() *cobra.Command {
 
 func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 	opts := struct {
-		TargetNodeName string
-		Wait           bool
+		TargetNodeName   string
+		StorageSize      string
+		StorageClassName string
+		Wait             bool
 	}{Wait: true}
 	cmd := &cobra.Command{
-		Use:   "localize <app>",
-		Short: "Move the app managed Postgres primary to the app runtime and keep one local instance",
-		Args:  cobra.ExactArgs(1),
+		Use:     "localize <app>",
+		Aliases: []string{"migrate-storage"},
+		Short:   "Move the app managed Postgres primary to the app runtime and keep one local instance",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -410,7 +413,11 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 				return fmt.Errorf("managed postgres is not configured for this app")
 			}
 
-			response, err := client.LocalizeAppDatabase(app.ID, opts.TargetNodeName, "")
+			response, err := client.LocalizeAppDatabaseWithOptions(app.ID, databaseLocalizeRequest{
+				TargetNodeName:   opts.TargetNodeName,
+				StorageSize:      opts.StorageSize,
+				StorageClassName: opts.StorageClassName,
+			})
 			if err != nil {
 				return err
 			}
@@ -429,6 +436,8 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 					"app":              redactAppForOutput(finalApp),
 					"operation":        redactOperationForOutput(response.Operation),
 					"target_node_name": strings.TrimSpace(opts.TargetNodeName),
+					"storage_size":     strings.TrimSpace(opts.StorageSize),
+					"storage_class":    strings.TrimSpace(opts.StorageClassName),
 				}
 				return writeJSON(c.stdout, payload)
 			}
@@ -437,10 +446,14 @@ func (c *CLI) newAppDatabaseLocalizeCommand() *cobra.Command {
 				kvPair{Key: "operation_id", Value: response.Operation.ID},
 				kvPair{Key: "target_runtime_id", Value: strings.TrimSpace(response.Operation.TargetRuntimeID)},
 				kvPair{Key: "target_node_name", Value: strings.TrimSpace(opts.TargetNodeName)},
+				kvPair{Key: "storage_size", Value: strings.TrimSpace(opts.StorageSize)},
+				kvPair{Key: "storage_class", Value: strings.TrimSpace(opts.StorageClassName)},
 			)
 		},
 	}
 	cmd.Flags().StringVar(&opts.TargetNodeName, "node", "", "Explicit Kubernetes node name for the localized Postgres primary")
+	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Target persistent storage size for a storage migration")
+	cmd.Flags().StringVar(&opts.StorageClassName, "storage-class", "", "Target persistent storage class for a storage migration")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for operation completion")
 	return cmd
 }

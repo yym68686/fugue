@@ -5,5 +5,8 @@ dependencies:
 - name: volsync
   repository: https://backube.github.io/helm-charts
   version: 0.15.0
-digest: sha256:0337014c7edcffcb2699ace27a1fa16341dab5cbc574ce546e6efa880a3ff852
-generated: "2026-04-02T07:42:55.312834903Z"
+- name: openebs
+  repository: https://openebs.github.io/openebs
+  version: 4.5.0
+digest: sha256:5e83aa24f92b761c86b5dabf5e1b29e37e27c3c04b055a5716a8332e743f6c44
+generated: "2026-06-08T17:11:22.388447+08:00"

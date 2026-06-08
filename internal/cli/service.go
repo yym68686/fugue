@@ -329,29 +329,22 @@ func (c *CLI) newServiceMoveCommand() *cobra.Command {
 
 func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 	opts := struct {
-		RuntimeName string
-		RuntimeID   string
-		NodeName    string
-		Wait        bool
+		RuntimeName      string
+		RuntimeID        string
+		NodeName         string
+		StorageSize      string
+		StorageClassName string
+		Wait             bool
 	}{Wait: true}
 	cmd := &cobra.Command{
-		Use:   "localize <service>",
-		Short: "Move a managed Postgres backing service primary to one local instance",
-		Args:  cobra.ExactArgs(1),
+		Use:     "localize <service>",
+		Aliases: []string{"migrate-storage"},
+		Short:   "Move a managed Postgres backing service primary to one local instance",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
 				return err
-			}
-			if strings.TrimSpace(opts.RuntimeName) == "" && strings.TrimSpace(opts.RuntimeID) == "" {
-				return fmt.Errorf("target runtime is required")
-			}
-			runtimeID, err := resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(runtimeID) == "" {
-				return fmt.Errorf("target runtime is required")
 			}
 			service, err := c.resolveNamedService(client, args[0])
 			if err != nil {
@@ -361,7 +354,26 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.LocalizeBackingService(service.ID, runtimeID, opts.NodeName)
+			runtimeID := ""
+			if strings.TrimSpace(opts.RuntimeName) != "" || strings.TrimSpace(opts.RuntimeID) != "" {
+				runtimeID, err = resolveRuntimeSelection(client, opts.RuntimeID, opts.RuntimeName)
+				if err != nil {
+					return err
+				}
+			} else if strings.TrimSpace(opts.StorageSize) != "" || strings.TrimSpace(opts.StorageClassName) != "" {
+				if service.Spec.Postgres != nil {
+					runtimeID = strings.TrimSpace(service.Spec.Postgres.RuntimeID)
+				}
+			}
+			if strings.TrimSpace(runtimeID) == "" {
+				return fmt.Errorf("target runtime is required")
+			}
+			response, err := client.LocalizeBackingServiceWithOptions(service.ID, databaseLocalizeRequest{
+				TargetRuntimeID:  runtimeID,
+				TargetNodeName:   opts.NodeName,
+				StorageSize:      opts.StorageSize,
+				StorageClassName: opts.StorageClassName,
+			})
 			if err != nil {
 				return err
 			}
@@ -380,6 +392,8 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 					"backing_service":  redactBackingServiceForOutput(service),
 					"already_current":  response.AlreadyCurrent,
 					"target_node_name": strings.TrimSpace(opts.NodeName),
+					"storage_size":     strings.TrimSpace(opts.StorageSize),
+					"storage_class":    strings.TrimSpace(opts.StorageClassName),
 				}
 				if response.Operation != nil {
 					payload["operation"] = response.Operation
@@ -396,6 +410,8 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 					kvPair{Key: "operation_id", Value: response.Operation.ID},
 					kvPair{Key: "target_runtime_id", Value: strings.TrimSpace(response.Operation.TargetRuntimeID)},
 					kvPair{Key: "target_node_name", Value: strings.TrimSpace(opts.NodeName)},
+					kvPair{Key: "storage_size", Value: strings.TrimSpace(opts.StorageSize)},
+					kvPair{Key: "storage_class", Value: strings.TrimSpace(opts.StorageClassName)},
 				); err != nil {
 					return err
 				}
@@ -409,6 +425,8 @@ func (c *CLI) newServiceLocalizeCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.RuntimeName, "to", "", "Target runtime name")
 	cmd.Flags().StringVar(&opts.RuntimeID, "runtime-id", "", "Target runtime ID")
 	cmd.Flags().StringVar(&opts.NodeName, "node", "", "Explicit Kubernetes node name for the localized Postgres primary")
+	cmd.Flags().StringVar(&opts.StorageSize, "storage-size", "", "Target persistent storage size for a storage migration")
+	cmd.Flags().StringVar(&opts.StorageClassName, "storage-class", "", "Target persistent storage class for a storage migration")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for backing service localize completion")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	return cmd

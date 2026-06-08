@@ -667,6 +667,8 @@ func TestRunAppDatabaseLocalizeUsesDatabaseEndpoint(t *testing.T) {
 		"--token", "token",
 		"app", "db", "localize", "demo",
 		"--node", "instance-us-1",
+		"--storage-size", "5Gi",
+		"--storage-class", "fugue-postgres-rwo",
 		"--wait=false",
 	}, &stdout, &stderr)
 	if err != nil {
@@ -676,8 +678,11 @@ func TestRunAppDatabaseLocalizeUsesDatabaseEndpoint(t *testing.T) {
 	if gotBody["target_node_name"] != "instance-us-1" {
 		t.Fatalf("expected target_node_name instance-us-1, got %+v", gotBody)
 	}
+	if gotBody["storage_size"] != "5Gi" || gotBody["storage_class_name"] != "fugue-postgres-rwo" {
+		t.Fatalf("expected storage migration target, got %+v", gotBody)
+	}
 	out := stdout.String()
-	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "target_runtime_id=runtime_app", "target_node_name=instance-us-1"} {
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "target_runtime_id=runtime_app", "target_node_name=instance-us-1", "storage_size=5Gi", "storage_class=fugue-postgres-rwo"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}

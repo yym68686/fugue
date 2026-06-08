@@ -135,8 +135,10 @@ func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req struct {
-		TargetNodeName  string `json:"target_node_name"`
-		TargetRuntimeID string `json:"target_runtime_id"`
+		TargetNodeName   string `json:"target_node_name"`
+		TargetRuntimeID  string `json:"target_runtime_id"`
+		StorageSize      string `json:"storage_size"`
+		StorageClassName string `json:"storage_class_name"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -153,17 +155,19 @@ func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Reques
 	}
 
 	desiredSpec := app.Spec
-	databaseCopy := *database
-	if database.Resources != nil {
-		resources := *database.Resources
-		databaseCopy.Resources = &resources
-	}
+	databaseCopy := *cloneAppPostgresSpec(database)
 	databaseCopy.RuntimeID = targetRuntimeID
 	databaseCopy.FailoverTargetRuntimeID = ""
 	databaseCopy.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
 	databaseCopy.PrimaryPlacementPendingRebalance = false
 	databaseCopy.Instances = 1
 	databaseCopy.SynchronousReplicas = 0
+	if storageSize := strings.TrimSpace(req.StorageSize); storageSize != "" {
+		databaseCopy.StorageSize = storageSize
+	}
+	if storageClassName := strings.TrimSpace(req.StorageClassName); storageClassName != "" {
+		databaseCopy.StorageClassName = storageClassName
+	}
 	desiredSpec.Postgres = &databaseCopy
 
 	op, err := s.store.CreateOperation(model.Operation{
@@ -186,6 +190,12 @@ func (s *Server) handleLocalizeAppDatabase(w http.ResponseWriter, r *http.Reques
 	}
 	if nodeName := strings.TrimSpace(req.TargetNodeName); nodeName != "" {
 		metadata["target_node_name"] = nodeName
+	}
+	if storageSize := strings.TrimSpace(req.StorageSize); storageSize != "" {
+		metadata["storage_size"] = storageSize
+	}
+	if storageClassName := strings.TrimSpace(req.StorageClassName); storageClassName != "" {
+		metadata["storage_class_name"] = storageClassName
 	}
 	s.appendAudit(principal, "app.database_localize", "operation", op.ID, app.TenantID, metadata)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})

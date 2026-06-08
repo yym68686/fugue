@@ -532,8 +532,10 @@ func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services/"+service.ID+"/localize", apiKey, map[string]any{
-		"target_runtime_id": targetRuntime.ID,
-		"target_node_name":  "target-node",
+		"target_runtime_id":  targetRuntime.ID,
+		"target_node_name":   "target-node",
+		"storage_size":       "5Gi",
+		"storage_class_name": "fugue-postgres-rwo",
 	})
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
@@ -564,6 +566,9 @@ func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
 	if postgres.RuntimeID != targetRuntime.ID || postgres.FailoverTargetRuntimeID != "" || postgres.PrimaryNodeName != "target-node" {
 		t.Fatalf("unexpected desired postgres placement: %+v", postgres)
 	}
+	if postgres.StorageSize != "5Gi" || postgres.StorageClassName != "fugue-postgres-rwo" {
+		t.Fatalf("unexpected desired postgres storage migration target: %+v", postgres)
+	}
 	if postgres.Instances != 1 || postgres.SynchronousReplicas != 0 || postgres.PrimaryPlacementPendingRebalance {
 		t.Fatalf("expected single localized postgres spec, got %+v", postgres)
 	}
@@ -574,6 +579,55 @@ func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
 	}
 	if persisted.Spec.Postgres == nil || persisted.Spec.Postgres.RuntimeID != sourceRuntime.ID {
 		t.Fatalf("expected persisted service to stay on source runtime until controller localize, got %+v", persisted.Spec.Postgres)
+	}
+}
+
+func TestCreateBackingServiceDefaultsManagedPostgresStorageClass(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Backing Service Storage Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "project-admin", []string{"project.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{ManagedPostgresStorageClass: "fugue-postgres-rwo"})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backing-services", apiKey, map[string]any{
+		"tenant_id":  tenant.ID,
+		"project_id": project.ID,
+		"name":       "main-db",
+		"spec": map[string]any{
+			"postgres": map[string]any{
+				"database": "demo",
+				"user":     "demo",
+				"password": "secret",
+			},
+		},
+	})
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		BackingService model.BackingService `json:"backing_service"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.BackingService.Spec.Postgres == nil {
+		t.Fatalf("expected postgres backing service, got %+v", response.BackingService)
+	}
+	if got := response.BackingService.Spec.Postgres.StorageClassName; got != "fugue-postgres-rwo" {
+		t.Fatalf("expected default managed postgres storage class, got %q", got)
 	}
 }
 
