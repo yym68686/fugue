@@ -1645,6 +1645,149 @@ func TestReconcileManagedAppObjectSkipsApplyWhileOperationIsActive(t *testing.T)
 	}
 }
 
+func TestManagedAppBaselineUsesNormalizedBuildSource(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:    "registry.pull.example/fugue-apps/demo:git-current",
+			Replicas: 1,
+		},
+		BuildSource: &model.AppSource{
+			Type:             model.AppSourceTypeUpload,
+			UploadID:         "upload_current",
+			ArchiveSHA256:    "sha256-current",
+			ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-current",
+		},
+	}
+
+	if managedAppBaselineNeedsRecovery(app) {
+		t.Fatal("expected normalized build source to satisfy managed app baseline")
+	}
+}
+
+func TestReconcileManagedAppObjectRefreshesStoredDesiredStateBeforeApply(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Refresh Desired")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	latestSource := model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         "upload_latest",
+		ArchiveSHA256:    "sha256-latest",
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-latest",
+	}
+	latestApp, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.pull.example/fugue-apps/demo:git-latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, latestSource)
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	staleApp := latestApp
+	staleApp.Spec.Image = "registry.pull.example/fugue-apps/demo:git-stale"
+	model.SetAppSourceState(&staleApp, &model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         "upload_stale",
+		ArchiveSHA256:    "sha256-stale",
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-stale",
+	}, &model.AppSource{
+		Type:             model.AppSourceTypeUpload,
+		UploadID:         "upload_stale",
+		ArchiveSHA256:    "sha256-stale",
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo:git-stale",
+	})
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(staleApp, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build stale managed app: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(latestApp.TenantID)
+	managedName := runtime.ManagedAppResourceName(latestApp)
+	deploymentName := runtime.RuntimeAppResourceName(latestApp)
+	var recordedManagedApp map[string]any
+	var recordedDeployment map[string]any
+
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && strings.HasSuffix(req.URL.Path, "/status"):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch &&
+			req.URL.Path == managedAppAPIPath(namespace, managedName) &&
+			strings.HasPrefix(req.Header.Get("Content-Type"), "application/json-patch+json"):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch &&
+			req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName &&
+			strings.HasPrefix(req.Header.Get("Content-Type"), "application/json-patch+json"):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch:
+			var body map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode apply object %s: %v", req.URL.Path, err)
+			}
+			switch strings.TrimSpace(body["kind"].(string)) {
+			case runtime.ManagedAppKind:
+				recordedManagedApp = body
+			case "Deployment":
+				recordedDeployment = body
+			}
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
+			if recordedManagedApp == nil {
+				t.Fatal("managed app was requested before apply")
+			}
+			data, err := json.Marshal(recordedManagedApp)
+			if err != nil {
+				t.Fatalf("marshal recorded managed app: %v", err)
+			}
+			return okJSONResponse(string(data)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName:
+			return notFoundJSONResponse(), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/apis/coordination.k8s.io/v1/namespaces/"+namespace+"/leases/"+managedName+"-fence":
+			return notFoundJSONResponse(), nil
+		case req.Method == http.MethodGet && req.URL.RawQuery != "":
+			return okJSONResponse(`{"items":[]}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	svc := &Service{
+		Store:    stateStore,
+		Renderer: runtime.Renderer{},
+	}
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+
+	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
+		t.Fatalf("reconcile managed app: %v", err)
+	}
+	if got := managedAppSpecImage(recordedManagedApp); got != latestApp.Spec.Image {
+		t.Fatalf("expected managed app image %q, got %q", latestApp.Spec.Image, got)
+	}
+	if got := deploymentContainerImage(recordedDeployment); got != latestApp.Spec.Image {
+		t.Fatalf("expected deployment image %q, got %q", latestApp.Spec.Image, got)
+	}
+}
+
 func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyManagedSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -2439,6 +2582,26 @@ func managedAppSpecEnv(obj map[string]any) map[string]string {
 	spec, _ := obj["spec"].(map[string]any)
 	appSpec, _ := spec["appSpec"].(map[string]any)
 	return stringMapFromAnyMap(appSpec["env"])
+}
+
+func managedAppSpecImage(obj map[string]any) string {
+	spec, _ := obj["spec"].(map[string]any)
+	appSpec, _ := spec["appSpec"].(map[string]any)
+	image, _ := appSpec["image"].(string)
+	return strings.TrimSpace(image)
+}
+
+func deploymentContainerImage(obj map[string]any) string {
+	spec, _ := obj["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	templateSpec, _ := template["spec"].(map[string]any)
+	containers, _ := templateSpec["containers"].([]any)
+	if len(containers) == 0 {
+		return ""
+	}
+	container, _ := containers[0].(map[string]any)
+	image, _ := container["image"].(string)
+	return strings.TrimSpace(image)
 }
 
 func deploymentContainerEnv(obj map[string]any) map[string]string {

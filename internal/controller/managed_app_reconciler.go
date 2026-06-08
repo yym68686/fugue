@@ -199,6 +199,16 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
 		app = normalizedApp
 	}
+	if syncStoredManagedAppSnapshot {
+		refreshedApp, skipApply, err := s.refreshStoredManagedAppDesiredBeforeApply(ctx, managed, app)
+		if err != nil {
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+		}
+		if skipApply {
+			return nil
+		}
+		app = refreshedApp
+	}
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)
 		status.Phase = runtime.ManagedAppPhaseDeleting
@@ -321,6 +331,41 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	return nil
 }
 
+func (s *Service) refreshStoredManagedAppDesiredBeforeApply(ctx context.Context, managed runtime.ManagedAppObject, app model.App) (model.App, bool, error) {
+	if s.Store == nil || strings.TrimSpace(app.ID) == "" {
+		return app, false, nil
+	}
+	storedApp, err := s.Store.GetApp(app.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return app, false, nil
+		}
+		return app, false, fmt.Errorf("refresh stored managed app desired state: %w", err)
+	}
+	hasActiveOp, err := s.appHasActiveOperation(storedApp)
+	if err != nil {
+		return app, false, fmt.Errorf("refresh active app operation state: %w", err)
+	}
+	if hasActiveOp {
+		return app, true, nil
+	}
+	refreshed, useStoredBaseline := selectManagedAppDesiredApp(runtime.AppFromManagedApp(managed), storedApp, false)
+	if !useStoredBaseline {
+		return refreshed, false, nil
+	}
+	observedApp, changed, err := s.observedManagedPostgresDesiredApp(ctx, storedApp)
+	if err != nil {
+		return app, false, fmt.Errorf("refresh observed managed postgres desired state: %w", err)
+	}
+	if changed {
+		refreshed = observedApp
+	}
+	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(refreshed); changed {
+		refreshed = normalizedApp
+	}
+	return refreshed, false, nil
+}
+
 func (s *Service) managedAppSnapshotRecoverable(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App) (bool, error) {
 	if app.Spec.Replicas <= 0 {
 		return true, nil
@@ -382,7 +427,7 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 }
 
 func managedAppBaselineNeedsRecovery(app model.App) bool {
-	return strings.TrimSpace(app.Spec.Image) == "" || managedAppSourceNeedsRecovery(app.Source)
+	return strings.TrimSpace(app.Spec.Image) == "" || managedAppSourceNeedsRecovery(model.AppBuildSource(app))
 }
 
 func managedAppSourceNeedsRecovery(source *model.AppSource) bool {
