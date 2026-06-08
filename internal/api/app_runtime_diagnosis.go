@@ -410,6 +410,9 @@ func appPlatformEnvDrift(app model.App, deployment appsv1.Deployment) appPlatfor
 	var missing []string
 	var changed []string
 	for key := range liveEnv {
+		if model.IsFugueInjectedAppEnvName(key) {
+			continue
+		}
 		if _, expected := expectedPlatformNames[key]; !expected {
 			extra = append(extra, key)
 		}

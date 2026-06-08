@@ -42,6 +42,8 @@ func TestAppPlatformEnvDriftReportsStalePlatformEnv(t *testing.T) {
 							{Name: "ARGUS_KEEP", Value: "current"},
 							{Name: "ARGUS_FUGUE_RUNTIME_IMAGE", Value: "old"},
 							{Name: "FUGUE_TOKEN", Value: "injected"},
+							{Name: "FUGUE_OBSERVABILITY_ENDPOINT", Value: "http://telemetry-agent:7834"},
+							{Name: "FUGUE_OBSERVABILITY_APP_ID", Value: "app_demo"},
 							{Name: "USER_ENV", Value: "live-hotfix"},
 						},
 					}},
@@ -55,7 +57,7 @@ func TestAppPlatformEnvDriftReportsStalePlatformEnv(t *testing.T) {
 	if !strings.Contains(joinedEvidence, "ARGUS_FUGUE_RUNTIME_IMAGE") {
 		t.Fatalf("expected stale ARGUS env evidence, got %#v", report.evidence)
 	}
-	if strings.Contains(joinedEvidence, "FUGUE_TOKEN") || strings.Contains(joinedEvidence, "USER_ENV") {
+	if strings.Contains(joinedEvidence, "FUGUE_TOKEN") || strings.Contains(joinedEvidence, "FUGUE_OBSERVABILITY_ENDPOINT") || strings.Contains(joinedEvidence, "FUGUE_OBSERVABILITY_APP_ID") || strings.Contains(joinedEvidence, "USER_ENV") {
 		t.Fatalf("expected injected Fugue and user env to be ignored, got %#v", report.evidence)
 	}
 	if len(report.warnings) == 0 {
