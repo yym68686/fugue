@@ -1168,6 +1168,49 @@ func TestApplyCaddyConfigInstallsSharedCustomDomainCertificate(t *testing.T) {
 	}
 }
 
+func TestSyncSharedCaddyTLSCertificatesSkipsUnchangedInstall(t *testing.T) {
+	t.Parallel()
+
+	var apiCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/edge/domains/www.customer.com/tls-bundle" {
+			t.Fatalf("unexpected API request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"certificate": caddyTLSCertificateBundle{
+				CertificatePEM: "shared-cert-pem",
+				PrivateKeyPEM:  "shared-key-pem",
+				MetadataJSON:   `{"issuer":"shared"}`,
+				IssuerStorage:  defaultCaddyIssuerStorage,
+			},
+		}); err != nil {
+			t.Fatalf("encode shared TLS bundle: %v", err)
+		}
+	}))
+	defer api.Close()
+
+	var logs bytes.Buffer
+	service := NewService(config.EdgeConfig{
+		APIURL:                api.URL,
+		EdgeToken:             "edge-secret",
+		CaddyDataDir:          t.TempDir(),
+		CaddySharedTLSEnabled: true,
+	}, log.New(&logs, "", 0))
+
+	for range 2 {
+		if err := service.syncSharedCaddyTLSCertificates(context.Background(), []string{"www.customer.com"}); err != nil {
+			t.Fatalf("sync shared TLS certificate: %v", err)
+		}
+	}
+	if apiCalls != 2 {
+		t.Fatalf("expected shared TLS certificate to be fetched twice, got %d", apiCalls)
+	}
+	if installs := strings.Count(logs.String(), "shared TLS certificate installed"); installs != 1 {
+		t.Fatalf("expected unchanged shared TLS certificate to be installed once, got %d logs=%q", installs, logs.String())
+	}
+}
+
 func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
 	t.Parallel()
 

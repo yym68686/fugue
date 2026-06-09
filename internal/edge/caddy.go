@@ -701,13 +701,14 @@ func (s *Service) syncSharedCaddyTLSCertificates(ctx context.Context, hosts []st
 		if bundle == nil {
 			continue
 		}
-		if err := s.installSharedCaddyTLSCertificate(host, *bundle); err != nil {
+		installed, err := s.installSharedCaddyTLSCertificate(host, *bundle)
+		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		if s.Logger != nil {
+		if installed && s.Logger != nil {
 			s.Logger.Printf("edge caddy shared TLS certificate installed; host=%s issuer_storage=%s", host, strings.TrimSpace(bundle.IssuerStorage))
 		}
 	}
@@ -763,33 +764,43 @@ func (s *Service) fetchSharedCaddyTLSCertificate(ctx context.Context, hostname s
 	return &out.Certificate, nil
 }
 
-func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddyTLSCertificateBundle) error {
+func (s *Service) installSharedCaddyTLSCertificate(hostname string, bundle caddyTLSCertificateBundle) (bool, error) {
 	hostname = normalizeRouteHost(hostname)
 	if hostname == "" {
-		return nil
+		return false, nil
 	}
-	issuerStorage := strings.Trim(strings.TrimSpace(bundle.IssuerStorage), "/")
-	if issuerStorage == "" {
-		issuerStorage = defaultCaddyIssuerStorage
+	bundle = normalizeCaddyTLSCertificateBundle(bundle)
+	if current, err := s.readLocalCaddyTLSCertificate(hostname); err == nil && normalizeCaddyTLSCertificateBundle(current) == bundle {
+		return false, nil
 	}
-	hostDir := filepath.Join(s.caddyDataDir(), "certificates", issuerStorage, hostname)
+	hostDir := filepath.Join(s.caddyDataDir(), "certificates", bundle.IssuerStorage, hostname)
 	if err := os.MkdirAll(hostDir, 0o700); err != nil {
-		return fmt.Errorf("create Caddy certificate directory for %s: %w", hostname, err)
+		return false, fmt.Errorf("create Caddy certificate directory for %s: %w", hostname, err)
 	}
-	if err := os.WriteFile(filepath.Join(hostDir, hostname+".crt"), []byte(strings.TrimSpace(bundle.CertificatePEM)+"\n"), 0o644); err != nil {
-		return fmt.Errorf("write Caddy certificate for %s: %w", hostname, err)
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".crt"), []byte(bundle.CertificatePEM+"\n"), 0o644); err != nil {
+		return false, fmt.Errorf("write Caddy certificate for %s: %w", hostname, err)
 	}
-	if err := os.WriteFile(filepath.Join(hostDir, hostname+".key"), []byte(strings.TrimSpace(bundle.PrivateKeyPEM)+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write Caddy private key for %s: %w", hostname, err)
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".key"), []byte(bundle.PrivateKeyPEM+"\n"), 0o600); err != nil {
+		return false, fmt.Errorf("write Caddy private key for %s: %w", hostname, err)
 	}
-	metadata := strings.TrimSpace(bundle.MetadataJSON)
-	if metadata == "" {
-		metadata = "{}"
+	if err := os.WriteFile(filepath.Join(hostDir, hostname+".json"), []byte(bundle.MetadataJSON+"\n"), 0o644); err != nil {
+		return false, fmt.Errorf("write Caddy certificate metadata for %s: %w", hostname, err)
 	}
-	if err := os.WriteFile(filepath.Join(hostDir, hostname+".json"), []byte(metadata+"\n"), 0o644); err != nil {
-		return fmt.Errorf("write Caddy certificate metadata for %s: %w", hostname, err)
+	return true, nil
+}
+
+func normalizeCaddyTLSCertificateBundle(bundle caddyTLSCertificateBundle) caddyTLSCertificateBundle {
+	bundle.CertificatePEM = strings.TrimSpace(bundle.CertificatePEM)
+	bundle.PrivateKeyPEM = strings.TrimSpace(bundle.PrivateKeyPEM)
+	bundle.MetadataJSON = strings.TrimSpace(bundle.MetadataJSON)
+	if bundle.MetadataJSON == "" {
+		bundle.MetadataJSON = "{}"
 	}
-	return nil
+	bundle.IssuerStorage = strings.Trim(strings.TrimSpace(bundle.IssuerStorage), "/")
+	if bundle.IssuerStorage == "" {
+		bundle.IssuerStorage = defaultCaddyIssuerStorage
+	}
+	return bundle
 }
 
 func (s *Service) readLocalCaddyTLSCertificate(hostname string) (caddyTLSCertificateBundle, error) {
