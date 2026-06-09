@@ -209,9 +209,17 @@ data:
               description: "More than 10 GiB of registry blobs are not reachable from retained manifests or workload digests."
           - alert: FugueRegistryGCOverdue
             expr: |
-              fugue_registry_gc_last_success_timestamp_seconds == 0
+              (
+                fugue_registry_gc_requested == 1
+                and
+                fugue_registry_gc_last_success_timestamp_seconds == 0
+              )
               or
-              time() - fugue_registry_gc_last_success_timestamp_seconds > 108000
+              (
+                fugue_registry_gc_last_success_timestamp_seconds > 0
+                and
+                time() - fugue_registry_gc_last_success_timestamp_seconds > 108000
+              )
             for: 30m
             labels:
               severity: warning
