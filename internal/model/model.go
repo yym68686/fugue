@@ -161,6 +161,7 @@ const (
 	OperationRequestedByImageTracking        = "fugue-controller/image-tracking"
 	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"
 	OperationRequestedByImageRebuild         = "fugue-controller/image-rebuild"
+	OperationRequestedByOOMRightSizing       = "fugue-api/oom-right-sizing"
 
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"

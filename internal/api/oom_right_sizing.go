@@ -2,7 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -211,6 +215,12 @@ func (s *Server) queueOOMRightSizingDeploy(app model.App, targets []oomRightSizi
 	} else if hasActive {
 		return nil
 	}
+	requestedByID := oomRightSizingRequestedByID(targets)
+	if exists, err := s.oomRightSizingOperationExists(app, requestedByID); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
 	spec, source, err := s.recoverAppDeployBaseline(app)
 	if err != nil {
 		return err
@@ -254,13 +264,44 @@ func (s *Server) queueOOMRightSizingDeploy(app model.App, targets []oomRightSizi
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     model.ActorTypeSystem,
-		RequestedByID:       "fugue-api/oom-right-sizing",
+		RequestedByID:       requestedByID,
 		AppID:               app.ID,
 		DesiredSpec:         &spec,
 		DesiredSource:       source,
 		DesiredOriginSource: model.AppOriginSource(app),
 	})
+	if errors.Is(err, store.ErrConflict) {
+		if exists, lookupErr := s.oomRightSizingOperationExists(app, requestedByID); lookupErr == nil && exists {
+			return nil
+		}
+	}
 	return err
+}
+
+func (s *Server) oomRightSizingOperationExists(app model.App, requestedByID string) (bool, error) {
+	operations, err := s.store.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, operation := range operations {
+		if operation.RequestedByType == model.ActorTypeSystem &&
+			operation.RequestedByID == requestedByID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func oomRightSizingRequestedByID(targets []oomRightSizingTarget) string {
+	keys := oomTargetEventKeys(targets)
+	if len(keys) == 0 {
+		for _, target := range targets {
+			keys = append(keys, target.kind+"/"+target.id)
+		}
+	}
+	sort.Strings(keys)
+	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
+	return model.OperationRequestedByOOMRightSizing + "/" + hex.EncodeToString(sum[:12])
 }
 
 func (s *Server) validateAutoscalingTenantEnvelope(app model.App, desired model.AppSpec) error {

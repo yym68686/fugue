@@ -2947,6 +2947,9 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		); err != nil {
 			return err
 		}
+		if duplicateOOMRightSizingOperation(state.Operations, op) {
+			return ErrConflict
+		}
 		op.ID = model.NewID("op")
 		op.Status = model.OperationStatusPending
 		op.ExecutionMode = model.ExecutionModeManaged
@@ -2961,6 +2964,21 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 		return nil
 	})
 	return op, err
+}
+
+func duplicateOOMRightSizingOperation(operations []model.Operation, candidate model.Operation) bool {
+	if candidate.RequestedByType != model.ActorTypeSystem ||
+		!strings.HasPrefix(candidate.RequestedByID, model.OperationRequestedByOOMRightSizing+"/") {
+		return false
+	}
+	for _, operation := range operations {
+		if operation.TenantID == candidate.TenantID &&
+			operation.RequestedByType == candidate.RequestedByType &&
+			operation.RequestedByID == candidate.RequestedByID {
+			return true
+		}
+	}
+	return false
 }
 
 type OperationListFilter struct {

@@ -94,6 +94,9 @@ func TestQueueOOMRightSizingDeployHonorsTenantEnvelopeOnOwnedRuntime(t *testing.
 	err = server.queueOOMRightSizingDeploy(app, []oomRightSizingTarget{{
 		kind: model.ClusterNodeWorkloadKindBackingService,
 		id:   app.BackingServices[0].ID,
+		eventKeys: []string{
+			"demo-postgres-1/postgres/last-state/1/2026-06-10T11:58:00Z",
+		},
 	}})
 	if !errors.Is(err, store.ErrBillingCapExceeded) {
 		t.Fatalf("expected tenant envelope to reject owned-runtime growth, got %v", err)
@@ -164,8 +167,20 @@ func TestQueueOOMRightSizingDeployGrowsAppAndPostgres(t *testing.T) {
 
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
 	err = server.queueOOMRightSizingDeploy(app, []oomRightSizingTarget{
-		{kind: model.ClusterNodeWorkloadKindApp, id: app.ID},
-		{kind: model.ClusterNodeWorkloadKindBackingService, id: app.BackingServices[0].ID},
+		{
+			kind: model.ClusterNodeWorkloadKindApp,
+			id:   app.ID,
+			eventKeys: []string{
+				"demo-abc/demo/last-state/1/2026-06-10T11:58:00Z",
+			},
+		},
+		{
+			kind: model.ClusterNodeWorkloadKindBackingService,
+			id:   app.BackingServices[0].ID,
+			eventKeys: []string{
+				"demo-postgres-1/postgres/last-state/1/2026-06-10T11:59:00Z",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("queue OOM right-sizing deploy: %v", err)
@@ -186,5 +201,72 @@ func TestQueueOOMRightSizingDeployGrowsAppAndPostgres(t *testing.T) {
 		desired.Postgres.Resources.MemoryMebibytes != 1536 ||
 		desired.Postgres.Resources.MemoryLimitMebibytes != 1664 {
 		t.Fatalf("unexpected postgres OOM resources: %+v", desired.Postgres)
+	}
+	if operations[0].RequestedByID == model.OperationRequestedByOOMRightSizing {
+		t.Fatalf("expected event fingerprint in requested_by_id, got %q", operations[0].RequestedByID)
+	}
+}
+
+func TestQueueOOMRightSizingDeployDeduplicatesEventAcrossServers(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("OOM Dedupe Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        500,
+			MemoryMebibytes:      512,
+			MemoryLimitMebibytes: 512,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	targets := []oomRightSizingTarget{{
+		kind: model.ClusterNodeWorkloadKindApp,
+		id:   app.ID,
+		eventKeys: []string{
+			"demo-abc/demo/last-state/1/2026-06-10T11:58:00Z",
+		},
+	}}
+
+	first := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	second := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	if err := first.queueOOMRightSizingDeploy(app, targets); err != nil {
+		t.Fatalf("first queue OOM right-sizing deploy: %v", err)
+	}
+	if err := second.queueOOMRightSizingDeploy(app, targets); err != nil {
+		t.Fatalf("duplicate queue OOM right-sizing deploy: %v", err)
+	}
+
+	operations, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("expected one operation for the shared event, got %+v", operations)
+	}
+	duplicate := operations[0]
+	duplicate.ID = ""
+	duplicate.Status = ""
+	duplicate.CreatedAt = time.Time{}
+	duplicate.UpdatedAt = time.Time{}
+	if _, err := stateStore.CreateOperation(duplicate); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("expected store-level event fingerprint conflict, got %v", err)
 	}
 }
