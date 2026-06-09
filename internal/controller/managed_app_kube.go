@@ -1056,6 +1056,23 @@ func (c *kubeClient) patchDeploymentJSONPatch(ctx context.Context, namespace, na
 	return err
 }
 
+func (c *kubeClient) patchStorageClassAllowVolumeExpansion(ctx context.Context, name string, value bool) error {
+	body := map[string]any{
+		"allowVolumeExpansion": value,
+	}
+	_, err := c.doRequest(ctx, http.MethodPatch, "/apis/storage.k8s.io/v1/storageclasses/"+url.PathEscape(strings.TrimSpace(name)), "application/merge-patch+json", body, nil)
+	return err
+}
+
+func (c *kubeClient) removeStorageClassAllowVolumeExpansion(ctx context.Context, name string) error {
+	ops := []map[string]string{{
+		"op":   "remove",
+		"path": "/allowVolumeExpansion",
+	}}
+	_, err := c.doRequest(ctx, http.MethodPatch, "/apis/storage.k8s.io/v1/storageclasses/"+url.PathEscape(strings.TrimSpace(name)), "application/json-patch+json", ops, nil)
+	return err
+}
+
 func (c *kubeClient) deleteCloudNativePGCluster(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
 	return normalizeDeleteNotFound(err)

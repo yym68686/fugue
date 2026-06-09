@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -17,12 +18,99 @@ func redactDiagnosticString(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return raw
 	}
+	redacted := redactDiagnosticScalarString(raw)
+	if structured, ok := redactDiagnosticJSONText(redacted); ok {
+		return structured
+	}
+	return redacted
+}
+
+func redactDiagnosticScalarString(raw string) string {
 	redacted := redactAuthorizationHeaderPattern.ReplaceAllString(raw, `${1}[redacted]`)
 	redacted = redactCookieHeaderPattern.ReplaceAllString(redacted, `${1}[redacted]`)
 	redacted = redactSetCookiePattern.ReplaceAllString(redacted, `${1}=[redacted]`)
 	redacted = redactJSONSecretPattern.ReplaceAllString(redacted, `${1}[redacted]${3}`)
 	redacted = redactQuerySecretPattern.ReplaceAllString(redacted, `${1}=[redacted]`)
 	return redacted
+}
+
+func redactDiagnosticJSONText(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !json.Valid([]byte(trimmed)) {
+		return "", false
+	}
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return "", false
+	}
+	rendered, err := json.Marshal(redactDiagnosticJSONValue(value, false))
+	if err != nil {
+		return "", false
+	}
+	return string(rendered), true
+}
+
+func redactDiagnosticJSONValue(value any, force bool) any {
+	if force {
+		return redactDiagnosticJSONSecretValue(value)
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, child := range typed {
+			switch {
+			case diagnosticKeyLooksSensitive(key):
+				out[key] = redactDiagnosticJSONSecretValue(child)
+			case diagnosticKeyRedactsChildren(key):
+				out[key] = redactDiagnosticJSONValue(child, true)
+			default:
+				out[key] = redactDiagnosticJSONValue(child, false)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for index, child := range typed {
+			out[index] = redactDiagnosticJSONValue(child, false)
+		}
+		return out
+	case string:
+		scalar := redactDiagnosticScalarString(typed)
+		if structured, ok := redactDiagnosticJSONText(scalar); ok {
+			return structured
+		}
+		return scalar
+	default:
+		return typed
+	}
+}
+
+func redactDiagnosticJSONSecretValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, child := range typed {
+			out[key] = redactDiagnosticJSONSecretValue(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for index, child := range typed {
+			out[index] = redactDiagnosticJSONSecretValue(child)
+		}
+		return out
+	case string:
+		if typed == "" {
+			return typed
+		}
+		return redactedSecretValue
+	case nil:
+		return nil
+	default:
+		return redactedSecretValue
+	}
 }
 
 func redactDiagnosticHeaderValue(name, value string) string {
@@ -94,6 +182,12 @@ func diagnosticKeyLooksSensitive(key string) bool {
 		"secret",
 		"password",
 		"cookie",
+		"databaseurl",
+		"dsn",
+		"connectionstring",
+		"connectionurl",
+		"postgresurl",
+		"postgresqlurl",
 		"sessionid",
 		"session",
 	} {
@@ -102,4 +196,16 @@ func diagnosticKeyLooksSensitive(key string) bool {
 		}
 	}
 	return false
+}
+
+func diagnosticKeyRedactsChildren(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	switch normalized {
+	case "env", "environment", "environmentvariables":
+		return true
+	default:
+		return false
+	}
 }

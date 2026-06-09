@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const managedPostgresPodSelectorTemplate = "cnpg.io/cluster=%s,app.kubernetes.io/managed-by=cloudnative-pg"
@@ -303,6 +305,7 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	}
 	desiredDatabase := databaseLocalizeDesiredPostgresSpec(currentDatabase, desiredPostgresSpec(op))
 	storageMigrationRequired := managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
+	storageTarget := databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 
 	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
 	if clusterName == "" {
@@ -322,6 +325,17 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if err != nil {
 		return err
 	}
+	restoreStorageExpansion, err := s.prepareManagedPostgresStorageMigrationExpansion(ctx, client, namespace, clusterName, storageTarget)
+	if err != nil {
+		return err
+	}
+	if restoreStorageExpansion != nil {
+		defer func() {
+			if err := restoreStorageExpansion(context.Background()); err != nil && s != nil && s.Logger != nil {
+				s.Logger.Printf("restore storage expansion state after database localize %s: %v", op.ID, err)
+			}
+		}()
+	}
 
 	targetPrimary := ""
 	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
@@ -338,7 +352,6 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
 			return fmt.Errorf("prepare localized managed postgres standby on runtime %s: %w", targetRuntimeID, err)
 		}
-		storageTarget := databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 		if targetNodeName != "" {
 			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID, storageTarget)
 		} else {
@@ -430,6 +443,7 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	}
 	desiredDatabase := databaseLocalizeDesiredPostgresSpec(currentDatabase, desiredPostgresSpec(op))
 	storageMigrationRequired := managedPostgresStorageMigrationRequired(currentDatabase, desiredDatabase)
+	storageTarget := databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 
 	clusterName := strings.TrimSpace(currentDatabase.ServiceName)
 	if clusterName == "" {
@@ -448,6 +462,17 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
 	if err != nil {
 		return err
+	}
+	restoreStorageExpansion, err := s.prepareManagedPostgresStorageMigrationExpansion(ctx, client, namespace, clusterName, storageTarget)
+	if err != nil {
+		return err
+	}
+	if restoreStorageExpansion != nil {
+		defer func() {
+			if err := restoreStorageExpansion(context.Background()); err != nil && s != nil && s.Logger != nil {
+				s.Logger.Printf("restore storage expansion state after database localize %s: %v", op.ID, err)
+			}
+		}()
 	}
 
 	targetPrimary := ""
@@ -469,7 +494,6 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, stageApp, stageApp.Spec); err != nil {
 			return fmt.Errorf("prepare localized managed postgres service %s standby on runtime %s: %w", target.ServiceID, targetRuntimeID, err)
 		}
-		storageTarget := databaseLocalizeStorageTarget(storageMigrationRequired, desiredDatabase)
 		if targetNodeName != "" {
 			targetPrimary, err = s.waitForManagedPostgresReplicaOnNode(ctx, client, namespace, clusterName, targetNodeName, op.ID, storageTarget)
 		} else {
@@ -691,9 +715,14 @@ func databaseLocalizeStagePostgresSpec(
 ) model.AppPostgresSpec {
 	sourceRuntimeID = strings.TrimSpace(sourceRuntimeID)
 	targetRuntimeID = strings.TrimSpace(targetRuntimeID)
+	targetNodeName = strings.TrimSpace(targetNodeName)
+	if targetNodeName != "" {
+		return databaseLocalizePostgresSpec(postgres, targetRuntimeID, targetNodeName, false, true)
+	}
 	if sourceRuntimeID != "" && targetRuntimeID != "" && sourceRuntimeID != targetRuntimeID {
 		postgresCopy := databaseSwitchoverPostgresSpec(postgres, sourceRuntimeID, targetRuntimeID)
 		postgresCopy.PrimaryNodeName = ""
+		postgresCopy.PrimaryPlacementPendingRebalance = true
 		return postgresCopy
 	}
 	return databaseLocalizePostgresSpec(postgres, targetRuntimeID, targetNodeName, false, true)
@@ -771,6 +800,103 @@ func (s *Service) applyManagedDesiredAppState(
 	// it here can deadlock when a transient app ReplicaSet is held behind the same
 	// database state this operation is preparing.
 	return bundle, nil
+}
+
+type storageClassExpansionRestore struct {
+	Name     string
+	HadValue bool
+	Value    bool
+}
+
+func (s *Service) prepareManagedPostgresStorageMigrationExpansion(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	target managedPostgresStorageTarget,
+) (func(context.Context) error, error) {
+	if target.isZero() || strings.TrimSpace(target.StorageSize) == "" {
+		return nil, nil
+	}
+	targetQuantity, err := resource.ParseQuantity(strings.TrimSpace(target.StorageSize))
+	if err != nil {
+		return nil, nil
+	}
+	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA")
+	if err != nil {
+		return nil, fmt.Errorf("list postgres PVCs for storage migration %s/%s: %w", namespace, clusterName, err)
+	}
+
+	restoresByClass := make(map[string]storageClassExpansionRestore)
+	for _, pvcName := range pvcNames {
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+		if err != nil {
+			return nil, fmt.Errorf("read postgres PVC %s/%s for storage migration: %w", namespace, pvcName, err)
+		}
+		if !found {
+			continue
+		}
+		storageClassName := strings.TrimSpace(pvc.Spec.StorageClassName)
+		if storageClassName == "" || storageClassName == strings.TrimSpace(target.StorageClassName) {
+			continue
+		}
+		currentSize := managedPostgresPVCStorageSize(pvc)
+		if currentSize == "" {
+			continue
+		}
+		currentQuantity, err := resource.ParseQuantity(currentSize)
+		if err != nil || currentQuantity.Cmp(targetQuantity) >= 0 {
+			continue
+		}
+		storageClass, found, err := client.getStorageClass(ctx, storageClassName)
+		if err != nil {
+			return nil, fmt.Errorf("read storage class %s for postgres storage migration: %w", storageClassName, err)
+		}
+		if !found {
+			continue
+		}
+		if storageClass.AllowVolumeExpansion != nil && *storageClass.AllowVolumeExpansion {
+			continue
+		}
+		if _, ok := restoresByClass[storageClassName]; ok {
+			continue
+		}
+		restoresByClass[storageClassName] = storageClassExpansionRestore{
+			Name:     storageClassName,
+			HadValue: storageClass.AllowVolumeExpansion != nil,
+			Value:    storageClass.AllowVolumeExpansion != nil && *storageClass.AllowVolumeExpansion,
+		}
+		if err := client.patchStorageClassAllowVolumeExpansion(ctx, storageClassName, true); err != nil {
+			return nil, fmt.Errorf("temporarily allow expansion for storage class %s during postgres storage migration: %w", storageClassName, err)
+		}
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf(
+				"temporarily enabled volume expansion for storage class %s so postgres storage migration %s/%s can create target PVC %s/%s without old PVC resize admission blocking CNPG",
+				storageClassName,
+				namespace,
+				clusterName,
+				strings.TrimSpace(target.StorageClassName),
+				strings.TrimSpace(target.StorageSize),
+			)
+		}
+	}
+	if len(restoresByClass) == 0 {
+		return nil, nil
+	}
+	return func(ctx context.Context) error {
+		var restoreErrs []error
+		for _, restore := range restoresByClass {
+			if restore.HadValue {
+				if err := client.patchStorageClassAllowVolumeExpansion(ctx, restore.Name, restore.Value); err != nil {
+					restoreErrs = append(restoreErrs, fmt.Errorf("restore storage class %s allowVolumeExpansion=%v: %w", restore.Name, restore.Value, err))
+				}
+				continue
+			}
+			if err := client.removeStorageClassAllowVolumeExpansion(ctx, restore.Name); err != nil {
+				restoreErrs = append(restoreErrs, fmt.Errorf("remove storage class %s allowVolumeExpansion: %w", restore.Name, err))
+			}
+		}
+		return errors.Join(restoreErrs...)
+	}, nil
 }
 
 func (s *Service) resolveDatabaseLocalizeTargetNode(

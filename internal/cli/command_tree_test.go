@@ -3865,6 +3865,47 @@ func TestRunAPIRequestShowsRawResponse(t *testing.T) {
 	}
 }
 
+func TestRunAPIRequestRedactsNestedJSONBodyString(t *testing.T) {
+	t.Parallel()
+
+	nestedBody := `{"app":{"spec":{"env":{"APP_PUBLIC_URL":"https://app.example.com","OPENAI_API_KEY":"sk-live-secret"},"postgres":{"password":"pg-secret"}}},"operation":{"desired_spec":{"env":{"DATABASE_URL":"postgres://user:pass@db/app"}}}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/apps/app_123" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"body": nestedBody,
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"api", "request", "GET", "/v1/apps/app_123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run api request: %v", err)
+	}
+
+	out := stdout.String()
+	for _, leaked := range []string{"https://app.example.com", "sk-live-secret", "pg-secret", "postgres://user:pass@db/app"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("expected api request output to redact %q, got %q", leaked, out)
+		}
+	}
+	if !strings.Contains(out, redactedSecretValue) {
+		t.Fatalf("expected api request output to contain redacted marker, got %q", out)
+	}
+}
+
 func TestRunDiagnoseTimingCapturesRequests(t *testing.T) {
 	t.Parallel()
 

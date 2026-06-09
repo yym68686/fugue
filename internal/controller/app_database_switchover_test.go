@@ -42,7 +42,7 @@ func TestDatabaseSwitchoverSpecClearsPendingPlacementRebalance(t *testing.T) {
 	}
 }
 
-func TestDatabaseLocalizeStageSpecKeepsPrimaryOnSourceRuntime(t *testing.T) {
+func TestDatabaseLocalizeStageSpecPinsTargetNodeWithPlacementHold(t *testing.T) {
 	t.Parallel()
 
 	base := model.AppSpec{
@@ -65,10 +65,38 @@ func TestDatabaseLocalizeStageSpecKeepsPrimaryOnSourceRuntime(t *testing.T) {
 	if stage.Postgres == nil {
 		t.Fatalf("expected postgres spec, got %+v", stage)
 	}
+	if stage.Postgres.RuntimeID != "runtime_app" || stage.Postgres.FailoverTargetRuntimeID != "" || stage.Postgres.PrimaryNodeName != "instance-us-1" {
+		t.Fatalf("unexpected stage postgres placement: %+v", stage.Postgres)
+	}
+	if stage.Postgres.Instances != 2 || stage.Postgres.SynchronousReplicas != 0 || !stage.Postgres.PrimaryPlacementPendingRebalance {
+		t.Fatalf("unexpected stage postgres lifecycle: %+v", stage.Postgres)
+	}
+}
+
+func TestDatabaseLocalizeStageSpecHoldsCrossRuntimePrimaryWithoutTargetNode(t *testing.T) {
+	t.Parallel()
+
+	base := model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: "runtime_app",
+	}
+	postgres := &model.AppPostgresSpec{
+		Database:                "demo",
+		User:                    "demo",
+		Password:                "secret",
+		RuntimeID:               "runtime_source",
+		FailoverTargetRuntimeID: "runtime_old_target",
+		Instances:               1,
+	}
+
+	stage := databaseLocalizeStageSpec(base, postgres, "runtime_source", "runtime_app", "")
+	if stage.Postgres == nil {
+		t.Fatalf("expected postgres spec, got %+v", stage)
+	}
 	if stage.Postgres.RuntimeID != "runtime_source" || stage.Postgres.FailoverTargetRuntimeID != "runtime_app" || stage.Postgres.PrimaryNodeName != "" {
 		t.Fatalf("unexpected stage postgres placement: %+v", stage.Postgres)
 	}
-	if stage.Postgres.Instances != 2 || stage.Postgres.SynchronousReplicas != 1 || stage.Postgres.PrimaryPlacementPendingRebalance {
+	if stage.Postgres.Instances != 2 || stage.Postgres.SynchronousReplicas != 1 || !stage.Postgres.PrimaryPlacementPendingRebalance {
 		t.Fatalf("unexpected stage postgres lifecycle: %+v", stage.Postgres)
 	}
 }
@@ -130,6 +158,88 @@ func TestDatabaseLocalizeStorageMigrationForcesExtraReplica(t *testing.T) {
 	}
 	if stage.Instances != 3 {
 		t.Fatalf("expected storage migration to force one extra replica, got %+v", stage)
+	}
+}
+
+func TestPrepareManagedPostgresStorageMigrationExpansionTemporarilyEnablesLegacyClass(t *testing.T) {
+	t.Parallel()
+
+	var patchValues []bool
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/tenant-demo/persistentvolumeclaims":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"metadata": map[string]any{"name": "demo-postgres-1"},
+				}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/tenant-demo/persistentvolumeclaims/demo-postgres-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "demo-postgres-1"},
+				"spec": map[string]any{
+					"storageClassName": "local-path",
+					"resources": map[string]any{
+						"requests": map[string]any{"storage": "1Gi"},
+					},
+				},
+				"status": map[string]any{
+					"capacity": map[string]any{"storage": "1Gi"},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/storage.k8s.io/v1/storageclasses/local-path":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":             map[string]any{"name": "local-path"},
+				"allowVolumeExpansion": false,
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/apis/storage.k8s.io/v1/storageclasses/local-path":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode storage class patch: %v", err)
+			}
+			value, ok := body["allowVolumeExpansion"].(bool)
+			if !ok {
+				t.Fatalf("expected allowVolumeExpansion patch, got %+v", body)
+			}
+			patchValues = append(patchValues, value)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":             map[string]any{"name": "local-path"},
+				"allowVolumeExpansion": value,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   "tenant-demo",
+	}
+	svc := &Service{
+		Logger: log.New(io.Discard, "", 0),
+	}
+
+	restore, err := svc.prepareManagedPostgresStorageMigrationExpansion(context.Background(), client, "tenant-demo", "demo-postgres", managedPostgresStorageTarget{
+		StorageClassName: "fugue-postgres-rwo",
+		StorageSize:      "5Gi",
+	})
+	if err != nil {
+		t.Fatalf("prepare storage migration expansion: %v", err)
+	}
+	if restore == nil {
+		t.Fatal("expected restore function")
+	}
+	if len(patchValues) != 1 || !patchValues[0] {
+		t.Fatalf("expected temporary allowVolumeExpansion=true patch, got %v", patchValues)
+	}
+	if err := restore(context.Background()); err != nil {
+		t.Fatalf("restore storage class expansion: %v", err)
+	}
+	if len(patchValues) != 2 || patchValues[1] {
+		t.Fatalf("expected restore allowVolumeExpansion=false patch, got %v", patchValues)
 	}
 }
 
