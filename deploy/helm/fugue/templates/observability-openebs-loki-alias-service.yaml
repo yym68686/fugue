@@ -1,0 +1,17 @@
+{{- if and .Values.observability.logs.enabled .Values.openebs.enabled (not .Values.openebs.loki.enabled) (not (eq .Values.openebs.alloy.enabled false)) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-loki" .Release.Name }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "observability-loki-alias") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "observability-loki") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.observability.logs.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

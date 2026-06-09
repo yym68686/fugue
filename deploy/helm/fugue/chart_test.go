@@ -762,6 +762,7 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 	}{
 		{"Deployment", "fugue-fugue-observability-loki"},
 		{"Service", "fugue-fugue-observability-loki"},
+		{"Service", "fugue-loki"},
 		{"ConfigMap", "fugue-fugue-observability-loki"},
 	} {
 		if doc := manifestDocumentForKindAndName(manifest, tc.kind, tc.name); doc != "" {
@@ -783,11 +784,13 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 	manifest = string(output)
 	deploymentDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-observability-loki")
 	serviceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-observability-loki")
+	openEBSAliasServiceDoc := manifestDocumentForKindAndName(manifest, "Service", "fugue-loki")
 	configDoc := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-loki")
 	for name, doc := range map[string]string{
-		"loki deployment": deploymentDoc,
-		"loki service":    serviceDoc,
-		"loki config":     configDoc,
+		"loki deployment":            deploymentDoc,
+		"loki service":               serviceDoc,
+		"openebs loki alias service": openEBSAliasServiceDoc,
+		"loki config":                configDoc,
 	} {
 		if doc == "" {
 			t.Fatalf("expected %s to render:\n%s", name, manifest)
@@ -812,6 +815,31 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 		if !strings.Contains(configDoc, want) {
 			t.Fatalf("loki config missing %q:\n%s", want, configDoc)
 		}
+	}
+	for _, want := range []string{
+		"name: fugue-loki",
+		"app.kubernetes.io/component: observability-loki-alias",
+		"app.kubernetes.io/component: observability-loki",
+		"port: 3100",
+		"targetPort: http",
+	} {
+		if !strings.Contains(openEBSAliasServiceDoc, want) {
+			t.Fatalf("openebs loki alias service missing %q:\n%s", want, openEBSAliasServiceDoc)
+		}
+	}
+
+	cmd = exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.logs.enabled=true",
+		"--set", "openebs.alloy.enabled=false",
+	)
+	cmd.Dir = chartDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	if doc := manifestDocumentForKindAndName(string(output), "Service", "fugue-loki"); doc != "" {
+		t.Fatalf("openebs loki alias service should not render when openebs alloy is disabled:\n%s", doc)
 	}
 }
 
