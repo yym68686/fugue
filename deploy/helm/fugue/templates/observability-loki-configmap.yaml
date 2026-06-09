@@ -31,6 +31,7 @@ data:
             period: 24h
     limits_config:
       retention_period: {{ .Values.observability.logs.retention }}
+      max_label_names_per_series: {{ .Values.observability.logs.maxLabelNamesPerSeries }}
     compactor:
       working_directory: /loki/compactor
       retention_enabled: true

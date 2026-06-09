@@ -89,6 +89,7 @@ observability:
       pullPolicy: IfNotPresent
     port: 3100
     retention: 24h
+    maxLabelNamesPerSeries: 20
     resources:
       requests:
         cpu: 100m

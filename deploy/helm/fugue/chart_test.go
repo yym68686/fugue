@@ -809,6 +809,7 @@ func TestObservabilityLokiIsDisabledByDefaultAndCanRender(t *testing.T) {
 	for _, want := range []string{
 		"auth_enabled: false",
 		"retention_period: 24h",
+		"max_label_names_per_series: 20",
 		"delete_request_store: filesystem",
 		"schema: v13",
 	} {
