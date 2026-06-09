@@ -1212,6 +1212,35 @@ func (s *Server) handleScaleApp(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.Replicas > 0 && strings.TrimSpace(app.Spec.Image) == "" {
+		spec, source, err := s.recoverAppDeployBaseline(app)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if strings.TrimSpace(spec.Image) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "app has no deployable image; import or deploy the app before scaling above zero")
+			return
+		}
+		spec.Replicas = req.Replicas
+		op, err := s.store.CreateOperation(model.Operation{
+			TenantID:            app.TenantID,
+			Type:                model.OperationTypeDeploy,
+			RequestedByType:     principal.ActorType,
+			RequestedByID:       principal.ActorID,
+			AppID:               app.ID,
+			DesiredSpec:         &spec,
+			DesiredSource:       source,
+			DesiredOriginSource: model.AppOriginSource(app),
+		})
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		s.appendAudit(principal, "app.scale", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"operation": sanitizeOperationForAPI(op)})
+		return
+	}
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        app.TenantID,
 		Type:            model.OperationTypeScale,

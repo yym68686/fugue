@@ -2073,6 +2073,29 @@ func TestReconcileManagedAppObjectScalesDownUnrecoverableFailedSnapshot(t *testi
 	}
 }
 
+func TestValidateManagedAppDeployableImageRejectsPositiveReplicasWithoutImage(t *testing.T) {
+	t.Parallel()
+
+	err := validateManagedAppDeployableImage(model.App{
+		ID: "app_empty",
+		Spec: model.AppSpec{
+			Replicas: 1,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected missing image with positive replicas to be rejected")
+	}
+
+	if err := validateManagedAppDeployableImage(model.App{
+		ID: "app_disabled",
+		Spec: model.AppSpec{
+			Replicas: 0,
+		},
+	}); err != nil {
+		t.Fatalf("expected disabled app without image to remain valid, got %v", err)
+	}
+}
+
 func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObjects(t *testing.T) {
 	t.Parallel()
 

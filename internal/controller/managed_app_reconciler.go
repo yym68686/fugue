@@ -26,6 +26,9 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
 		app = normalizedApp
 	}
+	if err := validateManagedAppDeployableImage(app); err != nil {
+		return err
+	}
 	app = s.Renderer.PrepareApp(app)
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
@@ -243,6 +246,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	}
 
 	app = s.Renderer.PrepareApp(app)
+	if err := validateManagedAppDeployableImage(app); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
 	postgresPlacements, err := s.managedPostgresPlacements(ctx, app)
 	if err != nil {
@@ -428,6 +434,13 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 
 func managedAppBaselineNeedsRecovery(app model.App) bool {
 	return strings.TrimSpace(app.Spec.Image) == "" || managedAppSourceNeedsRecovery(model.AppBuildSource(app))
+}
+
+func validateManagedAppDeployableImage(app model.App) error {
+	if app.Spec.Replicas <= 0 || strings.TrimSpace(app.Spec.Image) != "" {
+		return nil
+	}
+	return fmt.Errorf("managed app %s has no deployable image for %d desired replicas", strings.TrimSpace(app.ID), app.Spec.Replicas)
 }
 
 func managedAppSourceNeedsRecovery(source *model.AppSource) bool {
