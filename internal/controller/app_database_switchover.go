@@ -1058,22 +1058,31 @@ func (s *Service) waitForManagedPostgresReplicaOnNode(
 		}
 		if !found {
 			lastMessage = fmt.Sprintf("waiting for cluster %s to be created", clusterName)
-		} else if !managedBackingServiceClusterReady(cluster, found) {
-			lastMessage = fmt.Sprintf(
-				"waiting for cluster %s to become ready (%d/%d instances)",
-				clusterName,
-				cluster.Status.ReadyInstances,
-				max(cluster.Spec.Instances, 1),
-			)
 		} else {
-			targetPrimary, err := s.selectManagedPostgresSwitchoverTargetOnNode(waitCtx, client, namespace, clusterName, targetNodeName, cluster.Status.CurrentPrimary, firstStorageTarget(storageTargets))
+			boundPod, err := s.bindManagedPostgresPendingReplicaOnNode(waitCtx, client, namespace, clusterName, targetNodeName, cluster.Status.CurrentPrimary, firstStorageTarget(storageTargets))
 			if err != nil {
 				return "", err
 			}
-			if targetPrimary != "" {
-				return targetPrimary, nil
+			if boundPod != "" {
+				lastMessage = fmt.Sprintf("bound pending standby %s to node %s for cluster %s", boundPod, targetNodeName, clusterName)
 			}
-			lastMessage = fmt.Sprintf("waiting for a standby on node %s for cluster %s", targetNodeName, clusterName)
+			if !managedBackingServiceClusterReady(cluster, found) {
+				lastMessage = fmt.Sprintf(
+					"waiting for cluster %s to become ready (%d/%d instances)",
+					clusterName,
+					cluster.Status.ReadyInstances,
+					max(cluster.Spec.Instances, 1),
+				)
+			} else {
+				targetPrimary, err := s.selectManagedPostgresSwitchoverTargetOnNode(waitCtx, client, namespace, clusterName, targetNodeName, cluster.Status.CurrentPrimary, firstStorageTarget(storageTargets))
+				if err != nil {
+					return "", err
+				}
+				if targetPrimary != "" {
+					return targetPrimary, nil
+				}
+				lastMessage = fmt.Sprintf("waiting for a standby on node %s for cluster %s", targetNodeName, clusterName)
+			}
 		}
 
 		select {
@@ -1141,6 +1150,59 @@ func (s *Service) waitForManagedPostgresPrimary(
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) bindManagedPostgresPendingReplicaOnNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName, targetNodeName, currentPrimary string,
+	storageTarget managedPostgresStorageTarget,
+) (string, error) {
+	targetNodeName = strings.TrimSpace(targetNodeName)
+	if targetNodeName == "" || storageTarget.isZero() {
+		return "", nil
+	}
+	pods, err := client.listPodsBySelector(
+		ctx,
+		namespace,
+		fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName),
+	)
+	if err != nil {
+		return "", fmt.Errorf("list postgres pods for cluster %s: %w", clusterName, err)
+	}
+
+	currentPrimary = strings.TrimSpace(currentPrimary)
+	for _, pod := range pods {
+		podName := strings.TrimSpace(pod.Metadata.Name)
+		if podName == "" || podName == currentPrimary || strings.TrimSpace(pod.Spec.NodeName) != "" {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Pending") {
+			continue
+		}
+		matches, err := s.managedPostgresPodMatchesStorageTarget(ctx, client, namespace, pod, storageTarget)
+		if err != nil {
+			return "", err
+		}
+		if !matches {
+			continue
+		}
+		pvcMatchesNode, err := s.managedPostgresPodPVCBoundToNode(ctx, client, namespace, pod, targetNodeName)
+		if err != nil {
+			return "", err
+		}
+		if !pvcMatchesNode {
+			continue
+		}
+		if err := client.bindPodToNode(ctx, namespace, podName, targetNodeName); err != nil {
+			return "", fmt.Errorf("bind pending postgres replica %s/%s to node %s: %w", namespace, podName, targetNodeName, err)
+		}
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf("bound pending postgres replica %s/%s to node %s for same-node storage migration", namespace, podName, targetNodeName)
+		}
+		return podName, nil
+	}
+	return "", nil
 }
 
 func (s *Service) selectManagedPostgresSwitchoverTarget(
@@ -1231,6 +1293,57 @@ func firstStorageTarget(targets []managedPostgresStorageTarget) managedPostgresS
 		return managedPostgresStorageTarget{}
 	}
 	return targets[0]
+}
+
+func (s *Service) managedPostgresPodPVCBoundToNode(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	pod kubePod,
+	targetNodeName string,
+) (bool, error) {
+	pvcName := managedPostgresPVCNameForPod(pod)
+	if pvcName == "" {
+		pvcName = strings.TrimSpace(pod.Metadata.Name)
+	}
+	if pvcName == "" {
+		return false, nil
+	}
+	pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+	if err != nil {
+		return false, fmt.Errorf("read postgres pvc %s/%s for pending replica binding: %w", namespace, pvcName, err)
+	}
+	if !found || strings.TrimSpace(pvc.Spec.VolumeName) == "" {
+		return false, nil
+	}
+	pv, found, err := client.getPersistentVolume(ctx, pvc.Spec.VolumeName)
+	if err != nil {
+		return false, fmt.Errorf("read postgres pv %s for pending replica binding: %w", pvc.Spec.VolumeName, err)
+	}
+	if !found {
+		return false, nil
+	}
+	return persistentVolumeNodeAffinityIncludesNode(pv, targetNodeName), nil
+}
+
+func persistentVolumeNodeAffinityIncludesNode(pv kubePersistentVolume, targetNodeName string) bool {
+	targetNodeName = strings.TrimSpace(targetNodeName)
+	if targetNodeName == "" || pv.Spec.NodeAffinity.Required == nil {
+		return false
+	}
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		for _, expression := range term.MatchExpressions {
+			if !strings.EqualFold(strings.TrimSpace(expression.Operator), "In") {
+				continue
+			}
+			for _, value := range expression.Values {
+				if strings.TrimSpace(value) == targetNodeName {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) managedPostgresPodMatchesStorageTarget(

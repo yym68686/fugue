@@ -243,6 +243,105 @@ func TestPrepareManagedPostgresStorageMigrationExpansionTemporarilyEnablesLegacy
 	}
 }
 
+func TestBindManagedPostgresPendingReplicaOnNodeBindsPVCOnTargetNode(t *testing.T) {
+	t.Parallel()
+
+	var boundNode string
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/tenant-demo/pods":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"metadata": map[string]any{"name": "demo-postgres-1"},
+						"status":   map[string]any{"phase": "Running"},
+					},
+					{
+						"metadata": map[string]any{"name": "demo-postgres-3"},
+						"spec": map[string]any{
+							"volumes": []map[string]any{{
+								"name": "pgdata",
+								"persistentVolumeClaim": map[string]any{
+									"claimName": "demo-postgres-3",
+								},
+							}},
+						},
+						"status": map[string]any{"phase": "Pending"},
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/tenant-demo/persistentvolumeclaims/demo-postgres-3":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "demo-postgres-3"},
+				"spec": map[string]any{
+					"storageClassName": "fugue-postgres-rwo",
+					"volumeName":       "pv-demo-postgres-3",
+					"resources": map[string]any{
+						"requests": map[string]any{"storage": "5Gi"},
+					},
+				},
+				"status": map[string]any{
+					"capacity": map[string]any{"storage": "5Gi"},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/persistentvolumes/pv-demo-postgres-3":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "pv-demo-postgres-3"},
+				"spec": map[string]any{
+					"nodeAffinity": map[string]any{
+						"required": map[string]any{
+							"nodeSelectorTerms": []map[string]any{{
+								"matchExpressions": []map[string]any{{
+									"key":      "openebs.io/nodename",
+									"operator": "In",
+									"values":   []string{"node-a"},
+								}},
+							}},
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/tenant-demo/pods/demo-postgres-3/binding":
+			var body struct {
+				Target struct {
+					Name string `json:"name"`
+				} `json:"target"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode binding body: %v", err)
+			}
+			boundNode = body.Target.Name
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"kind": "Binding"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   "tenant-demo",
+	}
+	svc := &Service{
+		Logger: log.New(io.Discard, "", 0),
+	}
+
+	podName, err := svc.bindManagedPostgresPendingReplicaOnNode(context.Background(), client, "tenant-demo", "demo-postgres", "node-a", "demo-postgres-1", managedPostgresStorageTarget{
+		StorageClassName: "fugue-postgres-rwo",
+		StorageSize:      "5Gi",
+	})
+	if err != nil {
+		t.Fatalf("bind pending replica: %v", err)
+	}
+	if podName != "demo-postgres-3" || boundNode != "node-a" {
+		t.Fatalf("expected demo-postgres-3 bound to node-a, got pod=%q node=%q", podName, boundNode)
+	}
+}
+
 func TestSelectManagedPostgresSwitchoverTargetMatchesManagedSharedLocationNode(t *testing.T) {
 	t.Parallel()
 

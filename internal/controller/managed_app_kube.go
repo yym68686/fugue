@@ -1073,6 +1073,27 @@ func (c *kubeClient) removeStorageClassAllowVolumeExpansion(ctx context.Context,
 	return err
 }
 
+func (c *kubeClient) bindPodToNode(ctx context.Context, namespace, podName, nodeName string) error {
+	body := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Binding",
+		"metadata": map[string]string{
+			"name":      strings.TrimSpace(podName),
+			"namespace": c.effectiveNamespace(namespace),
+		},
+		"target": map[string]string{
+			"apiVersion": "v1",
+			"kind":       "Node",
+			"name":       strings.TrimSpace(nodeName),
+		},
+	}
+	status, err := c.doRequest(ctx, http.MethodPost, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/pods/"+url.PathEscape(strings.TrimSpace(podName))+"/binding", "application/json", body, nil)
+	if err != nil && status == http.StatusConflict {
+		return nil
+	}
+	return err
+}
+
 func (c *kubeClient) deleteCloudNativePGCluster(ctx context.Context, namespace, name string) error {
 	_, err := c.doRequest(ctx, http.MethodDelete, cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name), "", nil, nil)
 	return normalizeDeleteNotFound(err)
