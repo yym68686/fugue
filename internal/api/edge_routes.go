@@ -14,6 +14,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
+	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
@@ -122,7 +123,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
 	}
 	runtimeNodeLabelsByID := s.edgeRouteRuntimeNodeLabels(r.Context())
-	apps = s.overlayManagedAppStatusesCached(apps)
+	apps = s.overlayManagedAppStatusesForEdgeRoutesCached(apps, runtimeByID)
 	appByID := make(map[string]model.App, len(apps))
 	for _, app := range apps {
 		appByID[strings.TrimSpace(app.ID)] = app
@@ -431,9 +432,19 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 		return model.EdgeRouteStatusRuntimeMissing, "runtime not found"
 	case app.Status.CurrentReplicas == 0:
 		return model.EdgeRouteStatusUnavailable, appRouteUnavailableMessage(app)
+	case appUsesKnownNonHTTPRouteProtocol(app):
+		return model.EdgeRouteStatusUnavailable, "app source exposes a non-HTTP service protocol"
 	default:
 		return model.EdgeRouteStatusActive, ""
 	}
+}
+
+func appUsesKnownNonHTTPRouteProtocol(app model.App) bool {
+	if app.Source != nil && sourceimport.ImageUsesNonHTTPServiceProtocol(app.Source.ImageRef) {
+		return true
+	}
+	origin := model.AppOriginSource(app)
+	return origin != nil && sourceimport.ImageUsesNonHTTPServiceProtocol(origin.ImageRef)
 }
 
 func edgeServicePortForApp(app model.App) int {

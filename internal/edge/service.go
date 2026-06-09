@@ -928,6 +928,9 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			req.Out.Header.Set("X-Forwarded-Host", host)
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
 			req.Out.Header.Set("X-Fugue-Edge-App-ID", strings.TrimSpace(route.AppID))
+			if observed != nil && observed.Streaming && observed.Upload {
+				req.Out.Close = true
+			}
 		},
 		Transport: s.newEdgeProxyTransport(observed),
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {

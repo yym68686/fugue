@@ -403,6 +403,50 @@ func (s *Server) overlayManagedAppStatusesCached(apps []model.App) []model.App {
 	return apps
 }
 
+func (s *Server) overlayManagedAppStatusesForEdgeRoutesCached(apps []model.App, runtimeByID map[string]model.Runtime) []model.App {
+	if len(apps) == 0 {
+		return apps
+	}
+	cached, ok, expired := s.managedAppStatusCache.getList()
+	if ok {
+		if expired {
+			s.refreshManagedAppStatusesAsync()
+		}
+		return overlayAppsWithManagedStatusesForEdgeRoutes(apps, cached.items, runtimeByID)
+	}
+	s.refreshManagedAppStatusesAsync()
+	return apps
+}
+
+func overlayAppsWithManagedStatusesForEdgeRoutes(apps []model.App, managedByAppID map[string]runtime.ManagedAppObject, runtimeByID map[string]model.Runtime) []model.App {
+	out := make([]model.App, 0, len(apps))
+	for _, app := range apps {
+		managed, found := managedByAppID[strings.TrimSpace(app.ID)]
+		if found {
+			app = runtime.OverlayAppStatusFromManagedApp(app, managed)
+		} else if appUsesManagedRuntime(app, runtimeByID) {
+			app.Status.Phase = "unavailable"
+			app.Status.CurrentReplicas = 0
+			app.Status.LastMessage = "managed app runtime object not found"
+		}
+		out = append(out, app)
+	}
+	return out
+}
+
+func appUsesManagedRuntime(app model.App, runtimeByID map[string]model.Runtime) bool {
+	runtimeObj, ok := runtimeByID[strings.TrimSpace(appProxyRuntimeID(app))]
+	if !ok {
+		return false
+	}
+	switch strings.TrimSpace(runtimeObj.Type) {
+	case "", model.RuntimeTypeManagedShared, model.RuntimeTypeManagedOwned:
+		return true
+	default:
+		return false
+	}
+}
+
 func overlayAppsWithManagedStatuses(apps []model.App, managedByAppID map[string]runtime.ManagedAppObject) []model.App {
 	out := make([]model.App, 0, len(apps))
 	for _, app := range apps {

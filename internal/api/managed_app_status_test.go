@@ -591,6 +591,54 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 	}
 }
 
+func TestOverlayManagedAppStatusesForEdgeRoutesMarksMissingManagedAppUnavailable(t *testing.T) {
+	t.Parallel()
+
+	present := model.App{
+		ID:       "app_present",
+		TenantID: "tenant_demo",
+		Name:     "present",
+		Spec: model.AppSpec{
+			RuntimeID: model.DefaultManagedRuntimeID,
+			Replicas:  1,
+		},
+		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
+	}
+	missing := present
+	missing.ID = "app_missing"
+	missing.Name = "missing"
+
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(present, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("build managed app: %v", err)
+	}
+	managed.Status = runtime.ManagedAppStatus{
+		Phase:         runtime.ManagedAppPhaseReady,
+		ReadyReplicas: 1,
+	}
+
+	apiServer := &Server{managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second)}
+	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
+		items:     map[string]runtime.ManagedAppObject{present.ID: managed},
+		ok:        true,
+		expiresAt: time.Now().Add(time.Minute),
+	})
+	runtimes := map[string]model.Runtime{
+		model.DefaultManagedRuntimeID: {
+			ID:   model.DefaultManagedRuntimeID,
+			Type: model.RuntimeTypeManagedShared,
+		},
+	}
+
+	updated := apiServer.overlayManagedAppStatusesForEdgeRoutesCached([]model.App{present, missing}, runtimes)
+	if updated[0].Status.CurrentReplicas != 1 {
+		t.Fatalf("expected present managed app to remain ready, got %+v", updated[0].Status)
+	}
+	if updated[1].Status.CurrentReplicas != 0 || updated[1].Status.Phase != "unavailable" || !strings.Contains(updated[1].Status.LastMessage, "not found") {
+		t.Fatalf("expected missing managed app to become unavailable for edge publication, got %+v", updated[1].Status)
+	}
+}
+
 func TestOverlayManagedAppStatusCachedBacksOffAfterBackgroundListError(t *testing.T) {
 	t.Parallel()
 

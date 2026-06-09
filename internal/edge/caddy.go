@@ -493,10 +493,6 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		return nil
 	}
 	hosts := s.caddyWarmupHosts(bundle)
-	customDomainHosts := s.customDomainTLSHosts(bundle)
-	if syncErr := s.syncSharedCaddyTLSCertificates(ctx, customDomainHosts); syncErr != nil && s.Logger != nil {
-		s.Logger.Printf("edge caddy shared TLS sync failed; hosts=%d error=%s", len(customDomainHosts), s.redact(syncErr.Error()))
-	}
 	if len(hosts) == 0 {
 		return nil
 	}
@@ -507,6 +503,10 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 	warmupSignature := configSignature + ":" + strings.Join(hosts, ",")
 	if !s.needsCaddyWarmup(warmupSignature) {
 		return nil
+	}
+	customDomainHosts := s.customDomainTLSHosts(bundle)
+	if syncErr := s.syncSharedCaddyTLSCertificates(ctx, customDomainHosts); syncErr != nil && s.Logger != nil {
+		s.Logger.Printf("edge caddy shared TLS sync failed; hosts=%d error=%s", len(customDomainHosts), s.redact(syncErr.Error()))
 	}
 	warmup := s.caddyWarmup
 	if warmup == nil {
@@ -639,6 +639,9 @@ func (s *Service) customDomainTLSReportHosts(bundle model.EdgeRouteBundle) map[s
 		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
 			continue
 		}
+		if !s.routeCanIssueTLS(route) {
+			continue
+		}
 		out[host] = tlsStatus
 	}
 	if len(out) == 0 {
@@ -664,6 +667,9 @@ func (s *Service) customDomainTLSHosts(bundle model.EdgeRouteBundle) []string {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyCustomDomain) {
+			continue
+		}
+		if !s.routeCanIssueTLS(route) {
 			continue
 		}
 		seen[host] = struct{}{}

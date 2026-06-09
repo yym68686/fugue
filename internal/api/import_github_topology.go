@@ -989,6 +989,9 @@ func (s *Server) topologyRouteAssignmentForService(topologyPlan sourceimport.Top
 		}
 		return route, true, nil
 	}
+	if service.BackingService {
+		return model.AppRoute{}, false, nil
+	}
 	if !servicePublishedByName(topologyPlan.Deployable, serviceName) && !serviceIsPrimaryRequested(topologyPlan.Topology.PrimaryService, serviceName) {
 		return model.AppRoute{}, false, nil
 	}

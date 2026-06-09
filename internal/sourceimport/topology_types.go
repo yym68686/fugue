@@ -207,6 +207,15 @@ func detectServiceTypeFromImage(image string) string {
 	return ""
 }
 
+func ImageUsesNonHTTPServiceProtocol(image string) bool {
+	switch detectServiceTypeFromImage(image) {
+	case ServiceTypePostgres, ServiceTypeRedis, ServiceTypeMySQL:
+		return true
+	default:
+		return false
+	}
+}
+
 func managedBackingService(service ComposeService) bool {
 	if !service.BackingService {
 		return false

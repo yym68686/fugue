@@ -845,6 +845,22 @@ func TestEdgeRouteBindingDerivesNonActiveStatuses(t *testing.T) {
 	if unavailable.Status != model.EdgeRouteStatusUnavailable || unavailable.UpstreamURL != "" {
 		t.Fatalf("expected unavailable route without upstream, got %+v", unavailable)
 	}
+
+	nonHTTP := server.deriveEdgeRouteBinding(req, model.App{
+		ID:       "app_redis",
+		TenantID: "tenant_demo",
+		Name:     "redis",
+		Route:    &model.AppRoute{Hostname: "redis.fugue.pro", ServicePort: 6379},
+		Source:   &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "redis:8-alpine"},
+		Spec: model.AppSpec{
+			Replicas:  1,
+			RuntimeID: model.DefaultManagedRuntimeID,
+		},
+		Status: model.AppStatus{CurrentReplicas: 1},
+	}, "redis.fugue.pro", model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, time.Time{}, time.Time{}, runtimes, nil)
+	if nonHTTP.Status != model.EdgeRouteStatusUnavailable || nonHTTP.UpstreamURL != "" || !strings.Contains(nonHTTP.StatusReason, "non-HTTP") {
+		t.Fatalf("expected known non-HTTP app route to be unavailable, got %+v", nonHTTP)
+	}
 }
 
 func TestEdgeRouteBundleVersionIgnoresNonContentMetadata(t *testing.T) {

@@ -724,6 +724,116 @@ func TestApplyCaddyConfigWarmsPlatformHost(t *testing.T) {
 	}
 }
 
+func TestApplyCaddyConfigSkipsDisabledCustomDomainTLSWork(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/load" {
+			t.Fatalf("unexpected caddy admin request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	var apiCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		http.Error(w, "disabled custom domain must not request TLS work", http.StatusInternalServerError)
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_disabled_custom_tls")
+	custom := bundle.Routes[0]
+	custom.Hostname = "disabled.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	custom.Status = model.EdgeRouteStatusDisabled
+	custom.StatusReason = "desired replicas is 0"
+	custom.UpstreamURL = ""
+	bundle.Routes = []model.EdgeRouteBinding{custom}
+	bundle.TLSAllowlist = []model.EdgeTLSAllowlistEntry{{
+		Hostname:  custom.Hostname,
+		AppID:     custom.AppID,
+		TenantID:  custom.TenantID,
+		Status:    model.AppDomainStatusVerified,
+		TLSStatus: model.AppDomainTLSStatusReady,
+	}}
+
+	var warmups int
+	service := NewService(config.EdgeConfig{
+		APIURL:                api.URL,
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-default",
+		ListenAddr:            "127.0.0.1:7832",
+		CaddyEnabled:          true,
+		CaddyAdminURL:         admin.URL,
+		CaddyListenAddr:       ":18443",
+		CaddyTLSMode:          caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:  ":7833",
+		CaddyDataDir:          t.TempDir(),
+		CaddySharedTLSEnabled: true,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(context.Context, string, string) error {
+		warmups++
+		return nil
+	}
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if warmups != 0 || apiCalls != 0 {
+		t.Fatalf("expected disabled custom domain to skip TLS work, got warmups=%d api_calls=%d", warmups, apiCalls)
+	}
+}
+
+func TestApplyCaddyConfigDoesNotRepeatSharedTLSSyncForUnchangedBundle(t *testing.T) {
+	t.Parallel()
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer admin.Close()
+
+	var bundleFetches int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bundleFetches++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer api.Close()
+
+	bundle := testBundle("routegen_shared_tls_once")
+	custom := bundle.Routes[0]
+	custom.Hostname = "www.customer.com"
+	custom.RouteKind = model.EdgeRouteKindCustomDomain
+	custom.TLSPolicy = model.EdgeRouteTLSPolicyCustomDomain
+	bundle.Routes = []model.EdgeRouteBinding{custom}
+
+	service := NewService(config.EdgeConfig{
+		APIURL:                api.URL,
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-default",
+		ListenAddr:            "127.0.0.1:7832",
+		CaddyEnabled:          true,
+		CaddyAdminURL:         admin.URL,
+		CaddyListenAddr:       ":18443",
+		CaddyTLSMode:          caddyTLSModePublicOnDemand,
+		CaddyProxyListenAddr:  ":7833",
+		CaddyDataDir:          t.TempDir(),
+		CaddySharedTLSEnabled: true,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(context.Context, string, string) error { return nil }
+
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply caddy config: %v", err)
+	}
+	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
+		t.Fatalf("apply unchanged caddy config: %v", err)
+	}
+	if bundleFetches != 1 {
+		t.Fatalf("expected one shared TLS fetch for unchanged bundle, got %d", bundleFetches)
+	}
+}
+
 func TestApplyCaddyConfigWarmsPendingCustomDomainAndReportsReady(t *testing.T) {
 	t.Parallel()
 
@@ -1723,6 +1833,10 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, "uploaded:%s:%s", r.Header.Get("X-Forwarded-Host"), body)
 		case "/events":
+			if !r.Close {
+				t.Errorf("expected streaming upload to use a fresh origin connection")
+			}
+			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = fmt.Fprint(w, "data: ready\n\n")
 			if flusher, ok := w.(http.Flusher); ok {
@@ -1757,7 +1871,7 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 	}
 
 	events := httptest.NewRecorder()
-	eventsReq := httptest.NewRequest(http.MethodGet, "http://www.customer.com/events", nil)
+	eventsReq := httptest.NewRequest(http.MethodPost, "http://www.customer.com/events", strings.NewReader("payload"))
 	eventsReq.Header.Set("Accept", "text/event-stream")
 	service.ProxyHandler().ServeHTTP(events, eventsReq)
 	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), "data: ready") {

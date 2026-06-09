@@ -460,6 +460,8 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 				Kind:           sourceimport.ComposeServiceKindApp,
 				ServiceType:    sourceimport.ServiceTypeRedis,
 				BackingService: true,
+				Published:      true,
+				InternalPort:   6379,
 				Image:          "redis:7-alpine",
 			},
 		}},
@@ -531,10 +533,10 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 		t.Fatalf("expected redis source type %q, got %q", model.AppSourceTypeDockerImage, redisApp.Source.Type)
 	}
 	if redisApp.Route != nil && redisApp.Route.ServicePort != 0 {
-		t.Fatalf("expected redis to remain internal-only before image port detection, got %+v", redisApp.Route)
+		t.Fatalf("expected published redis backing service to remain internal-only, got %+v", redisApp.Route)
 	}
-	if redisApp.Spec.Ports != nil {
-		t.Fatalf("expected redis spec ports to be detected at import time, got %#v", redisApp.Spec.Ports)
+	if len(redisApp.Spec.Ports) != 1 || redisApp.Spec.Ports[0] != 6379 {
+		t.Fatalf("expected redis internal service port 6379, got %#v", redisApp.Spec.Ports)
 	}
 }
 
