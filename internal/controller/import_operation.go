@@ -42,6 +42,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	}
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	placementNodeSelector := s.importBuildPlacementNodeSelector(ctx, app, op)
+	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
 	var output sourceimport.GitHubSourceImportOutput
 	queuedDockerImageRef := ""
 	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
@@ -77,6 +78,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
 			JobLabels:             jobLabels,
 			PlacementNodeSelector: placementNodeSelector,
+			BuilderMemoryCeiling:  builderMemoryCeiling,
 			Stateful:              stateful,
 		})
 	case model.AppSourceTypeUpload:
@@ -112,6 +114,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
 			JobLabels:             jobLabels,
 			PlacementNodeSelector: placementNodeSelector,
+			BuilderMemoryCeiling:  builderMemoryCeiling,
 			Stateful:              stateful,
 		})
 	default:
@@ -240,6 +243,35 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 
 	s.Logger.Printf("operation %s completed import build; managed_image=%s runtime_image=%s deploy=%s", op.ID, managedImageRef, finalSpec.Image, deployOp.ID)
 	return nil
+}
+
+func (s *Service) importBuilderMemoryCeilingBytes(tenantID string) int64 {
+	base := sourceimport.DefaultBuilderHeavyMemoryLimitBytes()
+	maximum := sourceimport.MaxBuilderHeavyMemoryLimitBytes()
+	summary, err := s.Store.GetTenantBillingSummary(strings.TrimSpace(tenantID))
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("builder memory ceiling billing lookup failed tenant=%s: %v", strings.TrimSpace(tenantID), err)
+		}
+		return base
+	}
+	committed, err := s.Store.GetTenantResourceCommitment(strings.TrimSpace(tenantID))
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("builder memory ceiling resource lookup failed tenant=%s: %v", strings.TrimSpace(tenantID), err)
+		}
+		return base
+	}
+	const mebibyte = int64(1024 * 1024)
+	availableMebibytes := maxInt64(0, summary.ManagedCap.MemoryMebibytes-committed.MemoryMebibytes)
+	ceiling := base + availableMebibytes*mebibyte
+	if ceiling < base {
+		return base
+	}
+	if maximum > 0 && ceiling > maximum {
+		return maximum
+	}
+	return ceiling
 }
 
 func (s *Service) importBuildPlacementNodeSelector(ctx context.Context, app model.App, op model.Operation) map[string]string {

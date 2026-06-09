@@ -629,7 +629,14 @@ func runtimeAppResourceRequirements(spec model.AppSpec) map[string]any {
 }
 
 func runtimeResourceRequirements(spec *model.ResourceSpec) map[string]any {
-	return runtimeStaticResourceRequirementsFromSpec(spec, true)
+	if spec == nil {
+		return nil
+	}
+	normalized := *spec
+	if normalized.MemoryMebibytes > 0 && normalized.MemoryLimitMebibytes == 0 {
+		normalized.MemoryLimitMebibytes = model.DefaultPostgresMemoryLimitMebibytes(normalized.MemoryMebibytes)
+	}
+	return runtimeStaticResourceRequirementsFromSpec(&normalized, true)
 }
 
 func runtimeResourceRequirementsForClass(spec *model.ResourceSpec, workloadClass string) map[string]any {

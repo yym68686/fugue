@@ -28,6 +28,7 @@ type UploadSourceImportRequest struct {
 	ComposeService        string
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
+	BuilderMemoryCeiling  int64
 	Stateful              bool
 }
 
@@ -42,6 +43,10 @@ type extractedUploadSource struct {
 }
 
 func (i *Importer) ImportUploadedArchiveSource(ctx context.Context, req UploadSourceImportRequest) (GitHubSourceImportOutput, error) {
+	scopedImporter := *i
+	scopedImporter.BuilderPolicy = builderPodPolicyWithMemoryCeiling(i.BuilderPolicy, req.BuilderMemoryCeiling)
+	i = &scopedImporter
+
 	logger := effectiveBuilderLogger(i.Logger)
 	logUploadImportResult := func(buildStrategy string, output GitHubSourceImportOutput, err error) {
 		logger.Printf(

@@ -116,9 +116,17 @@ func DefaultManagedAppBillingResources() BillingResourceSpec {
 
 func DefaultManagedPostgresResources() ResourceSpec {
 	return ResourceSpec{
-		CPUMilliCores:   DefaultManagedPostgresCPUMilliCores,
-		MemoryMebibytes: DefaultManagedPostgresMemoryMebibytes,
+		CPUMilliCores:        DefaultManagedPostgresCPUMilliCores,
+		MemoryMebibytes:      DefaultManagedPostgresMemoryMebibytes,
+		MemoryLimitMebibytes: DefaultPostgresMemoryLimitMebibytes(DefaultManagedPostgresMemoryMebibytes),
 	}
+}
+
+func DefaultPostgresMemoryLimitMebibytes(requestMebibytes int64) int64 {
+	if requestMebibytes <= 0 {
+		return 0
+	}
+	return (requestMebibytes*3 + 1) / 2
 }
 
 func DefaultManagedPostgresBillingResources() BillingResourceSpec {

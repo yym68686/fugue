@@ -23,6 +23,7 @@ type GitHubSourceImportRequest struct {
 	ComposeService        string
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
+	BuilderMemoryCeiling  int64
 	Stateful              bool
 }
 
@@ -32,6 +33,10 @@ type GitHubSourceImportOutput struct {
 }
 
 func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImportRequest) (GitHubSourceImportOutput, error) {
+	scopedImporter := *i
+	scopedImporter.BuilderPolicy = builderPodPolicyWithMemoryCeiling(i.BuilderPolicy, req.BuilderMemoryCeiling)
+	i = &scopedImporter
+
 	buildStrategy := normalizeGitHubBuildStrategy(req.BuildStrategy)
 	if buildStrategy == "" {
 		buildStrategy = model.AppBuildStrategyAuto

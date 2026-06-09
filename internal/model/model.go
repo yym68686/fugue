@@ -224,10 +224,12 @@ func ApplyAppSpecDefaults(spec *AppSpec) {
 	}
 	spec.GeneratedEnv = NormalizeAppGeneratedEnvSpecs(spec.GeneratedEnv)
 	spec.WorkloadClass = NormalizeWorkloadClass(spec.WorkloadClass)
+	rightSizing := AppRightSizingSpec{Mode: AppRightSizingModeAuto}
 	if spec.RightSizing != nil {
-		normalized := NormalizeAppRightSizingSpec(*spec.RightSizing)
-		spec.RightSizing = &normalized
+		rightSizing = *spec.RightSizing
 	}
+	normalizedRightSizing := NormalizeAppRightSizingSpec(rightSizing)
+	spec.RightSizing = &normalizedRightSizing
 	spec.ImageMirrorLimit = EffectiveAppImageMirrorLimit(spec.ImageMirrorLimit)
 }
 

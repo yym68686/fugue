@@ -10,7 +10,13 @@ import (
 
 const (
 	defaultBuilderJobMaxAttempts = 2
+	oomBuilderJobMaxAttempts     = 4
 )
+
+type builderJobAttempt struct {
+	Number        int
+	OOMRetryCount int
+}
 
 var retriableBuilderFailureSignals = []string{
 	"unexpected eof",
@@ -36,39 +42,50 @@ var retriableBuilderFailureSignals = []string{
 	"disk-pressure",
 	"diskpressure",
 	"evicted",
+	"oomkilled",
+	"out of memory",
 }
 
-func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string, logger *log.Logger, run func(context.Context) error) error {
+func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string, logger *log.Logger, run func(context.Context, builderJobAttempt) error) error {
 	logger = effectiveBuilderLogger(logger)
 	if run == nil {
 		return fmt.Errorf("builder job runner is nil")
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= defaultBuilderJobMaxAttempts; attempt++ {
+	oomRetryCount := 0
+	for attempt := 1; attempt <= oomBuilderJobMaxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			break
 		}
-		err := run(ctx)
+		err := run(ctx, builderJobAttempt{Number: attempt, OOMRetryCount: oomRetryCount})
 		if err == nil {
 			return nil
 		}
 		lastErr = err
 
 		retriable, signal := shouldRetryBuilderJobFailure(err)
+		oomFailure := isBuilderOOMFailure(err, signal)
+		maxAttempts := defaultBuilderJobMaxAttempts
+		if oomFailure || oomRetryCount > 0 {
+			maxAttempts = oomBuilderJobMaxAttempts
+		}
 		logger.Printf(
 			"builder job attempt failed kind=%s name=%s image=%s attempt=%d/%d retriable=%t signal=%s err=%v",
 			strings.TrimSpace(kind),
 			strings.TrimSpace(jobName),
 			strings.TrimSpace(imageRef),
 			attempt,
-			defaultBuilderJobMaxAttempts,
+			maxAttempts,
 			retriable,
 			strings.TrimSpace(signal),
 			err,
 		)
-		if !retriable || attempt >= defaultBuilderJobMaxAttempts {
+		if !retriable || attempt >= maxAttempts {
 			break
+		}
+		if oomFailure {
+			oomRetryCount++
 		}
 
 		delay := builderRetryBackoff(attempt)
@@ -78,7 +95,7 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 			strings.TrimSpace(jobName),
 			strings.TrimSpace(imageRef),
 			attempt+1,
-			defaultBuilderJobMaxAttempts,
+			maxAttempts,
 			delay,
 		)
 
@@ -94,6 +111,14 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 		return lastErr
 	}
 	return context.Cause(ctx)
+}
+
+func isBuilderOOMFailure(err error, signal string) bool {
+	message := strings.ToLower(strings.TrimSpace(signal))
+	if err != nil {
+		message += " " + strings.ToLower(err.Error())
+	}
+	return strings.Contains(message, "oomkilled") || strings.Contains(message, "out of memory")
 }
 
 func shouldRetryBuilderJobFailure(err error) (bool, string) {

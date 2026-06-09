@@ -1392,6 +1392,35 @@ func TestExecuteManagedImportOperationConstrainsBuildPlacementByRuntimeLocation(
 	}
 }
 
+func TestImportBuilderMemoryCeilingUsesTenantManagedHeadroom(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Builder Budget Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    4_000,
+		MemoryMebibytes:  4 * 1024,
+		StorageGibibytes: 20,
+	}); err != nil {
+		t.Fatalf("update tenant billing: %v", err)
+	}
+
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+	want := sourceimport.DefaultBuilderHeavyMemoryLimitBytes() + 4*1024*1024*1024
+	if got := svc.importBuilderMemoryCeilingBytes(tenant.ID); got != want {
+		t.Fatalf("expected builder ceiling %d bytes, got %d", want, got)
+	}
+}
+
 func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCustomValues(t *testing.T) {
 	t.Parallel()
 

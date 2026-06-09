@@ -130,6 +130,37 @@ func TestBuilderDemandForProfileUsesRequestedResourcesWhenPresent(t *testing.T) 
 	}
 }
 
+func TestEscalatedBuilderDemandReservesOOMMemoryTier(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyForAttempt(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1)
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+	if demand.MemoryBytes != parseBuilderBytes("8Gi") {
+		t.Fatalf("expected escalated builder to reserve 8Gi, got %d bytes", demand.MemoryBytes)
+	}
+}
+
+func TestSelectBuilderCandidatesExcludesNodesBelowReservedDemand(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyForAttempt(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 1)
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+	candidates := selectBuilderCandidates(policy, builderWorkloadProfileHeavy, demand, []builderNodeSnapshot{
+		builderTestNode("too-small", "too-small", policy, "4000m", "10Gi", "20Gi", "0", "1Gi", "0"),
+		builderTestNode("fits", "fits", policy, "4000m", "16Gi", "20Gi", "0", "1Gi", "0"),
+	}, nil, nil)
+	candidates = builderFittingCandidates(candidates, demand)
+	if len(candidates) != 1 || candidates[0].Node.Name != "fits" {
+		t.Fatalf("expected only node with 8Gi plus safety headroom, got %+v", candidates)
+	}
+}
+
 func TestSelectBuilderCandidatesReservationsReduceHeadroom(t *testing.T) {
 	t.Parallel()
 

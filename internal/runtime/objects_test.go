@@ -97,6 +97,10 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if got := clusterRequests["memory"]; got != "1024Mi" {
 		t.Fatalf("expected postgres memory request 1024Mi, got %#v", got)
 	}
+	clusterLimits := resourceStringValues(t, clusterResources["limits"])
+	if got := clusterLimits["memory"]; got != "1536Mi" {
+		t.Fatalf("expected postgres memory limit with headroom 1536Mi, got %#v", got)
+	}
 	initdb := clusterSpec["bootstrap"].(map[string]any)["initdb"].(map[string]any)
 	if got := initdb["database"]; got != "uniapi" {
 		t.Fatalf("expected initdb database %q, got %#v", "uniapi", got)

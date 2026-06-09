@@ -329,7 +329,11 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		ImageRef:           req.ImageRef,
 		JobLabels:          req.JobLabels,
 	})
-	return runBuilderJobWithRetry(ctx, "nixpacks", jobName, req.ImageRef, logger, func(attemptCtx context.Context) error {
+	return runBuilderJobWithRetry(ctx, "nixpacks", jobName, req.ImageRef, logger, func(attemptCtx context.Context, attempt builderJobAttempt) error {
+		attemptPolicy, err := builderPodPolicyForJobAttempt(req.PodPolicy, req.WorkloadProfile, attempt)
+		if err != nil {
+			return err
+		}
 		logger.Printf("builder job preflight kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		if err := deleteBuilderJobIfPresent(attemptCtx, namespace, jobName); err != nil {
 			logger.Printf("builder job preflight failed kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
@@ -337,7 +341,7 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 		}
 		logger.Printf("builder job preflight complete kind=nixpacks stage=delete-existing name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
 		logger.Printf("builder job preflight kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s", jobName, namespace, strings.TrimSpace(req.ImageRef))
-		placement, releasePlacement, err := acquireBuilderPlacement(attemptCtx, namespace, jobName, req.PodPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
+		placement, releasePlacement, err := acquireBuilderPlacement(attemptCtx, namespace, jobName, attemptPolicy, req.WorkloadProfile, req.PlacementNodeSelector)
 		if err != nil {
 			logger.Printf("builder job preflight failed kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s err=%v", jobName, namespace, strings.TrimSpace(req.ImageRef), err)
 			return fmt.Errorf("select builder placement: %w", err)
@@ -346,6 +350,7 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 
 		attemptReq := req
 		attemptReq.Placement = placement
+		attemptReq.PodPolicy = attemptPolicy
 		logger.Printf("builder job preflight complete kind=nixpacks stage=reserve-placement name=%s namespace=%s image=%s placement=%s", jobName, namespace, strings.TrimSpace(req.ImageRef), builderPlacementSummary(placement))
 		logger.Printf(
 			"builder job start kind=nixpacks name=%s namespace=%s image=%s operation=%s app=%s placement=%s",

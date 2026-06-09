@@ -10,7 +10,7 @@ func TestRunBuilderJobWithRetryRetriesTransientFailures(t *testing.T) {
 	t.Parallel()
 
 	attempts := 0
-	err := runBuilderJobWithRetry(context.Background(), "dockerfile", "build-demo", "registry.example/demo:upload-abc123", nil, func(context.Context) error {
+	err := runBuilderJobWithRetry(context.Background(), "dockerfile", "build-demo", "registry.example/demo:upload-abc123", nil, func(context.Context, builderJobAttempt) error {
 		attempts++
 		if attempts == 1 {
 			return errors.New("kaniko job build-demo: pod build-demo-abc container kaniko failed: Error: exit_code=1\npod build-demo-abc container kaniko log tail: error building image: failed to get filesystem from image: unexpected EOF")
@@ -30,7 +30,7 @@ func TestRunBuilderJobWithRetryDoesNotRetryPermanentFailures(t *testing.T) {
 
 	attempts := 0
 	wantErr := errors.New("kaniko job build-demo: invalid Dockerfile: unknown instruction FROOOM")
-	err := runBuilderJobWithRetry(context.Background(), "dockerfile", "build-demo", "registry.example/demo:upload-abc123", nil, func(context.Context) error {
+	err := runBuilderJobWithRetry(context.Background(), "dockerfile", "build-demo", "registry.example/demo:upload-abc123", nil, func(context.Context, builderJobAttempt) error {
 		attempts++
 		return wantErr
 	})
@@ -58,6 +58,11 @@ func TestShouldRetryBuilderJobFailureSignals(t *testing.T) {
 		{
 			name:      "evicted pod",
 			message:   "pod build-demo-abc on node node-a failed: Evicted: The node was low on resource: ephemeral-storage.",
+			retriable: true,
+		},
+		{
+			name:      "oom killed container",
+			message:   "pod build-demo-abc on node node-a container executor failed: OOMKilled: exit_code=137",
 			retriable: true,
 		},
 		{
@@ -89,5 +94,14 @@ func TestShouldRetryBuilderJobFailureSignals(t *testing.T) {
 				t.Fatalf("unexpected retry decision for %q: got %t want %t", tc.message, retriable, tc.retriable)
 			}
 		})
+	}
+}
+
+func TestIsBuilderOOMFailure(t *testing.T) {
+	t.Parallel()
+
+	err := errors.New("pod build-demo-abc container executor failed: OOMKilled: exit_code=137")
+	if !isBuilderOOMFailure(err, "oomkilled") {
+		t.Fatal("expected OOMKilled builder failure to trigger memory escalation")
 	}
 }

@@ -481,6 +481,9 @@ func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 	if defaultedApp.Spec.RuntimeID != defaultRuntime.ID {
 		t.Fatalf("expected app runtime %q, got %q", defaultRuntime.ID, defaultedApp.Spec.RuntimeID)
 	}
+	if defaultedApp.Spec.RightSizing == nil || defaultedApp.Spec.RightSizing.Mode != model.AppRightSizingModeAuto {
+		t.Fatalf("expected new app to default to automatic right-sizing, got %+v", defaultedApp.Spec.RightSizing)
+	}
 
 	movedApp, err := s.CreateApp(tenant.ID, project.ID, "moved", "", model.AppSpec{
 		Image:     "nginx:1.27",
@@ -506,6 +509,11 @@ func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 	}
 	if service.Spec.Postgres == nil || service.Spec.Postgres.RuntimeID != defaultRuntime.ID {
 		t.Fatalf("expected service runtime %q, got %+v", defaultRuntime.ID, service.Spec.Postgres)
+	}
+	if got := service.Spec.Postgres.Resources; got == nil ||
+		got.MemoryMebibytes != model.DefaultManagedPostgresMemoryMebibytes ||
+		got.MemoryLimitMebibytes != model.DefaultPostgresMemoryLimitMebibytes(model.DefaultManagedPostgresMemoryMebibytes) {
+		t.Fatalf("expected postgres memory request and headroom defaults, got %+v", got)
 	}
 }
 

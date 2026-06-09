@@ -275,6 +275,9 @@ func normalizePostgresSpecResources(spec *model.AppPostgresSpec) error {
 	if err != nil {
 		return err
 	}
+	if resources.MemoryLimitMebibytes == 0 {
+		resources.MemoryLimitMebibytes = model.DefaultPostgresMemoryLimitMebibytes(resources.MemoryMebibytes)
+	}
 	spec.Resources = resources
 	return nil
 }

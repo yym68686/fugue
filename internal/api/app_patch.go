@@ -135,18 +135,10 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 				httpx.WriteError(w, http.StatusBadRequest, "right_sizing.mode must be disabled, recommend, or auto")
 				return
 			}
-			if normalizedRightSizing.Mode == model.AppRightSizingModeDisabled {
-				spec.RightSizing = nil
-			} else {
-				spec.RightSizing = &normalizedRightSizing
-			}
+			spec.RightSizing = &normalizedRightSizing
 			if !appRightSizingEqual(currentRightSizing, spec.RightSizing) {
 				deployChanged = true
-				if spec.RightSizing == nil {
-					auditMetadata["right_sizing"] = "disabled"
-				} else {
-					auditMetadata["right_sizing"] = spec.RightSizing.Mode
-				}
+				auditMetadata["right_sizing"] = spec.RightSizing.Mode
 			}
 		}
 

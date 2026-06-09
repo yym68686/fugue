@@ -1,6 +1,8 @@
 package sourceimport
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 
 	"fugue/internal/model"
@@ -14,6 +16,7 @@ const (
 	defaultBuilderSelectionTimeoutSec     = 600
 	defaultBuilderRetryIntervalSec        = 5
 	defaultBuilderReservationLeaseSec     = 120
+	defaultBuilderHeavyMemoryCeiling      = "16Gi"
 )
 
 type builderWorkloadProfile string
@@ -48,6 +51,7 @@ type BuilderPodPolicy struct {
 	SelectionTimeoutSeconds      int                   `json:"selectionTimeoutSeconds,omitempty"`
 	RetryIntervalSeconds         int                   `json:"retryIntervalSeconds,omitempty"`
 	ReservationLeaseDurationSecs int                   `json:"reservationLeaseDurationSeconds,omitempty"`
+	HeavyMemoryLimitCeiling      string                `json:"heavyMemoryLimitCeiling,omitempty"`
 	Tolerations                  []BuilderToleration   `json:"tolerations,omitempty"`
 	Light                        BuilderWorkloadPolicy `json:"light,omitempty"`
 	Heavy                        BuilderWorkloadPolicy `json:"heavy,omitempty"`
@@ -61,6 +65,7 @@ func defaultBuilderPodPolicy() BuilderPodPolicy {
 		SelectionTimeoutSeconds:      defaultBuilderSelectionTimeoutSec,
 		RetryIntervalSeconds:         defaultBuilderRetryIntervalSec,
 		ReservationLeaseDurationSecs: defaultBuilderReservationLeaseSec,
+		HeavyMemoryLimitCeiling:      defaultBuilderHeavyMemoryCeiling,
 		Light: BuilderWorkloadPolicy{
 			Resources: BuilderResourceRequirements{
 				Requests: map[string]string{
@@ -116,10 +121,97 @@ func normalizeBuilderPodPolicy(policy BuilderPodPolicy) BuilderPodPolicy {
 	if policy.ReservationLeaseDurationSecs <= 0 {
 		policy.ReservationLeaseDurationSecs = defaults.ReservationLeaseDurationSecs
 	}
+	if strings.TrimSpace(policy.HeavyMemoryLimitCeiling) == "" {
+		policy.HeavyMemoryLimitCeiling = defaults.HeavyMemoryLimitCeiling
+	}
 	policy.Tolerations = normalizeBuilderTolerations(policy.Tolerations)
 	policy.Light = normalizeBuilderWorkloadPolicy(policy.Light, defaults.Light)
 	policy.Heavy = normalizeBuilderWorkloadPolicy(policy.Heavy, defaults.Heavy)
 	return policy
+}
+
+func DefaultBuilderHeavyMemoryLimitBytes() int64 {
+	return parseBuilderBytes(defaultBuilderPodPolicy().Heavy.Resources.Limits["memory"])
+}
+
+func MaxBuilderHeavyMemoryLimitBytes() int64 {
+	return parseBuilderBytes(defaultBuilderHeavyMemoryCeiling)
+}
+
+func builderPodPolicyWithMemoryCeiling(policy BuilderPodPolicy, ceilingBytes int64) BuilderPodPolicy {
+	policy = normalizeBuilderPodPolicy(policy)
+	if ceilingBytes <= 0 {
+		return policy
+	}
+	baseBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["memory"])
+	if ceilingBytes < baseBytes {
+		ceilingBytes = baseBytes
+	}
+	if maxBytes := MaxBuilderHeavyMemoryLimitBytes(); maxBytes > 0 && ceilingBytes > maxBytes {
+		ceilingBytes = maxBytes
+	}
+	policy.HeavyMemoryLimitCeiling = formatBuilderMemoryBytes(ceilingBytes)
+	return policy
+}
+
+func builderPodPolicyForAttempt(policy BuilderPodPolicy, profile builderWorkloadProfile, oomRetryCount int) BuilderPodPolicy {
+	policy = normalizeBuilderPodPolicy(policy)
+	if profile != builderWorkloadProfileHeavy || oomRetryCount <= 0 {
+		return policy
+	}
+	currentBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["memory"])
+	ceilingBytes := parseBuilderBytes(policy.HeavyMemoryLimitCeiling)
+	if ceilingBytes < currentBytes {
+		ceilingBytes = currentBytes
+	}
+	for retry := 0; retry < oomRetryCount && currentBytes < ceilingBytes; retry++ {
+		currentBytes = nextBuilderHeavyMemoryTier(currentBytes)
+		if currentBytes > ceilingBytes {
+			currentBytes = ceilingBytes
+		}
+	}
+	memory := formatBuilderMemoryBytes(currentBytes)
+	policy.Heavy.Resources.Requests["memory"] = memory
+	policy.Heavy.Resources.Limits["memory"] = memory
+	return policy
+}
+
+func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkloadProfile, attempt builderJobAttempt) (BuilderPodPolicy, error) {
+	current := builderPodPolicyForAttempt(policy, profile, attempt.OOMRetryCount)
+	if attempt.OOMRetryCount <= 0 || profile != builderWorkloadProfileHeavy {
+		return current, nil
+	}
+	previous := builderPodPolicyForAttempt(policy, profile, attempt.OOMRetryCount-1)
+	currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["memory"])
+	previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["memory"])
+	if currentBytes <= previousBytes {
+		return BuilderPodPolicy{}, fmt.Errorf(
+			"builder memory escalation is capped at %s; increase the tenant managed memory envelope or free capacity before retrying",
+			current.Heavy.Resources.Limits["memory"],
+		)
+	}
+	return current, nil
+}
+
+func nextBuilderHeavyMemoryTier(currentBytes int64) int64 {
+	for _, tier := range []int64{
+		8 * 1024 * 1024 * 1024,
+		12 * 1024 * 1024 * 1024,
+		16 * 1024 * 1024 * 1024,
+	} {
+		if currentBytes < tier {
+			return tier
+		}
+	}
+	return currentBytes
+}
+
+func formatBuilderMemoryBytes(value int64) string {
+	const mebibyte = int64(1024 * 1024)
+	if value <= 0 {
+		return ""
+	}
+	return strconv.FormatInt((value+mebibyte-1)/mebibyte, 10) + "Mi"
 }
 
 func normalizeBuilderTolerations(tolerations []BuilderToleration) []BuilderToleration {

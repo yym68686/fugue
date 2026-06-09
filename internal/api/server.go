@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,6 +93,8 @@ type Server struct {
 	dnsDelegationProbe           dnsDelegationProbeFunc
 	dnsParentNSLookup            dnsParentNSLookupFunc
 	logStreamTuning              logStreamTuning
+	oomRightSizingMu             sync.Mutex
+	oomRightSizingEvents         map[string]time.Time
 	ready                        atomic.Bool
 }
 
@@ -166,6 +169,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		dnsDelegationProbe:   defaultDNSDelegationProbe,
 		dnsParentNSLookup:    defaultDNSParentNSLookup,
 		logStreamTuning:      defaultLogStreamTuning(),
+		oomRightSizingEvents: map[string]time.Time{},
 	}
 	if server.registryPullBase == "" {
 		server.registryPullBase = server.registryPushBase

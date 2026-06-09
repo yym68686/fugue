@@ -175,6 +175,9 @@ func (s *Server) applyAppRightSizingRecommendation(
 	} else if hasActive {
 		return recommendation, nil, true, nil
 	}
+	if err := s.validateAutoscalingTenantEnvelope(app, spec); err != nil {
+		return recommendation, nil, false, err
+	}
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
@@ -219,11 +222,15 @@ func (s *Server) applyAutoRightSizingOnce() {
 		return
 	}
 	for _, app := range apps {
-		if app.Spec.RightSizing == nil {
+		spec := model.AppRightSizingSpec{Mode: model.AppRightSizingModeAuto}
+		if app.Spec.RightSizing != nil {
+			spec = model.NormalizeAppRightSizingSpec(*app.Spec.RightSizing)
+		}
+		if spec.Mode != model.AppRightSizingModeAuto {
 			continue
 		}
-		spec := model.NormalizeAppRightSizingSpec(*app.Spec.RightSizing)
-		if spec.Mode != model.AppRightSizingModeAuto {
+		runtimeObj, err := s.store.GetRuntime(app.Spec.RuntimeID)
+		if err != nil || runtimeObj.Type == model.RuntimeTypeExternalOwned {
 			continue
 		}
 		if _, _, _, err := s.applyAppRightSizingRecommendation(nil, app, spec.WindowHours, spec.MinSamples, model.ActorTypeSystem, "fugue-api/right-sizing"); err != nil && s.log != nil {

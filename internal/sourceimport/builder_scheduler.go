@@ -298,6 +298,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 		return builderJobPlacement{}, "", err
 	}
 	candidates := selectBuilderCandidates(s.policy, s.profile, s.demand, snapshots, reservations, s.requiredNodeLabels)
+	candidates = builderFittingCandidates(candidates, s.demand)
 	candidates = builderPlacementCandidates(candidates, s.profile, s.candidateCount)
 	if len(candidates) == 0 {
 		return builderJobPlacement{}, "", fmt.Errorf("%w for profile %s", errNoBuilderPlacement, s.profile)
@@ -334,6 +335,7 @@ func (s *builderScheduler) tryReservePlacement(ctx context.Context, jobName stri
 			return builderJobPlacement{}, "", err
 		}
 		refreshedCandidates := selectBuilderCandidates(s.policy, s.profile, s.demand, refreshedSnapshots, refreshedReservations, s.requiredNodeLabels)
+		refreshedCandidates = builderFittingCandidates(refreshedCandidates, s.demand)
 		refreshedCandidates = builderPlacementCandidates(refreshedCandidates, s.profile, s.candidateCount)
 		if !builderCandidatesContainNode(refreshedCandidates, candidate.Node.Name) {
 			releaseLock()
@@ -599,6 +601,16 @@ func sortedBuilderCandidates(policy BuilderPodPolicy, profile builderWorkloadPro
 		return builderCandidateLess(demand, candidates[i], candidates[j])
 	})
 	return candidates
+}
+
+func builderFittingCandidates(candidates []builderCandidate, demand builderResourceDemand) []builderCandidate {
+	fitting := make([]builderCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if builderDemandFits(candidate.Available, demand) {
+			fitting = append(fitting, candidate)
+		}
+	}
+	return fitting
 }
 
 func builderPlacementCandidates(candidates []builderCandidate, profile builderWorkloadProfile, candidateCount int) []builderCandidate {
