@@ -75,8 +75,21 @@ func (s *Service) pruneExcessManagedAppImagesWithSnapshot(
 		if _, inUse := remainingRefs[imageRef]; inUse {
 			continue
 		}
-		if _, err := deleteImage(ctx, imageRef); err != nil {
+		digestInUse, err := s.managedImageDigestInUse(ctx, imageRef, liveRefs)
+		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if digestInUse {
+			continue
+		}
+		result, err := deleteImage(ctx, imageRef)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if result.Deleted {
+			s.markRegistryGCNeeded(ctx, "managed app image retention deleted "+imageRef)
 		}
 	}
 	return errors.Join(errs...)

@@ -151,3 +151,25 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 		t.Fatalf("expected app observability endpoint from env, got %q", cfg.AppObservabilityEndpoint)
 	}
 }
+
+func TestControllerFromEnvReadsRegistryMaintenanceNames(t *testing.T) {
+	t.Setenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "registry-gc-state")
+	t.Setenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "registry-retention")
+	t.Setenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "registry-gc")
+
+	cfg := ControllerFromEnv()
+	if cfg.RegistryGCLeaseName != "registry-gc-state" ||
+		cfg.RegistryJanitorCronJobName != "registry-retention" ||
+		cfg.RegistryGCCronJobName != "registry-gc" {
+		t.Fatalf("unexpected registry maintenance names: %+v", cfg)
+	}
+}
+
+func TestAPIFromEnvReadsRegistryGCLeaseName(t *testing.T) {
+	t.Setenv("FUGUE_REGISTRY_GC_LEASE_NAME", "registry-gc-state")
+
+	cfg := APIFromEnv()
+	if cfg.RegistryGCLeaseName != "registry-gc-state" {
+		t.Fatalf("expected registry GC lease name from env, got %q", cfg.RegistryGCLeaseName)
+	}
+}

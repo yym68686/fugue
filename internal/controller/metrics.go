@@ -49,7 +49,7 @@ func (s *Service) MetricsHandler() http.Handler {
 	return http.HandlerFunc(s.handleMetrics)
 }
 
-func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	observability.WriteComponentRuntimeMetrics(w, "controller", s.metricsStartedAt)
 	observability.WriteGaugeMetric(w, "fugue_controller_leader_election_enabled", "Whether controller leader election is enabled.", nil, boolGauge(s.Config.LeaderElectionEnabled))
@@ -61,6 +61,30 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_activate"}, float64(s.Config.ForegroundActivateWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "github_sync_import"}, float64(s.Config.GitHubSyncImportWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "github_sync_activate"}, float64(s.Config.GitHubSyncActivateWorkers))
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	registry := registryMaintenanceStatus{}
+	if s.readRegistryMaintenance != nil {
+		registry = s.readRegistryMaintenance(ctx)
+	} else {
+		registry = s.readRegistryMaintenanceStatus(ctx)
+	}
+	observability.WriteMetricHeader(w, "fugue_registry_janitor_present", "Whether the configured registry maintenance CronJob exists and is not suspended.", "gauge")
+	observability.WriteMetricSample(w, "fugue_registry_janitor_present", map[string]string{"job": "retention"}, boolGauge(registry.JanitorPresent))
+	observability.WriteMetricSample(w, "fugue_registry_janitor_present", map[string]string{"job": "gc"}, boolGauge(registry.GCCronJobPresent))
+	observability.WriteGaugeMetric(w, "fugue_registry_gc_running", "Whether protected registry garbage collection is currently running.", nil, boolGauge(registry.GCRunning))
+	observability.WriteGaugeMetric(w, "fugue_registry_gc_requested", "Whether image deletion requested a registry garbage collection newer than the last successful run.", nil, boolGauge(registry.GCRequested))
+	lastGCTimestamp := float64(0)
+	if !registry.LastGCTimestamp.IsZero() {
+		lastGCTimestamp = float64(registry.LastGCTimestamp.Unix())
+	}
+	observability.WriteGaugeMetric(w, "fugue_registry_gc_last_success_timestamp_seconds", "Unix timestamp of the last successful protected registry garbage collection.", nil, lastGCTimestamp)
+	observability.WriteGaugeMetric(w, "fugue_registry_storage_used_bytes", "Bytes used on the dedicated registry storage filesystem at the last maintenance scan.", nil, float64(registry.StorageUsedBytes))
+	observability.WriteGaugeMetric(w, "fugue_registry_storage_capacity_bytes", "Capacity of the dedicated registry storage filesystem at the last maintenance scan.", nil, float64(registry.StorageCapacityBytes))
+	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_bytes", "Registry blob bytes not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobBytes))
+	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
+	observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 }
 
 func boolGauge(value bool) float64 {

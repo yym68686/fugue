@@ -32,7 +32,8 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 		s.registryPushBase,
 		s.registryPullBase,
 	)
-	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, append(append([]model.App(nil), remainingApps...), app)))
+	liveRefs := s.liveManagedImageRefSet(ctx, append(append([]model.App(nil), remainingApps...), app))
+	mergeManagedImageRefSets(remainingRefs, liveRefs)
 
 	imageRefs := appimages.ManagedImageRefs(
 		app,
@@ -50,6 +51,14 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 		if _, inUse := remainingRefs[imageRef]; inUse {
 			continue
 		}
+		digestInUse, err := s.managedImageDigestInUse(ctx, imageRef, liveRefs)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if digestInUse {
+			continue
+		}
 		if _, err := s.appImageRegistry.DeleteImage(ctx, imageRef); err != nil {
 			errs = append(errs, err)
 			continue
@@ -57,7 +66,7 @@ func (s *Server) cleanupDeletedAppImages(ctx context.Context, app model.App) err
 		gcNeeded = true
 	}
 	if gcNeeded {
-		if err := s.runAppImageRegistryGarbageCollect(ctx); err != nil {
+		if err := s.requestAppImageRegistryGarbageCollect(ctx, "API app deletion removed managed image manifests"); err != nil {
 			errs = append(errs, err)
 		}
 	}

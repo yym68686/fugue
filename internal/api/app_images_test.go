@@ -277,20 +277,14 @@ func TestHandleDeleteAppImageDeletesHistoricalRegistryVersion(t *testing.T) {
 	t.Parallel()
 
 	_, server, apiKey, _, _, app, fakeRegistry, oldImageRef, _, _ := setupAppImagesTestServer(t)
-	pod := kubePodInfo{}
-	pod.Metadata.Name = "fugue-fugue-registry-abc123"
-	pod.Metadata.CreationTimestamp = time.Date(2026, 4, 3, 9, 0, 0, 0, time.UTC)
-	pod.Status.Phase = "Running"
-	server.newFilesystemPodLister = func(namespace string) (filesystemPodLister, error) {
-		if namespace != "fugue-system" {
-			t.Fatalf("expected control-plane namespace fugue-system, got %q", namespace)
+	gcRequests := 0
+	server.requestRegistryGC = func(_ context.Context, reason string) error {
+		gcRequests++
+		if reason == "" {
+			t.Fatal("expected registry GC request reason")
 		}
-		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+		return nil
 	}
-	runner := &fakeFilesystemExecRunner{
-		outputs: [][]byte{{}},
-	}
-	server.filesystemExecRunner = runner
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/images/delete", apiKey, map[string]any{
 		"image_ref": oldImageRef,
@@ -308,45 +302,26 @@ func TestHandleDeleteAppImageDeletesHistoricalRegistryVersion(t *testing.T) {
 	if response.ReclaimedSizeBytes != 60 {
 		t.Fatalf("expected reclaimed size estimate 60, got %#v", response)
 	}
-	if response.ReclaimRequiresGC {
-		t.Fatalf("expected delete response to report immediate cleanup, got %#v", response)
+	if !response.ReclaimRequiresGC {
+		t.Fatalf("expected delete response to report queued protected cleanup, got %#v", response)
 	}
-	if response.ReclaimNote != "" {
-		t.Fatalf("expected delete response to omit reclaim note, got %q", response.ReclaimNote)
+	if response.ReclaimNote == "" {
+		t.Fatal("expected delete response to explain queued registry GC")
 	}
 	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != oldImageRef {
 		t.Fatalf("expected fake registry delete for %q, got %#v", oldImageRef, fakeRegistry.deleted)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("expected registry GC exec call, got %d", len(runner.calls))
-	}
-	if runner.calls[0].namespace != "fugue-system" {
-		t.Fatalf("expected registry GC namespace fugue-system, got %#v", runner.calls[0])
-	}
-	if runner.calls[0].podName != pod.Metadata.Name {
-		t.Fatalf("expected registry GC pod %q, got %#v", pod.Metadata.Name, runner.calls[0])
-	}
-	if runner.calls[0].container != "registry" {
-		t.Fatalf("expected registry GC container registry, got %#v", runner.calls[0])
-	}
-	if got := runner.calls[0].command; len(got) != 4 || got[0] != "registry" || got[1] != "garbage-collect" || got[2] != "--delete-untagged" || got[3] != "/etc/docker/registry/config.yml" {
-		t.Fatalf("unexpected registry GC command %#v", got)
+	if gcRequests != 1 {
+		t.Fatalf("expected one registry GC request, got %d", gcRequests)
 	}
 }
 
-func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCFails(t *testing.T) {
+func TestHandleDeleteAppImageReturnsBadGatewayWhenRegistryGCRequestFails(t *testing.T) {
 	t.Parallel()
 
 	_, server, apiKey, _, _, app, fakeRegistry, oldImageRef, _, _ := setupAppImagesTestServer(t)
-	pod := kubePodInfo{}
-	pod.Metadata.Name = "fugue-fugue-registry-abc123"
-	pod.Metadata.CreationTimestamp = time.Date(2026, 4, 3, 9, 0, 0, 0, time.UTC)
-	pod.Status.Phase = "Running"
-	server.newFilesystemPodLister = func(string) (filesystemPodLister, error) {
-		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
-	}
-	server.filesystemExecRunner = &fakeFilesystemExecRunner{
-		errs: []error{errors.New("gc failed")},
+	server.requestRegistryGC = func(context.Context, string) error {
+		return errors.New("queue failed")
 	}
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/images/delete", apiKey, map[string]any{
@@ -509,9 +484,11 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
 		ControlPlaneNamespace:       "fugue-system",
 		ControlPlaneReleaseInstance: "fugue",
+		RegistryGCLeaseName:         "fugue-fugue-registry-gc",
 		RegistryPushBase:            pushBase,
 		RegistryPullBase:            pullBase,
 	})
+	server.requestRegistryGC = func(context.Context, string) error { return nil }
 	fakeRegistry := &fakeAppImageRegistry{
 		images: map[string]appImageRegistryInspectResult{
 			oldImageRef: {

@@ -21,6 +21,7 @@ type APIConfig struct {
 	WorkloadIdentitySigningKey   string
 	ControlPlaneNamespace        string
 	ControlPlaneReleaseInstance  string
+	RegistryGCLeaseName          string
 	ControlPlaneGitHubRepository string
 	ControlPlaneGitHubWorkflow   string
 	ControlPlaneGitHubAPIURL     string
@@ -83,6 +84,9 @@ type ControllerConfig struct {
 	ImageTrackingTimeout          time.Duration
 	ImageRetentionSweepInterval   time.Duration
 	ImageRetentionSweepTimeout    time.Duration
+	RegistryGCLeaseName           string
+	RegistryJanitorCronJobName    string
+	RegistryGCCronJobName         string
 	ManagedAppRolloutTimeout      time.Duration
 	PollInterval                  time.Duration
 	FallbackPollInterval          time.Duration
@@ -219,6 +223,7 @@ func APIFromEnv() APIConfig {
 		WorkloadIdentitySigningKey:   strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		ControlPlaneNamespace:        getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
 		ControlPlaneReleaseInstance:  getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
+		RegistryGCLeaseName:          getenv("FUGUE_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
 		ControlPlaneGitHubRepository: strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY")),
 		ControlPlaneGitHubWorkflow:   getenv("FUGUE_CONTROL_PLANE_GITHUB_WORKFLOW", "deploy-control-plane.yml"),
 		ControlPlaneGitHubAPIURL:     getenv("FUGUE_CONTROL_PLANE_GITHUB_API_URL", "https://api.github.com"),
@@ -333,6 +338,9 @@ func ControllerFromEnv() ControllerConfig {
 		ImageTrackingTimeout:          getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_TIMEOUT", 20*time.Second),
 		ImageRetentionSweepInterval:   getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL", 6*time.Hour),
 		ImageRetentionSweepTimeout:    getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT", 5*time.Minute),
+		RegistryGCLeaseName:           getenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
+		RegistryJanitorCronJobName:    getenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "fugue-registry-janitor"),
+		RegistryGCCronJobName:         getenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "fugue-registry-gc"),
 		ManagedAppRolloutTimeout:      getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", 10*time.Minute),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 15*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),

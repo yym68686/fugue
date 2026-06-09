@@ -72,6 +72,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: FUGUE_CONTROL_PLANE_RELEASE_INSTANCE
               value: {{ .Release.Name | quote }}
+            - name: FUGUE_REGISTRY_GC_LEASE_NAME
+              value: {{ include "fugue.registryGCName" . | quote }}
             - name: FUGUE_DATABASE_URL
               valueFrom:
                 secretKeyRef:

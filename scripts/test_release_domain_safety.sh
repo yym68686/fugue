@@ -59,4 +59,11 @@ node_local_build_plane_changed || fail "image-cache code changes must mark build
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/registry-deployment.yaml'
 stateful_dependency_changed || fail "registry template changes must mark stateful dependency changed"
 
+for maintenance_template in registry-janitor-cronjob.yaml registry-gc-cronjob.yaml registry-gc-lease.yaml; do
+  FUGUE_RELEASE_CHANGED_FILES="deploy/helm/fugue/templates/${maintenance_template}"
+  if stateful_dependency_changed; then
+    fail "${maintenance_template} must be releasable without the stateful dependency override"
+  fi
+done
+
 printf '[test_release_domain_safety] ok\n'

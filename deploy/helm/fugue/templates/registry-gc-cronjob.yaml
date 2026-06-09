@@ -1,0 +1,297 @@
+{{- $registryPersistence := (.Values.registry.persistence | default (dict)) -}}
+{{- if and .Values.registry.enabled .Values.registryGC.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fugue.registryGCName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry-gc") | nindent 4 }}
+spec:
+  schedule: {{ .Values.registryGC.schedule | quote }}
+  concurrencyPolicy: {{ .Values.registryGC.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.registryGC.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.registryGC.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.registryGC.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.registryGC.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "registry-gc") | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
+            {{- with .Values.podAnnotations }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: registry-gc
+              image: {{ include "fugue.imageRef" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "digest" .Values.controller.image.digest) | quote }}
+              imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+              command:
+                - /bin/bash
+                - -lc
+                - |
+                  set -euo pipefail
+
+                  namespace="${POD_NAMESPACE}"
+                  registry_deploy="{{ include "fugue.fullname" . }}-registry"
+                  gc_lease="{{ include "fugue.registryGCName" . }}"
+                  original_replicas=""
+                  gc_started="false"
+                  keep_file="/tmp/registry-workload-digests"
+
+                  log() {
+                    printf '[registry-gc] %s\n' "$*"
+                  }
+
+                  ensure_gc_lease() {
+                    if kubectl -n "${namespace}" get "lease/${gc_lease}" >/dev/null 2>&1; then
+                      return 0
+                    fi
+                    cat <<EOF | kubectl -n "${namespace}" create -f - >/dev/null
+                  apiVersion: coordination.k8s.io/v1
+                  kind: Lease
+                  metadata:
+                    name: ${gc_lease}
+                    labels:
+                      app.kubernetes.io/managed-by: fugue
+                      app.kubernetes.io/component: registry-gc
+                  spec:
+                    holderIdentity: registry-gc
+                  EOF
+                  }
+
+                  annotate_gc() {
+                    kubectl -n "${namespace}" annotate "lease/${gc_lease}" --overwrite "$@" >/dev/null
+                  }
+
+                  active_builder_jobs() {
+                    kubectl get jobs --all-namespaces \
+                      -l 'app.kubernetes.io/managed-by=fugue,app.kubernetes.io/component=builder' \
+                      -o jsonpath='{range .items[*]}{.status.active}{"\n"}{end}' 2>/dev/null \
+                      | awk '$1 + 0 > 0 {count += $1} END {print count + 0}'
+                  }
+
+                  active_retention_jobs() {
+                    kubectl -n "${namespace}" get jobs \
+                      -l 'app.kubernetes.io/managed-by=fugue,app.kubernetes.io/component=registry-janitor' \
+                      -o jsonpath='{range .items[*]}{.status.active}{"\n"}{end}' 2>/dev/null \
+                      | awk '$1 + 0 > 0 {count += $1} END {print count + 0}'
+                  }
+
+                  active_imports() {
+                    fugue-registry-maintenance active-imports --format count
+                  }
+
+                  maintenance_safe() {
+                    local builders imports retention
+                    builders="$(active_builder_jobs)"
+                    imports="$(active_imports)"
+                    retention="$(active_retention_jobs)"
+                    if [[ "${builders}" -gt 0 || "${imports}" -gt 0 || "${retention}" -gt 0 ]]; then
+                      log "skip GC: active_builder_jobs=${builders} active_import_operations=${imports} active_retention_jobs=${retention}"
+                      return 1
+                    fi
+                    return 0
+                  }
+
+                  collect_workload_digests() {
+                    local workload_values="/tmp/registry-workload-values"
+                    if ! kubectl get deployments,statefulsets,daemonsets --all-namespaces \
+                      -o jsonpath='{range .items[*]}{range .spec.template.spec.initContainers[*]}{.image}{"\n"}{range .env[*]}{.value}{"\n"}{end}{end}{range .spec.template.spec.containers[*]}{.image}{"\n"}{range .env[*]}{.value}{"\n"}{end}{end}{end}' \
+                      >"${workload_values}"; then
+                      log "abort GC: workload image reference scan failed"
+                      return 1
+                    fi
+
+                    : >"${keep_file}"
+                    while IFS= read -r value; do
+                      case "${value}" in
+                        "${FUGUE_REGISTRY_PUSH_BASE}/"*|"${FUGUE_REGISTRY_PULL_BASE}/"*|*/fugue-apps/*)
+                          printf '%s\n' "${value}" \
+                            | grep -Eo 'sha256:[0-9a-fA-F]{64}' \
+                            | tr '[:upper:]' '[:lower:]' >>"${keep_file}" || true
+                          ;;
+                      esac
+                    done <"${workload_values}"
+                    sort -u -o "${keep_file}" "${keep_file}"
+                  }
+
+                  scan_registry() {
+                    fugue-registry-maintenance scan \
+                      --root /var/lib/registry/docker/registry/v2 \
+                      --keep-digest-file "${keep_file}" \
+                      --format env
+                  }
+
+                  restore_registry() {
+                    local exit_code=$?
+                    if [[ -n "${original_replicas}" ]]; then
+                      kubectl -n "${namespace}" scale "deploy/${registry_deploy}" --replicas="${original_replicas}" >/dev/null || true
+                      if [[ "${original_replicas}" -gt 0 ]]; then
+                        kubectl -n "${namespace}" rollout status "deploy/${registry_deploy}" --timeout=180s >/dev/null || true
+                      fi
+                    fi
+                    if [[ "${gc_started}" == "true" && "${exit_code}" -ne 0 ]]; then
+                      annotate_gc \
+                        fugue.pro/registry-gc-running=false \
+                        fugue.pro/registry-gc-last-status=failed \
+                        fugue.pro/registry-gc-last-completed-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+                    fi
+                    exit "${exit_code}"
+                  }
+                  trap restore_registry EXIT
+
+                  ensure_gc_lease
+                  if ! maintenance_safe; then
+                    annotate_gc fugue.pro/registry-gc-last-status=skipped-active-import
+                    exit 0
+                  fi
+
+                  collect_workload_digests
+                  scan_registry >/tmp/registry-pre.env
+                  source /tmp/registry-pre.env
+                  if [[ "${REGISTRY_MISSING_KEEP_DIGEST_COUNT}" -gt 0 ]]; then
+                    log "abort GC: ${REGISTRY_MISSING_KEEP_DIGEST_COUNT} workload digests are absent from registry storage"
+                    annotate_gc \
+                      fugue.pro/registry-gc-last-status=blocked-missing-workload-digest \
+                      fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}"
+                    exit 0
+                  fi
+
+                  gc_started="true"
+                  annotate_gc \
+                    fugue.pro/registry-gc-running=true \
+                    fugue.pro/registry-gc-last-status=running \
+                    fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}" \
+                    fugue.pro/registry-storage-used-bytes="${REGISTRY_STORAGE_USED_BYTES}" \
+                    fugue.pro/registry-storage-capacity-bytes="${REGISTRY_STORAGE_CAPACITY_BYTES}" \
+                    fugue.pro/registry-unreferenced-blob-bytes="${REGISTRY_UNREFERENCED_BLOB_BYTES}" \
+                    fugue.pro/registry-unreferenced-blob-count="${REGISTRY_UNREFERENCED_BLOB_COUNT}"
+
+                  sleep {{ .Values.registryGC.quiesceSeconds }}
+                  if ! maintenance_safe; then
+                    annotate_gc \
+                      fugue.pro/registry-gc-running=false \
+                      fugue.pro/registry-gc-last-status=skipped-race-with-import
+                    gc_started="false"
+                    exit 0
+                  fi
+
+                  collect_workload_digests
+                  scan_registry >/tmp/registry-pre.env
+                  source /tmp/registry-pre.env
+                  if [[ "${REGISTRY_MISSING_KEEP_DIGEST_COUNT}" -gt 0 ]]; then
+                    log "abort GC after quiesce: ${REGISTRY_MISSING_KEEP_DIGEST_COUNT} workload digests are absent from registry storage"
+                    annotate_gc \
+                      fugue.pro/registry-gc-running=false \
+                      fugue.pro/registry-gc-last-status=blocked-missing-workload-digest \
+                      fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}"
+                    gc_started="false"
+                    exit 0
+                  fi
+
+                  original_replicas="$(kubectl -n "${namespace}" get "deploy/${registry_deploy}" -o jsonpath='{.spec.replicas}')"
+                  original_replicas="${original_replicas:-1}"
+                  kubectl -n "${namespace}" scale "deploy/${registry_deploy}" --replicas=0 >/dev/null
+                  for attempt in $(seq 1 90); do
+                    if [[ -z "$(kubectl -n "${namespace}" get pods \
+                      -l 'app.kubernetes.io/component=registry' \
+                      -o name 2>/dev/null)" ]]; then
+                      break
+                    fi
+                    sleep 2
+                  done
+                  if [[ -n "$(kubectl -n "${namespace}" get pods \
+                    -l 'app.kubernetes.io/component=registry' \
+                    -o name 2>/dev/null)" ]]; then
+                    log "abort GC: registry pod did not terminate within 180 seconds"
+                    exit 1
+                  fi
+
+                  # Digest-pinned workloads remain safe because stale manifests
+                  # are removed only by the controller after checking the full
+                  # workload keep set.
+                  registry garbage-collect /etc/docker/registry/config.yml
+
+                  scan_registry >/tmp/registry-post.env
+                  source /tmp/registry-post.env
+                  kubectl -n "${namespace}" scale "deploy/${registry_deploy}" --replicas="${original_replicas}" >/dev/null
+                  if [[ "${original_replicas}" -gt 0 ]]; then
+                    kubectl -n "${namespace}" rollout status "deploy/${registry_deploy}" --timeout=180s >/dev/null
+                  fi
+                  original_replicas=""
+
+                  annotate_gc \
+                    fugue.pro/registry-gc-running=false \
+                    fugue.pro/registry-gc-last-status=success \
+                    fugue.pro/registry-gc-last-completed-at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    fugue.pro/registry-storage-used-bytes="${REGISTRY_STORAGE_USED_BYTES}" \
+                    fugue.pro/registry-storage-capacity-bytes="${REGISTRY_STORAGE_CAPACITY_BYTES}" \
+                    fugue.pro/registry-unreferenced-blob-bytes="${REGISTRY_UNREFERENCED_BLOB_BYTES}" \
+                    fugue.pro/registry-unreferenced-blob-count="${REGISTRY_UNREFERENCED_BLOB_COUNT}" \
+                    fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}"
+                  gc_started="false"
+                  log "protected registry GC completed"
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: FUGUE_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "fugue.configSecretName" . }}
+                      key: FUGUE_DATABASE_URL
+                - name: FUGUE_REGISTRY_PUSH_BASE
+                  value: {{ include "fugue.registryPushBase" . | quote }}
+                - name: FUGUE_REGISTRY_PULL_BASE
+                  value: {{ include "fugue.registryPullBase" . | quote }}
+              volumeMounts:
+                - name: registry-config
+                  mountPath: /etc/docker/registry/config.yml
+                  subPath: config.yml
+                  readOnly: true
+                - name: registry-data
+                  mountPath: /var/lib/registry
+              resources:
+                {{- toYaml .Values.registryGC.resources | nindent 16 }}
+          volumes:
+            - name: registry-config
+              configMap:
+                name: {{ printf "%s-registry-config" (include "fugue.fullname" .) | quote }}
+                items:
+                  - key: config.yml
+                    path: config.yml
+            - name: registry-data
+              {{- if eq $registryPersistence.mode "hostPath" }}
+              hostPath:
+                path: {{ $registryPersistence.hostPath | quote }}
+                type: DirectoryOrCreate
+              {{- else if eq $registryPersistence.mode "existingClaim" }}
+              persistentVolumeClaim:
+                claimName: {{ required "registry.persistence.existingClaim must be set when registry.persistence.mode=existingClaim" (include "fugue.registryDataClaimName" .) | quote }}
+              {{- else }}
+              persistentVolumeClaim:
+                claimName: {{ include "fugue.registryDataClaimName" . | quote }}
+              {{- end }}
+          {{- with .Values.registryGC.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.registryGC.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

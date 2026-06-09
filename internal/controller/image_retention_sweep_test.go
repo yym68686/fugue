@@ -94,6 +94,7 @@ func TestSweepManagedAppImageRetentionPrunesStaleHistory(t *testing.T) {
 		pushBase + "/fugue-apps/example-demo:git-current": true,
 	}
 	deletedRefs := make([]string, 0, 1)
+	gcRequests := 0
 	svc := &Service{
 		Store:            stateStore,
 		Logger:           log.New(io.Discard, "", 0),
@@ -105,6 +106,10 @@ func TestSweepManagedAppImageRetentionPrunesStaleHistory(t *testing.T) {
 		deleteManagedImage: func(_ context.Context, imageRef string) (appimages.DeleteResult, error) {
 			deletedRefs = append(deletedRefs, imageRef)
 			return appimages.DeleteResult{ImageRef: imageRef, Deleted: true}, nil
+		},
+		requestRegistryGC: func(_ context.Context, _ string) error {
+			gcRequests++
+			return nil
 		},
 		newKubeClient: func(string) (*kubeClient, error) {
 			return nil, errors.New("kube disabled in test")
@@ -120,6 +125,9 @@ func TestSweepManagedAppImageRetentionPrunesStaleHistory(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deletedRefs, wantDeletedRefs) {
 		t.Fatalf("expected deleted refs %v, got %v", wantDeletedRefs, deletedRefs)
+	}
+	if gcRequests != len(wantDeletedRefs) {
+		t.Fatalf("expected %d registry GC requests, got %d", len(wantDeletedRefs), gcRequests)
 	}
 }
 

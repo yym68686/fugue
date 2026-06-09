@@ -741,9 +741,28 @@ registryJanitor:
     limits:
       memory: 256Mi
       ephemeral-storage: 256Mi
-  gc:
-    enabled: true
-    skipWhenActiveJobs: true
+
+registryGC:
+  enabled: true
+  schedule: "17 */6 * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  activeDeadlineSeconds: 3600
+  startingDeadlineSeconds: 900
+  quiesceSeconds: 15
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+      ephemeral-storage: 64Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+      ephemeral-storage: 512Mi
 
 platformFailureDrill:
   enabled: false

@@ -1,0 +1,10 @@
+{{- if and .Values.registry.enabled .Values.registryGC.enabled }}
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: {{ include "fugue.registryGCName" . }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "registry-gc") | nindent 4 }}
+spec:
+  holderIdentity: registry-gc
+{{- end }}

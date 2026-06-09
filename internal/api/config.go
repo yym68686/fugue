@@ -9,6 +9,7 @@ import (
 type ServerConfig struct {
 	ControlPlaneNamespace        string
 	ControlPlaneReleaseInstance  string
+	RegistryGCLeaseName          string
 	ControlPlaneGitHubRepository string
 	ControlPlaneGitHubWorkflow   string
 	ControlPlaneGitHubAPIURL     string

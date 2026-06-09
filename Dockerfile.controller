@@ -1,3 +1,5 @@
+FROM --platform=$TARGETPLATFORM registry:2.8.3 AS registry
+
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
@@ -8,10 +10,13 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-controller ./cmd/fugue-controller
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-controller ./cmd/fugue-controller && \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-registry-maintenance ./cmd/fugue-registry-maintenance
 
 FROM --platform=$TARGETPLATFORM golang:1.25-alpine
 RUN apk add --no-cache bash ca-certificates curl git kubectl
 WORKDIR /app
 COPY --from=build /out/fugue-controller /usr/local/bin/fugue-controller
+COPY --from=build /out/fugue-registry-maintenance /usr/local/bin/fugue-registry-maintenance
+COPY --from=registry /bin/registry /usr/local/bin/registry
 ENTRYPOINT ["/usr/local/bin/fugue-controller"]

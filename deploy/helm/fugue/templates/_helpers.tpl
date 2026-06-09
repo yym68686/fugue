@@ -171,6 +171,18 @@ tolerations:
 {{- printf "%s-registry-janitor" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.registryGCName" -}}
+{{- printf "%s-registry-gc" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.registryDataClaimName" -}}
+{{- if eq .Values.registry.persistence.mode "existingClaim" -}}
+{{- .Values.registry.persistence.existingClaim -}}
+{{- else -}}
+{{- printf "%s-registry-data" (include "fugue.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.configSecretName" -}}
 {{- if .Values.configSecret.existingSecretName -}}
 {{- .Values.configSecret.existingSecretName | trunc 63 | trimSuffix "-" -}}

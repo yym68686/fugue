@@ -543,6 +543,11 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"fugue-fugue-telemetry-agent:7834",
 		"FugueAppNoReadyPods",
 		"FugueAppHighErrorRate",
+		"fugue_registry_pvc_usage_ratio",
+		"FugueRegistryMaintenanceJobMissing",
+		"FugueRegistryPVCUsageHigh",
+		"FugueRegistryUnreferencedBlobsHigh",
+		"FugueRegistryGCOverdue",
 	} {
 		if !strings.Contains(configDoc, want) {
 			t.Fatalf("prometheus config missing %q:\n%s", want, configDoc)
@@ -1121,6 +1126,106 @@ func TestRegistryDefaultsToPVCStorage(t *testing.T) {
 	}
 	if strings.Contains(deploymentDoc, "hostPath:") {
 		t.Fatalf("registry deployment should not render hostPath by default:\n%s", deploymentDoc)
+	}
+}
+
+func TestRegistryMaintenanceJobsRenderByDefault(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	janitor := manifestDocumentForKindAndName(manifest, "CronJob", "fugue-fugue-registry-janitor")
+	if janitor == "" {
+		t.Fatalf("rendered manifest missing registry janitor:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"kubectl get deployments,statefulsets,daemonsets --all-namespaces",
+		"controller retention owns these manifests",
+		"fugue.pro/registry-gc-requested-at",
+		"protected registry GC is running",
+	} {
+		if !strings.Contains(janitor, want) {
+			t.Fatalf("registry janitor missing %q:\n%s", want, janitor)
+		}
+	}
+
+	gc := manifestDocumentForKindAndName(manifest, "CronJob", "fugue-fugue-registry-gc")
+	if gc == "" {
+		t.Fatalf("rendered manifest missing registry GC:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"fugue-registry-maintenance active-imports",
+		"fugue-registry-maintenance scan",
+		"registry garbage-collect /etc/docker/registry/config.yml",
+		"kubectl get deployments,statefulsets,daemonsets --all-namespaces",
+		"active_retention_jobs",
+		"registry pod did not terminate within 180 seconds",
+		"FUGUE_REGISTRY_PUSH_BASE",
+		"abort GC after quiesce",
+		"persistentVolumeClaim:",
+		`claimName: "fugue-fugue-registry-data"`,
+	} {
+		if !strings.Contains(gc, want) {
+			t.Fatalf("registry GC missing %q:\n%s", want, gc)
+		}
+	}
+	if strings.Contains(gc, "--delete-untagged") {
+		t.Fatalf("protected registry GC must not delete untagged digest-pinned manifests:\n%s", gc)
+	}
+	if lease := manifestDocumentForKindAndName(manifest, "Lease", "fugue-fugue-registry-gc"); lease == "" {
+		t.Fatalf("rendered manifest missing registry GC coordination lease:\n%s", manifest)
+	}
+	api := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	for _, want := range []string{
+		"name: FUGUE_REGISTRY_GC_LEASE_NAME",
+		`value: "fugue-fugue-registry-gc"`,
+	} {
+		if !strings.Contains(api, want) {
+			t.Fatalf("API deployment missing registry GC coordination value %q:\n%s", want, api)
+		}
+	}
+}
+
+func TestRegistryMaintenanceJobsCanBeDisabled(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "registryJanitor.enabled=false",
+		"--set", "registryGC.enabled=false",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	manifest := string(output)
+	if doc := manifestDocumentForKindAndName(manifest, "CronJob", "fugue-fugue-registry-janitor"); doc != "" {
+		t.Fatalf("registry janitor should be disabled:\n%s", doc)
+	}
+	if doc := manifestDocumentForKindAndName(manifest, "CronJob", "fugue-fugue-registry-gc"); doc != "" {
+		t.Fatalf("registry GC should be disabled:\n%s", doc)
+	}
+	if doc := manifestDocumentForKindAndName(manifest, "Lease", "fugue-fugue-registry-gc"); doc != "" {
+		t.Fatalf("registry GC coordination lease should be disabled:\n%s", doc)
 	}
 }
 

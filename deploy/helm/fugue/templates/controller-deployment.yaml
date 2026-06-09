@@ -100,6 +100,12 @@ spec:
               value: {{ .Values.controller.imageRetentionSweepInterval | quote }}
             - name: FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT
               value: {{ .Values.controller.imageRetentionSweepTimeout | quote }}
+            - name: FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME
+              value: {{ include "fugue.registryGCName" . | quote }}
+            - name: FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME
+              value: {{ include "fugue.registryJanitorName" . | quote }}
+            - name: FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME
+              value: {{ include "fugue.registryGCName" . | quote }}
             - name: FUGUE_RUNTIME_OFFLINE_AFTER
               value: {{ .Values.controller.runtimeOfflineAfter | quote }}
             - name: FUGUE_CONTROLLER_KUBECTL_APPLY

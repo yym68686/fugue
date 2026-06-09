@@ -55,8 +55,21 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 		if _, inUse := remainingRefs[imageRef]; inUse {
 			continue
 		}
-		if _, err := deleteImage(ctx, imageRef); err != nil {
+		digestInUse, err := s.managedImageDigestInUse(ctx, imageRef, remainingRefs)
+		if err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		if digestInUse {
+			continue
+		}
+		result, err := deleteImage(ctx, imageRef)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if result.Deleted {
+			s.markRegistryGCNeeded(ctx, "deleted app image "+imageRef)
 		}
 	}
 	return errors.Join(errs...)

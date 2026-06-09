@@ -459,16 +459,16 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.runAppImageRegistryGarbageCollect(r.Context()); err != nil {
+	if err := s.requestAppImageRegistryGarbageCollect(r.Context(), "manual app image deletion removed "+version.Candidate.ImageRef); err != nil {
 		s.appendAudit(principal, "app.image.delete", "app", app.ID, app.TenantID, map[string]string{
 			"app_id":       app.ID,
 			"image_ref":    version.Candidate.ImageRef,
 			"digest":       deleteResult.Digest,
-			"registry_gc":  "failed",
+			"registry_gc":  "request_failed",
 			"delete_state": appImageDeleteAuditState(deleteResult),
 		})
 		httpx.WriteError(w, http.StatusBadGateway, fmt.Sprintf(
-			"saved image reference was removed, but immediate registry cleanup failed: %v",
+			"saved image reference was removed, but protected registry cleanup could not be queued: %v",
 			err,
 		))
 		return
@@ -478,7 +478,7 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		"app_id":       app.ID,
 		"image_ref":    version.Candidate.ImageRef,
 		"digest":       deleteResult.Digest,
-		"registry_gc":  "completed",
+		"registry_gc":  "requested",
 		"delete_state": appImageDeleteAuditState(deleteResult),
 	})
 	s.scheduleTenantBillingImageStorageRefresh(app.TenantID)
@@ -487,6 +487,8 @@ func (s *Server) handleDeleteAppImage(w http.ResponseWriter, r *http.Request) {
 		Deleted:            deleteResult.Deleted,
 		AlreadyMissing:     deleteResult.AlreadyMissing,
 		RegistryConfigured: true,
+		ReclaimRequiresGC:  true,
+		ReclaimNote:        "protected registry garbage collection has been queued",
 		ReclaimedSizeBytes: version.Response.ReclaimableSizeBytes,
 	})
 }
@@ -952,12 +954,67 @@ func (s *Server) managedImageStillReferenced(ctx context.Context, app model.App,
 	if _, ok := otherRefs[imageRef]; ok {
 		return true, "another app or operation desired spec", nil
 	}
-	for _, reference := range s.liveManagedImageReferences(ctx, allApps) {
+	liveReferences := s.liveManagedImageReferences(ctx, allApps)
+	liveRefs := make(map[string]struct{}, len(liveReferences))
+	for _, reference := range liveReferences {
+		liveRefs[reference.ImageRef] = struct{}{}
 		if reference.ImageRef == imageRef {
 			return true, reference.Source, nil
 		}
 	}
+	if inUse, err := s.managedImageDigestInUse(ctx, imageRef, liveRefs); err != nil {
+		return false, "", err
+	} else if inUse {
+		return true, "live workload digest reference", nil
+	}
 	return false, "", nil
+}
+
+func (s *Server) managedImageDigestInUse(ctx context.Context, candidate string, refs map[string]struct{}) (bool, error) {
+	liveDigests := make(map[string]struct{})
+	for ref := range refs {
+		if digest := managedImageDigest(ref); digest != "" {
+			liveDigests[digest] = struct{}{}
+		}
+	}
+	if len(liveDigests) == 0 {
+		return false, nil
+	}
+
+	candidateDigest := managedImageDigest(candidate)
+	if candidateDigest == "" {
+		result, err := s.appImageRegistry.InspectImage(ctx, candidate)
+		if err != nil {
+			return false, fmt.Errorf("resolve candidate image digest %s: %w", candidate, err)
+		}
+		if !result.Exists {
+			return false, nil
+		}
+		candidateDigest = managedImageDigest(result.Digest)
+	}
+	if candidateDigest == "" {
+		return false, fmt.Errorf("resolve candidate image digest %s returned no digest", candidate)
+	}
+	_, inUse := liveDigests[candidateDigest]
+	return inUse, nil
+}
+
+func managedImageDigest(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	index := strings.LastIndex(value, "sha256:")
+	if index < 0 {
+		return ""
+	}
+	digest := value[index:]
+	if len(digest) != len("sha256:")+64 {
+		return ""
+	}
+	for _, r := range digest[len("sha256:"):] {
+		if r < '0' || r > '9' && r < 'a' || r > 'f' {
+			return ""
+		}
+	}
+	return digest
 }
 
 func appImageDeleteAuditState(result appImageRegistryDeleteResult) string {

@@ -29,6 +29,7 @@ func main() {
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		ControlPlaneNamespace:        cfg.ControlPlaneNamespace,
 		ControlPlaneReleaseInstance:  cfg.ControlPlaneReleaseInstance,
+		RegistryGCLeaseName:          cfg.RegistryGCLeaseName,
 		ControlPlaneGitHubRepository: cfg.ControlPlaneGitHubRepository,
 		ControlPlaneGitHubWorkflow:   cfg.ControlPlaneGitHubWorkflow,
 		ControlPlaneGitHubAPIURL:     cfg.ControlPlaneGitHubAPIURL,

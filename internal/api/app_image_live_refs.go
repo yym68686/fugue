@@ -40,6 +40,46 @@ func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.Ap
 	defer client.closeIdleConnections()
 
 	var out []liveManagedImageReference
+	if deployments, err := client.listDeploymentObjects(ctx); err != nil {
+		if s.log != nil {
+			s.log.Printf("skip cluster live managed image reference scan for deployments: %v", err)
+		}
+	} else {
+		for _, deployment := range deployments {
+			out = append(out, s.liveManagedImageReferencesFromDeployment(deployment)...)
+		}
+	}
+	if statefulSets, err := client.listStatefulSetObjects(ctx); err != nil {
+		if s.log != nil {
+			s.log.Printf("skip cluster live managed image reference scan for statefulsets: %v", err)
+		}
+	} else {
+		for _, statefulSet := range statefulSets {
+			out = append(out, s.liveManagedImageReferencesFromPodSpec(
+				"statefulset",
+				statefulSet.Namespace,
+				statefulSet.Name,
+				statefulSet.Spec.Template.Spec,
+			)...)
+		}
+	}
+	if daemonSets, err := client.listDaemonSetObjects(ctx); err != nil {
+		if s.log != nil {
+			s.log.Printf("skip cluster live managed image reference scan for daemonsets: %v", err)
+		}
+	} else {
+		for _, daemonSet := range daemonSets {
+			out = append(out, s.liveManagedImageReferencesFromPodSpec(
+				"daemonset",
+				daemonSet.Namespace,
+				daemonSet.Name,
+				daemonSet.Spec.Template.Spec,
+			)...)
+		}
+	}
+
+	// Keep the per-app lookup as a fallback for clusters whose API credentials
+	// can read named deployments but cannot list workloads cluster-wide.
 	for _, app := range apps {
 		if strings.TrimSpace(app.ID) == "" || strings.TrimSpace(app.TenantID) == "" {
 			continue
@@ -62,30 +102,44 @@ func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.Ap
 }
 
 func (s *Server) liveManagedImageReferencesFromDeployment(deployment appsv1.Deployment) []liveManagedImageReference {
+	return s.liveManagedImageReferencesFromPodSpec(
+		"deployment",
+		deployment.Namespace,
+		deployment.Name,
+		deployment.Spec.Template.Spec,
+	)
+}
+
+func (s *Server) liveManagedImageReferencesFromPodSpec(
+	kind string,
+	namespace string,
+	name string,
+	podSpec corev1.PodSpec,
+) []liveManagedImageReference {
 	var out []liveManagedImageReference
 	appendContainer := func(container corev1.Container, init bool) {
 		containerName := strings.TrimSpace(container.Name)
 		if ref := s.managedImageRefFromRuntimeValue(container.Image); ref != "" {
-			source := fmt.Sprintf("deployment %s/%s container %s image", deployment.Namespace, deployment.Name, containerName)
+			source := fmt.Sprintf("%s %s/%s container %s image", kind, namespace, name, containerName)
 			if init {
-				source = fmt.Sprintf("deployment %s/%s init container %s image", deployment.Namespace, deployment.Name, containerName)
+				source = fmt.Sprintf("%s %s/%s init container %s image", kind, namespace, name, containerName)
 			}
 			out = append(out, liveManagedImageReference{ImageRef: ref, Source: source})
 		}
 		for _, env := range container.Env {
 			if ref := s.managedImageRefFromRuntimeValue(env.Value); ref != "" {
-				source := fmt.Sprintf("deployment %s/%s container %s env %s", deployment.Namespace, deployment.Name, containerName, strings.TrimSpace(env.Name))
+				source := fmt.Sprintf("%s %s/%s container %s env %s", kind, namespace, name, containerName, strings.TrimSpace(env.Name))
 				if init {
-					source = fmt.Sprintf("deployment %s/%s init container %s env %s", deployment.Namespace, deployment.Name, containerName, strings.TrimSpace(env.Name))
+					source = fmt.Sprintf("%s %s/%s init container %s env %s", kind, namespace, name, containerName, strings.TrimSpace(env.Name))
 				}
 				out = append(out, liveManagedImageReference{ImageRef: ref, Source: source})
 			}
 		}
 	}
-	for _, container := range deployment.Spec.Template.Spec.InitContainers {
+	for _, container := range podSpec.InitContainers {
 		appendContainer(container, true)
 	}
-	for _, container := range deployment.Spec.Template.Spec.Containers {
+	for _, container := range podSpec.Containers {
 		appendContainer(container, false)
 	}
 	return out
@@ -115,4 +169,28 @@ func (c *clusterNodeClient) readDeploymentObject(ctx context.Context, namespace,
 		return appsv1.Deployment{}, false, err
 	}
 	return deployment, true, nil
+}
+
+func (c *clusterNodeClient) listDeploymentObjects(ctx context.Context) ([]appsv1.Deployment, error) {
+	var workloads appsv1.DeploymentList
+	if err := c.doJSON(ctx, http.MethodGet, "/apis/apps/v1/deployments", &workloads); err != nil {
+		return nil, err
+	}
+	return workloads.Items, nil
+}
+
+func (c *clusterNodeClient) listStatefulSetObjects(ctx context.Context) ([]appsv1.StatefulSet, error) {
+	var workloads appsv1.StatefulSetList
+	if err := c.doJSON(ctx, http.MethodGet, "/apis/apps/v1/statefulsets", &workloads); err != nil {
+		return nil, err
+	}
+	return workloads.Items, nil
+}
+
+func (c *clusterNodeClient) listDaemonSetObjects(ctx context.Context) ([]appsv1.DaemonSet, error) {
+	var workloads appsv1.DaemonSetList
+	if err := c.doJSON(ctx, http.MethodGet, "/apis/apps/v1/daemonsets", &workloads); err != nil {
+		return nil, err
+	}
+	return workloads.Items, nil
 }

@@ -9,6 +9,7 @@ on:
       - 'assets/**'
       - 'cmd/fugue-api/**'
       - 'cmd/fugue-controller/**'
+      - 'cmd/fugue-registry-maintenance/**'
       - 'cmd/fugue-telemetry-agent/**'
       - 'cmd/fugue-image-cache/**'
       - 'cmd/fugue-edge/**'
@@ -207,7 +208,7 @@ jobs:
           else
             changed_files=""
           fi
-          forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-.*|headscale-.*|control-plane-postgres-.*|shared-workspace-.*|snapshot-controller)\.yaml$'
+          forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-(configmap|deployment|pvc|service)|headscale-.*|control-plane-postgres-.*|shared-workspace-.*|snapshot-controller)\.yaml$'
           if printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" >/dev/null; then
             echo "stateful component manifests changed in this push:"
             printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" || true

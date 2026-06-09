@@ -159,4 +159,63 @@ data:
             annotations:
               summary: "Fugue app restarted repeatedly"
               description: "An app restarted more than 3 times in 10 minutes."
+      - name: fugue-registry-maintenance
+        rules:
+          - record: fugue_registry_pvc_usage_ratio
+            expr: |
+              max(
+                kubelet_volume_stats_used_bytes{
+                  namespace={{ .Release.Namespace | quote }},
+                  persistentvolumeclaim={{ include "fugue.registryDataClaimName" . | quote }}
+                }
+              )
+              /
+              max(
+                kubelet_volume_stats_capacity_bytes{
+                  namespace={{ .Release.Namespace | quote }},
+                  persistentvolumeclaim={{ include "fugue.registryDataClaimName" . | quote }}
+                }
+              )
+          - alert: FugueRegistryMaintenanceJobMissing
+            expr: fugue_registry_janitor_present == 0
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue registry maintenance job is missing"
+              description: "A required registry retention or garbage-collection CronJob is absent or suspended."
+          - alert: FugueRegistryPVCUsageHigh
+            expr: |
+              fugue_registry_pvc_usage_ratio > 0.80
+              or
+              (
+                fugue_registry_storage_capacity_bytes > 0
+                and
+                fugue_registry_storage_used_bytes / fugue_registry_storage_capacity_bytes > 0.80
+              )
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue registry PVC usage is high"
+              description: "The bundled registry storage filesystem has remained above 80% utilization."
+          - alert: FugueRegistryUnreferencedBlobsHigh
+            expr: fugue_registry_unreferenced_blob_bytes > 10737418240
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue registry has excessive unreferenced blobs"
+              description: "More than 10 GiB of registry blobs are not reachable from retained manifests or workload digests."
+          - alert: FugueRegistryGCOverdue
+            expr: |
+              fugue_registry_gc_last_success_timestamp_seconds == 0
+              or
+              time() - fugue_registry_gc_last_success_timestamp_seconds > 108000
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue registry garbage collection is overdue"
+              description: "Protected registry garbage collection has never succeeded or has not succeeded in the last 30 hours."
 {{- end }}

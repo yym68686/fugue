@@ -28,6 +28,8 @@ type Service struct {
 	inspectManagedImage            appimages.InspectFunc
 	inspectManagedImageConfig      imageConfigInspector
 	deleteManagedImage             func(context.Context, string) (appimages.DeleteResult, error)
+	requestRegistryGC              func(context.Context, string) error
+	readRegistryMaintenance        func(context.Context) registryMaintenanceStatus
 	resolveManagedImageDigestRef   func(context.Context, string) (string, error)
 	resolveRemoteImageDigest       func(context.Context, string) (string, error)
 	syncBillingImageStorage        bool
@@ -594,6 +596,12 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 			}
 			if errors.Is(err, errOperationNoLongerActive) {
 				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
+				return nil
+			}
+			if errors.Is(err, errRegistryGCRunning) {
+				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued while registry garbage collection is running"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
+					s.Logger.Printf("operation %s requeue during registry GC failed: %v", op.ID, requeueErr)
+				}
 				return nil
 			}
 			s.Logger.Printf("operation %s failed: %v", op.ID, err)

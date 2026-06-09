@@ -33,6 +33,7 @@ type Server struct {
 	metricsStartedAt             time.Time
 	controlPlaneNamespace        string
 	controlPlaneReleaseInstance  string
+	registryGCLeaseName          string
 	controlPlaneGitHubRepository string
 	controlPlaneGitHubWorkflow   string
 	controlPlaneGitHubAPIURL     string
@@ -69,6 +70,7 @@ type Server struct {
 	resolveRemoteImageDigest     func(context.Context, string) (string, error)
 	inspectBuilderPlacement      builderPlacementInspector
 	appImageRegistry             appImageRegistry
+	requestRegistryGC            func(context.Context, string) error
 	projectImageUsageCache       expiringResponseCache[projectImageUsageResponse]
 	readinessKubernetesAPICache  expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache    expiringResponseCache[[]clusterNodeSnapshot]
@@ -109,6 +111,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		metricsStartedAt:             time.Now().UTC(),
 		controlPlaneNamespace:        strings.TrimSpace(cfg.ControlPlaneNamespace),
 		controlPlaneReleaseInstance:  strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		registryGCLeaseName:          strings.TrimSpace(cfg.RegistryGCLeaseName),
 		controlPlaneGitHubRepository: strings.TrimSpace(cfg.ControlPlaneGitHubRepository),
 		controlPlaneGitHubWorkflow:   strings.TrimSpace(cfg.ControlPlaneGitHubWorkflow),
 		controlPlaneGitHubAPIURL:     strings.TrimRight(strings.TrimSpace(cfg.ControlPlaneGitHubAPIURL), "/"),

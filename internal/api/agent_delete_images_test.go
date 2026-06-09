@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -110,20 +111,11 @@ func TestAgentCompleteDeleteOperationDeletesAppImages(t *testing.T) {
 	}
 	server.appImageRegistry = fakeRegistry
 
-	pod := kubePodInfo{}
-	pod.Metadata.Name = "fugue-fugue-registry-abc123"
-	pod.Metadata.CreationTimestamp = time.Date(2026, 4, 4, 9, 0, 0, 0, time.UTC)
-	pod.Status.Phase = "Running"
-	server.newFilesystemPodLister = func(namespace string) (filesystemPodLister, error) {
-		if namespace != "fugue-system" {
-			t.Fatalf("expected control-plane namespace fugue-system, got %q", namespace)
-		}
-		return fakeFilesystemPodLister{pods: []kubePodInfo{pod}}, nil
+	gcRequests := 0
+	server.requestRegistryGC = func(context.Context, string) error {
+		gcRequests++
+		return nil
 	}
-	runner := &fakeFilesystemExecRunner{
-		outputs: [][]byte{{}},
-	}
-	server.filesystemExecRunner = runner
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/agent/operations/"+deleteOp.ID+"/complete", strings.NewReader(`{"manifest_path":"/tmp/demo.yaml","message":"deleted"}`))
 	req.Header.Set("Authorization", "Bearer "+runtimeKey)
@@ -138,7 +130,7 @@ func TestAgentCompleteDeleteOperationDeletesAppImages(t *testing.T) {
 	if len(fakeRegistry.deleted) != 1 || fakeRegistry.deleted[0] != imageRef {
 		t.Fatalf("expected deleted image ref %q, got %#v", imageRef, fakeRegistry.deleted)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("expected registry GC exec call, got %d", len(runner.calls))
+	if gcRequests != 1 {
+		t.Fatalf("expected one registry GC request, got %d", gcRequests)
 	}
 }

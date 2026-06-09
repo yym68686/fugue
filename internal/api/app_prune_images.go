@@ -51,12 +51,21 @@ func (s *Server) pruneExcessManagedAppImages(ctx context.Context, app model.App)
 		s.registryPushBase,
 		s.registryPullBase,
 	)
-	mergeManagedImageRefSets(remainingRefs, s.liveManagedImageRefSet(ctx, allApps))
+	liveRefs := s.liveManagedImageRefSet(ctx, allApps)
+	mergeManagedImageRefSets(remainingRefs, liveRefs)
 
 	var errs []error
 	gcNeeded := false
 	for _, imageRef := range imageRefs {
 		if _, inUse := remainingRefs[imageRef]; inUse {
+			continue
+		}
+		digestInUse, err := s.managedImageDigestInUse(ctx, imageRef, liveRefs)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if digestInUse {
 			continue
 		}
 		if _, err := s.appImageRegistry.DeleteImage(ctx, imageRef); err != nil {
@@ -66,7 +75,7 @@ func (s *Server) pruneExcessManagedAppImages(ctx context.Context, app model.App)
 		gcNeeded = true
 	}
 	if gcNeeded {
-		if err := s.runAppImageRegistryGarbageCollect(ctx); err != nil {
+		if err := s.requestAppImageRegistryGarbageCollect(ctx, "API image retention deleted stale app manifests"); err != nil {
 			errs = append(errs, err)
 		}
 	}

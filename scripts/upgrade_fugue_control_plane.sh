@@ -95,7 +95,10 @@ release_changed_files_match() {
       build:deploy/helm/fugue/values-production-ha.yaml)
         return 0
         ;;
-      stateful:deploy/helm/fugue/templates/registry-*|\
+      stateful:deploy/helm/fugue/templates/registry-configmap.yaml|\
+      stateful:deploy/helm/fugue/templates/registry-deployment.yaml|\
+      stateful:deploy/helm/fugue/templates/registry-pvc.yaml|\
+      stateful:deploy/helm/fugue/templates/registry-service.yaml|\
       stateful:deploy/helm/fugue/templates/headscale-*|\
       stateful:deploy/helm/fugue/templates/control-plane-postgres-*|\
       stateful:deploy/helm/fugue/templates/postgres-*|\
@@ -4464,6 +4467,8 @@ main() {
     FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY:-fugue-image-cache}"
     FUGUE_IMAGE_CACHE_IMAGE_TAG="${FUGUE_IMAGE_CACHE_IMAGE_TAG:-latest}"
   fi
+  FUGUE_REGISTRY_JANITOR_ENABLED="${FUGUE_REGISTRY_JANITOR_ENABLED:-true}"
+  FUGUE_REGISTRY_GC_ENABLED="${FUGUE_REGISTRY_GC_ENABLED:-true}"
   FUGUE_EDGE_ENABLED="${FUGUE_EDGE_ENABLED:-true}"
   if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
     require_env FUGUE_EDGE_IMAGE_REPOSITORY
@@ -4956,6 +4961,8 @@ PY
     --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
     --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
     --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}" \
+    --set registryJanitor.enabled="${FUGUE_REGISTRY_JANITOR_ENABLED}" \
+    --set registryGC.enabled="${FUGUE_REGISTRY_GC_ENABLED}" \
     --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
     --set-string edge.image.repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
     --set-string edge.image.tag="${FUGUE_EDGE_IMAGE_TAG}" \

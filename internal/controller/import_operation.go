@@ -31,6 +31,11 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if strings.TrimSpace(s.registryPushBase) == "" {
 		return fmt.Errorf("controller registry push base is not configured")
 	}
+	if running, checkErr := s.registryGCInProgress(ctx); checkErr != nil {
+		return fmt.Errorf("check registry garbage collection state: %w", checkErr)
+	} else if running {
+		return errRegistryGCRunning
+	}
 
 	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout())
 	defer cancel()

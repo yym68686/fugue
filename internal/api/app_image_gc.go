@@ -3,80 +3,68 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	coordinationv1 "k8s.io/api/coordination/v1"
 )
 
 const (
-	appImageRegistryGCContainerName = "registry"
-	appImageRegistryGCConfigPath    = "/etc/docker/registry/config.yml"
-	appImageRegistryGCTimeout       = 2 * time.Minute
+	appImageRegistryGCRequestedAtAnnotation   = "fugue.pro/registry-gc-requested-at"
+	appImageRegistryGCRequestReasonAnnotation = "fugue.pro/registry-gc-request-reason"
 )
 
-func (s *Server) runAppImageRegistryGarbageCollect(ctx context.Context) error {
+func (s *Server) requestAppImageRegistryGarbageCollect(ctx context.Context, reason string) error {
+	if s.requestRegistryGC != nil {
+		return s.requestRegistryGC(ctx, reason)
+	}
 	namespace, err := s.controlPlaneNamespaceForRegistryGC()
 	if err != nil {
 		return err
 	}
+	leaseName := strings.TrimSpace(s.registryGCLeaseName)
+	if leaseName == "" {
+		return fmt.Errorf("registry GC lease name is not configured")
+	}
 
-	listerFactory := s.newFilesystemPodLister
-	if listerFactory == nil {
-		listerFactory = func(namespace string) (filesystemPodLister, error) {
-			return newKubeLogsClient(namespace)
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
+	if err != nil {
+		return fmt.Errorf("registry GC request is not available: %w", err)
+	}
+	defer client.closeIdleConnections()
+
+	apiPath := "/apis/coordination.k8s.io/v1/namespaces/" + url.PathEscape(namespace) + "/leases/" + url.PathEscape(leaseName)
+	for attempt := 0; attempt < 4; attempt++ {
+		var lease coordinationv1.Lease
+		if err := client.doJSON(ctx, http.MethodGet, apiPath, &lease); err != nil {
+			return fmt.Errorf("read registry GC lease: %w", err)
 		}
+		if lease.Annotations == nil {
+			lease.Annotations = make(map[string]string)
+		}
+		lease.Annotations[appImageRegistryGCRequestedAtAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+		lease.Annotations[appImageRegistryGCRequestReasonAnnotation] = truncateAppImageGCReason(reason, 240)
+		if err := client.doJSONWithBody(ctx, http.MethodPut, apiPath, lease, nil); err != nil {
+			if strings.Contains(err.Error(), "status=409") {
+				continue
+			}
+			return fmt.Errorf("update registry GC lease: %w", err)
+		}
+		return nil
 	}
-	lister, err := listerFactory(namespace)
-	if err != nil {
-		return fmt.Errorf("registry cleanup is not available: %w", err)
-	}
-
-	pods, err := lister.listPodsBySelector(ctx, namespace, s.registryGCPodSelector())
-	if err != nil {
-		return fmt.Errorf("list registry pods: %w", err)
-	}
-	pod, err := selectLatestRunningRegistryPod(pods)
-	if err != nil {
-		return err
-	}
-
-	runner := s.filesystemExecRunner
-	if runner == nil {
-		runner = kubeFilesystemExecRunner{}
-	}
-
-	commandCtx, cancel := context.WithTimeout(ctx, appImageRegistryGCTimeout)
-	defer cancel()
-
-	if _, err := runner.Run(
-		commandCtx,
-		namespace,
-		pod.Metadata.Name,
-		appImageRegistryGCContainerName,
-		nil,
-		"registry",
-		"garbage-collect",
-		"--delete-untagged",
-		appImageRegistryGCConfigPath,
-	); err != nil {
-		return fmt.Errorf("run registry garbage collector in pod %s: %w", pod.Metadata.Name, err)
-	}
-
-	return nil
-}
-
-func (s *Server) registryGCPodSelector() string {
-	parts := []string{"app.kubernetes.io/component=registry"}
-	if release := strings.TrimSpace(s.controlPlaneReleaseInstance); release != "" {
-		parts = append(parts, "app.kubernetes.io/instance="+release)
-	}
-	return strings.Join(parts, ",")
+	return fmt.Errorf("update registry GC lease after retries")
 }
 
 func (s *Server) controlPlaneNamespaceForRegistryGC() (string, error) {
 	if namespace := strings.TrimSpace(s.controlPlaneNamespace); namespace != "" {
 		return namespace, nil
 	}
-
 	namespace, err := kubeNamespace()
 	if err != nil {
 		return "", fmt.Errorf("resolve control plane namespace: %w", err)
@@ -84,16 +72,10 @@ func (s *Server) controlPlaneNamespaceForRegistryGC() (string, error) {
 	return namespace, nil
 }
 
-func selectLatestRunningRegistryPod(pods []kubePodInfo) (kubePodInfo, error) {
-	if len(pods) == 0 {
-		return kubePodInfo{}, fmt.Errorf("registry pod is not available")
+func truncateAppImageGCReason(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
 	}
-
-	sortPodsByCreation(pods)
-	for index := len(pods) - 1; index >= 0; index-- {
-		if strings.EqualFold(strings.TrimSpace(pods[index].Status.Phase), "Running") {
-			return pods[index], nil
-		}
-	}
-	return kubePodInfo{}, fmt.Errorf("registry pod is not running")
+	return value[:limit]
 }

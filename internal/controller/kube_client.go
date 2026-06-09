@@ -39,9 +39,11 @@ type kubeLease struct {
 	APIVersion string `json:"apiVersion,omitempty"`
 	Kind       string `json:"kind,omitempty"`
 	Metadata   struct {
-		Name            string `json:"name,omitempty"`
-		Namespace       string `json:"namespace,omitempty"`
-		ResourceVersion string `json:"resourceVersion,omitempty"`
+		Name            string            `json:"name,omitempty"`
+		Namespace       string            `json:"namespace,omitempty"`
+		ResourceVersion string            `json:"resourceVersion,omitempty"`
+		Annotations     map[string]string `json:"annotations,omitempty"`
+		Labels          map[string]string `json:"labels,omitempty"`
 	} `json:"metadata"`
 	Spec kubeLeaseSpec `json:"spec"`
 }
@@ -146,6 +148,19 @@ type kubeJobInfo struct {
 
 type kubeJobStatus struct {
 	Active int `json:"active,omitempty"`
+}
+
+type kubeCronJob struct {
+	Metadata struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec struct {
+		Suspend *bool `json:"suspend,omitempty"`
+	} `json:"spec,omitempty"`
+}
+
+type kubeWorkloadList struct {
+	Items []map[string]any `json:"items"`
 }
 
 type kubePod struct {
@@ -301,6 +316,32 @@ func (c *kubeClient) listJobsBySelector(ctx context.Context, namespace, selector
 		return nil, err
 	}
 	return jobList.Items, nil
+}
+
+func (c *kubeClient) getCronJob(ctx context.Context, namespace, name string) (kubeCronJob, bool, error) {
+	var cronJob kubeCronJob
+	status, err := c.doJSON(ctx, http.MethodGet, "/apis/batch/v1/namespaces/"+c.effectiveNamespace(namespace)+"/cronjobs/"+url.PathEscape(strings.TrimSpace(name)), nil, &cronJob)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return kubeCronJob{}, false, nil
+		}
+		return kubeCronJob{}, false, err
+	}
+	return cronJob, true, nil
+}
+
+func (c *kubeClient) listWorkloads(ctx context.Context, resource string) ([]map[string]any, error) {
+	resource = strings.TrimSpace(resource)
+	switch resource {
+	case "deployments", "statefulsets", "daemonsets":
+	default:
+		return nil, fmt.Errorf("unsupported workload resource %q", resource)
+	}
+	var list kubeWorkloadList
+	if _, err := c.doJSON(ctx, http.MethodGet, "/apis/apps/v1/"+resource, nil, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 func (c *kubeClient) createJob(ctx context.Context, namespace string, job map[string]any) error {
