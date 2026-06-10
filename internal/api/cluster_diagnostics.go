@@ -199,7 +199,7 @@ func (s *Server) handleGetClusterLogs(w http.ResponseWriter, r *http.Request) {
 		Previous:  previous,
 	})
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+		writeKubeReadError(w, err)
 		return
 	}
 

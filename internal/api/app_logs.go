@@ -382,6 +382,18 @@ func isForbiddenStatusError(err error) bool {
 	return strings.Contains(message, "status=403")
 }
 
+func writeKubeReadError(w http.ResponseWriter, err error) {
+	status := http.StatusServiceUnavailable
+	var statusErr *kubeStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+			status = statusErr.StatusCode
+		}
+	}
+	httpx.WriteError(w, status, err.Error())
+}
+
 func podContainerNames(pod kubePodInfo, includeInit bool) []string {
 	names := make([]string, 0, len(pod.Spec.Containers)+len(pod.Spec.InitContainers))
 	if includeInit {

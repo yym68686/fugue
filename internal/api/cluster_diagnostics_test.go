@@ -232,6 +232,57 @@ func TestListClusterPodsReturnsSystemPods(t *testing.T) {
 	}
 }
 
+func TestGetClusterLogsPreservesKubernetesClientErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return clusterLogsErrorClient{
+			err: &kubeStatusError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "container not-a-container is not valid for pod fugue-api",
+			},
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/logs?namespace=fugue-system&pod=fugue-api&container=not-a-container", "bootstrap-secret", nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "container not-a-container is not valid") {
+		t.Fatalf("expected Kubernetes error body, got %s", recorder.Body.String())
+	}
+}
+
+type clusterLogsErrorClient struct {
+	err error
+}
+
+func (c clusterLogsErrorClient) listJobsBySelector(context.Context, string, string) ([]kubeJobInfo, error) {
+	return nil, nil
+}
+
+func (c clusterLogsErrorClient) getJob(context.Context, string, string) (kubeJobInfo, error) {
+	return kubeJobInfo{}, nil
+}
+
+func (c clusterLogsErrorClient) listPodsBySelector(context.Context, string, string) ([]kubePodInfo, error) {
+	return nil, nil
+}
+
+func (c clusterLogsErrorClient) readPodLogs(context.Context, string, string, kubeLogOptions) (string, error) {
+	return "", c.err
+}
+
+func (c clusterLogsErrorClient) streamPodLogs(context.Context, string, string, kubeLogOptions) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), c.err
+}
+
 func TestListClusterEventsFallsBackToEventsV1WhenCoreEventsForbidden(t *testing.T) {
 	t.Parallel()
 
