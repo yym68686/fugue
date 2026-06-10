@@ -12,6 +12,8 @@ import (
 	"fugue/internal/observability"
 )
 
+const DefaultManagedAppRolloutTimeout = 30 * time.Minute
+
 type APIConfig struct {
 	BindAddr                     string
 	MetricsBindAddr              string
@@ -341,7 +343,7 @@ func ControllerFromEnv() ControllerConfig {
 		RegistryGCLeaseName:           getenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
 		RegistryJanitorCronJobName:    getenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "fugue-registry-janitor"),
 		RegistryGCCronJobName:         getenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "fugue-registry-gc"),
-		ManagedAppRolloutTimeout:      getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", 10*time.Minute),
+		ManagedAppRolloutTimeout:      getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", DefaultManagedAppRolloutTimeout),
 		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 15*time.Second),
 		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
 		RuntimeOfflineAfter:           getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),

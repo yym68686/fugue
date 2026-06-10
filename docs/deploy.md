@@ -169,7 +169,7 @@ Controller GitHub sync knobs:
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY`: base retry delay after a tracked commit fails during auto sync. Repeated auto failures for the same commit back off from this value while automatic retries remain available.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated auto failures of the same tracked commit.
 - GitHub sync stops auto retrying a tracked commit after `3` failed auto-triggered import or deploy attempts for the same app and commit. The controller only re-arms that commit after a non-`github-sync` GitHub rebuild or deploy is triggered manually, or after a release for that commit completes successfully.
-- `FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT`: maximum time a managed deploy operation waits for the Kubernetes rollout to finish before it is marked failed.
+- `FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT`: maximum time a managed deploy operation waits for the Kubernetes rollout to finish before it is marked failed. Defaults to `30m` so slow image pulls can complete without prematurely failing an otherwise available rolling update.
 - `FUGUE_CONTROLLER_POLL_INTERVAL`: base interval for periodic controller maintenance and managed app reconciliation. The chart default is `15s`; avoid shorter values on small control-plane clusters unless the Kubernetes API and etcd have enough headroom.
 - `FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL`: how often the controller reapplies managed app image retention across all apps. Set `0` to disable the periodic sweep; deploy/delete operations still run their own post-operation image maintenance.
 - `FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT`: timeout for one managed app image retention sweep.

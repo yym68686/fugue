@@ -12,11 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/registry"
-	"golang.org/x/sync/singleflight"
 )
 
 type imageCache struct {
@@ -32,7 +32,15 @@ type imageCache struct {
 	registry       http.Handler
 	hydrateTimeout time.Duration
 	copyImageFn    func(context.Context, string, string) error
-	hydrateGroup   singleflight.Group
+	hydrateMu      sync.Mutex
+	hydrateCalls   map[string]*hydrateCall
+}
+
+type hydrateCall struct {
+	done    chan struct{}
+	cancel  context.CancelFunc
+	err     error
+	waiters int
 }
 
 type imageLocation struct {
@@ -67,7 +75,7 @@ func main() {
 		cacheEndpoint:  strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
-		hydrateTimeout: 10 * time.Minute,
+		hydrateTimeout: envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
 		log.Print("control-plane API credentials are not configured; cache will serve local registry storage only")
@@ -125,15 +133,68 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (c *imageCache) hydrate(parent context.Context, repo, target string) error {
 	key := repo + "\x00" + target
-	result := c.hydrateGroup.DoChan(key, func() (any, error) {
-		// Keep the shared copy independent from one waiting request's cancellation.
-		return nil, c.hydrateOnce(context.Background(), repo, target)
-	})
+	call := c.joinHydrate(key, repo, target)
+	defer c.leaveHydrate(call)
+
 	select {
-	case res := <-result:
-		return res.Err
+	case <-call.done:
+		return call.err
 	case <-parent.Done():
 		return parent.Err()
+	}
+}
+
+func (c *imageCache) joinHydrate(key, repo, target string) *hydrateCall {
+	c.hydrateMu.Lock()
+	defer c.hydrateMu.Unlock()
+
+	if c.hydrateCalls == nil {
+		c.hydrateCalls = make(map[string]*hydrateCall)
+	}
+	if call := c.hydrateCalls[key]; call != nil {
+		call.waiters++
+		return call
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	call := &hydrateCall{
+		done:    make(chan struct{}),
+		cancel:  cancel,
+		waiters: 1,
+	}
+	c.hydrateCalls[key] = call
+	go func() {
+		err := c.hydrateOnce(ctx, repo, target)
+
+		c.hydrateMu.Lock()
+		call.err = err
+		if c.hydrateCalls[key] == call {
+			delete(c.hydrateCalls, key)
+		}
+		c.hydrateMu.Unlock()
+		close(call.done)
+	}()
+	return call
+}
+
+func (c *imageCache) leaveHydrate(call *hydrateCall) {
+	if call == nil {
+		return
+	}
+
+	c.hydrateMu.Lock()
+	defer c.hydrateMu.Unlock()
+
+	if call.waiters > 0 {
+		call.waiters--
+	}
+	if call.waiters != 0 {
+		return
+	}
+	select {
+	case <-call.done:
+	default:
+		call.cancel()
 	}
 }
 
@@ -305,6 +366,18 @@ func env(key, fallback string) string {
 		return value
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 type deferredNotFoundWriter struct {

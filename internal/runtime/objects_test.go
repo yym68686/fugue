@@ -823,6 +823,9 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if strategy["type"] != "RollingUpdate" {
 		t.Fatalf("expected RollingUpdate strategy, got %#v", strategy["type"])
 	}
+	if spec["progressDeadlineSeconds"] != appProgressDeadlineSeconds {
+		t.Fatalf("expected progressDeadlineSeconds=%d, got %#v", appProgressDeadlineSeconds, spec["progressDeadlineSeconds"])
+	}
 	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
 	if rollingUpdate["maxUnavailable"] != 0 {
 		t.Fatalf("expected maxUnavailable=0, got %#v", rollingUpdate["maxUnavailable"])

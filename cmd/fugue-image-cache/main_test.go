@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -71,6 +72,133 @@ func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	}
 	if got := copies.Load(); got != 1 {
 		t.Fatalf("expected concurrent hydrates to share one copy, got %d", got)
+	}
+}
+
+func TestHydrateCancelsCopyWhenAllWaitersCancel(t *testing.T) {
+	t.Parallel()
+
+	copyStarted := make(chan struct{})
+	copyDone := make(chan error, 1)
+	cache := &imageCache{
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		upstreamBase:   "upstream.example.com:5000",
+		cacheEndpoint:  "http://127.0.0.1:5000",
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(ctx context.Context, src, dst string) error {
+			close(copyStarted)
+			<-ctx.Done()
+			copyDone <- ctx.Err()
+			return ctx.Err()
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errs := make(chan error, 1)
+	go func() {
+		errs <- cache.hydrate(ctx, "library/nginx", "latest")
+	}()
+
+	select {
+	case <-copyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected hydrate copy to start")
+	}
+	cancel()
+	if err := <-errs; !errors.Is(err, context.Canceled) {
+		t.Fatalf("hydrate error = %v, want context canceled", err)
+	}
+	select {
+	case err := <-copyDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("copy error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected copy to be canceled after last waiter left")
+	}
+}
+
+func TestHydrateKeepsCopyWhileAnotherWaiterIsActive(t *testing.T) {
+	t.Parallel()
+
+	copyStarted := make(chan struct{})
+	releaseCopy := make(chan struct{})
+	copyDone := make(chan error, 1)
+	cache := &imageCache{
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		upstreamBase:   "upstream.example.com:5000",
+		cacheEndpoint:  "http://127.0.0.1:5000",
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(ctx context.Context, src, dst string) error {
+			close(copyStarted)
+			select {
+			case <-releaseCopy:
+				copyDone <- nil
+				return nil
+			case <-ctx.Done():
+				copyDone <- ctx.Err()
+				return ctx.Err()
+			}
+		},
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstErr := make(chan error, 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		firstErr <- cache.hydrate(firstCtx, "library/nginx", "latest")
+	}()
+	select {
+	case <-copyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected hydrate copy to start")
+	}
+	go func() {
+		secondErr <- cache.hydrate(context.Background(), "library/nginx", "latest")
+	}()
+	waitForHydrateWaiters(t, cache, 2)
+
+	cancelFirst()
+	if err := <-firstErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first hydrate error = %v, want context canceled", err)
+	}
+	select {
+	case err := <-copyDone:
+		t.Fatalf("copy finished while second waiter was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseCopy)
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second hydrate returned error: %v", err)
+	}
+	if err := <-copyDone; err != nil {
+		t.Fatalf("copy error = %v, want nil", err)
+	}
+}
+
+func waitForHydrateWaiters(t *testing.T, cache *imageCache, want int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		cache.hydrateMu.Lock()
+		got := 0
+		for _, call := range cache.hydrateCalls {
+			if call.waiters > got {
+				got = call.waiters
+			}
+		}
+		cache.hydrateMu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected %d hydrate waiters, got %d", want, got)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

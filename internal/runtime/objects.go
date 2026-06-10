@@ -25,6 +25,7 @@ const (
 	defaultHelperMemoryLimit      = "128Mi"
 	defaultHelperEphemeralRequest = "32Mi"
 	defaultHelperEphemeralLimit   = "128Mi"
+	appProgressDeadlineSeconds    = 1800
 	AppFilesVolumeName            = "app-files"
 	appFilesVolumeName            = AppFilesVolumeName
 	appFilesSourceMountPath       = "/fugue-app-files"
@@ -468,8 +469,9 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"kind":       "Deployment",
 		"metadata":   deploymentMetadata,
 		"spec": map[string]any{
-			"replicas": app.Spec.Replicas,
-			"strategy": deploymentStrategy(app),
+			"replicas":                app.Spec.Replicas,
+			"progressDeadlineSeconds": appProgressDeadlineSeconds,
+			"strategy":                deploymentStrategy(app),
 			"selector": map[string]any{
 				"matchLabels": labels,
 			},

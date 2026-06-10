@@ -125,7 +125,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.Config.GitHubSyncRetryMaxDelay = s.Config.GitHubSyncRetryBaseDelay
 	}
 	if s.Config.ManagedAppRolloutTimeout <= 0 {
-		s.Config.ManagedAppRolloutTimeout = 10 * time.Minute
+		s.Config.ManagedAppRolloutTimeout = config.DefaultManagedAppRolloutTimeout
 	}
 	if s.Config.LeaderElectionLeaseDuration <= 0 {
 		s.Config.LeaderElectionLeaseDuration = 15 * time.Second
