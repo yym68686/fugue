@@ -138,12 +138,39 @@ ensure_primary_host_time_sync_via_ssh() {
   return 1
 }
 
+ensure_primary_host_time_sync_via_node_janitor() {
+  local primary_node_name=""
+  local output=""
+  local cmd=""
+
+  if [[ -z "${KUBECTL:-}" ]]; then
+    return 1
+  fi
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -z "$(trim_field "${primary_node_name}")" ]]; then
+    return 1
+  fi
+  cmd="$(host_time_sync_root_script)"
+  if output="$(run_host_script_via_node_janitor "${primary_node_name}" "${cmd}" 2>&1)"; then
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      log "primary host time sync: ${line}"
+    done <<<"${output}"
+    return 0
+  fi
+  log_stderr "failed to harden primary host time synchronization via node-janitor: ${output}"
+  return 1
+}
+
 ensure_host_time_sync() {
   if [[ "${FUGUE_HOST_TIME_SYNC_ENABLED:-true}" != "true" ]]; then
     log "host time synchronization hardening disabled"
     return 0
   fi
   if ensure_primary_host_time_sync_via_ssh; then
+    return 0
+  fi
+  if ensure_primary_host_time_sync_via_node_janitor; then
     return 0
   fi
   if ! command_exists systemctl; then
@@ -387,6 +414,44 @@ node_local_build_plane_manifest_changed() {
   return 1
 }
 
+node_janitor_pod_on_node() {
+  local node_name="$1"
+  local namespace="${FUGUE_NAMESPACE:-fugue-system}"
+
+  ${KUBECTL} -n "${namespace}" get pods \
+    -l app.kubernetes.io/component=node-janitor \
+    -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase \
+    --no-headers 2>/dev/null |
+    awk -v node="${node_name}" '$2 == node && $3 == "Running" {print $1; exit}'
+}
+
+run_host_script_via_node_janitor() {
+  local node_name="$1"
+  local script="$2"
+  local namespace="${FUGUE_NAMESPACE:-fugue-system}"
+  local pod_name=""
+
+  if [[ -z "${KUBECTL:-}" ]]; then
+    return 1
+  fi
+  pod_name="$(node_janitor_pod_on_node "${node_name}")"
+  if [[ -z "$(trim_field "${pod_name}")" ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${script}" | ${KUBECTL} -n "${namespace}" exec "${pod_name}" -c node-janitor -- /bin/bash -lc '
+set -euo pipefail
+target="/host/tmp/fugue-host-root-script-$(date +%s)-$$.sh"
+cleanup() {
+  rm -f "${target}"
+}
+trap cleanup EXIT
+cat >"${target}"
+chmod 0700 "${target}"
+chroot /host /bin/bash "${target#/host}"
+'
+}
+
 stateful_dependency_changed() {
   release_changed_files_match stateful
 }
@@ -411,11 +476,7 @@ ensure_control_plane_observability_via_node_janitor() {
     return 1
   fi
 
-  pod_name="$(${KUBECTL} -n "${namespace}" get pods \
-    -l app.kubernetes.io/component=node-janitor \
-    -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName,PHASE:.status.phase \
-    --no-headers 2>/dev/null |
-    awk -v node="${node_name}" '$2 == node && $3 == "Running" {print $1; exit}')"
+  pod_name="$(node_janitor_pod_on_node "${node_name}")"
   if [[ -z "$(trim_field "${pod_name}")" ]]; then
     log "control-plane host observability node-janitor fallback unavailable because no running node-janitor pod was found on ${node_name}"
     return 1
