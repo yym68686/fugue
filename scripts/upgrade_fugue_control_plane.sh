@@ -439,7 +439,7 @@ run_host_script_via_node_janitor() {
     return 1
   fi
 
-  printf '%s\n' "${script}" | ${KUBECTL} -n "${namespace}" exec "${pod_name}" -c node-janitor -- /bin/bash -lc '
+  printf '%s\n' "${script}" | ${KUBECTL} -n "${namespace}" exec -i "${pod_name}" -c node-janitor -- /bin/bash -lc '
 set -euo pipefail
 target="/host/tmp/fugue-host-root-script-$(date +%s)-$$.sh"
 cleanup() {
@@ -483,7 +483,7 @@ ensure_control_plane_observability_via_node_janitor() {
   fi
 
   log "running control-plane host observability bootstrap through node-janitor pod ${namespace}/${pod_name} on ${node_name}"
-  ${KUBECTL} -n "${namespace}" exec "${pod_name}" -c node-janitor -- /bin/bash -lc '
+  ${KUBECTL} -n "${namespace}" exec -i "${pod_name}" -c node-janitor -- /bin/bash -lc '
 set -euo pipefail
 target=/host/tmp/fugue-control-plane-observability-bootstrap.sh
 cat >"${target}"
