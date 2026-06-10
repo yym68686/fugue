@@ -82,12 +82,58 @@ if ! command -v systemctl >/dev/null 2>&1; then
   echo "systemctl unavailable; skipping host time synchronization hardening"
   exit 0
 fi
-if ! systemctl list-unit-files systemd-timesyncd.service 2>/dev/null | awk '{print $1}' | grep -Fqx systemd-timesyncd.service; then
+
+host_command_output() {
+  if "$@" 2>/dev/null; then
+    return 0
+  fi
+  if command -v nsenter >/dev/null 2>&1 && [ -d /proc/1/ns ]; then
+    nsenter -t 1 -m -u -i -n -p "$@" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+host_command_quiet() {
+  if "$@" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v nsenter >/dev/null 2>&1 && [ -d /proc/1/ns ]; then
+    nsenter -t 1 -m -u -i -n -p "$@" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+systemd_unit_file_exists() {
+  local unit="$1"
+  local path=""
+
+  if host_command_output systemctl list-unit-files "${unit}" | awk '{print $1}' | grep -Fqx "${unit}"; then
+    return 0
+  fi
+  for path in \
+    "/etc/systemd/system/${unit}" \
+    "/run/systemd/system/${unit}" \
+    "/usr/local/lib/systemd/system/${unit}" \
+    "/lib/systemd/system/${unit}" \
+    "/usr/lib/systemd/system/${unit}"; do
+    if [ -e "${path}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+restart_time_sync_service() {
+  host_command_quiet systemctl restart systemd-timesyncd.service ||
+    host_command_quiet timedatectl set-ntp true
+}
+
+if ! systemd_unit_file_exists systemd-timesyncd.service; then
   echo "systemd-timesyncd unavailable; skipping host time synchronization hardening"
   exit 0
 fi
 for unit in chrony.service chronyd.service; do
-  if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+  if host_command_quiet systemctl is-active --quiet "${unit}"; then
     echo "${unit} is active; leaving systemd-timesyncd poll interval unchanged"
     exit 0
   fi
@@ -103,13 +149,18 @@ tmp="$(mktemp)"
 mkdir -p "$(dirname "${dropin}")"
 if [ -f "${dropin}" ] && cmp -s "${tmp}" "${dropin}"; then
   rm -f "${tmp}"
+  restart_time_sync_service >/dev/null 2>&1 || true
   echo "systemd-timesyncd poll interval already configured"
   exit 0
 fi
 install -m 0644 "${tmp}" "${dropin}"
 rm -f "${tmp}"
-systemctl restart systemd-timesyncd.service >/dev/null 2>&1 || timedatectl set-ntp true >/dev/null 2>&1 || true
-echo "configured systemd-timesyncd poll interval min=32s max=64s"
+if restart_time_sync_service; then
+  echo "configured systemd-timesyncd poll interval min=32s max=64s"
+  exit 0
+fi
+echo "configured systemd-timesyncd poll interval min=32s max=64s but could not restart time synchronization"
+exit 1
 EOF
 }
 
@@ -5371,6 +5422,14 @@ PY
       log "mesh recovery rollout check failed; attempting rollback"
       rollback_release || true
       fail "mesh recovery rollout failed"
+    fi
+  fi
+
+  if daemonset_exists "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
+    if rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
+      ensure_host_time_sync
+    else
+      log "warning: node-janitor rollout check failed; control-plane host time sync hardening may remain pending"
     fi
   fi
 

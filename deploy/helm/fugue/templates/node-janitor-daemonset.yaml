@@ -86,6 +86,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      hostPID: true
       {{- if .Values.rbac.create }}
       serviceAccountName: {{ include "fugue.serviceAccountName" . }}
       {{- end }}

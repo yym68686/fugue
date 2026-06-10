@@ -31,6 +31,9 @@ func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	if !strings.Contains(manifest, "priorityClassName: \"system-node-critical\"") {
 		t.Fatalf("node-janitor should render with system-node-critical priority:\n%s", manifest)
 	}
+	if !strings.Contains(manifest, "hostPID: true") {
+		t.Fatalf("node-janitor should render with host PID access for host maintenance:\n%s", manifest)
+	}
 }
 
 func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
