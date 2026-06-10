@@ -26,6 +26,8 @@ assert_contains "${UPGRADE_SCRIPT}" "ensure_control_plane_observability_via_node
 assert_contains "${UPGRADE_SCRIPT}" "ensure_host_time_sync"
 assert_contains "${UPGRADE_SCRIPT}" "/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf"
 assert_contains "${UPGRADE_SCRIPT}" "PollIntervalMaxSec=%ss"
+assert_contains "${UPGRADE_SCRIPT}" "node-role.kubernetes.io/control-plane=true"
+assert_contains "${UPGRADE_SCRIPT}" "fugue.io/control-plane-desired-role=member"
 assert_contains "${UPGRADE_SCRIPT}" "app.kubernetes.io/component=node-janitor"
 assert_contains "${UPGRADE_SCRIPT}" "FUGUE_CONTROL_PLANE_OBSERVABILITY_RESTART_K3S=false"
 assert_contains "${UPGRADE_SCRIPT}" "restore_local_control_plane_automation_bundle_from_secret"

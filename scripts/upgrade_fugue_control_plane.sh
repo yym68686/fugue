@@ -3493,7 +3493,21 @@ build_primary_control_plane_ssh_opts() {
 }
 
 detect_primary_node_name() {
-  ${KUBECTL} get nodes -l fugue.install/role=primary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+  local node_name=""
+  local selector=""
+
+  for selector in \
+    "fugue.install/role=primary" \
+    "node-role.kubernetes.io/control-plane=true" \
+    "node-role.kubernetes.io/control-plane" \
+    "fugue.io/control-plane-desired-role=member"; do
+    node_name="$(${KUBECTL} get nodes -l "${selector}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    node_name="$(trim_field "${node_name}")"
+    if [[ -n "${node_name}" ]]; then
+      printf '%s' "${node_name}"
+      return
+    fi
+  done
 }
 
 primary_node_is_ready() {
