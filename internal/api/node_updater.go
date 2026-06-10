@@ -14,7 +14,7 @@ import (
 	"fugue/internal/store"
 )
 
-const nodeUpdaterScriptVersion = "v1"
+const nodeUpdaterScriptVersion = "v3"
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
@@ -483,9 +483,9 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v2"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v3"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
 FUGUE_NODE_UPDATER_STATE_DIR="${FUGUE_NODE_UPDATER_STATE_DIR:-${FUGUE_NODE_UPDATER_WORK_DIR}}"
@@ -497,6 +497,10 @@ FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/r
 FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE="${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE:-/etc/rancher/k3s/registries.yaml}"
 FUGUE_NODE_UPDATER_EDGE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_ENV_FILE:-/etc/fugue/fugue-edge.env}"
 FUGUE_NODE_UPDATER_DNS_ENV_FILE="${FUGUE_NODE_UPDATER_DNS_ENV_FILE:-/etc/fugue/fugue-dns.env}"
+FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN="${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN:-/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf}"
+FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC:-32}"
+FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC:-64}"
+FUGUE_NODE_UPDATER_CLOCK_SKEW_REPAIR_THRESHOLD_SEC="${FUGUE_NODE_UPDATER_CLOCK_SKEW_REPAIR_THRESHOLD_SEC:-5}"
 
 log() {
   printf '[fugue-node-updater] %s\n' "$*" >&2
@@ -976,6 +980,147 @@ reconcile_cni_bridge_mtu() {
   return "${changed}"
 }
 
+systemd_unit_file_exists() {
+  local unit="$1"
+  systemctl list-unit-files "${unit}" 2>/dev/null | awk '{print $1}' | grep -Fqx "${unit}"
+}
+
+active_time_sync_service() {
+  local unit=""
+  for unit in chrony.service chronyd.service systemd-timesyncd.service; do
+    if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+      printf '%s' "${unit}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+restart_time_sync_service() {
+  local unit=""
+  unit="$(active_time_sync_service || true)"
+  if [ -z "${unit}" ] && systemd_unit_file_exists systemd-timesyncd.service; then
+    unit="systemd-timesyncd.service"
+  fi
+  if [ -z "${unit}" ]; then
+    return 1
+  fi
+  if systemctl restart "${unit}" >/dev/null 2>&1; then
+    log "restarted ${unit} to refresh host clock"
+    return 0
+  fi
+  return 1
+}
+
+reconcile_systemd_timesyncd_poll() {
+  local active_unit=""
+  local min_poll="${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC}"
+  local max_poll="${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC}"
+  local tmp=""
+
+  case "${min_poll}" in
+    ""|*[!0-9]*) min_poll=32 ;;
+  esac
+  case "${max_poll}" in
+    ""|*[!0-9]*) max_poll=64 ;;
+  esac
+  if [ "${max_poll}" -lt "${min_poll}" ]; then
+    max_poll="${min_poll}"
+  fi
+  if ! systemd_unit_file_exists systemd-timesyncd.service; then
+    return 1
+  fi
+  active_unit="$(active_time_sync_service || true)"
+  case "${active_unit}" in
+    chrony.service|chronyd.service)
+      log "${active_unit} is active; leaving systemd-timesyncd poll interval unchanged"
+      return 1
+      ;;
+  esac
+
+  mkdir -p "$(dirname "${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN}")"
+  tmp="$(mktemp)"
+  {
+    printf '[Time]\n'
+    printf 'PollIntervalMinSec=%ss\n' "${min_poll}"
+    printf 'PollIntervalMaxSec=%ss\n' "${max_poll}"
+  } >"${tmp}"
+  if write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN}"; then
+    systemctl restart systemd-timesyncd.service >/dev/null 2>&1 || timedatectl set-ntp true >/dev/null 2>&1 || true
+    log "configured systemd-timesyncd poll interval min=${min_poll}s max=${max_poll}s"
+    return 0
+  fi
+  return 1
+}
+
+control_plane_date_epoch() {
+  local headers=""
+  local http_date=""
+  headers="$(mktemp)"
+  if ! curl -fsSL --max-time 10 --retry 1 --retry-delay 1 -D "${headers}" -o /dev/null "${FUGUE_API_BASE}/readyz"; then
+    rm -f "${headers}"
+    return 1
+  fi
+  http_date="$(awk '
+    {
+      line = $0
+      if (tolower(line) ~ /^date:[[:space:]]*/) {
+        sub(/^[^:]+:[[:space:]]*/, "", line)
+        sub(/\r$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "${headers}")"
+  rm -f "${headers}"
+  if [ -z "${http_date}" ]; then
+    return 1
+  fi
+  date -u -d "${http_date}" +%s 2>/dev/null || return 1
+}
+
+repair_clock_skew_from_control_plane() {
+  local server_epoch=""
+  local local_epoch=""
+  local skew=0
+  local abs_skew=0
+  local threshold="${FUGUE_NODE_UPDATER_CLOCK_SKEW_REPAIR_THRESHOLD_SEC}"
+
+  case "${threshold}" in
+    ""|*[!0-9]*) threshold=5 ;;
+  esac
+  server_epoch="$(control_plane_date_epoch || true)"
+  case "${server_epoch}" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  local_epoch="$(date -u +%s 2>/dev/null || true)"
+  case "${local_epoch}" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  skew=$((server_epoch - local_epoch))
+  abs_skew="${skew#-}"
+  if [ "${abs_skew}" -le "${threshold}" ]; then
+    return 1
+  fi
+  log "detected host clock skew ${skew}s relative to control plane Date header"
+  if restart_time_sync_service; then
+    return 0
+  fi
+  log "unable to restart a host time synchronization service"
+  return 1
+}
+
+reconcile_time_sync() {
+  local changed=1
+  if reconcile_systemd_timesyncd_poll; then
+    changed=0
+  fi
+  if repair_clock_skew_from_control_plane; then
+    changed=0
+  fi
+  return "${changed}"
+}
+
 render_lkg_service_env() {
   local target="$1"
   local generation_key="$2"
@@ -1018,6 +1163,9 @@ reconcile_lkg_service_envs() {
 
 reconcile_node_state() {
   mkdir -p "${FUGUE_NODE_UPDATER_STATE_DIR}"
+  if reconcile_time_sync; then
+    log "reconciled host time synchronization"
+  fi
   if fetch_discovery_bundle; then
     log "refreshed discovery bundle cache"
   elif [ -r "${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE}" ]; then
@@ -1128,6 +1276,9 @@ current_config_hash() {
     printf 'edge_env_generation=%s\n' "$(current_edge_env_generation)"
     printf 'dns_env_generation=%s\n' "$(current_dns_env_generation)"
     printf 'discovery_generation=%s\n' "${FUGUE_DISCOVERY_GENERATION:-}"
+    printf 'timesyncd_dropin_hash=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN}")"
+    printf 'timesyncd_poll_min=%s\n' "${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC}"
+    printf 'timesyncd_poll_max=%s\n' "${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC}"
   } >"${tmp}"
   sha256_file "${tmp}" || true
   rm -f "${tmp}"
