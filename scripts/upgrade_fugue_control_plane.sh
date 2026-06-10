@@ -74,9 +74,76 @@ write_privileged_file_if_changed() {
   return 0
 }
 
+host_time_sync_root_script() {
+  cat <<'EOF'
+set -euo pipefail
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemctl unavailable; skipping host time synchronization hardening"
+  exit 0
+fi
+if ! systemctl list-unit-files systemd-timesyncd.service 2>/dev/null | awk '{print $1}' | grep -Fqx systemd-timesyncd.service; then
+  echo "systemd-timesyncd unavailable; skipping host time synchronization hardening"
+  exit 0
+fi
+for unit in chrony.service chronyd.service; do
+  if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+    echo "${unit} is active; leaving systemd-timesyncd poll interval unchanged"
+    exit 0
+  fi
+done
+
+dropin="/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf"
+tmp="$(mktemp)"
+{
+  printf '[Time]\n'
+  printf 'PollIntervalMinSec=32s\n'
+  printf 'PollIntervalMaxSec=64s\n'
+} >"${tmp}"
+mkdir -p "$(dirname "${dropin}")"
+if [ -f "${dropin}" ] && cmp -s "${tmp}" "${dropin}"; then
+  rm -f "${tmp}"
+  echo "systemd-timesyncd poll interval already configured"
+  exit 0
+fi
+install -m 0644 "${tmp}" "${dropin}"
+rm -f "${tmp}"
+systemctl restart systemd-timesyncd.service >/dev/null 2>&1 || timedatectl set-ntp true >/dev/null 2>&1 || true
+echo "configured systemd-timesyncd poll interval min=32s max=64s"
+EOF
+}
+
+ensure_primary_host_time_sync_via_ssh() {
+  local primary_node_name=""
+  local output=""
+  local cmd=""
+
+  if [[ -z "${KUBECTL:-}" ]]; then
+    return 1
+  fi
+  primary_node_name="$(detect_primary_node_name)"
+  if [[ -z "$(trim_field "${primary_node_name}")" ]]; then
+    log_stderr "primary control-plane node not found; cannot harden host time synchronization via SSH"
+    return 1
+  fi
+  cmd="$(host_time_sync_root_script)"
+  if output="$(run_primary_host_root_command "${primary_node_name}" "${cmd}" 2>&1)"; then
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      log "primary host time sync: ${line}"
+    done <<<"${output}"
+    return 0
+  fi
+  log_stderr "failed to harden primary host time synchronization via SSH: ${output}"
+  return 1
+}
+
 ensure_host_time_sync() {
   if [[ "${FUGUE_HOST_TIME_SYNC_ENABLED:-true}" != "true" ]]; then
     log "host time synchronization hardening disabled"
+    return 0
+  fi
+  if ensure_primary_host_time_sync_via_ssh; then
     return 0
   fi
   if ! command_exists systemctl; then
@@ -3461,6 +3528,10 @@ run_primary_host_root_command() {
   local_hostname="$(hostname 2>/dev/null || true)"
   local_hostname_short="$(hostname -s 2>/dev/null || true)"
   if [[ "${local_hostname}" == "${primary_node_name}" || "${local_hostname_short}" == "${primary_node_name}" ]]; then
+    if [[ "$(id -u)" == "0" ]]; then
+      bash -lc "${cmd}"
+      return
+    fi
     if sudo -n true >/dev/null 2>&1; then
       sudo -n bash -lc "${cmd}"
       return
@@ -4592,7 +4663,6 @@ main() {
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
   trap cleanup_tmp_artifacts EXIT
-  ensure_host_time_sync
   apply_discovery_bundle_defaults || log "DiscoveryBundle not configured; release will require explicit runtime values"
   if ! ensure_kube_api_access; then
     log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"
@@ -4931,6 +5001,7 @@ PY
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
   fi
   require_env FUGUE_SMOKE_URL
+  ensure_host_time_sync
   ensure_control_plane_observability
   run_release_preflight
 
