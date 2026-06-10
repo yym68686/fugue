@@ -127,7 +127,7 @@ ensure_primary_host_time_sync_via_ssh() {
     return 1
   fi
   cmd="$(host_time_sync_root_script)"
-  if output="$(run_primary_host_root_command "${primary_node_name}" "${cmd}" 2>&1)"; then
+  if output="$(try_primary_host_root_command "${primary_node_name}" "${cmd}" 2>&1)"; then
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       log "primary host time sync: ${line}"
@@ -3533,7 +3533,7 @@ primary_node_has_disk_pressure() {
   [[ "${status}" == "True" ]]
 }
 
-run_primary_host_root_command() {
+try_primary_host_root_command() {
   local primary_node_name="$1"
   local cmd="$2"
   local local_hostname=""
@@ -3554,11 +3554,20 @@ run_primary_host_root_command() {
   fi
 
   if ! prepare_control_plane_automation_ssh; then
-    fail "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
+    return 1
   fi
   build_primary_control_plane_ssh_opts "${primary_node_name}"
   ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
     "sudo -n bash -lc $(printf '%q' "${cmd}")"
+}
+
+run_primary_host_root_command() {
+  local primary_node_name="$1"
+
+  if try_primary_host_root_command "$@"; then
+    return 0
+  fi
+  fail "primary host root command failed on ${primary_node_name}"
 }
 
 wait_for_primary_node_ready() {
@@ -4083,7 +4092,10 @@ restore_primary_mesh_network_if_needed() {
     return 0
   fi
 
-  primary_mesh_ip="$(run_primary_host_root_command "${primary_node_name}" "if command -v tailscale >/dev/null 2>&1; then tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'; fi" | tr -d '\r')"
+  if ! primary_mesh_ip="$(try_primary_host_root_command "${primary_node_name}" "if command -v tailscale >/dev/null 2>&1; then tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'; fi" | tr -d '\r')"; then
+    log "skip primary mesh restore because host root access is unavailable on ${primary_node_name}"
+    return 0
+  fi
   if [[ -z "${primary_mesh_ip}" ]]; then
     log "skip primary mesh restore because tailscale has no IPv4 on ${primary_node_name}"
     return 0
