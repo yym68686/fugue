@@ -1863,6 +1863,7 @@ func TestCaddyStaticTLSFilesMustBePairedAndRequireTLS(t *testing.T) {
 func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testing.T) {
 	t.Parallel()
 
+	var uploadRemoteAddr string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Fugue-Edge-App-ID") != "app_demo" {
 			t.Fatalf("expected app id header, got %q", r.Header.Get("X-Fugue-Edge-App-ID"))
@@ -1873,11 +1874,15 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 			if err != nil {
 				t.Fatalf("read upload body: %v", err)
 			}
+			uploadRemoteAddr = r.RemoteAddr
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, "uploaded:%s:%s", r.Header.Get("X-Forwarded-Host"), body)
 		case "/events":
 			if !r.Close {
 				t.Errorf("expected streaming upload to use a fresh origin connection")
+			}
+			if r.RemoteAddr == uploadRemoteAddr {
+				t.Errorf("expected streaming upload to avoid reusing origin connection %s", r.RemoteAddr)
 			}
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("Content-Type", "text/event-stream")

@@ -1013,6 +1013,15 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if t == nil || t.base == nil {
 		return nil, fmt.Errorf("edge proxy transport is unavailable")
 	}
+	base := t.base
+	if t.observation != nil && t.observation.Streaming && t.observation.Upload {
+		if transport, ok := base.(*http.Transport); ok {
+			// Request.Close only closes after the request; a private transport also avoids selecting a stale idle connection.
+			fresh := transport.Clone()
+			fresh.DisableKeepAlives = true
+			base = fresh
+		}
+	}
 	started := time.Now()
 	if t.observation != nil {
 		var connectStarted time.Time
@@ -1036,7 +1045,7 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 		}
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	}
-	resp, err := t.base.RoundTrip(req)
+	resp, err := base.RoundTrip(req)
 	if t.observation != nil {
 		t.observation.Upstream = time.Since(started)
 		if resp != nil && t.observation.OriginTTFB <= 0 {
