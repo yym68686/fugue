@@ -816,6 +816,55 @@ ssh_root_run() {
     ssh_root_run_raw "${host}" "${mode}" "${cmd}"
 }
 
+ensure_host_time_sync_on_host() {
+  local host="$1"
+  log "ensuring host time synchronization on ${host}"
+  ssh_root "${host}" <<'EOF'
+set -euo pipefail
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  echo "systemctl unavailable; skipping host time synchronization hardening"
+  exit 0
+fi
+if ! systemctl list-unit-files systemd-timesyncd.service 2>/dev/null | awk '{print $1}' | grep -Fqx systemd-timesyncd.service; then
+  echo "systemd-timesyncd unavailable; skipping host time synchronization hardening"
+  exit 0
+fi
+for unit in chrony.service chronyd.service; do
+  if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+    echo "${unit} is active; leaving systemd-timesyncd poll interval unchanged"
+    exit 0
+  fi
+done
+
+dropin="/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf"
+tmp="$(mktemp)"
+{
+  printf '[Time]\n'
+  printf 'PollIntervalMinSec=32s\n'
+  printf 'PollIntervalMaxSec=64s\n'
+} >"${tmp}"
+mkdir -p "$(dirname "${dropin}")"
+if [ -f "${dropin}" ] && cmp -s "${tmp}" "${dropin}"; then
+  rm -f "${tmp}"
+  echo "systemd-timesyncd poll interval already configured"
+  exit 0
+fi
+install -m 0644 "${tmp}" "${dropin}"
+rm -f "${tmp}"
+systemctl restart systemd-timesyncd.service >/dev/null 2>&1 || timedatectl set-ntp true >/dev/null 2>&1 || true
+echo "configured systemd-timesyncd poll interval min=32s max=64s"
+EOF
+}
+
+ensure_host_time_sync_on_aliases() {
+  local host=""
+  for host in "${ALL_ALIASES[@]}"; do
+    [[ -n "${host}" ]] || continue
+    ensure_host_time_sync_on_host "${host}"
+  done
+}
+
 scp_to() {
   local src="$1"
   local host="$2"
@@ -2805,6 +2854,7 @@ main() {
   prepare_dist
   check_ssh_and_sudo
   detect_remote_platform
+  ensure_host_time_sync_on_aliases
   detect_api_ip
   detect_public_endpoint_host
 

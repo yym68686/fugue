@@ -26,6 +26,116 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+run_privileged_host_command() {
+  if [[ "$(id -u)" == "0" ]]; then
+    "$@"
+    return
+  fi
+  if command_exists sudo && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"
+    return
+  fi
+  return 1
+}
+
+host_systemd_unit_file_exists() {
+  local unit="$1"
+  systemctl list-unit-files "${unit}" 2>/dev/null | awk '{print $1}' | grep -Fqx "${unit}"
+}
+
+host_active_time_sync_service() {
+  local unit=""
+  for unit in chrony.service chronyd.service systemd-timesyncd.service; do
+    if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+      printf '%s' "${unit}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+write_privileged_file_if_changed() {
+  local source_path="$1"
+  local target_path="$2"
+
+  if [[ -f "${target_path}" ]] && cmp -s "${source_path}" "${target_path}"; then
+    rm -f "${source_path}"
+    return 1
+  fi
+  if ! run_privileged_host_command mkdir -p "$(dirname "${target_path}")"; then
+    rm -f "${source_path}"
+    return 2
+  fi
+  if ! run_privileged_host_command install -m 0644 "${source_path}" "${target_path}"; then
+    rm -f "${source_path}"
+    return 2
+  fi
+  rm -f "${source_path}"
+  return 0
+}
+
+ensure_host_time_sync() {
+  if [[ "${FUGUE_HOST_TIME_SYNC_ENABLED:-true}" != "true" ]]; then
+    log "host time synchronization hardening disabled"
+    return 0
+  fi
+  if ! command_exists systemctl; then
+    log "systemctl unavailable; skipping host time synchronization hardening"
+    return 0
+  fi
+  if ! host_systemd_unit_file_exists systemd-timesyncd.service; then
+    log "systemd-timesyncd unavailable; skipping host time synchronization hardening"
+    return 0
+  fi
+
+  local active_unit=""
+  active_unit="$(host_active_time_sync_service || true)"
+  case "${active_unit}" in
+    chrony.service|chronyd.service)
+      log "${active_unit} is active; leaving systemd-timesyncd poll interval unchanged"
+      return 0
+      ;;
+  esac
+
+  local min_poll="${FUGUE_HOST_TIMESYNCD_MIN_POLL_SEC:-32}"
+  local max_poll="${FUGUE_HOST_TIMESYNCD_MAX_POLL_SEC:-64}"
+  local dropin="${FUGUE_HOST_TIMESYNCD_DROPIN:-/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf}"
+  local tmp=""
+
+  if ! [[ "${min_poll}" =~ ^[0-9]+$ ]]; then
+    min_poll=32
+  fi
+  if ! [[ "${max_poll}" =~ ^[0-9]+$ ]]; then
+    max_poll=64
+  fi
+  if (( max_poll < min_poll )); then
+    max_poll="${min_poll}"
+  fi
+
+  tmp="$(mktemp)"
+  {
+    printf '[Time]\n'
+    printf 'PollIntervalMinSec=%ss\n' "${min_poll}"
+    printf 'PollIntervalMaxSec=%ss\n' "${max_poll}"
+  } >"${tmp}"
+  if write_privileged_file_if_changed "${tmp}" "${dropin}"; then
+    if run_privileged_host_command systemctl restart systemd-timesyncd.service; then
+      log "configured systemd-timesyncd poll interval min=${min_poll}s max=${max_poll}s"
+    elif command_exists timedatectl && run_privileged_host_command timedatectl set-ntp true; then
+      log "enabled host NTP after configuring systemd-timesyncd poll interval"
+    else
+      log_stderr "configured ${dropin}, but could not restart systemd-timesyncd"
+    fi
+  else
+    local rc=$?
+    if [[ "${rc}" == "1" ]]; then
+      log "systemd-timesyncd poll interval already configured"
+    else
+      log_stderr "failed to configure ${dropin}; continuing without blocking control-plane upgrade"
+    fi
+  fi
+}
+
 CONTROL_PLANE_AUTOMATION_TMP_DIR=""
 KUBECONFIG_FALLBACK_FILE=""
 UPGRADE_OVERRIDE_VALUES_FILE=""
@@ -4482,6 +4592,7 @@ main() {
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
   trap cleanup_tmp_artifacts EXIT
+  ensure_host_time_sync
   apply_discovery_bundle_defaults || log "DiscoveryBundle not configured; release will require explicit runtime values"
   if ! ensure_kube_api_access; then
     log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"
