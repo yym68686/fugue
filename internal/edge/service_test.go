@@ -2528,6 +2528,42 @@ func TestProxyHandlerRecordsUpstreamErrors(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerClassifiesClientCanceledOriginAs499(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_client_canceled")
+	bundle.Routes[0].UpstreamURL = "http://origin.example.invalid"
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	service.proxyBase = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_client_canceled"`, now, false)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/images/generations", strings.NewReader("payload"))
+	service.ProxyHandler().ServeHTTP(recorder, req)
+	if recorder.Code != edgeStatusClientClosedRequest {
+		t.Fatalf("expected client-canceled origin request to return 499, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	metrics := renderMetrics(t, service)
+	for _, want := range []string{
+		`fugue_edge_route_status_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform",status="499"} 1`,
+		`fugue_edge_route_upload_requests_total{hostname="demo.fugue.pro",path_prefix="/",app="app_demo",route_kind="platform"} 1`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+	if strings.Contains(metrics, `fugue_edge_route_upstream_errors_total{hostname="demo.fugue.pro"`) {
+		t.Fatalf("client cancellation should not increment upstream error metrics:\n%s", metrics)
+	}
+}
+
 func TestProxyHandlerSupportsWebSocket(t *testing.T) {
 	t.Parallel()
 

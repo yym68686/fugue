@@ -32,6 +32,7 @@ import (
 const cacheFileVersion = 1
 
 const edgePeerFallbackHeader = "X-Fugue-Edge-Peer-Fallback"
+const edgeStatusClientClosedRequest = 499
 
 type Service struct {
 	Config                   config.EdgeConfig
@@ -204,6 +205,7 @@ type edgeProxyObservation struct {
 	Streaming              bool
 	Upload                 bool
 	PeerFallback           bool
+	ClientCanceled         bool
 	CacheStatus            string
 	CachePolicyID          string
 	CacheKeyHash           string
@@ -767,6 +769,12 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
 	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed, &cacheDecision)
 	proxy.ServeHTTP(observedWriter, r)
+	if observed.ClientCanceled {
+		if observed.StatusCode == 0 {
+			observed.StatusCode = edgeStatusClientClosedRequest
+		}
+		return
+	}
 	if observed.UpstreamError != "" && !observedWriter.wroteHeader && peerFallbackAllowed {
 		if s.proxyPeerFallback(w, r, host, route, &observed) {
 			return
@@ -936,6 +944,14 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			if observed != nil {
 				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
+				if edgeProxyErrorIsClientCanceled(req, proxyErr) {
+					observed.ClientCanceled = true
+					observed.StatusCode = edgeStatusClientClosedRequest
+					if !suppressErrorResponse {
+						rw.WriteHeader(edgeStatusClientClosedRequest)
+					}
+					return
+				}
 			}
 			if suppressErrorResponse {
 				return
@@ -966,6 +982,16 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			return nil
 		},
 	}
+}
+
+func edgeProxyErrorIsClientCanceled(req *http.Request, proxyErr error) bool {
+	if errors.Is(proxyErr, context.Canceled) {
+		return true
+	}
+	if req != nil && errors.Is(req.Context().Err(), context.Canceled) {
+		return true
+	}
+	return false
 }
 
 func setEdgeXForwarded(req *httputil.ProxyRequest) {
@@ -2242,7 +2268,7 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		}
 		s.metrics.RouteFallbackHits[key]++
 	}
-	if strings.TrimSpace(observed.UpstreamError) != "" {
+	if strings.TrimSpace(observed.UpstreamError) != "" && !observed.ClientCanceled {
 		if s.metrics.RouteUpstreamErrors == nil {
 			s.metrics.RouteUpstreamErrors = make(map[routeMetricKey]uint64)
 		}
@@ -2361,6 +2387,9 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 }
 
 func edgeProxyObservationResult(observed edgeProxyObservation) string {
+	if observed.ClientCanceled {
+		return "client_closed"
+	}
 	if strings.TrimSpace(observed.UpstreamError) != "" {
 		return "error"
 	}
@@ -2544,8 +2573,9 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 	}
 	edgeGroupID := firstNonEmpty(observed.Route.EdgeGroupID, s.Config.EdgeGroupID)
 	runtimeEdgeGroupID := firstNonEmpty(observed.Route.RuntimeEdgeGroupID, observed.Route.RuntimeEdgeGroup)
+	upstreamError := strings.TrimSpace(observed.UpstreamError) != "" && !observed.ClientCanceled
 	s.Logger.Printf(
-		"edge_proxy_request received_at=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_connect_ms=%d origin_conn_reused=%t origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t",
+		"edge_proxy_request received_at=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_connect_ms=%d origin_conn_reused=%t origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t",
 		observed.ReceivedAt.Format(time.RFC3339Nano),
 		observed.Host,
 		strings.TrimSpace(observed.Route.AppID),
@@ -2573,12 +2603,13 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.OriginTotal.Milliseconds(),
 		observed.ResponseWrite.Milliseconds(),
 		strings.TrimSpace(observed.Route.UpstreamURL),
-		strings.TrimSpace(observed.UpstreamError) != "",
+		upstreamError,
 		observed.FallbackHit,
 		observed.WebSocket,
 		observed.SSE,
 		observed.Streaming,
 		observed.Upload,
+		observed.ClientCanceled,
 	)
 	s.logProxyObservationFact(observed)
 }

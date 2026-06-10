@@ -63,7 +63,9 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"asset_class":           strings.TrimSpace(observed.AssetClass),
 		"path":                  strings.TrimSpace(observed.Path),
 	}
-	if strings.TrimSpace(observed.UpstreamError) != "" {
+	if observed.ClientCanceled {
+		summary["client_canceled"] = true
+	} else if strings.TrimSpace(observed.UpstreamError) != "" {
 		summary["upstream_error"] = true
 	}
 	summaryJSON, _ := json.Marshal(summary)
@@ -101,6 +103,9 @@ func edgeStatusClass(statusCode int) string {
 }
 
 func edgeObservationErrorType(observed edgeProxyObservation) string {
+	if observed.ClientCanceled {
+		return "client_closed"
+	}
 	if strings.TrimSpace(observed.UpstreamError) != "" {
 		return "upstream_error"
 	}
