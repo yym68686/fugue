@@ -1728,10 +1728,15 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteS
 			ResolvedImageRef: "ghcr.io/example/demo@sha256:abc",
 		},
 		Spec: model.AppSpec{
-			Image:                         "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
-			Ports:                         []int{8080},
-			Replicas:                      1,
-			RuntimeID:                     "runtime_demo",
+			Image:     "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env: map[string]string{
+				"CONFIG_URL":       "http://file_url/api.yaml",
+				"FUGUE_PROJECT_ID": "project_demo",
+				"FUGUE_TOKEN":      "runtime-token",
+			},
 			TerminationGracePeriodSeconds: 2101,
 			PersistentStorage: &model.AppPersistentStorageSpec{
 				Mode: model.AppPersistentStorageModeMovableRWO,
@@ -1747,10 +1752,13 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteS
 		Type:     model.AppSourceTypeDockerImage,
 		ImageRef: "ghcr.io/example/demo:latest",
 	}
+	managedSnapshot.Spec.Env = map[string]string{
+		"CONFIG_URL": "http://file_url/api.yaml",
+	}
 
 	selected, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false)
 	if useStored {
-		t.Fatal("expected source drift to keep the current online rollout snapshot")
+		t.Fatal("expected source and injected env drift to keep the current online rollout snapshot")
 	}
 	if got := selected.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineLifecycleUpdate {
 		t.Fatalf("expected rollout intent to be preserved, got %q", got)

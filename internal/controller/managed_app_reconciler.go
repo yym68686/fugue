@@ -463,7 +463,10 @@ type managedAppRolloutSnapshot struct {
 func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapshot {
 	spec := cloneControllerAppSpec(&app.Spec)
 	if spec != nil {
+		normalized, _ := model.StripFugueInjectedAppEnvFromSpec(*spec)
+		spec = &normalized
 		spec.RolloutIntent = ""
+		model.ApplyAppSpecDefaults(spec)
 	}
 	return managedAppRolloutSnapshot{
 		ID:              strings.TrimSpace(app.ID),
