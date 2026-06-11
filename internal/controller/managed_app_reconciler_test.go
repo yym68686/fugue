@@ -1714,6 +1714,49 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshot(t *test
 	}
 }
 
+func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteSourceDrift(t *testing.T) {
+	t.Parallel()
+
+	stored := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "ghcr.io/example/demo:latest",
+			ResolvedImageRef: "ghcr.io/example/demo@sha256:abc",
+		},
+		Spec: model.AppSpec{
+			Image:                         "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:                         []int{8080},
+			Replicas:                      1,
+			RuntimeID:                     "runtime_demo",
+			TerminationGracePeriodSeconds: 2101,
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+				},
+			},
+		},
+	}
+	managedSnapshot := stored
+	managedSnapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineLifecycleUpdate
+	managedSnapshot.Source = &model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "ghcr.io/example/demo:latest",
+	}
+
+	selected, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if useStored {
+		t.Fatal("expected source drift to keep the current online rollout snapshot")
+	}
+	if got := selected.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineLifecycleUpdate {
+		t.Fatalf("expected rollout intent to be preserved, got %q", got)
+	}
+}
+
 func TestReconcileManagedAppObjectRefreshesStoredDesiredStateBeforeApply(t *testing.T) {
 	t.Parallel()
 

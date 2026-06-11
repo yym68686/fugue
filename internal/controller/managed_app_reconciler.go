@@ -455,7 +455,6 @@ type managedAppRolloutSnapshot struct {
 	ProjectID       string
 	Name            string
 	Route           *model.AppRoute
-	Source          *model.AppSource
 	Spec            model.AppSpec
 	Bindings        []model.ServiceBinding
 	BackingServices []model.BackingService
@@ -472,7 +471,6 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		ProjectID:       strings.TrimSpace(app.ProjectID),
 		Name:            strings.TrimSpace(app.Name),
 		Route:           app.Route,
-		Source:          model.AppBuildSource(app),
 		Spec:            derefControllerAppSpec(spec),
 		Bindings:        app.Bindings,
 		BackingServices: app.BackingServices,
