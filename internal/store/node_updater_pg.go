@@ -235,6 +235,16 @@ func (s *Store) pgCreateNodeUpdateTask(principal model.Principal, updaterID, clu
 	if !nodeUpdaterSupportsTask(updater, taskType) {
 		return model.NodeUpdateTask{}, fmt.Errorf("%w: node updater %s does not support task type %q", ErrInvalidInput, updater.ID, taskType)
 	}
+	taskPayload := cloneMap(payload)
+	payloadJSON, err := marshalNullableJSON(taskPayload)
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	if existing, found, err := s.pgDuplicatePendingNodeUpdateTask(ctx, updater.ID, taskType, payloadJSON); err != nil {
+		return model.NodeUpdateTask{}, err
+	} else if found {
+		return redactNodeUpdateTask(existing), nil
+	}
 	now := time.Now().UTC()
 	task := model.NodeUpdateTask{
 		ID:              model.NewID("nodeupdate"),
@@ -246,15 +256,11 @@ func (s *Store) pgCreateNodeUpdateTask(principal model.Principal, updaterID, clu
 		ClusterNodeName: updater.ClusterNodeName,
 		Type:            taskType,
 		Status:          model.NodeUpdateTaskStatusPending,
-		Payload:         cloneMap(payload),
+		Payload:         taskPayload,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 		CreatedAt:       now,
 		UpdatedAt:       now,
-	}
-	payloadJSON, err := marshalNullableJSON(task.Payload)
-	if err != nil {
-		return model.NodeUpdateTask{}, err
 	}
 	logsJSON, err := marshalNullableJSON(task.Logs)
 	if err != nil {
@@ -275,6 +281,37 @@ INSERT INTO fugue_node_update_tasks (
 		return model.NodeUpdateTask{}, mapDBErr(err)
 	}
 	return redactNodeUpdateTask(task), nil
+}
+
+func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID, taskType string, payloadJSON []byte) (model.NodeUpdateTask, bool, error) {
+	if taskType != model.NodeUpdateTaskTypePrepullAppImages {
+		return model.NodeUpdateTask{}, false, nil
+	}
+	args := []any{
+		strings.TrimSpace(updaterID),
+		taskType,
+		model.NodeUpdateTaskStatusPending,
+		model.NodeUpdateTaskStatusRunning,
+	}
+	payloadClause := "payload_json IS NULL"
+	if payloadJSON != nil {
+		args = append(args, payloadJSON)
+		payloadClause = fmt.Sprintf("payload_json = $%d::jsonb", len(args))
+	}
+	task, err := scanNodeUpdateTask(s.db.QueryRowContext(ctx, `
+SELECT id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
+FROM fugue_node_update_tasks
+WHERE node_updater_id = $1 AND task_type = $2 AND status IN ($3, $4) AND `+payloadClause+`
+ORDER BY created_at ASC
+LIMIT 1
+`, args...))
+	if err != nil {
+		if errors.Is(mapDBErr(err), ErrNotFound) {
+			return model.NodeUpdateTask{}, false, nil
+		}
+		return model.NodeUpdateTask{}, false, mapDBErr(err)
+	}
+	return task, true, nil
 }
 
 func (s *Store) pgNodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType string) (bool, error) {

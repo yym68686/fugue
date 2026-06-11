@@ -213,6 +213,11 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 		if !nodeUpdaterSupportsTask(updater, taskType) {
 			return fmt.Errorf("%w: node updater %s does not support task type %q", ErrInvalidInput, updater.ID, taskType)
 		}
+		taskPayload := cloneMap(payload)
+		if existing, ok := duplicatePendingNodeUpdateTask(state, updater.ID, taskType, taskPayload); ok {
+			task = existing
+			return nil
+		}
 		now := time.Now().UTC()
 		task = model.NodeUpdateTask{
 			ID:              model.NewID("nodeupdate"),
@@ -224,7 +229,7 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 			ClusterNodeName: updater.ClusterNodeName,
 			Type:            taskType,
 			Status:          model.NodeUpdateTaskStatusPending,
-			Payload:         cloneMap(payload),
+			Payload:         taskPayload,
 			RequestedByType: principal.ActorType,
 			RequestedByID:   principal.ActorID,
 			CreatedAt:       now,
@@ -237,6 +242,27 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 		return model.NodeUpdateTask{}, err
 	}
 	return redactNodeUpdateTask(task), nil
+}
+
+func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType string, payload map[string]string) (model.NodeUpdateTask, bool) {
+	if taskType != model.NodeUpdateTaskTypePrepullAppImages {
+		return model.NodeUpdateTask{}, false
+	}
+	updaterID = strings.TrimSpace(updaterID)
+	for _, task := range state.NodeUpdateTasks {
+		if strings.TrimSpace(task.NodeUpdaterID) != updaterID || task.Type != taskType {
+			continue
+		}
+		switch task.Status {
+		case model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning:
+		default:
+			continue
+		}
+		if stringMapEqual(task.Payload, payload) {
+			return task, true
+		}
+	}
+	return model.NodeUpdateTask{}, false
 }
 
 func (s *Store) ListNodeUpdateTasks(tenantID string, platformAdmin bool, updaterID, status string) ([]model.NodeUpdateTask, error) {

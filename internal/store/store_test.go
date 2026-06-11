@@ -436,6 +436,83 @@ func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T)
 	}
 }
 
+func TestCreateNodeUpdateTaskDeduplicatesPendingPrepullAppImages(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater Dedup Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	payload := map[string]string{"images": "registry.example/app:git-abc", "app_id": "app_1"}
+	first, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, payload)
+	if err != nil {
+		t.Fatalf("create first prepull task: %v", err)
+	}
+	second, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, map[string]string{"app_id": "app_1", "images": "registry.example/app:git-abc"})
+	if err != nil {
+		t.Fatalf("create duplicate prepull task: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("expected duplicate prepull task to reuse %s, got %s", first.ID, second.ID)
+	}
+	tasks, err := s.ListNodeUpdateTasks(tenant.ID, false, updater.ID, "")
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one deduplicated task, got %+v", tasks)
+	}
+
+	claimed, err := s.ClaimNodeUpdateTask(first.ID, updater.ID)
+	if err != nil {
+		t.Fatalf("claim task: %v", err)
+	}
+	third, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, payload)
+	if err != nil {
+		t.Fatalf("create duplicate running prepull task: %v", err)
+	}
+	if third.ID != claimed.ID {
+		t.Fatalf("expected running duplicate prepull task to reuse %s, got %s", claimed.ID, third.ID)
+	}
+	if _, err := s.CompleteNodeUpdateTask(claimed.ID, updater.ID, model.NodeUpdateTaskStatusCompleted, "ok", ""); err != nil {
+		t.Fatalf("complete task: %v", err)
+	}
+	fourth, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, payload)
+	if err != nil {
+		t.Fatalf("create prepull task after completion: %v", err)
+	}
+	if fourth.ID == first.ID {
+		t.Fatalf("expected new task after completion, got reused %s", fourth.ID)
+	}
+}
+
 func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 	t.Parallel()
 
