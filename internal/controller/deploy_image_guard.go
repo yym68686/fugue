@@ -273,6 +273,10 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 	if s == nil || s.Store == nil || strings.TrimSpace(imageRef) == "" {
 		return
 	}
+	imageRef = s.nodeHydrationImageRef(imageRef)
+	if imageRef == "" {
+		return
+	}
 	if strings.TrimSpace(target.ClusterNodeName) == "" && strings.TrimSpace(target.RuntimeID) == "" {
 		return
 	}
@@ -303,6 +307,22 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 		s.Logger.Printf("schedule image hydrate task app=%s image=%s runtime=%s node=%s failed: %v", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, err)
 	}
 	_ = ctx
+}
+
+func (s *Service) nodeHydrationImageRef(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if s == nil || imageRef == "" {
+		return imageRef
+	}
+	managedRef := strings.TrimSpace(managedRegistryRefFromRuntimeImageRef(imageRef, s.registryPushBase, s.registryPullBase))
+	if managedRef == "" {
+		return imageRef
+	}
+	runtimeRef := strings.TrimSpace(appimages.RuntimeImageRefFromManagedRef(managedRef, s.registryPushBase, s.registryPullBase))
+	if runtimeRef == "" {
+		return imageRef
+	}
+	return runtimeRef
 }
 
 func compactImageRefs(refs []string) []string {

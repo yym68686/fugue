@@ -197,6 +197,72 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterTaskEnvNormalizesLegacyManagedPrepullImageRefs(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Node Updater API Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, apiSecret, err := stateStore.CreateAPIKey(tenant.ID, "tenant-admin", []string{"runtime.attach"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{
+		RegistryPushBase: "fugue-fugue-registry.fugue-system.svc.cluster.local:5000",
+		RegistryPullBase: "registry.fugue.internal:5000",
+	})
+
+	enrollForm := url.Values{}
+	enrollForm.Set("node_key", nodeSecret)
+	enrollForm.Set("node_name", "worker-1")
+	enrollForm.Set("machine_name", "worker-1")
+	enrollForm.Set("machine_fingerprint", "machine-1")
+	enrollForm.Set("endpoint", "https://worker-1.example.com")
+	enrollForm.Set("capabilities", "heartbeat,tasks,prepull-app-images")
+	enrollRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/enroll", "", enrollForm)
+	if enrollRecorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, enrollRecorder.Code, enrollRecorder.Body.String())
+	}
+	enrollEnv := parseEnvResponse(enrollRecorder.Body.String())
+	updaterToken := enrollEnv["FUGUE_NODE_UPDATER_TOKEN"]
+	updaterID := enrollEnv["FUGUE_NODE_UPDATER_ID"]
+	if updaterID == "" || updaterToken == "" {
+		t.Fatalf("expected updater enrollment env, got %q", enrollRecorder.Body.String())
+	}
+
+	legacyRef := "fugue-fugue-registry.fugue-system.svc.cluster.local:5000/fugue-apps/demo:git-abc"
+	createRecorder := performJSONRequest(t, server, http.MethodPost, "/v1/node-update-tasks", apiSecret, map[string]any{
+		"node_updater_id": updaterID,
+		"type":            model.NodeUpdateTaskTypePrepullAppImages,
+		"payload": map[string]string{
+			"images":    legacyRef,
+			"image_ref": legacyRef,
+		},
+	})
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, createRecorder.Code, createRecorder.Body.String())
+	}
+
+	pollRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/tasks?format=env&limit=1", updaterToken, nil)
+	if pollRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, pollRecorder.Code, pollRecorder.Body.String())
+	}
+	taskEnv := parseEnvResponse(pollRecorder.Body.String())
+	wantRef := "registry.fugue.internal:5000/fugue-apps/demo:git-abc"
+	if taskEnv["FUGUE_NODE_UPDATE_TASK_IMAGES"] != wantRef || taskEnv["FUGUE_NODE_UPDATE_TASK_IMAGE_REF"] != wantRef {
+		t.Fatalf("expected normalized prepull refs %q, got %q", wantRef, pollRecorder.Body.String())
+	}
+}
+
 func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 	t.Parallel()
 

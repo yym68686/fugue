@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -221,7 +222,7 @@ func (s *Server) handleNodeUpdaterTasks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "env") {
-		writeNodeUpdateTaskEnv(w, firstNodeUpdateTask(tasks))
+		writeNodeUpdateTaskEnv(w, s.nodeUpdateTaskForDelivery(firstNodeUpdateTask(tasks)))
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
@@ -406,6 +407,50 @@ func writeNodeUpdaterEnrollEnv(w http.ResponseWriter, updater model.NodeUpdater,
 	fmt.Fprintf(w, "FUGUE_NODE_UPDATER_STATUS=%s\n", shellQuote(updater.Status))
 	fmt.Fprintf(w, "FUGUE_NODE_UPDATER_RUNTIME_ID=%s\n", shellQuote(updater.RuntimeID))
 	fmt.Fprintf(w, "FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME=%s\n", shellQuote(updater.ClusterNodeName))
+}
+
+func (s *Server) nodeUpdateTaskForDelivery(task *model.NodeUpdateTask) *model.NodeUpdateTask {
+	if task == nil || task.Type != model.NodeUpdateTaskTypePrepullAppImages || len(task.Payload) == 0 {
+		return task
+	}
+	normalized := *task
+	normalized.Payload = cloneStringMap(task.Payload)
+	for _, key := range []string{"images", "image_ref"} {
+		value := strings.TrimSpace(normalized.Payload[key])
+		if value == "" {
+			continue
+		}
+		normalized.Payload[key] = s.nodeUpdaterPrepullImageRefsForDelivery(value)
+	}
+	return &normalized
+}
+
+func (s *Server) nodeUpdaterPrepullImageRefsForDelivery(raw string) string {
+	parts := strings.Fields(strings.NewReplacer(",", " ").Replace(raw))
+	if len(parts) == 0 {
+		return strings.TrimSpace(raw)
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, s.nodeUpdaterPrepullImageRefForDelivery(part))
+	}
+	return strings.Join(out, ",")
+}
+
+func (s *Server) nodeUpdaterPrepullImageRefForDelivery(imageRef string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	if s == nil || imageRef == "" {
+		return imageRef
+	}
+	managedRef := strings.TrimSpace(appimages.ManagedRegistryRefFromRuntimeImageRef(imageRef, s.registryPushBase, s.registryPullBase))
+	if managedRef == "" {
+		return imageRef
+	}
+	runtimeRef := strings.TrimSpace(appimages.RuntimeImageRefFromManagedRef(managedRef, s.registryPushBase, s.registryPullBase))
+	if runtimeRef == "" {
+		return imageRef
+	}
+	return runtimeRef
 }
 
 func writeNodeUpdateTaskEnv(w http.ResponseWriter, task *model.NodeUpdateTask) {
