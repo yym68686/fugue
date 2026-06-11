@@ -34,6 +34,13 @@ type kubeDeployment struct {
 	} `json:"metadata"`
 	Spec struct {
 		Replicas *int `json:"replicas,omitempty"`
+		Strategy struct {
+			Type          string `json:"type,omitempty"`
+			RollingUpdate struct {
+				MaxUnavailable any `json:"maxUnavailable,omitempty"`
+				MaxSurge       any `json:"maxSurge,omitempty"`
+			} `json:"rollingUpdate,omitempty"`
+		} `json:"strategy,omitempty"`
 		Template struct {
 			Metadata struct {
 				Labels      map[string]string `json:"labels,omitempty"`

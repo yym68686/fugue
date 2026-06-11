@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 	app = s.Renderer.PrepareApp(app)
 	expectedReleaseKey := expectedManagedAppReleaseKey(app, scheduling)
 	expectedImage := strings.TrimSpace(app.Spec.Image)
+	expectedManagedAppSpecHash := expectedManagedAppSpecHash(app, scheduling)
+	expectedDeployment, expectedDeploymentFound := expectedManagedAppDeployment(app, scheduling)
 
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
@@ -80,6 +83,12 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 				message = schedulingMessage
 			}
 		}
+		if ready && expectedDeploymentFound && appUsesOnlineDurableRolloutIntent(app) {
+			if policyReady, policyMessage := deploymentRolloutPolicyReady(deployment, found, expectedDeployment); !policyReady {
+				ready = false
+				message = policyMessage
+			}
+		}
 		watchTargets := rolloutWatchTargets(namespace, name, deployment, found)
 		managed, foundManagedApp, err := client.getManagedApp(waitCtx, namespace, managedAppName)
 		if err != nil {
@@ -87,7 +96,7 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 		}
 		watchTargets = append(watchTargets, managedAppRolloutWatchTargets(namespace, managedAppName, managed, foundManagedApp)...)
 		if ready {
-			if managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling); !managedReady {
+			if managedReady, managedMessage := managedAppRuntimeSchedulingReady(managed, foundManagedApp, app, scheduling, expectedManagedAppSpecHash); !managedReady {
 				ready = false
 				message = managedMessage
 			}
@@ -507,8 +516,108 @@ func expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingCo
 	return strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
 }
 
+func expectedManagedAppSpecHash(app model.App, scheduling runtime.SchedulingConstraints) string {
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, scheduling))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(runtime.ManagedAppSpecHash(managed.Spec))
+}
+
+func expectedManagedAppDeployment(app model.App, scheduling runtime.SchedulingConstraints) (kubeDeployment, bool) {
+	for _, object := range runtime.BuildManagedAppChildObjects(app, scheduling, nil) {
+		if !strings.EqualFold(strings.TrimSpace(objectStringField(object, "kind")), "Deployment") {
+			continue
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			return kubeDeployment{}, false
+		}
+		var deployment kubeDeployment
+		if err := json.Unmarshal(data, &deployment); err != nil {
+			return kubeDeployment{}, false
+		}
+		return deployment, true
+	}
+	return kubeDeployment{}, false
+}
+
 func deploymentReleaseKey(deployment kubeDeployment) string {
 	return strings.TrimSpace(deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey])
+}
+
+func deploymentRolloutPolicyReady(deployment kubeDeployment, found bool, expected kubeDeployment) (bool, string) {
+	name := strings.TrimSpace(expected.Metadata.Name)
+	if name == "" {
+		name = strings.TrimSpace(deployment.Metadata.Name)
+	}
+	if name == "" {
+		name = "deployment"
+	}
+	if !found {
+		return false, fmt.Sprintf("waiting for deployment %s rollout policy to be created", name)
+	}
+	if !desiredStringMapSubset(deployment.Metadata.Annotations, expected.Metadata.Annotations) {
+		return false, fmt.Sprintf("waiting for deployment %s rollout annotations to match desired policy", name)
+	}
+	expectedType := strings.TrimSpace(expected.Spec.Strategy.Type)
+	if expectedType == "" {
+		return true, ""
+	}
+	actualType := strings.TrimSpace(deployment.Spec.Strategy.Type)
+	if !strings.EqualFold(actualType, expectedType) {
+		if actualType == "" {
+			return false, fmt.Sprintf("waiting for deployment %s strategy %s to be applied", name, expectedType)
+		}
+		return false, fmt.Sprintf("waiting for deployment %s strategy %s to be applied (current=%s)", name, expectedType, actualType)
+	}
+	if !strings.EqualFold(expectedType, "RollingUpdate") {
+		return true, ""
+	}
+	if !kubeIntOrStringEqual(deployment.Spec.Strategy.RollingUpdate.MaxUnavailable, expected.Spec.Strategy.RollingUpdate.MaxUnavailable) {
+		return false, fmt.Sprintf("waiting for deployment %s rolling update maxUnavailable to match desired policy", name)
+	}
+	if !kubeIntOrStringEqual(deployment.Spec.Strategy.RollingUpdate.MaxSurge, expected.Spec.Strategy.RollingUpdate.MaxSurge) {
+		return false, fmt.Sprintf("waiting for deployment %s rolling update maxSurge to match desired policy", name)
+	}
+	return true, ""
+}
+
+func kubeIntOrStringEqual(actual, expected any) bool {
+	return normalizedKubeIntOrString(actual) == normalizedKubeIntOrString(expected)
+}
+
+func normalizedKubeIntOrString(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		if typed == float64(int64(typed)) {
+			return fmt.Sprintf("%d", int64(typed))
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	case float32:
+		if typed == float32(int64(typed)) {
+			return fmt.Sprintf("%d", int64(typed))
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	case int:
+		return fmt.Sprintf("%d", typed)
+	case int32:
+		return fmt.Sprintf("%d", typed)
+	case int64:
+		return fmt.Sprintf("%d", typed)
+	case uint:
+		return fmt.Sprintf("%d", typed)
+	case uint32:
+		return fmt.Sprintf("%d", typed)
+	case uint64:
+		return fmt.Sprintf("%d", typed)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
 }
 
 func deploymentSchedulingReady(deployment kubeDeployment, expected runtime.SchedulingConstraints) (bool, string) {
@@ -631,7 +740,7 @@ func kubeResourceMapContainsDesired(actual, desired map[string]string) bool {
 	return true
 }
 
-func managedAppRuntimeSchedulingReady(managed runtime.ManagedAppObject, found bool, app model.App, expected runtime.SchedulingConstraints) (bool, string) {
+func managedAppRuntimeSchedulingReady(managed runtime.ManagedAppObject, found bool, app model.App, expected runtime.SchedulingConstraints, expectedSpecHash string) (bool, string) {
 	name := strings.TrimSpace(managed.Metadata.Name)
 	if name == "" {
 		name = runtime.ManagedAppResourceName(app)
@@ -647,6 +756,22 @@ func managedAppRuntimeSchedulingReady(managed runtime.ManagedAppObject, found bo
 	}
 	if !tolerationSetsEqual(managed.Spec.Scheduling.Tolerations, expected.Tolerations) {
 		return false, fmt.Sprintf("waiting for managed app %s scheduling tolerations to match target runtime", name)
+	}
+	expectedSpecHash = strings.TrimSpace(expectedSpecHash)
+	if expectedSpecHash == "" {
+		return true, ""
+	}
+	if currentSpecHash := strings.TrimSpace(runtime.ManagedAppSpecHash(managed.Spec)); currentSpecHash != expectedSpecHash {
+		return false, fmt.Sprintf("waiting for managed app %s desired spec to match operation", name)
+	}
+	if managed.Status.ObservedGeneration < managed.Metadata.Generation {
+		return false, fmt.Sprintf("waiting for managed app %s observed generation %d/%d", name, managed.Status.ObservedGeneration, managed.Metadata.Generation)
+	}
+	if appliedSpecHash := strings.TrimSpace(managed.Status.LastAppliedSpecHash); appliedSpecHash != expectedSpecHash {
+		if appliedSpecHash == "" {
+			return false, fmt.Sprintf("waiting for managed app %s applied spec hash to be recorded", name)
+		}
+		return false, fmt.Sprintf("waiting for managed app %s applied spec hash to match operation", name)
 	}
 	return true, ""
 }

@@ -51,6 +51,7 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 		"message":            "pod demo-abc123 container demo failed: CrashLoopBackOff: back-off restarting failed container",
 		"observedGeneration": 1,
 	}
+	markManagedAppFixtureApplied(t, managedApp)
 
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -254,6 +255,7 @@ func TestWaitForManagedAppRolloutWithSchedulingAcceptsAppliedHostnamePin(t *test
 	managedApp := runtime.BuildManagedAppObject(app, appliedScheduling)
 	managedMetadata := managedApp["metadata"].(map[string]any)
 	managedMetadata["generation"] = 1
+	markManagedAppFixtureApplied(t, managedApp)
 
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -345,6 +347,7 @@ func TestWaitForManagedAppRolloutRequiresReadyPodFromAppliedTemplate(t *testing.
 	managedMetadata := managedApp["metadata"].(map[string]any)
 	managedMetadata["generation"] = 1
 	managedMetadata["resourceVersion"] = "managed-rv-1"
+	markManagedAppFixtureApplied(t, managedApp)
 
 	var deploymentCalls atomic.Int32
 	var managedAppCalls atomic.Int32
@@ -441,7 +444,7 @@ func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *test
 		t.Fatalf("decode managed app: %v", err)
 	}
 
-	ready, message := managedAppRuntimeSchedulingReady(managed, true, app, expected)
+	ready, message := managedAppRuntimeSchedulingReady(managed, true, app, expected, "")
 	if ready {
 		t.Fatal("expected stale managed app scheduling to be rejected")
 	}
@@ -451,7 +454,7 @@ func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *test
 
 	managed.Spec.Scheduling = expected
 	managed.Spec.AppSpec.RuntimeID = "runtime_other"
-	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected)
+	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected, "")
 	if ready {
 		t.Fatal("expected stale managed app runtime to be rejected")
 	}
@@ -460,9 +463,109 @@ func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *test
 	}
 
 	managed.Spec.AppSpec.RuntimeID = app.Spec.RuntimeID
-	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected)
+	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected, "")
 	if !ready {
 		t.Fatalf("expected matching managed app runtime scheduling to be ready, got %q", message)
+	}
+}
+
+func TestManagedAppRuntimeSchedulingReadyRequiresObservedExpectedSpec(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:        "registry.pull.example/fugue-apps/demo@sha256:new",
+			Replicas:     1,
+			RuntimeID:    "runtime_agent",
+			RestartToken: "restart_new",
+		},
+	}
+	expected := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.RuntimeIDLabelKey: "runtime_agent",
+		},
+	}
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, expected))
+	if err != nil {
+		t.Fatalf("decode managed app: %v", err)
+	}
+	managed.Metadata.Generation = 7
+	expectedSpecHash := runtime.ManagedAppSpecHash(managed.Spec)
+
+	managed.Status.ObservedGeneration = 6
+	managed.Status.LastAppliedSpecHash = expectedSpecHash
+	ready, message := managedAppRuntimeSchedulingReady(managed, true, app, expected, expectedSpecHash)
+	if ready {
+		t.Fatal("expected stale observed generation to be rejected")
+	}
+	if !strings.Contains(message, "observed generation") {
+		t.Fatalf("expected observed generation message, got %q", message)
+	}
+
+	managed.Status.ObservedGeneration = 7
+	managed.Status.LastAppliedSpecHash = "old-hash"
+	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected, expectedSpecHash)
+	if ready {
+		t.Fatal("expected stale applied spec hash to be rejected")
+	}
+	if !strings.Contains(message, "applied spec hash") {
+		t.Fatalf("expected applied spec hash message, got %q", message)
+	}
+
+	managed.Status.LastAppliedSpecHash = expectedSpecHash
+	ready, message = managedAppRuntimeSchedulingReady(managed, true, app, expected, expectedSpecHash)
+	if !ready {
+		t.Fatalf("expected observed matching managed app to be ready, got %q", message)
+	}
+}
+
+func TestDeploymentRolloutPolicyReadyRejectsRecreateForOnlineRestart(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:         "registry.pull.example/fugue-apps/demo@sha256:new",
+			Ports:         []int{8080},
+			Replicas:      1,
+			RuntimeID:     "runtime_agent",
+			RestartToken:  "restart_new",
+			RolloutIntent: model.AppRolloutIntentOnlineRestart,
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	expected, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected deployment object")
+	}
+
+	recreateApp := app
+	recreateApp.Spec.RolloutIntent = ""
+	recreate, found := expectedManagedAppDeployment(recreateApp, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected recreate deployment object")
+	}
+	if deploymentReleaseKey(recreate) != deploymentReleaseKey(expected) {
+		t.Fatalf("expected release key to ignore rollout policy: recreate=%q expected=%q", deploymentReleaseKey(recreate), deploymentReleaseKey(expected))
+	}
+
+	ready, message := deploymentRolloutPolicyReady(recreate, true, expected)
+	if ready {
+		t.Fatal("expected recreate rollout policy to be rejected for online restart")
+	}
+	if !strings.Contains(message, "rollout annotations") && !strings.Contains(message, "strategy RollingUpdate") {
+		t.Fatalf("expected rollout policy mismatch message, got %q", message)
 	}
 }
 
@@ -527,6 +630,7 @@ func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppE
 		"message":            "pod demo-abc123 on node gcp3 failed: Evicted: The node had condition: [DiskPressure].",
 		"observedGeneration": 1,
 	}
+	markManagedAppFixtureApplied(t, managedApp)
 
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -615,6 +719,7 @@ func TestWaitForManagedAppRolloutUsesWatchEvents(t *testing.T) {
 		"message":            "deployment progressing",
 		"observedGeneration": 1,
 	}
+	markManagedAppFixtureApplied(t, managedApp)
 
 	var ready atomic.Int32
 	var watchSeen atomic.Int32
@@ -747,6 +852,7 @@ func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing
 		"message":            "deployment ready",
 		"observedGeneration": 1,
 	}
+	markManagedAppFixtureApplied(t, managedApp)
 
 	var clusterGets int32
 	var kubeServer *httptest.Server
@@ -910,6 +1016,7 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 		"message":            "deployment ready",
 		"observedGeneration": 1,
 	}
+	markManagedAppFixtureApplied(t, managedApp)
 
 	var deletedPod atomic.Int32
 	var kubeServer *httptest.Server
@@ -1026,6 +1133,33 @@ func readyKubeDeployment(name string, replicas int) kubeDeployment {
 	deployment.Status.ReadyReplicas = replicas
 	deployment.Status.AvailableReplicas = replicas
 	return deployment
+}
+
+func markManagedAppFixtureApplied(t *testing.T, managedApp map[string]any) {
+	t.Helper()
+
+	managed, err := runtime.ManagedAppObjectFromMap(managedApp)
+	if err != nil {
+		t.Fatalf("decode managed app fixture: %v", err)
+	}
+	metadata, _ := managedApp["metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = map[string]any{}
+		managedApp["metadata"] = metadata
+	}
+	generation := managed.Metadata.Generation
+	if generation <= 0 {
+		generation = 1
+		metadata["generation"] = generation
+	}
+
+	status, _ := managedApp["status"].(map[string]any)
+	if status == nil {
+		status = map[string]any{}
+		managedApp["status"] = status
+	}
+	status["observedGeneration"] = generation
+	status["lastAppliedSpecHash"] = runtime.ManagedAppSpecHash(managed.Spec)
 }
 
 func readyTemplatePod(name string, deployment kubeDeployment, resources kubeResourceRequirements) kubePod {

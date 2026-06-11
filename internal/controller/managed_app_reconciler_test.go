@@ -1783,6 +1783,55 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineResourceRolloutSnapshot
 	}
 }
 
+func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stored := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Source: &model.AppSource{
+			Type:     model.AppSourceTypeDockerImage,
+			ImageRef: "ghcr.io/example/demo:latest",
+		},
+		Spec: model.AppSpec{
+			Image:        "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_new",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	managedSnapshot := stored
+	managedSnapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineRestart
+
+	selected, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if useStored {
+		t.Fatal("expected current online restart rollout snapshot to keep driving reconcile")
+	}
+	if got := selected.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineRestart {
+		t.Fatalf("expected restart rollout intent to be preserved, got %q", got)
+	}
+
+	changedStored := stored
+	changedStored.Spec.RestartToken = "restart_other"
+	selected, useStored = selectManagedAppDesiredApp(managedSnapshot, changedStored, false)
+	if !useStored {
+		t.Fatal("expected stored app to win after a newer restart token")
+	}
+	if got := selected.Spec.RestartToken; got != changedStored.Spec.RestartToken {
+		t.Fatalf("expected changed stored restart token %q, got %q", changedStored.Spec.RestartToken, got)
+	}
+}
+
 func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteSourceDrift(t *testing.T) {
 	t.Parallel()
 
