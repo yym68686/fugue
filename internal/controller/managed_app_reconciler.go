@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -429,7 +430,60 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 		backfillManagedAppBackingServices(&app, stored)
 		return app, false
 	}
+	if managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored) {
+		app := managedSnapshot
+		backfillManagedAppSource(&app, stored)
+		backfillManagedAppBackingServices(&app, stored)
+		return app, false
+	}
 	return stored, true
+}
+
+func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model.App) bool {
+	if !appUsesOnlineDurableRolloutIntent(managedSnapshot) {
+		return false
+	}
+	return reflect.DeepEqual(
+		comparableManagedAppRolloutSnapshot(managedSnapshot),
+		comparableManagedAppRolloutSnapshot(stored),
+	)
+}
+
+type managedAppRolloutSnapshot struct {
+	ID              string
+	TenantID        string
+	ProjectID       string
+	Name            string
+	Route           *model.AppRoute
+	Source          *model.AppSource
+	Spec            model.AppSpec
+	Bindings        []model.ServiceBinding
+	BackingServices []model.BackingService
+}
+
+func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapshot {
+	spec := cloneControllerAppSpec(&app.Spec)
+	if spec != nil {
+		spec.RolloutIntent = ""
+	}
+	return managedAppRolloutSnapshot{
+		ID:              strings.TrimSpace(app.ID),
+		TenantID:        strings.TrimSpace(app.TenantID),
+		ProjectID:       strings.TrimSpace(app.ProjectID),
+		Name:            strings.TrimSpace(app.Name),
+		Route:           app.Route,
+		Source:          model.AppBuildSource(app),
+		Spec:            derefControllerAppSpec(spec),
+		Bindings:        app.Bindings,
+		BackingServices: app.BackingServices,
+	}
+}
+
+func derefControllerAppSpec(spec *model.AppSpec) model.AppSpec {
+	if spec == nil {
+		return model.AppSpec{}
+	}
+	return *spec
 }
 
 func managedAppBaselineNeedsRecovery(app model.App) bool {

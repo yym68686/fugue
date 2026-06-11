@@ -20,10 +20,11 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 			ComposeDependsOn: []string{"worker"},
 		},
 		Spec: model.AppSpec{
-			Image:     "ghcr.io/example/demo:latest",
-			Ports:     []int{8080},
-			Replicas:  2,
-			RuntimeID: "runtime_demo",
+			Image:         "ghcr.io/example/demo:latest",
+			Ports:         []int{8080},
+			Replicas:      2,
+			RuntimeID:     "runtime_demo",
+			RolloutIntent: model.AppRolloutIntentOnlineLifecycleUpdate,
 			Env: map[string]string{
 				"APP_ENV": "prod",
 			},
@@ -89,6 +90,9 @@ func TestBuildManagedAppStateObjectsEncodesDesiredState(t *testing.T) {
 	appSpec := spec["appSpec"].(map[string]any)
 	if got := appSpec["image"]; got != "ghcr.io/example/demo:latest" {
 		t.Fatalf("unexpected app image: %#v", got)
+	}
+	if got := spec["rolloutIntent"]; got != model.AppRolloutIntentOnlineLifecycleUpdate {
+		t.Fatalf("unexpected rollout intent: %#v", got)
 	}
 	scheduling := spec["scheduling"].(map[string]any)
 	nodeSelector := scheduling["nodeSelector"].(map[string]any)
@@ -248,10 +252,11 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 			ComposeService: "mongodb",
 		},
 		Spec: model.AppSpec{
-			Image:     "ghcr.io/example/mongo:latest",
-			Ports:     []int{27017},
-			Replicas:  1,
-			RuntimeID: "runtime_demo",
+			Image:         "ghcr.io/example/mongo:latest",
+			Ports:         []int{27017},
+			Replicas:      1,
+			RuntimeID:     "runtime_demo",
+			RolloutIntent: model.AppRolloutIntentOnlineResourceUpdate,
 		},
 		Route: &model.AppRoute{
 			Hostname:    "mongo.example.com",
@@ -276,6 +281,9 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 	}
 	if roundTrip.Route == nil || roundTrip.Route.PublicURL != "https://mongo.example.com" {
 		t.Fatalf("expected route to survive managed app round-trip, got %+v", roundTrip.Route)
+	}
+	if got := roundTrip.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineResourceUpdate {
+		t.Fatalf("expected rollout intent to survive managed app round-trip, got %q", got)
 	}
 
 	objects := BuildManagedAppChildObjects(roundTrip, SchedulingConstraints{}, nil)
