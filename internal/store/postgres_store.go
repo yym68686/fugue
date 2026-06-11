@@ -4163,7 +4163,7 @@ func (s *Store) pgDispatchOperationToRuntime(id, runtimeID string) (model.Operat
 	return op, nil
 }
 
-func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
+func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -4188,6 +4188,9 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	}
 	if desiredSource != nil {
 		op.DesiredSource = cloneAppSource(desiredSource)
+	}
+	if desiredOriginSource != nil {
+		op.DesiredOriginSource = cloneAppSource(desiredOriginSource)
 	}
 
 	now := time.Now().UTC()

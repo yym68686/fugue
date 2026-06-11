@@ -651,6 +651,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)
 		}
+		if completed, err := s.completeStaleDeployOperationIfNeeded(op, currentApp); err != nil {
+			return err
+		} else if completed {
+			timer.Mark("stale_deploy_skip")
+			return nil
+		}
 		app.Spec = *op.DesiredSpec
 		buildSource := model.AppBuildSource(app)
 		if op.DesiredSource != nil {

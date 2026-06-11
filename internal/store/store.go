@@ -3438,15 +3438,19 @@ func claimPendingOperationLocked(state *model.State, index int) (model.Operation
 }
 
 func (s *Store) CompleteManagedOperationWithResult(id, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
-	return s.completeOperation(id, "", manifestPath, message, desiredSpec, desiredSource)
+	return s.completeOperation(id, "", manifestPath, message, desiredSpec, desiredSource, nil)
+}
+
+func (s *Store) CompleteManagedOperationWithSourceState(id, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
+	return s.completeOperation(id, "", manifestPath, message, desiredSpec, desiredSource, desiredOriginSource)
 }
 
 func (s *Store) CompleteManagedOperation(id, manifestPath, message string) (model.Operation, error) {
-	return s.completeOperation(id, "", manifestPath, message, nil, nil)
+	return s.completeOperation(id, "", manifestPath, message, nil, nil, nil)
 }
 
 func (s *Store) CompleteAgentOperation(id, runtimeID, manifestPath, message string) (model.Operation, error) {
-	return s.completeOperation(id, runtimeID, manifestPath, message, nil, nil)
+	return s.completeOperation(id, runtimeID, manifestPath, message, nil, nil, nil)
 }
 
 func (s *Store) UpdateOperationProgress(id, message string) (model.Operation, error) {
@@ -3499,9 +3503,9 @@ func (s *Store) SetOperationControllerTiming(id string, segments []model.Operati
 	return op, err
 }
 
-func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
+func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
 	if s.usingDatabase() {
-		return s.pgCompleteOperation(id, runtimeID, manifestPath, message, desiredSpec, desiredSource)
+		return s.pgCompleteOperation(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource)
 	}
 	var op model.Operation
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -3520,6 +3524,9 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 		}
 		if desiredSource != nil {
 			state.Operations[index].DesiredSource = cloneAppSource(desiredSource)
+		}
+		if desiredOriginSource != nil {
+			state.Operations[index].DesiredOriginSource = cloneAppSource(desiredOriginSource)
 		}
 		now := time.Now().UTC()
 		state.Operations[index].Status = model.OperationStatusCompleted
