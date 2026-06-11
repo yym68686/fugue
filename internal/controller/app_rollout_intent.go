@@ -11,6 +11,9 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	if managedDeployOperationIsRestartOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineRestart
 	}
+	if managedDeployOperationIsImageOnly(op, currentApp, desiredApp) {
+		return model.AppRolloutIntentOnlineImageUpdate
+	}
 	if managedDeployOperationIsResourceOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineResourceUpdate
 	}
@@ -46,6 +49,33 @@ func managedDeployOperationIsRestartOnly(op model.Operation, currentApp, desired
 
 func comparableRestartSpec(spec model.AppSpec) model.AppSpec {
 	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
+	normalized.RestartToken = ""
+	normalized.RolloutIntent = ""
+	model.ApplyAppSpecDefaults(&normalized)
+	return normalized
+}
+
+func managedDeployOperationIsImageOnly(op model.Operation, currentApp, desiredApp model.App) bool {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
+		return false
+	}
+	if strings.TrimSpace(desiredApp.Spec.Image) == "" {
+		return false
+	}
+	if strings.TrimSpace(currentApp.Spec.Image) == strings.TrimSpace(desiredApp.Spec.Image) &&
+		reflect.DeepEqual(model.AppOriginSource(currentApp), model.AppOriginSource(desiredApp)) &&
+		reflect.DeepEqual(model.AppBuildSource(currentApp), model.AppBuildSource(desiredApp)) {
+		return false
+	}
+
+	currentSpec := comparableImageOnlySpec(currentApp.Spec)
+	desiredSpec := comparableImageOnlySpec(desiredApp.Spec)
+	return reflect.DeepEqual(currentSpec, desiredSpec)
+}
+
+func comparableImageOnlySpec(spec model.AppSpec) model.AppSpec {
+	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
+	normalized.Image = ""
 	normalized.RestartToken = ""
 	normalized.RolloutIntent = ""
 	model.ApplyAppSpecDefaults(&normalized)

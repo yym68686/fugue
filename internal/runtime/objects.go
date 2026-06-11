@@ -1279,6 +1279,7 @@ func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
 func appRolloutIntentIsOnlineDurable(intent string) bool {
 	switch strings.TrimSpace(intent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate,
+		model.AppRolloutIntentOnlineImageUpdate,
 		model.AppRolloutIntentOnlineRestart,
 		model.AppRolloutIntentOnlineResourceUpdate:
 		return true
@@ -1303,6 +1304,8 @@ func onlineDurableRolloutReason(intent string) string {
 	switch strings.TrimSpace(intent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate:
 		return "lifecycle-only"
+	case model.AppRolloutIntentOnlineImageUpdate:
+		return "image-only"
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return "resource-only"
 	default:

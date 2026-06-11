@@ -1413,6 +1413,65 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageResourceUpdat
 	}
 }
 
+func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageImageUpdate(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:         "ghcr.io/example/demo:v2",
+			Ports:         []int{8080},
+			Replicas:      1,
+			RuntimeID:     "runtime_demo",
+			RolloutIntent: model.AppRolloutIntentOnlineImageUpdate,
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{
+						Kind:        model.AppPersistentStorageMountKindFile,
+						Path:        "/home/api.yaml",
+						SeedContent: "providers: []\n",
+					},
+					{
+						Kind: model.AppPersistentStorageMountKindDirectory,
+						Path: "/home/data",
+					},
+				},
+			},
+		},
+	}
+
+	deployment := firstObjectByKind(t, buildAppObjects(app, SchedulingConstraints{}), "Deployment")
+	spec := deployment["spec"].(map[string]any)
+	strategy := spec["strategy"].(map[string]any)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected online image update to use RollingUpdate, got %#v", got)
+	}
+	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
+	if rollingUpdate["maxUnavailable"] != 0 {
+		t.Fatalf("expected maxUnavailable=0, got %#v", rollingUpdate["maxUnavailable"])
+	}
+	if rollingUpdate["maxSurge"] != 1 {
+		t.Fatalf("expected maxSurge=1, got %#v", rollingUpdate["maxSurge"])
+	}
+
+	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if annotations["fugue.io/rollout-mode"] != "rolling-restart" {
+		t.Fatalf("expected deployment rollout mode rolling-restart, got %#v", annotations["fugue.io/rollout-mode"])
+	}
+	if annotations["fugue.io/downtime-class"] != "online-required" {
+		t.Fatalf("expected deployment downtime class online-required, got %#v", annotations["fugue.io/downtime-class"])
+	}
+	if annotations["fugue.io/rollout-reason"] != "image-only" {
+		t.Fatalf("expected image-only rollout reason, got %#v", annotations["fugue.io/rollout-reason"])
+	}
+
+	templateAnnotations := spec["template"].(map[string]any)["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if templateAnnotations["fugue.io/rollout-mode"] != "isolated-singleton" {
+		t.Fatalf("expected durable template rollout mode to remain isolated-singleton, got %#v", templateAnnotations["fugue.io/rollout-mode"])
+	}
+}
+
 func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageLifecycleUpdate(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

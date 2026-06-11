@@ -37,7 +37,7 @@ func TestRolloutIntentForManagedOperationDetectsRestartOnlyDeploy(t *testing.T) 
 	}
 }
 
-func TestRolloutIntentForManagedOperationRejectsNonRestartDeploy(t *testing.T) {
+func TestRolloutIntentForManagedOperationRejectsImageAndLifecycleDeploy(t *testing.T) {
 	current := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -53,13 +53,87 @@ func TestRolloutIntentForManagedOperationRejectsNonRestartDeploy(t *testing.T) {
 	desired := current
 	desired.Spec.Image = "ghcr.io/example/demo:v2"
 	desired.Spec.RestartToken = "restart_new"
+	desired.Spec.TerminationGracePeriodSeconds = 30
 	op := model.Operation{
 		Type:        model.OperationTypeDeploy,
 		DesiredSpec: &desired.Spec,
 	}
 
 	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
-		t.Fatalf("expected no rollout intent for image deploy, got %q", got)
+		t.Fatalf("expected no rollout intent for mixed image and lifecycle deploy, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationDetectsImageOnlyDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "ghcr.io/example/demo:latest",
+			ResolvedImageRef: "registry.push.example/demo:image-old",
+		},
+		Spec: model.AppSpec{
+			Image:        "registry.pull.example/fugue-apps/demo@sha256:old",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	model.NormalizeAppSourceState(&current)
+	desired := current
+	desired.Spec.Image = "registry.pull.example/fugue-apps/demo@sha256:new"
+	desired.Spec.RestartToken = "restart_new"
+	nextSource := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo:latest",
+		ResolvedImageRef: "registry.push.example/demo:image-new",
+	}
+	model.SetAppSourceState(&desired, &nextSource, &nextSource)
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected online image rollout intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsImageAndResourceDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.pull.example/fugue-apps/demo@sha256:old",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Resources: &model.ResourceSpec{
+				CPUMilliCores: 250,
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Image = "registry.pull.example/fugue-apps/demo@sha256:new"
+	desired.Spec.Resources = &model.ResourceSpec{CPUMilliCores: 500}
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected no rollout intent for image plus resource deploy, got %q", got)
 	}
 }
 

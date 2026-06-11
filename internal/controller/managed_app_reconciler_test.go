@@ -1783,6 +1783,166 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineResourceRolloutSnapshot
 	}
 }
 
+func TestSelectManagedAppDesiredAppPreservesCurrentOnlineImageRolloutSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stored := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "ghcr.io/example/demo:latest",
+			ResolvedImageRef: "registry.push.example/demo:image-new",
+		},
+		Spec: model.AppSpec{
+			Image:        "registry.fugue.internal:5000/fugue-apps/demo@sha256:new",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_new",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	managedSnapshot := stored
+	managedSnapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineImageUpdate
+
+	selected, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if useStored {
+		t.Fatal("expected current online image rollout snapshot to keep driving reconcile")
+	}
+	if got := selected.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected image rollout intent to be preserved, got %q", got)
+	}
+
+	changedStored := stored
+	changedStored.Spec.Image = "registry.fugue.internal:5000/fugue-apps/demo@sha256:other"
+	selected, useStored = selectManagedAppDesiredApp(managedSnapshot, changedStored, false)
+	if !useStored {
+		t.Fatal("expected stored app to win after a newer image")
+	}
+	if got := selected.Spec.Image; got != changedStored.Spec.Image {
+		t.Fatalf("expected changed stored image %q, got %q", changedStored.Spec.Image, got)
+	}
+}
+
+func TestRefreshStoredManagedAppDesiredBeforeApplyUsesLatestOnlineRolloutSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(t.TempDir() + "/store.json")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Online Resource Rollout")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "Project A", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   680,
+			MemoryMebibytes: 768,
+		},
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:             model.AppPersistentStorageModeMovableRWO,
+			StorageClassName: "fugue-local-rwo",
+			Mounts: []model.AppPersistentStorageMount{
+				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+			},
+		},
+	}, model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo:latest",
+		ResolvedImageRef: "registry.push.example/fugue-apps/demo@sha256:abc",
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	staleManaged, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue,
+		},
+	}))
+	if err != nil {
+		t.Fatalf("build stale managed app: %v", err)
+	}
+	latestApp := app
+	latestApp.Spec.RolloutIntent = model.AppRolloutIntentOnlineResourceUpdate
+	latestManaged, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(latestApp, runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue,
+			kubeHostnameLabelKey:       "node-a",
+		},
+	}))
+	if err != nil {
+		t.Fatalf("build latest managed app: %v", err)
+	}
+	latestManagedJSON, err := json.Marshal(latestManaged)
+	if err != nil {
+		t.Fatalf("marshal latest managed app: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	managedName := runtime.ManagedAppResourceName(app)
+	gotLatestManaged := false
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName) {
+			gotLatestManaged = true
+			return okJSONResponse(string(latestManagedJSON)), nil
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+		return nil, nil
+	})
+
+	svc := &Service{Store: stateStore}
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+	refreshedApp, refreshedManaged, skipApply, err := svc.refreshStoredManagedAppDesiredBeforeApply(
+		context.Background(),
+		client,
+		namespace,
+		staleManaged,
+		runtime.AppFromManagedApp(staleManaged),
+	)
+	if err != nil {
+		t.Fatalf("refresh stored desired before apply: %v", err)
+	}
+	if skipApply {
+		t.Fatal("expected reconcile to continue after active operation completed")
+	}
+	if !gotLatestManaged {
+		t.Fatal("expected latest managed app snapshot to be fetched")
+	}
+	if got := refreshedApp.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineResourceUpdate {
+		t.Fatalf("expected online resource rollout intent to be preserved, got %q", got)
+	}
+	if got := refreshedManaged.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineResourceUpdate {
+		t.Fatalf("expected managed rollout intent to be refreshed, got %q", got)
+	}
+	if got := refreshedManaged.Spec.Scheduling.NodeSelector[kubeHostnameLabelKey]; got != "node-a" {
+		t.Fatalf("expected latest hostname pin to be preserved, got %q", got)
+	}
+}
+
 func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -1964,7 +2124,11 @@ func TestReconcileManagedAppObjectRefreshesStoredDesiredStateBeforeApply(t *test
 			return okJSONResponse(`{}`), nil
 		case req.Method == http.MethodGet && req.URL.Path == managedAppAPIPath(namespace, managedName):
 			if recordedManagedApp == nil {
-				t.Fatal("managed app was requested before apply")
+				data, err := json.Marshal(managed)
+				if err != nil {
+					t.Fatalf("marshal stale managed app: %v", err)
+				}
+				return okJSONResponse(string(data)), nil
 			}
 			data, err := json.Marshal(recordedManagedApp)
 			if err != nil {

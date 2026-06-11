@@ -204,7 +204,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		app = normalizedApp
 	}
 	if syncStoredManagedAppSnapshot {
-		refreshedApp, skipApply, err := s.refreshStoredManagedAppDesiredBeforeApply(ctx, managed, app)
+		refreshedApp, refreshedManaged, skipApply, err := s.refreshStoredManagedAppDesiredBeforeApply(ctx, client, namespace, managed, app)
 		if err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 		}
@@ -212,6 +212,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 			return nil
 		}
 		app = refreshedApp
+		managed = refreshedManaged
 	}
 	if strings.TrimSpace(managed.Metadata.DeletionTimestamp) != "" {
 		status := managedAppBaseStatus(managed, app)
@@ -338,31 +339,50 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	return nil
 }
 
-func (s *Service) refreshStoredManagedAppDesiredBeforeApply(ctx context.Context, managed runtime.ManagedAppObject, app model.App) (model.App, bool, error) {
+func (s *Service) refreshStoredManagedAppDesiredBeforeApply(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	managed runtime.ManagedAppObject,
+	app model.App,
+) (model.App, runtime.ManagedAppObject, bool, error) {
 	if s.Store == nil || strings.TrimSpace(app.ID) == "" {
-		return app, false, nil
+		return app, managed, false, nil
 	}
 	storedApp, err := s.Store.GetApp(app.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return app, false, nil
+			return app, managed, false, nil
 		}
-		return app, false, fmt.Errorf("refresh stored managed app desired state: %w", err)
+		return app, managed, false, fmt.Errorf("refresh stored managed app desired state: %w", err)
 	}
 	hasActiveOp, err := s.appHasActiveOperation(storedApp)
 	if err != nil {
-		return app, false, fmt.Errorf("refresh active app operation state: %w", err)
+		return app, managed, false, fmt.Errorf("refresh active app operation state: %w", err)
 	}
 	if hasActiveOp {
-		return app, true, nil
+		return app, managed, true, nil
+	}
+	if client != nil {
+		managedName := strings.TrimSpace(managed.Metadata.Name)
+		if managedName == "" {
+			managedName = runtime.ManagedAppResourceName(app)
+		}
+		latestManaged, found, err := client.getManagedApp(ctx, namespace, managedName)
+		if err != nil {
+			return app, managed, false, fmt.Errorf("refresh managed app desired snapshot before apply: %w", err)
+		}
+		if found {
+			managed = latestManaged
+		}
 	}
 	refreshed, useStoredBaseline := selectManagedAppDesiredApp(runtime.AppFromManagedApp(managed), storedApp, false)
 	if !useStoredBaseline {
-		return refreshed, false, nil
+		return refreshed, managed, false, nil
 	}
 	observedApp, changed, err := s.observedManagedPostgresDesiredApp(ctx, storedApp)
 	if err != nil {
-		return app, false, fmt.Errorf("refresh observed managed postgres desired state: %w", err)
+		return app, managed, false, fmt.Errorf("refresh observed managed postgres desired state: %w", err)
 	}
 	if changed {
 		refreshed = observedApp
@@ -370,7 +390,7 @@ func (s *Service) refreshStoredManagedAppDesiredBeforeApply(ctx context.Context,
 	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(refreshed); changed {
 		refreshed = normalizedApp
 	}
-	return refreshed, false, nil
+	return refreshed, managed, false, nil
 }
 
 func (s *Service) managedAppSnapshotRecoverable(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App) (bool, error) {
@@ -447,6 +467,8 @@ func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model
 		return false
 	}
 	switch strings.TrimSpace(managedSnapshot.Spec.RolloutIntent) {
+	case model.AppRolloutIntentOnlineImageUpdate:
+		return managedAppImageRolloutSnapshotMatchesStored(managedSnapshot, stored)
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return managedAppResourceRolloutSnapshotMatchesStored(managedSnapshot, stored)
 	case model.AppRolloutIntentOnlineLifecycleUpdate:
@@ -480,6 +502,14 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		spec.RolloutIntent = ""
 		model.ApplyAppSpecDefaults(spec)
 	}
+	bindings := app.Bindings
+	if len(bindings) == 0 {
+		bindings = nil
+	}
+	backingServices := app.BackingServices
+	if len(backingServices) == 0 {
+		backingServices = nil
+	}
 	return managedAppRolloutSnapshot{
 		ID:              strings.TrimSpace(app.ID),
 		TenantID:        strings.TrimSpace(app.TenantID),
@@ -487,8 +517,8 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		Name:            strings.TrimSpace(app.Name),
 		Route:           app.Route,
 		Spec:            derefControllerAppSpec(spec),
-		Bindings:        app.Bindings,
-		BackingServices: app.BackingServices,
+		Bindings:        bindings,
+		BackingServices: backingServices,
 	}
 }
 
@@ -498,6 +528,16 @@ func managedAppRolloutSnapshotIdentityEqual(left, right model.App) bool {
 	leftSnapshot.Spec = model.AppSpec{}
 	rightSnapshot.Spec = model.AppSpec{}
 	return reflect.DeepEqual(leftSnapshot, rightSnapshot)
+}
+
+func managedAppImageRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
+	if strings.TrimSpace(managedSnapshot.Spec.Image) == "" ||
+		strings.TrimSpace(managedSnapshot.Spec.Image) != strings.TrimSpace(stored.Spec.Image) {
+		return false
+	}
+	left := comparableImageOnlySpec(managedSnapshot.Spec)
+	right := comparableImageOnlySpec(stored.Spec)
+	return reflect.DeepEqual(left, right)
 }
 
 func managedAppResourceRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {

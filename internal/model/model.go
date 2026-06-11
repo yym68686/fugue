@@ -175,6 +175,7 @@ const (
 	AppPersistentStorageMountKindDirectory   = "directory"
 	AppPersistentStorageMountKindFile        = "file"
 	AppRolloutIntentOnlineLifecycleUpdate    = "online_lifecycle_update"
+	AppRolloutIntentOnlineImageUpdate        = "online_image_update"
 	AppRolloutIntentOnlineRestart            = "online_restart"
 	AppRolloutIntentOnlineResourceUpdate     = "online_resource_update"
 	AppVolumeReplicationModeDisabled         = "disabled"
