@@ -165,9 +165,11 @@ type kubeWorkloadList struct {
 
 type kubePod struct {
 	Metadata struct {
-		Name              string    `json:"name"`
-		CreationTimestamp time.Time `json:"creationTimestamp"`
-		DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+		Name              string            `json:"name"`
+		CreationTimestamp time.Time         `json:"creationTimestamp"`
+		DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+		Labels            map[string]string `json:"labels,omitempty"`
+		Annotations       map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec   kubePodSpec `json:"spec"`
 	Status struct {
@@ -181,9 +183,10 @@ type kubePod struct {
 }
 
 type kubePodSpec struct {
-	NodeName    string                  `json:"nodeName,omitempty"`
-	Tolerations []runtimepkg.Toleration `json:"tolerations,omitempty"`
-	Volumes     []kubePodVolume         `json:"volumes,omitempty"`
+	NodeName                      string                  `json:"nodeName,omitempty"`
+	TerminationGracePeriodSeconds *int64                  `json:"terminationGracePeriodSeconds,omitempty"`
+	Tolerations                   []runtimepkg.Toleration `json:"tolerations,omitempty"`
+	Volumes                       []kubePodVolume         `json:"volumes,omitempty"`
 
 	InitContainers []kubeContainerSpec `json:"initContainers"`
 	Containers     []kubeContainerSpec `json:"containers"`
@@ -200,11 +203,13 @@ type kubePersistentVolumeRef struct {
 
 type kubeContainerSpec struct {
 	Name      string                   `json:"name"`
+	Image     string                   `json:"image,omitempty"`
 	Resources kubeResourceRequirements `json:"resources,omitempty"`
 }
 
 type kubeResourceRequirements struct {
 	Requests map[string]string `json:"requests,omitempty"`
+	Limits   map[string]string `json:"limits,omitempty"`
 }
 
 type kubePodCondition struct {

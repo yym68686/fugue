@@ -443,10 +443,22 @@ func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model
 	if !appUsesOnlineDurableRolloutIntent(managedSnapshot) {
 		return false
 	}
-	return reflect.DeepEqual(
-		comparableManagedAppRolloutSnapshot(managedSnapshot),
-		comparableManagedAppRolloutSnapshot(stored),
-	)
+	if !managedAppRolloutSnapshotIdentityEqual(managedSnapshot, stored) {
+		return false
+	}
+	switch strings.TrimSpace(managedSnapshot.Spec.RolloutIntent) {
+	case model.AppRolloutIntentOnlineResourceUpdate:
+		return managedAppResourceRolloutSnapshotMatchesStored(managedSnapshot, stored)
+	case model.AppRolloutIntentOnlineLifecycleUpdate:
+		return managedAppLifecycleRolloutSnapshotMatchesStored(managedSnapshot, stored)
+	case model.AppRolloutIntentOnlineRestart:
+		return managedAppRestartRolloutSnapshotMatchesStored(managedSnapshot, stored)
+	default:
+		return reflect.DeepEqual(
+			comparableManagedAppRolloutSnapshot(managedSnapshot),
+			comparableManagedAppRolloutSnapshot(stored),
+		)
+	}
 }
 
 type managedAppRolloutSnapshot struct {
@@ -478,6 +490,42 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		Bindings:        app.Bindings,
 		BackingServices: app.BackingServices,
 	}
+}
+
+func managedAppRolloutSnapshotIdentityEqual(left, right model.App) bool {
+	leftSnapshot := comparableManagedAppRolloutSnapshot(left)
+	rightSnapshot := comparableManagedAppRolloutSnapshot(right)
+	leftSnapshot.Spec = model.AppSpec{}
+	rightSnapshot.Spec = model.AppSpec{}
+	return reflect.DeepEqual(leftSnapshot, rightSnapshot)
+}
+
+func managedAppResourceRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
+	if managedDeployOperationResourcesDiffer(managedSnapshot.Spec, stored.Spec) {
+		return false
+	}
+	left := comparableResourceOnlySpec(managedSnapshot.Spec)
+	right := comparableResourceOnlySpec(stored.Spec)
+	return reflect.DeepEqual(left, right)
+}
+
+func managedAppLifecycleRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
+	if managedSnapshot.Spec.TerminationGracePeriodSeconds != stored.Spec.TerminationGracePeriodSeconds {
+		return false
+	}
+	left := comparableLifecycleOnlySpec(managedSnapshot.Spec)
+	right := comparableLifecycleOnlySpec(stored.Spec)
+	return reflect.DeepEqual(left, right)
+}
+
+func managedAppRestartRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
+	if strings.TrimSpace(managedSnapshot.Spec.RestartToken) == "" ||
+		strings.TrimSpace(managedSnapshot.Spec.RestartToken) != strings.TrimSpace(stored.Spec.RestartToken) {
+		return false
+	}
+	left := comparableRestartSpec(managedSnapshot.Spec)
+	right := comparableRestartSpec(stored.Spec)
+	return reflect.DeepEqual(left, right)
 }
 
 func derefControllerAppSpec(spec *model.AppSpec) model.AppSpec {

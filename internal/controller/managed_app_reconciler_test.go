@@ -593,9 +593,11 @@ func TestBuildManagedAppStatusMarksCrashLoopingPodsAsError(t *testing.T) {
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
@@ -678,9 +680,11 @@ func TestBuildManagedAppStatusIgnoresRecoveredContainerLastFailure(t *testing.T)
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
@@ -761,9 +765,11 @@ func TestBuildManagedAppStatusPrefersPodFailureOverDeploymentCondition(t *testin
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
@@ -846,9 +852,11 @@ func TestBuildManagedAppStatusIgnoresSIGTERMAndTerminatingPods(t *testing.T) {
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-old",
 				CreationTimestamp: time.Date(2026, time.March, 26, 9, 0, 0, 0, time.UTC),
@@ -878,9 +886,11 @@ func TestBuildManagedAppStatusIgnoresSIGTERMAndTerminatingPods(t *testing.T) {
 		},
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-new",
 				CreationTimestamp: time.Date(2026, time.March, 26, 9, 11, 0, 0, time.UTC),
@@ -953,9 +963,11 @@ func TestBuildManagedAppStatusIgnoresPodFailuresFromPreviousRelease(t *testing.T
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-old",
 				CreationTimestamp: time.Date(2026, time.March, 26, 9, 1, 0, 0, time.UTC),
@@ -1029,9 +1041,11 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-old",
 				CreationTimestamp: pendingStartedAt.Add(-time.Minute),
@@ -1059,9 +1073,11 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 		},
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-new",
 				CreationTimestamp: pendingStartedAt.Add(time.Minute),
@@ -1194,9 +1210,11 @@ func TestBuildManagedAppStatusMarksUnschedulablePodsAsError(t *testing.T) {
 	pods := []kubePod{
 		{
 			Metadata: struct {
-				Name              string    `json:"name"`
-				CreationTimestamp time.Time `json:"creationTimestamp"`
-				DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
 			}{
 				Name:              "demo-abc123",
 				CreationTimestamp: time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC),
@@ -1708,6 +1726,57 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshot(t *test
 	selected, useStored = selectManagedAppDesiredApp(managedSnapshot, changedStored, false)
 	if !useStored {
 		t.Fatal("expected stored app to win after a real desired-state change")
+	}
+	if got := selected.Spec.Image; got != changedStored.Spec.Image {
+		t.Fatalf("expected changed stored image %q, got %q", changedStored.Spec.Image, got)
+	}
+}
+
+func TestSelectManagedAppDesiredAppPreservesCurrentOnlineResourceRolloutSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stored := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Source: &model.AppSource{
+			Type:     model.AppSourceTypeDockerImage,
+			ImageRef: "ghcr.io/example/demo:latest",
+		},
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:   670,
+				MemoryMebibytes: 512,
+			},
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+				},
+			},
+		},
+	}
+	managedSnapshot := stored
+	managedSnapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineResourceUpdate
+
+	selected, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if useStored {
+		t.Fatal("expected current online resource rollout snapshot to keep driving reconcile")
+	}
+	if got := selected.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineResourceUpdate {
+		t.Fatalf("expected resource rollout intent to be preserved, got %q", got)
+	}
+
+	changedStored := stored
+	changedStored.Spec.Image = "registry.fugue.internal:5000/fugue-apps/demo@sha256:def"
+	selected, useStored = selectManagedAppDesiredApp(managedSnapshot, changedStored, false)
+	if !useStored {
+		t.Fatal("expected stored app to win after a non-resource desired-state change")
 	}
 	if got := selected.Spec.Image; got != changedStored.Spec.Image {
 		t.Fatalf("expected changed stored image %q, got %q", changedStored.Spec.Image, got)

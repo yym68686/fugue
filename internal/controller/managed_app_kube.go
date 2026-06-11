@@ -35,13 +35,16 @@ type kubeDeployment struct {
 	Spec struct {
 		Replicas *int `json:"replicas,omitempty"`
 		Template struct {
+			Metadata struct {
+				Labels      map[string]string `json:"labels,omitempty"`
+				Annotations map[string]string `json:"annotations,omitempty"`
+			} `json:"metadata,omitempty"`
 			Spec struct {
-				Containers []struct {
-					Name  string `json:"name,omitempty"`
-					Image string `json:"image,omitempty"`
-				} `json:"containers,omitempty"`
-				NodeSelector map[string]string    `json:"nodeSelector,omitempty"`
-				Tolerations  []runtime.Toleration `json:"tolerations,omitempty"`
+				Containers                    []kubeContainerSpec  `json:"containers,omitempty"`
+				InitContainers                []kubeContainerSpec  `json:"initContainers,omitempty"`
+				NodeSelector                  map[string]string    `json:"nodeSelector,omitempty"`
+				TerminationGracePeriodSeconds *int64               `json:"terminationGracePeriodSeconds,omitempty"`
+				Tolerations                   []runtime.Toleration `json:"tolerations,omitempty"`
 			} `json:"spec,omitempty"`
 		} `json:"template,omitempty"`
 	} `json:"spec"`

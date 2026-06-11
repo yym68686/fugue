@@ -293,6 +293,120 @@ func TestWaitForManagedAppRolloutWithSchedulingAcceptsAppliedHostnamePin(t *test
 	}
 }
 
+func TestWaitForManagedAppRolloutRequiresReadyPodFromAppliedTemplate(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.pull.example/fugue-apps/demo@sha256:new",
+			Replicas: 1,
+			Resources: &model.ResourceSpec{
+				CPUMilliCores: 200,
+			},
+		},
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+	expectedReleaseKey := runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{})
+
+	deployment := readyKubeDeployment(deploymentName, 1)
+	deployment.Metadata.ResourceVersion = "deployment-rv-1"
+	deployment.Metadata.Annotations = map[string]string{
+		runtime.FugueAnnotationReleaseKey: expectedReleaseKey,
+	}
+	deployment.Spec.Template.Metadata.Labels = map[string]string{"app": "demo"}
+	deployment.Spec.Template.Spec.Containers = []kubeContainerSpec{{
+		Name:  "demo",
+		Image: app.Spec.Image,
+		Resources: kubeResourceRequirements{
+			Requests: map[string]string{"cpu": "200m"},
+		},
+	}}
+
+	oldPod := readyTemplatePod("demo-old", deployment, kubeResourceRequirements{
+		Requests: map[string]string{"cpu": "100m"},
+	})
+	newPod := readyTemplatePod("demo-new", deployment, kubeResourceRequirements{
+		Requests: map[string]string{"cpu": "200m"},
+	})
+	if podMatchesDeploymentTemplate(oldPod, deployment) {
+		t.Fatal("expected old resource template pod not to match deployment template")
+	}
+	if !podMatchesDeploymentTemplate(newPod, deployment) {
+		t.Fatal("expected new resource template pod to match deployment template")
+	}
+
+	managedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managedMetadata := managedApp["metadata"].(map[string]any)
+	managedMetadata["generation"] = 1
+	managedMetadata["resourceVersion"] = "managed-rv-1"
+
+	var deploymentCalls atomic.Int32
+	var managedAppCalls atomic.Int32
+	var podListCalls atomic.Int32
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("watch") == "true" {
+			if err := json.NewEncoder(w).Encode(map[string]any{"type": "MODIFIED", "object": map[string]any{}}); err != nil {
+				t.Errorf("encode watch event: %v", err)
+			}
+			return
+		}
+		switch r.URL.Path {
+		case "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + deploymentName:
+			deploymentCalls.Add(1)
+			if err := json.NewEncoder(w).Encode(deployment); err != nil {
+				t.Errorf("encode deployment: %v", err)
+			}
+		case managedAppAPIPath(namespace, managedAppName):
+			managedAppCalls.Add(1)
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Errorf("encode managed app: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods":
+			call := podListCalls.Add(1)
+			pods := []kubePod{oldPod}
+			if call >= 2 {
+				pods = []kubePod{newPod}
+			}
+			if err := json.NewEncoder(w).Encode(kubePodList{Items: pods}); err != nil {
+				t.Errorf("encode pods: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	if err := svc.waitForManagedAppRolloutWithScheduling(context.Background(), app, "", runtime.SchedulingConstraints{}); err != nil {
+		t.Fatalf("expected rollout wait to succeed once applied-template pod is ready, got %v (deployment calls=%d managed calls=%d pod list calls=%d)", err, deploymentCalls.Load(), managedAppCalls.Load(), podListCalls.Load())
+	}
+	if got := podListCalls.Load(); got < 2 {
+		t.Fatalf("expected wait to reject old-template pod before succeeding, pod list calls=%d", got)
+	}
+}
+
 func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *testing.T) {
 	t.Parallel()
 
@@ -844,9 +958,11 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 				Items: []kubePod{
 					{
 						Metadata: struct {
-							Name              string    `json:"name"`
-							CreationTimestamp time.Time `json:"creationTimestamp"`
-							DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+							Name              string            `json:"name"`
+							CreationTimestamp time.Time         `json:"creationTimestamp"`
+							DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+							Labels            map[string]string `json:"labels,omitempty"`
+							Annotations       map[string]string `json:"annotations,omitempty"`
 						}{
 							Name:              "demo-postgres-1",
 							CreationTimestamp: time.Date(2026, time.April, 12, 10, 0, 0, 0, time.UTC),
@@ -858,9 +974,11 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 					},
 					{
 						Metadata: struct {
-							Name              string    `json:"name"`
-							CreationTimestamp time.Time `json:"creationTimestamp"`
-							DeletionTimestamp string    `json:"deletionTimestamp,omitempty"`
+							Name              string            `json:"name"`
+							CreationTimestamp time.Time         `json:"creationTimestamp"`
+							DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+							Labels            map[string]string `json:"labels,omitempty"`
+							Annotations       map[string]string `json:"annotations,omitempty"`
 						}{
 							Name:              "demo-postgres-4",
 							CreationTimestamp: time.Date(2026, time.April, 12, 11, 10, 0, 0, time.UTC),
@@ -910,11 +1028,26 @@ func readyKubeDeployment(name string, replicas int) kubeDeployment {
 	return deployment
 }
 
+func readyTemplatePod(name string, deployment kubeDeployment, resources kubeResourceRequirements) kubePod {
+	pod := kubePod{}
+	pod.Metadata.Name = name
+	pod.Metadata.Labels = deployment.Spec.Template.Metadata.Labels
+	pod.Metadata.Annotations = deployment.Spec.Template.Metadata.Annotations
+	pod.Spec.TerminationGracePeriodSeconds = deployment.Spec.Template.Spec.TerminationGracePeriodSeconds
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		container.Resources = resources
+		pod.Spec.Containers = append(pod.Spec.Containers, container)
+	}
+	for _, container := range deployment.Spec.Template.Spec.InitContainers {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, container)
+	}
+	pod.Status.Phase = "Running"
+	pod.Status.Conditions = []kubePodCondition{{Type: "Ready", Status: "True"}}
+	return pod
+}
+
 func setKubeDeploymentPrimaryImage(deployment *kubeDeployment, name, image string) {
-	deployment.Spec.Template.Spec.Containers = []struct {
-		Name  string `json:"name,omitempty"`
-		Image string `json:"image,omitempty"`
-	}{
+	deployment.Spec.Template.Spec.Containers = []kubeContainerSpec{
 		{Name: name, Image: image},
 	}
 }

@@ -92,6 +92,16 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 				message = managedMessage
 			}
 		}
+		if ready && expectedReleaseKey != "" {
+			templatePodsReady, templatePodsMessage, err := deploymentReadyPodsMatchTemplate(waitCtx, client, namespace, app, deployment, app.Spec.Replicas)
+			if err != nil {
+				return err
+			}
+			if !templatePodsReady {
+				ready = false
+				message = templatePodsMessage
+			}
+		}
 		if ready {
 			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
 			if err != nil {
@@ -517,6 +527,108 @@ func deploymentSchedulingReadyForRollout(deployment kubeDeployment, desiredRepli
 		return true, ""
 	}
 	return deploymentSchedulingReady(deployment, expected)
+}
+
+func deploymentReadyPodsMatchTemplate(ctx context.Context, client *kubeClient, namespace string, app model.App, deployment kubeDeployment, desiredReplicas int) (bool, string, error) {
+	if desiredReplicas <= 0 {
+		return true, "", nil
+	}
+	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
+	if err != nil {
+		return false, "", fmt.Errorf("list deployment pods for %s/%s: %w", namespace, strings.TrimSpace(deployment.Metadata.Name), err)
+	}
+
+	matchingReady := 0
+	for _, pod := range pods {
+		if podMatchesDeploymentTemplate(pod, deployment) {
+			matchingReady++
+		}
+	}
+	if matchingReady >= desiredReplicas {
+		return true, "", nil
+	}
+
+	name := strings.TrimSpace(deployment.Metadata.Name)
+	if name == "" {
+		name = runtime.RuntimeAppResourceName(app)
+	}
+	return false, fmt.Sprintf("waiting for deployment %s ready pods to match applied template (%d/%d)", name, matchingReady, desiredReplicas), nil
+}
+
+func podMatchesDeploymentTemplate(pod kubePod, deployment kubeDeployment) bool {
+	if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !kubePodReady(pod) {
+		return false
+	}
+	if !desiredStringMapSubset(pod.Metadata.Labels, deployment.Spec.Template.Metadata.Labels) {
+		return false
+	}
+	if !desiredStringMapSubset(pod.Metadata.Annotations, deployment.Spec.Template.Metadata.Annotations) {
+		return false
+	}
+	if desiredGrace := deployment.Spec.Template.Spec.TerminationGracePeriodSeconds; desiredGrace != nil {
+		if pod.Spec.TerminationGracePeriodSeconds == nil || *pod.Spec.TerminationGracePeriodSeconds != *desiredGrace {
+			return false
+		}
+	}
+	if !podContainerSpecsMatchTemplate(pod.Spec.InitContainers, deployment.Spec.Template.Spec.InitContainers) {
+		return false
+	}
+	return podContainerSpecsMatchTemplate(pod.Spec.Containers, deployment.Spec.Template.Spec.Containers)
+}
+
+func podContainerSpecsMatchTemplate(actual, desired []kubeContainerSpec) bool {
+	if len(desired) == 0 {
+		return true
+	}
+	actualByName := make(map[string]kubeContainerSpec, len(actual))
+	for _, container := range actual {
+		name := strings.TrimSpace(container.Name)
+		if name == "" {
+			continue
+		}
+		actualByName[name] = container
+	}
+	for _, desiredContainer := range desired {
+		name := strings.TrimSpace(desiredContainer.Name)
+		if name == "" {
+			continue
+		}
+		actualContainer, ok := actualByName[name]
+		if !ok {
+			return false
+		}
+		if desiredImage := strings.TrimSpace(desiredContainer.Image); desiredImage != "" && strings.TrimSpace(actualContainer.Image) != desiredImage {
+			return false
+		}
+		if !kubeResourceRequirementsEqual(actualContainer.Resources, desiredContainer.Resources) {
+			return false
+		}
+	}
+	return true
+}
+
+func kubeResourceRequirementsEqual(actual, desired kubeResourceRequirements) bool {
+	return kubeResourceMapContainsDesired(actual.Requests, desired.Requests) &&
+		kubeResourceMapContainsDesired(actual.Limits, desired.Limits)
+}
+
+func kubeResourceMapContainsDesired(actual, desired map[string]string) bool {
+	for name, desiredValue := range desired {
+		actualValue, ok := actual[name]
+		if !ok {
+			return false
+		}
+		if kubeQuantityValueEqual(actualValue, desiredValue) {
+			continue
+		}
+		if strings.TrimSpace(actualValue) != strings.TrimSpace(desiredValue) {
+			return false
+		}
+	}
+	return true
 }
 
 func managedAppRuntimeSchedulingReady(managed runtime.ManagedAppObject, found bool, app model.App, expected runtime.SchedulingConstraints) (bool, string) {
