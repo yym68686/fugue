@@ -280,22 +280,11 @@ func (s *Service) importBuilderMemoryCeilingBytes(tenantID string) int64 {
 }
 
 func (s *Service) importBuildPlacementNodeSelector(ctx context.Context, app model.App, op model.Operation) map[string]string {
-	if s == nil || op.DesiredSpec == nil {
-		return nil
-	}
-	buildApp := app
-	buildApp.Spec = *op.DesiredSpec
-	if op.DesiredSource != nil {
-		model.SetAppSourceState(&buildApp, op.DesiredOriginSource, op.DesiredSource)
-	}
-	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, buildApp)
-	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Printf("skip import build placement app=%s op=%s: %v", app.ID, op.ID, err)
-		}
-		return nil
-	}
-	return clonePlacementStringMap(scheduling.NodeSelector)
+	// Source builds run in the platform builder pool and push to the registry.
+	// The imported image is hydrated to the app runtime after the build succeeds.
+	// Do not inherit the app runtime node selector here: location/runtime labels can
+	// exclude every shared builder node and leave otherwise healthy builds stuck.
+	return nil
 }
 
 func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, operationID string) func() {

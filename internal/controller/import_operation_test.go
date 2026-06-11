@@ -1306,7 +1306,7 @@ func TestExecuteManagedImportOperationSyncsBillingImageStorage(t *testing.T) {
 	}
 }
 
-func TestExecuteManagedImportOperationConstrainsBuildPlacementByRuntimeLocation(t *testing.T) {
+func TestExecuteManagedImportOperationDoesNotConstrainBuildPlacementByRuntimeLocation(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -1381,14 +1381,8 @@ func TestExecuteManagedImportOperationConstrainsBuildPlacementByRuntimeLocation(
 	}
 
 	selector := importer.githubReq.PlacementNodeSelector
-	if selector == nil {
-		t.Fatal("expected import build placement selector")
-	}
-	if selector["topology.kubernetes.io/region"] != "ap-northeast-1" {
-		t.Fatalf("expected region placement selector, got %v", selector)
-	}
-	if selector["fugue.io/location-country-code"] != "jp" {
-		t.Fatalf("expected country placement selector, got %v", selector)
+	if len(selector) != 0 {
+		t.Fatalf("expected source build to use the builder pool without app runtime placement selector, got %v", selector)
 	}
 }
 
