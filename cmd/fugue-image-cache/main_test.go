@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -234,6 +235,56 @@ func TestImageCacheStillServesRegistryAPIBase(t *testing.T) {
 	}
 	if got := rec.Header().Get("Docker-Distribution-API-Version"); got != "registry/2.0" {
 		t.Fatalf("Docker-Distribution-API-Version = %q, want registry/2.0", got)
+	}
+}
+
+func TestBlobMissProxiesUpstreamWithoutHydrate(t *testing.T) {
+	t.Parallel()
+
+	const blobDigest = "sha256:6a0ac1617861a677b045b7ff88545213ec31c0ff08763195a70a4a5adda577bb"
+	var upstreamRange string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/library/demo/blobs/"+blobDigest {
+			t.Fatalf("upstream path = %q", r.URL.Path)
+		}
+		upstreamRange = r.Header.Get("Range")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", "11")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, "hello layer")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copies atomic.Int32
+	cache := &imageCache{
+		registry:     registry.New(),
+		upstreamBase: upstreamURL.Host,
+		copyImageFn: func(context.Context, string, string) error {
+			copies.Add(1)
+			return nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/library/demo/blobs/"+blobDigest, nil)
+	req.Header.Set("Range", "bytes=0-10")
+	rec := httptest.NewRecorder()
+
+	cache.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusPartialContent, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "hello layer" {
+		t.Fatalf("body = %q", got)
+	}
+	if upstreamRange != "bytes=0-10" {
+		t.Fatalf("upstream Range = %q", upstreamRange)
+	}
+	if got := copies.Load(); got != 0 {
+		t.Fatalf("copyImage calls = %d, want 0", got)
 	}
 }
 

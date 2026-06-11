@@ -118,9 +118,12 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.flush()
 		return
 	}
-	repo, target, ok := parseRegistryTarget(r.URL.Path)
+	repo, target, targetKind, ok := parseRegistryTarget(r.URL.Path)
 	if !ok {
 		rec.flush()
+		return
+	}
+	if targetKind == registryTargetBlob && c.proxyBlobFromUpstream(w, r, repo, target) {
 		return
 	}
 	if err := c.hydrate(r.Context(), repo, target); err != nil {
@@ -130,6 +133,13 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	c.registry.ServeHTTP(w, r)
 }
+
+type registryTargetKind string
+
+const (
+	registryTargetManifest registryTargetKind = "manifest"
+	registryTargetBlob     registryTargetKind = "blob"
+)
 
 func (c *imageCache) hydrate(parent context.Context, repo, target string) error {
 	key := repo + "\x00" + target
@@ -325,19 +335,58 @@ func isRegistryAPIPath(path string) bool {
 	return path == "/v2" || strings.HasPrefix(path, "/v2/")
 }
 
-func parseRegistryTarget(path string) (string, string, bool) {
+func parseRegistryTarget(path string) (string, string, registryTargetKind, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) < 4 || parts[0] != "v2" {
-		return "", "", false
+		return "", "", "", false
 	}
 	for idx := 2; idx < len(parts)-1; idx++ {
-		if parts[idx] == "manifests" || parts[idx] == "blobs" {
+		switch parts[idx] {
+		case "manifests":
 			repo := strings.Join(parts[1:idx], "/")
 			target := parts[idx+1]
-			return repo, target, repo != "" && target != ""
+			return repo, target, registryTargetManifest, repo != "" && target != ""
+		case "blobs":
+			repo := strings.Join(parts[1:idx], "/")
+			target := parts[idx+1]
+			return repo, target, registryTargetBlob, repo != "" && target != ""
 		}
 	}
-	return "", "", false
+	return "", "", "", false
+}
+
+func (c *imageCache) proxyBlobFromUpstream(w http.ResponseWriter, r *http.Request, repo, digest string) bool {
+	if c.upstreamBase == "" {
+		return false
+	}
+	upstreamURL := "http://" + trimRegistryBase(c.upstreamBase) + "/v2/" + repo + "/blobs/" + digest
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, nil)
+	if err != nil {
+		log.Printf("build upstream blob request repo=%s digest=%s failed: %v", repo, digest, err)
+		return false
+	}
+	if value := r.Header.Get("Range"); value != "" {
+		req.Header.Set("Range", value)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("upstream blob proxy repo=%s digest=%s failed: %v", repo, digest, err)
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("upstream blob proxy repo=%s digest=%s status=%d", repo, digest, resp.StatusCode)
+		return false
+	}
+	copyHeader(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if r.Method == http.MethodHead {
+		return true
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("stream upstream blob repo=%s digest=%s failed: %v", repo, digest, err)
+	}
+	return true
 }
 
 func imageRef(base, repo, target string) (string, string) {
