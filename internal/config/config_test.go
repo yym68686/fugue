@@ -152,6 +152,21 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerFromEnvManagedAppRolloutTimeout(t *testing.T) {
+	t.Setenv("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", "")
+
+	cfg := ControllerFromEnv()
+	if cfg.ManagedAppRolloutTimeout != time.Hour {
+		t.Fatalf("expected default managed app rollout timeout 1h, got %s", cfg.ManagedAppRolloutTimeout)
+	}
+
+	t.Setenv("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", "45m")
+	cfg = ControllerFromEnv()
+	if cfg.ManagedAppRolloutTimeout != 45*time.Minute {
+		t.Fatalf("expected configured managed app rollout timeout 45m, got %s", cfg.ManagedAppRolloutTimeout)
+	}
+}
+
 func TestControllerFromEnvReadsRegistryMaintenanceNames(t *testing.T) {
 	t.Setenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "registry-gc-state")
 	t.Setenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "registry-retention")

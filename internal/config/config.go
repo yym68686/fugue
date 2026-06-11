@@ -12,7 +12,7 @@ import (
 	"fugue/internal/observability"
 )
 
-const DefaultManagedAppRolloutTimeout = 30 * time.Minute
+const DefaultManagedAppRolloutTimeout = time.Hour
 
 type APIConfig struct {
 	BindAddr                     string
