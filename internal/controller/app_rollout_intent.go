@@ -11,6 +11,9 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	if managedDeployOperationIsRestartOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineRestart
 	}
+	if managedDeployOperationIsResourceOnly(op, currentApp, desiredApp) {
+		return model.AppRolloutIntentOnlineResourceUpdate
+	}
 	return ""
 }
 
@@ -43,5 +46,56 @@ func comparableRestartSpec(spec model.AppSpec) model.AppSpec {
 	normalized.RestartToken = ""
 	normalized.RolloutIntent = ""
 	model.ApplyAppSpecDefaults(&normalized)
+	return normalized
+}
+
+func managedDeployOperationIsResourceOnly(op model.Operation, currentApp, desiredApp model.App) bool {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
+		return false
+	}
+	if !managedDeployOperationResourcesDiffer(currentApp.Spec, desiredApp.Spec) {
+		return false
+	}
+
+	currentSpec := comparableResourceOnlySpec(currentApp.Spec)
+	desiredSpec := comparableResourceOnlySpec(desiredApp.Spec)
+	if !reflect.DeepEqual(currentSpec, desiredSpec) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppOriginSource(currentApp), model.AppOriginSource(desiredApp)) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppBuildSource(currentApp), model.AppBuildSource(desiredApp)) {
+		return false
+	}
+	return true
+}
+
+func managedDeployOperationResourcesDiffer(currentSpec, desiredSpec model.AppSpec) bool {
+	if !reflect.DeepEqual(currentSpec.Resources, desiredSpec.Resources) {
+		return true
+	}
+
+	var currentPostgresResources *model.ResourceSpec
+	if currentSpec.Postgres != nil {
+		currentPostgresResources = currentSpec.Postgres.Resources
+	}
+	var desiredPostgresResources *model.ResourceSpec
+	if desiredSpec.Postgres != nil {
+		desiredPostgresResources = desiredSpec.Postgres.Resources
+	}
+	return !reflect.DeepEqual(currentPostgresResources, desiredPostgresResources)
+}
+
+func comparableResourceOnlySpec(spec model.AppSpec) model.AppSpec {
+	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
+	normalized.RolloutIntent = ""
+	model.ApplyAppSpecDefaults(&normalized)
+	normalized.Resources = nil
+	if normalized.Postgres != nil {
+		postgres := *normalized.Postgres
+		postgres.Resources = nil
+		normalized.Postgres = &postgres
+	}
 	return normalized
 }

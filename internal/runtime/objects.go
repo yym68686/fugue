@@ -1243,7 +1243,7 @@ func legacyComposeAppNameAliasLabels(app model.App) map[string]string {
 }
 
 func deploymentStrategy(app model.App) map[string]any {
-	if appUsesOnlineRestartStrategy(app) {
+	if appUsesOnlineDurableRolloutStrategy(app) {
 		return rollingUpdateDeploymentStrategy()
 	}
 	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
@@ -1263,21 +1263,43 @@ func rollingUpdateDeploymentStrategy() map[string]any {
 }
 
 func appUsesOnlineRestartStrategy(app model.App) bool {
-	return strings.TrimSpace(app.Spec.RolloutIntent) == model.AppRolloutIntentOnlineRestart &&
+	return appUsesOnlineDurableRolloutStrategy(app)
+}
+
+func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
+	return appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) &&
 		model.AppHasClusterService(app.Spec) &&
 		app.Spec.Replicas > 0 &&
 		(normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil)
 }
 
+func appRolloutIntentIsOnlineDurable(intent string) bool {
+	switch strings.TrimSpace(intent) {
+	case model.AppRolloutIntentOnlineRestart, model.AppRolloutIntentOnlineResourceUpdate:
+		return true
+	default:
+		return false
+	}
+}
+
 func deploymentRolloutAnnotations(app model.App) map[string]string {
-	if !appUsesOnlineRestartStrategy(app) {
+	if !appUsesOnlineDurableRolloutStrategy(app) {
 		return appRolloutAnnotations(app)
 	}
 	return map[string]string{
 		"fugue.io/rollout-mode":    "rolling-restart",
 		"fugue.io/downtime-class":  "online-required",
-		"fugue.io/rollout-reason":  "restart-only",
+		"fugue.io/rollout-reason":  onlineDurableRolloutReason(app.Spec.RolloutIntent),
 		"fugue.io/rollout-surface": "tenant-app",
+	}
+}
+
+func onlineDurableRolloutReason(intent string) string {
+	switch strings.TrimSpace(intent) {
+	case model.AppRolloutIntentOnlineResourceUpdate:
+		return "resource-only"
+	default:
+		return "restart-only"
 	}
 }
 

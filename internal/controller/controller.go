@@ -734,6 +734,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app.Spec.RolloutIntent = rolloutIntentForManagedOperation(op, currentApp, app)
+	scheduling = s.onlineDurableRolloutScheduling(ctx, currentApp, app, scheduling)
 	timer.Mark("scheduling")
 	if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 		if err := s.ensureDeployableImage(ctx, op, app, scheduling); err != nil {
