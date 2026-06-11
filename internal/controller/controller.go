@@ -779,7 +779,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
 			timer.Mark("apply_desired_state")
-			if err := s.waitForManagedAppRollout(ctx, app, op.ID); err != nil {
+			if err := s.waitForManagedAppRolloutWithScheduling(ctx, app, op.ID, scheduling); err != nil {
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
 			}
 			timer.Mark("rollout_wait")

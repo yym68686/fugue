@@ -174,6 +174,7 @@ const (
 	AppPersistentStorageModeSharedProjectRWX = "shared_project_rwx"
 	AppPersistentStorageMountKindDirectory   = "directory"
 	AppPersistentStorageMountKindFile        = "file"
+	AppRolloutIntentOnlineLifecycleUpdate    = "online_lifecycle_update"
 	AppRolloutIntentOnlineRestart            = "online_restart"
 	AppRolloutIntentOnlineResourceUpdate     = "online_resource_update"
 	AppVolumeReplicationModeDisabled         = "disabled"
@@ -181,6 +182,7 @@ const (
 	AppVolumeReplicationModeScheduled        = "scheduled"
 	DefaultAppVolumeReplicationSchedule      = "*/5 * * * *"
 	DefaultAppImageMirrorLimit               = 1
+	MaxAppTerminationGracePeriodSeconds      = 24 * 60 * 60
 )
 
 func NormalizeGitHubAppSourceType(raw string) string {
@@ -1490,29 +1492,30 @@ type EdgeTLSCertificate struct {
 }
 
 type AppSpec struct {
-	Image             string                         `json:"image"`
-	Command           []string                       `json:"command,omitempty"`
-	Args              []string                       `json:"args,omitempty"`
-	Env               map[string]string              `json:"env,omitempty"`
-	GeneratedEnv      map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
-	NetworkMode       string                         `json:"network_mode,omitempty"`
-	NetworkPolicy     *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
-	WorkloadClass     string                         `json:"workload_class,omitempty"`
-	Ports             []int                          `json:"ports,omitempty"`
-	Replicas          int                            `json:"replicas"`
-	Resources         *ResourceSpec                  `json:"resources,omitempty"`
-	RightSizing       *AppRightSizingSpec            `json:"right_sizing,omitempty"`
-	RuntimeID         string                         `json:"runtime_id"`
-	Files             []AppFile                      `json:"files,omitempty"`
-	Workspace         *AppWorkspaceSpec              `json:"workspace,omitempty"`
-	Data              *AppDataMaterializationSpec    `json:"data,omitempty"`
-	PersistentStorage *AppPersistentStorageSpec      `json:"persistent_storage,omitempty"`
-	VolumeReplication *AppVolumeReplicationSpec      `json:"volume_replication,omitempty"`
-	Postgres          *AppPostgresSpec               `json:"postgres,omitempty"`
-	Failover          *AppFailoverSpec               `json:"failover,omitempty"`
-	ImageMirrorLimit  int                            `json:"image_mirror_limit,omitempty"`
-	RestartToken      string                         `json:"restart_token,omitempty"`
-	RolloutIntent     string                         `json:"-"`
+	Image                         string                         `json:"image"`
+	Command                       []string                       `json:"command,omitempty"`
+	Args                          []string                       `json:"args,omitempty"`
+	Env                           map[string]string              `json:"env,omitempty"`
+	GeneratedEnv                  map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
+	NetworkMode                   string                         `json:"network_mode,omitempty"`
+	NetworkPolicy                 *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
+	WorkloadClass                 string                         `json:"workload_class,omitempty"`
+	Ports                         []int                          `json:"ports,omitempty"`
+	Replicas                      int                            `json:"replicas"`
+	Resources                     *ResourceSpec                  `json:"resources,omitempty"`
+	RightSizing                   *AppRightSizingSpec            `json:"right_sizing,omitempty"`
+	RuntimeID                     string                         `json:"runtime_id"`
+	Files                         []AppFile                      `json:"files,omitempty"`
+	Workspace                     *AppWorkspaceSpec              `json:"workspace,omitempty"`
+	Data                          *AppDataMaterializationSpec    `json:"data,omitempty"`
+	PersistentStorage             *AppPersistentStorageSpec      `json:"persistent_storage,omitempty"`
+	VolumeReplication             *AppVolumeReplicationSpec      `json:"volume_replication,omitempty"`
+	Postgres                      *AppPostgresSpec               `json:"postgres,omitempty"`
+	Failover                      *AppFailoverSpec               `json:"failover,omitempty"`
+	ImageMirrorLimit              int                            `json:"image_mirror_limit,omitempty"`
+	TerminationGracePeriodSeconds int64                          `json:"termination_grace_period_seconds,omitempty"`
+	RestartToken                  string                         `json:"restart_token,omitempty"`
+	RolloutIntent                 string                         `json:"-"`
 }
 
 type AppNetworkPolicySpec struct {

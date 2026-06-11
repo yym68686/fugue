@@ -171,3 +171,54 @@ func TestRolloutIntentForManagedOperationRejectsNoopDeploy(t *testing.T) {
 		t.Fatalf("expected no rollout intent for noop deploy, got %q", got)
 	}
 }
+
+func TestRolloutIntentForManagedOperationDetectsLifecycleOnlyDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:                         "ghcr.io/example/demo:latest",
+			Ports:                         []int{8080},
+			Replicas:                      1,
+			RuntimeID:                     "runtime_demo",
+			TerminationGracePeriodSeconds: 30,
+		},
+	}
+	desired := current
+	desired.Spec.TerminationGracePeriodSeconds = 2100
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineLifecycleUpdate {
+		t.Fatalf("expected online lifecycle update rollout intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsLifecycleAndImageDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:                         "ghcr.io/example/demo:latest",
+			Ports:                         []int{8080},
+			Replicas:                      1,
+			RuntimeID:                     "runtime_demo",
+			TerminationGracePeriodSeconds: 30,
+		},
+	}
+	desired := current
+	desired.Spec.Image = "ghcr.io/example/demo:v2"
+	desired.Spec.TerminationGracePeriodSeconds = 2100
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected no rollout intent for image plus lifecycle deploy, got %q", got)
+	}
+}

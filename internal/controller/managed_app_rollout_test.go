@@ -229,6 +229,70 @@ func TestDeploymentSchedulingReadyRequiresRuntimeScheduling(t *testing.T) {
 	}
 }
 
+func TestWaitForManagedAppRolloutWithSchedulingAcceptsAppliedHostnamePin(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Replicas: 1,
+		},
+	}
+	appliedScheduling := runtime.SchedulingConstraints{
+		NodeSelector: map[string]string{
+			kubeHostnameLabelKey: "node-a",
+		},
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+
+	deployment := readyKubeDeployment(deploymentName, 1)
+	deployment.Spec.Template.Spec.NodeSelector = appliedScheduling.NodeSelector
+	managedApp := runtime.BuildManagedAppObject(app, appliedScheduling)
+	managedMetadata := managedApp["metadata"].(map[string]any)
+	managedMetadata["generation"] = 1
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + deploymentName:
+			if err := json.NewEncoder(w).Encode(deployment); err != nil {
+				t.Errorf("encode deployment: %v", err)
+			}
+		case managedAppAPIPath(namespace, managedAppName):
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Errorf("encode managed app: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	if err := svc.waitForManagedAppRolloutWithScheduling(context.Background(), app, "", appliedScheduling); err != nil {
+		t.Fatalf("expected rollout wait to accept applied hostname pin, got %v", err)
+	}
+}
+
 func TestManagedAppRuntimeSchedulingReadyRequiresTargetRuntimeScheduling(t *testing.T) {
 	t.Parallel()
 

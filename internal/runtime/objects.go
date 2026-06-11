@@ -419,6 +419,9 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"containers": []map[string]any{container},
 		"volumes":    volumes,
 	}
+	if app.Spec.TerminationGracePeriodSeconds > 0 {
+		podSpec["terminationGracePeriodSeconds"] = app.Spec.TerminationGracePeriodSeconds
+	}
 	if len(sidecars) > 0 {
 		podSpec["containers"] = append(podSpec["containers"].([]map[string]any), sidecars...)
 	}
@@ -1275,7 +1278,9 @@ func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
 
 func appRolloutIntentIsOnlineDurable(intent string) bool {
 	switch strings.TrimSpace(intent) {
-	case model.AppRolloutIntentOnlineRestart, model.AppRolloutIntentOnlineResourceUpdate:
+	case model.AppRolloutIntentOnlineLifecycleUpdate,
+		model.AppRolloutIntentOnlineRestart,
+		model.AppRolloutIntentOnlineResourceUpdate:
 		return true
 	default:
 		return false
@@ -1296,6 +1301,8 @@ func deploymentRolloutAnnotations(app model.App) map[string]string {
 
 func onlineDurableRolloutReason(intent string) string {
 	switch strings.TrimSpace(intent) {
+	case model.AppRolloutIntentOnlineLifecycleUpdate:
+		return "lifecycle-only"
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return "resource-only"
 	default:

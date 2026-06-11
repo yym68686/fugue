@@ -553,6 +553,74 @@ func TestPatchAppImageMirrorLimitUpdatesAppWithoutDeployOperation(t *testing.T) 
 	}
 }
 
+func TestPatchAppTerminationGracePeriodQueuesDeployOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"termination_grace_period_seconds": 2100,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var patchResponse struct {
+		AlreadyCurrent bool            `json:"already_current"`
+		Operation      model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if patchResponse.AlreadyCurrent {
+		t.Fatal("expected termination grace period patch to report a change")
+	}
+	if patchResponse.Operation.ID == "" {
+		t.Fatal("expected deploy operation in patch response")
+	}
+
+	op, err := s.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get operation: %v", err)
+	}
+	if op.DesiredSpec == nil {
+		t.Fatal("expected desired spec on deploy operation")
+	}
+	if got := op.DesiredSpec.TerminationGracePeriodSeconds; got != 2100 {
+		t.Fatalf("expected desired termination grace period 2100, got %d", got)
+	}
+
+	completeNextManagedOperation(t, s)
+	updatedApp, err := s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get updated app: %v", err)
+	}
+	if got := updatedApp.Spec.TerminationGracePeriodSeconds; got != 2100 {
+		t.Fatalf("expected stored termination grace period 2100, got %d", got)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"termination_grace_period_seconds": 2100,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &patchResponse)
+	if !patchResponse.AlreadyCurrent {
+		t.Fatal("expected repeated termination grace period patch to report already_current")
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID, apiKey, map[string]any{
+		"termination_grace_period_seconds": model.MaxAppTerminationGracePeriodSeconds + 1,
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid grace period status %d, got %d body=%s", http.StatusBadRequest, recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestPatchAppStartupCommandQueuesDeployOperation(t *testing.T) {
 	t.Parallel()
 

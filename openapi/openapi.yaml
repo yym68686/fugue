@@ -9824,6 +9824,11 @@ components:
         image_mirror_limit:
           type: integer
           format: int32
+        termination_grace_period_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 86400
         restart_token:
           type: string
     AppNetworkPolicySpec:
@@ -12042,6 +12047,11 @@ components:
           $ref: "#/components/schemas/AppVolumeReplicationSpec"
         right_sizing:
           $ref: "#/components/schemas/AppRightSizingSpec"
+        termination_grace_period_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 86400
     ApplyAppResourceRecommendationRequest:
       type: object
       additionalProperties: false

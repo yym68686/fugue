@@ -14,6 +14,9 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	if managedDeployOperationIsResourceOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineResourceUpdate
 	}
+	if managedDeployOperationIsLifecycleOnly(op, currentApp, desiredApp) {
+		return model.AppRolloutIntentOnlineLifecycleUpdate
+	}
 	return ""
 }
 
@@ -97,5 +100,35 @@ func comparableResourceOnlySpec(spec model.AppSpec) model.AppSpec {
 		postgres.Resources = nil
 		normalized.Postgres = &postgres
 	}
+	return normalized
+}
+
+func managedDeployOperationIsLifecycleOnly(op model.Operation, currentApp, desiredApp model.App) bool {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
+		return false
+	}
+	if currentApp.Spec.TerminationGracePeriodSeconds == desiredApp.Spec.TerminationGracePeriodSeconds {
+		return false
+	}
+
+	currentSpec := comparableLifecycleOnlySpec(currentApp.Spec)
+	desiredSpec := comparableLifecycleOnlySpec(desiredApp.Spec)
+	if !reflect.DeepEqual(currentSpec, desiredSpec) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppOriginSource(currentApp), model.AppOriginSource(desiredApp)) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppBuildSource(currentApp), model.AppBuildSource(desiredApp)) {
+		return false
+	}
+	return true
+}
+
+func comparableLifecycleOnlySpec(spec model.AppSpec) model.AppSpec {
+	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
+	normalized.RolloutIntent = ""
+	normalized.TerminationGracePeriodSeconds = 0
+	model.ApplyAppSpecDefaults(&normalized)
 	return normalized
 }

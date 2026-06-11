@@ -21,22 +21,32 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ImageMirrorLimit  *int                            `json:"image_mirror_limit"`
-		StartupCommand    *string                         `json:"startup_command,omitempty"`
-		PersistentStorage *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
-		VolumeReplication *model.AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
-		RightSizing       *model.AppRightSizingSpec       `json:"right_sizing,omitempty"`
+		ImageMirrorLimit              *int                            `json:"image_mirror_limit"`
+		StartupCommand                *string                         `json:"startup_command,omitempty"`
+		PersistentStorage             *model.AppPersistentStorageSpec `json:"persistent_storage,omitempty"`
+		VolumeReplication             *model.AppVolumeReplicationSpec `json:"volume_replication,omitempty"`
+		RightSizing                   *model.AppRightSizingSpec       `json:"right_sizing,omitempty"`
+		TerminationGracePeriodSeconds *int64                          `json:"termination_grace_period_seconds,omitempty"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil && req.RightSizing == nil {
-		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, volume_replication, or right_sizing is required")
+	if req.ImageMirrorLimit == nil && req.StartupCommand == nil && req.PersistentStorage == nil && req.VolumeReplication == nil && req.RightSizing == nil && req.TerminationGracePeriodSeconds == nil {
+		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit, startup_command, persistent_storage, volume_replication, right_sizing, or termination_grace_period_seconds is required")
 		return
 	}
 	if req.ImageMirrorLimit != nil && *req.ImageMirrorLimit < 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "image_mirror_limit must be greater than or equal to 0")
+		return
+	}
+	if req.TerminationGracePeriodSeconds != nil &&
+		(*req.TerminationGracePeriodSeconds < 0 || *req.TerminationGracePeriodSeconds > model.MaxAppTerminationGracePeriodSeconds) {
+		httpx.WriteError(
+			w,
+			http.StatusBadRequest,
+			fmt.Sprintf("termination_grace_period_seconds must be between 0 and %d", model.MaxAppTerminationGracePeriodSeconds),
+		)
 		return
 	}
 
@@ -69,7 +79,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var operation *model.Operation
-	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.RightSizing != nil {
+	if req.StartupCommand != nil || req.PersistentStorage != nil || req.VolumeReplication != nil || req.RightSizing != nil || req.TerminationGracePeriodSeconds != nil {
 		spec, source, err := s.recoverAppDeployBaseline(currentApp)
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -80,6 +90,7 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 		currentPersistentStorage := cloneAppSpec(spec).PersistentStorage
 		currentVolumeReplication := cloneAppSpec(spec).VolumeReplication
 		currentRightSizing := cloneAppSpec(spec).RightSizing
+		currentTerminationGracePeriodSeconds := spec.TerminationGracePeriodSeconds
 		spec.ImageMirrorLimit = model.EffectiveAppImageMirrorLimit(currentApp.Spec.ImageMirrorLimit)
 
 		deployChanged := false
@@ -139,6 +150,14 @@ func (s *Server) handlePatchApp(w http.ResponseWriter, r *http.Request) {
 			if !appRightSizingEqual(currentRightSizing, spec.RightSizing) {
 				deployChanged = true
 				auditMetadata["right_sizing"] = spec.RightSizing.Mode
+			}
+		}
+
+		if req.TerminationGracePeriodSeconds != nil {
+			spec.TerminationGracePeriodSeconds = *req.TerminationGracePeriodSeconds
+			if currentTerminationGracePeriodSeconds != spec.TerminationGracePeriodSeconds {
+				deployChanged = true
+				auditMetadata["termination_grace_period_seconds"] = httpxValue(spec.TerminationGracePeriodSeconds)
 			}
 		}
 

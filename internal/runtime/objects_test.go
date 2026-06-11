@@ -1413,6 +1413,43 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageResourceUpdat
 	}
 }
 
+func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageLifecycleUpdate(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:                         "ghcr.io/example/demo:latest",
+			Ports:                         []int{8080},
+			Replicas:                      1,
+			RuntimeID:                     "runtime_demo",
+			RolloutIntent:                 model.AppRolloutIntentOnlineLifecycleUpdate,
+			TerminationGracePeriodSeconds: 2100,
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
+				},
+			},
+		},
+	}
+
+	deployment := firstObjectByKind(t, buildAppObjects(app, SchedulingConstraints{}), "Deployment")
+	spec := deployment["spec"].(map[string]any)
+	strategy := spec["strategy"].(map[string]any)
+	if got := strategy["type"]; got != "RollingUpdate" {
+		t.Fatalf("expected online lifecycle update to use RollingUpdate, got %#v", got)
+	}
+	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if got := annotations["fugue.io/rollout-reason"]; got != "lifecycle-only" {
+		t.Fatalf("expected lifecycle-only rollout reason, got %#v", got)
+	}
+	podSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
+	if got := podSpec["terminationGracePeriodSeconds"]; got != int64(2100) {
+		t.Fatalf("expected terminationGracePeriodSeconds=2100, got %#v", got)
+	}
+}
+
 func TestBuildAppObjectsUsesPersistentStorageClaimName(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

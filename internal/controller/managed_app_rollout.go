@@ -11,15 +11,24 @@ import (
 )
 
 func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, operationID string) error {
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
+	if err != nil {
+		return err
+	}
+	return s.waitForManagedAppRolloutWithScheduling(ctx, app, operationID, scheduling)
+}
+
+func (s *Service) waitForManagedAppRolloutWithScheduling(
+	ctx context.Context,
+	app model.App,
+	operationID string,
+	scheduling runtime.SchedulingConstraints,
+) error {
 	client, err := s.kubeClient()
 	if err != nil {
 		return fmt.Errorf("initialize kubernetes rollout client: %w", err)
 	}
 	app = s.Renderer.PrepareApp(app)
-	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
-	if err != nil {
-		return err
-	}
 	expectedReleaseKey := expectedManagedAppReleaseKey(app, scheduling)
 	expectedImage := strings.TrimSpace(app.Spec.Image)
 

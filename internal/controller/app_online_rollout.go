@@ -50,7 +50,9 @@ func appUsesOnlineDurableRolloutIntent(app model.App) bool {
 		return false
 	}
 	switch strings.TrimSpace(app.Spec.RolloutIntent) {
-	case model.AppRolloutIntentOnlineRestart, model.AppRolloutIntentOnlineResourceUpdate:
+	case model.AppRolloutIntentOnlineLifecycleUpdate,
+		model.AppRolloutIntentOnlineRestart,
+		model.AppRolloutIntentOnlineResourceUpdate:
 		return true
 	default:
 		return false
