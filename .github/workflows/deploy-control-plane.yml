@@ -109,7 +109,7 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.api_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Build and push fugue-controller
         uses: docker/build-push-action@v7.1.0
@@ -120,7 +120,7 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.controller_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Build and push fugue-telemetry-agent
         uses: docker/build-push-action@v7.1.0
@@ -131,7 +131,7 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.telemetry_agent_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Build and push fugue-image-cache
         uses: docker/build-push-action@v7.1.0
@@ -142,7 +142,7 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.image_cache_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Build and push fugue-edge
         uses: docker/build-push-action@v7.1.0
@@ -153,7 +153,7 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.edge_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
   deploy:
     needs: build
