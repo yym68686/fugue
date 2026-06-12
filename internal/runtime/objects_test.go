@@ -2243,8 +2243,8 @@ func assertHelperResources(t *testing.T, value any) {
 	if got := limits["memory"]; got != defaultHelperMemoryLimit {
 		t.Fatalf("expected helper memory limit %q, got %#v", defaultHelperMemoryLimit, got)
 	}
-	if got := limits["ephemeral-storage"]; got != defaultHelperEphemeralLimit {
-		t.Fatalf("expected helper ephemeral limit %q, got %#v", defaultHelperEphemeralLimit, got)
+	if got, ok := limits["ephemeral-storage"]; ok {
+		t.Fatalf("expected helper ephemeral limit to be unset, got %#v", got)
 	}
 }
 

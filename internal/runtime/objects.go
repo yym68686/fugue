@@ -24,7 +24,6 @@ const (
 	defaultHelperMemoryRequest    = "32Mi"
 	defaultHelperMemoryLimit      = "128Mi"
 	defaultHelperEphemeralRequest = "32Mi"
-	defaultHelperEphemeralLimit   = "128Mi"
 	appProgressDeadlineSeconds    = 3600
 	AppFilesVolumeName            = "app-files"
 	appFilesVolumeName            = AppFilesVolumeName
@@ -729,9 +728,8 @@ func runtimeHelperResourceRequirements() map[string]any {
 			"ephemeral-storage": defaultHelperEphemeralRequest,
 		},
 		map[string]string{
-			"cpu":               defaultHelperCPULimit,
-			"memory":            defaultHelperMemoryLimit,
-			"ephemeral-storage": defaultHelperEphemeralLimit,
+			"cpu":    defaultHelperCPULimit,
+			"memory": defaultHelperMemoryLimit,
 		},
 	)
 }
