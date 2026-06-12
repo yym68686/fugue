@@ -90,3 +90,33 @@ func TestDescribePodIssueDoesNotCompareRuntimeImageIDToExpectedSpecImage(t *test
 		t.Fatalf("expected no issue when spec image matches and image_id differs, got %q", issue)
 	}
 }
+
+func TestDescribePodIssueIgnoresNonComparableRuntimeImageIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, image := range []string{
+		"sha256:runtime-id",
+		"docker-pullable://registry.pull.example/fugue-apps/demo@sha256:expected",
+		"containerd://runtime-id",
+		"docker://runtime-id",
+	} {
+		pod := model.ClusterPod{
+			Name:  "demo-ready",
+			Phase: "Running",
+			Ready: true,
+			Containers: []model.ClusterPodContainer{
+				{
+					Name:  "demo",
+					Image: image,
+					Ready: true,
+					State: "running",
+				},
+			},
+		}
+
+		issue := describePodIssue(pod, "registry.pull.example/fugue-apps/demo@sha256:expected")
+		if issue != "" {
+			t.Fatalf("expected no issue for non-comparable image %q, got %q", image, issue)
+		}
+	}
+}

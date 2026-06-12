@@ -740,7 +740,7 @@ func describePodIssue(pod model.ClusterPod, expectedImage string) string {
 		return ""
 	}
 	for _, container := range pod.Containers {
-		if expectedImage != "" && strings.TrimSpace(container.Image) != "" && !strings.EqualFold(strings.TrimSpace(container.Image), expectedImage) {
+		if expectedImage != "" && containerImageComparable(container.Image) && !strings.EqualFold(strings.TrimSpace(container.Image), expectedImage) {
 			if hasExpectedImage {
 				continue
 			}
@@ -763,6 +763,18 @@ func describePodIssue(pod model.ClusterPod, expectedImage string) string {
 		return fmt.Sprintf("pod %s is not ready", pod.Name)
 	}
 	return ""
+}
+
+func containerImageComparable(image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return false
+	}
+	normalized := strings.ToLower(image)
+	return !strings.HasPrefix(normalized, "sha256:") &&
+		!strings.HasPrefix(normalized, "docker://") &&
+		!strings.HasPrefix(normalized, "containerd://") &&
+		!strings.HasPrefix(normalized, "docker-pullable://")
 }
 
 func buildArtifactEvidence(report *appBuildArtifactReport, deployDiagnosis *model.OperationDiagnosis) []string {
