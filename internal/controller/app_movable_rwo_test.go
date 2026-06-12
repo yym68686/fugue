@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -150,6 +151,64 @@ func TestBuildMovableRWOCopyPodMountsSharedSourceAndTarget(t *testing.T) {
 	targetPVC := volumes[1]["persistentVolumeClaim"].(map[string]any)
 	if got := targetPVC["claimName"]; got != "app-workspace" {
 		t.Fatalf("expected target claim, got %#v", got)
+	}
+}
+
+func TestBuildMovableRWOSourcePodRetriesReceiverConnection(t *testing.T) {
+	pod := buildMovableRWOSourcePod("tenant-a", "source", map[string]string{"fugue.pro/volume-migration": "demo"}, movableRWOCopyPlan{
+		sourceClaimName: "app-workspace",
+		sourceCopyPath:  ".",
+	}, "10.42.6.64", runtimepkg.SchedulingConstraints{})
+
+	spec := pod["spec"].(map[string]any)
+	containers := spec["containers"].([]map[string]any)
+	command := containers[0]["command"].([]string)
+	script := command[2]
+	for _, want := range []string{
+		`while [ "$attempt" -le 30 ]; do`,
+		`tar -cpf - -C "$source" . | nc "$target" 8730`,
+		`waiting for movable RWO receiver`,
+		`did not become reachable`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected source pod script to contain %q, got:\n%s", want, script)
+		}
+	}
+	if got := command[len(command)-1]; got != "10.42.6.64" {
+		t.Fatalf("expected target address arg, got %q", got)
+	}
+}
+
+func TestMovableRWOMigrationServiceNameStaysShort(t *testing.T) {
+	app := model.App{ID: "app_demo", Name: "demo"}
+	names := movableRWOMigrationResourceNames(app, "app-1780920656-d995f31e1f88-workspace-mv-c0c22b6ed2c6")
+	if got := len(names.service); got > 40 {
+		t.Fatalf("expected compact service name, got length %d name %q", got, names.service)
+	}
+	if !strings.HasPrefix(names.service, "fugue-rwo-svc-") {
+		t.Fatalf("expected fugue-rwo service prefix, got %q", names.service)
+	}
+}
+
+func TestMovableRWOPodFailureMessageIncludesContainerTermination(t *testing.T) {
+	pod := kubePod{}
+	pod.Status.ContainerStatuses = []kubeContainerStatus{
+		{
+			Name: "sender",
+			State: kubeRuntimeState{
+				Terminated: &kubeStateDetail{
+					Reason:   "Error",
+					ExitCode: 1,
+				},
+			},
+		},
+	}
+
+	message := movableRWOPodFailureMessage(pod)
+	for _, want := range []string{"sender terminated", "exit=1", "reason=Error"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected failure message to contain %q, got %q", want, message)
+		}
 	}
 }
 

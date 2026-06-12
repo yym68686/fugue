@@ -431,7 +431,7 @@ func movableRWOMigrationResourceNames(app model.App, targetClaim string) movable
 		sourcePod: name("src"),
 		targetPod: name("dst"),
 		copyPod:   name("copy"),
-		service:   name("svc"),
+		service:   "fugue-rwo-svc-" + suffix,
 		labels:    labels,
 	}
 }
@@ -639,7 +639,17 @@ if [ ! -d "$source" ]; then
   mkdir -p /tmp/fugue-empty
   source=/tmp/fugue-empty
 fi
-tar -cpf - -C "$source" . | nc "$target" 8730`,
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if tar -cpf - -C "$source" . | nc "$target" 8730; then
+    exit 0
+  fi
+  echo "waiting for movable RWO receiver $target:8730 attempt $attempt" >&2
+  attempt=$((attempt + 1))
+  sleep 1
+done
+echo "movable RWO receiver $target:8730 did not become reachable" >&2
+exit 1`,
 					"sh",
 					path.Join("/src", cleanRelativeCopyPath(plan.sourceCopyPath)),
 					targetServiceName,
@@ -766,11 +776,7 @@ func waitForMovableRWOPodSucceeded(ctx context.Context, client *kubeClient, name
 		case "Succeeded":
 			return nil
 		case "Failed":
-			message := strings.TrimSpace(pod.Status.Message)
-			if message == "" {
-				message = strings.TrimSpace(pod.Status.Reason)
-			}
-			return fmt.Errorf("pod failed: %s", message)
+			return fmt.Errorf("pod failed: %s", movableRWOPodFailureMessage(pod))
 		}
 		select {
 		case <-waitCtx.Done():
@@ -778,6 +784,39 @@ func waitForMovableRWOPodSucceeded(ctx context.Context, client *kubeClient, name
 		case <-ticker.C:
 		}
 	}
+}
+
+func movableRWOPodFailureMessage(pod kubePod) string {
+	parts := make([]string, 0, 2+len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	if message := strings.TrimSpace(pod.Status.Message); message != "" {
+		parts = append(parts, message)
+	}
+	if reason := strings.TrimSpace(pod.Status.Reason); reason != "" {
+		parts = append(parts, reason)
+	}
+	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, status := range statuses {
+		if status.State.Terminated == nil {
+			continue
+		}
+		detail := status.State.Terminated
+		fragments := []string{strings.TrimSpace(status.Name), "terminated"}
+		if detail.ExitCode != 0 {
+			fragments = append(fragments, fmt.Sprintf("exit=%d", detail.ExitCode))
+		}
+		if reason := strings.TrimSpace(detail.Reason); reason != "" {
+			fragments = append(fragments, "reason="+reason)
+		}
+		if message := strings.TrimSpace(detail.Message); message != "" {
+			fragments = append(fragments, "message="+message)
+		}
+		parts = append(parts, strings.Join(fragments, " "))
+	}
+	if len(parts) == 0 {
+		return "unknown"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func podConditionTrue(pod kubePod, conditionType string) bool {
