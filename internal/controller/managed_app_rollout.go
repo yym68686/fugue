@@ -136,7 +136,7 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 			}
 			return nil
 		}
-		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp); failureMessage != "" {
+		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp, expectedManagedAppSpecHash); failureMessage != "" {
 			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 		}
 		if strings.TrimSpace(message) != "" {
@@ -381,7 +381,7 @@ func podNodeReadyState(
 	return ready, true, nil
 }
 
-func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) string {
+func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool, expectedSpecHash string) string {
 	if !found {
 		return ""
 	}
@@ -389,6 +389,9 @@ func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) stri
 		return ""
 	}
 	if managed.Status.ObservedGeneration < managed.Metadata.Generation {
+		return ""
+	}
+	if !managedAppRolloutFailureMatchesExpectedSpec(managed, expectedSpecHash) {
 		return ""
 	}
 
@@ -401,6 +404,20 @@ func managedAppRolloutFailure(managed runtime.ManagedAppObject, found bool) stri
 	}
 
 	return "managed app reported an error"
+}
+
+func managedAppRolloutFailureMatchesExpectedSpec(managed runtime.ManagedAppObject, expectedSpecHash string) bool {
+	expectedSpecHash = strings.TrimSpace(expectedSpecHash)
+	if expectedSpecHash == "" {
+		return true
+	}
+	if currentSpecHash := strings.TrimSpace(runtime.ManagedAppSpecHash(managed.Spec)); currentSpecHash != expectedSpecHash {
+		return false
+	}
+	if appliedSpecHash := strings.TrimSpace(managed.Status.LastAppliedSpecHash); appliedSpecHash != expectedSpecHash {
+		return false
+	}
+	return true
 }
 
 func isBenignManagedAppRolloutFailureMessage(message string) bool {

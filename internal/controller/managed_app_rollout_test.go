@@ -105,7 +105,7 @@ func TestManagedAppRolloutFailureIgnoresTransientRestartExit(t *testing.T) {
 	managed.Status.ObservedGeneration = 3
 	managed.Status.Message = "pod demo-abc123 container demo failed: Error: exit_code=3"
 
-	if got := managedAppRolloutFailure(managed, true); got != "" {
+	if got := managedAppRolloutFailure(managed, true, ""); got != "" {
 		t.Fatalf("expected transient restart rollout message to be ignored, got %q", got)
 	}
 }
@@ -119,7 +119,7 @@ func TestManagedAppRolloutFailureIgnoresSIGTERMDuringRollingUpdate(t *testing.T)
 	managed.Status.ObservedGeneration = 3
 	managed.Status.Message = "pod demo-abc123 container demo failed: Error: exit_code=143"
 
-	if got := managedAppRolloutFailure(managed, true); got != "" {
+	if got := managedAppRolloutFailure(managed, true, ""); got != "" {
 		t.Fatalf("expected SIGTERM rollout message to be ignored, got %q", got)
 	}
 }
@@ -668,6 +668,51 @@ func TestWaitForManagedAppRolloutSucceedsWhenDeploymentIsReadyDespiteManagedAppE
 
 	if err := svc.waitForManagedAppRollout(context.Background(), app, ""); err != nil {
 		t.Fatalf("expected rollout wait to succeed once deployment is ready, got %v", err)
+	}
+}
+
+func TestManagedAppRolloutFailureIgnoresStaleExpectedSpec(t *testing.T) {
+	t.Parallel()
+
+	oldApp := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:        "ghcr.io/example/demo:old",
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+		},
+	}
+	newApp := oldApp
+	newApp.Spec.Image = "ghcr.io/example/demo:new"
+	newApp.Spec.RestartToken = "restart_new"
+
+	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(oldApp, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode managed app: %v", err)
+	}
+	managed.Metadata.Generation = 3
+	managed.Status.Phase = runtime.ManagedAppPhaseError
+	managed.Status.Message = "pod demo-old failed: Evicted: old pod"
+	managed.Status.ObservedGeneration = 3
+	managed.Status.LastAppliedSpecHash = runtime.ManagedAppSpecHash(managed.Spec)
+
+	expected, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(newApp, runtime.SchedulingConstraints{}))
+	if err != nil {
+		t.Fatalf("decode expected managed app: %v", err)
+	}
+	expectedSpecHash := runtime.ManagedAppSpecHash(expected.Spec)
+
+	if got := managedAppRolloutFailure(managed, true, expectedSpecHash); got != "" {
+		t.Fatalf("expected stale managed app error to be ignored, got %q", got)
+	}
+
+	managed.Spec = expected.Spec
+	managed.Status.LastAppliedSpecHash = expectedSpecHash
+	if got := managedAppRolloutFailure(managed, true, expectedSpecHash); got == "" {
+		t.Fatal("expected current managed app error to fail rollout")
 	}
 }
 

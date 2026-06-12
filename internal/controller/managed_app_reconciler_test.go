@@ -1118,6 +1118,85 @@ func TestBuildManagedAppStatusOnlyConsidersPodFailuresAfterPendingReleaseStart(t
 	}
 }
 
+func TestBuildManagedAppStatusIgnoresLegacyPodFailuresBeforeLastAppliedTime(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v2",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	lastAppliedAt := time.Date(2026, time.March, 26, 10, 0, 0, 0, time.UTC)
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{
+			Generation: 2,
+		},
+		Spec: runtime.ManagedAppSpec{
+			Scheduling: runtime.SchedulingConstraints{},
+		},
+		Status: runtime.ManagedAppStatus{
+			LastAppliedTime: lastAppliedAt.Format(time.RFC3339Nano),
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+
+	pods := []kubePod{
+		{
+			Metadata: struct {
+				Name              string            `json:"name"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+				DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+				Labels            map[string]string `json:"labels,omitempty"`
+				Annotations       map[string]string `json:"annotations,omitempty"`
+			}{
+				Name:              "demo-old-failed",
+				CreationTimestamp: lastAppliedAt.Add(-time.Minute),
+			},
+			Status: struct {
+				Phase                 string                `json:"phase"`
+				Reason                string                `json:"reason,omitempty"`
+				Message               string                `json:"message,omitempty"`
+				Conditions            []kubePodCondition    `json:"conditions,omitempty"`
+				InitContainerStatuses []kubeContainerStatus `json:"initContainerStatuses,omitempty"`
+				ContainerStatuses     []kubeContainerStatus `json:"containerStatuses,omitempty"`
+			}{
+				Phase: "Running",
+				ContainerStatuses: []kubeContainerStatus{
+					{
+						Name: "demo",
+						State: kubeRuntimeState{
+							Waiting: &kubeStateDetail{
+								Reason: "CrashLoopBackOff",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
+
+	if status.Phase != runtime.ManagedAppPhaseProgressing {
+		t.Fatalf("expected phase progressing for legacy status, got %q message=%q", status.Phase, status.Message)
+	}
+	if strings.Contains(status.Message, "demo-old-failed") {
+		t.Fatalf("expected old failed pod to be ignored for legacy status, got %q", status.Message)
+	}
+	if status.PendingReleaseKey != runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{}) {
+		t.Fatalf("expected pending release key to be set, got %q", status.PendingReleaseKey)
+	}
+}
+
 func TestBuildManagedAppStatusRefreshesPendingCutoffForSameReleaseRetry(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",

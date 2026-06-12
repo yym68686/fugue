@@ -891,6 +891,12 @@ func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, app model.App
 	}
 
 	currentKey := strings.TrimSpace(previous.CurrentReleaseKey)
+	if currentKey == "" && strings.TrimSpace(previous.PendingReleaseKey) == "" {
+		if cutoff := parseManagedAppStatusTimestamp(previous.LastAppliedTime); cutoff != nil {
+			return cutoff, true
+		}
+		return nil, true
+	}
 	if currentKey != "" && currentKey != releaseKey {
 		return nil, false
 	}
