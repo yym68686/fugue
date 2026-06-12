@@ -493,6 +493,22 @@ func (c *kubeClient) getPod(ctx context.Context, namespace, name string) (kubePo
 	return pod, true, nil
 }
 
+func (c *kubeClient) getPodIP(ctx context.Context, namespace, name string) (string, bool, error) {
+	var pod struct {
+		Status struct {
+			PodIP string `json:"podIP,omitempty"`
+		} `json:"status"`
+	}
+	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/pods/"+url.PathEscape(strings.TrimSpace(name)), nil, &pod)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(pod.Status.PodIP), true, nil
+}
+
 func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSelector string) ([]kubePod, error) {
 	query := url.Values{}
 	if strings.TrimSpace(labelSelector) != "" {

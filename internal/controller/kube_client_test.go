@@ -36,6 +36,36 @@ func TestFormatKubeTimestampUsesMicrosecondPrecision(t *testing.T) {
 	}
 }
 
+func TestGetPodIPReadsStatusPodIP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("unexpected request method %s", r.Method)
+		}
+		if r.URL.Path != "/api/v1/namespaces/tenant-a/pods/target" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":{"podIP":"10.42.6.74"}}`))
+	}))
+	defer server.Close()
+
+	client := &kubeClient{
+		client:      server.Client(),
+		baseURL:     server.URL,
+		bearerToken: "token",
+		namespace:   "tenant-a",
+	}
+	ip, found, err := client.getPodIP(context.Background(), "tenant-a", "target")
+	if err != nil {
+		t.Fatalf("get pod IP: %v", err)
+	}
+	if !found {
+		t.Fatal("expected pod to be found")
+	}
+	if ip != "10.42.6.74" {
+		t.Fatalf("expected target pod IP, got %q", ip)
+	}
+}
+
 func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
 	t.Parallel()
 

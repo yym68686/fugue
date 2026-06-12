@@ -332,17 +332,24 @@ func (s *Service) copyMovableRWOVolumeViaTransferPods(
 	}
 	defer cleanupTransferPods()
 
-	if err := client.applyObject(ctx, buildMovableRWOTargetService(namespace, names.service, names.labels), nil); err != nil {
-		return fmt.Errorf("apply movable RWO transfer service %s/%s: %w", namespace, names.service, err)
-	}
 	if err := client.applyObject(ctx, buildMovableRWOTargetPod(namespace, names.targetPod, names.labels, plan.targetClaimName, plan.targetCopyPath, targetScheduling), nil); err != nil {
 		return fmt.Errorf("apply movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
 	}
 	if err := waitForMovableRWOPodReady(ctx, client, namespace, names.targetPod, s.movableRWOWaitTimeout()); err != nil {
 		return fmt.Errorf("wait for movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
 	}
+	targetAddress, found, err := client.getPodIP(ctx, namespace, names.targetPod)
+	if err != nil {
+		return fmt.Errorf("resolve movable RWO target pod %s/%s IP: %w", namespace, names.targetPod, err)
+	}
+	if !found {
+		return fmt.Errorf("resolve movable RWO target pod %s/%s IP: pod not found", namespace, names.targetPod)
+	}
+	if targetAddress == "" {
+		return fmt.Errorf("resolve movable RWO target pod %s/%s IP: podIP is empty", namespace, names.targetPod)
+	}
 
-	if err := client.applyObject(ctx, buildMovableRWOSourcePod(namespace, names.sourcePod, names.labels, plan, names.service, sourceScheduling), nil); err != nil {
+	if err := client.applyObject(ctx, buildMovableRWOSourcePod(namespace, names.sourcePod, names.labels, plan, targetAddress, sourceScheduling), nil); err != nil {
 		return fmt.Errorf("apply movable RWO source pod %s/%s: %w", namespace, names.sourcePod, err)
 	}
 	if err := waitForMovableRWOPodSucceeded(ctx, client, namespace, names.sourcePod, s.movableRWOWaitTimeout()); err != nil {
