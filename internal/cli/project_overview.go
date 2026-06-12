@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	climonitor "fugue/internal/cli/monitor"
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
@@ -77,6 +78,9 @@ func (c *CLI) newProjectOverviewCommand() *cobra.Command {
 				}
 				return writeJSON(c.stdout, payload)
 			}
+			if c.shouldUseRichText() {
+				return c.renderRichProjectWorkbench(buildProjectOverviewWorkbenchView(detail, extras.Services), buildProjectStatusDiagnosisEvidenceViews(status))
+			}
 			if err := renderConsoleProjectOverview(c.stdout, summary, detail, status); err != nil {
 				return err
 			}
@@ -140,7 +144,8 @@ func (c *CLI) newProjectWatchCommand() *cobra.Command {
 		Interval time.Duration
 		Poll     bool
 		Live     bool
-	}{Interval: 5 * time.Second, Live: true}
+		Monitor  monitorOptions
+	}{Interval: 5 * time.Second, Live: true, Monitor: monitorOptions{Interval: 5 * time.Second, Sort: "PROJECT"}}
 	cmd := &cobra.Command{
 		Use:   "watch [project]",
 		Short: "Watch project overview changes",
@@ -152,6 +157,22 @@ func (c *CLI) newProjectWatchCommand() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			if opts.Monitor.Interval <= 0 {
+				opts.Monitor.Interval = opts.Interval
+			}
+			if !c.wantsJSON() {
+				if opts.Monitor.Once || !c.shouldUseInteractiveMonitor(opts.Monitor.Plain) {
+					if !opts.Monitor.Once {
+						c.progressf("watch_fallback=plain_snapshot reason=non_interactive")
+					}
+					snapshot, _, err := c.loadProjectWatchSnapshot(ctx, client, args, opts.Live)
+					if err != nil {
+						return err
+					}
+					return c.renderMonitorSnapshot(buildProjectMonitorSnapshot(snapshot, opts.Monitor))
+				}
+				return c.watchProjectMonitor(ctx, client, args, opts.Monitor, opts.Live)
+			}
 			if opts.Poll {
 				return c.watchProjectPolling(ctx, client, args, opts.Interval, opts.Live)
 			}
@@ -161,6 +182,12 @@ func (c *CLI) newProjectWatchCommand() *cobra.Command {
 	cmd.Flags().DurationVar(&opts.Interval, "interval", opts.Interval, "Polling interval")
 	cmd.Flags().BoolVar(&opts.Poll, "poll", false, "Use polling instead of the default server-sent events stream")
 	cmd.Flags().BoolVar(&opts.Live, "live", opts.Live, "Include live runtime status in project snapshots")
+	cmd.Flags().BoolVar(&opts.Monitor.Once, "once", false, "Render one monitor snapshot and exit")
+	cmd.Flags().BoolVar(&opts.Monitor.Plain, "plain", false, "Force plain monitor output without interactive terminal mode")
+	cmd.Flags().BoolVar(&opts.Monitor.AltScreen, "alt-screen", false, "Use the alternate screen for interactive monitor output")
+	cmd.Flags().StringVar(&opts.Monitor.Filter, "filter", "", "Filter monitor table rows")
+	cmd.Flags().StringVar(&opts.Monitor.Search, "search", "", "Search monitor table rows")
+	cmd.Flags().StringVar(&opts.Monitor.Sort, "sort", opts.Monitor.Sort, "Sort monitor table rows by column")
 	return cmd
 }
 
@@ -213,6 +240,37 @@ func (c *CLI) watchProjectPolling(ctx context.Context, client *Client, args []st
 		case <-ctx.Done():
 			return nil
 		case <-time.After(interval):
+		}
+	}
+}
+
+func (c *CLI) watchProjectMonitor(ctx context.Context, client *Client, args []string, opts monitorOptions, includeLiveStatus bool) error {
+	if opts.Interval <= 0 {
+		opts.Interval = 5 * time.Second
+	}
+	session := climonitor.Session{Controls: monitorControls(opts)}
+	for {
+		rawSnapshot, _, err := c.loadProjectWatchSnapshot(ctx, client, args, includeLiveStatus)
+		if err != nil {
+			if session.HaveLast {
+				if renderErr := c.renderMonitorSnapshot(session.SnapshotWithError(err, time.Now().UTC())); renderErr != nil {
+					return renderErr
+				}
+				if waitErr := waitMonitorInterval(ctx, opts.Interval); waitErr != nil {
+					return c.printMonitorSummary(session.Last)
+				}
+				continue
+			}
+			return err
+		}
+		snapshot := buildProjectMonitorSnapshot(rawSnapshot, opts)
+		if session.Accept(snapshot) {
+			if err := c.renderMonitorSnapshot(snapshot); err != nil {
+				return err
+			}
+		}
+		if err := waitMonitorInterval(ctx, opts.Interval); err != nil {
+			return c.printMonitorSummary(snapshot)
 		}
 	}
 }

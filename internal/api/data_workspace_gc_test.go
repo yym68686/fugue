@@ -16,6 +16,8 @@ import (
 )
 
 func TestSweepDataWorkspaceGCPreservesLiveBlobsAndDeletesOrphans(t *testing.T) {
+	clearDefaultDataBackendEnv(t)
+
 	storePath := filepath.Join(t.TempDir(), "store.json")
 	stateStore := store.New(storePath)
 	if err := stateStore.Init(); err != nil {
@@ -174,6 +176,24 @@ func TestSweepDataWorkspaceGCCleansOldMigrationBackendObjects(t *testing.T) {
 func testDataDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func clearDefaultDataBackendEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"FUGUE_DATA_BACKEND_PROVIDER",
+		"FUGUE_DATA_BACKEND_BUCKET",
+		"FUGUE_DATA_BACKEND_ACCESS_KEY_ID",
+		"FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY",
+		"FUGUE_DATA_BACKEND_SESSION_TOKEN",
+		"FUGUE_DATA_BACKEND_ENDPOINT",
+		"FUGUE_DATA_R2_ACCOUNT_ID",
+		"FUGUE_DATA_BACKEND_REGION",
+		"FUGUE_DATA_BACKEND_PREFIX",
+		"FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY",
+	} {
+		t.Setenv(key, "")
+	}
 }
 
 func touchDataBlob(storePath, digest string, when time.Time) error {

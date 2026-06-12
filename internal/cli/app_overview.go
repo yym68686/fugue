@@ -185,6 +185,18 @@ func (c *CLI) renderAppOverviewSnapshot(client *Client, snapshot appOverviewSnap
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, snapshot)
 	}
+	if c.shouldUseRichText() {
+		if err := c.renderRichAppHealth(buildAppOverviewHealthView(snapshot)); err != nil {
+			return err
+		}
+		if snapshot.Diagnosis != nil {
+			if _, err := fmt.Fprintln(c.stdout); err != nil {
+				return err
+			}
+			return c.renderRichDiagnosis(buildAppOverviewDiagnosisEvidenceView(snapshot.Diagnosis))
+		}
+		return nil
+	}
 	if _, err := fmt.Fprintf(c.stdout, "observed_at=%s\n", formatTime(time.Now().UTC())); err != nil {
 		return err
 	}

@@ -25,6 +25,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 	cmd.AddCommand(
 		c.newAdminAccessCommand(),
 		c.newAdminAppsCommand(),
+		c.newAdminCockpitCommand(),
 		c.newAdminDomainsCommand(),
 		c.newAdminRuntimeCommand(),
 		c.newAdminDiscoveryCommand(),
@@ -876,6 +877,7 @@ func (c *CLI) newAdminClusterCommand() *cobra.Command {
 		Short: "Inspect cluster infrastructure",
 	}
 	cmd.AddCommand(
+		c.newAdminClusterTopCommand(),
 		c.newAdminClusterNodesCommand(),
 		c.newAdminClusterNodeCommand(),
 		c.newAdminClusterNodePolicyCommand(),

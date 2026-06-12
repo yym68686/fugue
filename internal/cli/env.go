@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -34,6 +35,7 @@ func (c *CLI) newEnvCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newEnvListCommand(),
+		c.newEnvExportCommand(),
 		c.newEnvSetCommand(),
 		c.newEnvRemoveCommand(),
 		c.newEnvGeneratedCommand(),
@@ -70,6 +72,39 @@ func (c *CLI) newEnvListCommand() *cobra.Command {
 				Env:     response.Env,
 				Entries: response.Entries,
 			})
+		},
+	}
+}
+
+func (c *CLI) newEnvExportCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "export <app>",
+		Aliases: []string{"dump"},
+		Short:   "Export effective app env vars as reusable .env text",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppEnv(app.ID)
+			if err != nil {
+				return err
+			}
+			result := envCommandResult{
+				AppName: app.Name,
+				AppID:   app.ID,
+				Env:     response.Env,
+				Entries: response.Entries,
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, result)
+			}
+			return writeEnvExport(c.stdout, normalizeEnvEntries(response.Env, response.Entries))
 		},
 	}
 }
@@ -548,6 +583,29 @@ func writeEnvEntryTable(w io.Writer, entries []model.AppEnvEntry) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func writeEnvExport(w io.Writer, entries []model.AppEnvEntry) error {
+	for _, entry := range entries {
+		key := strings.TrimSpace(entry.Key)
+		if key == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%s=%s\n", key, formatEnvExportValue(entry.Value)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatEnvExportValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	if strings.ContainsAny(value, " \t\r\n#\"'\\") {
+		return strconv.Quote(value)
+	}
+	return value
 }
 
 func formatInlineTableValue(value string) string {

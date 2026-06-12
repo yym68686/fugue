@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 
+	cliterminal "fugue/internal/cli/terminal"
+
 	"github.com/spf13/cobra"
 )
 
@@ -31,6 +33,8 @@ type rootOptions struct {
 	ProjectID   string
 	ProjectName string
 	Output      string
+	Color       string
+	Interactive string
 	JSONOutput  bool
 	ShowIDs     bool
 	OutputFile  string
@@ -70,8 +74,10 @@ func newCLI(stdout, stderr io.Writer) *CLI {
 		stdout: stdout,
 		stderr: stderr,
 		root: rootOptions{
-			Output: "text",
-			Redact: true,
+			Output:      "text",
+			Color:       cliterminal.ModeAuto.String(),
+			Interactive: cliterminal.ModeAuto.String(),
+			Redact:      true,
 		},
 	}
 }
@@ -213,6 +219,9 @@ Environment variables:
 			if err := c.validateOutput(); err != nil {
 				return err
 			}
+			if err := c.validateTerminalModes(); err != nil {
+				return err
+			}
 			if err := c.configureOutputWriter(cmd); err != nil {
 				return err
 			}
@@ -237,6 +246,8 @@ Environment variables:
 	flags.StringVar(&c.root.TenantName, "tenant", c.root.TenantName, "Optional tenant name or slug. Needed only when your key can see multiple tenants")
 	flags.StringVar(&c.root.ProjectName, "project", c.root.ProjectName, "Optional project name. Deploy/create defaults to the default project when omitted")
 	flags.StringVarP(&c.root.Output, "output", "o", c.root.Output, "Output format: text or json")
+	flags.StringVar(&c.root.Color, "color", c.root.Color, "Terminal color mode: auto, always, or never")
+	flags.StringVar(&c.root.Interactive, "interactive", c.root.Interactive, "Interactive terminal mode: auto, always, or never")
 	flags.BoolVar(&c.root.JSONOutput, "json", false, "Shortcut for --output json")
 	flags.BoolVar(&c.root.ShowIDs, "show-ids", false, "Include internal IDs in text output where supported")
 	flags.StringVar(&c.root.OutputFile, "output-file", c.root.OutputFile, "Also write stdout output to a local file")
@@ -267,6 +278,7 @@ Environment variables:
 		c.newAPICommand(),
 		c.newDiagnoseCommand(),
 		c.newWebCommand(),
+		c.newConsoleCommand(),
 		c.newOpsCommand(),
 		hideCompatCommand(c.newTemplateCommand(), "fugue deploy inspect"),
 		c.newAdminCommand(),
@@ -298,6 +310,20 @@ func (c *CLI) validateOutput() error {
 	default:
 		return fmt.Errorf("unsupported output format %q", c.root.Output)
 	}
+}
+
+func (c *CLI) validateTerminalModes() error {
+	color, err := cliterminal.ParseMode(c.root.Color)
+	if err != nil {
+		return err
+	}
+	interactive, err := cliterminal.ParseMode(c.root.Interactive)
+	if err != nil {
+		return err
+	}
+	c.root.Color = color.String()
+	c.root.Interactive = interactive.String()
+	return nil
 }
 
 func (c *CLI) wantsJSON() bool {

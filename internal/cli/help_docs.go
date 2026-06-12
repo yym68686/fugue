@@ -37,6 +37,21 @@ fugue deploy github owner/repo --project argus --dry-run
 fugue deploy github owner/repo --project argus --replace --delete-missing
 `),
 	},
+	"fugue console": {
+		Long: strings.TrimSpace(`
+Open the preview Fugue terminal console over the same control-plane API used by normal CLI commands and the Web console.
+
+The preview is read-only in the first release. Project, app, operation, runtime, and admin pages share the same status language as the Web console, while existing --json command output remains the machine contract for agents, jq, and CI.
+
+Use --plain for a one-frame terminal-safe snapshot. In non-TTY output, NO_COLOR sessions, and constrained terminals, the console falls back to plain text instead of emitting terminal controls.
+`),
+		Example: strings.TrimSpace(`
+fugue console --plain
+fugue console --project marketing --plain
+fugue console --admin --mouse --alt-screen
+fugue console --project marketing --json
+`),
+	},
 	"fugue app": {
 		Example: strings.TrimSpace(`
 fugue app overview my-app
@@ -512,12 +527,16 @@ fugue operation explain op_123 --show-secrets --output json
 	},
 	"fugue operation watch": {
 		Long: strings.TrimSpace(`
-Wait for one operation or the most recent operation for an app until it reaches a terminal state.
+Watch one operation or the most recent operation for an app in a btop-like monitor surface.
+
+Use --once for a deterministic snapshot, --plain for non-interactive terminals, and --filter/--search/--sort to keep long timelines readable. Ctrl+C prints a final summary with the resume command.
 
 JSON output redacts desired env values, passwords, and repo tokens by default. Pass --show-secrets only when you explicitly need the raw values for debugging.
 `),
 		Example: strings.TrimSpace(`
 fugue operation watch op_123
+fugue operation watch op_123 --once --sort STEP
+fugue operation watch --app my-app --plain --interval 10s
 fugue operation watch --app my-app --show-secrets --output json
 `),
 	},
@@ -544,11 +563,15 @@ fugue project overview marketing --output json
 	},
 	"fugue project watch": {
 		Long: strings.TrimSpace(`
-Watch the same aggregated project snapshot as "project overview" and re-render the service pipeline only when the observed state changes.
+Watch the same aggregated project snapshot as "project overview" in a terminal monitor.
+
+Use --once for a deterministic snapshot, --plain for non-interactive terminals, and --filter/--search/--sort to focus the service pipeline. Ctrl+C prints the last accepted view and the resume command.
 `),
 		Example: strings.TrimSpace(`
 fugue project watch marketing
-fugue project watch marketing --poll --interval 10s
+fugue project watch marketing --once
+fugue project watch marketing --plain --filter api
+fugue project watch marketing --interval 10s --alt-screen
 `),
 	},
 	"fugue project verify": {
@@ -711,10 +734,26 @@ fugue admin runtime token create edge-a --ttl 3600
 	"fugue admin cluster": {
 		Example: strings.TrimSpace(`
 fugue admin cluster status
+fugue admin cluster top --once
 fugue admin cluster node-policy status
 fugue admin cluster pods --namespace kube-system
 fugue admin cluster dns resolve api.github.com --server 10.43.0.10
 fugue admin cluster net websocket my-app --path /ws
+`),
+	},
+	"fugue admin cockpit": {
+		Long: strings.TrimSpace(`
+Show a read-only admin cockpit that joins tenants, project gallery, runtime capacity, cluster nodes, node policy drift, edge health, DNS health, control-plane rollout state, and optional Web admin user snapshots.
+
+This command is intentionally diagnostic. It documents the formal release path as GitHub Actions deploy-control-plane.yml and does not treat SSH hotfixes or manual Kubernetes patches as the normal control-plane update path.
+
+User emails are redacted in text output by default. Use --redacted=false only for a local, intentional investigation.
+`),
+		Example: strings.TrimSpace(`
+fugue admin cockpit
+fugue admin cockpit --with-users --redacted
+fugue admin cockpit --with-users --cookie 'fugue_session=...'
+fugue admin cockpit --json
 `),
 	},
 	"fugue admin cluster status": {
@@ -724,6 +763,19 @@ Show control-plane deployment health, image versions, and component readiness.
 When the API is configured with FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY, this view also includes the latest deploy-control-plane GitHub Actions workflow run so you can correlate control-plane rollouts with the current cluster state.
 
 Non-core control-plane pods are reported as warnings when they are Pending, not ready, or otherwise unhealthy, so issues like workspace provisioner or postgres joiner stalls are visible without changing the core ready summary.
+`),
+	},
+	"fugue admin cluster top": {
+		Long: strings.TrimSpace(`
+Watch high-density cluster, runtime, control-plane, and node-policy status in a terminal monitor.
+
+Use --once for snapshot tests or tickets, --plain for non-interactive terminals, and --filter/--search/--sort when the cluster view is too wide. JSON output returns the raw clusterTopPayload without terminal controls.
+`),
+		Example: strings.TrimSpace(`
+fugue admin cluster top
+fugue admin cluster top --once
+fugue admin cluster top --plain --filter runtime-a
+fugue admin cluster top --json
 `),
 	},
 	"fugue admin cluster pods": {

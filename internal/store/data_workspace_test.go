@@ -8,6 +8,8 @@ import (
 )
 
 func TestDefaultDataBackendWithoutEnvUsesManagedBlobAPI(t *testing.T) {
+	clearDefaultDataBackendEnv(t)
+
 	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -76,5 +78,23 @@ func TestSeedDefaultDataBackendFromEnvStoresEncryptedCredentials(t *testing.T) {
 	}
 	if rotatedForUse.Credentials.AccessKeyID != "rotated-access" || rotatedForUse.Credentials.SecretAccessKey != "rotated-secret" {
 		t.Fatalf("expected rotated unredacted credentials for backend use, got %+v", rotatedForUse.Credentials)
+	}
+}
+
+func clearDefaultDataBackendEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"FUGUE_DATA_BACKEND_PROVIDER",
+		"FUGUE_DATA_BACKEND_BUCKET",
+		"FUGUE_DATA_BACKEND_ACCESS_KEY_ID",
+		"FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY",
+		"FUGUE_DATA_BACKEND_SESSION_TOKEN",
+		"FUGUE_DATA_BACKEND_ENDPOINT",
+		"FUGUE_DATA_R2_ACCOUNT_ID",
+		"FUGUE_DATA_BACKEND_REGION",
+		"FUGUE_DATA_BACKEND_PREFIX",
+		"FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY",
+	} {
+		t.Setenv(key, "")
 	}
 }

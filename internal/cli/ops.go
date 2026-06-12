@@ -1,12 +1,17 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
+	"time"
 
+	climonitor "fugue/internal/cli/monitor"
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
@@ -201,6 +206,9 @@ func (c *CLI) newOpsExplainCommand() *cobra.Command {
 					"diagnosis": diagnosis,
 				})
 			}
+			if c.shouldUseRichText() {
+				return c.renderRichOperationExplain(buildOperationTimelineView([]model.Operation{op}), buildOperationDiagnosisEvidenceView(diagnosis))
+			}
 			return renderOperationWithDiagnosis(c.stdout, op, &diagnosis)
 		},
 	}
@@ -212,7 +220,8 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 	opts := struct {
 		App         string
 		ShowSecrets bool
-	}{}
+		Monitor     monitorOptions
+	}{Monitor: monitorOptions{Interval: 2 * time.Second}}
 	cmd := &cobra.Command{
 		Use:     "watch [operation]",
 		Aliases: []string{"wait"},
@@ -243,25 +252,111 @@ func (c *CLI) newOpsWatchCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			finalOps, err := c.waitForOperations(client, []model.Operation{op})
-			if err != nil {
-				return err
-			}
-			if len(finalOps) > 0 {
-				op = finalOps[0]
-			}
-			if !opts.ShowSecrets {
-				op = redactOperationForOutput(op)
-			}
 			if c.wantsJSON() {
+				finalOps, err := c.waitForOperations(client, []model.Operation{op})
+				if err != nil {
+					return err
+				}
+				if len(finalOps) > 0 {
+					op = finalOps[0]
+				}
+				if !opts.ShowSecrets {
+					op = redactOperationForOutput(op)
+				}
 				return writeJSON(c.stdout, map[string]any{"operation": op})
 			}
-			return renderOperation(c.stdout, op)
+			if opts.Monitor.Once || !c.shouldUseInteractiveMonitor(opts.Monitor.Plain) {
+				if !opts.Monitor.Once {
+					c.progressf("watch_fallback=plain_snapshot reason=non_interactive")
+				}
+				if !opts.ShowSecrets {
+					op = redactOperationForOutput(op)
+				}
+				return c.renderMonitorSnapshot(buildOperationMonitorSnapshot(op, opts.Monitor))
+			}
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			return c.watchOperationMonitor(ctx, client, op.ID, opts.Monitor, opts.ShowSecrets)
 		},
 	}
 	cmd.Flags().StringVar(&opts.App, "app", "", "Watch the most recent operation for an app")
 	cmd.Flags().BoolVar(&opts.ShowSecrets, "show-secrets", false, "Show env values, passwords, and other sensitive fields")
+	cmd.Flags().DurationVar(&opts.Monitor.Interval, "interval", opts.Monitor.Interval, "Monitor refresh interval")
+	cmd.Flags().BoolVar(&opts.Monitor.Once, "once", false, "Render one monitor snapshot and exit")
+	cmd.Flags().BoolVar(&opts.Monitor.Plain, "plain", false, "Force plain monitor output without interactive terminal mode")
+	cmd.Flags().BoolVar(&opts.Monitor.AltScreen, "alt-screen", false, "Use the alternate screen for interactive monitor output")
+	cmd.Flags().StringVar(&opts.Monitor.Filter, "filter", "", "Filter monitor table rows")
+	cmd.Flags().StringVar(&opts.Monitor.Search, "search", "", "Search monitor table rows")
+	cmd.Flags().StringVar(&opts.Monitor.Sort, "sort", "", "Sort monitor table rows by column")
 	return cmd
+}
+
+func (c *CLI) watchOperationMonitor(ctx context.Context, client *Client, operationID string, opts monitorOptions, showSecrets bool) error {
+	if opts.Interval <= 0 {
+		opts.Interval = 2 * time.Second
+	}
+	session := climonitor.Session{Controls: monitorControls(opts)}
+	for {
+		op, err := client.GetOperation(operationID)
+		if err != nil {
+			if session.HaveLast {
+				if renderErr := c.renderMonitorSnapshot(session.SnapshotWithError(err, time.Now().UTC())); renderErr != nil {
+					return renderErr
+				}
+				if waitErr := waitMonitorInterval(ctx, opts.Interval); waitErr != nil {
+					return c.printMonitorSummary(session.Last)
+				}
+				continue
+			}
+			return err
+		}
+		if !showSecrets {
+			op = redactOperationForOutput(op)
+		}
+		snapshot := buildOperationMonitorSnapshot(op, opts)
+		if session.Accept(snapshot) {
+			if err := c.renderMonitorSnapshot(snapshot); err != nil {
+				return err
+			}
+		}
+		if operationMonitorDone(op) {
+			return c.printMonitorSummary(snapshot)
+		}
+		if err := waitMonitorInterval(ctx, opts.Interval); err != nil {
+			return c.printMonitorSummary(snapshot)
+		}
+	}
+}
+
+func waitMonitorInterval(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (c *CLI) printMonitorSummary(snapshot climonitor.Snapshot) error {
+	lines := climonitor.CtrlCSummary(snapshot)
+	if len(lines) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(c.stderr, strings.Join(lines, " ")); err != nil {
+		return err
+	}
+	return nil
+}
+
+func operationMonitorDone(op model.Operation) bool {
+	switch strings.ToLower(strings.TrimSpace(op.Status)) {
+	case model.OperationStatusCompleted, model.OperationStatusFailed, "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *CLI) newOpsAuditCommand() *cobra.Command {

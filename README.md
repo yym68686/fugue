@@ -85,6 +85,8 @@ Common workflows:
 - `fugue deploy github https://github.com/example/app --private --repo-token $GITHUB_TOKEN`
 - `fugue deploy image nginx:1.27`
 - `fugue tenant ls`
+- `fugue console --plain`
+- `fugue console --project marketing --plain`
 - `fugue app create my-app --github owner/repo --branch main`
 - `fugue app status my-app`
 - `fugue app overview my-app`
@@ -106,15 +108,20 @@ Common workflows:
 - `fugue runtime doctor shared`
 - `fugue project overview marketing`
 - `fugue project watch marketing`
+- `fugue project watch marketing --once`
 - `fugue project verify marketing --path /healthz`
 - `fugue project delete marketing --wait`
 - `fugue project images usage marketing`
 - `fugue operation ls --app my-app`
 - `fugue operation ls --project marketing --type deploy --status pending`
 - `fugue operation show op_123 --show-secrets`
+- `fugue operation watch op_123 --once`
 - `fugue api request GET /v1/apps`
 - `fugue diagnose timing -- app overview my-app`
+- `fugue admin cockpit`
+- `fugue admin cockpit --with-users --redacted`
 - `fugue admin cluster status`
+- `fugue admin cluster top --once`
 - `fugue admin cluster pods --namespace kube-system`
 - `fugue admin cluster events --namespace kube-system --limit 20`
 - `fugue admin cluster logs --namespace kube-system --pod coredns-abc --container coredns --tail 200`
@@ -158,6 +165,8 @@ When `fugue app request` fails with a low-level error such as `connection refuse
 
 `fugue tenant ls` is the direct answer to "which workspace can this key see?". It removes the need to fall back to `fugue api request GET /v1/tenants` before choosing `--tenant`.
 
+`fugue console` is the preview Terminal Console: a read-only terminal workbench over the same control-plane API and product semantics as the Web console. The first release is deliberately separate from machine workflows: agents, jq, and CI should continue to use `--json`, while humans can use `fugue console --plain`, `fugue project watch`, `fugue operation watch`, and `fugue admin cluster top` for high-density terminal views. See [Terminal Console preview](docs/cli-terminal-console-preview.md) for status language, fallback behavior, safety confirmation rules, and the feedback path.
+
 `fugue source-upload show <upload-id>` is the read-only inspection path for uploaded source archives. It exposes archive metadata plus the import operations and apps that currently reference that upload, so you no longer need to guess from raw `upload_id` values or hit a missing metadata endpoint.
 
 `fugue deploy` now reuses the same app artifact diagnosis path after a waited import finishes. When the current release image is missing from registry inventory, the command prints that root cause directly instead of making you manually chain `app logs build`, `app release ls`, `app overview`, and `operation explain`.
@@ -169,6 +178,8 @@ When `fugue app request` fails with a low-level error such as `connection refuse
 `fugue app env ls` text output now renders a table with separate source and reference columns plus override information, so normal terminal output is usable without falling back to `--json`.
 
 `fugue operation ls` defaults to a smaller text-mode window and sends tenant, project, type, status, and limit filters to the API, so bootstrap/admin keys no longer need to download the full operation history before narrowing it locally.
+
+`fugue project watch`, `fugue operation watch`, and `fugue admin cluster top` are btop-like monitor commands. Use `--once` for deterministic snapshots, `--plain` for scrollback-safe output, and `--filter`, `--search`, or `--sort` when the visible table is too dense. They fall back to plain output when stdout is not a TTY and never replace their JSON contracts.
 
 `fugue api request` shows raw status, headers, server-timing, body, and transport timings for any control-plane endpoint. `fugue diagnose timing -- <command...>` wraps any Fugue CLI command and reports DNS/connect/TLS/TTFB/total timing for each HTTP request it makes.
 
@@ -185,6 +196,8 @@ Released CLI builds can upgrade themselves with `fugue upgrade`. When the curren
 `fugue admin users` and the admin aliases under `fugue web diagnose` read the same `fugue-web` page snapshot routes that power the admin product UI. Set `FUGUE_WEB_BASE_URL` (or pass `--web-base-url`) for those commands. Admin page snapshots accept bootstrap bearer auth; workspace-scoped console page routes can also be diagnosed by passing a session cookie with `--cookie`.
 
 `fugue admin users resolve <email>` is the direct answer to "which tenant/workspace does this user actually land in?". It resolves one email to the enriched workspace snapshot, including tenant id/name, default project, first app, and whether a workspace admin key is available.
+
+`fugue admin cockpit` is a read-only admin overview for tenant, project, runtime, cluster, node policy, edge, DNS, control-plane rollout, and optional Web admin user snapshots. It records the formal control-plane release path as GitHub Actions `deploy-control-plane.yml`; manual SSH or Kubernetes hotfixes remain emergency investigation tools, not the normal release flow.
 
 When `FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY` is configured on the API, `fugue admin cluster status` also shows the latest `deploy-control-plane` workflow run so you can correlate control-plane image rollouts with cluster state. The same command now includes both the desired deployment image and the live observed control-plane pod tags, and warns about unhealthy non-core control-plane pods such as workspace provisioners or postgres joiners.
 

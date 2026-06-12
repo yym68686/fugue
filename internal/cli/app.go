@@ -209,6 +209,9 @@ func (c *CLI) newAppStatusCommand() *cobra.Command {
 				}
 				return writeJSON(c.stdout, payload)
 			}
+			if c.shouldUseRichText() {
+				return c.renderRichAppHealth(buildAppHealthView(finalApp, activeOps))
+			}
 			if err := c.renderAppStatus(client, finalApp); err != nil {
 				return err
 			}

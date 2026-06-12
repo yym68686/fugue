@@ -1,11 +1,10 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	climonitor "fugue/internal/cli/monitor"
 	"fugue/internal/model"
 )
 
@@ -139,22 +138,12 @@ func (c *CLI) renderDeployProgressSnapshot(client *Client, apps []model.App, ope
 	if c.wantsJSON() {
 		return nil
 	}
-	status, err := c.buildProjectStatusFromAppsAndOperations(client, apps, operations, filters)
+	snapshot, err := c.buildDeployProgressSnapshot(client, apps, operations, filters)
 	if err != nil {
 		c.progressf("warning=deploy service status unavailable: %v", err)
 		return nil
 	}
-	snapshotBytes, err := json.Marshal(struct {
-		Operations []model.Operation      `json:"operations"`
-		Status     *projectStatusResponse `json:"status,omitempty"`
-	}{
-		Operations: operations,
-		Status:     status,
-	})
-	if err != nil {
-		return err
-	}
-	hashValue := sha256.Sum256(snapshotBytes)
+	hashValue := climonitor.HashAny(snapshot)
 	if *haveSnapshot && hashValue == *lastHash {
 		return nil
 	}
@@ -163,12 +152,29 @@ func (c *CLI) renderDeployProgressSnapshot(client *Client, apps []model.App, ope
 			return err
 		}
 	}
-	if err := renderProjectStatus(c.stdout, status); err != nil {
+	if err := c.renderDeployProgressSnapshotValue(snapshot); err != nil {
 		return err
 	}
 	*lastHash = hashValue
 	*haveSnapshot = true
 	return nil
+}
+
+type deployProgressSnapshot struct {
+	Operations []model.Operation      `json:"operations"`
+	Status     *projectStatusResponse `json:"status,omitempty"`
+}
+
+func (c *CLI) buildDeployProgressSnapshot(client *Client, apps []model.App, operations []model.Operation, filters projectStatusFilters) (deployProgressSnapshot, error) {
+	status, err := c.buildProjectStatusFromAppsAndOperations(client, apps, operations, filters)
+	if err != nil {
+		return deployProgressSnapshot{}, err
+	}
+	return deployProgressSnapshot{Operations: operations, Status: status}, nil
+}
+
+func (c *CLI) renderDeployProgressSnapshotValue(snapshot deployProgressSnapshot) error {
+	return renderProjectStatus(c.stdout, snapshot.Status)
 }
 
 func deployBundleStatusFilters(bundle importBundle) projectStatusFilters {

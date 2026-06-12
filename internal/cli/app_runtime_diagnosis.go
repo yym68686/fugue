@@ -48,6 +48,9 @@ func (c *CLI) newAppDiagnosisCommand() *cobra.Command {
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"diagnosis": diagnosis})
 			}
+			if c.shouldUseRichText() {
+				return c.renderRichDiagnosis(buildAppDiagnosisEvidenceView(diagnosis))
+			}
 			return renderAppDiagnosis(c.stdout, diagnosis)
 		},
 	}
