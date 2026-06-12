@@ -17,6 +17,12 @@ const (
 	defaultRightSizingWindowHours = 168
 	defaultRightSizingMinSamples  = 12
 	maxRightSizingWindowHours     = 168
+
+	rightSizingAutoApplyRequestedByID   = "fugue-api/right-sizing"
+	rightSizingAutoApplyMinCPUIncrease  = int64(50)
+	rightSizingAutoApplyMinMemIncrease  = int64(128)
+	rightSizingAutoApplyMinCPUIncreaseR = 0.25
+	rightSizingAutoApplyMinMemIncreaseR = 0.20
 )
 
 func (s *Server) handleGetAppResourceRecommendation(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +200,94 @@ func (s *Server) applyAppRightSizingRecommendation(
 	return recommendation, &op, false, nil
 }
 
+func (s *Server) applyAutoAppRightSizingRecommendation(
+	app model.App,
+	windowHours, minSamples int,
+) (model.AppRightSizingRecommendation, *model.Operation, bool, error) {
+	recommendation, err := s.appResourceRecommendation(app, windowHours, minSamples)
+	if err != nil {
+		return recommendation, nil, false, err
+	}
+	spec, source, err := s.recoverAppDeployBaseline(app)
+	if err != nil {
+		return recommendation, nil, false, err
+	}
+	if !recommendation.App.Ready ||
+		recommendation.App.Recommended == nil ||
+		!autoRightSizingAppResourceChangeAllowed(spec.Resources, recommendation.App.Recommended) {
+		return recommendation, nil, true, nil
+	}
+
+	spec.Resources = cloneResourceSpec(recommendation.App.Recommended)
+	if hasActive, err := s.appHasActiveDeployOperation(app); err != nil {
+		return recommendation, nil, false, err
+	} else if hasActive {
+		return recommendation, nil, true, nil
+	}
+	if err := s.validateAutoscalingTenantEnvelope(app, spec); err != nil {
+		return recommendation, nil, false, err
+	}
+	op, err := s.store.CreateOperation(model.Operation{
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeDeploy,
+		RequestedByType:     model.ActorTypeSystem,
+		RequestedByID:       rightSizingAutoApplyRequestedByID,
+		AppID:               app.ID,
+		DesiredSpec:         &spec,
+		DesiredSource:       source,
+		DesiredOriginSource: model.AppOriginSource(app),
+	})
+	if err != nil {
+		return recommendation, nil, false, err
+	}
+	return recommendation, &op, false, nil
+}
+
+func autoRightSizingAppResourceChangeAllowed(current, recommended *model.ResourceSpec) bool {
+	if recommended == nil {
+		return false
+	}
+	effectiveCurrent := model.DefaultManagedAppResources()
+	if current != nil {
+		effectiveCurrent = *current
+	}
+	if resourceSpecsEqual(&effectiveCurrent, recommended) {
+		return false
+	}
+	if resourceSpecHasDecrease(effectiveCurrent, *recommended) {
+		return false
+	}
+	return materialResourceIncrease(
+		effectiveCurrent.CPUMilliCores,
+		recommended.CPUMilliCores,
+		rightSizingAutoApplyMinCPUIncrease,
+		rightSizingAutoApplyMinCPUIncreaseR,
+	) || materialResourceIncrease(
+		effectiveCurrent.MemoryMebibytes,
+		recommended.MemoryMebibytes,
+		rightSizingAutoApplyMinMemIncrease,
+		rightSizingAutoApplyMinMemIncreaseR,
+	)
+}
+
+func resourceSpecHasDecrease(current, recommended model.ResourceSpec) bool {
+	return recommended.CPUMilliCores < current.CPUMilliCores ||
+		recommended.MemoryMebibytes < current.MemoryMebibytes ||
+		recommended.CPULimitMilliCores < current.CPULimitMilliCores ||
+		recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes
+}
+
+func materialResourceIncrease(current, recommended, minIncrease int64, minRatio float64) bool {
+	if recommended <= current {
+		return false
+	}
+	if current <= 0 {
+		return true
+	}
+	increase := recommended - current
+	return increase >= minIncrease && float64(increase)/float64(current) >= minRatio
+}
+
 func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {
 	if s == nil || s.store == nil || ctx == nil {
 		return
@@ -233,7 +327,7 @@ func (s *Server) applyAutoRightSizingOnce() {
 		if err != nil || runtimeObj.Type == model.RuntimeTypeExternalOwned {
 			continue
 		}
-		if _, _, _, err := s.applyAppRightSizingRecommendation(nil, app, spec.WindowHours, spec.MinSamples, model.ActorTypeSystem, "fugue-api/right-sizing"); err != nil && s.log != nil {
+		if _, _, _, err := s.applyAutoAppRightSizingRecommendation(app, spec.WindowHours, spec.MinSamples); err != nil && s.log != nil {
 			s.log.Printf("right-sizing auto apply for app=%s failed: %v", app.ID, err)
 		}
 	}

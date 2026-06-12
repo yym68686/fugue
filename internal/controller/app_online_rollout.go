@@ -43,10 +43,17 @@ func (s *Service) onlineDurableRolloutScheduling(
 }
 
 func appUsesOnlineDurableRolloutIntent(app model.App) bool {
-	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
+	if !appHasOnlineRolloutIntent(app) {
 		return false
 	}
 	if app.Spec.Workspace == nil && !appPersistentStorageRequiresSameNodeOnlineRollout(app.Spec.PersistentStorage) {
+		return false
+	}
+	return true
+}
+
+func appHasOnlineRolloutIntent(app model.App) bool {
+	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
 		return false
 	}
 	switch strings.TrimSpace(app.Spec.RolloutIntent) {

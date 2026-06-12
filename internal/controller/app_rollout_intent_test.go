@@ -162,7 +162,7 @@ func TestRolloutIntentForManagedOperationDetectsResourceOnlyDeploy(t *testing.T)
 	}
 }
 
-func TestRolloutIntentForManagedOperationDetectsPostgresResourceOnlyDeploy(t *testing.T) {
+func TestRolloutIntentForManagedOperationRejectsPostgresResourceOnlyDeploy(t *testing.T) {
 	current := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -192,8 +192,8 @@ func TestRolloutIntentForManagedOperationDetectsPostgresResourceOnlyDeploy(t *te
 		DesiredSpec: &desired.Spec,
 	}
 
-	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineResourceUpdate {
-		t.Fatalf("expected postgres resource-only rollout intent, got %q", got)
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected no online rollout intent for postgres resource-only deploy, got %q", got)
 	}
 }
 

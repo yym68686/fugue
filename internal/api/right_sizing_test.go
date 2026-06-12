@@ -212,6 +212,158 @@ func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testi
 	}
 }
 
+func TestAutoRightSizingSkipsDownsizeAndPostgresRecommendation(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Auto Right Size Down Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        500,
+			MemoryMebibytes:      512,
+			MemoryLimitMebibytes: 1024,
+		},
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:        250,
+				MemoryMebibytes:      512,
+				MemoryLimitMebibytes: 768,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	postgresService := app.BackingServices[0]
+	samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
+		{cpuMilli: 20, memoryMiB: 64},
+		{cpuMilli: 30, memoryMiB: 80},
+		{cpuMilli: 50, memoryMiB: 100},
+	})
+	samples = append(samples, rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindBackingService, postgresService.ID, []rightSizingUsageValue{
+		{cpuMilli: 500, memoryMiB: 768},
+		{cpuMilli: 600, memoryMiB: 800},
+		{cpuMilli: 700, memoryMiB: 832},
+	})...)
+	if err := stateStore.RecordResourceUsageSamples(samples, time.Time{}); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	recommendation, op, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+	if err != nil {
+		t.Fatalf("apply auto recommendation: %v", err)
+	}
+	if !alreadyCurrent || op != nil {
+		t.Fatalf("expected auto right-sizing to skip downsize/postgres-only recommendation, already_current=%v op=%+v", alreadyCurrent, op)
+	}
+	if !recommendation.App.Ready || len(recommendation.BackingServices) != 1 || !recommendation.BackingServices[0].Ready {
+		t.Fatalf("expected ready app and postgres recommendations, got %+v", recommendation)
+	}
+	operations, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("expected no auto deploy operation, got %+v", operations)
+	}
+}
+
+func TestAutoRightSizingQueuesMaterialAppIncreaseWithoutPostgres(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Auto Right Size Up Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        100,
+			MemoryMebibytes:      128,
+			MemoryLimitMebibytes: 256,
+		},
+		Postgres: &model.AppPostgresSpec{
+			Database: "demo",
+			User:     "demo",
+			Password: "secret",
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:        250,
+				MemoryMebibytes:      512,
+				MemoryLimitMebibytes: 768,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	postgresService := app.BackingServices[0]
+	samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
+		{cpuMilli: 160, memoryMiB: 300},
+		{cpuMilli: 180, memoryMiB: 320},
+		{cpuMilli: 200, memoryMiB: 400},
+	})
+	samples = append(samples, rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindBackingService, postgresService.ID, []rightSizingUsageValue{
+		{cpuMilli: 500, memoryMiB: 768},
+		{cpuMilli: 600, memoryMiB: 800},
+		{cpuMilli: 700, memoryMiB: 832},
+	})...)
+	if err := stateStore.RecordResourceUsageSamples(samples, time.Time{}); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	_, op, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+	if err != nil {
+		t.Fatalf("apply auto recommendation: %v", err)
+	}
+	if alreadyCurrent || op == nil || op.DesiredSpec == nil {
+		t.Fatalf("expected material app increase to queue deploy, already_current=%v op=%+v", alreadyCurrent, op)
+	}
+	if got := op.RequestedByID; got != rightSizingAutoApplyRequestedByID {
+		t.Fatalf("expected auto right-sizing requester %q, got %q", rightSizingAutoApplyRequestedByID, got)
+	}
+	if op.DesiredSpec.Postgres != nil {
+		t.Fatalf("auto right-sizing must not mutate postgres resources, got %+v", op.DesiredSpec.Postgres)
+	}
+	resources := op.DesiredSpec.Resources
+	if resources == nil || resources.CPUMilliCores <= 100 || resources.MemoryMebibytes <= 128 {
+		t.Fatalf("expected app resources to increase, got %+v", resources)
+	}
+}
+
 type rightSizingUsageValue struct {
 	cpuMilli  int64
 	memoryMiB int64

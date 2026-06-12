@@ -2982,6 +2982,36 @@ func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
 	}
 }
 
+func TestManagedAppCloudNativePGApplyContextSkipsExistingForOnlineIntent(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:         "ghcr.io/example/demo:latest",
+			Ports:         []int{8080},
+			Replicas:      1,
+			RolloutIntent: model.AppRolloutIntentOnlineResourceUpdate,
+		},
+	}
+
+	ctx := managedAppCloudNativePGApplyContext(context.Background(), app, false)
+	if !skipExistingCloudNativePGWrites(ctx) {
+		t.Fatal("expected online rollout to skip existing CloudNativePG writes")
+	}
+	forcedCtx := managedAppCloudNativePGApplyContext(context.Background(), app, true)
+	if skipExistingCloudNativePGWrites(forcedCtx) {
+		t.Fatal("expected forced CloudNativePG write to override online rollout skip")
+	}
+	app.Spec.RolloutIntent = ""
+	plainCtx := managedAppCloudNativePGApplyContext(context.Background(), app, false)
+	if skipExistingCloudNativePGWrites(plainCtx) {
+		t.Fatal("expected non-online rollout to allow CloudNativePG writes")
+	}
+}
+
 func managedAppSpecEnv(obj map[string]any) map[string]string {
 	spec, _ := obj["spec"].(map[string]any)
 	appSpec, _ := spec["appSpec"].(map[string]any)

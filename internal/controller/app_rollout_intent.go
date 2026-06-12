@@ -105,19 +105,7 @@ func managedDeployOperationIsResourceOnly(op model.Operation, currentApp, desire
 }
 
 func managedDeployOperationResourcesDiffer(currentSpec, desiredSpec model.AppSpec) bool {
-	if !reflect.DeepEqual(currentSpec.Resources, desiredSpec.Resources) {
-		return true
-	}
-
-	var currentPostgresResources *model.ResourceSpec
-	if currentSpec.Postgres != nil {
-		currentPostgresResources = currentSpec.Postgres.Resources
-	}
-	var desiredPostgresResources *model.ResourceSpec
-	if desiredSpec.Postgres != nil {
-		desiredPostgresResources = desiredSpec.Postgres.Resources
-	}
-	return !reflect.DeepEqual(currentPostgresResources, desiredPostgresResources)
+	return !reflect.DeepEqual(currentSpec.Resources, desiredSpec.Resources)
 }
 
 func comparableResourceOnlySpec(spec model.AppSpec) model.AppSpec {

@@ -269,10 +269,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	applyCtx := ctx
-	if stabilizedPostgresStorage {
-		applyCtx = withoutSkipExistingCloudNativePGWrites(ctx)
-	}
+	applyCtx := managedAppCloudNativePGApplyContext(ctx, app, stabilizedPostgresStorage)
 	if err := client.applyObjects(applyCtx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
@@ -337,6 +334,16 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		}
 	}
 	return nil
+}
+
+func managedAppCloudNativePGApplyContext(ctx context.Context, app model.App, forceWrite bool) context.Context {
+	if forceWrite {
+		return withoutSkipExistingCloudNativePGWrites(ctx)
+	}
+	if appHasOnlineRolloutIntent(app) {
+		return withSkipExistingCloudNativePGWrites(ctx)
+	}
+	return ctx
 }
 
 func (s *Service) refreshStoredManagedAppDesiredBeforeApply(
