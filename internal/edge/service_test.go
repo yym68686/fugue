@@ -79,6 +79,64 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	}
 }
 
+func TestEdgeProxyObservationBackfillsRequestIDFromOriginResponse(t *testing.T) {
+	t.Parallel()
+
+	target, err := url.Parse("http://origin.internal")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
+	service.proxyBase = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"X-Request-Id": []string{"origin_req_123"},
+			},
+			Body:    io.NopCloser(strings.NewReader("ok")),
+			Request: req,
+		}, nil
+	})
+	observed := edgeProxyObservation{}
+	proxy := service.newEdgeReverseProxy("demo.fugue.pro", target, model.EdgeRouteBinding{}, &observed, false, nil)
+
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/v1", nil))
+
+	if observed.RequestID != "origin_req_123" {
+		t.Fatalf("expected origin response request id to be backfilled, got %q", observed.RequestID)
+	}
+}
+
+func TestEdgeProxyObservationKeepsInboundRequestID(t *testing.T) {
+	t.Parallel()
+
+	target, err := url.Parse("http://origin.internal")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
+	service.proxyBase = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"X-Request-Id": []string{"origin_req_123"},
+			},
+			Body:    io.NopCloser(strings.NewReader("ok")),
+			Request: req,
+		}, nil
+	})
+	observed := edgeProxyObservation{RequestID: "inbound_req_456"}
+	proxy := service.newEdgeReverseProxy("demo.fugue.pro", target, model.EdgeRouteBinding{}, &observed, false, nil)
+
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/v1", nil))
+
+	if observed.RequestID != "inbound_req_456" {
+		t.Fatalf("expected inbound request id to be preserved, got %q", observed.RequestID)
+	}
+}
+
 func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	t.Parallel()
 

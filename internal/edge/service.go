@@ -960,6 +960,9 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if observed != nil && resp != nil {
+				if strings.TrimSpace(observed.RequestID) == "" {
+					observed.RequestID = edgeRequestIDFromHeader(resp.Header)
+				}
 				addEdgeServerTiming(resp.Header, edgeProxyServerTiming(*observed, true))
 			}
 			if resp == nil || cacheDecision == nil || !cacheDecision.Enabled {

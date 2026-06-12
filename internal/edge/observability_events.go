@@ -149,8 +149,15 @@ func edgeRequestIDFromRequest(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	for _, header := range []string{"X-Request-Id", "X-Request-ID", "X-Correlation-ID"} {
-		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+	return edgeRequestIDFromHeader(r.Header)
+}
+
+func edgeRequestIDFromHeader(header http.Header) string {
+	if header == nil {
+		return ""
+	}
+	for _, headerName := range []string{"X-Request-Id", "X-Request-ID", "X-Correlation-ID"} {
+		if value := strings.TrimSpace(header.Get(headerName)); value != "" {
 			return value
 		}
 	}
