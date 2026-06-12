@@ -873,7 +873,7 @@ func managedDeploymentRuntimeKey(obj map[string]any) string {
 	if spec != nil {
 		if template, ok := spec["template"]; ok && template != nil {
 			specPayload = map[string]any{
-				"template": template,
+				"template": deploymentTemplateForRuntimeKey(template),
 			}
 		} else {
 			specPayload = spec
@@ -894,6 +894,47 @@ func managedDeploymentRuntimeKey(obj map[string]any) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func deploymentTemplateForRuntimeKey(template any) any {
+	templateMap, ok := template.(map[string]any)
+	if !ok {
+		return template
+	}
+	out := make(map[string]any, len(templateMap))
+	for key, value := range templateMap {
+		out[key] = value
+	}
+	metadata, ok := templateMap["metadata"].(map[string]any)
+	if !ok {
+		return out
+	}
+	metadataCopy := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		metadataCopy[key] = value
+	}
+	switch annotations := metadata["annotations"].(type) {
+	case map[string]string:
+		annotationsCopy := make(map[string]string, len(annotations))
+		for key, value := range annotations {
+			if key == FugueAnnotationReleaseKey {
+				continue
+			}
+			annotationsCopy[key] = value
+		}
+		metadataCopy["annotations"] = annotationsCopy
+	case map[string]any:
+		annotationsCopy := make(map[string]any, len(annotations))
+		for key, value := range annotations {
+			if key == FugueAnnotationReleaseKey {
+				continue
+			}
+			annotationsCopy[key] = value
+		}
+		metadataCopy["annotations"] = annotationsCopy
+	}
+	out["metadata"] = metadataCopy
+	return out
 }
 
 func annotateManagedDeploymentReleaseKey(obj map[string]any) {
@@ -920,6 +961,31 @@ func annotateManagedDeploymentReleaseKey(obj map[string]any) {
 	}
 	annotations[FugueAnnotationReleaseKey] = key
 	metadata["annotations"] = annotations
+
+	spec, _ := obj["spec"].(map[string]any)
+	template, _ := spec["template"].(map[string]any)
+	if template == nil {
+		return
+	}
+	templateMetadata, _ := template["metadata"].(map[string]any)
+	if templateMetadata == nil {
+		templateMetadata = map[string]any{}
+		template["metadata"] = templateMetadata
+	}
+	templateAnnotations := map[string]string{}
+	if existing, ok := templateMetadata["annotations"].(map[string]string); ok {
+		for name, value := range existing {
+			templateAnnotations[name] = value
+		}
+	} else if existing, ok := templateMetadata["annotations"].(map[string]any); ok {
+		for name, value := range existing {
+			if text, ok := value.(string); ok {
+				templateAnnotations[name] = text
+			}
+		}
+	}
+	templateAnnotations[FugueAnnotationReleaseKey] = key
+	templateMetadata["annotations"] = templateAnnotations
 }
 
 func mergedRuntimeEnv(app model.App) map[string]string {

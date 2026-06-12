@@ -735,6 +735,18 @@ func TestBuildAppDeploymentAnnotatesReleaseKey(t *testing.T) {
 	if expected := ManagedAppReleaseKey(app, SchedulingConstraints{}); releaseKey != expected {
 		t.Fatalf("expected release key %q, got %q", expected, releaseKey)
 	}
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	templateMetadata := template["metadata"].(map[string]any)
+	templateAnnotations, ok := templateMetadata["annotations"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected template annotations, got %#v", templateMetadata["annotations"])
+	}
+	if got := templateAnnotations[FugueAnnotationReleaseKey]; got != releaseKey {
+		t.Fatalf("expected template release key %q, got %q", releaseKey, got)
+	}
+	if got := managedDeploymentRuntimeKey(deployment); got != releaseKey {
+		t.Fatalf("expected release key annotation not to change runtime key, got %q want %q", got, releaseKey)
+	}
 
 	app.Spec.Image = "ghcr.io/example/demo:v2"
 	updatedDeployment := buildAppObjects(app, SchedulingConstraints{})[1]

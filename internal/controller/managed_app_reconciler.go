@@ -716,6 +716,9 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	}
 	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), backingServiceStatuses...)
 	podFailureCutoff, allowPodFailure := managedAppPodFailureCutoff(managed.Status, app, managed.Spec.Scheduling)
+	if allowPodFailure && managedAppReleaseAttemptAdvanced(managed.Status, managed.Metadata.Generation, app, managed.Spec.Scheduling) {
+		allowPodFailure = false
+	}
 	podFailureMessage := ""
 	if allowPodFailure {
 		podFailureMessage = managedAppPodFailureMessage(pods, podFailureCutoff)
@@ -896,6 +899,20 @@ func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, app model.App
 	}
 
 	return nil, true
+}
+
+func managedAppReleaseAttemptAdvanced(previous runtime.ManagedAppStatus, generation int64, app model.App, scheduling runtime.SchedulingConstraints) bool {
+	releaseKey := strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+	if releaseKey == "" {
+		return false
+	}
+	if strings.TrimSpace(previous.PendingReleaseKey) != releaseKey {
+		return false
+	}
+	if previous.ObservedGeneration <= 0 || generation <= 0 {
+		return false
+	}
+	return previous.ObservedGeneration < generation
 }
 
 func parseManagedAppStatusTimestamp(raw string) *time.Time {
@@ -1156,7 +1173,7 @@ func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous run
 	}
 
 	status.PendingReleaseKey = releaseKey
-	if pendingKey == releaseKey && pendingStartedAt != "" {
+	if pendingKey == releaseKey && pendingStartedAt != "" && previous.ObservedGeneration >= status.ObservedGeneration {
 		status.PendingReleaseStartedAt = pendingStartedAt
 	} else {
 		status.PendingReleaseStartedAt = now
