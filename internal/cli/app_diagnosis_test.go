@@ -2,6 +2,7 @@ package cli
 
 import (
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -118,5 +119,105 @@ func TestDescribePodIssueIgnoresNonComparableRuntimeImageIDs(t *testing.T) {
 		if issue != "" {
 			t.Fatalf("expected no issue for non-comparable image %q, got %q", image, issue)
 		}
+	}
+}
+
+func TestDescribePodIssueIgnoresCompletedInitLikeContainers(t *testing.T) {
+	t.Parallel()
+
+	pod := model.ClusterPod{
+		Name:  "demo-ready",
+		Phase: "Running",
+		Ready: true,
+		Containers: []model.ClusterPodContainer{
+			{
+				Name:   "wait-postgres",
+				Image:  "busybox:1.36",
+				State:  "terminated",
+				Reason: "Completed",
+			},
+			{
+				Name:  "demo",
+				Image: "registry.pull.example/fugue-apps/demo:git-abc123",
+				Ready: true,
+				State: "running",
+			},
+		},
+	}
+
+	issue := describePodIssue(pod, "")
+	if issue != "" {
+		t.Fatalf("expected no issue for completed helper container in ready pod, got %q", issue)
+	}
+}
+
+func TestSummarizeAppBuildArtifactFallsBackToCurrentAppImageRefs(t *testing.T) {
+	t.Parallel()
+
+	managedRef := "registry.push.example/fugue-apps/demo:git-abc123"
+	runtimeRef := "registry.pull.example/fugue-apps/demo:git-abc123"
+	app := model.App{
+		ID:   "app_123",
+		Name: "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeGitHubPublic,
+			ResolvedImageRef: managedRef,
+		},
+		Spec: model.AppSpec{Image: runtimeRef},
+	}
+	createdAt := time.Date(2026, 6, 12, 9, 45, 0, 0, time.UTC)
+	operations := []model.Operation{
+		{
+			ID:        "op_deploy",
+			AppID:     app.ID,
+			Type:      model.OperationTypeDeploy,
+			Status:    model.OperationStatusCompleted,
+			CreatedAt: createdAt,
+		},
+	}
+	images := &appImageInventoryResponse{
+		Versions: []appImageVersion{
+			{ImageRef: managedRef, RuntimeImageRef: runtimeRef, Status: "available", Current: true},
+		},
+	}
+	pods := &model.AppRuntimePodInventory{
+		Groups: []model.AppRuntimePodGroup{
+			{
+				OwnerKind: "ReplicaSet",
+				OwnerName: "demo-abc123",
+				Pods: []model.ClusterPod{
+					{
+						Name:  "demo-ready",
+						Phase: "Running",
+						Ready: true,
+						Containers: []model.ClusterPodContainer{
+							{Name: "demo", Image: runtimeRef, Ready: true, State: "running"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	report, _, latestDeploy := summarizeAppBuildArtifact(app, operations, images, pods)
+	if report == nil {
+		t.Fatal("expected artifact report")
+	}
+	if report.ManagedImageRef != managedRef {
+		t.Fatalf("expected managed image ref fallback %q, got %q", managedRef, report.ManagedImageRef)
+	}
+	if report.RuntimeImageRef != runtimeRef {
+		t.Fatalf("expected runtime image ref fallback %q, got %q", runtimeRef, report.RuntimeImageRef)
+	}
+	if report.RegistryImageStatus != "available" || !report.RegistryImageCurrent {
+		t.Fatalf("expected current available registry image, got status=%q current=%v", report.RegistryImageStatus, report.RegistryImageCurrent)
+	}
+	if len(report.PodIssues) != 0 || report.ReadyPods != 1 {
+		t.Fatalf("expected one ready pod with no issues, got ready=%d issues=%+v", report.ReadyPods, report.PodIssues)
+	}
+
+	diagnosis := summarizeAppOverviewDiagnosis(app, nil, latestDeploy, nil, report)
+	if diagnosis != nil {
+		t.Fatalf("expected healthy artifact summary to suppress overview diagnosis, got %+v", diagnosis)
 	}
 }

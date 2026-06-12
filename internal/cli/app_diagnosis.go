@@ -120,7 +120,7 @@ func (c *CLI) collectBuildArtifactReport(client *Client, appID string, logs buil
 		podInventory = &inventory
 	}
 
-	enrichBuildArtifactReport(report, importOp, operations, images, podInventory)
+	enrichBuildArtifactReport(report, model.App{}, importOp, operations, images, podInventory)
 	if !buildArtifactReportHasContent(report) {
 		return nil
 	}
@@ -167,14 +167,14 @@ func summarizeAppBuildArtifact(app model.App, operations []model.Operation, imag
 		BuildStrategy:        buildArtifactStrategy(latestImport, latestDeploy),
 		BuildMessage:         operationMessage(latestImport),
 	}
-	enrichBuildArtifactReport(report, latestImport, sorted, images, podInventory)
+	enrichBuildArtifactReport(report, app, latestImport, sorted, images, podInventory)
 	if !buildArtifactReportHasContent(report) {
 		return nil, latestImport, latestDeploy
 	}
 	return report, latestImport, latestDeploy
 }
 
-func enrichBuildArtifactReport(report *appBuildArtifactReport, importOp *model.Operation, operations []model.Operation, images *appImageInventoryResponse, podInventory *model.AppRuntimePodInventory) {
+func enrichBuildArtifactReport(report *appBuildArtifactReport, app model.App, importOp *model.Operation, operations []model.Operation, images *appImageInventoryResponse, podInventory *model.AppRuntimePodInventory) {
 	if report == nil {
 		return
 	}
@@ -210,10 +210,12 @@ func enrichBuildArtifactReport(report *appBuildArtifactReport, importOp *model.O
 	report.ManagedImageRef = firstNonEmptyTrimmed(
 		sourceResolvedImageRef(importOp),
 		sourceResolvedImageRef(deployOp),
+		appResolvedImageRef(app),
 	)
 	report.RuntimeImageRef = firstNonEmptyTrimmed(
 		specImage(deployOp),
 		specImage(importOp),
+		strings.TrimSpace(app.Spec.Image),
 	)
 
 	if version := matchImageVersion(images, report.ManagedImageRef, report.RuntimeImageRef); version != nil {
@@ -740,6 +742,9 @@ func describePodIssue(pod model.ClusterPod, expectedImage string) string {
 		return ""
 	}
 	for _, container := range pod.Containers {
+		if containerCompletedSuccessfully(container) {
+			continue
+		}
 		if expectedImage != "" && containerImageComparable(container.Image) && !strings.EqualFold(strings.TrimSpace(container.Image), expectedImage) {
 			if hasExpectedImage {
 				continue
@@ -775,6 +780,11 @@ func containerImageComparable(image string) bool {
 		!strings.HasPrefix(normalized, "docker://") &&
 		!strings.HasPrefix(normalized, "containerd://") &&
 		!strings.HasPrefix(normalized, "docker-pullable://")
+}
+
+func containerCompletedSuccessfully(container model.ClusterPodContainer) bool {
+	return strings.EqualFold(strings.TrimSpace(container.State), "terminated") &&
+		strings.EqualFold(strings.TrimSpace(container.Reason), "Completed")
 }
 
 func buildArtifactEvidence(report *appBuildArtifactReport, deployDiagnosis *model.OperationDiagnosis) []string {
@@ -1035,6 +1045,18 @@ func sourceResolvedImageRef(op *model.Operation) string {
 		return ""
 	}
 	return strings.TrimSpace(op.DesiredSource.ResolvedImageRef)
+}
+
+func appResolvedImageRef(app model.App) string {
+	for _, source := range []*model.AppSource{model.AppBuildSource(app), model.AppOriginSource(app)} {
+		if source == nil {
+			continue
+		}
+		if ref := strings.TrimSpace(source.ResolvedImageRef); ref != "" {
+			return ref
+		}
+	}
+	return ""
 }
 
 func specImage(op *model.Operation) string {
