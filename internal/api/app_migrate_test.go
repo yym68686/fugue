@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"path/filepath"
@@ -11,6 +12,75 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+func TestMigrateAppDryRunChecksRuntimeVisibility(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	owner, err := s.CreateTenant("Runtime Owner")
+	if err != nil {
+		t.Fatalf("create owner tenant: %v", err)
+	}
+	consumer, err := s.CreateTenant("Runtime Consumer")
+	if err != nil {
+		t.Fatalf("create consumer tenant: %v", err)
+	}
+	project, err := s.CreateProject(consumer.ID, "demo", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	targetRuntime, _, err := s.CreateRuntime(owner.ID, "owner-private-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create target runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(consumer.ID, "tenant-admin", []string{"app.write", "app.migrate"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(consumer.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: model.DefaultManagedRuntimeID,
+		Replicas:  1,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/migrate", apiKey, map[string]any{
+		"target_runtime_id": targetRuntime.ID,
+		"dry_run":           true,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Impact model.AppMoveImpact `json:"impact"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode dry-run response: %v", err)
+	}
+	if response.Impact.Pass {
+		t.Fatalf("expected dry-run impact to fail for hidden runtime, got %+v", response.Impact)
+	}
+	foundAccessCheck := false
+	for _, check := range response.Impact.Checks {
+		if check.Name != "target_runtime_access" {
+			continue
+		}
+		foundAccessCheck = true
+		if check.Pass || !strings.Contains(check.Message, "not visible") {
+			t.Fatalf("unexpected access check: %+v", check)
+		}
+	}
+	if !foundAccessCheck {
+		t.Fatalf("expected target_runtime_access check, got %+v", response.Impact.Checks)
+	}
+}
 
 func TestMigrateAppRejectsStatefulFailoverBlockers(t *testing.T) {
 	t.Parallel()

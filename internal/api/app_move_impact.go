@@ -40,6 +40,23 @@ func (s *Server) buildAppMoveImpact(app model.App, targetRuntimeID string) model
 			impact.Pass = false
 		}
 	}
+	if targetRuntimeID != "" {
+		visible, err := s.store.RuntimeVisibleToTenant(targetRuntimeID, app.TenantID, false)
+		if err != nil {
+			appendCheck("target_runtime_access", false, err.Error())
+		} else if !visible {
+			appendCheck("target_runtime_access", false, "target runtime is not visible to the app tenant")
+		} else {
+			appendCheck("target_runtime_access", true, "target runtime is visible to the app tenant")
+		}
+		desiredSpec := app.Spec
+		prepareMigrateDesiredSpec(app, &desiredSpec, targetRuntimeID)
+		if err := s.store.ValidateAppSpecRuntimeReservations(app.ProjectID, desiredSpec); err != nil {
+			appendCheck("project_runtime_reservation", false, err.Error())
+		} else {
+			appendCheck("project_runtime_reservation", true, "target runtime is not reserved for another project")
+		}
+	}
 	if app.Spec.PersistentStorage != nil {
 		storage := app.Spec.PersistentStorage
 		mode, err := model.NormalizeAppPersistentStorageMode(storage.Mode)

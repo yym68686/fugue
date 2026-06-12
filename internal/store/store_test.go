@@ -2688,6 +2688,9 @@ func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound before grant, got %v", err)
 	}
+	if _, err := s.ReserveProjectRuntime(project.ID, runtimeObj.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound reserving hidden runtime before grant, got %v", err)
+	}
 
 	grant, err := s.GrantRuntimeAccess(runtimeObj.ID, owner.ID, grantee.ID)
 	if err != nil {
@@ -2718,6 +2721,13 @@ func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 		RuntimeID: runtimeObj.ID,
 	}); err != nil {
 		t.Fatalf("create app on granted runtime: %v", err)
+	}
+	reservation, err := s.ReserveProjectRuntime(project.ID, runtimeObj.ID)
+	if err != nil {
+		t.Fatalf("reserve granted runtime for project: %v", err)
+	}
+	if reservation.ProjectID != project.ID || reservation.RuntimeID != runtimeObj.ID {
+		t.Fatalf("unexpected runtime reservation: %+v", reservation)
 	}
 
 	removed, err := s.RevokeRuntimeAccess(runtimeObj.ID, owner.ID, grantee.ID)

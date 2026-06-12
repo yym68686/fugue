@@ -89,7 +89,11 @@ FOR UPDATE
 	if err != nil {
 		return model.ProjectRuntimeReservation{}, mapDBErr(err)
 	}
-	if err := validateProjectRuntimeReservationTarget(project, runtimeObj); err != nil {
+	visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, project.TenantID)
+	if err != nil {
+		return model.ProjectRuntimeReservation{}, err
+	}
+	if err := validateProjectRuntimeReservationTarget(project, runtimeObj, visible); err != nil {
 		return model.ProjectRuntimeReservation{}, err
 	}
 
@@ -134,6 +138,25 @@ VALUES ($1, $2, $3, $4, $5, $6)
 		return model.ProjectRuntimeReservation{}, fmt.Errorf("commit reserve project runtime transaction: %w", err)
 	}
 	return reservation, nil
+}
+
+func (s *Store) pgValidateAppSpecRuntimeReservations(projectID string, spec model.AppSpec) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin validate app spec runtime reservations transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := pgValidateAppSpecRuntimeReservationsTx(ctx, tx, projectID, spec); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit validate app spec runtime reservations transaction: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) pgDeleteProjectRuntimeReservation(projectID, runtimeID string) (model.ProjectRuntimeReservation, error) {

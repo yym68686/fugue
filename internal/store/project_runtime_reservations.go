@@ -60,7 +60,7 @@ func (s *Store) ReserveProjectRuntime(projectID, runtimeID string) (model.Projec
 		}
 		project := state.Projects[projectIndex]
 		runtimeObj := state.Runtimes[runtimeIndex]
-		if err := validateProjectRuntimeReservationTarget(project, runtimeObj); err != nil {
+		if err := validateProjectRuntimeReservationTarget(project, runtimeObj, runtimeVisibleToTenant(state, runtimeObj.ID, project.TenantID)); err != nil {
 			return err
 		}
 
@@ -95,6 +95,19 @@ func (s *Store) ReserveProjectRuntime(projectID, runtimeID string) (model.Projec
 		return nil
 	})
 	return reservation, err
+}
+
+func (s *Store) ValidateAppSpecRuntimeReservations(projectID string, spec model.AppSpec) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgValidateAppSpecRuntimeReservations(projectID, spec)
+	}
+	return s.withLockedState(false, func(state *model.State) error {
+		return validateAppSpecRuntimeReservationsState(state, projectID, spec)
+	})
 }
 
 func (s *Store) DeleteProjectRuntimeReservation(projectID, runtimeID string) (model.ProjectRuntimeReservation, error) {
@@ -139,7 +152,7 @@ func normalizeProjectRuntimeReservation(reservation model.ProjectRuntimeReservat
 	return reservation
 }
 
-func validateProjectRuntimeReservationTarget(project model.Project, runtimeObj model.Runtime) error {
+func validateProjectRuntimeReservationTarget(project model.Project, runtimeObj model.Runtime, visibleToProjectTenant bool) error {
 	if strings.TrimSpace(project.ID) == "" || strings.TrimSpace(runtimeObj.ID) == "" {
 		return ErrInvalidInput
 	}
@@ -148,8 +161,13 @@ func validateProjectRuntimeReservationTarget(project model.Project, runtimeObj m
 	default:
 		return ErrInvalidInput
 	}
-	if strings.TrimSpace(project.TenantID) == "" || runtimeObj.TenantID != project.TenantID {
+	if strings.TrimSpace(project.TenantID) == "" {
 		return ErrNotFound
+	}
+	if runtimeObj.TenantID != project.TenantID {
+		if !visibleToProjectTenant {
+			return ErrNotFound
+		}
 	}
 	return nil
 }
