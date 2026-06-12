@@ -950,6 +950,7 @@ type ClusterPodOwner struct {
 type ClusterPodContainer struct {
 	Name         string `json:"name"`
 	Image        string `json:"image"`
+	ImageID      string `json:"image_id,omitempty"`
 	Ready        bool   `json:"ready"`
 	RestartCount int32  `json:"restart_count"`
 	State        string `json:"state"`

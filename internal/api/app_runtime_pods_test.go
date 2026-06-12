@@ -45,6 +45,7 @@ func TestGetAppRuntimePodsReturnsReplicaSetHistory(t *testing.T) {
 	currentPod.Status.ContainerStatuses = []kubeContainerStatus{{
 		Name:         containerName,
 		Image:        "ghcr.io/example/demo:v2",
+		ImageID:      "docker-pullable://ghcr.io/example/demo@sha256:abc123",
 		Ready:        true,
 		RestartCount: 1,
 		State:        kubeRuntimeState{Running: &struct{}{}},
@@ -121,5 +122,40 @@ func TestGetAppRuntimePodsReturnsReplicaSetHistory(t *testing.T) {
 	}
 	if response.Groups[1].OwnerName != "demo-7b7d9f8c5d" || response.Groups[1].Revision != "12" || len(response.Groups[1].Pods) != 0 {
 		t.Fatalf("expected old replica set context without live pods, got %+v", response.Groups[1])
+	}
+	containers := response.Groups[0].Pods[0].Containers
+	if len(containers) != 1 {
+		t.Fatalf("expected one runtime container, got %+v", containers)
+	}
+	if containers[0].Image != "ghcr.io/example/demo:v2" {
+		t.Fatalf("expected runtime pod container image to use spec image, got %q", containers[0].Image)
+	}
+	if containers[0].ImageID != "docker-pullable://ghcr.io/example/demo@sha256:abc123" {
+		t.Fatalf("expected runtime pod container image_id, got %q", containers[0].ImageID)
+	}
+}
+
+func TestRuntimePodContainerPrefersSpecImageOverStatusDigest(t *testing.T) {
+	t.Parallel()
+
+	pod := fakePod("demo-8c9f6d74f7-abc12", "Running", time.Date(2026, 4, 15, 1, 5, 0, 0, time.UTC), "demo")
+	pod.Spec.Containers[0].Image = "registry.pull.example/fugue-apps/demo@sha256:expected"
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:    "demo",
+		Image:   "sha256:runtime-id",
+		ImageID: "docker-pullable://registry.pull.example/fugue-apps/demo@sha256:expected",
+		Ready:   true,
+		State:   kubeRuntimeState{Running: &struct{}{}},
+	}}
+
+	containers := logPodContainers(pod)
+	if len(containers) != 1 {
+		t.Fatalf("expected one container, got %+v", containers)
+	}
+	if containers[0].Image != "registry.pull.example/fugue-apps/demo@sha256:expected" {
+		t.Fatalf("expected spec image for rollout comparison, got %q", containers[0].Image)
+	}
+	if containers[0].ImageID != "docker-pullable://registry.pull.example/fugue-apps/demo@sha256:expected" {
+		t.Fatalf("expected image_id to preserve runtime image id, got %q", containers[0].ImageID)
 	}
 }

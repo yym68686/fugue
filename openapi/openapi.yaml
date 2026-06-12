@@ -12785,6 +12785,8 @@ components:
           type: string
         image:
           type: string
+        image_id:
+          type: string
         ready:
           type: boolean
         restart_count:

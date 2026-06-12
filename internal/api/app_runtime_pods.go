@@ -255,7 +255,8 @@ func logPodContainers(pod kubePodInfo) []model.ClusterPodContainer {
 		state, reason, message := podContainerStateFromLogStatus(status)
 		out = append(out, model.ClusterPodContainer{
 			Name:         strings.TrimSpace(status.Name),
-			Image:        firstNonEmptyString(strings.TrimSpace(status.Image), specImages[status.Name]),
+			Image:        firstNonEmptyString(specImages[status.Name], strings.TrimSpace(status.Image)),
+			ImageID:      strings.TrimSpace(status.ImageID),
 			Ready:        status.Ready,
 			RestartCount: status.RestartCount,
 			State:        state,

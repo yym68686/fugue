@@ -66,3 +66,27 @@ func TestDescribePodIssueReportsExpectedImageMismatchWhenNoContainerMatches(t *t
 		t.Fatal("expected image mismatch issue")
 	}
 }
+
+func TestDescribePodIssueDoesNotCompareRuntimeImageIDToExpectedSpecImage(t *testing.T) {
+	t.Parallel()
+
+	pod := model.ClusterPod{
+		Name:  "demo-ready",
+		Phase: "Running",
+		Ready: true,
+		Containers: []model.ClusterPodContainer{
+			{
+				Name:    "demo",
+				Image:   "registry.pull.example/fugue-apps/demo@sha256:expected",
+				ImageID: "sha256:runtime-id",
+				Ready:   true,
+				State:   "running",
+			},
+		},
+	}
+
+	issue := describePodIssue(pod, "registry.pull.example/fugue-apps/demo@sha256:expected")
+	if issue != "" {
+		t.Fatalf("expected no issue when spec image matches and image_id differs, got %q", issue)
+	}
+}

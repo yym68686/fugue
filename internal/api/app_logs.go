@@ -94,6 +94,7 @@ type kubePodInfo struct {
 type kubeContainerStatus struct {
 	Name         string           `json:"name"`
 	Image        string           `json:"image,omitempty"`
+	ImageID      string           `json:"imageID,omitempty"`
 	Ready        bool             `json:"ready"`
 	RestartCount int32            `json:"restartCount,omitempty"`
 	State        kubeRuntimeState `json:"state,omitempty"`

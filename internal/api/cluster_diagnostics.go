@@ -1035,6 +1035,7 @@ func podContainers(pod corev1.Pod) []model.ClusterPodContainer {
 		out = append(out, model.ClusterPodContainer{
 			Name:         strings.TrimSpace(status.Name),
 			Image:        firstNonEmptyString(specImages[status.Name], status.Image),
+			ImageID:      strings.TrimSpace(status.ImageID),
 			Ready:        status.Ready,
 			RestartCount: status.RestartCount,
 			State:        state,
