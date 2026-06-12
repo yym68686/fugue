@@ -31,34 +31,55 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+type shortReadReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *shortReadReader) Read(data []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(data, r.data)
+	return n, r.err
+}
+
 func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T) {
 	t.Parallel()
 	observed := edgeProxyObservation{
-		ReceivedAt:         time.Date(2026, 6, 6, 1, 2, 3, 0, time.UTC),
-		Host:               "demo.fugue.pro",
-		Method:             http.MethodPost,
-		Path:               "/v1/chat?...",
-		TraceID:            "4bf92f3577b34da6a3ce929d0e0e4736",
-		RequestID:          "req_123",
-		StatusCode:         http.StatusServiceUnavailable,
-		Duration:           1500 * time.Millisecond,
-		TTFB:               200 * time.Millisecond,
-		Upstream:           1200 * time.Millisecond,
-		OriginDNS:          3 * time.Millisecond,
-		OriginConnect:      9 * time.Millisecond,
-		OriginGotConn:      true,
-		OriginRemoteAddr:   "10.42.5.112:8000",
-		OriginLocalAddr:    "10.42.1.10:45678",
-		OriginWroteHeaders: true,
-		OriginWroteRequest: true,
-		OriginRequestWrite: 20 * time.Millisecond,
-		OriginTTFB:         200 * time.Millisecond,
-		OriginTotal:        1200 * time.Millisecond,
-		RequestBytes:       123,
-		ResponseBytes:      456,
-		Streaming:          true,
-		CacheStatus:        edgeCacheStatusBypass,
-		Upload:             true,
+		ReceivedAt:           time.Date(2026, 6, 6, 1, 2, 3, 0, time.UTC),
+		Host:                 "demo.fugue.pro",
+		Method:               http.MethodPost,
+		Path:                 "/v1/chat?...",
+		TraceID:              "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:            "req_123",
+		StatusCode:           http.StatusServiceUnavailable,
+		Duration:             1500 * time.Millisecond,
+		TTFB:                 200 * time.Millisecond,
+		Upstream:             1200 * time.Millisecond,
+		OriginDNS:            3 * time.Millisecond,
+		OriginConnect:        9 * time.Millisecond,
+		OriginGotConn:        true,
+		OriginRemoteAddr:     "10.42.5.112:8000",
+		OriginLocalAddr:      "10.42.1.10:45678",
+		OriginWroteHeaders:   true,
+		OriginWroteRequest:   true,
+		OriginRequestWrite:   20 * time.Millisecond,
+		OriginTTFB:           200 * time.Millisecond,
+		OriginTotal:          1200 * time.Millisecond,
+		RequestBytes:         123,
+		RequestBodyReadBytes: 100,
+		RequestBodyReadError: "unexpected EOF",
+		EdgeRequestID:        "edge_req_123",
+		Protocol:             "HTTP/1.1",
+		ClientIP:             "203.0.113.10",
+		ClientRemoteAddr:     "203.0.113.10:45678",
+		ResponseBytes:        456,
+		Streaming:            true,
+		CacheStatus:          edgeCacheStatusBypass,
+		Upload:               true,
 		Route: model.EdgeRouteBinding{
 			Hostname:             "demo.fugue.pro",
 			PathPrefix:           "/v1",
@@ -89,6 +110,13 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	}
 	if !strings.Contains(summary, `"origin_wrote_request":true`) || !strings.Contains(summary, `"origin_response_wait_ms":180`) || !strings.Contains(summary, `"origin_remote_addr":"10.42.5.112:8000"`) {
 		t.Fatalf("summary missing origin phase details: %s", summary)
+	}
+	if !strings.Contains(summary, `"edge_request_id":"edge_req_123"`) ||
+		!strings.Contains(summary, `"request_body_read_bytes":100`) ||
+		!strings.Contains(summary, `"request_body_missing_bytes":23`) ||
+		!strings.Contains(summary, `"request_body_complete":false`) ||
+		!strings.Contains(summary, `"request_body_read_error":"unexpected EOF"`) {
+		t.Fatalf("summary missing request body observability details: %s", summary)
 	}
 }
 
@@ -147,6 +175,66 @@ func TestEdgeProxyObservationKeepsInboundRequestID(t *testing.T) {
 
 	if observed.RequestID != "inbound_req_456" {
 		t.Fatalf("expected inbound request id to be preserved, got %q", observed.RequestID)
+	}
+}
+
+func TestProxyHandlerEmitsAndForwardsEdgeRequestID(t *testing.T) {
+	t.Parallel()
+
+	var originEdgeRequestID string
+	var originClientRemoteAddr string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originEdgeRequestID = r.Header.Get(edgeRequestIDHeader)
+		originClientRemoteAddr = r.Header.Get(edgeClientRemoteAddrHeader)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_edge_request_id")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	now := time.Now().UTC()
+	service.recordSyncSuccess(bundle, `"routegen_edge_request_id"`, now, false)
+
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/upload", strings.NewReader("payload"))
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	req.Header.Set(edgeClientRemoteAddrHeader, "198.51.100.7:45678")
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	edgeRequestID := recorder.Header().Get(edgeRequestIDHeader)
+	if edgeRequestID == "" {
+		t.Fatalf("expected edge request id response header")
+	}
+	if originEdgeRequestID != edgeRequestID {
+		t.Fatalf("expected origin edge request id %q, got %q", edgeRequestID, originEdgeRequestID)
+	}
+	if originClientRemoteAddr != "" {
+		t.Fatalf("expected internal client remote addr header not to reach origin, got %q", originClientRemoteAddr)
+	}
+}
+
+func TestEdgeProxyObservedRequestBodyRecordsShortRead(t *testing.T) {
+	t.Parallel()
+
+	observed := edgeProxyObservation{}
+	body := &edgeProxyObservedRequestBody{
+		ReadCloser:  io.NopCloser(&shortReadReader{data: []byte("abc"), err: io.ErrUnexpectedEOF}),
+		observation: &observed,
+	}
+	data, err := io.ReadAll(body)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected unexpected EOF, got data=%q err=%v", string(data), err)
+	}
+	if string(data) != "abc" || observed.RequestBodyReadBytes != 3 {
+		t.Fatalf("unexpected body observation data=%q read=%d", string(data), observed.RequestBodyReadBytes)
+	}
+	if observed.RequestBodyReadError != io.ErrUnexpectedEOF.Error() || observed.RequestBodyEOF {
+		t.Fatalf("unexpected body error observation error=%q eof=%t", observed.RequestBodyReadError, observed.RequestBodyEOF)
 	}
 }
 

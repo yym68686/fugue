@@ -48,6 +48,13 @@ type Service struct {
 	Logger *log.Logger
 }
 
+type tcpCopyResult struct {
+	name     string
+	bytes    int64
+	duration time.Duration
+	err      error
+}
+
 func NewService(cfg Config, logger *log.Logger) *Service {
 	if logger == nil {
 		logger = log.Default()
@@ -262,6 +269,7 @@ func (s *Service) startTCPProxy(cfg Config, protocol string, listenAddr string, 
 }
 
 func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream net.Conn) {
+	startedAt := time.Now()
 	defer downstream.Close()
 
 	slot := s.activeSlot(cfg)
@@ -287,20 +295,40 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 			return
 		}
 	}
-	proxyConns(downstream, upstream)
+	clientToWorker, workerToClient, firstCompleted := proxyConns(downstream, upstream)
+	s.logTCPConnection(protocol, slot, target, downstream, upstream, startedAt, clientToWorker, workerToClient, firstCompleted, cfg.ProxyProtocol)
 }
 
-func proxyConns(a net.Conn, b net.Conn) {
+func proxyConns(a net.Conn, b net.Conn) (tcpCopyResult, tcpCopyResult, string) {
 	var wg sync.WaitGroup
-	copyAndClose := func(dst net.Conn, src net.Conn) {
+	results := make(chan tcpCopyResult, 2)
+	copyAndClose := func(name string, dst net.Conn, src net.Conn) {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		startedAt := time.Now()
+		n, err := io.Copy(dst, src)
 		closeWrite(dst)
+		results <- tcpCopyResult{
+			name:     name,
+			bytes:    n,
+			duration: time.Since(startedAt),
+			err:      err,
+		}
 	}
 	wg.Add(2)
-	go copyAndClose(a, b)
-	go copyAndClose(b, a)
+	go copyAndClose("worker_to_client", a, b)
+	go copyAndClose("client_to_worker", b, a)
+	first := <-results
 	wg.Wait()
+	second := <-results
+	close(results)
+
+	clientToWorker := first
+	workerToClient := second
+	if first.name == "worker_to_client" {
+		clientToWorker = second
+		workerToClient = first
+	}
+	return clientToWorker, workerToClient, first.name
 }
 
 func closeWrite(conn net.Conn) {
@@ -328,6 +356,68 @@ func (s *Service) activeSlot(cfg Config) string {
 		return cfg.DefaultSlot
 	}
 	return "a"
+}
+
+func (s *Service) logTCPConnection(protocol, slot, target string, downstream, upstream net.Conn, startedAt time.Time, clientToWorker, workerToClient tcpCopyResult, firstCompleted string, proxyProtocol bool) {
+	if s == nil || s.Logger == nil {
+		return
+	}
+	duration := time.Duration(0)
+	if !startedAt.IsZero() {
+		duration = time.Since(startedAt)
+	}
+	s.Logger.Printf(
+		"edge_front_tcp_connection protocol=%s slot=%s target=%s downstream_remote=%s downstream_local=%s upstream_local=%s duration_ms=%d client_to_worker_bytes=%d client_to_worker_ms=%d client_to_worker_error=%s worker_to_client_bytes=%d worker_to_client_ms=%d worker_to_client_error=%s first_completed=%s proxy_protocol=%t",
+		protocol,
+		slot,
+		logSafeTCPValue(target),
+		connAddr(downstream.RemoteAddr()),
+		connAddr(downstream.LocalAddr()),
+		connAddr(upstream.LocalAddr()),
+		duration.Milliseconds(),
+		clientToWorker.bytes,
+		clientToWorker.duration.Milliseconds(),
+		logSafeTCPError(clientToWorker.err),
+		workerToClient.bytes,
+		workerToClient.duration.Milliseconds(),
+		logSafeTCPError(workerToClient.err),
+		firstCompleted,
+		proxyProtocol,
+	)
+}
+
+func connAddr(addr net.Addr) string {
+	if addr == nil {
+		return "-"
+	}
+	return logSafeTCPValue(addr.String())
+}
+
+func logSafeTCPError(err error) string {
+	if err == nil {
+		return "-"
+	}
+	return logSafeTCPValue(err.Error())
+}
+
+func logSafeTCPValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	value = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		default:
+			return r
+		}
+	}, value)
+	const maxLogValueLength = 256
+	if len(value) > maxLogValueLength {
+		return value[:maxLogValueLength] + "..."
+	}
+	return value
 }
 
 func normalizeSlot(value string) string {

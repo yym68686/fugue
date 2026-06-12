@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/config"
@@ -14,6 +16,7 @@ import (
 )
 
 var edgeStructuredLogMu sync.Mutex
+var edgeProxyRequestSequence uint64
 
 func (s *Service) logProxyObservationFact(observed edgeProxyObservation) {
 	if s == nil || s.Logger == nil {
@@ -50,6 +53,10 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"route_kind":            strings.TrimSpace(route.RouteKind),
 		"route_generation":      strings.TrimSpace(route.RouteGeneration),
 		"deployment_generation": strings.TrimSpace(route.DeploymentGeneration),
+		"edge_request_id":       strings.TrimSpace(observed.EdgeRequestID),
+		"protocol":              strings.TrimSpace(observed.Protocol),
+		"client_ip":             strings.TrimSpace(observed.ClientIP),
+		"client_remote_addr":    strings.TrimSpace(observed.ClientRemoteAddr),
 		"edge_group_id":         firstNonEmpty(route.EdgeGroupID, cfg.EdgeGroupID),
 		"runtime_edge_group_id": firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup),
 		"runtime_region":        edgeGroupRegion(firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup)),
@@ -67,6 +74,20 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"origin_wrote_headers":  observed.OriginWroteHeaders,
 		"origin_wrote_request":  observed.OriginWroteRequest,
 		"origin_first_byte":     observed.OriginTTFB > 0,
+		"request_body_eof":      observed.RequestBodyEOF,
+	}
+	if observed.RequestBytes > 0 {
+		summary["request_content_length"] = observed.RequestBytes
+		summary["request_body_read_bytes"] = nonNegativeInt64(observed.RequestBodyReadBytes)
+		if observed.RequestBodyReadBytes < observed.RequestBytes {
+			summary["request_body_complete"] = false
+			summary["request_body_missing_bytes"] = observed.RequestBytes - observed.RequestBodyReadBytes
+		} else {
+			summary["request_body_complete"] = true
+		}
+	}
+	if errText := logSafeValue(observed.RequestBodyReadError); errText != "-" {
+		summary["request_body_read_error"] = errText
 	}
 	if observed.OriginDNS > 0 {
 		summary["origin_dns_ms"] = durationMilliseconds(observed.OriginDNS)
@@ -200,6 +221,42 @@ func edgeRequestIDFromHeader(header http.Header) string {
 		}
 	}
 	return ""
+}
+
+func edgeRequestIDForProxy(r *http.Request) string {
+	if r != nil {
+		if value := strings.TrimSpace(r.Header.Get(edgeRequestIDHeader)); value != "" {
+			return value
+		}
+	}
+	sequence := atomic.AddUint64(&edgeProxyRequestSequence, 1)
+	return fmt.Sprintf("edge_%x_%x", time.Now().UnixNano(), sequence)
+}
+
+func edgeClientIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if forwarded := lastForwardedForValue(r.Header.Values("X-Forwarded-For")); forwarded != "" {
+		return forwarded
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func edgeClientRemoteAddrFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(r.Header.Get(edgeClientRemoteAddrHeader)); value != "" {
+		return value
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func allZeroHex(value string) bool {
