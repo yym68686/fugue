@@ -78,8 +78,9 @@ func (r Renderer) Table(headers []string, rows [][]string) string {
 			widths[i] = maxInt(widths[i], minInt(32, displayWidth(value)))
 		}
 	}
+	widths = fitTableWidths(headers, widths, maxInt(1, r.Width-4))
 	var b strings.Builder
-	b.WriteString(renderRow(headers, widths))
+	b.WriteString(renderRow(truncateValues(headers, widths), widths))
 	b.WriteByte('\n')
 	separators := make([]string, len(headers))
 	for i := range headers {
@@ -98,6 +99,70 @@ func (r Renderer) Table(headers []string, rows [][]string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func fitTableWidths(headers []string, widths []int, maxWidth int) []int {
+	fitted := append([]int(nil), widths...)
+	if len(fitted) == 0 || maxWidth <= 0 {
+		return fitted
+	}
+	minWidths := make([]int, len(fitted))
+	for i := range fitted {
+		minWidths[i] = minInt(fitted[i], maxInt(3, displayWidth(headers[i])))
+	}
+	for totalTableWidth(fitted) > maxWidth {
+		index := widestShrinkableColumn(fitted, minWidths)
+		if index < 0 {
+			break
+		}
+		fitted[index]--
+	}
+	for totalTableWidth(fitted) > maxWidth {
+		index := widestShrinkableColumn(fitted, nil)
+		if index < 0 {
+			break
+		}
+		fitted[index]--
+	}
+	return fitted
+}
+
+func totalTableWidth(widths []int) int {
+	total := 0
+	for i, width := range widths {
+		if i > 0 {
+			total += 2
+		}
+		total += width
+	}
+	return total
+}
+
+func widestShrinkableColumn(widths []int, minWidths []int) int {
+	index := -1
+	for i, width := range widths {
+		minWidth := 1
+		if i < len(minWidths) {
+			minWidth = minWidths[i]
+		}
+		if width <= minWidth {
+			continue
+		}
+		if index < 0 || width > widths[index] {
+			index = i
+		}
+	}
+	return index
+}
+
+func truncateValues(values []string, widths []int) []string {
+	out := make([]string, len(widths))
+	for i := range widths {
+		if i < len(values) {
+			out[i] = truncate(values[i], widths[i])
+		}
+	}
+	return out
 }
 
 func (r Renderer) StatusChip(label string, tone viewmodel.Tone) string {

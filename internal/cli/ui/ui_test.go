@@ -66,6 +66,33 @@ func TestRendererNoColorAndStateSnapshots(t *testing.T) {
 	assertSnapshot(t, got, want)
 }
 
+func TestRendererTableFitsPanelWidth(t *testing.T) {
+	t.Parallel()
+
+	renderer := NewRenderer(100, terminal.Palette{Level: terminal.ColorNone})
+	table := renderer.Table(
+		[]string{"NODE", "STATUS", "REGION", "RUNTIME", "CPU", "MEM", "POLICY"},
+		[][]string{{
+			"v2202605354515455529",
+			"ready",
+			"United States",
+			"runtime_1778408670_9adbdffeed1f",
+			"12%",
+			"55%",
+			"app,build,shared",
+		}},
+	)
+	got := renderer.Panel("Admin cluster top", strings.Join([]string{"cluster nodes", table}, "\n"))
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		if len(line) > 100 {
+			t.Fatalf("expected table panel line <= 100 chars, got %d %q in\n%s", len(line), line, got)
+		}
+	}
+	if strings.Contains(got, "\n| app,build,shared") {
+		t.Fatalf("expected policy label to stay in the table row, got\n%s", got)
+	}
+}
+
 func renderOverviewBody(renderer Renderer) string {
 	timeline := viewmodel.OperationTimelineView{
 		State:       viewmodel.ReadyState(),

@@ -214,7 +214,7 @@ func buildClusterTopSnapshot(nodes []model.ClusterNode, runtimes []model.Runtime
 				firstNonEmptyTrimmed(component.Component, component.DeploymentName),
 				firstNonEmptyTrimmed(component.Status, "-"),
 				fmt.Sprintf("%d/%d", component.ReadyReplicas, component.DesiredReplicas),
-				firstNonEmptyTrimmed(component.ImageTag, component.Image, "-"),
+				monitorVersionLabel(firstNonEmptyTrimmed(component.ImageTag, component.Image, "-")),
 			})
 		}
 		sections = append(sections, climonitor.Section{Title: "control plane", Headers: []string{"COMPONENT", "STATUS", "READY", "VERSION"}, Rows: componentRows})
@@ -280,4 +280,31 @@ func clusterNodePolicyLabel(policy *model.ClusterNodePolicy) string {
 		return "none"
 	}
 	return strings.Join(parts, ",")
+}
+
+func monitorVersionLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return "-"
+	}
+	if index := strings.LastIndex(value, ":"); index >= 0 && index+1 < len(value) {
+		value = strings.TrimSpace(value[index+1:])
+	}
+	if len(value) >= 12 && isHexString(value) {
+		return value[:12]
+	}
+	return value
+}
+
+func isHexString(value string) bool {
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		case r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return value != ""
 }
