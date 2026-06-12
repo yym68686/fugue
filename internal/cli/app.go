@@ -6,6 +6,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 
@@ -52,6 +53,8 @@ type appCommandResult struct {
 	AlreadyDisabled bool             `json:"already_disabled,omitempty"`
 	AlreadyDeleting bool             `json:"already_deleting,omitempty"`
 }
+
+const appStatusSettleAfterOperationTimeout = 30 * time.Second
 
 func (c *CLI) newAppCommand() *cobra.Command {
 	cmd := &cobra.Command{
@@ -476,11 +479,12 @@ func (c *CLI) newAppMoveCommand() *cobra.Command {
 			}
 			result.Operation = &response.Operation
 			if opts.Wait {
-				finalApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+				finalApp, finalOp, err := c.waitForSingleAppOperation(client, app.ID, response.Operation, true)
 				if err != nil {
 					return err
 				}
 				result.App = finalApp
+				result.Operation = finalOp
 			} else {
 				result.App = &app
 			}
@@ -907,7 +911,47 @@ func (c *CLI) waitForSingleAppOperation(client *Client, appID string, op model.O
 	if err != nil {
 		return nil, &finalOp, err
 	}
+	app, err = c.waitForAppStatusSettleAfterOperation(client, appID, finalOp, app)
+	if err != nil {
+		return nil, &finalOp, err
+	}
 	return &app, &finalOp, nil
+}
+
+func (c *CLI) waitForAppStatusSettleAfterOperation(client *Client, appID string, op model.Operation, app model.App) (model.App, error) {
+	if !appStatusStillApplyingOperation(app, op) {
+		return app, nil
+	}
+	deadline := time.Now().Add(appStatusSettleAfterOperationTimeout)
+	for time.Now().Before(deadline) {
+		sleepDeployWaitPoll()
+		next, err := client.GetApp(appID)
+		if err != nil {
+			return model.App{}, err
+		}
+		app = next
+		if !appStatusStillApplyingOperation(app, op) {
+			return app, nil
+		}
+	}
+	c.progressf("warning=app status still %s after operation %s completed; returning latest status", strings.TrimSpace(app.Status.Phase), strings.TrimSpace(op.ID))
+	return app, nil
+}
+
+func appStatusStillApplyingOperation(app model.App, op model.Operation) bool {
+	if !strings.EqualFold(strings.TrimSpace(op.Status), model.OperationStatusCompleted) {
+		return false
+	}
+	opID := strings.TrimSpace(op.ID)
+	if opID == "" || strings.TrimSpace(app.Status.LastOperationID) != opID {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(app.Status.Phase)) {
+	case "deploying", "deleting":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadActiveAppOperations(client *Client, appID string) ([]model.Operation, error) {

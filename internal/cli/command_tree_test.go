@@ -1083,6 +1083,13 @@ func TestRunAppMoveLocalizesOwnedManagedPostgresBeforeMigratingApp(t *testing.T)
 	if !strings.Contains(stdout.String(), `"current_runtime_id": "runtime_b"`) {
 		t.Fatalf("expected final app on runtime_b, got %s", stdout.String())
 	}
+	var output appCommandResult
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode app move output: %v", err)
+	}
+	if output.Operation == nil || output.Operation.Status != model.OperationStatusCompleted {
+		t.Fatalf("expected final completed migrate operation in output, got %+v", output.Operation)
+	}
 }
 
 func TestRunAppMoveProjectRequestsAtomicProjectMove(t *testing.T) {
