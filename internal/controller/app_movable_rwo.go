@@ -325,6 +325,13 @@ func (s *Service) copyMovableRWOVolumeViaTransferPods(
 	sourceScheduling runtimepkg.SchedulingConstraints,
 	targetScheduling runtimepkg.SchedulingConstraints,
 ) error {
+	cleanupTransferPods := func() {
+		_ = client.deletePod(context.Background(), namespace, names.sourcePod)
+		_ = client.deletePod(context.Background(), namespace, names.targetPod)
+		_ = client.deleteService(context.Background(), namespace, names.service)
+	}
+	defer cleanupTransferPods()
+
 	if err := client.applyObject(ctx, buildMovableRWOTargetService(namespace, names.service, names.labels), nil); err != nil {
 		return fmt.Errorf("apply movable RWO transfer service %s/%s: %w", namespace, names.service, err)
 	}
@@ -345,9 +352,6 @@ func (s *Service) copyMovableRWOVolumeViaTransferPods(
 		return fmt.Errorf("wait for movable RWO target pod %s/%s: %w", namespace, names.targetPod, err)
 	}
 
-	_ = client.deletePod(context.Background(), namespace, names.sourcePod)
-	_ = client.deletePod(context.Background(), namespace, names.targetPod)
-	_ = client.deleteService(context.Background(), namespace, names.service)
 	return nil
 }
 
