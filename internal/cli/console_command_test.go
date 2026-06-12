@@ -66,6 +66,24 @@ func TestConsoleJSONIsMachineReadable(t *testing.T) {
 	}
 }
 
+func TestConsoleDefaultProjectUsesStableID(t *testing.T) {
+	t.Parallel()
+
+	server := newConsolePreviewServer(t)
+	defer server.Close()
+
+	stdout, stderr, err := runConsoleCommand(server.URL, "console", "--plain")
+	if err != nil {
+		t.Fatalf("run console: %v stderr=%s", err, stderr)
+	}
+	if strings.Contains(stdout, "state=error") {
+		t.Fatalf("expected default console project to load by id, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "Project Pretty Name") || !strings.Contains(stdout, "web") {
+		t.Fatalf("expected console to render default project detail, got %q", stdout)
+	}
+}
+
 func runConsoleCommand(baseURL string, args ...string) (string, string, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -79,7 +97,7 @@ func newConsolePreviewServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/console/gallery":
-			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","name":"demo","app_count":1,"service_count":0,"lifecycle":{"label":"live","live":true,"sync_mode":"auto","tone":"positive"},"resource_usage_snapshot":{},"service_badges":[]}]}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_123","name":"Project Pretty Name","app_count":1,"service_count":0,"lifecycle":{"label":"live","live":true,"sync_mode":"auto","tone":"positive"},"resource_usage_snapshot":{},"service_badges":[]}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
 			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_123","name":"Acme","slug":"acme","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/projects"):

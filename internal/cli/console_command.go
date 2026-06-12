@@ -98,7 +98,7 @@ func (c *CLI) loadConsoleView(client *Client, projectRef string, includeAdmin bo
 
 	ref := strings.TrimSpace(projectRef)
 	if ref == "" && len(gallery.Projects) > 0 {
-		ref = firstNonEmptyTrimmed(gallery.Projects[0].Name, gallery.Projects[0].ID)
+		ref = firstNonEmptyTrimmed(gallery.Projects[0].ID, gallery.Projects[0].Name)
 	}
 	if ref != "" {
 		summary, detail, _, err := c.loadConsoleProjectOverview(client, ref, true)
