@@ -62,6 +62,44 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"cache_policy_id":       strings.TrimSpace(observed.CachePolicyID),
 		"asset_class":           strings.TrimSpace(observed.AssetClass),
 		"path":                  strings.TrimSpace(observed.Path),
+		"origin_got_conn":       observed.OriginGotConn,
+		"origin_conn_reused":    observed.OriginConnectionReused,
+		"origin_wrote_headers":  observed.OriginWroteHeaders,
+		"origin_wrote_request":  observed.OriginWroteRequest,
+		"origin_first_byte":     observed.OriginTTFB > 0,
+	}
+	if observed.OriginDNS > 0 {
+		summary["origin_dns_ms"] = durationMilliseconds(observed.OriginDNS)
+	}
+	if errText := logSafeValue(observed.OriginDNSError); errText != "-" {
+		summary["origin_dns_error"] = errText
+	}
+	if observed.OriginConnect > 0 {
+		summary["origin_connect_ms"] = durationMilliseconds(observed.OriginConnect)
+	}
+	if errText := logSafeValue(observed.OriginConnectError); errText != "-" {
+		summary["origin_connect_error"] = errText
+	}
+	if addr := logSafeValue(observed.OriginRemoteAddr); addr != "-" {
+		summary["origin_remote_addr"] = addr
+	}
+	if addr := logSafeValue(observed.OriginLocalAddr); addr != "-" {
+		summary["origin_local_addr"] = addr
+	}
+	if observed.OriginRequestWrite > 0 {
+		summary["origin_request_write_ms"] = durationMilliseconds(observed.OriginRequestWrite)
+	}
+	if errText := logSafeValue(observed.OriginRequestWriteErr); errText != "-" {
+		summary["origin_request_write_error"] = errText
+	}
+	if wait := originResponseHeaderWait(observed); wait > 0 {
+		summary["origin_response_wait_ms"] = durationMilliseconds(wait)
+	}
+	if observed.OriginTTFB > 0 {
+		summary["origin_ttfb_ms"] = durationMilliseconds(observed.OriginTTFB)
+	}
+	if observed.OriginTotal > 0 {
+		summary["origin_total_ms"] = durationMilliseconds(observed.OriginTotal)
 	}
 	if observed.ClientCanceled {
 		summary["client_canceled"] = true

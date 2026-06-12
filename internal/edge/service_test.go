@@ -34,21 +34,31 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T) {
 	t.Parallel()
 	observed := edgeProxyObservation{
-		ReceivedAt:    time.Date(2026, 6, 6, 1, 2, 3, 0, time.UTC),
-		Host:          "demo.fugue.pro",
-		Method:        http.MethodPost,
-		Path:          "/v1/chat?...",
-		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
-		RequestID:     "req_123",
-		StatusCode:    http.StatusServiceUnavailable,
-		Duration:      1500 * time.Millisecond,
-		TTFB:          200 * time.Millisecond,
-		Upstream:      1200 * time.Millisecond,
-		RequestBytes:  123,
-		ResponseBytes: 456,
-		Streaming:     true,
-		CacheStatus:   edgeCacheStatusBypass,
-		Upload:        true,
+		ReceivedAt:         time.Date(2026, 6, 6, 1, 2, 3, 0, time.UTC),
+		Host:               "demo.fugue.pro",
+		Method:             http.MethodPost,
+		Path:               "/v1/chat?...",
+		TraceID:            "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:          "req_123",
+		StatusCode:         http.StatusServiceUnavailable,
+		Duration:           1500 * time.Millisecond,
+		TTFB:               200 * time.Millisecond,
+		Upstream:           1200 * time.Millisecond,
+		OriginDNS:          3 * time.Millisecond,
+		OriginConnect:      9 * time.Millisecond,
+		OriginGotConn:      true,
+		OriginRemoteAddr:   "10.42.5.112:8000",
+		OriginLocalAddr:    "10.42.1.10:45678",
+		OriginWroteHeaders: true,
+		OriginWroteRequest: true,
+		OriginRequestWrite: 20 * time.Millisecond,
+		OriginTTFB:         200 * time.Millisecond,
+		OriginTotal:        1200 * time.Millisecond,
+		RequestBytes:       123,
+		ResponseBytes:      456,
+		Streaming:          true,
+		CacheStatus:        edgeCacheStatusBypass,
+		Upload:             true,
 		Route: model.EdgeRouteBinding{
 			Hostname:             "demo.fugue.pro",
 			PathPrefix:           "/v1",
@@ -76,6 +86,9 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	}
 	if !strings.Contains(summary, `"path":"/v1/chat?..."`) || !strings.Contains(summary, `"upload":true`) {
 		t.Fatalf("summary missing expected safe details: %s", summary)
+	}
+	if !strings.Contains(summary, `"origin_wrote_request":true`) || !strings.Contains(summary, `"origin_response_wait_ms":180`) || !strings.Contains(summary, `"origin_remote_addr":"10.42.5.112:8000"`) {
+		t.Fatalf("summary missing origin phase details: %s", summary)
 	}
 }
 
@@ -134,6 +147,59 @@ func TestEdgeProxyObservationKeepsInboundRequestID(t *testing.T) {
 
 	if observed.RequestID != "inbound_req_456" {
 		t.Fatalf("expected inbound request id to be preserved, got %q", observed.RequestID)
+	}
+}
+
+func TestEdgeProxyTransportRecordsOriginRequestPhases(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		if string(body) != "payload" {
+			t.Errorf("unexpected body %q", string(body))
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	observed := edgeProxyObservation{Streaming: true, Upload: true}
+	proxyTransport := &edgeProxyTransport{
+		base:        transport,
+		observation: &observed,
+	}
+	req, err := http.NewRequest(http.MethodPost, backend.URL, strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := proxyTransport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+	if body, err := io.ReadAll(resp.Body); err != nil || string(body) != "ok" {
+		t.Fatalf("unexpected response body=%q err=%v", string(body), err)
+	}
+
+	if !observed.OriginGotConn || !observed.OriginWroteHeaders || !observed.OriginWroteRequest {
+		t.Fatalf("origin phases not recorded: %+v", observed)
+	}
+	if observed.OriginRemoteAddr == "" || observed.OriginLocalAddr == "" {
+		t.Fatalf("origin addresses not recorded: remote=%q local=%q", observed.OriginRemoteAddr, observed.OriginLocalAddr)
+	}
+	if observed.OriginRequestWrite <= 0 || observed.OriginTTFB <= 0 || observed.OriginTotal <= 0 {
+		t.Fatalf("origin durations not recorded: write=%s ttfb=%s total=%s", observed.OriginRequestWrite, observed.OriginTTFB, observed.OriginTotal)
+	}
+	if wait := originResponseHeaderWait(observed); wait <= 0 {
+		t.Fatalf("expected positive response wait after request write, got %s from %+v", wait, observed)
 	}
 }
 

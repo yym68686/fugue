@@ -135,10 +135,16 @@ type telemetry struct {
 	RouteCacheLookupSum   map[routeMetricKey]float64
 	RouteOriginConnCount  map[routeMetricKey]uint64
 	RouteOriginConnSum    map[routeMetricKey]float64
+	RouteOriginDNSCount   map[routeMetricKey]uint64
+	RouteOriginDNSSum     map[routeMetricKey]float64
 	RouteOriginTTFBCount  map[routeMetricKey]uint64
 	RouteOriginTTFBSum    map[routeMetricKey]float64
 	RouteOriginTotalCount map[routeMetricKey]uint64
 	RouteOriginTotalSum   map[routeMetricKey]float64
+	RouteOriginWriteCount map[routeMetricKey]uint64
+	RouteOriginWriteSum   map[routeMetricKey]float64
+	RouteOriginWaitCount  map[routeMetricKey]uint64
+	RouteOriginWaitSum    map[routeMetricKey]float64
 	RouteWriteCount       map[routeMetricKey]uint64
 	RouteWriteSum         map[routeMetricKey]float64
 	RouteCacheStatus      map[routeCacheMetricKey]uint64
@@ -192,8 +198,18 @@ type edgeProxyObservation struct {
 	TTFB                   time.Duration
 	Upstream               time.Duration
 	CacheLookup            time.Duration
+	OriginDNS              time.Duration
+	OriginDNSError         string
 	OriginConnect          time.Duration
+	OriginConnectError     string
+	OriginGotConn          bool
 	OriginConnectionReused bool
+	OriginRemoteAddr       string
+	OriginLocalAddr        string
+	OriginWroteHeaders     bool
+	OriginWroteRequest     bool
+	OriginRequestWrite     time.Duration
+	OriginRequestWriteErr  string
 	OriginTTFB             time.Duration
 	OriginTotal            time.Duration
 	ResponseWrite          time.Duration
@@ -1053,17 +1069,47 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	started := time.Now()
 	if t.observation != nil {
+		var dnsStarted time.Time
 		var connectStarted time.Time
 		trace := &httptrace.ClientTrace{
+			DNSStart: func(httptrace.DNSStartInfo) {
+				dnsStarted = time.Now()
+			},
+			DNSDone: func(info httptrace.DNSDoneInfo) {
+				if !dnsStarted.IsZero() {
+					t.observation.OriginDNS = time.Since(dnsStarted)
+				}
+				if info.Err != nil {
+					t.observation.OriginDNSError = info.Err.Error()
+				}
+			},
 			GotConn: func(info httptrace.GotConnInfo) {
+				t.observation.OriginGotConn = true
 				t.observation.OriginConnectionReused = info.Reused
+				if info.Conn != nil {
+					t.observation.OriginRemoteAddr = info.Conn.RemoteAddr().String()
+					t.observation.OriginLocalAddr = info.Conn.LocalAddr().String()
+				}
 			},
 			ConnectStart: func(_, _ string) {
 				connectStarted = time.Now()
 			},
-			ConnectDone: func(_, _ string, _ error) {
+			ConnectDone: func(_, _ string, err error) {
 				if !connectStarted.IsZero() {
 					t.observation.OriginConnect = time.Since(connectStarted)
+				}
+				if err != nil {
+					t.observation.OriginConnectError = err.Error()
+				}
+			},
+			WroteHeaders: func() {
+				t.observation.OriginWroteHeaders = true
+			},
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				t.observation.OriginWroteRequest = true
+				t.observation.OriginRequestWrite = time.Since(started)
+				if info.Err != nil {
+					t.observation.OriginRequestWriteErr = info.Err.Error()
 				}
 			},
 			GotFirstResponseByte: func() {
@@ -1320,11 +1366,29 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "fugue_edge_route_cache_lookup_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteCacheLookupSum[key])
 		fmt.Fprintf(w, "fugue_edge_route_cache_lookup_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteCacheLookupCount[key])
 	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_dns_duration_seconds Edge data-plane origin DNS lookup duration by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_dns_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginDNSCount) {
+		fmt.Fprintf(w, "fugue_edge_route_origin_dns_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginDNSSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_origin_dns_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginDNSCount[key])
+	}
 	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_connect_duration_seconds Edge data-plane origin TCP connect duration by route for non-reused upstream connections.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_connect_duration_seconds summary")
 	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginConnCount) {
 		fmt.Fprintf(w, "fugue_edge_route_origin_connect_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginConnSum[key])
 		fmt.Fprintf(w, "fugue_edge_route_origin_connect_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginConnCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_request_write_duration_seconds Edge data-plane time until the origin request, including body, is written by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_request_write_duration_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginWriteCount) {
+		fmt.Fprintf(w, "fugue_edge_route_origin_request_write_duration_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWriteSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_origin_request_write_duration_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWriteCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_response_header_wait_seconds Edge data-plane time spent waiting for the first origin response byte after writing the origin request by route.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_response_header_wait_seconds summary")
+	for _, key := range sortedRouteMetricKeys(snapshot.Metrics.RouteOriginWaitCount) {
+		fmt.Fprintf(w, "fugue_edge_route_origin_response_header_wait_seconds_sum{%s} %.6f\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWaitSum[key])
+		fmt.Fprintf(w, "fugue_edge_route_origin_response_header_wait_seconds_count{%s} %d\n", routeMetricLabels(key), snapshot.Metrics.RouteOriginWaitCount[key])
 	}
 	fmt.Fprintln(w, "# HELP fugue_edge_route_origin_ttfb_seconds Edge data-plane origin time-to-first-byte by route.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_route_origin_ttfb_seconds summary")
@@ -2320,6 +2384,16 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		s.metrics.RouteCacheLookupCount[key]++
 		s.metrics.RouteCacheLookupSum[key] += durationSeconds(observed.CacheLookup)
 	}
+	if observed.OriginDNS > 0 {
+		if s.metrics.RouteOriginDNSCount == nil {
+			s.metrics.RouteOriginDNSCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteOriginDNSSum == nil {
+			s.metrics.RouteOriginDNSSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteOriginDNSCount[key]++
+		s.metrics.RouteOriginDNSSum[key] += durationSeconds(observed.OriginDNS)
+	}
 	if observed.Proxied {
 		if s.metrics.RouteLatencyCount == nil {
 			s.metrics.RouteLatencyCount = make(map[routeMetricKey]uint64)
@@ -2347,6 +2421,26 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		}
 		s.metrics.RouteOriginConnCount[key]++
 		s.metrics.RouteOriginConnSum[key] += durationSeconds(observed.OriginConnect)
+	}
+	if observed.OriginRequestWrite > 0 {
+		if s.metrics.RouteOriginWriteCount == nil {
+			s.metrics.RouteOriginWriteCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteOriginWriteSum == nil {
+			s.metrics.RouteOriginWriteSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteOriginWriteCount[key]++
+		s.metrics.RouteOriginWriteSum[key] += durationSeconds(observed.OriginRequestWrite)
+	}
+	if wait := originResponseHeaderWait(observed); wait > 0 {
+		if s.metrics.RouteOriginWaitCount == nil {
+			s.metrics.RouteOriginWaitCount = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteOriginWaitSum == nil {
+			s.metrics.RouteOriginWaitSum = make(map[routeMetricKey]float64)
+		}
+		s.metrics.RouteOriginWaitCount[key]++
+		s.metrics.RouteOriginWaitSum[key] += durationSeconds(wait)
 	}
 	if observed.OriginTTFB > 0 {
 		if s.metrics.RouteOriginTTFBCount == nil {
@@ -2577,8 +2671,9 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 	edgeGroupID := firstNonEmpty(observed.Route.EdgeGroupID, s.Config.EdgeGroupID)
 	runtimeEdgeGroupID := firstNonEmpty(observed.Route.RuntimeEdgeGroupID, observed.Route.RuntimeEdgeGroup)
 	upstreamError := strings.TrimSpace(observed.UpstreamError) != "" && !observed.ClientCanceled
+	originWait := originResponseHeaderWait(observed)
 	s.Logger.Printf(
-		"edge_proxy_request received_at=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_connect_ms=%d origin_conn_reused=%t origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t",
+		"edge_proxy_request received_at=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s method=%s path=%s status=%d duration_ms=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t",
 		observed.ReceivedAt.Format(time.RFC3339Nano),
 		observed.Host,
 		strings.TrimSpace(observed.Route.AppID),
@@ -2600,8 +2695,19 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		strings.TrimSpace(observed.CacheKeyHash),
 		strings.TrimSpace(observed.AssetClass),
 		observed.CacheLookup.Milliseconds(),
+		observed.OriginDNS.Milliseconds(),
+		logSafeValue(observed.OriginDNSError),
 		observed.OriginConnect.Milliseconds(),
+		logSafeValue(observed.OriginConnectError),
+		observed.OriginGotConn,
 		observed.OriginConnectionReused,
+		logSafeValue(observed.OriginRemoteAddr),
+		logSafeValue(observed.OriginLocalAddr),
+		observed.OriginWroteHeaders,
+		observed.OriginWroteRequest,
+		observed.OriginRequestWrite.Milliseconds(),
+		logSafeValue(observed.OriginRequestWriteErr),
+		originWait.Milliseconds(),
 		observed.OriginTTFB.Milliseconds(),
 		observed.OriginTotal.Milliseconds(),
 		observed.ResponseWrite.Milliseconds(),
@@ -2673,6 +2779,40 @@ func durationSeconds(value time.Duration) float64 {
 		return 0
 	}
 	return value.Seconds()
+}
+
+func originResponseHeaderWait(observed edgeProxyObservation) time.Duration {
+	if !observed.OriginWroteRequest || observed.OriginRequestWrite <= 0 {
+		return 0
+	}
+	end := observed.OriginTTFB
+	if end <= 0 {
+		end = observed.Upstream
+	}
+	if end <= observed.OriginRequestWrite {
+		return 0
+	}
+	return end - observed.OriginRequestWrite
+}
+
+func logSafeValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	value = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		default:
+			return r
+		}
+	}, value)
+	const maxLogValueLength = 256
+	if len(value) > maxLogValueLength {
+		return value[:maxLogValueLength] + "..."
+	}
+	return value
 }
 
 func edgeProxyServerTiming(observed edgeProxyObservation, proxied bool) string {
