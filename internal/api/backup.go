@@ -505,8 +505,12 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	if backupRunTerminalStatus(created.Status) {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"run": created})
+		return
+	}
 	if req.Wait {
-		s.executeBackupRun(r.Context(), created.ID)
+		s.executeBackupRun(contextWithoutCancel(r.Context()), created.ID)
 		finalRun, err := s.store.GetBackupRun(created.ID, principal.TenantID, principal.IsPlatformAdmin())
 		if err == nil {
 			created = finalRun
@@ -516,6 +520,15 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 	}
 	go s.executeBackupRun(contextWithoutCancel(r.Context()), created.ID)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"run": created})
+}
+
+func backupRunTerminalStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case model.BackupRunStatusSucceeded, model.BackupRunStatusFailed, model.BackupRunStatusCanceled, model.BackupRunStatusBlocked:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) applyDefaultControlPlaneBackupPolicy(run model.BackupRun) (model.BackupRun, error) {

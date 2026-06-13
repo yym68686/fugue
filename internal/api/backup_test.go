@@ -338,6 +338,40 @@ func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
 	}
 }
 
+func TestBlockedBackupRunDoesNotStartWorker(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	workerCalled := make(chan struct{}, 1)
+	server.backupRunner = func(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+		workerCalled <- struct{}{}
+		return nil, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backups/runs", "bootstrap-secret", map[string]any{
+		"wait": true,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Run model.BackupRun `json:"run"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Run.Status != model.BackupRunStatusBlocked || response.Run.ErrorCode != "backup_backend_missing" {
+		t.Fatalf("expected blocked missing-backend run, got %+v", response.Run)
+	}
+	select {
+	case <-workerCalled:
+		t.Fatal("blocked backup run should not start worker")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestAppDatabaseBackupRunCreatesCloneRestorePlan(t *testing.T) {
 	t.Parallel()
 

@@ -489,7 +489,7 @@ func (c *CLI) newBackupRunStartCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := client.CreateBackupRun(backupRunRequestMap(opts))
+			resp, err := c.createBackupRunAndMaybeWait(client, backupRunRequestMap(opts), opts.Wait, client.CreateBackupRun)
 			if err != nil {
 				return err
 			}
@@ -551,6 +551,48 @@ func backupRunRequestMap(opts backupRunOptions) map[string]any {
 		"backend_id": strings.TrimSpace(opts.BackendID),
 		"version":    strings.TrimSpace(opts.Version),
 		"wait":       opts.Wait,
+	}
+}
+
+func (c *CLI) createBackupRunAndMaybeWait(client *Client, req map[string]any, wait bool, create func(map[string]any) (backupRunEnvelope, error)) (backupRunEnvelope, error) {
+	if wait {
+		req = cloneBackupRunRequest(req)
+		req["wait"] = false
+	}
+	resp, err := create(req)
+	if err != nil || !wait {
+		return resp, err
+	}
+	return c.waitForBackupRun(client, resp.Run.ID)
+}
+
+func cloneBackupRunRequest(req map[string]any) map[string]any {
+	clone := make(map[string]any, len(req))
+	for key, value := range req {
+		clone[key] = value
+	}
+	return clone
+}
+
+func (c *CLI) waitForBackupRun(client *Client, runID string) (backupRunEnvelope, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return backupRunEnvelope{}, fmt.Errorf("backup run id is empty")
+	}
+	deadline := time.Now().Add(45 * time.Minute)
+	for {
+		resp, err := client.GetBackupRun(runID)
+		if err != nil {
+			return resp, err
+		}
+		switch resp.Run.Status {
+		case model.BackupRunStatusSucceeded, model.BackupRunStatusFailed, model.BackupRunStatusCanceled, model.BackupRunStatusBlocked:
+			return resp, nil
+		}
+		if time.Now().After(deadline) {
+			return resp, fmt.Errorf("timed out waiting for backup run %s to finish", runID)
+		}
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -835,7 +877,7 @@ func (c *CLI) newAdminBackupRunCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := client.CreateBackupRun(backupRunRequestMap(opts))
+			resp, err := c.createBackupRunAndMaybeWait(client, backupRunRequestMap(opts), opts.Wait, client.CreateBackupRun)
 			if err != nil {
 				return err
 			}
@@ -970,7 +1012,9 @@ func (c *CLI) newAppBackupRunCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := client.CreateAppBackupRun(app.ID, backupRunRequestMap(opts))
+			resp, err := c.createBackupRunAndMaybeWait(client, backupRunRequestMap(opts), opts.Wait, func(req map[string]any) (backupRunEnvelope, error) {
+				return client.CreateAppBackupRun(app.ID, req)
+			})
 			if err != nil {
 				return err
 			}
