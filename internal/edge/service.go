@@ -1077,18 +1077,20 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 	if !s.requestBodyBufferEligible(r, observed) {
 		return false, 0
 	}
-	maxBytes := int64(s.Config.RequestBodyBufferMaxBytes)
+	manager := s.edgeRequestBodyBufferManager()
+	maxBytes := s.requestBodyBufferMaxBytes(manager)
 	if maxBytes <= 0 {
 		return false, 0
 	}
 	if r.ContentLength > maxBytes {
 		err := fmt.Errorf("request body exceeds edge buffer limit: content_length=%d max_bytes=%d", r.ContentLength, maxBytes)
 		observed.RequestBodyBufferError = err.Error()
+		observed.RequestBodyBufferPath = manager.path
+		observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return true, http.StatusRequestEntityTooLarge
 	}
-	manager := s.edgeRequestBodyBufferManager()
-	reservationBytes := maxBytes
+	reservationBytes := int64(1)
 	if r.ContentLength > 0 {
 		reservationBytes = r.ContentLength
 	}
@@ -1126,13 +1128,19 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 		_ = file.Close()
 		_ = os.Remove(path)
 	}
-	written, copyErr := io.Copy(file, io.LimitReader(r.Body, maxBytes+1))
+	bufferWriter := &edgeRequestBodyBufferWriter{
+		file:        file,
+		reservation: reservation,
+		maxBytes:    maxBytes,
+	}
+	written, copyErr := io.Copy(bufferWriter, r.Body)
 	observed.RequestBodyBuffer = time.Since(started)
 	observed.RequestBodyBufferBytes = written
 	closeErr := r.Body.Close()
-	if copyErr == nil && written > maxBytes {
+	var tooLargeErr edgeRequestBodyBufferTooLargeError
+	if errors.As(copyErr, &tooLargeErr) {
 		cleanup()
-		err := fmt.Errorf("request body exceeds edge buffer limit: read_bytes=%d max_bytes=%d", written, maxBytes)
+		err := fmt.Errorf("request body exceeds edge buffer limit: read_bytes=%d max_bytes=%d", tooLargeErr.readBytes, tooLargeErr.maxBytes)
 		observed.RequestBodyBufferError = err.Error()
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return true, http.StatusRequestEntityTooLarge
@@ -1178,6 +1186,35 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 	keepReservation = true
 	r.ContentLength = written
 	return false, 0
+}
+
+func (s *Service) requestBodyBufferMaxBytes(manager *edgeRequestBodyBufferManager) int64 {
+	if s == nil {
+		return 0
+	}
+	baseMaxBytes := int64(s.Config.RequestBodyBufferMaxBytes)
+	if baseMaxBytes <= 0 {
+		return 0
+	}
+	if manager == nil {
+		return baseMaxBytes
+	}
+	ratio := s.Config.RequestBodyBufferMaxBudgetRatio
+	if ratio <= 0 {
+		return baseMaxBytes
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	budget := manager.currentBudget()
+	if budget <= 0 {
+		return baseMaxBytes
+	}
+	dynamicMaxBytes := int64(float64(budget) * ratio)
+	if dynamicMaxBytes > baseMaxBytes {
+		return dynamicMaxBytes
+	}
+	return baseMaxBytes
 }
 
 func (s *Service) requestBodyBufferEligible(r *http.Request, observed *edgeProxyObservation) bool {
@@ -1232,6 +1269,57 @@ type edgeBufferedRequestBody struct {
 	reservation *edgeRequestBodyBufferReservation
 	once        sync.Once
 	closeErr    error
+}
+
+type edgeRequestBodyBufferTooLargeError struct {
+	readBytes int64
+	maxBytes  int64
+}
+
+func (e edgeRequestBodyBufferTooLargeError) Error() string {
+	return fmt.Sprintf("request body exceeds edge buffer limit: read_bytes=%d max_bytes=%d", e.readBytes, e.maxBytes)
+}
+
+type edgeRequestBodyBufferWriter struct {
+	file        *os.File
+	reservation *edgeRequestBodyBufferReservation
+	maxBytes    int64
+	written     int64
+}
+
+func (w *edgeRequestBodyBufferWriter) Write(data []byte) (int, error) {
+	if w == nil || w.file == nil {
+		return 0, io.ErrClosedPipe
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	target := w.written + int64(len(data))
+	if w.maxBytes > 0 && target > w.maxBytes {
+		allowed := w.maxBytes - w.written
+		if allowed <= 0 {
+			return 0, edgeRequestBodyBufferTooLargeError{readBytes: target, maxBytes: w.maxBytes}
+		}
+		if w.reservation != nil {
+			if err := w.reservation.grow(w.written + allowed); err != nil {
+				return 0, err
+			}
+		}
+		n, err := w.file.Write(data[:allowed])
+		w.written += int64(n)
+		if err != nil {
+			return n, err
+		}
+		return n, edgeRequestBodyBufferTooLargeError{readBytes: target, maxBytes: w.maxBytes}
+	}
+	if w.reservation != nil {
+		if err := w.reservation.grow(target); err != nil {
+			return 0, err
+		}
+	}
+	n, err := w.file.Write(data)
+	w.written += int64(n)
+	return n, err
 }
 
 func (b *edgeBufferedRequestBody) Read(data []byte) (int, error) {
@@ -1378,6 +1466,16 @@ func (m *edgeRequestBodyBufferManager) reserve(bytes int64) (*edgeRequestBodyBuf
 	}, nil
 }
 
+func (m *edgeRequestBodyBufferManager) currentBudget() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshBudgetLocked()
+	return m.budget
+}
+
 func (m *edgeRequestBodyBufferManager) refreshBudgetLocked() {
 	if m == nil || !m.dynamic {
 		return
@@ -1402,6 +1500,35 @@ func (r *edgeRequestBodyBufferReservation) resize(bytes int64) {
 		r.manager.used = 0
 	}
 	r.bytes = bytes
+}
+
+func (r *edgeRequestBodyBufferReservation) grow(bytes int64) error {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	if bytes <= r.bytes {
+		return nil
+	}
+	r.manager.mu.Lock()
+	defer r.manager.mu.Unlock()
+	r.manager.refreshBudgetLocked()
+	if r.manager.disabled || r.manager.budget <= 0 {
+		reason := strings.TrimSpace(r.manager.reason)
+		if reason == "" {
+			reason = "edge request body buffer disabled"
+		}
+		return fmt.Errorf("%s", reason)
+	}
+	if bytes > r.manager.budget {
+		return fmt.Errorf("request body buffer reservation exceeds budget: bytes=%d budget=%d", bytes, r.manager.budget)
+	}
+	delta := bytes - r.bytes
+	if r.manager.used+delta > r.manager.budget {
+		return fmt.Errorf("request body buffer budget exhausted: requested=%d used=%d budget=%d active=%d", delta, r.manager.used, r.manager.budget, r.manager.active)
+	}
+	r.manager.used += delta
+	r.bytes = bytes
+	return nil
 }
 
 func (r *edgeRequestBodyBufferReservation) release() {

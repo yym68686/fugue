@@ -130,53 +130,54 @@ type AgentConfig struct {
 }
 
 type EdgeConfig struct {
-	APIURL                         string
-	EdgeToken                      string
-	EdgeID                         string
-	EdgeGroupID                    string
-	Region                         string
-	Country                        string
-	PublicHostname                 string
-	PublicIPv4                     string
-	PublicIPv6                     string
-	MeshIP                         string
-	Draining                       bool
-	CachePath                      string
-	CacheArchiveLimit              int
-	AssetCachePath                 string
-	AssetCacheMaxBytes             int
-	RequestBodyBufferPath          string
-	RequestBodyBufferMaxBytes      int
-	RequestBodyBufferTotalMaxBytes int64
-	RequestBodyBufferReserveBytes  int64
-	RequestBodyBufferDiskRatio     float64
-	CacheWarmupEnabled             bool
-	CacheWarmupTimeout             time.Duration
-	CacheWarmupMaxTargets          int
-	CacheWarmupMaxDepth            int
-	MaxStale                       time.Duration
-	PeerFallbackEnabled            bool
-	ListenAddr                     string
-	SyncInterval                   time.Duration
-	HeartbeatInterval              time.Duration
-	HTTPTimeout                    time.Duration
-	CaddyEnabled                   bool
-	CaddyAdminURL                  string
-	CaddyListenAddr                string
-	CaddyTLSMode                   string
-	CaddyTLSAskURL                 string
-	CaddyProxyListenAddr           string
-	CaddyProxyProtocolEnabled      bool
-	CaddyProxyProtocolTrustedCIDRs []string
-	CaddyDataDir                   string
-	CaddySharedTLSEnabled          bool
-	CaddyStaticTLSCertFile         string
-	CaddyStaticTLSKeyFile          string
-	BundleSigningKey               string
-	BundleSigningKeyID             string
-	BundleSigningPreviousKey       string
-	BundleSigningPreviousKeyID     string
-	BundleRevokedKeyIDs            []string
+	APIURL                          string
+	EdgeToken                       string
+	EdgeID                          string
+	EdgeGroupID                     string
+	Region                          string
+	Country                         string
+	PublicHostname                  string
+	PublicIPv4                      string
+	PublicIPv6                      string
+	MeshIP                          string
+	Draining                        bool
+	CachePath                       string
+	CacheArchiveLimit               int
+	AssetCachePath                  string
+	AssetCacheMaxBytes              int
+	RequestBodyBufferPath           string
+	RequestBodyBufferMaxBytes       int
+	RequestBodyBufferMaxBudgetRatio float64
+	RequestBodyBufferTotalMaxBytes  int64
+	RequestBodyBufferReserveBytes   int64
+	RequestBodyBufferDiskRatio      float64
+	CacheWarmupEnabled              bool
+	CacheWarmupTimeout              time.Duration
+	CacheWarmupMaxTargets           int
+	CacheWarmupMaxDepth             int
+	MaxStale                        time.Duration
+	PeerFallbackEnabled             bool
+	ListenAddr                      string
+	SyncInterval                    time.Duration
+	HeartbeatInterval               time.Duration
+	HTTPTimeout                     time.Duration
+	CaddyEnabled                    bool
+	CaddyAdminURL                   string
+	CaddyListenAddr                 string
+	CaddyTLSMode                    string
+	CaddyTLSAskURL                  string
+	CaddyProxyListenAddr            string
+	CaddyProxyProtocolEnabled       bool
+	CaddyProxyProtocolTrustedCIDRs  []string
+	CaddyDataDir                    string
+	CaddySharedTLSEnabled           bool
+	CaddyStaticTLSCertFile          string
+	CaddyStaticTLSKeyFile           string
+	BundleSigningKey                string
+	BundleSigningKeyID              string
+	BundleSigningPreviousKey        string
+	BundleSigningPreviousKeyID      string
+	BundleRevokedKeyIDs             []string
 }
 
 type DNSConfig struct {
@@ -415,6 +416,10 @@ func EdgeFromEnv() EdgeConfig {
 		AssetCacheMaxBytes:        getenvInt("FUGUE_EDGE_ASSET_CACHE_MAX_BYTES", 32*1024*1024),
 		RequestBodyBufferPath:     getenv("FUGUE_EDGE_REQUEST_BODY_BUFFER_PATH", "/var/lib/fugue/edge/request-body-buffer"),
 		RequestBodyBufferMaxBytes: getenvInt("FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BYTES", 16*1024*1024),
+		RequestBodyBufferMaxBudgetRatio: getenvFloat(
+			"FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BUDGET_RATIO",
+			1,
+		),
 		RequestBodyBufferTotalMaxBytes: getenvInt64(
 			"FUGUE_EDGE_REQUEST_BODY_BUFFER_TOTAL_MAX_BYTES",
 			0,

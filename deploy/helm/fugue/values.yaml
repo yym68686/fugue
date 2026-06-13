@@ -392,6 +392,9 @@ edge:
   requestBodyBuffer:
     path: /var/lib/fugue/edge/request-body-buffer
     maxBytes: 16777216
+    # Known-size requests may use up to this fraction of the dynamic total
+    # buffer budget when it is larger than maxBytes.
+    maxBudgetRatio: 1.0
     # 0 means derive dynamically from filesystem availability.
     totalMaxBytes: 0
     reserveBytes: 4294967296

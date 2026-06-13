@@ -147,6 +147,8 @@ spec:
               value: {{ default "/var/lib/fugue/edge/request-body-buffer" $edgeRequestBodyBuffer.path | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BYTES
               value: {{ (default 16777216 $edgeRequestBodyBuffer.maxBytes) | int64 | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BUDGET_RATIO
+              value: {{ printf "%v" (default 1.0 $edgeRequestBodyBuffer.maxBudgetRatio) | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_TOTAL_MAX_BYTES
               value: {{ (default 0 $edgeRequestBodyBuffer.totalMaxBytes) | int64 | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_RESERVE_BYTES

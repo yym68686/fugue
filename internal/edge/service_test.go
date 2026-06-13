@@ -341,6 +341,99 @@ func TestProxyHandlerRejectsBufferedBodyOverLimit(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerRaisesBufferedBodyLimitFromBudget(t *testing.T) {
+	t.Parallel()
+
+	var originBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read origin body: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		originBody = string(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_buffer_dynamic_limit")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:                          "https://api.example.invalid",
+		EdgeToken:                       "edge-secret",
+		RequestBodyBufferPath:           t.TempDir(),
+		RequestBodyBufferMaxBytes:       3,
+		RequestBodyBufferMaxBudgetRatio: 1,
+		RequestBodyBufferTotalMaxBytes:  1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_buffer_dynamic_limit"`, time.Now().UTC(), false)
+
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", strings.NewReader("abcd"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if originBody != "abcd" {
+		t.Fatalf("unexpected origin body %q", originBody)
+	}
+	if used := service.edgeRequestBodyBufferManager().usedBytes(); used != 0 {
+		t.Fatalf("expected buffer reservation to be released, used=%d", used)
+	}
+}
+
+func TestProxyHandlerRaisesUnknownLengthBufferedBodyLimitFromBudget(t *testing.T) {
+	t.Parallel()
+
+	var originBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read origin body: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		originBody = string(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_buffer_dynamic_limit_unknown_length")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:                          "https://api.example.invalid",
+		EdgeToken:                       "edge-secret",
+		RequestBodyBufferPath:           t.TempDir(),
+		RequestBodyBufferMaxBytes:       3,
+		RequestBodyBufferMaxBudgetRatio: 1,
+		RequestBodyBufferTotalMaxBytes:  1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_buffer_dynamic_limit_unknown_length"`, time.Now().UTC(), false)
+
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", io.NopCloser(strings.NewReader("abcd")))
+	req.ContentLength = -1
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if originBody != "abcd" {
+		t.Fatalf("unexpected origin body %q", originBody)
+	}
+	if used := service.edgeRequestBodyBufferManager().usedBytes(); used != 0 {
+		t.Fatalf("expected buffer reservation to be released, used=%d", used)
+	}
+}
+
 func TestEdgeProxyObservedRequestBodyRecordsShortRead(t *testing.T) {
 	t.Parallel()
 
