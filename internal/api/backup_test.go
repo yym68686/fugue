@@ -273,3 +273,77 @@ func TestScheduleBackupRetryCreatesPendingRetryRun(t *testing.T) {
 		t.Fatalf("expected retry next run about five minutes out, got %+v", retry.NextRetryAt)
 	}
 }
+
+func TestRecoverStaleBackupRunMarksFailedAndSchedulesRetry(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:      "control-plane",
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backend.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
+	staleLock := time.Now().UTC().Add(-8 * time.Minute)
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:    policy.ID,
+		Target:      policy.Target,
+		BackendID:   backend.ID,
+		Trigger:     model.BackupRunTriggerScheduled,
+		Status:      model.BackupRunStatusRunning,
+		Attempt:     1,
+		RetryCount:  0,
+		LockedUntil: &staleLock,
+		HeartbeatAt: &staleHeartbeat,
+	})
+	if err != nil {
+		t.Fatalf("create stale run: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	server.recoverStaleBackupRuns(context.Background())
+
+	recovered, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get recovered run: %v", err)
+	}
+	if recovered.Status != model.BackupRunStatusFailed {
+		t.Fatalf("expected stale run to fail, got %+v", recovered)
+	}
+	if recovered.ErrorCode != "backup_run_lost" || recovered.FinishedAt == nil {
+		t.Fatalf("expected stale run recovery metadata, got %+v", recovered)
+	}
+
+	runs, err := stateStore.ListBackupRuns(store.BackupRunFilter{Status: model.BackupRunStatusPending, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list pending runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected one retry run, got %+v", runs)
+	}
+	retry := runs[0]
+	if retry.Trigger != model.BackupRunTriggerRetry || retry.Attempt != 2 || retry.RetryCount != 1 {
+		t.Fatalf("unexpected retry run: %+v", retry)
+	}
+	if retry.NextRetryAt == nil {
+		t.Fatalf("expected retry next_retry_at, got %+v", retry)
+	}
+}

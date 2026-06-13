@@ -16,6 +16,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/httpx"
@@ -26,10 +27,12 @@ import (
 )
 
 const (
-	backupSchedulerInterval = time.Minute
-	backupRunTimeout        = 30 * time.Minute
-	backupBackendProbeTTL   = 30 * time.Second
-	backupRunMaxRetries     = 3
+	backupSchedulerInterval  = time.Minute
+	backupRunTimeout         = 30 * time.Minute
+	backupRunLeaseTTL        = 2 * time.Minute
+	backupRunHeartbeatPeriod = 30 * time.Second
+	backupBackendProbeTTL    = 30 * time.Second
+	backupRunMaxRetries      = 3
 )
 
 type backupBackendRequest struct {
@@ -100,6 +103,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 }
 
 func (s *Server) enqueueDueBackups(ctx context.Context) {
+	s.recoverStaleBackupRuns(ctx)
 	s.enqueueDueBackupRetries(ctx)
 	policies, err := s.store.ListDueBackupPolicies(time.Now().UTC(), 25)
 	if err != nil {
@@ -133,6 +137,66 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 		}
 		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
 	}
+}
+
+func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
+	now := time.Now().UTC()
+	for _, status := range []string{model.BackupRunStatusRunning, model.BackupRunStatusPending} {
+		runs, err := s.store.ListBackupRuns(store.BackupRunFilter{Status: status, PlatformAdmin: true, Limit: 500})
+		if err != nil {
+			if s.log != nil {
+				s.log.Printf("backup scheduler list %s runs for recovery failed: %v", status, err)
+			}
+			continue
+		}
+		for _, run := range runs {
+			if !backupRunIsStale(run, now) {
+				continue
+			}
+			failed := model.BackupRunStatusFailed
+			code := "backup_run_lost"
+			message := "backup run lease expired before completion; worker likely restarted or lost ownership"
+			finishedAt := now
+			updated, err := s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
+				Status:       &failed,
+				ErrorCode:    &code,
+				ErrorMessage: &message,
+				FinishedAt:   timePtrPtr(&finishedAt),
+				HeartbeatAt:  timePtrPtr(&now),
+			})
+			if err != nil {
+				if s.log != nil {
+					s.log.Printf("backup scheduler recover stale run=%s failed: %v", run.ID, err)
+				}
+				continue
+			}
+			if s.log != nil {
+				s.log.Printf("backup scheduler recovered stale run=%s target=%s retry_count=%d", updated.ID, updated.Target.Type, updated.RetryCount)
+			}
+			s.scheduleBackupRetry(contextWithoutCancel(ctx), updated)
+		}
+	}
+}
+
+func backupRunIsStale(run model.BackupRun, now time.Time) bool {
+	run = model.NormalizeBackupRun(run)
+	if run.Status != model.BackupRunStatusRunning && run.Status != model.BackupRunStatusPending {
+		return false
+	}
+	if run.Status == model.BackupRunStatusPending && run.Trigger == model.BackupRunTriggerRetry && run.NextRetryAt != nil && run.NextRetryAt.After(now) {
+		return false
+	}
+	if run.LockedUntil != nil {
+		return run.LockedUntil.Before(now)
+	}
+	lastSeen := run.UpdatedAt
+	if run.HeartbeatAt != nil {
+		lastSeen = *run.HeartbeatAt
+	}
+	if lastSeen.IsZero() {
+		lastSeen = run.CreatedAt
+	}
+	return !lastSeen.IsZero() && lastSeen.Add(backupRunLeaseTTL).Before(now)
 }
 
 func (s *Server) enqueueDueBackupRetries(ctx context.Context) {
@@ -929,18 +993,24 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	}
 	now := time.Now().UTC()
 	startedAt := now
+	lockedUntil := now.Add(backupRunLeaseTTL)
 	status := model.BackupRunStatusRunning
+	leaseOwner := backupLeaseOwner()
 	_, _ = s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
 		Status:      &status,
-		StartedAt:   &[]*time.Time{&startedAt}[0],
-		HeartbeatAt: &[]*time.Time{&startedAt}[0],
+		LeaseOwner:  &leaseOwner,
+		LockedUntil: timePtrPtr(&lockedUntil),
+		StartedAt:   timePtrPtr(&startedAt),
+		HeartbeatAt: timePtrPtr(&startedAt),
 	})
+	stopHeartbeat := s.startBackupRunHeartbeat(ctx, run.ID)
 	runner := s.backupRunner
 	if runner == nil {
 		runner = s.runBackup
 	}
 	artifacts, err := runner(ctx, run)
 	finishedAt := time.Now().UTC()
+	stopHeartbeat()
 	if err != nil {
 		status = model.BackupRunStatusFailed
 		code := backupErrorCode(err)
@@ -949,8 +1019,9 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 			Status:       &status,
 			ErrorCode:    &code,
 			ErrorMessage: &message,
-			FinishedAt:   &[]*time.Time{&finishedAt}[0],
-			HeartbeatAt:  &[]*time.Time{&finishedAt}[0],
+			LockedUntil:  timePtrPtr(nil),
+			FinishedAt:   timePtrPtr(&finishedAt),
+			HeartbeatAt:  timePtrPtr(&finishedAt),
 		})
 		if s.log != nil {
 			s.log.Printf("backup run %s failed: %v", run.ID, err)
@@ -966,11 +1037,59 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	count := len(artifacts)
 	_, _ = s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
 		Status:        &status,
+		LockedUntil:   timePtrPtr(nil),
 		BytesWritten:  &bytesWritten,
 		ArtifactCount: &count,
-		FinishedAt:    &[]*time.Time{&finishedAt}[0],
-		HeartbeatAt:   &[]*time.Time{&finishedAt}[0],
+		FinishedAt:    timePtrPtr(&finishedAt),
+		HeartbeatAt:   timePtrPtr(&finishedAt),
 	})
+}
+
+func (s *Server) startBackupRunHeartbeat(ctx context.Context, runID string) func() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(backupRunHeartbeatPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				now := time.Now().UTC()
+				lockedUntil := now.Add(backupRunLeaseTTL)
+				_, _ = s.store.UpdateBackupRun(runID, store.BackupRunUpdate{
+					LockedUntil: timePtrPtr(&lockedUntil),
+					HeartbeatAt: timePtrPtr(&now),
+				})
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
+}
+
+func backupLeaseOwner() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		return "fugue-api"
+	}
+	return "fugue-api/" + strings.TrimSpace(hostname)
+}
+
+func timePtrPtr(value *time.Time) **time.Time {
+	return &value
 }
 
 func (s *Server) scheduleBackupRetry(ctx context.Context, run model.BackupRun) {
