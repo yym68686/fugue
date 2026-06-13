@@ -146,11 +146,11 @@ spec:
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_PATH
               value: {{ default "/var/lib/fugue/edge/request-body-buffer" $edgeRequestBodyBuffer.path | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BYTES
-              value: {{ printf "%v" (default 16777216 $edgeRequestBodyBuffer.maxBytes) | quote }}
+              value: {{ (default 16777216 $edgeRequestBodyBuffer.maxBytes) | int64 | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_TOTAL_MAX_BYTES
-              value: {{ printf "%v" (default 0 $edgeRequestBodyBuffer.totalMaxBytes) | quote }}
+              value: {{ (default 0 $edgeRequestBodyBuffer.totalMaxBytes) | int64 | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_RESERVE_BYTES
-              value: {{ printf "%v" (default 4294967296 $edgeRequestBodyBuffer.reserveBytes) | quote }}
+              value: {{ (default 4294967296 $edgeRequestBodyBuffer.reserveBytes) | int64 | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_DISK_RATIO
               value: {{ printf "%v" (default 0.25 $edgeRequestBodyBuffer.diskRatio) | quote }}
             {{- if .Values.edge.caddy.enabled }}
