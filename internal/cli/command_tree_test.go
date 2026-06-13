@@ -3835,6 +3835,50 @@ func TestRunAppFilesystemListFallsBackToLiveFilesystem(t *testing.T) {
 	}
 }
 
+func TestRunAppFilesystemListUsesPersistentStorageWorkspaceMount(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"persistent_storage":{"mode":"movable_rwo","storage_size":"1Gi","mounts":[{"kind":"directory","path":"/workspace"}]}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"persistent_storage":{"mode":"movable_rwo","storage_size":"1Gi","mounts":[{"kind":"directory","path":"/workspace"}]}},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/filesystem/tree":
+			if got := r.URL.Query().Get("path"); got != "/workspace" {
+				t.Fatalf("expected persistent storage path /workspace, got %q", got)
+			}
+			if got := r.URL.Query().Get("component"); got != "app" {
+				t.Fatalf("expected component=app, got %q", got)
+			}
+			_, _ = w.Write([]byte(`{"component":"app","pod":"demo-pod","path":"/workspace","depth":1,"workspace_root":"/workspace","entries":[{"name":"AGENTS.md","path":"/workspace/AGENTS.md","kind":"file","size":9,"mode":420,"modified_at":"2026-04-02T00:00:00Z","has_children":false}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "fs", "ls", "demo", "/",
+		"--source", "persistent",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app fs ls persistent: %v", err)
+	}
+
+	out := stdout.String()
+	for _, want := range []string{`"workspace_root": "/workspace"`, `"/workspace/AGENTS.md"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected persistent fs output to contain %q, got %q", want, out)
+		}
+	}
+}
+
 func TestRunAPIRequestShowsRawResponse(t *testing.T) {
 	t.Parallel()
 

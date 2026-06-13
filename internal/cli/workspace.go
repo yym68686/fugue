@@ -430,6 +430,9 @@ func normalizeFilesystemComponent(raw string) (string, error) {
 }
 
 func resolvePersistentCLIPath(root, raw string, allowRoot bool) (string, error) {
+	if raw == "/" && allowRoot {
+		raw = root
+	}
 	if !strings.HasPrefix(raw, "/") {
 		raw = path.Join(root, raw)
 	}
@@ -453,14 +456,52 @@ func resolveLiveCLIPath(raw string, allowRoot bool) (string, error) {
 }
 
 func workspaceRoot(app model.App) (string, error) {
-	if app.Spec.Workspace == nil {
-		return "", fmt.Errorf("app does not have a persistent workspace")
+	if app.Spec.Workspace != nil {
+		root, err := model.NormalizeAppWorkspaceMountPath(app.Spec.Workspace.MountPath)
+		if err != nil {
+			return "", fmt.Errorf("app workspace mount_path is invalid: %w", err)
+		}
+		return root, nil
 	}
-	root, err := model.NormalizeAppWorkspaceMountPath(app.Spec.Workspace.MountPath)
+	root, ok, err := persistentStorageWorkspaceRoot(app.Spec.PersistentStorage)
 	if err != nil {
-		return "", fmt.Errorf("app workspace mount_path is invalid: %w", err)
+		return "", err
 	}
-	return root, nil
+	if ok {
+		return root, nil
+	}
+	return "", fmt.Errorf("app does not have a persistent workspace")
+}
+
+func persistentStorageWorkspaceRoot(spec *model.AppPersistentStorageSpec) (string, bool, error) {
+	if spec == nil || len(spec.Mounts) == 0 {
+		return "", false, nil
+	}
+	var directoryRoots []string
+	for _, mount := range spec.Mounts {
+		kind, err := model.NormalizeAppPersistentStorageMountKind(mount.Kind)
+		if err != nil {
+			return "", false, fmt.Errorf("app persistent_storage is invalid: %w", err)
+		}
+		mountPath, err := model.NormalizeAppPersistentStorageMountPath(kind, mount.Path)
+		if err != nil {
+			return "", false, fmt.Errorf("app persistent_storage is invalid: %w", err)
+		}
+		if kind != model.AppPersistentStorageMountKindDirectory {
+			continue
+		}
+		if mountPath == model.DefaultAppWorkspaceMountPath {
+			return mountPath, true, nil
+		}
+		directoryRoots = append(directoryRoots, mountPath)
+	}
+	if len(directoryRoots) == 1 {
+		return directoryRoots[0], true, nil
+	}
+	if len(directoryRoots) > 1 {
+		return "", false, fmt.Errorf("app has multiple persistent storage directory mounts; use an absolute path inside one of: %s", strings.Join(directoryRoots, ", "))
+	}
+	return "", false, nil
 }
 
 func isPathWithinFilesystemRootForCLI(rootPath, targetPath string) bool {
