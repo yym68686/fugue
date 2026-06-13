@@ -7,6 +7,7 @@ import (
 )
 
 type ServerConfig struct {
+	DatabaseURL                  string
 	ControlPlaneNamespace        string
 	ControlPlaneReleaseInstance  string
 	RegistryGCLeaseName          string

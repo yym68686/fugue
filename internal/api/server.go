@@ -31,6 +31,7 @@ type Server struct {
 	auth                         *auth.Authenticator
 	log                          *log.Logger
 	metricsStartedAt             time.Time
+	controlPlaneDatabaseURL      string
 	controlPlaneNamespace        string
 	controlPlaneReleaseInstance  string
 	registryGCLeaseName          string
@@ -90,6 +91,7 @@ type Server struct {
 	appRequestHTTPClient         *http.Client
 	openAppDatabase              func(driverName, dsn string) (*sql.DB, error)
 	appDatabaseImportRunner      func(context.Context, model.AppDatabaseImportJob) (string, error)
+	backupRunner                 func(context.Context, model.BackupRun) ([]model.BackupArtifact, error)
 	dialAppDatabaseTunnel        func(context.Context, string, string) (net.Conn, error)
 	dnsResolver                  appDomainDNSResolver
 	dnsDelegationProbe           dnsDelegationProbeFunc
@@ -109,6 +111,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		auth:                         authn,
 		log:                          logger,
 		metricsStartedAt:             time.Now().UTC(),
+		controlPlaneDatabaseURL:      strings.TrimSpace(cfg.DatabaseURL),
 		controlPlaneNamespace:        strings.TrimSpace(cfg.ControlPlaneNamespace),
 		controlPlaneReleaseInstance:  strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
 		registryGCLeaseName:          strings.TrimSpace(cfg.RegistryGCLeaseName),
@@ -168,6 +171,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		appProxyTransport:    newDefaultAppProxyTransport(),
 		appRequestHTTPClient: &http.Client{},
 		openAppDatabase:      sql.Open,
+		backupRunner:         nil,
 		dnsResolver:          netAppDomainResolver{},
 		dnsDelegationProbe:   defaultDNSDelegationProbe,
 		dnsParentNSLookup:    defaultDNSParentNSLookup,
@@ -251,6 +255,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	status := s.observabilityConfig.Normalize().Status()
 	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
+	s.writeBackupMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

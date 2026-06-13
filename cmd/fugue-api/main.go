@@ -27,6 +27,7 @@ func main() {
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
+		DatabaseURL:                  cfg.DatabaseURL,
 		ControlPlaneNamespace:        cfg.ControlPlaneNamespace,
 		ControlPlaneReleaseInstance:  cfg.ControlPlaneReleaseInstance,
 		RegistryGCLeaseName:          cfg.RegistryGCLeaseName,
@@ -65,6 +66,7 @@ func main() {
 	defer stop()
 	server.StartBackgroundWarmers(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
+	go server.StartBackgroundBackups(ctx)
 
 	var metricsServer *http.Server
 	if cfg.MetricsBindAddr != "" {

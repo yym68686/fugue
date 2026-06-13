@@ -273,6 +273,7 @@ Environment variables:
 		c.newRuntimeCommand(),
 		c.newServiceCommand(),
 		c.newDataCommand(),
+		c.newBackupCommand(),
 		c.newVersionCommand(),
 		c.newUpgradeCommand(),
 		c.newAPICommand(),

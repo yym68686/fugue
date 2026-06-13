@@ -17,6 +17,7 @@ const appDatabaseRestoreInventorySQL = `select current_database() as database, c
 type appDatabaseRestorePlanOptions struct {
 	SourceNode       string
 	SourcePGData     string
+	FromBackup       string
 	ExpectedSystemID string
 	ExpectedDatabase string
 	TableMinRows     []string
@@ -25,6 +26,7 @@ type appDatabaseRestorePlanOptions struct {
 
 type appDatabaseRestoreVerifyOptions struct {
 	ExpectedDatabase string
+	FromBackup       string
 	TableMinRows     []string
 	Timeout          time.Duration
 }
@@ -103,12 +105,13 @@ func (c *CLI) newAppDatabaseRestorePlanCommand() *cobra.Command {
 			}
 			opts.SourceNode = strings.TrimSpace(opts.SourceNode)
 			opts.SourcePGData = strings.TrimSpace(opts.SourcePGData)
+			opts.FromBackup = strings.TrimSpace(opts.FromBackup)
 			opts.ExpectedSystemID = strings.TrimSpace(opts.ExpectedSystemID)
 			opts.ExpectedDatabase = strings.TrimSpace(opts.ExpectedDatabase)
-			if opts.SourcePGData == "" {
+			if opts.FromBackup == "" && opts.SourcePGData == "" {
 				return fmt.Errorf("--source-pgdata is required")
 			}
-			if opts.ExpectedSystemID == "" {
+			if opts.FromBackup == "" && opts.ExpectedSystemID == "" {
 				return fmt.Errorf("--expected-system-id is required; inspect the source PGDATA with pg_controldata before planning a restore")
 			}
 
@@ -127,6 +130,30 @@ func (c *CLI) newAppDatabaseRestorePlanCommand() *cobra.Command {
 			database := ownedManagedPostgresSpec(app)
 			if database == nil {
 				return fmt.Errorf("managed postgres is not configured for this app")
+			}
+			if opts.FromBackup != "" {
+				artifact, err := client.GetBackupArtifact(opts.FromBackup)
+				if err != nil {
+					return err
+				}
+				if !backupArtifactBelongsToApp(artifact, app.ID) {
+					return fmt.Errorf("backup artifact %s does not belong to app %s", artifact.ID, app.Name)
+				}
+				if artifact.Target.Type != model.BackupTargetAppDatabase {
+					return fmt.Errorf("backup artifact %s is target %s, not app database", artifact.ID, artifact.Target.Type)
+				}
+				plan, err := client.CreateBackupRestorePlan(map[string]any{
+					"artifact_id": artifact.ID,
+					"mode":        model.BackupRestoreModePlanOnly,
+					"target":      artifact.Target,
+				})
+				if err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{"plan": plan})
+				}
+				return renderBackupRestorePlan(c.stdout, plan, true)
 			}
 
 			statusResponse, err := client.GetAppDatabaseStatus(app.ID)
@@ -154,6 +181,7 @@ func (c *CLI) newAppDatabaseRestorePlanCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.SourceNode, "source-node", "", "Kubernetes node that holds the old PGDATA directory")
 	cmd.Flags().StringVar(&opts.SourcePGData, "source-pgdata", "", "Absolute source PGDATA path to restore from")
+	cmd.Flags().StringVar(&opts.FromBackup, "from-backup", "", "App database backup artifact id to restore from")
 	cmd.Flags().StringVar(&opts.ExpectedSystemID, "expected-system-id", "", "PostgreSQL system identifier read from source PGDATA")
 	cmd.Flags().StringVar(&opts.ExpectedDatabase, "expected-database", "", "Expected database name after restore; defaults to app managed Postgres database")
 	cmd.Flags().StringArrayVar(&opts.TableMinRows, "table-min-rows", nil, "Post-restore row-count check in table=min_rows form; may be repeated")
@@ -173,6 +201,7 @@ func (c *CLI) newAppDatabaseRestoreVerifyCommand() *cobra.Command {
 				return err
 			}
 			opts.ExpectedDatabase = strings.TrimSpace(opts.ExpectedDatabase)
+			opts.FromBackup = strings.TrimSpace(opts.FromBackup)
 
 			client, err := c.newClient()
 			if err != nil {
@@ -190,6 +219,18 @@ func (c *CLI) newAppDatabaseRestoreVerifyCommand() *cobra.Command {
 				return fmt.Errorf("managed postgres is not configured for this app")
 			}
 			result := appDatabaseRestoreVerifyResult{AppID: app.ID, AppName: app.Name}
+			if opts.FromBackup != "" {
+				artifact, err := client.GetBackupArtifact(opts.FromBackup)
+				if err != nil {
+					return err
+				}
+				result.Checks = append(result.Checks,
+					appDatabaseRestoreCheck{Name: "backup_artifact_app", Pass: backupArtifactBelongsToApp(artifact, app.ID), Message: artifact.ID},
+					appDatabaseRestoreCheck{Name: "backup_artifact_target", Pass: artifact.Target.Type == model.BackupTargetAppDatabase, Message: artifact.Target.Type},
+					appDatabaseRestoreCheck{Name: "backup_artifact_checksum", Pass: strings.TrimSpace(artifact.SHA256) != "", Message: blankDash(artifact.SHA256)},
+					appDatabaseRestoreCheck{Name: "backup_artifact_manifest", Pass: strings.TrimSpace(artifact.ManifestDigest) != "", Message: blankDash(artifact.ManifestDigest)},
+				)
+			}
 			if opts.ExpectedDatabase != "" {
 				response, err := client.QueryAppDatabase(app.ID, `select current_database() as database`, 1, opts.Timeout)
 				if err != nil {
@@ -223,6 +264,7 @@ func (c *CLI) newAppDatabaseRestoreVerifyCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.ExpectedDatabase, "expected-database", "", "Expected database name after restore")
+	cmd.Flags().StringVar(&opts.FromBackup, "from-backup", "", "App database backup artifact id to verify")
 	cmd.Flags().StringArrayVar(&opts.TableMinRows, "table-min-rows", nil, "Row-count check in table=min_rows form; may be repeated")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", opts.Timeout, "Verification query timeout")
 	return cmd

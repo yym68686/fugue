@@ -67,6 +67,12 @@ func (s *Store) Init() error {
 		if err := s.SeedDefaultDataBackendFromEnv(); err != nil {
 			return err
 		}
+		if err := s.SeedDefaultBackupBackendFromEnv(); err != nil {
+			return err
+		}
+		if err := s.EnsureDefaultBackupPolicy(); err != nil {
+			return err
+		}
 		if err := s.pgRepairAppStatuses(); err != nil {
 			return err
 		}
@@ -76,7 +82,10 @@ func (s *Store) Init() error {
 		ensureDefaults(state)
 		repairAllAPIKeyStatuses(state)
 		repairAllAppStatuses(state)
-		return seedDefaultDataBackendFromEnvInState(state)
+		if err := seedDefaultDataBackendFromEnvInState(state); err != nil {
+			return err
+		}
+		return seedDefaultBackupBackendFromEnvInState(state)
 	})
 }
 
@@ -255,6 +264,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.TenantBilling = deleteTenantBillingRecords(state.TenantBilling, id)
 		state.BillingEvents = deleteTenantBillingEvents(state.BillingEvents, id)
 		state.Idempotency = deleteIdempotencyRecordsByTenant(state.Idempotency, id)
+		deleteBackupStateByTenant(state, id)
 		return nil
 	})
 	return tenant, err
@@ -3852,6 +3862,7 @@ func ensureDefaults(state *model.State) {
 	}
 	ensureTenantBillingDefaults(state)
 	ensureDataDefaults(state)
+	ensureBackupDefaults(state)
 	if findRuntime(state, "runtime_managed_shared") < 0 {
 		now := time.Now().UTC()
 		state.Runtimes = append(state.Runtimes, model.Runtime{
@@ -5073,6 +5084,7 @@ func deleteProjectFromState(state *model.State, projectID string) (model.Project
 	state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByAppIDs(state.AppDatabaseAccessGrants, appIDs)
 	state.BackingServices = deleteBackingServicesByProject(state.BackingServices, projectID)
 	state.Operations = deleteOperationsByAppIDs(state.Operations, appIDs)
+	deleteBackupStateByProject(state, projectID, appIDs)
 	clearProjectDeleteRequested(state, projectID)
 	return project, nil
 }

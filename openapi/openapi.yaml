@@ -50,6 +50,8 @@ tags:
     description: Source upload archive endpoints.
   - name: Data Workspaces
     description: Project-level dataset, checkpoint, and intermediate artifact workspaces.
+  - name: Backups
+    description: Backup backend, policy, run, artifact, restore, and usage endpoints.
   - name: Agent
     description: Runtime agent control-plane endpoints.
   - name: Node Updater
@@ -5470,6 +5472,566 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/backends:
+    get:
+      operationId: listBackupBackends
+      summary: List Backup Backends
+      tags: [Backups]
+      x-fugue-handler: handleListBackupBackends
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupBackendListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createBackupBackend
+      summary: Create Backup Backend
+      tags: [Backups]
+      x-fugue-handler: handleCreateBackupBackend
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupBackendRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupBackendResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/backends/{id}:
+    get:
+      operationId: getBackupBackend
+      summary: Get Backup Backend
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupBackend
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupBackendResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteBackupBackend
+      summary: Delete Backup Backend
+      tags: [Backups]
+      x-fugue-handler: handleDeleteBackupBackend
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupBackendResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/backends/{id}/test:
+    post:
+      operationId: testBackupBackend
+      summary: Test Backup Backend
+      tags: [Backups]
+      x-fugue-handler: handleTestBackupBackend
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupBackendTestResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/policies:
+    get:
+      operationId: listBackupPolicies
+      summary: List Backup Policies
+      tags: [Backups]
+      x-fugue-handler: handleListBackupPolicies
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: project_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: target_type
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: include_disabled
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: upsertBackupPolicy
+      summary: Upsert Backup Policy
+      tags: [Backups]
+      x-fugue-handler: handleUpsertBackupPolicy
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupPolicyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/policies/{id}:
+    get:
+      operationId: getBackupPolicy
+      summary: Get Backup Policy
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: patchBackupPolicy
+      summary: Patch Backup Policy
+      tags: [Backups]
+      x-fugue-handler: handlePatchBackupPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupPolicyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/runs:
+    get:
+      operationId: listBackupRuns
+      summary: List Backup Runs
+      tags: [Backups]
+      x-fugue-handler: handleListBackupRuns
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: project_id
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          schema:
+            type: string
+        - in: query
+          name: policy_id
+          schema:
+            type: string
+        - in: query
+          name: target_type
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRunListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createBackupRun
+      summary: Create Backup Run
+      tags: [Backups]
+      x-fugue-handler: handleCreateBackupRun
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupRunRequest"
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRunResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/runs/{id}:
+    get:
+      operationId: getBackupRun
+      summary: Get Backup Run
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupRun
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRunResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/artifacts:
+    get:
+      operationId: listBackupArtifacts
+      summary: List Backup Artifacts
+      tags: [Backups]
+      x-fugue-handler: handleListBackupArtifacts
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: project_id
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          schema:
+            type: string
+        - in: query
+          name: policy_id
+          schema:
+            type: string
+        - in: query
+          name: run_id
+          schema:
+            type: string
+        - in: query
+          name: target_type
+          schema:
+            type: string
+        - in: query
+          name: include_deleted
+          schema:
+            type: boolean
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupArtifactListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/artifacts/{id}:
+    get:
+      operationId: getBackupArtifact
+      summary: Get Backup Artifact
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupArtifactResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteBackupArtifact
+      summary: Delete Backup Artifact
+      tags: [Backups]
+      x-fugue-handler: handleDeleteBackupArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupArtifactResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/restore-plans:
+    get:
+      operationId: listBackupRestorePlans
+      summary: List Backup Restore Plans
+      tags: [Backups]
+      x-fugue-handler: handleListBackupRestorePlans
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRestorePlanListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createBackupRestorePlan
+      summary: Create Backup Restore Plan
+      tags: [Backups]
+      x-fugue-handler: handleCreateBackupRestorePlan
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupRestorePlanRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRestorePlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/restore-runs:
+    get:
+      operationId: listBackupRestoreRuns
+      summary: List Backup Restore Runs
+      tags: [Backups]
+      x-fugue-handler: handleListBackupRestoreRuns
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRestoreRunListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createBackupRestoreRun
+      summary: Create Backup Restore Run
+      tags: [Backups]
+      x-fugue-handler: handleCreateBackupRestoreRun
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupRestoreRunRequest"
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRestoreRunResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/usage:
+    get:
+      operationId: getBackupUsage
+      summary: Get Backup Usage
+      tags: [Backups]
+      x-fugue-handler: handleGetBackupUsage
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupUsageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/backups/status:
+    get:
+      operationId: getAdminBackupStatus
+      summary: Get Admin Backup Status
+      tags: [Backups, Admin]
+      x-fugue-handler: handleGetAdminBackupStatus
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminBackupStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/backups/status:
+    get:
+      operationId: getAppBackupStatus
+      summary: Get App Backup Status
+      tags: [Backups, Apps]
+      x-fugue-handler: handleGetAppBackupStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppBackupStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/backups/policies:
+    post:
+      operationId: createAppBackupPolicy
+      summary: Create App Backup Policy
+      tags: [Backups, Apps]
+      x-fugue-handler: handleCreateAppBackupPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupPolicyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/backups/runs:
+    post:
+      operationId: createAppBackupRun
+      summary: Create App Backup Run
+      tags: [Backups, Apps]
+      x-fugue-handler: handleCreateAppBackupRun
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupRunRequest"
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupRunResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/data/backends:
     get:
       operationId: listDataBackends
@@ -6684,6 +7246,597 @@ components:
         details:
           type: object
           additionalProperties: true
+    BackupCredentials:
+      type: object
+      additionalProperties: false
+      properties:
+        access_key_id:
+          type: string
+        secret_access_key:
+          type: string
+        token:
+          type: string
+    BackupBackend:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        provider:
+          type: string
+          enum: [fugue-managed, cloudflare-r2, backblaze-b2, s3, hugging-face, minio]
+        bucket:
+          type: string
+        region:
+          type: string
+        endpoint:
+          type: string
+        base_url:
+          type: string
+        prefix:
+          type: string
+        status:
+          type: string
+        capabilities:
+          type: object
+          additionalProperties: true
+        credentials:
+          $ref: "#/components/schemas/BackupCredentials"
+        fugue_managed:
+          type: boolean
+        billable:
+          type: boolean
+        last_tested_at:
+          type: string
+          format: date-time
+        last_test_result:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    BackupBackendRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tenant_id:
+          type: string
+        name:
+          type: string
+        provider:
+          type: string
+        bucket:
+          type: string
+        region:
+          type: string
+        endpoint:
+          type: string
+        base_url:
+          type: string
+        prefix:
+          type: string
+        credentials:
+          $ref: "#/components/schemas/BackupCredentials"
+        fugue_managed:
+          type: boolean
+        billable:
+          type: boolean
+        rotate_only:
+          type: boolean
+    BackupTarget:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [control-plane-db, app-database, persistent-storage, data-workspace, registry]
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        workspace_id:
+          type: string
+        runtime_id:
+          type: string
+        name:
+          type: string
+        service_name:
+          type: string
+        database:
+          type: string
+        component:
+          type: string
+    BackupRetentionPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        retain_count:
+          type: integer
+        retain_days:
+          type: integer
+        protect_latest:
+          type: integer
+    BackupPolicy:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        scope:
+          type: string
+          enum: [platform, tenant, project, app]
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        backend_id:
+          type: string
+        enabled:
+          type: boolean
+        status:
+          type: string
+          enum: [active, disabled, blocked_no_backend, error]
+        disabled_reason:
+          type: string
+        schedule:
+          type: string
+        retain_count:
+          type: integer
+        retention:
+          $ref: "#/components/schemas/BackupRetentionPolicy"
+        version:
+          type: string
+        last_run_id:
+          type: string
+        last_successful_run_id:
+          type: string
+        last_run_at:
+          type: string
+          format: date-time
+        last_successful_at:
+          type: string
+          format: date-time
+        next_run_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    BackupPolicyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        name:
+          type: string
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        backend_id:
+          type: string
+        enabled:
+          type: boolean
+        schedule:
+          type: string
+        retain_count:
+          type: integer
+        retention:
+          $ref: "#/components/schemas/BackupRetentionPolicy"
+        version:
+          type: string
+    BackupRun:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        policy_id:
+          type: string
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        backend_id:
+          type: string
+        trigger:
+          type: string
+          enum: [manual, scheduled, retry]
+        version:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, canceled, blocked]
+        bytes_written:
+          type: integer
+          format: int64
+        logical_bytes:
+          type: integer
+          format: int64
+        artifact_count:
+          type: integer
+        error_code:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+    BackupRunRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        policy_id:
+          type: string
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        backend_id:
+          type: string
+        trigger:
+          type: string
+        version:
+          type: string
+        wait:
+          type: boolean
+    BackupManifest:
+      type: object
+      additionalProperties: true
+    BackupArtifact:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        run_id:
+          type: string
+        policy_id:
+          type: string
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        backend_id:
+          type: string
+        kind:
+          type: string
+        version:
+          type: string
+        object_key:
+          type: string
+        manifest_object_key:
+          type: string
+        sha256:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        logical_bytes:
+          type: integer
+          format: int64
+        status:
+          type: string
+        protected:
+          type: boolean
+        billable:
+          type: boolean
+        billing_class:
+          type: string
+        manifest_digest:
+          type: string
+        manifest:
+          $ref: "#/components/schemas/BackupManifest"
+        created_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+    BackupRestorePlan:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        artifact_id:
+          type: string
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        mode:
+          type: string
+        status:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        phases:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    BackupRestorePlanRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_id]
+      properties:
+        artifact_id:
+          type: string
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        mode:
+          type: string
+    BackupRestoreRun:
+      type: object
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        plan_id:
+          type: string
+        artifact_id:
+          type: string
+        mode:
+          type: string
+        status:
+          type: string
+        phases:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        error_code:
+          type: string
+        error_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    BackupRestoreRunRequest:
+      type: object
+      additionalProperties: false
+      required: [plan_id]
+      properties:
+        plan_id:
+          type: string
+        mode:
+          type: string
+    BackupUsage:
+      type: object
+      additionalProperties: false
+      properties:
+        tenant_id:
+          type: string
+        backend_id:
+          type: string
+        provider:
+          type: string
+        billable_bytes:
+          type: integer
+          format: int64
+        cloudflare_r2_price_code:
+          type: string
+        markup_percent:
+          type: integer
+        effective_multiplier:
+          type: number
+        currency:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    BackupPosture:
+      type: object
+      additionalProperties: true
+      properties:
+        target:
+          $ref: "#/components/schemas/BackupTarget"
+        status:
+          type: string
+        message:
+          type: string
+        policy_id:
+          type: string
+        last_successful_run_id:
+          type: string
+        last_successful_at:
+          type: string
+          format: date-time
+        billable_bytes:
+          type: integer
+          format: int64
+        externalized:
+          type: boolean
+        externally_backed_up:
+          type: boolean
+        cnpg_backup_integrated:
+          type: boolean
+        restore_drill_status:
+          type: string
+    BackupBackendResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        backend:
+          $ref: "#/components/schemas/BackupBackend"
+    BackupBackendListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        backends:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupBackend"
+    BackupBackendTestResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        backend:
+          $ref: "#/components/schemas/BackupBackend"
+    BackupPolicyResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        policy:
+          $ref: "#/components/schemas/BackupPolicy"
+    BackupPolicyListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupPolicy"
+    BackupRunResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        run:
+          $ref: "#/components/schemas/BackupRun"
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupArtifact"
+    BackupRunListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupRun"
+    BackupArtifactResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        artifact:
+          $ref: "#/components/schemas/BackupArtifact"
+    BackupArtifactListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupArtifact"
+    BackupRestorePlanResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        plan:
+          $ref: "#/components/schemas/BackupRestorePlan"
+    BackupRestorePlanListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        plans:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupRestorePlan"
+    BackupRestoreRunResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        run:
+          $ref: "#/components/schemas/BackupRestoreRun"
+    BackupRestoreRunListResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupRestoreRun"
+    BackupUsageResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        usage:
+          $ref: "#/components/schemas/BackupUsage"
+    AdminBackupStatusResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupPolicy"
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupRun"
+        usage:
+          $ref: "#/components/schemas/BackupUsage"
+        posture:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupPosture"
+    AppBackupStatusResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        app:
+          type: object
+          additionalProperties: true
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupPolicy"
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupArtifact"
+        posture:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupPosture"
     DataAsset:
       type: object
       additionalProperties: false

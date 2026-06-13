@@ -1557,6 +1557,8 @@ func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":2},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
 			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":2},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/backups/status":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":2},"status":{"phase":"ready","current_runtime_id":"runtime_managed_shared","current_replicas":2},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"policies":[],"artifacts":[],"posture":[{"target":{"type":"app-database","app_id":"app_123"},"status":"disabled"},{"target":{"type":"persistent-storage","app_id":"app_123"},"status":"disabled"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtimes":
 			_, _ = w.Write([]byte(`{"runtimes":[{"id":"runtime_managed_shared","name":"shared","type":"managed-shared","status":"active","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		default:
@@ -1582,6 +1584,7 @@ func TestRunAppContinuityAuditByNameUsesExplicitCommand(t *testing.T) {
 		"classification=ready",
 		"summary=eligible for live transfer",
 		"runtime_type=managed-shared",
+		"backup_readiness=disabled",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)

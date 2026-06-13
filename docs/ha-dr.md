@@ -75,6 +75,12 @@ FUGUE_DATABASE_URL='postgres://...' ./scripts/restore_fugue_postgres.sh --input 
 
 These scripts are intentionally separate from replication. They provide a recovery artifact even if the standby replicated bad data.
 
+The productized backup surface is documented in `docs/backup-system-plan.md`
+and the CLI guide is in `docs/backup-cli-guide.md`. In the new baseline Fugue
+keeps the control-plane database backup enabled by default, uses platform R2
+when configured, retains three successful records, and keeps user app/database
+backup disabled until the user explicitly creates an app backup policy.
+
 ## 4. Production Helm install
 
 Render the chart with the production baseline:

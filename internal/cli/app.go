@@ -98,6 +98,8 @@ in more than one visible project or tenant.
 		c.newAppServiceCommand(),
 		hideCompatCommand(c.newAppBindingCompatCommand(), "fugue app service"),
 		c.newAppDatabaseCommand(),
+		c.newAppBackupCommand(),
+		c.newAppRestoreCommand(),
 		c.newAppResourcesCommand(),
 		c.newAppDeployShortcutCommand(),
 		hideCompatCommand(c.newAppRedeployCommand(), "fugue app deploy"),

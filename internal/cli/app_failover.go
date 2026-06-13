@@ -14,8 +14,10 @@ import (
 )
 
 type appFailoverResult struct {
-	App        model.App                 `json:"app"`
-	Assessment failoverpkg.AppAssessment `json:"assessment"`
+	App             model.App                 `json:"app"`
+	Assessment      failoverpkg.AppAssessment `json:"assessment"`
+	BackupReadiness string                    `json:"backup_readiness,omitempty"`
+	BackupPosture   []model.BackupPosture     `json:"backup_posture,omitempty"`
 }
 
 func (c *CLI) newAppContinuityCommand() *cobra.Command {
@@ -75,6 +77,7 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 					return err
 				}
 				result := buildAppFailoverResult(app, runtimeByID)
+				c.attachAppBackupReadiness(client, &result)
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, result)
 				}
@@ -90,6 +93,9 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 				return err
 			}
 			results := buildAppFailoverResults(filterApps(apps, tenantID, projectID), runtimeByID)
+			for index := range results {
+				c.attachAppBackupReadiness(client, &results[index])
+			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"assessments": results})
 			}
@@ -400,6 +406,52 @@ func buildAppFailoverResult(app model.App, runtimeByID map[string]*model.Runtime
 	}
 }
 
+func (c *CLI) attachAppBackupReadiness(client *Client, result *appFailoverResult) {
+	if client == nil || result == nil || strings.TrimSpace(result.App.ID) == "" {
+		return
+	}
+	status, err := client.GetAppBackupStatus(result.App.ID)
+	if err != nil {
+		result.BackupReadiness = "unknown"
+		return
+	}
+	result.BackupPosture = append([]model.BackupPosture(nil), status.Posture...)
+	result.BackupReadiness = summarizeAppBackupReadiness(status.Posture)
+}
+
+func summarizeAppBackupReadiness(posture []model.BackupPosture) string {
+	if len(posture) == 0 {
+		return "unknown"
+	}
+	hasReady := false
+	hasBlocked := false
+	hasDisabled := false
+	for _, item := range posture {
+		switch strings.TrimSpace(strings.ToLower(item.Status)) {
+		case "ready", model.BackupPolicyStatusActive:
+			hasReady = true
+		case "blocked", model.BackupPolicyStatusBlockedNoBackend, model.BackupPolicyStatusError, model.BackupRunStatusFailed:
+			hasBlocked = true
+		case model.BackupPolicyStatusDisabled, "":
+			hasDisabled = true
+		default:
+			if strings.TrimSpace(item.Status) != "" {
+				hasReady = true
+			}
+		}
+	}
+	switch {
+	case hasBlocked:
+		return "blocked"
+	case hasReady:
+		return "enabled"
+	case hasDisabled:
+		return "disabled"
+	default:
+		return "unknown"
+	}
+}
+
 func mapRuntimesByID(runtimes []model.Runtime) map[string]*model.Runtime {
 	out := make(map[string]*model.Runtime, len(runtimes))
 	for index := range runtimes {
@@ -430,18 +482,19 @@ func failoverSeverity(classification string) int {
 
 func writeAppFailoverTable(w io.Writer, results []appFailoverResult) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "APP\tCLASS\tREPLICAS\tRUNTIME\tNOTES"); err != nil {
+	if _, err := fmt.Fprintln(tw, "APP\tCLASS\tREPLICAS\tRUNTIME\tBACKUP\tNOTES"); err != nil {
 		return err
 	}
 	for _, result := range results {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d/%d\t%s\t%s\n",
+			"%s\t%s\t%d/%d\t%s\t%s\t%s\n",
 			result.App.Name,
 			result.Assessment.Classification,
 			result.App.Status.CurrentReplicas,
 			result.App.Spec.Replicas,
 			formatFailoverRuntime(result.Assessment),
+			blankDash(result.BackupReadiness),
 			result.Assessment.Summary,
 		); err != nil {
 			return err
@@ -461,6 +514,7 @@ func writeAppFailoverStatus(w io.Writer, result appFailoverResult) error {
 		{Key: "runtime_id", Value: result.Assessment.RuntimeID},
 		{Key: "runtime_type", Value: result.Assessment.RuntimeType},
 		{Key: "runtime_status", Value: result.Assessment.RuntimeStatus},
+		{Key: "backup_readiness", Value: result.BackupReadiness},
 		{Key: "blockers", Value: strings.Join(result.Assessment.Blockers, "; ")},
 		{Key: "warnings", Value: strings.Join(result.Assessment.Warnings, "; ")},
 	}

@@ -2259,6 +2259,13 @@ type State struct {
 	ResourceUsageSamples       []ResourceUsageSample       `json:"resource_usage_samples,omitempty"`
 	DataBackends               []DataBackend               `json:"data_backends,omitempty"`
 	DataBackendSecrets         []DataBackendSecret         `json:"data_backend_secrets,omitempty"`
+	BackupBackends             []BackupBackend             `json:"backup_backends,omitempty"`
+	BackupBackendSecrets       []BackupBackendSecret       `json:"backup_backend_secrets,omitempty"`
+	BackupPolicies             []BackupPolicy              `json:"backup_policies,omitempty"`
+	BackupRuns                 []BackupRun                 `json:"backup_runs,omitempty"`
+	BackupArtifacts            []BackupArtifact            `json:"backup_artifacts,omitempty"`
+	BackupRestorePlans         []BackupRestorePlan         `json:"backup_restore_plans,omitempty"`
+	BackupRestoreRuns          []BackupRestoreRun          `json:"backup_restore_runs,omitempty"`
 	DataWorkspaces             []DataWorkspace             `json:"data_workspaces,omitempty"`
 	DataSnapshots              []DataSnapshot              `json:"data_snapshots,omitempty"`
 	DataTransfers              []DataTransfer              `json:"data_transfers,omitempty"`
