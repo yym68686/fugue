@@ -492,6 +492,14 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 			run.Target.TenantID = principal.TenantID
 		}
 	}
+	if principal.IsPlatformAdmin() {
+		var err error
+		run, err = s.applyDefaultControlPlaneBackupPolicy(run)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
 	created, err := s.store.CreateBackupRun(run)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -508,6 +516,29 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 	}
 	go s.executeBackupRun(contextWithoutCancel(r.Context()), created.ID)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"run": created})
+}
+
+func (s *Server) applyDefaultControlPlaneBackupPolicy(run model.BackupRun) (model.BackupRun, error) {
+	run = model.NormalizeBackupRun(run)
+	if run.PolicyID != "" || run.BackendID != "" || run.Target.Type != model.BackupTargetControlPlaneDatabase {
+		return run, nil
+	}
+	if run.Target.TenantID != "" || run.Target.ProjectID != "" || run.Target.AppID != "" {
+		return run, nil
+	}
+	policy, err := s.store.GetBackupPolicy(s.store.DefaultControlPlaneBackupPolicyID(), "", true)
+	if errors.Is(err, store.ErrNotFound) {
+		return run, nil
+	}
+	if err != nil {
+		return run, err
+	}
+	policy = model.NormalizeBackupPolicy(policy)
+	if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive || policy.BackendID == "" {
+		return run, nil
+	}
+	run.PolicyID = policy.ID
+	return run, nil
 }
 
 func (s *Server) handleGetBackupRun(w http.ResponseWriter, r *http.Request) {

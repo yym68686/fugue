@@ -279,6 +279,65 @@ func TestControlPlaneBackupRunCreatesRestorePlan(t *testing.T) {
 	}
 }
 
+func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	_, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		ID:       stateStore.DefaultBackupBackendID(),
+		Name:     "fugue-default-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+		Status:   "active",
+	})
+	if err != nil {
+		t.Fatalf("create default backend: %v", err)
+	}
+	if err := stateStore.EnsureDefaultBackupPolicy(); err != nil {
+		t.Fatalf("ensure default policy: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	seenRun := make(chan model.BackupRun, 1)
+	server.backupRunner = func(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+		seenRun <- run
+		return nil, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backups/runs", "bootstrap-secret", map[string]any{
+		"wait": true,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Run model.BackupRun `json:"run"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Run.Status != model.BackupRunStatusSucceeded {
+		t.Fatalf("expected succeeded default backup run, got %+v", response.Run)
+	}
+	if response.Run.PolicyID != stateStore.DefaultControlPlaneBackupPolicyID() {
+		t.Fatalf("expected default control-plane policy, got %+v", response.Run)
+	}
+	if response.Run.BackendID != stateStore.DefaultBackupBackendID() {
+		t.Fatalf("expected default backup backend, got %+v", response.Run)
+	}
+
+	select {
+	case run := <-seenRun:
+		if run.PolicyID != stateStore.DefaultControlPlaneBackupPolicyID() || run.BackendID != stateStore.DefaultBackupBackendID() {
+			t.Fatalf("expected runner to receive default policy/backend, got %+v", run)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for default backup run execution")
+	}
+}
+
 func TestAppDatabaseBackupRunCreatesCloneRestorePlan(t *testing.T) {
 	t.Parallel()
 
