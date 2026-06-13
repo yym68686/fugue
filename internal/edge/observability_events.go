@@ -89,6 +89,17 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	if errText := logSafeValue(observed.RequestBodyReadError); errText != "-" {
 		summary["request_body_read_error"] = errText
 	}
+	if observed.RequestBodyBuffered {
+		summary["request_body_buffered"] = true
+		summary["request_body_buffer_bytes"] = nonNegativeInt64(observed.RequestBodyBufferBytes)
+		summary["request_body_buffer_ms"] = durationMilliseconds(observed.RequestBodyBuffer)
+		summary["request_body_buffer_budget_bytes"] = nonNegativeInt64(observed.RequestBodyBufferBudget)
+		summary["request_body_buffer_used_bytes"] = nonNegativeInt64(observed.RequestBodyBufferUsed)
+		summary["request_body_buffer_active_requests"] = nonNegativeInt64(observed.RequestBodyBufferActive)
+	}
+	if errText := logSafeValue(observed.RequestBodyBufferError); errText != "-" {
+		summary["request_body_buffer_error"] = errText
+	}
 	if observed.OriginDNS > 0 {
 		summary["origin_dns_ms"] = durationMilliseconds(observed.OriginDNS)
 	}

@@ -11,15 +11,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"fugue/internal/bundleauth"
@@ -43,6 +46,7 @@ type Service struct {
 	caddyWarmup              func(context.Context, string, string) error
 	cacheWarmupClientFactory func(string, string) *http.Client
 	proxyBase                http.RoundTripper
+	bodyBuffer               *edgeRequestBodyBufferManager
 
 	mu                  sync.Mutex
 	snapshot            Status
@@ -188,55 +192,63 @@ type routeCacheMetricKey struct {
 }
 
 type edgeProxyObservation struct {
-	ReceivedAt             time.Time
-	Host                   string
-	Route                  model.EdgeRouteBinding
-	Method                 string
-	Path                   string
-	TraceID                string
-	RequestID              string
-	EdgeRequestID          string
-	Protocol               string
-	ClientIP               string
-	ClientRemoteAddr       string
-	StatusCode             int
-	Duration               time.Duration
-	TTFB                   time.Duration
-	Upstream               time.Duration
-	CacheLookup            time.Duration
-	OriginDNS              time.Duration
-	OriginDNSError         string
-	OriginConnect          time.Duration
-	OriginConnectError     string
-	OriginGotConn          bool
-	OriginConnectionReused bool
-	OriginRemoteAddr       string
-	OriginLocalAddr        string
-	OriginWroteHeaders     bool
-	OriginWroteRequest     bool
-	OriginRequestWrite     time.Duration
-	OriginRequestWriteErr  string
-	OriginTTFB             time.Duration
-	OriginTotal            time.Duration
-	ResponseWrite          time.Duration
-	UpstreamError          string
-	Proxied                bool
-	FallbackHit            bool
-	WebSocket              bool
-	SSE                    bool
-	Streaming              bool
-	Upload                 bool
-	PeerFallback           bool
-	ClientCanceled         bool
-	CacheStatus            string
-	CachePolicyID          string
-	CacheKeyHash           string
-	AssetClass             string
-	RequestBytes           int64
-	RequestBodyReadBytes   int64
-	RequestBodyReadError   string
-	RequestBodyEOF         bool
-	ResponseBytes          int64
+	ReceivedAt              time.Time
+	Host                    string
+	Route                   model.EdgeRouteBinding
+	Method                  string
+	Path                    string
+	TraceID                 string
+	RequestID               string
+	EdgeRequestID           string
+	Protocol                string
+	ClientIP                string
+	ClientRemoteAddr        string
+	StatusCode              int
+	Duration                time.Duration
+	TTFB                    time.Duration
+	Upstream                time.Duration
+	CacheLookup             time.Duration
+	OriginDNS               time.Duration
+	OriginDNSError          string
+	OriginConnect           time.Duration
+	OriginConnectError      string
+	OriginGotConn           bool
+	OriginConnectionReused  bool
+	OriginRemoteAddr        string
+	OriginLocalAddr         string
+	OriginWroteHeaders      bool
+	OriginWroteRequest      bool
+	OriginRequestWrite      time.Duration
+	OriginRequestWriteErr   string
+	OriginTTFB              time.Duration
+	OriginTotal             time.Duration
+	ResponseWrite           time.Duration
+	UpstreamError           string
+	Proxied                 bool
+	FallbackHit             bool
+	WebSocket               bool
+	SSE                     bool
+	Streaming               bool
+	Upload                  bool
+	PeerFallback            bool
+	ClientCanceled          bool
+	CacheStatus             string
+	CachePolicyID           string
+	CacheKeyHash            string
+	AssetClass              string
+	RequestBytes            int64
+	RequestBodyReadBytes    int64
+	RequestBodyReadError    string
+	RequestBodyEOF          bool
+	RequestBodyBuffered     bool
+	RequestBodyBufferBytes  int64
+	RequestBodyBuffer       time.Duration
+	RequestBodyBufferError  string
+	RequestBodyBufferPath   string
+	RequestBodyBufferBudget int64
+	RequestBodyBufferUsed   int64
+	RequestBodyBufferActive int64
+	ResponseBytes           int64
 }
 
 func (e statusError) Error() string {
@@ -263,6 +275,7 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		caddyWarmup:              warmupCaddyTLS,
 		cacheWarmupClientFactory: newEdgeCacheWarmupClient,
 		proxyBase:                newDefaultEdgeProxyTransport(),
+		bodyBuffer:               newEdgeRequestBodyBufferManager(cfg),
 		snapshot: Status{
 			Status:      "unhealthy",
 			EdgeID:      strings.TrimSpace(cfg.EdgeID),
@@ -801,6 +814,16 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
+	bufferedBody := false
+	if handled, status := s.bufferRequestBodyForOrigin(observedWriter, r, &observed); handled {
+		observed.StatusCode = status
+		return
+	} else if observed.RequestBodyBuffered {
+		bufferedBody = true
+	}
+	if bufferedBody && r.Body != nil {
+		defer r.Body.Close()
+	}
 	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed, &cacheDecision)
 	proxy.ServeHTTP(observedWriter, r)
 	if observed.ClientCanceled {
@@ -1050,6 +1073,140 @@ func observeEdgeProxyRequestBody(r *http.Request, observed *edgeProxyObservation
 	}
 }
 
+func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Request, observed *edgeProxyObservation) (bool, int) {
+	if !s.requestBodyBufferEligible(r, observed) {
+		return false, 0
+	}
+	maxBytes := int64(s.Config.RequestBodyBufferMaxBytes)
+	if maxBytes <= 0 {
+		return false, 0
+	}
+	if r.ContentLength > maxBytes {
+		err := fmt.Errorf("request body exceeds edge buffer limit: content_length=%d max_bytes=%d", r.ContentLength, maxBytes)
+		observed.RequestBodyBufferError = err.Error()
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return true, http.StatusRequestEntityTooLarge
+	}
+	manager := s.edgeRequestBodyBufferManager()
+	reservationBytes := maxBytes
+	if r.ContentLength > 0 {
+		reservationBytes = r.ContentLength
+	}
+	reservation, err := manager.reserve(reservationBytes)
+	if err != nil {
+		observed.RequestBodyBufferError = err.Error()
+		observed.RequestBodyBufferPath = manager.path
+		observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
+		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
+		return true, http.StatusServiceUnavailable
+	}
+	keepReservation := false
+	defer func() {
+		if reservation != nil && !keepReservation {
+			reservation.release()
+		}
+	}()
+	started := time.Now()
+	observed.RequestBodyBuffered = true
+	observed.RequestBodyBufferPath = manager.path
+	observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
+	if err := os.MkdirAll(observed.RequestBodyBufferPath, 0o700); err != nil {
+		observed.RequestBodyBufferError = err.Error()
+		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
+		return true, http.StatusServiceUnavailable
+	}
+	file, err := os.CreateTemp(observed.RequestBodyBufferPath, "edge-request-body-*")
+	if err != nil {
+		observed.RequestBodyBufferError = err.Error()
+		http.Error(w, "edge request body buffer unavailable", http.StatusServiceUnavailable)
+		return true, http.StatusServiceUnavailable
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}
+	written, copyErr := io.Copy(file, io.LimitReader(r.Body, maxBytes+1))
+	observed.RequestBodyBuffer = time.Since(started)
+	observed.RequestBodyBufferBytes = written
+	closeErr := r.Body.Close()
+	if copyErr == nil && written > maxBytes {
+		cleanup()
+		err := fmt.Errorf("request body exceeds edge buffer limit: read_bytes=%d max_bytes=%d", written, maxBytes)
+		observed.RequestBodyBufferError = err.Error()
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return true, http.StatusRequestEntityTooLarge
+	}
+	if reservation != nil {
+		reservation.resize(written)
+		observed.RequestBodyBufferBudget, observed.RequestBodyBufferUsed, observed.RequestBodyBufferActive = manager.stats()
+	}
+	if copyErr != nil || closeErr != nil {
+		err := copyErr
+		if err == nil {
+			err = closeErr
+		}
+		cleanup()
+		observed.RequestBodyBufferError = err.Error()
+		observed.ClientCanceled = true
+		if w != nil {
+			w.WriteHeader(edgeStatusClientClosedRequest)
+		}
+		return true, edgeStatusClientClosedRequest
+	}
+	if r.ContentLength >= 0 && written != r.ContentLength {
+		cleanup()
+		err := fmt.Errorf("request body length mismatch: read %d of %d bytes", written, r.ContentLength)
+		observed.RequestBodyBufferError = err.Error()
+		observed.ClientCanceled = true
+		if w != nil {
+			w.WriteHeader(edgeStatusClientClosedRequest)
+		}
+		return true, edgeStatusClientClosedRequest
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		observed.RequestBodyBufferError = err.Error()
+		http.Error(w, "edge request body buffer unavailable", http.StatusInternalServerError)
+		return true, http.StatusInternalServerError
+	}
+	r.Body = &edgeBufferedRequestBody{
+		file:        file,
+		path:        path,
+		reservation: reservation,
+	}
+	keepReservation = true
+	r.ContentLength = written
+	return false, 0
+}
+
+func (s *Service) requestBodyBufferEligible(r *http.Request, observed *edgeProxyObservation) bool {
+	if s == nil || r == nil || r.Body == nil || observed == nil {
+		return false
+	}
+	if s.Config.RequestBodyBufferMaxBytes <= 0 || observed.WebSocket || !observed.SSE || !observed.Upload {
+		return false
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return false
+	}
+	if r.ContentLength == 0 {
+		return false
+	}
+	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if contentType == "" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.Split(contentType, ";")[0])
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
 func (b *edgeProxyObservedRequestBody) Read(data []byte) (int, error) {
 	n, err := b.ReadCloser.Read(data)
 	if b.observation != nil {
@@ -1067,6 +1224,228 @@ func (b *edgeProxyObservedRequestBody) Read(data []byte) (int, error) {
 
 func (b *edgeProxyObservedRequestBody) Close() error {
 	return b.ReadCloser.Close()
+}
+
+type edgeBufferedRequestBody struct {
+	file        *os.File
+	path        string
+	reservation *edgeRequestBodyBufferReservation
+	once        sync.Once
+	closeErr    error
+}
+
+func (b *edgeBufferedRequestBody) Read(data []byte) (int, error) {
+	if b == nil || b.file == nil {
+		return 0, io.EOF
+	}
+	return b.file.Read(data)
+}
+
+func (b *edgeBufferedRequestBody) Close() error {
+	if b == nil {
+		return nil
+	}
+	b.once.Do(func() {
+		if b.file != nil {
+			b.closeErr = b.file.Close()
+		}
+		if strings.TrimSpace(b.path) != "" {
+			if err := os.Remove(b.path); err != nil && !errors.Is(err, os.ErrNotExist) && b.closeErr == nil {
+				b.closeErr = err
+			}
+		}
+		if b.reservation != nil {
+			b.reservation.release()
+		}
+	})
+	return b.closeErr
+}
+
+type edgeRequestBodyBufferManager struct {
+	mu           sync.Mutex
+	path         string
+	budget       int64
+	dynamic      bool
+	reserveBytes int64
+	diskRatio    float64
+	used         int64
+	active       int64
+	disabled     bool
+	reason       string
+}
+
+type edgeRequestBodyBufferReservation struct {
+	manager *edgeRequestBodyBufferManager
+	bytes   int64
+	once    sync.Once
+}
+
+func newEdgeRequestBodyBufferManager(cfg config.EdgeConfig) *edgeRequestBodyBufferManager {
+	path := strings.TrimSpace(cfg.RequestBodyBufferPath)
+	if path == "" {
+		path = "/var/lib/fugue/edge/request-body-buffer"
+	}
+	dynamic := cfg.RequestBodyBufferTotalMaxBytes <= 0
+	budget := cfg.RequestBodyBufferTotalMaxBytes
+	if dynamic {
+		budget = dynamicEdgeRequestBodyBufferBudget(path, cfg.RequestBodyBufferReserveBytes, cfg.RequestBodyBufferDiskRatio)
+	}
+	manager := &edgeRequestBodyBufferManager{
+		path:         path,
+		budget:       budget,
+		dynamic:      dynamic,
+		reserveBytes: cfg.RequestBodyBufferReserveBytes,
+		diskRatio:    cfg.RequestBodyBufferDiskRatio,
+	}
+	if !dynamic && budget <= 0 {
+		manager.disabled = true
+		manager.reason = "no request body buffer budget available"
+	}
+	return manager
+}
+
+func dynamicEdgeRequestBodyBufferBudget(path string, reserveBytes int64, ratio float64) int64 {
+	if reserveBytes < 0 {
+		reserveBytes = 0
+	}
+	if ratio <= 0 || ratio > 1 {
+		ratio = 0.25
+	}
+	available, err := filesystemAvailableBytes(path)
+	if err != nil {
+		parent := filepath.Dir(strings.TrimSpace(path))
+		if parent == "" || parent == "." {
+			parent = "/"
+		}
+		available, err = filesystemAvailableBytes(parent)
+	}
+	if err != nil || available <= reserveBytes {
+		return 0
+	}
+	return int64(float64(available-reserveBytes) * ratio)
+}
+
+func filesystemAvailableBytes(path string) (int64, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "/"
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	return int64(stat.Bavail) * int64(stat.Bsize), nil
+}
+
+func (s *Service) edgeRequestBodyBufferManager() *edgeRequestBodyBufferManager {
+	if s == nil {
+		return newEdgeRequestBodyBufferManager(config.EdgeConfig{})
+	}
+	if s.bodyBuffer == nil {
+		s.bodyBuffer = newEdgeRequestBodyBufferManager(s.Config)
+	}
+	return s.bodyBuffer
+}
+
+func (m *edgeRequestBodyBufferManager) reserve(bytes int64) (*edgeRequestBodyBufferReservation, error) {
+	if m == nil {
+		return nil, fmt.Errorf("edge request body buffer manager is unavailable")
+	}
+	if bytes <= 0 {
+		bytes = 1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refreshBudgetLocked()
+	if m.disabled || m.budget <= 0 {
+		reason := strings.TrimSpace(m.reason)
+		if reason == "" {
+			reason = "edge request body buffer disabled"
+		}
+		return nil, fmt.Errorf("%s", reason)
+	}
+	if bytes > m.budget {
+		return nil, fmt.Errorf("request body buffer reservation exceeds budget: bytes=%d budget=%d", bytes, m.budget)
+	}
+	if m.used+bytes > m.budget {
+		return nil, fmt.Errorf("request body buffer budget exhausted: requested=%d used=%d budget=%d active=%d", bytes, m.used, m.budget, m.active)
+	}
+	m.used += bytes
+	m.active++
+	return &edgeRequestBodyBufferReservation{
+		manager: m,
+		bytes:   bytes,
+	}, nil
+}
+
+func (m *edgeRequestBodyBufferManager) refreshBudgetLocked() {
+	if m == nil || !m.dynamic {
+		return
+	}
+	m.budget = dynamicEdgeRequestBodyBufferBudget(m.path, m.reserveBytes, m.diskRatio)
+	if m.budget <= 0 {
+		m.reason = "no request body buffer budget available"
+		return
+	}
+	m.reason = ""
+}
+
+func (r *edgeRequestBodyBufferReservation) resize(bytes int64) {
+	if r == nil || r.manager == nil || bytes < 0 {
+		return
+	}
+	r.manager.mu.Lock()
+	defer r.manager.mu.Unlock()
+	delta := bytes - r.bytes
+	r.manager.used += delta
+	if r.manager.used < 0 {
+		r.manager.used = 0
+	}
+	r.bytes = bytes
+}
+
+func (r *edgeRequestBodyBufferReservation) release() {
+	if r == nil || r.manager == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.manager.mu.Lock()
+		defer r.manager.mu.Unlock()
+		r.manager.used -= r.bytes
+		if r.manager.used < 0 {
+			r.manager.used = 0
+		}
+		if r.manager.active > 0 {
+			r.manager.active--
+		}
+	})
+}
+
+func (m *edgeRequestBodyBufferManager) usedBytes() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.used
+}
+
+func (m *edgeRequestBodyBufferManager) activeRequests() int64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active
+}
+
+func (m *edgeRequestBodyBufferManager) stats() (int64, int64, int64) {
+	if m == nil {
+		return 0, 0, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.budget, m.used, m.active
 }
 
 func setEdgeXForwarded(req *httputil.ProxyRequest) {
@@ -2735,7 +3114,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		requestBodyMissing = observed.RequestBytes - observed.RequestBodyReadBytes
 	}
 	s.Logger.Printf(
-		"edge_proxy_request received_at=%s edge_request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t",
+		"edge_proxy_request received_at=%s edge_request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t",
 		observed.ReceivedAt.Format(time.RFC3339Nano),
 		logSafeValue(observed.EdgeRequestID),
 		observed.Host,
@@ -2761,6 +3140,13 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		requestBodyComplete,
 		observed.RequestBodyEOF,
 		logSafeValue(observed.RequestBodyReadError),
+		observed.RequestBodyBuffered,
+		observed.RequestBodyBufferBytes,
+		observed.RequestBodyBuffer.Milliseconds(),
+		logSafeValue(observed.RequestBodyBufferError),
+		observed.RequestBodyBufferBudget,
+		observed.RequestBodyBufferUsed,
+		observed.RequestBodyBufferActive,
 		observed.ResponseBytes,
 		strings.TrimSpace(observed.CacheStatus),
 		strings.TrimSpace(observed.CachePolicyID),

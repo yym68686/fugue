@@ -35,6 +35,7 @@
 {{- $routesCachePath := .routesCachePath -}}
 {{- $cacheArchiveLimit := .cacheArchiveLimit -}}
 {{- $maxStale := .maxStale -}}
+{{- $requestBodyBuffer := default dict $root.Values.edge.requestBodyBuffer -}}
 {{- $syncInterval := .syncInterval -}}
 {{- $httpTimeout := .httpTimeout -}}
 {{- $routeCacheHostPath := .routeCacheHostPath -}}
@@ -277,6 +278,16 @@ spec:
               value: {{ $syncInterval | quote }}
             - name: FUGUE_EDGE_HTTP_TIMEOUT
               value: {{ $httpTimeout | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_PATH
+              value: {{ default "/var/lib/fugue/edge/request-body-buffer" $requestBodyBuffer.path | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BYTES
+              value: {{ printf "%v" (default 16777216 $requestBodyBuffer.maxBytes) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_TOTAL_MAX_BYTES
+              value: {{ printf "%v" (default 0 $requestBodyBuffer.totalMaxBytes) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_RESERVE_BYTES
+              value: {{ printf "%v" (default 4294967296 $requestBodyBuffer.reserveBytes) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_DISK_RATIO
+              value: {{ printf "%v" (default 0.25 $requestBodyBuffer.diskRatio) | quote }}
             {{- if $caddyEnabled }}
             - name: FUGUE_EDGE_CADDY_ENABLED
               value: "true"

@@ -389,6 +389,13 @@ edge:
       readOnlyRootFilesystem: true
   syncInterval: 15s
   httpTimeout: 10s
+  requestBodyBuffer:
+    path: /var/lib/fugue/edge/request-body-buffer
+    maxBytes: 16777216
+    # 0 means derive dynamically from filesystem availability.
+    totalMaxBytes: 0
+    reserveBytes: 4294967296
+    diskRatio: 0.25
   routesCachePath: /var/lib/fugue/edge/routes-cache.json
   cacheArchiveLimit: 5
   maxStale: 24h

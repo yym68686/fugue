@@ -12,6 +12,7 @@
 {{- $edgeCaddyStaticTLSPrivateKeyKey := default "tls.key" $edgeCaddyStaticTLS.privateKeyKey -}}
 {{- $edgeCaddyDataDir := default "/data/caddy" .Values.edge.caddy.dataDir -}}
 {{- $edgeCaddySharedTLSEnabled := default true .Values.edge.caddy.sharedTLS.enabled -}}
+{{- $edgeRequestBodyBuffer := default dict .Values.edge.requestBodyBuffer -}}
 {{- if and $edgeCaddyStaticTLSEnabled (not (trim $edgeCaddyStaticTLSSecretName)) }}
 {{- fail "edge.caddy.staticTLS.secretName is required when edge.caddy.staticTLS.enabled=true" }}
 {{- end }}
@@ -142,6 +143,16 @@ spec:
               value: {{ .Values.edge.syncInterval | quote }}
             - name: FUGUE_EDGE_HTTP_TIMEOUT
               value: {{ .Values.edge.httpTimeout | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_PATH
+              value: {{ default "/var/lib/fugue/edge/request-body-buffer" $edgeRequestBodyBuffer.path | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BYTES
+              value: {{ printf "%v" (default 16777216 $edgeRequestBodyBuffer.maxBytes) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_TOTAL_MAX_BYTES
+              value: {{ printf "%v" (default 0 $edgeRequestBodyBuffer.totalMaxBytes) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_RESERVE_BYTES
+              value: {{ printf "%v" (default 4294967296 $edgeRequestBodyBuffer.reserveBytes) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_DISK_RATIO
+              value: {{ printf "%v" (default 0.25 $edgeRequestBodyBuffer.diskRatio) | quote }}
             {{- if .Values.edge.caddy.enabled }}
             - name: FUGUE_EDGE_CADDY_ENABLED
               value: "true"

@@ -218,6 +218,129 @@ func TestProxyHandlerEmitsAndForwardsEdgeRequestID(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerBuffersJSONSSERequestBodyBeforeOrigin(t *testing.T) {
+	t.Parallel()
+
+	var originBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read origin body: %v", err)
+			return
+		}
+		originBody = string(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_buffer_body")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:                         "https://api.example.invalid",
+		EdgeToken:                      "edge-secret",
+		RequestBodyBufferPath:          t.TempDir(),
+		RequestBodyBufferMaxBytes:      1024,
+		RequestBodyBufferTotalMaxBytes: 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_buffer_body"`, time.Now().UTC(), false)
+
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", strings.NewReader(`{"prompt":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if originBody != `{"prompt":"hello"}` {
+		t.Fatalf("unexpected origin body %q", originBody)
+	}
+	if used := service.edgeRequestBodyBufferManager().usedBytes(); used != 0 {
+		t.Fatalf("expected buffer reservation to be released, used=%d", used)
+	}
+	if active := service.edgeRequestBodyBufferManager().activeRequests(); active != 0 {
+		t.Fatalf("expected no active buffer reservations, active=%d", active)
+	}
+}
+
+func TestProxyHandlerDoesNotReachOriginWhenBufferedBodyShortReads(t *testing.T) {
+	t.Parallel()
+
+	var originHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_buffer_short_read")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:                         "https://api.example.invalid",
+		EdgeToken:                      "edge-secret",
+		RequestBodyBufferPath:          t.TempDir(),
+		RequestBodyBufferMaxBytes:      1024,
+		RequestBodyBufferTotalMaxBytes: 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_buffer_short_read"`, time.Now().UTC(), false)
+
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", io.NopCloser(&shortReadReader{
+		data: []byte(`{"bad"`),
+		err:  io.ErrUnexpectedEOF,
+	}))
+	req.ContentLength = 20
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	if recorder.Code != edgeStatusClientClosedRequest {
+		t.Fatalf("expected status %d, got %d body=%q", edgeStatusClientClosedRequest, recorder.Code, recorder.Body.String())
+	}
+	if hits := originHits.Load(); hits != 0 {
+		t.Fatalf("expected origin not to be reached, hits=%d", hits)
+	}
+}
+
+func TestProxyHandlerRejectsBufferedBodyOverLimit(t *testing.T) {
+	t.Parallel()
+
+	var originHits atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_buffer_too_large")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	service := NewService(config.EdgeConfig{
+		APIURL:                         "https://api.example.invalid",
+		EdgeToken:                      "edge-secret",
+		RequestBodyBufferPath:          t.TempDir(),
+		RequestBodyBufferMaxBytes:      3,
+		RequestBodyBufferTotalMaxBytes: 1024,
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_buffer_too_large"`, time.Now().UTC(), false)
+
+	req := httptest.NewRequest(http.MethodPost, "http://demo.fugue.pro/v1/responses", strings.NewReader("abcd"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	recorder := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status %d, got %d body=%q", http.StatusRequestEntityTooLarge, recorder.Code, recorder.Body.String())
+	}
+	if hits := originHits.Load(); hits != 0 {
+		t.Fatalf("expected origin not to be reached, hits=%d", hits)
+	}
+}
+
 func TestEdgeProxyObservedRequestBodyRecordsShortRead(t *testing.T) {
 	t.Parallel()
 

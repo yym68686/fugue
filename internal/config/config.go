@@ -145,6 +145,11 @@ type EdgeConfig struct {
 	CacheArchiveLimit              int
 	AssetCachePath                 string
 	AssetCacheMaxBytes             int
+	RequestBodyBufferPath          string
+	RequestBodyBufferMaxBytes      int
+	RequestBodyBufferTotalMaxBytes int64
+	RequestBodyBufferReserveBytes  int64
+	RequestBodyBufferDiskRatio     float64
 	CacheWarmupEnabled             bool
 	CacheWarmupTimeout             time.Duration
 	CacheWarmupMaxTargets          int
@@ -408,23 +413,34 @@ func EdgeFromEnv() EdgeConfig {
 		CacheArchiveLimit:         getenvInt("FUGUE_EDGE_CACHE_ARCHIVE_LIMIT", 5),
 		AssetCachePath:            getenv("FUGUE_EDGE_ASSET_CACHE_PATH", "/var/lib/fugue/edge/http-cache"),
 		AssetCacheMaxBytes:        getenvInt("FUGUE_EDGE_ASSET_CACHE_MAX_BYTES", 32*1024*1024),
-		CacheWarmupEnabled:        getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
-		CacheWarmupTimeout:        getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
-		CacheWarmupMaxTargets:     getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
-		CacheWarmupMaxDepth:       getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
-		MaxStale:                  getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
-		PeerFallbackEnabled:       getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
-		ListenAddr:                getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
-		SyncInterval:              getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
-		HeartbeatInterval:         getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
-		HTTPTimeout:               getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
-		CaddyEnabled:              getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
-		CaddyAdminURL:             getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
-		CaddyListenAddr:           getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
-		CaddyTLSMode:              getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
-		CaddyTLSAskURL:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
-		CaddyProxyListenAddr:      getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
-		CaddyProxyProtocolEnabled: getenvBool("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_ENABLED", true),
+		RequestBodyBufferPath:     getenv("FUGUE_EDGE_REQUEST_BODY_BUFFER_PATH", "/var/lib/fugue/edge/request-body-buffer"),
+		RequestBodyBufferMaxBytes: getenvInt("FUGUE_EDGE_REQUEST_BODY_BUFFER_MAX_BYTES", 16*1024*1024),
+		RequestBodyBufferTotalMaxBytes: getenvInt64(
+			"FUGUE_EDGE_REQUEST_BODY_BUFFER_TOTAL_MAX_BYTES",
+			0,
+		),
+		RequestBodyBufferReserveBytes: getenvInt64(
+			"FUGUE_EDGE_REQUEST_BODY_BUFFER_RESERVE_BYTES",
+			4*1024*1024*1024,
+		),
+		RequestBodyBufferDiskRatio: getenvFloat("FUGUE_EDGE_REQUEST_BODY_BUFFER_DISK_RATIO", 0.25),
+		CacheWarmupEnabled:         getenvBool("FUGUE_EDGE_CACHE_WARMUP_ENABLED", true),
+		CacheWarmupTimeout:         getenvDuration("FUGUE_EDGE_CACHE_WARMUP_TIMEOUT", 15*time.Second),
+		CacheWarmupMaxTargets:      getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_TARGETS", 24),
+		CacheWarmupMaxDepth:        getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
+		MaxStale:                   getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
+		PeerFallbackEnabled:        getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
+		ListenAddr:                 getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
+		SyncInterval:               getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
+		HeartbeatInterval:          getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
+		HTTPTimeout:                getenvDuration("FUGUE_EDGE_HTTP_TIMEOUT", 10*time.Second),
+		CaddyEnabled:               getenvBool("FUGUE_EDGE_CADDY_ENABLED", false),
+		CaddyAdminURL:              getenv("FUGUE_EDGE_CADDY_ADMIN_URL", "http://127.0.0.1:2019"),
+		CaddyListenAddr:            getenv("FUGUE_EDGE_CADDY_LISTEN_ADDR", "127.0.0.1:18080"),
+		CaddyTLSMode:               getenv("FUGUE_EDGE_CADDY_TLS_MODE", "off"),
+		CaddyTLSAskURL:             strings.TrimSpace(os.Getenv("FUGUE_EDGE_CADDY_TLS_ASK_URL")),
+		CaddyProxyListenAddr:       getenv("FUGUE_EDGE_PROXY_LISTEN_ADDR", "127.0.0.1:7833"),
+		CaddyProxyProtocolEnabled:  getenvBool("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_ENABLED", true),
 		CaddyProxyProtocolTrustedCIDRs: getenvListDefault("FUGUE_EDGE_CADDY_PROXY_PROTOCOL_TRUSTED_CIDRS", []string{
 			"127.0.0.1/32",
 			"::1/128",
@@ -638,6 +654,19 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("invalid integer in %s=%q, using fallback %d", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func getenvInt64(key string, fallback int64) int64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		log.Printf("invalid integer in %s=%q, using fallback %d", key, value, fallback)
 		return fallback
