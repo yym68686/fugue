@@ -20,7 +20,7 @@ func TestConsolePlainPreviewLoadsReadOnlyPages(t *testing.T) {
 		t.Fatalf("run console: %v stderr=%s", err, stderr)
 	}
 	for _, want := range []string{
-		"+ Fugue console",
+		"┌ Fugue console",
 		"preview=true",
 		"Projects",
 		"Apps",

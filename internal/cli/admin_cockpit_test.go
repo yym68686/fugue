@@ -20,7 +20,7 @@ func TestAdminCockpitReadOnlyOverview(t *testing.T) {
 		t.Fatalf("run admin cockpit: %v stderr=%s", err, stderr)
 	}
 	for _, want := range []string{
-		"+ Admin cockpit",
+		"┌ Admin cockpit",
 		"release_path=GitHub Actions deploy-control-plane.yml",
 		"control_plane=ready",
 		"route drilldown",

@@ -174,7 +174,8 @@ func renderSection(renderer ui.Renderer, controls Controls, section Section) str
 	var body string
 	switch {
 	case len(section.Headers) > 0:
-		body = renderer.Table(section.Headers, applyControls(section.Headers, section.Rows, controls))
+		body = renderer.TableWithTitle(title, section.Headers, applyControls(section.Headers, section.Rows, controls))
+		title = ""
 	default:
 		body = strings.Join(section.Lines, "\n")
 	}

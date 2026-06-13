@@ -13,7 +13,7 @@ func TestRichTextAppStatusOptIn(t *testing.T) {
 	defer server.Close()
 
 	out := runRichCommand(t, server.URL, "app", "status", "demo")
-	assertRichOutput(t, out, "+ App demo", "status [ready]", "route", "op_running")
+	assertRichOutput(t, out, "┌ App demo", "status [ready]", "route", "op_running")
 }
 
 func TestRichTextRequiresExperimentFlag(t *testing.T) {
@@ -33,7 +33,7 @@ func TestRichTextRequiresExperimentFlag(t *testing.T) {
 		t.Fatalf("run app status: %v stderr=%s", err, stderr.String())
 	}
 	out := stdout.String()
-	if strings.Contains(out, "+ App demo") {
+	if strings.Contains(out, "┌ App demo") {
 		t.Fatalf("expected rich output to stay disabled without experiment flag, got %q", out)
 	}
 	if !strings.Contains(out, "app=demo") {
@@ -46,7 +46,7 @@ func TestRichTextAppOverviewOptIn(t *testing.T) {
 	defer server.Close()
 
 	out := runRichCommand(t, server.URL, "app", "overview", "demo")
-	assertRichOutput(t, out, "+ App demo", "+ Diagnosis", "category=", "next")
+	assertRichOutput(t, out, "┌ App demo", "┌ Diagnosis", "category=", "next")
 }
 
 func TestRichTextAppDiagnoseOptIn(t *testing.T) {
@@ -54,7 +54,7 @@ func TestRichTextAppDiagnoseOptIn(t *testing.T) {
 	defer server.Close()
 
 	out := runRichCommand(t, server.URL, "app", "diagnose", "demo")
-	assertRichOutput(t, out, "+ Diagnosis volume-affinity-conflict", "summary=pod cannot schedule", "evidence=node affinity conflict")
+	assertRichOutput(t, out, "┌ Diagnosis volume-affinity-conflict", "summary=pod cannot schedule", "evidence=node affinity conflict")
 }
 
 func TestRichTextOperationExplainOptIn(t *testing.T) {
@@ -62,7 +62,7 @@ func TestRichTextOperationExplainOptIn(t *testing.T) {
 	defer server.Close()
 
 	out := runRichCommand(t, server.URL, "operation", "explain", "op_123")
-	assertRichOutput(t, out, "+ Operation op_123", "diagnosis", "category=builder-no-eligible-nodes")
+	assertRichOutput(t, out, "┌ Operation op_123", "diagnosis", "category=builder-no-eligible-nodes")
 }
 
 func TestRichTextProjectOverviewOptIn(t *testing.T) {
@@ -70,7 +70,7 @@ func TestRichTextProjectOverviewOptIn(t *testing.T) {
 	defer server.Close()
 
 	out := runRichCommand(t, server.URL, "project", "overview", "demo")
-	assertRichOutput(t, out, "+ Project demo", "apps=1 services=1 operations=1", "APP", "web")
+	assertRichOutput(t, out, "┌ Project demo", "apps=1 services=1 operations=1", "APP", "web")
 }
 
 func runRichCommand(t *testing.T, baseURL string, args ...string) string {

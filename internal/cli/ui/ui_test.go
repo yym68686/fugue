@@ -13,17 +13,17 @@ func TestRendererWideSnapshot(t *testing.T) {
 
 	renderer := NewRenderer(72, terminal.Palette{Level: terminal.ColorNone})
 	got := renderer.Panel("App web", renderOverviewBody(renderer))
-	want := `+ App web -------------------------------------------------------------+
-| status [ready] replicas [####----] 1/2                               |
-| route  [github] -> [build] -> [runtime] -> [edge] ->                 |
-| [https://web.example.com]                                            |
-|                                                                      |
-| o op_import [completed] import                                       |
-| * op_deploy [running] deploy - waiting for route                     |
-|                                                                      |
-| next                                                                 |
-|   fugue app logs runtime web --follow                                |
-+----------------------------------------------------------------------+
+	want := `┌ App web ─────────────────────────────────────────────────────────────┐
+│ status [ready] replicas ▕████░░░░▏ 1/2                               │
+│ route  [github] → [build] → [runtime] → [edge] →                     │
+│ [https://web.example.com]                                            │
+│                                                                      │
+│ ○ op_import [completed] import                                       │
+│ ● op_deploy [running] deploy - waiting for route                     │
+│                                                                      │
+│ next                                                                 │
+│   fugue app logs runtime web --follow                                │
+└──────────────────────────────────────────────────────────────────────┘
 `
 	assertSnapshot(t, got, want)
 }
@@ -33,19 +33,18 @@ func TestRendererNarrowSnapshot(t *testing.T) {
 
 	renderer := NewRenderer(42, terminal.Palette{Level: terminal.ColorNone})
 	got := renderer.Panel("App with a very long name", renderOverviewBody(renderer))
-	want := `+ App with a very long name -------------+
-| status [ready] replicas [####----] 1/2 |
-| route  [github] -> [build] ->          |
-| [runtime] -> [edge] ->                 |
-| [https://web.example.com]              |
-|                                        |
-| o op_import [completed] import         |
-| * op_deploy [running] deploy -         |
-| waiting for route                      |
-|                                        |
-| next                                   |
-|   fugue app logs runtime web --follow  |
-+----------------------------------------+
+	want := `┌ App with a very long name ─────────────┐
+│ status [ready] replicas ▕████░░░░▏ 1/2 │
+│ route  [github] → [build] → [runtime]  │
+│ → [edge] → [https://web.example.com]   │
+│                                        │
+│ ○ op_import [completed] import         │
+│ ● op_deploy [running] deploy -         │
+│ waiting for route                      │
+│                                        │
+│ next                                   │
+│   fugue app logs runtime web --follow  │
+└────────────────────────────────────────┘
 `
 	assertSnapshot(t, got, want)
 }
@@ -84,11 +83,14 @@ func TestRendererTableFitsPanelWidth(t *testing.T) {
 	)
 	got := renderer.Panel("Admin cluster top", strings.Join([]string{"cluster nodes", table}, "\n"))
 	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
-		if len(line) > 100 {
-			t.Fatalf("expected table panel line <= 100 chars, got %d %q in\n%s", len(line), line, got)
+		if displayWidth(line) > 100 {
+			t.Fatalf("expected table panel line <= 100 cells, got %d %q in\n%s", displayWidth(line), line, got)
 		}
 	}
-	if strings.Contains(got, "\n| app,build,shared") {
+	if !strings.Contains(got, "┌") || !strings.Contains(got, "┼") || !strings.Contains(got, "┘") {
+		t.Fatalf("expected Unicode grid lines, got\n%s", got)
+	}
+	if strings.Contains(got, "\n│ app,build,shared") {
 		t.Fatalf("expected policy label to stay in the table row, got\n%s", got)
 	}
 }

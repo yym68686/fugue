@@ -144,7 +144,6 @@ func (r Renderer) Render(model Model) string {
 	}
 	body = append(body, "", renderTabs(view.Pages, view.ActivePage, view.LowWidth))
 	for _, table := range visibleTables(view) {
-		body = append(body, "", table.Title)
 		rows := make([][]string, 0, len(table.Rows))
 		for index, row := range table.Rows {
 			cells := append([]string(nil), row.Cells...)
@@ -157,7 +156,7 @@ func (r Renderer) Render(model Model) string {
 			}
 			rows = append(rows, cells)
 		}
-		body = append(body, renderer.Table(table.Headers, rows))
+		body = append(body, "", renderer.TableWithTitle(table.Title, table.Headers, rows))
 	}
 	if len(view.Logs) > 0 {
 		body = append(body, "", "logs")

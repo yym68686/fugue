@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"fugue/internal/cli/terminal"
 )
@@ -59,8 +60,8 @@ func TestRendererFilterSortResizeAndHelp(t *testing.T) {
 	}
 	narrow := NewRenderer(34, terminal.Palette{}).Render(snapshot)
 	for _, line := range strings.Split(strings.TrimRight(narrow, "\n"), "\n") {
-		if len(line) > 34 {
-			t.Fatalf("expected narrow render line <= 34 chars, got %d %q in\n%s", len(line), line, narrow)
+		if utf8.RuneCountInString(line) > 34 {
+			t.Fatalf("expected narrow render line <= 34 cells, got %d %q in\n%s", utf8.RuneCountInString(line), line, narrow)
 		}
 	}
 }

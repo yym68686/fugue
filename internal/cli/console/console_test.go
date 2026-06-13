@@ -3,6 +3,7 @@ package console
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"fugue/internal/cli/terminal"
 )
@@ -38,8 +39,8 @@ func TestRendererWideNarrowStatesAndMouseOptional(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(strings.TrimRight(narrow, "\n"), "\n") {
-		if len(line) > 42 {
-			t.Fatalf("expected narrow render line <= 42 chars, got %d %q\n%s", len(line), line, narrow)
+		if utf8.RuneCountInString(line) > 42 {
+			t.Fatalf("expected narrow render line <= 42 cells, got %d %q\n%s", utf8.RuneCountInString(line), line, narrow)
 		}
 	}
 }

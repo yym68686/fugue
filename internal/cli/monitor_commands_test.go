@@ -24,7 +24,7 @@ func TestOperationWatchOnceRendersMonitorSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run operation watch: %v stderr=%s", err, stderr)
 	}
-	for _, want := range []string{"+ Operation op_123", "operation_id=op_123", "status=running", "timeline", "q quit", "resume=fugue operation watch op_123"} {
+	for _, want := range []string{"┌ Operation op_123", "operation_id=op_123", "status=running", "timeline", "q quit", "resume=fugue operation watch op_123"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout)
 		}
@@ -44,7 +44,7 @@ func TestProjectWatchOnceRendersMonitorSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run project watch: %v stderr=%s", err, stderr)
 	}
-	for _, want := range []string{"+ Project demo", "project=demo", "apps=1", "web", "operations", "resume=fugue project watch demo"} {
+	for _, want := range []string{"┌ Project demo", "project=demo", "apps=1", "web", "operations", "resume=fugue project watch demo"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout)
 		}
@@ -61,7 +61,7 @@ func TestAdminClusterTopOnceAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run admin cluster top: %v stderr=%s", err, stderr)
 	}
-	for _, want := range []string{"+ Admin cluster top", "nodes=1 ready=1", "control_plane=ready", "gcp1", "node policy", "deploy-control-plane"} {
+	for _, want := range []string{"┌ Admin cluster top", "nodes=1 ready=1", "control_plane=ready", "gcp1", "node policy", "deploy-control-plane"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout)
 		}

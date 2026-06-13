@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"fugue/internal/cli/terminal"
 	"fugue/internal/cli/ui"
@@ -44,8 +45,8 @@ func TestDangerConfirmDialogSnapshot(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		if len(line) > 72 {
-			t.Fatalf("expected dialog line <= 72 chars, got %d %q\n%s", len(line), line, out)
+		if utf8.RuneCountInString(line) > 72 {
+			t.Fatalf("expected dialog line <= 72 cells, got %d %q\n%s", utf8.RuneCountInString(line), line, out)
 		}
 	}
 }

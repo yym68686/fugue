@@ -112,7 +112,7 @@ func (c *CLI) renderRichProjectWorkbench(view viewmodel.ProjectWorkbenchView, di
 	}
 	bodyParts := []string{
 		fmt.Sprintf("apps=%d services=%d operations=%d", view.AppCount, view.ServiceCount, view.OperationCount),
-		renderer.Table([]string{"APP", "PHASE", "REPLICAS", "RUNTIME", "URL"}, rows),
+		renderer.TableWithTitle("apps", []string{"APP", "PHASE", "REPLICAS", "RUNTIME", "URL"}, rows),
 	}
 	if len(view.Operations.Steps) > 0 {
 		bodyParts = append(bodyParts, "operations", renderer.OperationTimeline(view.Operations))

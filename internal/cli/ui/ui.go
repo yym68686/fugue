@@ -11,6 +11,20 @@ import (
 
 const DefaultWidth = 100
 
+const (
+	boxHorizontal  = "─"
+	boxVertical    = "│"
+	boxTopLeft     = "┌"
+	boxTopRight    = "┐"
+	boxBottomLeft  = "└"
+	boxBottomRight = "┘"
+	boxLeftJoin    = "├"
+	boxRightJoin   = "┤"
+	boxTopJoin     = "┬"
+	boxBottomJoin  = "┴"
+	boxCross       = "┼"
+)
+
 type Renderer struct {
 	Width   int
 	Palette terminal.Palette
@@ -38,10 +52,8 @@ func (r Renderer) Section(title string, body string) string {
 func (r Renderer) Panel(title string, body string) string {
 	width := maxInt(24, r.Width)
 	innerWidth := maxInt(1, width-4)
-	title = truncate(strings.TrimSpace(title), innerWidth)
-	topLabel := " " + title + " "
-	top := "+" + topLabel + strings.Repeat("-", maxInt(0, width-2-displayWidth(topLabel))) + "+"
-	bottom := "+" + strings.Repeat("-", width-2) + "+"
+	top := renderTopBorder(strings.TrimSpace(title), width)
+	bottom := boxBottomLeft + strings.Repeat(boxHorizontal, width-2) + boxBottomRight
 	lines := wrapLines(body, innerWidth)
 	if len(lines) == 0 {
 		lines = []string{""}
@@ -51,9 +63,9 @@ func (r Renderer) Panel(title string, body string) string {
 	b.WriteByte('\n')
 	for _, line := range lines {
 		padded := padRight(line, innerWidth)
-		b.WriteString(r.Palette.Style(terminal.RoleBorder, "| "))
+		b.WriteString(r.Palette.Style(terminal.RoleBorder, boxVertical+" "))
 		b.WriteString(padded)
-		b.WriteString(r.Palette.Style(terminal.RoleBorder, " |"))
+		b.WriteString(r.Palette.Style(terminal.RoleBorder, " "+boxVertical))
 		b.WriteByte('\n')
 	}
 	b.WriteString(r.Palette.Style(terminal.RoleBorder, bottom))
@@ -62,6 +74,10 @@ func (r Renderer) Panel(title string, body string) string {
 }
 
 func (r Renderer) Table(headers []string, rows [][]string) string {
+	return r.TableWithTitle("", headers, rows)
+}
+
+func (r Renderer) TableWithTitle(title string, headers []string, rows [][]string) string {
 	if len(headers) == 0 {
 		return ""
 	}
@@ -80,24 +96,18 @@ func (r Renderer) Table(headers []string, rows [][]string) string {
 	}
 	widths = fitTableWidths(headers, widths, maxInt(1, r.Width-4))
 	var b strings.Builder
-	b.WriteString(renderRow(truncateValues(headers, widths), widths))
+	b.WriteString(r.Palette.Style(terminal.RoleBorder, renderTableTopBorder(strings.TrimSpace(title), widths)))
 	b.WriteByte('\n')
-	separators := make([]string, len(headers))
-	for i := range headers {
-		separators[i] = strings.Repeat("-", widths[i])
-	}
-	b.WriteString(r.Palette.Style(terminal.RoleBorder, renderRow(separators, widths)))
+	b.WriteString(renderTableRow(headers, widths))
+	b.WriteByte('\n')
+	b.WriteString(r.Palette.Style(terminal.RoleBorder, renderTableDivider(widths, boxLeftJoin, boxCross, boxRightJoin)))
 	b.WriteByte('\n')
 	for _, row := range rows {
-		values := make([]string, len(headers))
-		for i := range headers {
-			if i < len(row) {
-				values[i] = truncate(row[i], widths[i])
-			}
-		}
-		b.WriteString(renderRow(values, widths))
+		b.WriteString(renderTableRow(row, widths))
 		b.WriteByte('\n')
 	}
+	b.WriteString(r.Palette.Style(terminal.RoleBorder, renderTableDivider(widths, boxBottomLeft, boxBottomJoin, boxBottomRight)))
+	b.WriteByte('\n')
 	return b.String()
 }
 
@@ -131,11 +141,11 @@ func totalTableWidth(widths []int) int {
 	total := 0
 	for i, width := range widths {
 		if i > 0 {
-			total += 2
+			total++
 		}
-		total += width
+		total += width + 2
 	}
-	return total
+	return total + 2
 }
 
 func widestShrinkableColumn(widths []int, minWidths []int) int {
@@ -153,16 +163,6 @@ func widestShrinkableColumn(widths []int, minWidths []int) int {
 		}
 	}
 	return index
-}
-
-func truncateValues(values []string, widths []int) []string {
-	out := make([]string, len(widths))
-	for i := range widths {
-		if i < len(values) {
-			out[i] = truncate(values[i], widths[i])
-		}
-	}
-	return out
 }
 
 func (r Renderer) StatusChip(label string, tone viewmodel.Tone) string {
@@ -200,7 +200,7 @@ func (r Renderer) RouteChain(segments []RouteSegment) string {
 		}
 		parts = append(parts, r.StatusChip(label, segment.Tone))
 	}
-	return strings.Join(parts, " -> ")
+	return strings.Join(parts, " → ")
 }
 
 func (r Renderer) OperationTimeline(timeline viewmodel.OperationTimelineView) string {
@@ -209,9 +209,9 @@ func (r Renderer) OperationTimeline(timeline viewmodel.OperationTimelineView) st
 	}
 	var b strings.Builder
 	for _, step := range timeline.Steps {
-		marker := "o"
+		marker := "○"
 		if step.Active {
-			marker = "*"
+			marker = "●"
 		}
 		line := fmt.Sprintf("%s %s %s %s", marker, step.ID, r.StatusChip(step.Status, step.Tone), step.Type)
 		if strings.TrimSpace(step.Message) != "" {
@@ -240,7 +240,7 @@ func (r Renderer) MetricBar(label string, current int, total int, width int) str
 	if filled > width {
 		filled = width
 	}
-	return fmt.Sprintf("%s [%s%s] %d/%d", strings.TrimSpace(label), strings.Repeat("#", filled), strings.Repeat("-", width-filled), current, total)
+	return fmt.Sprintf("%s ▕%s%s▏ %d/%d", strings.TrimSpace(label), strings.Repeat("█", filled), strings.Repeat("░", width-filled), current, total)
 }
 
 func (r Renderer) ErrorBlock(view viewmodel.DiagnosisEvidenceView) string {
@@ -328,16 +328,48 @@ func toneForState(kind viewmodel.StateKind) viewmodel.Tone {
 	}
 }
 
-func renderRow(values []string, widths []int) string {
+func renderTopBorder(title string, width int) string {
+	available := maxInt(0, width-2)
+	label := borderLabel(title, available)
+	return boxTopLeft + label + strings.Repeat(boxHorizontal, maxInt(0, available-displayWidth(label))) + boxTopRight
+}
+
+func renderTableTopBorder(title string, widths []int) string {
+	width := totalTableWidth(widths)
+	available := maxInt(0, width-2)
+	label := borderLabel(title, available)
+	return boxTopLeft + label + strings.Repeat(boxHorizontal, maxInt(0, available-displayWidth(label))) + boxTopRight
+}
+
+func borderLabel(title string, available int) string {
+	title = strings.TrimSpace(title)
+	if title == "" || available <= 0 {
+		return ""
+	}
+	if available <= 2 {
+		return truncate(title, available)
+	}
+	return " " + truncate(title, available-2) + " "
+}
+
+func renderTableDivider(widths []int, left string, join string, right string) string {
+	parts := make([]string, len(widths))
+	for i, width := range widths {
+		parts[i] = strings.Repeat(boxHorizontal, width+2)
+	}
+	return left + strings.Join(parts, join) + right
+}
+
+func renderTableRow(values []string, widths []int) string {
 	parts := make([]string, len(widths))
 	for i := range widths {
 		value := ""
 		if i < len(values) {
 			value = values[i]
 		}
-		parts[i] = padRight(value, widths[i])
+		parts[i] = " " + padRight(truncate(value, widths[i]), widths[i]) + " "
 	}
-	return strings.Join(parts, "  ")
+	return boxVertical + strings.Join(parts, boxVertical) + boxVertical
 }
 
 func wrapLines(value string, width int) []string {
@@ -367,7 +399,7 @@ func truncate(value string, width int) string {
 		return value[:0]
 	}
 	cut := cutWidth(value, width-1)
-	return strings.TrimRight(value[:cut], " ") + "."
+	return strings.TrimRight(value[:cut], " ") + "…"
 }
 
 func cutWidthAtWord(value string, width int) int {

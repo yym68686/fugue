@@ -139,14 +139,14 @@ func (c *CLI) renderAdminCockpit(payload adminCockpitPayload, redacted bool) err
 		for _, trace := range payload.RouteTrace {
 			rows = append(rows, []string{trace.App, trace.Route, trace.Runtime, trace.Node, trace.Edge, trace.DNS, trace.Status})
 		}
-		body = append(body, "", "route drilldown", renderer.Table([]string{"APP", "ROUTE", "RUNTIME", "NODE", "EDGE", "DNS", "STATUS"}, rows))
+		body = append(body, "", renderer.TableWithTitle("route drilldown", []string{"APP", "ROUTE", "RUNTIME", "NODE", "EDGE", "DNS", "STATUS"}, rows))
 	}
 	if len(payload.ClusterNodes) > 0 {
 		rows := make([][]string, 0, len(payload.ClusterNodes))
 		for _, node := range payload.ClusterNodes {
 			rows = append(rows, []string{node.Name, firstNonEmptyTrimmed(node.Status, "-"), firstNonEmptyTrimmed(node.RuntimeID, "-"), firstNonEmptyTrimmed(node.Region, node.Zone, "-")})
 		}
-		body = append(body, "", "cluster nodes", renderer.Table([]string{"NODE", "STATUS", "RUNTIME", "REGION"}, rows))
+		body = append(body, "", renderer.TableWithTitle("cluster nodes", []string{"NODE", "STATUS", "RUNTIME", "REGION"}, rows))
 	} else {
 		body = append(body, "cluster_nodes=empty")
 	}
@@ -163,7 +163,7 @@ func (c *CLI) renderAdminCockpit(payload adminCockpitPayload, redacted bool) err
 			}
 			rows = append(rows, []string{email, user.Status, fmt.Sprintf("%t", user.IsAdmin), tenantID})
 		}
-		body = append(body, "", "users", renderer.Table([]string{"USER", "STATUS", "ADMIN", "TENANT"}, rows))
+		body = append(body, "", renderer.TableWithTitle("users", []string{"USER", "STATUS", "ADMIN", "TENANT"}, rows))
 	}
 	if len(payload.Warnings) > 0 {
 		body = append(body, "", "warnings")
