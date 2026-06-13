@@ -72,6 +72,10 @@ spec:
                   fieldPath: metadata.namespace
             - name: FUGUE_CONTROL_PLANE_RELEASE_INSTANCE
               value: {{ .Release.Name | quote }}
+            - name: FUGUE_CONTROL_PLANE_CNPG_BACKUP_ENABLED
+              value: {{ and .Values.controlPlanePostgres.enabled .Values.controlPlanePostgres.backup.enabled .Values.controlPlanePostgres.backup.scheduled.enabled | quote }}
+            - name: FUGUE_CONTROL_PLANE_CNPG_BACKUP_NAME
+              value: {{ printf "%s-backup" (include "fugue.controlPlanePostgresName" .) | quote }}
             - name: FUGUE_REGISTRY_GC_LEASE_NAME
               value: {{ include "fugue.registryGCName" . | quote }}
             - name: FUGUE_DATABASE_URL

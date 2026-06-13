@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -263,6 +265,41 @@ func TestOutputCompatibilityDiagnosticBundleRedactsByDefault(t *testing.T) {
 			t.Fatalf("expected debug bundle stdout to contain %q, got %q", want, stdout)
 		}
 	}
+	backupStatus := readZipEntryForTest(t, archivePath, "backup-status.json")
+	if !strings.Contains(backupStatus, redactedSecretValue) {
+		t.Fatalf("expected backup status to contain redacted markers, got %s", backupStatus)
+	}
+	for _, leaked := range []string{"fugue-backups/private", "secret-sha256", "secret-manifest-digest", "backup_backend_private"} {
+		if strings.Contains(backupStatus, leaked) {
+			t.Fatalf("expected backup status to redact %q, got %s", leaked, backupStatus)
+		}
+	}
+}
+
+func readZipEntryForTest(t *testing.T, archivePath, entryName string) string {
+	t.Helper()
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	defer reader.Close()
+	for _, file := range reader.File {
+		if file.Name != entryName {
+			continue
+		}
+		entry, err := file.Open()
+		if err != nil {
+			t.Fatalf("open zip entry %s: %v", entryName, err)
+		}
+		defer entry.Close()
+		payload, err := io.ReadAll(entry)
+		if err != nil {
+			t.Fatalf("read zip entry %s: %v", entryName, err)
+		}
+		return string(payload)
+	}
+	t.Fatalf("zip entry %s not found", entryName)
+	return ""
 }
 
 func TestTerminalModeFlagsValidate(t *testing.T) {

@@ -23,6 +23,9 @@ func TestAdminCockpitReadOnlyOverview(t *testing.T) {
 		"┌ Admin cockpit",
 		"release_path=GitHub Actions deploy-control-plane.yml",
 		"control_plane=ready",
+		"backup=ready",
+		"backup posture",
+		"control-plane-db",
 		"route drilldown",
 		"shared",
 		"gcp1",
@@ -54,6 +57,9 @@ func TestAdminCockpitJSONAndEdgeCases(t *testing.T) {
 			}
 			if payload.ReleasePath == "" {
 				t.Fatalf("expected release path in payload: %+v", payload)
+			}
+			if payload.Backup == nil {
+				t.Fatalf("expected backup status in payload: %+v", payload)
 			}
 			switch mode {
 			case adminCockpitFixtureModeEmpty:
@@ -121,6 +127,8 @@ func newAdminCockpitServer(t *testing.T, mode adminCockpitFixtureMode) *httptest
 			_, _ = w.Write([]byte(`{"nodes":[{"id":"dns-us","edge_group_id":"default","zone":"example.com","status":"ready","healthy":true,"record_count":1,"udp_listen":true,"tcp_listen":true,"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/cluster/control-plane":
 			_, _ = w.Write([]byte(`{"control_plane":{"namespace":"fugue-system","release_instance":"fugue","version":"deadbeef","live_version":"deadbeef","status":"ready","observed_at":"2026-04-14T00:00:00Z","components":[],"deploy_workflow":{"repository":"acme/fugue","workflow":"deploy-control-plane.yml","status":"completed","conclusion":"success","run_number":42,"head_sha":"deadbeef","head_branch":"main","observed_at":"2026-04-14T00:00:00Z"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/backups/status":
+			_, _ = w.Write([]byte(`{"policies":[{"id":"backup_policy_control_plane_db_default","name":"control-plane-database-hourly","target":{"type":"control-plane-db"},"backend_id":"backup_backend_fugue_default_r2","enabled":true,"status":"active","schedule":"0 * * * *","retain_count":3,"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"runs":[{"id":"backup_run_123","target":{"type":"control-plane-db"},"trigger":"scheduled","status":"succeeded","bytes_written":1024,"created_at":"2026-04-02T01:00:00Z","updated_at":"2026-04-02T01:01:00Z","finished_at":"2026-04-02T01:01:00Z"}],"usage":{"billable_bytes":1024,"provider":"cloudflare-r2","markup_percent":5,"effective_multiplier":1.05,"price_code":"cloudflare-r2-standard-storage"},"posture":[{"target":{"type":"control-plane-db"},"status":"ready","policy_id":"backup_policy_control_plane_db_default","last_successful_run_id":"backup_run_123","last_successful_at":"2026-04-02T01:01:00Z","billable_bytes":1024,"restore_drill_status":"plan-available"}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}

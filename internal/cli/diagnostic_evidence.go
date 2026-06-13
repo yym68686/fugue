@@ -60,6 +60,7 @@ type diagnosticEvidenceResult struct {
 	RuntimeDiagnosis   *appDiagnosis                 `json:"runtime_diagnosis,omitempty"`
 	OperationDiagnosis *model.OperationDiagnosis     `json:"operation_diagnosis,omitempty"`
 	PodInventory       *model.AppRuntimePodInventory `json:"pod_inventory,omitempty"`
+	BackupStatus       *appBackupStatusResponse      `json:"backup_status,omitempty"`
 	Workflow           *workflowRunResult            `json:"workflow,omitempty"`
 	Timeline           []diagnosticTimelineEntry     `json:"timeline,omitempty"`
 	Logs               []diagnosticCollectedLog      `json:"logs,omitempty"`
@@ -152,6 +153,11 @@ func (c *CLI) collectDiagnosticEvidence(client *Client, app model.App, opts diag
 		result.Warnings = append(result.Warnings, fmt.Sprintf("runtime diagnosis unavailable: %v", err))
 	} else if diagnosis != nil {
 		result.RuntimeDiagnosis = diagnosis
+	}
+	if backupStatus, err := client.GetAppBackupStatus(app.ID); err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("backup status unavailable: %v", err))
+	} else {
+		result.BackupStatus = &backupStatus
 	}
 
 	operations := resultOperations(result)
@@ -541,6 +547,10 @@ func sanitizeDiagnosticEvidenceResult(result diagnosticEvidenceResult, redact bo
 		diagnosis.Evidence = redactDiagnosticStringSlice(diagnosis.Evidence)
 		result.OperationDiagnosis = &diagnosis
 	}
+	if result.BackupStatus != nil && redact {
+		status := sanitizeAppBackupStatusForDiagnostics(*result.BackupStatus)
+		result.BackupStatus = &status
+	}
 	if result.Workflow != nil {
 		workflow := sanitizeWorkflowRunResult(*result.Workflow, redact)
 		result.Workflow = &workflow
@@ -556,6 +566,44 @@ func sanitizeDiagnosticEvidenceResult(result diagnosticEvidenceResult, redact bo
 		result.Timeline[index].Message = redactDiagnosticString(result.Timeline[index].Message)
 	}
 	return result
+}
+
+func sanitizeAppBackupStatusForDiagnostics(status appBackupStatusResponse) appBackupStatusResponse {
+	status.App = redactAppForOutput(status.App)
+	for index := range status.Policies {
+		status.Policies[index].BackendID = redactIfPresent(status.Policies[index].BackendID)
+		status.Policies[index].DisabledReason = redactDiagnosticString(status.Policies[index].DisabledReason)
+	}
+	for index := range status.Artifacts {
+		status.Artifacts[index] = sanitizeBackupArtifactForDiagnostics(status.Artifacts[index])
+	}
+	for index := range status.Posture {
+		status.Posture[index].Message = redactDiagnosticString(status.Posture[index].Message)
+	}
+	return status
+}
+
+func sanitizeBackupArtifactForDiagnostics(artifact model.BackupArtifact) model.BackupArtifact {
+	artifact.BackendID = redactIfPresent(artifact.BackendID)
+	artifact.ObjectKey = redactIfPresent(artifact.ObjectKey)
+	artifact.ManifestObjectKey = redactIfPresent(artifact.ManifestObjectKey)
+	artifact.SHA256 = redactIfPresent(artifact.SHA256)
+	artifact.ManifestDigest = redactIfPresent(artifact.ManifestDigest)
+	artifact.Manifest.ObjectKey = redactIfPresent(artifact.Manifest.ObjectKey)
+	artifact.Manifest.ManifestObjectKey = redactIfPresent(artifact.Manifest.ManifestObjectKey)
+	artifact.Manifest.SHA256 = redactIfPresent(artifact.Manifest.SHA256)
+	for index := range artifact.Manifest.Files {
+		artifact.Manifest.Files[index].ObjectKey = redactIfPresent(artifact.Manifest.Files[index].ObjectKey)
+		artifact.Manifest.Files[index].SHA256 = redactIfPresent(artifact.Manifest.Files[index].SHA256)
+	}
+	return artifact
+}
+
+func redactIfPresent(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return redactedSecretValue
 }
 
 func renderDiagnosticEvidenceResult(w io.Writer, result diagnosticEvidenceResult) error {

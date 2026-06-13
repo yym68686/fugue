@@ -256,3 +256,112 @@ func TestGetOperationDiagnosisExplainsBuilderPlacementFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationDiagnosisIncludesFailedBackupHint(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Backup Diagnosis Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "ops", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: "runtime_managed_shared",
+		Replicas:  1,
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	_, apiKey, err := stateStore.CreateAPIKey(tenant.ID, "reader", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	target := model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: tenant.ID, ProjectID: project.ID, AppID: app.ID, Database: "appdb"}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		TenantID:  tenant.ID,
+		ProjectID: project.ID,
+		AppID:     app.ID,
+		Name:      "app-db",
+		Target:    target,
+		BackendID: backend.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create backup policy: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:     policy.ID,
+		TenantID:     tenant.ID,
+		ProjectID:    project.ID,
+		AppID:        app.ID,
+		Target:       target,
+		BackendID:    backend.ID,
+		Trigger:      model.BackupRunTriggerScheduled,
+		Status:       model.BackupRunStatusFailed,
+		ErrorCode:    "pg_dump_failed",
+		ErrorMessage: "pg_dump exited non-zero",
+	})
+	if err != nil {
+		t.Fatalf("create failed backup run: %v", err)
+	}
+	runs, err := stateStore.ListBackupRuns(store.BackupRunFilter{AppID: app.ID, PlatformAdmin: true, Limit: 20})
+	if err != nil {
+		t.Fatalf("list backup runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("expected failed backup run to be app-visible, got %+v", runs)
+	}
+	spec := app.Spec
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDeploy,
+		AppID:       app.ID,
+		DesiredSpec: &spec,
+	})
+	if err != nil {
+		t.Fatalf("create op: %v", err)
+	}
+	op, err = stateStore.FailOperation(op.ID, "deploy failed")
+	if err != nil {
+		t.Fatalf("fail op: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
+	for _, want := range []string{"backup failed", run.ID, "pg_dump_failed"} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected backup evidence %q, got %+v", want, response.Diagnosis)
+		}
+	}
+	if !strings.Contains(response.Diagnosis.Hint, "fugue app backup status/show") {
+		t.Fatalf("expected backup hint, got %+v", response.Diagnosis)
+	}
+}

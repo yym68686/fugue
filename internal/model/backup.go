@@ -17,6 +17,7 @@ const (
 	BackupTargetPersistentStorage    = "persistent-storage"
 	BackupTargetDataWorkspace        = "data-workspace"
 	BackupTargetRegistry             = "registry"
+	BackupTargetPlatformComponent    = "platform-component"
 
 	BackupPolicyStatusActive           = "active"
 	BackupPolicyStatusDisabled         = "disabled"
@@ -334,6 +335,8 @@ func NormalizeBackupTargetType(raw string) string {
 		return BackupTargetDataWorkspace
 	case BackupTargetRegistry, "image-registry":
 		return BackupTargetRegistry
+	case BackupTargetPlatformComponent, "platform", "component":
+		return BackupTargetPlatformComponent
 	default:
 		return strings.TrimSpace(strings.ToLower(raw))
 	}
@@ -352,7 +355,7 @@ func NormalizeBackupScope(raw string, target BackupTarget) string {
 	}
 	target = NormalizeBackupTarget(target)
 	switch {
-	case target.Type == BackupTargetControlPlaneDatabase || target.Type == BackupTargetRegistry:
+	case target.Type == BackupTargetControlPlaneDatabase || target.Type == BackupTargetRegistry || target.Type == BackupTargetPlatformComponent:
 		return BackupScopePlatform
 	case target.AppID != "" || target.Type == BackupTargetAppDatabase || target.Type == BackupTargetPersistentStorage:
 		return BackupScopeApp

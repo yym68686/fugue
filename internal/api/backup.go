@@ -1,7 +1,9 @@
 package api
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -592,6 +595,10 @@ func (s *Server) handleCreateBackupRestorePlan(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if _, err := s.store.GetBackupArtifact(req.ArtifactID, principal.TenantID, principal.IsPlatformAdmin()); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	plan, err := s.store.CreateBackupRestorePlan(model.BackupRestorePlan{
 		ArtifactID:    req.ArtifactID,
 		Target:        req.Target,
@@ -636,10 +643,31 @@ func (s *Server) handleCreateBackupRestoreRun(w http.ResponseWriter, r *http.Req
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	plan, err := s.store.GetBackupRestorePlan(req.PlanID, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	mode := model.NormalizeBackupRestoreMode(firstNonEmptyString(req.Mode, plan.Mode))
+	phases := append([]model.BackupRestorePhase(nil), plan.Phases...)
+	if mode == model.BackupRestoreModeReplace {
+		protectiveRun, err := s.createProtectiveBackupRunForRestore(principal, plan)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if protectiveRun.Status == model.BackupRunStatusBlocked {
+			httpx.WriteError(w, http.StatusConflict, protectiveRun.ErrorMessage)
+			return
+		}
+		phases = annotateProtectiveBackupPhase(phases, protectiveRun.ID)
+		go s.executeBackupRun(contextWithoutCancel(r.Context()), protectiveRun.ID)
+	}
 	run, err := s.store.CreateBackupRestoreRun(model.BackupRestoreRun{
 		PlanID:          req.PlanID,
-		Mode:            req.Mode,
+		Mode:            mode,
 		Status:          model.BackupRestoreStatusPlanned,
+		Phases:          phases,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 	})
@@ -747,7 +775,7 @@ func (s *Server) handleGetAppBackupStatus(w http.ResponseWriter, r *http.Request
 		"app":       sanitizeAppForAPI(app),
 		"policies":  policies,
 		"artifacts": artifacts,
-		"posture":   appBackupPosture(app, policies, artifacts),
+		"posture":   s.appBackupPosture(app, policies, artifacts),
 	})
 }
 
@@ -803,6 +831,15 @@ func resolveAppBackupTarget(w http.ResponseWriter, app model.App, target model.B
 	target.ProjectID = app.ProjectID
 	target.AppID = app.ID
 	target.Name = firstNonEmptyString(target.Name, app.Name)
+	if target.Type == model.BackupTargetPersistentStorage {
+		storage, _ := appPersistentStorageBackupSpec(app)
+		if storage == nil {
+			httpx.WriteError(w, http.StatusBadRequest, "app has no persistent storage backup target")
+			return model.BackupTarget{}, false
+		}
+		target.RuntimeID = firstNonEmptyString(target.RuntimeID, app.Spec.RuntimeID)
+		return target, true
+	}
 	if target.Type != model.BackupTargetAppDatabase {
 		return target, true
 	}
@@ -1150,11 +1187,11 @@ func (s *Server) runBackup(ctx context.Context, run model.BackupRun) ([]model.Ba
 	case model.BackupTargetAppDatabase:
 		return s.runAppDatabaseBackup(ctx, run)
 	case model.BackupTargetPersistentStorage:
-		return nil, fmt.Errorf("unsupported_target: persistent storage backup worker is disabled by default")
+		return s.runPersistentStorageBackup(ctx, run)
 	case model.BackupTargetDataWorkspace:
-		return nil, fmt.Errorf("unsupported_target: data workspace backup maps to snapshot integration and is disabled by default")
+		return s.runDataWorkspaceBackup(ctx, run)
 	case model.BackupTargetRegistry:
-		return nil, fmt.Errorf("unsupported_target: bundled registry backup is not enabled")
+		return s.runRegistryBackup(ctx, run)
 	default:
 		return nil, fmt.Errorf("unsupported_target: %s", run.Target.Type)
 	}
@@ -1239,7 +1276,8 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 			"backend_kind":      s.store.BackendKind(),
 			"pg_dump":           pgDump,
 			"status_error":      errorString(statusErr),
-			"cnpg_integration":  "logical-pg-dump",
+			"cnpg_integration":  s.controlPlaneCNPGBackupIntegrationLabel(),
+			"cnpg_backup_name":  s.controlPlaneCNPGBackupName,
 			"restore_drill":     "plan-available",
 			"offline_restore":   "supported",
 			"online_restore":    "plan-only",
@@ -1437,6 +1475,623 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	return []model.BackupArtifact{artifact}, nil
 }
 
+func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+	if strings.TrimSpace(run.BackendID) == "" {
+		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
+	}
+	appID := firstNonEmptyString(run.AppID, run.Target.AppID)
+	if appID == "" {
+		return nil, fmt.Errorf("app_id_missing: persistent storage backup requires an app id")
+	}
+	app, err := s.store.GetApp(appID)
+	if err != nil {
+		return nil, err
+	}
+	storage, storageKind := appPersistentStorageBackupSpec(app)
+	if storage == nil {
+		return nil, fmt.Errorf("persistent_storage_missing: app has no persistent storage or workspace backup target")
+	}
+	sourceRoot, ok := persistentStorageBackupSourceRoot(app)
+	if !ok {
+		return nil, fmt.Errorf("persistent_storage_source_unavailable: FUGUE_BACKUP_PERSISTENT_STORAGE_ROOT is not mounted for the file-level worker")
+	}
+	info, err := os.Stat(sourceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("stat persistent storage source: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("persistent_storage_source_invalid: %s is not a directory", sourceRoot)
+	}
+	backend, objectBackend, err := s.backupObjectBackendForRun(run, app.TenantID, false)
+	if err != nil {
+		return nil, err
+	}
+	tmpDir, err := os.MkdirTemp("", "fugue-persistent-storage-backup-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	archivePath := filepath.Join(tmpDir, "persistent-storage.tar.gz")
+	files, logicalBytes, err := writeFileArchive(sourceRoot, archivePath)
+	if err != nil {
+		return nil, err
+	}
+	size, sha256sum, err := fileSizeAndSHA256(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	version := backupVersionLabel(run.Version)
+	target := model.NormalizeBackupTarget(run.Target)
+	target.Type = model.BackupTargetPersistentStorage
+	target.TenantID = app.TenantID
+	target.ProjectID = app.ProjectID
+	target.AppID = app.ID
+	target.Name = firstNonEmptyString(target.Name, app.Name)
+	target.RuntimeID = firstNonEmptyString(target.RuntimeID, app.Spec.RuntimeID)
+	baseKey := path.Join("apps", app.TenantID, app.ProjectID, app.ID, run.ID, "persistent-storage")
+	archiveKey := baseKey + "/persistent-storage.tar.gz"
+	manifestKey := baseKey + "/manifest.json"
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := objectBackend.putObject(ctx, archiveKey, file, size); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("upload persistent storage archive: %w", err)
+	}
+	_ = file.Close()
+	if err := verifyBackupObjectSHA256(ctx, objectBackend, archiveKey, size, sha256sum); err != nil {
+		return nil, fmt.Errorf("verify persistent storage archive: %w", err)
+	}
+	manifest := model.NormalizeBackupManifest(model.BackupManifest{
+		RunID:             run.ID,
+		PolicyID:          run.PolicyID,
+		Target:            target,
+		Kind:              model.BackupArtifactKindFileArchive,
+		Version:           version,
+		Format:            "tar+gzip",
+		Compression:       "gzip",
+		ObjectKey:         archiveKey,
+		ManifestObjectKey: manifestKey,
+		SizeBytes:         size,
+		LogicalBytes:      logicalBytes,
+		SHA256:            sha256sum,
+		Metadata: map[string]string{
+			"app_id":                    app.ID,
+			"app_name":                  app.Name,
+			"tenant_id":                 app.TenantID,
+			"project_id":                app.ProjectID,
+			"runtime_id":                target.RuntimeID,
+			"storage_kind":              storageKind,
+			"storage_mode":              storage.Mode,
+			"storage_class":             storage.StorageClassName,
+			"claim_name":                storage.ClaimName,
+			"backup_strategy":           "file-archive",
+			"source_root":               sourceRoot,
+			"restore_target":            "new-pvc",
+			"restore_verification":      "manifest-checksum-tar-headers",
+			"cutover":                   "normal-deploy-operation",
+			"rollback":                  "retain-old-pvc-until-explicit-delete",
+			"volume_snapshot_supported": boolStringFromBool(detectCSIVolumeSnapshotSupport()),
+			"pvc_clone_supported":       boolStringFromBool(storageSupportsPVCClone(*storage)),
+		},
+		Files:     files,
+		CreatedAt: time.Now().UTC(),
+	})
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+		return nil, fmt.Errorf("upload persistent storage manifest: %w", err)
+	}
+	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+		RunID:             run.ID,
+		PolicyID:          run.PolicyID,
+		TenantID:          app.TenantID,
+		ProjectID:         app.ProjectID,
+		AppID:             app.ID,
+		Target:            target,
+		BackendID:         backend.ID,
+		Kind:              model.BackupArtifactKindFileArchive,
+		Version:           version,
+		ObjectKey:         archiveKey,
+		ManifestObjectKey: manifestKey,
+		SHA256:            sha256sum,
+		SizeBytes:         size,
+		LogicalBytes:      logicalBytes,
+		Status:            model.BackupArtifactStatusActive,
+		Billable:          backend.Billable,
+		BillingClass:      backupBillingClass(backend),
+		Manifest:          manifest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []model.BackupArtifact{artifact}, nil
+}
+
+func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+	if strings.TrimSpace(run.BackendID) == "" {
+		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
+	}
+	workspaceID := firstNonEmptyString(run.Target.WorkspaceID, run.Target.Name)
+	if workspaceID == "" {
+		return nil, fmt.Errorf("workspace_id_missing: data workspace backup requires a workspace id")
+	}
+	workspace, err := s.store.GetDataWorkspace(workspaceID, run.TenantID, false)
+	if err != nil {
+		workspace, err = s.store.GetDataWorkspace(workspaceID, "", true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	snapshot, err := s.resolveDataWorkspaceBackupSnapshot(workspace, run)
+	if err != nil {
+		return nil, err
+	}
+	backend, objectBackend, err := s.backupObjectBackendForRun(run, workspace.TenantID, false)
+	if err != nil {
+		return nil, err
+	}
+	version := backupVersionLabel(firstNonEmptyString(run.Version, snapshot.Version))
+	target := model.NormalizeBackupTarget(run.Target)
+	target.Type = model.BackupTargetDataWorkspace
+	target.TenantID = workspace.TenantID
+	target.ProjectID = workspace.ProjectID
+	target.WorkspaceID = workspace.ID
+	target.Name = workspace.Name
+	baseKey := path.Join("data-workspaces", workspace.TenantID, workspace.ProjectID, workspace.ID, run.ID)
+	manifestKey := baseKey + "/manifest.json"
+	manifest := model.NormalizeBackupManifest(model.BackupManifest{
+		RunID:             run.ID,
+		PolicyID:          run.PolicyID,
+		Target:            target,
+		Kind:              model.BackupArtifactKindDataSnapshot,
+		Version:           version,
+		Format:            "data-workspace-snapshot-reference",
+		ObjectKey:         snapshot.ID,
+		ManifestObjectKey: manifestKey,
+		SizeBytes:         snapshot.TotalBytes,
+		LogicalBytes:      snapshot.TotalBytes,
+		SHA256:            snapshot.ManifestDigest,
+		Metadata: map[string]string{
+			"workspace_id":           workspace.ID,
+			"workspace_name":         workspace.Name,
+			"snapshot_id":            snapshot.ID,
+			"snapshot_version":       snapshot.Version,
+			"manifest_digest":        snapshot.ManifestDigest,
+			"file_count":             strconv.Itoa(snapshot.FileCount),
+			"asset_count":            strconv.Itoa(snapshot.AssetCount),
+			"total_bytes":            strconv.FormatInt(snapshot.TotalBytes, 10),
+			"storage_backend_id":     workspace.StorageBackendID,
+			"retention_protection":   "protected-backup-artifacts-are-not-expired",
+			"restore_plan":           "data-workspace-snapshot-materialization",
+			"blob_retention_policy":  "do-not-delete-blobs-referenced-by-protected-snapshots",
+			"snapshot_creation_mode": dataWorkspaceSnapshotCreationMode(run, snapshot),
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+		return nil, fmt.Errorf("upload data workspace backup manifest: %w", err)
+	}
+	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+		RunID:             run.ID,
+		PolicyID:          run.PolicyID,
+		TenantID:          workspace.TenantID,
+		ProjectID:         workspace.ProjectID,
+		Target:            target,
+		BackendID:         backend.ID,
+		Kind:              model.BackupArtifactKindDataSnapshot,
+		Version:           version,
+		ObjectKey:         snapshot.ID,
+		ManifestObjectKey: manifestKey,
+		SHA256:            snapshot.ManifestDigest,
+		SizeBytes:         int64(len(manifestBytes)),
+		LogicalBytes:      snapshot.TotalBytes,
+		Status:            model.BackupArtifactStatusActive,
+		Protected:         true,
+		Billable:          backend.Billable,
+		BillingClass:      backupBillingClass(backend),
+		ManifestDigest:    snapshot.ManifestDigest,
+		Manifest:          manifest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []model.BackupArtifact{artifact}, nil
+}
+
+func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+	if strings.TrimSpace(run.BackendID) == "" {
+		return nil, fmt.Errorf("backup_backend_missing: backup backend is not configured")
+	}
+	backend, objectBackend, err := s.backupObjectBackendForRun(run, "", true)
+	if err != nil {
+		return nil, err
+	}
+	version := backupVersionLabel(run.Version)
+	target := model.NormalizeBackupTarget(run.Target)
+	target.Type = model.BackupTargetRegistry
+	target.Component = firstNonEmptyString(target.Component, "registry")
+	baseKey := path.Join("platform", "registry", run.ID)
+	if s.registryIsExternalized() {
+		manifestKey := baseKey + "/manifest.json"
+		manifest := model.NormalizeBackupManifest(model.BackupManifest{
+			RunID:             run.ID,
+			PolicyID:          run.PolicyID,
+			Target:            target,
+			Kind:              model.BackupArtifactKindRegistryArchive,
+			Version:           version,
+			Format:            "externalized-registry-reference",
+			ManifestObjectKey: manifestKey,
+			Metadata: map[string]string{
+				"registry_push_base": s.registryPushBase,
+				"registry_pull_base": s.registryPullBase,
+				"registry_mirror":    s.clusterJoinRegistryEndpoint,
+				"externalized":       "true",
+				"backup_strategy":    "external-provider-backup",
+			},
+			CreatedAt: time.Now().UTC(),
+		})
+		manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(manifestBytes)
+		sha256sum := hex.EncodeToString(sum[:])
+		manifest.SHA256 = sha256sum
+		if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+			return nil, fmt.Errorf("upload registry reference manifest: %w", err)
+		}
+		artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+			RunID:             run.ID,
+			PolicyID:          run.PolicyID,
+			Target:            target,
+			BackendID:         backend.ID,
+			Kind:              model.BackupArtifactKindRegistryArchive,
+			Version:           version,
+			ManifestObjectKey: manifestKey,
+			SHA256:            sha256sum,
+			SizeBytes:         int64(len(manifestBytes)),
+			LogicalBytes:      0,
+			Status:            model.BackupArtifactStatusActive,
+			Billable:          backend.Billable,
+			BillingClass:      backupBillingClass(backend),
+			Manifest:          manifest,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return []model.BackupArtifact{artifact}, nil
+	}
+	sourceRoot := strings.TrimSpace(os.Getenv("FUGUE_BACKUP_REGISTRY_ROOT"))
+	if sourceRoot == "" {
+		return nil, fmt.Errorf("registry_source_unavailable: bundled registry backup requires FUGUE_BACKUP_REGISTRY_ROOT to be mounted")
+	}
+	if gcRunning := strings.TrimSpace(os.Getenv("FUGUE_BACKUP_REGISTRY_GC_RUNNING")); strings.EqualFold(gcRunning, "true") {
+		return nil, fmt.Errorf("registry_gc_running: registry backup is blocked while registry GC is running")
+	}
+	tmpDir, err := os.MkdirTemp("", "fugue-registry-backup-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
+	archivePath := filepath.Join(tmpDir, "registry.tar.gz")
+	files, logicalBytes, err := writeFileArchive(sourceRoot, archivePath)
+	if err != nil {
+		return nil, err
+	}
+	size, sha256sum, err := fileSizeAndSHA256(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	archiveKey := baseKey + "/registry.tar.gz"
+	manifestKey := baseKey + "/manifest.json"
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := objectBackend.putObject(ctx, archiveKey, file, size); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("upload registry archive: %w", err)
+	}
+	_ = file.Close()
+	if err := verifyBackupObjectSHA256(ctx, objectBackend, archiveKey, size, sha256sum); err != nil {
+		return nil, fmt.Errorf("verify registry archive: %w", err)
+	}
+	manifest := model.NormalizeBackupManifest(model.BackupManifest{
+		RunID:             run.ID,
+		PolicyID:          run.PolicyID,
+		Target:            target,
+		Kind:              model.BackupArtifactKindRegistryArchive,
+		Version:           version,
+		Format:            "tar+gzip",
+		Compression:       "gzip",
+		ObjectKey:         archiveKey,
+		ManifestObjectKey: manifestKey,
+		SizeBytes:         size,
+		LogicalBytes:      logicalBytes,
+		SHA256:            sha256sum,
+		Metadata: map[string]string{
+			"backup_strategy":        "file-archive",
+			"registry_gc_lease_name": s.registryGCLeaseName,
+			"gc_coordination":        "blocked-when-FUGUE_BACKUP_REGISTRY_GC_RUNNING=true",
+			"source_root":            sourceRoot,
+		},
+		Files:     files,
+		CreatedAt: time.Now().UTC(),
+	})
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
+		return nil, fmt.Errorf("upload registry manifest: %w", err)
+	}
+	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+		RunID:             run.ID,
+		PolicyID:          run.PolicyID,
+		Target:            target,
+		BackendID:         backend.ID,
+		Kind:              model.BackupArtifactKindRegistryArchive,
+		Version:           version,
+		ObjectKey:         archiveKey,
+		ManifestObjectKey: manifestKey,
+		SHA256:            sha256sum,
+		SizeBytes:         size,
+		LogicalBytes:      logicalBytes,
+		Status:            model.BackupArtifactStatusActive,
+		Billable:          backend.Billable,
+		BillingClass:      backupBillingClass(backend),
+		Manifest:          manifest,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []model.BackupArtifact{artifact}, nil
+}
+
+func (s *Server) backupObjectBackendForRun(run model.BackupRun, tenantID string, platformAdmin bool) (model.BackupBackend, *dataObjectBackend, error) {
+	backend, err := s.store.GetBackupBackendForUse(run.BackendID, tenantID, platformAdmin)
+	if err != nil && tenantID != "" {
+		backend, err = s.store.GetBackupBackendForUse(run.BackendID, "", true)
+	}
+	if err != nil {
+		return model.BackupBackend{}, nil, err
+	}
+	objectBackend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(backend))
+	if err != nil {
+		return model.BackupBackend{}, nil, err
+	}
+	return backend, objectBackend, nil
+}
+
+func backupVersionLabel(raw string) string {
+	version := strings.TrimSpace(raw)
+	if version == "" {
+		version = "v" + time.Now().UTC().Format("20060102-150405")
+	}
+	return version
+}
+
+func appPersistentStorageBackupSpec(app model.App) (*model.AppPersistentStorageSpec, string) {
+	if app.Spec.PersistentStorage != nil {
+		storage := *app.Spec.PersistentStorage
+		return &storage, "persistent_storage"
+	}
+	if app.Spec.Workspace != nil {
+		workspace := *app.Spec.Workspace
+		mountPath, err := model.NormalizeAppWorkspaceMountPath(workspace.MountPath)
+		if err != nil {
+			mountPath = model.DefaultAppWorkspaceMountPath
+		}
+		storage := model.AppPersistentStorageSpec{
+			Mode:             model.AppPersistentStorageModeMovableRWO,
+			StoragePath:      workspace.StoragePath,
+			StorageSize:      workspace.StorageSize,
+			StorageClassName: workspace.StorageClassName,
+			ResetToken:       workspace.ResetToken,
+			Mounts: []model.AppPersistentStorageMount{{
+				Kind: model.AppPersistentStorageMountKindDirectory,
+				Path: mountPath,
+				Mode: 0o755,
+			}},
+		}
+		return &storage, "workspace"
+	}
+	return nil, ""
+}
+
+func persistentStorageBackupSourceRoot(app model.App) (string, bool) {
+	root := strings.TrimSpace(os.Getenv("FUGUE_BACKUP_PERSISTENT_STORAGE_ROOT"))
+	if root == "" {
+		return "", false
+	}
+	replacements := map[string]string{
+		"{tenant_id}":  app.TenantID,
+		"{project_id}": app.ProjectID,
+		"{app_id}":     app.ID,
+		"{app_name}":   app.Name,
+	}
+	for key, value := range replacements {
+		root = strings.ReplaceAll(root, key, value)
+	}
+	return filepath.Clean(root), true
+}
+
+func writeFileArchive(sourceRoot, archivePath string) ([]model.BackupManifestFile, int64, error) {
+	sourceRoot = filepath.Clean(sourceRoot)
+	out, err := os.Create(archivePath)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer out.Close()
+	gw := gzip.NewWriter(out)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+	var files []model.BackupManifestFile
+	var logicalBytes int64
+	err = filepath.WalkDir(sourceRoot, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == sourceRoot {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(sourceRoot, current)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." || rel == "" {
+			return nil
+		}
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, _ = os.Readlink(current)
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
+		if err != nil {
+			return err
+		}
+		header.Name = rel
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		manifestFile := model.BackupManifestFile{
+			Path:  rel,
+			Size:  info.Size(),
+			MTime: info.ModTime().UTC(),
+		}
+		switch {
+		case entry.Type().IsDir():
+			manifestFile.Kind = "directory"
+		case info.Mode()&os.ModeSymlink != 0:
+			manifestFile.Kind = "symlink"
+		case info.Mode().IsRegular():
+			manifestFile.Kind = "file"
+			file, err := os.Open(current)
+			if err != nil {
+				return err
+			}
+			hasher := sha256.New()
+			written, copyErr := io.Copy(io.MultiWriter(tw, hasher), file)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if written != info.Size() {
+				return fmt.Errorf("archive file %s wrote %d bytes, expected %d", rel, written, info.Size())
+			}
+			logicalBytes += written
+			manifestFile.SHA256 = hex.EncodeToString(hasher.Sum(nil))
+		default:
+			manifestFile.Kind = "special"
+		}
+		files = append(files, manifestFile)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return files, logicalBytes, nil
+}
+
+func (s *Server) resolveDataWorkspaceBackupSnapshot(workspace model.DataWorkspace, run model.BackupRun) (model.DataSnapshot, error) {
+	version := strings.TrimSpace(run.Version)
+	if version != "" {
+		if snapshot, err := s.store.GetDataSnapshot(workspace.ID, version); err == nil {
+			return snapshot, nil
+		}
+	}
+	latest, err := s.store.LatestDataSnapshot(workspace.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return s.store.CreateDataSnapshot(model.DataSnapshot{
+				WorkspaceID: workspace.ID,
+				Version:     firstNonEmptyString(version, backupVersionLabel("")),
+				Message:     "created by Fugue backup policy because no data workspace snapshot existed",
+				Manifest: model.DataManifest{
+					WorkspaceID: workspace.ID,
+					Entries:     []model.DataManifestEntry{},
+				},
+				CreatedBy: "backup-worker",
+			})
+		}
+		return model.DataSnapshot{}, err
+	}
+	if version == "" || version == latest.Version {
+		return latest, nil
+	}
+	return s.store.CreateDataSnapshot(model.DataSnapshot{
+		WorkspaceID: workspace.ID,
+		Version:     version,
+		Message:     "created by Fugue backup policy from latest data workspace snapshot " + latest.ID,
+		Manifest:    latest.Manifest,
+		CreatedBy:   "backup-worker",
+	})
+}
+
+func dataWorkspaceSnapshotCreationMode(run model.BackupRun, snapshot model.DataSnapshot) string {
+	if strings.TrimSpace(run.Version) == "" || strings.TrimSpace(run.Version) == snapshot.Version {
+		return "referenced-existing-snapshot"
+	}
+	return "created-versioned-snapshot-reference"
+}
+
+func detectCSIVolumeSnapshotSupport() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("FUGUE_BACKUP_CSI_VOLUME_SNAPSHOT_SUPPORTED")))
+	return value == "1" || value == "true" || value == "yes"
+}
+
+func storageSupportsPVCClone(storage model.AppPersistentStorageSpec) bool {
+	mode := strings.TrimSpace(storage.Mode)
+	return mode == model.AppPersistentStorageModeDedicatedPVC || mode == model.AppPersistentStorageModeMovableRWO
+}
+
+func boolStringFromBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func (s *Server) registryIsExternalized() bool {
+	for _, value := range []string{s.registryPushBase, s.registryPullBase, s.clusterJoinRegistryEndpoint} {
+		if looksBundledRegistryEndpoint(value) {
+			return false
+		}
+	}
+	return strings.TrimSpace(s.registryPushBase) != "" || strings.TrimSpace(s.registryPullBase) != "" || strings.TrimSpace(s.clusterJoinRegistryEndpoint) != ""
+}
+
+func looksBundledRegistryEndpoint(raw string) bool {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, "svc.cluster.local") ||
+		strings.Contains(value, "fugue-registry") ||
+		strings.Contains(value, "registry.fugue.internal") ||
+		strings.HasPrefix(value, "127.") ||
+		strings.HasPrefix(value, "localhost") ||
+		strings.HasPrefix(value, "10.") ||
+		strings.HasPrefix(value, "100.64.")
+}
+
 func (s *Server) testBackupBackend(ctx context.Context, backendID string, principal model.Principal) (bool, string) {
 	ctx, cancel := context.WithTimeout(ctx, backupBackendProbeTTL)
 	defer cancel()
@@ -1613,11 +2268,156 @@ func (s *Server) platformBackupPosture(policies []model.BackupPolicy, usage mode
 			LastSuccessfulRunID:  policy.LastSuccessfulRunID,
 			LastSuccessfulAt:     policy.LastSuccessfulAt,
 			BillableBytes:        usage.BillableBytes,
-			CNPGBackupIntegrated: false,
+			CNPGBackupIntegrated: s.controlPlaneCNPGBackupIntegrated(),
 			RestoreDrillStatus:   "plan-available",
 		})
 	}
+	out = append(out, s.registryBackupPosture())
+	out = append(out, s.platformComponentBackupPosture("headscale"))
+	out = append(out, s.platformComponentBackupPosture("dns"))
+	out = append(out, s.platformComponentBackupPosture("edge"))
 	return out
+}
+
+func (s *Server) createProtectiveBackupRunForRestore(principal model.Principal, plan model.BackupRestorePlan) (model.BackupRun, error) {
+	artifact, err := s.store.GetBackupArtifact(plan.ArtifactID, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		return model.BackupRun{}, err
+	}
+	return s.store.CreateBackupRun(model.BackupRun{
+		TenantID:        plan.TenantID,
+		ProjectID:       plan.ProjectID,
+		AppID:           plan.AppID,
+		Target:          plan.Target,
+		BackendID:       artifact.BackendID,
+		Trigger:         "pre-restore-protective",
+		Version:         "protective-" + time.Now().UTC().Format("20060102-150405"),
+		Status:          model.BackupRunStatusPending,
+		RequestedByType: principal.ActorType,
+		RequestedByID:   principal.ActorID,
+	})
+}
+
+func annotateProtectiveBackupPhase(phases []model.BackupRestorePhase, runID string) []model.BackupRestorePhase {
+	if len(phases) == 0 {
+		phases = []model.BackupRestorePhase{{Name: "protective-backup", Status: model.BackupRestoreStatusPlanned}}
+	}
+	found := false
+	for idx := range phases {
+		if phases[idx].Name == "protective-backup" {
+			phases[idx].Message = strings.TrimSpace(phases[idx].Message + " queued protective backup run " + runID)
+			found = true
+			break
+		}
+	}
+	if !found {
+		phases = append([]model.BackupRestorePhase{{
+			Name:    "protective-backup",
+			Status:  model.BackupRestoreStatusPlanned,
+			Message: "queued protective backup run " + runID,
+		}}, phases...)
+	}
+	return phases
+}
+
+func (s *Server) controlPlaneCNPGBackupIntegrated() bool {
+	return s.controlPlaneCNPGBackupEnabled || strings.TrimSpace(s.controlPlaneCNPGBackupName) != ""
+}
+
+func (s *Server) controlPlaneCNPGBackupIntegrationLabel() string {
+	if s.controlPlaneCNPGBackupIntegrated() {
+		return "cnpg-scheduled-backup:" + strings.TrimSpace(s.controlPlaneCNPGBackupName)
+	}
+	return "logical-pg-dump"
+}
+
+func (s *Server) registryBackupPosture() model.BackupPosture {
+	externalized := s.registryIsExternalized()
+	status := "blocked"
+	message := "registry endpoint is not configured"
+	if strings.TrimSpace(s.registryPushBase) != "" || strings.TrimSpace(s.registryPullBase) != "" || strings.TrimSpace(s.clusterJoinRegistryEndpoint) != "" {
+		if externalized {
+			status = "externalized"
+			message = "registry endpoints are externalized; Fugue records endpoint health and relies on provider registry backup"
+		} else {
+			status = "needs-backup"
+			message = "bundled registry requires PVC/object backup coordinated with registry GC"
+		}
+	}
+	return model.BackupPosture{
+		Target: model.BackupTarget{
+			Type:      model.BackupTargetRegistry,
+			Component: "registry",
+			Name:      firstNonEmptyString(s.registryPullBase, s.registryPushBase, s.clusterJoinRegistryEndpoint),
+		},
+		Status:             status,
+		Message:            message,
+		Externalized:       externalized,
+		ExternallyBackedUp: externalized,
+	}
+}
+
+func (s *Server) platformComponentBackupPosture(component string) model.BackupPosture {
+	component = strings.TrimSpace(strings.ToLower(component))
+	posture := model.BackupPosture{
+		Target: model.BackupTarget{
+			Type:      model.BackupTargetPlatformComponent,
+			Component: component,
+			Name:      component,
+		},
+		Status:  "recorded-in-control-plane",
+		Message: "authoritative state is backed up with the control-plane database",
+	}
+	switch component {
+	case "headscale":
+		provider := strings.TrimSpace(strings.ToLower(s.clusterJoinMeshProvider))
+		loginServer := strings.TrimSpace(s.clusterJoinMeshLoginServer)
+		if provider == "" {
+			posture.Status = "disabled"
+			posture.Message = "mesh provider is not configured"
+			return posture
+		}
+		posture.Target.Name = firstNonEmptyString(loginServer, provider)
+		posture.Externalized = provider != "headscale" || looksExternalPlatformEndpoint(loginServer)
+		posture.ExternallyBackedUp = posture.Externalized
+		if posture.Externalized {
+			posture.Status = "externalized"
+			posture.Message = "mesh control state is externalized; provider backup is authoritative"
+		} else {
+			posture.Status = "needs-backup"
+			posture.Message = "bundled headscale uses persistent state; back up the headscale PVC or externalize it"
+		}
+	case "dns":
+		nodes, err := s.store.ListDNSNodes("")
+		if err != nil {
+			posture.Status = "unknown"
+			posture.Message = "dns inventory unavailable: " + err.Error()
+			return posture
+		}
+		posture.Message = fmt.Sprintf("control-plane DNS records and ACME challenges are backed up; %d DNS node caches are reconstructable from signed bundles", len(nodes))
+	case "edge":
+		nodes, _, err := s.store.ListEdgeNodes("")
+		if err != nil {
+			posture.Status = "unknown"
+			posture.Message = "edge inventory unavailable: " + err.Error()
+			return posture
+		}
+		posture.Message = fmt.Sprintf("route policy and node inventory are backed up; %d edge node caches are reconstructable, but node-local Caddy data should be externalized or backed up", len(nodes))
+	}
+	return posture
+}
+
+func looksExternalPlatformEndpoint(raw string) bool {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return false
+	}
+	return !strings.Contains(value, "svc.cluster.local") &&
+		!strings.Contains(value, ".svc") &&
+		!strings.Contains(value, "localhost") &&
+		!strings.HasPrefix(value, "127.") &&
+		!strings.HasPrefix(value, "10.") &&
+		!strings.HasPrefix(value, "100.64.")
 }
 
 func (s *Server) writeBackupMetrics(w io.Writer) {
@@ -1704,7 +2504,35 @@ func boolLabel(value bool) string {
 	return "false"
 }
 
-func appBackupPosture(app model.App, policies []model.BackupPolicy, artifacts []model.BackupArtifact) []model.BackupPosture {
+func (s *Server) persistentStoragePostureMessage(app model.App) string {
+	storage, kind := appPersistentStorageBackupSpec(app)
+	if storage == nil {
+		return "persistent storage is not configured"
+	}
+	runtimeID := strings.TrimSpace(app.Spec.RuntimeID)
+	runtimeType := ""
+	if runtimeID != "" {
+		if runtime, err := s.store.GetRuntime(runtimeID); err == nil {
+			runtimeType = runtime.Type
+		}
+	}
+	if runtimeType != "" && !model.RuntimeSupportsPersistentWorkspace(runtimeType) {
+		return fmt.Sprintf("%s backup blocked: runtime %s does not support persistent workspaces", kind, runtimeType)
+	}
+	strategy := "file-archive"
+	if detectCSIVolumeSnapshotSupport() {
+		strategy = "csi-snapshot"
+	} else if storageSupportsPVCClone(*storage) {
+		strategy = "pvc-clone-or-file-archive"
+	}
+	workerRoot := "not-mounted"
+	if _, ok := persistentStorageBackupSourceRoot(app); ok {
+		workerRoot = "mounted"
+	}
+	return fmt.Sprintf("%s backup strategy=%s csi_snapshot=%t pvc_clone=%t file_worker=%s", kind, strategy, detectCSIVolumeSnapshotSupport(), storageSupportsPVCClone(*storage), workerRoot)
+}
+
+func (s *Server) appBackupPosture(app model.App, policies []model.BackupPolicy, artifacts []model.BackupArtifact) []model.BackupPosture {
 	targets := []model.BackupTarget{
 		{Type: model.BackupTargetAppDatabase, TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID, Name: app.Name},
 		{Type: model.BackupTargetPersistentStorage, TenantID: app.TenantID, ProjectID: app.ProjectID, AppID: app.ID, Name: app.Name},
@@ -1730,6 +2558,9 @@ func appBackupPosture(app model.App, policies []model.BackupPolicy, artifacts []
 			if artifact.Target.Type == target.Type {
 				posture.BillableBytes += artifact.SizeBytes
 			}
+		}
+		if target.Type == model.BackupTargetPersistentStorage {
+			posture.Message = firstNonEmptyString(posture.Message, s.persistentStoragePostureMessage(app))
 		}
 		out = append(out, posture)
 	}

@@ -48,6 +48,7 @@ func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, err)
 		return
 	}
+	s.attachOperationBackupDiagnosis(op, &diagnosis)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": diagnosis})
 }
 
@@ -586,6 +587,61 @@ func (s *Server) attachOperationControllerLaneDiagnosis(op model.Operation, diag
 	}
 	diagnosis.ControllerLane = &laneDiagnosis
 	return nil
+}
+
+func (s *Server) attachOperationBackupDiagnosis(op model.Operation, diagnosis *model.OperationDiagnosis) {
+	if s == nil || s.store == nil || diagnosis == nil || strings.TrimSpace(op.AppID) == "" {
+		return
+	}
+	runs, err := s.store.ListBackupRuns(store.BackupRunFilter{AppID: op.AppID, PlatformAdmin: true, Limit: 20})
+	if err != nil {
+		diagnosis.Evidence = append(diagnosis.Evidence, "backup status unavailable: "+err.Error())
+		return
+	}
+	now := time.Now().UTC()
+	findings := make([]string, 0, 3)
+	for _, run := range runs {
+		switch {
+		case run.Status == model.BackupRunStatusFailed:
+			findings = append(findings, formatOperationBackupRunFinding("failed", run))
+		case backupRunIsStale(run, now):
+			findings = append(findings, formatOperationBackupRunFinding("stale", run))
+		}
+		if len(findings) >= 3 {
+			break
+		}
+	}
+	if len(findings) == 0 {
+		return
+	}
+	diagnosis.Evidence = append(diagnosis.Evidence, findings...)
+	backupHint := "Resolve failed or stale app backups before destructive restore, failover, or migration work; inspect with fugue app backup status/show."
+	if strings.TrimSpace(diagnosis.Hint) == "" {
+		diagnosis.Hint = backupHint
+	} else if !strings.Contains(strings.ToLower(diagnosis.Hint), "backup") {
+		diagnosis.Hint = strings.TrimSpace(diagnosis.Hint) + " " + backupHint
+	}
+}
+
+func formatOperationBackupRunFinding(label string, run model.BackupRun) string {
+	parts := []string{
+		"backup " + label,
+		"run=" + strings.TrimSpace(run.ID),
+		"target=" + strings.TrimSpace(run.Target.Type),
+		"status=" + strings.TrimSpace(run.Status),
+	}
+	if run.ErrorCode != "" {
+		parts = append(parts, "error_code="+strings.TrimSpace(run.ErrorCode))
+	}
+	if run.ErrorMessage != "" {
+		parts = append(parts, "error="+strings.TrimSpace(run.ErrorMessage))
+	}
+	if run.UpdatedAt.IsZero() {
+		parts = append(parts, "created_at="+run.CreatedAt.Format(time.RFC3339))
+	} else {
+		parts = append(parts, "updated_at="+run.UpdatedAt.Format(time.RFC3339))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Server) diagnosisAppsByID(appIDs []string) (map[string]model.App, error) {

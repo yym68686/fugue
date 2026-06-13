@@ -19,6 +19,7 @@ type adminCockpitPayload struct {
 	EdgeNodes         []model.EdgeNode                      `json:"edge_nodes,omitempty"`
 	DNSNodes          []model.DNSNode                       `json:"dns_nodes,omitempty"`
 	ControlPlane      *model.ControlPlaneStatus             `json:"control_plane,omitempty"`
+	Backup            *adminBackupStatusResponse            `json:"backup,omitempty"`
 	Users             *adminUsersPageSnapshot               `json:"users,omitempty"`
 	RouteTrace        []adminCockpitRouteTraceRow           `json:"route_trace,omitempty"`
 	Warnings          []string                              `json:"warnings,omitempty"`
@@ -115,6 +116,11 @@ func (c *CLI) loadAdminCockpit(client *Client) adminCockpitPayload {
 	} else {
 		payload.Warnings = append(payload.Warnings, "control plane unavailable: "+err.Error())
 	}
+	if backup, err := client.GetAdminBackupStatus(); err == nil {
+		payload.Backup = &backup
+	} else {
+		payload.Warnings = append(payload.Warnings, "backup status unavailable: "+err.Error())
+	}
 	payload.RouteTrace = buildAdminRouteTrace(payload)
 	return payload
 }
@@ -127,6 +133,9 @@ func (c *CLI) renderAdminCockpit(payload adminCockpitPayload, redacted bool) err
 	}
 	if payload.ControlPlane != nil {
 		body = append(body, "control_plane="+firstNonEmptyTrimmed(payload.ControlPlane.Status, "-"))
+	}
+	if payload.Backup != nil {
+		body = append(body, fmt.Sprintf("backup=%s billable_backup_bytes=%d", summarizeAdminBackupPosture(payload.Backup.Posture), payload.Backup.Usage.BillableBytes))
 	}
 	if payload.NodePolicySummary != nil {
 		body = append(body, fmt.Sprintf("node_policy_drifted=%d blocked_by_health=%d", payload.NodePolicySummary.Drifted, payload.NodePolicySummary.BlockedByHealth))
@@ -150,6 +159,19 @@ func (c *CLI) renderAdminCockpit(payload adminCockpitPayload, redacted bool) err
 	} else {
 		body = append(body, "cluster_nodes=empty")
 	}
+	if payload.Backup != nil && len(payload.Backup.Posture) > 0 {
+		rows := make([][]string, 0, len(payload.Backup.Posture))
+		for _, posture := range payload.Backup.Posture {
+			rows = append(rows, []string{
+				posture.Target.Type,
+				firstNonEmptyTrimmed(posture.Status, "-"),
+				formatBackupTime(posture.LastSuccessfulAt),
+				fmt.Sprintf("%d", posture.BillableBytes),
+				firstNonEmptyTrimmed(posture.Message, "-"),
+			})
+		}
+		body = append(body, "", renderer.TableWithTitle("backup posture", []string{"TARGET", "STATUS", "LAST SUCCESS", "BILLABLE BYTES", "MESSAGE"}, rows))
+	}
 	if payload.Users != nil && len(payload.Users.Users) > 0 {
 		rows := make([][]string, 0, len(payload.Users.Users))
 		for _, user := range payload.Users.Users {
@@ -172,6 +194,27 @@ func (c *CLI) renderAdminCockpit(payload adminCockpitPayload, redacted bool) err
 	body = append(body, "", "admin_writes=disabled_until_action_plan")
 	_, err := fmt.Fprint(c.stdout, renderer.Panel("Admin cockpit", strings.Join(body, "\n")))
 	return err
+}
+
+func summarizeAdminBackupPosture(posture []model.BackupPosture) string {
+	if len(posture) == 0 {
+		return "unknown"
+	}
+	counts := map[string]int{}
+	for _, item := range posture {
+		status := firstNonEmptyTrimmed(item.Status, "unknown")
+		counts[status]++
+	}
+	if counts["blocked"] > 0 || counts["failed"] > 0 {
+		return fmt.Sprintf("attention(%d)", counts["blocked"]+counts["failed"])
+	}
+	if counts["ready"] == len(posture) {
+		return "ready"
+	}
+	if counts["disabled"] == len(posture) {
+		return "disabled"
+	}
+	return "mixed"
 }
 
 func buildAdminRouteTrace(payload adminCockpitPayload) []adminCockpitRouteTraceRow {

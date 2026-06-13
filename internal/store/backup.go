@@ -541,7 +541,7 @@ func (s *Store) RecordBackupBackendTest(idOrName, tenantID string, platformAdmin
 }
 
 func (s *Store) ListBackupPolicies(filter BackupPolicyFilter) ([]model.BackupPolicy, error) {
-	filter.TargetType = model.NormalizeBackupTargetType(filter.TargetType)
+	filter.TargetType = normalizeBackupTargetTypeFilter(filter.TargetType)
 	if s.usingDatabase() {
 		return s.pgListBackupPolicies(filter)
 	}
@@ -789,7 +789,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 }
 
 func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error) {
-	filter.TargetType = model.NormalizeBackupTargetType(filter.TargetType)
+	filter.TargetType = normalizeBackupTargetTypeFilter(filter.TargetType)
 	if s.usingDatabase() {
 		return s.pgListBackupRuns(filter)
 	}
@@ -935,7 +935,7 @@ func (s *Store) CreateBackupArtifact(artifact model.BackupArtifact) (model.Backu
 }
 
 func (s *Store) ListBackupArtifacts(filter BackupArtifactFilter) ([]model.BackupArtifact, error) {
-	filter.TargetType = model.NormalizeBackupTargetType(filter.TargetType)
+	filter.TargetType = normalizeBackupTargetTypeFilter(filter.TargetType)
 	if s.usingDatabase() {
 		return s.pgListBackupArtifacts(filter)
 	}
@@ -1026,7 +1026,7 @@ func (s *Store) MarkBackupArtifactDeleted(id string) (model.BackupArtifact, erro
 }
 
 func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
-	plan = model.NormalizeBackupRestorePlan(plan)
+	plan.ArtifactID = strings.TrimSpace(plan.ArtifactID)
 	if plan.ArtifactID == "" {
 		return model.BackupRestorePlan{}, ErrInvalidInput
 	}
@@ -1044,8 +1044,10 @@ func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.Bac
 		if plan.ID == "" {
 			plan.ID = model.NewID("backup_restore_plan")
 		}
-		if plan.Target.Type == "" {
+		if backupTargetIsEmpty(plan.Target) {
 			plan.Target = artifact.Target
+		} else if strings.TrimSpace(plan.Target.Type) == "" {
+			return ErrInvalidInput
 		}
 		if plan.TenantID == "" {
 			plan.TenantID = artifact.TenantID
@@ -1060,6 +1062,7 @@ func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.Bac
 			plan.CreatedAt = now
 		}
 		plan.UpdatedAt = now
+		plan.Mode = model.NormalizeBackupRestoreMode(plan.Mode)
 		if len(plan.Phases) == 0 {
 			plan.Phases = defaultRestorePlanPhases(plan)
 		}
@@ -1347,6 +1350,14 @@ func backupTargetHasActiveRun(runs []model.BackupRun, target model.BackupTarget)
 	return false
 }
 
+func normalizeBackupTargetTypeFilter(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return model.NormalizeBackupTargetType(raw)
+}
+
 func backupTargetsEqual(left, right model.BackupTarget) bool {
 	left = model.NormalizeBackupTarget(left)
 	right = model.NormalizeBackupTarget(right)
@@ -1361,6 +1372,19 @@ func backupTargetsEqual(left, right model.BackupTarget) bool {
 		left.Component == right.Component
 }
 
+func backupTargetIsEmpty(target model.BackupTarget) bool {
+	return strings.TrimSpace(target.Type) == "" &&
+		strings.TrimSpace(target.TenantID) == "" &&
+		strings.TrimSpace(target.ProjectID) == "" &&
+		strings.TrimSpace(target.AppID) == "" &&
+		strings.TrimSpace(target.WorkspaceID) == "" &&
+		strings.TrimSpace(target.RuntimeID) == "" &&
+		strings.TrimSpace(target.Name) == "" &&
+		strings.TrimSpace(target.ServiceName) == "" &&
+		strings.TrimSpace(target.Database) == "" &&
+		strings.TrimSpace(target.Component) == ""
+}
+
 func digestBackupManifest(manifest model.BackupManifest) string {
 	manifest = model.NormalizeBackupManifest(manifest)
 	raw, _ := json.Marshal(manifest)
@@ -1369,6 +1393,27 @@ func digestBackupManifest(manifest model.BackupManifest) string {
 }
 
 func defaultRestorePlanPhases(plan model.BackupRestorePlan) []model.BackupRestorePhase {
+	switch plan.Target.Type {
+	case model.BackupTargetPersistentStorage:
+		return []model.BackupRestorePhase{
+			{Name: "provision-new-pvc", Status: model.BackupRestoreStatusPlanned, Message: "restore file archive into a new persistent volume claim"},
+			{Name: "verify-manifest", Status: model.BackupRestoreStatusPlanned, Message: "verify manifest entries, file checksums, ownership, and permissions from the archive headers"},
+			{Name: "cutover-deploy", Status: model.BackupRestoreStatusPlanned, Message: "switch the app storage reference through a normal deploy operation"},
+			{Name: "retain-old-pvc", Status: model.BackupRestoreStatusPlanned, Message: "retain the previous PVC as rollback source until explicit deletion or retention expiry"},
+		}
+	case model.BackupTargetDataWorkspace:
+		return []model.BackupRestorePhase{
+			{Name: "resolve-data-snapshot", Status: model.BackupRestoreStatusPlanned, Message: "resolve the protected Data Workspace snapshot and manifest digest"},
+			{Name: "materialize-snapshot", Status: model.BackupRestoreStatusPlanned, Message: "materialize the snapshot into the target workspace or restore workspace"},
+			{Name: "verify-manifest-digest", Status: model.BackupRestoreStatusPlanned, Message: "verify manifest digest, file count, and total bytes"},
+		}
+	case model.BackupTargetRegistry:
+		return []model.BackupRestorePhase{
+			{Name: "quiesce-registry-gc", Status: model.BackupRestoreStatusPlanned, Message: "ensure registry GC is not running during restore"},
+			{Name: "restore-registry-data", Status: model.BackupRestoreStatusPlanned, Message: "restore registry archive or verify external registry backup reference"},
+			{Name: "verify-registry-catalog", Status: model.BackupRestoreStatusPlanned, Message: "verify registry catalog and protected workload digests"},
+		}
+	}
 	switch plan.Mode {
 	case model.BackupRestoreModeOfflineControlPlane:
 		return []model.BackupRestorePhase{
@@ -2832,6 +2877,7 @@ func (s *Store) pgApplyBackupRetention(policyID string) error {
 }
 
 func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
+	plan.ArtifactID = strings.TrimSpace(plan.ArtifactID)
 	artifact, err := s.pgGetBackupArtifact(plan.ArtifactID, "", true)
 	if err != nil {
 		return model.BackupRestorePlan{}, err
@@ -2840,8 +2886,10 @@ func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.B
 	if plan.ID == "" {
 		plan.ID = model.NewID("backup_restore_plan")
 	}
-	if plan.Target.Type == "" {
+	if backupTargetIsEmpty(plan.Target) {
 		plan.Target = artifact.Target
+	} else if strings.TrimSpace(plan.Target.Type) == "" {
+		return model.BackupRestorePlan{}, ErrInvalidInput
 	}
 	plan.TenantID = firstNonEmpty(plan.TenantID, artifact.TenantID)
 	plan.ProjectID = firstNonEmpty(plan.ProjectID, artifact.ProjectID)
@@ -2850,6 +2898,7 @@ func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.B
 		plan.CreatedAt = now
 	}
 	plan.UpdatedAt = now
+	plan.Mode = model.NormalizeBackupRestoreMode(plan.Mode)
 	if len(plan.Phases) == 0 {
 		plan.Phases = defaultRestorePlanPhases(plan)
 	}

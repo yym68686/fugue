@@ -7339,7 +7339,7 @@ components:
       properties:
         type:
           type: string
-          enum: [control-plane-db, app-database, persistent-storage, data-workspace, registry]
+          enum: [control-plane-db, app-database, persistent-storage, data-workspace, registry, platform-component]
         tenant_id:
           type: string
         project_id:

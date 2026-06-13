@@ -183,6 +183,11 @@ func writeDiagnosticBundleArchive(archivePath string, evidence diagnosticEvidenc
 			return debugBundleResult{}, err
 		}
 	}
+	if evidence.BackupStatus != nil {
+		if err := addJSON("backup-status.json", evidence.BackupStatus, "backup"); err != nil {
+			return debugBundleResult{}, err
+		}
+	}
 	if evidence.Workflow != nil {
 		if err := addJSON("workflow.json", evidence.Workflow, "workflow"); err != nil {
 			return debugBundleResult{}, err

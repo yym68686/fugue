@@ -338,3 +338,86 @@ func TestBackupBackendValidationRejectsInvalidProvider(t *testing.T) {
 		t.Fatalf("expected missing bucket error, got %v", err)
 	}
 }
+
+func TestBackupListWithoutTargetTypeIncludesAppScopedItems(t *testing.T) {
+	clearDefaultDataBackendEnv(t)
+
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backend: %v", err)
+	}
+	target := model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_a", ProjectID: "project_a", AppID: "app_a", Database: "appdb"}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		TenantID:  "tenant_a",
+		ProjectID: "project_a",
+		AppID:     "app_a",
+		Name:      "app-db",
+		Target:    target,
+		BackendID: backend.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:  policy.ID,
+		TenantID:  "tenant_a",
+		ProjectID: "project_a",
+		AppID:     "app_a",
+		Target:    target,
+		BackendID: backend.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusFailed,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
+		RunID:     run.ID,
+		PolicyID:  policy.ID,
+		TenantID:  "tenant_a",
+		ProjectID: "project_a",
+		AppID:     "app_a",
+		Target:    target,
+		BackendID: backend.ID,
+		Kind:      model.BackupArtifactKindAppPGDump,
+		ObjectKey: "app.dump",
+		Status:    model.BackupArtifactStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create artifact: %v", err)
+	}
+
+	policies, err := stateStore.ListBackupPolicies(BackupPolicyFilter{AppID: "app_a", PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list policies: %v", err)
+	}
+	if len(policies) != 1 || policies[0].ID != policy.ID {
+		t.Fatalf("expected app policy without target type filter, got %+v", policies)
+	}
+	runs, err := stateStore.ListBackupRuns(BackupRunFilter{AppID: "app_a", PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("expected app run without target type filter, got %+v", runs)
+	}
+	artifacts, err := stateStore.ListBackupArtifacts(BackupArtifactFilter{AppID: "app_a", PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].ID != artifact.ID {
+		t.Fatalf("expected app artifact without target type filter, got %+v", artifacts)
+	}
+}

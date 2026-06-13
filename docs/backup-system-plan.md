@@ -1038,7 +1038,7 @@ control-plane release path:
 - [x] Enforce default retain count of 3 successful control-plane backups.
 - [x] Add online restore plan.
 - [x] Add offline restore CLI path.
-- [ ] Integrate CNPG `Backup` and `ScheduledBackup` when bundled CNPG is used.
+- [x] Integrate CNPG `Backup` and `ScheduledBackup` when bundled CNPG is used.
 - [x] Add restore drill status.
 
 ### App database backup
@@ -1050,37 +1050,37 @@ control-plane release path:
 - [x] Record database metadata, runtime id, service name, and CNPG cluster name.
 - [x] Add app database restore plan from backup artifact.
 - [x] Add clone restore mode.
-- [ ] Add destructive replace restore mode with protective backup.
+- [x] Add destructive replace restore mode with protective backup.
 - [x] Extend existing `fugue app db restore plan/verify` to accept backup refs.
 
 ### Persistent storage backup
 
 - [x] Ensure persistent storage backup policy is absent/disabled by default.
-- [ ] Detect runtime storage capabilities.
-- [ ] Detect CSI VolumeSnapshot support.
-- [ ] Choose snapshot, clone, or file backup strategy.
-- [ ] Add file-level backup worker.
-- [ ] Add restore to new PVC.
-- [ ] Verify manifest, checksums, ownership, and permissions.
-- [ ] Cut over storage through a normal deploy operation.
-- [ ] Add rollback while old PVC is retained.
+- [x] Detect runtime storage capabilities.
+- [x] Detect CSI VolumeSnapshot support.
+- [x] Choose snapshot, clone, or file backup strategy.
+- [x] Add file-level backup worker.
+- [x] Add restore to new PVC.
+- [x] Verify manifest, checksums, ownership, and permissions.
+- [x] Cut over storage through a normal deploy operation.
+- [x] Add rollback while old PVC is retained.
 
 ### Data Workspace backup
 
 - [x] Ensure Data Workspace scheduled backup policy is absent/disabled by
       default.
-- [ ] Map backup policy to Data Workspace snapshot creation.
-- [ ] Record Data Snapshot id and manifest digest in backup artifact.
-- [ ] Add retention rules that respect protected snapshots.
-- [ ] Add Data Workspace restore plan integration.
+- [x] Map backup policy to Data Workspace snapshot creation.
+- [x] Record Data Snapshot id and manifest digest in backup artifact.
+- [x] Add retention rules that respect protected snapshots.
+- [x] Add Data Workspace restore plan integration.
 
 ### Registry and bundled platform state
 
-- [ ] Detect externalized registry and mark as externally backed up.
-- [ ] Design bundled registry backup strategy.
-- [ ] Coordinate registry backup with registry GC.
-- [ ] Inventory bundled headscale, DNS, and edge state that needs backup.
-- [ ] Add platform backup posture checks for externalized components.
+- [x] Detect externalized registry and mark as externally backed up.
+- [x] Design bundled registry backup strategy.
+- [x] Coordinate registry backup with registry GC.
+- [x] Inventory bundled headscale, DNS, and edge state that needs backup.
+- [x] Add platform backup posture checks for externalized components.
 
 ### CLI
 
@@ -1100,11 +1100,11 @@ control-plane release path:
 
 - [x] Add backup metrics.
 - [x] Add restore metrics.
-- [ ] Add backup status to admin cockpit.
+- [x] Add backup status to admin cockpit.
 - [x] Add billable backup bytes to usage/status output.
 - [x] Add backup readiness to app continuity audit.
-- [ ] Add operation diagnosis hints for stale or failed backups.
-- [ ] Add debug bundle redaction for backup config.
+- [x] Add operation diagnosis hints for stale or failed backups.
+- [x] Add debug bundle redaction for backup config.
 
 ### Testing
 
@@ -1117,8 +1117,8 @@ control-plane release path:
 - [x] Unit-test R2 billable byte accounting and 5% markup calculation.
 - [x] Unit-test artifact manifest validation.
 - [x] Unit-test app managed Postgres target resolution.
-- [ ] Integration-test control-plane logical backup and restore plan.
-- [ ] Integration-test app database backup and clone restore.
+- [x] Integration-test control-plane logical backup and restore plan.
+- [x] Integration-test app database backup and clone restore.
 - [x] Integration-test backend credential redaction.
 - [x] Add OpenAPI drift checks through `make test`.
 - [x] Add CLI output compatibility tests.
