@@ -940,6 +940,9 @@ func (c *CLI) finishImportBundle(client *Client, bundle importBundle, wait bool)
 
 func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *appOverviewDiagnosis) error {
 	if c.wantsJSON() {
+		if c.shouldRedact() {
+			bundle = redactImportBundleForOutput(bundle)
+		}
 		payload := importBundleJSON{
 			Apps:          bundle.Apps,
 			Operations:    bundle.Operations,
@@ -1009,6 +1012,23 @@ func (c *CLI) renderImportBundle(bundle importBundle, waited bool, diagnosis *ap
 		return writeMultiAppSummary(c.stdout, bundle.Apps)
 	}
 	return nil
+}
+
+func redactImportBundleForOutput(bundle importBundle) importBundle {
+	out := bundle
+	if strings.TrimSpace(bundle.PrimaryApp.ID) != "" {
+		out.PrimaryApp = redactAppForOutput(bundle.PrimaryApp)
+	}
+	if len(bundle.Apps) > 0 {
+		out.Apps = redactAppsForOutput(bundle.Apps)
+	}
+	if strings.TrimSpace(bundle.PrimaryOp.ID) != "" {
+		out.PrimaryOp = redactOperationForOutput(bundle.PrimaryOp)
+	}
+	if len(bundle.Operations) > 0 {
+		out.Operations = redactOperationsForOutput(bundle.Operations)
+	}
+	return out
 }
 
 func (c *CLI) buildImportBundleDiagnosis(client *Client, app model.App) (*appOverviewDiagnosis, error) {

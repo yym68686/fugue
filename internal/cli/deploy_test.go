@@ -384,6 +384,99 @@ func TestRunDeployLocalOrdinaryUserAutoSelectsSingleWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunDeployJSONRedactsImportBundleSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "Dockerfile"), "FROM scratch\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tenants":
+			_, _ = w.Write([]byte(`{"tenants":[{"id":"tenant_user","name":"User workspace","slug":"user-workspace"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project_default","tenant_id":"tenant_user","name":"default","slug":"default"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates/inspect-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse inspect multipart form: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"upload":{"default_app_name":"demo","source_kind":"archive","source_path":"."}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/import-upload":
+			if err := r.ParseMultipartForm(32 << 20); err != nil {
+				t.Fatalf("parse import multipart form: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{
+				"app":{
+					"id":"app_user",
+					"name":"demo",
+					"source":{"type":"github-private","repo_auth_token":"repo-token-raw"},
+					"spec":{"env":{"APP_SECRET":"app-secret-raw"},"postgres":{"database":"demo","user":"demo","password":"postgres-password-raw"},"restart_token":"restart-token-raw"},
+					"bindings":[{"id":"binding_123","env":{"DATABASE_URL":"postgres://user:binding-secret-raw@db/demo"}}],
+					"backing_services":[{"id":"svc_123","spec":{"postgres":{"database":"demo","user":"demo","password":"service-password-raw"}}}]
+				},
+				"operation":{
+					"id":"op_user",
+					"app_id":"app_user",
+					"desired_source":{"type":"github-private","repo_auth_token":"operation-repo-token-raw"},
+					"desired_spec":{"env":{"OP_SECRET":"operation-secret-raw"},"postgres":{"database":"demo","user":"demo","password":"operation-postgres-password-raw"},"restart_token":"operation-restart-token-raw"}
+				},
+				"apps":[{
+					"id":"app_user",
+					"name":"demo",
+					"spec":{"env":{"LIST_SECRET":"list-secret-raw"}}
+				}],
+				"operations":[{
+					"id":"op_user",
+					"app_id":"app_user",
+					"desired_spec":{"env":{"LIST_OP_SECRET":"list-operation-secret-raw"}}
+				}]
+			}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runDeployWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "user-token",
+		"--dir", dir,
+		"--wait=false",
+		"--json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run deploy json: %v", err)
+	}
+
+	out := stdout.String()
+	for _, leaked := range []string{
+		"repo-token-raw",
+		"app-secret-raw",
+		"postgres-password-raw",
+		"restart-token-raw",
+		"binding-secret-raw",
+		"service-password-raw",
+		"operation-repo-token-raw",
+		"operation-secret-raw",
+		"operation-postgres-password-raw",
+		"operation-restart-token-raw",
+		"list-secret-raw",
+		"list-operation-secret-raw",
+	} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("expected deploy JSON output to redact %q, got %s", leaked, out)
+		}
+	}
+	if !strings.Contains(out, redactedSecretValue) {
+		t.Fatalf("expected deploy JSON output to contain redacted marker, got %s", out)
+	}
+}
+
 func TestValidateLocalDeployPreflightRejectsIgnoredDockerfile(t *testing.T) {
 	t.Parallel()
 
