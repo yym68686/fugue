@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -101,6 +102,21 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 				message = managedMessage
 			}
 		}
+		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
+			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
+			if err != nil {
+				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
+					return fmt.Errorf("list deployment pods for %s/%s: %w", namespace, strings.TrimSpace(deployment.Metadata.Name), err)
+				}
+				pods = nil
+			}
+			if len(pods) > 0 {
+				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(namespace, app)...)
+				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
+					return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
+				}
+			}
+		}
 		if ready && expectedReleaseKey != "" {
 			templatePodsReady, templatePodsMessage, err := deploymentReadyPodsMatchTemplate(waitCtx, client, namespace, app, deployment, app.Spec.Replicas)
 			if err != nil {
@@ -187,6 +203,18 @@ func managedAppRolloutWatchTargets(namespace, name string, managed runtime.Manag
 		target.resourceVersion = strings.TrimSpace(managed.Metadata.ResourceVersion)
 	}
 	return []kubeWatchTarget{target}
+}
+
+func managedAppPodRolloutWatchTargets(namespace string, app model.App) []kubeWatchTarget {
+	selector := strings.TrimSpace(managedAppPodLabelSelector(app))
+	if selector == "" {
+		return nil
+	}
+	query := url.Values{}
+	query.Set("labelSelector", selector)
+	return []kubeWatchTarget{{
+		apiPath: "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+	}}
 }
 
 func cloudNativePGClusterRolloutWatchTargets(namespace, name string, cluster kubeCloudNativePGCluster, found bool) []kubeWatchTarget {
@@ -547,6 +575,18 @@ func deploymentReleaseKey(deployment kubeDeployment) string {
 	return strings.TrimSpace(deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey])
 }
 
+func deploymentTargetsExpectedRollout(deployment kubeDeployment, expectedReleaseKey, expectedImage string) bool {
+	expectedReleaseKey = strings.TrimSpace(expectedReleaseKey)
+	if expectedReleaseKey != "" && deploymentReleaseKey(deployment) != expectedReleaseKey {
+		return false
+	}
+	expectedImage = strings.TrimSpace(expectedImage)
+	if expectedImage != "" && deploymentPrimaryContainerImage(deployment) != expectedImage {
+		return false
+	}
+	return true
+}
+
 func deploymentRolloutPolicyReady(deployment kubeDeployment, found bool, expected kubeDeployment) (bool, string) {
 	name := strings.TrimSpace(expected.Metadata.Name)
 	if name == "" {
@@ -665,11 +705,20 @@ func deploymentReadyPodsMatchTemplate(ctx context.Context, client *kubeClient, n
 	return false, fmt.Sprintf("waiting for deployment %s ready pods to match applied template (%d/%d)", name, matchingReady, desiredReplicas), nil
 }
 
-func podMatchesDeploymentTemplate(pod kubePod, deployment kubeDeployment) bool {
-	if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
-		return false
+func deploymentTemplatePodFailureMessage(pods []kubePod, deployment kubeDeployment) string {
+	for _, pod := range pods {
+		if !podHasDeploymentTemplateIdentity(pod, deployment) {
+			continue
+		}
+		if summary := summarizeManagedAppPodFailure(pod); summary != "" {
+			return summary
+		}
 	}
-	if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !kubePodReady(pod) {
+	return ""
+}
+
+func podHasDeploymentTemplateIdentity(pod kubePod, deployment kubeDeployment) bool {
+	if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
 		return false
 	}
 	if !desiredStringMapSubset(pod.Metadata.Labels, deployment.Spec.Template.Metadata.Labels) {
@@ -687,6 +736,13 @@ func podMatchesDeploymentTemplate(pod kubePod, deployment kubeDeployment) bool {
 		return false
 	}
 	return podContainerSpecsMatchTemplate(pod.Spec.Containers, deployment.Spec.Template.Spec.Containers)
+}
+
+func podMatchesDeploymentTemplate(pod kubePod, deployment kubeDeployment) bool {
+	if !strings.EqualFold(strings.TrimSpace(pod.Status.Phase), "Running") || !kubePodReady(pod) {
+		return false
+	}
+	return podHasDeploymentTemplateIdentity(pod, deployment)
 }
 
 func podContainerSpecsMatchTemplate(actual, desired []kubeContainerSpec) bool {

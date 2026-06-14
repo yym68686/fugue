@@ -28,6 +28,7 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 			Replicas: 1,
 		},
 	}
+	app = runtime.Renderer{}.PrepareApp(app)
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	deploymentName := runtime.RuntimeAppResourceName(app)
 	managedAppName := runtime.ManagedAppResourceName(app)
@@ -64,6 +65,10 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 		case managedAppAPIPath(namespace, managedAppName):
 			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
 				t.Fatalf("encode managed app: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods":
+			if err := json.NewEncoder(w).Encode(kubePodList{}); err != nil {
+				t.Fatalf("encode pod list: %v", err)
 			}
 		default:
 			http.NotFound(w, r)
@@ -121,6 +126,129 @@ func TestManagedAppRolloutFailureIgnoresSIGTERMDuringRollingUpdate(t *testing.T)
 
 	if got := managedAppRolloutFailure(managed, true, ""); got != "" {
 		t.Fatalf("expected SIGTERM rollout message to be ignored, got %q", got)
+	}
+}
+
+func TestWaitForManagedAppRolloutFailsWhenAppliedTemplatePodCrashes(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.example/fugue-apps/demo:broken",
+			Replicas: 1,
+		},
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	managedAppName := runtime.ManagedAppResourceName(app)
+
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected managed app deployment fixture")
+	}
+	deployment.Metadata.Name = deploymentName
+	deployment.Metadata.Generation = 3
+	deployment.Metadata.ResourceVersion = "deployment-rv-1"
+	releaseKey := runtime.ManagedAppReleaseKey(app, runtime.SchedulingConstraints{})
+	deployment.Metadata.Annotations = map[string]string{
+		runtime.FugueAnnotationReleaseKey: releaseKey,
+	}
+	deployment.Spec.Template.Metadata.Annotations = map[string]string{
+		runtime.FugueAnnotationReleaseKey: releaseKey,
+	}
+	deployment.Status.ObservedGeneration = 3
+	deployment.Status.Replicas = 2
+	deployment.Status.UpdatedReplicas = 1
+	deployment.Status.ReadyReplicas = 1
+	deployment.Status.AvailableReplicas = 1
+
+	oldPod := readyTemplatePod("demo-old", deployment, kubeResourceRequirements{})
+	oldPod.Metadata.Annotations = map[string]string{
+		runtime.FugueAnnotationReleaseKey: "old-release",
+	}
+	oldPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name: "demo",
+		State: kubeRuntimeState{
+			Waiting: &kubeStateDetail{
+				Reason:  "CrashLoopBackOff",
+				Message: "old pod crash should be ignored",
+			},
+		},
+	}}
+
+	newPod := readyTemplatePod("demo-new", deployment, kubeResourceRequirements{})
+	newPod.Status.Phase = "Running"
+	newPod.Status.Conditions = nil
+	newPod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name: "demo",
+		State: kubeRuntimeState{
+			Waiting: &kubeStateDetail{
+				Reason:  "CrashLoopBackOff",
+				Message: "back-off restarting failed container",
+			},
+		},
+	}}
+
+	managedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{})
+	managedMetadata := managedApp["metadata"].(map[string]any)
+	managedMetadata["generation"] = 3
+	managedMetadata["resourceVersion"] = "managed-rv-1"
+	markManagedAppFixtureApplied(t, managedApp)
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Query().Get("watch") == "true":
+			if err := json.NewEncoder(w).Encode(map[string]any{"type": "MODIFIED", "object": map[string]any{}}); err != nil {
+				t.Errorf("encode watch event: %v", err)
+			}
+		case r.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/deployments/"+deploymentName:
+			if err := json.NewEncoder(w).Encode(deployment); err != nil {
+				t.Errorf("encode deployment: %v", err)
+			}
+		case r.URL.Path == managedAppAPIPath(namespace, managedAppName):
+			if err := json.NewEncoder(w).Encode(managedApp); err != nil {
+				t.Errorf("encode managed app: %v", err)
+			}
+		case r.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			if err := json.NewEncoder(w).Encode(kubePodList{Items: []kubePod{oldPod, newPod}}); err != nil {
+				t.Errorf("encode pods: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	svc := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: 2 * time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+
+	err := svc.waitForManagedAppRolloutWithScheduling(context.Background(), app, "", runtime.SchedulingConstraints{})
+	if err == nil {
+		t.Fatal("expected rollout wait to fail")
+	}
+	if !strings.Contains(err.Error(), "CrashLoopBackOff") {
+		t.Fatalf("expected crashing pod failure message, got %v", err)
+	}
+	if strings.Contains(err.Error(), "old pod crash should be ignored") {
+		t.Fatalf("expected old template pod failure to be ignored, got %v", err)
 	}
 }
 
