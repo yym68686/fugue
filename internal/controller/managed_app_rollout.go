@@ -425,23 +425,7 @@ func isBenignManagedAppRolloutFailureMessage(message string) bool {
 	if strings.Contains(message, "exit_code=143") || strings.Contains(message, "exit code 143") {
 		return true
 	}
-	if !strings.Contains(message, "exit_code=") && !strings.Contains(message, "exit code ") {
-		return false
-	}
-	for _, marker := range []string{
-		"crashloopbackoff",
-		"imagepull",
-		"createcontainer",
-		"invalidimagename",
-		"oomkilled",
-		"evicted",
-		"progressdeadline",
-	} {
-		if strings.Contains(message, marker) {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 func (s *Service) refreshManagedAppStatus(ctx context.Context, client *kubeClient, app model.App) error {

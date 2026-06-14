@@ -96,7 +96,7 @@ func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
 	}
 }
 
-func TestManagedAppRolloutFailureIgnoresTransientRestartExit(t *testing.T) {
+func TestManagedAppRolloutFailureReportsNonSIGTERMExit(t *testing.T) {
 	t.Parallel()
 
 	managed := runtime.ManagedAppObject{}
@@ -105,8 +105,8 @@ func TestManagedAppRolloutFailureIgnoresTransientRestartExit(t *testing.T) {
 	managed.Status.ObservedGeneration = 3
 	managed.Status.Message = "pod demo-abc123 container demo failed: Error: exit_code=3"
 
-	if got := managedAppRolloutFailure(managed, true, ""); got != "" {
-		t.Fatalf("expected transient restart rollout message to be ignored, got %q", got)
+	if got := managedAppRolloutFailure(managed, true, ""); !strings.Contains(got, "exit_code=3") {
+		t.Fatalf("expected non-SIGTERM exit to fail rollout, got %q", got)
 	}
 }
 
