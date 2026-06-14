@@ -117,17 +117,7 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 				}
 			}
 		}
-		if ready && expectedReleaseKey != "" {
-			templatePodsReady, templatePodsMessage, err := deploymentReadyPodsMatchTemplate(waitCtx, client, namespace, app, deployment, app.Spec.Replicas)
-			if err != nil {
-				return err
-			}
-			if !templatePodsReady {
-				ready = false
-				message = templatePodsMessage
-			}
-		}
-		if ready {
+		if app.Spec.Replicas > 0 && len(backingServices) > 0 {
 			backingServicesReady, backingServiceMessage, backingServiceWatchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, backingServices)
 			if err != nil {
 				return err
@@ -142,6 +132,18 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 				}
 				continue
 			}
+		}
+		if ready && expectedReleaseKey != "" {
+			templatePodsReady, templatePodsMessage, err := deploymentReadyPodsMatchTemplate(waitCtx, client, namespace, app, deployment, app.Spec.Replicas)
+			if err != nil {
+				return err
+			}
+			if !templatePodsReady {
+				ready = false
+				message = templatePodsMessage
+			}
+		}
+		if ready {
 			if err := s.cleanupStrandedManagedAppPods(waitCtx, client, namespace, app); err != nil && s.Logger != nil {
 				s.Logger.Printf("cleanup stranded managed app pods after rollout failed for %s/%s: %v", namespace, name, err)
 			}
@@ -231,6 +233,18 @@ func cloudNativePGClusterRolloutWatchTargets(namespace, name string, cluster kub
 	return []kubeWatchTarget{target}
 }
 
+func managedPostgresPodRolloutWatchTargets(namespace, clusterName string) []kubeWatchTarget {
+	selector := strings.TrimSpace(fmt.Sprintf(managedPostgresPodSelectorTemplate, clusterName))
+	if selector == "" {
+		return nil
+	}
+	query := url.Values{}
+	query.Set("labelSelector", selector)
+	return []kubeWatchTarget{{
+		apiPath: "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+	}}
+}
+
 func (s *Service) managedBackingServicesRolloutReady(
 	ctx context.Context,
 	client *kubeClient,
@@ -246,6 +260,19 @@ func (s *Service) managedBackingServicesRolloutReady(
 				return false, "", watchTargets, fmt.Errorf("read backing service cluster %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
 			watchTargets = append(watchTargets, cloudNativePGClusterRolloutWatchTargets(namespace, deployment.ResourceName, cluster, found)...)
+			pods, err := client.listPodsBySelector(ctx, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, deployment.ResourceName))
+			if err != nil {
+				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
+					return false, "", watchTargets, fmt.Errorf("list backing service pods %s/%s: %w", namespace, deployment.ResourceName, err)
+				}
+				pods = nil
+			}
+			if len(pods) > 0 {
+				watchTargets = append(watchTargets, managedPostgresPodRolloutWatchTargets(namespace, deployment.ResourceName)...)
+				if failureMessage := managedAppPodFailureMessage(pods, nil); failureMessage != "" {
+					return false, "", watchTargets, fmt.Errorf("backing service cluster %s/%s rollout failed: %s", namespace, deployment.ResourceName, failureMessage)
+				}
+			}
 			if err := s.cleanupStrandedManagedPostgresPods(ctx, client, namespace, deployment.ResourceName); err != nil && s.Logger != nil {
 				s.Logger.Printf("cleanup stranded managed postgres pods for %s/%s failed: %v", namespace, deployment.ResourceName, err)
 			}
