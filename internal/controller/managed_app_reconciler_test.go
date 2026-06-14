@@ -338,6 +338,97 @@ func TestStabilizeManagedPostgresStorageSpecsDoesNotShrinkRecordedClusterSpec(t 
 	}
 }
 
+func TestPrepareManagedPostgresInPlaceStorageExpansionForDesiredObjectsPatchesPVC(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	const pvcName = "demo-postgres-1"
+
+	var patchedStorage string
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/storage.k8s.io/v1/storageclasses/fugue-postgres-rwo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":             map[string]any{"name": "fugue-postgres-rwo"},
+				"allowVolumeExpansion": true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims":
+			if got := r.URL.Query().Get("labelSelector"); got != "cnpg.io/cluster="+clusterName+",cnpg.io/pvcRole=PG_DATA" {
+				t.Fatalf("unexpected pvc label selector %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"metadata": map[string]any{"name": pvcName},
+				}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+				"spec": map[string]any{
+					"storageClassName": "fugue-postgres-rwo",
+					"resources": map[string]any{
+						"requests": map[string]any{"storage": "10Gi"},
+					},
+				},
+				"status": map[string]any{
+					"capacity": map[string]any{"storage": "10Gi"},
+				},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			var body struct {
+				Spec struct {
+					Resources struct {
+						Requests map[string]string `json:"requests"`
+					} `json:"resources"`
+				} `json:"spec"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode pvc patch: %v", err)
+			}
+			patchedStorage = body.Spec.Resources.Requests["storage"]
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	objects := []map[string]any{
+		{
+			"apiVersion": runtime.CloudNativePGAPIVersion,
+			"kind":       runtime.CloudNativePGClusterKind,
+			"metadata": map[string]any{
+				"name":      clusterName,
+				"namespace": namespace,
+			},
+			"spec": map[string]any{
+				"storage": map[string]any{
+					"size":         "20Gi",
+					"storageClass": "fugue-postgres-rwo",
+				},
+			},
+		},
+	}
+
+	svc := &Service{Logger: log.New(io.Discard, "", 0)}
+	if err := svc.prepareManagedPostgresInPlaceStorageExpansionForDesiredObjects(context.Background(), client, namespace, objects); err != nil {
+		t.Fatalf("prepare storage expansion for desired objects: %v", err)
+	}
+	if patchedStorage != "20Gi" {
+		t.Fatalf("expected pvc storage patch to 20Gi, got %q", patchedStorage)
+	}
+}
+
 func TestLogManagedPostgresStorageMigrationRequiredDedupe(t *testing.T) {
 	t.Parallel()
 

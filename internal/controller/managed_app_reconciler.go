@@ -269,6 +269,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
+	if err := s.prepareManagedPostgresInPlaceStorageExpansionForDesiredObjects(ctx, client, namespace, childObjects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
 	applyCtx := managedAppCloudNativePGApplyContext(ctx, app, stabilizedPostgresStorage)
 	if err := client.applyObjects(applyCtx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
@@ -1461,6 +1464,42 @@ func (s *Service) stabilizeManagedPostgresStorageSpecs(ctx context.Context, clie
 		}
 	}
 	return stabilized, nil
+}
+
+func (s *Service) prepareManagedPostgresInPlaceStorageExpansionForDesiredObjects(
+	ctx context.Context,
+	client *kubeClient,
+	defaultNamespace string,
+	desiredObjects []map[string]any,
+) error {
+	for _, obj := range desiredObjects {
+		if strings.TrimSpace(objectStringField(obj, "apiVersion")) != runtime.CloudNativePGAPIVersion ||
+			strings.TrimSpace(objectStringField(obj, "kind")) != runtime.CloudNativePGClusterKind {
+			continue
+		}
+		name, namespace := objectNameAndNamespace(defaultNamespace, obj)
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		spec, _ := obj["spec"].(map[string]any)
+		storage, _ := spec["storage"].(map[string]any)
+		if spec == nil || storage == nil {
+			continue
+		}
+		storageSize, _ := storage["size"].(string)
+		storageClassName, _ := storage["storageClass"].(string)
+		target := managedPostgresStorageTarget{
+			StorageClassName: strings.TrimSpace(storageClassName),
+			StorageSize:      strings.TrimSpace(storageSize),
+		}
+		if target.isZero() {
+			continue
+		}
+		if err := s.prepareManagedPostgresInPlaceStorageExpansion(ctx, client, namespace, name, target); err != nil {
+			return fmt.Errorf("prepare managed postgres in-place storage expansion for %s/%s: %w", namespace, name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) logManagedPostgresStorageMigrationRequired(namespace, clusterName, pvcName, recordedSize, pvcSize string) {
