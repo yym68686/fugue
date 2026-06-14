@@ -321,9 +321,12 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 		targetNodeName = strings.TrimSpace(op.DesiredSpec.Postgres.PrimaryNodeName)
 	}
-	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
-	if err != nil {
-		return err
+	inPlaceStorageExpansionRequired := managedPostgresInPlaceStorageExpansionRequired(currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
+	if !inPlaceStorageExpansionRequired {
+		targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+		if err != nil {
+			return err
+		}
 	}
 	restoreStorageExpansion, err := s.prepareManagedPostgresStorageMigrationExpansion(ctx, client, namespace, clusterName, storageTarget)
 	if err != nil {
@@ -336,17 +339,24 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 			}
 		}()
 	}
+	if inPlaceStorageExpansionRequired {
+		if err := s.prepareManagedPostgresInPlaceStorageExpansion(ctx, client, namespace, clusterName, storageTarget); err != nil {
+			return err
+		}
+	}
 
 	targetPrimary := ""
 	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
 	if err != nil {
 		return err
 	}
-	if alreadyLocalized && !storageMigrationRequired {
+	if inPlaceStorageExpansionRequired {
+		targetPrimary = currentPrimary
+	} else if alreadyLocalized {
 		targetPrimary = currentPrimary
 	} else {
 		stageSpec := databaseLocalizeStageSpec(app.Spec, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
-		if storageMigrationRequired && stageSpec.Postgres != nil {
+		if storageMigrationRequired && !inPlaceStorageExpansionRequired && stageSpec.Postgres != nil {
 			ensureDatabaseLocalizeStorageMigrationCapacity(stageSpec.Postgres, currentDatabase)
 		}
 		if _, err := s.applyManagedDesiredAppState(ctx, op.ID, app, stageSpec); err != nil {
@@ -386,6 +396,10 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 	if targetPrimary != "" {
 		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
 			return fmt.Errorf("wait for localized managed postgres to settle: %w", err)
+		}
+	} else if inPlaceStorageExpansionRequired {
+		if err := s.waitForManagedPostgresClusterReady(ctx, client, namespace, clusterName, op.ID); err != nil {
+			return fmt.Errorf("wait for expanded managed postgres to settle: %w", err)
 		}
 	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
@@ -459,9 +473,12 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 		targetNodeName = strings.TrimSpace(op.DesiredSpec.Postgres.PrimaryNodeName)
 	}
-	targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
-	if err != nil {
-		return err
+	inPlaceStorageExpansionRequired := managedPostgresInPlaceStorageExpansionRequired(currentDatabase, desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
+	if !inPlaceStorageExpansionRequired {
+		targetNodeName, err = s.resolveDatabaseLocalizeTargetNode(ctx, client, app, targetRuntimeID, targetNodeName)
+		if err != nil {
+			return err
+		}
 	}
 	restoreStorageExpansion, err := s.prepareManagedPostgresStorageMigrationExpansion(ctx, client, namespace, clusterName, storageTarget)
 	if err != nil {
@@ -474,17 +491,24 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 			}
 		}()
 	}
+	if inPlaceStorageExpansionRequired {
+		if err := s.prepareManagedPostgresInPlaceStorageExpansion(ctx, client, namespace, clusterName, storageTarget); err != nil {
+			return err
+		}
+	}
 
 	targetPrimary := ""
 	currentPrimary, alreadyLocalized, err := s.managedPostgresPrimaryMatchesTarget(ctx, client, namespace, clusterName, targetRuntimeID, targetNodeName)
 	if err != nil {
 		return err
 	}
-	if alreadyLocalized && !storageMigrationRequired {
+	if inPlaceStorageExpansionRequired {
+		targetPrimary = currentPrimary
+	} else if alreadyLocalized {
 		targetPrimary = currentPrimary
 	} else {
 		stagePostgres := databaseLocalizeStagePostgresSpec(desiredDatabase, sourceRuntimeID, targetRuntimeID, targetNodeName)
-		if storageMigrationRequired {
+		if storageMigrationRequired && !inPlaceStorageExpansionRequired {
 			ensureDatabaseLocalizeStorageMigrationCapacity(&stagePostgres, currentDatabase)
 		}
 		stageApp, err := s.updateAppBackingServicePostgres(target.ServiceID, app, stagePostgres)
@@ -532,6 +556,10 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 	if targetPrimary != "" {
 		if err := s.waitForManagedPostgresPrimary(ctx, client, namespace, clusterName, targetPrimary, op.ID); err != nil {
 			return fmt.Errorf("wait for localized managed postgres service %s to settle: %w", target.ServiceID, err)
+		}
+	} else if inPlaceStorageExpansionRequired {
+		if err := s.waitForManagedPostgresClusterReady(ctx, client, namespace, clusterName, op.ID); err != nil {
+			return fmt.Errorf("wait for expanded managed postgres service %s to settle: %w", target.ServiceID, err)
 		}
 	}
 	if err := s.ensureOperationStillActive(op.ID); err != nil {
@@ -618,6 +646,35 @@ func managedPostgresStorageMigrationRequired(current, desired *model.AppPostgres
 	}
 	return strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) ||
 		strings.TrimSpace(current.StorageSize) != strings.TrimSpace(desired.StorageSize)
+}
+
+func managedPostgresInPlaceStorageExpansionRequired(current, desired *model.AppPostgresSpec, sourceRuntimeID, targetRuntimeID, requestedTargetNodeName string) bool {
+	if current == nil || desired == nil {
+		return false
+	}
+	if strings.TrimSpace(sourceRuntimeID) == "" ||
+		strings.TrimSpace(targetRuntimeID) == "" ||
+		strings.TrimSpace(sourceRuntimeID) != strings.TrimSpace(targetRuntimeID) ||
+		strings.TrimSpace(requestedTargetNodeName) != "" {
+		return false
+	}
+	if strings.TrimSpace(current.StorageClassName) != strings.TrimSpace(desired.StorageClassName) {
+		return false
+	}
+	currentSize := strings.TrimSpace(current.StorageSize)
+	desiredSize := strings.TrimSpace(desired.StorageSize)
+	if currentSize == "" || desiredSize == "" || currentSize == desiredSize {
+		return false
+	}
+	currentQuantity, err := resource.ParseQuantity(currentSize)
+	if err != nil {
+		return false
+	}
+	desiredQuantity, err := resource.ParseQuantity(desiredSize)
+	if err != nil {
+		return false
+	}
+	return desiredQuantity.Cmp(currentQuantity) > 0
 }
 
 func databaseLocalizeStorageTarget(required bool, postgres *model.AppPostgresSpec) managedPostgresStorageTarget {
@@ -899,6 +956,64 @@ func (s *Service) prepareManagedPostgresStorageMigrationExpansion(
 	}, nil
 }
 
+func (s *Service) prepareManagedPostgresInPlaceStorageExpansion(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName string,
+	target managedPostgresStorageTarget,
+) error {
+	if target.isZero() || strings.TrimSpace(target.StorageSize) == "" {
+		return nil
+	}
+	targetQuantity, err := resource.ParseQuantity(strings.TrimSpace(target.StorageSize))
+	if err != nil {
+		return nil
+	}
+	storageClassName := strings.TrimSpace(target.StorageClassName)
+	if storageClassName == "" {
+		return nil
+	}
+	storageClass, found, err := client.getStorageClass(ctx, storageClassName)
+	if err != nil {
+		return fmt.Errorf("read storage class %s for postgres in-place expansion: %w", storageClassName, err)
+	}
+	if !found {
+		return fmt.Errorf("storage class %s was not found for postgres in-place expansion", storageClassName)
+	}
+	if storageClass.AllowVolumeExpansion == nil || !*storageClass.AllowVolumeExpansion {
+		return fmt.Errorf("storage class %s does not allow postgres in-place volume expansion", storageClassName)
+	}
+
+	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, "cnpg.io/cluster="+strings.TrimSpace(clusterName)+",cnpg.io/pvcRole=PG_DATA")
+	if err != nil {
+		return fmt.Errorf("list postgres PVCs for in-place expansion %s/%s: %w", namespace, clusterName, err)
+	}
+	for _, pvcName := range pvcNames {
+		pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
+		if err != nil {
+			return fmt.Errorf("read postgres PVC %s/%s for in-place expansion: %w", namespace, pvcName, err)
+		}
+		if !found || strings.TrimSpace(pvc.Spec.StorageClassName) != storageClassName {
+			continue
+		}
+		requestedSize := strings.TrimSpace(pvc.Spec.Resources.Requests["storage"])
+		if requestedSize == "" {
+			requestedSize = managedPostgresPVCStorageSize(pvc)
+		}
+		requestedQuantity, err := resource.ParseQuantity(requestedSize)
+		if err == nil && requestedQuantity.Cmp(targetQuantity) >= 0 {
+			continue
+		}
+		if err := client.patchPersistentVolumeClaimStorageRequest(ctx, namespace, pvcName, strings.TrimSpace(target.StorageSize)); err != nil {
+			return fmt.Errorf("expand postgres PVC %s/%s request to %s: %w", namespace, pvcName, strings.TrimSpace(target.StorageSize), err)
+		}
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf("expanded postgres PVC %s/%s request to %s for in-place storage growth", namespace, pvcName, strings.TrimSpace(target.StorageSize))
+		}
+	}
+	return nil
+}
+
 func (s *Service) resolveDatabaseLocalizeTargetNode(
 	ctx context.Context,
 	client *kubeClient,
@@ -1138,6 +1253,58 @@ func (s *Service) waitForManagedPostgresPrimary(
 				targetPrimary,
 				strings.TrimSpace(cluster.Status.CurrentPrimary),
 				strings.TrimSpace(cluster.Status.TargetPrimary),
+			)
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if lastMessage != "" {
+				return fmt.Errorf("%w (%s)", waitCtx.Err(), lastMessage)
+			}
+			return waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) waitForManagedPostgresClusterReady(
+	ctx context.Context,
+	client *kubeClient,
+	namespace, clusterName, operationID string,
+) error {
+	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
+	defer cancel()
+
+	interval := 2 * time.Second
+	if s.Config.PollInterval > interval {
+		interval = s.Config.PollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	lastMessage := ""
+	for {
+		if strings.TrimSpace(operationID) != "" {
+			if err := s.ensureOperationStillActive(operationID); err != nil {
+				return err
+			}
+		}
+
+		cluster, found, err := client.getCloudNativePGCluster(waitCtx, namespace, clusterName)
+		if err != nil {
+			return fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
+		}
+		if managedBackingServiceClusterReady(cluster, found) {
+			return nil
+		}
+		if !found {
+			lastMessage = fmt.Sprintf("waiting for cluster %s to exist", clusterName)
+		} else {
+			lastMessage = fmt.Sprintf(
+				"waiting for cluster %s to become ready (%d/%d instances)",
+				clusterName,
+				cluster.Status.ReadyInstances,
+				max(cluster.Spec.Instances, 1),
 			)
 		}
 

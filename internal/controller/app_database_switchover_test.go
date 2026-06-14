@@ -161,6 +161,117 @@ func TestDatabaseLocalizeStorageMigrationForcesExtraReplica(t *testing.T) {
 	}
 }
 
+func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
+	t.Parallel()
+
+	current := &model.AppPostgresSpec{
+		StorageSize:      "5Gi",
+		StorageClassName: "fugue-postgres-rwo",
+	}
+	desired := &model.AppPostgresSpec{
+		StorageSize:      "10Gi",
+		StorageClassName: "fugue-postgres-rwo",
+	}
+
+	if !managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "") {
+		t.Fatal("expected same-class storage growth to require in-place expansion")
+	}
+
+	desired.StorageClassName = "other"
+	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "") {
+		t.Fatal("expected different storage class to fall back to migration path")
+	}
+
+	desired.StorageClassName = "fugue-postgres-rwo"
+	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_b", "") {
+		t.Fatal("expected cross-runtime storage growth to fall back to migration path")
+	}
+	if managedPostgresInPlaceStorageExpansionRequired(current, desired, "runtime_a", "runtime_a", "node-a") {
+		t.Fatal("expected explicit target node to remain a placement localize")
+	}
+}
+
+func TestPrepareManagedPostgresInPlaceStorageExpansionPatchesPVCRequest(t *testing.T) {
+	t.Parallel()
+
+	const namespace = "tenant-demo"
+	const clusterName = "demo-postgres"
+	const pvcName = "demo-postgres-1"
+
+	var patchedStorage string
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/storage.k8s.io/v1/storageclasses/fugue-postgres-rwo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata":             map[string]any{"name": "fugue-postgres-rwo"},
+				"allowVolumeExpansion": true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims":
+			if got := r.URL.Query().Get("labelSelector"); got != "cnpg.io/cluster="+clusterName+",cnpg.io/pvcRole=PG_DATA" {
+				t.Fatalf("unexpected pvc label selector %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"metadata": map[string]any{"name": pvcName},
+				}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+				"spec": map[string]any{
+					"storageClassName": "fugue-postgres-rwo",
+					"resources": map[string]any{
+						"requests": map[string]any{"storage": "5Gi"},
+					},
+				},
+				"status": map[string]any{
+					"capacity": map[string]any{"storage": "5Gi"},
+				},
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/"+namespace+"/persistentvolumeclaims/"+pvcName:
+			var body struct {
+				Spec struct {
+					Resources struct {
+						Requests map[string]string `json:"requests"`
+					} `json:"resources"`
+				} `json:"spec"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode pvc patch: %v", err)
+			}
+			patchedStorage = body.Spec.Resources.Requests["storage"]
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": pvcName},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	svc := &Service{
+		Logger: log.New(io.Discard, "", 0),
+	}
+
+	err := svc.prepareManagedPostgresInPlaceStorageExpansion(context.Background(), client, namespace, clusterName, managedPostgresStorageTarget{
+		StorageClassName: "fugue-postgres-rwo",
+		StorageSize:      "10Gi",
+	})
+	if err != nil {
+		t.Fatalf("prepare in-place expansion: %v", err)
+	}
+	if patchedStorage != "10Gi" {
+		t.Fatalf("expected pvc storage patch to 10Gi, got %q", patchedStorage)
+	}
+}
+
 func TestPrepareManagedPostgresStorageMigrationExpansionTemporarilyEnablesLegacyClass(t *testing.T) {
 	t.Parallel()
 

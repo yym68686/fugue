@@ -1066,6 +1066,20 @@ func (c *kubeClient) patchDeploymentJSONPatch(ctx context.Context, namespace, na
 	return err
 }
 
+func (c *kubeClient) patchPersistentVolumeClaimStorageRequest(ctx context.Context, namespace, name, storageSize string) error {
+	body := map[string]any{
+		"spec": map[string]any{
+			"resources": map[string]any{
+				"requests": map[string]string{
+					"storage": strings.TrimSpace(storageSize),
+				},
+			},
+		},
+	}
+	_, err := c.doRequest(ctx, http.MethodPatch, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/persistentvolumeclaims/"+url.PathEscape(strings.TrimSpace(name)), "application/merge-patch+json", body, nil)
+	return err
+}
+
 func (c *kubeClient) patchStorageClassAllowVolumeExpansion(ctx context.Context, name string, value bool) error {
 	body := map[string]any{
 		"allowVolumeExpansion": value,
