@@ -31,6 +31,7 @@ type imageCache struct {
 	localBase      string
 	upstreamBase   string
 	cacheEndpoint  string
+	clusterNode    string
 	manifestDir    string
 	httpClient     *http.Client
 	registry       http.Handler
@@ -95,6 +96,7 @@ func main() {
 		localBase:      trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
 		upstreamBase:   trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
 		cacheEndpoint:  strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
+		clusterNode:    env("FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME", os.Getenv("NODE_NAME")),
 		manifestDir:    filepath.Join(storeDir, "_manifests"),
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
@@ -110,7 +112,7 @@ func main() {
 	if err := cache.loadPersistedManifests(); err != nil {
 		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
-	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s upstream=%s", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.upstreamBase)
+	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase)
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           cache,
@@ -597,7 +599,7 @@ func (c *imageCache) lookup(ctx context.Context, imageRef, digest string) []imag
 }
 
 func (c *imageCache) report(ctx context.Context, imageRef, digest, status, lastError string) error {
-	return c.reportLocation(ctx, imageLocation{CacheEndpoint: c.cacheEndpoint}, imageRef, digest, status, lastError)
+	return c.reportLocation(ctx, imageLocation{CacheEndpoint: c.cacheEndpoint, ClusterNodeName: c.clusterNode}, imageRef, digest, status, lastError)
 }
 
 func (c *imageCache) reportLocation(ctx context.Context, location imageLocation, imageRef, digest, status, lastError string) error {

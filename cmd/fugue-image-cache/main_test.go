@@ -802,6 +802,46 @@ func TestReportRegistryWriteReportsLogicalImageLocation(t *testing.T) {
 	}
 }
 
+func TestReportIncludesClusterNodeIdentity(t *testing.T) {
+	reported := make(chan url.Values, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		reported <- r.Form
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	cache := &imageCache{
+		apiBase:       server.URL,
+		apiToken:      "token",
+		reportPath:    "/v1/image-locations",
+		cacheEndpoint: "http://10.0.0.2:5000",
+		clusterNode:   "worker-2",
+		httpClient:    server.Client(),
+	}
+
+	if err := cache.report(context.Background(), "registry.fugue.internal:5000/fugue-apps/demo:image-test", "", "present", ""); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+
+	select {
+	case form := <-reported:
+		if got := form.Get("cache_endpoint"); got != "http://10.0.0.2:5000" {
+			t.Fatalf("cache_endpoint = %q", got)
+		}
+		if got := form.Get("cluster_node_name"); got != "worker-2" {
+			t.Fatalf("cluster_node_name = %q, want worker-2", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected image location report")
+	}
+}
+
 func TestIsRegistryAPIPath(t *testing.T) {
 	tests := map[string]bool{
 		"":             false,
