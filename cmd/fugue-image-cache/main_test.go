@@ -870,6 +870,46 @@ func TestFetchKubernetesPodNodeName(t *testing.T) {
 	}
 }
 
+func TestFetchKubernetesPodNodeNameByHostIP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Path; got != "/api/v1/namespaces/fugue-system/pods" {
+			t.Fatalf("path = %s", got)
+		}
+		if got := r.URL.Query().Get("labelSelector"); got != "app.kubernetes.io/component=image-cache" {
+			t.Fatalf("labelSelector = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer service-account-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"metadata": map[string]any{"name": "fugue-image-cache-a"},
+					"spec":     map[string]any{"nodeName": "worker-image-1"},
+					"status":   map[string]any{"hostIP": "10.0.0.1"},
+				},
+				{
+					"metadata": map[string]any{"name": "fugue-image-cache-b"},
+					"spec":     map[string]any{"nodeName": "worker-image-2"},
+					"status":   map[string]any{"hostIP": "10.0.0.2"},
+				},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	nodeName, err := fetchKubernetesPodNodeNameByHostIP(context.Background(), server.Client(), server.URL, "service-account-token", "fugue-system", "10.0.0.2")
+	if err != nil {
+		t.Fatalf("fetch pod node name by host IP: %v", err)
+	}
+	if nodeName != "worker-image-2" {
+		t.Fatalf("nodeName = %q, want worker-image-2", nodeName)
+	}
+}
+
 func TestIsRegistryAPIPath(t *testing.T) {
 	tests := map[string]bool{
 		"":             false,

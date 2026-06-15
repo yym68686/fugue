@@ -695,7 +695,22 @@ func discoverKubernetesPodNodeName(ctx context.Context) (string, error) {
 		return "", err
 	}
 	baseURL := "https://" + net.JoinHostPort(host, port)
-	return fetchKubernetesPodNodeName(ctx, client, baseURL, strings.TrimSpace(string(tokenData)), strings.TrimSpace(string(namespaceData)), strings.TrimSpace(podName))
+	token := strings.TrimSpace(string(tokenData))
+	namespace := strings.TrimSpace(string(namespaceData))
+	nodeName, err := fetchKubernetesPodNodeName(ctx, client, baseURL, token, namespace, strings.TrimSpace(podName))
+	if err == nil {
+		return nodeName, nil
+	}
+	directErr := err
+	hostIP := strings.TrimSpace(os.Getenv("NODE_IP"))
+	if hostIP == "" {
+		return "", directErr
+	}
+	nodeName, err = fetchKubernetesPodNodeNameByHostIP(ctx, client, baseURL, token, namespace, hostIP)
+	if err != nil {
+		return "", fmt.Errorf("get pod by hostname: %v; get pod by host IP: %w", directErr, err)
+	}
+	return nodeName, nil
 }
 
 func kubernetesAPIClient(caPEM []byte) (*http.Client, error) {
@@ -753,6 +768,65 @@ func fetchKubernetesPodNodeName(ctx context.Context, client *http.Client, baseUR
 		return "", errors.New("pod spec.nodeName is empty")
 	}
 	return nodeName, nil
+}
+
+func fetchKubernetesPodNodeNameByHostIP(ctx context.Context, client *http.Client, baseURL, token, namespace, hostIP string) (string, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	token = strings.TrimSpace(token)
+	namespace = strings.TrimSpace(namespace)
+	hostIP = strings.TrimSpace(hostIP)
+	if baseURL == "" || token == "" || namespace == "" || hostIP == "" {
+		return "", errors.New("kubernetes pod lookup is missing base URL, token, namespace, or host IP")
+	}
+	endpoint := baseURL + "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	query := req.URL.Query()
+	query.Set("labelSelector", "app.kubernetes.io/component=image-cache")
+	req.URL.RawQuery = query.Encode()
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("list pods status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var decoded struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				NodeName string `json:"nodeName"`
+			} `json:"spec"`
+			Status struct {
+				HostIP string `json:"hostIP"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", err
+	}
+	for _, item := range decoded.Items {
+		if strings.TrimSpace(item.Status.HostIP) != hostIP {
+			continue
+		}
+		nodeName := strings.TrimSpace(item.Spec.NodeName)
+		if nodeName == "" {
+			return "", fmt.Errorf("pod %s on host IP %s has empty spec.nodeName", strings.TrimSpace(item.Metadata.Name), hostIP)
+		}
+		return nodeName, nil
+	}
+	return "", fmt.Errorf("no image-cache pod found with host IP %s", hostIP)
 }
 
 func registryObjectMissing(err error) bool {
