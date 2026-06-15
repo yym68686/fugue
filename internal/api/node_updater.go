@@ -15,7 +15,7 @@ import (
 	"fugue/internal/store"
 )
 
-const nodeUpdaterScriptVersion = "v4"
+const nodeUpdaterScriptVersion = "v5"
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
@@ -528,7 +528,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v4"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v5"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -917,6 +917,8 @@ reconcile_k3s_config() {
   local server="${FUGUE_DISCOVERY_K3S_SERVER:-}"
   local fallback_servers="${FUGUE_DISCOVERY_K3S_FALLBACK_SERVERS:-}"
   local lb_cfg="/etc/fugue/k3s-api-lb.cfg"
+  local changed=1
+  local lb_changed=1
 
   if [ -z "${server}" ]; then
     log "no discovery server available for k3s reconciliation"
@@ -950,15 +952,20 @@ reconcile_k3s_config() {
       done
     } >"${lb_cfg}.tmp"
     preserve_rollback_file "${lb_cfg}"
-    write_file_if_changed "${lb_cfg}.tmp" "${lb_cfg}" || true
+    if write_file_if_changed "${lb_cfg}.tmp" "${lb_cfg}"; then
+      changed=0
+      lb_changed=0
+    fi
     server="https://127.0.0.1:16443"
-    if systemctl list-unit-files 2>/dev/null | grep -q '^fugue-k3s-api-lb\.service'; then
+    if [ "${lb_changed}" -eq 0 ] && systemctl list-unit-files 2>/dev/null | grep -q '^fugue-k3s-api-lb\.service'; then
       systemctl daemon-reload >/dev/null 2>&1 || true
       systemctl restart fugue-k3s-api-lb.service >/dev/null 2>&1 || true
     fi
   fi
-  yaml_update_scalar "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" server "${server}" || true
-  return 0
+  if yaml_update_scalar "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" server "${server}"; then
+    changed=0
+  fi
+  return "${changed}"
 }
 
 reconcile_registry_mirror() {

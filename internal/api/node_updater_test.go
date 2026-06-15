@@ -166,7 +166,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v4"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v5"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`restart_k3s_agent_for_config_reload`,
 		`restarting k3s-agent so containerd reloads updated join/registry configuration`,
@@ -196,6 +196,57 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterK3sConfigReconcileOnlyReportsRealChanges(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
+FUGUE_DISCOVERY_K3S_SERVER="https://cp.example:6443"
+FUGUE_DISCOVERY_K3S_FALLBACK_SERVERS=""
+mkdir() {
+  local args=()
+  local arg=""
+  for arg in "$@"; do
+    case "${arg}" in
+      /etc/rancher/k3s) arg="${tmpdir}/etc/rancher/k3s" ;;
+      /etc/fugue) arg="${tmpdir}/etc/fugue" ;;
+    esac
+    args+=("${arg}")
+  done
+  command mkdir "${args[@]}"
+}
+if ! reconcile_k3s_config; then
+  echo "first reconcile should report a write"
+  exit 1
+fi
+if reconcile_k3s_config; then
+  echo "second reconcile should not report a write"
+  exit 1
+fi
+grep -q 'server: "https://cp.example:6443"' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-reconcile-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater reconcile harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater reconcile harness failed: %v\n%s", err, output)
 	}
 }
 
@@ -279,7 +330,7 @@ func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 		`Installing NFS client tools`,
 		`install-nfs-client-tools`,
 		`time-sync`,
-		`local updater_version="v4"`,
+		`local updater_version="v5"`,
 		`reconcile_cni_bridge_mtu`,
 		`FLANNEL_MTU`,
 		`/v1/discovery/bundle`,
