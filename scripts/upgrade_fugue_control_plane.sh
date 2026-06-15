@@ -507,6 +507,38 @@ stateful_dependency_changed() {
   release_changed_files_match stateful
 }
 
+node_local_build_plane_preflight_override_allowed() {
+  local file=""
+  local saw_allowed="false"
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      cmd/fugue-image-cache/*|\
+      Dockerfile.image-cache|\
+      internal/sourceimport/*|\
+      internal/config/config.go|\
+      internal/controller/controller.go|\
+      internal/controller/deploy_image_guard.go|\
+      internal/controller/deploy_image_guard_test.go|\
+      internal/controller/import_operation.go|\
+      internal/controller/import_operation_test.go|\
+      deploy/helm/fugue/templates/_helpers.tpl|\
+      deploy/helm/fugue/templates/controller-deployment.yaml|\
+      scripts/upgrade_fugue_control_plane.sh|\
+      scripts/test_release_domain_safety.sh)
+        saw_allowed="true"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  [[ "${saw_allowed}" == "true" ]]
+}
+
 ensure_control_plane_observability_via_node_janitor() {
   if [[ -z "${KUBECTL:-}" ]]; then
     return 1
@@ -2394,7 +2426,11 @@ PY
     : >"${node_policies_file}"
   fi
   local autonomy_override_message=""
-  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" <<'PY'
+  local node_local_build_plane_override_allowed="false"
+  if node_local_build_plane_preflight_override_allowed; then
+    node_local_build_plane_override_allowed="true"
+  fi
+  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${node_local_build_plane_override_allowed}" <<'PY'
 import json
 from datetime import datetime, timedelta, timezone
 import sys
@@ -2553,6 +2589,7 @@ status_path = sys.argv[1]
 nodes_path = sys.argv[2]
 dns_nodes_path = sys.argv[3]
 node_policies_path = sys.argv[4]
+node_local_build_plane_override_allowed = trim(sys.argv[5]).lower() == "true"
 with open(status_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
@@ -2585,6 +2622,13 @@ if set(failing_checks).issubset(allowed_checks) and bootstrap_override and (not 
         retired_dns = ", ".join(sorted(set(filter(None, retired_dns_nodes)))) or "<none>"
         retired_note = f"; node-policy-retired edge nodes ignored: {retired_edge}; node-policy-retired DNS nodes ignored: {retired_dns}"
     print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending} and route-bootstrap nodes {route_pending}; dns bootstrap nodes {dns_pending}{retired_note}; continuing with explicit rollout to bring them online")
+elif node_local_build_plane_override_allowed and set(failing_checks).issubset({"registry", "node_policy"}):
+    registry_message = trim((checks.get("registry") or {}).get("message"))
+    node_policy_message = trim((checks.get("node_policy") or {}).get("message"))
+    detail = "; ".join(item for item in [registry_message, node_policy_message] if item)
+    if detail:
+        detail = f": {detail}"
+    print(f"release preflight node-local build-plane override: allowing rollout despite registry/node_policy gates{detail}")
 else:
     if not status.get("pass", False):
         raise SystemExit("platform autonomy status did not pass")

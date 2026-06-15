@@ -35,6 +35,9 @@ fi
 if node_local_build_plane_changed; then
   fail "control-plane-only changes must not mark build-plane changed"
 fi
+if node_local_build_plane_preflight_override_allowed; then
+  fail "generic control-plane changes must not bypass registry/node-policy preflight"
+fi
 
 FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
@@ -55,6 +58,18 @@ public_data_plane_changed || fail "dns daemonset changes must mark public data-p
 
 FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go'
 node_local_build_plane_changed || fail "image-cache code changes must mark build-plane changed"
+node_local_build_plane_preflight_override_allowed || fail "image-cache fixes must be allowed to bypass registry/node-policy preflight"
+
+FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go\ninternal/controller/deploy_image_guard.go\ndeploy/helm/fugue/templates/controller-deployment.yaml'
+node_local_build_plane_preflight_override_allowed || fail "builder registry routing fixes must be allowed to bypass registry/node-policy preflight"
+
+FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/test_release_domain_safety.sh'
+node_local_build_plane_preflight_override_allowed || fail "release preflight fix must be allowed to publish itself while registry/node-policy preflight is degraded"
+
+FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go\ninternal/api/server.go'
+if node_local_build_plane_preflight_override_allowed; then
+  fail "mixed unrelated API changes must not bypass registry/node-policy preflight"
+fi
 
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/registry-deployment.yaml'
 stateful_dependency_changed || fail "registry template changes must mark stateful dependency changed"
