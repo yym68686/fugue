@@ -66,6 +66,9 @@ node_local_build_plane_preflight_override_allowed || fail "builder registry rout
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/join_cluster.go\ninternal/api/node_updater.go\ninternal/api/node_updater_test.go'
 node_local_build_plane_preflight_override_allowed || fail "node updater registry mirror reload fixes must be allowed to bypass registry/node-policy preflight"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/api/import_github_compose_test.go\ninternal/api/import_github_topology.go\ninternal/api/import_network_mode.go'
+node_local_build_plane_preflight_override_allowed || fail "compose import process fixes must be allowed to bypass registry/node-policy preflight"
+
 FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/test_release_domain_safety.sh'
 node_local_build_plane_preflight_override_allowed || fail "release preflight fix must be allowed to publish itself while registry/node-policy preflight is degraded"
 
