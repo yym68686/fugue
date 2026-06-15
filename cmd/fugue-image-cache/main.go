@@ -38,7 +38,6 @@ type imageCache struct {
 
 type hydrateCall struct {
 	done    chan struct{}
-	cancel  context.CancelFunc
 	err     error
 	waiters int
 }
@@ -215,15 +214,13 @@ func (c *imageCache) joinHydrate(key, repo, target string) *hydrateCall {
 		return call
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	call := &hydrateCall{
 		done:    make(chan struct{}),
-		cancel:  cancel,
 		waiters: 1,
 	}
 	c.hydrateCalls[key] = call
 	go func() {
-		err := c.hydrateOnce(ctx, repo, target)
+		err := c.hydrateOnce(context.Background(), repo, target)
 
 		c.hydrateMu.Lock()
 		call.err = err
@@ -246,14 +243,6 @@ func (c *imageCache) leaveHydrate(call *hydrateCall) {
 
 	if call.waiters > 0 {
 		call.waiters--
-	}
-	if call.waiters != 0 {
-		return
-	}
-	select {
-	case <-call.done:
-	default:
-		call.cancel()
 	}
 }
 
