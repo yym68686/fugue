@@ -298,6 +298,23 @@ func TestNodeUpdaterCanReportImageLocationForAppTenant(t *testing.T) {
 	if response.ImageLocation.ClusterNodeName != "worker-image" || response.ImageLocation.Status != model.ImageLocationStatusPulling {
 		t.Fatalf("expected node metadata and pulling status, got %+v", response.ImageLocation)
 	}
+
+	listRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/image-locations?image_ref=registry.fugue.internal:5000/fugue-apps/web:test&status=pulling", updaterToken, nil)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, listRecorder.Code, listRecorder.Body.String())
+	}
+	var listResponse struct {
+		ImageLocations []model.ImageLocation `json:"image_locations"`
+	}
+	mustDecodeJSON(t, listRecorder, &listResponse)
+	if len(listResponse.ImageLocations) != 1 || listResponse.ImageLocations[0].TenantID != appTenant.ID {
+		t.Fatalf("expected cross-tenant app image location, got %+v", listResponse.ImageLocations)
+	}
+
+	unfilteredRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/image-locations", updaterToken, nil)
+	if unfilteredRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected unfiltered node updater list to be rejected, got %d body=%s", unfilteredRecorder.Code, unfilteredRecorder.Body.String())
+	}
 }
 
 func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {

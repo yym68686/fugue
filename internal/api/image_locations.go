@@ -40,7 +40,14 @@ func (s *Server) handleNodeUpdaterListImageLocations(w http.ResponseWriter, r *h
 		httpx.WriteError(w, http.StatusForbidden, "node updater credentials required")
 		return
 	}
-	locations, err := s.store.ListImageLocations(imageLocationFilterFromRequest(r, principal, false))
+	filter := imageLocationFilterFromRequest(r, principal, false)
+	if filter.ImageRef == "" && filter.Digest == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "image_ref or digest is required")
+		return
+	}
+	filter.TenantID = ""
+	filter.PlatformAdmin = true
+	locations, err := s.store.ListImageLocations(filter)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
