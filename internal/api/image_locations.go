@@ -185,7 +185,7 @@ func (s *Server) decodeImageLocationReport(r *http.Request, principal model.Prin
 		if err != nil {
 			return model.ImageLocation{}, err
 		}
-		if !principal.IsPlatformAdmin() && app.TenantID != principal.TenantID {
+		if !principal.IsPlatformAdmin() && principal.ActorType != model.ActorTypeNodeUpdater && app.TenantID != principal.TenantID {
 			return model.ImageLocation{}, storeErrorNotFound()
 		}
 		location.TenantID = app.TenantID

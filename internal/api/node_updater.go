@@ -15,7 +15,10 @@ import (
 	"fugue/internal/store"
 )
 
-const nodeUpdaterScriptVersion = "v5"
+const (
+	nodeUpdaterScriptVersion   = "v5"
+	staleNodeUpdateTaskTimeout = 2 * time.Hour
+)
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
@@ -216,6 +219,10 @@ func (s *Server) handleListNodeUpdateTasks(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleNodeUpdaterTasks(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	limit := parsePositiveInt(r.URL.Query().Get("limit"), 10)
+	if _, err := s.store.FailStaleRunningNodeUpdateTasks(principal.ActorID, staleNodeUpdateTaskTimeout); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	tasks, err := s.store.ListPendingNodeUpdateTasks(principal.ActorID, limit)
 	if err != nil {
 		s.writeStoreError(w, err)

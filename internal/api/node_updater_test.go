@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -152,6 +154,152 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterTaskPollExpiresStaleRunningTasks(t *testing.T) {
+	t.Parallel()
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	s := store.New(storePath)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater Stale API Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	enrollForm := url.Values{}
+	enrollForm.Set("node_key", nodeSecret)
+	enrollForm.Set("node_name", "worker-stale")
+	enrollForm.Set("machine_name", "worker-stale")
+	enrollForm.Set("machine_fingerprint", "machine-stale")
+	enrollForm.Set("endpoint", "https://worker-stale.example.com")
+	enrollForm.Set("updater_version", "v1")
+	enrollForm.Set("join_script_version", "join-v1")
+	enrollForm.Set("capabilities", "heartbeat,tasks,diagnose-node")
+	enrollRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/enroll", "", enrollForm)
+	if enrollRecorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, enrollRecorder.Code, enrollRecorder.Body.String())
+	}
+	enrollEnv := parseEnvResponse(enrollRecorder.Body.String())
+	updaterID := enrollEnv["FUGUE_NODE_UPDATER_ID"]
+	updaterToken := enrollEnv["FUGUE_NODE_UPDATER_TOKEN"]
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	staleTask, err := s.CreateNodeUpdateTask(requester, updaterID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "stale"})
+	if err != nil {
+		t.Fatalf("create stale task: %v", err)
+	}
+	nextTask, err := s.CreateNodeUpdateTask(requester, updaterID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "next"})
+	if err != nil {
+		t.Fatalf("create next task: %v", err)
+	}
+	if _, err := s.ClaimNodeUpdateTask(staleTask.ID, updaterID); err != nil {
+		t.Fatalf("claim stale task: %v", err)
+	}
+	ageTaskInStoreFile(t, storePath, staleTask.ID, time.Now().UTC().Add(-staleNodeUpdateTaskTimeout-time.Minute))
+
+	pollRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/tasks?format=env&limit=1", updaterToken, nil)
+	if pollRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, pollRecorder.Code, pollRecorder.Body.String())
+	}
+	taskEnv := parseEnvResponse(pollRecorder.Body.String())
+	if taskEnv["FUGUE_NODE_UPDATE_TASK_ID"] != nextTask.ID {
+		t.Fatalf("expected next pending task after stale task cleanup, got %q", pollRecorder.Body.String())
+	}
+	tasks, err := s.ListNodeUpdateTasks(tenant.ID, false, updaterID, "")
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	byID := map[string]model.NodeUpdateTask{}
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	if byID[staleTask.ID].Status != model.NodeUpdateTaskStatusFailed || byID[staleTask.ID].CompletedAt == nil {
+		t.Fatalf("expected stale task failed, got %+v", byID[staleTask.ID])
+	}
+	if byID[nextTask.ID].Status != model.NodeUpdateTaskStatusPending {
+		t.Fatalf("expected next task to remain pending until claimed, got %+v", byID[nextTask.ID])
+	}
+}
+
+func TestNodeUpdaterCanReportImageLocationForAppTenant(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	nodeTenant, err := s.CreateTenant("Node Tenant")
+	if err != nil {
+		t.Fatalf("create node tenant: %v", err)
+	}
+	appTenant, err := s.CreateTenant("App Tenant")
+	if err != nil {
+		t.Fatalf("create app tenant: %v", err)
+	}
+	project, err := s.CreateProject(appTenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := s.CreateApp(appTenant.ID, project.ID, "web", "", model.AppSpec{
+		Image:     "registry.fugue.internal:5000/fugue-apps/web:test",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(nodeTenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	enrollForm := url.Values{}
+	enrollForm.Set("node_key", nodeSecret)
+	enrollForm.Set("node_name", "worker-image")
+	enrollForm.Set("machine_name", "worker-image")
+	enrollForm.Set("machine_fingerprint", "machine-image")
+	enrollForm.Set("endpoint", "https://worker-image.example.com")
+	enrollForm.Set("updater_version", "v1")
+	enrollForm.Set("join_script_version", "join-v1")
+	enrollForm.Set("capabilities", "heartbeat,tasks,prepull-app-images")
+	enrollRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/enroll", "", enrollForm)
+	if enrollRecorder.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusCreated, enrollRecorder.Code, enrollRecorder.Body.String())
+	}
+	updaterToken := parseEnvResponse(enrollRecorder.Body.String())["FUGUE_NODE_UPDATER_TOKEN"]
+
+	reportForm := url.Values{}
+	reportForm.Set("app_id", app.ID)
+	reportForm.Set("image_ref", "registry.fugue.internal:5000/fugue-apps/web:test")
+	reportForm.Set("status", model.ImageLocationStatusPulling)
+	reportForm.Set("cache_endpoint", "http://127.0.0.1:5000")
+	reportRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/image-locations", updaterToken, reportForm)
+	if reportRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, reportRecorder.Code, reportRecorder.Body.String())
+	}
+	var response struct {
+		ImageLocation model.ImageLocation `json:"image_location"`
+	}
+	mustDecodeJSON(t, reportRecorder, &response)
+	if response.ImageLocation.TenantID != appTenant.ID || response.ImageLocation.AppID != app.ID {
+		t.Fatalf("expected app tenant image location, got %+v", response.ImageLocation)
+	}
+	if response.ImageLocation.ClusterNodeName != "worker-image" || response.ImageLocation.Status != model.ImageLocationStatusPulling {
+		t.Fatalf("expected node metadata and pulling status, got %+v", response.ImageLocation)
+	}
+}
+
 func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	t.Parallel()
 
@@ -196,6 +344,32 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func ageTaskInStoreFile(t *testing.T, storePath, taskID string, updatedAt time.Time) {
+	t.Helper()
+	raw, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	var state model.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode store: %v", err)
+	}
+	for i := range state.NodeUpdateTasks {
+		if state.NodeUpdateTasks[i].ID == taskID {
+			state.NodeUpdateTasks[i].UpdatedAt = updatedAt
+			state.NodeUpdateTasks[i].ClaimedAt = &updatedAt
+		}
+	}
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("encode store: %v", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
+		t.Fatalf("write store: %v", err)
 	}
 }
 

@@ -264,6 +264,92 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}
 }
 
+func TestFailStaleRunningNodeUpdateTasks(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Stale Node Updater Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-stale",
+		"https://worker-stale.example.com",
+		nil,
+		"worker-stale",
+		"machine-stale",
+		"v1",
+		"join-v1",
+		[]string{"tasks", "heartbeat", model.NodeUpdateTaskTypeDiagnoseNode},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	staleTask, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "stale"})
+	if err != nil {
+		t.Fatalf("create stale task: %v", err)
+	}
+	freshTask, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "fresh"})
+	if err != nil {
+		t.Fatalf("create fresh task: %v", err)
+	}
+	if _, err := s.ClaimNodeUpdateTask(staleTask.ID, updater.ID); err != nil {
+		t.Fatalf("claim stale task: %v", err)
+	}
+	if _, err := s.ClaimNodeUpdateTask(freshTask.ID, updater.ID); err != nil {
+		t.Fatalf("claim fresh task: %v", err)
+	}
+	old := time.Now().UTC().Add(-3 * time.Hour)
+	if err := s.withLockedState(true, func(state *model.State) error {
+		for i := range state.NodeUpdateTasks {
+			if state.NodeUpdateTasks[i].ID == staleTask.ID {
+				state.NodeUpdateTasks[i].UpdatedAt = old
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age stale task: %v", err)
+	}
+
+	expired, err := s.FailStaleRunningNodeUpdateTasks(updater.ID, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("fail stale running tasks: %v", err)
+	}
+	if expired != 1 {
+		t.Fatalf("expected one stale task to expire, got %d", expired)
+	}
+	tasks, err := s.ListNodeUpdateTasks(tenant.ID, false, updater.ID, "")
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	byID := map[string]model.NodeUpdateTask{}
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	if byID[staleTask.ID].Status != model.NodeUpdateTaskStatusFailed || byID[staleTask.ID].CompletedAt == nil {
+		t.Fatalf("expected stale task failed with completed_at, got %+v", byID[staleTask.ID])
+	}
+	if !strings.Contains(byID[staleTask.ID].ErrorMessage, "did not finish within 2h0m0s") {
+		t.Fatalf("expected stale task error message, got %q", byID[staleTask.ID].ErrorMessage)
+	}
+	if byID[freshTask.ID].Status != model.NodeUpdateTaskStatusRunning || byID[freshTask.ID].CompletedAt != nil {
+		t.Fatalf("expected fresh task to remain running, got %+v", byID[freshTask.ID])
+	}
+}
+
 func TestAppDatabaseImportJobAndAccessGrantLifecycle(t *testing.T) {
 	t.Parallel()
 

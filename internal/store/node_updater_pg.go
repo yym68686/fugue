@@ -361,6 +361,10 @@ FROM fugue_node_update_tasks`
 func (s *Store) pgListPendingNodeUpdateTasks(updaterID string, limit int) ([]model.NodeUpdateTask, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	updaterID = strings.TrimSpace(updaterID)
+	if updaterID == "" {
+		return nil, ErrInvalidInput
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -376,6 +380,30 @@ LIMIT $3
 	}
 	defer rows.Close()
 	return scanNodeUpdateTaskRows(rows)
+}
+
+func (s *Store) pgFailStaleRunningNodeUpdateTasks(updaterID string, staleAfter time.Duration) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	updaterID = strings.TrimSpace(updaterID)
+	if updaterID == "" || staleAfter <= 0 {
+		return 0, ErrInvalidInput
+	}
+	now := time.Now().UTC()
+	cutoff := now.Add(-staleAfter)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE fugue_node_update_tasks
+SET status = $3, result_message = $4, error_message = $5, completed_at = $6, updated_at = $6
+WHERE node_updater_id = $1 AND status = $2 AND updated_at < $7
+`, updaterID, model.NodeUpdateTaskStatusRunning, model.NodeUpdateTaskStatusFailed, staleNodeUpdateTaskResultMessage(), staleNodeUpdateTaskErrorMessage(staleAfter), now, cutoff)
+	if err != nil {
+		return 0, mapDBErr(err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 func (s *Store) pgClaimNodeUpdateTask(taskID, updaterID string) (model.NodeUpdateTask, error) {

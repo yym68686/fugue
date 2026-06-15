@@ -324,6 +324,43 @@ func (s *Store) ListPendingNodeUpdateTasks(updaterID string, limit int) ([]model
 	return tasks, err
 }
 
+func (s *Store) FailStaleRunningNodeUpdateTasks(updaterID string, staleAfter time.Duration) (int, error) {
+	if s.usingDatabase() {
+		return s.pgFailStaleRunningNodeUpdateTasks(updaterID, staleAfter)
+	}
+	updaterID = strings.TrimSpace(updaterID)
+	if updaterID == "" || staleAfter <= 0 {
+		return 0, ErrInvalidInput
+	}
+	now := time.Now().UTC()
+	cutoff := now.Add(-staleAfter)
+	resultMessage := staleNodeUpdateTaskResultMessage()
+	errorMessage := staleNodeUpdateTaskErrorMessage(staleAfter)
+	count := 0
+	err := s.withLockedState(true, func(state *model.State) error {
+		for i := range state.NodeUpdateTasks {
+			task := &state.NodeUpdateTasks[i]
+			if strings.TrimSpace(task.NodeUpdaterID) != updaterID || task.Status != model.NodeUpdateTaskStatusRunning {
+				continue
+			}
+			if !task.UpdatedAt.Before(cutoff) {
+				continue
+			}
+			task.Status = model.NodeUpdateTaskStatusFailed
+			task.ResultMessage = resultMessage
+			task.ErrorMessage = errorMessage
+			task.CompletedAt = &now
+			task.UpdatedAt = now
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Store) ClaimNodeUpdateTask(taskID, updaterID string) (model.NodeUpdateTask, error) {
 	if s.usingDatabase() {
 		return s.pgClaimNodeUpdateTask(taskID, updaterID)
@@ -417,6 +454,14 @@ func (s *Store) CompleteNodeUpdateTask(taskID, updaterID, status, message, error
 		return model.NodeUpdateTask{}, err
 	}
 	return redactNodeUpdateTask(task), nil
+}
+
+func staleNodeUpdateTaskResultMessage() string {
+	return "node update task timed out"
+}
+
+func staleNodeUpdateTaskErrorMessage(staleAfter time.Duration) string {
+	return fmt.Sprintf("node update task did not finish within %s; marking failed so updater can continue", staleAfter.Round(time.Second))
 }
 
 func nodeUpdaterPrincipal(updater model.NodeUpdater) model.Principal {
