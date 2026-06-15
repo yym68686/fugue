@@ -78,8 +78,10 @@ ORIGINAL_BEFORE_SHA_SET="${BEFORE_SHA+x}"
 ORIGINAL_BEFORE_SHA="${BEFORE_SHA:-}"
 ORIGINAL_AFTER_SHA_SET="${AFTER_SHA+x}"
 ORIGINAL_AFTER_SHA="${AFTER_SHA:-}"
+ORIGINAL_FUGUE_HELM_CHART_PATH_SET="${FUGUE_HELM_CHART_PATH+x}"
+ORIGINAL_FUGUE_HELM_CHART_PATH="${FUGUE_HELM_CHART_PATH:-}"
 
-restore_release_ref_env() {
+restore_temp_release_env() {
   if [[ -n "${ORIGINAL_BEFORE_SHA_SET}" ]]; then
     BEFORE_SHA="${ORIGINAL_BEFORE_SHA}"
   else
@@ -89,6 +91,11 @@ restore_release_ref_env() {
     AFTER_SHA="${ORIGINAL_AFTER_SHA}"
   else
     unset AFTER_SHA
+  fi
+  if [[ -n "${ORIGINAL_FUGUE_HELM_CHART_PATH_SET}" ]]; then
+    FUGUE_HELM_CHART_PATH="${ORIGINAL_FUGUE_HELM_CHART_PATH}"
+  else
+    unset FUGUE_HELM_CHART_PATH
   fi
 }
 
@@ -172,7 +179,20 @@ fi
 if node_local_build_plane_preflight_override_allowed; then
   fail "registryGC values must not bypass registry/node-policy preflight"
 fi
-restore_release_ref_env
+FUGUE_HELM_CHART_PATH="${TMP_REPO_ROOT}/deploy/helm/fugue"
+IMAGE_CACHE_DESIRED_RESOURCES="$(chart_image_cache_resources_json)"
+assert_eq "${IMAGE_CACHE_DESIRED_RESOURCES}" '{"limits":{"memory":"2Gi"},"requests":{"memory":"128Mi"}}' "image-cache desired resources parse from chart values"
+FUGUE_RELEASE_FULLNAME=fugue-fugue
+TEST_LIVE_IMAGE_CACHE_RESOURCES_JSON='{"limits":{"memory":"512Mi"},"requests":{"memory":"64Mi"}}'
+live_daemonset_container_resources_json() {
+  printf '%s' "${TEST_LIVE_IMAGE_CACHE_RESOURCES_JSON}"
+}
+image_cache_resource_values_drifted || fail "live image-cache resources below desired values must be treated as drift"
+TEST_LIVE_IMAGE_CACHE_RESOURCES_JSON="${IMAGE_CACHE_DESIRED_RESOURCES}"
+if image_cache_resource_values_drifted; then
+  fail "matching image-cache resources must not be treated as drift"
+fi
+restore_temp_release_env
 FUGUE_RELEASE_FULLNAME=fugue-fugue
 FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
 live_daemonset_container_image() {

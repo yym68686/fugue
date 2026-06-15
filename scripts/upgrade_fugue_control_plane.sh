@@ -641,6 +641,125 @@ node_local_build_plane_resource_values_changed() {
   [[ "${saw_resource_values}" == "true" ]]
 }
 
+chart_image_cache_resources_json() {
+  local values_file="${FUGUE_HELM_CHART_PATH:-deploy/helm/fugue}/values.yaml"
+
+  [[ -r "${values_file}" ]] || return 1
+  command_exists python3 || return 1
+  python3 - "${values_file}" <<'PY'
+import json
+import sys
+
+values_file = sys.argv[1]
+target = ("imageCache", "resources")
+
+with open(values_file, "r", encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+
+stack = []
+start = None
+start_indent = None
+for idx, line in enumerate(lines):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip(" "))
+    while stack and stack[-1][0] >= indent:
+        stack.pop()
+    content = line.lstrip(" ")
+    if content.startswith("- "):
+        content = content[2:].lstrip(" ")
+    key = ""
+    if ":" in content:
+        key = content.split(":", 1)[0].strip().strip("'\"")
+    current = tuple([item[1] for item in stack] + ([key] if key else []))
+    if current == target:
+        start = idx + 1
+        start_indent = indent
+        break
+    if key:
+        stack.append((indent, key))
+
+if start is None:
+    raise SystemExit(1)
+
+subtree = []
+for line in lines[start:]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    indent = len(line) - len(line.lstrip(" "))
+    if indent <= start_indent:
+        break
+    subtree.append(line)
+
+root = {}
+stack = [(start_indent, root)]
+for line in subtree:
+    indent = len(line) - len(line.lstrip(" "))
+    content = line.lstrip(" ")
+    if content.startswith("- "):
+        raise SystemExit(1)
+    if ":" not in content:
+        raise SystemExit(1)
+    key, value = content.split(":", 1)
+    key = key.strip().strip("'\"")
+    value = value.strip()
+    while stack and stack[-1][0] >= indent:
+        stack.pop()
+    if not stack:
+        raise SystemExit(1)
+    parent = stack[-1][1]
+    if value:
+        parent[key] = value.strip("'\"")
+        continue
+    child = {}
+    parent[key] = child
+    stack.append((indent, child))
+
+if not root:
+    raise SystemExit(1)
+json.dump(root, sys.stdout, sort_keys=True, separators=(",", ":"))
+PY
+}
+
+json_equal() {
+  local left="$1"
+  local right="$2"
+
+  command_exists python3 || return 1
+  python3 - "${left}" "${right}" <<'PY'
+import json
+import sys
+
+try:
+    left = json.loads(sys.argv[1])
+    right = json.loads(sys.argv[2])
+except json.JSONDecodeError as exc:
+    raise SystemExit(1) from exc
+raise SystemExit(0 if left == right else 1)
+PY
+}
+
+image_cache_resource_values_drifted() {
+  local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
+  local desired_resources live_resources
+
+  desired_resources="$(trim_field "$(chart_image_cache_resources_json)")" || return 1
+  live_resources="$(trim_field "$(live_daemonset_container_resources_json "${image_cache_ds}" "image-cache")")" || return 1
+  [[ -n "${desired_resources}" && -n "${live_resources}" ]] || return 1
+  ! json_equal "${desired_resources}" "${live_resources}"
+}
+
+append_node_local_build_plane_desired_resource_args() {
+  local desired_resources
+
+  desired_resources="$(trim_field "$(chart_image_cache_resources_json)")" || return 1
+  [[ -n "${desired_resources}" ]] || return 1
+  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${desired_resources}")
+  log "node-local build-plane image-cache resources applying desired chart values"
+}
+
 image_cache_source_changed_between_refs() {
   local old_ref="$1"
   local new_ref="$2"
@@ -4894,6 +5013,11 @@ prepare_release_domains() {
     elif node_local_build_plane_resource_values_changed; then
       log "node-local build-plane image-cache resources changed in values; preserving live image while applying rendered resources"
       preserve_node_local_build_plane_from_live true false
+      append_node_local_build_plane_desired_resource_args || fail "failed to apply desired image-cache resources"
+    elif image_cache_resource_values_drifted; then
+      log "node-local build-plane image-cache resources drift from chart values; preserving live image while reconciling resources"
+      preserve_node_local_build_plane_from_live true false
+      append_node_local_build_plane_desired_resource_args || fail "failed to apply desired image-cache resources"
     else
       if node_local_build_plane_changed; then
         log "node-local build-plane files changed without a safe image-only rollout target; preserving live image-cache DaemonSet spec for this control-plane release"
