@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	placementNodeSelector := s.importBuildPlacementNodeSelector(ctx, app, op)
 	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
+	dockerImageDestination := dockerImageImportDestination{}
 	var output sourceimport.GitHubSourceImportOutput
 	queuedDockerImageRef := ""
 	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
@@ -57,12 +59,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
+		dockerImageDestination = s.dockerImageImportDestination(app, op)
 		output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
-			AppName:          app.Name,
-			ImageNameSuffix:  strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ImageRef:         controllerReachableImportImageRef(queuedDockerImageRef, s.registryPushBase, s.registryPullBase),
-			RegistryPushBase: s.registryPushBase,
-			ImageRepository:  "fugue-apps",
+			AppName:                     app.Name,
+			ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ImageRef:                    controllerReachableImportImageRef(queuedDockerImageRef, s.registryPushBase, s.registryPullBase),
+			RegistryPushBase:            s.registryPushBase,
+			DestinationRegistryPushBase: dockerImageDestination.RegistryPushBase,
+			ImageRepository:             "fugue-apps",
 		})
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
@@ -210,6 +214,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 	finalSpec.RestartToken = model.NewID("restart")
 	s.recordImportedImageLocation(app, op, managedImageRef, runtimeImageRef)
+	if dockerImageDestination.CacheEndpoint != "" {
+		s.recordImportedImageLocationOnTarget(app, op, dockerImageDestination.Target, dockerImageDestination.CacheEndpoint, managedImageRef, runtimeImageRef)
+	}
 	hydrateApp := app
 	hydrateApp.Spec = finalSpec
 	if scheduling, scheduleErr := s.managedSchedulingConstraintsForApp(ctx, hydrateApp); scheduleErr == nil {
@@ -292,6 +299,105 @@ func (s *Service) importBuildPlacementNodeSelector(ctx context.Context, app mode
 	// Do not inherit the app runtime node selector here: location/runtime labels can
 	// exclude every shared builder node and leave otherwise healthy builds stuck.
 	return nil
+}
+
+type dockerImageImportDestination struct {
+	RegistryPushBase string
+	CacheEndpoint    string
+	Target           deployImageTarget
+}
+
+func (s *Service) dockerImageImportDestination(app model.App, op model.Operation) dockerImageImportDestination {
+	if s == nil || s.Store == nil || !s.nodeLocalBuilderRegistryEnabled() {
+		return dockerImageImportDestination{}
+	}
+	runtimeID := importOperationRuntimeID(app, op)
+	if runtimeID == "" {
+		return dockerImageImportDestination{}
+	}
+	runtimeObj, err := s.Store.GetRuntime(runtimeID)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("docker image import cache destination lookup failed app=%s runtime=%s: %v", app.ID, runtimeID, err)
+		}
+		return dockerImageImportDestination{}
+	}
+	registryBase, cacheEndpoint := s.controllerReachableImageCacheEndpoint(runtimeObj)
+	if registryBase == "" || cacheEndpoint == "" {
+		return dockerImageImportDestination{}
+	}
+	return dockerImageImportDestination{
+		RegistryPushBase: registryBase,
+		CacheEndpoint:    cacheEndpoint,
+		Target: deployImageTarget{
+			RuntimeID:       strings.TrimSpace(runtimeObj.ID),
+			ClusterNodeName: strings.TrimSpace(runtimeObj.ClusterNodeName),
+		},
+	}
+}
+
+func importOperationRuntimeID(app model.App, op model.Operation) string {
+	if op.DesiredSpec != nil {
+		if runtimeID := strings.TrimSpace(op.DesiredSpec.RuntimeID); runtimeID != "" {
+			return runtimeID
+		}
+	}
+	if runtimeID := strings.TrimSpace(op.TargetRuntimeID); runtimeID != "" {
+		return runtimeID
+	}
+	return strings.TrimSpace(app.Spec.RuntimeID)
+}
+
+func (s *Service) controllerReachableImageCacheEndpoint(runtimeObj model.Runtime) (string, string) {
+	host := endpointHost(runtimeObj.Endpoint)
+	if host == "" {
+		return "", ""
+	}
+	port := registryBasePort(s.builderRegistryPushBase)
+	if port == "" {
+		port = registryBasePort(s.registryPullBase)
+	}
+	if port == "" {
+		return "", ""
+	}
+	base := net.JoinHostPort(host, port)
+	return base, "http://" + base
+}
+
+func endpointHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+			raw = parsed.Host
+		}
+	}
+	raw = strings.TrimRight(raw, "/")
+	if idx := strings.Index(raw, "/"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(raw, "[]")
+}
+
+func registryBasePort(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+			raw = parsed.Host
+		}
+	}
+	if _, port, err := net.SplitHostPort(raw); err == nil {
+		return port
+	}
+	return ""
 }
 
 func (s *Service) startImportOperationProgressHeartbeat(ctx context.Context, operationID string) func() {
@@ -626,7 +732,11 @@ func (s *Service) importUsedNodeLocalBuilderRegistry(output sourceimport.GitHubS
 	if !s.nodeLocalBuilderRegistryEnabled() {
 		return false
 	}
-	return strings.TrimSpace(output.ImportResult.BuildJobName) != ""
+	if strings.TrimSpace(output.ImportResult.BuildJobName) != "" {
+		return true
+	}
+	destinationRef := strings.TrimSpace(output.ImportResult.DestinationImageRef)
+	return destinationRef != "" && destinationRef != strings.TrimSpace(output.ImportResult.ImageRef)
 }
 
 func (s *Service) rewriteImportedRuntimeImageRef(ctx context.Context, imageRef string) (string, error) {

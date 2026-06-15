@@ -53,11 +53,7 @@ func builderDestinationImageRef(imageRef, registryPushBase string) string {
 	if imageRef == "" || registryPushBase == "" || builderPushBase == "" || builderPushBase == registryPushBase {
 		return imageRef
 	}
-	prefix := registryPushBase + "/"
-	if !strings.HasPrefix(imageRef, prefix) {
-		return imageRef
-	}
-	return builderPushBase + "/" + strings.TrimPrefix(imageRef, prefix)
+	return imageRefWithRegistryBase(imageRef, registryPushBase, builderPushBase)
 }
 
 func trimRegistryBase(raw string) string {
@@ -65,6 +61,20 @@ func trimRegistryBase(raw string) string {
 	raw = strings.TrimPrefix(raw, "http://")
 	raw = strings.TrimPrefix(raw, "https://")
 	return raw
+}
+
+func imageRefWithRegistryBase(imageRef, fromBase, toBase string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	fromBase = trimRegistryBase(fromBase)
+	toBase = trimRegistryBase(toBase)
+	if imageRef == "" || fromBase == "" || toBase == "" || toBase == fromBase {
+		return imageRef
+	}
+	prefix := fromBase + "/"
+	if !strings.HasPrefix(imageRef, prefix) {
+		return imageRef
+	}
+	return toBase + "/" + strings.TrimPrefix(imageRef, prefix)
 }
 
 func effectiveDestinationImageRef(imageRef, destinationImageRef string) string {

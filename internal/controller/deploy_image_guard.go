@@ -386,6 +386,31 @@ func (s *Service) recordImportedImageLocation(app model.App, op model.Operation,
 	}
 }
 
+func (s *Service) recordImportedImageLocationOnTarget(app model.App, op model.Operation, target deployImageTarget, cacheEndpoint string, refs ...string) {
+	if s == nil || s.Store == nil || strings.TrimSpace(cacheEndpoint) == "" {
+		return
+	}
+	now := time.Now().UTC()
+	if s.now != nil {
+		now = s.now().UTC()
+	}
+	for _, ref := range compactImageRefs(refs) {
+		if _, err := s.Store.UpsertImageLocation(model.ImageLocation{
+			TenantID:          strings.TrimSpace(app.TenantID),
+			AppID:             strings.TrimSpace(app.ID),
+			ImageRef:          ref,
+			SourceOperationID: strings.TrimSpace(op.ID),
+			RuntimeID:         strings.TrimSpace(target.RuntimeID),
+			ClusterNodeName:   strings.TrimSpace(target.ClusterNodeName),
+			CacheEndpoint:     strings.TrimRight(strings.TrimSpace(cacheEndpoint), "/"),
+			Status:            model.ImageLocationStatusPresent,
+			LastSeenAt:        &now,
+		}); err != nil && s.Logger != nil {
+			s.Logger.Printf("record target image location app=%s op=%s image=%s runtime=%s node=%s failed: %v", app.ID, op.ID, ref, target.RuntimeID, target.ClusterNodeName, err)
+		}
+	}
+}
+
 func (s *Service) managedDeployImageRef(app model.App) string {
 	if s == nil {
 		return ""

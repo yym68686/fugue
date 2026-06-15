@@ -24,11 +24,12 @@ import (
 )
 
 type DockerImageSourceImportRequest struct {
-	AppName          string
-	ImageNameSuffix  string
-	ImageRef         string
-	ImageRepository  string
-	RegistryPushBase string
+	AppName                     string
+	ImageNameSuffix             string
+	ImageRef                    string
+	ImageRepository             string
+	RegistryPushBase            string
+	DestinationRegistryPushBase string
 }
 
 type remoteImageDigestFunc func(string, ...crane.Option) (string, error)
@@ -50,7 +51,7 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 		return GitHubSourceImportOutput{}, fmt.Errorf("resolve image digest: %w", err)
 	}
 
-	destImageRef := defaultMirroredImageRef(
+	logicalImageRef := defaultMirroredImageRef(
 		req.RegistryPushBase,
 		req.ImageRepository,
 		req.AppName,
@@ -58,43 +59,44 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 		digest,
 		req.ImageNameSuffix,
 	)
-	destOptions := craneOptionsForImageRef(ctx, destImageRef)
-	alreadyMirrored, err := mirroredImageReferenceMatchesDigest(destImageRef, digest, destOptions...)
+	destinationImageRef := imageRefWithRegistryBase(logicalImageRef, req.RegistryPushBase, req.DestinationRegistryPushBase)
+	destOptions := craneOptionsForImageRef(ctx, destinationImageRef)
+	alreadyMirrored, err := mirroredImageReferenceMatchesDigest(destinationImageRef, digest, destOptions...)
 	if err != nil {
 		return GitHubSourceImportOutput{}, fmt.Errorf("check mirrored image in internal registry: %w", err)
 	}
 	copyOptions := append([]crane.Option{}, sourceOptions...)
-	if isInsecureRegistryHost(registryHostFromImageRef(destImageRef)) {
+	if isInsecureRegistryHost(registryHostFromImageRef(destinationImageRef)) {
 		copyOptions = append(copyOptions, crane.Insecure)
 	}
 	if !alreadyMirrored {
-		if err := crane.Copy(sourceImageRef, destImageRef, copyOptions...); err != nil {
+		if err := crane.Copy(sourceImageRef, destinationImageRef, copyOptions...); err != nil {
 			return GitHubSourceImportOutput{}, fmt.Errorf("mirror image into internal registry: %w", err)
 		}
-		if err := validateMirroredImageReference(destImageRef, digest, destOptions...); err != nil {
+		if err := validateMirroredImageReference(destinationImageRef, digest, destOptions...); err != nil {
 			return GitHubSourceImportOutput{}, fmt.Errorf("validate mirrored image in internal registry: %w", err)
 		}
 	}
 	detectedPort := 80
 	exposesPublicService := false
 	detectedStack := ""
-	configFile, configErr := readRemoteImageConfig(destImageRef, destOptions...)
+	configFile, configErr := readRemoteImageConfig(destinationImageRef, destOptions...)
 	if configErr == nil {
 		if port := detectExposedPortFromImageConfig(configFile); port > 0 {
 			detectedPort = port
 			exposesPublicService = true
 		}
-		stack, suppressPublicService, suppressErr := detectImageBackgroundOverride(destImageRef, configFile, destOptions...)
+		stack, suppressPublicService, suppressErr := detectImageBackgroundOverride(destinationImageRef, configFile, destOptions...)
 		if suppressErr == nil {
 			detectedStack = stack
 			if suppressPublicService {
 				exposesPublicService = false
 			}
 		} else if i != nil && i.Logger != nil {
-			i.Logger.Printf("skip image background inspection for %s: %v", destImageRef, suppressErr)
+			i.Logger.Printf("skip image background inspection for %s: %v", destinationImageRef, suppressErr)
 		}
 	} else if i != nil && i.Logger != nil {
-		i.Logger.Printf("skip image config inspection for %s: %v", destImageRef, configErr)
+		i.Logger.Printf("skip image config inspection for %s: %v", destinationImageRef, configErr)
 	}
 
 	return GitHubSourceImportOutput{
@@ -104,12 +106,13 @@ func (i *Importer) ImportDockerImageSource(ctx context.Context, req DockerImageS
 			ExposesPublicService: exposesPublicService,
 			DetectedProvider:     model.AppSourceTypeDockerImage,
 			DetectedStack:        detectedStack,
-			ImageRef:             destImageRef,
+			ImageRef:             logicalImageRef,
+			DestinationImageRef:  destinationImageRef,
 		},
 		Source: model.AppSource{
 			Type:             model.AppSourceTypeDockerImage,
 			ImageRef:         strings.TrimSpace(req.ImageRef),
-			ResolvedImageRef: destImageRef,
+			ResolvedImageRef: logicalImageRef,
 			ImageNameSuffix:  strings.TrimSpace(req.ImageNameSuffix),
 			DetectedProvider: model.AppSourceTypeDockerImage,
 			DetectedStack:    detectedStack,

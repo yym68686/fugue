@@ -79,6 +79,28 @@ func TestDefaultMirroredImageRefIgnoresAppNameForSameDockerSource(t *testing.T) 
 	}
 }
 
+func TestImageRefWithRegistryBaseRewritesOnlyMatchingRegistry(t *testing.T) {
+	t.Parallel()
+
+	got := imageRefWithRegistryBase(
+		"registry.push.example/fugue-apps/demo:image-abc123",
+		"registry.push.example",
+		"203.0.113.10:5000",
+	)
+	if got != "203.0.113.10:5000/fugue-apps/demo:image-abc123" {
+		t.Fatalf("unexpected rewritten ref: %q", got)
+	}
+
+	unchanged := imageRefWithRegistryBase(
+		"other.registry.example/fugue-apps/demo:image-abc123",
+		"registry.push.example",
+		"203.0.113.10:5000",
+	)
+	if unchanged != "other.registry.example/fugue-apps/demo:image-abc123" {
+		t.Fatalf("expected non-matching registry to stay unchanged, got %q", unchanged)
+	}
+}
+
 func TestValidateMirroredImageReferenceWithClients(t *testing.T) {
 	t.Parallel()
 

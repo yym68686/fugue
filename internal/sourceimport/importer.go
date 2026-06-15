@@ -55,6 +55,7 @@ type GitHubImportResult struct {
 	DockerfilePath          string
 	BuildContextDir         string
 	ImageRef                string
+	DestinationImageRef     string
 	BuildJobName            string
 	DefaultAppName          string
 	DetectedPort            int
