@@ -315,9 +315,40 @@ PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 MAINTENANCE_AGENT_HELM_SET_ARGS=()
 NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="false"
+RELEASE_CHANGED_FILES_EFFECTIVE=""
 
 release_changed_files() {
+  if [[ -n "${RELEASE_CHANGED_FILES_EFFECTIVE:-}" ]]; then
+    printf '%s\n' "${RELEASE_CHANGED_FILES_EFFECTIVE}" | sed '/^[[:space:]]*$/d'
+    return
+  fi
   printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d'
+}
+
+refresh_release_changed_files_from_live_api() {
+  local api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
+  local live_image_ref=""
+  local live_tag=""
+  local target_tag=""
+  local changed_files=""
+
+  target_tag="$(trim_field "${FUGUE_API_IMAGE_TAG:-}")"
+  [[ -n "${target_tag}" ]] || return 0
+  if ! deployment_exists "${api_deployment}" && deployment_exists "${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"; then
+    api_deployment="${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"
+  fi
+  live_image_ref="$(trim_field "$(live_deployment_container_image "${api_deployment}" "api")")"
+  live_tag="$(image_ref_tag "${live_image_ref}")"
+  if [[ -z "${live_tag}" || "${live_tag}" == "${target_tag}" ]]; then
+    return 0
+  fi
+  if ! git -C "${REPO_ROOT}" cat-file -e "${live_tag}^{commit}" 2>/dev/null ||
+    ! git -C "${REPO_ROOT}" cat-file -e "${target_tag}^{commit}" 2>/dev/null; then
+    return 0
+  fi
+  changed_files="$(git -C "${REPO_ROOT}" diff --name-only "${live_tag}" "${target_tag}")"
+  RELEASE_CHANGED_FILES_EFFECTIVE="${changed_files}"
+  log "release changed files rebased from live API tag ${live_tag} to target ${target_tag}"
 }
 
 release_changed_files_exact_set() {
@@ -1676,6 +1707,14 @@ rollout_status() {
 daemonset_exists() {
   local daemonset_name="$1"
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" >/dev/null 2>&1
+}
+
+live_deployment_container_image() {
+  local deployment_name="$1"
+  local container_name="$2"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" \
+    -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
 }
 
 live_daemonset_container_image() {
@@ -4979,6 +5018,8 @@ rollback_release() {
 
 prepare_release_domains() {
   local public_mode build_mode stateful_mode maintenance_mode
+
+  refresh_release_changed_files_from_live_api
 
   public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   build_mode="${FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE:-auto}"

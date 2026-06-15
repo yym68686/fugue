@@ -70,10 +70,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
-            - name: FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
             - name: FUGUE_IMAGE_CACHE_ENDPOINT
               value: {{ printf "http://$(NODE_IP):%v" .Values.imageCache.port | quote }}
             - name: FUGUE_API_BASE

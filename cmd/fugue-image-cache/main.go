@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +23,12 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/registry"
+)
+
+const (
+	serviceAccountTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	serviceAccountCAPath        = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 type imageCache struct {
@@ -87,6 +96,17 @@ func main() {
 		reportPath = "/v1/image-locations"
 		lookupPath = "/v1/image-locations"
 	}
+	clusterNode := env("FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME", os.Getenv("NODE_NAME"))
+	if clusterNode == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		discovered, err := discoverKubernetesPodNodeName(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("discover image cache cluster node failed: %v", err)
+		} else {
+			clusterNode = discovered
+		}
+	}
 	cache := &imageCache{
 		apiBase:        strings.TrimRight(env("FUGUE_API_BASE", os.Getenv("FUGUE_API_URL")), "/"),
 		apiToken:       apiToken,
@@ -96,7 +116,7 @@ func main() {
 		localBase:      trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
 		upstreamBase:   trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
 		cacheEndpoint:  strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
-		clusterNode:    env("FUGUE_IMAGE_CACHE_CLUSTER_NODE_NAME", os.Getenv("NODE_NAME")),
+		clusterNode:    clusterNode,
 		manifestDir:    filepath.Join(storeDir, "_manifests"),
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
@@ -646,6 +666,93 @@ func (c *imageCache) reportLocation(ctx context.Context, location imageLocation,
 		return fmt.Errorf("report image location status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+func discoverKubernetesPodNodeName(ctx context.Context) (string, error) {
+	host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
+	if host == "" {
+		return "", errors.New("KUBERNETES_SERVICE_HOST is not set")
+	}
+	port := env("KUBERNETES_SERVICE_PORT", "443")
+	namespaceData, err := os.ReadFile(serviceAccountNamespacePath)
+	if err != nil {
+		return "", fmt.Errorf("read service account namespace: %w", err)
+	}
+	tokenData, err := os.ReadFile(serviceAccountTokenPath)
+	if err != nil {
+		return "", fmt.Errorf("read service account token: %w", err)
+	}
+	caData, err := os.ReadFile(serviceAccountCAPath)
+	if err != nil {
+		return "", fmt.Errorf("read service account CA: %w", err)
+	}
+	podName, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("get hostname: %w", err)
+	}
+	client, err := kubernetesAPIClient(caData)
+	if err != nil {
+		return "", err
+	}
+	baseURL := "https://" + net.JoinHostPort(host, port)
+	return fetchKubernetesPodNodeName(ctx, client, baseURL, strings.TrimSpace(string(tokenData)), strings.TrimSpace(string(namespaceData)), strings.TrimSpace(podName))
+}
+
+func kubernetesAPIClient(caPEM []byte) (*http.Client, error) {
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("parse service account CA")
+	}
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    roots,
+			},
+		},
+	}, nil
+}
+
+func fetchKubernetesPodNodeName(ctx context.Context, client *http.Client, baseURL, token, namespace, podName string) (string, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	token = strings.TrimSpace(token)
+	namespace = strings.TrimSpace(namespace)
+	podName = strings.TrimSpace(podName)
+	if baseURL == "" || token == "" || namespace == "" || podName == "" {
+		return "", errors.New("kubernetes pod lookup is missing base URL, token, namespace, or pod name")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods/"+url.PathEscape(podName), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("get pod status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var decoded struct {
+		Spec struct {
+			NodeName string `json:"nodeName"`
+		} `json:"spec"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return "", err
+	}
+	nodeName := strings.TrimSpace(decoded.Spec.NodeName)
+	if nodeName == "" {
+		return "", errors.New("pod spec.nodeName is empty")
+	}
+	return nodeName, nil
 }
 
 func registryObjectMissing(err error) bool {

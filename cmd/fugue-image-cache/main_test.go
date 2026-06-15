@@ -842,6 +842,34 @@ func TestReportIncludesClusterNodeIdentity(t *testing.T) {
 	}
 }
 
+func TestFetchKubernetesPodNodeName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		if got := r.URL.Path; got != "/api/v1/namespaces/fugue-system/pods/fugue-image-cache-abc" {
+			t.Fatalf("path = %s", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer service-account-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"spec": map[string]any{
+				"nodeName": "worker-image-1",
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	nodeName, err := fetchKubernetesPodNodeName(context.Background(), server.Client(), server.URL, "service-account-token", "fugue-system", "fugue-image-cache-abc")
+	if err != nil {
+		t.Fatalf("fetch pod node name: %v", err)
+	}
+	if nodeName != "worker-image-1" {
+		t.Fatalf("nodeName = %q, want worker-image-1", nodeName)
+	}
+}
+
 func TestIsRegistryAPIPath(t *testing.T) {
 	tests := map[string]bool{
 		"":             false,

@@ -144,6 +144,25 @@ printf 'package main\nfunc main() { println("fixed") }\n' >"${TMP_REPO_ROOT}/cmd
 git -C "${TMP_REPO_ROOT}" add .
 git -C "${TMP_REPO_ROOT}" commit -q -m image-cache
 IMAGE_CACHE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+(
+  REPO_ROOT="${TMP_REPO_ROOT}"
+  FUGUE_API_DEPLOYMENT_NAME=fugue-api
+  FUGUE_LEGACY_API_DEPLOYMENT_NAME=fugue
+  FUGUE_API_IMAGE_TAG="${IMAGE_CACHE_REF}"
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ncmd/fugue-image-cache/main.go'
+  RELEASE_CHANGED_FILES_EFFECTIVE=""
+  deployment_exists() {
+    [[ "$1" == "fugue-api" ]]
+  }
+  live_deployment_container_image() {
+    printf 'ghcr.io/acme/fugue-api:%s' "${SCRIPT_REF}"
+  }
+  refresh_release_changed_files_from_live_api
+  assert_eq "$(release_changed_files)" "cmd/fugue-image-cache/main.go" "release changed files rebase uses live API tag"
+  if node_local_build_plane_manifest_changed; then
+    fail "rebased live diff must not treat reverted image-cache templates as manifest changes"
+  fi
+)
 python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
 import pathlib
 import sys
