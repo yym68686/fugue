@@ -45,3 +45,15 @@ func applyImportedGeneratedEnv(spec *model.AppSpec, generatedEnv map[string]mode
 	}
 	spec.GeneratedEnv = model.NormalizeAppGeneratedEnvSpecs(generatedEnv)
 }
+
+func applyImportedProcess(spec *model.AppSpec, entrypoint, command []string) {
+	if spec == nil {
+		return
+	}
+	if len(entrypoint) > 0 {
+		spec.Command = append([]string(nil), entrypoint...)
+	}
+	if len(command) > 0 {
+		spec.Args = append([]string(nil), command...)
+	}
+}

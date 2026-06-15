@@ -436,6 +436,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		applyImportedNetworkMode(&spec, service.NetworkMode)
 		applyImportedNetworkPolicy(&spec, service.NetworkPolicy)
 		applyImportedGeneratedEnv(&spec, service.GeneratedEnv)
+		applyImportedProcess(&spec, service.Entrypoint, service.Command)
 		if route != nil {
 			route.ServicePort = model.AppServicePort(spec)
 		}

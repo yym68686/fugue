@@ -593,7 +593,8 @@ func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *tes
 					Image:        "busybox:latest",
 					InternalPort: 80,
 					NetworkMode:  model.AppNetworkModeBackground,
-					Command:      []string{"sh", "-lc", "sleep 3600"},
+					Entrypoint:   []string{"sh", "-lc"},
+					Command:      []string{"sleep 3600"},
 				},
 			},
 		},
@@ -617,6 +618,12 @@ func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *tes
 	}
 	if len(worker.Spec.Ports) != 0 {
 		t.Fatalf("expected background worker ports to be cleared, got %v", worker.Spec.Ports)
+	}
+	if got := strings.Join(worker.Spec.Command, " "); got != "sh -lc" {
+		t.Fatalf("expected compose entrypoint to become app command, got %#v", worker.Spec.Command)
+	}
+	if got := strings.Join(worker.Spec.Args, " "); got != "sleep 3600" {
+		t.Fatalf("expected compose command to become app args, got %#v", worker.Spec.Args)
 	}
 	if worker.Route != nil && worker.Route.Hostname != "" {
 		t.Fatalf("expected background worker to stay unrouted, got %+v", worker.Route)
