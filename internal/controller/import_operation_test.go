@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -417,6 +419,200 @@ func TestExecuteManagedImportOperationImportsDockerImageSourceThroughRuntimeCach
 		if !seen {
 			t.Fatalf("expected target image location for %q, got %+v", ref, locations)
 		}
+	}
+}
+
+func TestExecuteManagedImportOperationResolvesManagedSharedDockerImageImportToSelectedNodeCache(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://203.0.113.20:9443",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	if _, err := stateStore.SetRuntimePoolMode(updater.RuntimeID, model.RuntimePoolModeInternalShared); err != nil {
+		t.Fatalf("set runtime pool mode: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: "nginx:1.27",
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	nodeName := updater.ClusterNodeName
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			fmt.Fprint(w, `{"items":[]}`)
+		case "/api/v1/nodes":
+			fmt.Fprintf(w, `{"items":[{"metadata":{"name":%q,"labels":{"%s":%q}}}]}`, nodeName, runtime.RuntimeIDLabelKey, updater.RuntimeID)
+		case "/api/v1/nodes/" + nodeName:
+			encodeSharedPlacementNode(t, w, nodeName, "us", "4", "8Gi", "80Gi")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	const managedImageRef = "registry.push.example/fugue-apps/demo:image-abc123"
+	const destinationImageRef = "203.0.113.20:5000/fugue-apps/demo:image-abc123"
+	expectedRuntimeImageRef, err := rewriteImportedImageRef(managedImageRef, "registry.push.example", "registry.pull.example")
+	if err != nil {
+		t.Fatalf("rewrite imported image ref: %v", err)
+	}
+
+	importer := &recordingImporter{
+		dockerImageOutput: &sourceimport.GitHubSourceImportOutput{
+			ImportResult: sourceimport.GitHubImportResult{
+				DetectedProvider:     model.AppSourceTypeDockerImage,
+				ImageRef:             managedImageRef,
+				DestinationImageRef:  destinationImageRef,
+				DetectedPort:         9090,
+				ExposesPublicService: true,
+			},
+			Source: model.AppSource{
+				Type:             model.AppSourceTypeDockerImage,
+				ImageRef:         "nginx:1.27",
+				ResolvedImageRef: managedImageRef,
+				DetectedProvider: model.AppSourceTypeDockerImage,
+			},
+		},
+	}
+	svc := &Service{
+		Store:                   stateStore,
+		Logger:                  log.New(io.Discard, "", 0),
+		importer:                importer,
+		registryPushBase:        "registry.push.example",
+		registryPullBase:        "registry.pull.example",
+		builderRegistryPushBase: "127.0.0.1:5000",
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      kubeServer.Client(),
+				baseURL:     kubeServer.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			if imageRef != managedImageRef {
+				t.Fatalf("unexpected managed image inspect ref %q", imageRef)
+			}
+			return false, nil, errors.New("central registry unavailable")
+		},
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+	if importer.dockerImageReq == nil {
+		t.Fatal("expected importer to receive docker image request")
+	}
+	if got, want := importer.dockerImageReq.DestinationRegistryPushBase, "203.0.113.20:5000"; got != want {
+		t.Fatalf("expected docker import to target selected shared node cache %q, got %q", want, got)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil || deployOp.DesiredSource == nil {
+		t.Fatalf("expected deploy operation with desired spec/source, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != expectedRuntimeImageRef {
+		t.Fatalf("expected runtime image ref %q, got %q", expectedRuntimeImageRef, got)
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != managedImageRef {
+		t.Fatalf("expected logical resolved image ref %q, got %q", managedImageRef, got)
+	}
+
+	locations, err := stateStore.ListImageLocations(model.ImageLocationFilter{
+		TenantID:  tenant.ID,
+		AppID:     app.ID,
+		RuntimeID: updater.RuntimeID,
+		Status:    model.ImageLocationStatusPresent,
+	})
+	if err != nil {
+		t.Fatalf("list image locations: %v", err)
+	}
+	if len(locations) == 0 {
+		t.Fatal("expected image locations on selected shared node cache")
+	}
+	for _, location := range locations {
+		if location.ClusterNodeName != updater.ClusterNodeName {
+			t.Fatalf("expected image location node %q, got %q", updater.ClusterNodeName, location.ClusterNodeName)
+		}
+		if location.CacheEndpoint != "http://203.0.113.20:5000" {
+			t.Fatalf("expected cache endpoint http://203.0.113.20:5000, got %q", location.CacheEndpoint)
+		}
+	}
+}
+
+func TestControllerReachableImageCacheEndpointRejectsAbstractAndLoopbackHosts(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{builderRegistryPushBase: "127.0.0.1:5000"}
+	for _, endpoint := range []string{"in-cluster", "127.0.0.1", "http://localhost:9443", "https://[::1]:9443"} {
+		if registryBase, cacheEndpoint := svc.controllerReachableImageCacheEndpoint(model.Runtime{Endpoint: endpoint}); registryBase != "" || cacheEndpoint != "" {
+			t.Fatalf("expected endpoint %q to be rejected, got registry=%q cache=%q", endpoint, registryBase, cacheEndpoint)
+		}
+	}
+	registryBase, cacheEndpoint := svc.controllerReachableImageCacheEndpoint(model.Runtime{Endpoint: "https://203.0.113.20:9443"})
+	if registryBase != "203.0.113.20:5000" || cacheEndpoint != "http://203.0.113.20:5000" {
+		t.Fatalf("expected reachable node cache endpoint, got registry=%q cache=%q", registryBase, cacheEndpoint)
 	}
 }
 

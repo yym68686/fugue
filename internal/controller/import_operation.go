@@ -59,7 +59,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
-		dockerImageDestination = s.dockerImageImportDestination(app, op)
+		dockerImageDestination = s.dockerImageImportDestination(importCtx, app, op)
 		output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
 			AppName:                     app.Name,
 			ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
@@ -307,7 +307,7 @@ type dockerImageImportDestination struct {
 	Target           deployImageTarget
 }
 
-func (s *Service) dockerImageImportDestination(app model.App, op model.Operation) dockerImageImportDestination {
+func (s *Service) dockerImageImportDestination(ctx context.Context, app model.App, op model.Operation) dockerImageImportDestination {
 	if s == nil || s.Store == nil || !s.nodeLocalBuilderRegistryEnabled() {
 		return dockerImageImportDestination{}
 	}
@@ -322,6 +322,47 @@ func (s *Service) dockerImageImportDestination(app model.App, op model.Operation
 		}
 		return dockerImageImportDestination{}
 	}
+	if runtimeObj.Type == model.RuntimeTypeManagedShared {
+		return s.managedSharedDockerImageImportDestination(ctx, app, op, runtimeObj)
+	}
+	return s.dockerImageImportDestinationForRuntime(runtimeObj)
+}
+
+func (s *Service) managedSharedDockerImageImportDestination(ctx context.Context, app model.App, op model.Operation, sharedRuntime model.Runtime) dockerImageImportDestination {
+	scheduledApp := app
+	if op.DesiredSpec != nil {
+		scheduledApp.Spec = cloneImportSpec(*op.DesiredSpec)
+	}
+	scheduledApp.Spec.RuntimeID = strings.TrimSpace(sharedRuntime.ID)
+	if scheduledApp.Spec.RuntimeID == "" {
+		scheduledApp.Spec.RuntimeID = strings.TrimSpace(importOperationRuntimeID(app, op))
+	}
+	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, scheduledApp)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("docker image import shared cache placement failed app=%s runtime=%s: %v", app.ID, sharedRuntime.ID, err)
+		}
+		return dockerImageImportDestination{}
+	}
+	target := s.deployImageTarget(scheduledApp, scheduling)
+	if strings.TrimSpace(target.ClusterNodeName) == "" {
+		return dockerImageImportDestination{}
+	}
+	runtimeObj, found := s.runtimeForClusterNode(ctx, target.ClusterNodeName)
+	if !found {
+		if s.Logger != nil {
+			s.Logger.Printf("docker image import shared cache runtime lookup missed app=%s runtime=%s node=%s", app.ID, sharedRuntime.ID, target.ClusterNodeName)
+		}
+		return dockerImageImportDestination{}
+	}
+	destination := s.dockerImageImportDestinationForRuntime(runtimeObj)
+	if destination.Target.ClusterNodeName == "" {
+		destination.Target.ClusterNodeName = strings.TrimSpace(target.ClusterNodeName)
+	}
+	return destination
+}
+
+func (s *Service) dockerImageImportDestinationForRuntime(runtimeObj model.Runtime) dockerImageImportDestination {
 	registryBase, cacheEndpoint := s.controllerReachableImageCacheEndpoint(runtimeObj)
 	if registryBase == "" || cacheEndpoint == "" {
 		return dockerImageImportDestination{}
@@ -334,6 +375,64 @@ func (s *Service) dockerImageImportDestination(app model.App, op model.Operation
 			ClusterNodeName: strings.TrimSpace(runtimeObj.ClusterNodeName),
 		},
 	}
+}
+
+func (s *Service) runtimeForClusterNode(ctx context.Context, nodeName string) (model.Runtime, bool) {
+	nodeName = strings.TrimSpace(nodeName)
+	if s == nil || s.Store == nil || nodeName == "" {
+		return model.Runtime{}, false
+	}
+	if runtimes, err := s.Store.ListRuntimes("", true); err == nil {
+		for _, runtimeObj := range runtimes {
+			if runtimeObj.Type != model.RuntimeTypeManagedOwned {
+				continue
+			}
+			if strings.TrimSpace(runtimeObj.Status) != model.RuntimeStatusActive {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(runtimeObj.ClusterNodeName), nodeName) {
+				continue
+			}
+			if registryBase, _ := s.controllerReachableImageCacheEndpoint(runtimeObj); registryBase == "" {
+				continue
+			}
+			return runtimeObj, true
+		}
+	} else if s.Logger != nil {
+		s.Logger.Printf("list runtimes for cluster node cache lookup failed node=%s: %v", nodeName, err)
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("initialize kubernetes client for cluster node cache lookup failed node=%s: %v", nodeName, err)
+		}
+		return model.Runtime{}, false
+	}
+	nodeRuntimeIDs, err := client.listNodeRuntimeIDs(ctx)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("list kubernetes node runtime ids for cache lookup failed node=%s: %v", nodeName, err)
+		}
+		return model.Runtime{}, false
+	}
+	runtimeID := strings.TrimSpace(nodeRuntimeIDs[nodeName])
+	if runtimeID == "" {
+		return model.Runtime{}, false
+	}
+	runtimeObj, err := s.Store.GetRuntime(runtimeID)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("load runtime %s for cluster node cache lookup failed node=%s: %v", runtimeID, nodeName, err)
+		}
+		return model.Runtime{}, false
+	}
+	if runtimeObj.Type != model.RuntimeTypeManagedOwned || strings.TrimSpace(runtimeObj.Status) != model.RuntimeStatusActive {
+		return model.Runtime{}, false
+	}
+	if registryBase, _ := s.controllerReachableImageCacheEndpoint(runtimeObj); registryBase == "" {
+		return model.Runtime{}, false
+	}
+	return runtimeObj, true
 }
 
 func importOperationRuntimeID(app model.App, op model.Operation) string {
@@ -350,7 +449,7 @@ func importOperationRuntimeID(app model.App, op model.Operation) string {
 
 func (s *Service) controllerReachableImageCacheEndpoint(runtimeObj model.Runtime) (string, string) {
 	host := endpointHost(runtimeObj.Endpoint)
-	if host == "" {
+	if !controllerReachableImageCacheHost(host) {
 		return "", ""
 	}
 	port := registryBasePort(s.builderRegistryPushBase)
@@ -362,6 +461,17 @@ func (s *Service) controllerReachableImageCacheEndpoint(runtimeObj model.Runtime
 	}
 	base := net.JoinHostPort(host, port)
 	return base, "http://" + base
+}
+
+func controllerReachableImageCacheHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "" || host == "in-cluster" || host == "localhost" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 func endpointHost(raw string) string {
