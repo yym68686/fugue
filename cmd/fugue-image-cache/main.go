@@ -888,6 +888,9 @@ func manifestReferencedTargets(body []byte) []referencedRegistryTarget {
 		Config    *manifestDescriptor  `json:"config"`
 		Layers    []manifestDescriptor `json:"layers"`
 		Manifests []manifestDescriptor `json:"manifests"`
+		FSLayers  []struct {
+			BlobSum string `json:"blobSum"`
+		} `json:"fsLayers"`
 	}
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil
@@ -899,6 +902,11 @@ func manifestReferencedTargets(body []byte) []referencedRegistryTarget {
 	for _, layer := range decoded.Layers {
 		if strings.TrimSpace(layer.Digest) != "" {
 			targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: layer.Digest})
+		}
+	}
+	for _, layer := range decoded.FSLayers {
+		if strings.TrimSpace(layer.BlobSum) != "" {
+			targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: layer.BlobSum})
 		}
 	}
 	for _, manifest := range decoded.Manifests {

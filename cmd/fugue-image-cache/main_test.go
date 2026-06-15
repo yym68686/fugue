@@ -406,6 +406,27 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	}
 }
 
+func TestManifestReferencedTargetsIncludesDockerSchemaV1Layers(t *testing.T) {
+	t.Parallel()
+
+	const manifest = `{"schemaVersion":1,"name":"fugue-apps/demo","tag":"image-test","fsLayers":[{"blobSum":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"blobSum":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}`
+
+	targets := manifestReferencedTargets([]byte(manifest))
+
+	got := map[string]registryTargetKind{}
+	for _, target := range targets {
+		got[target.target] = target.kind
+	}
+	for _, digest := range []string{
+		"sha256:1111111111111111111111111111111111111111111111111111111111111111",
+		"sha256:2222222222222222222222222222222222222222222222222222222222222222",
+	} {
+		if got[digest] != registryTargetBlob {
+			t.Fatalf("digest %s kind = %q, want %q; targets=%v", digest, got[digest], registryTargetBlob, targets)
+		}
+	}
+}
+
 func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	t.Parallel()
 
