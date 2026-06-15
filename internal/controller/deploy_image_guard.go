@@ -67,6 +67,7 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 	if len(refs) == 0 {
 		return true, nil
 	}
+	var inspectErr error
 	if s.inspectManagedImage != nil {
 		for _, ref := range refs {
 			if !s.shouldInspectControllerImageRef(ref) {
@@ -74,7 +75,16 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 			}
 			exists, err := s.inspectManagedImageWithRetry(ctx, ref)
 			if err != nil {
-				return false, err
+				if !s.nodeLocalBuilderRegistryEnabled() {
+					return false, err
+				}
+				if inspectErr == nil {
+					inspectErr = err
+				}
+				if s.Logger != nil {
+					s.Logger.Printf("inspect deploy image failed; checking node-local image location evidence app=%s image=%s: %v", app.ID, ref, err)
+				}
+				continue
 			}
 			if exists {
 				s.scheduleImageHydration(ctx, app, target, ref)
@@ -87,6 +97,9 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 		return false, err
 	}
 	if len(locations) == 0 {
+		if inspectErr != nil {
+			return false, inspectErr
+		}
 		return false, nil
 	}
 	if imageLocationPresentOnTarget(locations, target) {
@@ -94,6 +107,15 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 	}
 	s.scheduleImageHydration(ctx, app, target, refs[0])
 	return true, nil
+}
+
+func (s *Service) nodeLocalBuilderRegistryEnabled() bool {
+	if s == nil {
+		return false
+	}
+	builderPushBase := strings.Trim(strings.TrimSpace(s.builderRegistryPushBase), "/")
+	registryPushBase := strings.Trim(strings.TrimSpace(s.registryPushBase), "/")
+	return builderPushBase != "" && builderPushBase != registryPushBase
 }
 
 func (s *Service) shouldInspectControllerImageRef(imageRef string) bool {

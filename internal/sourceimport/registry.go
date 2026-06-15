@@ -33,6 +33,58 @@ func isInsecureRegistryHost(host string) bool {
 		strings.HasSuffix(host, ".cluster.local")
 }
 
+func isLoopbackRegistryHost(host string) bool {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func configuredBuilderRegistryPushBase() string {
+	return trimRegistryBase(os.Getenv("FUGUE_BUILDER_REGISTRY_PUSH_BASE"))
+}
+
+func builderDestinationImageRef(imageRef, registryPushBase string) string {
+	imageRef = strings.TrimSpace(imageRef)
+	registryPushBase = trimRegistryBase(registryPushBase)
+	builderPushBase := configuredBuilderRegistryPushBase()
+	if imageRef == "" || registryPushBase == "" || builderPushBase == "" || builderPushBase == registryPushBase {
+		return imageRef
+	}
+	prefix := registryPushBase + "/"
+	if !strings.HasPrefix(imageRef, prefix) {
+		return imageRef
+	}
+	return builderPushBase + "/" + strings.TrimPrefix(imageRef, prefix)
+}
+
+func trimRegistryBase(raw string) string {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	raw = strings.TrimPrefix(raw, "http://")
+	raw = strings.TrimPrefix(raw, "https://")
+	return raw
+}
+
+func effectiveDestinationImageRef(imageRef, destinationImageRef string) string {
+	if destination := strings.TrimSpace(destinationImageRef); destination != "" {
+		return destination
+	}
+	return strings.TrimSpace(imageRef)
+}
+
+func applyBuilderRegistryNetwork(podSpec map[string]any, destinationImageRef string) {
+	if podSpec == nil {
+		return
+	}
+	if !isLoopbackRegistryHost(registryHostFromImageRef(destinationImageRef)) {
+		return
+	}
+	podSpec["hostNetwork"] = true
+	podSpec["dnsPolicy"] = "ClusterFirstWithHostNet"
+}
+
 func kanikoDestinationArgs(imageRef string, baseArgs ...string) []string {
 	args := append([]string(nil), baseArgs...)
 	args = append(args, configuredKanikoSnapshotArgs()...)

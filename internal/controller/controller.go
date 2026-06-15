@@ -25,6 +25,7 @@ type Service struct {
 	importer                       sourceImporter
 	registryPushBase               string
 	registryPullBase               string
+	builderRegistryPushBase        string
 	inspectManagedImage            appimages.InspectFunc
 	inspectManagedImageConfig      imageConfigInspector
 	deleteManagedImage             func(context.Context, string) (appimages.DeleteResult, error)
@@ -80,6 +81,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
+		builderRegistryPushBase:      strings.TrimSpace(cfg.BuilderRegistryPushBase),
 		resolveManagedImageDigestRef: sourceimport.ResolveRemoteImageDigestRef,
 		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
 		latestGitHubCommit:           sourceimport.LatestGitHubCommit,

@@ -316,6 +316,65 @@ func TestBuildArchiveKanikoJobObjectAppliesBuilderTolerations(t *testing.T) {
 	}
 }
 
+func TestGeneratedBuilderJobsPushToNodeLocalRegistryWhenConfigured(t *testing.T) {
+	t.Setenv("FUGUE_BUILDER_REGISTRY_PUSH_BASE", "127.0.0.1:5000")
+	const registryPushBase = "fugue-fugue-registry.fugue-system.svc.cluster.local:5000"
+	const managedRef = registryPushBase + "/fugue-apps/demo:git-abc123"
+	destinationRef := builderDestinationImageRef(managedRef, registryPushBase)
+
+	t.Run("buildpacks", func(t *testing.T) {
+		jobObject, err := buildBuildpacksJobObject("fugue-system", "build-demo", buildpacksBuildRequest{
+			ArchiveDownloadURL:  "https://example.com/archive.tar.gz",
+			SourceDir:           ".",
+			ImageRef:            managedRef,
+			DestinationImageRef: destinationRef,
+			WorkloadProfile:     builderWorkloadProfileHeavy,
+		})
+		if err != nil {
+			t.Fatalf("build buildpacks job object: %v", err)
+		}
+
+		podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		if got := podSpec["hostNetwork"]; got != true {
+			t.Fatalf("hostNetwork = %#v, want true", got)
+		}
+		if got := podSpec["dnsPolicy"]; got != "ClusterFirstWithHostNet" {
+			t.Fatalf("dnsPolicy = %#v, want ClusterFirstWithHostNet", got)
+		}
+		container := podSpec["containers"].([]map[string]any)[0]
+		command := container["command"].([]string)
+		if !strings.Contains(command[2], "127.0.0.1:5000/fugue-apps/demo:git-abc123") {
+			t.Fatalf("expected buildpacks destination to use node-local registry, got %q", command[2])
+		}
+	})
+
+	t.Run("nixpacks", func(t *testing.T) {
+		jobObject, err := buildNixpacksJobObject("fugue-system", "build-demo", nixpacksBuildRequest{
+			ArchiveDownloadURL:  "https://example.com/archive.tar.gz",
+			SourceDir:           ".",
+			ImageRef:            managedRef,
+			DestinationImageRef: destinationRef,
+			WorkloadProfile:     builderWorkloadProfileLight,
+		})
+		if err != nil {
+			t.Fatalf("build nixpacks job object: %v", err)
+		}
+
+		podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		if got := podSpec["hostNetwork"]; got != true {
+			t.Fatalf("hostNetwork = %#v, want true", got)
+		}
+		if got := podSpec["dnsPolicy"]; got != "ClusterFirstWithHostNet" {
+			t.Fatalf("dnsPolicy = %#v, want ClusterFirstWithHostNet", got)
+		}
+		container := podSpec["containers"].([]map[string]any)[0]
+		args := container["args"].([]string)
+		if !strings.Contains(strings.Join(args, " "), "--destination=127.0.0.1:5000/fugue-apps/demo:git-abc123") {
+			t.Fatalf("expected nixpacks destination to use node-local registry, got args: %v", args)
+		}
+	})
+}
+
 func builderEmptyDirVolume(t *testing.T, podSpec map[string]any, name string) map[string]any {
 	t.Helper()
 

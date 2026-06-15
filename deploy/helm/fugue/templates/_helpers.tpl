@@ -145,6 +145,16 @@ tolerations:
 {{- default (include "fugue.registryPushBase" .) .Values.api.registryPullBase -}}
 {{- end -}}
 
+{{- define "fugue.builderRegistryPushBase" -}}
+{{- if and .Values.controller (get .Values.controller "builderRegistryPushBase") -}}
+{{- trim (get .Values.controller "builderRegistryPushBase") -}}
+{{- else if and .Values.imageCache.enabled .Values.imageCache.port -}}
+{{- printf "127.0.0.1:%v" .Values.imageCache.port -}}
+{{- else -}}
+{{- include "fugue.registryPushBase" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.clusterJoinRegistryEndpoint" -}}
 {{- if .Values.api.clusterJoinRegistryEndpoint -}}
 {{- .Values.api.clusterJoinRegistryEndpoint -}}

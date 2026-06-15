@@ -339,6 +339,7 @@ func importStaticSiteFromExtractedUpload(ctx context.Context, src extractedUploa
 	}
 
 	imageRef := defaultUploadedImageRef(registryPushBase, imageRepository, src.DefaultAppName, src.ArchiveSHA256, imageNameSuffix)
+	destinationImageRef := builderDestinationImageRef(imageRef, registryPushBase)
 	buildJobNameValue := ""
 	if len(plan.SourceOverlay) > 0 {
 		if strings.TrimSpace(archiveDownloadURL) == "" {
@@ -351,6 +352,7 @@ func importStaticSiteFromExtractedUpload(ctx context.Context, src extractedUploa
 			DockerfilePath:        plan.DockerfilePath,
 			BuildContextDir:       plan.BuildContextDir,
 			ImageRef:              imageRef,
+			DestinationImageRef:   destinationImageRef,
 			SourceOverlayFiles:    plan.SourceOverlay,
 			JobLabels:             jobLabels,
 			PlacementNodeSelector: placementNodeSelector,
@@ -406,6 +408,7 @@ func importDockerfileFromExtractedUpload(ctx context.Context, src extractedUploa
 		DockerfilePath:        dockerfilePath,
 		BuildContextDir:       buildContextDir,
 		ImageRef:              imageRef,
+		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
@@ -457,6 +460,7 @@ func importBuildpacksFromExtractedUpload(ctx context.Context, src extractedUploa
 		ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
+		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
 		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
@@ -518,6 +522,7 @@ func importNixpacksFromExtractedUpload(ctx context.Context, src extractedUploadS
 		ArchiveDownloadURL:    strings.TrimSpace(archiveDownloadURL),
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
+		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
 		SourceOverlayFiles:    sourceOverlayFiles,
 		SystemPackages:        systemPackages.Packages,
 		JobLabels:             jobLabels,

@@ -76,6 +76,8 @@ spec:
               value: {{ include "fugue.registryPushBase" . | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE
               value: {{ include "fugue.registryPullBase" . | quote }}
+            - name: FUGUE_BUILDER_REGISTRY_PUSH_BASE
+              value: {{ include "fugue.builderRegistryPushBase" . | quote }}
             - name: FUGUE_SOURCE_UPLOAD_BASE_URL
               value: {{ printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port | quote }}
             {{- if and .Values.observability.enabled .Values.observability.agent.enabled }}

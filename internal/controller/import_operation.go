@@ -166,7 +166,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	finalSpec := cloneImportSpec(*op.DesiredSpec)
 	finalSource := restoreQueuedSourceMetadata(output.Source, *op.DesiredSource)
 	deployOriginSource := persistedOriginSourceAfterImport(op.DesiredOriginSource, *op.DesiredSource, finalSource)
-	managedImageRef, runtimeImageRef, err := s.resolveImportedManagedImageRef(importCtx, app, *op.DesiredSource, finalSource, strings.TrimSpace(output.ImportResult.ImageRef))
+	managedImageRef, runtimeImageRef, err := s.resolveImportedManagedImageRef(
+		importCtx,
+		app,
+		*op.DesiredSource,
+		finalSource,
+		strings.TrimSpace(output.ImportResult.ImageRef),
+		s.importUsedNodeLocalBuilderRegistry(output),
+	)
 	if err != nil {
 		return err
 	}
@@ -538,6 +545,7 @@ func (s *Service) resolveImportedManagedImageRef(
 	queuedSource model.AppSource,
 	importedSource model.AppSource,
 	importResultImageRef string,
+	allowBuilderRegistryEvidence bool,
 ) (string, string, error) {
 	seen := make(map[string]struct{})
 	orderedCandidates := make([]string, 0, 4)
@@ -594,6 +602,12 @@ func (s *Service) resolveImportedManagedImageRef(
 			inspectErr = fmt.Errorf("inspect image %s: %w", candidate, lastErr)
 		}
 		if !exists {
+			if allowBuilderRegistryEvidence {
+				if s.Logger != nil {
+					s.Logger.Printf("accept imported managed image from builder registry evidence app=%s candidate=%s runtime_image=%s", app.ID, candidate, runtimeImageRef)
+				}
+				return candidate, runtimeImageRef, nil
+			}
 			continue
 		}
 		return candidate, runtimeImageRef, nil
@@ -606,6 +620,13 @@ func (s *Service) resolveImportedManagedImageRef(
 		s.importImageInspectAttempts(),
 		strings.Join(orderedCandidates, ", "),
 	)
+}
+
+func (s *Service) importUsedNodeLocalBuilderRegistry(output sourceimport.GitHubSourceImportOutput) bool {
+	if !s.nodeLocalBuilderRegistryEnabled() {
+		return false
+	}
+	return strings.TrimSpace(output.ImportResult.BuildJobName) != ""
 }
 
 func (s *Service) rewriteImportedRuntimeImageRef(ctx context.Context, imageRef string) (string, error) {

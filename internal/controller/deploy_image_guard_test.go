@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -414,6 +415,55 @@ func TestEnsureManagedDeployImageReadyDoesNotInspectPullBaseAliasAfterPushRefMis
 	}
 	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
 		t.Fatalf("expected inspect refs [%q %q], got %v", managedRef, runtimePushRef, inspected)
+	}
+}
+
+func TestDeployImageRefAvailableUsesLocationEvidenceWhenNodeLocalBuilderRegistryEnabled(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	app := model.App{
+		ID:       "app_1",
+		TenantID: "tenant_1",
+		Spec: model.AppSpec{
+			Image:    "registry.pull.example/fugue-apps/demo:git-abc123",
+			Replicas: 1,
+		},
+	}
+	managedRef := "registry.push.example/fugue-apps/demo:git-abc123"
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID: app.TenantID,
+		AppID:    app.ID,
+		ImageRef: managedRef,
+		Status:   model.ImageLocationStatusPresent,
+	}); err != nil {
+		t.Fatalf("record image location: %v", err)
+	}
+
+	svc := &Service{
+		Store:                         stateStore,
+		registryPushBase:              "registry.push.example",
+		registryPullBase:              "registry.pull.example",
+		builderRegistryPushBase:       "127.0.0.1:5000",
+		importImageInspectMaxAttempts: 1,
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			if imageRef != managedRef {
+				t.Fatalf("unexpected image ref %q", imageRef)
+			}
+			return false, nil, errors.New("central registry unavailable")
+		},
+	}
+
+	exists, err := svc.deployImageRefAvailable(context.Background(), app, deployImageTarget{}, managedRef)
+	if err != nil {
+		t.Fatalf("deploy image ref available: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected location evidence to make deploy image available")
 	}
 }
 

@@ -74,6 +74,7 @@ type ControllerConfig struct {
 	WorkloadIdentitySigningKey    string
 	RegistryPushBase              string
 	RegistryPullBase              string
+	BuilderRegistryPushBase       string
 	SourceUploadBaseURL           string
 	ImportWorkDir                 string
 	ForegroundImportWorkers       int
@@ -336,6 +337,7 @@ func ControllerFromEnv() ControllerConfig {
 		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
+		BuilderRegistryPushBase:       strings.TrimSpace(os.Getenv("FUGUE_BUILDER_REGISTRY_PUSH_BASE")),
 		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
 		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
 		ForegroundImportWorkers:       getenvInt("FUGUE_CONTROLLER_FOREGROUND_IMPORT_WORKERS", 0),

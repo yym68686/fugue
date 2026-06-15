@@ -109,7 +109,9 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isRegistryPull(r) {
-		c.registry.ServeHTTP(w, r)
+		rec := &statusRecordingWriter{ResponseWriter: w}
+		c.registry.ServeHTTP(rec, r)
+		c.reportRegistryWrite(r, rec.statusCode())
 		return
 	}
 	rec := newDeferredNotFoundWriter(w)
@@ -132,6 +134,53 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.registry.ServeHTTP(w, r)
+}
+
+type statusRecordingWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecordingWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusRecordingWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *statusRecordingWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func (c *imageCache) reportRegistryWrite(r *http.Request, status int) {
+	if r == nil || r.URL == nil || status < 200 || status >= 300 {
+		return
+	}
+	if r.Method != http.MethodPut {
+		return
+	}
+	repo, target, targetKind, ok := parseRegistryTarget(r.URL.Path)
+	if !ok || targetKind != registryTargetManifest {
+		return
+	}
+	logicalRef, digest := imageRef(c.registryBase, repo, target)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
+			log.Printf("report pushed image location ref=%s failed: %v", logicalRef, err)
+		}
+	}()
 }
 
 type registryTargetKind string

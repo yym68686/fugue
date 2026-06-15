@@ -57,6 +57,7 @@ type nixpacksBuildRequest struct {
 	ArchiveDownloadURL    string
 	SourceDir             string
 	ImageRef              string
+	DestinationImageRef   string
 	SourceOverlayFiles    []sourceOverlayFile
 	SystemPackages        []string
 	JobLabels             map[string]string
@@ -133,6 +134,7 @@ func importNixpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, re
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
+		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
 		SourceOverlayFiles:    sourceOverlayFiles,
 		SystemPackages:        systemPackages.Packages,
 		JobLabels:             jobLabels,
@@ -381,6 +383,7 @@ func buildAndPushNixpacksImage(ctx context.Context, req nixpacksBuildRequest) er
 }
 
 func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest) (map[string]any, error) {
+	destinationImageRef := effectiveDestinationImageRef(req.ImageRef, req.DestinationImageRef)
 	workingDir := "/workspace/repo"
 	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
@@ -436,7 +439,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 						{
 							"name":  "kaniko",
 							"image": defaultKanikoImage,
-							"args":  kanikoDestinationArgs(req.ImageRef, "--context=dir:///workspace/generated", "--dockerfile=/workspace/generated/Dockerfile"),
+							"args":  kanikoDestinationArgs(destinationImageRef, "--context=dir:///workspace/generated", "--dockerfile=/workspace/generated/Dockerfile"),
 							"volumeMounts": []map[string]any{
 								{"name": "workspace", "mountPath": "/workspace"},
 							},
@@ -451,6 +454,7 @@ func buildNixpacksJobObject(namespace, jobName string, req nixpacksBuildRequest)
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
+	applyBuilderRegistryNetwork(podSpec, destinationImageRef)
 	return jobObject, nil
 }
 

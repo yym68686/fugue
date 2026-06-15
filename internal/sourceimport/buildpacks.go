@@ -42,6 +42,7 @@ type buildpacksBuildRequest struct {
 	ArchiveDownloadURL    string
 	SourceDir             string
 	ImageRef              string
+	DestinationImageRef   string
 	SourceOverlayFiles    []sourceOverlayFile
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
@@ -91,6 +92,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
+		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
 		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
@@ -218,12 +220,13 @@ func buildAndPushBuildpacksImage(ctx context.Context, req buildpacksBuildRequest
 }
 
 func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequest) (map[string]any, error) {
+	destinationImageRef := effectiveDestinationImageRef(req.ImageRef, req.DestinationImageRef)
 	workingDir := "/workspace/repo"
 	if strings.TrimSpace(req.SourceDir) != "" && strings.TrimSpace(req.SourceDir) != "." {
 		workingDir += "/" + filepath.ToSlash(strings.TrimSpace(req.SourceDir))
 	}
 
-	script := buildpacksJobScript(workingDir, req.ImageRef, req.DetectedProvider, req.IncludeAptBuildpack)
+	script := buildpacksJobScript(workingDir, destinationImageRef, req.DetectedProvider, req.IncludeAptBuildpack)
 	initContainers := []map[string]any{}
 	if strings.TrimSpace(req.ArchiveDownloadURL) != "" {
 		initContainers = buildArchiveDownloadInitContainers(req.ArchiveDownloadURL)
@@ -288,6 +291,7 @@ func buildBuildpacksJobObject(namespace, jobName string, req buildpacksBuildRequ
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
+	applyBuilderRegistryNetwork(podSpec, destinationImageRef)
 	return jobObject, nil
 }
 

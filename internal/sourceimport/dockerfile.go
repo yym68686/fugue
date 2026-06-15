@@ -61,6 +61,7 @@ type dockerfileBuildRequest struct {
 	DockerfilePath        string
 	BuildContextDir       string
 	ImageRef              string
+	DestinationImageRef   string
 	SourceOverlayFiles    []sourceOverlayFile
 	JobLabels             map[string]string
 	PlacementNodeSelector map[string]string
@@ -135,6 +136,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DockerfilePath:        dockerfilePath,
 		BuildContextDir:       buildContextDir,
 		ImageRef:              imageRef,
+		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
@@ -506,7 +508,8 @@ func deleteBuilderJobIfPresent(ctx context.Context, namespace, jobName string) e
 }
 
 func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest) (map[string]any, error) {
-	args := kanikoDestinationArgs(req.ImageRef,
+	destinationImageRef := effectiveDestinationImageRef(req.ImageRef, req.DestinationImageRef)
+	args := kanikoDestinationArgs(destinationImageRef,
 		"--context=dir:///workspace/repo",
 		"--dockerfile=/workspace/repo/"+filepath.ToSlash(strings.TrimSpace(req.DockerfilePath)),
 	)
@@ -568,6 +571,7 @@ func buildKanikoJobObject(namespace, jobName string, req dockerfileBuildRequest)
 	podSpec := jobObject["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
 	applyBuilderPodPolicy(podSpec, req.PodPolicy, req.WorkloadProfile)
 	applyBuilderPlacement(podSpec, req.Placement)
+	applyBuilderRegistryNetwork(podSpec, destinationImageRef)
 	return jobObject, nil
 }
 

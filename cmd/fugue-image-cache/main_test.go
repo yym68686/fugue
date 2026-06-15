@@ -288,6 +288,54 @@ func TestBlobMissProxiesUpstreamWithoutHydrate(t *testing.T) {
 	}
 }
 
+func TestReportRegistryWriteReportsLogicalImageLocation(t *testing.T) {
+	reported := make(chan url.Values, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/v1/image-locations" {
+			t.Fatalf("path = %s, want /v1/image-locations", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		reported <- r.Form
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	cache := &imageCache{
+		apiBase:       server.URL,
+		apiToken:      "token",
+		reportPath:    "/v1/image-locations",
+		registryBase:  "registry.fugue.internal:5000",
+		cacheEndpoint: "http://10.0.0.2:5000",
+		httpClient:    server.Client(),
+	}
+	req := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:5000/v2/fugue-apps/demo/manifests/git-abc123", nil)
+
+	cache.reportRegistryWrite(req, http.StatusCreated)
+
+	select {
+	case form := <-reported:
+		if got := form.Get("image_ref"); got != "registry.fugue.internal:5000/fugue-apps/demo:git-abc123" {
+			t.Fatalf("image_ref = %q", got)
+		}
+		if got := form.Get("status"); got != "present" {
+			t.Fatalf("status = %q", got)
+		}
+		if got := form.Get("cache_endpoint"); got != "http://10.0.0.2:5000" {
+			t.Fatalf("cache_endpoint = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected image location report")
+	}
+}
+
 func TestIsRegistryAPIPath(t *testing.T) {
 	tests := map[string]bool{
 		"":             false,
