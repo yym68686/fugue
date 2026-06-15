@@ -145,6 +145,10 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.flush()
 		return
 	}
+	if isLocalOnlyRegistryPull(r) {
+		rec.flush()
+		return
+	}
 	repo, target, targetKind, ok := parseRegistryTarget(r.URL.Path)
 	if !ok {
 		rec.flush()
@@ -434,6 +438,7 @@ const (
 )
 
 const maxProxiedManifestBytes = 64 << 20
+const imageCacheLocalOnlyHeader = "X-Fugue-Image-Cache-Local-Only"
 
 func (c *imageCache) hydrate(parent context.Context, repo, target string) error {
 	key := repo + "\x00" + target
@@ -725,6 +730,7 @@ func (c *imageCache) fetchManifest(ctx context.Context, sourceBase, repo, target
 		"application/vnd.docker.distribution.manifest.v1+prettyjws",
 		"application/vnd.docker.distribution.manifest.v1+json",
 	}, ", "))
+	req.Header.Set(imageCacheLocalOnlyHeader, "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", nil, err
@@ -764,6 +770,14 @@ func isRegistryPull(r *http.Request) bool {
 		return false
 	}
 	return strings.Contains(r.URL.Path, "/manifests/") || strings.Contains(r.URL.Path, "/blobs/")
+}
+
+func isLocalOnlyRegistryPull(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	value := strings.TrimSpace(r.Header.Get(imageCacheLocalOnlyHeader))
+	return value == "1" || strings.EqualFold(value, "true")
 }
 
 func isRegistryAPIPath(path string) bool {
@@ -907,6 +921,7 @@ func (c *imageCache) proxyRegistryPull(w http.ResponseWriter, r *http.Request, s
 		return proxyPullResult{err: err}
 	}
 	copyRequestHeader(req.Header, r.Header)
+	req.Header.Set(imageCacheLocalOnlyHeader, "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return proxyPullResult{err: err}

@@ -314,6 +314,9 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"` + blobDigest + `","size":11}]}`
 	var peerRange string
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(imageCacheLocalOnlyHeader); got != "1" {
+			t.Errorf("%s local-only header = %q, want 1", r.URL.Path, got)
+		}
 		switch r.URL.Path {
 		case "/v2/fugue-apps/demo/manifests/image-test":
 			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
@@ -403,6 +406,123 @@ func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
 	}
 	if peerRange != "bytes=0-10" {
 		t.Fatalf("peer Range = %q", peerRange)
+	}
+}
+
+func TestLocalOnlyRegistryPullDoesNotCascade(t *testing.T) {
+	t.Parallel()
+
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var copies atomic.Int32
+	cache := &imageCache{
+		registry:       registry.New(),
+		upstreamBase:   upstreamURL.Host,
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(context.Context, string, string) error {
+			copies.Add(1)
+			return nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-missing", nil)
+	req.Header.Set(imageCacheLocalOnlyHeader, "1")
+	rec := httptest.NewRecorder()
+
+	cache.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Fatalf("upstream hits = %d, want 0", got)
+	}
+	if got := copies.Load(); got != 0 {
+		t.Fatalf("copyImage calls = %d, want 0", got)
+	}
+}
+
+func TestManifestMissMarksPeerMissingWithoutRecursiveProxy(t *testing.T) {
+	t.Parallel()
+
+	var peerHits atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerHits.Add(1)
+		if got := r.Header.Get(imageCacheLocalOnlyHeader); got != "1" {
+			t.Errorf("peer local-only header = %q, want 1", got)
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(peer.Close)
+
+	reports := []url.Values{}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/image-locations":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"image_locations": []imageLocation{{
+					TenantID:      "tenant-1",
+					RuntimeID:     "runtime-1",
+					CacheEndpoint: peer.URL,
+					Status:        "present",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/image-locations":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			reports = append(reports, r.Form)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected API request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	cache := &imageCache{
+		apiBase:        api.URL,
+		apiToken:       "token",
+		reportPath:     "/v1/image-locations",
+		lookupPath:     "/v1/image-locations",
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		cacheEndpoint:  "http://10.0.0.2:5000",
+		httpClient:     api.Client(),
+		registry:       registry.New(),
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(context.Context, string, string) error {
+			return errors.New("GET peer manifest: NAME_UNKNOWN: Unknown name")
+		},
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-missing", nil)
+	rec := httptest.NewRecorder()
+
+	cache.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+	if got := peerHits.Load(); got != 1 {
+		t.Fatalf("peer hits = %d, want 1", got)
+	}
+	foundMissingPeer := false
+	for _, report := range reports {
+		if report.Get("status") == "missing" && report.Get("cache_endpoint") == peer.URL {
+			foundMissingPeer = true
+			break
+		}
+	}
+	if !foundMissingPeer {
+		t.Fatalf("expected missing peer report, got %v", reports)
 	}
 }
 
