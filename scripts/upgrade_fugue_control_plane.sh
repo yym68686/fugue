@@ -510,6 +510,137 @@ stateful_dependency_changed() {
   release_changed_files_match stateful
 }
 
+release_diff_old_ref() {
+  local ref="${FUGUE_RELEASE_BEFORE_SHA:-${BEFORE_SHA:-}}"
+
+  ref="$(trim_field "${ref}")"
+  if [[ -n "${ref}" && "${ref}" != "0000000000000000000000000000000000000000" ]] &&
+    git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null; then
+    printf '%s\n' "${ref}"
+    return 0
+  fi
+
+  git -C "${REPO_ROOT}" rev-parse --verify HEAD^ 2>/dev/null
+}
+
+release_diff_new_ref() {
+  local ref="${FUGUE_RELEASE_AFTER_SHA:-${AFTER_SHA:-${GITHUB_SHA:-}}}"
+
+  ref="$(trim_field "${ref}")"
+  if [[ -n "${ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null; then
+    printf '%s\n' "${ref}"
+    return 0
+  fi
+
+  git -C "${REPO_ROOT}" rev-parse --verify HEAD 2>/dev/null
+}
+
+values_file_changes_limited_to_yaml_path() {
+  local file="$1"
+  local allowed_path="$2"
+  local old_ref new_ref
+
+  old_ref="$(release_diff_old_ref)" || return 1
+  new_ref="$(release_diff_new_ref)" || return 1
+  old_ref="$(trim_field "${old_ref}")"
+  new_ref="$(trim_field "${new_ref}")"
+  [[ -n "${old_ref}" && -n "${new_ref}" ]] || return 1
+  [[ "${old_ref}" != "${new_ref}" ]] || return 1
+  command_exists python3 || return 1
+
+  python3 - "${REPO_ROOT}" "${old_ref}" "${new_ref}" "${file}" "${allowed_path}" <<'PY'
+import difflib
+import subprocess
+import sys
+
+repo, old_ref, new_ref, file_path, allowed_path = sys.argv[1:6]
+allowed = tuple(part for part in allowed_path.split(".") if part)
+
+def read_lines(ref):
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo, "show", f"{ref}:{file_path}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(1) from exc
+    return out.splitlines()
+
+def yaml_paths(lines):
+    stack = []
+    paths = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            paths.append(tuple(key for _, key in stack))
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+
+        content = line.lstrip(" ")
+        if content.startswith("- "):
+            content = content[2:].lstrip(" ")
+
+        key = ""
+        if ":" in content:
+            key = content.split(":", 1)[0].strip().strip("'\"")
+            if any(ch in key for ch in "{}[]"):
+                key = ""
+
+        current = [key for _, key in stack]
+        if key:
+            current.append(key)
+            stack.append((indent, key))
+        paths.append(tuple(current))
+    return paths
+
+def line_allowed(path):
+    return len(path) >= len(allowed) and path[: len(allowed)] == allowed
+
+old_lines = read_lines(old_ref)
+new_lines = read_lines(new_ref)
+old_paths = yaml_paths(old_lines)
+new_paths = yaml_paths(new_lines)
+changed = False
+
+for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old_lines, b=new_lines).get_opcodes():
+    if tag == "equal":
+        continue
+    for idx in range(i1, i2):
+        if old_lines[idx].strip() and not line_allowed(old_paths[idx]):
+            raise SystemExit(1)
+        changed = True
+    for idx in range(j1, j2):
+        if new_lines[idx].strip() and not line_allowed(new_paths[idx]):
+            raise SystemExit(1)
+        changed = True
+
+raise SystemExit(0 if changed else 1)
+PY
+}
+
+node_local_build_plane_resource_values_changed() {
+  local file=""
+  local saw_resource_values="false"
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      deploy/helm/fugue/values.yaml|\
+      deploy/helm/fugue/values-production-ha.yaml)
+        values_file_changes_limited_to_yaml_path "${file}" "imageCache.resources" || return 1
+        saw_resource_values="true"
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  [[ "${saw_resource_values}" == "true" ]]
+}
+
 image_cache_source_changed_between_refs() {
   local old_ref="$1"
   local new_ref="$2"
@@ -572,6 +703,11 @@ node_local_build_plane_preflight_override_allowed() {
       deploy/helm/fugue/templates/controller-deployment.yaml|\
       scripts/upgrade_fugue_control_plane.sh|\
       scripts/test_release_domain_safety.sh)
+        saw_allowed="true"
+        ;;
+      deploy/helm/fugue/values.yaml|\
+      deploy/helm/fugue/values-production-ha.yaml)
+        values_file_changes_limited_to_yaml_path "${file}" "imageCache.resources" || return 1
         saw_allowed="true"
         ;;
       *)
@@ -1724,6 +1860,7 @@ preserve_public_data_plane_from_live() {
 
 preserve_node_local_build_plane_from_live() {
   local preserve_image="${1:-true}"
+  local preserve_resources="${2:-true}"
   local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
   local image_cache_resources
 
@@ -1733,10 +1870,12 @@ preserve_node_local_build_plane_from_live() {
     preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
   fi
 
-  image_cache_resources="$(trim_field "$(live_daemonset_container_resources_json "${image_cache_ds}" "image-cache")")"
-  if [[ -n "${image_cache_resources}" ]]; then
-    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
-    log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
+  if [[ "${preserve_resources}" == "true" ]]; then
+    image_cache_resources="$(trim_field "$(live_daemonset_container_resources_json "${image_cache_ds}" "image-cache")")"
+    if [[ -n "${image_cache_resources}" ]]; then
+      NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
+      log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
+    fi
   fi
 }
 
@@ -4752,6 +4891,9 @@ prepare_release_domains() {
     if node_local_build_plane_image_rollout_allowed; then
       log "node-local build-plane image-cache source changed since the live tag; allowing image-cache image rollout to ${FUGUE_IMAGE_CACHE_IMAGE_TAG} while preserving live non-image settings"
       preserve_node_local_build_plane_from_live false
+    elif node_local_build_plane_resource_values_changed; then
+      log "node-local build-plane image-cache resources changed in values; preserving live image while applying rendered resources"
+      preserve_node_local_build_plane_from_live true false
     else
       if node_local_build_plane_changed; then
         log "node-local build-plane files changed without a safe image-only rollout target; preserving live image-cache DaemonSet spec for this control-plane release"

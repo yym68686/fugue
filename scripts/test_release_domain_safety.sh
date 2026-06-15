@@ -74,14 +74,46 @@ fi
 ORIGINAL_REPO_ROOT="${REPO_ROOT}"
 TMP_REPO_ROOT="$(mktemp -d)"
 trap 'rm -rf "${TMP_REPO_ROOT}"' EXIT
+ORIGINAL_BEFORE_SHA_SET="${BEFORE_SHA+x}"
+ORIGINAL_BEFORE_SHA="${BEFORE_SHA:-}"
+ORIGINAL_AFTER_SHA_SET="${AFTER_SHA+x}"
+ORIGINAL_AFTER_SHA="${AFTER_SHA:-}"
+
+restore_release_ref_env() {
+  if [[ -n "${ORIGINAL_BEFORE_SHA_SET}" ]]; then
+    BEFORE_SHA="${ORIGINAL_BEFORE_SHA}"
+  else
+    unset BEFORE_SHA
+  fi
+  if [[ -n "${ORIGINAL_AFTER_SHA_SET}" ]]; then
+    AFTER_SHA="${ORIGINAL_AFTER_SHA}"
+  else
+    unset AFTER_SHA
+  fi
+}
+
 git -C "${TMP_REPO_ROOT}" init -q
 git -C "${TMP_REPO_ROOT}" config user.email test@example.com
 git -C "${TMP_REPO_ROOT}" config user.name "Fugue Test"
-mkdir -p "${TMP_REPO_ROOT}/cmd/fugue-image-cache" "${TMP_REPO_ROOT}/scripts"
+mkdir -p "${TMP_REPO_ROOT}/cmd/fugue-image-cache" "${TMP_REPO_ROOT}/deploy/helm/fugue" "${TMP_REPO_ROOT}/scripts"
 printf 'module example.com/fugue-test\n' >"${TMP_REPO_ROOT}/go.mod"
 : >"${TMP_REPO_ROOT}/go.sum"
 printf 'FROM scratch\n' >"${TMP_REPO_ROOT}/Dockerfile.image-cache"
 printf 'package main\nfunc main() {}\n' >"${TMP_REPO_ROOT}/cmd/fugue-image-cache/main.go"
+cat >"${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'YAML'
+imageCache:
+  enabled: true
+  resources:
+    requests:
+      memory: 64Mi
+    limits:
+      memory: 512Mi
+
+registryGC:
+  resources:
+    requests:
+      memory: 128Mi
+YAML
 git -C "${TMP_REPO_ROOT}" add .
 git -C "${TMP_REPO_ROOT}" commit -q -m base
 BASE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
@@ -93,11 +125,54 @@ printf 'package main\nfunc main() { println("fixed") }\n' >"${TMP_REPO_ROOT}/cmd
 git -C "${TMP_REPO_ROOT}" add .
 git -C "${TMP_REPO_ROOT}" commit -q -m image-cache
 IMAGE_CACHE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("      memory: 64Mi\n", "      memory: 128Mi\n", 1)
+text = text.replace("      memory: 512Mi\n", "      memory: 2Gi\n", 1)
+path.write_text(text)
+PY
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m image-cache-resources
+IMAGE_CACHE_RESOURCES_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "registryGC:\n  resources:\n    requests:\n      memory: 128Mi\n",
+    "registryGC:\n  resources:\n    requests:\n      memory: 256Mi\n",
+    1,
+)
+path.write_text(text)
+PY
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m registry-gc-resources
+REGISTRY_GC_RESOURCES_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
 REPO_ROOT="${TMP_REPO_ROOT}"
 if image_cache_source_changed_between_refs "${BASE_REF}" "${SCRIPT_REF}"; then
   fail "script-only changes must not roll image-cache"
 fi
 image_cache_source_changed_between_refs "${SCRIPT_REF}" "${IMAGE_CACHE_REF}" || fail "image-cache source changes must allow image rollout"
+BEFORE_SHA="${IMAGE_CACHE_REF}"
+AFTER_SHA="${IMAGE_CACHE_RESOURCES_REF}"
+FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/values.yaml'
+node_local_build_plane_resource_values_changed || fail "image-cache resource values must be recognized"
+node_local_build_plane_preflight_override_allowed || fail "image-cache resource values must bypass registry/node-policy preflight"
+BEFORE_SHA="${IMAGE_CACHE_RESOURCES_REF}"
+AFTER_SHA="${REGISTRY_GC_RESOURCES_REF}"
+if node_local_build_plane_resource_values_changed; then
+  fail "registryGC values must not be recognized as image-cache resource values"
+fi
+if node_local_build_plane_preflight_override_allowed; then
+  fail "registryGC values must not bypass registry/node-policy preflight"
+fi
+restore_release_ref_env
 FUGUE_RELEASE_FULLNAME=fugue-fugue
 FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
 live_daemonset_container_image() {
