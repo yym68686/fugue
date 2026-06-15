@@ -312,6 +312,7 @@ HEADSCALE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 MAINTENANCE_AGENT_HELM_SET_ARGS=()
+NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="false"
 
 release_changed_files() {
   printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d'
@@ -505,6 +506,47 @@ chroot /host /bin/bash "${target#/host}"
 
 stateful_dependency_changed() {
   release_changed_files_match stateful
+}
+
+image_cache_source_changed_between_refs() {
+  local old_ref="$1"
+  local new_ref="$2"
+  local rc=0
+
+  old_ref="$(trim_field "${old_ref}")"
+  new_ref="$(trim_field "${new_ref}")"
+  [[ -n "${old_ref}" && -n "${new_ref}" ]] || return 1
+  [[ "${old_ref}" != "${new_ref}" ]] || return 1
+  git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null || return 1
+  git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null || return 1
+  git -C "${REPO_ROOT}" diff --quiet "${old_ref}" "${new_ref}" -- \
+    cmd/fugue-image-cache \
+    Dockerfile.image-cache \
+    go.mod \
+    go.sum && return 1
+  rc=$?
+  [[ "${rc}" -eq 1 ]]
+}
+
+node_local_build_plane_image_rollout_allowed() {
+  local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
+  local live_image_ref live_tag target_tag
+
+  target_tag="$(trim_field "${FUGUE_IMAGE_CACHE_IMAGE_TAG:-}")"
+  [[ -n "${target_tag}" ]] || return 1
+  live_image_ref="$(trim_field "$(live_daemonset_container_image "${image_cache_ds}" "image-cache")")"
+  [[ -n "${live_image_ref}" ]] || return 1
+  live_tag="$(image_ref_tag "${live_image_ref}")"
+  [[ -n "${live_tag}" ]] || return 1
+  image_cache_source_changed_between_refs "${live_tag}" "${target_tag}"
+}
+
+skip_singleton_rollout_wait_for_node_local_override() {
+  local singleton="$1"
+
+  [[ "${singleton}" == "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" ]] || return 1
+  [[ "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED}" == "true" ]] || return 1
+  ! stateful_dependency_changed
 }
 
 node_local_build_plane_preflight_override_allowed() {
@@ -1679,12 +1721,15 @@ preserve_public_data_plane_from_live() {
 }
 
 preserve_node_local_build_plane_from_live() {
+  local preserve_image="${1:-true}"
   local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
   local image_cache_resources
 
   NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 
-  preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
+  if [[ "${preserve_image}" == "true" ]]; then
+    preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
+  fi
 
   image_cache_resources="$(trim_field "$(live_daemonset_container_resources_json "${image_cache_ds}" "image-cache")")"
   if [[ -n "${image_cache_resources}" ]]; then
@@ -2647,6 +2692,9 @@ PY
   fi
   if [[ -n "$(trim_field "${autonomy_override_message}")" ]]; then
     log "${autonomy_override_message}"
+    if [[ "${autonomy_override_message}" == release\ preflight\ node-local\ build-plane\ override:* ]]; then
+      NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="true"
+    fi
   fi
 
   log "release preflight passed for ${api_base}; discovery_etag=${discovery_etag}"
@@ -4699,10 +4747,15 @@ prepare_release_domains() {
     if node_local_build_plane_manifest_changed; then
       fail "node-local build-plane manifests changed; ship image-cache through an isolated worker/front release before changing its rendered pod spec"
     fi
-    if node_local_build_plane_changed; then
-      log "node-local build-plane files changed; preserving live image-cache DaemonSet spec for this control-plane release"
+    if node_local_build_plane_image_rollout_allowed; then
+      log "node-local build-plane image-cache source changed since the live tag; allowing image-cache image rollout to ${FUGUE_IMAGE_CACHE_IMAGE_TAG} while preserving live non-image settings"
+      preserve_node_local_build_plane_from_live false
+    else
+      if node_local_build_plane_changed; then
+        log "node-local build-plane files changed without a safe image-only rollout target; preserving live image-cache DaemonSet spec for this control-plane release"
+      fi
+      preserve_node_local_build_plane_from_live true
     fi
-    preserve_node_local_build_plane_from_live
   else
     log "node-local build-plane release explicitly allowed"
   fi
@@ -5428,6 +5481,10 @@ PY
     "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}" \
     "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}"; do
     if deployment_exists "${singleton}"; then
+      if skip_singleton_rollout_wait_for_node_local_override "${singleton}"; then
+        log "skipping registry singleton rollout wait because node-local build-plane preflight override accepted the pre-existing registry/node_policy degradation"
+        continue
+      fi
       log "waiting for isolated singleton dependency ${singleton}"
       if ! rollout_status "${singleton}"; then
         log "${singleton} rollout check failed; attempting rollback"

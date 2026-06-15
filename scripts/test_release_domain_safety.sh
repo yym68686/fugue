@@ -71,6 +71,58 @@ if node_local_build_plane_preflight_override_allowed; then
   fail "mixed unrelated API changes must not bypass registry/node-policy preflight"
 fi
 
+ORIGINAL_REPO_ROOT="${REPO_ROOT}"
+TMP_REPO_ROOT="$(mktemp -d)"
+trap 'rm -rf "${TMP_REPO_ROOT}"' EXIT
+git -C "${TMP_REPO_ROOT}" init -q
+git -C "${TMP_REPO_ROOT}" config user.email test@example.com
+git -C "${TMP_REPO_ROOT}" config user.name "Fugue Test"
+mkdir -p "${TMP_REPO_ROOT}/cmd/fugue-image-cache" "${TMP_REPO_ROOT}/scripts"
+printf 'module example.com/fugue-test\n' >"${TMP_REPO_ROOT}/go.mod"
+: >"${TMP_REPO_ROOT}/go.sum"
+printf 'FROM scratch\n' >"${TMP_REPO_ROOT}/Dockerfile.image-cache"
+printf 'package main\nfunc main() {}\n' >"${TMP_REPO_ROOT}/cmd/fugue-image-cache/main.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m base
+BASE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+printf '# script-only\n' >"${TMP_REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m scripts
+SCRIPT_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+printf 'package main\nfunc main() { println("fixed") }\n' >"${TMP_REPO_ROOT}/cmd/fugue-image-cache/main.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m image-cache
+IMAGE_CACHE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+REPO_ROOT="${TMP_REPO_ROOT}"
+if image_cache_source_changed_between_refs "${BASE_REF}" "${SCRIPT_REF}"; then
+  fail "script-only changes must not roll image-cache"
+fi
+image_cache_source_changed_between_refs "${SCRIPT_REF}" "${IMAGE_CACHE_REF}" || fail "image-cache source changes must allow image rollout"
+FUGUE_RELEASE_FULLNAME=fugue-fugue
+FUGUE_IMAGE_CACHE_IMAGE_TAG="${IMAGE_CACHE_REF}"
+live_daemonset_container_image() {
+  printf 'ghcr.io/acme/fugue-image-cache:%s' "${SCRIPT_REF}"
+}
+node_local_build_plane_image_rollout_allowed || fail "live image-cache tag behind changed target must allow image rollout"
+FUGUE_IMAGE_CACHE_IMAGE_TAG="${SCRIPT_REF}"
+if node_local_build_plane_image_rollout_allowed; then
+  fail "matching live and target image-cache tags must not roll image-cache"
+fi
+REPO_ROOT="${ORIGINAL_REPO_ROOT}"
+
+FUGUE_REGISTRY_DEPLOYMENT_NAME=fugue-fugue-registry
+NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=true
+FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh'
+skip_singleton_rollout_wait_for_node_local_override fugue-fugue-registry || fail "registry singleton wait must be skipped after accepted node-local build-plane override"
+if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-headscale; then
+  fail "node-local build-plane override must not skip headscale singleton rollout waits"
+fi
+FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/registry-deployment.yaml'
+if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-registry; then
+  fail "node-local build-plane override must not skip registry waits when registry manifests changed"
+fi
+NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=false
+
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/registry-deployment.yaml'
 stateful_dependency_changed || fail "registry template changes must mark stateful dependency changed"
 
