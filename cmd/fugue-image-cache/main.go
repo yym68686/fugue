@@ -513,6 +513,10 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 		peerBase := trimRegistryBase(location.CacheEndpoint)
 		peerRef, _ := imageRef(peerBase, repo, target)
 		if err := c.copyImage(ctx, peerRef, localRef); err == nil {
+			if err := c.ensureLocalManifest(ctx, peerBase, repo, target); err != nil {
+				_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
+				return err
+			}
 			log.Printf("hydrated %s from peer %s", logicalRef, peerBase)
 			_ = c.report(ctx, logicalRef, digest, "present", "")
 			return nil
@@ -528,6 +532,10 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 	if c.upstreamBase != "" {
 		upstreamRef, _ := imageRef(c.upstreamBase, repo, target)
 		if err := c.copyImage(ctx, upstreamRef, localRef); err == nil {
+			if err := c.ensureLocalManifest(ctx, c.upstreamBase, repo, target); err != nil {
+				_ = c.report(ctx, logicalRef, digest, "failed", err.Error())
+				return err
+			}
 			log.Printf("hydrated %s from upstream %s", logicalRef, c.upstreamBase)
 			_ = c.report(ctx, logicalRef, digest, "present", "")
 			return nil
@@ -657,6 +665,82 @@ func registryObjectMissing(err error) bool {
 
 func copyImage(ctx context.Context, src, dst string) error {
 	return crane.Copy(src, dst, crane.WithContext(ctx), crane.Insecure)
+}
+
+func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, target string) error {
+	if c == nil || c.registry == nil {
+		return nil
+	}
+	if c.localManifestAvailable(repo, target) {
+		return nil
+	}
+	contentType, body, err := c.fetchManifest(ctx, sourceBase, repo, target)
+	if err != nil {
+		return err
+	}
+	manifest := persistedManifest{
+		Repo:        strings.Trim(strings.TrimSpace(repo), "/"),
+		Target:      strings.TrimSpace(target),
+		ContentType: contentType,
+		Body:        body,
+	}
+	if err := c.replayManifest(manifest); err != nil {
+		return fmt.Errorf("replay hydrated manifest: %w", err)
+	}
+	if err := c.persistManifest(manifest.Repo, manifest.Target, manifest.ContentType, manifest.Body); err != nil {
+		return fmt.Errorf("persist hydrated manifest: %w", err)
+	}
+	if !c.localManifestAvailable(repo, target) {
+		return fmt.Errorf("hydrated manifest is still unavailable locally for %s:%s", repo, target)
+	}
+	return nil
+}
+
+func (c *imageCache) localManifestAvailable(repo, target string) bool {
+	if c == nil || c.registry == nil {
+		return false
+	}
+	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + strings.TrimSpace(target)
+	req := httptestRequest(http.MethodHead, path, "", nil)
+	rec := &memoryResponseWriter{header: http.Header{}}
+	c.registry.ServeHTTP(rec, req)
+	return rec.statusCode() >= 200 && rec.statusCode() < 300
+}
+
+func (c *imageCache) fetchManifest(ctx context.Context, sourceBase, repo, target string) (string, []byte, error) {
+	sourceBase = trimRegistryBase(sourceBase)
+	if sourceBase == "" {
+		return "", nil, fmt.Errorf("manifest source is empty")
+	}
+	targetURL := "http://" + sourceBase + "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + strings.TrimSpace(target)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+		"application/vnd.docker.distribution.manifest.v1+prettyjws",
+		"application/vnd.docker.distribution.manifest.v1+json",
+	}, ", "))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("fetch manifest from %s status=%d", sourceBase, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProxiedManifestBytes+1))
+	if err != nil {
+		return "", nil, err
+	}
+	if len(body) > maxProxiedManifestBytes {
+		return "", nil, fmt.Errorf("manifest from %s exceeds %d bytes", sourceBase, maxProxiedManifestBytes)
+	}
+	return resp.Header.Get("Content-Type"), body, nil
 }
 
 type registrySource struct {

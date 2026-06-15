@@ -427,6 +427,46 @@ func TestManifestReferencedTargetsIncludesDockerSchemaV1Layers(t *testing.T) {
 	}
 }
 
+func TestHydrateEnsuresManifestWhenCopyDoesNotPopulateTag(t *testing.T) {
+	t.Parallel()
+
+	const manifest = `{"schemaVersion":1,"name":"fugue-apps/demo","tag":"image-test","fsLayers":[{"blobSum":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/fugue-apps/demo/manifests/image-test" {
+			t.Fatalf("upstream path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v1+prettyjws")
+		_, _ = io.WriteString(w, manifest)
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache := &imageCache{
+		registry:       registry.New(),
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		upstreamBase:   upstreamURL.Host,
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(context.Context, string, string) error {
+			return nil
+		},
+	}
+
+	if err := cache.hydrate(context.Background(), "fugue-apps/demo", "image-test"); err != nil {
+		t.Fatalf("hydrate: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", nil)
+	rec := httptest.NewRecorder()
+	cache.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("local manifest status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
 func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	t.Parallel()
 
