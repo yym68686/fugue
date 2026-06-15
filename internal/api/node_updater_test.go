@@ -262,7 +262,7 @@ func TestNodeUpdaterCanReportImageLocationForAppTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
-	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{RegistryPullBase: "registry.fugue.internal:5000"})
 
 	enrollForm := url.Values{}
 	enrollForm.Set("node_key", nodeSecret)
@@ -299,7 +299,20 @@ func TestNodeUpdaterCanReportImageLocationForAppTenant(t *testing.T) {
 		t.Fatalf("expected node metadata and pulling status, got %+v", response.ImageLocation)
 	}
 
-	listRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/image-locations?image_ref=registry.fugue.internal:5000/fugue-apps/web:test&status=pulling", updaterToken, nil)
+	presentForm := url.Values{}
+	presentForm.Set("app_id", app.ID)
+	presentForm.Set("image_ref", "registry.fugue.internal:5000/fugue-apps/web:test")
+	presentForm.Set("status", model.ImageLocationStatusPresent)
+	presentRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/image-locations", updaterToken, presentForm)
+	if presentRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, presentRecorder.Code, presentRecorder.Body.String())
+	}
+	mustDecodeJSON(t, presentRecorder, &response)
+	if response.ImageLocation.CacheEndpoint != "http://worker-image.example.com:5000" {
+		t.Fatalf("expected inferred cache endpoint, got %+v", response.ImageLocation)
+	}
+
+	listRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/image-locations?image_ref=registry.fugue.internal:5000/fugue-apps/web:test&status=present", updaterToken, nil)
 	if listRecorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, listRecorder.Code, listRecorder.Body.String())
 	}
@@ -331,8 +344,10 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v5"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v6"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
+		`verify_image_cache_manifest`,
+		`pre-pull succeeded but node image cache does not serve registry manifest`,
 		`restart_k3s_agent_for_config_reload`,
 		`restarting k3s-agent so containerd reloads updated join/registry configuration`,
 		`time-sync`,
@@ -521,7 +536,7 @@ func TestJoinClusterInstallScriptIncludesNodeUpdaterInstaller(t *testing.T) {
 		`Installing NFS client tools`,
 		`install-nfs-client-tools`,
 		`time-sync`,
-		`local updater_version="v5"`,
+		`local updater_version="v6"`,
 		`reconcile_cni_bridge_mtu`,
 		`FLANNEL_MTU`,
 		`/v1/discovery/bundle`,

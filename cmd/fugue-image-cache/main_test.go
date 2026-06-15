@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -301,6 +304,120 @@ func TestBlobMissProxiesUpstreamWithoutHydrate(t *testing.T) {
 	}
 	if got := copies.Load(); got != 0 {
 		t.Fatalf("copyImage calls = %d, want 0", got)
+	}
+}
+
+func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		manifestDir: manifestDir,
+	}
+	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", strings.NewReader(manifest))
+	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+	putRec := httptest.NewRecorder()
+
+	cache.ServeHTTP(putRec, put)
+
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("put status = %d, want %d; body=%q", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+	files, err := filepath.Glob(filepath.Join(manifestDir, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("persisted manifests = %d, want 1", len(files))
+	}
+
+	restarted := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		manifestDir: manifestDir,
+	}
+	if err := restarted.loadPersistedManifests(); err != nil {
+		t.Fatalf("load persisted manifests: %v", err)
+	}
+	head := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", nil)
+	headRec := httptest.NewRecorder()
+
+	restarted.ServeHTTP(headRec, head)
+
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("head status after restart = %d, want %d; body=%q", headRec.Code, http.StatusOK, headRec.Body.String())
+	}
+}
+
+func TestHydrateMarksMissingPeerLocationStale(t *testing.T) {
+	t.Parallel()
+
+	reports := []url.Values{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/image-locations":
+			if got := r.URL.Query().Get("image_ref"); got != "registry.fugue.internal:5000/fugue-apps/demo:image-missing" {
+				t.Fatalf("image_ref query = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"image_locations": []imageLocation{{
+					TenantID:          "tenant-1",
+					AppID:             "app-1",
+					SourceOperationID: "op-1",
+					RuntimeID:         "runtime-1",
+					ClusterNodeName:   "worker-1",
+					CacheEndpoint:     "http://10.0.0.1:5000",
+					Status:            "present",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/image-locations":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			reports = append(reports, r.Form)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cache := &imageCache{
+		apiBase:        server.URL,
+		apiToken:       "token",
+		reportPath:     "/v1/image-locations",
+		lookupPath:     "/v1/image-locations",
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		cacheEndpoint:  "http://10.0.0.2:5000",
+		httpClient:     server.Client(),
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(context.Context, string, string) error {
+			return errors.New("GET http://10.0.0.1:5000/v2/fugue-apps/demo/manifests/image-missing: NAME_UNKNOWN: Unknown name")
+		},
+	}
+
+	if err := cache.hydrate(context.Background(), "fugue-apps/demo", "image-missing"); err == nil {
+		t.Fatal("expected hydrate to fail")
+	}
+
+	found := false
+	for _, form := range reports {
+		if form.Get("status") != "missing" || form.Get("cache_endpoint") != "http://10.0.0.1:5000" {
+			continue
+		}
+		found = true
+		if form.Get("tenant_id") != "tenant-1" || form.Get("app_id") != "app-1" || form.Get("source_operation_id") != "op-1" {
+			t.Fatalf("stale peer report lost app identity: %v", form)
+		}
+		if form.Get("runtime_id") != "runtime-1" || form.Get("cluster_node_name") != "worker-1" {
+			t.Fatalf("stale peer report lost node identity: %v", form)
+		}
+	}
+	if !found {
+		t.Fatalf("expected missing peer location report, got %v", reports)
 	}
 }
 

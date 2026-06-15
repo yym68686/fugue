@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +31,7 @@ type imageCache struct {
 	localBase      string
 	upstreamBase   string
 	cacheEndpoint  string
+	manifestDir    string
 	httpClient     *http.Client
 	registry       http.Handler
 	hydrateTimeout time.Duration
@@ -43,10 +47,16 @@ type hydrateCall struct {
 }
 
 type imageLocation struct {
-	ImageRef      string `json:"image_ref"`
-	Digest        string `json:"digest"`
-	CacheEndpoint string `json:"cache_endpoint"`
-	Status        string `json:"status"`
+	TenantID          string `json:"tenant_id"`
+	AppID             string `json:"app_id"`
+	ImageRef          string `json:"image_ref"`
+	Digest            string `json:"digest"`
+	SourceOperationID string `json:"source_operation_id"`
+	NodeID            string `json:"node_id"`
+	RuntimeID         string `json:"runtime_id"`
+	ClusterNodeName   string `json:"cluster_node_name"`
+	CacheEndpoint     string `json:"cache_endpoint"`
+	Status            string `json:"status"`
 }
 
 func main() {
@@ -72,6 +82,7 @@ func main() {
 		localBase:      trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
 		upstreamBase:   trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
 		cacheEndpoint:  strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
+		manifestDir:    filepath.Join(storeDir, "_manifests"),
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
 		hydrateTimeout: envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
@@ -81,6 +92,9 @@ func main() {
 	}
 	if cache.cacheEndpoint == "" {
 		cache.cacheEndpoint = "http://" + cache.localBase
+	}
+	if err := cache.loadPersistedManifests(); err != nil {
+		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
 	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s upstream=%s", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.upstreamBase)
 	server := &http.Server{
@@ -108,9 +122,7 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isRegistryPull(r) {
-		rec := &statusRecordingWriter{ResponseWriter: w}
-		c.registry.ServeHTTP(rec, r)
-		c.reportRegistryWrite(r, rec.statusCode())
+		c.serveRegistryWrite(w, r)
 		return
 	}
 	rec := newDeferredNotFoundWriter(w)
@@ -133,6 +145,213 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.registry.ServeHTTP(w, r)
+}
+
+func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) {
+	var manifestBody []byte
+	var manifestRepo, manifestTarget, manifestContentType string
+	if r != nil && r.URL != nil && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
+		repo, target, targetKind, ok := parseRegistryTarget(r.URL.Path)
+		if ok && targetKind == registryTargetManifest {
+			if r.Method == http.MethodPut {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("read manifest body: %v", err), http.StatusInternalServerError)
+					return
+				}
+				_ = r.Body.Close()
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				manifestBody = body
+				manifestContentType = r.Header.Get("Content-Type")
+			}
+			manifestRepo = repo
+			manifestTarget = target
+		}
+	}
+
+	rec := &statusRecordingWriter{ResponseWriter: w}
+	c.registry.ServeHTTP(rec, r)
+	status := rec.statusCode()
+	if status >= 200 && status < 300 && len(manifestBody) > 0 {
+		if err := c.persistManifest(manifestRepo, manifestTarget, manifestContentType, manifestBody); err != nil {
+			log.Printf("persist manifest repo=%s target=%s failed: %v", manifestRepo, manifestTarget, err)
+		}
+	} else if status >= 200 && status < 300 && r.Method == http.MethodDelete && manifestRepo != "" && manifestTarget != "" {
+		if err := c.deletePersistedManifest(manifestRepo, manifestTarget); err != nil {
+			log.Printf("delete persisted manifest repo=%s target=%s failed: %v", manifestRepo, manifestTarget, err)
+		}
+	}
+	c.reportRegistryWrite(r, status)
+}
+
+type persistedManifest struct {
+	Repo        string `json:"repo"`
+	Target      string `json:"target"`
+	ContentType string `json:"content_type"`
+	Body        []byte `json:"body"`
+}
+
+func (c *imageCache) persistManifest(repo, target, contentType string, body []byte) error {
+	if c == nil || strings.TrimSpace(c.manifestDir) == "" {
+		return nil
+	}
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	target = strings.TrimSpace(target)
+	if repo == "" || target == "" || len(body) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(c.manifestDir, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(persistedManifest{
+		Repo:        repo,
+		Target:      target,
+		ContentType: strings.TrimSpace(contentType),
+		Body:        append([]byte(nil), body...),
+	})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(c.manifestDir, manifestStoreKey(repo, target)+".json")
+	tmp, err := os.CreateTemp(c.manifestDir, "manifest-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func (c *imageCache) deletePersistedManifest(repo, target string) error {
+	if c == nil || strings.TrimSpace(c.manifestDir) == "" {
+		return nil
+	}
+	path := filepath.Join(c.manifestDir, manifestStoreKey(strings.Trim(strings.TrimSpace(repo), "/"), strings.TrimSpace(target))+".json")
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (c *imageCache) loadPersistedManifests() error {
+	if c == nil || c.registry == nil || strings.TrimSpace(c.manifestDir) == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(c.manifestDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	pending := make([]persistedManifest, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(c.manifestDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		var manifest persistedManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return fmt.Errorf("decode %s: %w", entry.Name(), err)
+		}
+		if strings.TrimSpace(manifest.Repo) == "" || strings.TrimSpace(manifest.Target) == "" || len(manifest.Body) == 0 {
+			continue
+		}
+		pending = append(pending, manifest)
+	}
+
+	loaded := 0
+	var lastErr error
+	for len(pending) > 0 {
+		next := make([]persistedManifest, 0, len(pending))
+		for _, manifest := range pending {
+			if err := c.replayManifest(manifest); err != nil {
+				lastErr = err
+				next = append(next, manifest)
+				continue
+			}
+			loaded++
+		}
+		if len(next) == 0 {
+			break
+		}
+		if len(next) == len(pending) {
+			return fmt.Errorf("replay %d persisted manifests failed after loading %d: %w", len(next), loaded, lastErr)
+		}
+		pending = next
+	}
+	if loaded > 0 {
+		log.Printf("loaded %d persisted image cache manifests", loaded)
+	}
+	return nil
+}
+
+func (c *imageCache) replayManifest(manifest persistedManifest) error {
+	path := "/v2/" + strings.Trim(strings.TrimSpace(manifest.Repo), "/") + "/manifests/" + strings.TrimSpace(manifest.Target)
+	req := httptestRequest(http.MethodPut, path, manifest.ContentType, manifest.Body)
+	rec := &memoryResponseWriter{header: http.Header{}}
+	c.registry.ServeHTTP(rec, req)
+	if rec.statusCode() < 200 || rec.statusCode() >= 300 {
+		return fmt.Errorf("status=%d body=%s", rec.statusCode(), strings.TrimSpace(rec.body.String()))
+	}
+	return nil
+}
+
+func manifestStoreKey(repo, target string) string {
+	sum := sha256.Sum256([]byte(repo + "\x00" + target))
+	return hex.EncodeToString(sum[:])
+}
+
+type memoryResponseWriter struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (w *memoryResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *memoryResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *memoryResponseWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(data)
+}
+
+func (w *memoryResponseWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
+}
+
+func httptestRequest(method, path, contentType string, body []byte) *http.Request {
+	req, err := http.NewRequest(method, path, bytes.NewReader(body))
+	if err != nil {
+		panic(err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	return req
 }
 
 type statusRecordingWriter struct {
@@ -267,6 +486,11 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 			return nil
 		} else {
 			log.Printf("peer hydrate %s from %s failed: %v", logicalRef, peerBase, err)
+			if registryObjectMissing(err) {
+				if reportErr := c.reportLocation(ctx, location, logicalRef, digest, "missing", err.Error()); reportErr != nil {
+					log.Printf("report stale peer image location ref=%s endpoint=%s failed: %v", logicalRef, location.CacheEndpoint, reportErr)
+				}
+			}
 		}
 	}
 	if c.upstreamBase != "" {
@@ -328,6 +552,10 @@ func (c *imageCache) lookup(ctx context.Context, imageRef, digest string) []imag
 }
 
 func (c *imageCache) report(ctx context.Context, imageRef, digest, status, lastError string) error {
+	return c.reportLocation(ctx, imageLocation{CacheEndpoint: c.cacheEndpoint}, imageRef, digest, status, lastError)
+}
+
+func (c *imageCache) reportLocation(ctx context.Context, location imageLocation, imageRef, digest, status, lastError string) error {
 	if c.apiBase == "" || c.apiToken == "" {
 		return nil
 	}
@@ -335,8 +563,26 @@ func (c *imageCache) report(ctx context.Context, imageRef, digest, status, lastE
 	values.Set("image_ref", imageRef)
 	values.Set("digest", digest)
 	values.Set("status", status)
-	values.Set("cache_endpoint", c.cacheEndpoint)
 	values.Set("last_error", lastError)
+	if location.TenantID != "" {
+		values.Set("tenant_id", location.TenantID)
+	}
+	if location.AppID != "" {
+		values.Set("app_id", location.AppID)
+	}
+	if location.SourceOperationID != "" {
+		values.Set("source_operation_id", location.SourceOperationID)
+	}
+	if location.NodeID != "" {
+		values.Set("node_id", location.NodeID)
+	}
+	if location.RuntimeID != "" {
+		values.Set("runtime_id", location.RuntimeID)
+	}
+	if location.ClusterNodeName != "" {
+		values.Set("cluster_node_name", location.ClusterNodeName)
+	}
+	values.Set("cache_endpoint", strings.TrimRight(strings.TrimSpace(location.CacheEndpoint), "/"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase+c.reportPath, strings.NewReader(values.Encode()))
 	if err != nil {
 		return err
@@ -353,6 +599,28 @@ func (c *imageCache) report(ctx context.Context, imageRef, digest, status, lastE
 		return fmt.Errorf("report image location status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+func registryObjectMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, token := range []string{
+		"name_unknown",
+		"manifest_unknown",
+		"blob_unknown",
+		"unknown name",
+		"manifest unknown",
+		"blob unknown",
+		"404",
+		"not found",
+	} {
+		if strings.Contains(message, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func copyImage(ctx context.Context, src, dst string) error {

@@ -2067,7 +2067,7 @@ install_fugue_node_updater() {
 
   log_step "Installing Fugue node updater..."
   mkdir -p /etc/fugue /var/lib/fugue-node-updater
-  local updater_version="v5"
+  local updater_version="v6"
   local updater_capabilities="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
   updater_tmp="$(mktemp)"
   curl -fsSL --retry 3 --retry-delay 2 "${FUGUE_API_BASE}/install/node-updater.sh" -o "${updater_tmp}"

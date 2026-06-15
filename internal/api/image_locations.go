@@ -1,7 +1,9 @@
 package api
 
 import (
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,6 +84,9 @@ func (s *Server) handleNodeUpdaterReportImageLocation(w http.ResponseWriter, r *
 	}
 	if location.ClusterNodeName == "" {
 		location.ClusterNodeName = updater.ClusterNodeName
+	}
+	if location.CacheEndpoint == "" {
+		location.CacheEndpoint = s.nodeUpdaterImageCacheEndpoint(updater)
 	}
 	location, err = s.store.UpsertImageLocation(location)
 	if err != nil {
@@ -227,6 +232,75 @@ func imageLocationFilterFromRequest(r *http.Request, principal model.Principal, 
 		filter.PlatformAdmin = false
 	}
 	return filter
+}
+
+func (s *Server) nodeUpdaterImageCacheEndpoint(updater model.NodeUpdater) string {
+	if s == nil || s.store == nil || strings.TrimSpace(updater.RuntimeID) == "" {
+		return ""
+	}
+	runtimeObj, err := s.store.GetRuntime(strings.TrimSpace(updater.RuntimeID))
+	if err != nil {
+		return ""
+	}
+	host := imageLocationEndpointHost(runtimeObj.Endpoint)
+	if !imageLocationReachableCacheHost(host) {
+		return ""
+	}
+	port := imageLocationRegistryBasePort(s.registryPullBase)
+	if port == "" {
+		port = imageLocationRegistryBasePort(s.registryPushBase)
+	}
+	if port == "" {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+func imageLocationEndpointHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+			raw = parsed.Host
+		}
+	}
+	raw = strings.TrimRight(raw, "/")
+	if idx := strings.Index(raw, "/"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.Trim(raw, "[]")
+}
+
+func imageLocationRegistryBasePort(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+			raw = parsed.Host
+		}
+	}
+	if _, port, err := net.SplitHostPort(raw); err == nil {
+		return port
+	}
+	return ""
+}
+
+func imageLocationReachableCacheHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "" || host == "in-cluster" || host == "localhost" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 type badImageLocationError string

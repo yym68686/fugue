@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion   = "v5"
+	nodeUpdaterScriptVersion   = "v6"
 	staleNodeUpdateTaskTimeout = 2 * time.Hour
 )
 
@@ -535,7 +535,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v5"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v6"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -1502,6 +1502,77 @@ pull_container_image() {
   fi
 }
 
+internal_registry_image() {
+  local image="$1"
+  case "${image}" in
+    registry.fugue.internal/*|registry.fugue.internal:*/*|fugue-fugue-registry.*/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+image_cache_manifest_path() {
+  local image="$1"
+  local ref="${image#*://}"
+  local path_part=""
+  local repo=""
+  local target=""
+  case "${ref}" in
+    */*) path_part="${ref#*/}" ;;
+    *) return 1 ;;
+  esac
+  case "${path_part}" in
+    *@sha256:*)
+      repo="${path_part%@sha256:*}"
+      target="${path_part##*@}"
+      ;;
+    *)
+      local last="${path_part##*/}"
+      if [[ "${last}" == *:* ]]; then
+        repo="${path_part%:*}"
+        target="${path_part##*:}"
+      else
+        repo="${path_part}"
+        target="latest"
+      fi
+      ;;
+  esac
+  [ -n "${repo}" ] && [ -n "${target}" ] || return 1
+  printf '%s %s\n' "${repo}" "${target}"
+}
+
+first_registry_mirror_endpoint() {
+  local endpoint=""
+  for endpoint in $(current_registry_mirror); do
+    break
+  done
+  if [ -z "${endpoint}" ]; then
+    endpoint="http://127.0.0.1:5000"
+  fi
+  case "${endpoint}" in
+    http://*|https://*) ;;
+    *) endpoint="http://${endpoint}" ;;
+  esac
+  printf '%s' "${endpoint%/}"
+}
+
+verify_image_cache_manifest() {
+  local image="$1"
+  if ! internal_registry_image "${image}"; then
+    return 0
+  fi
+  local parsed=""
+  parsed="$(image_cache_manifest_path "${image}")" || return 1
+  local repo="${parsed% *}"
+  local target="${parsed##* }"
+  local endpoint=""
+  endpoint="$(first_registry_mirror_endpoint)"
+  curl -fsSI --max-time 20 "${endpoint}/v2/${repo}/manifests/${target}" >/dev/null
+}
+
 report_image_location() {
   local image="$1"
   local status="$2"
@@ -1548,6 +1619,12 @@ prepull_app_images() {
     [ -n "${image}" ] || continue
     report_image_location "${image}" pulling ""
     if pull_output="$(pull_container_image "${image}" 2>&1)"; then
+      if ! verify_image_cache_manifest "${image}"; then
+        pull_output="pre-pull succeeded but node image cache does not serve registry manifest for ${image}"
+        log_task "${pull_output}"
+        report_image_location "${image}" failed "${pull_output}"
+        return 1
+      fi
       log_task "pre-pulled app image ${image}"
       report_image_location "${image}" present ""
     else
