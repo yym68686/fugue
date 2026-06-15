@@ -673,15 +673,32 @@ func copyImage(ctx context.Context, src, dst string) error {
 }
 
 func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, target string) error {
+	return c.ensureLocalManifestTree(ctx, sourceBase, repo, target, map[string]struct{}{})
+}
+
+func (c *imageCache) ensureLocalManifestTree(ctx context.Context, sourceBase, repo, target string, seen map[string]struct{}) error {
 	if c == nil || c.registry == nil {
 		return nil
 	}
 	if c.localManifestAvailable(repo, target) {
 		return nil
 	}
+	key := sourceCacheKey(registryTargetManifest, repo, target)
+	if _, ok := seen[key]; ok {
+		return nil
+	}
+	seen[key] = struct{}{}
 	contentType, body, err := c.fetchManifest(ctx, sourceBase, repo, target)
 	if err != nil {
 		return err
+	}
+	for _, descriptor := range manifestReferencedTargets(body) {
+		if descriptor.kind != registryTargetManifest {
+			continue
+		}
+		if err := c.ensureLocalManifestTree(ctx, sourceBase, repo, descriptor.target, seen); err != nil {
+			return err
+		}
 	}
 	manifest := persistedManifest{
 		Repo:        strings.Trim(strings.TrimSpace(repo), "/"),

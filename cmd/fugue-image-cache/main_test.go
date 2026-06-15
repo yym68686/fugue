@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -584,6 +586,57 @@ func TestHydrateEnsuresManifestWhenCopyDoesNotPopulateTag(t *testing.T) {
 	cache.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("local manifest status = %d, want %d; body=%q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestHydrateEnsuresManifestListChildrenBeforeTag(t *testing.T) {
+	t.Parallel()
+
+	child := []byte(`{"schemaVersion":1,"name":"fugue-apps/demo","tag":"child","fsLayers":[]}`)
+	childSum := sha256.Sum256(child)
+	childDigest := fmt.Sprintf("sha256:%x", childSum[:])
+	parent := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v1+json","digest":%q,"size":%d,"platform":{"os":"linux","architecture":"amd64"}}]}`, childDigest, len(child)))
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/fugue-apps/demo/manifests/image-list":
+			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.list.v2+json")
+			_, _ = w.Write(parent)
+		case "/v2/fugue-apps/demo/manifests/" + childDigest:
+			w.Header().Set("Content-Type", "application/vnd.docker.distribution.manifest.v1+json")
+			_, _ = w.Write(child)
+		default:
+			t.Fatalf("upstream path = %q", r.URL.Path)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cache := &imageCache{
+		registry:       registry.New(),
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		upstreamBase:   upstreamURL.Host,
+		hydrateTimeout: 5 * time.Second,
+		copyImageFn: func(context.Context, string, string) error {
+			return nil
+		},
+	}
+
+	if err := cache.hydrate(context.Background(), "fugue-apps/demo", "image-list"); err != nil {
+		t.Fatalf("hydrate: %v", err)
+	}
+
+	for _, target := range []string{"image-list", childDigest} {
+		req := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/"+target, nil)
+		rec := httptest.NewRecorder()
+		cache.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("local manifest %s status = %d, want %d; body=%q", target, rec.Code, http.StatusOK, rec.Body.String())
+		}
 	}
 }
 
