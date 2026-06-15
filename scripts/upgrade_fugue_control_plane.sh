@@ -818,6 +818,9 @@ node_local_build_plane_preflight_override_allowed() {
       internal/controller/deploy_image_guard_test.go|\
       internal/controller/import_operation.go|\
       internal/controller/import_operation_test.go|\
+      internal/api/join_cluster.go|\
+      internal/api/node_updater.go|\
+      internal/api/node_updater_test.go|\
       deploy/helm/fugue/templates/_helpers.tpl|\
       deploy/helm/fugue/templates/controller-deployment.yaml|\
       scripts/upgrade_fugue_control_plane.sh|\

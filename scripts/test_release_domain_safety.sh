@@ -63,6 +63,9 @@ node_local_build_plane_preflight_override_allowed || fail "image-cache fixes mus
 FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go\ninternal/controller/deploy_image_guard.go\ndeploy/helm/fugue/templates/controller-deployment.yaml'
 node_local_build_plane_preflight_override_allowed || fail "builder registry routing fixes must be allowed to bypass registry/node-policy preflight"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/api/join_cluster.go\ninternal/api/node_updater.go\ninternal/api/node_updater_test.go'
+node_local_build_plane_preflight_override_allowed || fail "node updater registry mirror reload fixes must be allowed to bypass registry/node-policy preflight"
+
 FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/test_release_domain_safety.sh'
 node_local_build_plane_preflight_override_allowed || fail "release preflight fix must be allowed to publish itself while registry/node-policy preflight is degraded"
 
