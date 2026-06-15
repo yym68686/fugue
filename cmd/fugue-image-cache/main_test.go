@@ -307,6 +307,105 @@ func TestBlobMissProxiesUpstreamWithoutHydrate(t *testing.T) {
 	}
 }
 
+func TestManifestMissProxiesPeerAndHydratesInBackground(t *testing.T) {
+	t.Parallel()
+
+	const blobDigest = "sha256:6a0ac1617861a677b045b7ff88545213ec31c0ff08763195a70a4a5adda577bb"
+	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":"` + blobDigest + `","size":11}]}`
+	var peerRange string
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/fugue-apps/demo/manifests/image-test":
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = io.WriteString(w, manifest)
+		case "/v2/fugue-apps/demo/blobs/" + blobDigest:
+			peerRange = r.Header.Get("Range")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = io.WriteString(w, "hello layer")
+		default:
+			t.Errorf("unexpected peer request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(peer.Close)
+
+	copyStarted := make(chan struct{})
+	var copies atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/image-locations":
+			if got := r.URL.Query().Get("image_ref"); got != "registry.fugue.internal:5000/fugue-apps/demo:image-test" {
+				t.Errorf("image_ref query = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"image_locations": []imageLocation{{
+					CacheEndpoint: peer.URL,
+					Status:        "present",
+				}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/image-locations":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected API request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	cache := &imageCache{
+		apiBase:        api.URL,
+		apiToken:       "token",
+		reportPath:     "/v1/image-locations",
+		lookupPath:     "/v1/image-locations",
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		cacheEndpoint:  "http://10.0.0.2:5000",
+		httpClient:     api.Client(),
+		registry:       registry.New(),
+		hydrateTimeout: 5 * time.Second,
+		sourceTTL:      time.Minute,
+		copyImageFn: func(context.Context, string, string) error {
+			if copies.Add(1) == 1 {
+				close(copyStarted)
+			}
+			return nil
+		},
+	}
+	manifestReq := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", nil)
+	manifestRec := httptest.NewRecorder()
+
+	cache.ServeHTTP(manifestRec, manifestReq)
+
+	if manifestRec.Code != http.StatusOK {
+		t.Fatalf("manifest status = %d, want %d; body=%q", manifestRec.Code, http.StatusOK, manifestRec.Body.String())
+	}
+	if got := manifestRec.Body.String(); got != manifest {
+		t.Fatalf("manifest body = %q", got)
+	}
+	select {
+	case <-copyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected background hydrate to start")
+	}
+
+	blobReq := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/blobs/"+blobDigest, nil)
+	blobReq.Header.Set("Range", "bytes=0-10")
+	blobRec := httptest.NewRecorder()
+
+	cache.ServeHTTP(blobRec, blobReq)
+
+	if blobRec.Code != http.StatusPartialContent {
+		t.Fatalf("blob status = %d, want %d; body=%q", blobRec.Code, http.StatusPartialContent, blobRec.Body.String())
+	}
+	if got := blobRec.Body.String(); got != "hello layer" {
+		t.Fatalf("blob body = %q", got)
+	}
+	if peerRange != "bytes=0-10" {
+		t.Fatalf("peer Range = %q", peerRange)
+	}
+}
+
 func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	t.Parallel()
 

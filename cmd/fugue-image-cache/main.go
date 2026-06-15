@@ -38,12 +38,25 @@ type imageCache struct {
 	copyImageFn    func(context.Context, string, string) error
 	hydrateMu      sync.Mutex
 	hydrateCalls   map[string]*hydrateCall
+	sourceMu       sync.RWMutex
+	sourceByTarget map[string]sourceCacheEntry
+	sourceTTL      time.Duration
 }
 
 type hydrateCall struct {
 	done    chan struct{}
 	err     error
 	waiters int
+}
+
+type sourceCacheEntry struct {
+	base      string
+	expiresAt time.Time
+}
+
+type manifestDescriptor struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
 }
 
 type imageLocation struct {
@@ -86,6 +99,7 @@ func main() {
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
 		hydrateTimeout: envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
+		sourceTTL:      envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
 		log.Print("control-plane API credentials are not configured; cache will serve local registry storage only")
@@ -136,7 +150,18 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.flush()
 		return
 	}
+	if targetKind == registryTargetBlob && c.proxyBlobFromKnownSource(w, r, repo, target) {
+		return
+	}
 	if targetKind == registryTargetBlob && c.proxyBlobFromUpstream(w, r, repo, target) {
+		return
+	}
+	if targetKind == registryTargetBlob {
+		rec.flush()
+		return
+	}
+	if targetKind == registryTargetManifest && c.proxyManifestFromRemote(w, r, repo, target) {
+		c.startHydrate(repo, target)
 		return
 	}
 	if err := c.hydrate(r.Context(), repo, target); err != nil {
@@ -408,6 +433,8 @@ const (
 	registryTargetBlob     registryTargetKind = "blob"
 )
 
+const maxProxiedManifestBytes = 64 << 20
+
 func (c *imageCache) hydrate(parent context.Context, repo, target string) error {
 	key := repo + "\x00" + target
 	call := c.joinHydrate(key, repo, target)
@@ -419,6 +446,11 @@ func (c *imageCache) hydrate(parent context.Context, repo, target string) error 
 	case <-parent.Done():
 		return parent.Err()
 	}
+}
+
+func (c *imageCache) startHydrate(repo, target string) {
+	call := c.joinHydrate(repo+"\x00"+target, repo, target)
+	c.leaveHydrate(call)
 }
 
 func (c *imageCache) joinHydrate(key, repo, target string) *hydrateCall {
@@ -627,6 +659,19 @@ func copyImage(ctx context.Context, src, dst string) error {
 	return crane.Copy(src, dst, crane.WithContext(ctx), crane.Insecure)
 }
 
+type registrySource struct {
+	base     string
+	location imageLocation
+}
+
+type proxyPullResult struct {
+	body    []byte
+	ok      bool
+	missing bool
+	status  int
+	err     error
+}
+
 func isRegistryPull(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
@@ -665,34 +710,263 @@ func (c *imageCache) proxyBlobFromUpstream(w http.ResponseWriter, r *http.Reques
 	if c.upstreamBase == "" {
 		return false
 	}
-	upstreamURL := "http://" + trimRegistryBase(c.upstreamBase) + "/v2/" + repo + "/blobs/" + digest
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, nil)
-	if err != nil {
-		log.Printf("build upstream blob request repo=%s digest=%s failed: %v", repo, digest, err)
+	result := c.proxyRegistryPull(w, r, trimRegistryBase(c.upstreamBase))
+	if result.ok {
+		return true
+	}
+	if result.err != nil {
+		log.Printf("upstream blob proxy repo=%s digest=%s failed: %v", repo, digest, result.err)
+	} else if result.status != 0 {
+		log.Printf("upstream blob proxy repo=%s digest=%s status=%d", repo, digest, result.status)
+	}
+	return false
+}
+
+func (c *imageCache) proxyBlobFromKnownSource(w http.ResponseWriter, r *http.Request, repo, digest string) bool {
+	sourceBase, ok := c.knownSource(registryTargetBlob, repo, digest)
+	if !ok || sourceBase == "" {
 		return false
 	}
-	if value := r.Header.Get("Range"); value != "" {
-		req.Header.Set("Range", value)
+	result := c.proxyRegistryPull(w, r, sourceBase)
+	if result.ok {
+		return true
 	}
+	if result.missing {
+		c.forgetSource(registryTargetBlob, repo, digest, sourceBase)
+	}
+	if result.err != nil {
+		log.Printf("known-source blob proxy repo=%s digest=%s source=%s failed: %v", repo, digest, sourceBase, result.err)
+	} else if result.status != 0 {
+		log.Printf("known-source blob proxy repo=%s digest=%s source=%s status=%d", repo, digest, sourceBase, result.status)
+	}
+	return false
+}
+
+func (c *imageCache) proxyManifestFromRemote(w http.ResponseWriter, r *http.Request, repo, target string) bool {
+	logicalRef, digest := imageRef(c.registryBase, repo, target)
+	if sourceBase, ok := c.knownSource(registryTargetManifest, repo, target); ok {
+		result := c.proxyRegistryPull(w, r, sourceBase)
+		if result.ok {
+			c.rememberManifestSource(repo, target, sourceBase, result.body)
+			return true
+		}
+		if result.missing {
+			c.forgetSource(registryTargetManifest, repo, target, sourceBase)
+		}
+		if result.err != nil {
+			log.Printf("known-source manifest proxy %s from %s failed: %v", logicalRef, sourceBase, result.err)
+		} else if result.status != 0 {
+			log.Printf("known-source manifest proxy %s from %s status=%d", logicalRef, sourceBase, result.status)
+		}
+	}
+	for _, source := range c.remoteSources(r.Context(), logicalRef, digest) {
+		result := c.proxyRegistryPull(w, r, source.base)
+		if result.ok {
+			c.rememberManifestSource(repo, target, source.base, result.body)
+			return true
+		}
+		if result.missing && source.location.CacheEndpoint != "" {
+			reportCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if err := c.reportLocation(reportCtx, source.location, logicalRef, digest, "missing", fmt.Sprintf("proxy status=%d", result.status)); err != nil {
+				log.Printf("report stale peer image location ref=%s endpoint=%s failed: %v", logicalRef, source.location.CacheEndpoint, err)
+			}
+			cancel()
+		}
+		if result.err != nil {
+			log.Printf("remote manifest proxy %s from %s failed: %v", logicalRef, source.base, result.err)
+		} else if result.status != 0 {
+			log.Printf("remote manifest proxy %s from %s status=%d", logicalRef, source.base, result.status)
+		}
+	}
+	return false
+}
+
+func (c *imageCache) remoteSources(ctx context.Context, imageRef, digest string) []registrySource {
+	sources := make([]registrySource, 0, 4)
+	seen := map[string]struct{}{}
+	for _, location := range c.lookup(ctx, imageRef, digest) {
+		if strings.TrimSpace(location.CacheEndpoint) == "" || !strings.EqualFold(location.Status, "present") {
+			continue
+		}
+		if sameEndpoint(location.CacheEndpoint, c.cacheEndpoint) {
+			continue
+		}
+		base := trimRegistryBase(location.CacheEndpoint)
+		if base == "" {
+			continue
+		}
+		if _, ok := seen[base]; ok {
+			continue
+		}
+		seen[base] = struct{}{}
+		sources = append(sources, registrySource{base: base, location: location})
+	}
+	if c.upstreamBase != "" {
+		base := trimRegistryBase(c.upstreamBase)
+		if _, ok := seen[base]; base != "" && !ok {
+			sources = append(sources, registrySource{base: base})
+		}
+	}
+	return sources
+}
+
+func (c *imageCache) proxyRegistryPull(w http.ResponseWriter, r *http.Request, sourceBase string) proxyPullResult {
+	if r == nil || r.URL == nil || strings.TrimSpace(sourceBase) == "" {
+		return proxyPullResult{}
+	}
+	targetURL := "http://" + trimRegistryBase(sourceBase) + r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, nil)
+	if err != nil {
+		return proxyPullResult{err: err}
+	}
+	copyRequestHeader(req.Header, r.Header)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("upstream blob proxy repo=%s digest=%s failed: %v", repo, digest, err)
-		return false
+		return proxyPullResult{err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("upstream blob proxy repo=%s digest=%s status=%d", repo, digest, resp.StatusCode)
-		return false
+		return proxyPullResult{status: resp.StatusCode, missing: resp.StatusCode == http.StatusNotFound}
+	}
+	if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/manifests/") {
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxProxiedManifestBytes+1))
+		if err != nil {
+			return proxyPullResult{status: resp.StatusCode, err: err}
+		}
+		if len(body) > maxProxiedManifestBytes {
+			return proxyPullResult{status: resp.StatusCode, err: fmt.Errorf("proxied manifest exceeds %d bytes", maxProxiedManifestBytes)}
+		}
+		copyHeader(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		if _, err := w.Write(body); err != nil {
+			log.Printf("write proxied registry manifest source=%s path=%s failed: %v", sourceBase, r.URL.Path, err)
+		}
+		return proxyPullResult{body: body, ok: true, status: resp.StatusCode}
 	}
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if r.Method == http.MethodHead {
-		return true
+		return proxyPullResult{ok: true, status: resp.StatusCode}
 	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Printf("stream upstream blob repo=%s digest=%s failed: %v", repo, digest, err)
+		log.Printf("stream proxied registry pull source=%s path=%s failed: %v", sourceBase, r.URL.Path, err)
 	}
-	return true
+	return proxyPullResult{ok: true, status: resp.StatusCode}
+}
+
+func copyRequestHeader(dst, src http.Header) {
+	for key, values := range src {
+		if strings.EqualFold(key, "Host") {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func (c *imageCache) rememberManifestSource(repo, target, sourceBase string, manifestBody []byte) {
+	c.rememberSource(registryTargetManifest, repo, target, sourceBase)
+	for _, descriptor := range manifestReferencedTargets(manifestBody) {
+		c.rememberSource(descriptor.kind, repo, descriptor.target, sourceBase)
+	}
+}
+
+type referencedRegistryTarget struct {
+	kind   registryTargetKind
+	target string
+}
+
+func manifestReferencedTargets(body []byte) []referencedRegistryTarget {
+	if len(body) == 0 {
+		return nil
+	}
+	var decoded struct {
+		Config    *manifestDescriptor  `json:"config"`
+		Layers    []manifestDescriptor `json:"layers"`
+		Manifests []manifestDescriptor `json:"manifests"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return nil
+	}
+	targets := make([]referencedRegistryTarget, 0, 1+len(decoded.Layers)+len(decoded.Manifests))
+	if decoded.Config != nil && strings.TrimSpace(decoded.Config.Digest) != "" {
+		targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: decoded.Config.Digest})
+	}
+	for _, layer := range decoded.Layers {
+		if strings.TrimSpace(layer.Digest) != "" {
+			targets = append(targets, referencedRegistryTarget{kind: registryTargetBlob, target: layer.Digest})
+		}
+	}
+	for _, manifest := range decoded.Manifests {
+		if strings.TrimSpace(manifest.Digest) != "" {
+			targets = append(targets, referencedRegistryTarget{kind: registryTargetManifest, target: manifest.Digest})
+		}
+	}
+	return targets
+}
+
+func (c *imageCache) rememberSource(kind registryTargetKind, repo, target, sourceBase string) {
+	if c == nil {
+		return
+	}
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	target = strings.TrimSpace(target)
+	sourceBase = trimRegistryBase(sourceBase)
+	if repo == "" || target == "" || sourceBase == "" {
+		return
+	}
+	ttl := c.sourceTTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	c.sourceMu.Lock()
+	defer c.sourceMu.Unlock()
+	if c.sourceByTarget == nil {
+		c.sourceByTarget = make(map[string]sourceCacheEntry)
+	}
+	c.sourceByTarget[sourceCacheKey(kind, repo, target)] = sourceCacheEntry{base: sourceBase, expiresAt: time.Now().Add(ttl)}
+}
+
+func (c *imageCache) knownSource(kind registryTargetKind, repo, target string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	target = strings.TrimSpace(target)
+	c.sourceMu.RLock()
+	entry, ok := c.sourceByTarget[sourceCacheKey(kind, repo, target)]
+	c.sourceMu.RUnlock()
+	if !ok || entry.base == "" {
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		c.forgetSource(kind, repo, target, entry.base)
+		return "", false
+	}
+	return entry.base, true
+}
+
+func (c *imageCache) forgetSource(kind registryTargetKind, repo, target, sourceBase string) {
+	if c == nil {
+		return
+	}
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	target = strings.TrimSpace(target)
+	sourceBase = trimRegistryBase(sourceBase)
+	c.sourceMu.Lock()
+	defer c.sourceMu.Unlock()
+	key := sourceCacheKey(kind, repo, target)
+	if entry, ok := c.sourceByTarget[key]; ok && (sourceBase == "" || entry.base == sourceBase) {
+		delete(c.sourceByTarget, key)
+	}
+}
+
+func sourceCacheKey(kind registryTargetKind, repo, target string) string {
+	return string(kind) + "\x00" + strings.Trim(strings.TrimSpace(repo), "/") + "\x00" + strings.TrimSpace(target)
 }
 
 func imageRef(base, repo, target string) (string, string) {
