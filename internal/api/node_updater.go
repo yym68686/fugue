@@ -15,7 +15,7 @@ import (
 	"fugue/internal/store"
 )
 
-const nodeUpdaterScriptVersion = "v3"
+const nodeUpdaterScriptVersion = "v4"
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
@@ -528,7 +528,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v3"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v4"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -981,8 +981,7 @@ reconcile_registry_mirror() {
     printf '      insecure_skip_verify: true\n'
   } >"${tmp}"
   preserve_rollback_file "${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE}"
-  write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE}" || true
-  return 0
+  write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE}"
 }
 
 flannel_mtu() {
@@ -1207,6 +1206,7 @@ reconcile_lkg_service_envs() {
 }
 
 reconcile_node_state() {
+  local k3s_runtime_config_changed=0
   mkdir -p "${FUGUE_NODE_UPDATER_STATE_DIR}"
   if reconcile_time_sync; then
     log "reconciled host time synchronization"
@@ -1228,15 +1228,20 @@ reconcile_node_state() {
   render_node_updater_state_env
   if reconcile_registry_mirror; then
     log "updated k3s registry mirror configuration"
+    k3s_runtime_config_changed=1
   fi
   if reconcile_k3s_config; then
     log "updated k3s join configuration"
+    k3s_runtime_config_changed=1
   fi
   if reconcile_cni_bridge_mtu; then
     log "reconciled CNI bridge MTU"
   fi
   if reconcile_lkg_service_envs; then
     log "updated edge/dns non-secret environment generation"
+  fi
+  if [ "${k3s_runtime_config_changed}" -eq 1 ]; then
+    restart_k3s_agent_for_config_reload
   fi
   return 0
 }
@@ -1409,6 +1414,17 @@ restart_k3s_agent() {
   systemctl restart k3s-agent
   wait_for_unit_active k3s-agent 900
   log_task "k3s-agent is active"
+}
+
+restart_k3s_agent_for_config_reload() {
+  if ! systemctl list-unit-files k3s-agent.service >/dev/null 2>&1; then
+    log "k3s-agent unit is absent; skip containerd registry mirror reload"
+    return 0
+  fi
+  log "restarting k3s-agent so containerd reloads updated join/registry configuration"
+  systemctl restart k3s-agent
+  wait_for_unit_active k3s-agent 900
+  log "k3s-agent is active after join/registry configuration reload"
 }
 
 upgrade_k3s_agent() {
