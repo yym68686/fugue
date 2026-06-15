@@ -607,10 +607,10 @@ imageCache:
   resources:
     requests:
       cpu: 25m
-      memory: 64Mi
+      memory: 128Mi
       ephemeral-storage: 128Mi
     limits:
-      memory: 512Mi
+      memory: 2Gi
       ephemeral-storage: 4Gi
 
 topologyLabeler:
