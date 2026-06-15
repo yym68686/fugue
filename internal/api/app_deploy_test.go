@@ -115,3 +115,46 @@ func TestDeployAppWorkspacePatchRecoversFailedImportedAppDesiredState(t *testing
 		t.Fatalf("expected import, failed deploy, and recovered deploy operations, got %d", len(ops))
 	}
 }
+
+func TestDeployAppSpecPatchRecoversFailedImportedAppImage(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, app, recoveredImage, recoveredSource := setupFailedImportedAppRecoveryServer(t)
+
+	nextSpec := cloneAppSpec(app.Spec)
+	nextSpec.Args = []string{"serve"}
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/deploy", apiKey, map[string]any{
+		"spec": nextSpec,
+	})
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Operation model.Operation `json:"operation"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Operation.DesiredSpec == nil {
+		t.Fatal("expected desired spec on deploy response")
+	}
+	if got := response.Operation.DesiredSpec.Image; got != recoveredImage {
+		t.Fatalf("expected recovered image %q, got %q", recoveredImage, got)
+	}
+	if got := response.Operation.DesiredSpec.Args; len(got) != 1 || got[0] != "serve" {
+		t.Fatalf("expected desired args [serve], got %#v", got)
+	}
+	if response.Operation.DesiredSource == nil {
+		t.Fatal("expected desired source on deploy response")
+	}
+	if got := response.Operation.DesiredSource.ResolvedImageRef; got != recoveredSource.ResolvedImageRef {
+		t.Fatalf("expected resolved image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
+	}
+
+	ops, err := s.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 3 {
+		t.Fatalf("expected import, failed deploy, and recovered spec deploy operations, got %d", len(ops))
+	}
+}

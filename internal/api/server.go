@@ -1156,13 +1156,17 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	spec, source, err := s.recoverAppDeployBaseline(app)
+	recoveredSpec, source, err := s.recoverAppDeployBaseline(app)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	spec := recoveredSpec
 	if req.Spec != nil {
 		spec = cloneAppSpec(*req.Spec)
+		if strings.TrimSpace(spec.Image) == "" {
+			spec.Image = strings.TrimSpace(recoveredSpec.Image)
+		}
 	}
 	if req.Workspace != nil {
 		if spec.PersistentStorage != nil {

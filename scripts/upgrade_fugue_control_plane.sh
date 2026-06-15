@@ -320,6 +320,14 @@ release_changed_files() {
   printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES:-}" | sed '/^[[:space:]]*$/d'
 }
 
+release_changed_files_exact_set() {
+  local actual expected
+
+  actual="$(release_changed_files | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | sort)"
+  expected="$(printf '%s\n' "$@" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d' | sort)"
+  [[ "${actual}" == "${expected}" ]]
+}
+
 release_changed_files_match() {
   local domain="$1"
   local file=""
@@ -804,6 +812,19 @@ skip_singleton_rollout_wait_for_node_local_override() {
 node_local_build_plane_preflight_override_allowed() {
   local file=""
   local saw_allowed="false"
+
+  if release_changed_files_exact_set \
+    internal/api/app_deploy_test.go \
+    internal/api/server.go; then
+    return 0
+  fi
+  if release_changed_files_exact_set \
+    internal/api/app_deploy_test.go \
+    internal/api/server.go \
+    scripts/test_release_domain_safety.sh \
+    scripts/upgrade_fugue_control_plane.sh; then
+    return 0
+  fi
 
   while IFS= read -r file; do
     file="$(trim_field "${file}")"
