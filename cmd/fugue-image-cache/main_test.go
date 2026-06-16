@@ -650,6 +650,7 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 		manifestDir: manifestDir,
 	}
 	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`
+	manifestDigest := manifestBodyDigest([]byte(manifest))
 	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", strings.NewReader(manifest))
 	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 	putRec := httptest.NewRecorder()
@@ -659,12 +660,20 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	if putRec.Code != http.StatusCreated {
 		t.Fatalf("put status = %d, want %d; body=%q", putRec.Code, http.StatusCreated, putRec.Body.String())
 	}
+	for _, target := range []string{"image-test", manifestDigest} {
+		head := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/"+target, nil)
+		headRec := httptest.NewRecorder()
+		cache.ServeHTTP(headRec, head)
+		if headRec.Code != http.StatusOK {
+			t.Fatalf("head %s status after put = %d, want %d; body=%q", target, headRec.Code, http.StatusOK, headRec.Body.String())
+		}
+	}
 	files, err := filepath.Glob(filepath.Join(manifestDir, "*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("persisted manifests = %d, want 1", len(files))
+	if len(files) != 2 {
+		t.Fatalf("persisted manifests = %d, want 2", len(files))
 	}
 
 	restarted := &imageCache{
@@ -674,13 +683,13 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	if err := restarted.loadPersistedManifests(); err != nil {
 		t.Fatalf("load persisted manifests: %v", err)
 	}
-	head := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/image-test", nil)
-	headRec := httptest.NewRecorder()
-
-	restarted.ServeHTTP(headRec, head)
-
-	if headRec.Code != http.StatusOK {
-		t.Fatalf("head status after restart = %d, want %d; body=%q", headRec.Code, http.StatusOK, headRec.Body.String())
+	for _, target := range []string{"image-test", manifestDigest} {
+		head := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/"+target, nil)
+		headRec := httptest.NewRecorder()
+		restarted.ServeHTTP(headRec, head)
+		if headRec.Code != http.StatusOK {
+			t.Fatalf("head %s status after restart = %d, want %d; body=%q", target, headRec.Code, http.StatusOK, headRec.Body.String())
+		}
 	}
 }
 
@@ -755,7 +764,7 @@ func TestHydrateMarksMissingPeerLocationStale(t *testing.T) {
 }
 
 func TestReportRegistryWriteReportsLogicalImageLocation(t *testing.T) {
-	reported := make(chan url.Values, 1)
+	reported := make(chan url.Values, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
@@ -782,14 +791,31 @@ func TestReportRegistryWriteReportsLogicalImageLocation(t *testing.T) {
 		cacheEndpoint: "http://10.0.0.2:5000",
 		httpClient:    server.Client(),
 	}
+	const manifest = `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[]}`
+	manifestDigest := manifestBodyDigest([]byte(manifest))
 	req := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:5000/v2/fugue-apps/demo/manifests/git-abc123", nil)
 
-	cache.reportRegistryWrite(req, http.StatusCreated)
+	cache.reportRegistryWrite(req, http.StatusCreated, []byte(manifest))
 
-	select {
-	case form := <-reported:
-		if got := form.Get("image_ref"); got != "registry.fugue.internal:5000/fugue-apps/demo:git-abc123" {
-			t.Fatalf("image_ref = %q", got)
+	seen := map[string]url.Values{}
+	for len(seen) < 2 {
+		select {
+		case form := <-reported:
+			seen[form.Get("image_ref")] = form
+		case <-time.After(time.Second):
+			t.Fatal("expected image location reports")
+		}
+	}
+	for _, imageRef := range []string{
+		"registry.fugue.internal:5000/fugue-apps/demo:git-abc123",
+		"registry.fugue.internal:5000/fugue-apps/demo@" + manifestDigest,
+	} {
+		form := seen[imageRef]
+		if form == nil {
+			t.Fatalf("missing image location report for %s; got %v", imageRef, seen)
+		}
+		if got := form.Get("digest"); got != manifestDigest {
+			t.Fatalf("digest for %s = %q, want %q", imageRef, got, manifestDigest)
 		}
 		if got := form.Get("status"); got != "present" {
 			t.Fatalf("status = %q", got)
@@ -797,8 +823,6 @@ func TestReportRegistryWriteReportsLogicalImageLocation(t *testing.T) {
 		if got := form.Get("cache_endpoint"); got != "http://10.0.0.2:5000" {
 			t.Fatalf("cache_endpoint = %q", got)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("expected image location report")
 	}
 }
 

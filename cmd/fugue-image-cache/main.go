@@ -224,15 +224,28 @@ func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) 
 	c.registry.ServeHTTP(rec, r)
 	status := rec.statusCode()
 	if status >= 200 && status < 300 && len(manifestBody) > 0 {
-		if err := c.persistManifest(manifestRepo, manifestTarget, manifestContentType, manifestBody); err != nil {
-			log.Printf("persist manifest repo=%s target=%s failed: %v", manifestRepo, manifestTarget, err)
+		for _, target := range manifestPersistTargets(manifestTarget, manifestBody) {
+			if target != manifestTarget {
+				manifest := persistedManifest{
+					Repo:        strings.Trim(strings.TrimSpace(manifestRepo), "/"),
+					Target:      target,
+					ContentType: manifestContentType,
+					Body:        manifestBody,
+				}
+				if err := c.replayManifest(manifest); err != nil {
+					log.Printf("replay manifest alias repo=%s target=%s failed: %v", manifestRepo, target, err)
+				}
+			}
+			if err := c.persistManifest(manifestRepo, target, manifestContentType, manifestBody); err != nil {
+				log.Printf("persist manifest repo=%s target=%s failed: %v", manifestRepo, target, err)
+			}
 		}
 	} else if status >= 200 && status < 300 && r.Method == http.MethodDelete && manifestRepo != "" && manifestTarget != "" {
 		if err := c.deletePersistedManifest(manifestRepo, manifestTarget); err != nil {
 			log.Printf("delete persisted manifest repo=%s target=%s failed: %v", manifestRepo, manifestTarget, err)
 		}
 	}
-	c.reportRegistryWrite(r, status)
+	c.reportRegistryWrite(r, status, manifestBody)
 }
 
 type persistedManifest struct {
@@ -279,6 +292,27 @@ func (c *imageCache) persistManifest(repo, target, contentType string, body []by
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+func manifestPersistTargets(target string, body []byte) []string {
+	target = strings.TrimSpace(target)
+	if target == "" || len(body) == 0 {
+		return nil
+	}
+	targets := []string{target}
+	digest := manifestBodyDigest(body)
+	if digest != "" && digest != target {
+		targets = append(targets, digest)
+	}
+	return targets
+}
+
+func manifestBodyDigest(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (c *imageCache) deletePersistedManifest(repo, target string) error {
@@ -431,7 +465,7 @@ func (w *statusRecordingWriter) statusCode() int {
 	return w.status
 }
 
-func (c *imageCache) reportRegistryWrite(r *http.Request, status int) {
+func (c *imageCache) reportRegistryWrite(r *http.Request, status int, manifestBody []byte) {
 	if r == nil || r.URL == nil || status < 200 || status >= 300 {
 		return
 	}
@@ -443,11 +477,22 @@ func (c *imageCache) reportRegistryWrite(r *http.Request, status int) {
 		return
 	}
 	logicalRef, digest := imageRef(c.registryBase, repo, target)
+	bodyDigest := manifestBodyDigest(manifestBody)
+	if digest == "" {
+		digest = bodyDigest
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := c.report(ctx, logicalRef, digest, "present", ""); err != nil {
 			log.Printf("report pushed image location ref=%s failed: %v", logicalRef, err)
+		}
+		if bodyDigest == "" || bodyDigest == target {
+			return
+		}
+		digestRef, digest := imageRef(c.registryBase, repo, bodyDigest)
+		if err := c.report(ctx, digestRef, digest, "present", ""); err != nil {
+			log.Printf("report pushed image location ref=%s failed: %v", digestRef, err)
 		}
 	}()
 }
