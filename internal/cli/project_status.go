@@ -365,7 +365,7 @@ func statusCategoryFromReport(report *appBuildArtifactReport) string {
 	if report == nil {
 		return ""
 	}
-	if normalizeImageInventoryStatus(report.RegistryImageStatus) == "missing" {
+	if normalizeImageInventoryStatus(report.RegistryImageStatus) == "missing" && !hasReadyRuntimeWithoutImageIssues(report) {
 		return "runtime-image-missing"
 	}
 	if hasImagePullPodIssue(report.PodIssues) {

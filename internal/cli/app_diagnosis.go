@@ -257,7 +257,7 @@ func summarizeAppOverviewDiagnosis(app model.App, latestImport, latestDeploy *mo
 	if report != nil {
 		status := normalizeImageInventoryStatus(report.RegistryImageStatus)
 		switch {
-		case status == "missing":
+		case status == "missing" && !hasReadyRuntimeWithoutImageIssues(report):
 			return &appOverviewDiagnosis{
 				Category:        "runtime-image-missing",
 				Summary:         runtimeImageMissingSummary(report),
@@ -300,7 +300,7 @@ func summarizeAppOverviewDiagnosis(app model.App, latestImport, latestDeploy *mo
 		return nil
 	}
 	if strings.EqualFold(report.LinkedDeployStatus, model.OperationStatusCompleted) &&
-		normalizeImageInventoryStatus(report.RegistryImageStatus) == "available" &&
+		(normalizeImageInventoryStatus(report.RegistryImageStatus) == "available" || hasReadyRuntimeWithoutImageIssues(report)) &&
 		len(report.PodIssues) == 0 &&
 		report.ReadyPods > 0 {
 		return nil
@@ -670,7 +670,7 @@ func preferredBuildLogsSummary(logs buildLogsResponse) string {
 			return buildPlacementSummary(artifact)
 		case strings.TrimSpace(artifact.RegistryLifecycleHint) != "":
 			return strings.TrimSpace(artifact.RegistryLifecycleHint)
-		case normalizeImageInventoryStatus(artifact.RegistryImageStatus) == "missing":
+		case normalizeImageInventoryStatus(artifact.RegistryImageStatus) == "missing" && !hasReadyRuntimeWithoutImageIssues(artifact):
 			return runtimeImageMissingSummary(artifact)
 		case hasImagePullPodIssue(artifact.PodIssues):
 			return runtimeImagePullFailureSummary(artifact)
@@ -679,6 +679,10 @@ func preferredBuildLogsSummary(logs buildLogsResponse) string {
 		}
 	}
 	return firstNonEmptyTrimmed(strings.TrimSpace(logs.Summary), strings.TrimSpace(logs.ResultMessage), strings.TrimSpace(logs.ErrorMessage))
+}
+
+func hasReadyRuntimeWithoutImageIssues(report *appBuildArtifactReport) bool {
+	return report != nil && report.ReadyPods > 0 && len(report.PodIssues) == 0
 }
 
 func buildPlacementSummary(report *appBuildArtifactReport) string {

@@ -221,3 +221,31 @@ func TestSummarizeAppBuildArtifactFallsBackToCurrentAppImageRefs(t *testing.T) {
 		t.Fatalf("expected healthy artifact summary to suppress overview diagnosis, got %+v", diagnosis)
 	}
 }
+
+func TestSummarizeAppOverviewDiagnosisIgnoresMissingInventoryWhenRuntimeReady(t *testing.T) {
+	t.Parallel()
+
+	latestDeploy := &model.Operation{ID: "op_deploy", Status: model.OperationStatusCompleted}
+	report := &appBuildArtifactReport{
+		BuildOperationID:        "op_import",
+		BuildOperationStatus:    model.OperationStatusCompleted,
+		LinkedDeployOperationID: latestDeploy.ID,
+		LinkedDeployStatus:      latestDeploy.Status,
+		ManagedImageRef:         "registry.example.com/fugue-apps/demo:upload-abc",
+		RuntimeImageRef:         "registry.fugue.internal:5000/fugue-apps/demo:upload-abc",
+		RegistryImageStatus:     "missing",
+		ReadyPods:               1,
+		LivePods:                1,
+	}
+
+	diagnosis := summarizeAppOverviewDiagnosis(model.App{}, nil, latestDeploy, nil, report)
+	if diagnosis != nil {
+		t.Fatalf("expected ready runtime to suppress missing inventory diagnosis, got %+v", diagnosis)
+	}
+	if category := statusCategoryFromReport(report); category != "" {
+		t.Fatalf("expected project status category to be empty for ready runtime, got %q", category)
+	}
+	if summary := preferredBuildLogsSummary(buildLogsResponse{ArtifactSummary: report, Summary: "import build completed"}); summary != "import build completed" {
+		t.Fatalf("expected build logs to keep normal summary for ready runtime, got %q", summary)
+	}
+}
