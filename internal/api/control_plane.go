@@ -19,6 +19,7 @@ const (
 	controlPlaneComponentAPI        = "api"
 	controlPlaneComponentController = "controller"
 	controlPlaneComponentHeadscale  = "headscale"
+	controlPlaneComponentImageCache = "image-cache"
 
 	controlPlaneStatusReady    = "ready"
 	controlPlaneStatusRolling  = "rolling"
@@ -29,6 +30,10 @@ const (
 
 type kubeDeploymentList struct {
 	Items []kubeDeployment `json:"items"`
+}
+
+type kubeDaemonSetList struct {
+	Items []kubeDaemonSet `json:"items"`
 }
 
 type kubeDeployment struct {
@@ -50,6 +55,28 @@ type kubeDeployment struct {
 		ReadyReplicas     int32 `json:"readyReplicas,omitempty"`
 		UpdatedReplicas   int32 `json:"updatedReplicas,omitempty"`
 		AvailableReplicas int32 `json:"availableReplicas,omitempty"`
+	} `json:"status"`
+}
+
+type kubeDaemonSet struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers []kubeContainer `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		DesiredNumberScheduled int32 `json:"desiredNumberScheduled,omitempty"`
+		CurrentNumberScheduled int32 `json:"currentNumberScheduled,omitempty"`
+		NumberReady            int32 `json:"numberReady,omitempty"`
+		UpdatedNumberScheduled int32 `json:"updatedNumberScheduled,omitempty"`
+		NumberAvailable        int32 `json:"numberAvailable,omitempty"`
+		NumberMisscheduled     int32 `json:"numberMisscheduled,omitempty"`
 	} `json:"status"`
 }
 
@@ -191,6 +218,20 @@ func (c *clusterNodeClient) listDeployments(ctx context.Context, namespace strin
 		return nil, err
 	}
 	return deploymentList.Items, nil
+}
+
+func (c *clusterNodeClient) listDaemonSets(ctx context.Context, namespace string) ([]kubeDaemonSet, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+
+	var daemonSetList kubeDaemonSetList
+	apiPath := "/apis/apps/v1/namespaces/" + url.PathEscape(namespace) + "/daemonsets"
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &daemonSetList); err != nil {
+		return nil, err
+	}
+	return daemonSetList.Items, nil
 }
 
 func (c *clusterNodeClient) listControlPlaneComponentPods(
@@ -381,6 +422,35 @@ func findControlPlaneDeployment(
 	return nil
 }
 
+func findControlPlaneDaemonSet(
+	daemonSets []kubeDaemonSet,
+	component string,
+	releaseInstance string,
+) *kubeDaemonSet {
+	for index := range daemonSets {
+		daemonSet := &daemonSets[index]
+		if !daemonSetMatchesControlPlaneComponent(daemonSet, component) {
+			continue
+		}
+		if releaseInstance != "" && readDaemonSetReleaseInstance(daemonSet) != releaseInstance {
+			continue
+		}
+		return daemonSet
+	}
+
+	if releaseInstance != "" {
+		return nil
+	}
+
+	for index := range daemonSets {
+		daemonSet := &daemonSets[index]
+		if daemonSetMatchesControlPlaneComponent(daemonSet, component) {
+			return daemonSet
+		}
+	}
+	return nil
+}
+
 func deploymentMatchesControlPlaneComponent(deployment *kubeDeployment, component string) bool {
 	if deployment == nil {
 		return false
@@ -394,11 +464,31 @@ func deploymentMatchesControlPlaneComponent(deployment *kubeDeployment, componen
 	return strings.HasSuffix(strings.TrimSpace(deployment.Metadata.Name), "-"+component)
 }
 
+func daemonSetMatchesControlPlaneComponent(daemonSet *kubeDaemonSet, component string) bool {
+	if daemonSet == nil {
+		return false
+	}
+	if strings.EqualFold(
+		strings.TrimSpace(daemonSet.Metadata.Labels["app.kubernetes.io/component"]),
+		component,
+	) {
+		return true
+	}
+	return strings.HasSuffix(strings.TrimSpace(daemonSet.Metadata.Name), "-"+component)
+}
+
 func readDeploymentReleaseInstance(deployment *kubeDeployment) string {
 	if deployment == nil {
 		return ""
 	}
 	return strings.TrimSpace(deployment.Metadata.Labels["app.kubernetes.io/instance"])
+}
+
+func readDaemonSetReleaseInstance(daemonSet *kubeDaemonSet) string {
+	if daemonSet == nil {
+		return ""
+	}
+	return strings.TrimSpace(daemonSet.Metadata.Labels["app.kubernetes.io/instance"])
 }
 
 func readControlPlaneReleaseInstance(

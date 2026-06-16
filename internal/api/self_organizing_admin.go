@@ -513,9 +513,81 @@ func (s *Server) registryReachabilityCheck(ctx context.Context) (bool, string) {
 		return false, "registry push endpoint is not configured"
 	}
 	if ok, message := dependencyHTTPReachable(ctx, healthURL); !ok {
+		if registryEndpointIsNodeLocalImageCache(s.clusterJoinRegistryEndpoint, s.registryPullBase) {
+			if cacheOK, cacheMessage := s.nodeLocalImageCacheReachabilityCheck(ctx); cacheOK {
+				return true, fmt.Sprintf("%s reachable via node-local image-cache; legacy push endpoint unavailable at %s: %s; %s", s.registryPullBase, healthURL, message, cacheMessage)
+			} else if strings.TrimSpace(cacheMessage) != "" {
+				return false, fmt.Sprintf("registry unavailable at %s: %s; node-local image-cache unavailable: %s", healthURL, message, cacheMessage)
+			}
+		}
 		return false, fmt.Sprintf("registry unavailable at %s: %s", healthURL, message)
 	}
 	return true, fmt.Sprintf("%s reachable via %s", s.registryPullBase, healthURL)
+}
+
+func (s *Server) nodeLocalImageCacheReachabilityCheck(ctx context.Context) (bool, string) {
+	namespace := strings.TrimSpace(s.controlPlaneNamespace)
+	if namespace == "" {
+		return false, "control-plane namespace is not configured"
+	}
+	clientFactory := s.newClusterNodeClient
+	if clientFactory == nil {
+		clientFactory = newClusterNodeClient
+	}
+	client, err := clientFactory()
+	if err != nil {
+		return false, err.Error()
+	}
+	defer client.closeIdleConnections()
+
+	daemonSets, err := client.listDaemonSets(ctx, namespace)
+	if err != nil {
+		return false, err.Error()
+	}
+	daemonSet := findControlPlaneDaemonSet(daemonSets, controlPlaneComponentImageCache, strings.TrimSpace(s.controlPlaneReleaseInstance))
+	if daemonSet == nil {
+		return false, "image-cache daemonset is missing"
+	}
+	status := daemonSet.Status
+	desired := status.DesiredNumberScheduled
+	if desired <= 0 {
+		return false, "image-cache daemonset has no scheduled nodes"
+	}
+	if status.NumberMisscheduled > 0 {
+		return false, fmt.Sprintf("image-cache daemonset has %d misscheduled pods", status.NumberMisscheduled)
+	}
+	if status.NumberReady < desired || status.NumberAvailable < desired || status.UpdatedNumberScheduled < desired {
+		return false, fmt.Sprintf("image-cache daemonset not ready: ready=%d available=%d updated=%d desired=%d", status.NumberReady, status.NumberAvailable, status.UpdatedNumberScheduled, desired)
+	}
+	return true, fmt.Sprintf("image-cache daemonset ready: ready=%d available=%d desired=%d", status.NumberReady, status.NumberAvailable, desired)
+}
+
+func registryEndpointIsNodeLocalImageCache(endpoint, registryPullBase string) bool {
+	parsed := parseDependencyURL(endpoint)
+	if parsed == nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return false
+	}
+	pull := parseDependencyURL(registryPullBase)
+	return pull != nil && strings.TrimSpace(parsed.Port()) != "" && parsed.Port() == pull.Port()
+}
+
+func parseDependencyURL(raw string) *url.URL {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return nil
+	}
+	return parsed
 }
 
 func (s *Server) headscaleReachabilityCheck(ctx context.Context) (bool, string) {

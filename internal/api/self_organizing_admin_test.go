@@ -27,6 +27,67 @@ func TestRegistryReachabilityCheckFailsWhenRegistryUnavailable(t *testing.T) {
 	}
 }
 
+func TestRegistryReachabilityCheckFallsBackToReadyNodeLocalImageCache(t *testing.T) {
+	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/apis/apps/v1/namespaces/fugue-system/daemonsets":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"items": [{
+					"metadata": {
+						"name": "fugue-fugue-image-cache",
+						"labels": {
+							"app.kubernetes.io/component": "image-cache",
+							"app.kubernetes.io/instance": "fugue"
+						}
+					},
+					"status": {
+						"desiredNumberScheduled": 3,
+						"currentNumberScheduled": 3,
+						"numberReady": 3,
+						"updatedNumberScheduled": 3,
+						"numberAvailable": 3
+					}
+				}]
+			}`))
+		default:
+			t.Fatalf("unexpected kubernetes path %q", r.URL.String())
+		}
+	}))
+	defer kube.Close()
+
+	server := &Server{
+		registryPushBase:            "127.0.0.1:1",
+		registryPullBase:            "registry.fugue.internal:5000",
+		clusterJoinRegistryEndpoint: "http://127.0.0.1:5000",
+		controlPlaneNamespace:       "fugue-system",
+		controlPlaneReleaseInstance: "fugue",
+		newClusterNodeClient: func() (*clusterNodeClient, error) {
+			return &clusterNodeClient{
+				client:      kube.Client(),
+				baseURL:     kube.URL,
+				bearerToken: "test-token",
+			}, nil
+		},
+	}
+	pass, message := server.registryReachabilityCheck(context.Background())
+	if !pass {
+		t.Fatalf("expected ready node-local image-cache to pass, got %q", message)
+	}
+	if !strings.Contains(message, "node-local image-cache") {
+		t.Fatalf("expected node-local image-cache message, got %q", message)
+	}
+}
+
+func TestRegistryEndpointIsNodeLocalImageCacheRejectsLegacyNodePort(t *testing.T) {
+	if registryEndpointIsNodeLocalImageCache("127.0.0.1:30500", "registry.fugue.internal:5000") {
+		t.Fatal("expected legacy local registry NodePort to be rejected")
+	}
+	if !registryEndpointIsNodeLocalImageCache("http://127.0.0.1:5000", "registry.fugue.internal:5000") {
+		t.Fatal("expected loopback endpoint matching registry pull port to be accepted")
+	}
+}
+
 func TestRegistryReachabilityCheckPassesOnRegistryV2Endpoint(t *testing.T) {
 	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/" {

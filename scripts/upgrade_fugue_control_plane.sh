@@ -2736,6 +2736,8 @@ run_release_preflight() {
   local autonomy_status_file=""
   local edge_nodes_file=""
   local dns_nodes_file=""
+  local node_policies_file=""
+  local image_cache_status_file=""
   local discovery_etag=""
 
   case "${FUGUE_RELEASE_PREFLIGHT_ENABLED:-true}" in
@@ -2806,18 +2808,34 @@ PY
     log "release preflight: node policy status endpoint unavailable; evaluating raw edge and DNS inventory"
     : >"${node_policies_file}"
   fi
+  image_cache_status_file="$(mktemp)"
+  if [[ -n "${KUBECTL:-}" ]] && ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
+    : >"${image_cache_status_file}"
+  fi
   local autonomy_override_message=""
   local node_local_build_plane_override_allowed="false"
   if node_local_build_plane_preflight_override_allowed; then
     node_local_build_plane_override_allowed="true"
   fi
-  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${node_local_build_plane_override_allowed}" <<'PY'
+  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${node_local_build_plane_override_allowed}" "${image_cache_status_file}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" "${FUGUE_REGISTRY_PULL_BASE}" <<'PY'
 import json
 from datetime import datetime, timedelta, timezone
 import sys
+from urllib.parse import urlparse
 
 def trim(value):
     return str(value or "").strip()
+
+def parse_endpoint(value):
+    value = trim(value)
+    if not value:
+        return None
+    if not value.startswith(("http://", "https://")):
+        value = "http://" + value
+    parsed = urlparse(value)
+    if not parsed.hostname:
+        return None
+    return parsed
 
 def load_node_policy_statuses(path):
     if not trim(path):
@@ -2966,11 +2984,45 @@ def dns_inventory_bootstrap_healthy(nodes, route_bootstrap_groups):
         return False, bootstrap_pending
     return healthy_count > 0 or len(bootstrap_pending) > 0, bootstrap_pending
 
+def node_local_image_cache_endpoint(endpoint, registry_pull_base):
+    parsed = parse_endpoint(endpoint)
+    pull = parse_endpoint(registry_pull_base)
+    if parsed is None or pull is None:
+        return False
+    if parsed.hostname.lower() not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    return bool(parsed.port) and parsed.port == pull.port
+
+def image_cache_daemonset_ready(path, endpoint, registry_pull_base):
+    if not node_local_image_cache_endpoint(endpoint, registry_pull_base):
+        return False, ""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False, "image-cache daemonset status unavailable"
+    status = payload.get("status") or {}
+    desired = int(status.get("desiredNumberScheduled") or 0)
+    ready = int(status.get("numberReady") or 0)
+    available = int(status.get("numberAvailable") or 0)
+    updated = int(status.get("updatedNumberScheduled") or 0)
+    misscheduled = int(status.get("numberMisscheduled") or 0)
+    if desired <= 0:
+        return False, "image-cache daemonset has no scheduled nodes"
+    if misscheduled > 0:
+        return False, f"image-cache daemonset has {misscheduled} misscheduled pods"
+    if ready < desired or available < desired or updated < desired:
+        return False, f"image-cache daemonset not ready: ready={ready} available={available} updated={updated} desired={desired}"
+    return True, f"image-cache daemonset ready: ready={ready} available={available} desired={desired}"
+
 status_path = sys.argv[1]
 nodes_path = sys.argv[2]
 dns_nodes_path = sys.argv[3]
 node_policies_path = sys.argv[4]
 node_local_build_plane_override_allowed = trim(sys.argv[5]).lower() == "true"
+image_cache_status_path = sys.argv[6]
+cluster_join_registry_endpoint = sys.argv[7]
+registry_pull_base = sys.argv[8]
 with open(status_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
@@ -2987,6 +3039,7 @@ checks = {str(item.get("name", "")).strip(): item for item in status.get("checks
 failing_checks = [name for name, check in checks.items() if not check.get("pass", False)]
 bootstrap_override, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups = edge_inventory_healthy(nodes)
 dns_bootstrap_override, dns_bootstrap_pending = dns_inventory_bootstrap_healthy(dns_nodes, set(filter(None, route_bootstrap_groups)))
+image_cache_override, image_cache_message = image_cache_daemonset_ready(image_cache_status_path, cluster_join_registry_endpoint, registry_pull_base)
 store = status.get("control_plane_store") or {}
 if store.get("block_rollout", False):
     raise SystemExit("control-plane store promotion gate is blocked")
@@ -3010,6 +3063,10 @@ elif node_local_build_plane_override_allowed and set(failing_checks).issubset({"
     if detail:
         detail = f": {detail}"
     print(f"release preflight node-local build-plane override: allowing rollout despite registry/node_policy gates{detail}")
+elif set(failing_checks).issubset({"registry"}) and image_cache_override:
+    registry_message = trim((checks.get("registry") or {}).get("message"))
+    detail = f": {registry_message}" if registry_message else ""
+    print(f"release preflight node-local image-cache override: allowing rollout despite legacy registry gate{detail}; {image_cache_message}")
 else:
     if not status.get("pass", False):
         raise SystemExit("platform autonomy status did not pass")
@@ -3023,7 +3080,7 @@ else:
         raise SystemExit("platform autonomy status did not pass")
 PY
   )"; then
-    rm -f "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}"
+    rm -f "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${image_cache_status_file}"
     return 1
   fi
   if [[ -n "$(trim_field "${autonomy_override_message}")" ]]; then
@@ -3035,7 +3092,7 @@ PY
 
   log "release preflight passed for ${api_base}; discovery_etag=${discovery_etag}"
   rm -f "${discovery_headers}" "${discovery_body}" "${autonomy_status_file}"
-  rm -f "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}"
+  rm -f "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${image_cache_status_file}"
 }
 
 fetch_discovery_bundle() {
