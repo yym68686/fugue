@@ -246,6 +246,45 @@ skip_singleton_rollout_wait_for_node_local_override fugue-fugue-registry || fail
 if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-headscale; then
   fail "node-local build-plane override must not skip headscale singleton rollout waits"
 fi
+
+live_deployment_replicas() {
+  case "$1" in
+    fugue-fugue-registry) printf '0' ;;
+    *) printf '1' ;;
+  esac
+}
+prepare_helm_post_renderer
+[[ "${PRESERVE_REGISTRY_ZERO_REPLICAS}" == "true" ]] || fail "scaled-down registry must be preserved through a Helm post-renderer"
+REGISTRY_RENDERED_MANIFEST="$("${HELM_POST_RENDERER_FILE}" <<'YAML'
+apiVersion: v1
+kind: Service
+metadata:
+  name: fugue-fugue-registry
+spec:
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-registry
+spec:
+  replicas: 1
+  selector: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fugue-fugue-api
+spec:
+  replicas: 2
+  selector: {}
+YAML
+)"
+assert_eq "$(grep -c '^  replicas: 0$' <<<"${REGISTRY_RENDERED_MANIFEST}")" "1" "registry post-renderer forces only the registry deployment to zero"
+assert_eq "$(grep -c '^  replicas: 1$' <<<"${REGISTRY_RENDERED_MANIFEST}")" "0" "registry post-renderer removes the chart registry replica"
+assert_eq "$(grep -c '^  replicas: 2$' <<<"${REGISTRY_RENDERED_MANIFEST}")" "1" "registry post-renderer leaves other deployments alone"
+cleanup_upgrade_override_values
+
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/registry-deployment.yaml'
 if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-registry; then
   fail "node-local build-plane override must not skip registry waits when registry manifests changed"

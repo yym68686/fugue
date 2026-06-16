@@ -286,6 +286,7 @@ ensure_host_time_sync() {
 CONTROL_PLANE_AUTOMATION_TMP_DIR=""
 KUBECONFIG_FALLBACK_FILE=""
 UPGRADE_OVERRIDE_VALUES_FILE=""
+HELM_POST_RENDERER_FILE=""
 DNS_STATIC_RECORDS_FILE=""
 PLATFORM_ROUTES_FILE=""
 DISCOVERY_BUNDLE_FILE=""
@@ -314,7 +315,9 @@ HEADSCALE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 MAINTENANCE_AGENT_HELM_SET_ARGS=()
+HELM_POST_RENDERER_ARGS=()
 NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="false"
+PRESERVE_REGISTRY_ZERO_REPLICAS="false"
 RELEASE_CHANGED_FILES_EFFECTIVE=""
 
 release_changed_files() {
@@ -2405,6 +2408,9 @@ cleanup_upgrade_override_values() {
   if [[ -n "${UPGRADE_OVERRIDE_VALUES_FILE}" && -f "${UPGRADE_OVERRIDE_VALUES_FILE}" ]]; then
     rm -f "${UPGRADE_OVERRIDE_VALUES_FILE}"
   fi
+  if [[ -n "${HELM_POST_RENDERER_FILE}" && -f "${HELM_POST_RENDERER_FILE}" ]]; then
+    rm -f "${HELM_POST_RENDERER_FILE}"
+  fi
   if [[ -n "${DNS_STATIC_RECORDS_FILE}" && -f "${DNS_STATIC_RECORDS_FILE}" ]]; then
     rm -f "${DNS_STATIC_RECORDS_FILE}"
   fi
@@ -3290,6 +3296,105 @@ $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
     controlPlaneSingletonNodeSelector:
 $(selector_yaml "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}" "      ")
 EOF
+}
+
+live_deployment_replicas() {
+  local deployment_name="$1"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true
+}
+
+prepare_helm_post_renderer() {
+  local registry_replicas=""
+
+  HELM_POST_RENDERER_FILE=""
+  HELM_POST_RENDERER_ARGS=()
+  PRESERVE_REGISTRY_ZERO_REPLICAS="false"
+  if [[ "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED}" != "true" ]]; then
+    return 0
+  fi
+  registry_replicas="$(trim_field "$(live_deployment_replicas "${FUGUE_REGISTRY_DEPLOYMENT_NAME}")")"
+  if [[ "${registry_replicas}" != "0" ]]; then
+    return 0
+  fi
+  if stateful_dependency_changed; then
+    return 0
+  fi
+
+  HELM_POST_RENDERER_FILE="$(mktemp -t fugue-helm-post-renderer.XXXXXX.py)"
+  cat >"${HELM_POST_RENDERER_FILE}" <<'PY'
+#!/usr/bin/env python3
+import os
+import sys
+
+target_name = os.environ.get("FUGUE_HELM_POST_RENDERER_REGISTRY_DEPLOYMENT", "").strip()
+if not target_name:
+    sys.stdout.write(sys.stdin.read())
+    raise SystemExit(0)
+
+target = f"  name: {target_name}"
+lines = sys.stdin.read().splitlines()
+out = []
+in_doc = False
+in_spec = False
+doc_is_target = False
+doc_is_deployment = False
+spec_indent = None
+replicas_set = False
+
+def target_doc():
+    return doc_is_deployment and doc_is_target
+
+def flush_missing_replicas():
+    global in_spec, replicas_set
+    if in_spec and target_doc() and not replicas_set:
+        out.append("  replicas: 0")
+    in_spec = False
+    replicas_set = False
+
+for line in lines:
+    if line == "---":
+        flush_missing_replicas()
+        in_doc = False
+        doc_is_target = False
+        doc_is_deployment = False
+        spec_indent = None
+        out.append(line)
+        continue
+
+    if not in_doc and line.strip():
+        in_doc = True
+    if in_doc and line == target:
+        doc_is_target = True
+    if in_doc and line == "kind: Deployment":
+        doc_is_deployment = True
+
+    if target_doc():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if not in_spec and line == "spec:":
+            in_spec = True
+            spec_indent = indent
+            replicas_set = False
+        elif in_spec and indent <= spec_indent and stripped and not line.startswith(" "):
+            flush_missing_replicas()
+        elif in_spec and indent == spec_indent + 2 and stripped.startswith("replicas:"):
+            out.append("  replicas: 0")
+            replicas_set = True
+            continue
+
+    out.append(line)
+
+flush_missing_replicas()
+sys.stdout.write("\n".join(out))
+if lines:
+    sys.stdout.write("\n")
+PY
+  chmod 0700 "${HELM_POST_RENDERER_FILE}"
+  export FUGUE_HELM_POST_RENDERER_REGISTRY_DEPLOYMENT="${FUGUE_REGISTRY_DEPLOYMENT_NAME}"
+  HELM_POST_RENDERER_ARGS=(--post-renderer "${HELM_POST_RENDERER_FILE}")
+  PRESERVE_REGISTRY_ZERO_REPLICAS="true"
+  log "preserving ${FUGUE_REGISTRY_DEPLOYMENT_NAME} at replicas=0 during this Helm upgrade"
 }
 
 deployment_node_selector_pairs() {
@@ -5648,6 +5753,7 @@ PY
   write_upgrade_override_values
   upgrade_override_values_file="${UPGRADE_OVERRIDE_VALUES_FILE}"
   build_dns_helm_set_args
+  prepare_helm_post_renderer
   log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
 
   # Do not use Helm's release-wide --wait here. It waits on every resource in
@@ -5660,6 +5766,7 @@ PY
     --reset-then-reuse-values \
     --history-max 20 \
     --timeout "${FUGUE_HELM_TIMEOUT}" \
+    "${HELM_POST_RENDERER_ARGS[@]}" \
     -f "${upgrade_override_values_file}" \
     "${HEADSCALE_HELM_SET_ARGS[@]}" \
     "${DNS_HELM_SET_ARGS[@]}" \
