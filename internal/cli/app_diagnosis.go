@@ -254,6 +254,17 @@ func summarizeAppOverviewDiagnosis(app model.App, latestImport, latestDeploy *mo
 		}
 	}
 
+	if report != nil && linkedDeployInProgress(report) {
+		status := strings.TrimSpace(report.LinkedDeployStatus)
+		return &appOverviewDiagnosis{
+			Category:        "deploy-" + status,
+			Summary:         firstNonEmptyTrimmed(report.LinkedDeployMessage, "latest deploy operation is still in progress"),
+			Hint:            buildArtifactHint(app, report),
+			Evidence:        buildArtifactEvidence(report, deployDiagnosis),
+			ArtifactSummary: report,
+		}
+	}
+
 	if report != nil {
 		status := normalizeImageInventoryStatus(report.RegistryImageStatus)
 		switch {
@@ -314,6 +325,22 @@ func summarizeAppOverviewDiagnosis(app model.App, latestImport, latestDeploy *mo
 		Hint:            buildArtifactHint(app, report),
 		Evidence:        buildArtifactEvidence(report, nil),
 		ArtifactSummary: report,
+	}
+}
+
+func linkedDeployInProgress(report *appBuildArtifactReport) bool {
+	if report == nil || strings.TrimSpace(report.LinkedDeployOperationID) == "" {
+		return false
+	}
+	return operationStatusInProgress(report.LinkedDeployStatus)
+}
+
+func operationStatusInProgress(status string) bool {
+	switch strings.TrimSpace(status) {
+	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+		return true
+	default:
+		return false
 	}
 }
 

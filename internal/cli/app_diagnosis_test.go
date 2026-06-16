@@ -249,3 +249,30 @@ func TestSummarizeAppOverviewDiagnosisIgnoresMissingInventoryWhenRuntimeReady(t 
 		t.Fatalf("expected build logs to keep normal summary for ready runtime, got %q", summary)
 	}
 }
+
+func TestSummarizeAppOverviewDiagnosisWaitsForLinkedDeployBeforeImageMissing(t *testing.T) {
+	t.Parallel()
+
+	latestDeploy := &model.Operation{ID: "op_deploy", Status: model.OperationStatusPending}
+	report := &appBuildArtifactReport{
+		BuildOperationID:        "op_import",
+		BuildOperationStatus:    model.OperationStatusCompleted,
+		LinkedDeployOperationID: latestDeploy.ID,
+		LinkedDeployStatus:      latestDeploy.Status,
+		LinkedDeployMessage:     "waiting for deployment rollout",
+		ManagedImageRef:         "registry.example.com/fugue-apps/demo:upload-abc",
+		RuntimeImageRef:         "registry.fugue.internal:5000/fugue-apps/demo:upload-abc",
+		RegistryImageStatus:     "missing",
+	}
+
+	diagnosis := summarizeAppOverviewDiagnosis(model.App{}, nil, latestDeploy, nil, report)
+	if diagnosis == nil {
+		t.Fatal("expected deploy progress diagnosis")
+	}
+	if diagnosis.Category != "deploy-pending" {
+		t.Fatalf("expected deploy-pending, got %+v", diagnosis)
+	}
+	if category := statusCategoryFromReport(report); category != "" {
+		t.Fatalf("expected project status to suppress image-missing while deploy is pending, got %q", category)
+	}
+}
