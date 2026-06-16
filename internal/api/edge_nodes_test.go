@@ -141,8 +141,8 @@ func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 		sample.EdgeID != "edge-us-1" ||
 		sample.EdgeGroupID != "edge-group-country-us" ||
 		sample.Hostname != "demo.fugue.pro" ||
-		sample.ClientCountry != "us" ||
-		sample.ClientRegion != "us-east" ||
+		sample.ClientCountry != "" ||
+		sample.ClientRegion != "" ||
 		sample.ClientASN != "as123" ||
 		sample.SampleCount != 4 ||
 		sample.CacheHitCount != 3 ||

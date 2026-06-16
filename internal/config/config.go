@@ -221,6 +221,7 @@ type DNSGeoIPOverride struct {
 	CIDR        string `json:"cidr"`
 	Country     string `json:"country,omitempty"`
 	Region      string `json:"region,omitempty"`
+	ASN         string `json:"asn,omitempty"`
 	EdgeGroupID string `json:"edge_group_id,omitempty"`
 }
 
@@ -524,6 +525,7 @@ func parseDNSGeoIPOverrides(raw string) []DNSGeoIPOverride {
 		override.CIDR = strings.TrimSpace(override.CIDR)
 		override.Country = strings.ToLower(strings.TrimSpace(override.Country))
 		override.Region = strings.TrimSpace(override.Region)
+		override.ASN = strings.TrimSpace(override.ASN)
 		override.EdgeGroupID = strings.TrimSpace(override.EdgeGroupID)
 		if override.CIDR != "" {
 			out = append(out, override)

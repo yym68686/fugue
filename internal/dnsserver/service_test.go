@@ -220,6 +220,10 @@ func TestServiceOrdersGeoDNSCandidatesFromECS(t *testing.T) {
 	if !ok || first.A.String() != "5.102.124.125" {
 		t.Fatalf("expected ECS HK hint to order HK edge first, got %+v", answer.Answer)
 	}
+	ecs := ecsSubnetOption(answer)
+	if ecs == nil || ecs.SourceScope != 24 {
+		t.Fatalf("expected ECS response scope to confirm /24 geographic scope, got %+v", ecs)
+	}
 }
 
 func TestServiceUsesStableRoutePriorityWithoutGeoHint(t *testing.T) {
@@ -324,9 +328,160 @@ func TestServiceIgnoresECSWithoutGeoOverride(t *testing.T) {
 	if !ok || first.A.String() != "51.38.126.103" {
 		t.Fatalf("expected ECS without GeoIP override to keep stable route-priority answer, got %+v", answer.Answer)
 	}
+	ecs := ecsSubnetOption(answer)
+	if ecs == nil || ecs.SourceScope != 0 {
+		t.Fatalf("expected ECS response scope 0 when server has no user-location signal, got %+v", ecs)
+	}
 }
 
-func TestServiceLatencyAwareKeepsPreferredRouteWhenHealthy(t *testing.T) {
+func TestServiceUsesScopedLatencyCandidatesOnlyWithExplicitGeoHint(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:        "dns.fugue.pro",
+		TTL:         60,
+		Nameservers: []string{"ns1.dns.fugue.pro"},
+		GeoIPOverrides: []config.DNSGeoIPOverride{
+			{CIDR: "198.51.100.0/24", Country: "us", Region: "us-east", ASN: "as701"},
+		},
+	}, log.New(ioDiscard{}, "", 0))
+	record := model.EdgeDNSRecord{
+		Name:       "app.dns.fugue.pro",
+		Type:       model.EdgeDNSRecordTypeA,
+		Values:     []string{"51.38.126.103", "15.204.94.71"},
+		TTL:        60,
+		RecordKind: model.EdgeDNSRecordKindPlatform,
+		Status:     model.EdgeRouteStatusActive,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:         model.DNSAnswerPolicyKindGeo,
+			ECSEnabled:         true,
+			HealthRequired:     true,
+			RouteReadyRequired: true,
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 0, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+		},
+		ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{
+			{
+				ScopeKey:            "country:us",
+				Country:             "us",
+				PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
+				Reason:              "latency_aware_stable_window_24h",
+				SelectedEdgeGroupID: "edge-group-country-us",
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 50, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_scoped_latency",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{record},
+	}, `"dnsgen_scoped_latency"`, false, "")
+
+	global := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if global.Rcode != miekgdns.RcodeSuccess || len(global.Answer) != 1 {
+		t.Fatalf("expected one global answer, got rcode=%s answers=%+v", miekgdns.RcodeToString[global.Rcode], global.Answer)
+	}
+	globalA, ok := global.Answer[0].(*miekgdns.A)
+	if !ok || globalA.A.String() != "51.38.126.103" {
+		t.Fatalf("without ECS/Geo, expected stable global route-priority answer, got %+v", global.Answer)
+	}
+
+	req := new(miekgdns.Msg)
+	req.SetQuestion("app.dns.fugue.pro.", miekgdns.TypeA)
+	req.RecursionDesired = true
+	opt := new(miekgdns.OPT)
+	opt.Hdr.Name = "."
+	opt.Hdr.Rrtype = miekgdns.TypeOPT
+	opt.Option = append(opt.Option, &miekgdns.EDNS0_SUBNET{
+		Code:          miekgdns.EDNS0SUBNET,
+		Family:        1,
+		SourceNetmask: 24,
+		Address:       net.ParseIP("198.51.100.25").To4(),
+	})
+	req.Extra = append(req.Extra, opt)
+
+	scoped := dnsQueryMsg(t, service, req)
+	if scoped.Rcode != miekgdns.RcodeSuccess || len(scoped.Answer) != 1 {
+		t.Fatalf("expected one scoped answer, got rcode=%s answers=%+v", miekgdns.RcodeToString[scoped.Rcode], scoped.Answer)
+	}
+	scopedA, ok := scoped.Answer[0].(*miekgdns.A)
+	if !ok || scopedA.A.String() != "15.204.94.71" {
+		t.Fatalf("with explicit ECS/Geo, expected scoped latency answer, got %+v", scoped.Answer)
+	}
+	ecs := ecsSubnetOption(scoped)
+	if ecs == nil || ecs.SourceScope != 24 {
+		t.Fatalf("expected ECS response scope to reflect scoped decision, got %+v", ecs)
+	}
+}
+
+func TestEdgeDNSExplorationPromotesHealthyAlternativeDeterministically(t *testing.T) {
+	t.Parallel()
+
+	record := model.EdgeDNSRecord{
+		Name: "app.dns.fugue.pro",
+		Type: model.EdgeDNSRecordTypeA,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:         model.DNSAnswerPolicyKindLatencyAware,
+			HealthRequired:     true,
+			RouteReadyRequired: true,
+			ExplorationPercent: 5,
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 50, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "5.102.124.125", EdgeGroupID: "edge-group-country-hk", Country: "hk", Priority: 50, Weight: 240, Healthy: false, RouteReady: true, TLSReady: true},
+		},
+	}
+	hint := dnsGeoHint{Country: "us", IP: "198.51.100.25", Source: "ecs"}
+	foundExploration := false
+	for bucket := int64(0); bucket < 2000; bucket++ {
+		ordered := edgeDNSOrderedCandidates(record, hint, time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC())
+		if len(ordered) == 0 {
+			t.Fatal("expected eligible candidates")
+		}
+		if ordered[0].IP == "15.204.94.71" {
+			foundExploration = true
+			break
+		}
+		if ordered[0].IP == "5.102.124.125" {
+			t.Fatalf("exploration must never promote unhealthy candidates: %+v", ordered)
+		}
+	}
+	if !foundExploration {
+		t.Fatal("expected 5% exploration to promote a healthy non-top candidate in at least one deterministic bucket")
+	}
+}
+
+func TestEdgeDNSCandidateEligibilityRequiresTLSReadyForWeightedPolicy(t *testing.T) {
+	t.Parallel()
+
+	record := model.EdgeDNSRecord{
+		Name: "app.dns.fugue.pro",
+		Type: model.EdgeDNSRecordTypeA,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:         model.DNSAnswerPolicyKindWeighted,
+			HealthRequired:     true,
+			RouteReadyRequired: true,
+			ExplorationPercent: 50,
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Priority: 0, Weight: 200, Healthy: true, RouteReady: true, TLSReady: false},
+			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Priority: 50, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "5.102.124.125", EdgeGroupID: "edge-group-country-hk", Priority: 50, Weight: 240, Healthy: false, RouteReady: true, TLSReady: true},
+		},
+	}
+	ordered := edgeDNSOrderedCandidates(record, dnsGeoHint{}, time.Date(2026, 6, 17, 0, 0, 0, 0, time.UTC))
+	if len(ordered) != 1 || ordered[0].IP != "51.38.126.103" {
+		t.Fatalf("expected only healthy route-ready TLS-ready candidate, got %+v", ordered)
+	}
+}
+
+func TestServiceLatencyAwareSelectsMeasuredFastEdgeWhenHealthy(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.DNSConfig{
@@ -366,11 +521,11 @@ func TestServiceLatencyAwareKeepsPreferredRouteWhenHealthy(t *testing.T) {
 		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
 	}
 	if len(answer.Answer) != 1 {
-		t.Fatalf("expected one locality-selected answer, got %+v", answer.Answer)
+		t.Fatalf("expected one latency-selected answer, got %+v", answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
-	if !ok || first.A.String() != "51.38.126.103" {
-		t.Fatalf("expected local healthy edge to beat global latency weight, got %+v", answer.Answer)
+	if !ok || first.A.String() != "15.204.94.71" {
+		t.Fatalf("expected measured fast healthy edge to beat local route priority, got %+v", answer.Answer)
 	}
 }
 
@@ -733,6 +888,22 @@ func dnsQueryMsg(t *testing.T, service *Service, req *miekgdns.Msg) *miekgdns.Ms
 		t.Fatal("expected DNS response")
 	}
 	return writer.msg
+}
+
+func ecsSubnetOption(msg *miekgdns.Msg) *miekgdns.EDNS0_SUBNET {
+	if msg == nil {
+		return nil
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		return nil
+	}
+	for _, extra := range opt.Option {
+		if subnet, ok := extra.(*miekgdns.EDNS0_SUBNET); ok {
+			return subnet
+		}
+	}
+	return nil
 }
 
 type captureDNSResponseWriter struct {

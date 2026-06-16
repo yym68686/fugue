@@ -214,12 +214,6 @@ func sanitizeEdgeHeartbeatPerformanceSamples(req edgeHeartbeatRequest, now time.
 		sample.ClientCountry = strings.ToLower(strings.TrimSpace(sample.ClientCountry))
 		sample.ClientRegion = strings.TrimSpace(sample.ClientRegion)
 		sample.ClientASN = strings.TrimSpace(sample.ClientASN)
-		if sample.ClientCountry == "" {
-			sample.ClientCountry = strings.ToLower(strings.TrimSpace(req.Country))
-		}
-		if sample.ClientRegion == "" {
-			sample.ClientRegion = strings.TrimSpace(req.Region)
-		}
 		sample.RuntimeRegion = strings.TrimSpace(sample.RuntimeRegion)
 		sample.RouteGeneration = strings.TrimSpace(sample.RouteGeneration)
 		sample.CacheStatus = strings.ToLower(strings.TrimSpace(sample.CacheStatus))

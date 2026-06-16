@@ -168,10 +168,20 @@ type statusError struct {
 }
 
 type routeMetricKey struct {
-	Hostname   string
-	PathPrefix string
-	AppID      string
-	RouteKind  string
+	Hostname      string
+	PathPrefix    string
+	AppID         string
+	RouteKind     string
+	ClientCountry string
+	ClientRegion  string
+	ClientASN     string
+}
+
+func routeMetricIdentityKey(key routeMetricKey) routeMetricKey {
+	key.ClientCountry = ""
+	key.ClientRegion = ""
+	key.ClientASN = ""
+	return key
 }
 
 type routeStatusMetricKey struct {
@@ -203,6 +213,9 @@ type edgeProxyObservation struct {
 	Protocol                string
 	ClientIP                string
 	ClientRemoteAddr        string
+	ClientCountry           string
+	ClientRegion            string
+	ClientASN               string
 	StatusCode              int
 	Duration                time.Duration
 	TTFB                    time.Duration
@@ -745,6 +758,9 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Protocol:         strings.TrimSpace(r.Proto),
 		ClientIP:         edgeClientIPFromRequest(r),
 		ClientRemoteAddr: edgeClientRemoteAddrFromRequest(r),
+		ClientCountry:    edgeClientCountryFromRequest(r),
+		ClientRegion:     edgeClientRegionFromRequest(r),
+		ClientASN:        edgeClientASNFromRequest(r),
 		FallbackHit:      fallbackHit,
 		WebSocket:        edgeRequestIsWebSocket(r),
 		SSE:              edgeRequestWantsSSE(r),
@@ -1597,6 +1613,49 @@ func lastForwardedForValue(values []string) string {
 	return ""
 }
 
+func edgeClientCountryFromRequest(r *http.Request) string {
+	return normalizeEdgeClientScopeValue(firstNonEmptyHeaders(r,
+		"X-Fugue-Client-Country",
+		"CF-IPCountry",
+		"CloudFront-Viewer-Country",
+		"X-Vercel-IP-Country",
+		"X-Client-Country",
+	))
+}
+
+func edgeClientRegionFromRequest(r *http.Request) string {
+	return normalizeEdgeClientScopeValue(firstNonEmptyHeaders(r,
+		"X-Fugue-Client-Region",
+		"CloudFront-Viewer-Country-Region",
+		"X-Vercel-IP-Country-Region",
+		"CF-Region",
+		"X-Client-Region",
+	))
+}
+
+func edgeClientASNFromRequest(r *http.Request) string {
+	value := normalizeEdgeClientScopeValue(firstNonEmptyHeaders(r,
+		"X-Fugue-Client-ASN",
+		"CF-Connecting-ASN",
+		"X-Vercel-IP-ASN",
+		"Fastly-Client-ASN",
+		"X-Client-ASN",
+	))
+	value = strings.TrimPrefix(strings.ToLower(value), "as")
+	if value == "" {
+		return ""
+	}
+	return "as" + value
+}
+
+func normalizeEdgeClientScopeValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, "unknown") || strings.EqualFold(value, "xx") {
+		return ""
+	}
+	return strings.ToLower(value)
+}
+
 type edgeProxyTransport struct {
 	base        http.RoundTripper
 	observation *edgeProxyObservation
@@ -2186,8 +2245,6 @@ func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []
 	bundle := s.bundle
 	edgeID := strings.TrimSpace(s.Config.EdgeID)
 	edgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
-	clientCountry := strings.ToLower(strings.TrimSpace(s.Config.Country))
-	clientRegion := strings.TrimSpace(s.Config.Region)
 	s.mu.Unlock()
 
 	if bundle == nil {
@@ -2220,14 +2277,14 @@ func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []
 		}
 	}
 
-	samples := buildEdgePerformanceSamples(snapshot.Metrics, baseline, routesByKey, edgeID, edgeGroupID, clientCountry, clientRegion, now)
+	samples := buildEdgePerformanceSamples(snapshot.Metrics, baseline, routesByKey, edgeID, edgeGroupID, now)
 	if len(samples) > edgePerformanceSampleHeartbeatLimit {
 		samples = samples[:edgePerformanceSampleHeartbeatLimit]
 	}
 	return samples
 }
 
-func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[routeMetricKey]model.EdgeRouteBinding, edgeID, edgeGroupID, clientCountry, clientRegion string, sampledAt time.Time) []model.EdgePerformanceSample {
+func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[routeMetricKey]model.EdgeRouteBinding, edgeID, edgeGroupID string, sampledAt time.Time) []model.EdgePerformanceSample {
 	keys := sortedRouteMetricKeys(current.RouteRequests)
 	if len(keys) == 0 {
 		return nil
@@ -2263,7 +2320,7 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 
 		cacheHitCount, cacheObservationCount, dominantCacheStatus := edgePerformanceCacheSummary(current.RouteCacheStatus, baseline.RouteCacheStatus, key)
 		errorCount, dominantStatusCode := edgePerformanceStatusSummary(current.RouteStatuses, baseline.RouteStatuses, current.RouteUpstreamErrors, baseline.RouteUpstreamErrors, key)
-		route := routesByKey[key]
+		route := routesByKey[routeMetricIdentityKey(key)]
 		runtimeRegion := firstNonEmpty(edgeGroupRegion(firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup)), edgeGroupRegion(strings.TrimSpace(route.EdgeGroupID)))
 		sample := model.EdgePerformanceSample{
 			ID:                    edgePerformanceSampleID(edgeID, edgeGroupID, key, sampledAt),
@@ -2271,11 +2328,13 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 			EdgeGroupID:           edgeGroupID,
 			Hostname:              key.Hostname,
 			PathPrefix:            model.NormalizeAppRoutePathPrefix(key.PathPrefix),
-			ClientCountry:         clientCountry,
-			ClientRegion:          clientRegion,
+			ClientCountry:         key.ClientCountry,
+			ClientRegion:          key.ClientRegion,
+			ClientASN:             key.ClientASN,
 			RuntimeRegion:         runtimeRegion,
 			RouteGeneration:       strings.TrimSpace(route.RouteGeneration),
 			CacheStatus:           dominantCacheStatus,
+			DNSPolicy:             edgePerformanceSampleDNSPolicy(key),
 			TTFBMS:                ttfbAvg,
 			UpstreamMS:            upstreamAvg,
 			TotalMS:               totalAvg,
@@ -2289,6 +2348,13 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 		samples = append(samples, sample)
 	}
 	return samples
+}
+
+func edgePerformanceSampleDNSPolicy(key routeMetricKey) string {
+	if strings.TrimSpace(key.ClientCountry) != "" || strings.TrimSpace(key.ClientRegion) != "" || strings.TrimSpace(key.ClientASN) != "" {
+		return "client_scope_header"
+	}
+	return "global"
 }
 
 func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
@@ -2322,7 +2388,7 @@ func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
 }
 
 func edgePerformanceSampleID(edgeID, edgeGroupID string, key routeMetricKey, sampledAt time.Time) string {
-	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.PathPrefix, key.AppID, key.RouteKind, sampledAt.UnixNano())
+	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.PathPrefix, key.AppID, key.RouteKind, key.ClientCountry, key.ClientRegion, key.ClientASN, sampledAt.UnixNano())
 	sum := sha256.Sum256([]byte(payload))
 	return "edge_perf_" + hex.EncodeToString(sum[:])[:16]
 }
@@ -2875,10 +2941,13 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		observed.Upstream = observed.Duration
 	}
 	key := routeMetricKey{
-		Hostname:   firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
-		PathPrefix: model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
-		AppID:      strings.TrimSpace(observed.Route.AppID),
-		RouteKind:  strings.TrimSpace(observed.Route.RouteKind),
+		Hostname:      firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
+		PathPrefix:    model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
+		AppID:         strings.TrimSpace(observed.Route.AppID),
+		RouteKind:     strings.TrimSpace(observed.Route.RouteKind),
+		ClientCountry: strings.ToLower(strings.TrimSpace(observed.ClientCountry)),
+		ClientRegion:  strings.TrimSpace(observed.ClientRegion),
+		ClientASN:     strings.TrimSpace(observed.ClientASN),
 	}
 	statusKey := routeStatusMetricKey{RouteMetricKey: key, StatusCode: observed.StatusCode}
 	s.mu.Lock()
@@ -3625,6 +3694,18 @@ func firstNonEmptyHeader(r *http.Request, header string, fallback string) string
 	return fallback
 }
 
+func firstNonEmptyHeaders(r *http.Request, headers ...string) string {
+	if r == nil {
+		return ""
+	}
+	for _, header := range headers {
+		if value := strings.TrimSpace(r.Header.Get(header)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func edgeRequestIsWebSocket(r *http.Request) bool {
 	if r == nil {
 		return false
@@ -3745,6 +3826,15 @@ func sortedRouteResultMetricKeys(values map[routeResultMetricKey]uint64) []route
 		if left.RouteKind != right.RouteKind {
 			return left.RouteKind < right.RouteKind
 		}
+		if left.ClientCountry != right.ClientCountry {
+			return left.ClientCountry < right.ClientCountry
+		}
+		if left.ClientRegion != right.ClientRegion {
+			return left.ClientRegion < right.ClientRegion
+		}
+		if left.ClientASN != right.ClientASN {
+			return left.ClientASN < right.ClientASN
+		}
 		return keys[i].Result < keys[j].Result
 	})
 	return keys
@@ -3765,7 +3855,16 @@ func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey 
 		if keys[i].AppID != keys[j].AppID {
 			return keys[i].AppID < keys[j].AppID
 		}
-		return keys[i].RouteKind < keys[j].RouteKind
+		if keys[i].RouteKind != keys[j].RouteKind {
+			return keys[i].RouteKind < keys[j].RouteKind
+		}
+		if keys[i].ClientCountry != keys[j].ClientCountry {
+			return keys[i].ClientCountry < keys[j].ClientCountry
+		}
+		if keys[i].ClientRegion != keys[j].ClientRegion {
+			return keys[i].ClientRegion < keys[j].ClientRegion
+		}
+		return keys[i].ClientASN < keys[j].ClientASN
 	})
 	return keys
 }
@@ -3789,6 +3888,15 @@ func sortedRouteStatusMetricKeys(values map[routeStatusMetricKey]uint64) []route
 		}
 		if left.RouteKind != right.RouteKind {
 			return left.RouteKind < right.RouteKind
+		}
+		if left.ClientCountry != right.ClientCountry {
+			return left.ClientCountry < right.ClientCountry
+		}
+		if left.ClientRegion != right.ClientRegion {
+			return left.ClientRegion < right.ClientRegion
+		}
+		if left.ClientASN != right.ClientASN {
+			return left.ClientASN < right.ClientASN
 		}
 		return keys[i].StatusCode < keys[j].StatusCode
 	})
@@ -3815,6 +3923,15 @@ func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCa
 		if left.RouteKind != right.RouteKind {
 			return left.RouteKind < right.RouteKind
 		}
+		if left.ClientCountry != right.ClientCountry {
+			return left.ClientCountry < right.ClientCountry
+		}
+		if left.ClientRegion != right.ClientRegion {
+			return left.ClientRegion < right.ClientRegion
+		}
+		if left.ClientASN != right.ClientASN {
+			return left.ClientASN < right.ClientASN
+		}
 		if keys[i].CacheStatus != keys[j].CacheStatus {
 			return keys[i].CacheStatus < keys[j].CacheStatus
 		}
@@ -3828,11 +3945,14 @@ func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCa
 
 func routeMetricLabels(key routeMetricKey) string {
 	return fmt.Sprintf(
-		`hostname="%s",path_prefix="%s",app="%s",route_kind="%s"`,
+		`hostname="%s",path_prefix="%s",app="%s",route_kind="%s",client_country="%s",client_region="%s",client_asn="%s"`,
 		prometheusLabelValue(key.Hostname),
 		prometheusLabelValue(model.NormalizeAppRoutePathPrefix(key.PathPrefix)),
 		prometheusLabelValue(key.AppID),
 		prometheusLabelValue(key.RouteKind),
+		prometheusLabelValue(key.ClientCountry),
+		prometheusLabelValue(key.ClientRegion),
+		prometheusLabelValue(key.ClientASN),
 	)
 }
 

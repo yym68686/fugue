@@ -10085,6 +10085,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgeDNSAnswerCandidate"
+        scoped_candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeDNSScopedAnswerCandidates"
     DNSAnswerPolicy:
       type: object
       additionalProperties: false
@@ -10114,6 +10118,12 @@ components:
           type: boolean
         route_ready_required:
           type: boolean
+        exploration_percent:
+          type: integer
+          format: int32
+        switch_cooldown_seconds:
+          type: integer
+          format: int32
         region:
           type: string
         country:
@@ -10153,6 +10163,33 @@ components:
           type: boolean
         tls_ready:
           type: boolean
+    EdgeDNSScopedAnswerCandidates:
+      type: object
+      additionalProperties: false
+      required: [scope_key]
+      properties:
+        scope_key:
+          type: string
+        country:
+          type: string
+        region:
+          type: string
+        asn:
+          type: string
+        policy_kind:
+          type: string
+          enum: [global, geo, weighted, latency_aware, pinned, disabled]
+        reason:
+          type: string
+        selected_edge_group_id:
+          type: string
+        cooldown_until:
+          type: string
+          format: date-time
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeDNSAnswerCandidate"
     DNSACMEChallenge:
       type: object
       additionalProperties: false

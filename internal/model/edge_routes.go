@@ -329,6 +329,8 @@ type DNSAnswerPolicy struct {
 	ECSEnabled          bool     `json:"ecs_enabled,omitempty"`
 	HealthRequired      bool     `json:"health_required,omitempty"`
 	RouteReadyRequired  bool     `json:"route_ready_required,omitempty"`
+	ExplorationPercent  int      `json:"exploration_percent,omitempty"`
+	SwitchCooldownSec   int      `json:"switch_cooldown_seconds,omitempty"`
 	Region              string   `json:"region,omitempty"`
 	Country             string   `json:"country,omitempty"`
 	Priority            int      `json:"priority,omitempty"`
@@ -347,6 +349,18 @@ type EdgeDNSAnswerCandidate struct {
 	Healthy     bool   `json:"healthy,omitempty"`
 	RouteReady  bool   `json:"route_ready,omitempty"`
 	TLSReady    bool   `json:"tls_ready,omitempty"`
+}
+
+type EdgeDNSScopedAnswerCandidates struct {
+	ScopeKey            string                   `json:"scope_key"`
+	Country             string                   `json:"country,omitempty"`
+	Region              string                   `json:"region,omitempty"`
+	ASN                 string                   `json:"asn,omitempty"`
+	PolicyKind          string                   `json:"policy_kind,omitempty"`
+	Reason              string                   `json:"reason,omitempty"`
+	SelectedEdgeGroupID string                   `json:"selected_edge_group_id,omitempty"`
+	CooldownUntil       time.Time                `json:"cooldown_until,omitempty"`
+	Candidates          []EdgeDNSAnswerCandidate `json:"candidates,omitempty"`
 }
 
 type EdgePerformanceSample struct {
@@ -392,20 +406,38 @@ type EdgeDNSBundle struct {
 }
 
 type EdgeDNSRecord struct {
-	Name                string                   `json:"name"`
-	Type                string                   `json:"type"`
-	Values              []string                 `json:"values"`
-	TTL                 int                      `json:"ttl"`
-	RecordKind          string                   `json:"record_kind"`
-	AppID               string                   `json:"app_id,omitempty"`
-	TenantID            string                   `json:"tenant_id,omitempty"`
-	EdgeGroupID         string                   `json:"edge_group_id,omitempty"`
-	FallbackEdgeGroupID string                   `json:"fallback_edge_group_id,omitempty"`
-	Status              string                   `json:"status"`
-	StatusReason        string                   `json:"status_reason,omitempty"`
-	RecordGeneration    string                   `json:"record_generation"`
-	AnswerPolicy        DNSAnswerPolicy          `json:"answer_policy,omitempty"`
-	Candidates          []EdgeDNSAnswerCandidate `json:"candidates,omitempty"`
+	Name                string                          `json:"name"`
+	Type                string                          `json:"type"`
+	Values              []string                        `json:"values"`
+	TTL                 int                             `json:"ttl"`
+	RecordKind          string                          `json:"record_kind"`
+	AppID               string                          `json:"app_id,omitempty"`
+	TenantID            string                          `json:"tenant_id,omitempty"`
+	EdgeGroupID         string                          `json:"edge_group_id,omitempty"`
+	FallbackEdgeGroupID string                          `json:"fallback_edge_group_id,omitempty"`
+	Status              string                          `json:"status"`
+	StatusReason        string                          `json:"status_reason,omitempty"`
+	RecordGeneration    string                          `json:"record_generation"`
+	AnswerPolicy        DNSAnswerPolicy                 `json:"answer_policy,omitempty"`
+	Candidates          []EdgeDNSAnswerCandidate        `json:"candidates,omitempty"`
+	ScopedCandidates    []EdgeDNSScopedAnswerCandidates `json:"scoped_candidates,omitempty"`
+}
+
+type EdgeDNSRoutingDecision struct {
+	Hostname            string    `json:"hostname"`
+	ScopeKey            string    `json:"scope_key"`
+	Country             string    `json:"country,omitempty"`
+	Region              string    `json:"region,omitempty"`
+	ASN                 string    `json:"asn,omitempty"`
+	SelectedEdgeGroupID string    `json:"selected_edge_group_id"`
+	PreviousEdgeGroupID string    `json:"previous_edge_group_id,omitempty"`
+	Reason              string    `json:"reason,omitempty"`
+	Score               float64   `json:"score,omitempty"`
+	SampleCount         int       `json:"sample_count,omitempty"`
+	SwitchedAt          time.Time `json:"switched_at,omitempty"`
+	CooldownUntil       time.Time `json:"cooldown_until,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type DNSACMEChallenge struct {

@@ -867,6 +867,8 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 			Hostname:              "api.fugue.pro",
 			ClientCountry:         "de",
 			ClientRegion:          "eu-central",
+			ClientASN:             "as3320",
+			DNSPolicy:             "client_scope_header",
 			TTFBMS:                120,
 			UpstreamMS:            80,
 			TotalMS:               140,
@@ -882,6 +884,8 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 			Hostname:              "api.fugue.pro",
 			ClientCountry:         "de",
 			ClientRegion:          "eu-central",
+			ClientASN:             "as3320",
+			DNSPolicy:             "client_scope_header",
 			TTFBMS:                650,
 			UpstreamMS:            520,
 			TotalMS:               700,
@@ -908,9 +912,11 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 		t.Fatalf("expected api.fugue.pro A record, got %+v", bundle.Records)
 	}
 	if apiA.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindLatencyAware ||
-		apiA.AnswerPolicy.Reason != "latency_aware_geo_close_but_slow" ||
+		!strings.Contains(apiA.AnswerPolicy.Reason, "latency_aware") ||
 		!apiA.AnswerPolicy.HealthRequired ||
-		!apiA.AnswerPolicy.RouteReadyRequired {
+		!apiA.AnswerPolicy.RouteReadyRequired ||
+		apiA.AnswerPolicy.ExplorationPercent != edgeDNSExplorationPercent ||
+		apiA.AnswerPolicy.SwitchCooldownSec != int(edgeDNSDecisionCooldown.Seconds()) {
 		t.Fatalf("expected latency-aware policy with safety gates, got %+v", apiA.AnswerPolicy)
 	}
 	var usCandidate, deCandidate *model.EdgeDNSAnswerCandidate
@@ -927,9 +933,254 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 	}
 	if usCandidate.Weight <= deCandidate.Weight ||
 		!strings.Contains(usCandidate.Reason, "latency_fast") ||
-		!strings.Contains(deCandidate.Reason, "geo_close_but_slow") {
-		t.Fatalf("expected latency weights and geo-close explanation, us=%+v de=%+v", usCandidate, deCandidate)
+		strings.Contains(deCandidate.Reason, "latency_fast") {
+		t.Fatalf("expected latency weights and latency explanation, us=%+v de=%+v", usCandidate, deCandidate)
 	}
+	countryScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "country:de")
+	if countryScoped == nil || countryScoped.SelectedEdgeGroupID != "edge-group-country-us" || countryScoped.PolicyKind != model.DNSAnswerPolicyKindLatencyAware {
+		t.Fatalf("expected DE scoped latency profile selecting US edge, got %+v", apiA.ScopedCandidates)
+	}
+	asnScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "asn:as3320")
+	if asnScoped == nil || asnScoped.SelectedEdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected ASN scoped latency profile selecting US edge, got %+v", apiA.ScopedCandidates)
+	}
+}
+
+func TestEdgeDNSBundleDoesNotCreateScopedLatencyProfileWithoutClientScopePolicy(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.platformRoutes = []model.PlatformRoute{
+		{
+			Hostname:      "api.fugue.pro",
+			Kind:          model.EdgeRouteKindControlPlaneAPI,
+			UpstreamKind:  model.EdgeRouteUpstreamKindMesh,
+			UpstreamScope: model.EdgeRouteUpstreamScopeMesh,
+			UpstreamURL:   "http://api.fugue.internal",
+			TLSPolicy:     model.EdgeRouteTLSPolicyPlatform,
+			RoutePolicy:   model.EdgeRoutePolicyEnabled,
+			EdgeGroupMode: model.PlatformRouteEdgeGroupModeAllHealthy,
+			Status:        model.EdgeRouteStatusActive,
+			TTL:           60,
+		},
+	}
+	for _, node := range []model.EdgeNode{
+		{
+			ID:              "edge-us-1",
+			EdgeGroupID:     "edge-group-country-us",
+			Country:         "us",
+			Region:          "us-east",
+			PublicIPv4:      "15.204.94.71",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+		{
+			ID:              "edge-de-1",
+			EdgeGroupID:     "edge-group-country-de",
+			Country:         "de",
+			Region:          "eu-central",
+			PublicIPv4:      "51.38.126.103",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+	} {
+		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+			t.Fatalf("record edge heartbeat: %v", err)
+		}
+	}
+	now := time.Now().UTC()
+	if err := storeState.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{
+		{
+			ID:            "api-us-fast-no-scope",
+			EdgeGroupID:   "edge-group-country-us",
+			Hostname:      "api.fugue.pro",
+			ClientCountry: "de",
+			ClientRegion:  "eu-central",
+			TTFBMS:        120,
+			UpstreamMS:    80,
+			TotalMS:       140,
+			StatusCode:    200,
+			SampleCount:   12,
+			SampledAt:     now.Add(-10 * time.Minute),
+		},
+		{
+			ID:            "api-de-slow-no-scope",
+			EdgeGroupID:   "edge-group-country-de",
+			Hostname:      "api.fugue.pro",
+			ClientCountry: "de",
+			ClientRegion:  "eu-central",
+			TTFBMS:        650,
+			UpstreamMS:    520,
+			TotalMS:       700,
+			StatusCode:    200,
+			SampleCount:   12,
+			SampledAt:     now.Add(-10 * time.Minute),
+		},
+	}, time.Time{}); err != nil {
+		t.Fatalf("record performance samples: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	apiA := edgeDNSRecordByNameAndType(bundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil {
+		t.Fatalf("expected api.fugue.pro A record, got %+v", bundle.Records)
+	}
+	if len(apiA.ScopedCandidates) != 0 {
+		t.Fatalf("samples without client-scope DNS policy must not create scoped profiles, got %+v", apiA.ScopedCandidates)
+	}
+	if apiA.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindLatencyAware {
+		t.Fatalf("global latency profile should still be available, got %+v", apiA.AnswerPolicy)
+	}
+}
+
+func TestEdgeDNSBundleHoldsLatencyAwareDecisionDuringCooldown(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.platformRoutes = []model.PlatformRoute{
+		{
+			Hostname:      "api.fugue.pro",
+			Kind:          model.EdgeRouteKindControlPlaneAPI,
+			UpstreamKind:  model.EdgeRouteUpstreamKindMesh,
+			UpstreamScope: model.EdgeRouteUpstreamScopeMesh,
+			UpstreamURL:   "http://api.fugue.internal",
+			TLSPolicy:     model.EdgeRouteTLSPolicyPlatform,
+			RoutePolicy:   model.EdgeRoutePolicyEnabled,
+			EdgeGroupMode: model.PlatformRouteEdgeGroupModeAllHealthy,
+			Status:        model.EdgeRouteStatusActive,
+			TTL:           60,
+		},
+	}
+	for _, node := range []model.EdgeNode{
+		{
+			ID:              "edge-us-1",
+			EdgeGroupID:     "edge-group-country-us",
+			Country:         "us",
+			Region:          "us-east",
+			PublicIPv4:      "15.204.94.71",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+		{
+			ID:              "edge-de-1",
+			EdgeGroupID:     "edge-group-country-de",
+			Country:         "de",
+			Region:          "eu-central",
+			PublicIPv4:      "51.38.126.103",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+	} {
+		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+			t.Fatalf("record edge heartbeat: %v", err)
+		}
+	}
+	now := time.Now().UTC()
+	if err := storeState.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{
+		{
+			ID:            "api-us-now-fast",
+			EdgeGroupID:   "edge-group-country-us",
+			Hostname:      "api.fugue.pro",
+			ClientCountry: "de",
+			DNSPolicy:     "client_scope_header",
+			TTFBMS:        100,
+			UpstreamMS:    70,
+			TotalMS:       120,
+			StatusCode:    200,
+			SampleCount:   10,
+			SampledAt:     now.Add(-2 * time.Minute),
+		},
+		{
+			ID:            "api-de-previous",
+			EdgeGroupID:   "edge-group-country-de",
+			Hostname:      "api.fugue.pro",
+			ClientCountry: "de",
+			DNSPolicy:     "client_scope_header",
+			TTFBMS:        600,
+			UpstreamMS:    500,
+			TotalMS:       650,
+			StatusCode:    200,
+			SampleCount:   10,
+			SampledAt:     now.Add(-2 * time.Minute),
+		},
+	}, time.Time{}); err != nil {
+		t.Fatalf("record performance samples: %v", err)
+	}
+	cooldownUntil := now.Add(20 * time.Minute)
+	if err := storeState.UpsertEdgeDNSRoutingDecisions([]model.EdgeDNSRoutingDecision{
+		{
+			Hostname:            "api.fugue.pro",
+			ScopeKey:            "country:de",
+			Country:             "de",
+			SelectedEdgeGroupID: "edge-group-country-de",
+			Reason:              "previous",
+			SwitchedAt:          now.Add(-10 * time.Minute),
+			CooldownUntil:       cooldownUntil,
+			CreatedAt:           now.Add(-10 * time.Minute),
+			UpdatedAt:           now.Add(-10 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatalf("upsert routing decision: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	apiA := edgeDNSRecordByNameAndType(bundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil {
+		t.Fatalf("expected api.fugue.pro A record, got %+v", bundle.Records)
+	}
+	countryScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "country:de")
+	if countryScoped == nil || countryScoped.SelectedEdgeGroupID != "edge-group-country-de" || countryScoped.Reason != "latency_aware_cooldown_hold" {
+		t.Fatalf("expected country scoped decision to hold DE during cooldown, got %+v", apiA.ScopedCandidates)
+	}
+	first := countryScoped.Candidates[0]
+	if first.EdgeGroupID != "edge-group-country-de" || !strings.Contains(first.Reason, "latency_cooldown_hold") {
+		t.Fatalf("expected DE candidate promoted during cooldown, got %+v", countryScoped.Candidates)
+	}
+	decisions, err := storeState.ListEdgeDNSRoutingDecisions("api.fugue.pro")
+	if err != nil {
+		t.Fatalf("list routing decisions: %v", err)
+	}
+	var held *model.EdgeDNSRoutingDecision
+	for index := range decisions {
+		if decisions[index].ScopeKey == "country:de" {
+			held = &decisions[index]
+			break
+		}
+	}
+	if held == nil || held.SelectedEdgeGroupID != "edge-group-country-de" || !held.CooldownUntil.Equal(cooldownUntil) {
+		t.Fatalf("expected persisted cooldown decision to remain on DE, got %+v", decisions)
+	}
+}
+
+func edgeDNSScopedCandidatesByScope(scoped []model.EdgeDNSScopedAnswerCandidates, scopeKey string) *model.EdgeDNSScopedAnswerCandidates {
+	for index := range scoped {
+		if scoped[index].ScopeKey == scopeKey {
+			return &scoped[index]
+		}
+	}
+	return nil
 }
 
 func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {

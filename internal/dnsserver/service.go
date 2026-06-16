@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net"
@@ -410,6 +411,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	if !nameWithinZone(name, zone) {
 		resp.Rcode = miekgdns.RcodeRefused
 		rcode = miekgdns.RcodeToString[resp.Rcode]
+		s.applyECSResponseScope(resp, r, w)
 		_ = w.WriteMsg(resp)
 		return
 	}
@@ -451,6 +453,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	if rcode == "" {
 		rcode = fmt.Sprintf("RCODE%d", resp.Rcode)
 	}
+	s.applyECSResponseScope(resp, r, w)
 	_ = w.WriteMsg(resp)
 }
 
@@ -1533,6 +1536,7 @@ type dnsGeoHint struct {
 	IP          string
 	Country     string
 	Region      string
+	ASN         string
 	EdgeGroupID string
 	Source      string
 }
@@ -1549,6 +1553,45 @@ func (s *Service) geoHintForQuery(msg *miekgdns.Msg, writer miekgdns.ResponseWri
 		}
 	}
 	return dnsGeoHint{}
+}
+
+func (s *Service) applyECSResponseScope(resp, req *miekgdns.Msg, writer miekgdns.ResponseWriter) {
+	if resp == nil || req == nil {
+		return
+	}
+	opt := req.IsEdns0()
+	if opt == nil {
+		return
+	}
+	var subnet *miekgdns.EDNS0_SUBNET
+	for _, extra := range opt.Option {
+		if candidate, ok := extra.(*miekgdns.EDNS0_SUBNET); ok && candidate != nil {
+			subnet = candidate
+			break
+		}
+	}
+	if subnet == nil {
+		return
+	}
+	scopeNetmask := uint8(0)
+	if hint := s.geoHintForQuery(req, writer); hint.Country != "" || hint.Region != "" || hint.ASN != "" || hint.EdgeGroupID != "" {
+		scopeNetmask = subnet.SourceNetmask
+	}
+	respOpt := resp.IsEdns0()
+	if respOpt == nil {
+		respOpt = new(miekgdns.OPT)
+		respOpt.Hdr.Name = "."
+		respOpt.Hdr.Rrtype = miekgdns.TypeOPT
+		respOpt.SetUDPSize(opt.UDPSize())
+		resp.Extra = append(resp.Extra, respOpt)
+	}
+	respOpt.Option = append(respOpt.Option, &miekgdns.EDNS0_SUBNET{
+		Code:          miekgdns.EDNS0SUBNET,
+		Family:        subnet.Family,
+		SourceNetmask: subnet.SourceNetmask,
+		SourceScope:   scopeNetmask,
+		Address:       subnet.Address,
+	})
 }
 
 func (s *Service) geoHintFromEDNS(msg *miekgdns.Msg) dnsGeoHint {
@@ -1600,6 +1643,7 @@ func (s *Service) geoHintForOverride(ip net.IP, source string) (dnsGeoHint, bool
 			IP:          ip.String(),
 			Country:     strings.ToLower(strings.TrimSpace(override.Country)),
 			Region:      strings.TrimSpace(override.Region),
+			ASN:         strings.TrimSpace(override.ASN),
 			EdgeGroupID: strings.TrimSpace(override.EdgeGroupID),
 			Source:      source,
 		}, true
@@ -1621,7 +1665,7 @@ func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qty
 	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
 		return rrForEdgeDNSRecord(record, ownerName)
 	}
-	ordered := edgeDNSOrderedCandidates(record, hint)
+	ordered := edgeDNSOrderedCandidates(record, hint, time.Now().UTC())
 	if liveHealth != nil && len(ordered) > 0 {
 		filtered := ordered[:0]
 		for _, candidate := range ordered {
@@ -1683,17 +1727,28 @@ func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.E
 	}
 }
 
-func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint) []model.EdgeDNSAnswerCandidate {
-	candidates := make([]model.EdgeDNSAnswerCandidate, 0, len(record.Candidates))
-	for _, candidate := range record.Candidates {
-		if !edgeDNSCandidateEligible(candidate, record.AnswerPolicy) {
+func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) []model.EdgeDNSAnswerCandidate {
+	policy := record.AnswerPolicy
+	sourceCandidates := record.Candidates
+	if scoped, ok := edgeDNSScopedCandidatesForHint(record.ScopedCandidates, hint); ok {
+		sourceCandidates = scoped.Candidates
+		if strings.TrimSpace(scoped.PolicyKind) != "" {
+			policy.PolicyKind = scoped.PolicyKind
+		}
+		if strings.TrimSpace(scoped.Reason) != "" {
+			policy.Reason = scoped.Reason
+		}
+	}
+	candidates := make([]model.EdgeDNSAnswerCandidate, 0, len(sourceCandidates))
+	for _, candidate := range sourceCandidates {
+		if !edgeDNSCandidateEligible(candidate, policy) {
 			continue
 		}
 		candidates = append(candidates, candidate)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		ai := edgeDNSCandidateSortScore(candidates[i], record.AnswerPolicy, hint)
-		aj := edgeDNSCandidateSortScore(candidates[j], record.AnswerPolicy, hint)
+		ai := edgeDNSCandidateSortScore(candidates[i], policy, hint)
+		aj := edgeDNSCandidateSortScore(candidates[j], policy, hint)
 		if ai != aj {
 			return ai < aj
 		}
@@ -1708,6 +1763,7 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint) []mod
 		}
 		return candidates[i].IP < candidates[j].IP
 	})
+	candidates = edgeDNSMaybePromoteExploration(record, policy, hint, candidates, now)
 	return candidates
 }
 
@@ -1718,7 +1774,7 @@ func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy mod
 	if policy.RouteReadyRequired && !candidate.RouteReady {
 		return false
 	}
-	if policy.PolicyKind != model.DNSAnswerPolicyKindDisabled && policy.PolicyKind != model.DNSAnswerPolicyKindWeighted {
+	if policy.PolicyKind != model.DNSAnswerPolicyKindDisabled {
 		if !candidate.TLSReady {
 			return false
 		}
@@ -1726,23 +1782,110 @@ func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy mod
 	return true
 }
 
+func edgeDNSScopedCandidatesForHint(scoped []model.EdgeDNSScopedAnswerCandidates, hint dnsGeoHint) (model.EdgeDNSScopedAnswerCandidates, bool) {
+	bestScore := 0
+	var best model.EdgeDNSScopedAnswerCandidates
+	for _, candidate := range scoped {
+		score := edgeDNSScopedCandidateMatchScore(candidate, hint)
+		if score == 0 {
+			continue
+		}
+		if score > bestScore || (score == bestScore && candidate.ScopeKey < best.ScopeKey) {
+			bestScore = score
+			best = candidate
+		}
+	}
+	return best, bestScore > 0
+}
+
+func edgeDNSScopedCandidateMatchScore(candidate model.EdgeDNSScopedAnswerCandidates, hint dnsGeoHint) int {
+	score := 0
+	if hint.ASN != "" && candidate.ASN != "" && strings.EqualFold(candidate.ASN, hint.ASN) {
+		score += 8000
+	}
+	if hint.Country != "" && candidate.Country != "" && strings.EqualFold(candidate.Country, hint.Country) {
+		score += 4000
+	}
+	if hint.Region != "" && candidate.Region != "" && strings.EqualFold(candidate.Region, hint.Region) {
+		score += 2000
+	}
+	if score == 0 {
+		return 0
+	}
+	return score
+}
+
+func edgeDNSMaybePromoteExploration(record model.EdgeDNSRecord, policy model.DNSAnswerPolicy, hint dnsGeoHint, candidates []model.EdgeDNSAnswerCandidate, now time.Time) []model.EdgeDNSAnswerCandidate {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+	switch strings.TrimSpace(policy.PolicyKind) {
+	case model.DNSAnswerPolicyKindDisabled, model.DNSAnswerPolicyKindPinned:
+		return candidates
+	}
+	percent := policy.ExplorationPercent
+	if percent <= 0 {
+		return candidates
+	}
+	if percent > 50 {
+		percent = 50
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	bucket := now.Unix() / int64((10 * time.Minute).Seconds())
+	scope := firstNonEmpty(hint.ASN, hint.Region, hint.Country, hint.EdgeGroupID, hint.IP, hint.Source, "global")
+	seed := strings.Join([]string{
+		normalizeName(record.Name),
+		strings.ToUpper(strings.TrimSpace(record.Type)),
+		scope,
+		strconv.FormatInt(bucket, 10),
+	}, "|")
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(seed))
+	value := int(hash.Sum64() % 100)
+	if value >= percent {
+		return candidates
+	}
+	rest := len(candidates) - 1
+	if rest <= 0 {
+		return candidates
+	}
+	index := 1 + int((hash.Sum64()/100)%uint64(rest))
+	if index <= 0 || index >= len(candidates) {
+		return candidates
+	}
+	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
+	explorer := out[index]
+	copy(out[1:index+1], out[0:index])
+	out[0] = explorer
+	return out
+}
+
 func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy, hint dnsGeoHint) int {
 	score := candidate.Priority * 100
 	switch policy.PolicyKind {
-	case model.DNSAnswerPolicyKindLatencyAware, model.DNSAnswerPolicyKindWeighted:
+	case model.DNSAnswerPolicyKindLatencyAware:
+		score = candidate.Priority*10 - candidate.Weight*20
+	case model.DNSAnswerPolicyKindWeighted:
 		score -= candidate.Weight * 20
 	}
-	if hint.EdgeGroupID != "" && strings.EqualFold(candidate.EdgeGroupID, hint.EdgeGroupID) {
-		score -= 10000
-	}
-	if hint.Country != "" && strings.EqualFold(candidate.Country, hint.Country) {
-		score -= 5000
-	}
-	if hint.Region != "" && strings.EqualFold(candidate.Region, hint.Region) {
-		score -= 2500
-	}
-	if strings.EqualFold(candidate.Reason, "same_region") {
-		score -= 250
+	if policy.PolicyKind != model.DNSAnswerPolicyKindLatencyAware {
+		if hint.EdgeGroupID != "" && strings.EqualFold(candidate.EdgeGroupID, hint.EdgeGroupID) {
+			score -= 10000
+		}
+		if hint.Country != "" && strings.EqualFold(candidate.Country, hint.Country) {
+			score -= 5000
+		}
+		if hint.Region != "" && strings.EqualFold(candidate.Region, hint.Region) {
+			score -= 2500
+		}
+		if hint.ASN != "" && strings.Contains(strings.ToLower(candidate.Reason), "asn_"+strings.ToLower(hint.ASN)) {
+			score -= 1250
+		}
+		if strings.EqualFold(candidate.Reason, "same_region") {
+			score -= 250
+		}
 	}
 	return score
 }
