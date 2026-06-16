@@ -222,17 +222,63 @@ func TestServiceOrdersGeoDNSCandidatesFromECS(t *testing.T) {
 	}
 }
 
-func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
+func TestServiceUsesStableRoutePriorityWithoutGeoHint(t *testing.T) {
+	t.Parallel()
+
+	for _, edgeGroupID := range []string{"edge-group-country-us", "edge-group-country-de"} {
+		service := NewService(config.DNSConfig{
+			Zone:        "dns.fugue.pro",
+			TTL:         60,
+			Nameservers: []string{"ns1.dns.fugue.pro"},
+			EdgeGroupID: edgeGroupID,
+		}, log.New(ioDiscard{}, "", 0))
+		service.setBundle(model.EdgeDNSBundle{
+			Version: "dnsgen_stable_priority",
+			Zone:    "dns.fugue.pro",
+			Records: []model.EdgeDNSRecord{
+				{
+					Name:       "app.dns.fugue.pro",
+					Type:       model.EdgeDNSRecordTypeA,
+					Values:     []string{"15.204.94.71", "51.38.126.103"},
+					TTL:        60,
+					RecordKind: model.EdgeDNSRecordKindPlatform,
+					Status:     model.EdgeRouteStatusActive,
+					AnswerPolicy: model.DNSAnswerPolicy{
+						PolicyKind:         model.DNSAnswerPolicyKindGeo,
+						ECSEnabled:         true,
+						HealthRequired:     true,
+						RouteReadyRequired: true,
+					},
+					Candidates: []model.EdgeDNSAnswerCandidate{
+						{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 0, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+						{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+					},
+				},
+			},
+		}, `"dnsgen_stable_priority"`, false, "")
+
+		answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+		if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 1 {
+			t.Fatalf("edge group %s: expected one selected answer, got rcode=%s answers=%+v", edgeGroupID, miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+		}
+		first, ok := answer.Answer[0].(*miekgdns.A)
+		if !ok || first.A.String() != "51.38.126.103" {
+			t.Fatalf("edge group %s: expected stable route-priority answer, got %+v", edgeGroupID, answer.Answer)
+		}
+	}
+}
+
+func TestServiceIgnoresECSWithoutGeoOverride(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.DNSConfig{
 		Zone:        "dns.fugue.pro",
 		TTL:         60,
 		Nameservers: []string{"ns1.dns.fugue.pro"},
+		EdgeGroupID: "edge-group-country-us",
 	}, log.New(ioDiscard{}, "", 0))
-	service.Config.EdgeGroupID = "edge-group-country-us"
 	service.setBundle(model.EdgeDNSBundle{
-		Version: "dnsgen_local",
+		Version: "dnsgen_ecs_without_geo",
 		Zone:    "dns.fugue.pro",
 		Records: []model.EdgeDNSRecord{
 			{
@@ -254,19 +300,33 @@ func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
 				},
 			},
 		},
-	}, `"dnsgen_local"`, false, "")
+	}, `"dnsgen_ecs_without_geo"`, false, "")
 
-	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	req := new(miekgdns.Msg)
+	req.SetQuestion("app.dns.fugue.pro.", miekgdns.TypeA)
+	req.RecursionDesired = true
+	opt := new(miekgdns.OPT)
+	opt.Hdr.Name = "."
+	opt.Hdr.Rrtype = miekgdns.TypeOPT
+	opt.Option = append(opt.Option, &miekgdns.EDNS0_SUBNET{
+		Code:          miekgdns.EDNS0SUBNET,
+		Family:        1,
+		SourceNetmask: 24,
+		Address:       net.ParseIP("198.51.100.25").To4(),
+	})
+	req.Extra = append(req.Extra, opt)
+
+	answer := dnsQueryMsg(t, service, req)
 	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 1 {
 		t.Fatalf("expected one selected answer, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
-	if !ok || first.A.String() != "15.204.94.71" {
-		t.Fatalf("expected local edge group to win without GeoIP override, got %+v", answer.Answer)
+	if !ok || first.A.String() != "51.38.126.103" {
+		t.Fatalf("expected ECS without GeoIP override to keep stable route-priority answer, got %+v", answer.Answer)
 	}
 }
 
-func TestServiceLatencyAwareKeepsLocalHintWhenHealthy(t *testing.T) {
+func TestServiceLatencyAwareKeepsPreferredRouteWhenHealthy(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.DNSConfig{

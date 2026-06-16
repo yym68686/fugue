@@ -1548,11 +1548,7 @@ func (s *Service) geoHintForQuery(msg *miekgdns.Msg, writer miekgdns.ResponseWri
 			}
 		}
 	}
-	return dnsGeoHint{
-		EdgeGroupID: strings.TrimSpace(s.Config.EdgeGroupID),
-		Country:     edgeGroupCountry(strings.TrimSpace(s.Config.EdgeGroupID)),
-		Source:      "local_edge_group",
-	}
+	return dnsGeoHint{}
 }
 
 func (s *Service) geoHintFromEDNS(msg *miekgdns.Msg) dnsGeoHint {
@@ -1586,10 +1582,8 @@ func (s *Service) geoHintForIP(raw, source string) dnsGeoHint {
 		return hint
 	}
 	return dnsGeoHint{
-		IP:          ip.String(),
-		EdgeGroupID: strings.TrimSpace(s.Config.EdgeGroupID),
-		Country:     edgeGroupCountry(strings.TrimSpace(s.Config.EdgeGroupID)),
-		Source:      source,
+		IP:     ip.String(),
+		Source: source,
 	}
 }
 
