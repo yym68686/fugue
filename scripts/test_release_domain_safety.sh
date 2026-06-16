@@ -72,6 +72,9 @@ node_local_build_plane_preflight_override_allowed || fail "compose import proces
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/app_deploy_test.go\ninternal/api/server.go'
 node_local_build_plane_preflight_override_allowed || fail "deploy baseline recovery fixes must be allowed to bypass registry/node-policy preflight"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/controller/managed_app_reconciler.go\ninternal/controller/managed_app_reconciler_test.go\ninternal/controller/managed_app_rollout_test.go'
+node_local_build_plane_preflight_override_allowed || fail "managed app rollout recovery fixes must be allowed to bypass registry/node-policy preflight"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/app_deploy_test.go\ninternal/api/server.go\nscripts/upgrade_fugue_control_plane.sh\nscripts/test_release_domain_safety.sh'
 node_local_build_plane_preflight_override_allowed || fail "deploy baseline recovery release preflight fix must be allowed to publish itself"
 

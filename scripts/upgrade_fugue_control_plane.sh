@@ -870,6 +870,10 @@ node_local_build_plane_preflight_override_allowed() {
       internal/controller/deploy_image_guard_test.go|\
       internal/controller/import_operation.go|\
       internal/controller/import_operation_test.go|\
+      internal/controller/managed_app_reconciler.go|\
+      internal/controller/managed_app_reconciler_test.go|\
+      internal/controller/managed_app_rollout.go|\
+      internal/controller/managed_app_rollout_test.go|\
       internal/api/join_cluster.go|\
       internal/api/import_github_compose_test.go|\
       internal/api/import_github_topology.go|\
