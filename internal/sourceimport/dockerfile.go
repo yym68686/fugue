@@ -24,18 +24,19 @@ const (
 )
 
 type GitHubDockerImportRequest struct {
-	SourceType            string
-	RepoURL               string
-	RepoAuthToken         string
-	Branch                string
-	DockerfilePath        string
-	BuildContextDir       string
-	RegistryPushBase      string
-	ImageRepository       string
-	ImageNameSuffix       string
-	JobLabels             map[string]string
-	PlacementNodeSelector map[string]string
-	Stateful              bool
+	SourceType                  string
+	RepoURL                     string
+	RepoAuthToken               string
+	Branch                      string
+	DockerfilePath              string
+	BuildContextDir             string
+	RegistryPushBase            string
+	DestinationRegistryPushBase string
+	ImageRepository             string
+	ImageNameSuffix             string
+	JobLabels                   map[string]string
+	PlacementNodeSelector       map[string]string
+	Stateful                    bool
 }
 
 func (i *Importer) ImportGitHubDockerfileImage(ctx context.Context, req GitHubDockerImportRequest) (GitHubImportResult, error) {
@@ -48,7 +49,7 @@ func (i *Importer) ImportGitHubDockerfileImage(ctx context.Context, req GitHubDo
 	}
 	defer releaseClonedRepo(repo)
 
-	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
+	return importDockerfileFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.DockerfilePath, req.BuildContextDir, req.RegistryPushBase, req.DestinationRegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 }
 
 type dockerfileBuildRequest struct {
@@ -113,7 +114,7 @@ func detectDockerBuildInputs(repoDir, dockerfilePath, buildContextDir string) (s
 	return relDockerfile, relContext, nil
 }
 
-func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, dockerfilePath, buildContextDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
+func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, dockerfilePath, buildContextDir, registryPushBase, destinationRegistryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
 	dockerfilePath, buildContextDir, err := detectDockerBuildInputs(repo.RepoDir, dockerfilePath, buildContextDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -128,6 +129,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	}
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := dockerfileBuildRequest{
 		RepoURL:               repoURL,
 		RepoAuthToken:         repoAuthToken,
@@ -136,7 +138,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DockerfilePath:        dockerfilePath,
 		BuildContextDir:       buildContextDir,
 		ImageRef:              imageRef,
-		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
+		DestinationImageRef:   destinationImageRef,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
 		PodPolicy:             builderPolicy,
@@ -158,6 +160,7 @@ func importDockerfileFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		DockerfilePath:       dockerfilePath,
 		BuildContextDir:      buildContextDir,
 		ImageRef:             imageRef,
+		DestinationImageRef:  destinationImageRef,
 		BuildJobName:         buildJobNameValue,
 		DefaultAppName:       repo.DefaultAppName,
 		DetectedPort:         detectedPort,

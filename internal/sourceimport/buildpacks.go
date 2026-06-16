@@ -20,17 +20,18 @@ const (
 )
 
 type GitHubBuildpacksImportRequest struct {
-	SourceType            string
-	RepoURL               string
-	RepoAuthToken         string
-	Branch                string
-	SourceDir             string
-	RegistryPushBase      string
-	ImageRepository       string
-	ImageNameSuffix       string
-	JobLabels             map[string]string
-	PlacementNodeSelector map[string]string
-	Stateful              bool
+	SourceType                  string
+	RepoURL                     string
+	RepoAuthToken               string
+	Branch                      string
+	SourceDir                   string
+	RegistryPushBase            string
+	DestinationRegistryPushBase string
+	ImageRepository             string
+	ImageNameSuffix             string
+	JobLabels                   map[string]string
+	PlacementNodeSelector       map[string]string
+	Stateful                    bool
 }
 
 type buildpacksBuildRequest struct {
@@ -64,10 +65,10 @@ func (i *Importer) ImportGitHubBuildpacks(ctx context.Context, req GitHubBuildpa
 	}
 	defer releaseClonedRepo(repo)
 
-	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
+	return importBuildpacksFromClonedRepo(ctx, repo, req.RepoURL, req.RepoAuthToken, req.SourceDir, req.RegistryPushBase, req.DestinationRegistryPushBase, req.ImageRepository, req.ImageNameSuffix, req.JobLabels, req.PlacementNodeSelector, i.BuilderPolicy, req.Stateful, i.Logger)
 }
 
-func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
+func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, repoURL, repoAuthToken, sourceDir, registryPushBase, destinationRegistryPushBase, imageRepository, imageNameSuffix string, jobLabels, placementNodeSelector map[string]string, builderPolicy BuilderPodPolicy, stateful bool, logger *log.Logger) (GitHubImportResult, error) {
 	normalizedSourceDir, err := normalizeRepoSourceDir(repo.RepoDir, sourceDir)
 	if err != nil {
 		return GitHubImportResult{}, err
@@ -85,6 +86,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 	sourceOverlayFiles = append(sourceOverlayFiles, systemOverlayFiles...)
 
 	imageRef := defaultImportedImageRef(registryPushBase, imageRepository, repo, imageNameSuffix)
+	destinationImageRef := importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase)
 	buildReq := buildpacksBuildRequest{
 		RepoURL:               repoURL,
 		RepoAuthToken:         repoAuthToken,
@@ -92,7 +94,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		CommitSHA:             repo.CommitSHA,
 		SourceDir:             normalizedSourceDir,
 		ImageRef:              imageRef,
-		DestinationImageRef:   builderDestinationImageRef(imageRef, registryPushBase),
+		DestinationImageRef:   destinationImageRef,
 		SourceOverlayFiles:    sourceOverlayFiles,
 		JobLabels:             jobLabels,
 		PlacementNodeSelector: placementNodeSelector,
@@ -127,6 +129,7 @@ func importBuildpacksFromClonedRepo(ctx context.Context, repo clonedGitHubRepo, 
 		SourceDir:               normalizeImportedSourceDirValue(normalizedSourceDir),
 		BuildStrategy:           model.AppBuildStrategyBuildpacks,
 		ImageRef:                imageRef,
+		DestinationImageRef:     destinationImageRef,
 		BuildJobName:            buildJobNameValue,
 		DefaultAppName:          repo.DefaultAppName,
 		DetectedPort:            port,

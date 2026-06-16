@@ -77,6 +77,20 @@ func imageRefWithRegistryBase(imageRef, fromBase, toBase string) string {
 	return toBase + "/" + strings.TrimPrefix(imageRef, prefix)
 }
 
+func importBuilderDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase string) string {
+	if strings.TrimSpace(destinationRegistryPushBase) != "" {
+		return imageRefWithRegistryBase(imageRef, registryPushBase, destinationRegistryPushBase)
+	}
+	return builderDestinationImageRef(imageRef, registryPushBase)
+}
+
+func importControllerDestinationImageRef(imageRef, registryPushBase, destinationRegistryPushBase string) string {
+	if strings.TrimSpace(destinationRegistryPushBase) != "" {
+		return imageRefWithRegistryBase(imageRef, registryPushBase, destinationRegistryPushBase)
+	}
+	return strings.TrimSpace(imageRef)
+}
+
 func effectiveDestinationImageRef(imageRef, destinationImageRef string) string {
 	if destination := strings.TrimSpace(destinationImageRef); destination != "" {
 		return destination

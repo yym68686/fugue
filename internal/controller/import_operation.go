@@ -32,11 +32,6 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if strings.TrimSpace(s.registryPushBase) == "" {
 		return fmt.Errorf("controller registry push base is not configured")
 	}
-	if running, checkErr := s.registryGCInProgress(ctx); checkErr != nil {
-		return fmt.Errorf("check registry garbage collection state: %w", checkErr)
-	} else if running {
-		return errRegistryGCRunning
-	}
 
 	importCtx, cancel := context.WithTimeout(ctx, importSourceTimeout())
 	defer cancel()
@@ -49,7 +44,14 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	stateful := op.DesiredSpec.Workspace != nil || op.DesiredSpec.PersistentStorage != nil || op.DesiredSpec.Postgres != nil
 	placementNodeSelector := s.importBuildPlacementNodeSelector(ctx, app, op)
 	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
-	dockerImageDestination := dockerImageImportDestination{}
+	imageDestination := s.importImageDestination(importCtx, app, op)
+	if strings.TrimSpace(imageDestination.RegistryPushBase) == "" {
+		if running, checkErr := s.registryGCInProgress(ctx); checkErr != nil {
+			return fmt.Errorf("check registry garbage collection state: %w", checkErr)
+		} else if running {
+			return errRegistryGCRunning
+		}
+	}
 	var output sourceimport.GitHubSourceImportOutput
 	queuedDockerImageRef := ""
 	stopImportProgress := s.startImportOperationProgressHeartbeat(importCtx, op.ID)
@@ -59,13 +61,12 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
-		dockerImageDestination = s.dockerImageImportDestination(importCtx, app, op)
 		output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
 			AppName:                     app.Name,
 			ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
 			ImageRef:                    controllerReachableImportImageRef(queuedDockerImageRef, s.registryPushBase, s.registryPullBase),
 			RegistryPushBase:            s.registryPushBase,
-			DestinationRegistryPushBase: dockerImageDestination.RegistryPushBase,
+			DestinationRegistryPushBase: imageDestination.RegistryPushBase,
 			ImageRepository:             "fugue-apps",
 		})
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
@@ -73,22 +74,23 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			return fmt.Errorf("import operation %s missing repo_url", op.ID)
 		}
 		output, err = s.importer.ImportGitHubSource(importCtx, sourceimport.GitHubSourceImportRequest{
-			SourceType:            strings.TrimSpace(op.DesiredSource.Type),
-			RepoURL:               strings.TrimSpace(op.DesiredSource.RepoURL),
-			RepoAuthToken:         strings.TrimSpace(op.DesiredSource.RepoAuthToken),
-			Branch:                strings.TrimSpace(op.DesiredSource.RepoBranch),
-			SourceDir:             strings.TrimSpace(op.DesiredSource.SourceDir),
-			DockerfilePath:        strings.TrimSpace(op.DesiredSource.DockerfilePath),
-			BuildContextDir:       strings.TrimSpace(op.DesiredSource.BuildContextDir),
-			BuildStrategy:         strings.TrimSpace(op.DesiredSource.BuildStrategy),
-			RegistryPushBase:      s.registryPushBase,
-			ImageRepository:       "fugue-apps",
-			ImageNameSuffix:       strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
-			JobLabels:             jobLabels,
-			PlacementNodeSelector: placementNodeSelector,
-			BuilderMemoryCeiling:  builderMemoryCeiling,
-			Stateful:              stateful,
+			SourceType:                  strings.TrimSpace(op.DesiredSource.Type),
+			RepoURL:                     strings.TrimSpace(op.DesiredSource.RepoURL),
+			RepoAuthToken:               strings.TrimSpace(op.DesiredSource.RepoAuthToken),
+			Branch:                      strings.TrimSpace(op.DesiredSource.RepoBranch),
+			SourceDir:                   strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:              strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:             strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:               strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:            s.registryPushBase,
+			DestinationRegistryPushBase: imageDestination.RegistryPushBase,
+			ImageRepository:             "fugue-apps",
+			ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:              strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:                   jobLabels,
+			PlacementNodeSelector:       placementNodeSelector,
+			BuilderMemoryCeiling:        builderMemoryCeiling,
+			Stateful:                    stateful,
 		})
 	case model.AppSourceTypeUpload:
 		if strings.TrimSpace(op.DesiredSource.UploadID) == "" {
@@ -106,25 +108,26 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 			return archiveURLErr
 		}
 		output, err = s.importer.ImportUploadedArchiveSource(importCtx, sourceimport.UploadSourceImportRequest{
-			UploadID:              upload.ID,
-			ArchiveFilename:       upload.Filename,
-			ArchiveSHA256:         upload.SHA256,
-			ArchiveSizeBytes:      upload.SizeBytes,
-			ArchiveData:           archiveBytes,
-			ArchiveDownloadURL:    archiveURL,
-			AppName:               app.Name,
-			SourceDir:             strings.TrimSpace(op.DesiredSource.SourceDir),
-			DockerfilePath:        strings.TrimSpace(op.DesiredSource.DockerfilePath),
-			BuildContextDir:       strings.TrimSpace(op.DesiredSource.BuildContextDir),
-			BuildStrategy:         strings.TrimSpace(op.DesiredSource.BuildStrategy),
-			RegistryPushBase:      s.registryPushBase,
-			ImageRepository:       "fugue-apps",
-			ImageNameSuffix:       strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ComposeService:        strings.TrimSpace(op.DesiredSource.ComposeService),
-			JobLabels:             jobLabels,
-			PlacementNodeSelector: placementNodeSelector,
-			BuilderMemoryCeiling:  builderMemoryCeiling,
-			Stateful:              stateful,
+			UploadID:                    upload.ID,
+			ArchiveFilename:             upload.Filename,
+			ArchiveSHA256:               upload.SHA256,
+			ArchiveSizeBytes:            upload.SizeBytes,
+			ArchiveData:                 archiveBytes,
+			ArchiveDownloadURL:          archiveURL,
+			AppName:                     app.Name,
+			SourceDir:                   strings.TrimSpace(op.DesiredSource.SourceDir),
+			DockerfilePath:              strings.TrimSpace(op.DesiredSource.DockerfilePath),
+			BuildContextDir:             strings.TrimSpace(op.DesiredSource.BuildContextDir),
+			BuildStrategy:               strings.TrimSpace(op.DesiredSource.BuildStrategy),
+			RegistryPushBase:            s.registryPushBase,
+			DestinationRegistryPushBase: imageDestination.RegistryPushBase,
+			ImageRepository:             "fugue-apps",
+			ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+			ComposeService:              strings.TrimSpace(op.DesiredSource.ComposeService),
+			JobLabels:                   jobLabels,
+			PlacementNodeSelector:       placementNodeSelector,
+			BuilderMemoryCeiling:        builderMemoryCeiling,
+			Stateful:                    stateful,
 		})
 	default:
 		return fmt.Errorf("import operation %s only supports github-backed, image-backed, or upload source", op.ID)
@@ -214,8 +217,8 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	finalSpec.Command = mergeImportCommand(finalSpec.Command, finalSpec.Args, output.ImportResult.SuggestedStartupCommand)
 	finalSpec.RestartToken = model.NewID("restart")
 	s.recordImportedImageLocation(app, op, managedImageRef, runtimeImageRef)
-	if dockerImageDestination.CacheEndpoint != "" {
-		s.recordImportedImageLocationOnTarget(app, op, dockerImageDestination.Target, dockerImageDestination.CacheEndpoint, managedImageRef, runtimeImageRef)
+	if imageDestination.CacheEndpoint != "" {
+		s.recordImportedImageLocationOnTarget(app, op, imageDestination.Target, imageDestination.CacheEndpoint, managedImageRef, runtimeImageRef)
 	}
 	hydrateApp := app
 	hydrateApp.Spec = finalSpec
@@ -301,34 +304,34 @@ func (s *Service) importBuildPlacementNodeSelector(ctx context.Context, app mode
 	return nil
 }
 
-type dockerImageImportDestination struct {
+type importImageDestination struct {
 	RegistryPushBase string
 	CacheEndpoint    string
 	Target           deployImageTarget
 }
 
-func (s *Service) dockerImageImportDestination(ctx context.Context, app model.App, op model.Operation) dockerImageImportDestination {
+func (s *Service) importImageDestination(ctx context.Context, app model.App, op model.Operation) importImageDestination {
 	if s == nil || s.Store == nil || !s.nodeLocalBuilderRegistryEnabled() {
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
 	runtimeID := importOperationRuntimeID(app, op)
 	if runtimeID == "" {
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
 	runtimeObj, err := s.Store.GetRuntime(runtimeID)
 	if err != nil {
 		if s.Logger != nil {
-			s.Logger.Printf("docker image import cache destination lookup failed app=%s runtime=%s: %v", app.ID, runtimeID, err)
+			s.Logger.Printf("import image cache destination lookup failed app=%s runtime=%s: %v", app.ID, runtimeID, err)
 		}
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
 	if runtimeObj.Type == model.RuntimeTypeManagedShared {
-		return s.managedSharedDockerImageImportDestination(ctx, app, op, runtimeObj)
+		return s.managedSharedImportImageDestination(ctx, app, op, runtimeObj)
 	}
-	return s.dockerImageImportDestinationForRuntime(runtimeObj)
+	return s.importImageDestinationForRuntime(runtimeObj)
 }
 
-func (s *Service) managedSharedDockerImageImportDestination(ctx context.Context, app model.App, op model.Operation, sharedRuntime model.Runtime) dockerImageImportDestination {
+func (s *Service) managedSharedImportImageDestination(ctx context.Context, app model.App, op model.Operation, sharedRuntime model.Runtime) importImageDestination {
 	scheduledApp := app
 	if op.DesiredSpec != nil {
 		scheduledApp.Spec = cloneImportSpec(*op.DesiredSpec)
@@ -340,34 +343,34 @@ func (s *Service) managedSharedDockerImageImportDestination(ctx context.Context,
 	scheduling, err := s.managedSchedulingConstraintsForApp(ctx, scheduledApp)
 	if err != nil {
 		if s.Logger != nil {
-			s.Logger.Printf("docker image import shared cache placement failed app=%s runtime=%s: %v", app.ID, sharedRuntime.ID, err)
+			s.Logger.Printf("import image shared cache placement failed app=%s runtime=%s: %v", app.ID, sharedRuntime.ID, err)
 		}
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
 	target := s.deployImageTarget(scheduledApp, scheduling)
 	if strings.TrimSpace(target.ClusterNodeName) == "" {
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
 	runtimeObj, found := s.runtimeForClusterNode(ctx, target.ClusterNodeName)
 	if !found {
 		if s.Logger != nil {
-			s.Logger.Printf("docker image import shared cache runtime lookup missed app=%s runtime=%s node=%s", app.ID, sharedRuntime.ID, target.ClusterNodeName)
+			s.Logger.Printf("import image shared cache runtime lookup missed app=%s runtime=%s node=%s", app.ID, sharedRuntime.ID, target.ClusterNodeName)
 		}
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
-	destination := s.dockerImageImportDestinationForRuntime(runtimeObj)
+	destination := s.importImageDestinationForRuntime(runtimeObj)
 	if destination.Target.ClusterNodeName == "" {
 		destination.Target.ClusterNodeName = strings.TrimSpace(target.ClusterNodeName)
 	}
 	return destination
 }
 
-func (s *Service) dockerImageImportDestinationForRuntime(runtimeObj model.Runtime) dockerImageImportDestination {
+func (s *Service) importImageDestinationForRuntime(runtimeObj model.Runtime) importImageDestination {
 	registryBase, cacheEndpoint := s.controllerReachableImageCacheEndpoint(runtimeObj)
 	if registryBase == "" || cacheEndpoint == "" {
-		return dockerImageImportDestination{}
+		return importImageDestination{}
 	}
-	return dockerImageImportDestination{
+	return importImageDestination{
 		RegistryPushBase: registryBase,
 		CacheEndpoint:    cacheEndpoint,
 		Target: deployImageTarget{

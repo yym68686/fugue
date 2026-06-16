@@ -9,22 +9,23 @@ import (
 )
 
 type GitHubSourceImportRequest struct {
-	SourceType            string
-	RepoURL               string
-	RepoAuthToken         string
-	Branch                string
-	SourceDir             string
-	DockerfilePath        string
-	BuildContextDir       string
-	BuildStrategy         string
-	RegistryPushBase      string
-	ImageRepository       string
-	ImageNameSuffix       string
-	ComposeService        string
-	JobLabels             map[string]string
-	PlacementNodeSelector map[string]string
-	BuilderMemoryCeiling  int64
-	Stateful              bool
+	SourceType                  string
+	RepoURL                     string
+	RepoAuthToken               string
+	Branch                      string
+	SourceDir                   string
+	DockerfilePath              string
+	BuildContextDir             string
+	BuildStrategy               string
+	RegistryPushBase            string
+	DestinationRegistryPushBase string
+	ImageRepository             string
+	ImageNameSuffix             string
+	ComposeService              string
+	JobLabels                   map[string]string
+	PlacementNodeSelector       map[string]string
+	BuilderMemoryCeiling        int64
+	Stateful                    bool
 }
 
 type GitHubSourceImportOutput struct {
@@ -46,19 +47,20 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 	switch buildStrategy {
 	case model.AppBuildStrategyAuto:
 		importResult, err := i.ImportGitHubAuto(ctx, GitHubAutoImportRequest{
-			SourceType:            sourceType,
-			RepoURL:               req.RepoURL,
-			RepoAuthToken:         req.RepoAuthToken,
-			Branch:                req.Branch,
-			SourceDir:             req.SourceDir,
-			DockerfilePath:        req.DockerfilePath,
-			BuildContextDir:       req.BuildContextDir,
-			RegistryPushBase:      req.RegistryPushBase,
-			ImageRepository:       req.ImageRepository,
-			ImageNameSuffix:       req.ImageNameSuffix,
-			JobLabels:             req.JobLabels,
-			PlacementNodeSelector: req.PlacementNodeSelector,
-			Stateful:              req.Stateful,
+			SourceType:                  sourceType,
+			RepoURL:                     req.RepoURL,
+			RepoAuthToken:               req.RepoAuthToken,
+			Branch:                      req.Branch,
+			SourceDir:                   req.SourceDir,
+			DockerfilePath:              req.DockerfilePath,
+			BuildContextDir:             req.BuildContextDir,
+			RegistryPushBase:            req.RegistryPushBase,
+			DestinationRegistryPushBase: req.DestinationRegistryPushBase,
+			ImageRepository:             req.ImageRepository,
+			ImageNameSuffix:             req.ImageNameSuffix,
+			JobLabels:                   req.JobLabels,
+			PlacementNodeSelector:       req.PlacementNodeSelector,
+			Stateful:                    req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -85,17 +87,18 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 		}, nil
 	case model.AppBuildStrategyStaticSite:
 		importResult, err := i.ImportGitHubStaticSite(ctx, GitHubImportRequest{
-			SourceType:            sourceType,
-			RepoURL:               req.RepoURL,
-			RepoAuthToken:         req.RepoAuthToken,
-			Branch:                req.Branch,
-			SourceDir:             req.SourceDir,
-			RegistryPushBase:      req.RegistryPushBase,
-			ImageRepository:       req.ImageRepository,
-			ImageNameSuffix:       req.ImageNameSuffix,
-			JobLabels:             req.JobLabels,
-			PlacementNodeSelector: req.PlacementNodeSelector,
-			Stateful:              req.Stateful,
+			SourceType:                  sourceType,
+			RepoURL:                     req.RepoURL,
+			RepoAuthToken:               req.RepoAuthToken,
+			Branch:                      req.Branch,
+			SourceDir:                   req.SourceDir,
+			RegistryPushBase:            req.RegistryPushBase,
+			DestinationRegistryPushBase: req.DestinationRegistryPushBase,
+			ImageRepository:             req.ImageRepository,
+			ImageNameSuffix:             req.ImageNameSuffix,
+			JobLabels:                   req.JobLabels,
+			PlacementNodeSelector:       req.PlacementNodeSelector,
+			Stateful:                    req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -120,18 +123,19 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 		}, nil
 	case model.AppBuildStrategyDockerfile:
 		importResult, err := i.ImportGitHubDockerfileImage(ctx, GitHubDockerImportRequest{
-			SourceType:            sourceType,
-			RepoURL:               req.RepoURL,
-			RepoAuthToken:         req.RepoAuthToken,
-			Branch:                req.Branch,
-			DockerfilePath:        req.DockerfilePath,
-			BuildContextDir:       req.BuildContextDir,
-			RegistryPushBase:      req.RegistryPushBase,
-			ImageRepository:       req.ImageRepository,
-			ImageNameSuffix:       req.ImageNameSuffix,
-			JobLabels:             req.JobLabels,
-			PlacementNodeSelector: req.PlacementNodeSelector,
-			Stateful:              req.Stateful,
+			SourceType:                  sourceType,
+			RepoURL:                     req.RepoURL,
+			RepoAuthToken:               req.RepoAuthToken,
+			Branch:                      req.Branch,
+			DockerfilePath:              req.DockerfilePath,
+			BuildContextDir:             req.BuildContextDir,
+			RegistryPushBase:            req.RegistryPushBase,
+			DestinationRegistryPushBase: req.DestinationRegistryPushBase,
+			ImageRepository:             req.ImageRepository,
+			ImageNameSuffix:             req.ImageNameSuffix,
+			JobLabels:                   req.JobLabels,
+			PlacementNodeSelector:       req.PlacementNodeSelector,
+			Stateful:                    req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -157,17 +161,18 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 		}, nil
 	case model.AppBuildStrategyBuildpacks:
 		importResult, err := i.ImportGitHubBuildpacks(ctx, GitHubBuildpacksImportRequest{
-			SourceType:            sourceType,
-			RepoURL:               req.RepoURL,
-			RepoAuthToken:         req.RepoAuthToken,
-			Branch:                req.Branch,
-			SourceDir:             req.SourceDir,
-			RegistryPushBase:      req.RegistryPushBase,
-			ImageRepository:       req.ImageRepository,
-			ImageNameSuffix:       req.ImageNameSuffix,
-			JobLabels:             req.JobLabels,
-			PlacementNodeSelector: req.PlacementNodeSelector,
-			Stateful:              req.Stateful,
+			SourceType:                  sourceType,
+			RepoURL:                     req.RepoURL,
+			RepoAuthToken:               req.RepoAuthToken,
+			Branch:                      req.Branch,
+			SourceDir:                   req.SourceDir,
+			RegistryPushBase:            req.RegistryPushBase,
+			DestinationRegistryPushBase: req.DestinationRegistryPushBase,
+			ImageRepository:             req.ImageRepository,
+			ImageNameSuffix:             req.ImageNameSuffix,
+			JobLabels:                   req.JobLabels,
+			PlacementNodeSelector:       req.PlacementNodeSelector,
+			Stateful:                    req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
@@ -192,17 +197,18 @@ func (i *Importer) ImportGitHubSource(ctx context.Context, req GitHubSourceImpor
 		}, nil
 	case model.AppBuildStrategyNixpacks:
 		importResult, err := i.ImportGitHubNixpacks(ctx, GitHubNixpacksImportRequest{
-			SourceType:            sourceType,
-			RepoURL:               req.RepoURL,
-			RepoAuthToken:         req.RepoAuthToken,
-			Branch:                req.Branch,
-			SourceDir:             req.SourceDir,
-			RegistryPushBase:      req.RegistryPushBase,
-			ImageRepository:       req.ImageRepository,
-			ImageNameSuffix:       req.ImageNameSuffix,
-			JobLabels:             req.JobLabels,
-			PlacementNodeSelector: req.PlacementNodeSelector,
-			Stateful:              req.Stateful,
+			SourceType:                  sourceType,
+			RepoURL:                     req.RepoURL,
+			RepoAuthToken:               req.RepoAuthToken,
+			Branch:                      req.Branch,
+			SourceDir:                   req.SourceDir,
+			RegistryPushBase:            req.RegistryPushBase,
+			DestinationRegistryPushBase: req.DestinationRegistryPushBase,
+			ImageRepository:             req.ImageRepository,
+			ImageNameSuffix:             req.ImageNameSuffix,
+			JobLabels:                   req.JobLabels,
+			PlacementNodeSelector:       req.PlacementNodeSelector,
+			Stateful:                    req.Stateful,
 		})
 		if err != nil {
 			return GitHubSourceImportOutput{}, err
