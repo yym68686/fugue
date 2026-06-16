@@ -94,6 +94,7 @@ func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 			},
 		},
 	}, `"dnsgen_probe"`, false, "")
+	service.refreshEdgeHealth(context.Background())
 
 	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
 	if answer.Rcode != miekgdns.RcodeSuccess {
@@ -105,6 +106,59 @@ func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 	a, ok := answer.Answer[0].(*miekgdns.A)
 	if !ok || a.A.String() != "203.0.113.11" {
 		t.Fatalf("expected healthy fallback edge answer, got %+v", answer.Answer[0])
+	}
+}
+
+func TestServiceFallsBackToNextLiveHealthyCandidateBeforeLimiting(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:                   "dns.fugue.pro",
+		TTL:                    60,
+		Nameservers:            []string{"ns1.dns.fugue.pro"},
+		EdgeGroupID:            "edge-group-country-us",
+		EdgeHealthProbeEnabled: true,
+		EdgeHealthProbeTimeout: 10 * time.Millisecond,
+	}, log.New(ioDiscard{}, "", 0))
+	service.edgeProbe = func(ctx context.Context, ip string) bool {
+		return ip == "51.38.126.103"
+	}
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_live_fallback",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"15.204.94.71", "51.38.126.103"},
+				TTL:        60,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				Status:     model.EdgeRouteStatusActive,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindGeo,
+					ECSEnabled:         true,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 0, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 50, Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_live_fallback"`, false, "")
+	service.refreshEdgeHealth(context.Background())
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess {
+		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
+	}
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected one live fallback answer, got %+v", answer.Answer)
+	}
+	a, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || a.A.String() != "51.38.126.103" {
+		t.Fatalf("expected live healthy fallback edge answer, got %+v", answer.Answer)
 	}
 }
 
@@ -159,8 +213,8 @@ func TestServiceOrdersGeoDNSCandidatesFromECS(t *testing.T) {
 	req.Extra = append(req.Extra, opt)
 
 	answer := dnsQueryMsg(t, service, req)
-	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 2 {
-		t.Fatalf("expected two successful answers, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatalf("expected one selected answer, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
 	if !ok || first.A.String() != "5.102.124.125" {
@@ -203,8 +257,8 @@ func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
 	}, `"dnsgen_local"`, false, "")
 
 	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
-	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 2 {
-		t.Fatalf("expected two successful answers, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatalf("expected one selected answer, got rcode=%s answers=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
 	if !ok || first.A.String() != "15.204.94.71" {
@@ -212,7 +266,7 @@ func TestServicePrefersLocalEdgeGroupWhenNoGeoIPOverrideExists(t *testing.T) {
 	}
 }
 
-func TestServiceLatencyAwareWeightsOrderAnswersButKeepFallback(t *testing.T) {
+func TestServiceLatencyAwareKeepsLocalHintWhenHealthy(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.DNSConfig{
@@ -251,20 +305,16 @@ func TestServiceLatencyAwareWeightsOrderAnswersButKeepFallback(t *testing.T) {
 	if answer.Rcode != miekgdns.RcodeSuccess {
 		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
 	}
-	if len(answer.Answer) != 2 {
-		t.Fatalf("expected clear latency winner plus fallback answer, got %+v", answer.Answer)
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected one locality-selected answer, got %+v", answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
-	if !ok || first.A.String() != "15.204.94.71" {
-		t.Fatalf("expected latency weight to beat local geo hint, got %+v", answer.Answer)
-	}
-	second, ok := answer.Answer[1].(*miekgdns.A)
-	if !ok || second.A.String() != "51.38.126.103" {
-		t.Fatalf("expected healthy route-ready fallback answer, got %+v", answer.Answer)
+	if !ok || first.A.String() != "51.38.126.103" {
+		t.Fatalf("expected local healthy edge to beat global latency weight, got %+v", answer.Answer)
 	}
 }
 
-func TestServiceLatencyAwareKeepsTopTwoWhenWeightsAreClose(t *testing.T) {
+func TestServiceLatencyAwareSelectsTopAnswerWhenWeightsAreClose(t *testing.T) {
 	t.Parallel()
 
 	service := NewService(config.DNSConfig{
@@ -301,16 +351,12 @@ func TestServiceLatencyAwareKeepsTopTwoWhenWeightsAreClose(t *testing.T) {
 	if answer.Rcode != miekgdns.RcodeSuccess {
 		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
 	}
-	if len(answer.Answer) != 2 {
-		t.Fatalf("expected close latency candidates to keep top two answers, got %+v", answer.Answer)
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected close latency candidates to keep one selected answer, got %+v", answer.Answer)
 	}
 	first, ok := answer.Answer[0].(*miekgdns.A)
 	if !ok || first.A.String() != "15.204.94.71" {
 		t.Fatalf("expected faster weighted edge first, got %+v", answer.Answer)
-	}
-	second, ok := answer.Answer[1].(*miekgdns.A)
-	if !ok || second.A.String() != "51.38.126.103" {
-		t.Fatalf("expected local edge to stay as second fallback, got %+v", answer.Answer)
 	}
 }
 

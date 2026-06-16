@@ -326,6 +326,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 		return dnsAnswerCheckReport{}, err
 	}
 	routeReady := routeReadyEdgeGroups(explain)
+	dnsTargetOnly := len(routeReady) == 0 && strings.EqualFold(strings.TrimSpace(explain.ServingMode), "unrouted")
 	dnsNodes, err := client.ListDNSNodes("")
 	if err != nil {
 		return dnsAnswerCheckReport{}, err
@@ -338,7 +339,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 	edgeNodesByIP := edgeNodesByIPFromEdgeNodes(edgeNodes.Nodes)
 
 	nodes := make([]dnsAnswerCheckNode, 0, len(dnsNodes.Nodes))
-	pass := len(routeReady) > 0
+	pass := len(routeReady) > 0 || dnsTargetOnly
 	for _, node := range dnsNodes.Nodes {
 		if !dnsNodeServesHostname(node, hostname) {
 			continue
@@ -375,13 +376,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 			if len(groups) == 0 {
 				continue
 			}
-			edgeReady := false
-			for _, groupID := range groups {
-				if routeReady[groupID] {
-					edgeReady = true
-					break
-				}
-			}
+			edgeReady := dnsAnswerEdgeReady(groups, routeReady, dnsTargetOnly)
 			if !edgeReady {
 				nodePass = false
 				pass = false
@@ -400,6 +395,9 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 		}
 		if len(seenGroups) > 0 {
 			nodeReport.EdgeGroups = sortedStringSetKeys(seenGroups)
+		}
+		if dnsTargetOnly && nodeReport.Message == "" {
+			nodeReport.Message = "dns target hostname is not an HTTP route; validated answers against healthy edge inventory"
 		}
 		nodeReport.RouteReady = nodePass
 		nodeReport.Pass = nodePass
@@ -506,7 +504,7 @@ func queryDNSNodeAnswers(hostname string, node model.DNSNode, clientIP string) (
 	} else {
 		warnings = append(warnings, fmt.Sprintf("tcp AAAA query failed: %v", err))
 	}
-	answers = uniqueSortedStrings(answers)
+	answers = uniqueStringsPreserveOrder(answers)
 	if len(answers) == 0 {
 		if len(warnings) == 0 {
 			warnings = append(warnings, "no A/AAAA answers")
@@ -553,7 +551,7 @@ func queryAuthoritativeDNSRecord(hostname, address, network string, qtype uint16
 			}
 		}
 	}
-	return uniqueSortedStrings(answers), nil
+	return uniqueStringsPreserveOrder(answers), nil
 }
 
 func dnsClientSubnetOption(clientIP string) *miekgdns.EDNS0_SUBNET {
@@ -594,6 +592,21 @@ func routeReadyEdgeGroups(explain model.RouteExplainResponse) map[string]bool {
 		add(*explain.Route)
 	}
 	return out
+}
+
+func dnsAnswerEdgeReady(groups []string, routeReady map[string]bool, dnsTargetOnly bool) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	if dnsTargetOnly {
+		return true
+	}
+	for _, groupID := range groups {
+		if routeReady[strings.TrimSpace(groupID)] {
+			return true
+		}
+	}
+	return false
 }
 
 func edgeGroupsByIPFromEdgeNodes(nodes []model.EdgeNode) map[string][]string {
@@ -691,6 +704,23 @@ func sortedStringSetKeys(values map[string]struct{}) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func uniqueStringsPreserveOrder(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func normalizeDNSHostname(raw string) string {

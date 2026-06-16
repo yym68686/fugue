@@ -199,7 +199,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
-	latencyProfiles, err := s.edgeDNSLatencyProfiles()
+	latencyProfiles, err := s.edgeDNSLatencyProfiles(options)
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
@@ -1058,7 +1058,13 @@ type edgeDNSLatencyGroupAccumulator struct {
 	ASNCounts             map[string]int
 }
 
-func (s *Server) edgeDNSLatencyProfiles() (map[string]*edgeDNSLatencyProfile, error) {
+type edgeDNSLatencyScope struct {
+	Country string
+	Region  string
+	ASN     string
+}
+
+func (s *Server) edgeDNSLatencyProfiles(options edgeDNSBundleOptions) (map[string]*edgeDNSLatencyProfile, error) {
 	if s.store == nil {
 		return nil, nil
 	}
@@ -1066,12 +1072,30 @@ func (s *Server) edgeDNSLatencyProfiles() (map[string]*edgeDNSLatencyProfile, er
 	if err != nil {
 		return nil, err
 	}
-	return edgeDNSLatencyProfilesByHostname(samples), nil
+	return edgeDNSLatencyProfilesByHostname(samples, edgeDNSLatencyScopeForOptions(options)), nil
 }
 
-func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample) map[string]*edgeDNSLatencyProfile {
+func edgeDNSLatencyScopeForOptions(options edgeDNSBundleOptions) edgeDNSLatencyScope {
+	return edgeDNSLatencyScope{
+		Country: edgeDNSCountryFromEdgeGroupID(options.EdgeGroupID),
+	}
+}
+
+func edgeDNSCountryFromEdgeGroupID(edgeGroupID string) string {
+	edgeGroupID = strings.ToLower(strings.TrimSpace(edgeGroupID))
+	const marker = "-country-"
+	if index := strings.Index(edgeGroupID, marker); index >= 0 && index+len(marker) < len(edgeGroupID) {
+		return edgeGroupID[index+len(marker):]
+	}
+	return ""
+}
+
+func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, scope edgeDNSLatencyScope) map[string]*edgeDNSLatencyProfile {
 	byHostname := make(map[string]map[string]*edgeDNSLatencyGroupAccumulator)
 	for _, sample := range samples {
+		if !edgeDNSLatencySampleMatchesScope(sample, scope) {
+			continue
+		}
 		hostname := normalizeExternalAppDomain(sample.Hostname)
 		edgeGroupID := strings.TrimSpace(sample.EdgeGroupID)
 		if hostname == "" || edgeGroupID == "" {
@@ -1119,6 +1143,25 @@ func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample) map
 		}
 	}
 	return profiles
+}
+
+func edgeDNSLatencySampleMatchesScope(sample model.EdgePerformanceSample, scope edgeDNSLatencyScope) bool {
+	country := strings.ToLower(strings.TrimSpace(scope.Country))
+	region := strings.TrimSpace(scope.Region)
+	asn := strings.TrimSpace(scope.ASN)
+	if country == "" && region == "" && asn == "" {
+		return false
+	}
+	if country != "" && strings.EqualFold(strings.TrimSpace(sample.ClientCountry), country) {
+		return true
+	}
+	if region != "" && strings.EqualFold(strings.TrimSpace(sample.ClientRegion), region) {
+		return true
+	}
+	if asn != "" && strings.EqualFold(strings.TrimSpace(sample.ClientASN), asn) {
+		return true
+	}
+	return false
 }
 
 func buildEdgeDNSLatencyProfile(hostname string, groups map[string]*edgeDNSLatencyGroupAccumulator) *edgeDNSLatencyProfile {
