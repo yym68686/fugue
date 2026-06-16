@@ -253,6 +253,40 @@ func TestWaitForManagedAppRolloutFailsWhenAppliedTemplatePodCrashes(t *testing.T
 	}
 }
 
+func TestDeploymentTemplatePodFailureMessageIgnoresUnschedulableTemplatePod(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.example/fugue-apps/demo:v2",
+			Replicas: 1,
+		},
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected managed app deployment fixture")
+	}
+
+	pod := readyTemplatePod("demo-pending", deployment, kubeResourceRequirements{})
+	pod.Status.Phase = "Pending"
+	pod.Status.Conditions = []kubePodCondition{
+		{
+			Type:    "PodScheduled",
+			Status:  "False",
+			Reason:  "Unschedulable",
+			Message: "0/6 nodes are available: 1 Insufficient cpu, 5 Preemption is not helpful for scheduling.",
+		},
+	}
+
+	if got := deploymentTemplatePodFailureMessage([]kubePod{pod}, deployment); got != "" {
+		t.Fatalf("expected unschedulable pod to wait instead of failing rollout, got %q", got)
+	}
+}
+
 func TestDeploymentRolloutReadyRequiresExpectedRelease(t *testing.T) {
 	t.Parallel()
 

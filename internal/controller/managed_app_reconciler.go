@@ -1035,7 +1035,7 @@ func summarizeManagedAppFailureLine(subject, reason, message string) string {
 
 func isFailingManagedAppPodReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "evicted", "unexpectedadmissionerror", "unschedulable":
+	case "evicted", "unexpectedadmissionerror":
 		return true
 	default:
 		return false
@@ -1061,10 +1061,11 @@ func isFailingManagedAppPodCondition(condition kubePodCondition) bool {
 		return false
 	}
 	reason := strings.ToLower(strings.TrimSpace(condition.Reason))
-	if reason == "unschedulable" {
-		return true
-	}
 	if !strings.EqualFold(strings.TrimSpace(condition.Type), "PodScheduled") {
+		return false
+	}
+	// FailedScheduling is often temporary while the scheduler waits for capacity.
+	if reason == "unschedulable" {
 		return false
 	}
 	message := strings.ToLower(strings.TrimSpace(condition.Message))
@@ -1080,7 +1081,6 @@ func isFailingManagedAppPodCondition(condition kubePodCondition) bool {
 		"did not tolerate",
 		"untolerated taint",
 		"had taint",
-		"insufficient ",
 		"node affinity",
 	} {
 		if strings.Contains(message, marker) {

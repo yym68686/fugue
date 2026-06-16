@@ -1435,7 +1435,7 @@ func TestBuildManagedAppStatusKeepsContainerCreatingPodsAsProgressing(t *testing
 	}
 }
 
-func TestBuildManagedAppStatusMarksUnschedulablePodsAsError(t *testing.T) {
+func TestBuildManagedAppStatusKeepsUnschedulablePodsProgressing(t *testing.T) {
 	app := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -1497,17 +1497,11 @@ func TestBuildManagedAppStatusMarksUnschedulablePodsAsError(t *testing.T) {
 
 	status := buildManagedAppStatus(managed, app, deployment, true, pods, nil)
 
-	if status.Phase != runtime.ManagedAppPhaseError {
-		t.Fatalf("expected phase error, got %q", status.Phase)
+	if status.Phase != runtime.ManagedAppPhaseProgressing {
+		t.Fatalf("expected phase progressing, got %q message=%q", status.Phase, status.Message)
 	}
-	if !strings.Contains(status.Message, "volume node affinity conflict") {
-		t.Fatalf("expected node affinity conflict in message, got %q", status.Message)
-	}
-	if !strings.Contains(status.Message, "disk-pressure") {
-		t.Fatalf("expected disk-pressure in message, got %q", status.Message)
-	}
-	if !strings.Contains(status.Message, "demo-abc123") {
-		t.Fatalf("expected pod name in message, got %q", status.Message)
+	if strings.Contains(status.Message, "Unschedulable") || strings.Contains(status.Message, "volume node affinity conflict") {
+		t.Fatalf("expected scheduling failure to stay out of terminal status message, got %q", status.Message)
 	}
 }
 
