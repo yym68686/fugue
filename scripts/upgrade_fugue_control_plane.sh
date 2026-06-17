@@ -877,12 +877,21 @@ node_local_build_plane_preflight_override_allowed() {
       internal/controller/managed_app_reconciler_test.go|\
       internal/controller/managed_app_rollout.go|\
       internal/controller/managed_app_rollout_test.go|\
+      internal/store/machines.go|\
+      internal/store/store_test.go|\
+      internal/api/cluster_node_policy.go|\
+      internal/api/cluster_node_policy_seed_test.go|\
+      internal/api/cluster_node_policy_status.go|\
+      internal/api/cluster_node_views.go|\
+      internal/api/cluster_node_views_test.go|\
       internal/api/join_cluster.go|\
       internal/api/import_github_compose_test.go|\
       internal/api/import_github_topology.go|\
       internal/api/import_network_mode.go|\
       internal/api/node_updater.go|\
       internal/api/node_updater_test.go|\
+      internal/api/runtime_pool.go|\
+      internal/api/server_test.go|\
       deploy/helm/fugue/templates/_helpers.tpl|\
       deploy/helm/fugue/templates/controller-deployment.yaml|\
       scripts/upgrade_fugue_control_plane.sh|\
