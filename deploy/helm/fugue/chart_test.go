@@ -421,6 +421,10 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"value: \"fg-\"",
 		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR",
 		"value: \"app.kubernetes.io/managed-by=fugue\"",
+		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES",
+		"value: \"2000\"",
+		"name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE",
+		"value: \"20000\"",
 		"name: FUGUE_OBSERVABILITY_TENANT_ID",
 		"value: \"tenant_test\"",
 		"name: FUGUE_OBSERVABILITY_LOKI_URL",
@@ -521,6 +525,7 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		`image: "prom/prometheus:test"`,
 		"--storage.tsdb.retention.time=24h",
 		"--web.enable-remote-write-receiver",
+		"checksum/prometheus-config:",
 		"path: /-/ready",
 		"path: /-/healthy",
 	} {
