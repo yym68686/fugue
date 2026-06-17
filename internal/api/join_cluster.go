@@ -647,6 +647,150 @@ log_step() {
   printf '[fugue] %%s\n' "$*" >&2
 }
 
+detect_package_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    printf 'apt-get'
+    return 0
+  fi
+  if command -v dnf >/dev/null 2>&1; then
+    printf 'dnf'
+    return 0
+  fi
+  if command -v yum >/dev/null 2>&1; then
+    printf 'yum'
+    return 0
+  fi
+  if command -v microdnf >/dev/null 2>&1; then
+    printf 'microdnf'
+    return 0
+  fi
+  if command -v apk >/dev/null 2>&1; then
+    printf 'apk'
+    return 0
+  fi
+  if command -v zypper >/dev/null 2>&1; then
+    printf 'zypper'
+    return 0
+  fi
+  return 1
+}
+
+append_unique_word() {
+  local words="$1"
+  local word="$2"
+  [ -n "${word}" ] || {
+    printf '%%s' "${words}"
+    return 0
+  }
+  case " ${words} " in
+    *" ${word} "*)
+      printf '%%s' "${words}"
+      ;;
+    *)
+      if [ -n "${words}" ]; then
+        printf '%%s %%s' "${words}" "${word}"
+      else
+        printf '%%s' "${word}"
+      fi
+      ;;
+  esac
+}
+
+package_for_command() {
+  local manager="$1"
+  local command_name="$2"
+  case "${command_name}" in
+    curl)
+      printf 'curl'
+      ;;
+    ip)
+      case "${manager}" in
+        apt-get|apk|zypper)
+          printf 'iproute2'
+          ;;
+        *)
+          printf 'iproute'
+          ;;
+      esac
+      ;;
+    awk)
+      printf 'gawk'
+      ;;
+    cmp)
+      printf 'diffutils'
+      ;;
+    df)
+      printf 'coreutils'
+      ;;
+  esac
+}
+
+install_os_packages() {
+  local manager="$1"
+  shift
+  [ "$#" -gt 0 ] || return 0
+  case "${manager}" in
+    apt-get)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends "$@"
+      ;;
+    dnf)
+      dnf install -y "$@"
+      ;;
+    yum)
+      yum install -y "$@"
+      ;;
+    microdnf)
+      microdnf install -y "$@"
+      ;;
+    apk)
+      apk add --no-cache "$@"
+      ;;
+    zypper)
+      zypper --non-interactive install --no-recommends "$@"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ensure_commands_installed() {
+  local manager=""
+  local missing=""
+  local packages=""
+  local command_name=""
+  local package_name=""
+
+  for command_name in "$@"; do
+    if command -v "${command_name}" >/dev/null 2>&1; then
+      continue
+    fi
+    missing="$(append_unique_word "${missing}" "${command_name}")"
+  done
+  [ -n "${missing}" ] || return 0
+
+  manager="$(detect_package_manager || true)"
+  if [ -z "${manager}" ]; then
+    log_step "No supported package manager found for missing commands:${missing}; continuing to explicit command checks."
+    return 0
+  fi
+
+  for command_name in ${missing}; do
+    package_name="$(package_for_command "${manager}" "${command_name}")"
+    packages="$(append_unique_word "${packages}" "${package_name}")"
+  done
+  [ -n "${packages}" ] || return 0
+
+  log_step "Installing join prerequisites for missing commands:${missing}."
+  install_os_packages "${manager}" ${packages}
+}
+
+ensure_join_prerequisites() {
+  ensure_commands_installed curl ip awk df cmp
+}
+
 format_duration() {
   local total_seconds="${1:-0}"
   local hours=0
@@ -1570,12 +1714,15 @@ connect_mesh() {
       else
         log_step "tailscaled is already active."
       fi
-      run_with_heartbeat "Running tailscale up for ${hostname}" "10-60s" tailscale up \
+      if ! run_with_heartbeat "Running tailscale up for ${hostname}" "10-60s" tailscale up \
         --login-server "${FUGUE_JOIN_MESH_LOGIN_SERVER}" \
         --authkey "${FUGUE_JOIN_MESH_AUTH_KEY}" \
         --hostname "${hostname}" \
         --accept-dns=false \
-        --reset
+        --reset; then
+        log_step "tailscale mesh login failed. The control-plane mesh auth key may be expired, revoked, or rejected by ${FUGUE_JOIN_MESH_LOGIN_SERVER}."
+        return 1
+      fi
       wait_for_tailscale_ipv4
       ;;
     *)
@@ -1648,14 +1795,25 @@ install_nfs_client_tools() {
     log_step "NFS client tools are already installed."
     return 0
   fi
-  if command -v apt-get >/dev/null 2>&1; then
-    log_step "Installing NFS client tools required by shared-workspace volumes..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends nfs-common
-    return 0
-  fi
-  log_step "Skipping NFS client tools install because apt-get is unavailable; shared-workspace NFS volumes may not mount."
+  local manager=""
+  manager="$(detect_package_manager || true)"
+  case "${manager}" in
+    apt-get)
+      log_step "Installing NFS client tools required by shared-workspace volumes..."
+      install_os_packages "${manager}" nfs-common
+      ;;
+    dnf|yum|microdnf|apk)
+      log_step "Installing NFS client tools required by shared-workspace volumes..."
+      install_os_packages "${manager}" nfs-utils
+      ;;
+    zypper)
+      log_step "Installing NFS client tools required by shared-workspace volumes..."
+      install_os_packages "${manager}" nfs-client
+      ;;
+    *)
+      log_step "Skipping NFS client tools install because no supported package manager is available; shared-workspace NFS volumes may not mount."
+      ;;
+  esac
   return 0
 }
 
@@ -1700,18 +1858,38 @@ reconcile_cni_bridge_mtu() {
 }
 
 install_dns_escape_hatch_tools() {
-  if command -v dnsmasq >/dev/null 2>&1; then
+  if command -v dnsmasq >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 && command -v iptables-save >/dev/null 2>&1; then
     log_step "Local DNS escape hatch tools are already installed."
     return 0
   fi
-  if command -v apt-get >/dev/null 2>&1; then
-    log_step "Installing dnsmasq for the local DNS escape hatch..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends dnsmasq
+  local manager=""
+  manager="$(detect_package_manager || true)"
+  case "${manager}" in
+    apt-get)
+      log_step "Installing dnsmasq and iptables for the local DNS escape hatch..."
+      install_os_packages "${manager}" dnsmasq iptables
+      ;;
+    dnf|yum|microdnf)
+      log_step "Installing dnsmasq and iptables for the local DNS escape hatch..."
+      install_os_packages "${manager}" dnsmasq iptables-nft
+      ;;
+    apk)
+      log_step "Installing dnsmasq and iptables for the local DNS escape hatch..."
+      install_os_packages "${manager}" dnsmasq iptables
+      ;;
+    zypper)
+      log_step "Installing dnsmasq and iptables for the local DNS escape hatch..."
+      install_os_packages "${manager}" dnsmasq iptables
+      ;;
+    *)
+      log_step "Skipping local DNS escape hatch because required tools are unavailable and no supported package manager is available."
+      return 1
+      ;;
+  esac
+  if command -v dnsmasq >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 && command -v iptables-save >/dev/null 2>&1; then
     return 0
   fi
-  log_step "Skipping local DNS escape hatch because dnsmasq is unavailable and apt-get is missing."
+  log_step "Skipping local DNS escape hatch because required tools are still unavailable after package installation."
   return 1
 }
 
@@ -2193,8 +2371,9 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-require_cmd curl
 require_cmd systemctl
+ensure_join_prerequisites
+require_cmd curl
 require_cmd ip
 require_cmd cmp
 require_cmd awk

@@ -1537,14 +1537,30 @@ detect_primary_mesh_ip() {
   tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'
 }
 
-detect_cluster_join_server() {
+detect_config_secret_value() {
+  local key="$1"
   local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_SERVER}' 2>/dev/null | base64 --decode 2>/dev/null || true
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o "jsonpath={.data.${key}}" 2>/dev/null | base64 --decode 2>/dev/null || true
+}
+
+detect_cluster_join_server() {
+  detect_config_secret_value FUGUE_CLUSTER_JOIN_SERVER
 }
 
 detect_cluster_join_server_fallbacks() {
-  local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}' 2>/dev/null | base64 --decode 2>/dev/null || true
+  detect_config_secret_value FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS
+}
+
+detect_cluster_join_mesh_provider() {
+  detect_config_secret_value FUGUE_CLUSTER_JOIN_MESH_PROVIDER
+}
+
+detect_cluster_join_mesh_login_server() {
+  detect_config_secret_value FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER
+}
+
+detect_cluster_join_mesh_auth_key() {
+  detect_config_secret_value FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY
 }
 
 control_plane_postgres_name() {
@@ -5688,6 +5704,22 @@ PY
     fail "FUGUE_EDGE_ASSET_CACHE_MAX_BYTES must be an integer"
   fi
   dns_extra_groups_yaml >/dev/null
+  if [[ -z "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}" ]]; then
+    FUGUE_CLUSTER_JOIN_MESH_PROVIDER="$(detect_cluster_join_mesh_provider || true)"
+  fi
+  if [[ -z "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}" ]]; then
+    FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER="$(detect_cluster_join_mesh_login_server || true)"
+  fi
+  if [[ -z "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}" ]]; then
+    FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY="$(detect_cluster_join_mesh_auth_key || true)"
+  fi
+  if [[ -z "$(trim_field "${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-}")" && -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}")" ]]; then
+    FUGUE_MESH_RECOVERY_LOGIN_SERVER="${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER}"
+  fi
+  if [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}")" ]]; then
+    [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}")" ]] || fail "FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER is required when FUGUE_CLUSTER_JOIN_MESH_PROVIDER is set"
+    [[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] || fail "FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY is required when FUGUE_CLUSTER_JOIN_MESH_PROVIDER is set"
+  fi
   case "${FUGUE_MESH_RECOVERY_ENABLED}" in
     true|false) ;;
     *) fail "FUGUE_MESH_RECOVERY_ENABLED must be true or false" ;;
@@ -5780,6 +5812,9 @@ PY
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "cluster join server fallbacks: ${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-<none>}"
+  log "cluster join mesh provider: ${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-<none>}"
+  log "cluster join mesh login server: ${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-<none>}"
+  log "cluster join mesh auth key: $([[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] && printf configured || printf '<none>')"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
   log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
@@ -5915,6 +5950,9 @@ PY
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
     --set-string api.clusterJoinServerFallbacks="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}")" \
+    --set-string api.clusterJoinMeshProvider="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}")" \
+    --set-string api.clusterJoinMeshLoginServer="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}")" \
+    --set-string api.clusterJoinMeshAuthKey="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" \
     --set-string api.dataBackend.provider="${FUGUE_DATA_BACKEND_PROVIDER}" \
     --set-string api.dataBackend.bucket="${FUGUE_DATA_BACKEND_BUCKET}" \
     --set-string api.dataBackend.region="${FUGUE_DATA_BACKEND_REGION}" \
