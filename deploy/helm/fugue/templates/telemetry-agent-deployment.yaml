@@ -74,19 +74,21 @@ spec:
             - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL
               value: {{ .Values.observability.agent.kubernetesLogs.pollInterval | quote }}
             - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES
-              value: {{ .Values.observability.agent.kubernetesLogs.tailLines | quote }}
+              value: {{ .Values.observability.agent.kubernetesLogs.tailLines | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS
-              value: {{ .Values.observability.agent.kubernetesLogs.maxPods | quote }}
+              value: {{ .Values.observability.agent.kubernetesLogs.maxPods | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE
-              value: {{ .Values.observability.agent.kubernetesLogs.maxLinesPerCycle | quote }}
+              value: {{ .Values.observability.agent.kubernetesLogs.maxLinesPerCycle | int64 | quote }}
+            - name: FUGUE_OBSERVABILITY_QUEUE_SIZE
+              value: {{ .Values.observability.agent.queueSize | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_BATCH_SIZE
-              value: {{ .Values.observability.agent.batchSize | quote }}
+              value: {{ .Values.observability.agent.batchSize | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES
-              value: {{ .Values.observability.agent.maxPayloadBytes | quote }}
+              value: {{ .Values.observability.agent.maxPayloadBytes | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES
-              value: {{ .Values.observability.agent.memoryLimitBytes | quote }}
+              value: {{ .Values.observability.agent.memoryLimitBytes | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS
-              value: {{ .Values.observability.agent.retryMaxAttempts | quote }}
+              value: {{ .Values.observability.agent.retryMaxAttempts | int64 | quote }}
             - name: FUGUE_OBSERVABILITY_TENANT_ID
               value: {{ .Values.observability.identity.tenantID | quote }}
             - name: FUGUE_OBSERVABILITY_PROJECT_ID

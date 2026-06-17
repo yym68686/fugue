@@ -11,12 +11,12 @@ import (
 const (
 	DefaultRetention                     = 24 * time.Hour
 	DefaultExportTimeout                 = 5 * time.Second
-	DefaultQueueSize                     = 4096
+	DefaultQueueSize                     = 32768
 	DefaultSampleRate                    = 1.0
 	DefaultScrapeInterval                = 30 * time.Second
-	DefaultBatchSize                     = 128
+	DefaultBatchSize                     = 512
 	DefaultMaxPayloadBytes               = 1 << 20
-	DefaultMemoryLimit                   = 64 << 20
+	DefaultMemoryLimit                   = 128 << 20
 	DefaultRetryAttempts                 = 3
 	DefaultKubernetesLogPollInterval     = 15 * time.Second
 	DefaultKubernetesLogTailLines        = 2000

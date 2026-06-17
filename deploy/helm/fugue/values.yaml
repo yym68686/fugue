@@ -145,9 +145,10 @@ observability:
       tailLines: 2000
       maxPods: 500
       maxLinesPerCycle: 20000
-    batchSize: 128
+    queueSize: 32768
+    batchSize: 512
     maxPayloadBytes: 1048576
-    memoryLimitBytes: 67108864
+    memoryLimitBytes: 134217728
     retryMaxAttempts: 3
     terminationGracePeriodSeconds: 20
     resources:
