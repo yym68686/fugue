@@ -305,6 +305,9 @@ edge:
         enabled: true
         http: 80
         https: 443
+      procNet:
+        hostPath: /proc
+        mountPath: /host/proc
       resources:
         requests:
           cpu: 10m

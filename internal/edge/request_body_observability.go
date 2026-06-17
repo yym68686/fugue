@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/tcpdiag"
 )
 
 type edgeActiveRequestBodyBuffer struct {
@@ -26,6 +27,7 @@ type edgeActiveRequestBodyBuffer struct {
 	RouteID           string
 	RouteKind         string
 	ClientIP          string
+	ClientRemoteAddr  string
 	ClientCountry     string
 	ClientRegion      string
 	ClientASN         string
@@ -43,6 +45,7 @@ type edgeActiveRequestBodyBuffer struct {
 	LastBodyByte      time.Duration
 	MaxReadGap        time.Duration
 	SlowLogged        bool
+	EdgeProxyTCPInfo  tcpdiag.Snapshot
 }
 
 type edgeActiveRequestBodyBufferSnapshot struct {
@@ -59,6 +62,7 @@ type edgeActiveRequestBodyBufferSnapshot struct {
 	RouteID           string
 	RouteKind         string
 	ClientIP          string
+	ClientRemoteAddr  string
 	ClientCountry     string
 	ClientRegion      string
 	ClientASN         string
@@ -77,39 +81,42 @@ type edgeActiveRequestBodyBufferSnapshot struct {
 	MaxReadGap        time.Duration
 	Elapsed           time.Duration
 	LastReadAge       time.Duration
+	EdgeProxyTCPInfo  tcpdiag.Snapshot
 }
 
 type edgeRequestBodyBufferDebugEntry struct {
-	EdgeRequestID   string `json:"edge_request_id"`
-	TraceID         string `json:"trace_id,omitempty"`
-	RequestID       string `json:"request_id,omitempty"`
-	Host            string `json:"host,omitempty"`
-	Method          string `json:"method,omitempty"`
-	Path            string `json:"path,omitempty"`
-	PathPrefix      string `json:"path_prefix,omitempty"`
-	AppID           string `json:"app_id,omitempty"`
-	TenantID        string `json:"tenant_id,omitempty"`
-	RuntimeID       string `json:"runtime_id,omitempty"`
-	RouteID         string `json:"route_id,omitempty"`
-	RouteKind       string `json:"route_kind,omitempty"`
-	ClientIP        string `json:"client_ip,omitempty"`
-	ClientCountry   string `json:"client_country,omitempty"`
-	ClientRegion    string `json:"client_region,omitempty"`
-	ClientASN       string `json:"client_asn,omitempty"`
-	StartedAt       string `json:"started_at"`
-	LastReadAt      string `json:"last_read_at"`
-	ElapsedMS       int64  `json:"elapsed_ms"`
-	LastReadAgeMS   int64  `json:"last_read_age_ms"`
-	ContentLength   int64  `json:"content_length"`
-	BytesRead       int64  `json:"bytes_read"`
-	ReadCalls       int64  `json:"read_calls"`
-	AvgBPS          int64  `json:"avg_bps"`
-	MinWindowBPS    int64  `json:"min_window_bps"`
-	BodyReadBlockMS int64  `json:"body_read_block_ms"`
-	FileWriteMS     int64  `json:"file_write_ms"`
-	FirstBodyByteMS int64  `json:"first_body_byte_ms"`
-	LastBodyByteMS  int64  `json:"last_body_byte_ms"`
-	MaxReadGapMS    int64  `json:"max_read_gap_ms"`
+	EdgeRequestID    string         `json:"edge_request_id"`
+	TraceID          string         `json:"trace_id,omitempty"`
+	RequestID        string         `json:"request_id,omitempty"`
+	Host             string         `json:"host,omitempty"`
+	Method           string         `json:"method,omitempty"`
+	Path             string         `json:"path,omitempty"`
+	PathPrefix       string         `json:"path_prefix,omitempty"`
+	AppID            string         `json:"app_id,omitempty"`
+	TenantID         string         `json:"tenant_id,omitempty"`
+	RuntimeID        string         `json:"runtime_id,omitempty"`
+	RouteID          string         `json:"route_id,omitempty"`
+	RouteKind        string         `json:"route_kind,omitempty"`
+	ClientIP         string         `json:"client_ip,omitempty"`
+	ClientRemoteAddr string         `json:"client_remote_addr,omitempty"`
+	ClientCountry    string         `json:"client_country,omitempty"`
+	ClientRegion     string         `json:"client_region,omitempty"`
+	ClientASN        string         `json:"client_asn,omitempty"`
+	StartedAt        string         `json:"started_at"`
+	LastReadAt       string         `json:"last_read_at"`
+	ElapsedMS        int64          `json:"elapsed_ms"`
+	LastReadAgeMS    int64          `json:"last_read_age_ms"`
+	ContentLength    int64          `json:"content_length"`
+	BytesRead        int64          `json:"bytes_read"`
+	ReadCalls        int64          `json:"read_calls"`
+	AvgBPS           int64          `json:"avg_bps"`
+	MinWindowBPS     int64          `json:"min_window_bps"`
+	BodyReadBlockMS  int64          `json:"body_read_block_ms"`
+	FileWriteMS      int64          `json:"file_write_ms"`
+	FirstBodyByteMS  int64          `json:"first_body_byte_ms"`
+	LastBodyByteMS   int64          `json:"last_body_byte_ms"`
+	MaxReadGapMS     int64          `json:"max_read_gap_ms"`
+	EdgeProxyTCPInfo map[string]any `json:"edge_proxy_tcp_info,omitempty"`
 }
 
 type edgeRequestBodyBufferDebugResponse struct {
@@ -122,36 +129,38 @@ func (s *Service) handleRequestBodyBuffers(w http.ResponseWriter, r *http.Reques
 	entries := make([]edgeRequestBodyBufferDebugEntry, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		entries = append(entries, edgeRequestBodyBufferDebugEntry{
-			EdgeRequestID:   strings.TrimSpace(snapshot.EdgeRequestID),
-			TraceID:         strings.TrimSpace(snapshot.TraceID),
-			RequestID:       strings.TrimSpace(snapshot.RequestID),
-			Host:            strings.TrimSpace(snapshot.Host),
-			Method:          strings.TrimSpace(snapshot.Method),
-			Path:            strings.TrimSpace(snapshot.Path),
-			PathPrefix:      strings.TrimSpace(snapshot.PathPrefix),
-			AppID:           strings.TrimSpace(snapshot.AppID),
-			TenantID:        strings.TrimSpace(snapshot.TenantID),
-			RuntimeID:       strings.TrimSpace(snapshot.RuntimeID),
-			RouteID:         strings.TrimSpace(snapshot.RouteID),
-			RouteKind:       strings.TrimSpace(snapshot.RouteKind),
-			ClientIP:        strings.TrimSpace(snapshot.ClientIP),
-			ClientCountry:   strings.TrimSpace(snapshot.ClientCountry),
-			ClientRegion:    strings.TrimSpace(snapshot.ClientRegion),
-			ClientASN:       strings.TrimSpace(snapshot.ClientASN),
-			StartedAt:       snapshot.StartedAt.UTC().Format(time.RFC3339Nano),
-			LastReadAt:      snapshot.LastReadAt.UTC().Format(time.RFC3339Nano),
-			ElapsedMS:       durationMilliseconds(snapshot.Elapsed),
-			LastReadAgeMS:   durationMilliseconds(snapshot.LastReadAge),
-			ContentLength:   nonNegativeInt64(snapshot.ContentLength),
-			BytesRead:       nonNegativeInt64(snapshot.BytesRead),
-			ReadCalls:       nonNegativeInt64(snapshot.ReadCalls),
-			AvgBPS:          nonNegativeInt64(snapshot.AvgBPS),
-			MinWindowBPS:    nonNegativeInt64(snapshot.MinWindowBPS),
-			BodyReadBlockMS: durationMilliseconds(snapshot.BodyReadBlock),
-			FileWriteMS:     durationMilliseconds(snapshot.FileWrite),
-			FirstBodyByteMS: durationMilliseconds(snapshot.FirstBodyByte),
-			LastBodyByteMS:  durationMilliseconds(snapshot.LastBodyByte),
-			MaxReadGapMS:    durationMilliseconds(snapshot.MaxReadGap),
+			EdgeRequestID:    strings.TrimSpace(snapshot.EdgeRequestID),
+			TraceID:          strings.TrimSpace(snapshot.TraceID),
+			RequestID:        strings.TrimSpace(snapshot.RequestID),
+			Host:             strings.TrimSpace(snapshot.Host),
+			Method:           strings.TrimSpace(snapshot.Method),
+			Path:             strings.TrimSpace(snapshot.Path),
+			PathPrefix:       strings.TrimSpace(snapshot.PathPrefix),
+			AppID:            strings.TrimSpace(snapshot.AppID),
+			TenantID:         strings.TrimSpace(snapshot.TenantID),
+			RuntimeID:        strings.TrimSpace(snapshot.RuntimeID),
+			RouteID:          strings.TrimSpace(snapshot.RouteID),
+			RouteKind:        strings.TrimSpace(snapshot.RouteKind),
+			ClientIP:         strings.TrimSpace(snapshot.ClientIP),
+			ClientRemoteAddr: strings.TrimSpace(snapshot.ClientRemoteAddr),
+			ClientCountry:    strings.TrimSpace(snapshot.ClientCountry),
+			ClientRegion:     strings.TrimSpace(snapshot.ClientRegion),
+			ClientASN:        strings.TrimSpace(snapshot.ClientASN),
+			StartedAt:        snapshot.StartedAt.UTC().Format(time.RFC3339Nano),
+			LastReadAt:       snapshot.LastReadAt.UTC().Format(time.RFC3339Nano),
+			ElapsedMS:        durationMilliseconds(snapshot.Elapsed),
+			LastReadAgeMS:    durationMilliseconds(snapshot.LastReadAge),
+			ContentLength:    nonNegativeInt64(snapshot.ContentLength),
+			BytesRead:        nonNegativeInt64(snapshot.BytesRead),
+			ReadCalls:        nonNegativeInt64(snapshot.ReadCalls),
+			AvgBPS:           nonNegativeInt64(snapshot.AvgBPS),
+			MinWindowBPS:     nonNegativeInt64(snapshot.MinWindowBPS),
+			BodyReadBlockMS:  durationMilliseconds(snapshot.BodyReadBlock),
+			FileWriteMS:      durationMilliseconds(snapshot.FileWrite),
+			FirstBodyByteMS:  durationMilliseconds(snapshot.FirstBodyByte),
+			LastBodyByteMS:   durationMilliseconds(snapshot.LastBodyByte),
+			MaxReadGapMS:     durationMilliseconds(snapshot.MaxReadGap),
+			EdgeProxyTCPInfo: edgeTCPInfoDebug(snapshot.EdgeProxyTCPInfo),
 		})
 	}
 	httpx.WriteJSON(w, http.StatusOK, edgeRequestBodyBufferDebugResponse{
@@ -174,25 +183,26 @@ func (s *Service) startActiveRequestBodyBufferRead(observed edgeProxyObservation
 		startedAt = startedAt.UTC()
 	}
 	entry := edgeActiveRequestBodyBuffer{
-		EdgeRequestID: strings.TrimSpace(observed.EdgeRequestID),
-		TraceID:       strings.TrimSpace(observed.TraceID),
-		RequestID:     strings.TrimSpace(observed.RequestID),
-		Host:          firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), strings.TrimSpace(observed.Host)),
-		Method:        strings.TrimSpace(observed.Method),
-		Path:          strings.TrimSpace(observed.Path),
-		PathPrefix:    model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
-		AppID:         strings.TrimSpace(observed.Route.AppID),
-		TenantID:      strings.TrimSpace(observed.Route.TenantID),
-		RuntimeID:     strings.TrimSpace(observed.Route.RuntimeID),
-		RouteID:       strings.TrimSpace(observed.Route.RouteGeneration),
-		RouteKind:     strings.TrimSpace(observed.Route.RouteKind),
-		ClientIP:      strings.TrimSpace(observed.ClientIP),
-		ClientCountry: strings.TrimSpace(observed.ClientCountry),
-		ClientRegion:  strings.TrimSpace(observed.ClientRegion),
-		ClientASN:     strings.TrimSpace(observed.ClientASN),
-		StartedAt:     startedAt,
-		LastReadAt:    startedAt,
-		ContentLength: contentLength,
+		EdgeRequestID:    strings.TrimSpace(observed.EdgeRequestID),
+		TraceID:          strings.TrimSpace(observed.TraceID),
+		RequestID:        strings.TrimSpace(observed.RequestID),
+		Host:             firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), strings.TrimSpace(observed.Host)),
+		Method:           strings.TrimSpace(observed.Method),
+		Path:             strings.TrimSpace(observed.Path),
+		PathPrefix:       model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
+		AppID:            strings.TrimSpace(observed.Route.AppID),
+		TenantID:         strings.TrimSpace(observed.Route.TenantID),
+		RuntimeID:        strings.TrimSpace(observed.Route.RuntimeID),
+		RouteID:          strings.TrimSpace(observed.Route.RouteGeneration),
+		RouteKind:        strings.TrimSpace(observed.Route.RouteKind),
+		ClientIP:         strings.TrimSpace(observed.ClientIP),
+		ClientRemoteAddr: strings.TrimSpace(observed.ClientRemoteAddr),
+		ClientCountry:    strings.TrimSpace(observed.ClientCountry),
+		ClientRegion:     strings.TrimSpace(observed.ClientRegion),
+		ClientASN:        strings.TrimSpace(observed.ClientASN),
+		StartedAt:        startedAt,
+		LastReadAt:       startedAt,
+		ContentLength:    contentLength,
 	}
 	s.bodyBufferActiveMu.Lock()
 	defer s.bodyBufferActiveMu.Unlock()
@@ -229,6 +239,21 @@ func (s *Service) updateActiveRequestBodyBufferRead(edgeRequestID string, result
 	entry.FirstBodyByte = result.FirstBodyByte
 	entry.LastBodyByte = result.LastBodyByte
 	entry.MaxReadGap = result.MaxReadGap
+	s.activeBodyBufferReads[edgeRequestID] = entry
+}
+
+func (s *Service) updateActiveRequestBodyBufferTCPInfo(edgeRequestID string, snapshot tcpdiag.Snapshot) {
+	edgeRequestID = strings.TrimSpace(edgeRequestID)
+	if s == nil || edgeRequestID == "" {
+		return
+	}
+	s.bodyBufferActiveMu.Lock()
+	defer s.bodyBufferActiveMu.Unlock()
+	entry, ok := s.activeBodyBufferReads[edgeRequestID]
+	if !ok {
+		return
+	}
+	entry.EdgeProxyTCPInfo = snapshot
 	s.activeBodyBufferReads[edgeRequestID] = entry
 }
 
@@ -331,6 +356,7 @@ func activeRequestBodyBufferSnapshot(entry edgeActiveRequestBodyBuffer, now time
 		RouteID:           entry.RouteID,
 		RouteKind:         entry.RouteKind,
 		ClientIP:          entry.ClientIP,
+		ClientRemoteAddr:  entry.ClientRemoteAddr,
 		ClientCountry:     entry.ClientCountry,
 		ClientRegion:      entry.ClientRegion,
 		ClientASN:         entry.ClientASN,
@@ -349,6 +375,7 @@ func activeRequestBodyBufferSnapshot(entry edgeActiveRequestBodyBuffer, now time
 		MaxReadGap:        entry.MaxReadGap,
 		Elapsed:           elapsed,
 		LastReadAge:       lastReadAge,
+		EdgeProxyTCPInfo:  entry.EdgeProxyTCPInfo,
 	}
 }
 
@@ -388,6 +415,11 @@ func (s *Service) startRequestBodyBufferProgressLogger(ctx context.Context, obse
 					lastTick = now.UTC()
 					lastBytes = snapshot.BytesRead
 				}
+				snapshot, ok = s.activeRequestBodyBufferReadSnapshot(edgeRequestID, now.UTC())
+				if !ok {
+					return
+				}
+				s.updateActiveRequestBodyBufferTCPInfo(edgeRequestID, edgeTCPInfoSnapshotFromContext(ctx))
 				snapshot, ok = s.activeRequestBodyBufferReadSnapshot(edgeRequestID, now.UTC())
 				if !ok {
 					return
@@ -449,7 +481,7 @@ func (s *Service) logRequestBodyBufferProgressEvent(observed edgeProxyObservatio
 		severity = "warning"
 		message = "edge request body buffer slow"
 	}
-	writeEdgeStructuredLog(s.Logger.Writer(), map[string]any{
+	fields := map[string]any{
 		"event_type":         eventType,
 		"severity":           severity,
 		"message":            message,
@@ -464,6 +496,7 @@ func (s *Service) logRequestBodyBufferProgressEvent(observed edgeProxyObservatio
 		"path_template":      model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
 		"method":             strings.TrimSpace(observed.Method),
 		"edge_request_id":    strings.TrimSpace(snapshot.EdgeRequestID),
+		"client_remote_addr": strings.TrimSpace(snapshot.ClientRemoteAddr),
 		"bytes_read":         nonNegativeInt64(snapshot.BytesRead),
 		"content_length":     nonNegativeInt64(snapshot.ContentLength),
 		"elapsed_ms":         durationMilliseconds(snapshot.Elapsed),
@@ -479,5 +512,9 @@ func (s *Service) logRequestBodyBufferProgressEvent(observed edgeProxyObservatio
 		"client_country":     strings.ToLower(strings.TrimSpace(snapshot.ClientCountry)),
 		"client_region":      strings.TrimSpace(snapshot.ClientRegion),
 		"client_asn":         strings.TrimSpace(snapshot.ClientASN),
-	})
+	}
+	for key, value := range tcpdiag.SnapshotFields("edge_proxy", snapshot.EdgeProxyTCPInfo) {
+		fields[key] = value
+	}
+	writeEdgeStructuredLog(s.Logger.Writer(), fields)
 }

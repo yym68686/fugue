@@ -30,6 +30,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/tcpdiag"
 )
 
 const cacheFileVersion = 1
@@ -280,6 +281,7 @@ type edgeProxyObservation struct {
 	ReadCalls               int64
 	AvgBPS                  int64
 	MinWindowBPS            int64
+	EdgeProxyTCPInfo        tcpdiag.Snapshot
 	ResponseBytes           int64
 }
 
@@ -1189,6 +1191,8 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 		s.finishActiveRequestBodyBufferRead(activeID)
 	}()
 	copyResult, copyErr := s.copyRequestBodyToBuffer(r.Context(), bufferWriter, r.Body, observed, activeID, started)
+	observed.EdgeProxyTCPInfo = edgeTCPInfoSnapshotFromContext(r.Context())
+	s.updateActiveRequestBodyBufferTCPInfo(activeID, observed.EdgeProxyTCPInfo)
 	written := copyResult.Written
 	observed.RequestBodyBuffer = time.Since(started)
 	observed.RequestBodyBufferBytes = written
@@ -2274,6 +2278,9 @@ func (s *Service) startProxyServer() (func(context.Context) error, error) {
 	server := &http.Server{
 		Handler:           s.ProxyHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			return edgeContextWithDownstreamConn(ctx, conn)
+		},
 	}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {

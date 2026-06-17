@@ -44,10 +44,10 @@ data:
             regex: {{ .Release.Name | quote }}
             action: keep
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
-            regex: "api|controller|edge|dns|telemetry-agent|observability-prometheus"
+            regex: "api|controller|edge|dns|telemetry-agent|observability-prometheus|.*-front"
             action: keep
           - source_labels: [__meta_kubernetes_pod_container_port_name]
-            regex: "http|metrics"
+            regex: "http|metrics|health"
             action: keep
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
             target_label: component
@@ -189,6 +189,36 @@ data:
             annotations:
               summary: "Fugue edge request body throughput is low"
               description: "Buffered request body throughput averaged below 64 KiB/s over 5 minutes for an edge/app/route/client segment."
+          - alert: FugueEdgeFrontHighClientTCPRetransmits
+            expr: |
+              (
+                sum by (edge_id, edge_group_id, node_host, protocol) (rate(fugue_edge_front_client_tcp_total_retrans_sum[5m]))
+                /
+                sum by (edge_id, edge_group_id, node_host, protocol) (rate(fugue_edge_front_client_tcp_total_retrans_count[5m]))
+              ) > 5
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge-front client TCP retransmits are high"
+              description: "Completed public TCP connections averaged more than 5 retransmits over 5 minutes for an edge node/protocol segment."
+          - alert: FugueEdgeNodeTCPRetransmitRateHigh
+            expr: |
+              rate(fugue_edge_node_tcp_counter{protocol="Tcp",name="RetransSegs"}[5m]) > 100
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge node TCP retransmit rate is high"
+              description: "The edge node TCP RetransSegs counter increased faster than 100 segments/sec for more than 5 minutes."
+          - alert: FugueEdgeNodeTCPMetricsUnavailable
+            expr: fugue_edge_node_tcp_proc_read_error == 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge node TCP metrics are unavailable"
+              description: "edge-front could not read the configured /proc/net TCP counters from the edge node."
       - name: fugue-registry-maintenance
         rules:
           - record: fugue_registry_pvc_usage_ratio

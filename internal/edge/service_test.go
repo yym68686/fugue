@@ -314,12 +314,13 @@ func TestRequestBodyBuffersEndpointReportsActiveReads(t *testing.T) {
 	service := NewService(config.EdgeConfig{EdgeID: "edge_123"}, log.New(ioDiscard{}, "", 0))
 	started := time.Now().Add(-2 * time.Second)
 	observed := edgeProxyObservation{
-		Host:          "demo.fugue.pro",
-		Method:        http.MethodPost,
-		Path:          "/v1/responses",
-		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
-		RequestID:     "req_123",
-		EdgeRequestID: "edge_req_123",
+		Host:             "demo.fugue.pro",
+		Method:           http.MethodPost,
+		Path:             "/v1/responses",
+		TraceID:          "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:        "req_123",
+		EdgeRequestID:    "edge_req_123",
+		ClientRemoteAddr: "203.0.113.10:45678",
 		Route: model.EdgeRouteBinding{
 			Hostname:        "demo.fugue.pro",
 			PathPrefix:      "/v1",
@@ -353,6 +354,7 @@ func TestRequestBodyBuffersEndpointReportsActiveReads(t *testing.T) {
 	body := recorder.Body.String()
 	for _, want := range []string{
 		`"edge_request_id":"edge_req_123"`,
+		`"client_remote_addr":"203.0.113.10:45678"`,
 		`"bytes_read":40`,
 		`"content_length":100`,
 		`"last_read_age_ms"`,
@@ -374,12 +376,13 @@ func TestRequestBodyBufferSlowEventLogsStructuredFact(t *testing.T) {
 	}, log.New(&logs, "", 0))
 	started := time.Now().Add(-10 * time.Millisecond)
 	observed := edgeProxyObservation{
-		Host:          "demo.fugue.pro",
-		Method:        http.MethodPost,
-		Path:          "/v1/responses",
-		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
-		RequestID:     "req_123",
-		EdgeRequestID: "edge_req_123",
+		Host:             "demo.fugue.pro",
+		Method:           http.MethodPost,
+		Path:             "/v1/responses",
+		TraceID:          "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:        "req_123",
+		EdgeRequestID:    "edge_req_123",
+		ClientRemoteAddr: "203.0.113.10:45678",
 		Route: model.EdgeRouteBinding{
 			Hostname:        "demo.fugue.pro",
 			PathPrefix:      "/v1",
@@ -403,6 +406,8 @@ func TestRequestBodyBufferSlowEventLogsStructuredFact(t *testing.T) {
 	output := logs.String()
 	if !strings.Contains(output, `"event_type":"edge_request_body_buffer_slow"`) ||
 		!strings.Contains(output, `"edge_request_id":"edge_req_123"`) ||
+		!strings.Contains(output, `"client_remote_addr":"203.0.113.10:45678"`) ||
+		!strings.Contains(output, `"edge_proxy_tcp_info_available"`) ||
 		!strings.Contains(output, `"last_read_age_ms"`) {
 		t.Fatalf("missing slow event fields in %s", output)
 	}

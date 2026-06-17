@@ -44,6 +44,9 @@
 {{- $frontImageDigest := default $edgeImageDigest $root.Values.edge.blueGreen.front.image.digest -}}
 {{- $frontImagePullPolicy := default $edgeImagePullPolicy $root.Values.edge.blueGreen.front.image.pullPolicy -}}
 {{- $frontPublicHostPorts := default dict $root.Values.edge.blueGreen.front.publicHostPorts -}}
+{{- $frontProcNet := default dict $root.Values.edge.blueGreen.front.procNet -}}
+{{- $frontProcHostPath := default "/proc" $frontProcNet.hostPath -}}
+{{- $frontProcMountPath := default "/host/proc" $frontProcNet.mountPath -}}
 {{- $slotA := default dict $root.Values.edge.blueGreen.slots.a -}}
 {{- $slotB := default dict $root.Values.edge.blueGreen.slots.b -}}
 {{- $slotAHTTP := default 18080 $slotA.httpPort -}}
@@ -119,6 +122,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
+            - name: FUGUE_EDGE_FRONT_EDGE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FUGUE_EDGE_FRONT_EDGE_GROUP_ID
+              value: {{ $edgeGroupID | quote }}
             - name: FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR
               value: {{ default ":80" $root.Values.edge.blueGreen.front.httpListenAddr | quote }}
             - name: FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR
@@ -139,9 +148,16 @@ spec:
               value: {{ printf "%v" $slotBHTTP | quote }}
             - name: FUGUE_EDGE_FRONT_SLOT_B_HTTPS_PORT
               value: {{ printf "%v" $slotBHTTPS | quote }}
+            - name: FUGUE_EDGE_FRONT_PROC_NET_SNMP_PATH
+              value: {{ printf "%s/net/snmp" (trimSuffix "/" $frontProcMountPath) | quote }}
+            - name: FUGUE_EDGE_FRONT_PROC_NET_NETSTAT_PATH
+              value: {{ printf "%s/net/netstat" (trimSuffix "/" $frontProcMountPath) | quote }}
           volumeMounts:
             - name: edge-blue-green-state
               mountPath: {{ dir $activeSlotFile | quote }}
+            - name: host-proc
+              mountPath: {{ $frontProcMountPath | quote }}
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -164,6 +180,10 @@ spec:
           hostPath:
             path: {{ $stateHostPath | quote }}
             type: DirectoryOrCreate
+        - name: host-proc
+          hostPath:
+            path: {{ $frontProcHostPath | quote }}
+            type: Directory
       nodeSelector:
         {{- toYaml $nodeSelector | nindent 8 }}
       {{- with $root.Values.edge.affinity }}

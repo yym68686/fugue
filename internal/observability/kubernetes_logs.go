@@ -267,7 +267,7 @@ func kubernetesLogPriorityMessage(message string) bool {
 	}
 	eventType, _ := fields["event_type"].(string)
 	switch strings.ToLower(strings.TrimSpace(eventType)) {
-	case "request_fact", "request_summary", "edge_request_body_buffer_slow", "edge_request_body_buffer_progress":
+	case "request_fact", "request_summary", "edge_request_body_buffer_slow", "edge_request_body_buffer_progress", "edge_front_tcp_connection":
 		return true
 	default:
 		return false

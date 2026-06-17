@@ -16,6 +16,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/tcpdiag"
 )
 
 var edgeStructuredLogMu sync.Mutex
@@ -107,6 +108,9 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		summary["read_calls"] = nonNegativeInt64(observed.ReadCalls)
 		summary["avg_bps"] = nonNegativeInt64(observed.AvgBPS)
 		summary["min_window_bps"] = nonNegativeInt64(observed.MinWindowBPS)
+		for key, value := range tcpdiag.SnapshotFields("edge_proxy", observed.EdgeProxyTCPInfo) {
+			summary[key] = value
+		}
 	}
 	if errText := logSafeValue(observed.RequestBodyBufferError); errText != "-" {
 		summary["request_body_buffer_error"] = errText

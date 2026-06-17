@@ -16,15 +16,20 @@ func EdgeFrontFromEnv() EdgeFrontConfig {
 	nodeHost := getenv("FUGUE_EDGE_FRONT_NODE_HOST", "127.0.0.1")
 	defaultSlot := getenv("FUGUE_EDGE_FRONT_DEFAULT_SLOT", "a")
 	return EdgeFrontConfig{
-		HTTPListenAddr:  getenv("FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR", ":80"),
-		HTTPSListenAddr: getenv("FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR", ":443"),
-		HealthAddr:      getenv("FUGUE_EDGE_FRONT_HEALTH_LISTEN_ADDR", ":7831"),
-		HTTPMode:        getenv("FUGUE_EDGE_FRONT_HTTP_MODE", edgefront.HTTPModeRedirect),
-		ActiveSlotFile:  getenv("FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE", "/var/lib/fugue/edge-blue-green/active-slot"),
-		DefaultSlot:     defaultSlot,
-		DialTimeout:     getenvDuration("FUGUE_EDGE_FRONT_DIAL_TIMEOUT", 5*time.Second),
-		ShutdownTimeout: getenvDuration("FUGUE_EDGE_FRONT_SHUTDOWN_TIMEOUT", 10*time.Second),
-		ProxyProtocol:   getenvBool("FUGUE_EDGE_FRONT_PROXY_PROTOCOL", true),
+		HTTPListenAddr:     getenv("FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR", ":80"),
+		HTTPSListenAddr:    getenv("FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR", ":443"),
+		HealthAddr:         getenv("FUGUE_EDGE_FRONT_HEALTH_LISTEN_ADDR", ":7831"),
+		EdgeID:             getenv("FUGUE_EDGE_FRONT_EDGE_ID", nodeHost),
+		EdgeGroupID:        strings.TrimSpace(os.Getenv("FUGUE_EDGE_FRONT_EDGE_GROUP_ID")),
+		NodeHost:           nodeHost,
+		HTTPMode:           getenv("FUGUE_EDGE_FRONT_HTTP_MODE", edgefront.HTTPModeRedirect),
+		ActiveSlotFile:     getenv("FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE", "/var/lib/fugue/edge-blue-green/active-slot"),
+		DefaultSlot:        defaultSlot,
+		DialTimeout:        getenvDuration("FUGUE_EDGE_FRONT_DIAL_TIMEOUT", 5*time.Second),
+		ShutdownTimeout:    getenvDuration("FUGUE_EDGE_FRONT_SHUTDOWN_TIMEOUT", 10*time.Second),
+		ProxyProtocol:      getenvBool("FUGUE_EDGE_FRONT_PROXY_PROTOCOL", true),
+		ProcNetSNMPPath:    getenv("FUGUE_EDGE_FRONT_PROC_NET_SNMP_PATH", "/proc/net/snmp"),
+		ProcNetNetstatPath: getenv("FUGUE_EDGE_FRONT_PROC_NET_NETSTAT_PATH", "/proc/net/netstat"),
 		Slots: map[string]edgefront.SlotTargets{
 			"a": {
 				HTTPAddress:  edgeFrontTargetAddr("FUGUE_EDGE_FRONT_SLOT_A_HTTP_ADDR", nodeHost, "FUGUE_EDGE_FRONT_SLOT_A_HTTP_PORT", 18080),

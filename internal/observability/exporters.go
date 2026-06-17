@@ -717,7 +717,7 @@ func clickHouseTableForEvent(event Event) string {
 			return "request_facts"
 		case "request_span", "trace_span":
 			return "request_spans"
-		case "app_event", "operation_event", "deploy_event", "runtime_event", "platform_event", "edge_event", "edge_request_body_buffer_progress", "edge_request_body_buffer_slow":
+		case "app_event", "operation_event", "deploy_event", "runtime_event", "platform_event", "edge_event", "edge_request_body_buffer_progress", "edge_request_body_buffer_slow", "edge_front_tcp_connection":
 			return "app_events"
 		default:
 			return ""

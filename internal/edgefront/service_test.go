@@ -108,6 +108,88 @@ func TestFrontWritesProxyProtocolHeaderWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestFrontHealthServerExposesTCPDebugAndMetrics(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen health: %v", err)
+	}
+	healthAddr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close health listener: %v", err)
+	}
+	frontListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen front: %v", err)
+	}
+	frontAddr := frontListener.Addr().String()
+	if err := frontListener.Close(); err != nil {
+		t.Fatalf("close front listener: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := NewService(Config{
+		HealthAddr:         healthAddr,
+		HTTPSListenAddr:    frontAddr,
+		HTTPMode:           HTTPModeDisabled,
+		DefaultSlot:        "a",
+		EdgeID:             "edge_123",
+		EdgeGroupID:        "edge-group-us",
+		NodeHost:           "10.0.0.1",
+		ProcNetSNMPPath:    "/path/does/not/exist/snmp",
+		ProcNetNetstatPath: "/path/does/not/exist/netstat",
+		Slots: map[string]SlotTargets{
+			"a": {HTTPSAddress: "127.0.0.1:1"},
+			"b": {HTTPSAddress: "127.0.0.1:2"},
+		},
+	}, log.New(io.Discard, "", 0))
+	errCh := make(chan error, 1)
+	go func() { errCh <- service.Run(ctx) }()
+	waitForTCP(t, healthAddr)
+
+	resp, err := http.Get("http://" + healthAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("get metrics: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	metrics := string(body)
+	for _, want := range []string{
+		"fugue_edge_front_info",
+		`edge_id="edge_123"`,
+		"fugue_edge_node_tcp_proc_read_error",
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q in:\n%s", want, metrics)
+		}
+	}
+
+	resp, err = http.Get("http://" + healthAddr + "/edge/tcp-connections")
+	if err != nil {
+		t.Fatalf("get tcp connections: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), `"active":[]`) {
+		t.Fatalf("unexpected tcp connections body %s", string(body))
+	}
+
+	resp, err = http.Get("http://" + healthAddr + "/edge/tcp-capture-hints?remote=203.0.113.10:45678")
+	if err != nil {
+		t.Fatalf("get tcp capture hints: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !strings.Contains(string(body), `"bpf_filter":"tcp and host 203.0.113.10 and port 45678"`) {
+		t.Fatalf("unexpected capture hints body %s", string(body))
+	}
+
+	cancel()
+	if err := <-errCh; err != nil && err != context.Canceled {
+		t.Fatalf("front exited with error: %v", err)
+	}
+}
+
 func TestFrontRedirectsHTTPToHTTPS(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
