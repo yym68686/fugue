@@ -1287,8 +1287,8 @@ ensure_k3s_agent_non_stub_resolv_conf() {
 
 trim_whitespace() {
   local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%%"${value##*[![:space:]]}"}"
+  value="${value#"${value%%%%[![:space:]]*}"}"
+  value="${value%%%%"${value##*[![:space:]]}"}"
   printf '%%s' "${value}"
 }
 
