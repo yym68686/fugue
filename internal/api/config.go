@@ -32,6 +32,7 @@ type ServerConfig struct {
 	ClusterJoinServerFallbacks    string
 	ClusterJoinCAHash             string
 	ClusterJoinBootstrapTokenTTL  time.Duration
+	ClusterJoinK3SVersion         string
 	ClusterJoinMeshProvider       string
 	ClusterJoinMeshLoginServer    string
 	ClusterJoinMeshAuthKey        string

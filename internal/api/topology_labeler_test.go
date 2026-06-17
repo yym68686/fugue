@@ -240,6 +240,7 @@ func TestDeployWorkflowDefaultsLegacyPostgresOffWhenCNPGIsAPIStore(t *testing.T)
 		"FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL: ${{ vars.FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL || '' }}",
 		"FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS: ${{ vars.FUGUE_CONTROL_PLANE_KUBE_API_FALLBACK_SERVERS || '' }}",
 		"FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS: ${{ vars.FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS || '' }}",
+		"FUGUE_CLUSTER_JOIN_K3S_VERSION: ${{ vars.FUGUE_CLUSTER_JOIN_K3S_VERSION || '' }}",
 		"FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}",
 	} {
 		if !strings.Contains(workflow, want) {
@@ -323,6 +324,7 @@ func TestUpgradeScriptEscapesCommaSeparatedHelmStringValues(t *testing.T) {
 		"helm_set_string_value()",
 		"value=\"${value//,/\\\\,}\"",
 		"--set-string api.clusterJoinServerFallbacks=\"$(helm_set_string_value \"",
+		"--set-string api.clusterJoinK3SVersion=\"$(helm_set_string_value \"",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected upgrade script to contain %q: %s", want, path)

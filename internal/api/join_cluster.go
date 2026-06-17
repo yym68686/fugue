@@ -26,6 +26,7 @@ type joinClusterPlan struct {
 	RuntimeID        string   `json:"runtime_id"`
 	RegistryBase     string   `json:"registry_base,omitempty"`
 	RegistryEndpoint string   `json:"registry_endpoint,omitempty"`
+	K3SVersion       string   `json:"k3s_version,omitempty"`
 	MeshProvider     string   `json:"mesh_provider,omitempty"`
 	MeshLoginServer  string   `json:"mesh_login_server,omitempty"`
 	MeshAuthKey      string   `json:"mesh_auth_key,omitempty"`
@@ -149,6 +150,7 @@ func (s *Server) handleJoinClusterNodeEnv(w http.ResponseWriter, r *http.Request
 	fmt.Fprintf(w, "FUGUE_JOIN_RUNTIME_ID=%s\n", shellQuote(join.RuntimeID))
 	fmt.Fprintf(w, "FUGUE_JOIN_REGISTRY_BASE=%s\n", shellQuote(join.RegistryBase))
 	fmt.Fprintf(w, "FUGUE_JOIN_REGISTRY_ENDPOINT=%s\n", shellQuote(join.RegistryEndpoint))
+	fmt.Fprintf(w, "FUGUE_JOIN_K3S_VERSION=%s\n", shellQuote(join.K3SVersion))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_PROVIDER=%s\n", shellQuote(join.MeshProvider))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_LOGIN_SERVER=%s\n", shellQuote(join.MeshLoginServer))
 	fmt.Fprintf(w, "FUGUE_JOIN_MESH_AUTH_KEY=%s\n", shellQuote(join.MeshAuthKey))
@@ -310,6 +312,7 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 		RuntimeID:        runtimeID,
 		RegistryBase:     s.registryPullBase,
 		RegistryEndpoint: s.clusterJoinRegistryEndpoint,
+		K3SVersion:       s.clusterJoinK3SVersion,
 		MeshProvider:     s.clusterJoinMeshProvider,
 		MeshLoginServer:  s.clusterJoinMeshLoginServer,
 		MeshAuthKey:      s.clusterJoinMeshAuthKey,
@@ -624,6 +627,7 @@ set -euo pipefail
 FUGUE_API_BASE=${FUGUE_API_BASE:-%s}
 FUGUE_JOIN_SCRIPT_VERSION="${FUGUE_JOIN_SCRIPT_VERSION:-v1}"
 FUGUE_K3S_CHANNEL="${FUGUE_K3S_CHANNEL:-stable}"
+FUGUE_K3S_VERSION="${FUGUE_K3S_VERSION:-}"
 FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
 FUGUE_LIMIT_MEMORY="${FUGUE_LIMIT_MEMORY:-}"
 FUGUE_LIMIT_DISK="${FUGUE_LIMIT_DISK:-}"
@@ -1793,6 +1797,12 @@ cleanup_stale_cluster_nodes() {
 }
 
 install_k3s_agent_binaries() {
+  local version="${FUGUE_JOIN_K3S_VERSION:-${FUGUE_K3S_VERSION:-}}"
+  if [ -n "${version}" ]; then
+    log_step "Installing k3s agent version ${version}."
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${version}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
+    return 0
+  fi
   curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${FUGUE_K3S_CHANNEL}" INSTALL_K3S_EXEC="agent" INSTALL_K3S_SKIP_START="true" sh -
 }
 

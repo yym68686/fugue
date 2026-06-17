@@ -1537,6 +1537,13 @@ detect_primary_mesh_ip() {
   tailscale ip -4 2>/dev/null | awk 'NR == 1 {print; exit}'
 }
 
+detect_control_plane_k3s_version() {
+  if ! command_exists k3s; then
+    return 1
+  fi
+  k3s --version 2>/dev/null | awk 'NR == 1 {print $3; exit}'
+}
+
 detect_config_secret_value() {
   local key="$1"
   local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
@@ -1549,6 +1556,10 @@ detect_cluster_join_server() {
 
 detect_cluster_join_server_fallbacks() {
   detect_config_secret_value FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS
+}
+
+detect_cluster_join_k3s_version() {
+  detect_config_secret_value FUGUE_CLUSTER_JOIN_K3S_VERSION
 }
 
 detect_cluster_join_mesh_provider() {
@@ -5704,6 +5715,12 @@ PY
     fail "FUGUE_EDGE_ASSET_CACHE_MAX_BYTES must be an integer"
   fi
   dns_extra_groups_yaml >/dev/null
+  if [[ -z "${FUGUE_CLUSTER_JOIN_K3S_VERSION:-}" ]]; then
+    FUGUE_CLUSTER_JOIN_K3S_VERSION="$(detect_control_plane_k3s_version || true)"
+  fi
+  if [[ -z "${FUGUE_CLUSTER_JOIN_K3S_VERSION:-}" ]]; then
+    FUGUE_CLUSTER_JOIN_K3S_VERSION="$(detect_cluster_join_k3s_version || true)"
+  fi
   if [[ -z "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}" ]]; then
     FUGUE_CLUSTER_JOIN_MESH_PROVIDER="$(detect_cluster_join_mesh_provider || true)"
   fi
@@ -5812,6 +5829,7 @@ PY
   log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
   log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
   log "cluster join server fallbacks: ${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-<none>}"
+  log "cluster join k3s version: ${FUGUE_CLUSTER_JOIN_K3S_VERSION:-<none>}"
   log "cluster join mesh provider: ${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-<none>}"
   log "cluster join mesh login server: ${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-<none>}"
   log "cluster join mesh auth key: $([[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] && printf configured || printf '<none>')"
@@ -5950,6 +5968,7 @@ PY
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
     --set-string api.clusterJoinServerFallbacks="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}")" \
+    --set-string api.clusterJoinK3SVersion="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_K3S_VERSION:-}")" \
     --set-string api.clusterJoinMeshProvider="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}")" \
     --set-string api.clusterJoinMeshLoginServer="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}")" \
     --set-string api.clusterJoinMeshAuthKey="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" \

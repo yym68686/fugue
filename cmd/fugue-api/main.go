@@ -52,6 +52,7 @@ func main() {
 		ClusterJoinServerFallbacks:    cfg.ClusterJoinServerFallbacks,
 		ClusterJoinCAHash:             cfg.ClusterJoinCAHash,
 		ClusterJoinBootstrapTokenTTL:  cfg.ClusterJoinBootstrapTokenTTL,
+		ClusterJoinK3SVersion:         cfg.ClusterJoinK3SVersion,
 		ClusterJoinMeshProvider:       cfg.ClusterJoinMeshProvider,
 		ClusterJoinMeshLoginServer:    cfg.ClusterJoinMeshLoginServer,
 		ClusterJoinMeshAuthKey:        cfg.ClusterJoinMeshAuthKey,

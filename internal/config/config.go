@@ -45,6 +45,7 @@ type APIConfig struct {
 	ClusterJoinServerFallbacks    string
 	ClusterJoinCAHash             string
 	ClusterJoinBootstrapTokenTTL  time.Duration
+	ClusterJoinK3SVersion         string
 	ClusterJoinMeshProvider       string
 	ClusterJoinMeshLoginServer    string
 	ClusterJoinMeshAuthKey        string
@@ -259,6 +260,7 @@ func APIFromEnv() APIConfig {
 		ClusterJoinServerFallbacks:    strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS")),
 		ClusterJoinCAHash:             strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_CA_HASH")),
 		ClusterJoinBootstrapTokenTTL:  getenvDuration("FUGUE_CLUSTER_JOIN_BOOTSTRAP_TOKEN_TTL", 15*time.Minute),
+		ClusterJoinK3SVersion:         strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_K3S_VERSION")),
 		ClusterJoinMeshProvider:       getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
 		ClusterJoinMeshLoginServer:    getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
 		ClusterJoinMeshAuthKey:        getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),

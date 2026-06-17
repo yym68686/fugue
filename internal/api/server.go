@@ -59,6 +59,7 @@ type Server struct {
 	clusterJoinServerFallbacks    []string
 	clusterJoinCAHash             string
 	clusterJoinBootstrapTokenTTL  time.Duration
+	clusterJoinK3SVersion         string
 	clusterJoinMeshProvider       string
 	clusterJoinMeshLoginServer    string
 	clusterJoinMeshAuthKey        string
@@ -140,6 +141,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		clusterJoinServerFallbacks:    parseCSVValues(cfg.ClusterJoinServerFallbacks),
 		clusterJoinCAHash:             normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),
 		clusterJoinBootstrapTokenTTL:  cfg.ClusterJoinBootstrapTokenTTL,
+		clusterJoinK3SVersion:         strings.TrimSpace(cfg.ClusterJoinK3SVersion),
 		clusterJoinMeshProvider:       strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
 		clusterJoinMeshLoginServer:    strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
 		clusterJoinMeshAuthKey:        strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),

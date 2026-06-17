@@ -215,6 +215,7 @@ tolerations:
 {{- $_ := set $payload "FUGUE_CLUSTER_JOIN_SERVER" (.Values.api.clusterJoinServer | b64enc) -}}
 {{- $_ := set $payload "FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS" (.Values.api.clusterJoinServerFallbacks | b64enc) -}}
 {{- $_ := set $payload "FUGUE_CLUSTER_JOIN_CA_HASH" (.Values.api.clusterJoinCAHash | b64enc) -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_K3S_VERSION" (.Values.api.clusterJoinK3SVersion | b64enc) -}}
 {{- $_ := set $payload "FUGUE_CLUSTER_JOIN_MESH_PROVIDER" (.Values.api.clusterJoinMeshProvider | b64enc) -}}
 {{- $_ := set $payload "FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER" (.Values.api.clusterJoinMeshLoginServer | b64enc) -}}
 {{- if ne .Values.api.clusterJoinMeshAuthKey "" -}}
@@ -278,6 +279,7 @@ tolerations:
   "FUGUE_DATABASE_URL" $databaseURL
   "FUGUE_CLUSTER_JOIN_SERVER" .Values.api.clusterJoinServer
   "FUGUE_CLUSTER_JOIN_CA_HASH" .Values.api.clusterJoinCAHash
+  "FUGUE_CLUSTER_JOIN_K3S_VERSION" .Values.api.clusterJoinK3SVersion
   "FUGUE_CLUSTER_JOIN_MESH_PROVIDER" .Values.api.clusterJoinMeshProvider
   "FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER" .Values.api.clusterJoinMeshLoginServer
   "FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY" .Values.api.clusterJoinMeshAuthKey

@@ -441,6 +441,7 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 		ClusterJoinServerFallbacks:   "https://100.64.0.2:6443, https://100.64.0.3:6443",
 		ClusterJoinCAHash:            "deadbeef",
 		ClusterJoinBootstrapTokenTTL: time.Minute,
+		ClusterJoinK3SVersion:        "v1.35.4+k3s1",
 		RegistryPullBase:             "10.128.0.2:30500",
 		ClusterJoinRegistryEndpoint:  "100.64.0.1:30500",
 		ClusterJoinMeshProvider:      "tailscale",
@@ -485,6 +486,9 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 	if !strings.Contains(body, "FUGUE_JOIN_REGISTRY_ENDPOINT='100.64.0.1:30500'") {
 		t.Fatalf("expected registry endpoint in response body, got %s", body)
+	}
+	if !strings.Contains(body, "FUGUE_JOIN_K3S_VERSION='v1.35.4+k3s1'") {
+		t.Fatalf("expected k3s version in response body, got %s", body)
 	}
 	if !strings.Contains(body, "FUGUE_JOIN_MESH_LOGIN_SERVER='https://mesh.fugue.pro'") {
 		t.Fatalf("expected mesh login server in response body, got %s", body)
@@ -859,6 +863,7 @@ func TestJoinClusterInstallScriptSupportsResourceCaps(t *testing.T) {
 
 	for _, want := range []string{
 		`FUGUE_LIMIT_CPU`,
+		`FUGUE_K3S_VERSION`,
 		`FUGUE_LIMIT_MEMORY`,
 		`FUGUE_LIMIT_DISK`,
 		`FUGUE_LIMIT_DISK_PATH`,
@@ -871,6 +876,8 @@ func TestJoinClusterInstallScriptSupportsResourceCaps(t *testing.T) {
 		`parse_cpu_millicores() {`,
 		`milli="${raw%m}"`,
 		`parse_quantity_bytes() {`,
+		`local version="${FUGUE_JOIN_K3S_VERSION:-${FUGUE_K3S_VERSION:-}}"`,
+		`INSTALL_K3S_VERSION="${version}"`,
 		`configure_resource_limits() {`,
 		`system-reserved=${system_reserved}`,
 		`ephemeral-storage=$(format_bytes_quantity "${reserved}")`,

@@ -184,6 +184,7 @@ api:
   clusterJoinServerFallbacks: ""
   clusterJoinCAHash: ""
   clusterJoinBootstrapTokenTTL: 15m
+  clusterJoinK3SVersion: ""
   clusterJoinMeshProvider: ""
   clusterJoinMeshLoginServer: ""
   clusterJoinMeshAuthKey: ""
