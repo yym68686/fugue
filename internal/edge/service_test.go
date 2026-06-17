@@ -21,6 +21,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/tcpdiag"
 
 	"github.com/gorilla/websocket"
 )
@@ -321,6 +322,7 @@ func TestRequestBodyBuffersEndpointReportsActiveReads(t *testing.T) {
 		RequestID:        "req_123",
 		EdgeRequestID:    "edge_req_123",
 		ClientRemoteAddr: "203.0.113.10:45678",
+		EdgeProxyTCPInfo: tcpdiag.Snapshot{Available: true, RTTUsec: 1234, TotalRetrans: 2},
 		Route: model.EdgeRouteBinding{
 			Hostname:        "demo.fugue.pro",
 			PathPrefix:      "/v1",
@@ -359,6 +361,9 @@ func TestRequestBodyBuffersEndpointReportsActiveReads(t *testing.T) {
 		`"content_length":100`,
 		`"last_read_age_ms"`,
 		`"body_read_block_ms":120`,
+		`"tcp_info_available":true`,
+		`"tcp_rtt_us":1234`,
+		`"tcp_total_retrans":2`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("debug endpoint missing %q in %s", want, body)

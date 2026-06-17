@@ -1182,6 +1182,7 @@ func (s *Service) bufferRequestBodyForOrigin(w http.ResponseWriter, r *http.Requ
 		reservation: reservation,
 		maxBytes:    maxBytes,
 	}
+	observed.EdgeProxyTCPInfo = edgeTCPInfoSnapshotFromContext(r.Context())
 	activeID := s.startActiveRequestBodyBufferRead(*observed, r.ContentLength, started)
 	stopProgress := s.startRequestBodyBufferProgressLogger(r.Context(), *observed, activeID)
 	defer func() {

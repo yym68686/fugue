@@ -203,6 +203,7 @@ func (s *Service) startActiveRequestBodyBufferRead(observed edgeProxyObservation
 		StartedAt:        startedAt,
 		LastReadAt:       startedAt,
 		ContentLength:    contentLength,
+		EdgeProxyTCPInfo: observed.EdgeProxyTCPInfo,
 	}
 	s.bodyBufferActiveMu.Lock()
 	defer s.bodyBufferActiveMu.Unlock()
