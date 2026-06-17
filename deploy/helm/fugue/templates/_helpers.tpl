@@ -208,7 +208,52 @@ tolerations:
 {{- $secretName := include "fugue.configSecretName" . -}}
 {{- $existingSecret := lookup "v1" "Secret" .Release.Namespace $secretName -}}
 {{- if $existingSecret -}}
-{{- toJson $existingSecret.data | sha256sum -}}
+{{- $payload := dict -}}
+{{- range $key, $value := $existingSecret.data -}}
+{{- $_ := set $payload $key $value -}}
+{{- end -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_SERVER" (.Values.api.clusterJoinServer | b64enc) -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS" (.Values.api.clusterJoinServerFallbacks | b64enc) -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_CA_HASH" (.Values.api.clusterJoinCAHash | b64enc) -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_MESH_PROVIDER" (.Values.api.clusterJoinMeshProvider | b64enc) -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER" (.Values.api.clusterJoinMeshLoginServer | b64enc) -}}
+{{- if ne .Values.api.clusterJoinMeshAuthKey "" -}}
+{{- $_ := set $payload "FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY" (.Values.api.clusterJoinMeshAuthKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.bootstrapAdminKey "" -}}
+{{- $_ := set $payload "FUGUE_BOOTSTRAP_ADMIN_KEY" (.Values.bootstrapAdminKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.workloadIdentity.signingKey "" -}}
+{{- $_ := set $payload "FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY" (.Values.workloadIdentity.signingKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.bundle.signingKey "" -}}
+{{- $_ := set $payload "FUGUE_BUNDLE_SIGNING_KEY" (.Values.bundle.signingKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.bundle.previousSigningKey "" -}}
+{{- $_ := set $payload "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY" (.Values.bundle.previousSigningKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.api.edgeTLSAskToken "" -}}
+{{- $_ := set $payload "FUGUE_EDGE_TLS_ASK_TOKEN" (.Values.api.edgeTLSAskToken | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.api.dataBackend.accessKeyID "" -}}
+{{- $_ := set $payload "FUGUE_DATA_BACKEND_ACCESS_KEY_ID" (.Values.api.dataBackend.accessKeyID | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.api.dataBackend.secretAccessKey "" -}}
+{{- $_ := set $payload "FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY" (.Values.api.dataBackend.secretAccessKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.api.dataBackend.sessionToken "" -}}
+{{- $_ := set $payload "FUGUE_DATA_BACKEND_SESSION_TOKEN" (.Values.api.dataBackend.sessionToken | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.api.dataBackend.credentialEncryptionKey "" -}}
+{{- $_ := set $payload "FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY" (.Values.api.dataBackend.credentialEncryptionKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.api.databaseURL "" -}}
+{{- $_ := set $payload "FUGUE_DATABASE_URL" (.Values.api.databaseURL | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.postgres.password "" -}}
+{{- $_ := set $payload "POSTGRES_PASSWORD" (.Values.postgres.password | b64enc) -}}
+{{- end -}}
+{{- toJson $payload | sha256sum -}}
 {{- else -}}
 {{- $bootstrapAdminKey := .Values.bootstrapAdminKey -}}
 {{- if eq $bootstrapAdminKey "" -}}
