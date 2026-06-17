@@ -90,3 +90,46 @@ func TestBuildClusterNodePolicyViewReportsDedicatedModeDrift(t *testing.T) {
 		t.Fatalf("expected live taint to report dedicated edge drift, got %#v", policy)
 	}
 }
+
+func TestBuildClusterNodePolicyViewSavedEdgePolicyOverridesRuntimeIdentityFallback(t *testing.T) {
+	t.Parallel()
+
+	snapshot := clusterNodeSnapshot{
+		labels: map[string]string{
+			runtimepkg.RuntimeIDLabelKey:  "runtime_edge",
+			runtimepkg.TenantIDLabelKey:   "tenant_edge",
+			runtimepkg.NodeModeLabelKey:   model.RuntimeTypeManagedOwned,
+			runtimepkg.EdgeRoleLabelKey:   runtimepkg.NodeRoleLabelValue,
+			runtimepkg.NodeHealthLabelKey: runtimepkg.NodeHealthReadyValue,
+		},
+	}
+	runtimeObj := model.Runtime{
+		ID:              "runtime_edge",
+		TenantID:        "tenant_edge",
+		Type:            model.RuntimeTypeManagedOwned,
+		PoolMode:        model.RuntimePoolModeDedicated,
+		ClusterNodeName: "edge-1",
+	}
+	machine := model.Machine{
+		ID:        "machine_edge",
+		RuntimeID: runtimeObj.ID,
+		Policy: model.MachinePolicy{
+			AllowAppRuntime: false,
+			AllowEdge:       true,
+		},
+	}
+
+	policy := buildClusterNodePolicyView(snapshot, &machine, &runtimeObj)
+	if policy == nil {
+		t.Fatal("expected cluster node policy")
+	}
+	if policy.EffectiveAppRuntime {
+		t.Fatalf("expected saved edge-only policy to suppress runtime identity app fallback, got %#v", policy)
+	}
+	if !policy.EffectiveEdge {
+		t.Fatalf("expected live edge role to remain effective, got %#v", policy)
+	}
+	if policy.AllowAppRuntime {
+		t.Fatalf("expected desired app runtime disabled, got %#v", policy)
+	}
+}

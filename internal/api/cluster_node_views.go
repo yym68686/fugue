@@ -181,7 +181,8 @@ func machineHasSavedPolicy(machine *model.Machine) bool {
 }
 
 func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime) *model.ClusterNodePolicy {
-	effectiveAppRuntime := effectiveAppRuntimePolicy(snapshot)
+	hasSavedPolicy := machineHasSavedPolicy(machine)
+	effectiveAppRuntime := effectiveAppRuntimePolicy(snapshot, !hasSavedPolicy)
 	effectiveBuilds := effectiveBuildPolicy(snapshot)
 	effectiveSharedPool := snapshot.sharedPool
 	effectiveEdge := strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.EdgeRoleLabelKey), runtimepkg.NodeRoleLabelValue)
@@ -198,7 +199,6 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 	desiredRole := desiredControlPlaneRole(snapshot, machine)
 	nodeMode := strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.NodeModeLabelKey))
 	nodeHealth := strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.NodeHealthLabelKey))
-	hasSavedPolicy := machineHasSavedPolicy(machine)
 
 	if hasSavedPolicy {
 		desiredAppRuntime = machine.Policy.AllowAppRuntime
@@ -255,10 +255,11 @@ func buildClusterNodePolicyView(snapshot clusterNodeSnapshot, machine *model.Mac
 	}
 }
 
-func effectiveAppRuntimePolicy(snapshot clusterNodeSnapshot) bool {
-	return strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.AppRuntimeRoleLabelKey), runtimepkg.NodeRoleLabelValue) ||
-		strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.RuntimeIDLabelKey, runtimepkg.NodeModeLabelKey)) != "" ||
-		snapshot.sharedPool
+func effectiveAppRuntimePolicy(snapshot clusterNodeSnapshot, allowRuntimeIdentityFallback bool) bool {
+	if strings.EqualFold(firstNodeLabel(snapshot.labels, runtimepkg.AppRuntimeRoleLabelKey), runtimepkg.NodeRoleLabelValue) || snapshot.sharedPool {
+		return true
+	}
+	return allowRuntimeIdentityFallback && strings.TrimSpace(firstNodeLabel(snapshot.labels, runtimepkg.RuntimeIDLabelKey, runtimepkg.NodeModeLabelKey)) != ""
 }
 
 func effectiveBuildPolicy(snapshot clusterNodeSnapshot) bool {

@@ -77,6 +77,10 @@ func (s *Server) handleSetRuntimePoolMode(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) reconcileRuntimeClusterNode(ctx context.Context, runtimeObj model.Runtime) (bool, error) {
+	return s.reconcileRuntimeClusterNodeWithMachinePolicy(ctx, runtimeObj, nil)
+}
+
+func (s *Server) reconcileRuntimeClusterNodeWithMachinePolicy(ctx context.Context, runtimeObj model.Runtime, machine *model.Machine) (bool, error) {
 	nodeName := strings.TrimSpace(runtimeObj.ClusterNodeName)
 	if nodeName == "" {
 		return false, nil
@@ -91,10 +95,14 @@ func (s *Server) reconcileRuntimeClusterNode(ctx context.Context, runtimeObj mod
 		return false, err
 	}
 	defer client.closeIdleConnections()
-	return client.reconcileRuntimeNode(ctx, runtimeObj)
+	return client.reconcileRuntimeNodeWithMachinePolicy(ctx, runtimeObj, machine)
 }
 
 func (c *clusterNodeClient) reconcileRuntimeNode(ctx context.Context, runtimeObj model.Runtime) (bool, error) {
+	return c.reconcileRuntimeNodeWithMachinePolicy(ctx, runtimeObj, nil)
+}
+
+func (c *clusterNodeClient) reconcileRuntimeNodeWithMachinePolicy(ctx context.Context, runtimeObj model.Runtime, machine *model.Machine) (bool, error) {
 	nodeName := strings.TrimSpace(runtimeObj.ClusterNodeName)
 	if nodeName == "" {
 		return false, nil
@@ -108,7 +116,7 @@ func (c *clusterNodeClient) reconcileRuntimeNode(ctx context.Context, runtimeObj
 		return false, err
 	}
 
-	patch, changed := buildRuntimeNodeMergePatch(node, runtimeObj)
+	patch, changed := buildRuntimeNodeMergePatchWithMachinePolicy(node, runtimeObj, machine)
 	if !changed {
 		return false, nil
 	}
@@ -159,8 +167,12 @@ func (c *clusterNodeClient) patchNode(ctx context.Context, nodeName string, patc
 }
 
 func buildRuntimeNodeMergePatch(node kubeNode, runtimeObj model.Runtime) (map[string]any, bool) {
+	return buildRuntimeNodeMergePatchWithMachinePolicy(node, runtimeObj, nil)
+}
+
+func buildRuntimeNodeMergePatchWithMachinePolicy(node kubeNode, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
 	healthy := nodeSchedulingHealthy(node)
-	labelsPatch, labelsChanged := buildRuntimeNodeLabelsPatchForHealth(node.Metadata.Labels, healthy, runtimeObj)
+	labelsPatch, labelsChanged := buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(node.Metadata.Labels, healthy, runtimeObj, machine)
 	taints, taintsChanged := buildRuntimeNodeTaintsForHealth(node.Spec.Taints, healthy, runtimeObj)
 	if !labelsChanged && !taintsChanged {
 		return nil, false
@@ -181,8 +193,14 @@ func buildRuntimeNodeLabelsPatch(current map[string]string, runtimeObj model.Run
 }
 
 func buildRuntimeNodeLabelsPatchForHealth(current map[string]string, healthy bool, runtimeObj model.Runtime) (map[string]any, bool) {
+	return buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current, healthy, runtimeObj, nil)
+}
+
+func buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current map[string]string, healthy bool, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
 	desired := runtimepkg.JoinNodeLabelMap(runtimeObj)
-	desired[runtimepkg.AppRuntimeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	if desiredRuntimeNodeAppRole(runtimeObj, machine) {
+		desired[runtimepkg.AppRuntimeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	}
 	applyNodeHealthLabels(desired, healthy)
 	patch := map[string]any{}
 	changed := false
@@ -204,6 +222,13 @@ func buildRuntimeNodeLabelsPatchForHealth(current map[string]string, healthy boo
 		}
 	}
 	return patch, changed
+}
+
+func desiredRuntimeNodeAppRole(runtimeObj model.Runtime, machine *model.Machine) bool {
+	if machineHasSavedPolicy(machine) {
+		return machine.Policy.AllowAppRuntime || machine.Policy.AllowSharedPool
+	}
+	return true
 }
 
 func buildRuntimeNodeTaints(current []kubeNodeTaint, runtimeObj model.Runtime) ([]kubeNodeTaint, bool) {

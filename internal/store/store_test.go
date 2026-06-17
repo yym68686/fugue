@@ -2730,6 +2730,50 @@ func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
 	}
 }
 
+func TestBootstrapClusterNodeSeedsEdgeOnlyMachinePolicyFromJoinLabels(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Edge Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, secret, err := s.CreateNodeKey(tenant.ID, "edge")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	_, runtimeObj, err := s.BootstrapClusterNode(
+		secret,
+		"edge-1",
+		"https://edge-1.example.com",
+		map[string]string{runtimepkg.EdgeRoleLabelKey: runtimepkg.NodeRoleLabelValue},
+		"edge-1",
+		"edge-1-fingerprint",
+	)
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	machine, err := s.GetMachineByClusterNodeName(runtimeObj.ClusterNodeName)
+	if err != nil {
+		t.Fatalf("get machine by cluster node name: %v", err)
+	}
+	if machine.Policy.AllowAppRuntime {
+		t.Fatalf("expected edge-only join labels to disable app runtime, got %#v", machine.Policy)
+	}
+	if !machine.Policy.AllowEdge {
+		t.Fatalf("expected edge role enabled from join labels, got %#v", machine.Policy)
+	}
+	if got := model.MachinePolicyDedicatedMode(machine.Policy); got != model.MachineDedicatedModeEdge {
+		t.Fatalf("expected dedicated edge mode, got %q from %#v", got, machine.Policy)
+	}
+}
+
 func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 	t.Parallel()
 

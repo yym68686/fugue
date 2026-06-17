@@ -605,6 +605,44 @@ func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testin
 	}
 }
 
+func TestBuildRuntimeNodeLabelsPatchHonorsSavedEdgeOnlyMachinePolicy(t *testing.T) {
+	t.Parallel()
+
+	runtimeObj := model.Runtime{
+		ID:              "runtime_edge",
+		TenantID:        "tenant_edge",
+		Type:            model.RuntimeTypeManagedOwned,
+		PoolMode:        model.RuntimePoolModeDedicated,
+		ClusterNodeName: "edge-1",
+	}
+	machine := model.Machine{
+		ID:        "machine_edge",
+		RuntimeID: runtimeObj.ID,
+		Policy: model.MachinePolicy{
+			AllowAppRuntime: false,
+			AllowEdge:       true,
+		},
+	}
+	current := runtimepkg.JoinNodeLabelMap(runtimeObj)
+	current[runtimepkg.EdgeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	current[runtimepkg.AppRuntimeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	current[runtimepkg.NodeSchedulableLabelKey] = "true"
+	current[runtimepkg.NodeHealthLabelKey] = runtimepkg.NodeHealthReadyValue
+
+	patch, changed := buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current, true, runtimeObj, &machine)
+	if !changed {
+		t.Fatal("expected runtime label patch to remove stale app-runtime label")
+	}
+	if got, ok := patch[runtimepkg.AppRuntimeRoleLabelKey]; !ok || got != nil {
+		t.Fatalf("expected stale app-runtime label removal, got %#v in %#v", got, patch)
+	}
+
+	delete(current, runtimepkg.AppRuntimeRoleLabelKey)
+	if _, changed := buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current, true, runtimeObj, &machine); changed {
+		t.Fatalf("expected edge-only runtime labels to be reconciled without app-runtime label, got changed=true")
+	}
+}
+
 func TestBuildMachineNodeMergePatchAppliesDedicatedEdgeTaintForPureEdgeNode(t *testing.T) {
 	t.Parallel()
 

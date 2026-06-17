@@ -318,7 +318,7 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 		MeshAuthKey:      s.clusterJoinMeshAuthKey,
 	}
 	if runtimeObj != nil {
-		join.NodeTaints = runtime.JoinNodeTaints(*runtimeObj)
+		join.NodeTaints = joinClusterTaints(machine, runtimeObj)
 		if join.NodeName == "" {
 			join.NodeName = firstNonEmpty(runtimeObj.ClusterNodeName, runtimeObj.Name, nodeName)
 		}
@@ -326,6 +326,34 @@ func (s *Server) bootstrapJoinClusterNode(ctx context.Context, nodeKey, nodeName
 		join.NodeTaints = machineJoinTaints(machine)
 	}
 	return key, machine, runtimeObj, join, nil
+}
+
+func joinClusterTaints(machine model.Machine, runtimeObj *model.Runtime) []string {
+	taints := []string{}
+	if runtimeObj != nil {
+		taints = append(taints, runtime.JoinNodeTaints(*runtimeObj)...)
+	}
+	taints = append(taints, machineJoinTaints(machine)...)
+	if len(taints) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(taints))
+	for _, taint := range taints {
+		taint = strings.TrimSpace(taint)
+		if taint == "" {
+			continue
+		}
+		if _, ok := seen[taint]; ok {
+			continue
+		}
+		seen[taint] = struct{}{}
+		out = append(out, taint)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (s *Server) clusterJoinConfigured() bool {
@@ -632,6 +660,7 @@ FUGUE_LIMIT_CPU="${FUGUE_LIMIT_CPU:-}"
 FUGUE_LIMIT_MEMORY="${FUGUE_LIMIT_MEMORY:-}"
 FUGUE_LIMIT_DISK="${FUGUE_LIMIT_DISK:-}"
 FUGUE_LIMIT_DISK_PATH="${FUGUE_LIMIT_DISK_PATH:-/}"
+FUGUE_EDGE_ONLY="${FUGUE_EDGE_ONLY:-}"
 FUGUE_PROGRESS_HEARTBEAT_SECONDS="${FUGUE_PROGRESS_HEARTBEAT_SECONDS:-15}"
 FUGUE_NODE_UPDATER_ENABLED="${FUGUE_NODE_UPDATER_ENABLED:-true}"
 FUGUE_NODE_UPDATER_POLL_INTERVAL="${FUGUE_NODE_UPDATER_POLL_INTERVAL:-5min}"
@@ -1066,12 +1095,13 @@ print_install_timeline() {
 
 usage() {
   cat >&2 <<EOF_USAGE
-Usage: join-cluster.sh [--cpu LIMIT] [--memory LIMIT] [--disk LIMIT]
+Usage: join-cluster.sh [--edge-only] [--cpu LIMIT] [--memory LIMIT] [--disk LIMIT]
 
 Optional resource caps can also be provided as environment variables:
   FUGUE_LIMIT_CPU=2
   FUGUE_LIMIT_MEMORY=4Gi
   FUGUE_LIMIT_DISK=50Gi
+  FUGUE_EDGE_ONLY=true
 
 Accepted formats:
   CPU: integer cores (2), decimal cores (1.5), or millicores (1500m)
@@ -1087,6 +1117,9 @@ Examples:
 
   curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | \\
     sudo FUGUE_NODE_KEY='...' bash -s -- --cpu 2 --memory 4Gi --disk 50Gi
+
+  curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | \\
+    sudo FUGUE_NODE_KEY='...' bash -s -- --edge-only --cpu 1500m --memory 768Mi --disk 14Gi
 EOF_USAGE
 }
 
@@ -1120,6 +1153,10 @@ parse_args() {
         FUGUE_LIMIT_DISK="$2"
         shift 2
         ;;
+      --edge-only)
+        FUGUE_EDGE_ONLY=true
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -1131,6 +1168,39 @@ parse_args() {
         ;;
     esac
   done
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+append_runtime_label() {
+  local key="$1"
+  local value="$2"
+  local current="${FUGUE_RUNTIME_LABELS:-}"
+  case ",${current}," in
+    *",${key}="*)
+      return 0
+      ;;
+  esac
+  if [ -z "${current}" ]; then
+    FUGUE_RUNTIME_LABELS="${key}=${value}"
+  else
+    FUGUE_RUNTIME_LABELS="${current},${key}=${value}"
+  fi
+}
+
+apply_join_role_shortcuts() {
+  if truthy "${FUGUE_EDGE_ONLY:-}"; then
+    append_runtime_label "fugue.io/role.edge" "true"
+  fi
 }
 
 wait_for_systemd_unit_active() {
@@ -2411,6 +2481,7 @@ node_external_ip="${FUGUE_NODE_EXTERNAL_IP:-${node_public_ip}}"
 if [ -n "${node_public_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
   node_endpoint="${node_public_ip}"
 fi
+apply_join_role_shortcuts
 script_started_at="$(date +%%s)"
 print_install_timeline
 if fetch_discovery_bundle; then

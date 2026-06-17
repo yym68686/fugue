@@ -138,13 +138,43 @@ func NeedsLegacyPlatformMachinePolicyBackfill(machine model.Machine, labels map[
 }
 
 func machinePolicyFromRuntime(runtime model.Runtime, existing *model.Machine) model.MachinePolicy {
-	policy := seedMachinePolicyFromLabels(model.MachineScopeTenantRuntime, runtime.Labels)
 	if existing != nil {
-		policy = existing.Policy
+		policy := existing.Policy
+		policy.AllowSharedPool = model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode) == model.RuntimePoolModeInternalShared
+		if policy.AllowSharedPool {
+			policy.AllowAppRuntime = true
+			policy.AllowBuilds = true
+		}
+		return normalizeMachinePolicy(model.MachineScopeTenantRuntime, policy)
 	}
-	policy.AllowAppRuntime = true
+
+	policy := seedMachinePolicyFromLabels(model.MachineScopeTenantRuntime, runtime.Labels)
+	if labelsRequestDedicatedTenantRuntimePolicy(runtime.Labels) {
+		policy.AllowAppRuntime = false
+	}
 	policy.AllowSharedPool = model.NormalizeRuntimePoolMode(runtime.Type, runtime.PoolMode) == model.RuntimePoolModeInternalShared
+	if policy.AllowSharedPool {
+		policy.AllowAppRuntime = true
+		policy.AllowBuilds = true
+	}
 	return normalizeMachinePolicy(model.MachineScopeTenantRuntime, policy)
+}
+
+func labelsRequestDedicatedTenantRuntimePolicy(labels map[string]string) bool {
+	if len(labels) == 0 {
+		return false
+	}
+	hasDedicatedRole := strings.EqualFold(strings.TrimSpace(labels[runtimepkg.EdgeRoleLabelKey]), runtimepkg.NodeRoleLabelValue) ||
+		strings.EqualFold(strings.TrimSpace(labels[runtimepkg.DNSRoleLabelKey]), runtimepkg.NodeRoleLabelValue) ||
+		strings.EqualFold(strings.TrimSpace(labels[runtimepkg.InternalMaintenanceLabelKey]), runtimepkg.NodeRoleLabelValue)
+	if !hasDedicatedRole {
+		return false
+	}
+	hasAppRuntimeRole := strings.EqualFold(strings.TrimSpace(labels[runtimepkg.AppRuntimeRoleLabelKey]), runtimepkg.NodeRoleLabelValue)
+	hasBuildRole := strings.EqualFold(strings.TrimSpace(labels[runtimepkg.BuildNodeLabelKey]), runtimepkg.BuildNodeLabelValue) ||
+		strings.EqualFold(strings.TrimSpace(labels[runtimepkg.BuilderRoleLabelKey]), runtimepkg.NodeRoleLabelValue)
+	hasSharedPoolRole := strings.EqualFold(strings.TrimSpace(labels[runtimepkg.SharedPoolLabelKey]), runtimepkg.SharedPoolLabelValue)
+	return !hasAppRuntimeRole && !hasBuildRole && !hasSharedPoolRole
 }
 
 func machineFromRuntime(runtime model.Runtime, existing *model.Machine, now time.Time) model.Machine {

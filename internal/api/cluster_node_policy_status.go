@@ -167,7 +167,7 @@ func clusterNodePolicyReconcileReasons(snapshot clusterNodeSnapshot, machine *mo
 	healthy := clusterNodeSnapshotSchedulable(snapshot)
 	reasons := []string{}
 	if runtimeObj != nil {
-		if _, changed := buildRuntimeNodeLabelsPatchForHealth(snapshot.labels, healthy, *runtimeObj); changed {
+		if _, changed := buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(snapshot.labels, healthy, *runtimeObj, machine); changed {
 			reasons = append(reasons, "runtime labels drift from desired policy")
 		}
 		if _, changed := buildRuntimeNodeTaintsForHealth(snapshot.taints, healthy, *runtimeObj); changed {

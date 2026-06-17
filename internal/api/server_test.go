@@ -535,6 +535,84 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	}
 }
 
+func TestJoinClusterEnvSupportsEdgeOnlyJoinLabels(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Edge Only Join Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "edge")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/kube-system/secrets":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "bootstrap-token-created"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		ClusterJoinServer:            "https://100.64.0.1:6443",
+		ClusterJoinCAHash:            "deadbeef",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPullBase:             "10.128.0.2:30500",
+		ClusterJoinRegistryEndpoint:  "100.64.0.1:30500",
+	})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	form := url.Values{}
+	form.Set("node_key", nodeSecret)
+	form.Set("node_name", "edge-1")
+	form.Set("machine_name", "edge-1")
+	form.Set("machine_fingerprint", "edge-1-fingerprint")
+	form.Set("labels", runtime.EdgeRoleLabelKey+"="+runtime.NodeRoleLabelValue)
+	req := httptest.NewRequest(http.MethodPost, "/v1/nodes/join-cluster/env", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, runtime.EdgeRoleLabelKey+"="+runtime.NodeRoleLabelValue) {
+		t.Fatalf("expected edge role label in join env, got %s", body)
+	}
+	if strings.Contains(body, runtime.AppRuntimeRoleLabelKey+"="+runtime.NodeRoleLabelValue) {
+		t.Fatalf("expected edge-only join env to omit app-runtime label, got %s", body)
+	}
+	if !strings.Contains(body, runtime.DedicatedTaintKey+"="+runtime.DedicatedEdgeValue+":NoSchedule") {
+		t.Fatalf("expected edge dedicated taint in join env, got %s", body)
+	}
+
+	machine, err := s.GetMachineByClusterNodeName("edge-1")
+	if err != nil {
+		t.Fatalf("get machine: %v", err)
+	}
+	if machine.Policy.AllowAppRuntime || !machine.Policy.AllowEdge {
+		t.Fatalf("expected stored edge-only machine policy, got %#v", machine.Policy)
+	}
+}
+
 func TestJoinClusterEnvNormalizesNodeNameAndWritesRequestedAudit(t *testing.T) {
 	t.Parallel()
 
@@ -691,6 +769,10 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 		`--data-urlencode "current_node_name=${FUGUE_JOIN_NODE_NAME}"`,
 		`--data-urlencode "bootstrap_token_id=${FUGUE_JOIN_BOOTSTRAP_TOKEN_ID:-}"`,
 		`cleanup_stale_cluster_nodes`,
+		`FUGUE_EDGE_ONLY="${FUGUE_EDGE_ONLY:-}"`,
+		`--edge-only`,
+		`append_runtime_label "fugue.io/role.edge" "true"`,
+		`apply_join_role_shortcuts`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

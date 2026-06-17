@@ -208,7 +208,7 @@ func (s *Server) reconcileClusterNodePolicy(ctx context.Context, machine model.M
 	var reconcileErr string
 
 	if runtimeObj != nil {
-		reconciled, err := s.reconcileRuntimeClusterNode(ctx, *runtimeObj)
+		reconciled, err := s.reconcileRuntimeClusterNodeWithMachinePolicy(ctx, *runtimeObj, &machine)
 		if err != nil {
 			reconcileErr = err.Error()
 		} else if reconciled {
