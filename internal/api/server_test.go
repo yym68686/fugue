@@ -867,6 +867,7 @@ func TestJoinClusterInstallScriptSupportsResourceCaps(t *testing.T) {
 		`--disk LIMIT`,
 		`parse_args "$@"`,
 		`parse_cpu_millicores() {`,
+		`milli="${raw%m}"`,
 		`parse_quantity_bytes() {`,
 		`configure_resource_limits() {`,
 		`system-reserved=${system_reserved}`,

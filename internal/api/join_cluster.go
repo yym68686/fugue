@@ -1308,19 +1308,25 @@ append_csv_value() {
 
 parse_cpu_millicores() {
   local raw=""
+  local milli=""
   raw="$(trim_whitespace "$1")"
   [ -n "${raw}" ] || return 1
+  case "${raw}" in
+    *m)
+      milli="${raw%%m}"
+      case "${milli}" in
+        ''|*[!0-9]*)
+          return 1
+          ;;
+      esac
+      [ "${milli}" -gt 0 ] || return 1
+      printf '%%s' "${milli}"
+      return 0
+      ;;
+  esac
   awk -v raw="${raw}" '
     BEGIN {
       value = raw
-      if (value ~ /m$/) {
-        sub(/m$/, "", value)
-        if (value !~ /^[0-9]+$/ || value <= 0) {
-          exit 1
-        }
-        printf "%%d", value
-        exit 0
-      }
       if (value !~ /^[0-9]+([.][0-9]+)?$/) {
         exit 1
       }
