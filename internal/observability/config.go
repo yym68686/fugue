@@ -19,9 +19,9 @@ const (
 	DefaultMemoryLimit                   = 64 << 20
 	DefaultRetryAttempts                 = 3
 	DefaultKubernetesLogPollInterval     = 15 * time.Second
-	DefaultKubernetesLogTailLines        = 200
+	DefaultKubernetesLogTailLines        = 2000
 	DefaultKubernetesLogMaxPods          = 500
-	DefaultKubernetesLogMaxLinesPerCycle = 5000
+	DefaultKubernetesLogMaxLinesPerCycle = 20000
 )
 
 type Config struct {

@@ -98,7 +98,7 @@ func TestKubernetesLogAttributesUseOwnerAppForBackingService(t *testing.T) {
 	}
 }
 
-func TestKubernetesContainerHasLogsSkipsTerminatedContainers(t *testing.T) {
+func TestKubernetesContainerHasLogsIncludesTerminatedContainers(t *testing.T) {
 	pod := corev1.Pod{
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{
@@ -111,8 +111,78 @@ func TestKubernetesContainerHasLogsSkipsTerminatedContainers(t *testing.T) {
 			},
 		},
 	}
-	if kubernetesContainerHasLogs(pod, "app") {
-		t.Fatal("expected terminated container to be skipped by the live log collector")
+	if !kubernetesContainerHasLogs(pod, "app") {
+		t.Fatal("expected terminated container logs to remain eligible for collection")
+	}
+}
+
+func TestKubernetesLogCollectorKeepsNewestLinesWhenCapped(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:                       true,
+		QueueSize:                     4,
+		MemoryLimitBytes:              4096,
+		KubernetesLogsEnabled:         true,
+		KubernetesLogMaxLinesPerCycle: 2,
+		MaxPayloadBytes:               1024,
+	}, nil)
+	pipeline.ctx = context.Background()
+	collector := newKubernetesLogCollectorWithClient(pipeline, nil)
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "fg-tenant",
+			Name:      "demo-abc",
+		},
+	}
+	lines := strings.Join([]string{
+		"2026-06-06T01:02:01Z old-one",
+		"2026-06-06T01:02:02Z old-two",
+		"2026-06-06T01:02:03Z keep-one",
+		"2026-06-06T01:02:04Z keep-two",
+	}, "\n") + "\n"
+
+	if got := collector.ingestLogStream(context.Background(), strings.NewReader(lines), pod, "app", 2); got != 2 {
+		t.Fatalf("expected two ingested lines, got %d", got)
+	}
+	first := <-pipeline.queue
+	second := <-pipeline.queue
+	if first.Message != "keep-one" || second.Message != "keep-two" {
+		t.Fatalf("expected newest capped lines to be ingested in order, got %q then %q", first.Message, second.Message)
+	}
+}
+
+func TestKubernetesLogCollectorRetainsPriorityRequestFactsWhenCapped(t *testing.T) {
+	pipeline := NewPipeline(Config{
+		Enabled:                       true,
+		QueueSize:                     4,
+		MemoryLimitBytes:              4096,
+		KubernetesLogsEnabled:         true,
+		KubernetesLogMaxLinesPerCycle: 1,
+		MaxPayloadBytes:               2048,
+	}, nil)
+	pipeline.ctx = context.Background()
+	collector := newKubernetesLogCollectorWithClient(pipeline, nil)
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "fg-tenant",
+			Name:      "edge-abc",
+		},
+	}
+	lines := strings.Join([]string{
+		`2026-06-06T01:02:01Z {"event_type":"request_fact","trace_id":"trace_123","request_id":"req_123","summary_json":"{\"edge_request_id\":\"edge_req_123\"}"}`,
+		"2026-06-06T01:02:02Z noisy-one",
+		"2026-06-06T01:02:03Z noisy-two",
+	}, "\n") + "\n"
+
+	if got := collector.ingestLogStream(context.Background(), strings.NewReader(lines), pod, "edge", 1); got != 2 {
+		t.Fatalf("expected priority request fact plus newest capped line, got %d", got)
+	}
+	first := <-pipeline.queue
+	second := <-pipeline.queue
+	if first.Attributes["event_type"] != "request_fact" || first.Attributes["trace_id"] != "trace_123" {
+		t.Fatalf("expected priority request_fact first, got %+v", first)
+	}
+	if second.Message != "noisy-two" {
+		t.Fatalf("expected newest non-priority line second, got %q", second.Message)
 	}
 }
 

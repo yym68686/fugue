@@ -72,6 +72,16 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 		RequestBytes:         123,
 		RequestBodyReadBytes: 100,
 		RequestBodyReadError: "unexpected EOF",
+		RequestBodyBuffered:  true,
+		RequestBodyBuffer:    90 * time.Millisecond,
+		BodyReadBlock:        70 * time.Millisecond,
+		FileWrite:            2 * time.Millisecond,
+		FirstBodyByte:        10 * time.Millisecond,
+		LastBodyByte:         80 * time.Millisecond,
+		MaxReadGap:           40 * time.Millisecond,
+		ReadCalls:            4,
+		AvgBPS:               1024,
+		MinWindowBPS:         128,
 		EdgeRequestID:        "edge_req_123",
 		Protocol:             "HTTP/1.1",
 		ClientIP:             "203.0.113.10",
@@ -115,7 +125,15 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 		!strings.Contains(summary, `"request_body_read_bytes":100`) ||
 		!strings.Contains(summary, `"request_body_missing_bytes":23`) ||
 		!strings.Contains(summary, `"request_body_complete":false`) ||
-		!strings.Contains(summary, `"request_body_read_error":"unexpected EOF"`) {
+		!strings.Contains(summary, `"request_body_read_error":"unexpected EOF"`) ||
+		!strings.Contains(summary, `"body_read_block_ms":70`) ||
+		!strings.Contains(summary, `"file_write_ms":2`) ||
+		!strings.Contains(summary, `"first_body_byte_ms":10`) ||
+		!strings.Contains(summary, `"last_body_byte_ms":80`) ||
+		!strings.Contains(summary, `"max_read_gap_ms":40`) ||
+		!strings.Contains(summary, `"read_calls":4`) ||
+		!strings.Contains(summary, `"avg_bps":1024`) ||
+		!strings.Contains(summary, `"min_window_bps":128`) {
 		t.Fatalf("summary missing request body observability details: %s", summary)
 	}
 }
@@ -182,9 +200,13 @@ func TestProxyHandlerEmitsAndForwardsEdgeRequestID(t *testing.T) {
 	t.Parallel()
 
 	var originEdgeRequestID string
+	var originTraceID string
+	var originTraceparent string
 	var originClientRemoteAddr string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		originEdgeRequestID = r.Header.Get(edgeRequestIDHeader)
+		originTraceID = r.Header.Get(edgeTraceIDHeader)
+		originTraceparent = r.Header.Get("traceparent")
 		originClientRemoteAddr = r.Header.Get(edgeClientRemoteAddrHeader)
 		_, _ = io.Copy(io.Discard, r.Body)
 		_, _ = fmt.Fprint(w, "ok")
@@ -212,6 +234,16 @@ func TestProxyHandlerEmitsAndForwardsEdgeRequestID(t *testing.T) {
 	}
 	if originEdgeRequestID != edgeRequestID {
 		t.Fatalf("expected origin edge request id %q, got %q", edgeRequestID, originEdgeRequestID)
+	}
+	traceID := recorder.Header().Get(edgeTraceIDHeader)
+	if len(traceID) != 32 {
+		t.Fatalf("expected generated trace id response header, got %q", traceID)
+	}
+	if originTraceID != traceID {
+		t.Fatalf("expected origin trace id %q, got %q", traceID, originTraceID)
+	}
+	if !strings.Contains(originTraceparent, traceID) {
+		t.Fatalf("expected traceparent to contain trace id %q, got %q", traceID, originTraceparent)
 	}
 	if originClientRemoteAddr != "" {
 		t.Fatalf("expected internal client remote addr header not to reach origin, got %q", originClientRemoteAddr)
@@ -262,6 +294,117 @@ func TestProxyHandlerBuffersJSONSSERequestBodyBeforeOrigin(t *testing.T) {
 	}
 	if active := service.edgeRequestBodyBufferManager().activeRequests(); active != 0 {
 		t.Fatalf("expected no active buffer reservations, active=%d", active)
+	}
+	metrics := httptest.NewRecorder()
+	service.handleMetrics(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, want := range []string{
+		"fugue_edge_request_body_read_seconds_count",
+		"fugue_edge_request_body_file_write_seconds_count",
+		"fugue_edge_request_body_throughput_bps_count",
+	} {
+		if !strings.Contains(metrics.Body.String(), want) {
+			t.Fatalf("expected metrics to include %q, got:\n%s", want, metrics.Body.String())
+		}
+	}
+}
+
+func TestRequestBodyBuffersEndpointReportsActiveReads(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{EdgeID: "edge_123"}, log.New(ioDiscard{}, "", 0))
+	started := time.Now().Add(-2 * time.Second)
+	observed := edgeProxyObservation{
+		Host:          "demo.fugue.pro",
+		Method:        http.MethodPost,
+		Path:          "/v1/responses",
+		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:     "req_123",
+		EdgeRequestID: "edge_req_123",
+		Route: model.EdgeRouteBinding{
+			Hostname:        "demo.fugue.pro",
+			PathPrefix:      "/v1",
+			AppID:           "app_123",
+			TenantID:        "tenant_123",
+			RuntimeID:       "runtime_123",
+			RouteKind:       model.EdgeRouteKindPlatform,
+			RouteGeneration: "routegen_123",
+		},
+	}
+	activeID := service.startActiveRequestBodyBufferRead(observed, 100, started)
+	service.updateActiveRequestBodyBufferRead(activeID, edgeRequestBodyBufferCopyResult{
+		Written:       40,
+		BytesRead:     40,
+		BodyReadBlock: 120 * time.Millisecond,
+		FileWrite:     time.Millisecond,
+		FirstBodyByte: 100 * time.Millisecond,
+		LastBodyByte:  200 * time.Millisecond,
+		MaxReadGap:    100 * time.Millisecond,
+		ReadCalls:     2,
+		AvgBPS:        20,
+		MinWindowBPS:  10,
+	}, time.Now().Add(-1500*time.Millisecond))
+	defer service.finishActiveRequestBodyBufferRead(activeID)
+
+	recorder := httptest.NewRecorder()
+	service.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/edge/request-body-buffers", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", recorder.Code)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`"edge_request_id":"edge_req_123"`,
+		`"bytes_read":40`,
+		`"content_length":100`,
+		`"last_read_age_ms"`,
+		`"body_read_block_ms":120`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("debug endpoint missing %q in %s", want, body)
+		}
+	}
+}
+
+func TestRequestBodyBufferSlowEventLogsStructuredFact(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	service := NewService(config.EdgeConfig{
+		EdgeID:                         "edge_123",
+		RequestBodyBufferSlowThreshold: time.Millisecond,
+	}, log.New(&logs, "", 0))
+	started := time.Now().Add(-10 * time.Millisecond)
+	observed := edgeProxyObservation{
+		Host:          "demo.fugue.pro",
+		Method:        http.MethodPost,
+		Path:          "/v1/responses",
+		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
+		RequestID:     "req_123",
+		EdgeRequestID: "edge_req_123",
+		Route: model.EdgeRouteBinding{
+			Hostname:        "demo.fugue.pro",
+			PathPrefix:      "/v1",
+			AppID:           "app_123",
+			TenantID:        "tenant_123",
+			RuntimeID:       "runtime_123",
+			RouteGeneration: "routegen_123",
+		},
+	}
+	activeID := service.startActiveRequestBodyBufferRead(observed, 100, started)
+	defer service.finishActiveRequestBodyBufferRead(activeID)
+	service.updateActiveRequestBodyBufferRead(activeID, edgeRequestBodyBufferCopyResult{
+		BytesRead:     10,
+		Written:       10,
+		BodyReadBlock: 9 * time.Millisecond,
+		ReadCalls:     1,
+		AvgBPS:        1000,
+	}, time.Now().Add(-9*time.Millisecond))
+
+	service.logRequestBodyBufferSlowIfNeeded(observed, activeID)
+	output := logs.String()
+	if !strings.Contains(output, `"event_type":"edge_request_body_buffer_slow"`) ||
+		!strings.Contains(output, `"edge_request_id":"edge_req_123"`) ||
+		!strings.Contains(output, `"last_read_age_ms"`) {
+		t.Fatalf("missing slow event fields in %s", output)
 	}
 }
 

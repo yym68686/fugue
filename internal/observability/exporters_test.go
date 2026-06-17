@@ -274,6 +274,20 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 				"attributes_json": `{"phase":"rollout"}`,
 			},
 		},
+		{
+			Timestamp: time.Unix(104, 0).UTC(),
+			Kind:      EventKindLog,
+			Message:   "edge body read is slow",
+			Attributes: map[string]string{
+				"event_type":      "edge_request_body_buffer_slow",
+				"tenant_id":       "tenant_123",
+				"app_id":          "app_123",
+				"runtime_id":      "runtime_123",
+				"severity":        "warning",
+				"edge_request_id": "edge_req_123",
+				"elapsed_ms":      "30000",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("export ClickHouse rows: %v", err)
@@ -293,6 +307,8 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 		`\"role\":\"reader\"`,
 		`"stage_ms":17`,
 		`"event_type":"deploy_event"`,
+		`"event_type":"edge_request_body_buffer_slow"`,
+		`\"edge_request_id\":\"edge_req_123\"`,
 		`"attributes_json":"{\"phase\":\"rollout\"}"`,
 	} {
 		if !strings.Contains(joined, want) {

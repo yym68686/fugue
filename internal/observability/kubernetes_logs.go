@@ -3,6 +3,7 @@ package observability
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -33,6 +34,11 @@ type kubernetesLogCollector struct {
 	pipeline *Pipeline
 	client   kubernetes.Interface
 	deduper  *logLineDeduper
+}
+
+type kubernetesLogTarget struct {
+	pod       corev1.Pod
+	container string
 }
 
 func (p *Pipeline) runKubernetesLogCollection() {
@@ -106,11 +112,8 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 	now := time.Now().UTC()
 	c.deduper.Prune(now.Add(-kubernetesLogDedupWindow))
 	podCount := 0
-	lineBudget := cfg.KubernetesLogMaxLinesPerCycle
+	targets := []kubernetesLogTarget{}
 	for i := range pods.Items {
-		if lineBudget <= 0 {
-			break
-		}
 		pod := pods.Items[i]
 		if !kubernetesLogNamespaceAllowed(pod.Namespace, cfg.KubernetesLogNamespaces, cfg.KubernetesLogNamespacePrefixes) {
 			continue
@@ -122,17 +125,39 @@ func (c *kubernetesLogCollector) collectOnce(ctx context.Context) {
 			break
 		}
 		for _, container := range kubernetesLogContainerNames(pod) {
-			if lineBudget <= 0 {
-				break
-			}
 			if !kubernetesContainerHasLogs(pod, container) {
 				continue
 			}
-			consumed := c.collectContainerLogs(ctx, pod, container, lineBudget)
-			lineBudget -= consumed
+			targets = append(targets, kubernetesLogTarget{pod: pod, container: container})
 		}
 	}
+	linesPerContainer := c.kubernetesLogLinesPerContainer(len(targets))
+	for _, target := range targets {
+		c.collectContainerLogs(ctx, target.pod, target.container, linesPerContainer)
+	}
 	c.pipeline.kubernetesLogPods.Store(int64(podCount))
+}
+
+func (c *kubernetesLogCollector) kubernetesLogLinesPerContainer(targetCount int) int {
+	cfg := c.pipeline.cfg
+	tailLines := int(cfg.KubernetesLogTailLines)
+	if tailLines <= 0 {
+		tailLines = int(DefaultKubernetesLogTailLines)
+	}
+	if targetCount <= 0 || cfg.KubernetesLogMaxLinesPerCycle <= 0 {
+		return tailLines
+	}
+	fairShare := cfg.KubernetesLogMaxLinesPerCycle / targetCount
+	if cfg.KubernetesLogMaxLinesPerCycle%targetCount != 0 {
+		fairShare++
+	}
+	if fairShare < 1 {
+		fairShare = 1
+	}
+	if fairShare > tailLines {
+		return tailLines
+	}
+	return fairShare
 }
 
 func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod corev1.Pod, container string, maxLines int) int {
@@ -171,24 +196,47 @@ func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod c
 func (c *kubernetesLogCollector) ingestLogStream(ctx context.Context, stream io.Reader, pod corev1.Pod, container string, maxLines int) int {
 	scanner := bufio.NewScanner(stream)
 	scanner.Buffer(make([]byte, 0, 64*1024), int(c.pipeline.cfg.MaxPayloadBytes))
-	attrs := kubernetesLogAttributes(pod, container)
-	source := "kubernetes://" + pod.Namespace + "/" + pod.Name + "/" + container
-	ingested := 0
+	type logRecord struct {
+		timestamp time.Time
+		message   string
+	}
+	priorityRecords := []logRecord{}
+	records := make([]logRecord, 0, maxLines)
+	dropped := 0
 	for scanner.Scan() {
-		if ingested >= maxLines {
-			break
-		}
 		select {
 		case <-ctx.Done():
-			return ingested
+			return 0
 		default:
 		}
 		timestamp, message := splitKubernetesLogLine(scanner.Text())
-		key := kubernetesLogDedupKey(pod.Namespace, pod.Name, container, timestamp, message)
+		record := logRecord{timestamp: timestamp, message: message}
+		if kubernetesLogPriorityMessage(message) {
+			priorityRecords = append(priorityRecords, record)
+		}
+		if len(records) < maxLines {
+			records = append(records, record)
+		} else if maxLines > 0 {
+			records[dropped%maxLines] = record
+			dropped++
+		}
+	}
+	if dropped > 0 && len(records) > 1 {
+		rotate := dropped % len(records)
+		records = append(append([]logRecord{}, records[rotate:]...), records[:rotate]...)
+	}
+	if len(priorityRecords) > 0 {
+		records = append(priorityRecords, records...)
+	}
+	attrs := kubernetesLogAttributes(pod, container)
+	source := "kubernetes://" + pod.Namespace + "/" + pod.Name + "/" + container
+	ingested := 0
+	for _, record := range records {
+		key := kubernetesLogDedupKey(pod.Namespace, pod.Name, container, record.timestamp, record.message)
 		if c.deduper.Seen(key, time.Now().UTC()) {
 			continue
 		}
-		if c.pipeline.IngestLogLineWithAttributes(ctx, source, message, attrs, timestamp) {
+		if c.pipeline.IngestLogLineWithAttributes(ctx, source, record.message, attrs, record.timestamp) {
 			c.pipeline.kubernetesLogLines.Add(1)
 			ingested++
 		}
@@ -198,6 +246,32 @@ func (c *kubernetesLogCollector) ingestLogStream(ctx context.Context, stream io.
 		c.pipeline.recordError(fmt.Errorf("scan Kubernetes logs for %s/%s/%s: %w", pod.Namespace, pod.Name, container, err))
 	}
 	return ingested
+}
+
+func kubernetesLogPriorityMessage(message string) bool {
+	message = strings.TrimSpace(message)
+	if !strings.HasPrefix(message, "{") {
+		return false
+	}
+	fields := map[string]any{}
+	if err := json.Unmarshal([]byte(message), &fields); err != nil {
+		return false
+	}
+	for _, key := range []string{"fugue_table", "table"} {
+		if table, ok := fields[key].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(table)) {
+			case "request_fact", "request_facts":
+				return true
+			}
+		}
+	}
+	eventType, _ := fields["event_type"].(string)
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "request_fact", "request_summary", "edge_request_body_buffer_slow", "edge_request_body_buffer_progress":
+		return true
+	default:
+		return false
+	}
 }
 
 func kubernetesLogNamespaceAllowed(namespace string, exact []string, prefixes []string) bool {
@@ -260,7 +334,7 @@ func kubernetesContainerHasLogs(pod corev1.Pod, container string) bool {
 		if status.Name != container {
 			continue
 		}
-		return status.State.Running != nil
+		return status.State.Running != nil || status.State.Terminated != nil
 	}
 	return false
 }

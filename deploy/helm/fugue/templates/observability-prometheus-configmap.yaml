@@ -159,6 +159,36 @@ data:
             annotations:
               summary: "Fugue app restarted repeatedly"
               description: "An app restarted more than 3 times in 10 minutes."
+      - name: fugue-edge-request-body
+        rules:
+          - alert: FugueEdgeSlowRequestBodyRead
+            expr: |
+              (
+                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_read_seconds_sum[5m]))
+                /
+                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_read_seconds_count[5m]))
+              ) > 30
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge request body reads are slow"
+              description: "Buffered request body reads averaged more than 30 seconds over 5 minutes for an edge/app/route/client segment."
+          - alert: FugueEdgeLowRequestBodyThroughput
+            expr: |
+              (
+                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_throughput_bps_sum[5m]))
+                /
+                sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_throughput_bps_count[5m]))
+              ) < 65536
+              and
+              sum by (edge_id, app, hostname, path_prefix, route_kind, client_country, client_asn) (rate(fugue_edge_request_body_throughput_bps_count[5m])) > 0
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue edge request body throughput is low"
+              description: "Buffered request body throughput averaged below 64 KiB/s over 5 minutes for an edge/app/route/client segment."
       - name: fugue-registry-maintenance
         rules:
           - record: fugue_registry_pvc_usage_ratio

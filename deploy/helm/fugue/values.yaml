@@ -142,9 +142,9 @@ observability:
       namespacePrefixes: "fg-"
       labelSelector: ""
       pollInterval: 15s
-      tailLines: 200
+      tailLines: 2000
       maxPods: 500
-      maxLinesPerCycle: 5000
+      maxLinesPerCycle: 20000
     batchSize: 128
     maxPayloadBytes: 1048576
     memoryLimitBytes: 67108864
@@ -399,6 +399,8 @@ edge:
     totalMaxBytes: 0
     reserveBytes: 4294967296
     diskRatio: 0.25
+    slowThreshold: 30s
+    progressEvery: 10s
   routesCachePath: /var/lib/fugue/edge/routes-cache.json
   cacheArchiveLimit: 5
   maxStale: 24h

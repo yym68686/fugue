@@ -1,6 +1,9 @@
 package edge
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -96,6 +99,14 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		summary["request_body_buffer_budget_bytes"] = nonNegativeInt64(observed.RequestBodyBufferBudget)
 		summary["request_body_buffer_used_bytes"] = nonNegativeInt64(observed.RequestBodyBufferUsed)
 		summary["request_body_buffer_active_requests"] = nonNegativeInt64(observed.RequestBodyBufferActive)
+		summary["body_read_block_ms"] = durationMilliseconds(observed.BodyReadBlock)
+		summary["file_write_ms"] = durationMilliseconds(observed.FileWrite)
+		summary["first_body_byte_ms"] = durationMilliseconds(observed.FirstBodyByte)
+		summary["last_body_byte_ms"] = durationMilliseconds(observed.LastBodyByte)
+		summary["max_read_gap_ms"] = durationMilliseconds(observed.MaxReadGap)
+		summary["read_calls"] = nonNegativeInt64(observed.ReadCalls)
+		summary["avg_bps"] = nonNegativeInt64(observed.AvgBPS)
+		summary["min_window_bps"] = nonNegativeInt64(observed.MinWindowBPS)
 	}
 	if errText := logSafeValue(observed.RequestBodyBufferError); errText != "-" {
 		summary["request_body_buffer_error"] = errText
@@ -213,6 +224,41 @@ func edgeTraceIDFromRequest(r *http.Request) string {
 		return strings.ToLower(parts[1])
 	}
 	return ""
+}
+
+func edgeTraceIDForProxy(r *http.Request) string {
+	if traceID := edgeTraceIDFromRequest(r); traceID != "" {
+		return traceID
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err == nil && !allZeroHex(hex.EncodeToString(random[:])) {
+		return hex.EncodeToString(random[:])
+	}
+	sequence := atomic.AddUint64(&edgeProxyRequestSequence, 1)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d", time.Now().UnixNano(), sequence)))
+	return hex.EncodeToString(sum[:16])
+}
+
+func edgeTraceparentForProxy(traceID string, edgeRequestID string) string {
+	traceID = strings.ToLower(strings.TrimSpace(traceID))
+	if len(traceID) != 32 || allZeroHex(traceID) {
+		traceID = edgeTraceIDForProxy(nil)
+	}
+	spanID := edgeSpanIDForProxy(edgeRequestID)
+	return "00-" + traceID + "-" + spanID + "-01"
+}
+
+func edgeSpanIDForProxy(edgeRequestID string) string {
+	edgeRequestID = strings.TrimSpace(edgeRequestID)
+	if edgeRequestID == "" {
+		edgeRequestID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	sum := sha256.Sum256([]byte(edgeRequestID))
+	spanID := hex.EncodeToString(sum[:8])
+	if allZeroHex(spanID) {
+		return "0000000000000001"
+	}
+	return spanID
 }
 
 func edgeRequestIDFromRequest(r *http.Request) string {

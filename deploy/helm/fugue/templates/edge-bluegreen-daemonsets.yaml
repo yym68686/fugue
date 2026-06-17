@@ -290,6 +290,10 @@ spec:
               value: {{ (default 4294967296 $requestBodyBuffer.reserveBytes) | int64 | quote }}
             - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_DISK_RATIO
               value: {{ printf "%v" (default 0.25 $requestBodyBuffer.diskRatio) | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_SLOW_THRESHOLD
+              value: {{ default "30s" $requestBodyBuffer.slowThreshold | quote }}
+            - name: FUGUE_EDGE_REQUEST_BODY_BUFFER_PROGRESS_EVERY
+              value: {{ default "10s" $requestBodyBuffer.progressEvery | quote }}
             {{- if $caddyEnabled }}
             - name: FUGUE_EDGE_CADDY_ENABLED
               value: "true"
