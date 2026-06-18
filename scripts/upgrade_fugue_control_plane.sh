@@ -2055,6 +2055,26 @@ preserve_public_data_plane_from_live() {
       PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
       log "public data-plane caddy resources preserved from live ${FUGUE_RELEASE_FULLNAME}-edge-worker-a/caddy"
     fi
+    append_live_daemonset_image_helm_args "public data-plane dns" "${dns_ds}" "dns" "dns.image" || true
+    append_dns_group_image_args_from_live
+    dns_resources="$(trim_field "$(live_daemonset_container_resources_json "${dns_ds}" "dns")")"
+    if [[ -n "${dns_resources}" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "dns.resources=${dns_resources}")
+      log "public data-plane dns resources preserved from live ${dns_ds}/dns"
+    fi
+    probe_enabled="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED")")"
+    probe_port="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_PORT")")"
+    probe_timeout="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT")")"
+    if [[ -n "${probe_enabled}" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.enabled=${probe_enabled}")
+      log "public data-plane dns edge health probe enabled flag preserved from live ${dns_ds}/dns: ${probe_enabled}"
+    fi
+    if [[ -n "${probe_port}" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.port=${probe_port}")
+    fi
+    if [[ -n "${probe_timeout}" ]]; then
+      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-string "dns.edgeHealthProbe.timeout=${probe_timeout}")
+    fi
     return 0
   fi
 
@@ -5313,6 +5333,42 @@ prepare_release_domains() {
   fi
 }
 
+public_data_plane_front_daemonsets_ready() {
+  local rows=""
+  local name component generation observed desired ready unavailable
+  local found=0
+
+  rows="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\t"}{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}{"\n"}{end}' 2>/dev/null || true)"
+  while IFS=$'\t' read -r name component generation observed desired ready unavailable; do
+    name="$(trim_field "${name}")"
+    component="$(trim_field "${component}")"
+    [[ -n "${name}" ]] || continue
+    case "${component}" in
+      edge-front|edge-*-front)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    found=1
+    generation="${generation:-0}"
+    observed="${observed:-0}"
+    desired="${desired:-0}"
+    ready="${ready:-0}"
+    unavailable="${unavailable:-0}"
+    if [[ "${generation}" != "${observed}" || "${desired}" != "${ready}" || "${unavailable}" != "0" ]]; then
+      log "public data-plane front ${name} is not fully ready: generation=${generation} observed=${observed} desired=${desired} ready=${ready} unavailable=${unavailable}"
+      return 1
+    fi
+  done <<<"${rows}"
+
+  if [[ "${found}" == "0" ]]; then
+    log "public data-plane front readiness check skipped; no front DaemonSets found"
+  fi
+  return 0
+}
+
 release_public_data_plane_if_needed() {
   local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   local worker_changed="false"
@@ -5344,6 +5400,10 @@ release_public_data_plane_if_needed() {
   fi
   if public_data_plane_manifest_changed; then
     log "skip public data-plane auto release because manifest files changed; use scripts/release_fugue_public_data_plane.sh explicitly"
+    return 0
+  fi
+  if [[ "${worker_changed}" == "true" || "${front_changed}" == "true" ]] && ! public_data_plane_front_daemonsets_ready; then
+    log "skip public data-plane auto release because one or more front DaemonSets are not fully ready; repair bootstrap nodes and run scripts/release_fugue_public_data_plane.sh explicitly"
     return 0
   fi
 

@@ -931,11 +931,16 @@ func TestJoinClusterInstallScriptAvoidsRedundantRestarts(t *testing.T) {
 		`render_service_host_records() {`,
 		`detect_kube_dns_service_ip() {`,
 		`Fugue node DNS escape hatch skipping because iptables is unavailable.`,
+		`bind-interfaces`,
+		`failed to start dnsmasq; removed kube-dns redirect rules`,
 		`k3s_restart_needed=1`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)
 		}
+	}
+	if strings.Contains(script, "bind-dynamic") {
+		t.Fatalf("join-cluster install script must not use dnsmasq bind-dynamic")
 	}
 }
 

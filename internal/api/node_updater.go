@@ -535,7 +535,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v8"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v9"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -549,6 +549,8 @@ FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/r
 FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE="${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE:-/etc/rancher/k3s/registries.yaml}"
 FUGUE_NODE_UPDATER_EDGE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_ENV_FILE:-/etc/fugue/fugue-edge.env}"
 FUGUE_NODE_UPDATER_DNS_ENV_FILE="${FUGUE_NODE_UPDATER_DNS_ENV_FILE:-/etc/fugue/fugue-dns.env}"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE:-/etc/dnsmasq.d/fugue-node-dns-escape-hatch.conf}"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE:-fugue-node-dns-escape-hatch.service}"
 FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN="${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN:-/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC:-32}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC:-64}"
@@ -1386,6 +1388,54 @@ reconcile_time_sync() {
   return "${changed}"
 }
 
+node_dns_escape_hatch_installed() {
+  [ -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" ] && return 0
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemctl list-unit-files "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1
+}
+
+reconcile_node_dns_escape_hatch() {
+  local tmp=""
+  local changed=1
+  local dnsmasq_was_active=0
+
+  node_dns_escape_hatch_installed || return 1
+  if ! command -v dnsmasq >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
+    log "local DNS escape hatch is installed but dnsmasq/systemctl is unavailable"
+    return 1
+  fi
+  if systemctl is-active --quiet dnsmasq.service; then
+    dnsmasq_was_active=1
+  fi
+
+  mkdir -p "$(dirname "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}")" /var/lib/fugue-node-dns
+  tmp="$(mktemp)"
+  cat >"${tmp}" <<'EOF_DNSMASQ'
+interface=cni0
+bind-interfaces
+listen-address=127.0.0.1
+no-resolv
+no-hosts
+cache-size=1000
+addn-hosts=/var/lib/fugue-node-dns/hosts.generated
+server=1.1.1.1
+server=8.8.8.8
+EOF_DNSMASQ
+  if write_file_if_changed "${tmp}" "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"; then
+    changed=0
+  fi
+  if systemctl reload-or-restart dnsmasq.service >/dev/null 2>&1 || systemctl restart dnsmasq.service >/dev/null 2>&1; then
+    if [ "${dnsmasq_was_active}" -eq 0 ]; then
+      changed=0
+    fi
+  else
+    log "failed to start dnsmasq for local DNS escape hatch"
+    return 1
+  fi
+  systemctl start "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1 || true
+  return "${changed}"
+}
+
 render_lkg_service_env() {
   local target="$1"
   local generation_key="$2"
@@ -1457,6 +1507,9 @@ reconcile_node_state() {
   fi
   if reconcile_cni_bridge_mtu; then
     log "reconciled CNI bridge MTU"
+  fi
+  if reconcile_node_dns_escape_hatch; then
+    log "reconciled local DNS escape hatch"
   fi
   if reconcile_lkg_service_envs; then
     log "updated edge/dns non-secret environment generation"

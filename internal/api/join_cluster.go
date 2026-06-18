@@ -2000,6 +2000,15 @@ ensure_rule() {
   fi
 }
 
+delete_rule() {
+  local table="$1"
+  local chain="$2"
+  shift 2
+  while iptables -t "${table}" -C "${chain}" "$@" 2>/dev/null; do
+    iptables -t "${table}" -D "${chain}" "$@" || break
+  done
+}
+
 detect_cni_bridge_ip() {
   ip -4 addr show dev cni0 2>/dev/null | awk '/inet / {split($2, parts, "/"); print parts[1]; exit}'
 }
@@ -2074,6 +2083,26 @@ render_service_host_records() {
   ' | sort -u
 }
 
+ensure_dns_redirect_rules() {
+  local cni_bridge_ip="$1"
+  local kube_dns_service_ip="$2"
+
+  ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+}
+
+delete_dns_redirect_rules() {
+  local cni_bridge_ip="$1"
+  local kube_dns_service_ip="$2"
+
+  delete_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  delete_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  delete_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  delete_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+}
+
 main() {
   local cni_bridge_ip=""
   local kube_dns_service_ip=""
@@ -2096,12 +2125,13 @@ main() {
   chmod 0644 "${hosts_path}" 2>/dev/null || true
   rm -f "${hosts_tmp}"
 
-  ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
-  ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
-  ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
-  ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
+  if ! systemctl reload-or-restart dnsmasq.service >/dev/null 2>&1 && ! systemctl restart dnsmasq.service >/dev/null 2>&1; then
+    delete_dns_redirect_rules "${cni_bridge_ip}" "${kube_dns_service_ip}"
+    echo "Fugue node DNS escape hatch failed to start dnsmasq; removed kube-dns redirect rules."
+    exit 1
+  fi
 
-  systemctl reload-or-restart dnsmasq.service >/dev/null 2>&1 || systemctl restart dnsmasq.service
+  ensure_dns_redirect_rules "${cni_bridge_ip}" "${kube_dns_service_ip}"
 }
 
 main "$@"
@@ -2134,7 +2164,7 @@ configure_dns_escape_hatch() {
   config_tmp="$(mktemp)"
   cat >"${config_tmp}" <<'EOF_DNSMASQ'
 interface=cni0
-bind-dynamic
+bind-interfaces
 listen-address=127.0.0.1
 no-resolv
 no-hosts
