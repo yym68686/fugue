@@ -351,6 +351,8 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`restart_k3s_agent_for_config_reload`,
 		`restarting k3s-agent so containerd reloads updated join/registry configuration`,
 		`time-sync`,
+		`render_desired_k3s_policy_lists`,
+		`reconcile_node_policy_k3s_config`,
 		`--data-urlencode "capabilities=${FUGUE_NODE_UPDATER_CAPABILITIES}"`,
 		`capabilities)`,
 		`/etc/rancher/k3s/config.yaml`,
@@ -402,6 +404,109 @@ func ageTaskInStoreFile(t *testing.T, storePath, taskID string, updatedAt time.T
 	encoded = append(encoded, '\n')
 	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
 		t.Fatalf("write store: %v", err)
+	}
+}
+
+func TestNodeUpdaterK3sConfigReconcileRefreshesNodePolicyLabelsAndTaints(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
+FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
+cat >"${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" <<'YAML'
+server: "https://cp.example:6443"
+node-label:
+  - "fugue.io/machine-id=machine_edge"
+  - "fugue.io/machine-scope=tenant-runtime"
+  - "fugue.io/node-key-id=nodekey_edge"
+  - "fugue.io/node-mode=managed-owned"
+  - "fugue.io/role.app-runtime=true"
+  - "fugue.io/role.edge=true"
+  - "fugue.io/runtime-id=runtime_edge"
+  - "fugue.io/tenant-id=tenant_edge"
+  - "fugue.io/location-country-code=us"
+  - "fugue.io/public-ip=203.0.113.10"
+node-taint:
+  - "fugue.io/tenant=tenant_edge:NoSchedule"
+YAML
+cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
+{
+  "desired_state": {
+    "node_updater": {
+      "node_key_id": "nodekey_edge",
+      "machine_id": "machine_edge",
+      "runtime_id": "runtime_edge",
+      "tenant_id": "tenant_edge"
+    },
+    "node_policy": {
+      "node_name": "edge-1",
+      "runtime_id": "runtime_edge",
+      "tenant_id": "tenant_edge",
+      "machine_id": "machine_edge",
+      "policy": {
+        "allow_app_runtime": false,
+        "allow_builds": false,
+        "allow_shared_pool": false,
+        "allow_edge": true,
+        "allow_dns": false,
+        "allow_internal_maintenance": false,
+        "dedicated_mode": "edge",
+        "node_mode": "managed-owned",
+        "node_health": "ready",
+        "desired_control_plane_role": "none"
+      },
+      "labels": {
+        "fugue.io/machine-id": "machine_edge",
+        "fugue.io/machine-scope": "tenant-runtime",
+        "fugue.io/node-key-id": "nodekey_edge",
+        "fugue.io/node-mode": "managed-owned",
+        "fugue.io/role.app-runtime": "true",
+        "fugue.io/role.edge": "true",
+        "fugue.io/runtime-id": "runtime_edge",
+        "fugue.io/tenant-id": "tenant_edge",
+        "fugue.io/location-country-code": "us",
+        "fugue.io/public-ip": "203.0.113.10"
+      }
+    }
+  }
+}
+JSON
+if ! reconcile_node_policy_k3s_config; then
+  echo "first reconcile should report a write"
+  exit 1
+fi
+if grep -q 'fugue.io/role.app-runtime=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"; then
+  echo "stale app-runtime label was not removed"
+  cat "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+  exit 1
+fi
+grep -q 'fugue.io/role.edge=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/dedicated=edge:NoSchedule' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/tenant=tenant_edge:NoSchedule' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+if reconcile_node_policy_k3s_config; then
+  echo "second reconcile should not report a write"
+  exit 1
+fi
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-policy-reconcile-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater policy reconcile harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater policy reconcile harness failed: %v\n%s", err, output)
 	}
 }
 

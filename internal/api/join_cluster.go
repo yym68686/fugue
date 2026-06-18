@@ -2517,8 +2517,14 @@ log_step "Join parameters received for node ${FUGUE_JOIN_NODE_NAME} (discovery_g
 mesh_provider="${FUGUE_JOIN_MESH_PROVIDER:-}"
 flannel_iface=""
 if [ -n "${mesh_provider}" ]; then
-  node_external_ip="$(connect_mesh "${mesh_provider}" "${FUGUE_JOIN_NODE_NAME}")"
-  flannel_iface="tailscale0"
+  mesh_ip="$(connect_mesh "${mesh_provider}" "${FUGUE_JOIN_NODE_NAME}")"
+  if truthy "${FUGUE_JOIN_USE_MESH_FOR_FLANNEL:-}"; then
+    node_external_ip="${mesh_ip}"
+    flannel_iface="tailscale0"
+    log_step "Using ${mesh_provider} mesh address ${mesh_ip} for k3s node and flannel overlay."
+  elif [ -n "${mesh_ip}" ]; then
+    log_step "Connected ${mesh_provider} mesh at ${mesh_ip}; keeping k3s node/flannel address on ${node_external_ip:-auto-detected public IP}."
+  fi
 fi
 
 configure_resource_limits

@@ -773,6 +773,8 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 		`--edge-only`,
 		`append_runtime_label "fugue.io/role.edge" "true"`,
 		`apply_join_role_shortcuts`,
+		`FUGUE_JOIN_USE_MESH_FOR_FLANNEL`,
+		`keeping k3s node/flannel address`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)

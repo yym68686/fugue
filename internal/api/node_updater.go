@@ -911,6 +911,151 @@ yaml_update_scalar() {
   return "${changed}"
 }
 
+yaml_append_list_block() {
+  local target_file="$1"
+  local key="$2"
+  local values_file="$3"
+  local value=""
+  local escaped=""
+  if [ ! -s "${values_file}" ]; then
+    return 0
+  fi
+  printf '%s:\n' "${key}" >>"${target_file}"
+  while IFS= read -r value; do
+    [ -n "${value}" ] || continue
+    escaped="${value//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    printf '  - "%s"\n' "${escaped}" >>"${target_file}"
+  done <"${values_file}"
+}
+
+yaml_update_node_policy_blocks() {
+  local file="$1"
+  local labels_file="$2"
+  local taints_file="$3"
+  local tmp=""
+  tmp="$(mktemp)"
+  if [ -r "${file}" ]; then
+    preserve_rollback_file "${file}"
+    awk '
+      $0 ~ "^[[:space:]]*(node-label|node-taint):[[:space:]]*$" { in_block = 1; next }
+      in_block && $0 ~ "^[^[:space:]]" { in_block = 0 }
+      !in_block { print }
+    ' "${file}" >"${tmp}"
+  fi
+  yaml_append_list_block "${tmp}" node-label "${labels_file}"
+  yaml_append_list_block "${tmp}" node-taint "${taints_file}"
+  write_file_if_changed "${tmp}" "${file}"
+}
+
+render_desired_k3s_policy_lists() {
+  local labels_file="$1"
+  local taints_file="$2"
+  local state_file="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}"
+  if [ ! -r "${state_file}" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "${state_file}" "${labels_file}" "${taints_file}" <<'PY_NODE_POLICY'
+import json
+import sys
+
+state_path, labels_path, taints_path = sys.argv[1:4]
+with open(state_path, "r", encoding="utf-8") as fh:
+    envelope = json.load(fh)
+
+state = envelope.get("desired_state") or {}
+node_policy = state.get("node_policy") or {}
+policy = node_policy.get("policy") or {}
+current_labels = node_policy.get("labels") or {}
+node_updater = state.get("node_updater") or {}
+
+def truthy(value):
+    return value is True or str(value).strip().lower() == "true"
+
+def first(*values):
+    for value in values:
+        value = str(value or "").strip()
+        if value:
+            return value
+    return ""
+
+labels = []
+seen = set()
+
+def add_label(key, value):
+    value = str(value or "").strip()
+    if not key or not value or key in seen:
+        return
+    labels.append(f"{key}={value}")
+    seen.add(key)
+
+runtime_id = first(node_policy.get("runtime_id"), node_updater.get("runtime_id"), current_labels.get("fugue.io/runtime-id"))
+tenant_id = first(node_policy.get("tenant_id"), node_updater.get("tenant_id"), current_labels.get("fugue.io/tenant-id"))
+machine_id = first(node_policy.get("machine_id"), node_updater.get("machine_id"), current_labels.get("fugue.io/machine-id"))
+node_key_id = first(node_updater.get("node_key_id"), current_labels.get("fugue.io/node-key-id"))
+node_mode = first(policy.get("node_mode"), current_labels.get("fugue.io/node-mode"))
+machine_scope = first(current_labels.get("fugue.io/machine-scope"), "tenant-runtime" if runtime_id else "")
+
+add_label("fugue.io/machine-id", machine_id)
+add_label("fugue.io/machine-scope", machine_scope)
+add_label("fugue.io/node-key-id", node_key_id)
+add_label("fugue.io/node-mode", node_mode)
+add_label("fugue.io/runtime-id", runtime_id)
+add_label("fugue.io/tenant-id", tenant_id)
+add_label("fugue.io/location-country-code", current_labels.get("fugue.io/location-country-code"))
+add_label("fugue.io/public-ip", current_labels.get("fugue.io/public-ip"))
+
+if truthy(policy.get("allow_builds")):
+    add_label("fugue.io/build", "true")
+    add_label("fugue.io/role.builder", "true")
+if truthy(policy.get("allow_app_runtime")):
+    add_label("fugue.io/role.app-runtime", "true")
+if truthy(policy.get("allow_edge")):
+    add_label("fugue.io/role.edge", "true")
+if truthy(policy.get("allow_dns")):
+    add_label("fugue.io/role.dns", "true")
+if truthy(policy.get("allow_internal_maintenance")):
+    add_label("fugue.io/role.internal-maintenance", "true")
+if truthy(policy.get("allow_shared_pool")):
+    add_label("fugue.io/shared-pool", "internal")
+
+control_plane_role = first(policy.get("desired_control_plane_role"))
+if control_plane_role and control_plane_role != "none":
+    add_label("fugue.io/control-plane-desired-role", control_plane_role)
+
+taints = []
+if tenant_id and not truthy(policy.get("allow_shared_pool")):
+    taints.append(f"fugue.io/tenant={tenant_id}:NoSchedule")
+dedicated_mode = first(policy.get("dedicated_mode"))
+if dedicated_mode in {"edge", "dns", "internal"}:
+    taints.append(f"fugue.io/dedicated={dedicated_mode}:NoSchedule")
+
+with open(labels_path, "w", encoding="utf-8") as fh:
+    for item in labels:
+        fh.write(item + "\n")
+with open(taints_path, "w", encoding="utf-8") as fh:
+    for item in taints:
+        fh.write(item + "\n")
+PY_NODE_POLICY
+}
+
+reconcile_node_policy_k3s_config() {
+  local labels_tmp=""
+  local taints_tmp=""
+  local changed=1
+  labels_tmp="$(mktemp)"
+  taints_tmp="$(mktemp)"
+  if ! render_desired_k3s_policy_lists "${labels_tmp}" "${taints_tmp}"; then
+    rm -f "${labels_tmp}" "${taints_tmp}"
+    return 1
+  fi
+  if yaml_update_node_policy_blocks "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" "${labels_tmp}" "${taints_tmp}"; then
+    changed=0
+  fi
+  rm -f "${labels_tmp}" "${taints_tmp}"
+  return "${changed}"
+}
+
 yaml_list_block_hash() {
   parse_yaml_list_value_hash "$1" "$2" || return 1
 }
@@ -970,6 +1115,9 @@ reconcile_k3s_config() {
     fi
   fi
   if yaml_update_scalar "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" server "${server}"; then
+    changed=0
+  fi
+  if reconcile_node_policy_k3s_config; then
     changed=0
   fi
   return "${changed}"
