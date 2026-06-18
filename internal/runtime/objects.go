@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -1096,7 +1097,7 @@ func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[str
 	}
 	if networkPolicyDirectionRestricted(policy.Egress) {
 		policyTypes = append(policyTypes, "Egress")
-		spec["egress"] = buildNetworkPolicyEgressRules(policy.Egress, postgresResources)
+		spec["egress"] = buildNetworkPolicyEgressRules(policy.Egress, postgresResources, app.Spec.Env["FUGUE_OBSERVABILITY_ENDPOINT"])
 	}
 	if len(policyTypes) == 0 {
 		return nil
@@ -1138,11 +1139,11 @@ func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSp
 	return rules
 }
 
-func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpec, postgresResources []postgresRuntimeResource) []map[string]any {
+func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpec, postgresResources []postgresRuntimeResource, appObservabilityEndpoint string) []map[string]any {
 	if direction == nil {
 		return nil
 	}
-	rules := make([]map[string]any, 0, len(direction.AllowApps)+len(postgresResources)+6)
+	rules := make([]map[string]any, 0, len(direction.AllowApps)+len(postgresResources)+10)
 	if direction.AllowDNS {
 		rules = append(rules, buildNetworkPolicyDNSRules()...)
 	}
@@ -1152,6 +1153,7 @@ func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpe
 	if direction.AllowBackingServices {
 		rules = append(rules, buildNetworkPolicyBackingServiceEgressRules(postgresResources)...)
 	}
+	rules = append(rules, buildNetworkPolicyAppObservabilityEgressRules(appObservabilityEndpoint)...)
 	for _, peer := range direction.AllowApps {
 		rule := map[string]any{
 			"to": []map[string]any{
@@ -1164,6 +1166,104 @@ func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpe
 		rules = append(rules, rule)
 	}
 	return rules
+}
+
+func buildNetworkPolicyAppObservabilityEgressRules(rawEndpoint string) []map[string]any {
+	_, namespace, port, ok := parseAppObservabilityClusterServiceEndpoint(rawEndpoint)
+	if !ok {
+		return nil
+	}
+	ports := []map[string]any{{"protocol": "TCP", "port": port}}
+	rules := []map[string]any{
+		{
+			"to": []map[string]any{
+				{
+					"namespaceSelector": map[string]any{
+						"matchLabels": map[string]string{
+							"kubernetes.io/metadata.name": namespace,
+						},
+					},
+					"podSelector": map[string]any{
+						"matchLabels": map[string]string{
+							"app.kubernetes.io/component": "telemetry-agent",
+						},
+					},
+				},
+			},
+			"ports": ports,
+		},
+	}
+	// Some K3s/kube-router paths evaluate egress before Service ClusterIP
+	// DNAT. Keep the selector rule above for pod-IP traffic, and add a
+	// service-CIDR fallback limited to the injected telemetry port.
+	for _, cidr := range commonKubernetesServiceCIDRBlocks() {
+		rules = append(rules, map[string]any{
+			"to": []map[string]any{
+				{
+					"ipBlock": map[string]any{
+						"cidr": cidr,
+					},
+				},
+			},
+			"ports": ports,
+		})
+	}
+	return rules
+}
+
+func parseAppObservabilityClusterServiceEndpoint(rawEndpoint string) (string, string, int, bool) {
+	normalized := NormalizeAppObservabilityEndpoint(rawEndpoint)
+	if normalized == "" {
+		return "", "", 0, false
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", "", 0, false
+	}
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(parsed.Hostname())), ".")
+	service, namespace, ok := parseClusterLocalServiceHost(host)
+	if !ok || !strings.HasSuffix(service, "telemetry-agent") {
+		return "", "", 0, false
+	}
+	port := 80
+	if parsed.Scheme == "https" {
+		port = 443
+	}
+	if rawPort := strings.TrimSpace(parsed.Port()); rawPort != "" {
+		parsedPort, err := strconv.Atoi(rawPort)
+		if err != nil || parsedPort <= 0 || parsedPort > 65535 {
+			return "", "", 0, false
+		}
+		port = parsedPort
+	}
+	return service, namespace, port, true
+}
+
+func parseClusterLocalServiceHost(host string) (string, string, bool) {
+	parts := strings.Split(host, ".")
+	switch {
+	case len(parts) == 2:
+		return parts[0], parts[1], validServiceDNSLabel(parts[0]) && validServiceDNSLabel(parts[1])
+	case len(parts) == 3 && parts[2] == "svc":
+		return parts[0], parts[1], validServiceDNSLabel(parts[0]) && validServiceDNSLabel(parts[1])
+	case len(parts) == 5 && parts[2] == "svc" && parts[3] == "cluster" && parts[4] == "local":
+		return parts[0], parts[1], validServiceDNSLabel(parts[0]) && validServiceDNSLabel(parts[1])
+	default:
+		return "", "", false
+	}
+}
+
+func validServiceDNSLabel(value string) bool {
+	if value == "" || len(value) > 63 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return false
+	}
+	return value[0] != '-' && value[len(value)-1] != '-'
 }
 
 func buildNetworkPolicyDNSRules() []map[string]any {
@@ -1224,6 +1324,14 @@ func clusterDNSServiceCIDRBlocks() []string {
 		"10.43.0.10/32",
 		"10.96.0.10/32",
 		"172.20.0.10/32",
+	}
+}
+
+func commonKubernetesServiceCIDRBlocks() []string {
+	return []string{
+		"10.43.0.0/16",
+		"10.96.0.0/12",
+		"172.20.0.0/16",
 	}
 }
 

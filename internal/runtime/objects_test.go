@@ -2276,6 +2276,57 @@ func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsNetworkPolicyAllowsInjectedAppObservabilityEndpoint(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "observed-demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.pro/fugue-apps/observed:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Env: map[string]string{
+				"FUGUE_OBSERVABILITY_ENDPOINT": "http://fugue-fugue-telemetry-agent.fugue-system.svc.cluster.local:7834",
+			},
+			NetworkPolicy: &model.AppNetworkPolicySpec{
+				Egress: &model.AppNetworkPolicyDirectionSpec{
+					Mode: model.AppNetworkPolicyModeRestricted,
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	networkPolicy := firstObjectByKind(t, objects, "NetworkPolicy")
+	spec := networkPolicy["spec"].(map[string]any)
+	egress := spec["egress"].([]map[string]any)
+
+	telemetryEgress := networkPolicyRuleByPodSelector(t, egress, map[string]string{
+		"app.kubernetes.io/component": "telemetry-agent",
+	})
+	telemetryTarget := networkPolicyTargetWithPodSelector(t, telemetryEgress, map[string]string{
+		"app.kubernetes.io/component": "telemetry-agent",
+	})
+	namespaceSelector := telemetryTarget["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]string)
+	if got := namespaceSelector["kubernetes.io/metadata.name"]; got != "fugue-system" {
+		t.Fatalf("expected telemetry egress to target fugue-system, got %#v", namespaceSelector)
+	}
+	telemetryPorts := telemetryEgress["ports"].([]map[string]any)
+	if len(telemetryPorts) != 1 || telemetryPorts[0]["port"] != 7834 {
+		t.Fatalf("expected telemetry egress port 7834, got %#v", telemetryPorts)
+	}
+
+	for _, cidr := range []string{"10.43.0.0/16", "10.96.0.0/12", "172.20.0.0/16"} {
+		serviceCIDRRule := networkPolicyRuleByIPBlock(t, egress, cidr)
+		serviceCIDRPorts := serviceCIDRRule["ports"].([]map[string]any)
+		if len(serviceCIDRPorts) != 1 || serviceCIDRPorts[0]["port"] != 7834 {
+			t.Fatalf("expected telemetry service CIDR %s to allow port 7834, got %#v", cidr, serviceCIDRPorts)
+		}
+	}
+}
+
 func networkPolicyRuleByPodSelector(t *testing.T, rules []map[string]any, selector map[string]string) map[string]any {
 	t.Helper()
 	for _, rule := range rules {
@@ -2326,6 +2377,23 @@ func networkPolicyTargetWithPodSelectorMaybe(rule map[string]any, selector map[s
 
 func networkPolicyIPBlock(t *testing.T, rules []map[string]any, cidr string) map[string]any {
 	t.Helper()
+	rule := networkPolicyRuleByIPBlock(t, rules, cidr)
+	targets := rule["to"].([]map[string]any)
+	for _, target := range targets {
+		ipBlock, ok := target["ipBlock"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if ipBlock["cidr"] == cidr {
+			return ipBlock
+		}
+	}
+	t.Fatalf("expected network policy ipBlock cidr %q in %#v", cidr, rules)
+	return nil
+}
+
+func networkPolicyRuleByIPBlock(t *testing.T, rules []map[string]any, cidr string) map[string]any {
+	t.Helper()
 	for _, rule := range rules {
 		targets, ok := rule["to"].([]map[string]any)
 		if !ok {
@@ -2337,11 +2405,11 @@ func networkPolicyIPBlock(t *testing.T, rules []map[string]any, cidr string) map
 				continue
 			}
 			if ipBlock["cidr"] == cidr {
-				return ipBlock
+				return rule
 			}
 		}
 	}
-	t.Fatalf("expected network policy ipBlock cidr %q in %#v", cidr, rules)
+	t.Fatalf("expected network policy rule with ipBlock cidr %q in %#v", cidr, rules)
 	return nil
 }
 
