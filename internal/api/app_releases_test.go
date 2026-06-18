@@ -111,6 +111,7 @@ func TestAppReleaseGateMetricsUseReleaseID(t *testing.T) {
 		"FROM request_facts",
 		"app_id = '" + app.ID + "'",
 		"JSONExtractString(summary_json, 'release_id') = '" + releaseResponse.Release.ID + "'",
+		"quantileTDigestIf(0.99)(toFloat64(duration_ms), NOT (JSONExtractBool(summary_json, 'sse') OR JSONExtractBool(summary_json, 'stream') OR JSONExtractBool(summary_json, 'streaming'))) AS p99_duration_ms",
 		"FORMAT JSONEachRow",
 	} {
 		if !strings.Contains(clickHouseQuery, want) {

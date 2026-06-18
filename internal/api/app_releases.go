@@ -591,7 +591,7 @@ func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseI
 		"countIf(status_code >= 500) AS error_5xx_count, " +
 		"countIf(error_type = 'upstream_error') AS edge_upstream_error_count, " +
 		"quantileTDigest(0.95)(toFloat64(ttfb_ms)) AS p95_ttfb_ms, " +
-		"quantileTDigest(0.99)(toFloat64(duration_ms)) AS p99_duration_ms " +
+		"quantileTDigestIf(0.99)(toFloat64(duration_ms), NOT " + appObservabilityStreamingSummaryPredicate() + ") AS p99_duration_ms " +
 		"FROM request_facts WHERE app_id = " + quoteClickHouseString(appID) +
 		" AND ts >= " + clickHouseDateTime64Literal(since) +
 		" AND ts <= " + clickHouseDateTime64Literal(until) +
