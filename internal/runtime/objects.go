@@ -1172,7 +1172,7 @@ func buildNetworkPolicyDNSRules() []map[string]any {
 		{"k8s-app": "coredns"},
 		{"app.kubernetes.io/name": "coredns"},
 	}
-	rules := make([]map[string]any, 0, len(selectors))
+	rules := make([]map[string]any, 0, len(selectors)+len(clusterDNSServiceCIDRBlocks()))
 	for _, selector := range selectors {
 		rules = append(rules, map[string]any{
 			"to": []map[string]any{
@@ -1190,6 +1190,18 @@ func buildNetworkPolicyDNSRules() []map[string]any {
 			"ports": buildNetworkPolicyDNSPorts(),
 		})
 	}
+	for _, cidr := range clusterDNSServiceCIDRBlocks() {
+		rules = append(rules, map[string]any{
+			"to": []map[string]any{
+				{
+					"ipBlock": map[string]any{
+						"cidr": cidr,
+					},
+				},
+			},
+			"ports": buildNetworkPolicyDNSPorts(),
+		})
+	}
 	return rules
 }
 
@@ -1197,6 +1209,14 @@ func buildNetworkPolicyDNSPorts() []map[string]any {
 	return []map[string]any{
 		{"protocol": "UDP", "port": 53},
 		{"protocol": "TCP", "port": 53},
+	}
+}
+
+func clusterDNSServiceCIDRBlocks() []string {
+	return []string{
+		"10.43.0.10/32",
+		"10.96.0.10/32",
+		"172.20.0.10/32",
 	}
 }
 

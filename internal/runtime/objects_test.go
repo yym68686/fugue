@@ -2193,6 +2193,7 @@ func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
 	if len(dnsPorts) != 2 || dnsPorts[0]["port"] != 53 || dnsPorts[1]["port"] != 53 {
 		t.Fatalf("expected DNS egress ports 53/TCP and 53/UDP, got %#v", dnsPorts)
 	}
+	_ = networkPolicyIPBlock(t, egress, "10.43.0.10/32")
 
 	publicIPv4 := networkPolicyIPBlock(t, egress, "0.0.0.0/0")
 	publicIPv4Except := publicIPv4["except"].([]string)
