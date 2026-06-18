@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	defaultAppReleaseProbeTimeout = 10 * time.Second
-	defaultAppReleaseGateWindow   = 10 * time.Minute
+	defaultAppReleaseProbeTimeout    = 10 * time.Second
+	defaultAppReleaseGateWindow      = 10 * time.Minute
+	defaultAppReleaseGateMinRequests = 1
 )
 
 type appReleaseCreateRequest struct {
@@ -559,7 +560,7 @@ func (s *Server) evaluateAppReleaseGate(ctx context.Context, app model.App, rele
 	until := time.Now().UTC()
 	obsWindow := appObservabilityWindow{Since: until.Add(-window).Format(time.RFC3339), Until: until.Format(time.RFC3339)}
 	gate.Window = window.String()
-	if metrics, err := s.queryAppReleaseGateMetrics(ctx, app.ID, release.Role, obsWindow); err == nil {
+	if metrics, err := s.queryAppReleaseGateMetrics(ctx, app.ID, release.ID, release.Role, obsWindow); err == nil {
 		gate.Metrics = metrics
 		gate.Evidence = append(gate.Evidence, appReleaseGateMetricEvidence(metrics)...)
 		gate.Failures = append(gate.Failures, appReleaseGateMetricFailures(metrics, policy)...)
@@ -579,12 +580,12 @@ func (s *Server) evaluateAppReleaseGate(ctx context.Context, app model.App, rele
 	return gate
 }
 
-func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseRole string, window appObservabilityWindow) (map[string]any, error) {
+func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseID, releaseRole string, window appObservabilityWindow) (map[string]any, error) {
 	since, until, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
 		return nil, err
 	}
-	roleCondition := "JSONExtractString(summary_json, 'release_role') = " + quoteClickHouseString(strings.TrimSpace(releaseRole))
+	releaseCondition := appReleaseGateMetricReleaseCondition(releaseID, releaseRole)
 	queryText := "SELECT " +
 		"count() AS request_count, " +
 		"countIf(status_code >= 500) AS error_5xx_count, " +
@@ -594,7 +595,7 @@ func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseR
 		"FROM request_facts WHERE app_id = " + quoteClickHouseString(appID) +
 		" AND ts >= " + clickHouseDateTime64Literal(since) +
 		" AND ts <= " + clickHouseDateTime64Literal(until) +
-		" AND " + roleCondition +
+		" AND " + releaseCondition +
 		" FORMAT JSONEachRow"
 	rows, err := s.queryAppObservabilityClickHouse(ctx, queryText)
 	if err != nil {
@@ -622,6 +623,14 @@ func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseR
 		"p95_ttfb_ms":               finiteFloatField(row, "p95_ttfb_ms"),
 		"p99_duration_ms":           finiteFloatField(row, "p99_duration_ms"),
 	}, nil
+}
+
+func appReleaseGateMetricReleaseCondition(releaseID, releaseRole string) string {
+	releaseID = strings.TrimSpace(releaseID)
+	if releaseID != "" {
+		return "JSONExtractString(summary_json, 'release_id') = " + quoteClickHouseString(releaseID)
+	}
+	return "JSONExtractString(summary_json, 'release_role') = " + quoteClickHouseString(strings.TrimSpace(releaseRole))
 }
 
 func appReleaseGateMetricEvidence(metrics map[string]any) []string {
@@ -767,6 +776,7 @@ func runAppReleaseProbe(ctx context.Context, release model.AppRelease, probe mod
 func normalizeAppReleaseGatePolicy(raw *model.AppReleaseGatePolicy) model.AppReleaseGatePolicy {
 	policy := model.AppReleaseGatePolicy{
 		WindowSeconds:              int(defaultAppReleaseGateWindow.Seconds()),
+		MinCandidateRequests:       defaultAppReleaseGateMinRequests,
 		Max5xxRate:                 0.01,
 		MaxEdgeUpstreamErrorRate:   0.005,
 		MaxP95TTFBMilliseconds:     2000,
