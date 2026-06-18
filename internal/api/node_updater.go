@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion   = "v6"
+	nodeUpdaterScriptVersion   = "v7"
 	staleNodeUpdateTaskTimeout = 2 * time.Hour
 )
 
@@ -535,7 +535,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v6"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v7"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"

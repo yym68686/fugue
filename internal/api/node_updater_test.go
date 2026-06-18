@@ -344,7 +344,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v6"`,
+			`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v7"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
