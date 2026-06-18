@@ -242,6 +242,34 @@ func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
 	}
 
+	getTraffic := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+backend.ID+"/traffic", apiKey, nil)
+	if getTraffic.Code != http.StatusOK {
+		t.Fatalf("expected get backend traffic status %d, got %d body=%s", http.StatusOK, getTraffic.Code, getTraffic.Body.String())
+	}
+	var trafficResponse appTrafficResponse
+	mustDecodeJSON(t, getTraffic, &trafficResponse)
+	createCandidate := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+backend.ID+"/releases", apiKey, appReleaseCreateRequest{
+		Role:        model.AppReleaseRoleCandidate,
+		UpstreamURL: "https://api-candidate.example.internal",
+		Status:      model.AppReleaseStatusReady,
+	})
+	if createCandidate.Code != http.StatusCreated {
+		t.Fatalf("expected create backend release status %d, got %d body=%s", http.StatusCreated, createCandidate.Code, createCandidate.Body.String())
+	}
+	var releaseResponse appReleaseResponse
+	mustDecodeJSON(t, createCandidate, &releaseResponse)
+	stableWeight := 90
+	candidateWeight := 10
+	patchTraffic := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+backend.ID+"/traffic", apiKey, appTrafficPatchRequest{
+		Mode:               model.AppTrafficModeCanary,
+		CandidateReleaseID: releaseResponse.Release.ID,
+		StableWeight:       &stableWeight,
+		CandidateWeight:    &candidateWeight,
+	})
+	if patchTraffic.Code != http.StatusOK {
+		t.Fatalf("expected patch backend traffic status %d, got %d body=%s", http.StatusOK, patchTraffic.Code, patchTraffic.Body.String())
+	}
+
 	found, err := storeState.GetAppByRoutePrefix("api2.fugue.pro", "/v1")
 	if err != nil {
 		t.Fatalf("lookup project route table route: %v", err)
@@ -266,6 +294,20 @@ func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
 	if apiRoute.AppID != backend.ID || apiRoute.ServicePort != 9000 {
 		t.Fatalf("expected api route to target backend, got %+v", apiRoute)
 	}
+	if len(apiRoute.Upstreams) != 2 {
+		t.Fatalf("expected api route to carry weighted release upstreams, got %+v", apiRoute)
+	}
+	if apiRoute.Upstreams[0].Role != model.AppReleaseRoleStable ||
+		apiRoute.Upstreams[0].ReleaseID != trafficResponse.Traffic.StableReleaseID ||
+		apiRoute.Upstreams[0].Weight != stableWeight {
+		t.Fatalf("unexpected api stable upstream: %+v", apiRoute.Upstreams[0])
+	}
+	if apiRoute.Upstreams[1].Role != model.AppReleaseRoleCandidate ||
+		apiRoute.Upstreams[1].ReleaseID != releaseResponse.Release.ID ||
+		apiRoute.Upstreams[1].Weight != candidateWeight ||
+		apiRoute.Upstreams[1].UpstreamURL != "https://api-candidate.example.internal" {
+		t.Fatalf("unexpected api candidate upstream: %+v", apiRoute.Upstreams[1])
+	}
 	rootRoute := edgeRouteByHostKindAndPath(bundle.Routes, "0-0.fugue.pro", model.EdgeRouteKindPlatformDomain, "/")
 	if rootRoute == nil {
 		t.Fatalf("expected production root route, got %+v", bundle.Routes)
@@ -276,6 +318,75 @@ func TestEdgeRoutesBundlePublishesProjectRouteTable(t *testing.T) {
 	stagingRoute := edgeRouteByHostKindAndPath(bundle.Routes, "api2.fugue.pro", model.EdgeRouteKindPlatformDomain, "/v1")
 	if stagingRoute == nil || stagingRoute.AppID != backend.ID {
 		t.Fatalf("expected staging /v1 route to target backend, got %+v", stagingRoute)
+	}
+}
+
+func TestEdgeRoutesBundlePublishesAppReleaseTrafficUpstreams(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, apiKey, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
+
+	getTraffic := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/traffic", apiKey, nil)
+	if getTraffic.Code != http.StatusOK {
+		t.Fatalf("expected get traffic status %d, got %d body=%s", http.StatusOK, getTraffic.Code, getTraffic.Body.String())
+	}
+	var trafficResponse appTrafficResponse
+	mustDecodeJSON(t, getTraffic, &trafficResponse)
+	if trafficResponse.Traffic.StableReleaseID == "" {
+		t.Fatalf("expected default traffic policy to have stable release id: %+v", trafficResponse.Traffic)
+	}
+
+	createCandidate := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/releases", apiKey, appReleaseCreateRequest{
+		Role:        model.AppReleaseRoleCandidate,
+		UpstreamURL: "https://candidate.example.internal",
+		Status:      model.AppReleaseStatusReady,
+	})
+	if createCandidate.Code != http.StatusCreated {
+		t.Fatalf("expected create release status %d, got %d body=%s", http.StatusCreated, createCandidate.Code, createCandidate.Body.String())
+	}
+	var releaseResponse appReleaseResponse
+	mustDecodeJSON(t, createCandidate, &releaseResponse)
+
+	stableWeight := 90
+	candidateWeight := 10
+	patchTraffic := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/traffic", apiKey, appTrafficPatchRequest{
+		Mode:               model.AppTrafficModeCanary,
+		CandidateReleaseID: releaseResponse.Release.ID,
+		StableWeight:       &stableWeight,
+		CandidateWeight:    &candidateWeight,
+	})
+	if patchTraffic.Code != http.StatusOK {
+		t.Fatalf("expected patch traffic status %d, got %d body=%s", http.StatusOK, patchTraffic.Code, patchTraffic.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected edge routes status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeRouteBundle
+	mustDecodeJSON(t, recorder, &bundle)
+
+	route := edgeRouteByHostAndKind(bundle.Routes, "demo.fugue.pro", model.EdgeRouteKindPlatform)
+	if route == nil {
+		t.Fatalf("expected demo platform route, got %+v", bundle.Routes)
+	}
+	if len(route.Upstreams) != 2 {
+		t.Fatalf("expected weighted stable/candidate upstreams, got %+v", route)
+	}
+	if route.Upstreams[0].Role != model.AppReleaseRoleStable ||
+		route.Upstreams[0].ReleaseID != trafficResponse.Traffic.StableReleaseID ||
+		route.Upstreams[0].Weight != stableWeight {
+		t.Fatalf("unexpected stable upstream: %+v", route.Upstreams[0])
+	}
+	if route.Upstreams[1].Role != model.AppReleaseRoleCandidate ||
+		route.Upstreams[1].ReleaseID != releaseResponse.Release.ID ||
+		route.Upstreams[1].Weight != candidateWeight ||
+		route.Upstreams[1].UpstreamURL != "https://candidate.example.internal" {
+		t.Fatalf("unexpected candidate upstream: %+v", route.Upstreams[1])
 	}
 }
 

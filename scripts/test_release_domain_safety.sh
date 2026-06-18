@@ -214,6 +214,42 @@ if image_cache_source_changed_between_refs "${BASE_REF}" "${SCRIPT_REF}"; then
   fail "script-only changes must not roll image-cache"
 fi
 image_cache_source_changed_between_refs "${SCRIPT_REF}" "${IMAGE_CACHE_REF}" || fail "image-cache source changes must allow image rollout"
+
+mkdir -p "${TMP_REPO_ROOT}/cmd/fugue-edge" "${TMP_REPO_ROOT}/internal/edge"
+printf 'FROM scratch\n' >"${TMP_REPO_ROOT}/Dockerfile.edge"
+printf 'package main\nfunc main() {}\n' >"${TMP_REPO_ROOT}/cmd/fugue-edge/main.go"
+printf 'package edge\n' >"${TMP_REPO_ROOT}/internal/edge/service.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-base
+EDGE_BASE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+printf 'func weightedReleaseSelector() {}\n' >>"${TMP_REPO_ROOT}/internal/edge/service.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-worker-change
+EDGE_WORKER_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+public_data_plane_worker_source_changed_between_refs "${EDGE_BASE_REF}" "${EDGE_WORKER_REF}" || fail "edge worker source changes must be detected between live and target tags"
+if public_data_plane_front_source_changed_between_refs "${EDGE_BASE_REF}" "${EDGE_WORKER_REF}"; then
+  fail "edge worker-only source changes must not mark front image changed between live and target tags"
+fi
+fake_public_kubectl() {
+  if [[ "${1:-}" == "-n" ]]; then
+    shift 2
+  fi
+  if [[ "${1:-}" == "get" && "${2:-}" == "ds" ]]; then
+    printf '%s\n' "fugue-fugue-edge-worker-a"
+    return 0
+  fi
+  if [[ "${1:-}" == "get" && "${2:-}" == "ds/fugue-fugue-edge-worker-a" ]]; then
+    printf 'ghcr.io/acme/fugue-edge:%s' "${EDGE_BASE_REF}"
+    return 0
+  fi
+  return 1
+}
+KUBECTL=fake_public_kubectl
+FUGUE_NAMESPACE=fugue-system
+FUGUE_RELEASE_FULLNAME=fugue-fugue
+FUGUE_EDGE_IMAGE_TAG="${EDGE_WORKER_REF}"
+public_data_plane_live_worker_image_changed || fail "live edge worker tag drift must trigger public data-plane worker release"
+
 BEFORE_SHA="${IMAGE_CACHE_REF}"
 AFTER_SHA="${IMAGE_CACHE_RESOURCES_REF}"
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/values.yaml'

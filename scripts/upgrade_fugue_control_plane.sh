@@ -808,23 +808,61 @@ append_node_local_build_plane_desired_resource_args() {
 }
 
 image_cache_source_changed_between_refs() {
-  local old_ref="$1"
-  local new_ref="$2"
-  local rc=0
+	local old_ref="$1"
+	local new_ref="$2"
 
-  old_ref="$(trim_field "${old_ref}")"
-  new_ref="$(trim_field "${new_ref}")"
-  [[ -n "${old_ref}" && -n "${new_ref}" ]] || return 1
-  [[ "${old_ref}" != "${new_ref}" ]] || return 1
-  git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null || return 1
-  git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null || return 1
-  git -C "${REPO_ROOT}" diff --quiet "${old_ref}" "${new_ref}" -- \
-    cmd/fugue-image-cache \
-    Dockerfile.image-cache \
-    go.mod \
-    go.sum && return 1
-  rc=$?
-  [[ "${rc}" -eq 1 ]]
+	source_changed_between_refs "${old_ref}" "${new_ref}" \
+		cmd/fugue-image-cache \
+		Dockerfile.image-cache \
+		go.mod \
+		go.sum
+}
+
+source_changed_between_refs() {
+	local old_ref="$1"
+	local new_ref="$2"
+	local rc=0
+
+	shift 2 || true
+	old_ref="$(trim_field "${old_ref}")"
+	new_ref="$(trim_field "${new_ref}")"
+	[[ -n "${old_ref}" && -n "${new_ref}" ]] || return 1
+	[[ "${old_ref}" != "${new_ref}" ]] || return 1
+	git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null || return 1
+	git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null || return 1
+	[[ "$#" -gt 0 ]] || return 1
+	git -C "${REPO_ROOT}" diff --quiet "${old_ref}" "${new_ref}" -- "$@" && return 1
+	rc=$?
+	[[ "${rc}" -eq 1 ]]
+}
+
+public_data_plane_worker_source_changed_between_refs() {
+	source_changed_between_refs "$1" "$2" \
+		cmd/fugue-edge \
+		internal/edge \
+		internal/proxyproto \
+		Dockerfile.edge \
+		go.mod \
+		go.sum
+}
+
+public_data_plane_front_source_changed_between_refs() {
+	source_changed_between_refs "$1" "$2" \
+		cmd/fugue-edge-front \
+		internal/edgefront \
+		internal/proxyproto \
+		Dockerfile.edge \
+		go.mod \
+		go.sum
+}
+
+public_data_plane_dns_source_changed_between_refs() {
+	source_changed_between_refs "$1" "$2" \
+		cmd/fugue-dns \
+		internal/dnsserver \
+		Dockerfile.edge \
+		go.mod \
+		go.sum
 }
 
 node_local_build_plane_image_rollout_allowed() {
@@ -5384,11 +5422,79 @@ public_data_plane_front_daemonsets_ready() {
   return 0
 }
 
+public_data_plane_live_worker_image_changed() {
+  local target_tag live_image live_tag daemonset_name
+
+  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
+  [[ -n "${target_tag}" ]] || return 1
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    case "${daemonset_name}" in
+      "${FUGUE_RELEASE_FULLNAME}-edge-worker-a"|\
+      "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"|\
+      "${FUGUE_RELEASE_FULLNAME}-edge-country-"*"-worker-a"|\
+      "${FUGUE_RELEASE_FULLNAME}-edge-country-"*"-worker-b")
+        live_image="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "edge")")"
+        live_tag="$(image_ref_tag "${live_image}")"
+        if public_data_plane_worker_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+          return 0
+        fi
+        ;;
+    esac
+  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  return 1
+}
+
+public_data_plane_live_front_image_changed() {
+  local target_tag live_image live_tag daemonset_name
+
+  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
+  [[ -n "${target_tag}" ]] || return 1
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    case "${daemonset_name}" in
+      "${FUGUE_RELEASE_FULLNAME}-edge-front"|\
+      "${FUGUE_RELEASE_FULLNAME}-edge-country-"*"-front")
+        live_image="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "edge-front")")"
+        live_tag="$(image_ref_tag "${live_image}")"
+        if public_data_plane_front_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+          return 0
+        fi
+        ;;
+    esac
+  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  return 1
+}
+
+public_data_plane_live_dns_image_changed() {
+  local target_tag live_image live_tag daemonset_name
+
+  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
+  [[ -n "${target_tag}" ]] || return 1
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    case "${daemonset_name}" in
+      "${FUGUE_RELEASE_FULLNAME}-dns"|\
+      "${FUGUE_RELEASE_FULLNAME}-dns-country-"*)
+        live_image="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "dns")")"
+        live_tag="$(image_ref_tag "${live_image}")"
+        if public_data_plane_dns_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+          return 0
+        fi
+        ;;
+    esac
+  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+  return 1
+}
+
 release_public_data_plane_if_needed() {
-  local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
-  local worker_changed="false"
-  local front_changed="false"
-  local dns_changed="false"
+	local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
+	local worker_changed="false"
+	local front_changed="false"
+	local dns_changed="false"
 
   if [[ "${FUGUE_EDGE_ENABLED}" != "true" ]]; then
     return 0
@@ -5407,12 +5513,24 @@ release_public_data_plane_if_needed() {
   if public_data_plane_front_image_changed; then
     front_changed="true"
   fi
-  if public_data_plane_dns_image_changed; then
-    dns_changed="true"
-  fi
-  if [[ "${worker_changed}" != "true" && "${front_changed}" != "true" && "${dns_changed}" != "true" ]]; then
-    return 0
-  fi
+	if public_data_plane_dns_image_changed; then
+		dns_changed="true"
+	fi
+	if [[ "${worker_changed}" != "true" ]] && public_data_plane_live_worker_image_changed; then
+		worker_changed="true"
+		log "public data-plane worker image is behind target and worker source changed since the live tag"
+	fi
+	if [[ "${front_changed}" != "true" ]] && public_data_plane_live_front_image_changed; then
+		front_changed="true"
+		log "public data-plane front image is behind target and front source changed since the live tag"
+	fi
+	if [[ "${dns_changed}" != "true" ]] && public_data_plane_live_dns_image_changed; then
+		dns_changed="true"
+		log "public data-plane DNS image is behind target and DNS source changed since the live tag"
+	fi
+	if [[ "${worker_changed}" != "true" && "${front_changed}" != "true" && "${dns_changed}" != "true" ]]; then
+		return 0
+	fi
   if public_data_plane_manifest_changed; then
     log "skip public data-plane auto release because manifest files changed; use scripts/release_fugue_public_data_plane.sh explicitly"
     return 0
