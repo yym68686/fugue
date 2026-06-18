@@ -225,15 +225,25 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		return out
 	}
 	signatures := make([]model.BundleSignature, 0, 2)
+	signPayload := func(payload bundleSigningPayload, key string) string {
+		raw, _ := json.Marshal(payload)
+		mac := hmac.New(sha256.New, []byte(key))
+		_, _ = mac.Write(raw)
+		return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	}
 	appendSignature := func(key, keyID string) string {
 		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
 			return ""
 		}
 		payload := cloneBundleForSigning(out, validUntil, keyID)
-		raw, _ := json.Marshal(payload)
-		mac := hmac.New(sha256.New, []byte(key))
-		_, _ = mac.Write(raw)
-		return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		return signPayload(payload, key)
+	}
+	appendLegacyEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
+		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
+			return ""
+		}
+		payload := cloneEdgeRouteBundleForLegacySigning(bundle, validUntil, keyID)
+		return signPayload(payload, key)
 	}
 	signature := appendSignature(primaryKey, primaryKeyID)
 	previousSignature := appendSignature(keyring.previousKey(), keyring.previousKeyID())
@@ -260,6 +270,14 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		if previousSignature != "" {
 			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), previousSignature, typed.GeneratedAt, validUntil))
 		}
+		legacySignature := appendLegacyEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
+		if legacySignature != "" && legacySignature != signature {
+			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, legacySignature, typed.GeneratedAt, validUntil))
+		}
+		legacyPreviousSignature := appendLegacyEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
+		if legacyPreviousSignature != "" && legacyPreviousSignature != previousSignature {
+			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), legacyPreviousSignature, typed.GeneratedAt, validUntil))
+		}
 		typed.Signatures = signatures
 	case *model.EdgeDNSBundle:
 		typed.ValidUntil = validUntil
@@ -275,6 +293,27 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		typed.Signatures = signatures
 	}
 	return out
+}
+
+func cloneEdgeRouteBundleForLegacySigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
+	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
+	for idx := range routes {
+		routes[idx].Upstreams = nil
+	}
+	return bundleSigningPayload{
+		SchemaVersion:      bundle.SchemaVersion,
+		Version:            bundle.Version,
+		Generation:         bundle.Generation,
+		PreviousGeneration: bundle.PreviousGeneration,
+		GeneratedAt:        bundle.GeneratedAt,
+		ValidUntil:         validUntil,
+		Issuer:             bundle.Issuer,
+		KeyID:              keyID,
+		EdgeID:             bundle.EdgeID,
+		EdgeGroupID:        bundle.EdgeGroupID,
+		Routes:             routes,
+		TLSAllowlist:       bundle.TLSAllowlist,
+	}
 }
 
 func (k Keyring) primaryKey() string {

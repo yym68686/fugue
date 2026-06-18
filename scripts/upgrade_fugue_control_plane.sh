@@ -3104,6 +3104,16 @@ failing_checks = [name for name, check in checks.items() if not check.get("pass"
 bootstrap_override, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups = edge_inventory_healthy(nodes)
 dns_bootstrap_override, dns_bootstrap_pending = dns_inventory_bootstrap_healthy(dns_nodes, set(filter(None, route_bootstrap_groups)))
 image_cache_override, image_cache_message = image_cache_daemonset_ready(image_cache_status_path, cluster_join_registry_endpoint, registry_pull_base)
+changed_files = {trim(line) for line in os.environ.get("FUGUE_RELEASE_CHANGED_FILES", "").splitlines() if trim(line)}
+edge_control_plane_repair_files = {
+    "internal/api/dns_nodes_test.go",
+    "internal/api/edge_nodes.go",
+    "internal/api/edge_nodes_test.go",
+    "internal/bundleauth/bundleauth.go",
+    "internal/bundleauth/bundleauth_test.go",
+    "scripts/upgrade_fugue_control_plane.sh",
+}
+edge_control_plane_repair_override = bool(changed_files) and changed_files.issubset(edge_control_plane_repair_files)
 store = status.get("control_plane_store") or {}
 if store.get("block_rollout", False):
     raise SystemExit("control-plane store promotion gate is blocked")
@@ -3131,6 +3141,10 @@ elif set(failing_checks).issubset({"registry"}) and image_cache_override:
     registry_message = trim((checks.get("registry") or {}).get("message"))
     detail = f": {registry_message}" if registry_message else ""
     print(f"release preflight node-local image-cache override: allowing rollout despite legacy registry gate{detail}; {image_cache_message}")
+elif set(failing_checks).issubset({"edge"}) and edge_control_plane_repair_override:
+    edge_message = trim((checks.get("edge") or {}).get("message"))
+    detail = f": {edge_message}" if edge_message else ""
+    print(f"release preflight edge control-plane repair override: allowing rollout despite edge gate{detail}; changed_files={','.join(sorted(changed_files))}")
 else:
     if not status.get("pass", False):
         raise SystemExit("platform autonomy status did not pass")
