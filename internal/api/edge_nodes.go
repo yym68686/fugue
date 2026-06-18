@@ -317,9 +317,6 @@ func (ctx edgeAuthContext) constrain(edgeID *string, edgeGroupID *string) error 
 	if strings.TrimSpace(*edgeGroupID) == "" {
 		*edgeGroupID = ctx.EdgeGroupID
 	}
-	if !strings.EqualFold(strings.TrimSpace(*edgeID), ctx.EdgeID) {
-		return errors.New("edge token cannot access another edge_id")
-	}
 	if !strings.EqualFold(strings.TrimSpace(*edgeGroupID), ctx.EdgeGroupID) {
 		return errors.New("edge token cannot access another edge_group_id")
 	}

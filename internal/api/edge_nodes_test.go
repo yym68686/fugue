@@ -230,10 +230,36 @@ func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 		t.Fatalf("expected scoped token to fill edge selector, got %+v", bundle)
 	}
 
+	sameGroupRoutes := httptest.NewRecorder()
+	allowedRoutesReq = httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token="+token+"&edge_id=edge-us-2&edge_group_id=edge-group-country-us", nil)
+	server.Handler().ServeHTTP(sameGroupRoutes, allowedRoutesReq)
+	if sameGroupRoutes.Code != http.StatusOK {
+		t.Fatalf("expected scoped token same-group route request to succeed, got %d body=%s", sameGroupRoutes.Code, sameGroupRoutes.Body.String())
+	}
+	mustDecodeJSON(t, sameGroupRoutes, &bundle)
+	if bundle.EdgeID != "edge-us-2" || bundle.EdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected scoped token to allow same-group edge selector, got %+v", bundle)
+	}
+
+	allowedHeartbeat := httptest.NewRecorder()
+	sameGroupBody, _ := json.Marshal(map[string]any{
+		"edge_id":       "edge-us-2",
+		"edge_group_id": "edge-group-country-us",
+		"status":        model.EdgeHealthHealthy,
+		"healthy":       true,
+		"draining":      false,
+	})
+	allowedHeartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/edge/heartbeat?token="+token, bytes.NewReader(sameGroupBody))
+	allowedHeartbeatReq.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(allowedHeartbeat, allowedHeartbeatReq)
+	if allowedHeartbeat.Code != http.StatusOK {
+		t.Fatalf("expected scoped token same-group heartbeat to succeed, got %d body=%s", allowedHeartbeat.Code, allowedHeartbeat.Body.String())
+	}
+
 	forbiddenHeartbeat := httptest.NewRecorder()
 	mismatchBody, _ := json.Marshal(map[string]any{
 		"edge_id":       "edge-hk-1",
-		"edge_group_id": "edge-group-country-us",
+		"edge_group_id": "edge-group-country-hk",
 		"status":        model.EdgeHealthHealthy,
 		"healthy":       true,
 		"draining":      false,
@@ -242,6 +268,6 @@ func TestScopedEdgeTokenRestrictsEdgeGroupAccess(t *testing.T) {
 	forbiddenHeartbeatReq.Header.Set("Content-Type", "application/json")
 	server.Handler().ServeHTTP(forbiddenHeartbeat, forbiddenHeartbeatReq)
 	if forbiddenHeartbeat.Code != http.StatusForbidden {
-		t.Fatalf("expected scoped token edge mismatch to be forbidden, got %d body=%s", forbiddenHeartbeat.Code, forbiddenHeartbeat.Body.String())
+		t.Fatalf("expected scoped token group mismatch to be forbidden, got %d body=%s", forbiddenHeartbeat.Code, forbiddenHeartbeat.Body.String())
 	}
 }

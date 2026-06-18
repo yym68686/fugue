@@ -344,7 +344,7 @@ func TestDNSDelegationPreflightFailsWhenSameEdgeGroupReportsDifferentBundleVersi
 	assertDNSPreflightCheck(t, response.Checks, "dns_bundle_version_stable", false)
 }
 
-func TestScopedEdgeTokenRestrictsDNSHeartbeat(t *testing.T) {
+func TestScopedEdgeTokenAllowsSameGroupDNSHeartbeat(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -358,7 +358,7 @@ func TestScopedEdgeTokenRestrictsDNSHeartbeat(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"dns_node_id":   "dns-eu-1",
+		"dns_node_id":   "dns-us-2",
 		"edge_group_id": "edge-group-country-us",
 		"zone":          "dns.fugue.pro",
 		"status":        model.EdgeHealthHealthy,
@@ -368,8 +368,23 @@ func TestScopedEdgeTokenRestrictsDNSHeartbeat(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("expected scoped token node mismatch to be forbidden, got %d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected scoped token same-group DNS heartbeat to succeed, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	forbiddenBody, _ := json.Marshal(map[string]any{
+		"dns_node_id":   "dns-hk-1",
+		"edge_group_id": "edge-group-country-hk",
+		"zone":          "dns.fugue.pro",
+		"status":        model.EdgeHealthHealthy,
+		"healthy":       true,
+	})
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/v1/dns/heartbeat?token="+token, bytes.NewReader(forbiddenBody))
+	forbiddenReq.Header.Set("Content-Type", "application/json")
+	forbiddenRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(forbiddenRecorder, forbiddenReq)
+	if forbiddenRecorder.Code != http.StatusForbidden {
+		t.Fatalf("expected scoped token group mismatch to be forbidden, got %d body=%s", forbiddenRecorder.Code, forbiddenRecorder.Body.String())
 	}
 }
 
