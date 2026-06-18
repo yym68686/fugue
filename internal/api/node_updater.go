@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion   = "v7"
+	nodeUpdaterScriptVersion   = "v8"
 	staleNodeUpdateTaskTimeout = 2 * time.Hour
 )
 
@@ -535,7 +535,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v7"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v8"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -579,6 +579,17 @@ last_error() {
 
 clear_last_error() {
   rm -f "${FUGUE_NODE_UPDATER_LAST_ERROR_FILE}" 2>/dev/null || true
+}
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 write_file_if_changed() {
@@ -911,6 +922,25 @@ yaml_update_scalar() {
   return "${changed}"
 }
 
+yaml_delete_scalar() {
+  local file="$1"
+  local key="$2"
+  local tmp=""
+  if [ ! -r "${file}" ]; then
+    return 1
+  fi
+  if ! grep -Eq "^[[:space:]]*${key}:[[:space:]]*" "${file}"; then
+    return 1
+  fi
+  preserve_rollback_file "${file}"
+  tmp="$(mktemp)"
+  awk -v key="${key}" '
+    $0 ~ "^[[:space:]]*" key ":[[:space:]]*" { next }
+    { print }
+  ' "${file}" >"${tmp}"
+  write_file_if_changed "${tmp}" "${file}"
+}
+
 yaml_append_list_block() {
   local target_file="$1"
   local key="$2"
@@ -946,6 +976,27 @@ yaml_update_node_policy_blocks() {
   yaml_append_list_block "${tmp}" node-label "${labels_file}"
   yaml_append_list_block "${tmp}" node-taint "${taints_file}"
   write_file_if_changed "${tmp}" "${file}"
+}
+
+desired_node_policy_label() {
+  local key="$1"
+  local state_file="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}"
+  if [ ! -r "${state_file}" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "${state_file}" "${key}" <<'PY_NODE_LABEL'
+import json
+import sys
+
+state_path, key = sys.argv[1:3]
+with open(state_path, "r", encoding="utf-8") as fh:
+    envelope = json.load(fh)
+labels = (((envelope.get("desired_state") or {}).get("node_policy") or {}).get("labels") or {})
+value = str(labels.get(key) or "").strip()
+if not value:
+    raise SystemExit(1)
+print(value)
+PY_NODE_LABEL
 }
 
 render_desired_k3s_policy_lists() {
@@ -1068,6 +1119,7 @@ current_file_hash() {
 reconcile_k3s_config() {
   local server="${FUGUE_DISCOVERY_K3S_SERVER:-}"
   local fallback_servers="${FUGUE_DISCOVERY_K3S_FALLBACK_SERVERS:-}"
+  local node_public_ip=""
   local lb_cfg="/etc/fugue/k3s-api-lb.cfg"
   local changed=1
   local lb_changed=1
@@ -1115,6 +1167,13 @@ reconcile_k3s_config() {
     fi
   fi
   if yaml_update_scalar "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" server "${server}"; then
+    changed=0
+  fi
+  node_public_ip="$(desired_node_policy_label "fugue.io/public-ip" || true)"
+  if [ -n "${node_public_ip}" ] && yaml_update_scalar "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" node-external-ip "${node_public_ip}"; then
+    changed=0
+  fi
+  if ! truthy "${FUGUE_NODE_UPDATER_USE_MESH_FOR_FLANNEL:-}" && yaml_delete_scalar "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" flannel-iface; then
     changed=0
   fi
   if reconcile_node_policy_k3s_config; then

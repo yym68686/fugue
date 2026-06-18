@@ -344,7 +344,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-			`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v7"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v8"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -353,6 +353,8 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`time-sync`,
 		`render_desired_k3s_policy_lists`,
 		`reconcile_node_policy_k3s_config`,
+		`node-external-ip`,
+		`flannel-iface`,
 		`--data-urlencode "capabilities=${FUGUE_NODE_UPDATER_CAPABILITIES}"`,
 		`capabilities)`,
 		`/etc/rancher/k3s/config.yaml`,
@@ -425,8 +427,11 @@ func TestNodeUpdaterK3sConfigReconcileRefreshesNodePolicyLabelsAndTaints(t *test
 tmpdir="$(mktemp -d)"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
+FUGUE_DISCOVERY_K3S_SERVER="https://cp.example:6443"
 cat >"${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" <<'YAML'
 server: "https://cp.example:6443"
+node-external-ip: "100.64.0.13"
+flannel-iface: "tailscale0"
 node-label:
   - "fugue.io/machine-id=machine_edge"
   - "fugue.io/machine-scope=tenant-runtime"
@@ -483,7 +488,7 @@ cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
   }
 }
 JSON
-if ! reconcile_node_policy_k3s_config; then
+if ! reconcile_k3s_config; then
   echo "first reconcile should report a write"
   exit 1
 fi
@@ -492,10 +497,16 @@ if grep -q 'fugue.io/role.app-runtime=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FIL
   cat "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
   exit 1
 fi
+grep -q 'node-external-ip: "203.0.113.10"' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+if grep -q '^flannel-iface:' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"; then
+  echo "stale flannel iface was not removed"
+  cat "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+  exit 1
+fi
 grep -q 'fugue.io/role.edge=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
 grep -q 'fugue.io/dedicated=edge:NoSchedule' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
 grep -q 'fugue.io/tenant=tenant_edge:NoSchedule' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
-if reconcile_node_policy_k3s_config; then
+if reconcile_k3s_config; then
   echo "second reconcile should not report a write"
   exit 1
 fi
