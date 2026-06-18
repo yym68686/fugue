@@ -403,6 +403,56 @@ type EdgePerformanceSample struct {
 	SampledAt             time.Time `json:"sampled_at"`
 }
 
+type EdgeNodeQualityResponse struct {
+	Node        EdgeNode               `json:"node"`
+	Group       EdgeGroup              `json:"group"`
+	Summary     EdgeNodeQualitySummary `json:"summary"`
+	Routes      []EdgeNodeQualityRoute `json:"routes,omitempty"`
+	GeneratedAt time.Time              `json:"generated_at"`
+}
+
+type EdgeNodeQualitySummary struct {
+	EdgeID                string     `json:"edge_id"`
+	EdgeGroupID           string     `json:"edge_group_id"`
+	Since                 time.Time  `json:"since"`
+	SampleRecordCount     int        `json:"sample_record_count"`
+	RequestCount          int        `json:"request_count"`
+	ErrorCount            int        `json:"error_count"`
+	ErrorRate             float64    `json:"error_rate"`
+	AvgTLSHandshakeMS     float64    `json:"avg_tls_handshake_ms"`
+	AvgTTFBMS             float64    `json:"avg_ttfb_ms"`
+	AvgUpstreamMS         float64    `json:"avg_upstream_ms"`
+	AvgTotalMS            float64    `json:"avg_total_ms"`
+	CacheHitCount         int        `json:"cache_hit_count"`
+	CacheObservationCount int        `json:"cache_observation_count"`
+	CacheHitRate          float64    `json:"cache_hit_rate"`
+	TLSStatus             string     `json:"tls_status,omitempty"`
+	TLSLastMessage        string     `json:"tls_last_message,omitempty"`
+	TLSReadyAt            *time.Time `json:"tls_ready_at,omitempty"`
+	CacheStatus           string     `json:"cache_status,omitempty"`
+	CaddyRouteCount       int        `json:"caddy_route_count"`
+	RouteBundleVersion    string     `json:"route_bundle_version,omitempty"`
+	DNSBundleVersion      string     `json:"dns_bundle_version,omitempty"`
+	LastSampledAt         *time.Time `json:"last_sampled_at,omitempty"`
+}
+
+type EdgeNodeQualityRoute struct {
+	Hostname              string     `json:"hostname"`
+	PathPrefix            string     `json:"path_prefix,omitempty"`
+	SampleRecordCount     int        `json:"sample_record_count"`
+	RequestCount          int        `json:"request_count"`
+	ErrorCount            int        `json:"error_count"`
+	ErrorRate             float64    `json:"error_rate"`
+	AvgTLSHandshakeMS     float64    `json:"avg_tls_handshake_ms"`
+	AvgTTFBMS             float64    `json:"avg_ttfb_ms"`
+	AvgUpstreamMS         float64    `json:"avg_upstream_ms"`
+	AvgTotalMS            float64    `json:"avg_total_ms"`
+	CacheHitCount         int        `json:"cache_hit_count"`
+	CacheObservationCount int        `json:"cache_observation_count"`
+	CacheHitRate          float64    `json:"cache_hit_rate"`
+	LastSampledAt         *time.Time `json:"last_sampled_at,omitempty"`
+}
+
 type EdgeDNSBundle struct {
 	SchemaVersion      string            `json:"schema_version,omitempty"`
 	Version            string            `json:"version"`

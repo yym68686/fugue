@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -93,6 +94,37 @@ func (s *Server) handleGetEdgeNode(w http.ResponseWriter, r *http.Request) {
 		"node":  node,
 		"group": group,
 	})
+}
+
+func (s *Server) handleGetEdgeNodeQuality(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "only platform admin can inspect edge node quality")
+		return
+	}
+	edgeID := strings.TrimSpace(strings.ToLower(r.PathValue("edge_id")))
+	if edgeID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "edge_id is required")
+		return
+	}
+	now := time.Now().UTC()
+	since, err := parseEdgeNodeQualitySince(r.URL.Query().Get("since"), now)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	node, group, err := s.store.GetEdgeNode(edgeID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	samples, err := s.store.ListEdgePerformanceSamples("", since)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	response := buildEdgeNodeQualityResponse(node, group, samples, since, now)
+	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleCreateEdgeNodeToken(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +231,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 const edgePerformanceSampleRetention = 7 * 24 * time.Hour
+const edgeNodeQualityDefaultWindow = 24 * time.Hour
 
 func sanitizeEdgeHeartbeatPerformanceSamples(req edgeHeartbeatRequest, now time.Time) []model.EdgePerformanceSample {
 	if len(req.PerformanceSamples) == 0 {
@@ -229,6 +262,164 @@ func sanitizeEdgeHeartbeatPerformanceSamples(req edgeHeartbeatRequest, now time.
 		out = append(out, sample)
 	}
 	return out
+}
+
+func parseEdgeNodeQualitySince(raw string, now time.Time) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return now.Add(-edgeNodeQualityDefaultWindow), nil
+	}
+	if duration, err := time.ParseDuration(raw); err == nil {
+		if duration <= 0 {
+			return time.Time{}, errors.New("since duration must be positive")
+		}
+		return now.Add(-duration), nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, errors.New("since must be a positive duration such as 24h or an RFC3339 timestamp")
+	}
+	return parsed.UTC(), nil
+}
+
+type edgeNodeQualityAccumulator struct {
+	sampleRecordCount     int
+	requestCount          int
+	errorCount            int
+	weightedSampleCount   int
+	tlsHandshakeWeighted  int64
+	ttfbWeighted          int64
+	upstreamWeighted      int64
+	totalWeighted         int64
+	cacheHitCount         int
+	cacheObservationCount int
+	lastSampledAt         *time.Time
+}
+
+func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, samples []model.EdgePerformanceSample, since, generatedAt time.Time) model.EdgeNodeQualityResponse {
+	edgeID := strings.TrimSpace(strings.ToLower(node.ID))
+	summary := edgeNodeQualityAccumulator{}
+	routesByKey := map[string]*edgeNodeQualityRouteAccumulator{}
+	for _, sample := range samples {
+		if !strings.EqualFold(strings.TrimSpace(sample.EdgeID), edgeID) {
+			continue
+		}
+		summary.add(sample)
+		key := edgeNodeQualityRouteKey(sample)
+		accumulator := routesByKey[key]
+		if accumulator == nil {
+			accumulator = &edgeNodeQualityRouteAccumulator{
+				hostname:   strings.TrimSpace(sample.Hostname),
+				pathPrefix: strings.TrimSpace(sample.PathPrefix),
+			}
+			routesByKey[key] = accumulator
+		}
+		accumulator.add(sample)
+	}
+	routes := make([]model.EdgeNodeQualityRoute, 0, len(routesByKey))
+	for _, accumulator := range routesByKey {
+		routes = append(routes, accumulator.route())
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].Hostname != routes[j].Hostname {
+			return routes[i].Hostname < routes[j].Hostname
+		}
+		return routes[i].PathPrefix < routes[j].PathPrefix
+	})
+	return model.EdgeNodeQualityResponse{
+		Node:  node,
+		Group: group,
+		Summary: model.EdgeNodeQualitySummary{
+			EdgeID:                edgeID,
+			EdgeGroupID:           strings.TrimSpace(node.EdgeGroupID),
+			Since:                 since.UTC(),
+			SampleRecordCount:     summary.sampleRecordCount,
+			RequestCount:          summary.requestCount,
+			ErrorCount:            summary.errorCount,
+			ErrorRate:             edgeNodeQualityRate(summary.errorCount, summary.requestCount),
+			AvgTLSHandshakeMS:     summary.average(summary.tlsHandshakeWeighted),
+			AvgTTFBMS:             summary.average(summary.ttfbWeighted),
+			AvgUpstreamMS:         summary.average(summary.upstreamWeighted),
+			AvgTotalMS:            summary.average(summary.totalWeighted),
+			CacheHitCount:         summary.cacheHitCount,
+			CacheObservationCount: summary.cacheObservationCount,
+			CacheHitRate:          edgeNodeQualityRate(summary.cacheHitCount, summary.cacheObservationCount),
+			TLSStatus:             strings.TrimSpace(node.TLSStatus),
+			TLSLastMessage:        strings.TrimSpace(node.TLSLastMessage),
+			TLSReadyAt:            node.TLSReadyAt,
+			CacheStatus:           strings.TrimSpace(node.CacheStatus),
+			CaddyRouteCount:       node.CaddyRouteCount,
+			RouteBundleVersion:    strings.TrimSpace(node.RouteBundleVersion),
+			DNSBundleVersion:      strings.TrimSpace(node.DNSBundleVersion),
+			LastSampledAt:         summary.lastSampledAt,
+		},
+		Routes:      routes,
+		GeneratedAt: generatedAt.UTC(),
+	}
+}
+
+type edgeNodeQualityRouteAccumulator struct {
+	edgeNodeQualityAccumulator
+	hostname   string
+	pathPrefix string
+}
+
+func (a *edgeNodeQualityAccumulator) add(sample model.EdgePerformanceSample) {
+	weight := sample.SampleCount
+	if weight <= 0 {
+		weight = 1
+	}
+	a.sampleRecordCount++
+	a.requestCount += weight
+	a.errorCount += sample.ErrorCount
+	a.weightedSampleCount += weight
+	a.tlsHandshakeWeighted += sample.TLSHandshakeMS * int64(weight)
+	a.ttfbWeighted += sample.TTFBMS * int64(weight)
+	a.upstreamWeighted += sample.UpstreamMS * int64(weight)
+	a.totalWeighted += sample.TotalMS * int64(weight)
+	a.cacheHitCount += sample.CacheHitCount
+	a.cacheObservationCount += sample.CacheObservationCount
+	if a.lastSampledAt == nil || sample.SampledAt.After(*a.lastSampledAt) {
+		sampledAt := sample.SampledAt.UTC()
+		a.lastSampledAt = &sampledAt
+	}
+}
+
+func (a edgeNodeQualityAccumulator) average(weighted int64) float64 {
+	if a.weightedSampleCount <= 0 {
+		return 0
+	}
+	return float64(weighted) / float64(a.weightedSampleCount)
+}
+
+func (a edgeNodeQualityRouteAccumulator) route() model.EdgeNodeQualityRoute {
+	return model.EdgeNodeQualityRoute{
+		Hostname:              a.hostname,
+		PathPrefix:            a.pathPrefix,
+		SampleRecordCount:     a.sampleRecordCount,
+		RequestCount:          a.requestCount,
+		ErrorCount:            a.errorCount,
+		ErrorRate:             edgeNodeQualityRate(a.errorCount, a.requestCount),
+		AvgTLSHandshakeMS:     a.average(a.tlsHandshakeWeighted),
+		AvgTTFBMS:             a.average(a.ttfbWeighted),
+		AvgUpstreamMS:         a.average(a.upstreamWeighted),
+		AvgTotalMS:            a.average(a.totalWeighted),
+		CacheHitCount:         a.cacheHitCount,
+		CacheObservationCount: a.cacheObservationCount,
+		CacheHitRate:          edgeNodeQualityRate(a.cacheHitCount, a.cacheObservationCount),
+		LastSampledAt:         a.lastSampledAt,
+	}
+}
+
+func edgeNodeQualityRate(numerator, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func edgeNodeQualityRouteKey(sample model.EdgePerformanceSample) string {
+	return strings.TrimSpace(sample.Hostname) + "\x00" + strings.TrimSpace(sample.PathPrefix)
 }
 
 func (s *Server) enrichEdgeHeartbeatFromClusterNode(ctx context.Context, req edgeHeartbeatRequest) edgeHeartbeatRequest {

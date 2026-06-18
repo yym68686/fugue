@@ -270,6 +270,35 @@ paths:
                 $ref: "#/components/schemas/EdgeNodeResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/nodes/{edge_id}/quality:
+    get:
+      operationId: getEdgeNodeQuality
+      summary: Get Edge Node Quality
+      tags: [Edge]
+      x-fugue-handler: handleGetEdgeNodeQuality
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: since
+          required: false
+          description: Lower bound as a positive duration such as 24h or an RFC3339 timestamp. Defaults to 24h.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeQualityResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/nodes/{edge_id}/token:
     post:
       operationId: createEdgeNodeToken
@@ -9981,6 +10010,164 @@ components:
           $ref: "#/components/schemas/EdgeNode"
         group:
           $ref: "#/components/schemas/EdgeGroup"
+    EdgeNodeQualitySummary:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          edge_id,
+          edge_group_id,
+          since,
+          sample_record_count,
+          request_count,
+          error_count,
+          error_rate,
+          avg_tls_handshake_ms,
+          avg_ttfb_ms,
+          avg_upstream_ms,
+          avg_total_ms,
+          cache_hit_count,
+          cache_observation_count,
+          cache_hit_rate,
+          caddy_route_count
+        ]
+      properties:
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        since:
+          type: string
+          format: date-time
+        sample_record_count:
+          type: integer
+          format: int32
+        request_count:
+          type: integer
+          format: int32
+        error_count:
+          type: integer
+          format: int32
+        error_rate:
+          type: number
+          format: double
+        avg_tls_handshake_ms:
+          type: number
+          format: double
+        avg_ttfb_ms:
+          type: number
+          format: double
+        avg_upstream_ms:
+          type: number
+          format: double
+        avg_total_ms:
+          type: number
+          format: double
+        cache_hit_count:
+          type: integer
+          format: int32
+        cache_observation_count:
+          type: integer
+          format: int32
+        cache_hit_rate:
+          type: number
+          format: double
+        tls_status:
+          type: string
+        tls_last_message:
+          type: string
+        tls_ready_at:
+          type: string
+          format: date-time
+        cache_status:
+          type: string
+        caddy_route_count:
+          type: integer
+          format: int32
+        route_bundle_version:
+          type: string
+        dns_bundle_version:
+          type: string
+        last_sampled_at:
+          type: string
+          format: date-time
+    EdgeNodeQualityRoute:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          hostname,
+          sample_record_count,
+          request_count,
+          error_count,
+          error_rate,
+          avg_tls_handshake_ms,
+          avg_ttfb_ms,
+          avg_upstream_ms,
+          avg_total_ms,
+          cache_hit_count,
+          cache_observation_count,
+          cache_hit_rate
+        ]
+      properties:
+        hostname:
+          type: string
+        path_prefix:
+          type: string
+        sample_record_count:
+          type: integer
+          format: int32
+        request_count:
+          type: integer
+          format: int32
+        error_count:
+          type: integer
+          format: int32
+        error_rate:
+          type: number
+          format: double
+        avg_tls_handshake_ms:
+          type: number
+          format: double
+        avg_ttfb_ms:
+          type: number
+          format: double
+        avg_upstream_ms:
+          type: number
+          format: double
+        avg_total_ms:
+          type: number
+          format: double
+        cache_hit_count:
+          type: integer
+          format: int32
+        cache_observation_count:
+          type: integer
+          format: int32
+        cache_hit_rate:
+          type: number
+          format: double
+        last_sampled_at:
+          type: string
+          format: date-time
+    EdgeNodeQualityResponse:
+      type: object
+      additionalProperties: false
+      required: [node, group, summary, generated_at]
+      properties:
+        node:
+          $ref: "#/components/schemas/EdgeNode"
+        group:
+          $ref: "#/components/schemas/EdgeGroup"
+        summary:
+          $ref: "#/components/schemas/EdgeNodeQualitySummary"
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeNodeQualityRoute"
+        generated_at:
+          type: string
+          format: date-time
     CreateEdgeNodeTokenRequest:
       type: object
       additionalProperties: false

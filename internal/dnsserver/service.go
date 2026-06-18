@@ -1763,6 +1763,9 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now t
 		}
 		return candidates[i].IP < candidates[j].IP
 	})
+	if promoted, ok := edgeDNSMaybePromoteNodeExploration(record, policy, hint, candidates, now); ok {
+		return promoted
+	}
 	candidates = edgeDNSMaybePromoteExploration(record, policy, hint, candidates, now)
 	return candidates
 }
@@ -1819,16 +1822,69 @@ func edgeDNSMaybePromoteExploration(record model.EdgeDNSRecord, policy model.DNS
 	if len(candidates) <= 1 {
 		return candidates
 	}
+	hash, ok := edgeDNSExplorationHash(record, policy, hint, now)
+	if !ok {
+		return candidates
+	}
+	percent := edgeDNSExplorationPercent(policy)
+	if int(hash%100) >= percent {
+		return candidates
+	}
+	rest := len(candidates) - 1
+	if rest <= 0 {
+		return candidates
+	}
+	index := 1 + int((hash/100)%uint64(rest))
+	if index <= 0 || index >= len(candidates) {
+		return candidates
+	}
+	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
+	explorer := out[index]
+	copy(out[1:index+1], out[0:index])
+	out[0] = explorer
+	return out
+}
+
+func edgeDNSMaybePromoteNodeExploration(record model.EdgeDNSRecord, policy model.DNSAnswerPolicy, hint dnsGeoHint, candidates []model.EdgeDNSAnswerCandidate, now time.Time) ([]model.EdgeDNSAnswerCandidate, bool) {
+	if len(candidates) <= 1 {
+		return candidates, false
+	}
+	primaryGroupID := strings.TrimSpace(candidates[0].EdgeGroupID)
+	if primaryGroupID == "" {
+		return candidates, false
+	}
+	siblingIndexes := make([]int, 0, len(candidates)-1)
+	for index := 1; index < len(candidates); index++ {
+		if strings.EqualFold(strings.TrimSpace(candidates[index].EdgeGroupID), primaryGroupID) {
+			siblingIndexes = append(siblingIndexes, index)
+		}
+	}
+	if len(siblingIndexes) == 0 {
+		return candidates, false
+	}
+	hash, ok := edgeDNSExplorationHash(record, policy, hint, now)
+	if !ok {
+		return candidates, false
+	}
+	percent := edgeDNSExplorationPercent(policy)
+	if int(hash%100) >= percent {
+		return candidates, false
+	}
+	index := siblingIndexes[int((hash/100)%uint64(len(siblingIndexes)))]
+	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
+	explorer := out[index]
+	copy(out[1:index+1], out[0:index])
+	out[0] = explorer
+	return out, true
+}
+
+func edgeDNSExplorationHash(record model.EdgeDNSRecord, policy model.DNSAnswerPolicy, hint dnsGeoHint, now time.Time) (uint64, bool) {
 	switch strings.TrimSpace(policy.PolicyKind) {
 	case model.DNSAnswerPolicyKindDisabled, model.DNSAnswerPolicyKindPinned:
-		return candidates
+		return 0, false
 	}
-	percent := policy.ExplorationPercent
-	if percent <= 0 {
-		return candidates
-	}
-	if percent > 50 {
-		percent = 50
+	if edgeDNSExplorationPercent(policy) <= 0 {
+		return 0, false
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -1843,23 +1899,18 @@ func edgeDNSMaybePromoteExploration(record model.EdgeDNSRecord, policy model.DNS
 	}, "|")
 	hash := fnv.New64a()
 	_, _ = hash.Write([]byte(seed))
-	value := int(hash.Sum64() % 100)
-	if value >= percent {
-		return candidates
+	return hash.Sum64(), true
+}
+
+func edgeDNSExplorationPercent(policy model.DNSAnswerPolicy) int {
+	percent := policy.ExplorationPercent
+	if percent <= 0 {
+		return 0
 	}
-	rest := len(candidates) - 1
-	if rest <= 0 {
-		return candidates
+	if percent > 50 {
+		return 50
 	}
-	index := 1 + int((hash.Sum64()/100)%uint64(rest))
-	if index <= 0 || index >= len(candidates) {
-		return candidates
-	}
-	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
-	explorer := out[index]
-	copy(out[1:index+1], out[0:index])
-	out[0] = explorer
-	return out
+	return percent
 }
 
 func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy, hint dnsGeoHint) int {

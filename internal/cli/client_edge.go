@@ -167,6 +167,20 @@ func (c *Client) GetEdgeNode(edgeID string) (edgeNodeResponse, error) {
 	return response, nil
 }
 
+func (c *Client) GetEdgeNodeQuality(edgeID, since string) (model.EdgeNodeQualityResponse, error) {
+	apiPath := edgeNodePath(edgeID) + "/quality"
+	if strings.TrimSpace(since) != "" {
+		values := url.Values{}
+		values.Set("since", strings.TrimSpace(since))
+		apiPath += "?" + values.Encode()
+	}
+	var response model.EdgeNodeQualityResponse
+	if err := c.doJSON(http.MethodGet, apiPath, nil, &response); err != nil {
+		return model.EdgeNodeQualityResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) CreateEdgeNodeToken(edgeID string, request createEdgeNodeTokenRequest) (createEdgeNodeTokenResponse, error) {
 	var response createEdgeNodeTokenResponse
 	if err := c.doJSON(http.MethodPost, edgeNodePath(edgeID)+"/token", request, &response); err != nil {

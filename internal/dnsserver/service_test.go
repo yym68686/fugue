@@ -457,6 +457,47 @@ func TestEdgeDNSExplorationPromotesHealthyAlternativeDeterministically(t *testin
 	}
 }
 
+func TestEdgeDNSExplorationPromotesSameGroupNodeBeforeCrossGroup(t *testing.T) {
+	t.Parallel()
+
+	record := model.EdgeDNSRecord{
+		Name: "app.dns.fugue.pro",
+		Type: model.EdgeDNSRecordTypeA,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:         model.DNSAnswerPolicyKindWeighted,
+			HealthRequired:     true,
+			RouteReadyRequired: true,
+			ExplorationPercent: 5,
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "95.169.10.156", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 50, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+		},
+	}
+	hint := dnsGeoHint{Country: "us", IP: "198.51.100.25", Source: "ecs"}
+	foundNodeExploration := false
+	for bucket := int64(0); bucket < 2000; bucket++ {
+		ordered := edgeDNSOrderedCandidates(record, hint, time.Unix(bucket*int64((10*time.Minute).Seconds()), 0).UTC())
+		if len(ordered) == 0 {
+			t.Fatal("expected eligible candidates")
+		}
+		switch ordered[0].IP {
+		case "95.169.10.156":
+			foundNodeExploration = true
+		case "15.204.94.71":
+		default:
+			t.Fatalf("same-group node exploration must not promote cross-group candidate first, got %+v", ordered)
+		}
+		if foundNodeExploration {
+			break
+		}
+	}
+	if !foundNodeExploration {
+		t.Fatal("expected exploration to promote a same-group edge node in at least one deterministic bucket")
+	}
+}
+
 func TestEdgeDNSCandidateEligibilityRequiresTLSReadyForWeightedPolicy(t *testing.T) {
 	t.Parallel()
 

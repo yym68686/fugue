@@ -56,6 +56,7 @@ func (c *CLI) newAdminEdgeNodesCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAdminEdgeNodesListCommand(),
 		c.newAdminEdgeNodesGetCommand(),
+		c.newAdminEdgeNodesQualityCommand(),
 		c.newAdminEdgeNodesTokenCommand(),
 	)
 	return cmd
@@ -124,6 +125,35 @@ func (c *CLI) newAdminEdgeNodesGetCommand() *cobra.Command {
 			return writeEdgeGroup(c.stdout, response.Group)
 		},
 	}
+}
+
+func (c *CLI) newAdminEdgeNodesQualityCommand() *cobra.Command {
+	opts := struct {
+		Since string
+	}{
+		Since: "24h",
+	}
+	cmd := &cobra.Command{
+		Use:   "quality <edge-id>",
+		Short: "Show per-node edge quality metrics",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.GetEdgeNodeQuality(args[0], opts.Since)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeNodeQuality(c.stdout, response)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Since, "since", opts.Since, "Quality window as a duration such as 24h or an RFC3339 timestamp")
+	return cmd
 }
 
 func (c *CLI) newAdminEdgeNodesTokenCommand() *cobra.Command {
@@ -358,6 +388,86 @@ func writeEdgeNode(w io.Writer, node model.EdgeNode) error {
 		kvPair{Key: "last_heartbeat", Value: formatOptionalEdgeTime(node.LastHeartbeatAt)},
 		kvPair{Key: "updated", Value: formatTime(node.UpdatedAt)},
 	)
+}
+
+func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) error {
+	summary := response.Summary
+	if err := writeKeyValues(w,
+		kvPair{Key: "edge_id", Value: strings.TrimSpace(summary.EdgeID)},
+		kvPair{Key: "edge_group", Value: strings.TrimSpace(summary.EdgeGroupID)},
+		kvPair{Key: "status", Value: strings.TrimSpace(response.Node.Status)},
+		kvPair{Key: "healthy", Value: fmt.Sprintf("%t", response.Node.Healthy)},
+		kvPair{Key: "draining", Value: fmt.Sprintf("%t", response.Node.Draining)},
+		kvPair{Key: "since", Value: formatTime(summary.Since)},
+		kvPair{Key: "sample_records", Value: fmt.Sprintf("%d", summary.SampleRecordCount)},
+		kvPair{Key: "requests", Value: fmt.Sprintf("%d", summary.RequestCount)},
+		kvPair{Key: "errors", Value: fmt.Sprintf("%d", summary.ErrorCount)},
+		kvPair{Key: "error_rate", Value: formatEdgeNodeQualityRate(summary.ErrorRate)},
+		kvPair{Key: "avg_ttfb_ms", Value: formatEdgeNodeQualityMetric(summary.AvgTTFBMS)},
+		kvPair{Key: "avg_tls_ms", Value: formatEdgeNodeQualityMetric(summary.AvgTLSHandshakeMS)},
+		kvPair{Key: "avg_upstream_ms", Value: formatEdgeNodeQualityMetric(summary.AvgUpstreamMS)},
+		kvPair{Key: "avg_total_ms", Value: formatEdgeNodeQualityMetric(summary.AvgTotalMS)},
+		kvPair{Key: "cache_hit_rate", Value: formatEdgeNodeQualityRate(summary.CacheHitRate)},
+		kvPair{Key: "tls_status", Value: strings.TrimSpace(summary.TLSStatus)},
+		kvPair{Key: "cache_status", Value: strings.TrimSpace(summary.CacheStatus)},
+		kvPair{Key: "caddy_routes", Value: fmt.Sprintf("%d", summary.CaddyRouteCount)},
+		kvPair{Key: "route_bundle", Value: strings.TrimSpace(summary.RouteBundleVersion)},
+		kvPair{Key: "dns_bundle", Value: strings.TrimSpace(summary.DNSBundleVersion)},
+		kvPair{Key: "last_sampled", Value: formatOptionalEdgeTime(summary.LastSampledAt)},
+		kvPair{Key: "generated_at", Value: formatTime(response.GeneratedAt)},
+	); err != nil {
+		return err
+	}
+	if len(response.Routes) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeEdgeNodeQualityRouteTable(w, response.Routes)
+}
+
+func writeEdgeNodeQualityRouteTable(w io.Writer, routes []model.EdgeNodeQualityRoute) error {
+	sorted := append([]model.EdgeNodeQualityRoute(nil), routes...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Hostname != sorted[j].Hostname {
+			return sorted[i].Hostname < sorted[j].Hostname
+		}
+		return sorted[i].PathPrefix < sorted[j].PathPrefix
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPATH\tREQUESTS\tERROR_RATE\tAVG_TTFB_MS\tAVG_TLS_MS\tCACHE_HIT\tLAST_SAMPLED"); err != nil {
+		return err
+	}
+	for _, route := range sorted {
+		path := strings.TrimSpace(route.PathPrefix)
+		if path == "" {
+			path = "/"
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			strings.TrimSpace(route.Hostname),
+			path,
+			route.RequestCount,
+			formatEdgeNodeQualityRate(route.ErrorRate),
+			formatEdgeNodeQualityMetric(route.AvgTTFBMS),
+			formatEdgeNodeQualityMetric(route.AvgTLSHandshakeMS),
+			formatEdgeNodeQualityRate(route.CacheHitRate),
+			formatOptionalEdgeTime(route.LastSampledAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func formatEdgeNodeQualityRate(value float64) string {
+	return fmt.Sprintf("%.2f%%", value*100)
+}
+
+func formatEdgeNodeQualityMetric(value float64) string {
+	return fmt.Sprintf("%.1f", value)
 }
 
 func writeEdgeGroup(w io.Writer, group model.EdgeGroup) error {
