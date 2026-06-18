@@ -1623,10 +1623,11 @@ func PlanAppDataMaterialization(spec AppDataMaterializationSpec, availableBytes 
 }
 
 type AppNetworkPolicyDirectionSpec struct {
-	Mode                string                    `json:"mode,omitempty" yaml:"mode,omitempty"`
-	AllowDNS            bool                      `json:"allow_dns,omitempty" yaml:"allow_dns,omitempty"`
-	AllowPublicInternet bool                      `json:"allow_public_internet,omitempty" yaml:"allow_public_internet,omitempty"`
-	AllowApps           []AppNetworkPolicyAppPeer `json:"allow_apps,omitempty" yaml:"allow_apps,omitempty"`
+	Mode                 string                    `json:"mode,omitempty" yaml:"mode,omitempty"`
+	AllowDNS             bool                      `json:"allow_dns,omitempty" yaml:"allow_dns,omitempty"`
+	AllowPublicInternet  bool                      `json:"allow_public_internet,omitempty" yaml:"allow_public_internet,omitempty"`
+	AllowBackingServices bool                      `json:"allow_backing_services,omitempty" yaml:"allow_backing_services,omitempty"`
+	AllowApps            []AppNetworkPolicyAppPeer `json:"allow_apps,omitempty" yaml:"allow_apps,omitempty"`
 }
 
 type AppNetworkPolicyAppPeer struct {

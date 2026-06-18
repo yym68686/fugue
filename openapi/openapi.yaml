@@ -11798,6 +11798,8 @@ components:
           type: boolean
         allow_public_internet:
           type: boolean
+        allow_backing_services:
+          type: boolean
         allow_apps:
           type: array
           items:

@@ -2183,10 +2183,33 @@ func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
 	}
 
 	egress := spec["egress"].([]map[string]any)
-	if len(egress) != 3 {
-		t.Fatalf("expected dns, public internet, and gateway egress rules, got %#v", egress)
+	dnsRule := networkPolicyRuleByPodSelector(t, egress, map[string]string{"k8s-app": "kube-dns"})
+	dnsTarget := networkPolicyTargetWithPodSelector(t, dnsRule, map[string]string{"k8s-app": "kube-dns"})
+	dnsNamespaceSelector := dnsTarget["namespaceSelector"].(map[string]any)["matchLabels"].(map[string]string)
+	if got := dnsNamespaceSelector["kubernetes.io/metadata.name"]; got != "kube-system" {
+		t.Fatalf("expected DNS egress to target kube-system, got %#v", dnsNamespaceSelector)
 	}
-	gatewayEgress := egress[2]
+	dnsPorts := dnsRule["ports"].([]map[string]any)
+	if len(dnsPorts) != 2 || dnsPorts[0]["port"] != 53 || dnsPorts[1]["port"] != 53 {
+		t.Fatalf("expected DNS egress ports 53/TCP and 53/UDP, got %#v", dnsPorts)
+	}
+
+	publicIPv4 := networkPolicyIPBlock(t, egress, "0.0.0.0/0")
+	publicIPv4Except := publicIPv4["except"].([]string)
+	for _, cidr := range []string{"10.0.0.0/8", "169.254.0.0/16", "198.18.0.0/15", "224.0.0.0/4"} {
+		if !stringSliceContains(publicIPv4Except, cidr) {
+			t.Fatalf("expected IPv4 public internet exception %q in %#v", cidr, publicIPv4Except)
+		}
+	}
+	publicIPv6 := networkPolicyIPBlock(t, egress, "::/0")
+	publicIPv6Except := publicIPv6["except"].([]string)
+	for _, cidr := range []string{"::1/128", "fc00::/7", "fe80::/10"} {
+		if !stringSliceContains(publicIPv6Except, cidr) {
+			t.Fatalf("expected IPv6 public internet exception %q in %#v", cidr, publicIPv6Except)
+		}
+	}
+
+	gatewayEgress := networkPolicyRuleByPodSelector(t, egress, map[string]string{FugueLabelAppID: "app_gateway"})
 	to := gatewayEgress["to"].([]map[string]any)
 	gatewaySelector := to[0]["podSelector"].(map[string]any)["matchLabels"].(map[string]string)
 	if got := gatewaySelector[FugueLabelAppID]; got != "app_gateway" {
@@ -2207,6 +2230,124 @@ func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
 	if got := ingressPorts[0]["port"]; got != 7777 {
 		t.Fatalf("expected session ingress port 7777, got %#v", got)
 	}
+}
+
+func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "uni-api-demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.pro/fugue-apps/uni-api:git-abc123",
+			Ports:     []int{8000},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Postgres: &model.AppPostgresSpec{
+				Database:    "uniapi",
+				User:        "root",
+				Password:    "secret",
+				ServiceName: "uni-api-demo-postgres",
+			},
+			NetworkPolicy: &model.AppNetworkPolicySpec{
+				Egress: &model.AppNetworkPolicyDirectionSpec{
+					Mode:                 model.AppNetworkPolicyModeRestricted,
+					AllowBackingServices: true,
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	networkPolicy := firstObjectByKind(t, objects, "NetworkPolicy")
+	spec := networkPolicy["spec"].(map[string]any)
+	egress := spec["egress"].([]map[string]any)
+	postgresEgress := networkPolicyRuleByPodSelector(t, egress, map[string]string{
+		"cnpg.io/cluster":      "uni-api-demo-postgres",
+		"cnpg.io/instanceRole": "primary",
+	})
+	postgresPorts := postgresEgress["ports"].([]map[string]any)
+	if len(postgresPorts) != 1 || postgresPorts[0]["port"] != 5432 {
+		t.Fatalf("expected backing postgres egress port 5432, got %#v", postgresPorts)
+	}
+}
+
+func networkPolicyRuleByPodSelector(t *testing.T, rules []map[string]any, selector map[string]string) map[string]any {
+	t.Helper()
+	for _, rule := range rules {
+		if networkPolicyTargetWithPodSelectorMaybe(rule, selector) != nil {
+			return rule
+		}
+	}
+	t.Fatalf("expected network policy rule with pod selector %#v in %#v", selector, rules)
+	return nil
+}
+
+func networkPolicyTargetWithPodSelector(t *testing.T, rule map[string]any, selector map[string]string) map[string]any {
+	t.Helper()
+	target := networkPolicyTargetWithPodSelectorMaybe(rule, selector)
+	if target == nil {
+		t.Fatalf("expected network policy target with pod selector %#v in %#v", selector, rule)
+	}
+	return target
+}
+
+func networkPolicyTargetWithPodSelectorMaybe(rule map[string]any, selector map[string]string) map[string]any {
+	targets, ok := rule["to"].([]map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, target := range targets {
+		podSelector, ok := target["podSelector"].(map[string]any)
+		if !ok {
+			continue
+		}
+		matchLabels, ok := podSelector["matchLabels"].(map[string]string)
+		if !ok {
+			continue
+		}
+		matched := true
+		for key, value := range selector {
+			if matchLabels[key] != value {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return target
+		}
+	}
+	return nil
+}
+
+func networkPolicyIPBlock(t *testing.T, rules []map[string]any, cidr string) map[string]any {
+	t.Helper()
+	for _, rule := range rules {
+		targets, ok := rule["to"].([]map[string]any)
+		if !ok {
+			continue
+		}
+		for _, target := range targets {
+			ipBlock, ok := target["ipBlock"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if ipBlock["cidr"] == cidr {
+				return ipBlock
+			}
+		}
+	}
+	t.Fatalf("expected network policy ipBlock cidr %q in %#v", cidr, rules)
+	return nil
+}
+
+func stringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func envValue(envObjects []map[string]any, name string) string {

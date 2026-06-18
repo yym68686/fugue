@@ -99,7 +99,7 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	if aliasObject := buildLegacyComposeAppNameAliasObject(namespace, app); aliasObject != nil {
 		objects = append(objects, aliasObject)
 	}
-	if networkPolicyObject := buildAppNetworkPolicyObject(namespace, app, labels); networkPolicyObject != nil {
+	if networkPolicyObject := buildAppNetworkPolicyObject(namespace, app, labels, postgresResources); networkPolicyObject != nil {
 		objects = append(objects, networkPolicyObject)
 	}
 	attachOwnerReference(objects, ownerRef)
@@ -1073,7 +1073,7 @@ func appServicePorts(ports []int) []map[string]any {
 	return servicePorts
 }
 
-func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[string]string) map[string]any {
+func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[string]string, postgresResources []postgresRuntimeResource) map[string]any {
 	policy := app.Spec.NetworkPolicy
 	if policy == nil {
 		return nil
@@ -1096,7 +1096,7 @@ func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[str
 	}
 	if networkPolicyDirectionRestricted(policy.Egress) {
 		policyTypes = append(policyTypes, "Egress")
-		spec["egress"] = buildNetworkPolicyEgressRules(policy.Egress)
+		spec["egress"] = buildNetworkPolicyEgressRules(policy.Egress, postgresResources)
 	}
 	if len(policyTypes) == 0 {
 		return nil
@@ -1138,30 +1138,19 @@ func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSp
 	return rules
 }
 
-func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpec) []map[string]any {
+func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpec, postgresResources []postgresRuntimeResource) []map[string]any {
 	if direction == nil {
 		return nil
 	}
-	rules := make([]map[string]any, 0, len(direction.AllowApps)+2)
+	rules := make([]map[string]any, 0, len(direction.AllowApps)+len(postgresResources)+6)
 	if direction.AllowDNS {
-		rules = append(rules, map[string]any{
-			"ports": []map[string]any{
-				{"protocol": "UDP", "port": 53},
-				{"protocol": "TCP", "port": 53},
-			},
-		})
+		rules = append(rules, buildNetworkPolicyDNSRules()...)
 	}
 	if direction.AllowPublicInternet {
-		rules = append(rules, map[string]any{
-			"to": []map[string]any{
-				{
-					"ipBlock": map[string]any{
-						"cidr":   "0.0.0.0/0",
-						"except": privateEgressCIDRBlocks(),
-					},
-				},
-			},
-		})
+		rules = append(rules, buildNetworkPolicyPublicInternetRules()...)
+	}
+	if direction.AllowBackingServices {
+		rules = append(rules, buildNetworkPolicyBackingServiceEgressRules(postgresResources)...)
 	}
 	for _, peer := range direction.AllowApps {
 		rule := map[string]any{
@@ -1173,6 +1162,97 @@ func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpe
 			rule["ports"] = ports
 		}
 		rules = append(rules, rule)
+	}
+	return rules
+}
+
+func buildNetworkPolicyDNSRules() []map[string]any {
+	selectors := []map[string]string{
+		{"k8s-app": "kube-dns"},
+		{"k8s-app": "coredns"},
+		{"app.kubernetes.io/name": "coredns"},
+	}
+	rules := make([]map[string]any, 0, len(selectors))
+	for _, selector := range selectors {
+		rules = append(rules, map[string]any{
+			"to": []map[string]any{
+				{
+					"namespaceSelector": map[string]any{
+						"matchLabels": map[string]string{
+							"kubernetes.io/metadata.name": "kube-system",
+						},
+					},
+					"podSelector": map[string]any{
+						"matchLabels": selector,
+					},
+				},
+			},
+			"ports": buildNetworkPolicyDNSPorts(),
+		})
+	}
+	return rules
+}
+
+func buildNetworkPolicyDNSPorts() []map[string]any {
+	return []map[string]any{
+		{"protocol": "UDP", "port": 53},
+		{"protocol": "TCP", "port": 53},
+	}
+}
+
+func buildNetworkPolicyPublicInternetRules() []map[string]any {
+	return []map[string]any{
+		{
+			"to": []map[string]any{
+				{
+					"ipBlock": map[string]any{
+						"cidr":   "0.0.0.0/0",
+						"except": blockedPublicInternetIPv4CIDRBlocks(),
+					},
+				},
+			},
+		},
+		{
+			"to": []map[string]any{
+				{
+					"ipBlock": map[string]any{
+						"cidr":   "::/0",
+						"except": blockedPublicInternetIPv6CIDRBlocks(),
+					},
+				},
+			},
+		},
+	}
+}
+
+func buildNetworkPolicyBackingServiceEgressRules(postgresResources []postgresRuntimeResource) []map[string]any {
+	if len(postgresResources) == 0 {
+		return nil
+	}
+	rules := make([]map[string]any, 0, len(postgresResources))
+	for _, postgres := range postgresResources {
+		clusterName := strings.TrimSpace(postgres.spec.ServiceName)
+		if clusterName == "" {
+			clusterName = strings.TrimSpace(postgres.resourceName)
+		}
+		if clusterName == "" {
+			continue
+		}
+		rules = append(rules, map[string]any{
+			"to": []map[string]any{
+				{
+					"podSelector": map[string]any{
+						"matchLabels": map[string]string{
+							"cnpg.io/cluster":      clusterName,
+							"cnpg.io/instanceRole": "primary",
+						},
+					},
+				},
+			},
+			"ports": []map[string]any{
+				{"protocol": "TCP", "port": 5432},
+			},
+		})
 	}
 	return rules
 }
@@ -1204,14 +1284,36 @@ func buildNetworkPolicyPorts(ports []int) []map[string]any {
 	return out
 }
 
-func privateEgressCIDRBlocks() []string {
+func blockedPublicInternetIPv4CIDRBlocks() []string {
 	return []string{
+		"0.0.0.0/8",
 		"10.0.0.0/8",
 		"100.64.0.0/10",
 		"127.0.0.0/8",
 		"169.254.0.0/16",
 		"172.16.0.0/12",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
 		"192.168.0.0/16",
+		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"224.0.0.0/4",
+		"240.0.0.0/4",
+		"255.255.255.255/32",
+	}
+}
+
+func blockedPublicInternetIPv6CIDRBlocks() []string {
+	return []string{
+		"::/128",
+		"::1/128",
+		"::ffff:0:0/96",
+		"100::/64",
+		"2001:db8::/32",
+		"fc00::/7",
+		"fe80::/10",
+		"ff00::/8",
 	}
 }
 

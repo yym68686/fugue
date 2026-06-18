@@ -54,15 +54,17 @@ func (c *CLI) newAppNetworkShowCommand() *cobra.Command {
 
 func (c *CLI) newAppNetworkSetCommand() *cobra.Command {
 	opts := struct {
-		Mode             string
-		EgressDNS        string
-		EgressPublic     string
-		EgressAllowApps  []string
-		IngressDNS       string
-		IngressPublic    string
-		IngressAllowApps []string
-		ClearPolicy      bool
-		Wait             bool
+		Mode                  string
+		EgressPreset          string
+		EgressDNS             string
+		EgressPublic          string
+		EgressBackingServices string
+		EgressAllowApps       []string
+		IngressDNS            string
+		IngressPublic         string
+		IngressAllowApps      []string
+		ClearPolicy           bool
+		Wait                  bool
 	}{Wait: true}
 	cmd := &cobra.Command{
 		Use:   "set <app>",
@@ -70,8 +72,10 @@ func (c *CLI) newAppNetworkSetCommand() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !flagChanged(cmd, "mode") &&
+				!flagChanged(cmd, "egress-preset") &&
 				!flagChanged(cmd, "egress-dns") &&
 				!flagChanged(cmd, "egress-public") &&
+				!flagChanged(cmd, "egress-allow-backing-services") &&
 				len(opts.EgressAllowApps) == 0 &&
 				!flagChanged(cmd, "ingress-dns") &&
 				!flagChanged(cmd, "ingress-public") &&
@@ -111,13 +115,17 @@ func (c *CLI) newAppNetworkSetCommand() *cobra.Command {
 				if policy == nil {
 					policy = &model.AppNetworkPolicySpec{}
 				}
-				if flagChanged(cmd, "egress-dns") || flagChanged(cmd, "egress-public") || len(opts.EgressAllowApps) > 0 {
+				if flagChanged(cmd, "egress-preset") || flagChanged(cmd, "egress-dns") || flagChanged(cmd, "egress-public") || flagChanged(cmd, "egress-allow-backing-services") || len(opts.EgressAllowApps) > 0 {
 					direction, err := updateAppNetworkPolicyDirection(
 						policy.Egress,
+						opts.EgressPreset,
+						flagChanged(cmd, "egress-preset"),
 						opts.EgressDNS,
 						flagChanged(cmd, "egress-dns"),
 						opts.EgressPublic,
 						flagChanged(cmd, "egress-public"),
+						opts.EgressBackingServices,
+						flagChanged(cmd, "egress-allow-backing-services"),
 						egressPeers,
 					)
 					if err != nil {
@@ -128,10 +136,14 @@ func (c *CLI) newAppNetworkSetCommand() *cobra.Command {
 				if flagChanged(cmd, "ingress-dns") || flagChanged(cmd, "ingress-public") || len(opts.IngressAllowApps) > 0 {
 					direction, err := updateAppNetworkPolicyDirection(
 						policy.Ingress,
+						"",
+						false,
 						opts.IngressDNS,
 						flagChanged(cmd, "ingress-dns"),
 						opts.IngressPublic,
 						flagChanged(cmd, "ingress-public"),
+						"",
+						false,
 						ingressPeers,
 					)
 					if err != nil {
@@ -157,8 +169,10 @@ func (c *CLI) newAppNetworkSetCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Mode, "mode", "", "Network mode: public, internal, or background")
+	cmd.Flags().StringVar(&opts.EgressPreset, "egress-preset", "", "Egress policy preset: public-client")
 	cmd.Flags().StringVar(&opts.EgressDNS, "egress-dns", "", "Allow egress DNS: on or off")
 	cmd.Flags().StringVar(&opts.EgressPublic, "egress-public", "", "Allow egress public internet: on or off")
+	cmd.Flags().StringVar(&opts.EgressBackingServices, "egress-allow-backing-services", "", "Allow egress to app backing services: on or off")
 	cmd.Flags().StringArrayVar(&opts.EgressAllowApps, "egress-allow-app", nil, "Allow egress to an app peer: app[:port,port] (repeatable)")
 	cmd.Flags().StringVar(&opts.IngressDNS, "ingress-dns", "", "Allow ingress DNS: on or off")
 	cmd.Flags().StringVar(&opts.IngressPublic, "ingress-public", "", "Allow ingress public internet: on or off")
@@ -262,19 +276,30 @@ func writeAppNetworkDirection(w io.Writer, label string, direction *model.AppNet
 		kvPair{Key: label + "_mode", Value: firstNonEmpty(direction.Mode, "restricted")},
 		kvPair{Key: label + "_allow_dns", Value: fmt.Sprintf("%t", direction.AllowDNS)},
 		kvPair{Key: label + "_allow_public_internet", Value: fmt.Sprintf("%t", direction.AllowPublicInternet)},
+		kvPair{Key: label + "_allow_backing_services", Value: fmt.Sprintf("%t", direction.AllowBackingServices)},
 		kvPair{Key: label + "_allow_apps", Value: strings.Join(peerStrings, "; ")},
 	)
 }
 
-func updateAppNetworkPolicyDirection(existing *model.AppNetworkPolicyDirectionSpec, dnsRaw string, dnsChanged bool, publicRaw string, publicChanged bool, allowApps []model.AppNetworkPolicyAppPeer) (*model.AppNetworkPolicyDirectionSpec, error) {
+func updateAppNetworkPolicyDirection(existing *model.AppNetworkPolicyDirectionSpec, presetRaw string, presetChanged bool, dnsRaw string, dnsChanged bool, publicRaw string, publicChanged bool, backingServicesRaw string, backingServicesChanged bool, allowApps []model.AppNetworkPolicyAppPeer) (*model.AppNetworkPolicyDirectionSpec, error) {
 	direction := &model.AppNetworkPolicyDirectionSpec{Mode: model.AppNetworkPolicyModeRestricted}
 	if existing != nil {
 		direction = &model.AppNetworkPolicyDirectionSpec{
-			Mode:                firstNonEmpty(existing.Mode, model.AppNetworkPolicyModeRestricted),
-			AllowDNS:            existing.AllowDNS,
-			AllowPublicInternet: existing.AllowPublicInternet,
-			AllowApps:           append([]model.AppNetworkPolicyAppPeer(nil), existing.AllowApps...),
+			Mode:                 firstNonEmpty(existing.Mode, model.AppNetworkPolicyModeRestricted),
+			AllowDNS:             existing.AllowDNS,
+			AllowPublicInternet:  existing.AllowPublicInternet,
+			AllowBackingServices: existing.AllowBackingServices,
+			AllowApps:            append([]model.AppNetworkPolicyAppPeer(nil), existing.AllowApps...),
 		}
+	}
+	if presetChanged {
+		preset, err := parseAppNetworkEgressPreset(presetRaw)
+		if err != nil {
+			return nil, err
+		}
+		direction.Mode = preset.Mode
+		direction.AllowDNS = preset.AllowDNS
+		direction.AllowPublicInternet = preset.AllowPublicInternet
 	}
 	if dnsChanged {
 		value, err := parseOptionalSemanticBool(dnsRaw)
@@ -296,6 +321,16 @@ func updateAppNetworkPolicyDirection(existing *model.AppNetworkPolicyDirectionSp
 		}
 		direction.AllowPublicInternet = *value
 	}
+	if backingServicesChanged {
+		value, err := parseOptionalSemanticBool(backingServicesRaw)
+		if err != nil {
+			return nil, fmt.Errorf("egress backing services: %w", err)
+		}
+		if value == nil {
+			return nil, fmt.Errorf("egress backing services requires on or off")
+		}
+		direction.AllowBackingServices = *value
+	}
 	if len(allowApps) > 0 {
 		direction.AllowApps = append([]model.AppNetworkPolicyAppPeer(nil), allowApps...)
 	}
@@ -306,6 +341,19 @@ func updateAppNetworkPolicyDirection(existing *model.AppNetworkPolicyDirectionSp
 		return nil, fmt.Errorf("network policy mode must be restricted")
 	}
 	return direction, nil
+}
+
+func parseAppNetworkEgressPreset(raw string) (model.AppNetworkPolicyDirectionSpec, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "public-client":
+		return model.AppNetworkPolicyDirectionSpec{
+			Mode:                model.AppNetworkPolicyModeRestricted,
+			AllowDNS:            true,
+			AllowPublicInternet: true,
+		}, nil
+	default:
+		return model.AppNetworkPolicyDirectionSpec{}, fmt.Errorf("egress preset must be public-client")
+	}
 }
 
 func parseAppNetworkMode(raw string) (string, error) {

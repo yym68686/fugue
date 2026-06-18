@@ -665,6 +665,7 @@ services:
         mode: restricted
         allow_dns: true
         allow_public_internet: true
+        allow_backing_services: true
         allow_apps:
           - app_id: app_gateway
             ports: [8080]
@@ -701,6 +702,9 @@ services:
 	}
 	if !policy.Egress.AllowDNS || !policy.Egress.AllowPublicInternet {
 		t.Fatalf("expected DNS and public internet egress, got %+v", *policy.Egress)
+	}
+	if !policy.Egress.AllowBackingServices {
+		t.Fatalf("expected backing service egress, got %+v", *policy.Egress)
 	}
 	if len(policy.Egress.AllowApps) != 1 || policy.Egress.AllowApps[0].AppID != "app_gateway" || len(policy.Egress.AllowApps[0].Ports) != 1 || policy.Egress.AllowApps[0].Ports[0] != 8080 {
 		t.Fatalf("unexpected egress app allow list: %+v", policy.Egress.AllowApps)

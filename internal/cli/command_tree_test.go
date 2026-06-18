@@ -681,7 +681,9 @@ func TestRunAppNetworkSetResolvesPeerAppNames(t *testing.T) {
 		"--token", "token",
 		"app", "network", "set", "demo",
 		"--mode", "internal",
+		"--egress-preset", "public-client",
 		"--egress-dns", "off",
+		"--egress-allow-backing-services", "on",
 		"--egress-allow-app", "api:443",
 		"--wait=false",
 	}, &stdout, &stderr)
@@ -698,6 +700,12 @@ func TestRunAppNetworkSetResolvesPeerAppNames(t *testing.T) {
 	egress := gotBody.Spec.NetworkPolicy.Egress
 	if egress.AllowDNS {
 		t.Fatalf("expected egress DNS disabled, got %+v", egress)
+	}
+	if !egress.AllowPublicInternet {
+		t.Fatalf("expected egress public internet enabled by preset, got %+v", egress)
+	}
+	if !egress.AllowBackingServices {
+		t.Fatalf("expected egress backing services enabled, got %+v", egress)
 	}
 	if len(egress.AllowApps) != 1 || egress.AllowApps[0].AppID != "app_api" || len(egress.AllowApps[0].Ports) != 1 || egress.AllowApps[0].Ports[0] != 443 {
 		t.Fatalf("expected resolved peer app id and port, got %+v", egress.AllowApps)
