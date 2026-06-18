@@ -78,31 +78,7 @@ func (s *Store) ListEdgePerformanceSamples(hostname string, since time.Time) ([]
 	return samples, err
 }
 
-func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSample, pruneBefore time.Time) error {
-	if err := s.ensureDatabaseReady(); err != nil {
-		return err
-	}
-	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin edge performance sample transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	if !pruneBefore.IsZero() {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_edge_performance_samples WHERE sampled_at < $1`, pruneBefore); err != nil {
-			return fmt.Errorf("prune edge performance samples: %w", err)
-		}
-	}
-	for _, sample := range samples {
-		normalized, err := normalizeEdgePerformanceSampleForStore(sample, time.Now().UTC())
-		if err != nil {
-			continue
-		}
-		if normalized.ID == "" {
-			normalized.ID = model.NewID("edge_perf")
-		}
-		if _, err := tx.ExecContext(ctx, `
+const pgRecordEdgePerformanceSampleInsertSQL = `
 INSERT INTO fugue_edge_performance_samples (
 	id, edge_id, edge_group_id, hostname, path_prefix, method, traffic_class, client_country, client_region, client_asn, runtime_region,
 	route_generation, cache_status, dns_policy, tls_handshake_ms, ttfb_ms, upstream_ms,
@@ -122,7 +98,8 @@ INSERT INTO fugue_edge_performance_samples (
 	$30, $31, $32, $33, $34,
 	$35, $36, $37, $38, $39,
 	$40, $41, $42, $43, $44,
-	$45, $46, $47, $48, $49
+	$45, $46, $47, $48, $49,
+	$50, $51, $52
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_id = EXCLUDED.edge_id,
@@ -176,7 +153,33 @@ ON CONFLICT (id) DO UPDATE SET
 	goroutine_count = EXCLUDED.goroutine_count,
 	memory_alloc_bytes = EXCLUDED.memory_alloc_bytes,
 	sampled_at = EXCLUDED.sampled_at
-`,
+`
+
+func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSample, pruneBefore time.Time) error {
+	if err := s.ensureDatabaseReady(); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin edge performance sample transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if !pruneBefore.IsZero() {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_edge_performance_samples WHERE sampled_at < $1`, pruneBefore); err != nil {
+			return fmt.Errorf("prune edge performance samples: %w", err)
+		}
+	}
+	for _, sample := range samples {
+		normalized, err := normalizeEdgePerformanceSampleForStore(sample, time.Now().UTC())
+		if err != nil {
+			continue
+		}
+		if normalized.ID == "" {
+			normalized.ID = model.NewID("edge_perf")
+		}
+		if _, err := tx.ExecContext(ctx, pgRecordEdgePerformanceSampleInsertSQL,
 			normalized.ID,
 			normalized.EdgeID,
 			normalized.EdgeGroupID,

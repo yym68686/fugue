@@ -2,6 +2,9 @@ package store
 
 import (
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,4 +103,60 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 		samples[0].ActiveBodyBuffers != 1 {
 		t.Fatalf("unexpected normalized sample: %+v", samples[0])
 	}
+}
+
+func TestPGRecordEdgePerformanceSampleInsertSQLColumnPlaceholderParity(t *testing.T) {
+	t.Parallel()
+
+	columns := splitSQLCSVSection(t, pgRecordEdgePerformanceSampleInsertSQL, "INSERT INTO fugue_edge_performance_samples (", ") VALUES (")
+	placeholderMatches := regexp.MustCompile(`\$(\d+)`).FindAllStringSubmatch(
+		sqlSection(t, pgRecordEdgePerformanceSampleInsertSQL, ") VALUES (", ")\nON CONFLICT"),
+		-1,
+	)
+	if len(columns) != len(placeholderMatches) {
+		t.Fatalf("insert column count %d does not match placeholder count %d", len(columns), len(placeholderMatches))
+	}
+	seen := make(map[int]bool, len(placeholderMatches))
+	for _, match := range placeholderMatches {
+		value, err := strconv.Atoi(match[1])
+		if err != nil {
+			t.Fatalf("parse placeholder %q: %v", match[0], err)
+		}
+		seen[value] = true
+	}
+	for index := 1; index <= len(columns); index++ {
+		if !seen[index] {
+			t.Fatalf("insert SQL missing placeholder $%d for %d columns", index, len(columns))
+		}
+	}
+}
+
+func sqlSection(t *testing.T, sql, startMarker, endMarker string) string {
+	t.Helper()
+
+	start := strings.Index(sql, startMarker)
+	if start < 0 {
+		t.Fatalf("SQL section start marker %q not found", startMarker)
+	}
+	start += len(startMarker)
+	end := strings.Index(sql[start:], endMarker)
+	if end < 0 {
+		t.Fatalf("SQL section end marker %q not found", endMarker)
+	}
+	return sql[start : start+end]
+}
+
+func splitSQLCSVSection(t *testing.T, sql, startMarker, endMarker string) []string {
+	t.Helper()
+
+	section := sqlSection(t, sql, startMarker, endMarker)
+	fields := strings.Split(section, ",")
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
