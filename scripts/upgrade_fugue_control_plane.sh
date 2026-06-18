@@ -313,6 +313,7 @@ FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
 HEADSCALE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+PUBLIC_DATA_PLANE_PRESERVED=false
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 MAINTENANCE_AGENT_HELM_SET_ARGS=()
 HELM_POST_RENDERER_ARGS=()
@@ -488,6 +489,10 @@ public_data_plane_dns_image_changed() {
   done < <(release_changed_files)
 
   return 1
+}
+
+public_data_plane_daemonset_rollout_wait_required() {
+  [[ "${PUBLIC_DATA_PLANE_PRESERVED:-false}" != "true" ]]
 }
 
 node_local_build_plane_changed() {
@@ -2027,6 +2032,7 @@ preserve_public_data_plane_from_live() {
   local dns_resources
 
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+  PUBLIC_DATA_PLANE_PRESERVED=true
 
   if daemonset_exists "${edge_front_ds}" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"; then
     log "public data-plane blue/green DaemonSets detected; preserving front and per-slot worker templates from live state"
@@ -6070,7 +6076,9 @@ PY
   done
 
   if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
-    if ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
+    if ! public_data_plane_daemonset_rollout_wait_required; then
+      log "skipping edge daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
+    elif ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
       log "edge rollout check failed; attempting rollback"
       rollback_release || true
       fail "edge rollout failed"
@@ -6078,7 +6086,9 @@ PY
   fi
 
   if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
-    if ! rollout_daemonsets_by_component_prefix "dns" "dns"; then
+    if ! public_data_plane_daemonset_rollout_wait_required; then
+      log "skipping dns daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
+    elif ! rollout_daemonsets_by_component_prefix "dns" "dns"; then
       log "dns rollout check failed; attempting rollback"
       rollback_release || true
       fail "dns rollout failed"

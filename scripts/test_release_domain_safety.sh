@@ -28,6 +28,14 @@ assert_eq "$(image_ref_repository 'localhost:5000/acme/fugue-edge:sha123')" "loc
 assert_eq "$(image_ref_tag 'localhost:5000/acme/fugue-edge')" "latest" "missing tag defaults to latest"
 assert_eq "$(image_ref_repository 'ghcr.io/acme/fugue-edge@sha256:abc')" "ghcr.io/acme/fugue-edge" "repository strips digest"
 
+PUBLIC_DATA_PLANE_PRESERVED=false
+public_data_plane_daemonset_rollout_wait_required || fail "non-preserved public data-plane releases must wait for edge/DNS daemonsets"
+PUBLIC_DATA_PLANE_PRESERVED=true
+if public_data_plane_daemonset_rollout_wait_required; then
+  fail "preserved public data-plane daemonsets must not block control-plane rollout"
+fi
+PUBLIC_DATA_PLANE_PRESERVED=false
+
 FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-api/main.go\ninternal/api/server.go\n.github/workflows/deploy-control-plane.yml'
 if public_data_plane_changed; then
   fail "control-plane-only changes must not mark public data-plane changed"
