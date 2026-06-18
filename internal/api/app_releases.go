@@ -637,7 +637,7 @@ func appReleaseGateMetricEvidence(metrics map[string]any) []string {
 	if len(metrics) == 0 {
 		return nil
 	}
-	return []string{fmt.Sprintf("candidate requests=%0.f 5xx_rate=%.4f upstream_error_rate=%.4f p95_ttfb_ms=%.0f p99_duration_ms=%.0f",
+	return []string{fmt.Sprintf("release requests=%0.f 5xx_rate=%.4f upstream_error_rate=%.4f p95_ttfb_ms=%.0f p99_duration_ms=%.0f",
 		floatMetric(metrics, "request_count"),
 		floatMetric(metrics, "error_5xx_rate"),
 		floatMetric(metrics, "edge_upstream_error_rate"),
@@ -649,7 +649,7 @@ func appReleaseGateMetricEvidence(metrics map[string]any) []string {
 func appReleaseGateMetricFailures(metrics map[string]any, policy model.AppReleaseGatePolicy) []string {
 	failures := []string{}
 	if policy.MinCandidateRequests > 0 && floatMetric(metrics, "request_count") < float64(policy.MinCandidateRequests) {
-		failures = append(failures, fmt.Sprintf("candidate request count %.0f is below minimum %d", floatMetric(metrics, "request_count"), policy.MinCandidateRequests))
+		failures = append(failures, fmt.Sprintf("release request count %.0f is below minimum %d", floatMetric(metrics, "request_count"), policy.MinCandidateRequests))
 	}
 	if policy.Max5xxRate > 0 && floatMetric(metrics, "error_5xx_rate") > policy.Max5xxRate {
 		failures = append(failures, fmt.Sprintf("5xx rate %.4f exceeds %.4f", floatMetric(metrics, "error_5xx_rate"), policy.Max5xxRate))
