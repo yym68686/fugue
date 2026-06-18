@@ -2883,6 +2883,7 @@ PY
   fi
   if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${node_local_build_plane_override_allowed}" "${image_cache_status_file}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" "${FUGUE_REGISTRY_PULL_BASE}" <<'PY'
 import json
+import os
 from datetime import datetime, timedelta, timezone
 import sys
 from urllib.parse import urlparse
