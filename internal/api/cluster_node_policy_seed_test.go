@@ -626,6 +626,72 @@ func TestSetClusterNodePolicyRemovesStaleRuntimeAppRoleLabel(t *testing.T) {
 	}
 }
 
+func TestSharedPoolDriftReconcileHonorsEdgeOnlyMachinePolicy(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Edge Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "edge")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	_, runtimeObj, err := stateStore.BootstrapClusterNode(nodeSecret, "gcp1", "https://node.example", map[string]string{
+		runtimepkg.AppRuntimeRoleLabelKey: runtimepkg.NodeRoleLabelValue,
+		runtimepkg.EdgeRoleLabelKey:       runtimepkg.NodeRoleLabelValue,
+	}, "edge-node", "edge-fingerprint")
+	if err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+	if _, err := stateStore.SetMachinePolicyByClusterNodeName("gcp1", model.MachinePolicy{
+		AllowAppRuntime: false,
+		AllowBuilds:     false,
+		AllowSharedPool: false,
+		AllowEdge:       true,
+	}); err != nil {
+		t.Fatalf("set machine policy: %v", err)
+	}
+
+	liveLabels := runtimepkg.JoinNodeLabelMap(runtimeObj)
+	liveLabels[runtimepkg.EdgeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
+	liveLabels[runtimepkg.LocationCountryCodeLabelKey] = "us"
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, liveLabels)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	refreshed, _, err := server.reconcileSharedPoolPolicyDriftFromSnapshots([]clusterNodeSnapshot{{
+		node: model.ClusterNode{
+			Name: "gcp1",
+			Conditions: map[string]model.ClusterNodeCondition{
+				clusterNodeConditionReady: {Status: "true"},
+			},
+		},
+		labels: liveLabels,
+	}})
+	if err != nil {
+		t.Fatalf("reconcile shared-pool policy drift: %v", err)
+	}
+	if len(refreshed) != 1 {
+		t.Fatalf("expected one refreshed snapshot, got %d", len(refreshed))
+	}
+	if got := strings.TrimSpace(firstNodeLabel(refreshed[0].labels, runtimepkg.AppRuntimeRoleLabelKey)); got != "" {
+		t.Fatalf("expected shared-pool drift reconcile to preserve edge-only app-runtime removal, got %q", got)
+	}
+}
+
 func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testing.T) {
 	t.Parallel()
 

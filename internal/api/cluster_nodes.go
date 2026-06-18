@@ -475,7 +475,12 @@ func (s *Server) reconcileSharedPoolPolicyDriftFromSnapshots(snapshots []cluster
 		}
 
 		if runtimeObj, ok := runtimeByClusterNode[nodeName]; ok {
-			reconciled, err := client.reconcileRuntimeNode(context.Background(), runtimeObj)
+			var machinePolicy *model.Machine
+			if machine, ok := machineByClusterNode[nodeName]; ok {
+				machineCopy := machine
+				machinePolicy = &machineCopy
+			}
+			reconciled, err := client.reconcileRuntimeNodeWithMachinePolicy(context.Background(), runtimeObj, machinePolicy)
 			if err != nil {
 				if isKubernetesNodeNotFound(err) {
 					continue
