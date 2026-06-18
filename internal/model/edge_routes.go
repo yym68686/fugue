@@ -336,34 +336,41 @@ type CachePolicy struct {
 }
 
 type DNSAnswerPolicy struct {
-	PolicyKind          string   `json:"policy_kind"`
-	AllowedEdgeGroups   []string `json:"allowed_edge_groups,omitempty"`
-	PreferredEdgeGroups []string `json:"preferred_edge_groups,omitempty"`
-	FallbackEdgeGroups  []string `json:"fallback_edge_groups,omitempty"`
-	TTLSeconds          int      `json:"ttl_seconds,omitempty"`
-	ECSEnabled          bool     `json:"ecs_enabled,omitempty"`
-	HealthRequired      bool     `json:"health_required,omitempty"`
-	RouteReadyRequired  bool     `json:"route_ready_required,omitempty"`
-	ExplorationPercent  int      `json:"exploration_percent,omitempty"`
-	SwitchCooldownSec   int      `json:"switch_cooldown_seconds,omitempty"`
-	Region              string   `json:"region,omitempty"`
-	Country             string   `json:"country,omitempty"`
-	Priority            int      `json:"priority,omitempty"`
-	Weight              int      `json:"weight,omitempty"`
-	Reason              string   `json:"reason,omitempty"`
+	PolicyKind                string   `json:"policy_kind"`
+	AllowedEdgeGroups         []string `json:"allowed_edge_groups,omitempty"`
+	PreferredEdgeGroups       []string `json:"preferred_edge_groups,omitempty"`
+	FallbackEdgeGroups        []string `json:"fallback_edge_groups,omitempty"`
+	TTLSeconds                int      `json:"ttl_seconds,omitempty"`
+	ECSEnabled                bool     `json:"ecs_enabled,omitempty"`
+	HealthRequired            bool     `json:"health_required,omitempty"`
+	RouteReadyRequired        bool     `json:"route_ready_required,omitempty"`
+	ExplorationPercent        int      `json:"exploration_percent,omitempty"`
+	SwitchCooldownSec         int      `json:"switch_cooldown_seconds,omitempty"`
+	Region                    string   `json:"region,omitempty"`
+	Country                   string   `json:"country,omitempty"`
+	Priority                  int      `json:"priority,omitempty"`
+	Weight                    int      `json:"weight,omitempty"`
+	Reason                    string   `json:"reason,omitempty"`
+	SelectedEdgeGroupID       string   `json:"selected_edge_group_id,omitempty"`
+	ShadowSelectedEdgeGroupID string   `json:"shadow_selected_edge_group_id,omitempty"`
+	ShadowReason              string   `json:"shadow_reason,omitempty"`
 }
 
 type EdgeDNSAnswerCandidate struct {
-	IP          string `json:"ip"`
-	EdgeGroupID string `json:"edge_group_id,omitempty"`
-	Region      string `json:"region,omitempty"`
-	Country     string `json:"country,omitempty"`
-	Priority    int    `json:"priority,omitempty"`
-	Weight      int    `json:"weight,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	Healthy     bool   `json:"healthy,omitempty"`
-	RouteReady  bool   `json:"route_ready,omitempty"`
-	TLSReady    bool   `json:"tls_ready,omitempty"`
+	IP             string             `json:"ip"`
+	EdgeID         string             `json:"edge_id,omitempty"`
+	EdgeGroupID    string             `json:"edge_group_id,omitempty"`
+	Region         string             `json:"region,omitempty"`
+	Country        string             `json:"country,omitempty"`
+	Priority       int                `json:"priority,omitempty"`
+	Weight         int                `json:"weight,omitempty"`
+	Reason         string             `json:"reason,omitempty"`
+	TrafficClass   string             `json:"traffic_class,omitempty"`
+	Score          float64            `json:"score,omitempty"`
+	ScoreBreakdown map[string]float64 `json:"score_breakdown,omitempty"`
+	Healthy        bool               `json:"healthy,omitempty"`
+	RouteReady     bool               `json:"route_ready,omitempty"`
+	TLSReady       bool               `json:"tls_ready,omitempty"`
 }
 
 type EdgeDNSScopedAnswerCandidates struct {
@@ -384,6 +391,8 @@ type EdgePerformanceSample struct {
 	EdgeGroupID           string    `json:"edge_group_id"`
 	Hostname              string    `json:"hostname"`
 	PathPrefix            string    `json:"path_prefix,omitempty"`
+	Method                string    `json:"method,omitempty"`
+	TrafficClass          string    `json:"traffic_class,omitempty"`
 	ClientCountry         string    `json:"client_country,omitempty"`
 	ClientRegion          string    `json:"client_region,omitempty"`
 	ClientASN             string    `json:"client_asn,omitempty"`
@@ -400,6 +409,34 @@ type EdgePerformanceSample struct {
 	CacheHitCount         int       `json:"cache_hit_count,omitempty"`
 	CacheObservationCount int       `json:"cache_observation_count,omitempty"`
 	ErrorCount            int       `json:"error_count,omitempty"`
+	UploadRequestCount    int       `json:"upload_request_count,omitempty"`
+	BodyBufferCount       int       `json:"body_buffer_count,omitempty"`
+	BodyReadBlockMS       int64     `json:"body_read_block_ms,omitempty"`
+	FileWriteMS           int64     `json:"file_write_ms,omitempty"`
+	UploadEffectiveBPS    int64     `json:"upload_effective_bps,omitempty"`
+	MinWindowBPS          int64     `json:"min_window_bps,omitempty"`
+	MaxReadGapMS          int64     `json:"max_read_gap_ms,omitempty"`
+	RequestBodyBytes      int64     `json:"request_body_bytes,omitempty"`
+	RequestBodyReadBytes  int64     `json:"request_body_read_bytes,omitempty"`
+	BodyIncompleteCount   int       `json:"body_incomplete_count,omitempty"`
+	BodyReadErrorCount    int       `json:"body_read_error_count,omitempty"`
+	ResponseWriteMS       int64     `json:"response_write_ms,omitempty"`
+	ResponseBytes         int64     `json:"response_bytes,omitempty"`
+	ResponseEgressBPS     int64     `json:"response_egress_bps,omitempty"`
+	OriginDNSMS           int64     `json:"origin_dns_ms,omitempty"`
+	OriginConnectMS       int64     `json:"origin_connect_ms,omitempty"`
+	OriginRequestWriteMS  int64     `json:"origin_request_write_ms,omitempty"`
+	OriginResponseWaitMS  int64     `json:"origin_response_wait_ms,omitempty"`
+	OriginTTFBMS          int64     `json:"origin_ttfb_ms,omitempty"`
+	OriginTotalMS         int64     `json:"origin_total_ms,omitempty"`
+	StreamingRequestCount int       `json:"streaming_request_count,omitempty"`
+	WebSocketRequestCount int       `json:"websocket_request_count,omitempty"`
+	SSERequestCount       int       `json:"sse_request_count,omitempty"`
+	ClientCancelCount     int       `json:"client_cancel_count,omitempty"`
+	ActiveRequests        int       `json:"active_requests,omitempty"`
+	ActiveBodyBuffers     int       `json:"active_body_buffers,omitempty"`
+	GoroutineCount        int       `json:"goroutine_count,omitempty"`
+	MemoryAllocBytes      int64     `json:"memory_alloc_bytes,omitempty"`
 	SampledAt             time.Time `json:"sampled_at"`
 }
 
@@ -423,6 +460,22 @@ type EdgeNodeQualitySummary struct {
 	AvgTTFBMS             float64    `json:"avg_ttfb_ms"`
 	AvgUpstreamMS         float64    `json:"avg_upstream_ms"`
 	AvgTotalMS            float64    `json:"avg_total_ms"`
+	AvgUploadBPS          float64    `json:"avg_upload_bps"`
+	MinUploadBPS          int64      `json:"min_upload_bps,omitempty"`
+	AvgBodyReadMS         float64    `json:"avg_body_read_ms"`
+	AvgMaxReadGapMS       float64    `json:"avg_max_read_gap_ms"`
+	BodyIncompleteCount   int        `json:"body_incomplete_count"`
+	BodyReadErrorCount    int        `json:"body_read_error_count"`
+	AvgResponseEgressBPS  float64    `json:"avg_response_egress_bps"`
+	AvgResponseWriteMS    float64    `json:"avg_response_write_ms"`
+	AvgOriginDNSMS        float64    `json:"avg_origin_dns_ms"`
+	AvgOriginConnectMS    float64    `json:"avg_origin_connect_ms"`
+	AvgOriginWriteMS      float64    `json:"avg_origin_write_ms"`
+	AvgOriginWaitMS       float64    `json:"avg_origin_wait_ms"`
+	AvgOriginTTFBMS       float64    `json:"avg_origin_ttfb_ms"`
+	AvgOriginTotalMS      float64    `json:"avg_origin_total_ms"`
+	AvgActiveRequests     float64    `json:"avg_active_requests"`
+	AvgActiveBodyBuffers  float64    `json:"avg_active_body_buffers"`
 	CacheHitCount         int        `json:"cache_hit_count"`
 	CacheObservationCount int        `json:"cache_observation_count"`
 	CacheHitRate          float64    `json:"cache_hit_rate"`
@@ -439,6 +492,8 @@ type EdgeNodeQualitySummary struct {
 type EdgeNodeQualityRoute struct {
 	Hostname              string     `json:"hostname"`
 	PathPrefix            string     `json:"path_prefix,omitempty"`
+	Method                string     `json:"method,omitempty"`
+	TrafficClass          string     `json:"traffic_class,omitempty"`
 	SampleRecordCount     int        `json:"sample_record_count"`
 	RequestCount          int        `json:"request_count"`
 	ErrorCount            int        `json:"error_count"`
@@ -447,6 +502,22 @@ type EdgeNodeQualityRoute struct {
 	AvgTTFBMS             float64    `json:"avg_ttfb_ms"`
 	AvgUpstreamMS         float64    `json:"avg_upstream_ms"`
 	AvgTotalMS            float64    `json:"avg_total_ms"`
+	AvgUploadBPS          float64    `json:"avg_upload_bps"`
+	MinUploadBPS          int64      `json:"min_upload_bps,omitempty"`
+	AvgBodyReadMS         float64    `json:"avg_body_read_ms"`
+	AvgMaxReadGapMS       float64    `json:"avg_max_read_gap_ms"`
+	BodyIncompleteCount   int        `json:"body_incomplete_count"`
+	BodyReadErrorCount    int        `json:"body_read_error_count"`
+	AvgResponseEgressBPS  float64    `json:"avg_response_egress_bps"`
+	AvgResponseWriteMS    float64    `json:"avg_response_write_ms"`
+	AvgOriginDNSMS        float64    `json:"avg_origin_dns_ms"`
+	AvgOriginConnectMS    float64    `json:"avg_origin_connect_ms"`
+	AvgOriginWriteMS      float64    `json:"avg_origin_write_ms"`
+	AvgOriginWaitMS       float64    `json:"avg_origin_wait_ms"`
+	AvgOriginTTFBMS       float64    `json:"avg_origin_ttfb_ms"`
+	AvgOriginTotalMS      float64    `json:"avg_origin_total_ms"`
+	AvgActiveRequests     float64    `json:"avg_active_requests"`
+	AvgActiveBodyBuffers  float64    `json:"avg_active_body_buffers"`
 	CacheHitCount         int        `json:"cache_hit_count"`
 	CacheObservationCount int        `json:"cache_observation_count"`
 	CacheHitRate          float64    `json:"cache_hit_rate"`

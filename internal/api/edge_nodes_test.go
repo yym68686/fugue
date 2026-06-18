@@ -113,6 +113,8 @@ func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 			{
 				"id":                      "sample-1",
 				"hostname":                "Demo.Fugue.Pro.",
+				"method":                  "post",
+				"traffic_class":           "large_body_api",
 				"client_asn":              "AS123",
 				"runtime_region":          "us",
 				"ttfb_ms":                 120,
@@ -122,6 +124,17 @@ func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 				"sample_count":            4,
 				"cache_hit_count":         3,
 				"cache_observation_count": 4,
+				"upload_request_count":    4,
+				"body_read_block_ms":      320,
+				"upload_effective_bps":    131072,
+				"max_read_gap_ms":         1500,
+				"request_body_bytes":      4096,
+				"request_body_read_bytes": 2048,
+				"body_incomplete_count":   1,
+				"response_egress_bps":     524288,
+				"origin_ttfb_ms":          88,
+				"active_requests":         2,
+				"active_body_buffers":     1,
 				"sampled_at":              now,
 			},
 		},
@@ -142,12 +155,22 @@ func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 		sample.EdgeID != "edge-us-1" ||
 		sample.EdgeGroupID != "edge-group-country-us" ||
 		sample.Hostname != "demo.fugue.pro" ||
+		sample.Method != "POST" ||
+		sample.TrafficClass != "large_body_api" ||
 		sample.ClientCountry != "" ||
 		sample.ClientRegion != "" ||
 		sample.ClientASN != "as123" ||
 		sample.SampleCount != 4 ||
 		sample.CacheHitCount != 3 ||
-		sample.CacheObservationCount != 4 {
+		sample.CacheObservationCount != 4 ||
+		sample.UploadRequestCount != 4 ||
+		sample.UploadEffectiveBPS != 131072 ||
+		sample.MaxReadGapMS != 1500 ||
+		sample.RequestBodyReadBytes != 2048 ||
+		sample.BodyIncompleteCount != 1 ||
+		sample.ResponseEgressBPS != 524288 ||
+		sample.OriginTTFBMS != 88 ||
+		sample.ActiveBodyBuffers != 1 {
 		t.Fatalf("unexpected persisted sample: %+v", sample)
 	}
 }
@@ -178,6 +201,8 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 				"id":                      "edge-us-sample-1",
 				"hostname":                "Demo.Fugue.Pro",
 				"path_prefix":             "/",
+				"method":                  "POST",
+				"traffic_class":           "large_body_api",
 				"tls_handshake_ms":        10,
 				"ttfb_ms":                 120,
 				"upstream_ms":             80,
@@ -186,12 +211,25 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 				"cache_hit_count":         3,
 				"cache_observation_count": 4,
 				"error_count":             1,
+				"upload_effective_bps":    128 * 1024,
+				"min_window_bps":          96 * 1024,
+				"body_read_block_ms":      200,
+				"max_read_gap_ms":         1000,
+				"body_incomplete_count":   1,
+				"response_egress_bps":     512 * 1024,
+				"response_write_ms":       8,
+				"origin_ttfb_ms":          90,
+				"origin_total_ms":         110,
+				"active_requests":         2,
+				"active_body_buffers":     1,
 				"sampled_at":              now.Add(-2 * time.Hour),
 			},
 			{
 				"id":                      "edge-us-sample-2",
 				"hostname":                "Demo.Fugue.Pro",
 				"path_prefix":             "/api",
+				"method":                  "GET",
+				"traffic_class":           "html_dynamic",
 				"tls_handshake_ms":        20,
 				"ttfb_ms":                 200,
 				"upstream_ms":             150,
@@ -200,6 +238,14 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 				"cache_hit_count":         1,
 				"cache_observation_count": 2,
 				"error_count":             0,
+				"upload_effective_bps":    256 * 1024,
+				"body_read_block_ms":      80,
+				"max_read_gap_ms":         200,
+				"response_egress_bps":     768 * 1024,
+				"response_write_ms":       4,
+				"origin_ttfb_ms":          130,
+				"origin_total_ms":         170,
+				"active_requests":         1,
 				"sampled_at":              now.Add(-1 * time.Hour),
 			},
 		},
@@ -257,7 +303,16 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 	if !edgeQualityFloatClose(summary.ErrorRate, 1.0/6.0) ||
 		!edgeQualityFloatClose(summary.CacheHitRate, 4.0/6.0) ||
 		!edgeQualityFloatClose(summary.AvgTTFBMS, (120.0*4.0+200.0*2.0)/6.0) ||
-		!edgeQualityFloatClose(summary.AvgTLSHandshakeMS, (10.0*4.0+20.0*2.0)/6.0) {
+		!edgeQualityFloatClose(summary.AvgTLSHandshakeMS, (10.0*4.0+20.0*2.0)/6.0) ||
+		!edgeQualityFloatClose(summary.AvgUploadBPS, (128.0*1024.0*4.0+256.0*1024.0*2.0)/6.0) ||
+		summary.MinUploadBPS != 96*1024 ||
+		!edgeQualityFloatClose(summary.AvgBodyReadMS, (200.0*4.0+80.0*2.0)/6.0) ||
+		!edgeQualityFloatClose(summary.AvgMaxReadGapMS, (1000.0*4.0+200.0*2.0)/6.0) ||
+		summary.BodyIncompleteCount != 1 ||
+		!edgeQualityFloatClose(summary.AvgResponseEgressBPS, (512.0*1024.0*4.0+768.0*1024.0*2.0)/6.0) ||
+		!edgeQualityFloatClose(summary.AvgOriginTTFBMS, (90.0*4.0+130.0*2.0)/6.0) ||
+		!edgeQualityFloatClose(summary.AvgActiveRequests, (2.0*4.0+1.0*2.0)/6.0) ||
+		!edgeQualityFloatClose(summary.AvgActiveBodyBuffers, (1.0*4.0)/6.0) {
 		t.Fatalf("unexpected quality rates/averages: %+v", summary)
 	}
 	if len(response.Routes) != 2 {
@@ -265,9 +320,14 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 	}
 	if response.Routes[0].Hostname != "demo.fugue.pro" ||
 		response.Routes[0].PathPrefix != "/" ||
+		response.Routes[0].Method != "POST" ||
+		response.Routes[0].TrafficClass != "large_body_api" ||
 		response.Routes[0].RequestCount != 4 ||
+		response.Routes[0].MinUploadBPS != 96*1024 ||
 		response.Routes[1].Hostname != "demo.fugue.pro" ||
 		response.Routes[1].PathPrefix != "/api" ||
+		response.Routes[1].Method != "GET" ||
+		response.Routes[1].TrafficClass != "html_dynamic" ||
 		response.Routes[1].RequestCount != 2 {
 		t.Fatalf("unexpected route summaries: %+v", response.Routes)
 	}

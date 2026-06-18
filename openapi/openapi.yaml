@@ -10026,6 +10026,21 @@ components:
           avg_ttfb_ms,
           avg_upstream_ms,
           avg_total_ms,
+          avg_upload_bps,
+          avg_body_read_ms,
+          avg_max_read_gap_ms,
+          body_incomplete_count,
+          body_read_error_count,
+          avg_response_egress_bps,
+          avg_response_write_ms,
+          avg_origin_dns_ms,
+          avg_origin_connect_ms,
+          avg_origin_write_ms,
+          avg_origin_wait_ms,
+          avg_origin_ttfb_ms,
+          avg_origin_total_ms,
+          avg_active_requests,
+          avg_active_body_buffers,
           cache_hit_count,
           cache_observation_count,
           cache_hit_rate,
@@ -10061,6 +10076,54 @@ components:
           type: number
           format: double
         avg_total_ms:
+          type: number
+          format: double
+        avg_upload_bps:
+          type: number
+          format: double
+        min_upload_bps:
+          type: integer
+          format: int64
+        avg_body_read_ms:
+          type: number
+          format: double
+        avg_max_read_gap_ms:
+          type: number
+          format: double
+        body_incomplete_count:
+          type: integer
+          format: int32
+        body_read_error_count:
+          type: integer
+          format: int32
+        avg_response_egress_bps:
+          type: number
+          format: double
+        avg_response_write_ms:
+          type: number
+          format: double
+        avg_origin_dns_ms:
+          type: number
+          format: double
+        avg_origin_connect_ms:
+          type: number
+          format: double
+        avg_origin_write_ms:
+          type: number
+          format: double
+        avg_origin_wait_ms:
+          type: number
+          format: double
+        avg_origin_ttfb_ms:
+          type: number
+          format: double
+        avg_origin_total_ms:
+          type: number
+          format: double
+        avg_active_requests:
+          type: number
+          format: double
+        avg_active_body_buffers:
           type: number
           format: double
         cache_hit_count:
@@ -10105,6 +10168,21 @@ components:
           avg_ttfb_ms,
           avg_upstream_ms,
           avg_total_ms,
+          avg_upload_bps,
+          avg_body_read_ms,
+          avg_max_read_gap_ms,
+          body_incomplete_count,
+          body_read_error_count,
+          avg_response_egress_bps,
+          avg_response_write_ms,
+          avg_origin_dns_ms,
+          avg_origin_connect_ms,
+          avg_origin_write_ms,
+          avg_origin_wait_ms,
+          avg_origin_ttfb_ms,
+          avg_origin_total_ms,
+          avg_active_requests,
+          avg_active_body_buffers,
           cache_hit_count,
           cache_observation_count,
           cache_hit_rate
@@ -10113,6 +10191,10 @@ components:
         hostname:
           type: string
         path_prefix:
+          type: string
+        method:
+          type: string
+        traffic_class:
           type: string
         sample_record_count:
           type: integer
@@ -10136,6 +10218,54 @@ components:
           type: number
           format: double
         avg_total_ms:
+          type: number
+          format: double
+        avg_upload_bps:
+          type: number
+          format: double
+        min_upload_bps:
+          type: integer
+          format: int64
+        avg_body_read_ms:
+          type: number
+          format: double
+        avg_max_read_gap_ms:
+          type: number
+          format: double
+        body_incomplete_count:
+          type: integer
+          format: int32
+        body_read_error_count:
+          type: integer
+          format: int32
+        avg_response_egress_bps:
+          type: number
+          format: double
+        avg_response_write_ms:
+          type: number
+          format: double
+        avg_origin_dns_ms:
+          type: number
+          format: double
+        avg_origin_connect_ms:
+          type: number
+          format: double
+        avg_origin_write_ms:
+          type: number
+          format: double
+        avg_origin_wait_ms:
+          type: number
+          format: double
+        avg_origin_ttfb_ms:
+          type: number
+          format: double
+        avg_origin_total_ms:
+          type: number
+          format: double
+        avg_active_requests:
+          type: number
+          format: double
+        avg_active_body_buffers:
           type: number
           format: double
         cache_hit_count:
@@ -10280,6 +10410,10 @@ components:
           type: string
         path_prefix:
           type: string
+        method:
+          type: string
+        traffic_class:
+          type: string
         client_country:
           type: string
         client_region:
@@ -10321,6 +10455,90 @@ components:
         error_count:
           type: integer
           format: int32
+        upload_request_count:
+          type: integer
+          format: int32
+        body_buffer_count:
+          type: integer
+          format: int32
+        body_read_block_ms:
+          type: integer
+          format: int64
+        file_write_ms:
+          type: integer
+          format: int64
+        upload_effective_bps:
+          type: integer
+          format: int64
+        min_window_bps:
+          type: integer
+          format: int64
+        max_read_gap_ms:
+          type: integer
+          format: int64
+        request_body_bytes:
+          type: integer
+          format: int64
+        request_body_read_bytes:
+          type: integer
+          format: int64
+        body_incomplete_count:
+          type: integer
+          format: int32
+        body_read_error_count:
+          type: integer
+          format: int32
+        response_write_ms:
+          type: integer
+          format: int64
+        response_bytes:
+          type: integer
+          format: int64
+        response_egress_bps:
+          type: integer
+          format: int64
+        origin_dns_ms:
+          type: integer
+          format: int64
+        origin_connect_ms:
+          type: integer
+          format: int64
+        origin_request_write_ms:
+          type: integer
+          format: int64
+        origin_response_wait_ms:
+          type: integer
+          format: int64
+        origin_ttfb_ms:
+          type: integer
+          format: int64
+        origin_total_ms:
+          type: integer
+          format: int64
+        streaming_request_count:
+          type: integer
+          format: int32
+        websocket_request_count:
+          type: integer
+          format: int32
+        sse_request_count:
+          type: integer
+          format: int32
+        client_cancel_count:
+          type: integer
+          format: int32
+        active_requests:
+          type: integer
+          format: int32
+        active_body_buffers:
+          type: integer
+          format: int32
+        goroutine_count:
+          type: integer
+          format: int32
+        memory_alloc_bytes:
+          type: integer
+          format: int64
         sampled_at:
           type: string
           format: date-time
@@ -10565,12 +10783,20 @@ components:
           format: int32
         reason:
           type: string
+        selected_edge_group_id:
+          type: string
+        shadow_selected_edge_group_id:
+          type: string
+        shadow_reason:
+          type: string
     EdgeDNSAnswerCandidate:
       type: object
       additionalProperties: false
       required: [ip]
       properties:
         ip:
+          type: string
+        edge_id:
           type: string
         edge_group_id:
           type: string
@@ -10586,6 +10812,16 @@ components:
           format: int32
         reason:
           type: string
+        traffic_class:
+          type: string
+        score:
+          type: number
+          format: double
+        score_breakdown:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
         healthy:
           type: boolean
         route_ready:

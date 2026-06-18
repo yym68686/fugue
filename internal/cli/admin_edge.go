@@ -407,6 +407,22 @@ func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) e
 		kvPair{Key: "avg_tls_ms", Value: formatEdgeNodeQualityMetric(summary.AvgTLSHandshakeMS)},
 		kvPair{Key: "avg_upstream_ms", Value: formatEdgeNodeQualityMetric(summary.AvgUpstreamMS)},
 		kvPair{Key: "avg_total_ms", Value: formatEdgeNodeQualityMetric(summary.AvgTotalMS)},
+		kvPair{Key: "avg_upload_bps", Value: formatEdgeNodeQualityMetric(summary.AvgUploadBPS)},
+		kvPair{Key: "min_upload_bps", Value: fmt.Sprintf("%d", summary.MinUploadBPS)},
+		kvPair{Key: "avg_body_read_ms", Value: formatEdgeNodeQualityMetric(summary.AvgBodyReadMS)},
+		kvPair{Key: "avg_max_read_gap_ms", Value: formatEdgeNodeQualityMetric(summary.AvgMaxReadGapMS)},
+		kvPair{Key: "body_incomplete", Value: fmt.Sprintf("%d", summary.BodyIncompleteCount)},
+		kvPair{Key: "body_read_errors", Value: fmt.Sprintf("%d", summary.BodyReadErrorCount)},
+		kvPair{Key: "avg_response_egress_bps", Value: formatEdgeNodeQualityMetric(summary.AvgResponseEgressBPS)},
+		kvPair{Key: "avg_response_write_ms", Value: formatEdgeNodeQualityMetric(summary.AvgResponseWriteMS)},
+		kvPair{Key: "avg_origin_dns_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginDNSMS)},
+		kvPair{Key: "avg_origin_connect_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginConnectMS)},
+		kvPair{Key: "avg_origin_write_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginWriteMS)},
+		kvPair{Key: "avg_origin_wait_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginWaitMS)},
+		kvPair{Key: "avg_origin_ttfb_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginTTFBMS)},
+		kvPair{Key: "avg_origin_total_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginTotalMS)},
+		kvPair{Key: "avg_active_requests", Value: formatEdgeNodeQualityMetric(summary.AvgActiveRequests)},
+		kvPair{Key: "avg_active_body_buffers", Value: formatEdgeNodeQualityMetric(summary.AvgActiveBodyBuffers)},
 		kvPair{Key: "cache_hit_rate", Value: formatEdgeNodeQualityRate(summary.CacheHitRate)},
 		kvPair{Key: "tls_status", Value: strings.TrimSpace(summary.TLSStatus)},
 		kvPair{Key: "cache_status", Value: strings.TrimSpace(summary.CacheStatus)},
@@ -433,10 +449,16 @@ func writeEdgeNodeQualityRouteTable(w io.Writer, routes []model.EdgeNodeQualityR
 		if sorted[i].Hostname != sorted[j].Hostname {
 			return sorted[i].Hostname < sorted[j].Hostname
 		}
-		return sorted[i].PathPrefix < sorted[j].PathPrefix
+		if sorted[i].PathPrefix != sorted[j].PathPrefix {
+			return sorted[i].PathPrefix < sorted[j].PathPrefix
+		}
+		if sorted[i].Method != sorted[j].Method {
+			return sorted[i].Method < sorted[j].Method
+		}
+		return sorted[i].TrafficClass < sorted[j].TrafficClass
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPATH\tREQUESTS\tERROR_RATE\tAVG_TTFB_MS\tAVG_TLS_MS\tCACHE_HIT\tLAST_SAMPLED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPATH\tMETHOD\tCLASS\tREQUESTS\tERROR_RATE\tAVG_TTFB_MS\tUPLOAD_BPS\tBODY_READ_MS\tORIGIN_TTFB_MS\tRESP_BPS\tCACHE_HIT\tLAST_SAMPLED"); err != nil {
 		return err
 	}
 	for _, route := range sorted {
@@ -446,13 +468,18 @@ func writeEdgeNodeQualityRouteTable(w io.Writer, routes []model.EdgeNodeQualityR
 		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			strings.TrimSpace(route.Hostname),
 			path,
+			strings.TrimSpace(route.Method),
+			strings.TrimSpace(route.TrafficClass),
 			route.RequestCount,
 			formatEdgeNodeQualityRate(route.ErrorRate),
 			formatEdgeNodeQualityMetric(route.AvgTTFBMS),
-			formatEdgeNodeQualityMetric(route.AvgTLSHandshakeMS),
+			formatEdgeNodeQualityMetric(route.AvgUploadBPS),
+			formatEdgeNodeQualityMetric(route.AvgBodyReadMS),
+			formatEdgeNodeQualityMetric(route.AvgOriginTTFBMS),
+			formatEdgeNodeQualityMetric(route.AvgResponseEgressBPS),
 			formatEdgeNodeQualityRate(route.CacheHitRate),
 			formatOptionalEdgeTime(route.LastSampledAt),
 		); err != nil {

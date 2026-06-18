@@ -39,6 +39,8 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 			EdgeID:                "edge-hk-1",
 			EdgeGroupID:           "edge-group-country-hk",
 			Hostname:              "demo.fugue.pro",
+			Method:                "post",
+			TrafficClass:          "large_body_api",
 			ClientRegion:          "apac",
 			RuntimeRegion:         "us",
 			TTFBMS:                120,
@@ -48,6 +50,17 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 			SampleCount:           5,
 			CacheHitCount:         5,
 			CacheObservationCount: 5,
+			UploadRequestCount:    5,
+			BodyReadBlockMS:       250,
+			UploadEffectiveBPS:    128 * 1024,
+			MaxReadGapMS:          900,
+			RequestBodyBytes:      2048,
+			RequestBodyReadBytes:  1024,
+			BodyIncompleteCount:   1,
+			ResponseEgressBPS:     512 * 1024,
+			OriginTTFBMS:          90,
+			ActiveRequests:        3,
+			ActiveBodyBuffers:     1,
 			SampledAt:             now.Add(-30 * time.Minute),
 		},
 		{
@@ -74,8 +87,17 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 	if samples[0].ID != "recent-hk" ||
 		samples[0].Hostname != "demo.fugue.pro" ||
 		samples[0].EdgeGroupID != "edge-group-country-hk" ||
+		samples[0].Method != "POST" ||
+		samples[0].TrafficClass != "large_body_api" ||
 		samples[0].SampleCount != 5 ||
-		samples[0].CacheHitCount != 5 {
+		samples[0].CacheHitCount != 5 ||
+		samples[0].UploadRequestCount != 5 ||
+		samples[0].UploadEffectiveBPS != 128*1024 ||
+		samples[0].MaxReadGapMS != 900 ||
+		samples[0].RequestBodyReadBytes != 1024 ||
+		samples[0].BodyIncompleteCount != 1 ||
+		samples[0].OriginTTFBMS != 90 ||
+		samples[0].ActiveBodyBuffers != 1 {
 		t.Fatalf("unexpected normalized sample: %+v", samples[0])
 	}
 }

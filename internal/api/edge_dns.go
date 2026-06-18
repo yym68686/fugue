@@ -760,6 +760,7 @@ func edgeDNSAnswerCandidateForNode(ip string, node model.EdgeNode, localEdgeGrou
 	groupID := strings.TrimSpace(node.EdgeGroupID)
 	return model.EdgeDNSAnswerCandidate{
 		IP:          strings.TrimSpace(ip),
+		EdgeID:      strings.TrimSpace(node.ID),
 		EdgeGroupID: groupID,
 		Region:      strings.TrimSpace(node.Region),
 		Country:     strings.ToLower(strings.TrimSpace(node.Country)),
@@ -1046,44 +1047,93 @@ type edgeDNSLatencyProfileCatalog struct {
 }
 
 type edgeDNSLatencyProfile struct {
-	Hostname        string
-	Scope           edgeDNSLatencyScope
-	Enabled         bool
-	Reason          string
-	Weight          int
-	BestEdgeGroupID string
-	Candidates      map[string]edgeDNSLatencyCandidateProfile
-	CooldownUntil   time.Time
+	Hostname              string
+	Scope                 edgeDNSLatencyScope
+	Enabled               bool
+	Reason                string
+	Weight                int
+	BestEdgeGroupID       string
+	ShadowBestEdgeGroupID string
+	ShadowReason          string
+	Candidates            map[string]edgeDNSLatencyCandidateProfile
+	NodeCandidates        map[string]edgeDNSLatencyCandidateProfile
+	CooldownUntil         time.Time
 }
 
 type edgeDNSLatencyCandidateProfile struct {
-	EdgeGroupID string
-	Weight      int
-	Reason      string
-	Score       float64
-	TTFBMS      float64
-	UpstreamMS  float64
-	TotalMS     float64
-	HitRatio    float64
-	ErrorRate   float64
-	SampleCount int
-	Country     string
-	Region      string
-	ASN         string
+	EdgeGroupID        string
+	EdgeID             string
+	Weight             int
+	Reason             string
+	Score              float64
+	ScoreBreakdown     map[string]float64
+	TrafficClass       string
+	TTFBMS             float64
+	UpstreamMS         float64
+	TotalMS            float64
+	HitRatio           float64
+	ErrorRate          float64
+	UploadBPS          float64
+	BodyReadMS         float64
+	MaxReadGapMS       float64
+	BodyIncompleteRate float64
+	BodyReadErrorRate  float64
+	ResponseEgressBPS  float64
+	ResponseWriteMS    float64
+	OriginConnectMS    float64
+	OriginWriteMS      float64
+	OriginWaitMS       float64
+	OriginTTFBMS       float64
+	OriginTotalMS      float64
+	ActiveRequests     float64
+	ActiveBodyBuffers  float64
+	SampleCount        int
+	BodySampleCount    int
+	Country            string
+	Region             string
+	ASN                string
 }
 
 type edgeDNSLatencyGroupAccumulator struct {
-	EdgeGroupID           string
-	SampleCount           int
-	TTFBWeightedMS        float64
-	UpstreamWeightedMS    float64
-	TotalWeightedMS       float64
-	CacheHitCount         int
-	CacheObservationCount int
-	ErrorCount            int
-	CountryCounts         map[string]int
-	RegionCounts          map[string]int
-	ASNCounts             map[string]int
+	EdgeGroupID               string
+	EdgeID                    string
+	SampleCount               int
+	TTFBWeightedMS            float64
+	UpstreamWeightedMS        float64
+	TotalWeightedMS           float64
+	CacheHitCount             int
+	CacheObservationCount     int
+	ErrorCount                int
+	UploadWeightedBPS         float64
+	UploadSampleCount         int
+	BodyReadWeightedMS        float64
+	BodyReadSampleCount       int
+	MaxReadGapWeightedMS      float64
+	MaxReadGapSampleCount     int
+	BodyIncompleteCount       int
+	BodyReadErrorCount        int
+	ResponseEgressWeightedBPS float64
+	ResponseEgressSampleCount int
+	ResponseWriteWeightedMS   float64
+	ResponseWriteSampleCount  int
+	OriginConnectWeightedMS   float64
+	OriginConnectSampleCount  int
+	OriginWriteWeightedMS     float64
+	OriginWriteSampleCount    int
+	OriginWaitWeightedMS      float64
+	OriginWaitSampleCount     int
+	OriginTTFBWeightedMS      float64
+	OriginTTFBSampleCount     int
+	OriginTotalWeightedMS     float64
+	OriginTotalSampleCount    int
+	ActiveRequestsWeighted    float64
+	ActiveBodyWeighted        float64
+	SaturationSampleCount     int
+	TrafficClassCounts        map[string]int
+	CountryCounts             map[string]int
+	RegionCounts              map[string]int
+	ASNCounts                 map[string]int
+	NodeAccumulators          map[string]*edgeDNSLatencyGroupAccumulator
 }
 
 type edgeDNSLatencyScope struct {
@@ -1185,12 +1235,37 @@ func edgeDNSLatencyAccumulate(groups map[string]*edgeDNSLatencyGroupAccumulator,
 	accumulator := groups[edgeGroupID]
 	if accumulator == nil {
 		accumulator = &edgeDNSLatencyGroupAccumulator{
-			EdgeGroupID:   edgeGroupID,
-			CountryCounts: make(map[string]int),
-			RegionCounts:  make(map[string]int),
-			ASNCounts:     make(map[string]int),
+			EdgeGroupID:        edgeGroupID,
+			CountryCounts:      make(map[string]int),
+			RegionCounts:       make(map[string]int),
+			ASNCounts:          make(map[string]int),
+			TrafficClassCounts: make(map[string]int),
+			NodeAccumulators:   make(map[string]*edgeDNSLatencyGroupAccumulator),
 		}
 		groups[edgeGroupID] = accumulator
+	}
+	edgeDNSLatencyAccumulateInto(accumulator, sample)
+	edgeID := strings.TrimSpace(sample.EdgeID)
+	if edgeID != "" {
+		nodeAccumulator := accumulator.NodeAccumulators[edgeID]
+		if nodeAccumulator == nil {
+			nodeAccumulator = &edgeDNSLatencyGroupAccumulator{
+				EdgeGroupID:        edgeGroupID,
+				EdgeID:             edgeID,
+				CountryCounts:      make(map[string]int),
+				RegionCounts:       make(map[string]int),
+				ASNCounts:          make(map[string]int),
+				TrafficClassCounts: make(map[string]int),
+			}
+			accumulator.NodeAccumulators[edgeID] = nodeAccumulator
+		}
+		edgeDNSLatencyAccumulateInto(nodeAccumulator, sample)
+	}
+}
+
+func edgeDNSLatencyAccumulateInto(accumulator *edgeDNSLatencyGroupAccumulator, sample model.EdgePerformanceSample) {
+	if accumulator == nil {
+		return
 	}
 	sampleCount := sample.SampleCount
 	if sampleCount <= 0 {
@@ -1203,6 +1278,56 @@ func edgeDNSLatencyAccumulate(groups map[string]*edgeDNSLatencyGroupAccumulator,
 	accumulator.CacheHitCount += sample.CacheHitCount
 	accumulator.CacheObservationCount += sample.CacheObservationCount
 	accumulator.ErrorCount += sample.ErrorCount
+	if uploadBPS := edgeDNSPerformanceUploadBPS(sample); uploadBPS > 0 {
+		accumulator.UploadWeightedBPS += float64(uploadBPS) * float64(sampleCount)
+		accumulator.UploadSampleCount += sampleCount
+	}
+	if sample.BodyReadBlockMS > 0 {
+		accumulator.BodyReadWeightedMS += float64(sample.BodyReadBlockMS) * float64(sampleCount)
+		accumulator.BodyReadSampleCount += sampleCount
+	}
+	if sample.MaxReadGapMS > 0 {
+		accumulator.MaxReadGapWeightedMS += float64(sample.MaxReadGapMS) * float64(sampleCount)
+		accumulator.MaxReadGapSampleCount += sampleCount
+	}
+	accumulator.BodyIncompleteCount += sample.BodyIncompleteCount
+	accumulator.BodyReadErrorCount += sample.BodyReadErrorCount
+	if sample.ResponseEgressBPS > 0 {
+		accumulator.ResponseEgressWeightedBPS += float64(sample.ResponseEgressBPS) * float64(sampleCount)
+		accumulator.ResponseEgressSampleCount += sampleCount
+	}
+	if sample.ResponseWriteMS > 0 {
+		accumulator.ResponseWriteWeightedMS += float64(sample.ResponseWriteMS) * float64(sampleCount)
+		accumulator.ResponseWriteSampleCount += sampleCount
+	}
+	if sample.OriginConnectMS > 0 {
+		accumulator.OriginConnectWeightedMS += float64(sample.OriginConnectMS) * float64(sampleCount)
+		accumulator.OriginConnectSampleCount += sampleCount
+	}
+	if sample.OriginRequestWriteMS > 0 {
+		accumulator.OriginWriteWeightedMS += float64(sample.OriginRequestWriteMS) * float64(sampleCount)
+		accumulator.OriginWriteSampleCount += sampleCount
+	}
+	if sample.OriginResponseWaitMS > 0 {
+		accumulator.OriginWaitWeightedMS += float64(sample.OriginResponseWaitMS) * float64(sampleCount)
+		accumulator.OriginWaitSampleCount += sampleCount
+	}
+	if sample.OriginTTFBMS > 0 {
+		accumulator.OriginTTFBWeightedMS += float64(sample.OriginTTFBMS) * float64(sampleCount)
+		accumulator.OriginTTFBSampleCount += sampleCount
+	}
+	if sample.OriginTotalMS > 0 {
+		accumulator.OriginTotalWeightedMS += float64(sample.OriginTotalMS) * float64(sampleCount)
+		accumulator.OriginTotalSampleCount += sampleCount
+	}
+	if sample.ActiveRequests > 0 || sample.ActiveBodyBuffers > 0 {
+		accumulator.ActiveRequestsWeighted += float64(sample.ActiveRequests) * float64(sampleCount)
+		accumulator.ActiveBodyWeighted += float64(sample.ActiveBodyBuffers) * float64(sampleCount)
+		accumulator.SaturationSampleCount += sampleCount
+	}
+	if value := strings.TrimSpace(sample.TrafficClass); value != "" {
+		accumulator.TrafficClassCounts[value] += sampleCount
+	}
 	if value := strings.ToLower(strings.TrimSpace(sample.ClientCountry)); value != "" {
 		accumulator.CountryCounts[value] += sampleCount
 	}
@@ -1212,6 +1337,14 @@ func edgeDNSLatencyAccumulate(groups map[string]*edgeDNSLatencyGroupAccumulator,
 	if value := strings.TrimSpace(sample.ClientASN); value != "" {
 		accumulator.ASNCounts[value] += sampleCount
 	}
+}
+
+func edgeDNSPerformanceUploadBPS(sample model.EdgePerformanceSample) int64 {
+	uploadBPS := sample.UploadEffectiveBPS
+	if sample.MinWindowBPS > 0 && (uploadBPS <= 0 || sample.MinWindowBPS < uploadBPS) {
+		uploadBPS = sample.MinWindowBPS
+	}
+	return uploadBPS
 }
 
 func edgeDNSLatencyScopesForSample(sample model.EdgePerformanceSample) []edgeDNSLatencyScope {
@@ -1284,34 +1417,13 @@ func buildEdgeDNSLatencyProfile(hostname string, scope edgeDNSLatencyScope, grou
 		if accumulator == nil || accumulator.SampleCount < edgeDNSLatencyMinGroupSamples {
 			continue
 		}
-		candidate := edgeDNSLatencyCandidateProfile{
-			EdgeGroupID: strings.TrimSpace(accumulator.EdgeGroupID),
-			SampleCount: accumulator.SampleCount,
-			TTFBMS:      edgeDNSLatencyAverage(accumulator.TTFBWeightedMS, accumulator.SampleCount),
-			UpstreamMS:  edgeDNSLatencyAverage(accumulator.UpstreamWeightedMS, accumulator.SampleCount),
-			TotalMS:     edgeDNSLatencyAverage(accumulator.TotalWeightedMS, accumulator.SampleCount),
-			Country:     edgeDNSDominantStringCount(accumulator.CountryCounts, ""),
-			Region:      edgeDNSDominantStringCount(accumulator.RegionCounts, ""),
-			ASN:         edgeDNSDominantStringCount(accumulator.ASNCounts, ""),
-		}
-		if candidate.TotalMS <= 0 {
-			candidate.TotalMS = candidate.TTFBMS
-		}
-		if candidate.TTFBMS <= 0 {
-			candidate.TTFBMS = candidate.TotalMS
-		}
-		if accumulator.CacheObservationCount > 0 {
-			candidate.HitRatio = float64(accumulator.CacheHitCount) / float64(accumulator.CacheObservationCount)
-		}
-		if accumulator.SampleCount > 0 {
-			candidate.ErrorRate = float64(accumulator.ErrorCount) / float64(accumulator.SampleCount)
-		}
-		candidate.Score = edgeDNSLatencyScore(candidate)
+		candidate := edgeDNSLatencyCandidateFromAccumulator(accumulator)
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) < edgeDNSLatencyMinGroups {
 		return nil
 	}
+	edgeDNSApplyPeerRelativePenalties(candidates)
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].Score != candidates[j].Score {
 			return candidates[i].Score < candidates[j].Score
@@ -1341,6 +1453,7 @@ func buildEdgeDNSLatencyProfile(hostname string, scope edgeDNSLatencyScope, grou
 		Reason:          "latency_aware_stable_window_24h",
 		BestEdgeGroupID: best.EdgeGroupID,
 		Candidates:      make(map[string]edgeDNSLatencyCandidateProfile, len(candidates)),
+		NodeCandidates:  make(map[string]edgeDNSLatencyCandidateProfile),
 	}
 	for _, candidate := range candidates {
 		penalty := candidate.Score - best.Score
@@ -1353,6 +1466,17 @@ func buildEdgeDNSLatencyProfile(hostname string, scope edgeDNSLatencyScope, grou
 		}
 		candidate.Weight = weight
 		profile.Candidates[candidate.EdgeGroupID] = candidate
+		if groupAccumulator := groups[candidate.EdgeGroupID]; groupAccumulator != nil {
+			for edgeID, nodeAccumulator := range groupAccumulator.NodeAccumulators {
+				if nodeAccumulator == nil || nodeAccumulator.SampleCount < edgeDNSLatencyMinGroupSamples {
+					continue
+				}
+				nodeCandidate := edgeDNSLatencyCandidateFromAccumulator(nodeAccumulator)
+				nodeCandidate.Weight = weight
+				nodeCandidate.Reason = edgeDNSLatencyReason("node_quality", nodeCandidate)
+				profile.NodeCandidates[edgeID] = nodeCandidate
+			}
+		}
 	}
 	if bestCandidate, ok := profile.Candidates[profile.BestEdgeGroupID]; ok {
 		profile.Weight = bestCandidate.Weight
@@ -1366,6 +1490,8 @@ func applyEdgeDNSRoutingDecision(profile *edgeDNSLatencyProfile, existing model.
 	}
 	previous := strings.TrimSpace(existing.SelectedEdgeGroupID)
 	selected := strings.TrimSpace(profile.BestEdgeGroupID)
+	profile.ShadowBestEdgeGroupID = selected
+	profile.ShadowReason = profile.Reason
 	cooldownUntil := existing.CooldownUntil
 	switchedAt := existing.SwitchedAt
 	if previous == "" {
@@ -1495,14 +1621,131 @@ func (catalog edgeDNSLatencyProfileCatalog) scopedProfiles(hostname string, answ
 	return out
 }
 
-func edgeDNSLatencyScore(candidate edgeDNSLatencyCandidateProfile) float64 {
-	cacheMissPenalty := 0.0
-	if candidate.HitRatio > 0 && candidate.HitRatio < 1 {
-		cacheMissPenalty = (1 - candidate.HitRatio) * 200
-	} else if candidate.HitRatio == 0 {
-		cacheMissPenalty = 200
+func edgeDNSLatencyCandidateFromAccumulator(accumulator *edgeDNSLatencyGroupAccumulator) edgeDNSLatencyCandidateProfile {
+	candidate := edgeDNSLatencyCandidateProfile{
+		EdgeGroupID:       strings.TrimSpace(accumulator.EdgeGroupID),
+		EdgeID:            strings.TrimSpace(accumulator.EdgeID),
+		SampleCount:       accumulator.SampleCount,
+		BodySampleCount:   accumulator.BodyReadSampleCount,
+		TTFBMS:            edgeDNSLatencyAverage(accumulator.TTFBWeightedMS, accumulator.SampleCount),
+		UpstreamMS:        edgeDNSLatencyAverage(accumulator.UpstreamWeightedMS, accumulator.SampleCount),
+		TotalMS:           edgeDNSLatencyAverage(accumulator.TotalWeightedMS, accumulator.SampleCount),
+		UploadBPS:         edgeDNSLatencyAverage(accumulator.UploadWeightedBPS, accumulator.UploadSampleCount),
+		BodyReadMS:        edgeDNSLatencyAverage(accumulator.BodyReadWeightedMS, accumulator.BodyReadSampleCount),
+		MaxReadGapMS:      edgeDNSLatencyAverage(accumulator.MaxReadGapWeightedMS, accumulator.MaxReadGapSampleCount),
+		ResponseEgressBPS: edgeDNSLatencyAverage(accumulator.ResponseEgressWeightedBPS, accumulator.ResponseEgressSampleCount),
+		ResponseWriteMS:   edgeDNSLatencyAverage(accumulator.ResponseWriteWeightedMS, accumulator.ResponseWriteSampleCount),
+		OriginConnectMS:   edgeDNSLatencyAverage(accumulator.OriginConnectWeightedMS, accumulator.OriginConnectSampleCount),
+		OriginWriteMS:     edgeDNSLatencyAverage(accumulator.OriginWriteWeightedMS, accumulator.OriginWriteSampleCount),
+		OriginWaitMS:      edgeDNSLatencyAverage(accumulator.OriginWaitWeightedMS, accumulator.OriginWaitSampleCount),
+		OriginTTFBMS:      edgeDNSLatencyAverage(accumulator.OriginTTFBWeightedMS, accumulator.OriginTTFBSampleCount),
+		OriginTotalMS:     edgeDNSLatencyAverage(accumulator.OriginTotalWeightedMS, accumulator.OriginTotalSampleCount),
+		ActiveRequests:    edgeDNSLatencyAverage(accumulator.ActiveRequestsWeighted, accumulator.SaturationSampleCount),
+		ActiveBodyBuffers: edgeDNSLatencyAverage(accumulator.ActiveBodyWeighted, accumulator.SaturationSampleCount),
+		TrafficClass:      edgeDNSDominantStringCount(accumulator.TrafficClassCounts, "html_dynamic"),
+		Country:           edgeDNSDominantStringCount(accumulator.CountryCounts, ""),
+		Region:            edgeDNSDominantStringCount(accumulator.RegionCounts, ""),
+		ASN:               edgeDNSDominantStringCount(accumulator.ASNCounts, ""),
+		ScoreBreakdown:    map[string]float64{},
 	}
-	return candidate.TTFBMS*0.45 + candidate.UpstreamMS*0.35 + candidate.TotalMS*0.20 + cacheMissPenalty + candidate.ErrorRate*500
+	if candidate.TotalMS <= 0 {
+		candidate.TotalMS = candidate.TTFBMS
+	}
+	if candidate.TTFBMS <= 0 {
+		candidate.TTFBMS = candidate.TotalMS
+	}
+	if accumulator.CacheObservationCount > 0 {
+		candidate.HitRatio = float64(accumulator.CacheHitCount) / float64(accumulator.CacheObservationCount)
+	}
+	if accumulator.SampleCount > 0 {
+		candidate.ErrorRate = float64(accumulator.ErrorCount) / float64(accumulator.SampleCount)
+		candidate.BodyIncompleteRate = float64(accumulator.BodyIncompleteCount) / float64(accumulator.SampleCount)
+		candidate.BodyReadErrorRate = float64(accumulator.BodyReadErrorCount) / float64(accumulator.SampleCount)
+	}
+	candidate.Score = edgeDNSLatencyScore(candidate)
+	return candidate
+}
+
+func edgeDNSLatencyScore(candidate edgeDNSLatencyCandidateProfile) float64 {
+	breakdown := candidate.ScoreBreakdown
+	if breakdown == nil {
+		breakdown = map[string]float64{}
+	}
+	latency := candidate.TTFBMS*0.35 + candidate.UpstreamMS*0.20 + candidate.TotalMS*0.15
+	breakdown["latency"] = latency
+	errorPenalty := candidate.ErrorRate * 700
+	breakdown["availability"] = errorPenalty
+	origin := candidate.OriginConnectMS*0.10 + candidate.OriginWriteMS*0.20 + candidate.OriginWaitMS*0.15 + candidate.OriginTTFBMS*0.10 + candidate.OriginTotalMS*0.05
+	breakdown["origin"] = origin
+	upload := 0.0
+	if candidate.BodySampleCount > 0 || candidate.TrafficClass == "large_body_api" {
+		if candidate.UploadBPS <= 0 {
+			upload += 150
+		} else if candidate.UploadBPS < 256*1024 {
+			upload += ((256 * 1024) - candidate.UploadBPS) / 1024
+		}
+		upload += candidate.BodyReadMS * 0.03
+		upload += candidate.MaxReadGapMS * 0.08
+		upload += candidate.BodyIncompleteRate * 700
+		upload += candidate.BodyReadErrorRate * 700
+	}
+	breakdown["upload"] = upload
+	download := 0.0
+	if candidate.TrafficClass == "static_cacheable" || candidate.ResponseEgressBPS > 0 {
+		if candidate.ResponseEgressBPS > 0 && candidate.ResponseEgressBPS < 512*1024 {
+			download += ((512 * 1024) - candidate.ResponseEgressBPS) / 2048
+		}
+		download += candidate.ResponseWriteMS * 0.05
+	}
+	breakdown["download"] = download
+	cache := 0.0
+	if candidate.TrafficClass == "static_cacheable" {
+		if candidate.HitRatio > 0 && candidate.HitRatio < 1 {
+			cache = (1 - candidate.HitRatio) * 200
+		} else if candidate.HitRatio == 0 {
+			cache = 200
+		}
+	}
+	breakdown["cache"] = cache
+	saturation := candidate.ActiveRequests*0.20 + candidate.ActiveBodyBuffers*5
+	breakdown["saturation"] = saturation
+	return latency + errorPenalty + origin + upload + download + cache + saturation
+}
+
+func edgeDNSApplyPeerRelativePenalties(candidates []edgeDNSLatencyCandidateProfile) {
+	bestUpload := 0.0
+	bestDownload := 0.0
+	for _, candidate := range candidates {
+		if candidate.UploadBPS > bestUpload {
+			bestUpload = candidate.UploadBPS
+		}
+		if candidate.ResponseEgressBPS > bestDownload {
+			bestDownload = candidate.ResponseEgressBPS
+		}
+	}
+	for index := range candidates {
+		breakdown := candidates[index].ScoreBreakdown
+		if breakdown == nil {
+			breakdown = map[string]float64{}
+			candidates[index].ScoreBreakdown = breakdown
+		}
+		if bestUpload > 0 && candidates[index].UploadBPS > 0 && candidates[index].UploadBPS < bestUpload*0.5 {
+			penalty := ((bestUpload / candidates[index].UploadBPS) - 1) * 80
+			if penalty > 300 {
+				penalty = 300
+			}
+			breakdown["upload_peer"] = penalty
+			candidates[index].Score += penalty
+		}
+		if bestDownload > 0 && candidates[index].ResponseEgressBPS > 0 && candidates[index].ResponseEgressBPS < bestDownload*0.5 {
+			penalty := ((bestDownload / candidates[index].ResponseEgressBPS) - 1) * 50
+			if penalty > 200 {
+				penalty = 200
+			}
+			breakdown["download_peer"] = penalty
+			candidates[index].Score += penalty
+		}
+	}
 }
 
 func edgeDNSLatencyAverage(sum float64, count int) float64 {
@@ -1542,6 +1785,8 @@ func edgeDNSLatencyReason(prefix string, candidate edgeDNSLatencyCandidateProfil
 		prefix,
 		"ttfb_" + strconv.Itoa(int(candidate.TTFBMS+0.5)) + "ms",
 		"upstream_" + strconv.Itoa(int(candidate.UpstreamMS+0.5)) + "ms",
+		"class_" + strings.TrimSpace(candidate.TrafficClass),
+		"upload_" + strconv.Itoa(int(candidate.UploadBPS+0.5)) + "bps",
 		"hit_" + strconv.Itoa(int(candidate.HitRatio*100+0.5)) + "pct",
 		"error_" + strconv.Itoa(int(candidate.ErrorRate*100+0.5)) + "pct",
 	}
@@ -1594,9 +1839,26 @@ func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]
 		candidate.Priority = edgeDNSCandidatePriority(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
 		candidate.Reason = edgeDNSCandidateReason(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
 		if latencyProfile != nil && latencyProfile.Enabled {
-			if latencyCandidate, ok := latencyProfile.Candidates[groupID]; ok {
+			latencyCandidate, hasLatencyCandidate := latencyProfile.Candidates[groupID]
+			if hasLatencyCandidate {
 				candidate.Weight = latencyCandidate.Weight
 				candidate.Reason = edgeDNSLatencyCandidateReason(latencyProfile, latencyCandidate, groupID, preferredEdgeGroupID)
+				candidate.TrafficClass = latencyCandidate.TrafficClass
+				candidate.Score = latencyCandidate.Score
+				candidate.ScoreBreakdown = latencyCandidate.ScoreBreakdown
+			}
+			if nodeCandidate, ok := latencyProfile.NodeCandidates[strings.TrimSpace(candidate.EdgeID)]; ok {
+				if nodeCandidate.Weight > 0 {
+					candidate.Weight = nodeCandidate.Weight
+				}
+				if nodeCandidate.Reason != "" {
+					candidate.Reason = edgeDNSLatencyCandidateReason(latencyProfile, nodeCandidate, groupID, preferredEdgeGroupID)
+				}
+				if nodeCandidate.TrafficClass != "" {
+					candidate.TrafficClass = nodeCandidate.TrafficClass
+				}
+				candidate.Score = nodeCandidate.Score
+				candidate.ScoreBreakdown = nodeCandidate.ScoreBreakdown
 			}
 		}
 		if candidate.Weight <= 0 {
@@ -1610,6 +1872,9 @@ func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]
 		}
 		if out[i].Weight != out[j].Weight {
 			return out[i].Weight > out[j].Weight
+		}
+		if out[i].Score > 0 && out[j].Score > 0 && out[i].Score != out[j].Score {
+			return out[i].Score < out[j].Score
 		}
 		if out[i].EdgeGroupID != out[j].EdgeGroupID {
 			return out[i].EdgeGroupID < out[j].EdgeGroupID
@@ -1640,27 +1905,36 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 	policyKind := model.DNSAnswerPolicyKindGeo
 	reason := "geo_healthy_route_ready"
 	weight := 0
+	selectedEdgeGroupID := ""
+	shadowSelectedEdgeGroupID := ""
+	shadowReason := ""
 	if latencyProfile != nil && latencyProfile.Enabled {
 		policyKind = model.DNSAnswerPolicyKindLatencyAware
 		reason = latencyProfile.Reason
 		weight = latencyProfile.Weight
+		selectedEdgeGroupID = strings.TrimSpace(latencyProfile.BestEdgeGroupID)
+		shadowSelectedEdgeGroupID = strings.TrimSpace(latencyProfile.ShadowBestEdgeGroupID)
+		shadowReason = strings.TrimSpace(latencyProfile.ShadowReason)
 		if preferredEdgeGroupID != "" && latencyProfile.BestEdgeGroupID != "" && preferredEdgeGroupID != latencyProfile.BestEdgeGroupID {
 			reason = "latency_aware_geo_close_but_slow"
 		}
 	}
 	return model.DNSAnswerPolicy{
-		PolicyKind:          policyKind,
-		AllowedEdgeGroups:   allowed,
-		PreferredEdgeGroups: preferred,
-		FallbackEdgeGroups:  fallback,
-		TTLSeconds:          edgeDNSPolicyTTL(ttl),
-		ECSEnabled:          true,
-		HealthRequired:      true,
-		RouteReadyRequired:  true,
-		ExplorationPercent:  edgeDNSExplorationPercent,
-		SwitchCooldownSec:   int(edgeDNSDecisionCooldown.Seconds()),
-		Weight:              weight,
-		Reason:              reason,
+		PolicyKind:                policyKind,
+		AllowedEdgeGroups:         allowed,
+		PreferredEdgeGroups:       preferred,
+		FallbackEdgeGroups:        fallback,
+		TTLSeconds:                edgeDNSPolicyTTL(ttl),
+		ECSEnabled:                true,
+		HealthRequired:            true,
+		RouteReadyRequired:        true,
+		ExplorationPercent:        edgeDNSExplorationPercent,
+		SwitchCooldownSec:         int(edgeDNSDecisionCooldown.Seconds()),
+		Weight:                    weight,
+		Reason:                    reason,
+		SelectedEdgeGroupID:       selectedEdgeGroupID,
+		ShadowSelectedEdgeGroupID: shadowSelectedEdgeGroupID,
+		ShadowReason:              shadowReason,
 	}
 }
 

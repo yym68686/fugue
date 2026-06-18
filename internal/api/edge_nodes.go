@@ -244,6 +244,8 @@ func sanitizeEdgeHeartbeatPerformanceSamples(req edgeHeartbeatRequest, now time.
 		sample.EdgeGroupID = strings.TrimSpace(req.EdgeGroupID)
 		sample.Hostname = normalizeExternalAppDomain(sample.Hostname)
 		sample.PathPrefix = model.NormalizeAppRoutePathPrefix(sample.PathPrefix)
+		sample.Method = strings.ToUpper(strings.TrimSpace(sample.Method))
+		sample.TrafficClass = normalizeEdgeTrafficClass(sample.TrafficClass)
 		sample.ClientCountry = strings.ToLower(strings.TrimSpace(sample.ClientCountry))
 		sample.ClientRegion = strings.TrimSpace(sample.ClientRegion)
 		sample.ClientASN = strings.TrimSpace(sample.ClientASN)
@@ -282,18 +284,55 @@ func parseEdgeNodeQualitySince(raw string, now time.Time) (time.Time, error) {
 	return parsed.UTC(), nil
 }
 
+func normalizeEdgeTrafficClass(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "large_body_api", "small_api", "static_cacheable", "streaming", "html_dynamic":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
 type edgeNodeQualityAccumulator struct {
-	sampleRecordCount     int
-	requestCount          int
-	errorCount            int
-	weightedSampleCount   int
-	tlsHandshakeWeighted  int64
-	ttfbWeighted          int64
-	upstreamWeighted      int64
-	totalWeighted         int64
-	cacheHitCount         int
-	cacheObservationCount int
-	lastSampledAt         *time.Time
+	sampleRecordCount      int
+	requestCount           int
+	errorCount             int
+	weightedSampleCount    int
+	tlsHandshakeWeighted   int64
+	ttfbWeighted           int64
+	upstreamWeighted       int64
+	totalWeighted          int64
+	uploadWeighted         int64
+	uploadSampleCount      int
+	minUploadBPS           int64
+	bodyReadWeighted       int64
+	bodyReadSampleCount    int
+	maxReadGapWeighted     int64
+	maxReadGapSampleCount  int
+	bodyIncompleteCount    int
+	bodyReadErrorCount     int
+	responseEgressWeighted int64
+	responseEgressSamples  int
+	responseWriteWeighted  int64
+	responseWriteSamples   int
+	originDNSWeighted      int64
+	originDNSSamples       int
+	originConnectWeighted  int64
+	originConnectSamples   int
+	originWriteWeighted    int64
+	originWriteSamples     int
+	originWaitWeighted     int64
+	originWaitSamples      int
+	originTTFBWeighted     int64
+	originTTFBSamples      int
+	originTotalWeighted    int64
+	originTotalSamples     int
+	activeRequestsWeighted int64
+	activeBodyWeighted     int64
+	saturationSamples      int
+	cacheHitCount          int
+	cacheObservationCount  int
+	lastSampledAt          *time.Time
 }
 
 func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, samples []model.EdgePerformanceSample, since, generatedAt time.Time) model.EdgeNodeQualityResponse {
@@ -309,8 +348,10 @@ func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, sa
 		accumulator := routesByKey[key]
 		if accumulator == nil {
 			accumulator = &edgeNodeQualityRouteAccumulator{
-				hostname:   strings.TrimSpace(sample.Hostname),
-				pathPrefix: strings.TrimSpace(sample.PathPrefix),
+				hostname:     strings.TrimSpace(sample.Hostname),
+				pathPrefix:   strings.TrimSpace(sample.PathPrefix),
+				method:       strings.TrimSpace(sample.Method),
+				trafficClass: strings.TrimSpace(sample.TrafficClass),
 			}
 			routesByKey[key] = accumulator
 		}
@@ -324,7 +365,13 @@ func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, sa
 		if routes[i].Hostname != routes[j].Hostname {
 			return routes[i].Hostname < routes[j].Hostname
 		}
-		return routes[i].PathPrefix < routes[j].PathPrefix
+		if routes[i].PathPrefix != routes[j].PathPrefix {
+			return routes[i].PathPrefix < routes[j].PathPrefix
+		}
+		if routes[i].Method != routes[j].Method {
+			return routes[i].Method < routes[j].Method
+		}
+		return routes[i].TrafficClass < routes[j].TrafficClass
 	})
 	return model.EdgeNodeQualityResponse{
 		Node:  node,
@@ -341,6 +388,22 @@ func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, sa
 			AvgTTFBMS:             summary.average(summary.ttfbWeighted),
 			AvgUpstreamMS:         summary.average(summary.upstreamWeighted),
 			AvgTotalMS:            summary.average(summary.totalWeighted),
+			AvgUploadBPS:          summary.averageByCount(summary.uploadWeighted, summary.uploadSampleCount),
+			MinUploadBPS:          summary.minUploadBPS,
+			AvgBodyReadMS:         summary.averageByCount(summary.bodyReadWeighted, summary.bodyReadSampleCount),
+			AvgMaxReadGapMS:       summary.averageByCount(summary.maxReadGapWeighted, summary.maxReadGapSampleCount),
+			BodyIncompleteCount:   summary.bodyIncompleteCount,
+			BodyReadErrorCount:    summary.bodyReadErrorCount,
+			AvgResponseEgressBPS:  summary.averageByCount(summary.responseEgressWeighted, summary.responseEgressSamples),
+			AvgResponseWriteMS:    summary.averageByCount(summary.responseWriteWeighted, summary.responseWriteSamples),
+			AvgOriginDNSMS:        summary.averageByCount(summary.originDNSWeighted, summary.originDNSSamples),
+			AvgOriginConnectMS:    summary.averageByCount(summary.originConnectWeighted, summary.originConnectSamples),
+			AvgOriginWriteMS:      summary.averageByCount(summary.originWriteWeighted, summary.originWriteSamples),
+			AvgOriginWaitMS:       summary.averageByCount(summary.originWaitWeighted, summary.originWaitSamples),
+			AvgOriginTTFBMS:       summary.averageByCount(summary.originTTFBWeighted, summary.originTTFBSamples),
+			AvgOriginTotalMS:      summary.averageByCount(summary.originTotalWeighted, summary.originTotalSamples),
+			AvgActiveRequests:     summary.averageByCount(summary.activeRequestsWeighted, summary.saturationSamples),
+			AvgActiveBodyBuffers:  summary.averageByCount(summary.activeBodyWeighted, summary.saturationSamples),
 			CacheHitCount:         summary.cacheHitCount,
 			CacheObservationCount: summary.cacheObservationCount,
 			CacheHitRate:          edgeNodeQualityRate(summary.cacheHitCount, summary.cacheObservationCount),
@@ -360,8 +423,10 @@ func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, sa
 
 type edgeNodeQualityRouteAccumulator struct {
 	edgeNodeQualityAccumulator
-	hostname   string
-	pathPrefix string
+	hostname     string
+	pathPrefix   string
+	method       string
+	trafficClass string
 }
 
 func (a *edgeNodeQualityAccumulator) add(sample model.EdgePerformanceSample) {
@@ -377,12 +442,74 @@ func (a *edgeNodeQualityAccumulator) add(sample model.EdgePerformanceSample) {
 	a.ttfbWeighted += sample.TTFBMS * int64(weight)
 	a.upstreamWeighted += sample.UpstreamMS * int64(weight)
 	a.totalWeighted += sample.TotalMS * int64(weight)
+	if sample.UploadEffectiveBPS > 0 {
+		a.uploadWeighted += sample.UploadEffectiveBPS * int64(weight)
+		a.uploadSampleCount += weight
+	}
+	if uploadFloor := edgeNodeQualityUploadFloorBPS(sample); uploadFloor > 0 && (a.minUploadBPS == 0 || uploadFloor < a.minUploadBPS) {
+		a.minUploadBPS = uploadFloor
+	}
+	if sample.BodyReadBlockMS > 0 {
+		a.bodyReadWeighted += sample.BodyReadBlockMS * int64(weight)
+		a.bodyReadSampleCount += weight
+	}
+	if sample.MaxReadGapMS > 0 {
+		a.maxReadGapWeighted += sample.MaxReadGapMS * int64(weight)
+		a.maxReadGapSampleCount += weight
+	}
+	a.bodyIncompleteCount += sample.BodyIncompleteCount
+	a.bodyReadErrorCount += sample.BodyReadErrorCount
+	if sample.ResponseEgressBPS > 0 {
+		a.responseEgressWeighted += sample.ResponseEgressBPS * int64(weight)
+		a.responseEgressSamples += weight
+	}
+	if sample.ResponseWriteMS > 0 {
+		a.responseWriteWeighted += sample.ResponseWriteMS * int64(weight)
+		a.responseWriteSamples += weight
+	}
+	if sample.OriginDNSMS > 0 {
+		a.originDNSWeighted += sample.OriginDNSMS * int64(weight)
+		a.originDNSSamples += weight
+	}
+	if sample.OriginConnectMS > 0 {
+		a.originConnectWeighted += sample.OriginConnectMS * int64(weight)
+		a.originConnectSamples += weight
+	}
+	if sample.OriginRequestWriteMS > 0 {
+		a.originWriteWeighted += sample.OriginRequestWriteMS * int64(weight)
+		a.originWriteSamples += weight
+	}
+	if sample.OriginResponseWaitMS > 0 {
+		a.originWaitWeighted += sample.OriginResponseWaitMS * int64(weight)
+		a.originWaitSamples += weight
+	}
+	if sample.OriginTTFBMS > 0 {
+		a.originTTFBWeighted += sample.OriginTTFBMS * int64(weight)
+		a.originTTFBSamples += weight
+	}
+	if sample.OriginTotalMS > 0 {
+		a.originTotalWeighted += sample.OriginTotalMS * int64(weight)
+		a.originTotalSamples += weight
+	}
+	if sample.ActiveRequests > 0 || sample.ActiveBodyBuffers > 0 {
+		a.activeRequestsWeighted += int64(sample.ActiveRequests) * int64(weight)
+		a.activeBodyWeighted += int64(sample.ActiveBodyBuffers) * int64(weight)
+		a.saturationSamples += weight
+	}
 	a.cacheHitCount += sample.CacheHitCount
 	a.cacheObservationCount += sample.CacheObservationCount
 	if a.lastSampledAt == nil || sample.SampledAt.After(*a.lastSampledAt) {
 		sampledAt := sample.SampledAt.UTC()
 		a.lastSampledAt = &sampledAt
 	}
+}
+
+func edgeNodeQualityUploadFloorBPS(sample model.EdgePerformanceSample) int64 {
+	uploadFloor := sample.UploadEffectiveBPS
+	if sample.MinWindowBPS > 0 && (uploadFloor <= 0 || sample.MinWindowBPS < uploadFloor) {
+		uploadFloor = sample.MinWindowBPS
+	}
+	return uploadFloor
 }
 
 func (a edgeNodeQualityAccumulator) average(weighted int64) float64 {
@@ -392,10 +519,19 @@ func (a edgeNodeQualityAccumulator) average(weighted int64) float64 {
 	return float64(weighted) / float64(a.weightedSampleCount)
 }
 
+func (a edgeNodeQualityAccumulator) averageByCount(weighted int64, count int) float64 {
+	if count <= 0 {
+		return 0
+	}
+	return float64(weighted) / float64(count)
+}
+
 func (a edgeNodeQualityRouteAccumulator) route() model.EdgeNodeQualityRoute {
 	return model.EdgeNodeQualityRoute{
 		Hostname:              a.hostname,
 		PathPrefix:            a.pathPrefix,
+		Method:                a.method,
+		TrafficClass:          a.trafficClass,
 		SampleRecordCount:     a.sampleRecordCount,
 		RequestCount:          a.requestCount,
 		ErrorCount:            a.errorCount,
@@ -404,6 +540,22 @@ func (a edgeNodeQualityRouteAccumulator) route() model.EdgeNodeQualityRoute {
 		AvgTTFBMS:             a.average(a.ttfbWeighted),
 		AvgUpstreamMS:         a.average(a.upstreamWeighted),
 		AvgTotalMS:            a.average(a.totalWeighted),
+		AvgUploadBPS:          a.averageByCount(a.uploadWeighted, a.uploadSampleCount),
+		MinUploadBPS:          a.minUploadBPS,
+		AvgBodyReadMS:         a.averageByCount(a.bodyReadWeighted, a.bodyReadSampleCount),
+		AvgMaxReadGapMS:       a.averageByCount(a.maxReadGapWeighted, a.maxReadGapSampleCount),
+		BodyIncompleteCount:   a.bodyIncompleteCount,
+		BodyReadErrorCount:    a.bodyReadErrorCount,
+		AvgResponseEgressBPS:  a.averageByCount(a.responseEgressWeighted, a.responseEgressSamples),
+		AvgResponseWriteMS:    a.averageByCount(a.responseWriteWeighted, a.responseWriteSamples),
+		AvgOriginDNSMS:        a.averageByCount(a.originDNSWeighted, a.originDNSSamples),
+		AvgOriginConnectMS:    a.averageByCount(a.originConnectWeighted, a.originConnectSamples),
+		AvgOriginWriteMS:      a.averageByCount(a.originWriteWeighted, a.originWriteSamples),
+		AvgOriginWaitMS:       a.averageByCount(a.originWaitWeighted, a.originWaitSamples),
+		AvgOriginTTFBMS:       a.averageByCount(a.originTTFBWeighted, a.originTTFBSamples),
+		AvgOriginTotalMS:      a.averageByCount(a.originTotalWeighted, a.originTotalSamples),
+		AvgActiveRequests:     a.averageByCount(a.activeRequestsWeighted, a.saturationSamples),
+		AvgActiveBodyBuffers:  a.averageByCount(a.activeBodyWeighted, a.saturationSamples),
 		CacheHitCount:         a.cacheHitCount,
 		CacheObservationCount: a.cacheObservationCount,
 		CacheHitRate:          edgeNodeQualityRate(a.cacheHitCount, a.cacheObservationCount),
@@ -419,7 +571,7 @@ func edgeNodeQualityRate(numerator, denominator int) float64 {
 }
 
 func edgeNodeQualityRouteKey(sample model.EdgePerformanceSample) string {
-	return strings.TrimSpace(sample.Hostname) + "\x00" + strings.TrimSpace(sample.PathPrefix)
+	return strings.TrimSpace(sample.Hostname) + "\x00" + strings.TrimSpace(sample.PathPrefix) + "\x00" + strings.TrimSpace(sample.Method) + "\x00" + strings.TrimSpace(sample.TrafficClass)
 }
 
 func (s *Server) enrichEdgeHeartbeatFromClusterNode(ctx context.Context, req edgeHeartbeatRequest) edgeHeartbeatRequest {

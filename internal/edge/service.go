@@ -20,9 +20,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,6 +64,7 @@ type Service struct {
 	cacheRevalidating     map[string]struct{}
 	bodyBufferActiveMu    sync.Mutex
 	activeBodyBufferReads map[string]edgeActiveRequestBodyBuffer
+	activeProxyRequests   int64
 }
 
 type Status struct {
@@ -100,73 +103,83 @@ type cacheFile struct {
 }
 
 type telemetry struct {
-	BundleSyncSuccess        uint64
-	BundleSyncNotModified    uint64
-	BundleSyncError          uint64
-	LastSyncDuration         time.Duration
-	CacheWriteSuccess        uint64
-	CacheWriteError          uint64
-	CacheLoadSuccess         uint64
-	CacheLoadMiss            uint64
-	CacheLoadError           uint64
-	CaddyConfigSuccess       uint64
-	CaddyConfigError         uint64
-	CaddyAppliedVersion      string
-	CaddyAppliedSignature    string
-	CaddyRouteCount          int
-	CaddyLastApplyAt         *time.Time
-	CaddyLastError           string
-	CaddyWarmupSuccess       uint64
-	CaddyWarmupError         uint64
-	CaddyWarmupSignature     string
-	CaddyWarmupHost          string
-	CaddyWarmupDuration      time.Duration
-	CaddyWarmupAt            *time.Time
-	CaddyWarmupLastError     string
-	CacheWarmupSuccess       uint64
-	CacheWarmupError         uint64
-	CacheWarmupSignature     string
-	CacheWarmupTargets       string
-	CacheWarmupDuration      time.Duration
-	CacheWarmupAt            *time.Time
-	CacheWarmupLastError     string
-	RouteRequests            map[routeMetricKey]uint64
-	RouteStatuses            map[routeStatusMetricKey]uint64
-	RouteUpstreamErrors      map[routeMetricKey]uint64
-	RouteFallbackHits        map[routeMetricKey]uint64
-	RouteWebSocketResults    map[routeResultMetricKey]uint64
-	RouteSSEResults          map[routeResultMetricKey]uint64
-	RouteStreamingResults    map[routeResultMetricKey]uint64
-	RouteUploadRequests      map[routeMetricKey]uint64
-	RouteDurationCount       map[routeMetricKey]uint64
-	RouteDurationSum         map[routeMetricKey]float64
-	RouteLatencyCount        map[routeMetricKey]uint64
-	RouteLatencySum          map[routeMetricKey]float64
-	RouteTTFBCount           map[routeMetricKey]uint64
-	RouteTTFBSum             map[routeMetricKey]float64
-	RouteCacheLookupCount    map[routeMetricKey]uint64
-	RouteCacheLookupSum      map[routeMetricKey]float64
-	RouteOriginConnCount     map[routeMetricKey]uint64
-	RouteOriginConnSum       map[routeMetricKey]float64
-	RouteOriginDNSCount      map[routeMetricKey]uint64
-	RouteOriginDNSSum        map[routeMetricKey]float64
-	RouteOriginTTFBCount     map[routeMetricKey]uint64
-	RouteOriginTTFBSum       map[routeMetricKey]float64
-	RouteOriginTotalCount    map[routeMetricKey]uint64
-	RouteOriginTotalSum      map[routeMetricKey]float64
-	RouteOriginWriteCount    map[routeMetricKey]uint64
-	RouteOriginWriteSum      map[routeMetricKey]float64
-	RouteOriginWaitCount     map[routeMetricKey]uint64
-	RouteOriginWaitSum       map[routeMetricKey]float64
-	RouteBodyReadCount       map[routeMetricKey]uint64
-	RouteBodyReadSum         map[routeMetricKey]float64
-	RouteBodyWriteCount      map[routeMetricKey]uint64
-	RouteBodyWriteSum        map[routeMetricKey]float64
-	RouteBodyThroughputCount map[routeMetricKey]uint64
-	RouteBodyThroughputSum   map[routeMetricKey]float64
-	RouteWriteCount          map[routeMetricKey]uint64
-	RouteWriteSum            map[routeMetricKey]float64
-	RouteCacheStatus         map[routeCacheMetricKey]uint64
+	BundleSyncSuccess           uint64
+	BundleSyncNotModified       uint64
+	BundleSyncError             uint64
+	LastSyncDuration            time.Duration
+	CacheWriteSuccess           uint64
+	CacheWriteError             uint64
+	CacheLoadSuccess            uint64
+	CacheLoadMiss               uint64
+	CacheLoadError              uint64
+	CaddyConfigSuccess          uint64
+	CaddyConfigError            uint64
+	CaddyAppliedVersion         string
+	CaddyAppliedSignature       string
+	CaddyRouteCount             int
+	CaddyLastApplyAt            *time.Time
+	CaddyLastError              string
+	CaddyWarmupSuccess          uint64
+	CaddyWarmupError            uint64
+	CaddyWarmupSignature        string
+	CaddyWarmupHost             string
+	CaddyWarmupDuration         time.Duration
+	CaddyWarmupAt               *time.Time
+	CaddyWarmupLastError        string
+	CacheWarmupSuccess          uint64
+	CacheWarmupError            uint64
+	CacheWarmupSignature        string
+	CacheWarmupTargets          string
+	CacheWarmupDuration         time.Duration
+	CacheWarmupAt               *time.Time
+	CacheWarmupLastError        string
+	RouteRequests               map[routeMetricKey]uint64
+	RouteStatuses               map[routeStatusMetricKey]uint64
+	RouteUpstreamErrors         map[routeMetricKey]uint64
+	RouteFallbackHits           map[routeMetricKey]uint64
+	RouteWebSocketResults       map[routeResultMetricKey]uint64
+	RouteSSEResults             map[routeResultMetricKey]uint64
+	RouteStreamingResults       map[routeResultMetricKey]uint64
+	RouteUploadRequests         map[routeMetricKey]uint64
+	RouteDurationCount          map[routeMetricKey]uint64
+	RouteDurationSum            map[routeMetricKey]float64
+	RouteLatencyCount           map[routeMetricKey]uint64
+	RouteLatencySum             map[routeMetricKey]float64
+	RouteTTFBCount              map[routeMetricKey]uint64
+	RouteTTFBSum                map[routeMetricKey]float64
+	RouteCacheLookupCount       map[routeMetricKey]uint64
+	RouteCacheLookupSum         map[routeMetricKey]float64
+	RouteOriginConnCount        map[routeMetricKey]uint64
+	RouteOriginConnSum          map[routeMetricKey]float64
+	RouteOriginDNSCount         map[routeMetricKey]uint64
+	RouteOriginDNSSum           map[routeMetricKey]float64
+	RouteOriginTTFBCount        map[routeMetricKey]uint64
+	RouteOriginTTFBSum          map[routeMetricKey]float64
+	RouteOriginTotalCount       map[routeMetricKey]uint64
+	RouteOriginTotalSum         map[routeMetricKey]float64
+	RouteOriginWriteCount       map[routeMetricKey]uint64
+	RouteOriginWriteSum         map[routeMetricKey]float64
+	RouteOriginWaitCount        map[routeMetricKey]uint64
+	RouteOriginWaitSum          map[routeMetricKey]float64
+	RouteBodyReadCount          map[routeMetricKey]uint64
+	RouteBodyReadSum            map[routeMetricKey]float64
+	RouteBodyWriteCount         map[routeMetricKey]uint64
+	RouteBodyWriteSum           map[routeMetricKey]float64
+	RouteBodyThroughputCount    map[routeMetricKey]uint64
+	RouteBodyThroughputSum      map[routeMetricKey]float64
+	RouteBodyMinThroughputCount map[routeMetricKey]uint64
+	RouteBodyMinThroughputSum   map[routeMetricKey]float64
+	RouteBodyMaxReadGapCount    map[routeMetricKey]uint64
+	RouteBodyMaxReadGapSum      map[routeMetricKey]float64
+	RouteBodyRequestBytes       map[routeMetricKey]uint64
+	RouteBodyReadBytes          map[routeMetricKey]uint64
+	RouteBodyIncompleteCount    map[routeMetricKey]uint64
+	RouteBodyReadErrorCount     map[routeMetricKey]uint64
+	RouteResponseBytes          map[routeMetricKey]uint64
+	RouteClientCancelCount      map[routeMetricKey]uint64
+	RouteWriteCount             map[routeMetricKey]uint64
+	RouteWriteSum               map[routeMetricKey]float64
+	RouteCacheStatus            map[routeCacheMetricKey]uint64
 }
 
 type metricSnapshot struct {
@@ -183,6 +196,7 @@ type statusError struct {
 type routeMetricKey struct {
 	Hostname      string
 	PathPrefix    string
+	Method        string
 	AppID         string
 	RouteKind     string
 	ClientCountry string
@@ -191,6 +205,7 @@ type routeMetricKey struct {
 }
 
 func routeMetricIdentityKey(key routeMetricKey) routeMetricKey {
+	key.Method = ""
 	key.ClientCountry = ""
 	key.ClientRegion = ""
 	key.ClientASN = ""
@@ -839,6 +854,8 @@ func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding) bool {
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+	atomic.AddInt64(&s.activeProxyRequests, 1)
+	defer atomic.AddInt64(&s.activeProxyRequests, -1)
 	startedAt := time.Now()
 	host := normalizeRouteHost(firstNonEmptyHeader(r, "X-Fugue-Edge-Route-Host", r.Host))
 	route, ok, fallbackHit := s.routeForRequest(host, r.URL.Path)
@@ -2580,14 +2597,29 @@ func (s *Service) edgePerformanceSamplesForHeartbeat(snapshot metricSnapshot) []
 		}
 	}
 
-	samples := buildEdgePerformanceSamples(snapshot.Metrics, baseline, routesByKey, edgeID, edgeGroupID, now)
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	saturation := edgePerformanceSaturationSnapshot{
+		ActiveRequests:    int(atomic.LoadInt64(&s.activeProxyRequests)),
+		ActiveBodyBuffers: len(s.activeRequestBodyBufferReadSnapshots(now)),
+		GoroutineCount:    runtime.NumGoroutine(),
+		MemoryAllocBytes:  int64(mem.Alloc),
+	}
+	samples := buildEdgePerformanceSamples(snapshot.Metrics, baseline, routesByKey, edgeID, edgeGroupID, now, saturation)
 	if len(samples) > edgePerformanceSampleHeartbeatLimit {
 		samples = samples[:edgePerformanceSampleHeartbeatLimit]
 	}
 	return samples
 }
 
-func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[routeMetricKey]model.EdgeRouteBinding, edgeID, edgeGroupID string, sampledAt time.Time) []model.EdgePerformanceSample {
+type edgePerformanceSaturationSnapshot struct {
+	ActiveRequests    int
+	ActiveBodyBuffers int
+	GoroutineCount    int
+	MemoryAllocBytes  int64
+}
+
+func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[routeMetricKey]model.EdgeRouteBinding, edgeID, edgeGroupID string, sampledAt time.Time, saturation edgePerformanceSaturationSnapshot) []model.EdgePerformanceSample {
 	keys := sortedRouteMetricKeys(current.RouteRequests)
 	if len(keys) == 0 {
 		return nil
@@ -2604,6 +2636,40 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 		ttfbSum := deltaFloat64(current.RouteTTFBSum[key], baseline.RouteTTFBSum[key])
 		upstreamCount := int(deltaUint64(current.RouteLatencyCount[key], baseline.RouteLatencyCount[key]))
 		upstreamSum := deltaFloat64(current.RouteLatencySum[key], baseline.RouteLatencySum[key])
+		originDNSCount := int(deltaUint64(current.RouteOriginDNSCount[key], baseline.RouteOriginDNSCount[key]))
+		originDNSSum := deltaFloat64(current.RouteOriginDNSSum[key], baseline.RouteOriginDNSSum[key])
+		originConnectCount := int(deltaUint64(current.RouteOriginConnCount[key], baseline.RouteOriginConnCount[key]))
+		originConnectSum := deltaFloat64(current.RouteOriginConnSum[key], baseline.RouteOriginConnSum[key])
+		originWriteCount := int(deltaUint64(current.RouteOriginWriteCount[key], baseline.RouteOriginWriteCount[key]))
+		originWriteSum := deltaFloat64(current.RouteOriginWriteSum[key], baseline.RouteOriginWriteSum[key])
+		originWaitCount := int(deltaUint64(current.RouteOriginWaitCount[key], baseline.RouteOriginWaitCount[key]))
+		originWaitSum := deltaFloat64(current.RouteOriginWaitSum[key], baseline.RouteOriginWaitSum[key])
+		originTTFBCount := int(deltaUint64(current.RouteOriginTTFBCount[key], baseline.RouteOriginTTFBCount[key]))
+		originTTFBSum := deltaFloat64(current.RouteOriginTTFBSum[key], baseline.RouteOriginTTFBSum[key])
+		originTotalCount := int(deltaUint64(current.RouteOriginTotalCount[key], baseline.RouteOriginTotalCount[key]))
+		originTotalSum := deltaFloat64(current.RouteOriginTotalSum[key], baseline.RouteOriginTotalSum[key])
+		bodyReadCount := int(deltaUint64(current.RouteBodyReadCount[key], baseline.RouteBodyReadCount[key]))
+		bodyReadSum := deltaFloat64(current.RouteBodyReadSum[key], baseline.RouteBodyReadSum[key])
+		bodyWriteCount := int(deltaUint64(current.RouteBodyWriteCount[key], baseline.RouteBodyWriteCount[key]))
+		bodyWriteSum := deltaFloat64(current.RouteBodyWriteSum[key], baseline.RouteBodyWriteSum[key])
+		bodyThroughputCount := int(deltaUint64(current.RouteBodyThroughputCount[key], baseline.RouteBodyThroughputCount[key]))
+		bodyThroughputSum := deltaFloat64(current.RouteBodyThroughputSum[key], baseline.RouteBodyThroughputSum[key])
+		bodyMinThroughputCount := int(deltaUint64(current.RouteBodyMinThroughputCount[key], baseline.RouteBodyMinThroughputCount[key]))
+		bodyMinThroughputSum := deltaFloat64(current.RouteBodyMinThroughputSum[key], baseline.RouteBodyMinThroughputSum[key])
+		bodyMaxReadGapCount := int(deltaUint64(current.RouteBodyMaxReadGapCount[key], baseline.RouteBodyMaxReadGapCount[key]))
+		bodyMaxReadGapSum := deltaFloat64(current.RouteBodyMaxReadGapSum[key], baseline.RouteBodyMaxReadGapSum[key])
+		bodyRequestBytes := deltaUint64(current.RouteBodyRequestBytes[key], baseline.RouteBodyRequestBytes[key])
+		bodyReadBytes := deltaUint64(current.RouteBodyReadBytes[key], baseline.RouteBodyReadBytes[key])
+		bodyIncompleteCount := int(deltaUint64(current.RouteBodyIncompleteCount[key], baseline.RouteBodyIncompleteCount[key]))
+		bodyReadErrorCount := int(deltaUint64(current.RouteBodyReadErrorCount[key], baseline.RouteBodyReadErrorCount[key]))
+		uploadRequestCount := int(deltaUint64(current.RouteUploadRequests[key], baseline.RouteUploadRequests[key]))
+		responseWriteCount := int(deltaUint64(current.RouteWriteCount[key], baseline.RouteWriteCount[key]))
+		responseWriteSum := deltaFloat64(current.RouteWriteSum[key], baseline.RouteWriteSum[key])
+		responseBytes := deltaUint64(current.RouteResponseBytes[key], baseline.RouteResponseBytes[key])
+		clientCancelCount := int(deltaUint64(current.RouteClientCancelCount[key], baseline.RouteClientCancelCount[key]))
+		streamingRequestCount := edgePerformanceRouteResultCount(current.RouteStreamingResults, baseline.RouteStreamingResults, key)
+		webSocketRequestCount := edgePerformanceRouteResultCount(current.RouteWebSocketResults, baseline.RouteWebSocketResults, key)
+		sseRequestCount := edgePerformanceRouteResultCount(current.RouteSSEResults, baseline.RouteSSEResults, key)
 
 		if totalCount <= 0 {
 			totalCount = requestCount
@@ -2625,12 +2691,15 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 		errorCount, dominantStatusCode := edgePerformanceStatusSummary(current.RouteStatuses, baseline.RouteStatuses, current.RouteUpstreamErrors, baseline.RouteUpstreamErrors, key)
 		route := routesByKey[routeMetricIdentityKey(key)]
 		runtimeRegion := firstNonEmpty(edgeGroupRegion(firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup)), edgeGroupRegion(strings.TrimSpace(route.EdgeGroupID)))
+		trafficClass := edgePerformanceTrafficClass(key, route, uploadRequestCount, bodyReadCount, bodyRequestBytes, cacheObservationCount, streamingRequestCount, webSocketRequestCount, sseRequestCount)
 		sample := model.EdgePerformanceSample{
 			ID:                    edgePerformanceSampleID(edgeID, edgeGroupID, key, sampledAt),
 			EdgeID:                edgeID,
 			EdgeGroupID:           edgeGroupID,
 			Hostname:              key.Hostname,
 			PathPrefix:            model.NormalizeAppRoutePathPrefix(key.PathPrefix),
+			Method:                key.Method,
+			TrafficClass:          trafficClass,
 			ClientCountry:         key.ClientCountry,
 			ClientRegion:          key.ClientRegion,
 			ClientASN:             key.ClientASN,
@@ -2646,6 +2715,34 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 			CacheHitCount:         cacheHitCount,
 			CacheObservationCount: cacheObservationCount,
 			ErrorCount:            errorCount,
+			UploadRequestCount:    uploadRequestCount,
+			BodyBufferCount:       bodyReadCount,
+			BodyReadBlockMS:       edgePerformanceAverageMilliseconds(bodyReadSum, bodyReadCount),
+			FileWriteMS:           edgePerformanceAverageMilliseconds(bodyWriteSum, bodyWriteCount),
+			UploadEffectiveBPS:    edgePerformanceAverageInt64(bodyThroughputSum, bodyThroughputCount),
+			MinWindowBPS:          edgePerformanceAverageInt64(bodyMinThroughputSum, bodyMinThroughputCount),
+			MaxReadGapMS:          edgePerformanceAverageMilliseconds(bodyMaxReadGapSum, bodyMaxReadGapCount),
+			RequestBodyBytes:      int64(bodyRequestBytes),
+			RequestBodyReadBytes:  int64(bodyReadBytes),
+			BodyIncompleteCount:   bodyIncompleteCount,
+			BodyReadErrorCount:    bodyReadErrorCount,
+			ResponseWriteMS:       edgePerformanceAverageMilliseconds(responseWriteSum, responseWriteCount),
+			ResponseBytes:         int64(responseBytes),
+			ResponseEgressBPS:     edgePerformanceBytesPerSecond(responseBytes, responseWriteSum),
+			OriginDNSMS:           edgePerformanceAverageMilliseconds(originDNSSum, originDNSCount),
+			OriginConnectMS:       edgePerformanceAverageMilliseconds(originConnectSum, originConnectCount),
+			OriginRequestWriteMS:  edgePerformanceAverageMilliseconds(originWriteSum, originWriteCount),
+			OriginResponseWaitMS:  edgePerformanceAverageMilliseconds(originWaitSum, originWaitCount),
+			OriginTTFBMS:          edgePerformanceAverageMilliseconds(originTTFBSum, originTTFBCount),
+			OriginTotalMS:         edgePerformanceAverageMilliseconds(originTotalSum, originTotalCount),
+			StreamingRequestCount: streamingRequestCount,
+			WebSocketRequestCount: webSocketRequestCount,
+			SSERequestCount:       sseRequestCount,
+			ClientCancelCount:     clientCancelCount,
+			ActiveRequests:        saturation.ActiveRequests,
+			ActiveBodyBuffers:     saturation.ActiveBodyBuffers,
+			GoroutineCount:        saturation.GoroutineCount,
+			MemoryAllocBytes:      saturation.MemoryAllocBytes,
 			SampledAt:             sampledAt,
 		}
 		samples = append(samples, sample)
@@ -2658,6 +2755,46 @@ func edgePerformanceSampleDNSPolicy(key routeMetricKey) string {
 		return "client_scope_header"
 	}
 	return "global"
+}
+
+func edgePerformanceTrafficClass(key routeMetricKey, route model.EdgeRouteBinding, uploadRequests, bodyBufferCount int, bodyBytes uint64, cacheObservations, streamingRequests, websocketRequests, sseRequests int) string {
+	if streamingRequests > 0 || websocketRequests > 0 || sseRequests > 0 {
+		return "streaming"
+	}
+	method := strings.ToUpper(strings.TrimSpace(key.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	if bodyBufferCount > 0 || uploadRequests > 0 {
+		if bodyBytes >= 256*1024 || bodyBufferCount > 0 {
+			return "large_body_api"
+		}
+		return "small_api"
+	}
+	if method != http.MethodGet && method != http.MethodHead {
+		return "small_api"
+	}
+	if cacheObservations > 0 {
+		return "static_cacheable"
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(route.RouteKind)), "api") {
+		return "small_api"
+	}
+	return "html_dynamic"
+}
+
+func edgePerformanceRouteResultCount(current, baseline map[routeResultMetricKey]uint64, key routeMetricKey) int {
+	count := uint64(0)
+	for resultKey, value := range current {
+		if resultKey.RouteMetricKey != key {
+			continue
+		}
+		count += deltaUint64(value, baseline[resultKey])
+	}
+	if count > uint64(^uint(0)>>1) {
+		return int(^uint(0) >> 1)
+	}
+	return int(count)
 }
 
 func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
@@ -2680,16 +2817,32 @@ func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
 	out.RouteCacheLookupSum = cloneRouteFloatMap(in.RouteCacheLookupSum)
 	out.RouteOriginConnCount = cloneRouteCounterMap(in.RouteOriginConnCount)
 	out.RouteOriginConnSum = cloneRouteFloatMap(in.RouteOriginConnSum)
+	out.RouteOriginDNSCount = cloneRouteCounterMap(in.RouteOriginDNSCount)
+	out.RouteOriginDNSSum = cloneRouteFloatMap(in.RouteOriginDNSSum)
 	out.RouteOriginTTFBCount = cloneRouteCounterMap(in.RouteOriginTTFBCount)
 	out.RouteOriginTTFBSum = cloneRouteFloatMap(in.RouteOriginTTFBSum)
 	out.RouteOriginTotalCount = cloneRouteCounterMap(in.RouteOriginTotalCount)
 	out.RouteOriginTotalSum = cloneRouteFloatMap(in.RouteOriginTotalSum)
+	out.RouteOriginWriteCount = cloneRouteCounterMap(in.RouteOriginWriteCount)
+	out.RouteOriginWriteSum = cloneRouteFloatMap(in.RouteOriginWriteSum)
+	out.RouteOriginWaitCount = cloneRouteCounterMap(in.RouteOriginWaitCount)
+	out.RouteOriginWaitSum = cloneRouteFloatMap(in.RouteOriginWaitSum)
 	out.RouteBodyReadCount = cloneRouteCounterMap(in.RouteBodyReadCount)
 	out.RouteBodyReadSum = cloneRouteFloatMap(in.RouteBodyReadSum)
 	out.RouteBodyWriteCount = cloneRouteCounterMap(in.RouteBodyWriteCount)
 	out.RouteBodyWriteSum = cloneRouteFloatMap(in.RouteBodyWriteSum)
 	out.RouteBodyThroughputCount = cloneRouteCounterMap(in.RouteBodyThroughputCount)
 	out.RouteBodyThroughputSum = cloneRouteFloatMap(in.RouteBodyThroughputSum)
+	out.RouteBodyMinThroughputCount = cloneRouteCounterMap(in.RouteBodyMinThroughputCount)
+	out.RouteBodyMinThroughputSum = cloneRouteFloatMap(in.RouteBodyMinThroughputSum)
+	out.RouteBodyMaxReadGapCount = cloneRouteCounterMap(in.RouteBodyMaxReadGapCount)
+	out.RouteBodyMaxReadGapSum = cloneRouteFloatMap(in.RouteBodyMaxReadGapSum)
+	out.RouteBodyRequestBytes = cloneRouteCounterMap(in.RouteBodyRequestBytes)
+	out.RouteBodyReadBytes = cloneRouteCounterMap(in.RouteBodyReadBytes)
+	out.RouteBodyIncompleteCount = cloneRouteCounterMap(in.RouteBodyIncompleteCount)
+	out.RouteBodyReadErrorCount = cloneRouteCounterMap(in.RouteBodyReadErrorCount)
+	out.RouteResponseBytes = cloneRouteCounterMap(in.RouteResponseBytes)
+	out.RouteClientCancelCount = cloneRouteCounterMap(in.RouteClientCancelCount)
 	out.RouteWriteCount = cloneRouteCounterMap(in.RouteWriteCount)
 	out.RouteWriteSum = cloneRouteFloatMap(in.RouteWriteSum)
 	out.RouteCacheStatus = cloneRouteCacheCounterMap(in.RouteCacheStatus)
@@ -2697,7 +2850,7 @@ func cloneTelemetryForEdgePerformanceHeartbeat(in telemetry) telemetry {
 }
 
 func edgePerformanceSampleID(edgeID, edgeGroupID string, key routeMetricKey, sampledAt time.Time) string {
-	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.PathPrefix, key.AppID, key.RouteKind, key.ClientCountry, key.ClientRegion, key.ClientASN, sampledAt.UnixNano())
+	payload := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%d", strings.TrimSpace(edgeID), strings.TrimSpace(edgeGroupID), key.Hostname, key.PathPrefix, key.Method, key.AppID, key.RouteKind, key.ClientCountry, key.ClientRegion, key.ClientASN, sampledAt.UnixNano())
 	sum := sha256.Sum256([]byte(payload))
 	return "edge_perf_" + hex.EncodeToString(sum[:])[:16]
 }
@@ -2707,6 +2860,20 @@ func edgePerformanceAverageMilliseconds(sum float64, count int) int64 {
 		return 0
 	}
 	return int64((sum * 1000) / float64(count))
+}
+
+func edgePerformanceAverageInt64(sum float64, count int) int64 {
+	if count <= 0 || sum <= 0 {
+		return 0
+	}
+	return int64(sum / float64(count))
+}
+
+func edgePerformanceBytesPerSecond(bytes uint64, seconds float64) int64 {
+	if bytes == 0 || seconds <= 0 {
+		return 0
+	}
+	return int64(float64(bytes) / seconds)
 }
 
 func deltaUint64(current, baseline uint64) uint64 {
@@ -3252,6 +3419,7 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 	key := routeMetricKey{
 		Hostname:      firstNonEmpty(strings.TrimSpace(observed.Route.Hostname), observed.Host),
 		PathPrefix:    model.NormalizeAppRoutePathPrefix(observed.Route.PathPrefix),
+		Method:        strings.ToUpper(strings.TrimSpace(observed.Method)),
 		AppID:         strings.TrimSpace(observed.Route.AppID),
 		RouteKind:     strings.TrimSpace(observed.Route.RouteKind),
 		ClientCountry: strings.ToLower(strings.TrimSpace(observed.ClientCountry)),
@@ -3281,6 +3449,12 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		}
 		s.metrics.RouteUpstreamErrors[key]++
 	}
+	if observed.ClientCanceled {
+		if s.metrics.RouteClientCancelCount == nil {
+			s.metrics.RouteClientCancelCount = make(map[routeMetricKey]uint64)
+		}
+		s.metrics.RouteClientCancelCount[key]++
+	}
 	result := edgeProxyObservationResult(observed)
 	if observed.WebSocket {
 		if s.metrics.RouteWebSocketResults == nil {
@@ -3307,6 +3481,30 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		s.metrics.RouteUploadRequests[key]++
 	}
 	if observed.RequestBodyBuffered {
+		if s.metrics.RouteBodyRequestBytes == nil {
+			s.metrics.RouteBodyRequestBytes = make(map[routeMetricKey]uint64)
+		}
+		if s.metrics.RouteBodyReadBytes == nil {
+			s.metrics.RouteBodyReadBytes = make(map[routeMetricKey]uint64)
+		}
+		if observed.RequestBytes > 0 {
+			s.metrics.RouteBodyRequestBytes[key] += uint64(observed.RequestBytes)
+		}
+		if observed.RequestBodyReadBytes > 0 {
+			s.metrics.RouteBodyReadBytes[key] += uint64(observed.RequestBodyReadBytes)
+		}
+		if observed.RequestBytes > 0 && observed.RequestBodyReadBytes < observed.RequestBytes {
+			if s.metrics.RouteBodyIncompleteCount == nil {
+				s.metrics.RouteBodyIncompleteCount = make(map[routeMetricKey]uint64)
+			}
+			s.metrics.RouteBodyIncompleteCount[key]++
+		}
+		if strings.TrimSpace(observed.RequestBodyReadError) != "" || strings.TrimSpace(observed.RequestBodyBufferError) != "" {
+			if s.metrics.RouteBodyReadErrorCount == nil {
+				s.metrics.RouteBodyReadErrorCount = make(map[routeMetricKey]uint64)
+			}
+			s.metrics.RouteBodyReadErrorCount[key]++
+		}
 		if s.metrics.RouteBodyReadCount == nil {
 			s.metrics.RouteBodyReadCount = make(map[routeMetricKey]uint64)
 		}
@@ -3332,6 +3530,26 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 			}
 			s.metrics.RouteBodyThroughputCount[key]++
 			s.metrics.RouteBodyThroughputSum[key] += float64(observed.AvgBPS)
+		}
+		if observed.MinWindowBPS > 0 {
+			if s.metrics.RouteBodyMinThroughputCount == nil {
+				s.metrics.RouteBodyMinThroughputCount = make(map[routeMetricKey]uint64)
+			}
+			if s.metrics.RouteBodyMinThroughputSum == nil {
+				s.metrics.RouteBodyMinThroughputSum = make(map[routeMetricKey]float64)
+			}
+			s.metrics.RouteBodyMinThroughputCount[key]++
+			s.metrics.RouteBodyMinThroughputSum[key] += float64(observed.MinWindowBPS)
+		}
+		if observed.MaxReadGap > 0 {
+			if s.metrics.RouteBodyMaxReadGapCount == nil {
+				s.metrics.RouteBodyMaxReadGapCount = make(map[routeMetricKey]uint64)
+			}
+			if s.metrics.RouteBodyMaxReadGapSum == nil {
+				s.metrics.RouteBodyMaxReadGapSum = make(map[routeMetricKey]float64)
+			}
+			s.metrics.RouteBodyMaxReadGapCount[key]++
+			s.metrics.RouteBodyMaxReadGapSum[key] += durationSeconds(observed.MaxReadGap)
 		}
 	}
 	if s.metrics.RouteDurationCount == nil {
@@ -3439,6 +3657,12 @@ func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 		}
 		s.metrics.RouteWriteCount[key]++
 		s.metrics.RouteWriteSum[key] += durationSeconds(observed.ResponseWrite)
+	}
+	if observed.ResponseBytes > 0 {
+		if s.metrics.RouteResponseBytes == nil {
+			s.metrics.RouteResponseBytes = make(map[routeMetricKey]uint64)
+		}
+		s.metrics.RouteResponseBytes[key] += uint64(observed.ResponseBytes)
 	}
 	if s.metrics.RouteCacheStatus == nil {
 		s.metrics.RouteCacheStatus = make(map[routeCacheMetricKey]uint64)
@@ -3584,6 +3808,16 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	out.Metrics.RouteBodyWriteSum = cloneRouteFloatMap(s.metrics.RouteBodyWriteSum)
 	out.Metrics.RouteBodyThroughputCount = cloneRouteCounterMap(s.metrics.RouteBodyThroughputCount)
 	out.Metrics.RouteBodyThroughputSum = cloneRouteFloatMap(s.metrics.RouteBodyThroughputSum)
+	out.Metrics.RouteBodyMinThroughputCount = cloneRouteCounterMap(s.metrics.RouteBodyMinThroughputCount)
+	out.Metrics.RouteBodyMinThroughputSum = cloneRouteFloatMap(s.metrics.RouteBodyMinThroughputSum)
+	out.Metrics.RouteBodyMaxReadGapCount = cloneRouteCounterMap(s.metrics.RouteBodyMaxReadGapCount)
+	out.Metrics.RouteBodyMaxReadGapSum = cloneRouteFloatMap(s.metrics.RouteBodyMaxReadGapSum)
+	out.Metrics.RouteBodyRequestBytes = cloneRouteCounterMap(s.metrics.RouteBodyRequestBytes)
+	out.Metrics.RouteBodyReadBytes = cloneRouteCounterMap(s.metrics.RouteBodyReadBytes)
+	out.Metrics.RouteBodyIncompleteCount = cloneRouteCounterMap(s.metrics.RouteBodyIncompleteCount)
+	out.Metrics.RouteBodyReadErrorCount = cloneRouteCounterMap(s.metrics.RouteBodyReadErrorCount)
+	out.Metrics.RouteResponseBytes = cloneRouteCounterMap(s.metrics.RouteResponseBytes)
+	out.Metrics.RouteClientCancelCount = cloneRouteCounterMap(s.metrics.RouteClientCancelCount)
 	out.Metrics.RouteWriteCount = cloneRouteCounterMap(s.metrics.RouteWriteCount)
 	out.Metrics.RouteWriteSum = cloneRouteFloatMap(s.metrics.RouteWriteSum)
 	out.Metrics.RouteCacheStatus = cloneRouteCacheCounterMap(s.metrics.RouteCacheStatus)
@@ -4220,6 +4454,9 @@ func sortedRouteMetricKeys[V any](values map[routeMetricKey]V) []routeMetricKey 
 		if keys[i].PathPrefix != keys[j].PathPrefix {
 			return keys[i].PathPrefix < keys[j].PathPrefix
 		}
+		if keys[i].Method != keys[j].Method {
+			return keys[i].Method < keys[j].Method
+		}
 		if keys[i].AppID != keys[j].AppID {
 			return keys[i].AppID < keys[j].AppID
 		}
@@ -4313,9 +4550,10 @@ func sortedRouteCacheMetricKeys(values map[routeCacheMetricKey]uint64) []routeCa
 
 func routeMetricLabels(key routeMetricKey) string {
 	return fmt.Sprintf(
-		`hostname="%s",path_prefix="%s",app="%s",route_kind="%s",client_country="%s",client_region="%s",client_asn="%s"`,
+		`hostname="%s",path_prefix="%s",method="%s",app="%s",route_kind="%s",client_country="%s",client_region="%s",client_asn="%s"`,
 		prometheusLabelValue(key.Hostname),
 		prometheusLabelValue(model.NormalizeAppRoutePathPrefix(key.PathPrefix)),
+		prometheusLabelValue(key.Method),
 		prometheusLabelValue(key.AppID),
 		prometheusLabelValue(key.RouteKind),
 		prometheusLabelValue(key.ClientCountry),

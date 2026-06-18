@@ -104,21 +104,33 @@ func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSa
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_edge_performance_samples (
-	id, edge_id, edge_group_id, hostname, path_prefix, client_country, client_region, client_asn, runtime_region,
+	id, edge_id, edge_group_id, hostname, path_prefix, method, traffic_class, client_country, client_region, client_asn, runtime_region,
 	route_generation, cache_status, dns_policy, tls_handshake_ms, ttfb_ms, upstream_ms,
 	total_ms, status_code, sample_count, cache_hit_count, cache_observation_count,
-	error_count, sampled_at
+	error_count, upload_request_count, body_buffer_count, body_read_block_ms, file_write_ms,
+	upload_effective_bps, min_window_bps, max_read_gap_ms, request_body_bytes, request_body_read_bytes,
+	body_incomplete_count, body_read_error_count, response_write_ms, response_bytes, response_egress_bps,
+	origin_dns_ms, origin_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
+	origin_total_ms, streaming_request_count, websocket_request_count, sse_request_count, client_cancel_count,
+	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes, sampled_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14,
 	$15, $16, $17, $18, $19,
-	$20, $21, $22
+	$20, $21, $22, $23, $24,
+	$25, $26, $27, $28, $29,
+	$30, $31, $32, $33, $34,
+	$35, $36, $37, $38, $39,
+	$40, $41, $42, $43, $44,
+	$45, $46, $47, $48, $49
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_id = EXCLUDED.edge_id,
 	edge_group_id = EXCLUDED.edge_group_id,
 	hostname = EXCLUDED.hostname,
 	path_prefix = EXCLUDED.path_prefix,
+	method = EXCLUDED.method,
+	traffic_class = EXCLUDED.traffic_class,
 	client_country = EXCLUDED.client_country,
 	client_region = EXCLUDED.client_region,
 	client_asn = EXCLUDED.client_asn,
@@ -135,6 +147,34 @@ ON CONFLICT (id) DO UPDATE SET
 	cache_hit_count = EXCLUDED.cache_hit_count,
 	cache_observation_count = EXCLUDED.cache_observation_count,
 	error_count = EXCLUDED.error_count,
+	upload_request_count = EXCLUDED.upload_request_count,
+	body_buffer_count = EXCLUDED.body_buffer_count,
+	body_read_block_ms = EXCLUDED.body_read_block_ms,
+	file_write_ms = EXCLUDED.file_write_ms,
+	upload_effective_bps = EXCLUDED.upload_effective_bps,
+	min_window_bps = EXCLUDED.min_window_bps,
+	max_read_gap_ms = EXCLUDED.max_read_gap_ms,
+	request_body_bytes = EXCLUDED.request_body_bytes,
+	request_body_read_bytes = EXCLUDED.request_body_read_bytes,
+	body_incomplete_count = EXCLUDED.body_incomplete_count,
+	body_read_error_count = EXCLUDED.body_read_error_count,
+	response_write_ms = EXCLUDED.response_write_ms,
+	response_bytes = EXCLUDED.response_bytes,
+	response_egress_bps = EXCLUDED.response_egress_bps,
+	origin_dns_ms = EXCLUDED.origin_dns_ms,
+	origin_connect_ms = EXCLUDED.origin_connect_ms,
+	origin_request_write_ms = EXCLUDED.origin_request_write_ms,
+	origin_response_wait_ms = EXCLUDED.origin_response_wait_ms,
+	origin_ttfb_ms = EXCLUDED.origin_ttfb_ms,
+	origin_total_ms = EXCLUDED.origin_total_ms,
+	streaming_request_count = EXCLUDED.streaming_request_count,
+	websocket_request_count = EXCLUDED.websocket_request_count,
+	sse_request_count = EXCLUDED.sse_request_count,
+	client_cancel_count = EXCLUDED.client_cancel_count,
+	active_requests = EXCLUDED.active_requests,
+	active_body_buffers = EXCLUDED.active_body_buffers,
+	goroutine_count = EXCLUDED.goroutine_count,
+	memory_alloc_bytes = EXCLUDED.memory_alloc_bytes,
 	sampled_at = EXCLUDED.sampled_at
 `,
 			normalized.ID,
@@ -142,6 +182,8 @@ ON CONFLICT (id) DO UPDATE SET
 			normalized.EdgeGroupID,
 			normalized.Hostname,
 			normalized.PathPrefix,
+			normalized.Method,
+			normalized.TrafficClass,
 			normalized.ClientCountry,
 			normalized.ClientRegion,
 			normalized.ClientASN,
@@ -158,6 +200,34 @@ ON CONFLICT (id) DO UPDATE SET
 			normalized.CacheHitCount,
 			normalized.CacheObservationCount,
 			normalized.ErrorCount,
+			normalized.UploadRequestCount,
+			normalized.BodyBufferCount,
+			normalized.BodyReadBlockMS,
+			normalized.FileWriteMS,
+			normalized.UploadEffectiveBPS,
+			normalized.MinWindowBPS,
+			normalized.MaxReadGapMS,
+			normalized.RequestBodyBytes,
+			normalized.RequestBodyReadBytes,
+			normalized.BodyIncompleteCount,
+			normalized.BodyReadErrorCount,
+			normalized.ResponseWriteMS,
+			normalized.ResponseBytes,
+			normalized.ResponseEgressBPS,
+			normalized.OriginDNSMS,
+			normalized.OriginConnectMS,
+			normalized.OriginRequestWriteMS,
+			normalized.OriginResponseWaitMS,
+			normalized.OriginTTFBMS,
+			normalized.OriginTotalMS,
+			normalized.StreamingRequestCount,
+			normalized.WebSocketRequestCount,
+			normalized.SSERequestCount,
+			normalized.ClientCancelCount,
+			normalized.ActiveRequests,
+			normalized.ActiveBodyBuffers,
+			normalized.GoroutineCount,
+			normalized.MemoryAllocBytes,
 			normalized.SampledAt,
 		); err != nil {
 			return fmt.Errorf("insert edge performance sample: %w", err)
@@ -175,10 +245,15 @@ func (s *Store) pgListEdgePerformanceSamples(hostname string, since time.Time) (
 	}
 	query := `
 SELECT id, edge_id, edge_group_id, hostname, client_country, client_region, client_asn, runtime_region,
-	path_prefix,
+	path_prefix, method, traffic_class,
 	route_generation, cache_status, dns_policy, tls_handshake_ms, ttfb_ms, upstream_ms,
 	total_ms, status_code, sample_count, cache_hit_count, cache_observation_count,
-	error_count, sampled_at
+	error_count, upload_request_count, body_buffer_count, body_read_block_ms, file_write_ms,
+	upload_effective_bps, min_window_bps, max_read_gap_ms, request_body_bytes, request_body_read_bytes,
+	body_incomplete_count, body_read_error_count, response_write_ms, response_bytes, response_egress_bps,
+	origin_dns_ms, origin_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
+	origin_total_ms, streaming_request_count, websocket_request_count, sse_request_count, client_cancel_count,
+	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes, sampled_at
 FROM fugue_edge_performance_samples
 WHERE 1=1
 `
@@ -203,7 +278,14 @@ WHERE 1=1
 	for rows.Next() {
 		var sample model.EdgePerformanceSample
 		var tlsHandshake, ttfb, upstream, total sql.NullInt64
+		var bodyReadBlock, fileWrite, uploadEffective, minWindow, maxReadGap sql.NullInt64
+		var requestBodyBytes, requestBodyReadBytes, responseWrite, responseBytes, responseEgress sql.NullInt64
+		var originDNS, originConnect, originWrite, originWait, originTTFB, originTotal sql.NullInt64
+		var memoryAlloc sql.NullInt64
 		var sampleCount, cacheHitCount, cacheObservationCount, errorCount sql.NullInt64
+		var uploadRequestCount, bodyBufferCount, bodyIncompleteCount, bodyReadErrorCount sql.NullInt64
+		var streamingRequestCount, webSocketRequestCount, sseRequestCount, clientCancelCount sql.NullInt64
+		var activeRequests, activeBodyBuffers, goroutineCount sql.NullInt64
 		if err := rows.Scan(
 			&sample.ID,
 			&sample.EdgeID,
@@ -214,6 +296,8 @@ WHERE 1=1
 			&sample.ClientASN,
 			&sample.RuntimeRegion,
 			&sample.PathPrefix,
+			&sample.Method,
+			&sample.TrafficClass,
 			&sample.RouteGeneration,
 			&sample.CacheStatus,
 			&sample.DNSPolicy,
@@ -226,6 +310,34 @@ WHERE 1=1
 			&cacheHitCount,
 			&cacheObservationCount,
 			&errorCount,
+			&uploadRequestCount,
+			&bodyBufferCount,
+			&bodyReadBlock,
+			&fileWrite,
+			&uploadEffective,
+			&minWindow,
+			&maxReadGap,
+			&requestBodyBytes,
+			&requestBodyReadBytes,
+			&bodyIncompleteCount,
+			&bodyReadErrorCount,
+			&responseWrite,
+			&responseBytes,
+			&responseEgress,
+			&originDNS,
+			&originConnect,
+			&originWrite,
+			&originWait,
+			&originTTFB,
+			&originTotal,
+			&streamingRequestCount,
+			&webSocketRequestCount,
+			&sseRequestCount,
+			&clientCancelCount,
+			&activeRequests,
+			&activeBodyBuffers,
+			&goroutineCount,
+			&memoryAlloc,
 			&sample.SampledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan edge performance sample: %w", err)
@@ -246,6 +358,56 @@ WHERE 1=1
 		if errorCount.Valid {
 			sample.ErrorCount = int(errorCount.Int64)
 		}
+		sample.BodyReadBlockMS = edgePerformanceInt64FromNull(bodyReadBlock)
+		sample.FileWriteMS = edgePerformanceInt64FromNull(fileWrite)
+		sample.UploadEffectiveBPS = edgePerformanceInt64FromNull(uploadEffective)
+		sample.MinWindowBPS = edgePerformanceInt64FromNull(minWindow)
+		sample.MaxReadGapMS = edgePerformanceInt64FromNull(maxReadGap)
+		sample.RequestBodyBytes = edgePerformanceInt64FromNull(requestBodyBytes)
+		sample.RequestBodyReadBytes = edgePerformanceInt64FromNull(requestBodyReadBytes)
+		sample.ResponseWriteMS = edgePerformanceInt64FromNull(responseWrite)
+		sample.ResponseBytes = edgePerformanceInt64FromNull(responseBytes)
+		sample.ResponseEgressBPS = edgePerformanceInt64FromNull(responseEgress)
+		sample.OriginDNSMS = edgePerformanceInt64FromNull(originDNS)
+		sample.OriginConnectMS = edgePerformanceInt64FromNull(originConnect)
+		sample.OriginRequestWriteMS = edgePerformanceInt64FromNull(originWrite)
+		sample.OriginResponseWaitMS = edgePerformanceInt64FromNull(originWait)
+		sample.OriginTTFBMS = edgePerformanceInt64FromNull(originTTFB)
+		sample.OriginTotalMS = edgePerformanceInt64FromNull(originTotal)
+		sample.MemoryAllocBytes = edgePerformanceInt64FromNull(memoryAlloc)
+		if uploadRequestCount.Valid {
+			sample.UploadRequestCount = int(uploadRequestCount.Int64)
+		}
+		if bodyBufferCount.Valid {
+			sample.BodyBufferCount = int(bodyBufferCount.Int64)
+		}
+		if bodyIncompleteCount.Valid {
+			sample.BodyIncompleteCount = int(bodyIncompleteCount.Int64)
+		}
+		if bodyReadErrorCount.Valid {
+			sample.BodyReadErrorCount = int(bodyReadErrorCount.Int64)
+		}
+		if streamingRequestCount.Valid {
+			sample.StreamingRequestCount = int(streamingRequestCount.Int64)
+		}
+		if webSocketRequestCount.Valid {
+			sample.WebSocketRequestCount = int(webSocketRequestCount.Int64)
+		}
+		if sseRequestCount.Valid {
+			sample.SSERequestCount = int(sseRequestCount.Int64)
+		}
+		if clientCancelCount.Valid {
+			sample.ClientCancelCount = int(clientCancelCount.Int64)
+		}
+		if activeRequests.Valid {
+			sample.ActiveRequests = int(activeRequests.Int64)
+		}
+		if activeBodyBuffers.Valid {
+			sample.ActiveBodyBuffers = int(activeBodyBuffers.Int64)
+		}
+		if goroutineCount.Valid {
+			sample.GoroutineCount = int(goroutineCount.Int64)
+		}
 		samples = append(samples, sample)
 	}
 	if err := rows.Err(); err != nil {
@@ -260,6 +422,8 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	sample.EdgeGroupID = normalizeEdgeGroupID(sample.EdgeGroupID)
 	sample.Hostname = normalizeEdgePerformanceHostname(sample.Hostname)
 	sample.PathPrefix = model.NormalizeAppRoutePathPrefix(sample.PathPrefix)
+	sample.Method = strings.ToUpper(strings.TrimSpace(sample.Method))
+	sample.TrafficClass = strings.TrimSpace(strings.ToLower(sample.TrafficClass))
 	sample.ClientCountry = normalizeEdgeMetadataValue(sample.ClientCountry)
 	sample.ClientRegion = normalizeEdgeMetadataValue(sample.ClientRegion)
 	sample.ClientASN = normalizeEdgeMetadataValue(sample.ClientASN)
@@ -285,6 +449,39 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	if sample.ErrorCount < 0 {
 		sample.ErrorCount = 0
 	}
+	if sample.UploadRequestCount < 0 {
+		sample.UploadRequestCount = 0
+	}
+	if sample.BodyBufferCount < 0 {
+		sample.BodyBufferCount = 0
+	}
+	if sample.BodyIncompleteCount < 0 {
+		sample.BodyIncompleteCount = 0
+	}
+	if sample.BodyReadErrorCount < 0 {
+		sample.BodyReadErrorCount = 0
+	}
+	if sample.StreamingRequestCount < 0 {
+		sample.StreamingRequestCount = 0
+	}
+	if sample.WebSocketRequestCount < 0 {
+		sample.WebSocketRequestCount = 0
+	}
+	if sample.SSERequestCount < 0 {
+		sample.SSERequestCount = 0
+	}
+	if sample.ClientCancelCount < 0 {
+		sample.ClientCancelCount = 0
+	}
+	if sample.ActiveRequests < 0 {
+		sample.ActiveRequests = 0
+	}
+	if sample.ActiveBodyBuffers < 0 {
+		sample.ActiveBodyBuffers = 0
+	}
+	if sample.GoroutineCount < 0 {
+		sample.GoroutineCount = 0
+	}
 	if sample.TLSHandshakeMS < 0 {
 		sample.TLSHandshakeMS = 0
 	}
@@ -299,6 +496,57 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	}
 	if sample.StatusCode < 0 {
 		sample.StatusCode = 0
+	}
+	if sample.BodyReadBlockMS < 0 {
+		sample.BodyReadBlockMS = 0
+	}
+	if sample.FileWriteMS < 0 {
+		sample.FileWriteMS = 0
+	}
+	if sample.UploadEffectiveBPS < 0 {
+		sample.UploadEffectiveBPS = 0
+	}
+	if sample.MinWindowBPS < 0 {
+		sample.MinWindowBPS = 0
+	}
+	if sample.MaxReadGapMS < 0 {
+		sample.MaxReadGapMS = 0
+	}
+	if sample.RequestBodyBytes < 0 {
+		sample.RequestBodyBytes = 0
+	}
+	if sample.RequestBodyReadBytes < 0 {
+		sample.RequestBodyReadBytes = 0
+	}
+	if sample.ResponseWriteMS < 0 {
+		sample.ResponseWriteMS = 0
+	}
+	if sample.ResponseBytes < 0 {
+		sample.ResponseBytes = 0
+	}
+	if sample.ResponseEgressBPS < 0 {
+		sample.ResponseEgressBPS = 0
+	}
+	if sample.OriginDNSMS < 0 {
+		sample.OriginDNSMS = 0
+	}
+	if sample.OriginConnectMS < 0 {
+		sample.OriginConnectMS = 0
+	}
+	if sample.OriginRequestWriteMS < 0 {
+		sample.OriginRequestWriteMS = 0
+	}
+	if sample.OriginResponseWaitMS < 0 {
+		sample.OriginResponseWaitMS = 0
+	}
+	if sample.OriginTTFBMS < 0 {
+		sample.OriginTTFBMS = 0
+	}
+	if sample.OriginTotalMS < 0 {
+		sample.OriginTotalMS = 0
+	}
+	if sample.MemoryAllocBytes < 0 {
+		sample.MemoryAllocBytes = 0
 	}
 	return sample, nil
 }

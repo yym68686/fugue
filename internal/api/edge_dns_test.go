@@ -933,7 +933,10 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 	}
 	if usCandidate.Weight <= deCandidate.Weight ||
 		!strings.Contains(usCandidate.Reason, "latency_fast") ||
-		strings.Contains(deCandidate.Reason, "latency_fast") {
+		strings.Contains(deCandidate.Reason, "latency_fast") ||
+		usCandidate.Score <= 0 ||
+		deCandidate.Score <= usCandidate.Score ||
+		usCandidate.ScoreBreakdown["latency"] <= 0 {
 		t.Fatalf("expected latency weights and latency explanation, us=%+v de=%+v", usCandidate, deCandidate)
 	}
 	countryScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "country:de")
@@ -943,6 +946,67 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 	asnScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "asn:as3320")
 	if asnScoped == nil || asnScoped.SelectedEdgeGroupID != "edge-group-country-us" {
 		t.Fatalf("expected ASN scoped latency profile selecting US edge, got %+v", apiA.ScopedCandidates)
+	}
+}
+
+func TestEdgeDNSLatencyProfilePenalizesSlowRequestBodyReads(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	groups := map[string]*edgeDNSLatencyGroupAccumulator{}
+	edgeDNSLatencyAccumulate(groups, "edge-group-fast-upload", model.EdgePerformanceSample{
+		ID:                 "fast-upload",
+		EdgeID:             "edge-fast-1",
+		EdgeGroupID:        "edge-group-fast-upload",
+		Hostname:           "api.fugue.pro",
+		TrafficClass:       "large_body_api",
+		TTFBMS:             180,
+		UpstreamMS:         120,
+		TotalMS:            220,
+		StatusCode:         200,
+		SampleCount:        12,
+		UploadEffectiveBPS: 2 * 1024 * 1024,
+		MinWindowBPS:       1536 * 1024,
+		BodyReadBlockMS:    40,
+		MaxReadGapMS:       120,
+		SampledAt:          now.Add(-5 * time.Minute),
+	})
+	edgeDNSLatencyAccumulate(groups, "edge-group-slow-upload", model.EdgePerformanceSample{
+		ID:                  "slow-upload",
+		EdgeID:              "edge-slow-1",
+		EdgeGroupID:         "edge-group-slow-upload",
+		Hostname:            "api.fugue.pro",
+		TrafficClass:        "large_body_api",
+		TTFBMS:              185,
+		UpstreamMS:          125,
+		TotalMS:             225,
+		StatusCode:          200,
+		SampleCount:         12,
+		UploadEffectiveBPS:  64 * 1024,
+		MinWindowBPS:        32 * 1024,
+		BodyReadBlockMS:     1200,
+		MaxReadGapMS:        8000,
+		BodyIncompleteCount: 2,
+		SampledAt:           now.Add(-5 * time.Minute),
+	})
+
+	profile := buildEdgeDNSLatencyProfile("api.fugue.pro", edgeDNSLatencyScope{}, groups)
+	if profile == nil {
+		t.Fatal("expected slow request-body read metrics to create a latency profile")
+	}
+	if profile.BestEdgeGroupID != "edge-group-fast-upload" {
+		t.Fatalf("expected fast upload edge group to win, got %+v", profile)
+	}
+	fast := profile.Candidates["edge-group-fast-upload"]
+	slow := profile.Candidates["edge-group-slow-upload"]
+	if fast.Score <= 0 || slow.Score <= fast.Score || slow.Weight >= fast.Weight {
+		t.Fatalf("expected slow upload candidate to be scored and weighted lower, fast=%+v slow=%+v", fast, slow)
+	}
+	if slow.ScoreBreakdown["upload"] <= 0 || slow.ScoreBreakdown["upload_peer"] <= 0 {
+		t.Fatalf("expected upload penalties in score breakdown, slow=%+v", slow)
+	}
+	if profile.NodeCandidates["edge-fast-1"].Score <= 0 || profile.NodeCandidates["edge-slow-1"].Score <= 0 {
+		t.Fatalf("expected node-level quality candidates, got %+v", profile.NodeCandidates)
 	}
 }
 
@@ -1153,6 +1217,10 @@ func TestEdgeDNSBundleHoldsLatencyAwareDecisionDuringCooldown(t *testing.T) {
 	countryScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "country:de")
 	if countryScoped == nil || countryScoped.SelectedEdgeGroupID != "edge-group-country-de" || countryScoped.Reason != "latency_aware_cooldown_hold" {
 		t.Fatalf("expected country scoped decision to hold DE during cooldown, got %+v", apiA.ScopedCandidates)
+	}
+	if apiA.AnswerPolicy.ShadowSelectedEdgeGroupID != "edge-group-country-us" ||
+		apiA.AnswerPolicy.ShadowReason != "latency_aware_stable_window_24h" {
+		t.Fatalf("expected answer policy to expose shadow winner during cooldown, got %+v", apiA.AnswerPolicy)
 	}
 	first := countryScoped.Candidates[0]
 	if first.EdgeGroupID != "edge-group-country-de" || !strings.Contains(first.Reason, "latency_cooldown_hold") {

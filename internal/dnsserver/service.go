@@ -1938,6 +1938,9 @@ func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy mo
 			score -= 250
 		}
 	}
+	if candidate.Score > 0 {
+		score += int(candidate.Score)
+	}
 	return score
 }
 
