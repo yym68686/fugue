@@ -7,11 +7,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
 )
+
+const deployImageExistingAppSettleTimeout = 2 * time.Minute
 
 type deployCommonOptions struct {
 	Name                      string
@@ -858,23 +861,94 @@ func (c *CLI) runDeployImageExistingApp(imageRef, appRef string, opts deployImag
 	if err != nil {
 		return err
 	}
-	if err := c.waitForOptionalOperation(client, &response.Operation, opts.Wait); err != nil {
+	app, finalOp, err := c.waitForExistingImageApp(client, app.ID, strings.TrimSpace(imageRef), response.Operation, opts.Wait)
+	if err != nil {
 		return err
 	}
 	if c.wantsJSON() {
 		return writeJSON(c.stdout, map[string]any{
 			"app":       redactAppForOutput(app),
-			"operation": redactOperationForOutput(response.Operation),
+			"operation": redactOperationForOutput(*finalOp),
 			"build":     response.Build,
 		})
 	}
 	return writeKeyValues(c.stdout,
 		kvPair{Key: "app_id", Value: app.ID},
-		kvPair{Key: "operation_id", Value: response.Operation.ID},
+		kvPair{Key: "operation_id", Value: finalOp.ID},
 		kvPair{Key: "source_type", Value: response.Build.SourceType},
 		kvPair{Key: "build_strategy", Value: response.Build.BuildStrategy},
 		kvPair{Key: "image_ref", Value: firstNonEmpty(response.Build.ResolvedImageRef, response.Build.ImageRef)},
 	)
+}
+
+func (c *CLI) waitForExistingImageApp(client *Client, appID, imageRef string, op model.Operation, wait bool) (model.App, *model.Operation, error) {
+	finalOp := op
+	if wait {
+		finalOps, err := c.waitForOperations(client, []model.Operation{op})
+		if err != nil {
+			return model.App{}, &finalOp, err
+		}
+		if len(finalOps) > 0 {
+			finalOp = finalOps[0]
+		}
+		deadline := time.Now().Add(deployImageExistingAppSettleTimeout)
+		for {
+			active, err := loadActiveAppOperations(client, appID)
+			if err != nil {
+				return model.App{}, &finalOp, err
+			}
+			if len(active) > 0 {
+				finalOps, err := c.waitForOperations(client, active)
+				if err != nil {
+					return model.App{}, &finalOp, err
+				}
+				if len(finalOps) > 0 {
+					finalOp = finalOps[0]
+				}
+				continue
+			}
+			app, err := client.GetApp(appID)
+			if err != nil {
+				return model.App{}, &finalOp, err
+			}
+			if appBuildImageRefMatches(app, imageRef) && !appPhaseStillApplying(app) {
+				return app, &finalOp, nil
+			}
+			if time.Now().After(deadline) {
+				return model.App{}, &finalOp, fmt.Errorf("timed out waiting for app %s to deploy image %s", appID, imageRef)
+			}
+			sleepDeployWaitPoll()
+		}
+	}
+	app, err := client.GetApp(appID)
+	if err != nil {
+		return model.App{}, &finalOp, err
+	}
+	return app, &finalOp, nil
+}
+
+func appBuildImageRefMatches(app model.App, imageRef string) bool {
+	imageRef = strings.TrimSpace(imageRef)
+	if imageRef == "" {
+		return true
+	}
+	source := model.AppBuildSource(app)
+	if source == nil {
+		source = app.Source
+	}
+	if source == nil {
+		return false
+	}
+	return strings.TrimSpace(source.ImageRef) == imageRef
+}
+
+func appPhaseStillApplying(app model.App) bool {
+	switch strings.ToLower(strings.TrimSpace(app.Status.Phase)) {
+	case "building", "deploying", "importing", "pending":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateDeployImageExistingAppOptions(opts deployImageOptions) error {

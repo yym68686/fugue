@@ -734,6 +734,71 @@ func TestRunDeployImageCanUpdateExistingApp(t *testing.T) {
 	}
 }
 
+func TestRunDeployImageExistingAppWaitsForDerivedDeploy(t *testing.T) {
+	t.Parallel()
+
+	var gotBody rebuildPlanRequest
+	var getAppCalls int
+	var listOperationCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:old"},"spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			getAppCalls++
+			if getAppCalls == 1 {
+				_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:old"},"origin_source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:old"},"build_source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:old"},"spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:new"},"origin_source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:new"},"build_source":{"type":"docker-image","image_ref":"ghcr.io/example/demo:new"},"spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"deployed","current_replicas":1,"last_operation_id":"op_deploy"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:01:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/rebuild":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode rebuild body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","status":"pending","created_at":"2026-04-02T00:00:01Z","updated_at":"2026-04-02T00:00:01Z"},"build":{"source_type":"docker-image","image_ref":"ghcr.io/example/demo:new","build_strategy":""}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_import":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_import","app_id":"app_123","status":"completed","created_at":"2026-04-02T00:00:01Z","updated_at":"2026-04-02T00:00:02Z","completed_at":"2026-04-02T00:00:02Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations" && r.URL.Query().Get("app_id") == "app_123":
+			listOperationCalls++
+			if listOperationCalls == 1 {
+				_, _ = w.Write([]byte(`{"operations":[{"id":"op_deploy","app_id":"app_123","status":"running","created_at":"2026-04-02T00:00:03Z","updated_at":"2026-04-02T00:00:03Z"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"operations":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations/op_deploy":
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_deploy","app_id":"app_123","status":"completed","created_at":"2026-04-02T00:00:03Z","updated_at":"2026-04-02T00:00:04Z","completed_at":"2026-04-02T00:00:04Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"deploy", "image", "ghcr.io/example/demo:new",
+		"--app", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run deploy image existing app: %v stderr=%s", err, stderr.String())
+	}
+
+	if gotBody.ImageRef != "ghcr.io/example/demo:new" {
+		t.Fatalf("expected image override to be forwarded, got %+v", gotBody)
+	}
+	for _, want := range []string{"app_id=app_123", "operation_id=op_deploy", "image_ref=ghcr.io/example/demo:new"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+	if listOperationCalls < 2 {
+		t.Fatalf("expected CLI to re-check app operations after derived deploy completed, got %d", listOperationCalls)
+	}
+}
+
 func TestRunDeployLocalDryRunKeepsTopologyModeWhenDefaultNameCollidesWithExistingApp(t *testing.T) {
 	t.Parallel()
 
