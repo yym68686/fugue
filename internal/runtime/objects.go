@@ -1172,7 +1172,7 @@ func buildNetworkPolicyDNSRules() []map[string]any {
 		{"k8s-app": "coredns"},
 		{"app.kubernetes.io/name": "coredns"},
 	}
-	rules := make([]map[string]any, 0, len(selectors)+len(clusterDNSServiceCIDRBlocks()))
+	rules := make([]map[string]any, 0, len(selectors)+len(clusterDNSServiceCIDRBlocks())+1)
 	for _, selector := range selectors {
 		rules = append(rules, map[string]any{
 			"to": []map[string]any{
@@ -1202,6 +1202,13 @@ func buildNetworkPolicyDNSRules() []map[string]any {
 			"ports": buildNetworkPolicyDNSPorts(),
 		})
 	}
+	// K3s/kube-router can evaluate DNS traffic before ClusterIP DNAT, while
+	// kube-dns itself is still exposed through a Service IP in pod resolv.conf.
+	// Keep the strict CoreDNS selectors above, but retain a port-only DNS
+	// fallback so restricted egress does not break name resolution.
+	rules = append(rules, map[string]any{
+		"ports": buildNetworkPolicyDNSPorts(),
+	})
 	return rules
 }
 

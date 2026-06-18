@@ -2194,6 +2194,9 @@ func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
 		t.Fatalf("expected DNS egress ports 53/TCP and 53/UDP, got %#v", dnsPorts)
 	}
 	_ = networkPolicyIPBlock(t, egress, "10.43.0.10/32")
+	if !networkPolicyHasPortOnlyDNSRule(egress) {
+		t.Fatalf("expected port-only DNS fallback rule in %#v", egress)
+	}
 
 	publicIPv4 := networkPolicyIPBlock(t, egress, "0.0.0.0/0")
 	publicIPv4Except := publicIPv4["except"].([]string)
@@ -2340,6 +2343,22 @@ func networkPolicyIPBlock(t *testing.T, rules []map[string]any, cidr string) map
 	}
 	t.Fatalf("expected network policy ipBlock cidr %q in %#v", cidr, rules)
 	return nil
+}
+
+func networkPolicyHasPortOnlyDNSRule(rules []map[string]any) bool {
+	for _, rule := range rules {
+		if _, hasTo := rule["to"]; hasTo {
+			continue
+		}
+		ports, ok := rule["ports"].([]map[string]any)
+		if !ok || len(ports) != 2 {
+			continue
+		}
+		if ports[0]["port"] == 53 && ports[1]["port"] == 53 {
+			return true
+		}
+	}
+	return false
 }
 
 func stringSliceContains(values []string, needle string) bool {
