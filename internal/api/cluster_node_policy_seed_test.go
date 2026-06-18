@@ -562,6 +562,70 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	}
 }
 
+func TestSetClusterNodePolicyRemovesStaleRuntimeAppRoleLabel(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Edge Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "edge")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	labels := map[string]string{
+		runtimepkg.AppRuntimeRoleLabelKey:      runtimepkg.NodeRoleLabelValue,
+		runtimepkg.EdgeRoleLabelKey:            runtimepkg.NodeRoleLabelValue,
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+	}
+	if _, _, err := stateStore.BootstrapClusterNode(nodeSecret, "gcp1", "https://node.example", labels, "edge-node", "edge-fingerprint"); err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, labels)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/cluster/nodes/gcp1/policy", "bootstrap-secret", map[string]any{
+		"allow_app_runtime":          false,
+		"allow_builds":               false,
+		"allow_shared_pool":          false,
+		"allow_edge":                 true,
+		"allow_dns":                  false,
+		"allow_internal_maintenance": false,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	statusRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/node-policies/gcp1", "bootstrap-secret", nil)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var statusResponse struct {
+		NodePolicy model.ClusterNodePolicyStatus `json:"node_policy"`
+	}
+	mustDecodeJSON(t, statusRecorder, &statusResponse)
+	if statusResponse.NodePolicy.Labels[runtimepkg.AppRuntimeRoleLabelKey] != "" {
+		t.Fatalf("expected stale app-runtime role label removed, got %+v", statusResponse.NodePolicy)
+	}
+	if !statusResponse.NodePolicy.Reconciled || len(statusResponse.NodePolicy.ReconcileReasons) != 0 {
+		t.Fatalf("expected edge-only runtime node policy to be reconciled, got %+v", statusResponse.NodePolicy)
+	}
+}
+
 func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testing.T) {
 	t.Parallel()
 
