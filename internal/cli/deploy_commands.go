@@ -84,6 +84,8 @@ type deployGitHubOptions struct {
 
 type deployImageOptions struct {
 	deployCommonOptions
+	AppRef string
+	AppID  string
 }
 
 type importBundle struct {
@@ -252,19 +254,26 @@ Create an app directly from a container image.
 
 If you omit --name, Fugue derives one from the image name. Tenant and project
 selection follow the same automatic rules as "fugue deploy".
+
+Use --app to update an existing image-backed app to a new image reference while
+preserving its current runtime configuration.
 `),
 		Args: cobra.ExactArgs(1),
 		Example: strings.TrimSpace(`
-	  fugue deploy image nginx:1.27
-  fugue deploy image ghcr.io/example/app:latest --name demo --replicas 2
+fugue deploy image nginx:1.27
+fugue deploy image ghcr.io/example/app:latest --name demo --replicas 2
+fugue deploy image ghcr.io/example/app:sha-abc123 --app demo
 `),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return c.runDeployImage(args[0], opts)
 		},
 	}
 	bindCommonDeployFlags(cmd, &opts.deployCommonOptions, true)
+	cmd.Flags().StringVar(&opts.AppRef, "app", "", "Update an existing app by name or ID")
+	cmd.Flags().StringVar(&opts.AppID, "app-id", "", "Existing app ID to update")
 	_ = cmd.Flags().MarkHidden("runtime-id")
 	_ = cmd.Flags().MarkHidden("service-port")
+	_ = cmd.Flags().MarkHidden("app-id")
 	_ = cmd.Flags().MarkHidden("source-dir")
 	_ = cmd.Flags().MarkHidden("build")
 	_ = cmd.Flags().MarkHidden("build-strategy")
@@ -727,6 +736,13 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	if imageRef == "" {
 		return fmt.Errorf("image is required")
 	}
+	appRef := strings.TrimSpace(opts.AppRef)
+	if strings.TrimSpace(opts.AppID) != "" {
+		if appRef != "" && !strings.EqualFold(appRef, opts.AppID) {
+			return fmt.Errorf("--app and --app-id must point to the same app")
+		}
+		appRef = strings.TrimSpace(opts.AppID)
+	}
 	if opts.UpdateExisting || opts.DeleteMissing || opts.Replace || opts.DryRun {
 		return fmt.Errorf("--update-existing, --replace, --delete-missing, and --dry-run are only supported for source topology imports")
 	}
@@ -735,6 +751,9 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 	}
 	if len(opts.ServiceStorageSizes) > 0 {
 		return fmt.Errorf("--service-storage-size is only supported for source imports")
+	}
+	if appRef != "" {
+		return c.runDeployImageExistingApp(imageRef, appRef, opts)
 	}
 	workingDir, err := os.Getwd()
 	if err != nil {
@@ -809,6 +828,86 @@ func (c *CLI) runDeployImage(imageRef string, opts deployImageOptions) error {
 		PrimaryApp: response.App,
 		PrimaryOp:  response.Operation,
 	}, opts.Wait)
+}
+
+func (c *CLI) runDeployImageExistingApp(imageRef, appRef string, opts deployImageOptions) error {
+	if strings.TrimSpace(opts.Name) != "" {
+		return fmt.Errorf("--name cannot be used with --app")
+	}
+	if err := validateDeployImageExistingAppOptions(opts); err != nil {
+		return err
+	}
+	client, err := c.newClient()
+	if err != nil {
+		return err
+	}
+	app, err := c.resolveNamedApp(client, appRef)
+	if err != nil {
+		return err
+	}
+	app, err = client.GetApp(app.ID)
+	if err != nil {
+		return err
+	}
+	if model.AppOriginSource(app) == nil {
+		return fmt.Errorf("app does not have source metadata to update")
+	}
+	response, err := client.RebuildApp(app.ID, rebuildPlanRequest{
+		ImageRef: strings.TrimSpace(imageRef),
+	})
+	if err != nil {
+		return err
+	}
+	if err := c.waitForOptionalOperation(client, &response.Operation, opts.Wait); err != nil {
+		return err
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{
+			"app":       redactAppForOutput(app),
+			"operation": redactOperationForOutput(response.Operation),
+			"build":     response.Build,
+		})
+	}
+	return writeKeyValues(c.stdout,
+		kvPair{Key: "app_id", Value: app.ID},
+		kvPair{Key: "operation_id", Value: response.Operation.ID},
+		kvPair{Key: "source_type", Value: response.Build.SourceType},
+		kvPair{Key: "build_strategy", Value: response.Build.BuildStrategy},
+		kvPair{Key: "image_ref", Value: firstNonEmpty(response.Build.ResolvedImageRef, response.Build.ImageRef)},
+	)
+}
+
+func validateDeployImageExistingAppOptions(opts deployImageOptions) error {
+	switch {
+	case strings.TrimSpace(opts.Description) != "":
+		return fmt.Errorf("--description is not supported with deploy image --app")
+	case strings.TrimSpace(opts.EnvFile) != "":
+		return fmt.Errorf("--env-file is not supported with deploy image --app")
+	case opts.CreateProject:
+		return fmt.Errorf("--create-project is not supported with deploy image --app")
+	case strings.TrimSpace(opts.RuntimeName) != "" || strings.TrimSpace(opts.RuntimeID) != "":
+		return fmt.Errorf("--runtime is not supported with deploy image --app")
+	case opts.Replicas > 0:
+		return fmt.Errorf("--replicas is not supported with deploy image --app")
+	case opts.ServicePort > 0:
+		return fmt.Errorf("--port is not supported with deploy image --app")
+	case opts.Background:
+		return fmt.Errorf("--background is not supported with deploy image --app")
+	case strings.TrimSpace(opts.StartupCommand) != "":
+		return fmt.Errorf("--command is not supported with deploy image --app")
+	case len(opts.FileSpecs) > 0 || len(opts.SecretFileSpecs) > 0:
+		return fmt.Errorf("--file and --secret-file are not supported with deploy image --app")
+	case strings.TrimSpace(opts.StorageMode) != "" || strings.TrimSpace(opts.StorageSize) != "" || strings.TrimSpace(opts.StorageClass) != "" || len(opts.StorageMounts) > 0 || len(opts.StorageFiles) > 0:
+		return fmt.Errorf("storage flags are not supported with deploy image --app")
+	case opts.ManagedPostgres || strings.TrimSpace(opts.PostgresRuntime) != "" || strings.TrimSpace(opts.PostgresRuntimeID) != "" ||
+		strings.TrimSpace(opts.PostgresDatabase) != "" || strings.TrimSpace(opts.PostgresUser) != "" || strings.TrimSpace(opts.PostgresPassword) != "" ||
+		strings.TrimSpace(opts.PostgresImage) != "" || strings.TrimSpace(opts.PostgresServiceName) != "" || strings.TrimSpace(opts.PostgresStorageSize) != "" ||
+		strings.TrimSpace(opts.PostgresStorageClass) != "" || opts.PostgresInstances > 0 || opts.PostgresSyncReplicas > 0 ||
+		strings.TrimSpace(opts.PostgresFailoverTo) != "" || strings.TrimSpace(opts.PostgresFailoverRuntimeID) != "":
+		return fmt.Errorf("managed postgres flags are not supported with deploy image --app")
+	default:
+		return nil
+	}
 }
 
 func resolveDeployPath(pathArg, compatDir string) (string, error) {
