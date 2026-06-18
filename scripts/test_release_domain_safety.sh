@@ -69,6 +69,9 @@ node_local_build_plane_preflight_override_allowed || fail "node updater registry
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/cluster_node_policy.go\ninternal/api/cluster_node_policy_seed_test.go\ninternal/api/cluster_node_policy_status.go\ninternal/api/cluster_node_views.go\ninternal/api/cluster_node_views_test.go\ninternal/api/join_cluster.go\ninternal/api/runtime_pool.go\ninternal/api/server_test.go\ninternal/store/machines.go\ninternal/store/store_test.go'
 node_local_build_plane_preflight_override_allowed || fail "node-policy join fixes must be allowed to bypass existing node-policy preflight"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/api/cluster_nodes.go\ninternal/api/cluster_node_policy_seed_test.go'
+node_local_build_plane_preflight_override_allowed || fail "cluster node policy drift fixes must be allowed to bypass existing node-policy preflight"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/import_github_compose_test.go\ninternal/api/import_github_topology.go\ninternal/api/import_network_mode.go'
 node_local_build_plane_preflight_override_allowed || fail "compose import process fixes must be allowed to bypass registry/node-policy preflight"
 

@@ -879,6 +879,8 @@ node_local_build_plane_preflight_override_allowed() {
       internal/controller/managed_app_rollout_test.go|\
       internal/store/machines.go|\
       internal/store/store_test.go|\
+      internal/api/cluster_nodes.go|\
+      internal/api/cluster_nodes_test.go|\
       internal/api/cluster_node_policy.go|\
       internal/api/cluster_node_policy_seed_test.go|\
       internal/api/cluster_node_policy_status.go|\
