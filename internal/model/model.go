@@ -184,6 +184,29 @@ const (
 	DefaultAppVolumeReplicationSchedule      = "*/5 * * * *"
 	DefaultAppImageMirrorLimit               = 1
 	MaxAppTerminationGracePeriodSeconds      = 24 * 60 * 60
+
+	AppReleaseRoleStable    = "stable"
+	AppReleaseRoleCandidate = "candidate"
+	AppReleaseRolePrevious  = "previous"
+	AppReleaseRoleRetired   = "retired"
+
+	AppReleaseStatusCreating = "creating"
+	AppReleaseStatusReady    = "ready"
+	AppReleaseStatusServing  = "serving"
+	AppReleaseStatusFailed   = "failed"
+	AppReleaseStatusRetired  = "retired"
+
+	AppTrafficModeSingle   = "single"
+	AppTrafficModeCanary   = "canary"
+	AppTrafficModeWeighted = "weighted"
+	AppTrafficModePaused   = "paused"
+
+	AppReleaseGateStatusPass = "pass"
+	AppReleaseGateStatusWarn = "warn"
+	AppReleaseGateStatusFail = "fail"
+
+	AppReleaseProbeKindHTTP       = "http"
+	AppReleaseProbeKindHTTPStream = "http_stream"
 )
 
 func NormalizeGitHubAppSourceType(raw string) string {
@@ -1757,6 +1780,102 @@ type App struct {
 	UpdatedAt            time.Time           `json:"updated_at"`
 }
 
+type AppRelease struct {
+	ID               string     `json:"id"`
+	TenantID         string     `json:"tenant_id"`
+	AppID            string     `json:"app_id"`
+	Role             string     `json:"role"`
+	SourceRef        string     `json:"source_ref,omitempty"`
+	ResolvedImageRef string     `json:"resolved_image_ref,omitempty"`
+	UpstreamURL      string     `json:"upstream_url,omitempty"`
+	RuntimeID        string     `json:"runtime_id,omitempty"`
+	DeploymentName   string     `json:"deployment_name,omitempty"`
+	ServiceName      string     `json:"service_name,omitempty"`
+	Status           string     `json:"status"`
+	StatusReason     string     `json:"status_reason,omitempty"`
+	SpecSnapshot     *AppSpec   `json:"spec_snapshot,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	ReadyAt          *time.Time `json:"ready_at,omitempty"`
+	PromotedAt       *time.Time `json:"promoted_at,omitempty"`
+	RetiredAt        *time.Time `json:"retired_at,omitempty"`
+}
+
+type AppReleaseFilter struct {
+	TenantID       string
+	AppID          string
+	Role           string
+	IncludeRetired bool
+	PlatformAdmin  bool
+}
+
+type AppTrafficPolicy struct {
+	ID                 string    `json:"id"`
+	TenantID           string    `json:"tenant_id"`
+	AppID              string    `json:"app_id"`
+	Mode               string    `json:"mode"`
+	StableReleaseID    string    `json:"stable_release_id,omitempty"`
+	CandidateReleaseID string    `json:"candidate_release_id,omitempty"`
+	StableWeight       int       `json:"stable_weight"`
+	CandidateWeight    int       `json:"candidate_weight"`
+	StickyHeader       string    `json:"sticky_header,omitempty"`
+	StickyCookie       string    `json:"sticky_cookie,omitempty"`
+	UpdatedByType      string    `json:"updated_by_type,omitempty"`
+	UpdatedByID        string    `json:"updated_by_id,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+type AppReleaseGatePolicy struct {
+	WindowSeconds              int               `json:"window_seconds,omitempty"`
+	MinCandidateRequests       int               `json:"min_candidate_requests,omitempty"`
+	Max5xxRate                 float64           `json:"max_5xx_rate,omitempty"`
+	MaxEdgeUpstreamErrorRate   float64           `json:"max_edge_upstream_error_rate,omitempty"`
+	MaxP95TTFBMilliseconds     int               `json:"max_p95_ttfb_ms,omitempty"`
+	MaxP99DurationMilliseconds int               `json:"max_p99_duration_ms,omitempty"`
+	Probes                     []AppReleaseProbe `json:"probes,omitempty"`
+}
+
+type AppReleaseProbe struct {
+	Name                          string            `json:"name,omitempty"`
+	Kind                          string            `json:"kind,omitempty"`
+	Method                        string            `json:"method,omitempty"`
+	Path                          string            `json:"path"`
+	Headers                       map[string]string `json:"headers,omitempty"`
+	Body                          string            `json:"body,omitempty"`
+	ExpectedStatus                int               `json:"expected_status,omitempty"`
+	ExpectedContentType           string            `json:"expected_content_type,omitempty"`
+	ExpectedBodyContains          string            `json:"expected_body_contains,omitempty"`
+	ExpectStreamEventBeforeMillis int               `json:"expect_stream_event_before_ms,omitempty"`
+	TimeoutMilliseconds           int               `json:"timeout_ms,omitempty"`
+	MaxTTFBMilliseconds           int               `json:"max_ttfb_ms,omitempty"`
+	MaxDurationMilliseconds       int               `json:"max_duration_ms,omitempty"`
+}
+
+type AppReleaseGateResult struct {
+	Status       string                  `json:"status"`
+	ReleaseID    string                  `json:"release_id,omitempty"`
+	Role         string                  `json:"role,omitempty"`
+	Window       string                  `json:"window,omitempty"`
+	Evidence     []string                `json:"evidence,omitempty"`
+	Warnings     []string                `json:"warnings,omitempty"`
+	Failures     []string                `json:"failures,omitempty"`
+	ProbeResults []AppReleaseProbeResult `json:"probe_results,omitempty"`
+	Metrics      map[string]any          `json:"metrics,omitempty"`
+	EvaluatedAt  time.Time               `json:"evaluated_at"`
+}
+
+type AppReleaseProbeResult struct {
+	Name           string `json:"name,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Status         string `json:"status"`
+	StatusCode     int    `json:"status_code,omitempty"`
+	DurationMillis int64  `json:"duration_ms,omitempty"`
+	TTFBMillis     int64  `json:"ttfb_ms,omitempty"`
+	Error          string `json:"error,omitempty"`
+	Evidence       string `json:"evidence,omitempty"`
+}
+
 type ImageLocation struct {
 	ID                string     `json:"id"`
 	TenantID          string     `json:"tenant_id,omitempty"`
@@ -2234,6 +2353,8 @@ type State struct {
 	NodeUpdateTasks            []NodeUpdateTask            `json:"node_update_tasks,omitempty"`
 	ImageLocations             []ImageLocation             `json:"image_locations,omitempty"`
 	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
+	AppReleases                []AppRelease                `json:"app_releases,omitempty"`
+	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
 	AppDatabaseImportJobs      []AppDatabaseImportJob      `json:"app_database_import_jobs,omitempty"`

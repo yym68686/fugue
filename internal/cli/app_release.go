@@ -18,6 +18,12 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 		Short:   "Inspect and operate app releases",
 	}
 	cmd.AddCommand(
+		c.newAppReleaseCanaryCommand(),
+		c.newAppReleaseTrafficCommand(),
+		c.newAppReleaseProbeCommand(),
+		c.newAppReleaseGateCommand(),
+		c.newAppReleasePromoteCommand(),
+		c.newAppReleaseAbortCommand(),
 		c.newAppReleaseListCommand(),
 		c.newAppReleaseTrackingCommand(),
 		c.newAppReleasePruneCommand(),
@@ -26,6 +32,299 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
 		hideCompatCommand(c.newAppReleaseRollbackCommand(), "fugue app rollback"),
 	)
+	return cmd
+}
+
+func (c *CLI) newAppReleaseCanaryCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "canary",
+		Short: "Create and control weighted candidate releases",
+	}
+	cmd.AddCommand(c.newAppReleaseCanaryStartCommand())
+	return cmd
+}
+
+func (c *CLI) newAppReleaseCanaryStartCommand() *cobra.Command {
+	opts := struct {
+		SourceRef        string
+		ResolvedImageRef string
+		UpstreamURL      string
+		RuntimeID        string
+		Traffic          int
+	}{Traffic: 0}
+	cmd := &cobra.Command{
+		Use:   "start <app>",
+		Short: "Create a candidate release and optionally send traffic to it",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			if opts.Traffic < 0 || opts.Traffic > 100 {
+				return fmt.Errorf("--traffic must be between 0 and 100")
+			}
+			if _, err := client.GetAppTrafficPolicy(app.ID); err != nil {
+				return err
+			}
+			status := model.AppReleaseStatusReady
+			if strings.TrimSpace(opts.UpstreamURL) == "" {
+				status = model.AppReleaseStatusCreating
+			}
+			created, err := client.CreateAppRelease(app.ID, appReleaseCreateCLIRequest{
+				Role:             model.AppReleaseRoleCandidate,
+				SourceRef:        opts.SourceRef,
+				ResolvedImageRef: opts.ResolvedImageRef,
+				UpstreamURL:      opts.UpstreamURL,
+				RuntimeID:        opts.RuntimeID,
+				Status:           status,
+			})
+			if err != nil {
+				return err
+			}
+			traffic, err := client.PatchAppTrafficPolicy(app.ID, appTrafficPatchCLIRequest{
+				Mode:               model.AppTrafficModeCanary,
+				CandidateReleaseID: created.Release.ID,
+				StableWeight:       intPtr(100 - opts.Traffic),
+				CandidateWeight:    intPtr(opts.Traffic),
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"release": created.Release, "traffic": traffic.Traffic})
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "app_id", Value: app.ID},
+				kvPair{Key: "candidate_release_id", Value: created.Release.ID},
+				kvPair{Key: "candidate_status", Value: created.Release.Status},
+				kvPair{Key: "stable_weight", Value: fmt.Sprintf("%d", traffic.Traffic.StableWeight)},
+				kvPair{Key: "candidate_weight", Value: fmt.Sprintf("%d", traffic.Traffic.CandidateWeight)},
+			)
+		},
+	}
+	cmd.Flags().StringVar(&opts.SourceRef, "source-ref", "", "Source image or git reference for the candidate release")
+	cmd.Flags().StringVar(&opts.ResolvedImageRef, "resolved-image", "", "Resolved candidate image reference")
+	cmd.Flags().StringVar(&opts.UpstreamURL, "candidate-upstream", "", "Candidate upstream base URL to receive weighted traffic")
+	cmd.Flags().StringVar(&opts.RuntimeID, "runtime", "", "Runtime id associated with the candidate")
+	cmd.Flags().IntVar(&opts.Traffic, "traffic", opts.Traffic, "Initial candidate traffic percentage")
+	return cmd
+}
+
+func (c *CLI) newAppReleaseTrafficCommand() *cobra.Command {
+	opts := struct {
+		StableWeight       int
+		CandidateWeight    int
+		CandidateReleaseID string
+		Mode               string
+	}{StableWeight: -1, CandidateWeight: -1, Mode: model.AppTrafficModeCanary}
+	cmd := &cobra.Command{
+		Use:   "traffic <app>",
+		Short: "Set stable/candidate traffic weights",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			current, err := client.GetAppTrafficPolicy(app.ID)
+			if err != nil {
+				return err
+			}
+			stable := opts.StableWeight
+			candidate := opts.CandidateWeight
+			if stable < 0 && candidate < 0 {
+				return fmt.Errorf("--stable or --candidate is required")
+			}
+			if stable < 0 {
+				stable = 100 - candidate
+			}
+			if candidate < 0 {
+				candidate = 100 - stable
+			}
+			if stable < 0 || candidate < 0 || stable+candidate != 100 {
+				return fmt.Errorf("stable and candidate weights must be non-negative and sum to 100")
+			}
+			candidateReleaseID := firstNonEmpty(opts.CandidateReleaseID, current.Traffic.CandidateReleaseID)
+			response, err := client.PatchAppTrafficPolicy(app.ID, appTrafficPatchCLIRequest{
+				Mode:               opts.Mode,
+				CandidateReleaseID: candidateReleaseID,
+				StableWeight:       intPtr(stable),
+				CandidateWeight:    intPtr(candidate),
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeTrafficPolicySummary(c.stdout, response.Traffic)
+		},
+	}
+	cmd.Flags().IntVar(&opts.StableWeight, "stable", opts.StableWeight, "Stable traffic percentage")
+	cmd.Flags().IntVar(&opts.CandidateWeight, "candidate", opts.CandidateWeight, "Candidate traffic percentage")
+	cmd.Flags().StringVar(&opts.CandidateReleaseID, "candidate-release", "", "Candidate release id")
+	cmd.Flags().StringVar(&opts.Mode, "mode", opts.Mode, "Traffic mode")
+	return cmd
+}
+
+func (c *CLI) newAppReleaseProbeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "probe <app> [release-id]",
+		Short: "Run active probes against a release upstream",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			releaseID, err := resolveCLIReleaseID(client, app.ID, args, model.AppReleaseRoleCandidate)
+			if err != nil {
+				return err
+			}
+			response, err := client.ProbeAppRelease(app.ID, releaseID, nil)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeProbeResults(c.stdout, response.Status, response.Results)
+		},
+	}
+}
+
+func (c *CLI) newAppReleaseGateCommand() *cobra.Command {
+	opts := struct {
+		WindowSeconds    int
+		MinRequests      int
+		Max5xxRate       float64
+		MaxUpstreamRate  float64
+		MaxP95TTFBMS     int
+		MaxP99DurationMS int
+	}{WindowSeconds: 600, Max5xxRate: 0.01, MaxUpstreamRate: 0.005, MaxP95TTFBMS: 2000, MaxP99DurationMS: 30000}
+	cmd := &cobra.Command{
+		Use:   "gate <app> [release-id]",
+		Short: "Evaluate release health gates",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			releaseID, err := resolveCLIReleaseID(client, app.ID, args, model.AppReleaseRoleCandidate)
+			if err != nil {
+				return err
+			}
+			response, err := client.EvaluateAppReleaseGate(app.ID, releaseID, model.AppReleaseGatePolicy{
+				WindowSeconds:              opts.WindowSeconds,
+				MinCandidateRequests:       opts.MinRequests,
+				Max5xxRate:                 opts.Max5xxRate,
+				MaxEdgeUpstreamErrorRate:   opts.MaxUpstreamRate,
+				MaxP95TTFBMilliseconds:     opts.MaxP95TTFBMS,
+				MaxP99DurationMilliseconds: opts.MaxP99DurationMS,
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeGateSummary(c.stdout, response.Gate)
+		},
+	}
+	cmd.Flags().IntVar(&opts.WindowSeconds, "window-seconds", opts.WindowSeconds, "Observation window in seconds")
+	cmd.Flags().IntVar(&opts.MinRequests, "min-requests", opts.MinRequests, "Minimum candidate request count")
+	cmd.Flags().Float64Var(&opts.Max5xxRate, "max-5xx-rate", opts.Max5xxRate, "Maximum 5xx ratio")
+	cmd.Flags().Float64Var(&opts.MaxUpstreamRate, "max-upstream-error-rate", opts.MaxUpstreamRate, "Maximum edge upstream error ratio")
+	cmd.Flags().IntVar(&opts.MaxP95TTFBMS, "max-p95-ttfb-ms", opts.MaxP95TTFBMS, "Maximum p95 TTFB in milliseconds")
+	cmd.Flags().IntVar(&opts.MaxP99DurationMS, "max-p99-duration-ms", opts.MaxP99DurationMS, "Maximum p99 duration in milliseconds")
+	return cmd
+}
+
+func (c *CLI) newAppReleasePromoteCommand() *cobra.Command {
+	opts := struct{ To int }{To: 100}
+	cmd := &cobra.Command{
+		Use:   "promote <app> [release-id]",
+		Short: "Promote a candidate to a traffic percentage or stable",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			releaseID, err := resolveCLIReleaseID(client, app.ID, args, model.AppReleaseRoleCandidate)
+			if err != nil {
+				return err
+			}
+			response, err := client.PromoteAppRelease(app.ID, releaseID, opts.To)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeTrafficPolicySummary(c.stdout, response.Traffic)
+		},
+	}
+	cmd.Flags().IntVar(&opts.To, "to", opts.To, "Candidate traffic percentage; 100 finalizes as stable")
+	return cmd
+}
+
+func (c *CLI) newAppReleaseAbortCommand() *cobra.Command {
+	opts := struct {
+		MarkFailed bool
+		Reason     string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "abort <app> [release-id]",
+		Short: "Route all traffic back to stable",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			releaseID, err := resolveCLIReleaseID(client, app.ID, args, model.AppReleaseRoleCandidate)
+			if err != nil {
+				return err
+			}
+			response, err := client.AbortAppRelease(app.ID, releaseID, opts.MarkFailed, opts.Reason)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeTrafficPolicySummary(c.stdout, response.Traffic)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.MarkFailed, "mark-failed", false, "Mark the candidate release failed")
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Failure reason when marking failed")
 	return cmd
 }
 
@@ -619,4 +918,80 @@ func timeValue(value *time.Time) time.Time {
 		return time.Time{}
 	}
 	return value.UTC()
+}
+
+func resolveCLIReleaseID(client *Client, appID string, args []string, role string) (string, error) {
+	if len(args) >= 2 && strings.TrimSpace(args[1]) != "" {
+		return strings.TrimSpace(args[1]), nil
+	}
+	response, err := client.ListAppReleases(appID)
+	if err != nil {
+		return "", err
+	}
+	role = strings.TrimSpace(role)
+	candidates := make([]model.AppRelease, 0, len(response.Releases))
+	for _, release := range response.Releases {
+		if role != "" && strings.TrimSpace(release.Role) != role {
+			continue
+		}
+		candidates = append(candidates, release)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+	})
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no %s release found; pass release-id explicitly", role)
+	}
+	return candidates[0].ID, nil
+}
+
+func writeTrafficPolicySummary(w interface{ Write([]byte) (int, error) }, policy model.AppTrafficPolicy) error {
+	return writeKeyValues(w,
+		kvPair{Key: "app_id", Value: policy.AppID},
+		kvPair{Key: "mode", Value: policy.Mode},
+		kvPair{Key: "stable_release_id", Value: policy.StableReleaseID},
+		kvPair{Key: "candidate_release_id", Value: policy.CandidateReleaseID},
+		kvPair{Key: "stable_weight", Value: fmt.Sprintf("%d", policy.StableWeight)},
+		kvPair{Key: "candidate_weight", Value: fmt.Sprintf("%d", policy.CandidateWeight)},
+	)
+}
+
+func writeProbeResults(w interface{ Write([]byte) (int, error) }, status string, results []model.AppReleaseProbeResult) error {
+	pairs := []kvPair{{Key: "status", Value: status}, {Key: "probe_count", Value: fmt.Sprintf("%d", len(results))}}
+	for idx, result := range results {
+		prefix := fmt.Sprintf("probe_%d", idx+1)
+		pairs = append(pairs,
+			kvPair{Key: prefix + "_name", Value: firstNonEmpty(result.Name, result.Path)},
+			kvPair{Key: prefix + "_status", Value: result.Status},
+			kvPair{Key: prefix + "_status_code", Value: fmt.Sprintf("%d", result.StatusCode)},
+			kvPair{Key: prefix + "_ttfb_ms", Value: fmt.Sprintf("%d", result.TTFBMillis)},
+			kvPair{Key: prefix + "_duration_ms", Value: fmt.Sprintf("%d", result.DurationMillis)},
+		)
+		if strings.TrimSpace(result.Error) != "" {
+			pairs = append(pairs, kvPair{Key: prefix + "_error", Value: result.Error})
+		}
+	}
+	return writeKeyValues(w, pairs...)
+}
+
+func writeGateSummary(w interface{ Write([]byte) (int, error) }, gate model.AppReleaseGateResult) error {
+	pairs := []kvPair{
+		{Key: "status", Value: gate.Status},
+		{Key: "release_id", Value: gate.ReleaseID},
+		{Key: "role", Value: gate.Role},
+		{Key: "window", Value: gate.Window},
+		{Key: "failure_count", Value: fmt.Sprintf("%d", len(gate.Failures))},
+		{Key: "warning_count", Value: fmt.Sprintf("%d", len(gate.Warnings))},
+	}
+	for idx, failure := range gate.Failures {
+		pairs = append(pairs, kvPair{Key: fmt.Sprintf("failure_%d", idx+1), Value: failure})
+	}
+	for idx, warning := range gate.Warnings {
+		pairs = append(pairs, kvPair{Key: fmt.Sprintf("warning_%d", idx+1), Value: warning})
+	}
+	return writeKeyValues(w, pairs...)
+}
+
+func intPtr(value int) *int {
+	return &value
 }

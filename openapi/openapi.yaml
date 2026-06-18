@@ -2972,6 +2972,212 @@ paths:
                 $ref: "#/components/schemas/AppImageTrackingResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/releases:
+    get:
+      operationId: listAppReleases
+      summary: List App Releases
+      tags: [Apps]
+      x-fugue-handler: handleListAppReleases
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppReleaseListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createAppRelease
+      summary: Create App Release
+      tags: [Apps]
+      x-fugue-handler: handleCreateAppRelease
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppReleaseCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppReleaseResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/traffic:
+    get:
+      operationId: getAppTrafficPolicy
+      summary: Get App Traffic Policy
+      tags: [Apps]
+      x-fugue-handler: handleGetAppTrafficPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppTrafficResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      operationId: patchAppTrafficPolicy
+      summary: Patch App Traffic Policy
+      tags: [Apps]
+      x-fugue-handler: handlePatchAppTrafficPolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppTrafficPatchRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppTrafficResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/releases/{release_id}/probe:
+    post:
+      operationId: probeAppRelease
+      summary: Probe App Release
+      tags: [Apps]
+      x-fugue-handler: handleProbeAppRelease
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: release_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppReleaseProbeRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppReleaseProbeResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/releases/{release_id}/gate/evaluate:
+    post:
+      operationId: evaluateAppReleaseGate
+      summary: Evaluate App Release Gate
+      tags: [Apps]
+      x-fugue-handler: handleEvaluateAppReleaseGate
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: release_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppReleaseGateRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppReleaseGateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/releases/{release_id}/promote:
+    post:
+      operationId: promoteAppRelease
+      summary: Promote App Release
+      tags: [Apps]
+      x-fugue-handler: handlePromoteAppRelease
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: release_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppReleasePromoteRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppTrafficResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/releases/{release_id}/abort:
+    post:
+      operationId: abortAppRelease
+      summary: Abort App Release
+      tags: [Apps]
+      x-fugue-handler: handleAbortAppRelease
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: release_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppReleaseAbortRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppTrafficResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/image-sync:
     post:
       operationId: syncAppImage
@@ -9483,9 +9689,13 @@ components:
           enum: [kubernetes-service, mesh]
         upstream_scope:
           type: string
-          enum: [local-service, mesh]
+          enum: [local-service, cluster, mesh]
         upstream_url:
           type: string
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeRouteUpstream"
         service_port:
           type: integer
           format: int32
@@ -9513,6 +9723,38 @@ components:
         updated_at:
           type: string
           format: date-time
+    EdgeRouteUpstream:
+      type: object
+      additionalProperties: false
+      required: [weight, upstream_url]
+      properties:
+        role:
+          type: string
+        release_id:
+          type: string
+        weight:
+          type: integer
+          format: int32
+        upstream_kind:
+          type: string
+          enum: [kubernetes-service, mesh]
+        upstream_scope:
+          type: string
+          enum: [local-service, cluster, mesh]
+        upstream_url:
+          type: string
+        service_port:
+          type: integer
+          format: int32
+        runtime_id:
+          type: string
+        deployment_generation:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, unavailable, runtime-missing]
+        status_reason:
+          type: string
     EdgeRoutePolicy:
       type: object
       additionalProperties: false
@@ -13009,6 +13251,354 @@ components:
           type: string
         tracking:
           $ref: "#/components/schemas/AppImageTracking"
+    AppRelease:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, app_id, role, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        role:
+          type: string
+          enum: [stable, candidate, previous, retired]
+        source_ref:
+          type: string
+        resolved_image_ref:
+          type: string
+        upstream_url:
+          type: string
+        runtime_id:
+          type: string
+        deployment_name:
+          type: string
+        service_name:
+          type: string
+        status:
+          type: string
+          enum: [creating, ready, serving, failed, retired]
+        status_reason:
+          type: string
+        spec_snapshot:
+          $ref: "#/components/schemas/AppSpec"
+        ready_at:
+          type: string
+          format: date-time
+        promoted_at:
+          type: string
+          format: date-time
+        retired_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AppTrafficPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        [id, tenant_id, app_id, mode, stable_weight, candidate_weight, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        mode:
+          type: string
+          enum: [single, canary, weighted, paused]
+        stable_release_id:
+          type: string
+        candidate_release_id:
+          type: string
+        stable_weight:
+          type: integer
+          format: int32
+        candidate_weight:
+          type: integer
+          format: int32
+        sticky_header:
+          type: string
+        sticky_cookie:
+          type: string
+        updated_by_type:
+          type: string
+        updated_by_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AppReleaseCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        role:
+          type: string
+        source_ref:
+          type: string
+        resolved_image_ref:
+          type: string
+        upstream_url:
+          type: string
+        runtime_id:
+          type: string
+        deployment_name:
+          type: string
+        service_name:
+          type: string
+        status:
+          type: string
+        status_reason:
+          type: string
+        spec_snapshot:
+          $ref: "#/components/schemas/AppSpec"
+    AppReleaseResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, release]
+      properties:
+        app_id:
+          type: string
+        release:
+          $ref: "#/components/schemas/AppRelease"
+    AppReleaseListResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, releases]
+      properties:
+        app_id:
+          type: string
+        releases:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRelease"
+        traffic:
+          $ref: "#/components/schemas/AppTrafficPolicy"
+    AppTrafficPatchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+        stable_release_id:
+          type: string
+        candidate_release_id:
+          type: string
+        stable_weight:
+          type: integer
+          format: int32
+        candidate_weight:
+          type: integer
+          format: int32
+        sticky_header:
+          type: string
+        sticky_cookie:
+          type: string
+    AppTrafficResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, traffic]
+      properties:
+        app_id:
+          type: string
+        traffic:
+          $ref: "#/components/schemas/AppTrafficPolicy"
+        releases:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRelease"
+    AppReleaseProbe:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [http, http_stream]
+        method:
+          type: string
+        path:
+          type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        body:
+          type: string
+        expected_status:
+          type: integer
+          format: int32
+        expected_content_type:
+          type: string
+        expected_body_contains:
+          type: string
+        expect_stream_event_before_ms:
+          type: integer
+          format: int32
+        timeout_ms:
+          type: integer
+          format: int32
+        max_ttfb_ms:
+          type: integer
+          format: int32
+        max_duration_ms:
+          type: integer
+          format: int32
+    AppReleaseProbeResult:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        status:
+          type: string
+          enum: [pass, warn, fail]
+        status_code:
+          type: integer
+          format: int32
+        duration_ms:
+          type: integer
+          format: int64
+        ttfb_ms:
+          type: integer
+          format: int64
+        error:
+          type: string
+        evidence:
+          type: string
+    AppReleaseProbeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        probes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseProbe"
+    AppReleaseProbeResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, release, results, status]
+      properties:
+        app_id:
+          type: string
+        release:
+          $ref: "#/components/schemas/AppRelease"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseProbeResult"
+        status:
+          type: string
+          enum: [pass, warn, fail]
+    AppReleaseGatePolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        window_seconds:
+          type: integer
+          format: int32
+        min_candidate_requests:
+          type: integer
+          format: int32
+        max_5xx_rate:
+          type: number
+          format: double
+        max_edge_upstream_error_rate:
+          type: number
+          format: double
+        max_p95_ttfb_ms:
+          type: integer
+          format: int32
+        max_p99_duration_ms:
+          type: integer
+          format: int32
+        probes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseProbe"
+    AppReleaseGateResult:
+      type: object
+      additionalProperties: false
+      required: [status, evaluated_at]
+      properties:
+        status:
+          type: string
+          enum: [pass, warn, fail]
+        release_id:
+          type: string
+        role:
+          type: string
+        window:
+          type: string
+        evidence:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        failures:
+          type: array
+          items:
+            type: string
+        probe_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseProbeResult"
+        metrics:
+          type: object
+          additionalProperties: true
+        evaluated_at:
+          type: string
+          format: date-time
+    AppReleaseGateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        policy:
+          $ref: "#/components/schemas/AppReleaseGatePolicy"
+    AppReleaseGateResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, gate, policy]
+      properties:
+        app_id:
+          type: string
+        gate:
+          $ref: "#/components/schemas/AppReleaseGateResult"
+        policy:
+          $ref: "#/components/schemas/AppReleaseGatePolicy"
+    AppReleasePromoteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        candidate_weight:
+          type: integer
+          format: int32
+    AppReleaseAbortRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        mark_failed:
+          type: boolean
+        reason:
+          type: string
     AppImageSyncRequest:
       type: object
       additionalProperties: false

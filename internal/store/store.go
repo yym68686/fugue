@@ -255,6 +255,8 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.ProjectRouteTables = deleteProjectRouteTablesByTenant(state.ProjectRouteTables, id)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
+		state.AppReleases = deleteAppReleasesByTenant(state.AppReleases, id)
+		state.AppTrafficPolicies = deleteAppTrafficPoliciesByTenant(state.AppTrafficPolicies, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
 		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByTenant(state.AppDatabaseAccessGrants, id)
 		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
@@ -2474,6 +2476,8 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
 		deleteAppDomainsByApp(state, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
+		state.AppReleases = deleteAppReleasesByApp(state.AppReleases, id)
+		state.AppTrafficPolicies = deleteAppTrafficPoliciesByApp(state.AppTrafficPolicies, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByApp(state.AppDatabaseImportJobs, id)
 		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByApp(state.AppDatabaseAccessGrants, id)
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
@@ -3794,6 +3798,12 @@ func ensureDefaults(state *model.State) {
 	if state.AppImageTrackings == nil {
 		state.AppImageTrackings = []model.AppImageTracking{}
 	}
+	if state.AppReleases == nil {
+		state.AppReleases = []model.AppRelease{}
+	}
+	if state.AppTrafficPolicies == nil {
+		state.AppTrafficPolicies = []model.AppTrafficPolicy{}
+	}
 	if state.Runtimes == nil {
 		state.Runtimes = []model.Runtime{}
 	}
@@ -4844,6 +4854,50 @@ func deleteAppImageTrackingsByApp(trackings []model.AppImageTracking, appID stri
 			continue
 		}
 		filtered = append(filtered, tracking)
+	}
+	return filtered
+}
+
+func deleteAppReleasesByTenant(releases []model.AppRelease, tenantID string) []model.AppRelease {
+	filtered := releases[:0]
+	for _, release := range releases {
+		if release.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, release)
+	}
+	return filtered
+}
+
+func deleteAppReleasesByApp(releases []model.AppRelease, appID string) []model.AppRelease {
+	filtered := releases[:0]
+	for _, release := range releases {
+		if release.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, release)
+	}
+	return filtered
+}
+
+func deleteAppTrafficPoliciesByTenant(policies []model.AppTrafficPolicy, tenantID string) []model.AppTrafficPolicy {
+	filtered := policies[:0]
+	for _, policy := range policies {
+		if policy.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, policy)
+	}
+	return filtered
+}
+
+func deleteAppTrafficPoliciesByApp(policies []model.AppTrafficPolicy, appID string) []model.AppTrafficPolicy {
+	filtered := policies[:0]
+	for _, policy := range policies {
+		if policy.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, policy)
 	}
 	return filtered
 }

@@ -96,6 +96,14 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
+	releases, err := s.store.ListAppReleases(model.AppReleaseFilter{PlatformAdmin: true, IncludeRetired: false})
+	if err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
+	trafficPolicies, err := s.store.ListAppTrafficPolicies("", true)
+	if err != nil {
+		return model.EdgeRouteBundle{}, err
+	}
 	healthyEdgeGroups, expectedNonEmptyEdgeGroups, expectedMinTrafficRoutes, err := s.edgeRouteGroupInventory()
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
@@ -139,6 +147,8 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		}
 	}
 	policyByHostname := edgeRoutePolicyByHostname(policies)
+	releaseByID := appReleaseByID(releases)
+	trafficPolicyByApp := appTrafficPolicyByApp(trafficPolicies)
 
 	// Route publication is intentionally global. Edge group IDs steer DNS,
 	// policy, and telemetry, but every edge must retain host routes for every
@@ -150,6 +160,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, strings.TrimSpace(app.Route.Hostname), model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
 		for _, platformBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
 			routes = append(routes, platformBinding)
 		}
@@ -184,6 +195,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
 		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
 		binding = applyCustomDomainReadiness(binding, domain)
+		binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
 		addedRoute := false
 		for _, expandedBinding := range expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups) {
 			routes = append(routes, expandedBinding)
@@ -220,6 +232,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 			if domain != nil {
 				binding = applyCustomDomainReadiness(binding, *domain)
 			}
+			binding = applyAppReleaseTraffic(binding, trafficPolicyByApp, releaseByID)
 			routes = append(routes, expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)...)
 		}
 	}
@@ -467,6 +480,111 @@ func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]mode
 		out[hostname] = policy
 	}
 	return out
+}
+
+func appReleaseByID(releases []model.AppRelease) map[string]model.AppRelease {
+	out := make(map[string]model.AppRelease, len(releases))
+	for _, release := range releases {
+		if id := strings.TrimSpace(release.ID); id != "" {
+			out[id] = release
+		}
+	}
+	return out
+}
+
+func appTrafficPolicyByApp(policies []model.AppTrafficPolicy) map[string]model.AppTrafficPolicy {
+	out := make(map[string]model.AppTrafficPolicy, len(policies))
+	for _, policy := range policies {
+		if appID := strings.TrimSpace(policy.AppID); appID != "" {
+			out[appID] = policy
+		}
+	}
+	return out
+}
+
+func applyAppReleaseTraffic(binding model.EdgeRouteBinding, policies map[string]model.AppTrafficPolicy, releases map[string]model.AppRelease) model.EdgeRouteBinding {
+	policy, ok := policies[strings.TrimSpace(binding.AppID)]
+	if !ok || strings.TrimSpace(policy.StableReleaseID) == "" {
+		return binding
+	}
+	if !strings.EqualFold(strings.TrimSpace(binding.Status), model.EdgeRouteStatusActive) || strings.TrimSpace(binding.UpstreamURL) == "" {
+		return binding
+	}
+	stableRelease, ok := releases[strings.TrimSpace(policy.StableReleaseID)]
+	if !ok || strings.TrimSpace(stableRelease.AppID) != strings.TrimSpace(binding.AppID) {
+		return binding
+	}
+	stableWeight := policy.StableWeight
+	candidateWeight := policy.CandidateWeight
+	if policy.Mode == model.AppTrafficModeSingle || policy.Mode == model.AppTrafficModePaused {
+		stableWeight = 100
+		candidateWeight = 0
+	}
+
+	upstreams := []model.EdgeRouteUpstream{}
+	stableURL := firstNonEmpty(stableRelease.UpstreamURL, binding.UpstreamURL)
+	if stableWeight > 0 || candidateWeight == 0 {
+		upstreams = append(upstreams, model.EdgeRouteUpstream{
+			Role:                 model.AppReleaseRoleStable,
+			ReleaseID:            stableRelease.ID,
+			Weight:               stableWeight,
+			UpstreamKind:         firstNonEmpty(binding.UpstreamKind, model.EdgeRouteUpstreamKindKubernetesService),
+			UpstreamScope:        binding.UpstreamScope,
+			UpstreamURL:          stableURL,
+			ServicePort:          binding.ServicePort,
+			RuntimeID:            firstNonEmpty(stableRelease.RuntimeID, binding.RuntimeID),
+			DeploymentGeneration: firstNonEmpty(stableRelease.ResolvedImageRef, stableRelease.SourceRef, binding.DeploymentGeneration),
+			Status:               model.EdgeRouteStatusActive,
+		})
+	}
+
+	if candidateID := strings.TrimSpace(policy.CandidateReleaseID); candidateID != "" {
+		if candidate, ok := releases[candidateID]; ok && strings.TrimSpace(candidate.AppID) == strings.TrimSpace(binding.AppID) {
+			candidateStatus := model.EdgeRouteStatusActive
+			statusReason := strings.TrimSpace(candidate.StatusReason)
+			if !appReleaseCanReceiveEdgeTraffic(candidate) || strings.TrimSpace(candidate.UpstreamURL) == "" {
+				candidateStatus = model.EdgeRouteStatusUnavailable
+				if statusReason == "" {
+					statusReason = "candidate release is not ready for edge traffic"
+				}
+				candidateWeight = 0
+				if stableWeight < 100 {
+					stableWeight = 100
+				}
+			}
+			upstreams = append(upstreams, model.EdgeRouteUpstream{
+				Role:                 model.AppReleaseRoleCandidate,
+				ReleaseID:            candidate.ID,
+				Weight:               candidateWeight,
+				UpstreamKind:         firstNonEmpty(binding.UpstreamKind, model.EdgeRouteUpstreamKindKubernetesService),
+				UpstreamScope:        binding.UpstreamScope,
+				UpstreamURL:          candidate.UpstreamURL,
+				ServicePort:          binding.ServicePort,
+				RuntimeID:            firstNonEmpty(candidate.RuntimeID, binding.RuntimeID),
+				DeploymentGeneration: firstNonEmpty(candidate.ResolvedImageRef, candidate.SourceRef),
+				Status:               candidateStatus,
+				StatusReason:         statusReason,
+			})
+		}
+	}
+	if len(upstreams) == 0 {
+		return binding
+	}
+	if upstreams[0].Role == model.AppReleaseRoleStable {
+		upstreams[0].Weight = stableWeight
+	}
+	binding.Upstreams = upstreams
+	binding.RouteGeneration = edgeRouteGeneration(binding)
+	return binding
+}
+
+func appReleaseCanReceiveEdgeTraffic(release model.AppRelease) bool {
+	switch strings.TrimSpace(release.Status) {
+	case model.AppReleaseStatusReady, model.AppReleaseStatusServing:
+		return true
+	default:
+		return false
+	}
 }
 
 func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool) model.EdgeRouteBinding {
@@ -887,34 +1005,35 @@ func edgeRouteGeneration(binding model.EdgeRouteBinding) string {
 }
 
 type edgeRouteVersionMaterial struct {
-	Hostname             string `json:"hostname"`
-	PathPrefix           string `json:"path_prefix,omitempty"`
-	RouteKind            string `json:"route_kind"`
-	AppID                string `json:"app_id"`
-	TenantID             string `json:"tenant_id"`
-	RuntimeID            string `json:"runtime_id"`
-	RuntimeType          string `json:"runtime_type,omitempty"`
-	RuntimeEdgeGroupID   string `json:"runtime_edge_group_id,omitempty"`
-	RuntimeClusterNode   string `json:"runtime_cluster_node,omitempty"`
-	RuntimeEdgeGroup     string `json:"runtime_edge_group,omitempty"`
-	SelectedEdgeGroup    string `json:"selected_edge_group,omitempty"`
-	EdgeGroupID          string `json:"edge_group_id"`
-	FallbackEdgeGroupID  string `json:"fallback_edge_group_id,omitempty"`
-	PolicyEdgeGroupID    string `json:"policy_edge_group_id,omitempty"`
-	RoutePolicy          string `json:"route_policy"`
-	SelectionReason      string `json:"selection_reason,omitempty"`
-	FallbackReason       string `json:"fallback_reason,omitempty"`
-	UpstreamKind         string `json:"upstream_kind"`
-	UpstreamScope        string `json:"upstream_scope,omitempty"`
-	UpstreamURL          string `json:"upstream_url,omitempty"`
-	ServicePort          int    `json:"service_port"`
-	TLSPolicy            string `json:"tls_policy"`
-	CachePolicyID        string `json:"cache_policy_id,omitempty"`
-	CacheNamespace       string `json:"cache_namespace,omitempty"`
-	DeploymentGeneration string `json:"deployment_generation,omitempty"`
-	Streaming            bool   `json:"streaming"`
-	Status               string `json:"status"`
-	StatusReason         string `json:"status_reason,omitempty"`
+	Hostname             string                    `json:"hostname"`
+	PathPrefix           string                    `json:"path_prefix,omitempty"`
+	RouteKind            string                    `json:"route_kind"`
+	AppID                string                    `json:"app_id"`
+	TenantID             string                    `json:"tenant_id"`
+	RuntimeID            string                    `json:"runtime_id"`
+	RuntimeType          string                    `json:"runtime_type,omitempty"`
+	RuntimeEdgeGroupID   string                    `json:"runtime_edge_group_id,omitempty"`
+	RuntimeClusterNode   string                    `json:"runtime_cluster_node,omitempty"`
+	RuntimeEdgeGroup     string                    `json:"runtime_edge_group,omitempty"`
+	SelectedEdgeGroup    string                    `json:"selected_edge_group,omitempty"`
+	EdgeGroupID          string                    `json:"edge_group_id"`
+	FallbackEdgeGroupID  string                    `json:"fallback_edge_group_id,omitempty"`
+	PolicyEdgeGroupID    string                    `json:"policy_edge_group_id,omitempty"`
+	RoutePolicy          string                    `json:"route_policy"`
+	SelectionReason      string                    `json:"selection_reason,omitempty"`
+	FallbackReason       string                    `json:"fallback_reason,omitempty"`
+	UpstreamKind         string                    `json:"upstream_kind"`
+	UpstreamScope        string                    `json:"upstream_scope,omitempty"`
+	UpstreamURL          string                    `json:"upstream_url,omitempty"`
+	Upstreams            []model.EdgeRouteUpstream `json:"upstreams,omitempty"`
+	ServicePort          int                       `json:"service_port"`
+	TLSPolicy            string                    `json:"tls_policy"`
+	CachePolicyID        string                    `json:"cache_policy_id,omitempty"`
+	CacheNamespace       string                    `json:"cache_namespace,omitempty"`
+	DeploymentGeneration string                    `json:"deployment_generation,omitempty"`
+	Streaming            bool                      `json:"streaming"`
+	Status               string                    `json:"status"`
+	StatusReason         string                    `json:"status_reason,omitempty"`
 }
 
 type edgeRouteBundleVersionMaterial struct {
@@ -960,6 +1079,7 @@ func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRou
 		UpstreamKind:         binding.UpstreamKind,
 		UpstreamScope:        binding.UpstreamScope,
 		UpstreamURL:          binding.UpstreamURL,
+		Upstreams:            append([]model.EdgeRouteUpstream(nil), binding.Upstreams...),
 		ServicePort:          binding.ServicePort,
 		TLSPolicy:            binding.TLSPolicy,
 		CachePolicyID:        binding.CachePolicyID,

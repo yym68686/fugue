@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -217,6 +218,9 @@ type edgeProxyObservation struct {
 	ReceivedAt              time.Time
 	Host                    string
 	Route                   model.EdgeRouteBinding
+	ReleaseID               string
+	ReleaseRole             string
+	TrafficWeight           int
 	Method                  string
 	Path                    string
 	TraceID                 string
@@ -703,6 +707,80 @@ func (s *Service) routeForRequest(host, requestPath string) (model.EdgeRouteBind
 	return model.EdgeRouteBinding{}, false, false
 }
 
+func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBinding, host, traceID, edgeRequestID string) (model.EdgeRouteBinding, model.EdgeRouteUpstream) {
+	if len(route.Upstreams) == 0 {
+		return route, model.EdgeRouteUpstream{}
+	}
+	candidates := make([]model.EdgeRouteUpstream, 0, len(route.Upstreams))
+	total := 0
+	for _, upstream := range route.Upstreams {
+		if strings.TrimSpace(upstream.UpstreamURL) == "" || upstream.Weight <= 0 {
+			continue
+		}
+		if status := strings.TrimSpace(upstream.Status); status != "" && !strings.EqualFold(status, model.EdgeRouteStatusActive) {
+			continue
+		}
+		candidates = append(candidates, upstream)
+		total += upstream.Weight
+	}
+	if len(candidates) == 0 || total <= 0 {
+		return route, model.EdgeRouteUpstream{}
+	}
+	stickinessKey := weightedReleaseStickinessKey(r, host, route, traceID, edgeRequestID)
+	bucket := weightedReleaseBucket(stickinessKey, total)
+	running := 0
+	selected := candidates[len(candidates)-1]
+	for _, upstream := range candidates {
+		running += upstream.Weight
+		if bucket < running {
+			selected = upstream
+			break
+		}
+	}
+	route.UpstreamURL = selected.UpstreamURL
+	route.UpstreamKind = firstNonEmpty(selected.UpstreamKind, route.UpstreamKind)
+	route.UpstreamScope = firstNonEmpty(selected.UpstreamScope, route.UpstreamScope)
+	route.RuntimeID = firstNonEmpty(selected.RuntimeID, route.RuntimeID)
+	route.ServicePort = firstNonEmptyInt(selected.ServicePort, route.ServicePort)
+	route.DeploymentGeneration = firstNonEmpty(selected.DeploymentGeneration, route.DeploymentGeneration)
+	return route, selected
+}
+
+func weightedReleaseStickinessKey(r *http.Request, host string, route model.EdgeRouteBinding, traceID, edgeRequestID string) string {
+	parts := []string{
+		normalizeRouteHost(host),
+		model.NormalizeAppRoutePathPrefix(route.PathPrefix),
+		strings.TrimSpace(route.AppID),
+	}
+	identity := ""
+	if r != nil {
+		if cookie, err := r.Cookie("Fugue-Release-Stickiness"); err == nil {
+			identity = strings.TrimSpace(cookie.Value)
+		}
+		identity = firstNonEmpty(identity,
+			strings.TrimSpace(r.Header.Get("X-Fugue-Release-Stickiness")),
+			strings.TrimSpace(r.Header.Get("X-API-Key")),
+			strings.TrimSpace(r.Header.Get("Authorization")),
+			strings.TrimSpace(r.Header.Get("CF-Connecting-IP")),
+			strings.TrimSpace(r.Header.Get("X-Forwarded-For")),
+			strings.TrimSpace(r.RemoteAddr),
+		)
+	}
+	if identity == "" {
+		identity = firstNonEmpty(strings.TrimSpace(traceID), strings.TrimSpace(edgeRequestID), time.Now().UTC().Format("200601021504"))
+	}
+	parts = append(parts, identity)
+	return strings.Join(parts, "\x00")
+}
+
+func weightedReleaseBucket(key string, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	sum := sha256.Sum256([]byte(key))
+	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(total))
+}
+
 func (s *Service) hasBundle() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -766,6 +844,11 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	route, ok, fallbackHit := s.routeForRequest(host, r.URL.Path)
 	edgeRequestID := edgeRequestIDForProxy(r)
 	traceID := edgeTraceIDForProxy(r)
+	selectedRoute := route
+	selectedUpstream := model.EdgeRouteUpstream{}
+	if ok {
+		selectedRoute, selectedUpstream = selectWeightedEdgeRouteUpstream(r, route, host, traceID, edgeRequestID)
+	}
 	if edgeRequestID != "" {
 		w.Header().Set(edgeRequestIDHeader, edgeRequestID)
 	}
@@ -775,7 +858,10 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	observed := edgeProxyObservation{
 		ReceivedAt:       startedAt.UTC(),
 		Host:             host,
-		Route:            route,
+		Route:            selectedRoute,
+		ReleaseID:        strings.TrimSpace(selectedUpstream.ReleaseID),
+		ReleaseRole:      strings.TrimSpace(selectedUpstream.Role),
+		TrafficWeight:    selectedUpstream.Weight,
 		Method:           r.Method,
 		Path:             safeProxyLogPath(r),
 		TraceID:          traceID,
@@ -797,7 +883,12 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	observeEdgeProxyRequestBody(r, &observed)
 	observed.Streaming = observed.WebSocket || observed.SSE
-	cacheDecision := s.edgeCacheDecision(r, route)
+	cacheDecision := s.edgeCacheDecision(r, selectedRoute)
+	if len(route.Upstreams) > 0 {
+		cacheDecision.Enabled = false
+		cacheDecision.Status = edgeCacheStatusBypass
+		cacheDecision.Reason = "weighted release route"
+	}
 	observed.CacheStatus = cacheDecision.Status
 	observed.CachePolicyID = cacheDecision.PolicyID
 	observed.CacheKeyHash = cacheDecision.KeyHash
@@ -813,16 +904,16 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "edge route not found", http.StatusNotFound)
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) {
+	if !strings.EqualFold(strings.TrimSpace(selectedRoute.Status), model.EdgeRouteStatusActive) {
 		observed.StatusCode = http.StatusServiceUnavailable
-		message := strings.TrimSpace(route.StatusReason)
+		message := strings.TrimSpace(selectedRoute.StatusReason)
 		if message == "" {
 			message = "edge route is not active"
 		}
 		http.Error(w, message, http.StatusServiceUnavailable)
 		return
 	}
-	target, err := url.Parse(strings.TrimSpace(route.UpstreamURL))
+	target, err := url.Parse(strings.TrimSpace(selectedRoute.UpstreamURL))
 	if err != nil || target.Scheme == "" || target.Host == "" {
 		observed.StatusCode = http.StatusServiceUnavailable
 		http.Error(w, "edge route upstream is unavailable", http.StatusServiceUnavailable)
@@ -845,7 +936,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			if served, status, cacheStatus := s.edgeCacheServeIfFresh(observedWriter, cacheDecision, entry, edgeProxyServerTiming(observed, false)); served {
 				if cacheStatus == edgeCacheStatusStale {
-					s.edgeCacheRevalidateAsync(r, target, route, cacheDecision, host)
+					s.edgeCacheRevalidateAsync(r, target, selectedRoute, cacheDecision, host)
 				}
 				observed.Proxied = false
 				observed.StatusCode = status
@@ -866,7 +957,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if bufferedBody && r.Body != nil {
 		defer r.Body.Close()
 	}
-	proxy := s.newEdgeReverseProxy(host, target, route, &observed, peerFallbackAllowed, &cacheDecision)
+	proxy := s.newEdgeReverseProxy(host, target, selectedRoute, &observed, peerFallbackAllowed, &cacheDecision)
 	proxy.ServeHTTP(observedWriter, r)
 	if observed.ClientCanceled {
 		if observed.StatusCode == 0 {
@@ -875,7 +966,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if observed.UpstreamError != "" && !observedWriter.wroteHeader && peerFallbackAllowed {
-		if s.proxyPeerFallback(w, r, host, route, &observed) {
+		if s.proxyPeerFallback(w, r, host, selectedRoute, &observed) {
 			return
 		}
 	}
@@ -1036,6 +1127,14 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			req.Out.Header.Set("X-Forwarded-Host", host)
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
 			req.Out.Header.Set("X-Fugue-Edge-App-ID", strings.TrimSpace(route.AppID))
+			if observed != nil {
+				if releaseID := strings.TrimSpace(observed.ReleaseID); releaseID != "" {
+					req.Out.Header.Set("X-Fugue-Release-ID", releaseID)
+				}
+				if releaseRole := strings.TrimSpace(observed.ReleaseRole); releaseRole != "" {
+					req.Out.Header.Set("X-Fugue-Release-Role", releaseRole)
+				}
+			}
 			if observed != nil && strings.TrimSpace(observed.EdgeRequestID) != "" {
 				req.Out.Header.Set(edgeRequestIDHeader, strings.TrimSpace(observed.EdgeRequestID))
 			}
@@ -3928,6 +4027,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmptyInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func edgeGroupRegion(edgeGroupID string) string {
