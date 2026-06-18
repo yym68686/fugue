@@ -4230,6 +4230,9 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if err := s.pgUpdateAppImageTrackingDeployedTx(ctx, tx, op, now); err != nil {
 		return model.Operation{}, err
 	}
+	if err := s.pgSyncStableReleaseForCompletedDeployTx(ctx, tx, app, op, now); err != nil {
+		return model.Operation{}, err
+	}
 	if op.Type == model.OperationTypeDelete {
 		if err := s.pgDeleteAppDomainsByAppTx(ctx, tx, app.ID); err != nil {
 			return model.Operation{}, err

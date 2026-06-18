@@ -3555,6 +3555,11 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 			return err
 		}
 		currentOp := state.Operations[index]
+		if appIndex := findApp(state, currentOp.AppID); appIndex >= 0 {
+			if err := syncStableReleaseForCompletedDeployInState(state, state.Apps[appIndex], currentOp, now); err != nil {
+				return err
+			}
+		}
 		updateAppImageTrackingDeployedInState(state, currentOp, now)
 		if currentOp.Type == model.OperationTypeDelete {
 			deleteAppDomainsByApp(state, currentOp.AppID)
