@@ -553,10 +553,6 @@ chroot /host /bin/bash "${target#/host}"
 '
 }
 
-stateful_dependency_changed() {
-  release_changed_files_match stateful
-}
-
 release_diff_old_ref() {
   local ref="${FUGUE_RELEASE_BEFORE_SHA:-${BEFORE_SHA:-}}"
 
@@ -667,6 +663,112 @@ for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old_lines, b=new_lines).get
 
 raise SystemExit(0 if changed else 1)
 PY
+}
+
+values_file_changes_include_yaml_path() {
+  local file="$1"
+  local included_path="$2"
+  local old_ref new_ref
+
+  old_ref="$(release_diff_old_ref)" || return 1
+  new_ref="$(release_diff_new_ref)" || return 1
+  old_ref="$(trim_field "${old_ref}")"
+  new_ref="$(trim_field "${new_ref}")"
+  [[ -n "${old_ref}" && -n "${new_ref}" ]] || return 1
+  [[ "${old_ref}" != "${new_ref}" ]] || return 1
+  command_exists python3 || return 1
+
+  python3 - "${REPO_ROOT}" "${old_ref}" "${new_ref}" "${file}" "${included_path}" <<'PY'
+import difflib
+import subprocess
+import sys
+
+repo, old_ref, new_ref, file_path, included_path = sys.argv[1:6]
+included = tuple(part for part in included_path.split(".") if part)
+
+def read_lines(ref):
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo, "show", f"{ref}:{file_path}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(1) from exc
+    return out.splitlines()
+
+def yaml_paths(lines):
+    stack = []
+    paths = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            paths.append(tuple(key for _, key in stack))
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+
+        content = line.lstrip(" ")
+        if content.startswith("- "):
+            content = content[2:].lstrip(" ")
+
+        key = ""
+        if ":" in content:
+            key = content.split(":", 1)[0].strip().strip("'\"")
+            if any(ch in key for ch in "{}[]"):
+                key = ""
+
+        current = [key for _, key in stack]
+        if key:
+            current.append(key)
+            stack.append((indent, key))
+        paths.append(tuple(current))
+    return paths
+
+def path_included(path):
+    return len(path) >= len(included) and path[: len(included)] == included
+
+old_lines = read_lines(old_ref)
+new_lines = read_lines(new_ref)
+old_paths = yaml_paths(old_lines)
+new_paths = yaml_paths(new_lines)
+
+for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old_lines, b=new_lines).get_opcodes():
+    if tag == "equal":
+        continue
+    for idx in range(i1, i2):
+        if old_lines[idx].strip() and path_included(old_paths[idx]):
+            raise SystemExit(0)
+    for idx in range(j1, j2):
+        if new_lines[idx].strip() and path_included(new_paths[idx]):
+            raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+registry_persistence_values_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      deploy/helm/fugue/values.yaml|\
+      deploy/helm/fugue/values-production-ha.yaml)
+        values_file_changes_include_yaml_path "${file}" "registry.persistence" && return 0
+        values_file_changes_include_yaml_path "${file}" "registry.unsafeHostPath" && return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
+stateful_dependency_changed() {
+  release_changed_files_match stateful || registry_persistence_values_changed
 }
 
 node_local_build_plane_resource_values_changed() {
@@ -2715,6 +2817,7 @@ cloudnative-pg:
                 app.kubernetes.io/instance: fugue
 EOF
   append_control_plane_singleton_values
+  append_registry_upgrade_values
   append_headscale_upgrade_values
   append_upgrade_edge_dynamic_values
   append_upgrade_image_prepull_values
@@ -3582,6 +3685,27 @@ deployment_host_path_volume_path() {
   local volume_name="$2"
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${deployment_name}" \
     -o go-template='{{range .spec.template.spec.volumes}}{{if eq .name "'"${volume_name}"'"}}{{if .hostPath}}{{.hostPath.path}}{{end}}{{end}}{{end}}' 2>/dev/null || true
+}
+
+append_registry_upgrade_values() {
+  local existing_host_path=""
+
+  existing_host_path="$(trim_field "$(deployment_host_path_volume_path "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" "registry-data")")"
+  if [[ -z "${existing_host_path}" ]]; then
+    return 0
+  fi
+
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+
+registry:
+  persistence:
+    mode: hostPath
+    hostPath: $(yaml_quote "${existing_host_path}")
+  unsafeHostPath:
+    enabled: true
+    reason: "preserve existing live registry hostPath until explicit migration"
+EOF
+  log "preserving registry hostPath storage at ${existing_host_path}; migrate explicitly before switching registry.persistence.mode"
 }
 
 append_headscale_upgrade_values() {

@@ -774,11 +774,11 @@ registryGC:
   resources:
     requests:
       cpu: 100m
-      memory: 128Mi
+      memory: 256Mi
       ephemeral-storage: 64Mi
     limits:
       cpu: "2"
-      memory: 1Gi
+      memory: 2Gi
       ephemeral-storage: 512Mi
 
 platformFailureDrill:

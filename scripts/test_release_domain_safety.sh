@@ -145,6 +145,15 @@ imageCache:
     limits:
       memory: 512Mi
 
+registry:
+  persistence:
+    mode: hostPath
+    hostPath: /var/lib/fugue/registry
+    size: 50Gi
+  unsafeHostPath:
+    enabled: true
+    reason: test fixture
+
 registryGC:
   resources:
     requests:
@@ -209,6 +218,19 @@ PY
 git -C "${TMP_REPO_ROOT}" add .
 git -C "${TMP_REPO_ROOT}" commit -q -m registry-gc-resources
 REGISTRY_GC_RESOURCES_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("    mode: hostPath\n", "    mode: pvc\n", 1)
+text = text.replace("    size: 50Gi\n", "    size: 200Gi\n", 1)
+path.write_text(text)
+PY
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m registry-persistence
+REGISTRY_PERSISTENCE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
 REPO_ROOT="${TMP_REPO_ROOT}"
 if image_cache_source_changed_between_refs "${BASE_REF}" "${SCRIPT_REF}"; then
   fail "script-only changes must not roll image-cache"
@@ -263,6 +285,13 @@ fi
 if node_local_build_plane_preflight_override_allowed; then
   fail "registryGC values must not bypass registry/node-policy preflight"
 fi
+BEFORE_SHA="${REGISTRY_GC_RESOURCES_REF}"
+AFTER_SHA="${REGISTRY_PERSISTENCE_REF}"
+FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/values.yaml'
+stateful_dependency_changed || fail "registry persistence values must be treated as stateful dependency changes"
+if node_local_build_plane_preflight_override_allowed; then
+  fail "registry persistence values must not bypass registry/node-policy preflight"
+fi
 FUGUE_HELM_CHART_PATH="${TMP_REPO_ROOT}/deploy/helm/fugue"
 IMAGE_CACHE_DESIRED_RESOURCES="$(chart_image_cache_resources_json)"
 assert_eq "${IMAGE_CACHE_DESIRED_RESOURCES}" '{"limits":{"memory":"2Gi"},"requests":{"memory":"128Mi"}}' "image-cache desired resources parse from chart values"
@@ -290,6 +319,22 @@ fi
 REPO_ROOT="${ORIGINAL_REPO_ROOT}"
 
 FUGUE_REGISTRY_DEPLOYMENT_NAME=fugue-fugue-registry
+REGISTRY_UPGRADE_VALUES_FILE="$(mktemp)"
+(
+  UPGRADE_OVERRIDE_VALUES_FILE="${REGISTRY_UPGRADE_VALUES_FILE}"
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_REGISTRY_DEPLOYMENT_NAME=fugue-fugue-registry
+  fake_registry_kubectl() {
+    printf '/var/lib/fugue/registry'
+  }
+  KUBECTL=fake_registry_kubectl
+  append_registry_upgrade_values
+)
+grep -q 'mode: hostPath' "${REGISTRY_UPGRADE_VALUES_FILE}" || fail "registry hostPath preservation must set registry.persistence.mode"
+grep -q 'hostPath: "/var/lib/fugue/registry"' "${REGISTRY_UPGRADE_VALUES_FILE}" || fail "registry hostPath preservation must keep the live path"
+grep -q 'unsafeHostPath:' "${REGISTRY_UPGRADE_VALUES_FILE}" || fail "registry hostPath preservation must enable unsafeHostPath explicitly"
+rm -f "${REGISTRY_UPGRADE_VALUES_FILE}"
+
 NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED=true
 FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh'
 skip_singleton_rollout_wait_for_node_local_override fugue-fugue-registry || fail "registry singleton wait must be skipped after accepted node-local build-plane override"

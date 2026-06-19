@@ -27,7 +27,8 @@ type ScanResult struct {
 }
 
 type manifestDescriptor struct {
-	Digest string `json:"digest"`
+	Digest    string `json:"digest"`
+	MediaType string `json:"mediaType"`
 }
 
 type manifestEnvelope struct {
@@ -49,7 +50,6 @@ func Scan(root string, keepDigests []string) (ScanResult, error) {
 		return ScanResult{}, err
 	}
 
-	blobPaths := make(map[string]string)
 	blobSizes := make(map[string]int64)
 	blobsRoot := filepath.Join(root, "blobs")
 	if err := filepath.WalkDir(blobsRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -67,7 +67,6 @@ func Scan(root string, keepDigests []string) (ScanResult, error) {
 		if digest == "" {
 			return nil
 		}
-		blobPaths[digest] = path
 		blobSizes[digest] = info.Size()
 		result.BlobCount++
 		result.BlobBytes += info.Size()
@@ -111,7 +110,7 @@ func Scan(root string, keepDigests []string) (ScanResult, error) {
 		}
 		seenKeep[digest] = struct{}{}
 		result.KeepDigestCount++
-		if _, exists := blobPaths[digest]; !exists {
+		if _, exists := blobSizes[digest]; !exists {
 			result.MissingKeepDigestCount++
 			continue
 		}
@@ -129,17 +128,21 @@ func Scan(root string, keepDigests []string) (ScanResult, error) {
 		if _, exists := referenced[digest]; exists {
 			continue
 		}
-		path, exists := blobPaths[digest]
-		if !exists {
+		if _, exists := blobSizes[digest]; !exists {
 			continue
 		}
 		referenced[digest] = struct{}{}
 
-		children, err := manifestChildDigests(path)
+		references, err := manifestReferences(blobDataPathForDigest(blobsRoot, digest))
 		if err != nil {
 			continue
 		}
-		for _, child := range children {
+		for _, child := range references.terminal {
+			if _, exists := blobSizes[child]; exists {
+				referenced[child] = struct{}{}
+			}
+		}
+		for _, child := range references.traverse {
 			if _, exists := referenced[child]; !exists {
 				queue = append(queue, child)
 			}
@@ -213,28 +216,56 @@ func digestFromBlobDataPath(blobsRoot, path string) string {
 	return normalizeDigest(algorithm + ":" + hexDigest)
 }
 
-func manifestChildDigests(path string) ([]string, error) {
+func blobDataPathForDigest(blobsRoot, digest string) string {
+	digest = normalizeDigest(digest)
+	parts := strings.SplitN(digest, ":", 2)
+	if len(parts) != 2 || len(parts[1]) < 2 {
+		return ""
+	}
+	return filepath.Join(blobsRoot, parts[0], parts[1][:2], parts[1], "data")
+}
+
+type manifestReferenceSet struct {
+	traverse []string
+	terminal []string
+}
+
+func manifestReferences(path string) (manifestReferenceSet, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return manifestReferenceSet{}, err
 	}
 	var manifest manifestEnvelope
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, err
+		return manifestReferenceSet{}, err
 	}
-	candidates := make([]manifestDescriptor, 0, 2+len(manifest.Layers)+len(manifest.Manifests)+len(manifest.Blobs))
-	candidates = append(candidates, manifest.Config, manifest.Subject)
-	candidates = append(candidates, manifest.Layers...)
-	candidates = append(candidates, manifest.Manifests...)
-	candidates = append(candidates, manifest.Blobs...)
 
-	children := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
+	references := manifestReferenceSet{
+		traverse: make([]string, 0, len(manifest.Manifests)+1),
+		terminal: make([]string, 0, 1+len(manifest.Layers)+len(manifest.Blobs)),
+	}
+	addTerminal := func(candidate manifestDescriptor) {
 		if digest := normalizeDigest(candidate.Digest); digest != "" {
-			children = append(children, digest)
+			references.terminal = append(references.terminal, digest)
 		}
 	}
-	return children, nil
+	addTraverse := func(candidate manifestDescriptor) {
+		if digest := normalizeDigest(candidate.Digest); digest != "" {
+			references.traverse = append(references.traverse, digest)
+		}
+	}
+	addTerminal(manifest.Config)
+	for _, layer := range manifest.Layers {
+		addTerminal(layer)
+	}
+	for _, blob := range manifest.Blobs {
+		addTerminal(blob)
+	}
+	for _, child := range manifest.Manifests {
+		addTraverse(child)
+	}
+	addTraverse(manifest.Subject)
+	return references, nil
 }
 
 func normalizeDigest(value string) string {

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type imageCache struct {
 	httpClient     *http.Client
 	registry       http.Handler
 	hydrateTimeout time.Duration
+	hydrateSlots   chan struct{}
+	proxySlots     chan struct{}
+	copyJobs       int
 	copyImageFn    func(context.Context, string, string) error
 	hydrateMu      sync.Mutex
 	hydrateCalls   map[string]*hydrateCall
@@ -121,6 +125,9 @@ func main() {
 		httpClient:     &http.Client{Timeout: 15 * time.Second},
 		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
 		hydrateTimeout: envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
+		hydrateSlots:   newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
+		proxySlots:     newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
+		copyJobs:       envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
 		sourceTTL:      envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
@@ -132,7 +139,7 @@ func main() {
 	if err := cache.loadPersistedManifests(); err != nil {
 		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
-	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase)
+	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs)
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           cache,
@@ -621,10 +628,15 @@ func (c *imageCache) hydrateOnce(parent context.Context, repo, target string) er
 }
 
 func (c *imageCache) copyImage(ctx context.Context, src, dst string) error {
+	release, err := acquireSemaphore(ctx, c.hydrateSlots)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if c.copyImageFn != nil {
 		return c.copyImageFn(ctx, src, dst)
 	}
-	return copyImage(ctx, src, dst)
+	return copyImage(ctx, src, dst, c.copyJobs)
 }
 
 func (c *imageCache) lookup(ctx context.Context, imageRef, digest string) []imageLocation {
@@ -896,8 +908,12 @@ func registryObjectMissing(err error) bool {
 	return false
 }
 
-func copyImage(ctx context.Context, src, dst string) error {
-	return crane.Copy(src, dst, crane.WithContext(ctx), crane.Insecure)
+func copyImage(ctx context.Context, src, dst string, jobs int) error {
+	opts := []crane.Option{crane.WithContext(ctx), crane.Insecure}
+	if jobs > 0 {
+		opts = append(opts, crane.WithJobs(jobs))
+	}
+	return crane.Copy(src, dst, opts...)
 }
 
 func (c *imageCache) ensureLocalManifest(ctx context.Context, sourceBase, repo, target string) error {
@@ -1157,6 +1173,11 @@ func (c *imageCache) proxyRegistryPull(w http.ResponseWriter, r *http.Request, s
 	if r == nil || r.URL == nil || strings.TrimSpace(sourceBase) == "" {
 		return proxyPullResult{}
 	}
+	release, err := acquireSemaphore(r.Context(), c.proxySlots)
+	if err != nil {
+		return proxyPullResult{err: err}
+	}
+	defer release()
 	targetURL := "http://" + trimRegistryBase(sourceBase) + r.URL.EscapedPath()
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
@@ -1359,6 +1380,37 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
+}
+
+func newSemaphore(limit int) chan struct{} {
+	if limit < 1 {
+		return nil
+	}
+	return make(chan struct{}, limit)
+}
+
+func acquireSemaphore(ctx context.Context, slots chan struct{}) (func(), error) {
+	if slots == nil {
+		return func() {}, nil
+	}
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
+	}
 }
 
 type deferredNotFoundWriter struct {

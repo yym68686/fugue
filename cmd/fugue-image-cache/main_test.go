@@ -81,6 +81,82 @@ func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestHydrateLimitsConcurrentCopiesAcrossTargets(t *testing.T) {
+	t.Parallel()
+
+	var copies atomic.Int32
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	cache := &imageCache{
+		registryBase:   "registry.fugue.internal:5000",
+		localBase:      "127.0.0.1:5000",
+		upstreamBase:   "upstream.example.com:5000",
+		cacheEndpoint:  "http://127.0.0.1:5000",
+		hydrateTimeout: 5 * time.Second,
+		hydrateSlots:   newSemaphore(1),
+		copyImageFn: func(ctx context.Context, src, dst string) error {
+			switch copies.Add(1) {
+			case 1:
+				close(firstStarted)
+				select {
+				case <-releaseFirst:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			case 2:
+				close(secondStarted)
+				select {
+				case <-releaseSecond:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			default:
+				return nil
+			}
+		},
+	}
+
+	firstErr := make(chan error, 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		firstErr <- cache.hydrate(context.Background(), "library/nginx", "first")
+	}()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected first copy to start")
+	}
+	go func() {
+		secondErr <- cache.hydrate(context.Background(), "library/nginx", "second")
+	}()
+	select {
+	case <-secondStarted:
+		t.Fatal("second copy started before the hydrate slot was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := copies.Load(); got != 1 {
+		t.Fatalf("copies before release = %d, want 1", got)
+	}
+
+	close(releaseFirst)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first hydrate returned error: %v", err)
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected second copy to start after first released the slot")
+	}
+	close(releaseSecond)
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second hydrate returned error: %v", err)
+	}
+}
+
 func TestHydrateContinuesCopyWhenAllWaitersCancel(t *testing.T) {
 	t.Parallel()
 
@@ -306,6 +382,66 @@ func TestBlobMissProxiesUpstreamWithoutHydrate(t *testing.T) {
 	}
 	if got := copies.Load(); got != 0 {
 		t.Fatalf("copyImage calls = %d, want 0", got)
+	}
+}
+
+func TestProxyRegistryPullLimitsConcurrentStreams(t *testing.T) {
+	t.Parallel()
+
+	firstHit := make(chan struct{})
+	secondHit := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch hits.Add(1) {
+		case 1:
+			close(firstHit)
+			<-releaseFirst
+		case 2:
+			close(secondHit)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "layer")
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &imageCache{proxySlots: newSemaphore(1)}
+	req1 := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/library/demo/blobs/sha256:111", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/library/demo/blobs/sha256:222", nil)
+
+	firstResult := make(chan proxyPullResult, 1)
+	secondResult := make(chan proxyPullResult, 1)
+	go func() {
+		firstResult <- cache.proxyRegistryPull(httptest.NewRecorder(), req1, upstreamURL.Host)
+	}()
+	select {
+	case <-firstHit:
+	case <-time.After(time.Second):
+		t.Fatal("expected first proxy request to reach upstream")
+	}
+	go func() {
+		secondResult <- cache.proxyRegistryPull(httptest.NewRecorder(), req2, upstreamURL.Host)
+	}()
+	select {
+	case <-secondHit:
+		t.Fatal("second proxy request reached upstream before the proxy slot was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if result := <-firstResult; !result.ok || result.err != nil {
+		t.Fatalf("first proxy result = %+v", result)
+	}
+	select {
+	case <-secondHit:
+	case <-time.After(time.Second):
+		t.Fatal("expected second proxy request to reach upstream after first released the slot")
+	}
+	if result := <-secondResult; !result.ok || result.err != nil {
+		t.Fatalf("second proxy result = %+v", result)
 	}
 }
 
