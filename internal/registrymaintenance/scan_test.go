@@ -86,6 +86,30 @@ func TestScanDoesNotTraverseLayerBlobsAsManifests(t *testing.T) {
 	}
 }
 
+func TestScanTreatsMissingDistributionRootAsEmptyRegistry(t *testing.T) {
+	storageRoot := t.TempDir()
+	root := filepath.Join(storageRoot, "docker", "registry", "v2")
+
+	result, err := Scan(root, nil)
+	if err != nil {
+		t.Fatalf("scan missing distribution root: %v", err)
+	}
+	if result.BlobCount != 0 || result.ManifestRevisionCount != 0 || result.UnreferencedBlobCount != 0 {
+		t.Fatalf("expected empty registry result, got %+v", result)
+	}
+	if result.StorageCapacityBytes == 0 {
+		t.Fatalf("expected filesystem usage to be populated: %+v", result)
+	}
+}
+
+func TestScanFailsForMissingNonDistributionRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing")
+
+	if _, err := Scan(root, nil); err == nil {
+		t.Fatalf("expected missing non-distribution root to fail")
+	}
+}
+
 func writeBlob(t *testing.T, root, digest string, data []byte) {
 	t.Helper()
 	hexDigest := digest[7:]

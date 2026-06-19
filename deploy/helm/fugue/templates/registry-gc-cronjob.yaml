@@ -135,6 +135,10 @@ spec:
                       --format env
                   }
 
+                  registry_empty() {
+                    [[ "${REGISTRY_BLOB_COUNT:-0}" -eq 0 && "${REGISTRY_MANIFEST_REVISION_COUNT:-0}" -eq 0 ]]
+                  }
+
                   restore_registry() {
                     local exit_code=$?
                     if [[ -n "${original_replicas}" ]]; then
@@ -169,6 +173,17 @@ spec:
                       fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}"
                     exit 0
                   fi
+                  if registry_empty; then
+                    log "skip GC: registry storage is empty"
+                    annotate_gc \
+                      fugue.pro/registry-gc-last-status=skipped-empty-registry \
+                      fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}" \
+                      fugue.pro/registry-storage-used-bytes="${REGISTRY_STORAGE_USED_BYTES}" \
+                      fugue.pro/registry-storage-capacity-bytes="${REGISTRY_STORAGE_CAPACITY_BYTES}" \
+                      fugue.pro/registry-unreferenced-blob-bytes=0 \
+                      fugue.pro/registry-unreferenced-blob-count=0
+                    exit 0
+                  fi
 
                   gc_started="true"
                   annotate_gc \
@@ -198,6 +213,19 @@ spec:
                       fugue.pro/registry-gc-running=false \
                       fugue.pro/registry-gc-last-status=blocked-missing-workload-digest \
                       fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}"
+                    gc_started="false"
+                    exit 0
+                  fi
+                  if registry_empty; then
+                    log "skip GC after quiesce: registry storage is empty"
+                    annotate_gc \
+                      fugue.pro/registry-gc-running=false \
+                      fugue.pro/registry-gc-last-status=skipped-empty-registry \
+                      fugue.pro/registry-protected-workload-digests="${REGISTRY_KEEP_DIGEST_COUNT}" \
+                      fugue.pro/registry-storage-used-bytes="${REGISTRY_STORAGE_USED_BYTES}" \
+                      fugue.pro/registry-storage-capacity-bytes="${REGISTRY_STORAGE_CAPACITY_BYTES}" \
+                      fugue.pro/registry-unreferenced-blob-bytes=0 \
+                      fugue.pro/registry-unreferenced-blob-count=0
                     gc_started="false"
                     exit 0
                   fi

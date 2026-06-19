@@ -1191,6 +1191,7 @@ func TestRegistryMaintenanceJobsRenderByDefault(t *testing.T) {
 		"kubectl get deployments,statefulsets,daemonsets --all-namespaces",
 		"active_retention_jobs",
 		"registry pod did not terminate within 180 seconds",
+		"skipped-empty-registry",
 		"FUGUE_REGISTRY_PUSH_BASE",
 		"abort GC after quiesce",
 		"persistentVolumeClaim:",

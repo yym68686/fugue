@@ -190,13 +190,43 @@ func ReadKeepDigests(path string) ([]string, error) {
 
 func populateFilesystemUsage(root string, result *ScanResult) error {
 	var stats syscall.Statfs_t
-	if err := syscall.Statfs(root, &stats); err != nil {
-		return fmt.Errorf("stat registry filesystem: %w", err)
+	err := syscall.Statfs(root, &stats)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("stat registry filesystem: %w", err)
+		}
+		storageRoot, ok := distributionStorageRoot(root)
+		if !ok {
+			return fmt.Errorf("stat registry filesystem: %w", err)
+		}
+		if storageErr := syscall.Statfs(storageRoot, &stats); storageErr != nil {
+			return fmt.Errorf("stat registry filesystem: %w", storageErr)
+		}
 	}
 	blockSize := int64(stats.Bsize)
 	result.StorageCapacityBytes = int64(stats.Blocks) * blockSize
 	result.StorageUsedBytes = int64(stats.Blocks-stats.Bfree) * blockSize
 	return nil
+}
+
+func distributionStorageRoot(root string) (string, bool) {
+	root = filepath.Clean(root)
+	if filepath.Base(root) != "v2" {
+		return "", false
+	}
+	registryRoot := filepath.Dir(root)
+	if filepath.Base(registryRoot) != "registry" {
+		return "", false
+	}
+	dockerRoot := filepath.Dir(registryRoot)
+	if filepath.Base(dockerRoot) != "docker" {
+		return "", false
+	}
+	storageRoot := filepath.Dir(dockerRoot)
+	if storageRoot == dockerRoot || storageRoot == "." || storageRoot == string(os.PathSeparator) {
+		return "", false
+	}
+	return storageRoot, true
 }
 
 func digestFromBlobDataPath(blobsRoot, path string) string {
