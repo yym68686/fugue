@@ -570,6 +570,53 @@ func TestServiceLatencyAwareSelectsMeasuredFastEdgeWhenHealthy(t *testing.T) {
 	}
 }
 
+func TestServiceLatencyAwareCompositeScoreOverridesStaleGroupWeight(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		Zone:        "dns.fugue.pro",
+		TTL:         60,
+		Nameservers: []string{"ns1.dns.fugue.pro"},
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version: "dnsgen_latency_scored",
+		Zone:    "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "d-target.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"51.38.126.103", "95.169.10.156", "15.204.94.71"},
+				TTL:        60,
+				Status:     model.EdgeRouteStatusActive,
+				RecordKind: model.EdgeDNSRecordKindCustomDomainTarget,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindLatencyAware,
+					ECSEnabled:         true,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "51.38.126.103", EdgeID: "vps-84c8f0a9", EdgeGroupID: "edge-group-country-de", Country: "de", Priority: 0, Weight: 200, Score: 1257, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "95.169.10.156", EdgeID: "bwg", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 20, Score: 512, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "15.204.94.71", EdgeID: "vps-591f4447", EdgeGroupID: "edge-group-country-us", Country: "us", Priority: 50, Weight: 20, Score: 2853, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_latency_scored"`, false, "")
+
+	answer := dnsQuery(t, service, "d-target.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess {
+		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
+	}
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected one latency-selected answer, got %+v", answer.Answer)
+	}
+	first, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || first.A.String() != "95.169.10.156" {
+		t.Fatalf("expected best node-quality score to beat stale group weight, got %+v", answer.Answer)
+	}
+}
+
 func TestServiceLatencyAwareSelectsTopAnswerWhenWeightsAreClose(t *testing.T) {
 	t.Parallel()
 

@@ -11,6 +11,107 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
+func TestDedupeAndSortEdgeDNSRecordsPreservesLatencyAwarePolicy(t *testing.T) {
+	t.Parallel()
+
+	records := dedupeAndSortEdgeDNSRecords([]model.EdgeDNSRecord{
+		{
+			Name:   "d-target.dns.fugue.pro",
+			Type:   model.EdgeDNSRecordTypeA,
+			Values: []string{"95.169.10.156"},
+			AnswerPolicy: model.DNSAnswerPolicy{
+				PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
+				Reason:              "latency_aware_stable_window_24h",
+				SelectedEdgeGroupID: "edge-group-country-us",
+				Weight:              200,
+			},
+			Candidates: []model.EdgeDNSAnswerCandidate{
+				{
+					IP:             "95.169.10.156",
+					EdgeID:         "edge-us-fast",
+					EdgeGroupID:    "edge-group-country-us",
+					Weight:         200,
+					Reason:         "node_quality_ttfb_100ms",
+					TrafficClass:   "streaming",
+					Score:          100,
+					ScoreBreakdown: map[string]float64{"latency": 100},
+					Healthy:        true,
+					RouteReady:     true,
+					TLSReady:       true,
+				},
+			},
+		},
+		{
+			Name:   "d-target.dns.fugue.pro",
+			Type:   model.EdgeDNSRecordTypeA,
+			Values: []string{"51.38.126.103"},
+			AnswerPolicy: model.DNSAnswerPolicy{
+				PolicyKind:          model.DNSAnswerPolicyKindGeo,
+				PreferredEdgeGroups: []string{"edge-group-country-de"},
+				Reason:              "geo_healthy_route_ready",
+			},
+			Candidates: []model.EdgeDNSAnswerCandidate{
+				{
+					IP:          "51.38.126.103",
+					EdgeID:      "edge-de-slow",
+					EdgeGroupID: "edge-group-country-de",
+					Priority:    0,
+					Weight:      100,
+					Healthy:     true,
+					RouteReady:  true,
+					TLSReady:    true,
+				},
+			},
+		},
+	})
+
+	record := edgeDNSRecordByNameAndType(records, "d-target.dns.fugue.pro", model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected merged record, got %+v", records)
+	}
+	if record.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindLatencyAware ||
+		record.AnswerPolicy.SelectedEdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected latency-aware policy to survive geo merge, got %+v", record.AnswerPolicy)
+	}
+	if !stringSliceContains(record.Values, "95.169.10.156") || !stringSliceContains(record.Values, "51.38.126.103") {
+		t.Fatalf("expected merged answer values, got %+v", record.Values)
+	}
+}
+
+func TestMergeEdgeDNSAnswerCandidatesPreservesRicherQualityMetadata(t *testing.T) {
+	t.Parallel()
+
+	candidates := mergeEdgeDNSAnswerCandidates(
+		[]model.EdgeDNSAnswerCandidate{
+			{IP: "95.169.10.156", EdgeGroupID: "edge-group-country-us", Weight: 100, Healthy: true, RouteReady: true, TLSReady: true},
+		},
+		[]model.EdgeDNSAnswerCandidate{
+			{
+				IP:             "95.169.10.156",
+				EdgeGroupID:    "edge-group-country-us",
+				Weight:         200,
+				Reason:         "node_quality_ttfb_100ms",
+				TrafficClass:   "streaming",
+				Score:          100,
+				ScoreBreakdown: map[string]float64{"latency": 100},
+				Healthy:        true,
+				RouteReady:     true,
+				TLSReady:       true,
+			},
+		},
+	)
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected one merged candidate, got %+v", candidates)
+	}
+	if candidates[0].Score != 100 ||
+		candidates[0].Weight != 200 ||
+		candidates[0].TrafficClass != "streaming" ||
+		candidates[0].ScoreBreakdown["latency"] != 100 {
+		t.Fatalf("expected richer quality metadata to survive merge, got %+v", candidates[0])
+	}
+}
+
 func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 	t.Parallel()
 

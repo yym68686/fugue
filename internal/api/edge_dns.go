@@ -2018,9 +2018,7 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 			record.Values = uniqueSortedStrings(append(existing.Values, record.Values...))
 			record.Candidates = mergeEdgeDNSAnswerCandidates(existing.Candidates, record.Candidates)
 			record.ScopedCandidates = mergeEdgeDNSScopedAnswerCandidates(existing.ScopedCandidates, record.ScopedCandidates)
-			if record.AnswerPolicy.PolicyKind == "" {
-				record.AnswerPolicy = existing.AnswerPolicy
-			}
+			record.AnswerPolicy = mergeEdgeDNSAnswerPolicy(existing.AnswerPolicy, record.AnswerPolicy)
 			record.RecordGeneration = edgeDNSRecordGeneration(record)
 		}
 		byKey[key] = record
@@ -2036,6 +2034,38 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 		return out[i].Type < out[j].Type
 	})
 	return out
+}
+
+func mergeEdgeDNSAnswerPolicy(existing, incoming model.DNSAnswerPolicy) model.DNSAnswerPolicy {
+	if strings.TrimSpace(incoming.PolicyKind) == "" {
+		return existing
+	}
+	if strings.TrimSpace(existing.PolicyKind) == "" {
+		return incoming
+	}
+	existingRank := edgeDNSAnswerPolicyKindRank(existing.PolicyKind)
+	incomingRank := edgeDNSAnswerPolicyKindRank(incoming.PolicyKind)
+	if existingRank > incomingRank {
+		return existing
+	}
+	return incoming
+}
+
+func edgeDNSAnswerPolicyKindRank(kind string) int {
+	switch strings.TrimSpace(kind) {
+	case model.DNSAnswerPolicyKindPinned, model.DNSAnswerPolicyKindDisabled:
+		return 50
+	case model.DNSAnswerPolicyKindLatencyAware:
+		return 40
+	case model.DNSAnswerPolicyKindWeighted:
+		return 30
+	case model.DNSAnswerPolicyKindGeo:
+		return 20
+	case model.DNSAnswerPolicyKindGlobal:
+		return 10
+	default:
+		return 0
+	}
 }
 
 func mergeEdgeDNSScopedAnswerCandidates(left, right []model.EdgeDNSScopedAnswerCandidates) []model.EdgeDNSScopedAnswerCandidates {
@@ -2076,14 +2106,20 @@ func mergeEdgeDNSScopedAnswerCandidates(left, right []model.EdgeDNSScopedAnswerC
 
 func mergeEdgeDNSAnswerCandidates(left, right []model.EdgeDNSAnswerCandidate) []model.EdgeDNSAnswerCandidate {
 	out := make([]model.EdgeDNSAnswerCandidate, 0, len(left)+len(right))
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, candidates := range [][]model.EdgeDNSAnswerCandidate{left, right} {
 		for _, candidate := range candidates {
 			key := strings.TrimSpace(candidate.IP) + "\x00" + strings.TrimSpace(candidate.EdgeGroupID)
-			if key == "\x00" || seen[key] {
+			if key == "\x00" {
 				continue
 			}
-			seen[key] = true
+			if existingIndex, ok := seen[key]; ok {
+				if edgeDNSAnswerCandidateMetadataRank(candidate) > edgeDNSAnswerCandidateMetadataRank(out[existingIndex]) {
+					out[existingIndex] = candidate
+				}
+				continue
+			}
+			seen[key] = len(out)
 			out = append(out, candidate)
 		}
 	}
@@ -2100,6 +2136,26 @@ func mergeEdgeDNSAnswerCandidates(left, right []model.EdgeDNSAnswerCandidate) []
 		return out[i].IP < out[j].IP
 	})
 	return out
+}
+
+func edgeDNSAnswerCandidateMetadataRank(candidate model.EdgeDNSAnswerCandidate) int {
+	rank := 0
+	if candidate.Score > 0 {
+		rank += 16
+	}
+	if len(candidate.ScoreBreakdown) > 0 {
+		rank += 8
+	}
+	if strings.TrimSpace(candidate.TrafficClass) != "" {
+		rank += 4
+	}
+	if strings.TrimSpace(candidate.Reason) != "" {
+		rank += 2
+	}
+	if candidate.Weight > 0 {
+		rank++
+	}
+	return rank
 }
 
 func uniqueSortedStrings(values []string) []string {

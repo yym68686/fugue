@@ -1746,9 +1746,10 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now t
 		}
 		candidates = append(candidates, candidate)
 	}
+	hasLatencyScore := strings.TrimSpace(policy.PolicyKind) == model.DNSAnswerPolicyKindLatencyAware && edgeDNSAnyCandidateScore(candidates)
 	sort.SliceStable(candidates, func(i, j int) bool {
-		ai := edgeDNSCandidateSortScore(candidates[i], policy, hint)
-		aj := edgeDNSCandidateSortScore(candidates[j], policy, hint)
+		ai := edgeDNSCandidateSortScore(candidates[i], policy, hint, hasLatencyScore)
+		aj := edgeDNSCandidateSortScore(candidates[j], policy, hint, hasLatencyScore)
 		if ai != aj {
 			return ai < aj
 		}
@@ -1768,6 +1769,15 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now t
 	}
 	candidates = edgeDNSMaybePromoteExploration(record, policy, hint, candidates, now)
 	return candidates
+}
+
+func edgeDNSAnyCandidateScore(candidates []model.EdgeDNSAnswerCandidate) bool {
+	for _, candidate := range candidates {
+		if candidate.Score > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy) bool {
@@ -1913,11 +1923,20 @@ func edgeDNSExplorationPercent(policy model.DNSAnswerPolicy) int {
 	return percent
 }
 
-func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy, hint dnsGeoHint) int {
+func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy, hint dnsGeoHint, latencyScoreMode bool) int {
 	score := candidate.Priority * 100
 	switch policy.PolicyKind {
 	case model.DNSAnswerPolicyKindLatencyAware:
-		score = candidate.Priority*10 - candidate.Weight*20
+		if latencyScoreMode {
+			// Composite quality scores already include latency, error, body-read and cache health.
+			// Keep route priority as a preference and weight as a tie-break, not the primary signal.
+			score = 500000 + candidate.Priority*10 - candidate.Weight
+			if candidate.Score > 0 {
+				score = int(candidate.Score) + candidate.Priority*10 - candidate.Weight
+			}
+		} else {
+			score = candidate.Priority*10 - candidate.Weight*20
+		}
 	case model.DNSAnswerPolicyKindWeighted:
 		score -= candidate.Weight * 20
 	}
@@ -1938,7 +1957,7 @@ func edgeDNSCandidateSortScore(candidate model.EdgeDNSAnswerCandidate, policy mo
 			score -= 250
 		}
 	}
-	if candidate.Score > 0 {
+	if candidate.Score > 0 && !(policy.PolicyKind == model.DNSAnswerPolicyKindLatencyAware && latencyScoreMode) {
 		score += int(candidate.Score)
 	}
 	return score
