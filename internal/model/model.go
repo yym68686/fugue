@@ -2070,6 +2070,26 @@ func AppTrackedImageDigest(app App, imageRef string) string {
 	return ImageDigestFromReference(app.Spec.Image)
 }
 
+func ImageDigestsMatch(current, expected string) bool {
+	current = strings.ToLower(strings.TrimSpace(current))
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	if current == "" || expected == "" {
+		return false
+	}
+	if current == expected {
+		return true
+	}
+	current = strings.TrimPrefix(current, "sha256:")
+	expected = strings.TrimPrefix(expected, "sha256:")
+	if current == "" || expected == "" {
+		return false
+	}
+	if len(current) < len(expected) {
+		return strings.HasPrefix(expected, current)
+	}
+	return strings.HasPrefix(current, expected)
+}
+
 func ImageDigestFromReference(imageRef string) string {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
@@ -2081,7 +2101,26 @@ func ImageDigestFromReference(imageRef string) string {
 	if idx := strings.Index(imageRef, "@sha256:"); idx >= 0 {
 		return imageRef[idx+1:]
 	}
+	if idx := strings.LastIndex(imageRef, ":image-"); idx >= 0 {
+		value := strings.ToLower(imageRef[idx+len(":image-"):])
+		if isHexDigestPrefix(value) {
+			return "sha256:" + value
+		}
+	}
 	return ""
+}
+
+func isHexDigestPrefix(value string) bool {
+	if len(value) < 12 || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func SetOperationSourceState(op *Operation, build, origin *AppSource) {

@@ -56,3 +56,28 @@ func TestDNS1035LabelTruncatesWithoutTrailingDash(t *testing.T) {
 		t.Fatalf("expected numeric label to use service prefix, got %q", got)
 	}
 }
+
+func TestImageDigestFromReferenceParsesFugueMirrorTags(t *testing.T) {
+	t.Parallel()
+
+	got := ImageDigestFromReference("registry.fugue.internal:5000/fugue-apps/index-docker-io-acme-web:image-2fb05ebe4e37")
+	if got != "sha256:2fb05ebe4e37" {
+		t.Fatalf("expected fugue mirror digest prefix, got %q", got)
+	}
+	if got := ImageDigestFromReference("registry.example/web:image-not-a-digest"); got != "" {
+		t.Fatalf("expected non-digest image tag to stay empty, got %q", got)
+	}
+}
+
+func TestImageDigestsMatchAllowsFugueMirrorPrefix(t *testing.T) {
+	t.Parallel()
+
+	current := ImageDigestFromReference("registry.fugue.internal:5000/fugue-apps/index-docker-io-acme-web:image-2fb05ebe4e37")
+	expected := "sha256:2fb05ebe4e3768bd79206ee4c3cd768fc4270f0d881f648f75b13f2889cdd1d0"
+	if !ImageDigestsMatch(current, expected) {
+		t.Fatalf("expected digest prefix %q to match full digest %q", current, expected)
+	}
+	if ImageDigestsMatch("sha256:aaaaaaaaaaaa", expected) {
+		t.Fatal("unexpected digest prefix match")
+	}
+}

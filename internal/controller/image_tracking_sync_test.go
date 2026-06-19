@@ -87,6 +87,75 @@ func TestSyncTrackedAppImagesQueuesWhenHistoryMatchesButCurrentSourceDiffers(t *
 	}
 }
 
+func TestSyncTrackedAppImagesNoopsWhenFugueMirrorTagMatchesDigest(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, project, _ := newImageTrackingSyncTestStore(t)
+	trackingImageRef := "ghcr.io/acme/api:main"
+	fullDigest := "sha256:2fb05ebe4e3768bd79206ee4c3cd768fc4270f0d881f648f75b13f2889cdd1d0"
+	trackedSource := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         trackingImageRef,
+		ResolvedImageRef: "fugue-fugue-registry.fugue-system.svc.cluster.local:5000/fugue-apps/index-docker-io-acme-api:image-2fb05ebe4e37",
+		ImageNameSuffix:  "api",
+		ComposeService:   "api",
+		DetectedProvider: "docker-image",
+	}
+	app, err := s.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "tracked-api", "", model.AppSpec{
+		Image:     "registry.fugue.internal:5000/fugue-apps/index-docker-io-acme-api:image-2fb05ebe4e37",
+		Ports:     []int{8000},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, trackedSource)
+	if err != nil {
+		t.Fatalf("create tracked app: %v", err)
+	}
+	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID:         tenant.ID,
+		AppID:            app.ID,
+		ImageRef:         trackingImageRef,
+		Enabled:          true,
+		LastQueuedDigest: fullDigest,
+	})
+	if err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+
+	svc := &Service{
+		Store: s,
+		Config: config.ControllerConfig{
+			ImageTrackingTimeout: time.Second,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		resolveRemoteImageDigest: func(context.Context, string) (string, error) {
+			return fullDigest, nil
+		},
+		now: func() time.Time {
+			return time.Date(2026, time.May, 18, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	if err := svc.syncTrackedAppImages(context.Background()); err != nil {
+		t.Fatalf("sync tracked images: %v", err)
+	}
+	if queued, found, err := s.ClaimNextPendingGitHubSyncImportOperation(); err != nil {
+		t.Fatalf("claim background import: %v", err)
+	} else if found {
+		t.Fatalf("expected no image tracking import, got %s", queued.ID)
+	}
+
+	updated, err := s.GetAppImageTracking(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("get tracking: %v", err)
+	}
+	if updated.LastSeenDigest != fullDigest {
+		t.Fatalf("expected digest check to be recorded, got %q", updated.LastSeenDigest)
+	}
+	if updated.LastOperationID != tracking.LastOperationID {
+		t.Fatalf("expected no queued operation, got last operation %q", updated.LastOperationID)
+	}
+}
+
 func newImageTrackingSyncTestStore(t *testing.T) (*store.Store, model.Tenant, model.Project, model.App) {
 	t.Helper()
 
