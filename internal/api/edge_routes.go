@@ -613,7 +613,7 @@ func appReleaseCanReceiveEdgeTraffic(release model.AppRelease) bool {
 func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string, now time.Time) model.EdgeRouteBinding {
 	runtimeEdgeGroupID := strings.TrimSpace(firstNonEmpty(binding.RuntimeEdgeGroupID, binding.EdgeGroupID))
 	policy, ok := policies[normalizeExternalAppDomain(binding.Hostname)]
-	policyMatches := ok && strings.TrimSpace(policy.AppID) == strings.TrimSpace(binding.AppID)
+	policyMatches := ok && edgeRoutePolicyMatchesBinding(policy, binding)
 	exclusions := edgeRoutePolicyActiveExclusions(policy, now)
 	if !policyMatches {
 		exclusions = edgeRouteExclusions{}
@@ -706,6 +706,15 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 	}
 	binding.RouteGeneration = edgeRouteGeneration(binding)
 	return binding
+}
+
+func edgeRoutePolicyMatchesBinding(policy model.EdgeRoutePolicy, binding model.EdgeRouteBinding) bool {
+	if strings.TrimSpace(policy.AppID) == strings.TrimSpace(binding.AppID) {
+		return true
+	}
+	policyTenantID := strings.TrimSpace(policy.TenantID)
+	bindingTenantID := strings.TrimSpace(binding.TenantID)
+	return policyTenantID != "" && bindingTenantID != "" && policyTenantID == bindingTenantID
 }
 
 func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string) []model.EdgeRouteBinding {

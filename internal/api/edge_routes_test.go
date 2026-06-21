@@ -819,6 +819,93 @@ func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
 	}
 }
 
+func TestEdgeRoutePolicyExclusionAppliesToSharedHostnameRoutes(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, frontend, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	frontend = deployAppForEdgeRouteTest(t, storeState, frontend)
+	backend, err := storeState.CreateAppWithRoute(frontend.TenantID, frontend.ProjectID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api:latest",
+		Ports:     []int{9000},
+		Replicas:  1,
+		RuntimeID: model.DefaultManagedRuntimeID,
+	}, model.AppRoute{
+		Hostname:    "shared.example.com",
+		PathPrefix:  "/v1",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://shared.example.com/v1",
+		ServicePort: 9000,
+	})
+	if err != nil {
+		t.Fatalf("create backend app: %v", err)
+	}
+	backend = deployAppForEdgeRouteTest(t, storeState, backend)
+
+	now := time.Date(2026, 6, 21, 5, 40, 0, 0, time.UTC)
+	if _, err := storeState.PutAppDomain(model.AppDomain{
+		Hostname:    "shared.example.com",
+		AppID:       frontend.ID,
+		TenantID:    frontend.TenantID,
+		Status:      model.AppDomainStatusVerified,
+		TLSStatus:   model.AppDomainTLSStatusReady,
+		RouteTarget: server.primaryCustomDomainTarget(frontend),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("put shared hostname custom domain: %v", err)
+	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
+
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/shared.example.com", platformAdminKey, map[string]any{
+		"route_policy":      model.EdgeRoutePolicyEnabled,
+		"excluded_edge_ids": []string{"edge-de-1"},
+		"exclusion_reason":  "shared-hostname-edge-exclusion",
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	excluded := httptest.NewRecorder()
+	excludedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-de-1&edge_group_id=edge-group-country-de", nil)
+	server.Handler().ServeHTTP(excluded, excludedReq)
+	if excluded.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, excluded.Code, excluded.Body.String())
+	}
+	var excludedBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, excluded, &excludedBundle)
+	if route := edgeRouteByHostKindAndPath(excludedBundle.Routes, "shared.example.com", model.EdgeRouteKindCustomDomain, "/"); route != nil {
+		t.Fatalf("excluded edge must not receive shared hostname root route, got %+v in %+v", route, excludedBundle.Routes)
+	}
+	if route := edgeRouteByHostKindAndPath(excludedBundle.Routes, "shared.example.com", model.EdgeRouteKindPlatform, "/v1"); route != nil {
+		t.Fatalf("excluded edge must not receive shared hostname /v1 route, got %+v in %+v", route, excludedBundle.Routes)
+	}
+
+	allowed := httptest.NewRecorder()
+	allowedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-us-1&edge_group_id=edge-group-country-us", nil)
+	server.Handler().ServeHTTP(allowed, allowedReq)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, allowed.Code, allowed.Body.String())
+	}
+	var allowedBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, allowed, &allowedBundle)
+	rootRoute := edgeRouteByHostKindAndPath(allowedBundle.Routes, "shared.example.com", model.EdgeRouteKindCustomDomain, "/")
+	if rootRoute == nil || rootRoute.AppID != frontend.ID {
+		t.Fatalf("non-excluded edge should receive shared hostname root route, got %+v", allowedBundle.Routes)
+	}
+	apiRoute := edgeRouteByHostKindAndPath(allowedBundle.Routes, "shared.example.com", model.EdgeRouteKindPlatform, "/v1")
+	if apiRoute == nil || apiRoute.AppID != backend.ID {
+		t.Fatalf("non-excluded edge should receive shared hostname /v1 route, got %+v", allowedBundle.Routes)
+	}
+	for _, route := range []*model.EdgeRouteBinding{rootRoute, apiRoute} {
+		if route.EdgeGroupID != "edge-group-country-us" ||
+			!testStringSliceContainsFold(route.ExcludedEdgeIDs, "edge-de-1") ||
+			route.ExclusionReason != "shared-hostname-edge-exclusion" {
+			t.Fatalf("expected shared hostname exclusion metadata on allowed route, got %+v", route)
+		}
+	}
+}
+
 func TestPlatformRoutesBootstrapPendingEdgeGroupReceivesBundle(t *testing.T) {
 	t.Parallel()
 
