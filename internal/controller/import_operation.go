@@ -61,14 +61,18 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
-		output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
-			AppName:                     app.Name,
-			ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
-			ImageRef:                    controllerReachableImportImageRef(queuedDockerImageRef, s.registryPushBase, s.registryPullBase),
-			RegistryPushBase:            s.registryPushBase,
-			DestinationRegistryPushBase: imageDestination.RegistryPushBase,
-			ImageRepository:             "fugue-apps",
-		})
+		if reusedOutput, reused := s.reuseExistingManagedImageImportOutput(app, *op.DesiredSource, queuedDockerImageRef, imageDestination.Target); reused {
+			output = reusedOutput
+		} else {
+			output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
+				AppName:                     app.Name,
+				ImageNameSuffix:             strings.TrimSpace(op.DesiredSource.ImageNameSuffix),
+				ImageRef:                    controllerReachableImportImageRef(queuedDockerImageRef, s.registryPushBase, s.registryPullBase),
+				RegistryPushBase:            s.registryPushBase,
+				DestinationRegistryPushBase: imageDestination.RegistryPushBase,
+				ImageRepository:             "fugue-apps",
+			})
+		}
 	case model.AppSourceTypeGitHubPublic, model.AppSourceTypeGitHubPrivate:
 		if strings.TrimSpace(op.DesiredSource.RepoURL) == "" {
 			return fmt.Errorf("import operation %s missing repo_url", op.ID)
@@ -378,6 +382,119 @@ func (s *Service) importImageDestinationForRuntime(runtimeObj model.Runtime) imp
 			ClusterNodeName: strings.TrimSpace(runtimeObj.ClusterNodeName),
 		},
 	}
+}
+
+func (s *Service) reuseExistingManagedImageImportOutput(
+	app model.App,
+	queuedSource model.AppSource,
+	imageRef string,
+	target deployImageTarget,
+) (sourceimport.GitHubSourceImportOutput, bool) {
+	if s == nil || s.Store == nil || !s.nodeLocalBuilderRegistryEnabled() {
+		return sourceimport.GitHubSourceImportOutput{}, false
+	}
+	managedRef, runtimeRef, ok := configuredManagedImportImageRefs(imageRef, s.registryPushBase, s.registryPullBase)
+	if !ok {
+		return sourceimport.GitHubSourceImportOutput{}, false
+	}
+	locations, err := s.presentImageLocations(app, managedRef, runtimeRef)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("lookup reusable managed image locations app=%s image=%s failed: %v", app.ID, imageRef, err)
+		}
+		return sourceimport.GitHubSourceImportOutput{}, false
+	}
+	location, ok := reusableManagedImageLocation(locations, target)
+	if !ok {
+		return sourceimport.GitHubSourceImportOutput{}, false
+	}
+	destinationRef := cacheEndpointImageRef(location.CacheEndpoint, managedRef)
+	if destinationRef == "" {
+		destinationRef = runtimeRef
+	}
+	if s.Logger != nil {
+		s.Logger.Printf(
+			"reuse existing managed image for import app=%s image=%s managed_image=%s runtime_image=%s cache_endpoint=%s runtime=%s node=%s",
+			app.ID,
+			imageRef,
+			managedRef,
+			runtimeRef,
+			strings.TrimSpace(location.CacheEndpoint),
+			strings.TrimSpace(location.RuntimeID),
+			strings.TrimSpace(location.ClusterNodeName),
+		)
+	}
+	return sourceimport.GitHubSourceImportOutput{
+		ImportResult: sourceimport.GitHubImportResult{
+			DetectedProvider:     model.AppSourceTypeDockerImage,
+			ImageRef:             managedRef,
+			DestinationImageRef:  destinationRef,
+			DetectedPort:         80,
+			ExposesPublicService: false,
+		},
+		Source: model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         strings.TrimSpace(imageRef),
+			ResolvedImageRef: managedRef,
+			ImageNameSuffix:  strings.TrimSpace(queuedSource.ImageNameSuffix),
+			ComposeService:   strings.TrimSpace(queuedSource.ComposeService),
+			DetectedProvider: model.AppSourceTypeDockerImage,
+		},
+	}, true
+}
+
+func configuredManagedImportImageRefs(imageRef, pushBase, pullBase string) (string, string, bool) {
+	imageRef = strings.TrimSpace(imageRef)
+	pushBase = strings.Trim(strings.TrimSpace(pushBase), "/")
+	pullBase = strings.Trim(strings.TrimSpace(pullBase), "/")
+	if imageRef == "" || pushBase == "" {
+		return "", "", false
+	}
+	managedRef := ""
+	if strings.HasPrefix(imageRef, pushBase+"/") {
+		managedRef = imageRef
+	} else if pullBase != "" && pullBase != pushBase && strings.HasPrefix(imageRef, pullBase+"/") {
+		managedRef = pushBase + "/" + strings.TrimPrefix(imageRef, pullBase+"/")
+	} else {
+		return "", "", false
+	}
+	runtimeRef := appimages.RuntimeImageRefFromManagedRef(managedRef, pushBase, pullBase)
+	if strings.TrimSpace(runtimeRef) == "" {
+		runtimeRef = imageRef
+	}
+	return managedRef, runtimeRef, true
+}
+
+func reusableManagedImageLocation(locations []model.ImageLocation, target deployImageTarget) (model.ImageLocation, bool) {
+	if strings.TrimSpace(target.ClusterNodeName) == "" && strings.TrimSpace(target.RuntimeID) == "" {
+		return model.ImageLocation{}, false
+	}
+	for _, location := range locations {
+		if strings.TrimSpace(location.CacheEndpoint) == "" {
+			continue
+		}
+		if imageLocationPresentOnTarget([]model.ImageLocation{location}, target) {
+			return location, true
+		}
+	}
+	return model.ImageLocation{}, false
+}
+
+func cacheEndpointImageRef(cacheEndpoint, managedRef string) string {
+	cacheEndpoint = strings.TrimRight(strings.TrimSpace(cacheEndpoint), "/")
+	managedRef = strings.TrimSpace(managedRef)
+	if cacheEndpoint == "" || managedRef == "" {
+		return ""
+	}
+	host := cacheEndpoint
+	if parsed, err := url.Parse(cacheEndpoint); err == nil && strings.TrimSpace(parsed.Host) != "" {
+		host = strings.TrimSpace(parsed.Host)
+	}
+	index := strings.Index(managedRef, "/")
+	if host == "" || index < 0 || index+1 >= len(managedRef) {
+		return ""
+	}
+	return strings.Trim(host, "/") + "/" + strings.TrimPrefix(managedRef[index+1:], "/")
 }
 
 func (s *Service) runtimeForClusterNode(ctx context.Context, nodeName string) (model.Runtime, bool) {

@@ -422,6 +422,135 @@ func TestExecuteManagedImportOperationImportsDockerImageSourceThroughRuntimeCach
 	}
 }
 
+func TestExecuteManagedImportOperationReusesManagedImageLocationForDockerImageSource(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://203.0.113.10:9443",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+
+	const managedImageRef = "registry.push.example/fugue-apps/runtime:upload-abc123"
+	const runtimeImageRef = "registry.pull.example/fugue-apps/runtime:upload-abc123"
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           "app_template",
+		ImageRef:        runtimeImageRef,
+		RuntimeID:       updater.RuntimeID,
+		ClusterNodeName: updater.ClusterNodeName,
+		CacheEndpoint:   "http://203.0.113.10:5000",
+		Status:          model.ImageLocationStatusPresent,
+	}); err != nil {
+		t.Fatalf("record image location: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: updater.RuntimeID,
+		Ports:     []int{7777},
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: runtimeImageRef,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{}
+	svc := &Service{
+		Store:                   stateStore,
+		Logger:                  log.New(io.Discard, "", 0),
+		importer:                importer,
+		registryPushBase:        "registry.push.example",
+		registryPullBase:        "registry.pull.example",
+		builderRegistryPushBase: "127.0.0.1:5000",
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			if imageRef != managedImageRef {
+				t.Fatalf("unexpected managed image inspect ref %q", imageRef)
+			}
+			return false, nil, errors.New("central registry manifest missing")
+		},
+		resolveManagedImageDigestRef: func(_ context.Context, imageRef string) (string, error) {
+			if imageRef != managedImageRef {
+				t.Fatalf("unexpected digest ref %q", imageRef)
+			}
+			return "", errors.New("central registry manifest missing")
+		},
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+	if importer.dockerImageReq != nil {
+		t.Fatalf("expected managed image location reuse to skip docker importer, got request %+v", importer.dockerImageReq)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil || deployOp.DesiredSource == nil {
+		t.Fatalf("expected deploy operation with desired spec/source, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != runtimeImageRef {
+		t.Fatalf("expected runtime image ref %q, got %q", runtimeImageRef, got)
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != managedImageRef {
+		t.Fatalf("expected managed resolved image ref %q, got %q", managedImageRef, got)
+	}
+	if got := deployOp.DesiredSource.ImageRef; got != runtimeImageRef {
+		t.Fatalf("expected source image ref %q, got %q", runtimeImageRef, got)
+	}
+}
+
 func TestExecuteManagedImportOperationImportsGitHubSourceThroughRuntimeCache(t *testing.T) {
 	t.Parallel()
 
