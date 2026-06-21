@@ -36,6 +36,40 @@ if public_data_plane_daemonset_rollout_wait_required; then
 fi
 PUBLIC_DATA_PLANE_PRESERVED=false
 
+ORIGINAL_PATH="${PATH}"
+TMP_CURL_DIR="$(mktemp -d)"
+cat >"${TMP_CURL_DIR}/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[[ -n "${out}" ]]
+printf '%s' "${TEST_PLATFORM_AUTONOMY_JSON}" >"${out}"
+SH
+chmod +x "${TMP_CURL_DIR}/curl"
+PATH="${TMP_CURL_DIR}:${PATH}"
+FUGUE_API_URL="https://api.example.test"
+FUGUE_API_KEY="test-token"
+export TEST_PLATFORM_AUTONOMY_JSON='{"status":{"pass":true,"block_rollout":false,"checks":[]}}'
+assert_eq "$(platform_autonomy_status_summary)" "pass=true block_rollout=false" "platform autonomy pass summary"
+export TEST_PLATFORM_AUTONOMY_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"edge","pass":false,"message":"warming"}]}}'
+if autonomy_output="$(platform_autonomy_status_summary)"; then
+  fail "failed platform autonomy status must return non-zero"
+fi
+assert_eq "${autonomy_output}" "pass=false block_rollout=true; failing=edge: warming" "platform autonomy failure summary"
+PATH="${ORIGINAL_PATH}"
+rm -rf "${TMP_CURL_DIR}"
+
 FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-api/main.go\ninternal/api/server.go\n.github/workflows/deploy-control-plane.yml'
 if public_data_plane_changed; then
   fail "control-plane-only changes must not mark public data-plane changed"

@@ -5626,10 +5626,11 @@ public_data_plane_live_dns_image_changed() {
 }
 
 release_public_data_plane_if_needed() {
-	local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
-	local worker_changed="false"
-	local front_changed="false"
-	local dns_changed="false"
+  local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
+  local worker_changed="false"
+  local front_changed="false"
+  local dns_changed="false"
+  PUBLIC_DATA_PLANE_RELEASED="false"
 
   if [[ "${FUGUE_EDGE_ENABLED}" != "true" ]]; then
     return 0
@@ -5680,18 +5681,82 @@ release_public_data_plane_if_needed() {
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="blue-green"
     log "public data-plane worker image changed; starting isolated blue-green release"
     bash ./scripts/release_fugue_public_data_plane.sh
+    PUBLIC_DATA_PLANE_RELEASED="true"
   fi
   if [[ "${front_changed}" == "true" ]]; then
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="front-ondelete"
     export FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="true"
     log "public data-plane front image changed; starting isolated front-ondelete release after worker readiness checks"
     bash ./scripts/release_fugue_public_data_plane.sh
+    PUBLIC_DATA_PLANE_RELEASED="true"
   fi
   if [[ "${dns_changed}" == "true" ]]; then
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="dns-ondelete"
     log "public data-plane DNS image changed; starting isolated dns-ondelete release"
     bash ./scripts/release_fugue_public_data_plane.sh
+    PUBLIC_DATA_PLANE_RELEASED="true"
   fi
+}
+
+platform_autonomy_status_summary() {
+  local api_base token status_file rc
+
+  api_base="$(release_api_base_url)"
+  token="$(release_api_token)"
+  status_file="$(mktemp)"
+  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/platform/autonomy/status" -o "${status_file}"; then
+    rm -f "${status_file}"
+    printf 'platform autonomy status request failed'
+    return 1
+  fi
+  python3 - "${status_file}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+status = payload.get("status") or {}
+passed = bool(status.get("pass")) and not bool(status.get("block_rollout"))
+checks = status.get("checks") or []
+failing = []
+for check in checks:
+    if not isinstance(check, dict) or check.get("pass"):
+        continue
+    name = str(check.get("name") or "").strip() or "<unknown>"
+    message = str(check.get("message") or "").strip()
+    failing.append(f"{name}: {message}" if message else name)
+if passed:
+    print("pass=true block_rollout=false")
+    raise SystemExit(0)
+summary = f"pass={str(bool(status.get('pass'))).lower()} block_rollout={str(bool(status.get('block_rollout'))).lower()}"
+if failing:
+    summary += "; failing=" + "; ".join(failing)
+print(summary)
+raise SystemExit(1)
+PY
+  rc=$?
+  rm -f "${status_file}"
+  return "${rc}"
+}
+
+wait_for_platform_autonomy_after_public_data_plane_release() {
+  local timeout="${FUGUE_PUBLIC_DATA_PLANE_AUTONOMY_WAIT_SECONDS:-180}"
+  local delay="${FUGUE_PUBLIC_DATA_PLANE_AUTONOMY_WAIT_DELAY_SECONDS:-10}"
+  local deadline output
+
+  deadline=$((SECONDS + timeout))
+  while true; do
+    if output="$(platform_autonomy_status_summary)"; then
+      log "platform autonomy passed after public data-plane release: ${output}"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      fail "platform autonomy did not recover after public data-plane release: ${output}"
+    fi
+    log "waiting for platform autonomy after public data-plane release: ${output}"
+    sleep "${delay}"
+  done
 }
 
 main() {
@@ -6458,6 +6523,9 @@ PY
   fi
 
   release_public_data_plane_if_needed
+  if [[ "${PUBLIC_DATA_PLANE_RELEASED:-false}" == "true" ]]; then
+    wait_for_platform_autonomy_after_public_data_plane_release
+  fi
 
   local current_revision
   current_revision="$(helm_current_revision)"
