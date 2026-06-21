@@ -154,6 +154,10 @@ type EdgeRouteBinding struct {
 	EdgeGroupID          string              `json:"edge_group_id"`
 	FallbackEdgeGroupID  string              `json:"fallback_edge_group_id,omitempty"`
 	PolicyEdgeGroupID    string              `json:"policy_edge_group_id,omitempty"`
+	ExcludedEdgeIDs      []string            `json:"excluded_edge_ids,omitempty"`
+	ExcludedEdgeGroupIDs []string            `json:"excluded_edge_group_ids,omitempty"`
+	ExclusionReason      string              `json:"exclusion_reason,omitempty"`
+	ExclusionExpiresAt   *time.Time          `json:"exclusion_expires_at,omitempty"`
 	RoutePolicy          string              `json:"route_policy"`
 	SelectionReason      string              `json:"selection_reason,omitempty"`
 	FallbackReason       string              `json:"fallback_reason,omitempty"`
@@ -189,15 +193,19 @@ type EdgeRouteUpstream struct {
 }
 
 type EdgeRoutePolicy struct {
-	ID          string    `json:"id"`
-	Hostname    string    `json:"hostname"`
-	AppID       string    `json:"app_id"`
-	TenantID    string    `json:"tenant_id"`
-	EdgeGroupID string    `json:"edge_group_id,omitempty"`
-	RoutePolicy string    `json:"route_policy"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                   string     `json:"id"`
+	Hostname             string     `json:"hostname"`
+	AppID                string     `json:"app_id"`
+	TenantID             string     `json:"tenant_id"`
+	EdgeGroupID          string     `json:"edge_group_id,omitempty"`
+	ExcludedEdgeIDs      []string   `json:"excluded_edge_ids,omitempty"`
+	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
+	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
+	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
+	RoutePolicy          string     `json:"route_policy"`
+	Enabled              bool       `json:"enabled"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 type PlatformRoute struct {

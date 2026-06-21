@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -61,8 +62,21 @@ type createEdgeNodeTokenResponse struct {
 }
 
 type putEdgeRoutePolicyRequest struct {
-	EdgeGroupID string `json:"edge_group_id,omitempty"`
-	RoutePolicy string `json:"route_policy"`
+	EdgeGroupID          string     `json:"edge_group_id,omitempty"`
+	ExcludedEdgeIDs      []string   `json:"excluded_edge_ids,omitempty"`
+	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
+	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
+	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
+	RoutePolicy          string     `json:"route_policy"`
+}
+
+type edgeRoutePolicyUpdate struct {
+	EdgeGroupID          string
+	ExcludedEdgeIDs      []string
+	ExcludedEdgeGroupIDs []string
+	ExclusionReason      string
+	ExclusionExpiresAt   *time.Time
+	RoutePolicy          string
 }
 
 type putPlatformDomainBindingRequest struct {
@@ -88,9 +102,20 @@ func (c *Client) GetEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, err
 }
 
 func (c *Client) PutEdgeRoutePolicy(hostname, edgeGroupID, routePolicy string) (model.EdgeRoutePolicy, error) {
-	request := putEdgeRoutePolicyRequest{
+	return c.PutEdgeRoutePolicyUpdate(hostname, edgeRoutePolicyUpdate{
 		EdgeGroupID: strings.TrimSpace(edgeGroupID),
 		RoutePolicy: strings.TrimSpace(routePolicy),
+	})
+}
+
+func (c *Client) PutEdgeRoutePolicyUpdate(hostname string, update edgeRoutePolicyUpdate) (model.EdgeRoutePolicy, error) {
+	request := putEdgeRoutePolicyRequest{
+		EdgeGroupID:          strings.TrimSpace(update.EdgeGroupID),
+		ExcludedEdgeIDs:      append([]string(nil), update.ExcludedEdgeIDs...),
+		ExcludedEdgeGroupIDs: append([]string(nil), update.ExcludedEdgeGroupIDs...),
+		ExclusionReason:      strings.TrimSpace(update.ExclusionReason),
+		ExclusionExpiresAt:   update.ExclusionExpiresAt,
+		RoutePolicy:          strings.TrimSpace(update.RoutePolicy),
 	}
 	var response edgeRoutePolicyResponse
 	if err := c.doJSON(http.MethodPut, edgeRoutePolicyPath(hostname), request, &response); err != nil {

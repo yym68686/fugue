@@ -770,6 +770,55 @@ func TestPlatformRoutesDefaultToHealthyEdgeGroups(t *testing.T) {
 	}
 }
 
+func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
+
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/"+app.Route.Hostname, platformAdminKey, map[string]any{
+		"route_policy":      model.EdgeRoutePolicyEnabled,
+		"excluded_edge_ids": []string{"edge-de-1"},
+		"exclusion_reason":  "slow-upload",
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	excluded := httptest.NewRecorder()
+	excludedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-de-1&edge_group_id=edge-group-country-de", nil)
+	server.Handler().ServeHTTP(excluded, excludedReq)
+	if excluded.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, excluded.Code, excluded.Body.String())
+	}
+	var excludedBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, excluded, &excludedBundle)
+	if route := edgeRouteByHostKindAndGroup(excludedBundle.Routes, app.Route.Hostname, model.EdgeRouteKindPlatform, "edge-group-country-de"); route != nil {
+		t.Fatalf("excluded edge must not receive the hostname route, got %+v in %+v", route, excludedBundle.Routes)
+	}
+
+	allowed := httptest.NewRecorder()
+	allowedReq := httptest.NewRequest(http.MethodGet, "/v1/edge/routes?token=edge-secret&edge_id=edge-us-1&edge_group_id=edge-group-country-us", nil)
+	server.Handler().ServeHTTP(allowed, allowedReq)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, allowed.Code, allowed.Body.String())
+	}
+	var allowedBundle model.EdgeRouteBundle
+	mustDecodeJSON(t, allowed, &allowedBundle)
+	route := edgeRouteByHostKindAndGroup(allowedBundle.Routes, app.Route.Hostname, model.EdgeRouteKindPlatform, "edge-group-country-us")
+	if route == nil {
+		t.Fatalf("non-excluded edge should still receive the hostname route: %+v", allowedBundle.Routes)
+	}
+	if !testStringSliceContainsFold(route.ExcludedEdgeIDs, "edge-de-1") || route.ExclusionReason != "slow-upload" {
+		t.Fatalf("expected route exclusion metadata on allowed bundle, got %+v", route)
+	}
+	if route.EdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected excluded single-node DE group to be removed from selection, got %+v", route)
+	}
+}
+
 func TestPlatformRoutesBootstrapPendingEdgeGroupReceivesBundle(t *testing.T) {
 	t.Parallel()
 

@@ -14,6 +14,7 @@ type edgeRouteBundleInvariantInput struct {
 	HealthyEdgeGroups          map[string]bool
 	ExpectedNonEmptyEdgeGroups map[string]bool
 	ExpectedMinTrafficRoutes   map[string]int
+	ExplicitlyExcludedRoutes   int
 	Options                    edgeRouteBundleOptions
 }
 
@@ -45,15 +46,19 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 			}
 		}
 	}
-	if len(bundle.Routes) == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
+	if len(bundle.Routes) == 0 && input.ExplicitlyExcludedRoutes == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		return fmt.Errorf("edge route bundle invariant failed: refusing to publish empty route bundle for non-empty routable inventory")
 	}
 	if edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		trafficRoutes := edgeRouteBundleTrafficRouteCount(bundle, input.Options)
-		if trafficRoutes == 0 {
+		if trafficRoutes == 0 && input.ExplicitlyExcludedRoutes == 0 {
 			return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle without traffic routes for non-empty routable inventory")
 		}
 		if minimum := edgeRouteExpectedMinTrafficRoutes(input.Options, input.ExpectedMinTrafficRoutes); minimum >= 5 {
+			minimum -= input.ExplicitlyExcludedRoutes
+			if minimum < 0 {
+				minimum = 0
+			}
 			floor := (minimum*8 + 9) / 10
 			if trafficRoutes < floor {
 				return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle with abnormal traffic route drop: got %d, previous %d", trafficRoutes, minimum)

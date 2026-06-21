@@ -9799,6 +9799,20 @@ components:
           type: string
         edge_group_id:
           type: string
+        excluded_edge_ids:
+          type: array
+          items:
+            type: string
+        excluded_edge_group_ids:
+          type: array
+          items:
+            type: string
+        exclusion_reason:
+          type: string
+        exclusion_expires_at:
+          type: string
+          format: date-time
+          nullable: true
         route_policy:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]
@@ -10558,6 +10572,20 @@ components:
       properties:
         edge_group_id:
           type: string
+        excluded_edge_ids:
+          type: array
+          items:
+            type: string
+        excluded_edge_group_ids:
+          type: array
+          items:
+            type: string
+        exclusion_reason:
+          type: string
+        exclusion_expires_at:
+          type: string
+          format: date-time
+          nullable: true
         route_policy:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]

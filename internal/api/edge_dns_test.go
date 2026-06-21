@@ -599,6 +599,47 @@ func TestEdgeDNSBundleUsesAllRouteReadyEdgesForDefaultPlatformDomain(t *testing.
 	}
 }
 
+func TestEdgeDNSBundleExcludesPolicyBlockedEdgeNodeAnswers(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
+
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/"+app.Route.Hostname, platformAdminKey, map[string]any{
+		"route_policy":      model.EdgeRoutePolicyEnabled,
+		"excluded_edge_ids": []string{"edge-de-1"},
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	record := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected app route DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
+	}
+	if stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
+		t.Fatalf("expected DNS values to exclude DE edge and keep US edge, got %+v", record.Values)
+	}
+	for _, candidate := range record.Candidates {
+		if candidate.EdgeID == "edge-de-1" || candidate.IP == "51.38.126.103" {
+			t.Fatalf("expected candidates to exclude blocked edge node, got %+v", record.Candidates)
+		}
+	}
+	if len(record.Candidates) != 1 || record.Candidates[0].EdgeID != "edge-us-1" {
+		t.Fatalf("expected only US candidate after edge exclusion, got %+v", record.Candidates)
+	}
+}
+
 func TestEdgeDNSBundleUsesDegradedServingLKGEdgeIPsForPlatformAppRecords(t *testing.T) {
 	t.Parallel()
 

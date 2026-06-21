@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -209,6 +210,10 @@ until explicitly set to edge_canary or edge_enabled for one edge group.
 		c.newAdminEdgeRoutePolicyListCommand(),
 		c.newAdminEdgeRoutePolicyShowCommand(),
 		c.newAdminEdgeRoutePolicySetCommand(),
+		c.newAdminEdgeRoutePolicyExcludeEdgeCommand(),
+		c.newAdminEdgeRoutePolicyAllowEdgeCommand(),
+		c.newAdminEdgeRoutePolicyExcludeEdgeGroupCommand(),
+		c.newAdminEdgeRoutePolicyAllowEdgeGroupCommand(),
 		c.newAdminEdgeRoutePolicyDeleteCommand(),
 	)
 	return cmd
@@ -299,6 +304,153 @@ func (c *CLI) newAdminEdgeRoutePolicySetCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeCommand() *cobra.Command {
+	opts := struct {
+		EdgeID string
+		Reason string
+		TTL    string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "exclude-edge <hostname>",
+		Short: "Exclude one edge node from serving a hostname",
+		Args:  cobra.ExactArgs(1),
+		Example: strings.TrimSpace(`
+  fugue admin edge route-policy exclude-edge api.example.com --edge vps-84c8f0a9 --reason slow-upload --ttl 6h
+`),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			edgeID := normalizeEdgeRoutePolicyCLIID(opts.EdgeID)
+			if edgeID == "" {
+				return fmt.Errorf("--edge is required")
+			}
+			expiresAt, err := parseEdgeRoutePolicyTTL(opts.TTL)
+			if err != nil {
+				return err
+			}
+			result, err := c.mutateEdgeRoutePolicyExclusions(args[0], true, func(policy *model.EdgeRoutePolicy) {
+				policy.ExcludedEdgeIDs = addEdgeRoutePolicyListValue(policy.ExcludedEdgeIDs, edgeID)
+				if strings.TrimSpace(opts.Reason) != "" {
+					policy.ExclusionReason = strings.TrimSpace(opts.Reason)
+				}
+				if expiresAt != nil {
+					policy.ExclusionExpiresAt = expiresAt
+				}
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, result)
+			}
+			return writeEdgeRoutePolicyMutation(c.stdout, result)
+		},
+	}
+	cmd.Flags().StringVar(&opts.EdgeID, "edge", "", "Edge node ID to exclude")
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Reason recorded on the exclusion policy")
+	cmd.Flags().StringVar(&opts.TTL, "ttl", "", "Optional exclusion TTL such as 30m, 6h, or 168h")
+	return cmd
+}
+
+func (c *CLI) newAdminEdgeRoutePolicyAllowEdgeCommand() *cobra.Command {
+	opts := struct {
+		EdgeID string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "allow-edge <hostname>",
+		Short: "Remove one edge node exclusion from a hostname",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			edgeID := normalizeEdgeRoutePolicyCLIID(opts.EdgeID)
+			if edgeID == "" {
+				return fmt.Errorf("--edge is required")
+			}
+			result, err := c.mutateEdgeRoutePolicyExclusions(args[0], false, func(policy *model.EdgeRoutePolicy) {
+				policy.ExcludedEdgeIDs = removeEdgeRoutePolicyListValue(policy.ExcludedEdgeIDs, edgeID)
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, result)
+			}
+			return writeEdgeRoutePolicyMutation(c.stdout, result)
+		},
+	}
+	cmd.Flags().StringVar(&opts.EdgeID, "edge", "", "Edge node ID to allow again")
+	return cmd
+}
+
+func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeGroupCommand() *cobra.Command {
+	opts := struct {
+		EdgeGroupID string
+		Reason      string
+		TTL         string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "exclude-edge-group <hostname>",
+		Short: "Exclude one edge group from serving a hostname",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			edgeGroupID := normalizeEdgeRoutePolicyCLIID(opts.EdgeGroupID)
+			if edgeGroupID == "" {
+				return fmt.Errorf("--edge-group is required")
+			}
+			expiresAt, err := parseEdgeRoutePolicyTTL(opts.TTL)
+			if err != nil {
+				return err
+			}
+			result, err := c.mutateEdgeRoutePolicyExclusions(args[0], true, func(policy *model.EdgeRoutePolicy) {
+				policy.ExcludedEdgeGroupIDs = addEdgeRoutePolicyListValue(policy.ExcludedEdgeGroupIDs, edgeGroupID)
+				if strings.TrimSpace(opts.Reason) != "" {
+					policy.ExclusionReason = strings.TrimSpace(opts.Reason)
+				}
+				if expiresAt != nil {
+					policy.ExclusionExpiresAt = expiresAt
+				}
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, result)
+			}
+			return writeEdgeRoutePolicyMutation(c.stdout, result)
+		},
+	}
+	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Edge group ID to exclude")
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Reason recorded on the exclusion policy")
+	cmd.Flags().StringVar(&opts.TTL, "ttl", "", "Optional exclusion TTL such as 30m, 6h, or 168h")
+	return cmd
+}
+
+func (c *CLI) newAdminEdgeRoutePolicyAllowEdgeGroupCommand() *cobra.Command {
+	opts := struct {
+		EdgeGroupID string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "allow-edge-group <hostname>",
+		Short: "Remove one edge group exclusion from a hostname",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			edgeGroupID := normalizeEdgeRoutePolicyCLIID(opts.EdgeGroupID)
+			if edgeGroupID == "" {
+				return fmt.Errorf("--edge-group is required")
+			}
+			result, err := c.mutateEdgeRoutePolicyExclusions(args[0], false, func(policy *model.EdgeRoutePolicy) {
+				policy.ExcludedEdgeGroupIDs = removeEdgeRoutePolicyListValue(policy.ExcludedEdgeGroupIDs, edgeGroupID)
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, result)
+			}
+			return writeEdgeRoutePolicyMutation(c.stdout, result)
+		},
+	}
+	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Edge group ID to allow again")
+	return cmd
+}
+
 func (c *CLI) newAdminEdgeRoutePolicyDeleteCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "delete <hostname>",
@@ -326,12 +478,151 @@ func (c *CLI) newAdminEdgeRoutePolicyDeleteCommand() *cobra.Command {
 	}
 }
 
+type edgeRoutePolicyMutationResult struct {
+	Policy  model.EdgeRoutePolicy `json:"policy"`
+	Deleted bool                  `json:"deleted,omitempty"`
+}
+
+func (c *CLI) mutateEdgeRoutePolicyExclusions(hostname string, createIfMissing bool, mutate func(*model.EdgeRoutePolicy)) (edgeRoutePolicyMutationResult, error) {
+	client, err := c.newClient()
+	if err != nil {
+		return edgeRoutePolicyMutationResult{}, err
+	}
+	policy, err := client.GetEdgeRoutePolicy(hostname)
+	if err != nil {
+		apiErr, ok := err.(*apiServerError)
+		if !ok || apiErr.StatusCode != http.StatusNotFound || !createIfMissing {
+			return edgeRoutePolicyMutationResult{}, err
+		}
+		policy = model.EdgeRoutePolicy{
+			Hostname:    strings.TrimSpace(hostname),
+			RoutePolicy: model.EdgeRoutePolicyEnabled,
+		}
+	}
+	if policy.RoutePolicy == "" {
+		policy.RoutePolicy = model.EdgeRoutePolicyEnabled
+	}
+	if model.NormalizeEdgeRoutePolicy(policy.RoutePolicy) == model.EdgeRoutePolicyRouteAOnly {
+		return edgeRoutePolicyMutationResult{}, fmt.Errorf("hostname is route_a_only; enable edge routing before excluding individual edges")
+	}
+	mutate(&policy)
+	policy.ExcludedEdgeIDs = normalizeEdgeRoutePolicyCLIList(policy.ExcludedEdgeIDs)
+	policy.ExcludedEdgeGroupIDs = normalizeEdgeRoutePolicyCLIList(policy.ExcludedEdgeGroupIDs)
+	if len(policy.ExcludedEdgeIDs) == 0 && len(policy.ExcludedEdgeGroupIDs) == 0 {
+		policy.ExclusionReason = ""
+		policy.ExclusionExpiresAt = nil
+		if strings.TrimSpace(policy.EdgeGroupID) == "" {
+			response, err := client.DeleteEdgeRoutePolicy(hostname)
+			if err != nil {
+				return edgeRoutePolicyMutationResult{}, err
+			}
+			return edgeRoutePolicyMutationResult{Policy: response.Policy, Deleted: response.Deleted}, nil
+		}
+	}
+	updated, err := client.PutEdgeRoutePolicyUpdate(hostname, edgeRoutePolicyUpdate{
+		EdgeGroupID:          policy.EdgeGroupID,
+		ExcludedEdgeIDs:      policy.ExcludedEdgeIDs,
+		ExcludedEdgeGroupIDs: policy.ExcludedEdgeGroupIDs,
+		ExclusionReason:      policy.ExclusionReason,
+		ExclusionExpiresAt:   policy.ExclusionExpiresAt,
+		RoutePolicy:          policy.RoutePolicy,
+	})
+	if err != nil {
+		return edgeRoutePolicyMutationResult{}, err
+	}
+	return edgeRoutePolicyMutationResult{Policy: updated}, nil
+}
+
+func parseEdgeRoutePolicyTTL(raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration <= 0 {
+		return nil, fmt.Errorf("--ttl must be a positive duration such as 30m or 6h")
+	}
+	expiresAt := time.Now().UTC().Add(duration)
+	return &expiresAt, nil
+}
+
+func addEdgeRoutePolicyListValue(values []string, value string) []string {
+	value = normalizeEdgeRoutePolicyCLIID(value)
+	if value == "" {
+		return normalizeEdgeRoutePolicyCLIList(values)
+	}
+	for _, existing := range values {
+		if normalizeEdgeRoutePolicyCLIID(existing) == value {
+			return normalizeEdgeRoutePolicyCLIList(values)
+		}
+	}
+	return normalizeEdgeRoutePolicyCLIList(append(append([]string(nil), values...), value))
+}
+
+func removeEdgeRoutePolicyListValue(values []string, value string) []string {
+	value = normalizeEdgeRoutePolicyCLIID(value)
+	if value == "" {
+		return normalizeEdgeRoutePolicyCLIList(values)
+	}
+	out := make([]string, 0, len(values))
+	for _, existing := range values {
+		if normalizeEdgeRoutePolicyCLIID(existing) == value {
+			continue
+		}
+		out = append(out, existing)
+	}
+	return normalizeEdgeRoutePolicyCLIList(out)
+}
+
+func normalizeEdgeRoutePolicyCLIList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = normalizeEdgeRoutePolicyCLIID(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeEdgeRoutePolicyCLIID(value string) string {
+	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func writeEdgeRoutePolicyMutation(w io.Writer, result edgeRoutePolicyMutationResult) error {
+	if err := writeEdgeRoutePolicy(w, result.Policy); err != nil {
+		return err
+	}
+	if result.Deleted {
+		_, err := fmt.Fprintln(w, "deleted=true")
+		return err
+	}
+	return nil
+}
+
 func writeEdgeRoutePolicy(w io.Writer, policy model.EdgeRoutePolicy) error {
 	return writeKeyValues(w,
 		kvPair{Key: "hostname", Value: strings.TrimSpace(policy.Hostname)},
 		kvPair{Key: "app", Value: strings.TrimSpace(policy.AppID)},
 		kvPair{Key: "tenant", Value: strings.TrimSpace(policy.TenantID)},
 		kvPair{Key: "edge_group", Value: strings.TrimSpace(policy.EdgeGroupID)},
+		kvPair{Key: "excluded_edges", Value: strings.Join(policy.ExcludedEdgeIDs, ",")},
+		kvPair{Key: "excluded_edge_groups", Value: strings.Join(policy.ExcludedEdgeGroupIDs, ",")},
+		kvPair{Key: "exclusion_reason", Value: strings.TrimSpace(policy.ExclusionReason)},
+		kvPair{Key: "exclusion_expires", Value: formatOptionalEdgeTime(policy.ExclusionExpiresAt)},
 		kvPair{Key: "route_policy", Value: strings.TrimSpace(policy.RoutePolicy)},
 		kvPair{Key: "enabled", Value: fmt.Sprintf("%t", policy.Enabled)},
 		kvPair{Key: "updated", Value: formatTime(policy.UpdatedAt)},
@@ -344,16 +635,18 @@ func writeEdgeRoutePolicyTable(w io.Writer, policies []model.EdgeRoutePolicy) er
 		return sorted[i].Hostname < sorted[j].Hostname
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPOLICY\tEDGE_GROUP\tAPP\tENABLED\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPOLICY\tEDGE_GROUP\tEXCLUDED_EDGES\tEXCLUDED_GROUPS\tAPP\tENABLED\tUPDATED"); err != nil {
 		return err
 	}
 	for _, policy := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%t\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%t\t%s\n",
 			strings.TrimSpace(policy.Hostname),
 			strings.TrimSpace(policy.RoutePolicy),
 			strings.TrimSpace(policy.EdgeGroupID),
+			strings.Join(policy.ExcludedEdgeIDs, ","),
+			strings.Join(policy.ExcludedEdgeGroupIDs, ","),
 			strings.TrimSpace(policy.AppID),
 			policy.Enabled,
 			formatTime(policy.UpdatedAt),

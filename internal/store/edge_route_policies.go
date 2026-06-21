@@ -112,16 +112,30 @@ func normalizeEdgeRoutePolicyForStore(policy model.EdgeRoutePolicy) (model.EdgeR
 	policy.AppID = strings.TrimSpace(policy.AppID)
 	policy.TenantID = strings.TrimSpace(policy.TenantID)
 	policy.EdgeGroupID = normalizeEdgeGroupID(policy.EdgeGroupID)
+	policy.ExcludedEdgeIDs = normalizeEdgeRoutePolicyIDList(policy.ExcludedEdgeIDs, false)
+	policy.ExcludedEdgeGroupIDs = normalizeEdgeRoutePolicyIDList(policy.ExcludedEdgeGroupIDs, true)
+	policy.ExclusionReason = strings.TrimSpace(policy.ExclusionReason)
+	if policy.ExclusionExpiresAt != nil {
+		expiresAt := policy.ExclusionExpiresAt.UTC()
+		policy.ExclusionExpiresAt = &expiresAt
+		if expiresAt.IsZero() {
+			policy.ExclusionExpiresAt = nil
+		}
+	}
 	policy.RoutePolicy = model.NormalizeEdgeRoutePolicy(policy.RoutePolicy)
 	if policy.Hostname == "" || policy.AppID == "" || policy.TenantID == "" || policy.RoutePolicy == "" {
 		return model.EdgeRoutePolicy{}, ErrInvalidInput
 	}
 	policy.Enabled = model.EdgeRoutePolicyAllowsTraffic(policy.RoutePolicy)
-	if policy.Enabled && policy.EdgeGroupID == "" {
+	if policy.Enabled && policy.EdgeGroupID == "" && len(policy.ExcludedEdgeIDs) == 0 && len(policy.ExcludedEdgeGroupIDs) == 0 {
 		return model.EdgeRoutePolicy{}, ErrInvalidInput
 	}
 	if !policy.Enabled {
 		policy.EdgeGroupID = ""
+		policy.ExcludedEdgeIDs = nil
+		policy.ExcludedEdgeGroupIDs = nil
+		policy.ExclusionReason = ""
+		policy.ExclusionExpiresAt = nil
 	}
 	return policy, nil
 }
@@ -154,4 +168,36 @@ func normalizeEdgeRoutePolicyHostname(hostname string) string {
 
 func normalizeEdgeGroupID(edgeGroupID string) string {
 	return strings.TrimSpace(strings.ToLower(edgeGroupID))
+}
+
+func normalizeEdgeRoutePolicyIDList(values []string, edgeGroup bool) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if edgeGroup {
+			value = normalizeEdgeGroupID(value)
+		} else {
+			value = normalizeEdgeID(value)
+		}
+		if value == "" {
+			continue
+		}
+		key := value
+		if edgeGroup {
+			key = strings.ToLower(value)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

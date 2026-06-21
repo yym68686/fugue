@@ -246,7 +246,7 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record stale edge node: %v", err)
 	}
-	healthy, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestEdgeRouteBundleInvariantRejectsShortRecoveryBundleFromStaleLKG(t *testi
 	}); err != nil {
 		t.Fatalf("record stale edge node: %v", err)
 	}
-	healthy, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("record degraded serving heartbeat: %v", err)
 	}
-	healthy, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
+	healthy, _, expected, minimum, err := (&Server{store: storeState}).edgeRouteGroupInventory()
 	if err != nil {
 		t.Fatalf("inventory: %v", err)
 	}

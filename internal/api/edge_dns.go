@@ -171,7 +171,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
-	healthyEdgeGroups, err := s.edgeRouteHealthyEdgeGroups()
+	healthyEdgeGroups, healthyEdgeNodeIDsByGroup, err := s.edgeRouteHealthyEdgeGroupInventory()
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
@@ -220,6 +220,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	records := make([]model.EdgeDNSRecord, 0, len(staticRecords)+len(acmeRecords)+len(apps)+len(domains)+len(s.platformRoutes)+1)
 	records = append(records, staticRecords...)
 	records = append(records, acmeRecords...)
+	now := time.Now().UTC()
 	records = append(records, edgeDNSRecordsForTarget(
 		normalizeExternalAppDomain(defaultEdgeDNSProbeLabel+"."+options.Zone),
 		options.AnswerIPs,
@@ -276,10 +277,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
-		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
-		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
+		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
 		answerIPs := edgeDNSAnswerIPsForBindings(dnsBindings, options, edgeAnswerIPsByGroup)
+		answerIPs = edgeDNSFilterAnswerIPsForBinding(answerIPs, binding, edgeCandidateByIP)
 		if len(answerIPs) == 0 {
 			continue
 		}
@@ -320,10 +322,11 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, model.EdgeRouteKindPlatform, model.EdgeRouteTLSPolicyPlatform, app.CreatedAt, app.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
-		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
-		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
+		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
 		answerIPs := edgeDNSAnswerIPsForCustomDomainTarget(dnsBindings, options, edgeAnswerIPsByGroup)
+		answerIPs = edgeDNSFilterAnswerIPsForBinding(answerIPs, binding, edgeCandidateByIP)
 		if len(answerIPs) == 0 {
 			continue
 		}
@@ -371,9 +374,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		binding := s.deriveEdgeRouteBinding(r, app, hostname, routeKind, tlsPolicy, domain.CreatedAt, domain.UpdatedAt, runtimeByID, runtimeNodeLabelsByID)
-		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups)
+		binding = applyEdgeRoutePolicy(binding, policyByHostname, healthyEdgeGroups, healthyEdgeNodeIDsByGroup, now)
 		binding = applyCustomDomainReadiness(binding, domain)
-		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups)
+		dnsBindings := expandDefaultPlatformEdgeBindings(binding, healthyEdgeGroups, healthyEdgeNodeIDsByGroup)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, dnsBindings)
 		if routeKind == model.EdgeRouteKindCustomDomain &&
 			(domain.Status != model.AppDomainStatusVerified ||
@@ -395,6 +398,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		if routeKind == model.EdgeRouteKindCustomDomain {
 			answerIPs = edgeDNSAnswerIPsForCustomDomainTarget(dnsBindings, options, edgeAnswerIPsByGroup)
 		}
+		answerIPs = edgeDNSFilterAnswerIPsForBinding(answerIPs, binding, edgeCandidateByIP)
 		if len(answerIPs) == 0 {
 			continue
 		}
@@ -893,6 +897,31 @@ func edgeDNSAnswerIPsForBindings(bindings []model.EdgeRouteBinding, options edge
 		for _, ip := range edgeDNSAnswerIPsForBinding(binding, options, edgeAnswerIPsByGroup) {
 			out = appendEdgeDNSUniqueIP(out, ip)
 		}
+	}
+	return out
+}
+
+func edgeDNSFilterAnswerIPsForBinding(answerIPs []string, binding model.EdgeRouteBinding, candidateByIP map[string]model.EdgeDNSAnswerCandidate) []string {
+	exclusions := edgeRouteExclusionsFromBinding(binding)
+	if exclusions.Empty() || len(answerIPs) == 0 {
+		return answerIPs
+	}
+	out := make([]string, 0, len(answerIPs))
+	for _, raw := range answerIPs {
+		ip := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, raw)
+		if ip == "" {
+			ip = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, raw)
+		}
+		if ip == "" {
+			continue
+		}
+		candidate, ok := candidateByIP[ip]
+		if ok {
+			if exclusions.ExcludesEdge(candidate.EdgeID) || exclusions.ExcludesEdgeGroup(candidate.EdgeGroupID) {
+				continue
+			}
+		}
+		out = appendEdgeDNSUniqueIP(out, ip)
 	}
 	return out
 }
@@ -1606,6 +1635,10 @@ func (catalog edgeDNSLatencyProfileCatalog) scopedProfiles(hostname string, answ
 		if len(candidates) == 0 {
 			continue
 		}
+		selectedEdgeGroupID := strings.TrimSpace(profile.BestEdgeGroupID)
+		if selectedEdgeGroupID != "" && !edgeDNSCandidatesContainGroup(candidates, selectedEdgeGroupID) {
+			selectedEdgeGroupID = ""
+		}
 		out = append(out, model.EdgeDNSScopedAnswerCandidates{
 			ScopeKey:            profile.Scope.key(),
 			Country:             profile.Scope.Country,
@@ -1613,12 +1646,25 @@ func (catalog edgeDNSLatencyProfileCatalog) scopedProfiles(hostname string, answ
 			ASN:                 profile.Scope.ASN,
 			PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
 			Reason:              profile.Reason,
-			SelectedEdgeGroupID: profile.BestEdgeGroupID,
+			SelectedEdgeGroupID: selectedEdgeGroupID,
 			CooldownUntil:       profile.CooldownUntil,
 			Candidates:          candidates,
 		})
 	}
 	return out
+}
+
+func edgeDNSCandidatesContainGroup(candidates []model.EdgeDNSAnswerCandidate, edgeGroupID string) bool {
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
+	if edgeGroupID == "" {
+		return false
+	}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.EdgeGroupID) == edgeGroupID {
+			return true
+		}
+	}
+	return false
 }
 
 func edgeDNSLatencyCandidateFromAccumulator(accumulator *edgeDNSLatencyGroupAccumulator) edgeDNSLatencyCandidateProfile {
@@ -1918,6 +1964,13 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 		if preferredEdgeGroupID != "" && latencyProfile.BestEdgeGroupID != "" && preferredEdgeGroupID != latencyProfile.BestEdgeGroupID {
 			reason = "latency_aware_geo_close_but_slow"
 		}
+	}
+	if selectedEdgeGroupID != "" && !stringSliceContains(allowed, selectedEdgeGroupID) {
+		shadowSelectedEdgeGroupID = selectedEdgeGroupID
+		if shadowReason == "" {
+			shadowReason = "latency selected edge group is not in allowed answers"
+		}
+		selectedEdgeGroupID = ""
 	}
 	return model.DNSAnswerPolicy{
 		PolicyKind:                policyKind,
