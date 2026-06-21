@@ -299,6 +299,10 @@ func cloneEdgeRouteBundleForLegacySigning(bundle model.EdgeRouteBundle, validUnt
 	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
 	for idx := range routes {
 		routes[idx].Upstreams = nil
+		routes[idx].ExcludedEdgeIDs = nil
+		routes[idx].ExcludedEdgeGroupIDs = nil
+		routes[idx].ExclusionReason = ""
+		routes[idx].ExclusionExpiresAt = nil
 	}
 	return bundleSigningPayload{
 		SchemaVersion:      bundle.SchemaVersion,

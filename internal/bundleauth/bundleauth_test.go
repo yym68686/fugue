@@ -21,16 +21,23 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 		EdgeGroupID: "edge-group-country-us",
 		Routes: []model.EdgeRouteBinding{
 			{
-				Hostname:      "app.example.com",
-				RouteKind:     model.EdgeRouteKindPlatform,
-				AppID:         "app_1",
-				TenantID:      "tenant_1",
-				RuntimeID:     "runtime_1",
-				EdgeGroupID:   "edge-group-country-us",
-				RoutePolicy:   model.EdgeRoutePolicyEnabled,
-				UpstreamKind:  model.EdgeRouteUpstreamKindKubernetesService,
-				UpstreamScope: model.EdgeRouteUpstreamScopeCluster,
-				UpstreamURL:   "http://stable.example.svc.cluster.local:80",
+				Hostname:    "app.example.com",
+				RouteKind:   model.EdgeRouteKindPlatform,
+				AppID:       "app_1",
+				TenantID:    "tenant_1",
+				RuntimeID:   "runtime_1",
+				EdgeGroupID: "edge-group-country-us",
+				ExcludedEdgeIDs: []string{
+					"edge-de-1",
+				},
+				ExcludedEdgeGroupIDs: []string{
+					"edge-group-country-de",
+				},
+				ExclusionReason: "slow-upload",
+				RoutePolicy:     model.EdgeRoutePolicyEnabled,
+				UpstreamKind:    model.EdgeRouteUpstreamKindKubernetesService,
+				UpstreamScope:   model.EdgeRouteUpstreamScopeCluster,
+				UpstreamURL:     "http://stable.example.svc.cluster.local:80",
 				Upstreams: []model.EdgeRouteUpstream{
 					{
 						Role:         model.AppReleaseRoleStable,
@@ -74,6 +81,10 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 	legacyDecoded.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
 	for idx := range legacyDecoded.Routes {
 		legacyDecoded.Routes[idx].Upstreams = nil
+		legacyDecoded.Routes[idx].ExcludedEdgeIDs = nil
+		legacyDecoded.Routes[idx].ExcludedEdgeGroupIDs = nil
+		legacyDecoded.Routes[idx].ExclusionReason = ""
+		legacyDecoded.Routes[idx].ExclusionExpiresAt = nil
 	}
 	if err := VerifyEdgeRouteBundleWithKeyring(legacyDecoded, keyring, now); err != nil {
 		t.Fatalf("verify signed bundle after old edge drops unknown upstreams: %v", err)
