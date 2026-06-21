@@ -51,6 +51,22 @@ FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
 public_data_plane_worker_image_changed || fail "edge code changes must mark worker image changed"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/bundleauth/bundleauth.go'
+public_data_plane_changed || fail "bundle auth changes must mark public data-plane changed"
+public_data_plane_worker_image_changed || fail "bundle auth changes must mark worker image changed"
+public_data_plane_dns_image_changed || fail "bundle auth changes must mark DNS image changed"
+if public_data_plane_front_image_changed; then
+  fail "bundle auth changes must not mark front image changed"
+fi
+
+FUGUE_RELEASE_CHANGED_FILES=$'internal/model/edge_routes.go'
+public_data_plane_changed || fail "edge route model changes must mark public data-plane changed"
+public_data_plane_worker_image_changed || fail "edge route model changes must mark worker image changed"
+public_data_plane_dns_image_changed || fail "edge route model changes must mark DNS image changed"
+if public_data_plane_front_image_changed; then
+  fail "edge route model changes must not mark front image changed"
+fi
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/dnsserver/service.go'
 public_data_plane_changed || fail "dnsserver code changes must mark public data-plane changed"
 public_data_plane_dns_image_changed || fail "dnsserver code changes must mark DNS image changed"
@@ -251,6 +267,30 @@ EDGE_WORKER_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
 public_data_plane_worker_source_changed_between_refs "${EDGE_BASE_REF}" "${EDGE_WORKER_REF}" || fail "edge worker source changes must be detected between live and target tags"
 if public_data_plane_front_source_changed_between_refs "${EDGE_BASE_REF}" "${EDGE_WORKER_REF}"; then
   fail "edge worker-only source changes must not mark front image changed between live and target tags"
+fi
+mkdir -p "${TMP_REPO_ROOT}/internal/bundleauth" "${TMP_REPO_ROOT}/internal/model"
+printf 'package bundleauth\n' >"${TMP_REPO_ROOT}/internal/bundleauth/bundleauth.go"
+printf 'package model\n' >"${TMP_REPO_ROOT}/internal/model/edge_routes.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-shared-base
+EDGE_SHARED_BASE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+printf 'func verifyRouteBundle() {}\n' >>"${TMP_REPO_ROOT}/internal/bundleauth/bundleauth.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-shared-bundleauth-change
+EDGE_SHARED_BUNDLEAUTH_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+public_data_plane_worker_source_changed_between_refs "${EDGE_SHARED_BASE_REF}" "${EDGE_SHARED_BUNDLEAUTH_REF}" || fail "bundle auth source changes must be detected for edge worker image rollout"
+public_data_plane_dns_source_changed_between_refs "${EDGE_SHARED_BASE_REF}" "${EDGE_SHARED_BUNDLEAUTH_REF}" || fail "bundle auth source changes must be detected for DNS image rollout"
+if public_data_plane_front_source_changed_between_refs "${EDGE_SHARED_BASE_REF}" "${EDGE_SHARED_BUNDLEAUTH_REF}"; then
+  fail "bundle auth source changes must not mark front image changed between live and target tags"
+fi
+printf 'type EdgeRouteBundle struct{}\n' >>"${TMP_REPO_ROOT}/internal/model/edge_routes.go"
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-route-model-change
+EDGE_ROUTE_MODEL_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+public_data_plane_worker_source_changed_between_refs "${EDGE_SHARED_BUNDLEAUTH_REF}" "${EDGE_ROUTE_MODEL_REF}" || fail "edge route model source changes must be detected for edge worker image rollout"
+public_data_plane_dns_source_changed_between_refs "${EDGE_SHARED_BUNDLEAUTH_REF}" "${EDGE_ROUTE_MODEL_REF}" || fail "edge route model source changes must be detected for DNS image rollout"
+if public_data_plane_front_source_changed_between_refs "${EDGE_SHARED_BUNDLEAUTH_REF}" "${EDGE_ROUTE_MODEL_REF}"; then
+  fail "edge route model source changes must not mark front image changed between live and target tags"
 fi
 fake_public_kubectl() {
   if [[ "${1:-}" == "-n" ]]; then

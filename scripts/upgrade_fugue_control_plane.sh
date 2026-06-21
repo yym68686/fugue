@@ -374,10 +374,12 @@ release_changed_files_match() {
       public:cmd/fugue-edge/*|\
       public:cmd/fugue-edge-front/*|\
       public:cmd/fugue-dns/*|\
+      public:internal/bundleauth/*|\
       public:internal/edge/*|\
       public:internal/edgefront/*|\
       public:internal/proxyproto/*|\
       public:internal/dnsserver/*|\
+      public:internal/model/edge_routes.go|\
       public:Dockerfile.edge|\
       public:deploy/helm/fugue/templates/edge-*|\
       public:deploy/helm/fugue/templates/dns-*|\
@@ -443,7 +445,9 @@ public_data_plane_worker_image_changed() {
     [[ -n "${file}" ]] || continue
     case "${file}" in
       cmd/fugue-edge/*|\
+      internal/bundleauth/*|\
       internal/edge/*|\
+      internal/model/edge_routes.go|\
       internal/proxyproto/*|\
       Dockerfile.edge)
         return 0
@@ -481,7 +485,9 @@ public_data_plane_dns_image_changed() {
     [[ -n "${file}" ]] || continue
     case "${file}" in
       cmd/fugue-dns/*|\
+      internal/bundleauth/*|\
       internal/dnsserver/*|\
+      internal/model/edge_routes.go|\
       Dockerfile.edge)
         return 0
         ;;
@@ -941,7 +947,9 @@ source_changed_between_refs() {
 public_data_plane_worker_source_changed_between_refs() {
 	source_changed_between_refs "$1" "$2" \
 		cmd/fugue-edge \
+		internal/bundleauth \
 		internal/edge \
+		internal/model/edge_routes.go \
 		internal/proxyproto \
 		Dockerfile.edge \
 		go.mod \
@@ -961,7 +969,9 @@ public_data_plane_front_source_changed_between_refs() {
 public_data_plane_dns_source_changed_between_refs() {
 	source_changed_between_refs "$1" "$2" \
 		cmd/fugue-dns \
+		internal/bundleauth \
 		internal/dnsserver \
+		internal/model/edge_routes.go \
 		Dockerfile.edge \
 		go.mod \
 		go.sum
@@ -3253,6 +3263,7 @@ edge_control_plane_repair_files = {
     "internal/api/edge_nodes_test.go",
     "internal/bundleauth/bundleauth.go",
     "internal/bundleauth/bundleauth_test.go",
+    "scripts/test_release_domain_safety.sh",
     "scripts/upgrade_fugue_control_plane.sh",
 }
 edge_control_plane_repair_override = bool(changed_files) and changed_files.issubset(edge_control_plane_repair_files)
