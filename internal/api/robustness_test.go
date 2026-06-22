@@ -189,6 +189,32 @@ func TestRobustnessMetricsExposeGuardiansGenerationAndRepairEvents(t *testing.T)
 	}
 }
 
+func TestRobustnessGenerationDriftIsScopedByEdgeGroup(t *testing.T) {
+	t.Parallel()
+
+	edgeExpected := mostCommonNonEmptyEdgeRouteGenerationByGroup([]model.EdgeNode{
+		{ID: "edge-us-1", EdgeGroupID: "edge-group-country-us", RouteBundleVersion: "routegen_us"},
+		{ID: "edge-de-1", EdgeGroupID: "edge-group-country-de", RouteBundleVersion: "routegen_de"},
+	})
+	if edgeExpected["edge-group-country-us"] != "routegen_us" || edgeExpected["edge-group-country-de"] != "routegen_de" {
+		t.Fatalf("expected route generations to be scoped by edge group, got %+v", edgeExpected)
+	}
+	if msg := robustnessGenerationDriftMessage("edge", "edge-de-1", edgeExpected["edge-group-country-de"], "routegen_de"); msg != "" {
+		t.Fatalf("expected no drift for group-local edge generation, got %q", msg)
+	}
+
+	dnsExpected := mostCommonNonEmptyDNSGenerationByGroup([]model.DNSNode{
+		{ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", DNSBundleVersion: "dnsgen_us"},
+		{ID: "dns-de-1", EdgeGroupID: "edge-group-country-de", DNSBundleVersion: "dnsgen_de"},
+	})
+	if dnsExpected["edge-group-country-us"] != "dnsgen_us" || dnsExpected["edge-group-country-de"] != "dnsgen_de" {
+		t.Fatalf("expected DNS generations to be scoped by edge group, got %+v", dnsExpected)
+	}
+	if msg := robustnessGenerationDriftMessage("dns", "dns-de-1", dnsExpected["edge-group-country-de"], "dnsgen_de"); msg != "" {
+		t.Fatalf("expected no drift for group-local DNS generation, got %q", msg)
+	}
+}
+
 func TestRobustnessRepairPlanIsReadOnlyUntilSafeAutomationExists(t *testing.T) {
 	t.Parallel()
 

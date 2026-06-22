@@ -16,19 +16,21 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 
 	now := time.Now().UTC()
 	if edgeNodes, _, err := s.store.ListEdgeNodes(""); err == nil {
-		expected := mostCommonNonEmptyEdgeRouteGeneration(edgeNodes)
+		expectedByGroup := mostCommonNonEmptyEdgeRouteGenerationByGroup(edgeNodes)
 		observability.WriteMetricHeader(w, "fugue_robustness_node_generation_drift_seconds", "Seconds since a node was last observed with a generation that differs from the current majority generation.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_robustness_lkg_serving", "Whether a node reports serving an LKG or degraded cache generation.", "gauge")
 		for _, node := range edgeNodes {
+			expected := expectedByGroup[strings.TrimSpace(node.EdgeGroupID)]
 			labels := map[string]string{"kind": "edge", "node_id": node.ID, "edge_group_id": node.EdgeGroupID}
 			observability.WriteMetricSample(w, "fugue_robustness_node_generation_drift_seconds", labels, robustnessGenerationDriftSeconds(now, expected, firstNonEmpty(node.RouteBundleVersion, node.ServingGeneration), node.LastHeartbeatAt, node.UpdatedAt))
 			observability.WriteMetricSample(w, "fugue_robustness_lkg_serving", labels, boolMetric(robustnessNodeServingLKG(node.CacheStatus, node.RouteBundleVersion, node.ServingGeneration, node.LKGGeneration)))
 		}
 	}
 	if dnsNodes, err := s.store.ListDNSNodes(""); err == nil {
-		expected := mostCommonNonEmptyDNSGeneration(dnsNodes)
+		expectedByGroup := mostCommonNonEmptyDNSGenerationByGroup(dnsNodes)
 		observability.WriteMetricHeader(w, "fugue_robustness_dns_query_errors", "DNS node query errors reported by authoritative DNS nodes.", "gauge")
 		for _, node := range dnsNodes {
+			expected := expectedByGroup[strings.TrimSpace(node.EdgeGroupID)]
 			labels := map[string]string{"kind": "dns", "node_id": node.ID, "edge_group_id": node.EdgeGroupID}
 			observability.WriteMetricSample(w, "fugue_robustness_node_generation_drift_seconds", labels, robustnessGenerationDriftSeconds(now, expected, firstNonEmpty(node.DNSBundleVersion, node.ServingGeneration), node.LastHeartbeatAt, node.UpdatedAt))
 			observability.WriteMetricSample(w, "fugue_robustness_lkg_serving", labels, boolMetric(robustnessNodeServingLKG(node.CacheStatus, node.DNSBundleVersion, node.ServingGeneration, node.LKGGeneration)))

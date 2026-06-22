@@ -383,21 +383,22 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 		edgeNodes = activeEdgeNodesForPolicy(edgeNodes, nodePolicies)
 	}
 	edgeNodes = freshEdgeNodes(edgeNodes, now)
-	expectedRouteGeneration := mostCommonNonEmptyEdgeRouteGeneration(edgeNodes)
+	expectedRouteGenerationByGroup := mostCommonNonEmptyEdgeRouteGenerationByGroup(edgeNodes)
 	checks = append(checks, model.RobustnessCheck{
 		Name:     "edge_route_generation_inventory",
 		Pass:     true,
 		Severity: model.RobustnessSeverityInfo,
 		Subject:  "edge_nodes",
 		Expected: "edge nodes report route bundle and LKG generations",
-		Observed: fmt.Sprintf("nodes=%d expected_generation=%s", len(edgeNodes), firstNonEmpty(expectedRouteGeneration, "unknown")),
-		Evidence: map[string]string{"guardian": "node-health", "desired_generation": expectedRouteGeneration},
+		Observed: fmt.Sprintf("nodes=%d expected_generations=%s", len(edgeNodes), formatStringStringMap(expectedRouteGenerationByGroup)),
+		Evidence: map[string]string{"guardian": "node-health", "desired_generation_by_group": formatStringStringMap(expectedRouteGenerationByGroup)},
 	})
 	for _, node := range edgeNodes {
 		subject := "edge-node:" + strings.TrimSpace(node.ID)
 		if strings.TrimSpace(node.ID) == "" {
 			continue
 		}
+		expectedRouteGeneration := expectedRouteGenerationByGroup[strings.TrimSpace(node.EdgeGroupID)]
 		routeGeneration := firstNonEmpty(strings.TrimSpace(node.RouteBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		generationPass := expectedRouteGeneration == "" || routeGeneration == "" || routeGeneration == expectedRouteGeneration
 		checks = append(checks, model.RobustnessCheck{
@@ -460,21 +461,22 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 		dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
 	}
 	dnsNodes = freshDNSNodes(dnsNodes, now)
-	expectedDNSGeneration := mostCommonNonEmptyDNSGeneration(dnsNodes)
+	expectedDNSGenerationByGroup := mostCommonNonEmptyDNSGenerationByGroup(dnsNodes)
 	checks = append(checks, model.RobustnessCheck{
 		Name:     "dns_generation_inventory",
 		Pass:     true,
 		Severity: model.RobustnessSeverityInfo,
 		Subject:  "dns_nodes",
 		Expected: "DNS nodes report active and LKG generations",
-		Observed: fmt.Sprintf("nodes=%d expected_generation=%s", len(dnsNodes), firstNonEmpty(expectedDNSGeneration, "unknown")),
-		Evidence: map[string]string{"guardian": "node-health", "desired_generation": expectedDNSGeneration},
+		Observed: fmt.Sprintf("nodes=%d expected_generations=%s", len(dnsNodes), formatStringStringMap(expectedDNSGenerationByGroup)),
+		Evidence: map[string]string{"guardian": "node-health", "desired_generation_by_group": formatStringStringMap(expectedDNSGenerationByGroup)},
 	})
 	for _, node := range dnsNodes {
 		subject := "dns-node:" + strings.TrimSpace(node.ID)
 		if strings.TrimSpace(node.ID) == "" {
 			continue
 		}
+		expectedDNSGeneration := expectedDNSGenerationByGroup[strings.TrimSpace(node.EdgeGroupID)]
 		dnsGeneration := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		generationPass := expectedDNSGeneration == "" || dnsGeneration == "" || dnsGeneration == expectedDNSGeneration
 		checks = append(checks, model.RobustnessCheck{
@@ -522,26 +524,50 @@ func robustnessGenerationDriftMessage(kind, id, expected, observed string) strin
 	return fmt.Sprintf("%s node %s reports generation %s but the current majority generation is %s", kind, strings.TrimSpace(id), observed, expected)
 }
 
-func mostCommonNonEmptyEdgeRouteGeneration(nodes []model.EdgeNode) string {
-	counts := map[string]int{}
+func mostCommonNonEmptyEdgeRouteGenerationByGroup(nodes []model.EdgeNode) map[string]string {
+	countsByGroup := map[string]map[string]int{}
 	for _, node := range nodes {
+		groupID := strings.TrimSpace(node.EdgeGroupID)
+		if groupID == "" {
+			groupID = "default"
+		}
 		generation := firstNonEmpty(strings.TrimSpace(node.RouteBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		if generation != "" {
-			counts[generation]++
+			if countsByGroup[groupID] == nil {
+				countsByGroup[groupID] = map[string]int{}
+			}
+			countsByGroup[groupID][generation]++
 		}
 	}
-	return mostCommonGeneration(counts)
+	return mostCommonGenerationByGroup(countsByGroup)
 }
 
-func mostCommonNonEmptyDNSGeneration(nodes []model.DNSNode) string {
-	counts := map[string]int{}
+func mostCommonNonEmptyDNSGenerationByGroup(nodes []model.DNSNode) map[string]string {
+	countsByGroup := map[string]map[string]int{}
 	for _, node := range nodes {
+		groupID := strings.TrimSpace(node.EdgeGroupID)
+		if groupID == "" {
+			groupID = "default"
+		}
 		generation := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		if generation != "" {
-			counts[generation]++
+			if countsByGroup[groupID] == nil {
+				countsByGroup[groupID] = map[string]int{}
+			}
+			countsByGroup[groupID][generation]++
 		}
 	}
-	return mostCommonGeneration(counts)
+	return mostCommonGenerationByGroup(countsByGroup)
+}
+
+func mostCommonGenerationByGroup(countsByGroup map[string]map[string]int) map[string]string {
+	out := map[string]string{}
+	for groupID, counts := range countsByGroup {
+		if generation := mostCommonGeneration(counts); generation != "" {
+			out[groupID] = generation
+		}
+	}
+	return out
 }
 
 func mostCommonGeneration(counts map[string]int) string {
@@ -721,6 +747,22 @@ func formatStringIntMap(values map[string]int) string {
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
 		parts = append(parts, fmt.Sprintf("%s=%d", key, values[key]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatStringStringMap(values map[string]string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", key, values[key]))
 	}
 	return strings.Join(parts, ",")
 }
