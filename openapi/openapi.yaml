@@ -583,6 +583,182 @@ paths:
                 $ref: "#/components/schemas/PlatformFailureDrillResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/robustness/status:
+    get:
+      operationId: getRobustnessStatus
+      summary: Get Robustness Status
+      tags: [Admin]
+      x-fugue-handler: handleGetRobustnessStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: subject
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: min_healthy_nodes
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobustnessStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/robustness/check/{subject}:
+    get:
+      operationId: checkRobustnessSubject
+      summary: Check Robustness Subject
+      tags: [Admin]
+      x-fugue-handler: handleCheckRobustnessSubject
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: subject
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: zone
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobustnessStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/robustness/incidents:
+    get:
+      operationId: listRobustnessIncidents
+      summary: List Robustness Incidents
+      tags: [Admin]
+      x-fugue-handler: handleListRobustnessIncidents
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: subject
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobustnessIncidentListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/robustness/incidents/{id}:
+    get:
+      operationId: getRobustnessIncident
+      summary: Get Robustness Incident
+      tags: [Admin]
+      x-fugue-handler: handleGetRobustnessIncident
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: subject
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobustnessIncidentResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/robustness/incidents/{id}/repair-plan:
+    post:
+      operationId: planRobustnessRepair
+      summary: Plan Robustness Repair
+      tags: [Admin]
+      x-fugue-handler: handlePlanRobustnessRepair
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: subject
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobustnessRepairPlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/robustness/incidents/{id}/repair:
+    post:
+      operationId: runRobustnessRepair
+      summary: Run Robustness Repair
+      tags: [Admin]
+      x-fugue-handler: handleRunRobustnessRepair
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: subject
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RobustnessRepairRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RobustnessRepairPlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/security/key-rotation:
     post:
       operationId: preflightKeyRotation
@@ -17856,6 +18032,184 @@ components:
       properties:
         report:
           $ref: "#/components/schemas/PlatformFailureDrillReport"
+    RobustnessCheck:
+      type: object
+      additionalProperties: false
+      required: [name, pass, severity]
+      properties:
+        name:
+          type: string
+        pass:
+          type: boolean
+        severity:
+          type: string
+          enum: [block_publish, degraded, warning, info]
+        subject:
+          type: string
+        expected:
+          type: string
+        observed:
+          type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+        repair_hint:
+          type: string
+        message:
+          type: string
+    RobustnessIncident:
+      type: object
+      additionalProperties: false
+      required: [id, status, severity, subject, check_name, title, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        severity:
+          type: string
+          enum: [block_publish, degraded, warning, info]
+        subject:
+          type: string
+        check_name:
+          type: string
+        title:
+          type: string
+        message:
+          type: string
+        expected:
+          type: string
+        observed:
+          type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+        repair_hint:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RobustnessStatus:
+      type: object
+      additionalProperties: false
+      required: [generated_at, pass, block_rollout, checks, incidents]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        pass:
+          type: boolean
+        block_rollout:
+          type: boolean
+        subject:
+          type: string
+        summary:
+          type: object
+          additionalProperties:
+            type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/RobustnessCheck"
+        incidents:
+          type: array
+          items:
+            $ref: "#/components/schemas/RobustnessIncident"
+        autonomy:
+          $ref: "#/components/schemas/PlatformAutonomyStatus"
+        dns:
+          $ref: "#/components/schemas/DNSDelegationPreflightResponse"
+        route_explain:
+          $ref: "#/components/schemas/RouteExplainResponse"
+        generated_sources:
+          type: array
+          items:
+            type: string
+    RobustnessStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/RobustnessStatus"
+    RobustnessIncidentListResponse:
+      type: object
+      additionalProperties: false
+      required: [incidents, generated_at]
+      properties:
+        incidents:
+          type: array
+          items:
+            $ref: "#/components/schemas/RobustnessIncident"
+        generated_at:
+          type: string
+          format: date-time
+    RobustnessIncidentResponse:
+      type: object
+      additionalProperties: false
+      required: [incident, status]
+      properties:
+        incident:
+          $ref: "#/components/schemas/RobustnessIncident"
+        status:
+          $ref: "#/components/schemas/RobustnessStatus"
+    RobustnessRepairAction:
+      type: object
+      additionalProperties: false
+      required: [kind, description, automatic]
+      properties:
+        kind:
+          type: string
+        subject:
+          type: string
+        description:
+          type: string
+        command:
+          type: string
+        automatic:
+          type: boolean
+        risk:
+          type: string
+    RobustnessRepairRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run:
+          type: boolean
+    RobustnessRepairPlan:
+      type: object
+      additionalProperties: false
+      required: [incident_id, status, safe, dry_run, actions, generated_at]
+      properties:
+        incident_id:
+          type: string
+        status:
+          type: string
+        safe:
+          type: boolean
+        dry_run:
+          type: boolean
+        message:
+          type: string
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RobustnessRepairAction"
+        generated_at:
+          type: string
+          format: date-time
+    RobustnessRepairPlanResponse:
+      type: object
+      additionalProperties: false
+      required: [plan]
+      properties:
+        plan:
+          $ref: "#/components/schemas/RobustnessRepairPlan"
     KeyRotationPreflightRequest:
       type: object
       additionalProperties: false

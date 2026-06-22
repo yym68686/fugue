@@ -5740,6 +5740,61 @@ PY
   return "${rc}"
 }
 
+robustness_status_summary() {
+  local api_base token status_file rc
+
+  api_base="$(release_api_base_url)"
+  token="$(release_api_token)"
+  status_file="$(mktemp)"
+  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/robustness/status" -o "${status_file}"; then
+    rm -f "${status_file}"
+    printf 'robustness status request failed'
+    return 1
+  fi
+  python3 - "${status_file}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+status = payload.get("status")
+if not isinstance(status, dict):
+    print("robustness status response is missing status object")
+    raise SystemExit(1)
+
+checks = status.get("checks") or []
+incidents = status.get("incidents") or []
+block_rollout = bool(status.get("block_rollout"))
+blockers = []
+for check in checks:
+    if not isinstance(check, dict) or check.get("pass"):
+        continue
+    severity = str(check.get("severity") or "").strip()
+    if severity != "block_publish":
+        continue
+    name = str(check.get("name") or "").strip() or "<unknown>"
+    subject = str(check.get("subject") or "").strip()
+    message = str(check.get("message") or check.get("observed") or "").strip()
+    label = f"{name}({subject})" if subject else name
+    blockers.append(f"{label}: {message}" if message else label)
+
+summary = (
+    f"pass={str(bool(status.get('pass'))).lower()} "
+    f"block_rollout={str(block_rollout).lower()} "
+    f"checks={len(checks)} incidents={len(incidents)}"
+)
+if blockers:
+    summary += "; blockers=" + "; ".join(blockers)
+print(summary)
+if block_rollout or blockers:
+    raise SystemExit(1)
+PY
+  rc=$?
+  rm -f "${status_file}"
+  return "${rc}"
+}
+
 wait_for_platform_autonomy_after_public_data_plane_release() {
   local timeout="${FUGUE_PUBLIC_DATA_PLANE_AUTONOMY_WAIT_SECONDS:-180}"
   local delay="${FUGUE_PUBLIC_DATA_PLANE_AUTONOMY_WAIT_DELAY_SECONDS:-10}"
@@ -5755,6 +5810,36 @@ wait_for_platform_autonomy_after_public_data_plane_release() {
       fail "platform autonomy did not recover after public data-plane release: ${output}"
     fi
     log "waiting for platform autonomy after public data-plane release: ${output}"
+    sleep "${delay}"
+  done
+}
+
+wait_for_post_deploy_robustness() {
+  local timeout="${FUGUE_ROBUSTNESS_HEALTH_GATE_TIMEOUT_SECONDS:-180}"
+  local delay="${FUGUE_ROBUSTNESS_HEALTH_GATE_DELAY_SECONDS:-10}"
+  local deadline output
+
+  case "${FUGUE_ROBUSTNESS_HEALTH_GATE_ENABLED:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      log "post-deploy robustness gate disabled"
+      return 0
+      ;;
+  esac
+  command_exists python3 || fail "python3 is required for post-deploy robustness health gate"
+
+  deadline=$((SECONDS + timeout))
+  while true; do
+    if output="$(robustness_status_summary)"; then
+      log "post-deploy robustness gate passed: ${output}"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      log "post-deploy robustness gate did not pass: ${output}"
+      return 1
+    fi
+    log "waiting for post-deploy robustness gate: ${output}"
     sleep "${delay}"
   done
 }
@@ -6520,6 +6605,12 @@ PY
     log "smoke test failed; attempting rollback"
     rollback_release || true
     fail "smoke test failed"
+  fi
+
+  if ! wait_for_post_deploy_robustness; then
+    log "post-deploy robustness gate failed; attempting rollback"
+    rollback_release || true
+    fail "post-deploy robustness gate failed"
   fi
 
   release_public_data_plane_if_needed
