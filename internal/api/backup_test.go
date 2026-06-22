@@ -280,7 +280,7 @@ func TestControlPlaneBackupRunCreatesRestorePlan(t *testing.T) {
 }
 
 func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
-	t.Parallel()
+	clearDefaultDataBackendEnv(t)
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {
@@ -339,7 +339,7 @@ func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
 }
 
 func TestBlockedBackupRunDoesNotStartWorker(t *testing.T) {
-	t.Parallel()
+	clearDefaultDataBackendEnv(t)
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
 	if err := stateStore.Init(); err != nil {

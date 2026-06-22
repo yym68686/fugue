@@ -23,7 +23,7 @@ type edgeDNSBundleInvariantInput struct {
 	ProtectedRecords              []model.EdgeDNSRecord
 	AnswerEdgeGroupsByIP          map[string][]string
 	RouteReadyByHostnameEdgeGroup map[string]map[string]bool
-	RecordRouteHostByName         map[string]string
+	RecordRouteHostsByName        map[string][]string
 }
 
 func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeRouteBundleInvariantInput) error {
@@ -167,7 +167,7 @@ func validateEdgeDNSRouteReadyAnswers(bundle model.EdgeDNSBundle, input edgeDNSB
 		if !edgeDNSRecordRequiresRouteReady(record) {
 			continue
 		}
-		routeHost := edgeDNSRecordRouteHost(record, input)
+		routeHosts := edgeDNSRecordRouteHosts(record, input)
 		for _, value := range record.Values {
 			answerIP := normalizeEdgeDNSStaticRecordValue(record.Type, value)
 			if answerIP == "" {
@@ -177,12 +177,22 @@ func validateEdgeDNSRouteReadyAnswers(bundle model.EdgeDNSBundle, input edgeDNSB
 			if len(edgeGroups) == 0 {
 				continue
 			}
-			if routeHost == "" {
+			if record.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget {
+				if len(routeHosts) == 0 {
+					continue
+				}
+				routeHosts = edgeDNSRouteHostsWithReadiness(input.RouteReadyByHostnameEdgeGroup, routeHosts)
+				if len(routeHosts) == 0 {
+					continue
+				}
+			} else if len(routeHosts) == 0 {
 				return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s maps to edge groups %s but no route hostname is known", record.Name, record.Type, answerIP, strings.Join(edgeGroups, ","))
 			}
 			for _, edgeGroupID := range edgeGroups {
-				if !edgeDNSRouteReadyForGroup(input.RouteReadyByHostnameEdgeGroup, routeHost, edgeGroupID) {
-					return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s points at edge group %s without active route for %s", record.Name, record.Type, answerIP, edgeGroupID, routeHost)
+				for _, routeHost := range routeHosts {
+					if !edgeDNSRouteReadyForGroup(input.RouteReadyByHostnameEdgeGroup, routeHost, edgeGroupID) {
+						return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s points at edge group %s without active route for %s", record.Name, record.Type, answerIP, edgeGroupID, routeHost)
+					}
 				}
 			}
 		}
@@ -197,6 +207,7 @@ func edgeDNSRecordRequiresRouteReady(record model.EdgeDNSRecord) bool {
 	}
 	switch strings.TrimSpace(record.RecordKind) {
 	case model.EdgeDNSRecordKindPlatform,
+		model.EdgeDNSRecordKindCustomDomainTarget,
 		model.EdgeDNSRecordKindPlatformDomain,
 		model.EdgeDNSRecordKindPlatformRoute:
 		return true
@@ -205,18 +216,45 @@ func edgeDNSRecordRequiresRouteReady(record model.EdgeDNSRecord) bool {
 	}
 }
 
-func edgeDNSRecordRouteHost(record model.EdgeDNSRecord, input edgeDNSBundleInvariantInput) string {
+func edgeDNSRecordRouteHosts(record model.EdgeDNSRecord, input edgeDNSBundleInvariantInput) []string {
 	name := normalizeExternalAppDomain(record.Name)
 	if name == "" {
-		return ""
+		return nil
 	}
-	if host := normalizeExternalAppDomain(input.RecordRouteHostByName[name]); host != "" {
-		return host
+	if hosts := normalizeEdgeDNSRouteHosts(input.RecordRouteHostsByName[name]); len(hosts) > 0 {
+		return hosts
 	}
 	if record.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget {
-		return ""
+		return nil
 	}
-	return name
+	return []string{name}
+}
+
+func normalizeEdgeDNSRouteHosts(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = normalizeExternalAppDomain(value)
+		if value == "" || stringSliceContains(out, value) {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func edgeDNSRouteHostsWithReadiness(routeReady map[string]map[string]bool, routeHosts []string) []string {
+	out := make([]string, 0, len(routeHosts))
+	for _, routeHost := range routeHosts {
+		routeHost = normalizeExternalAppDomain(routeHost)
+		if routeHost == "" {
+			continue
+		}
+		if len(routeReady[routeHost]) == 0 {
+			continue
+		}
+		out = append(out, routeHost)
+	}
+	return out
 }
 
 func edgeDNSRouteReadyForGroup(routeReady map[string]map[string]bool, hostname, edgeGroupID string) bool {

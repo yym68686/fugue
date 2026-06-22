@@ -16,9 +16,10 @@ func TestDedupeAndSortEdgeDNSRecordsPreservesLatencyAwarePolicy(t *testing.T) {
 
 	records := dedupeAndSortEdgeDNSRecords([]model.EdgeDNSRecord{
 		{
-			Name:   "d-target.dns.fugue.pro",
-			Type:   model.EdgeDNSRecordTypeA,
-			Values: []string{"95.169.10.156"},
+			Name:       "demo.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"95.169.10.156"},
+			RecordKind: model.EdgeDNSRecordKindPlatform,
 			AnswerPolicy: model.DNSAnswerPolicy{
 				PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
 				Reason:              "latency_aware_stable_window_24h",
@@ -42,9 +43,10 @@ func TestDedupeAndSortEdgeDNSRecordsPreservesLatencyAwarePolicy(t *testing.T) {
 			},
 		},
 		{
-			Name:   "d-target.dns.fugue.pro",
-			Type:   model.EdgeDNSRecordTypeA,
-			Values: []string{"51.38.126.103"},
+			Name:       "demo.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"51.38.126.103"},
+			RecordKind: model.EdgeDNSRecordKindPlatform,
 			AnswerPolicy: model.DNSAnswerPolicy{
 				PolicyKind:          model.DNSAnswerPolicyKindGeo,
 				PreferredEdgeGroups: []string{"edge-group-country-de"},
@@ -65,7 +67,7 @@ func TestDedupeAndSortEdgeDNSRecordsPreservesLatencyAwarePolicy(t *testing.T) {
 		},
 	})
 
-	record := edgeDNSRecordByNameAndType(records, "d-target.dns.fugue.pro", model.EdgeDNSRecordTypeA)
+	record := edgeDNSRecordByNameAndType(records, "demo.fugue.pro", model.EdgeDNSRecordTypeA)
 	if record == nil {
 		t.Fatalf("expected merged record, got %+v", records)
 	}
@@ -637,6 +639,65 @@ func TestEdgeDNSBundleExcludesPolicyBlockedEdgeNodeAnswers(t *testing.T) {
 	}
 	if len(record.Candidates) != 1 || record.Candidates[0].EdgeID != "edge-us-1" {
 		t.Fatalf("expected only US candidate after edge exclusion, got %+v", record.Candidates)
+	}
+}
+
+func TestEdgeDNSBundleSharedCustomDomainTargetKeepsStrictestEdgeExclusions(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	target := server.primaryCustomDomainTarget(app)
+	now := time.Date(2026, 6, 22, 6, 0, 0, 0, time.UTC)
+	for _, hostname := range []string{"shared-api.example.net", "shared-web.example.net"} {
+		if _, err := storeState.PutAppDomain(model.AppDomain{
+			Hostname:    hostname,
+			AppID:       app.ID,
+			TenantID:    app.TenantID,
+			Status:      model.AppDomainStatusVerified,
+			DNSStatus:   model.AppDomainDNSStatusReady,
+			TLSStatus:   model.AppDomainTLSStatusReady,
+			RouteTarget: target,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}); err != nil {
+			t.Fatalf("put verified shared target domain %s: %v", hostname, err)
+		}
+	}
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71")
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
+	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/shared-api.example.net", platformAdminKey, map[string]any{
+		"route_policy":      model.EdgeRoutePolicyEnabled,
+		"excluded_edge_ids": []string{"edge-de-1"},
+		"exclusion_reason":  "shared-target-edge-exclusion",
+	})
+	if put.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	record := edgeDNSRecordByNameAndType(bundle.Records, target, model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected shared custom-domain target %s: %+v", target, bundle.Records)
+	}
+	if stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
+		t.Fatalf("expected shared target values to keep only edges valid for every hostname, got %+v", record.Values)
+	}
+	for _, candidate := range record.Candidates {
+		if candidate.EdgeID == "edge-de-1" || candidate.EdgeGroupID == "edge-group-country-de" || candidate.IP == "51.38.126.103" {
+			t.Fatalf("expected shared target candidates to exclude DE edge, got %+v", record.Candidates)
+		}
+	}
+	if stringSliceContains(record.AnswerPolicy.AllowedEdgeGroups, "edge-group-country-de") ||
+		!stringSliceContains(record.AnswerPolicy.AllowedEdgeGroups, "edge-group-country-us") {
+		t.Fatalf("expected answer policy to exclude DE group, got %+v", record.AnswerPolicy)
 	}
 }
 

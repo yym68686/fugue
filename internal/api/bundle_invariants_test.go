@@ -177,12 +177,54 @@ func TestEdgeDNSBundleInvariantRejectsRouteReadyMismatch(t *testing.T) {
 			"203.0.113.10": []string{"edge-group-country-us"},
 		},
 		RouteReadyByHostnameEdgeGroup: map[string]map[string]bool{},
-		RecordRouteHostByName: map[string]string{
-			"demo.fugue.pro": "demo.fugue.pro",
+		RecordRouteHostsByName: map[string][]string{
+			"demo.fugue.pro": {"demo.fugue.pro"},
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "without active route for demo.fugue.pro") {
 		t.Fatalf("expected route-ready mismatch failure, got %v", err)
+	}
+}
+
+func TestEdgeDNSBundleInvariantRejectsCustomDomainTargetRouteReadyMismatch(t *testing.T) {
+	t.Parallel()
+
+	bundle := model.EdgeDNSBundle{
+		Version:     "dnsgen_custom_target_route_ready_mismatch",
+		Generation:  "dnsgen_custom_target_route_ready_mismatch",
+		GeneratedAt: time.Now().UTC(),
+		Zone:        "fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "d-test.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.20"},
+				RecordKind: model.EdgeDNSRecordKindProbe,
+				Status:     model.EdgeRouteStatusActive,
+			},
+			{
+				Name:       "d-shared.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				Values:     []string{"203.0.113.10"},
+				RecordKind: model.EdgeDNSRecordKindCustomDomainTarget,
+				Status:     model.EdgeRouteStatusActive,
+			},
+		},
+	}
+	err := validateEdgeDNSBundleForPublish(bundle, edgeDNSBundleInvariantInput{
+		Options: edgeDNSBundleOptions{Zone: "fugue.pro"},
+		AnswerEdgeGroupsByIP: map[string][]string{
+			"203.0.113.10": {"edge-group-country-de"},
+		},
+		RouteReadyByHostnameEdgeGroup: map[string]map[string]bool{
+			"shared.example.net": {"edge-group-country-us": true},
+		},
+		RecordRouteHostsByName: map[string][]string{
+			"d-shared.dns.fugue.pro": {"shared.example.net"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "without active route for shared.example.net") {
+		t.Fatalf("expected custom-domain target route-ready mismatch failure, got %v", err)
 	}
 }
 

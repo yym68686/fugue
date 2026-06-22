@@ -204,7 +204,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		return model.EdgeDNSBundle{}, err
 	}
 	routeReadyByHostnameEdgeGroup := map[string]map[string]bool{}
-	recordRouteHostByName := map[string]string{}
+	recordRouteHostsByName := map[string][]string{}
 
 	staticRecords := edgeDNSStaticRecordsForZone(s.dnsStaticRecords, options.Zone)
 	platformOverrideNames := s.edgeDNSPlatformDomainNames(domains, options.Zone)
@@ -265,7 +265,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, ""),
 		)
 		records = append(records, targetRecords...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
 	}
 
 	for _, app := range appByID {
@@ -302,7 +302,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
 		)
 		records = append(records, targetRecords...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
 	}
 
 	for _, app := range appByID {
@@ -347,7 +347,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
 		)
 		records = append(records, targetRecords...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
 	}
 
 	for _, domain := range domains {
@@ -419,7 +419,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
 		)
 		records = append(records, targetRecords...)
-		registerEdgeDNSRecordRouteHost(recordRouteHostByName, hostname, targetRecords...)
+		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
 	}
 
 	records = dedupeAndSortEdgeDNSRecords(records)
@@ -438,7 +438,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		ProtectedRecords:              staticRecords,
 		AnswerEdgeGroupsByIP:          answerEdgeGroupsByIP,
 		RouteReadyByHostnameEdgeGroup: routeReadyByHostnameEdgeGroup,
-		RecordRouteHostByName:         recordRouteHostByName,
+		RecordRouteHostsByName:        recordRouteHostsByName,
 	}); err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
@@ -840,7 +840,7 @@ func registerEdgeDNSRouteReady(routeReady map[string]map[string]bool, hostname, 
 	routeReady[hostname][edgeGroupID] = true
 }
 
-func registerEdgeDNSRecordRouteHost(recordRouteHostByName map[string]string, routeHost string, records ...model.EdgeDNSRecord) {
+func registerEdgeDNSRecordRouteHost(recordRouteHostsByName map[string][]string, routeHost string, records ...model.EdgeDNSRecord) {
 	routeHost = normalizeExternalAppDomain(routeHost)
 	if routeHost == "" {
 		return
@@ -850,7 +850,10 @@ func registerEdgeDNSRecordRouteHost(recordRouteHostByName map[string]string, rou
 		if name == "" {
 			continue
 		}
-		recordRouteHostByName[name] = routeHost
+		if !stringSliceContains(recordRouteHostsByName[name], routeHost) {
+			recordRouteHostsByName[name] = append(recordRouteHostsByName[name], routeHost)
+			sort.Strings(recordRouteHostsByName[name])
+		}
 	}
 }
 
@@ -2068,16 +2071,15 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 	for _, record := range records {
 		key := record.Name + "\x00" + record.Type
 		if existing, ok := byKey[key]; ok {
-			record.Values = uniqueSortedStrings(append(existing.Values, record.Values...))
-			record.Candidates = mergeEdgeDNSAnswerCandidates(existing.Candidates, record.Candidates)
-			record.ScopedCandidates = mergeEdgeDNSScopedAnswerCandidates(existing.ScopedCandidates, record.ScopedCandidates)
-			record.AnswerPolicy = mergeEdgeDNSAnswerPolicy(existing.AnswerPolicy, record.AnswerPolicy)
-			record.RecordGeneration = edgeDNSRecordGeneration(record)
+			record = mergeEdgeDNSRecords(existing, record)
 		}
 		byKey[key] = record
 	}
 	out := make([]model.EdgeDNSRecord, 0, len(byKey))
 	for _, record := range byKey {
+		if len(record.Values) == 0 {
+			continue
+		}
 		out = append(out, record)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -2086,6 +2088,145 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 		}
 		return out[i].Type < out[j].Type
 	})
+	return out
+}
+
+func mergeEdgeDNSRecords(existing, incoming model.EdgeDNSRecord) model.EdgeDNSRecord {
+	record := incoming
+	constrainSharedTarget := edgeDNSRecordsShareConstrainedTarget(existing, incoming)
+	if constrainSharedTarget {
+		record.Values = intersectSortedStrings(existing.Values, incoming.Values)
+	} else {
+		record.Values = uniqueSortedStrings(append(existing.Values, record.Values...))
+	}
+	record.Candidates = mergeEdgeDNSAnswerCandidates(existing.Candidates, record.Candidates)
+	record.ScopedCandidates = mergeEdgeDNSScopedAnswerCandidates(existing.ScopedCandidates, record.ScopedCandidates)
+	record.AnswerPolicy = mergeEdgeDNSAnswerPolicy(existing.AnswerPolicy, record.AnswerPolicy)
+	if constrainSharedTarget {
+		record = constrainEdgeDNSRecordToValues(record)
+	}
+	record.RecordGeneration = edgeDNSRecordGeneration(record)
+	return record
+}
+
+func edgeDNSRecordsShareConstrainedTarget(left, right model.EdgeDNSRecord) bool {
+	recordType := strings.ToUpper(strings.TrimSpace(left.Type))
+	if recordType == "" || recordType != strings.ToUpper(strings.TrimSpace(right.Type)) {
+		return false
+	}
+	if recordType != model.EdgeDNSRecordTypeA && recordType != model.EdgeDNSRecordTypeAAAA {
+		return false
+	}
+	return strings.TrimSpace(left.RecordKind) == model.EdgeDNSRecordKindCustomDomainTarget &&
+		strings.TrimSpace(right.RecordKind) == model.EdgeDNSRecordKindCustomDomainTarget
+}
+
+func constrainEdgeDNSRecordToValues(record model.EdgeDNSRecord) model.EdgeDNSRecord {
+	record.Values = uniqueSortedStrings(record.Values)
+	record.Candidates = filterEdgeDNSAnswerCandidatesByValues(record.Candidates, record.Values)
+	record.ScopedCandidates = filterEdgeDNSScopedCandidatesByValues(record.ScopedCandidates, record.Values)
+	record.AnswerPolicy = constrainEdgeDNSAnswerPolicy(record.AnswerPolicy, record.Candidates)
+	return record
+}
+
+func filterEdgeDNSAnswerCandidatesByValues(candidates []model.EdgeDNSAnswerCandidate, values []string) []model.EdgeDNSAnswerCandidate {
+	allowed := edgeDNSValueSet(values)
+	if len(allowed) == 0 {
+		return nil
+	}
+	out := make([]model.EdgeDNSAnswerCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		ip := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, candidate.IP)
+		if ip == "" {
+			ip = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, candidate.IP)
+		}
+		if ip == "" || !allowed[ip] {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func filterEdgeDNSScopedCandidatesByValues(scoped []model.EdgeDNSScopedAnswerCandidates, values []string) []model.EdgeDNSScopedAnswerCandidates {
+	out := make([]model.EdgeDNSScopedAnswerCandidates, 0, len(scoped))
+	for _, profile := range scoped {
+		profile.Candidates = filterEdgeDNSAnswerCandidatesByValues(profile.Candidates, values)
+		if len(profile.Candidates) == 0 {
+			continue
+		}
+		allowedGroups := edgeDNSCandidateGroups(profile.Candidates)
+		if profile.SelectedEdgeGroupID != "" && !stringSliceContains(allowedGroups, profile.SelectedEdgeGroupID) {
+			profile.SelectedEdgeGroupID = ""
+		}
+		out = append(out, profile)
+	}
+	return out
+}
+
+func constrainEdgeDNSAnswerPolicy(policy model.DNSAnswerPolicy, candidates []model.EdgeDNSAnswerCandidate) model.DNSAnswerPolicy {
+	allowedGroups := edgeDNSCandidateGroups(candidates)
+	policy.AllowedEdgeGroups = allowedGroups
+	policy.PreferredEdgeGroups = filterEdgeDNSGroups(policy.PreferredEdgeGroups, allowedGroups)
+	policy.FallbackEdgeGroups = filterEdgeDNSGroups(policy.FallbackEdgeGroups, allowedGroups)
+	if policy.SelectedEdgeGroupID != "" && !stringSliceContains(allowedGroups, policy.SelectedEdgeGroupID) {
+		if policy.ShadowReason == "" {
+			policy.ShadowReason = "selected edge group removed by shared DNS target constraints"
+		}
+		policy.ShadowSelectedEdgeGroupID = policy.SelectedEdgeGroupID
+		policy.SelectedEdgeGroupID = ""
+	}
+	if policy.ShadowSelectedEdgeGroupID != "" && !stringSliceContains(allowedGroups, policy.ShadowSelectedEdgeGroupID) {
+		policy.ShadowSelectedEdgeGroupID = ""
+		policy.ShadowReason = ""
+	}
+	return policy
+}
+
+func edgeDNSCandidateGroups(candidates []model.EdgeDNSAnswerCandidate) []string {
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		groupID := strings.TrimSpace(candidate.EdgeGroupID)
+		if groupID == "" {
+			continue
+		}
+		seen[groupID] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for groupID := range seen {
+		out = append(out, groupID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func filterEdgeDNSGroups(values, allowed []string) []string {
+	if len(values) == 0 || len(allowed) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || !stringSliceContains(allowed, value) || stringSliceContains(out, value) {
+			continue
+		}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func edgeDNSValueSet(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, raw := range values {
+		value := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, raw)
+		if value == "" {
+			value = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, raw)
+		}
+		if value != "" {
+			out[value] = true
+		}
+	}
 	return out
 }
 
@@ -2217,6 +2358,34 @@ func uniqueSortedStrings(values []string) []string {
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func intersectSortedStrings(left, right []string) []string {
+	rightSet := map[string]struct{}{}
+	for _, value := range right {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			rightSet[value] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(left))
+	for _, value := range left {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := rightSet[value]; !ok {
 			continue
 		}
 		if _, ok := seen[value]; ok {
