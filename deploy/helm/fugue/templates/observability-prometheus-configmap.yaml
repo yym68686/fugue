@@ -219,6 +219,40 @@ data:
             annotations:
               summary: "Fugue edge node TCP metrics are unavailable"
               description: "edge-front could not read the configured /proc/net TCP counters from the edge node."
+      - name: fugue-robustness
+        rules:
+          - alert: FugueRobustnessBundlePublishRejected
+            expr: fugue_robustness_bundle_publish_rejections_recent > 0
+            for: 0m
+            labels:
+              severity: page
+            annotations:
+              summary: "Fugue rejected a generated data-plane bundle"
+              description: "A route, DNS, TLS, or generated-state invariant rejected a bundle. Inspect fugue admin robustness incidents before retrying rollout."
+          - alert: FugueRobustnessNodeGenerationDrift
+            expr: fugue_robustness_node_generation_drift_seconds > 600
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue node generation drift persists"
+              description: "An edge or DNS node has reported a stale generation for more than 10 minutes. Inspect node-health guardian evidence and resync or quarantine the affected node."
+          - alert: FugueRobustnessLKGServing
+            expr: fugue_robustness_lkg_serving == 1
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue node is serving LKG"
+              description: "An edge or DNS node has served last-known-good or degraded cached state for more than 15 minutes. Confirm the control plane can publish a new valid bundle."
+          - alert: FugueRobustnessBackupStale
+            expr: fugue_robustness_backup_last_success_age_seconds > 90000
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue backup freshness is stale"
+              description: "A backup policy has not recorded a successful backup within the expected 25-hour window."
       - name: fugue-registry-maintenance
         rules:
           - record: fugue_registry_pvc_usage_ratio

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +28,17 @@ func TestEdgeRouteBundleInvariantRejectsEmptyRoutableBundle(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "refusing to publish empty route bundle") {
 		t.Fatalf("expected empty route bundle invariant failure, got %v", err)
+	}
+	var invariantErr *bundleInvariantError
+	if !errors.As(err, &invariantErr) {
+		t.Fatalf("expected structured bundle invariant error, got %T", err)
+	}
+	checks := bundleInvariantChecks(err)
+	if len(checks) != 1 ||
+		checks[0].Name != "route_bundle_non_empty" ||
+		checks[0].Severity != model.RobustnessSeverityBlockPublish ||
+		checks[0].Pass {
+		t.Fatalf("expected block_publish structured invariant check, got %+v", checks)
 	}
 }
 

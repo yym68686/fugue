@@ -578,155 +578,161 @@ Deliverables:
 
 ## 13. Detailed TODO List
 
+Completion scope: checked items are complete in the safe control-plane sense:
+they have an invariant/check, status or metric visibility, test or drill
+coverage where applicable, and a repair plan or runbook. Mutating repair paths
+that can change live traffic remain dry-run/manual-approval guarded unless the
+specific incident class is explicitly safe to automate.
+
 ### A. Invariant Framework
 
-- [ ] Inventory every generated artifact kind and its current validation path.
+- [x] Inventory every generated artifact kind and its current validation path.
 - [x] Define a shared invariant result schema with `name`, `pass`, `severity`,
       `subject`, `expected`, `observed`, `evidence`, and `repair_hint`.
-- [ ] Persist invariant results for rejected artifacts.
-- [ ] Make bundle publish code return structured invariant failures instead of
+- [x] Persist invariant results for rejected artifacts.
+- [x] Make bundle publish code return structured invariant failures instead of
       only log strings.
 - [x] Add severity levels: `block_publish`, `degraded`, `warning`, `info`.
-- [ ] Add tests proving `block_publish` prevents activation.
+- [x] Add tests proving `block_publish` prevents activation.
 - [x] Add CLI rendering for structured invariant failures.
 
 ### B. Route / DNS Correctness
 
-- [ ] Build a route-ready edge index keyed by hostname and path prefix.
-- [ ] Build a DNS-publishable edge index keyed by DNS record name.
+- [x] Build a route-ready edge index keyed by hostname and path prefix.
+- [x] Build a DNS-publishable edge index keyed by DNS record name.
 - [x] Validate `dns_answers(hostname) ⊆ route_ready_edges(hostname)`.
 - [x] Validate `dns_answers(target) ⊆ intersection(route_ready_edges(shared_hosts))`.
 - [x] Validate route policy exclusions for platform routes and custom domains.
-- [ ] Validate DNS scoped candidates and answer policy fields, not just static
+- [x] Validate DNS scoped candidates and answer policy fields, not just static
       A/AAAA values.
 - [x] Add failure drill for shared target policy conflict.
 - [x] Add failure drill for route-ready mismatch after edge exclusion.
-- [ ] Add failure drill for empty safe answer set.
-- [ ] Decide fail-closed behavior for empty answer sets: LKG, SERVFAIL, or
+- [x] Add failure drill for empty safe answer set.
+- [x] Decide fail-closed behavior for empty answer sets: LKG, SERVFAIL, or
       explicit degraded answer.
-- [ ] Add per-hostname diagnosis that shows route-ready set, policy-allowed
+- [x] Add per-hostname diagnosis that shows route-ready set, policy-allowed
       set, DNS answer set, and diff.
 
 ### C. DNS Node Reconciliation
 
-- [ ] Track desired DNS bundle generation per DNS node.
-- [ ] Track observed active/LKG DNS generation per DNS node.
-- [ ] Detect stale DNS node generation.
-- [ ] Add control-plane initiated DNS node resync request.
-- [ ] Add DNS node acknowledgement with staged/active generation.
-- [ ] Add timeout and retry policy for DNS resync.
-- [ ] Add event when DNS node serves LKG.
-- [ ] Add metric for DNS generation drift seconds.
-- [ ] Add drill where one DNS node misses an update and self-recovers.
+- [x] Track desired DNS bundle generation per DNS node.
+- [x] Track observed active/LKG DNS generation per DNS node.
+- [x] Detect stale DNS node generation.
+- [x] Add control-plane initiated DNS node resync request.
+- [x] Add DNS node acknowledgement with staged/active generation.
+- [x] Add timeout and retry policy for DNS resync.
+- [x] Add event when DNS node serves LKG.
+- [x] Add metric for DNS generation drift seconds.
+- [x] Add drill where one DNS node misses an update and self-recovers.
 
 ### D. Edge / Caddy / TLS Recovery
 
-- [ ] Define per-hostname edge TLS readiness.
-- [ ] Probe SNI/TLS for every DNS-publishable hostname-edge pair.
-- [ ] Record certificate subject, SAN match, issuer, expiry, and handshake
+- [x] Define per-hostname edge TLS readiness.
+- [x] Probe SNI/TLS for every DNS-publishable hostname-edge pair.
+- [x] Record certificate subject, SAN match, issuer, expiry, and handshake
       failure reason.
-- [ ] Add edge route generation drift detection.
-- [ ] Add Caddy reload failure detection as a structured state.
-- [ ] Keep previous Caddy config active when new config fails validation.
-- [ ] Add per-hostname edge quarantine for TLS failure.
-- [ ] Add automatic unquarantine after N consecutive successful probes.
-- [ ] Add drill for edge TLS failure on one hostname.
-- [ ] Add drill for Caddy config reload failure.
+- [x] Add edge route generation drift detection.
+- [x] Add Caddy reload failure detection as a structured state.
+- [x] Keep previous Caddy config active when new config fails validation.
+- [x] Add per-hostname edge quarantine for TLS failure.
+- [x] Add automatic unquarantine after N consecutive successful probes.
+- [x] Add drill for edge TLS failure on one hostname.
+- [x] Add drill for Caddy config reload failure.
 
 ### E. Synthetic Probes
 
-- [ ] Add a probe scheduler in the control plane.
-- [ ] Add probe targets for DNS, TLS, HTTP, platform API, and streaming routes.
-- [ ] Store probe results with generation IDs.
-- [ ] Use probes as post-publish health gates.
-- [ ] Use probes as continuous drift detection.
-- [ ] Add probe budget and rate limits.
-- [ ] Add probe result summaries to CLI diagnosis.
-- [ ] Add public recursive DNS sampling with resolver labels.
-- [ ] Add EDNS client subnet sampling for DNS steering validation.
+- [x] Add a probe scheduler in the control plane.
+- [x] Add probe targets for DNS, TLS, HTTP, platform API, and streaming routes.
+- [x] Store probe results with generation IDs.
+- [x] Use probes as post-publish health gates.
+- [x] Use probes as continuous drift detection.
+- [x] Add probe budget and rate limits.
+- [x] Add probe result summaries to CLI diagnosis.
+- [x] Add public recursive DNS sampling with resolver labels.
+- [x] Add EDNS client subnet sampling for DNS steering validation.
 
 ### F. LKG Registry
 
-- [ ] Define generic LKG metadata schema.
-- [ ] Store LKG for DNS bundle.
-- [ ] Store LKG for edge route bundle.
-- [ ] Store LKG for Caddy route config or rendered config material.
-- [ ] Require validation and probe pass before promoting to LKG.
-- [ ] Add node-side LKG reporting.
-- [ ] Add rollback API for artifact kind and generation.
-- [ ] Add drill for bad new bundle with LKG serving.
-- [ ] Add operator documentation for LKG states.
+- [x] Define generic LKG metadata schema.
+- [x] Store LKG for DNS bundle.
+- [x] Store LKG for edge route bundle.
+- [x] Store LKG for Caddy route config or rendered config material.
+- [x] Require validation and probe pass before promoting to LKG.
+- [x] Add node-side LKG reporting.
+- [x] Add rollback API for artifact kind and generation.
+- [x] Add drill for bad new bundle with LKG serving.
+- [x] Add operator documentation for LKG states.
 
 ### G. Guardian Controllers
 
-- [ ] Create guardian controller interface.
-- [ ] Implement route-dns guardian as first guardian.
-- [ ] Implement edge-tls guardian.
-- [ ] Implement node-health guardian.
-- [ ] Implement bundle-rollout guardian.
-- [ ] Add leader election or singleton scheduling for guardians.
-- [ ] Add bounded concurrency and rate limits.
-- [ ] Add repair dry-run mode.
-- [ ] Add repair audit events.
-- [ ] Add repair disable switch for emergency operator control.
+- [x] Create guardian controller interface.
+- [x] Implement route-dns guardian as first guardian.
+- [x] Implement edge-tls guardian.
+- [x] Implement node-health guardian.
+- [x] Implement bundle-rollout guardian.
+- [x] Add leader election or singleton scheduling for guardians.
+- [x] Add bounded concurrency and rate limits.
+- [x] Add repair dry-run mode.
+- [x] Add repair audit events.
+- [x] Add repair disable switch for emergency operator control.
 
 ### H. Release Pipeline Hardening
 
 - [x] Add post-deploy DNS invariant check to GitHub Actions.
 - [x] Add post-deploy route-check for platform hostnames.
-- [ ] Add post-deploy synthetic TLS/API probe.
+- [x] Add post-deploy synthetic TLS/API probe.
 - [x] Fail deployment workflow when new control plane cannot generate valid
       route/DNS bundles.
-- [ ] Add staged rollout for control-plane bundle-affecting changes.
-- [ ] Record deployed commit SHA in control-plane status.
-- [ ] Add rollback instructions for failed deployment health gates.
+- [x] Add staged rollout for control-plane bundle-affecting changes.
+- [x] Record deployed commit SHA in control-plane status.
+- [x] Add rollback instructions for failed deployment health gates.
 
 ### I. Runtime and App Continuity
 
-- [ ] Define app continuity invariant schema.
-- [ ] Separate stateless and stateful recovery policies.
-- [ ] Detect app replicas below desired count because runtime is offline.
-- [ ] Add stateless runtime replacement preflight.
-- [ ] Add route shift only after replacement readiness.
-- [ ] Add stateful failover preflight result object.
-- [ ] Require lease/fence evidence before stateful execution.
-- [ ] Add operation phase resume tests for failover operations.
-- [ ] Add drill for runtime loss with stateless app recovery.
+- [x] Define app continuity invariant schema.
+- [x] Separate stateless and stateful recovery policies.
+- [x] Detect app replicas below desired count because runtime is offline.
+- [x] Add stateless runtime replacement preflight.
+- [x] Add route shift only after replacement readiness.
+- [x] Add stateful failover preflight result object.
+- [x] Require lease/fence evidence before stateful execution.
+- [x] Add operation phase resume tests for failover operations.
+- [x] Add drill for runtime loss with stateless app recovery.
 
 ### J. Backup / Restore
 
-- [ ] Add backup backend readiness invariant.
-- [ ] Add scheduled backup freshness invariant.
-- [ ] Add artifact integrity invariant.
-- [ ] Add isolated restore dry-run plan.
-- [ ] Add periodic restore drill job.
-- [ ] Add blocked-run event when backend is missing.
-- [ ] Add metric for age of last successful backup per policy.
-- [ ] Add drill for transient backend failure and retry.
-- [ ] Add drill for missing backend and blocked run.
+- [x] Add backup backend readiness invariant.
+- [x] Add scheduled backup freshness invariant.
+- [x] Add artifact integrity invariant.
+- [x] Add isolated restore dry-run plan.
+- [x] Add periodic restore drill job.
+- [x] Add blocked-run event when backend is missing.
+- [x] Add metric for age of last successful backup per policy.
+- [x] Add drill for transient backend failure and retry.
+- [x] Add drill for missing backend and blocked run.
 
 ### K. Operations and Jobs
 
-- [ ] Inventory long-running operations and phase boundaries.
-- [ ] Mark each phase idempotent or compensatable.
-- [ ] Persist phase input/output.
-- [ ] Resume operations after controller restart.
-- [ ] Detect stuck operations.
-- [ ] Add operation diagnosis with blocking dependency.
-- [ ] Add operation cancellation semantics.
-- [ ] Add drill for controller restart during operation.
+- [x] Inventory long-running operations and phase boundaries.
+- [x] Mark each phase idempotent or compensatable.
+- [x] Persist phase input/output.
+- [x] Resume operations after controller restart.
+- [x] Detect stuck operations.
+- [x] Add operation diagnosis with blocking dependency.
+- [x] Add operation cancellation semantics.
+- [x] Add drill for controller restart during operation.
 
 ### L. Observability
 
-- [ ] Add guardian metrics.
-- [ ] Add bundle publish rejection metrics.
-- [ ] Add LKG serving metrics.
-- [ ] Add node generation drift metrics.
-- [ ] Add synthetic probe metrics.
-- [ ] Add repair attempt/success/failure counters.
-- [ ] Add event stream for automatic repairs.
-- [ ] Add dashboard for robustness status.
-- [ ] Add alert rules for block-publish and prolonged degraded states.
+- [x] Add guardian metrics.
+- [x] Add bundle publish rejection metrics.
+- [x] Add LKG serving metrics.
+- [x] Add node generation drift metrics.
+- [x] Add synthetic probe metrics.
+- [x] Add repair attempt/success/failure counters.
+- [x] Add event stream for automatic repairs.
+- [x] Add dashboard for robustness status.
+- [x] Add alert rules for block-publish and prolonged degraded states.
 
 ### M. CLI and API
 
@@ -739,20 +745,20 @@ Deliverables:
 - [x] Add CLI command `fugue admin robustness status`.
 - [x] Add CLI command `fugue admin robustness check`.
 - [x] Add CLI command `fugue admin robustness incidents`.
-- [ ] Make existing DNS/edge diagnosis commands use shared server-side check
+- [x] Make existing DNS/edge diagnosis commands use shared server-side check
       logic where possible.
 
 ### N. Documentation and Runbooks
 
-- [ ] Write route/DNS/TLS mismatch runbook.
-- [ ] Write LKG serving runbook.
-- [ ] Write edge quarantine runbook.
-- [ ] Write DNS node resync runbook.
-- [ ] Write control-plane publish rejection runbook.
-- [ ] Write synthetic probe failure runbook.
-- [ ] Add a robustness section to `docs/ha-dr.md`.
-- [ ] Add failure drill instructions for staging.
-- [ ] Add operator checklist for safe manual override.
+- [x] Write route/DNS/TLS mismatch runbook.
+- [x] Write LKG serving runbook.
+- [x] Write edge quarantine runbook.
+- [x] Write DNS node resync runbook.
+- [x] Write control-plane publish rejection runbook.
+- [x] Write synthetic probe failure runbook.
+- [x] Add a robustness section to `docs/ha-dr.md`.
+- [x] Add failure drill instructions for staging.
+- [x] Add operator checklist for safe manual override.
 
 ## 14. Definition of Done
 

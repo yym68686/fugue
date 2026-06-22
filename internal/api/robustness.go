@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 func (s *Server) handleGetRobustnessStatus(w http.ResponseWriter, r *http.Request) {
@@ -124,11 +126,46 @@ func (s *Server) handleRunRobustnessRepair(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	plan := robustnessRepairPlanForIncident(incident, req.DryRun)
+	if robustnessRepairDisabled() {
+		s.appendRobustnessRepairAudit(principal, incident, plan, "disabled")
+		httpx.WriteError(w, http.StatusConflict, "automatic robustness repair is disabled by FUGUE_ROBUSTNESS_REPAIR_DISABLED")
+		return
+	}
 	if !req.DryRun {
+		s.appendRobustnessRepairAudit(principal, incident, plan, "blocked")
 		httpx.WriteError(w, http.StatusConflict, "automatic robustness repair is not enabled for this incident class; inspect the repair plan and run the recommended command")
 		return
 	}
+	s.appendRobustnessRepairAudit(principal, incident, plan, "dry_run")
 	httpx.WriteJSON(w, http.StatusOK, model.RobustnessRepairPlanResponse{Plan: plan})
+}
+
+func robustnessRepairDisabled() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("FUGUE_ROBUSTNESS_REPAIR_DISABLED")))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) appendRobustnessRepairAudit(principal model.Principal, incident model.RobustnessIncident, plan model.RobustnessRepairPlan, outcome string) {
+	if s == nil || s.store == nil {
+		return
+	}
+	outcome = strings.TrimSpace(outcome)
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	s.appendAudit(principal, "robustness.repair."+outcome, "robustness_incident", incident.ID, principal.TenantID, map[string]string{
+		"check_name": incident.CheckName,
+		"severity":   incident.Severity,
+		"subject":    incident.Subject,
+		"dry_run":    fmt.Sprintf("%t", plan.DryRun),
+		"safe":       fmt.Sprintf("%t", plan.Safe),
+		"status":     plan.Status,
+	})
 }
 
 func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principal, subject string) (model.RobustnessStatus, error) {
@@ -148,6 +185,26 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 	checks = append(checks, robustnessChecksFromStore("platform-autonomy", autonomy.Checks)...)
 	checks = append(checks, robustnessChecksFromDNSPreflight(dns)...)
 	checks = append(checks, robustnessChecksFromDNSNodes(dns.Nodes)...)
+	artifactChecks, err := s.robustnessGeneratedArtifactChecks(r, dnsOpts)
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, artifactChecks...)
+	nodeChecks, err := s.robustnessNodeStateChecks(r, principal)
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, nodeChecks...)
+	backupChecks, err := s.robustnessBackupChecks()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, backupChecks...)
+	operationChecks, err := s.robustnessOperationChecks()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, operationChecks...)
 	var routeExplain *model.RouteExplainResponse
 	if subject != "" {
 		explain, err := s.explainRouteForRobustness(r, subject)
@@ -192,9 +249,480 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		GeneratedSources: []string{
 			"platform_autonomy",
 			"dns_delegation_preflight",
+			"generated_artifact_inventory",
+			"node_generation_inventory",
+			"backup_restore_inventory",
+			"operation_inventory",
 			"route_explain",
 		},
 	}, nil
+}
+
+func (s *Server) robustnessGeneratedArtifactChecks(r *http.Request, dnsOpts dnsDelegationPreflightOptions) ([]model.RobustnessCheck, error) {
+	checks := []model.RobustnessCheck{}
+	routeBundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	if err != nil {
+		if failures := bundleInvariantChecks(err); len(failures) > 0 {
+			checks = append(checks, robustnessChecksWithGuardian(failures, "bundle-rollout")...)
+			return checks, nil
+		}
+		checks = append(checks, model.RobustnessCheck{
+			Name:       "generated_artifact_edge_route_bundle",
+			Pass:       false,
+			Severity:   model.RobustnessSeverityWarning,
+			Subject:    "edge_route_bundle",
+			Expected:   "route bundle can be derived and validated",
+			Observed:   err.Error(),
+			Message:    "edge route bundle derivation failed",
+			RepairHint: "inspect app route, runtime, and edge node inventory before publishing route bundles",
+			Evidence:   map[string]string{"guardian": "bundle-rollout", "validation_path": "validateEdgeRouteBundleForPublish"},
+		})
+	} else {
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "generated_artifact_edge_route_bundle",
+			Pass:     true,
+			Severity: model.RobustnessSeverityInfo,
+			Subject:  "edge_route_bundle",
+			Expected: "route bundle can be derived and validated",
+			Observed: fmt.Sprintf("version=%s routes=%d tls_allowlist=%d", routeBundle.Version, len(routeBundle.Routes), len(routeBundle.TLSAllowlist)),
+			Evidence: map[string]string{
+				"guardian":        "bundle-rollout",
+				"artifact_kind":   "edge_route_bundle",
+				"validation_path": "validateEdgeRouteBundleForPublish",
+				"generation":      routeBundle.Generation,
+			},
+		})
+	}
+
+	zone := normalizeExternalAppDomain(dnsOpts.Zone)
+	if zone == "" {
+		zone = normalizeExternalAppDomain(s.appBaseDomain)
+	}
+	edgeAnswerIPsByGroup, err := s.edgeDNSAnswerIPsByGroup(r.Context(), edgeDNSBundleOptions{Zone: zone})
+	if err != nil {
+		return nil, err
+	}
+	answerIPs := edgeDNSAllHealthyAnswerIPs("", edgeAnswerIPsByGroup)
+	if len(answerIPs) == 0 {
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "generated_artifact_edge_dns_bundle",
+			Pass:     true,
+			Severity: model.RobustnessSeverityInfo,
+			Subject:  "edge_dns_bundle",
+			Expected: "DNS bundle validation is skipped when no route-publishable edge IP exists",
+			Observed: "answer_ips=0",
+			Evidence: map[string]string{
+				"guardian":        "bundle-rollout",
+				"artifact_kind":   "edge_dns_bundle",
+				"validation_path": "validateEdgeDNSBundleForPublish",
+			},
+		})
+		return checks, nil
+	}
+	dnsBundle, err := s.deriveEdgeDNSBundle(r, edgeDNSBundleOptions{
+		Zone:      zone,
+		AnswerIPs: answerIPs,
+		TTL:       defaultEdgeDNSTTL,
+	})
+	if err != nil {
+		if failures := bundleInvariantChecks(err); len(failures) > 0 {
+			checks = append(checks, robustnessChecksWithGuardian(failures, "bundle-rollout")...)
+			return checks, nil
+		}
+		checks = append(checks, model.RobustnessCheck{
+			Name:       "generated_artifact_edge_dns_bundle",
+			Pass:       false,
+			Severity:   model.RobustnessSeverityWarning,
+			Subject:    "edge_dns_bundle",
+			Expected:   "DNS bundle can be derived and validated",
+			Observed:   err.Error(),
+			Message:    "edge DNS bundle derivation failed",
+			RepairHint: "inspect route/DNS invariant inputs before publishing DNS bundles",
+			Evidence:   map[string]string{"guardian": "bundle-rollout", "validation_path": "validateEdgeDNSBundleForPublish"},
+		})
+	} else {
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "generated_artifact_edge_dns_bundle",
+			Pass:     true,
+			Severity: model.RobustnessSeverityInfo,
+			Subject:  "edge_dns_bundle",
+			Expected: "DNS bundle can be derived and validated",
+			Observed: fmt.Sprintf("version=%s records=%d answer_ips=%d", dnsBundle.Version, len(dnsBundle.Records), len(answerIPs)),
+			Evidence: map[string]string{
+				"guardian":        "bundle-rollout",
+				"artifact_kind":   "edge_dns_bundle",
+				"validation_path": "validateEdgeDNSBundleForPublish",
+				"generation":      dnsBundle.Generation,
+			},
+		})
+	}
+	return checks, nil
+}
+
+func robustnessChecksWithGuardian(checks []model.RobustnessCheck, guardian string) []model.RobustnessCheck {
+	out := make([]model.RobustnessCheck, 0, len(checks))
+	for _, check := range checks {
+		if check.Evidence == nil {
+			check.Evidence = map[string]string{}
+		}
+		check.Evidence["guardian"] = strings.TrimSpace(guardian)
+		out = append(out, check)
+	}
+	return out
+}
+
+func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Principal) ([]model.RobustnessCheck, error) {
+	now := time.Now().UTC()
+	checks := []model.RobustnessCheck{}
+
+	edgeNodes, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		return nil, err
+	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), principal); policyErr == nil {
+		edgeNodes = activeEdgeNodesForPolicy(edgeNodes, nodePolicies)
+	}
+	edgeNodes = freshEdgeNodes(edgeNodes, now)
+	expectedRouteGeneration := mostCommonNonEmptyEdgeRouteGeneration(edgeNodes)
+	checks = append(checks, model.RobustnessCheck{
+		Name:     "edge_route_generation_inventory",
+		Pass:     true,
+		Severity: model.RobustnessSeverityInfo,
+		Subject:  "edge_nodes",
+		Expected: "edge nodes report route bundle and LKG generations",
+		Observed: fmt.Sprintf("nodes=%d expected_generation=%s", len(edgeNodes), firstNonEmpty(expectedRouteGeneration, "unknown")),
+		Evidence: map[string]string{"guardian": "node-health", "desired_generation": expectedRouteGeneration},
+	})
+	for _, node := range edgeNodes {
+		subject := "edge-node:" + strings.TrimSpace(node.ID)
+		if strings.TrimSpace(node.ID) == "" {
+			continue
+		}
+		routeGeneration := firstNonEmpty(strings.TrimSpace(node.RouteBundleVersion), strings.TrimSpace(node.ServingGeneration))
+		generationPass := expectedRouteGeneration == "" || routeGeneration == "" || routeGeneration == expectedRouteGeneration
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "edge_route_generation_drift",
+			Pass:     generationPass,
+			Severity: model.RobustnessSeverityDegraded,
+			Subject:  subject,
+			Expected: firstNonEmpty(expectedRouteGeneration, "reported route generation exists"),
+			Observed: fmt.Sprintf("route_bundle=%s serving=%s lkg=%s", node.RouteBundleVersion, node.ServingGeneration, node.LKGGeneration),
+			Message:  robustnessGenerationDriftMessage("edge", node.ID, expectedRouteGeneration, routeGeneration),
+			Evidence: map[string]string{
+				"guardian":           "node-health",
+				"edge_group_id":      node.EdgeGroupID,
+				"desired_generation": expectedRouteGeneration,
+				"serving_generation": node.ServingGeneration,
+				"lkg_generation":     node.LKGGeneration,
+			},
+			RepairHint: "request edge route resync or keep this edge out of DNS answer candidates until it converges",
+		})
+		caddyPass := strings.TrimSpace(node.CaddyLastError) == ""
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "edge_caddy_reload",
+			Pass:     caddyPass,
+			Severity: model.RobustnessSeverityDegraded,
+			Subject:  subject,
+			Expected: "caddy_last_error is empty",
+			Observed: firstNonEmpty(strings.TrimSpace(node.CaddyLastError), "caddy_last_error="),
+			Message:  strings.TrimSpace(node.CaddyLastError),
+			Evidence: map[string]string{
+				"guardian":              "edge-tls",
+				"caddy_applied_version": node.CaddyAppliedVersion,
+				"caddy_route_count":     fmt.Sprintf("%d", node.CaddyRouteCount),
+			},
+			RepairHint: "keep the previous Caddy config active and inspect the rendered route config before retrying reload",
+		})
+		if edgeNodeHasRouteState(node) {
+			tlsPass := edgeNodeTLSReadyForDNS(node)
+			checks = append(checks, model.RobustnessCheck{
+				Name:     "edge_tls_ready",
+				Pass:     tlsPass,
+				Severity: model.RobustnessSeverityBlockPublish,
+				Subject:  subject,
+				Expected: "route-publishable edge node has TLS-ready status",
+				Observed: fmt.Sprintf("tls_status=%s caddy_last_error=%s", firstNonEmpty(strings.TrimSpace(node.TLSStatus), "unknown"), strings.TrimSpace(node.CaddyLastError)),
+				Message:  strings.TrimSpace(node.TLSLastMessage),
+				Evidence: map[string]string{
+					"guardian":      "edge-tls",
+					"edge_group_id": node.EdgeGroupID,
+				},
+				RepairHint: "quarantine the hostname-edge pair from DNS answers until SNI/TLS probes pass",
+			})
+		}
+	}
+
+	dnsNodes, err := s.store.ListDNSNodes("")
+	if err != nil {
+		return nil, err
+	}
+	if nodePolicies, policyErr := s.loadClusterNodePolicyStatuses(r.Context(), principal); policyErr == nil {
+		dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
+	}
+	dnsNodes = freshDNSNodes(dnsNodes, now)
+	expectedDNSGeneration := mostCommonNonEmptyDNSGeneration(dnsNodes)
+	checks = append(checks, model.RobustnessCheck{
+		Name:     "dns_generation_inventory",
+		Pass:     true,
+		Severity: model.RobustnessSeverityInfo,
+		Subject:  "dns_nodes",
+		Expected: "DNS nodes report active and LKG generations",
+		Observed: fmt.Sprintf("nodes=%d expected_generation=%s", len(dnsNodes), firstNonEmpty(expectedDNSGeneration, "unknown")),
+		Evidence: map[string]string{"guardian": "node-health", "desired_generation": expectedDNSGeneration},
+	})
+	for _, node := range dnsNodes {
+		subject := "dns-node:" + strings.TrimSpace(node.ID)
+		if strings.TrimSpace(node.ID) == "" {
+			continue
+		}
+		dnsGeneration := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
+		generationPass := expectedDNSGeneration == "" || dnsGeneration == "" || dnsGeneration == expectedDNSGeneration
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "dns_generation_drift",
+			Pass:     generationPass,
+			Severity: model.RobustnessSeverityDegraded,
+			Subject:  subject,
+			Expected: firstNonEmpty(expectedDNSGeneration, "reported DNS generation exists"),
+			Observed: fmt.Sprintf("dns_bundle=%s serving=%s lkg=%s", node.DNSBundleVersion, node.ServingGeneration, node.LKGGeneration),
+			Message:  robustnessGenerationDriftMessage("dns", node.ID, expectedDNSGeneration, dnsGeneration),
+			Evidence: map[string]string{
+				"guardian":           "node-health",
+				"edge_group_id":      node.EdgeGroupID,
+				"desired_generation": expectedDNSGeneration,
+				"serving_generation": node.ServingGeneration,
+				"lkg_generation":     node.LKGGeneration,
+			},
+			RepairHint: "request DNS node resync and keep serving LKG while the node converges",
+		})
+		lkgReportPass := strings.TrimSpace(node.ServingGeneration) != "" || strings.TrimSpace(node.LKGGeneration) != ""
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "dns_node_lkg_reporting",
+			Pass:     lkgReportPass,
+			Severity: model.RobustnessSeverityWarning,
+			Subject:  subject,
+			Expected: "serving_generation or lkg_generation is reported",
+			Observed: fmt.Sprintf("serving=%s lkg=%s cache_status=%s", node.ServingGeneration, node.LKGGeneration, node.CacheStatus),
+			Evidence: map[string]string{
+				"guardian":       "node-health",
+				"cache_status":   node.CacheStatus,
+				"bundle_version": node.DNSBundleVersion,
+			},
+			RepairHint: "upgrade or resync this DNS node so operators can distinguish active and LKG serving states",
+		})
+	}
+	return checks, nil
+}
+
+func robustnessGenerationDriftMessage(kind, id, expected, observed string) string {
+	expected = strings.TrimSpace(expected)
+	observed = strings.TrimSpace(observed)
+	if expected == "" || observed == "" || expected == observed {
+		return ""
+	}
+	return fmt.Sprintf("%s node %s reports generation %s but the current majority generation is %s", kind, strings.TrimSpace(id), observed, expected)
+}
+
+func mostCommonNonEmptyEdgeRouteGeneration(nodes []model.EdgeNode) string {
+	counts := map[string]int{}
+	for _, node := range nodes {
+		generation := firstNonEmpty(strings.TrimSpace(node.RouteBundleVersion), strings.TrimSpace(node.ServingGeneration))
+		if generation != "" {
+			counts[generation]++
+		}
+	}
+	return mostCommonGeneration(counts)
+}
+
+func mostCommonNonEmptyDNSGeneration(nodes []model.DNSNode) string {
+	counts := map[string]int{}
+	for _, node := range nodes {
+		generation := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
+		if generation != "" {
+			counts[generation]++
+		}
+	}
+	return mostCommonGeneration(counts)
+}
+
+func mostCommonGeneration(counts map[string]int) string {
+	best := ""
+	bestCount := 0
+	for generation, count := range counts {
+		if count > bestCount || (count == bestCount && generation < best) {
+			best = generation
+			bestCount = count
+		}
+	}
+	return best
+}
+
+func (s *Server) robustnessBackupChecks() ([]model.RobustnessCheck, error) {
+	policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{IncludeDisabled: true, PlatformAdmin: true, Limit: 500})
+	if err != nil {
+		return nil, err
+	}
+	usage, err := s.store.BackupUsage("", true)
+	if err != nil {
+		return nil, err
+	}
+	posture := s.platformBackupPosture(policies, usage)
+	checks := make([]model.RobustnessCheck, 0, len(posture)+2)
+	for _, item := range posture {
+		target := strings.TrimSpace(item.Target.Type)
+		if target == "" {
+			target = strings.TrimSpace(item.Target.Component)
+		}
+		subject := "backup:" + firstNonEmpty(target, "unknown")
+		status := strings.TrimSpace(item.Status)
+		pass := !strings.EqualFold(status, "blocked") && !strings.EqualFold(status, model.BackupPolicyStatusBlockedNoBackend)
+		checks = append(checks, model.RobustnessCheck{
+			Name:     "backup_backend_readiness",
+			Pass:     pass,
+			Severity: model.RobustnessSeverityDegraded,
+			Subject:  subject,
+			Expected: "backup posture is not blocked",
+			Observed: fmt.Sprintf("status=%s policy=%s last_success=%s", status, item.PolicyID, robustnessTimeValue(item.LastSuccessfulAt)),
+			Message:  item.Message,
+			Evidence: map[string]string{
+				"guardian":             "bundle-rollout",
+				"policy_id":            item.PolicyID,
+				"restore_drill_status": item.RestoreDrillStatus,
+			},
+			RepairHint: "configure or repair the backup backend before relying on automated recovery",
+		})
+		if item.PolicyID != "" {
+			fresh := item.LastSuccessfulAt != nil && time.Since(item.LastSuccessfulAt.UTC()) <= 25*time.Hour
+			checks = append(checks, model.RobustnessCheck{
+				Name:     "scheduled_backup_freshness",
+				Pass:     fresh,
+				Severity: model.RobustnessSeverityWarning,
+				Subject:  subject,
+				Expected: "last successful scheduled backup is within 25h",
+				Observed: "last_successful_at=" + robustnessTimeValue(item.LastSuccessfulAt),
+				Evidence: map[string]string{
+					"guardian":  "bundle-rollout",
+					"policy_id": item.PolicyID,
+				},
+				RepairHint: "run a manual backup or repair the scheduled backup worker before a risky rollout",
+			})
+		}
+		if item.RestoreDrillStatus != "" {
+			checks = append(checks, model.RobustnessCheck{
+				Name:     "restore_dry_run_plan",
+				Pass:     strings.TrimSpace(item.RestoreDrillStatus) != "",
+				Severity: model.RobustnessSeverityInfo,
+				Subject:  subject,
+				Expected: "restore drill or plan status is recorded",
+				Observed: "restore_drill_status=" + item.RestoreDrillStatus,
+				Evidence: map[string]string{"guardian": "bundle-rollout", "policy_id": item.PolicyID},
+			})
+		}
+	}
+	artifacts, err := s.store.ListBackupArtifacts(store.BackupArtifactFilter{PlatformAdmin: true, ActiveOnly: true, Limit: 500})
+	if err != nil {
+		return nil, err
+	}
+	missingIntegrity := 0
+	for _, artifact := range artifacts {
+		if strings.TrimSpace(artifact.SHA256) == "" || strings.TrimSpace(artifact.ObjectKey) == "" {
+			missingIntegrity++
+		}
+	}
+	checks = append(checks, model.RobustnessCheck{
+		Name:       "backup_artifact_integrity",
+		Pass:       missingIntegrity == 0,
+		Severity:   model.RobustnessSeverityWarning,
+		Subject:    "backup_artifacts",
+		Expected:   "active artifacts include object key and sha256",
+		Observed:   fmt.Sprintf("active=%d missing_integrity=%d", len(artifacts), missingIntegrity),
+		Evidence:   map[string]string{"guardian": "bundle-rollout"},
+		RepairHint: "verify or replace artifacts that lack immutable object and digest metadata",
+	})
+	return checks, nil
+}
+
+func robustnessTimeValue(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "never"
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func (s *Server) robustnessOperationChecks() ([]model.RobustnessCheck, error) {
+	ops, err := s.store.ListOperations("", true)
+	if err != nil {
+		return nil, err
+	}
+	activeByType := map[string]int{}
+	stuck := 0
+	now := time.Now().UTC()
+	for _, op := range ops {
+		if !robustnessOperationActive(op.Status) {
+			continue
+		}
+		activeByType[op.Type]++
+		started := op.CreatedAt
+		if op.StartedAt != nil {
+			started = op.StartedAt.UTC()
+		}
+		if !started.IsZero() && now.Sub(started) > 6*time.Hour {
+			stuck++
+		}
+	}
+	return []model.RobustnessCheck{
+		{
+			Name:     "operation_inventory",
+			Pass:     true,
+			Severity: model.RobustnessSeverityInfo,
+			Subject:  "operations",
+			Expected: "long-running operation types and active counts are visible",
+			Observed: fmt.Sprintf("active=%d types=%s", sumIntMap(activeByType), formatStringIntMap(activeByType)),
+			Evidence: map[string]string{"guardian": "node-health"},
+		},
+		{
+			Name:       "operation_stuck_detection",
+			Pass:       stuck == 0,
+			Severity:   model.RobustnessSeverityWarning,
+			Subject:    "operations",
+			Expected:   "no active operation has been running longer than 6h",
+			Observed:   fmt.Sprintf("stuck=%d", stuck),
+			Evidence:   map[string]string{"guardian": "node-health", "threshold": "6h"},
+			RepairHint: "inspect operation diagnosis and blocking dependencies before retrying, failing, or canceling work",
+		},
+	}, nil
+}
+
+func robustnessOperationActive(status string) bool {
+	switch strings.TrimSpace(status) {
+	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+		return true
+	default:
+		return false
+	}
+}
+
+func sumIntMap(values map[string]int) int {
+	total := 0
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func formatStringIntMap(values map[string]int) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, values[key]))
+	}
+	return strings.Join(parts, ",")
 }
 
 func (s *Server) explainRouteForRobustness(r *http.Request, hostname string) (model.RouteExplainResponse, error) {

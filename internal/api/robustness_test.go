@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -44,6 +47,145 @@ func TestRobustnessStatusExposesStructuredChecksAndIncidents(t *testing.T) {
 	}
 	if !response.Status.BlockRollout {
 		t.Fatalf("expected missing DNS nodes to block rollout: %+v", response.Status)
+	}
+	for _, want := range []string{
+		"generated_artifact_edge_route_bundle",
+		"generated_artifact_edge_dns_bundle",
+		"backup_backend_readiness",
+		"operation_inventory",
+	} {
+		if !hasRobustnessCheck(response.Status.Checks, want) {
+			t.Fatalf("expected robustness check %q in %+v", want, response.Status.Checks)
+		}
+	}
+}
+
+func TestRobustnessStatusIncludesNodeBackupAndOperationEvidence(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	configureRobustnessTestPreflight(t, server)
+	now := time.Now().UTC()
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                  "edge-us-1",
+		EdgeGroupID:         "edge-group-country-us",
+		Status:              model.EdgeHealthHealthy,
+		Healthy:             true,
+		PublicIPv4:          "203.0.113.10",
+		RouteBundleVersion:  "routegen_live",
+		ServingGeneration:   "routegen_live",
+		LKGGeneration:       "routegen_live",
+		CaddyRouteCount:     3,
+		CaddyAppliedVersion: "routegen_live",
+		TLSStatus:           model.EdgeTLSStatusReady,
+		LastSeenAt:          &now,
+		LastHeartbeatAt:     &now,
+	}); err != nil {
+		t.Fatalf("record edge heartbeat: %v", err)
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(model.DNSNode{
+		ID:                "dns-us-1",
+		EdgeGroupID:       "edge-group-country-us",
+		Status:            model.EdgeHealthHealthy,
+		Healthy:           true,
+		PublicIPv4:        "198.51.100.10",
+		Zone:              "fugue.pro",
+		DNSBundleVersion:  "dnsgen_live",
+		ServingGeneration: "dnsgen_live",
+		LKGGeneration:     "dnsgen_live",
+		RecordCount:       4,
+		CacheStatus:       "ready",
+		UDPListen:         true,
+		TCPListen:         true,
+		LastSeenAt:        &now,
+		LastHeartbeatAt:   &now,
+	}); err != nil {
+		t.Fatalf("record dns heartbeat: %v", err)
+	}
+	replicas := 2
+	if _, err := storeState.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		Type:            model.OperationTypeScale,
+		DesiredReplicas: &replicas,
+	}); err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/robustness/status", platformAdminKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response model.RobustnessStatusResponse
+	mustDecodeJSON(t, recorder, &response)
+	for _, want := range []string{
+		"edge_route_generation_drift",
+		"edge_caddy_reload",
+		"dns_generation_drift",
+		"dns_node_lkg_reporting",
+		"backup_artifact_integrity",
+		"operation_stuck_detection",
+	} {
+		if !hasRobustnessCheck(response.Status.Checks, want) {
+			t.Fatalf("expected robustness check %q in %+v", want, response.Status.Checks)
+		}
+	}
+}
+
+func TestRobustnessMetricsExposeGuardiansGenerationAndRepairEvents(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                 "edge-us-1",
+		EdgeGroupID:        "edge-group-country-us",
+		Status:             model.EdgeHealthHealthy,
+		Healthy:            true,
+		RouteBundleVersion: "routegen_live",
+		ServingGeneration:  "routegen_live",
+		LKGGeneration:      "routegen_live",
+		LastHeartbeatAt:    &now,
+	}); err != nil {
+		t.Fatalf("record edge heartbeat: %v", err)
+	}
+	if _, err := storeState.UpdateDNSHeartbeat(model.DNSNode{
+		ID:                "dns-us-1",
+		EdgeGroupID:       "edge-group-country-us",
+		Status:            model.EdgeHealthDegraded,
+		Healthy:           true,
+		PublicIPv4:        "198.51.100.10",
+		Zone:              "fugue.pro",
+		DNSBundleVersion:  "dnsgen_new",
+		ServingGeneration: "dnsgen_lkg",
+		LKGGeneration:     "dnsgen_lkg",
+		CacheStatus:       "serving-lkg",
+		LastHeartbeatAt:   &now,
+	}); err != nil {
+		t.Fatalf("record dns heartbeat: %v", err)
+	}
+	if err := storeState.AppendAuditEvent(model.AuditEvent{
+		Action:     "robustness.repair.dry_run",
+		TargetType: "robustness_incident",
+		TargetID:   "robust_test",
+		CreatedAt:  now,
+	}); err != nil {
+		t.Fatalf("append audit event: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.MetricsHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`fugue_robustness_guardian_enabled{guardian="route-dns"} 1.000000`,
+		`fugue_robustness_node_generation_drift_seconds`,
+		`fugue_robustness_lkg_serving{edge_group_id="edge-group-country-us",kind="dns",node_id="dns-us-1"} 1.000000`,
+		`fugue_robustness_repair_events_total{outcome="dry_run"} 1.000000`,
+		`fugue_robustness_backup_last_success_age_seconds`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics output missing %q:\n%s", want, body)
+		}
 	}
 }
 

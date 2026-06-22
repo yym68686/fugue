@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -26,33 +27,94 @@ type edgeDNSBundleInvariantInput struct {
 	RecordRouteHostsByName        map[string][]string
 }
 
+type bundleInvariantError struct {
+	ArtifactKind string
+	Failures     []model.RobustnessCheck
+}
+
+func (e *bundleInvariantError) Error() string {
+	if e == nil {
+		return ""
+	}
+	kind := strings.ReplaceAll(strings.TrimSpace(e.ArtifactKind), "_", " ")
+	message := ""
+	if len(e.Failures) > 0 {
+		message = strings.TrimSpace(e.Failures[0].Message)
+	}
+	if message == "" {
+		message = "invariant failed"
+	}
+	return fmt.Sprintf("%s invariant failed: %s", kind, message)
+}
+
+func bundleInvariantChecks(err error) []model.RobustnessCheck {
+	var invariantErr *bundleInvariantError
+	if !errors.As(err, &invariantErr) || invariantErr == nil {
+		return nil
+	}
+	out := make([]model.RobustnessCheck, 0, len(invariantErr.Failures))
+	for _, failure := range invariantErr.Failures {
+		failure.Pass = false
+		if strings.TrimSpace(failure.Severity) == "" {
+			failure.Severity = model.RobustnessSeverityBlockPublish
+		}
+		out = append(out, failure)
+	}
+	return out
+}
+
+func newBundleInvariantError(artifactKind, name, subject, expected, observed, message string, evidence map[string]string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "bundle_publish_invariant"
+	}
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		subject = strings.TrimSpace(artifactKind)
+	}
+	return &bundleInvariantError{
+		ArtifactKind: strings.TrimSpace(artifactKind),
+		Failures: []model.RobustnessCheck{{
+			Name:       name,
+			Pass:       false,
+			Severity:   model.RobustnessSeverityBlockPublish,
+			Subject:    subject,
+			Expected:   strings.TrimSpace(expected),
+			Observed:   strings.TrimSpace(observed),
+			Evidence:   evidence,
+			Message:    strings.TrimSpace(message),
+			RepairHint: robustnessRepairHint(name),
+		}},
+	}
+}
+
 func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeRouteBundleInvariantInput) error {
 	if strings.TrimSpace(bundle.Version) == "" || strings.TrimSpace(bundle.Generation) == "" {
-		return fmt.Errorf("edge route bundle invariant failed: generation is required")
+		return newBundleInvariantError("edge_route_bundle", "bundle_generation", "edge_route_bundle", "version and generation are set", fmt.Sprintf("version=%s generation=%s", bundle.Version, bundle.Generation), "generation is required", nil)
 	}
 	for _, route := range bundle.Routes {
 		if normalizeExternalAppDomain(route.Hostname) == "" {
-			return fmt.Errorf("edge route bundle invariant failed: route hostname is required")
+			return newBundleInvariantError("edge_route_bundle", "route_hostname", "edge_route_bundle", "every route has a hostname", fmt.Sprintf("route_kind=%s edge_group=%s", route.RouteKind, route.EdgeGroupID), "route hostname is required", nil)
 		}
 		if strings.TrimSpace(route.RouteGeneration) == "" {
-			return fmt.Errorf("edge route bundle invariant failed: route generation is required for %s", route.Hostname)
+			return newBundleInvariantError("edge_route_bundle", "route_generation", "hostname:"+route.Hostname, "route_generation is set", "route_generation=", fmt.Sprintf("route generation is required for %s", route.Hostname), nil)
 		}
 		if strings.EqualFold(route.Status, model.EdgeRouteStatusActive) && model.EdgeRoutePolicyAllowsTraffic(route.RoutePolicy) {
 			if strings.TrimSpace(route.EdgeGroupID) == "" {
-				return fmt.Errorf("edge route bundle invariant failed: active route %s missing edge group", route.Hostname)
+				return newBundleInvariantError("edge_route_bundle", "route_active", "hostname:"+route.Hostname, "active traffic route has edge group", "edge_group=", fmt.Sprintf("active route %s missing edge group", route.Hostname), nil)
 			}
 			if strings.TrimSpace(route.UpstreamURL) == "" {
-				return fmt.Errorf("edge route bundle invariant failed: active route %s missing upstream", route.Hostname)
+				return newBundleInvariantError("edge_route_bundle", "route_active", "hostname:"+route.Hostname, "active traffic route has upstream", "upstream=", fmt.Sprintf("active route %s missing upstream", route.Hostname), nil)
 			}
 		}
 	}
 	if len(bundle.Routes) == 0 && input.ExplicitlyExcludedRoutes == 0 && edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
-		return fmt.Errorf("edge route bundle invariant failed: refusing to publish empty route bundle for non-empty routable inventory")
+		return newBundleInvariantError("edge_route_bundle", "route_bundle_non_empty", "edge_route_bundle", "non-empty route bundle for non-empty routable inventory", fmt.Sprintf("routes=0 expected_hosts=%d excluded_routes=%d", edgeRouteBundleExpectedRoutableHosts(input), input.ExplicitlyExcludedRoutes), "refusing to publish empty route bundle for non-empty routable inventory", nil)
 	}
 	if edgeRouteBundleExpectedRoutableHosts(input) > 0 && edgeRouteSelectorShouldHaveRoutes(input.Options, input.HealthyEdgeGroups, input.ExpectedNonEmptyEdgeGroups) {
 		trafficRoutes := edgeRouteBundleTrafficRouteCount(bundle, input.Options)
 		if trafficRoutes == 0 && input.ExplicitlyExcludedRoutes == 0 {
-			return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle without traffic routes for non-empty routable inventory")
+			return newBundleInvariantError("edge_route_bundle", "route_bundle_traffic_routes", "edge_route_bundle", "at least one traffic route for non-empty routable inventory", fmt.Sprintf("traffic_routes=0 expected_hosts=%d excluded_routes=%d", edgeRouteBundleExpectedRoutableHosts(input), input.ExplicitlyExcludedRoutes), "refusing to publish route bundle without traffic routes for non-empty routable inventory", nil)
 		}
 		if minimum := edgeRouteExpectedMinTrafficRoutes(input.Options, input.ExpectedMinTrafficRoutes); minimum >= 5 {
 			minimum -= input.ExplicitlyExcludedRoutes
@@ -61,7 +123,7 @@ func validateEdgeRouteBundleForPublish(bundle model.EdgeRouteBundle, input edgeR
 			}
 			floor := (minimum*8 + 9) / 10
 			if trafficRoutes < floor {
-				return fmt.Errorf("edge route bundle invariant failed: refusing to publish route bundle with abnormal traffic route drop: got %d, previous %d", trafficRoutes, minimum)
+				return newBundleInvariantError("edge_route_bundle", "route_bundle_traffic_drop", "edge_route_bundle", fmt.Sprintf("traffic routes >= %d", floor), fmt.Sprintf("traffic_routes=%d previous_minimum=%d", trafficRoutes, minimum), fmt.Sprintf("refusing to publish route bundle with abnormal traffic route drop: got %d, previous %d", trafficRoutes, minimum), nil)
 			}
 		}
 	}
@@ -125,18 +187,18 @@ func edgeRouteExpectedMinTrafficRoutes(_ edgeRouteBundleOptions, expected map[st
 
 func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, input edgeDNSBundleInvariantInput) error {
 	if strings.TrimSpace(bundle.Version) == "" || strings.TrimSpace(bundle.Generation) == "" {
-		return fmt.Errorf("edge dns bundle invariant failed: generation is required")
+		return newBundleInvariantError("edge_dns_bundle", "bundle_generation", "dns:"+bundle.Zone, "version and generation are set", fmt.Sprintf("version=%s generation=%s", bundle.Version, bundle.Generation), "generation is required", nil)
 	}
 	if normalizeExternalAppDomain(bundle.Zone) == "" {
-		return fmt.Errorf("edge dns bundle invariant failed: zone is required")
+		return newBundleInvariantError("edge_dns_bundle", "dns_zone", "edge_dns_bundle", "zone is set", "zone=", "zone is required", nil)
 	}
 	if len(bundle.Records) == 0 {
-		return fmt.Errorf("edge dns bundle invariant failed: refusing to publish empty dns record bundle")
+		return newBundleInvariantError("edge_dns_bundle", "dns_bundle_non_empty", "dns:"+bundle.Zone, "non-empty DNS record bundle", "records=0", "refusing to publish empty dns record bundle", nil)
 	}
 	probeName := normalizeExternalAppDomain(defaultEdgeDNSProbeLabel + "." + input.Options.Zone)
 	if !edgeDNSBundleHasRecordValue(bundle.Records, probeName, model.EdgeDNSRecordTypeA, "") &&
 		!edgeDNSBundleHasRecordValue(bundle.Records, probeName, model.EdgeDNSRecordTypeAAAA, "") {
-		return fmt.Errorf("edge dns bundle invariant failed: probe record %s is missing", probeName)
+		return newBundleInvariantError("edge_dns_bundle", "dns_probe_record", "dns:"+bundle.Zone, "probe A or AAAA record is present", "probe_record=missing", fmt.Sprintf("probe record %s is missing", probeName), map[string]string{"probe_name": probeName})
 	}
 	for _, record := range input.ProtectedRecords {
 		if record.RecordKind != model.EdgeDNSRecordKindProtected {
@@ -149,7 +211,7 @@ func validateEdgeDNSBundleForPublish(bundle model.EdgeDNSBundle, input edgeDNSBu
 		}
 		for _, value := range record.Values {
 			if !edgeDNSBundleHasRecordValue(bundle.Records, name, recordType, value) {
-				return fmt.Errorf("edge dns bundle invariant failed: protected %s %s value is missing", name, recordType)
+				return newBundleInvariantError("edge_dns_bundle", "dns_protected_record", "dns-record:"+name, "protected record value is preserved", fmt.Sprintf("type=%s value=%s missing", recordType, value), fmt.Sprintf("protected %s %s value is missing", name, recordType), nil)
 			}
 		}
 	}
@@ -186,12 +248,12 @@ func validateEdgeDNSRouteReadyAnswers(bundle model.EdgeDNSBundle, input edgeDNSB
 					continue
 				}
 			} else if len(routeHosts) == 0 {
-				return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s maps to edge groups %s but no route hostname is known", record.Name, record.Type, answerIP, strings.Join(edgeGroups, ","))
+				return newBundleInvariantError("edge_dns_bundle", "route_dns_invariant", "dns-record:"+record.Name, "DNS answer has route host mapping", fmt.Sprintf("answer=%s edge_groups=%s route_hosts=0", answerIP, strings.Join(edgeGroups, ",")), fmt.Sprintf("%s %s answer %s maps to edge groups %s but no route hostname is known", record.Name, record.Type, answerIP, strings.Join(edgeGroups, ",")), nil)
 			}
 			for _, edgeGroupID := range edgeGroups {
 				for _, routeHost := range routeHosts {
 					if !edgeDNSRouteReadyForGroup(input.RouteReadyByHostnameEdgeGroup, routeHost, edgeGroupID) {
-						return fmt.Errorf("edge dns bundle invariant failed: %s %s answer %s points at edge group %s without active route for %s", record.Name, record.Type, answerIP, edgeGroupID, routeHost)
+						return newBundleInvariantError("edge_dns_bundle", "route_dns_invariant", "hostname:"+routeHost, "DNS answer edge group is route-ready", fmt.Sprintf("record=%s type=%s answer=%s edge_group=%s route_ready=false", record.Name, record.Type, answerIP, edgeGroupID), fmt.Sprintf("%s %s answer %s points at edge group %s without active route for %s", record.Name, record.Type, answerIP, edgeGroupID, routeHost), nil)
 					}
 				}
 			}

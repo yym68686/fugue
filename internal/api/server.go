@@ -262,6 +262,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_api_observability_enabled", "Whether Fugue Observability is enabled for the API process.", nil, boolMetric(status.Enabled))
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
 	s.writeBackupMetrics(w)
+	s.writeRobustnessMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {
@@ -1795,6 +1796,8 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		httpx.WriteError(w, http.StatusNotFound, "resource not found")
 	case errors.Is(err, store.ErrConflict):
 		httpx.WriteError(w, http.StatusConflict, "resource conflict")
+	case len(bundleInvariantChecks(err)) > 0:
+		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrInvalidInput):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid input")
 	case errors.Is(err, store.ErrIdempotencyMismatch):

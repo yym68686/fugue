@@ -200,3 +200,107 @@ The CLI reports three classes:
 - `blocked`: stateless migration is intentionally blocked because managed backing services or persistent workspace state are still attached
 
 That audit is intentionally conservative: it reports stateless failover posture, not whether the new managed stateful failover workflow has been configured for a specific app. To execute a failover, use `fugue app failover run <app-name> --to <runtime>`.
+
+## 8. Robustness and self-healing runbooks
+
+Use the unified robustness surface before changing live DNS, route, edge, or
+backup state:
+
+```bash
+fugue admin robustness status
+fugue admin robustness incidents ls
+fugue admin robustness check <hostname-or-node>
+fugue admin robustness incidents show <incident-id>
+fugue admin robustness repair-plan <incident-id>
+fugue admin robustness repair <incident-id> --dry-run
+```
+
+The repair command is intentionally dry-run by default. Set
+`FUGUE_ROBUSTNESS_REPAIR_DISABLED=true` on the control plane when every repair
+path must be disabled during an incident. Non-dry-run automatic repair remains
+blocked unless the incident class has an explicitly safe implementation and an
+audit event.
+
+### Route, DNS, and TLS mismatch
+
+1. Run `fugue admin robustness check <hostname>`.
+2. Confirm `route_dns_invariant`, `edge_tls_ready`, route status, DNS answer
+   set, and the selected edge group in the incident evidence.
+3. If the incident is `block_publish`, do not push a new DNS or route bundle.
+   Keep nodes serving their current LKG bundle.
+4. If one edge is unsafe for the hostname, use the edge route policy exclusion
+   path for that hostname/edge and rerun the robustness check before restoring
+   traffic.
+5. Only remove an exclusion after repeated successful TLS/API probes and a clean
+   `fugue admin robustness check <hostname>`.
+
+### LKG serving
+
+1. Check `fugue_robustness_lkg_serving` and
+   `fugue_robustness_node_generation_drift_seconds` in Prometheus.
+2. Inspect the node with `fugue admin edge nodes` or `fugue admin dns status`.
+3. Verify `serving_generation`, `lkg_generation`, `cache_status`, and any Caddy
+   or DNS cache error.
+4. Keep LKG active while the current generated bundle fails invariants.
+5. Promote a new bundle only after robustness status has no `block_publish`
+   incident for the affected artifact.
+
+### DNS node resync
+
+1. Identify the stale DNS node from the `dns_generation_drift` incident.
+2. Confirm the node is still intended to serve DNS and is not excluded by node
+   policy.
+3. Restart or resync only the affected DNS node role; do not alter parent NS
+   delegation during the first recovery attempt.
+4. Watch for a fresh heartbeat with matching `dns_bundle_version`,
+   `serving_generation`, and `lkg_generation`.
+5. If the node cannot converge, keep it out of delegation candidates until it
+   reports a healthy bundle and probe pass.
+
+### Control-plane publish rejection
+
+1. Treat `block_publish` as a real release blocker, not a transient API error.
+2. Read the structured invariant fields: `name`, `subject`, `expected`,
+   `observed`, `evidence`, and `repair_hint`.
+3. Do not bypass the invariant by manually editing generated artifacts.
+4. Fix the source object or policy, then regenerate and re-run the status check.
+5. If a deployment already started, let the normal GitHub Actions rollback path
+   handle the failed health gate.
+
+### Synthetic probe failure
+
+1. Compare the failed probe target with the generated route and DNS evidence.
+2. Check TLS/SNI first for custom domains, then route readiness and upstream
+   readiness.
+3. If only one hostname-edge pair fails, quarantine that pair through route
+   policy instead of removing the whole edge group.
+4. If all probes fail for a bundle generation, keep the previous LKG bundle and
+   inspect control-plane bundle generation before retrying.
+
+### Staging failure drills
+
+Run drills in staging or a disposable control-plane namespace:
+
+- route/DNS mismatch after edge exclusion
+- empty safe DNS answer set
+- one stale DNS node generation
+- Caddy reload failure with previous config retained
+- missing backup backend and blocked backup run
+- runtime-loss continuity check for a stateless app
+- controller restart while an operation is pending/running
+
+Each drill must record the generated incident, the chosen repair plan, the audit
+event, and the metric/alert that would notify an operator in production.
+
+### Manual override checklist
+
+Before overriding a robustness gate:
+
+- Confirm the incident is not `block_publish`, or document the reason a manual
+  override is safer than rollback.
+- Capture `fugue admin robustness status --json`.
+- Capture the affected route/DNS/edge node status and current generation IDs.
+- Verify backups are fresh enough for the change being made.
+- Prefer a scoped exclusion or rollback over a broad node or edge-group change.
+- Record the manual command, expected blast radius, rollback command, and the
+  time when the override must be removed.
