@@ -293,6 +293,7 @@ func writeDNSFullZonePreflight(w io.Writer, response model.DNSFullZonePreflightR
 
 type dnsAnswerCheckReport struct {
 	Hostname             string                     `json:"hostname"`
+	QueryName            string                     `json:"query_name,omitempty"`
 	ClientIP             string                     `json:"client_ip,omitempty"`
 	PolicyReason         string                     `json:"policy_reason,omitempty"`
 	GeneratedAt          time.Time                  `json:"generated_at"`
@@ -337,11 +338,12 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 	}
 	edgeGroupsByIP := edgeGroupsByIPFromEdgeNodes(edgeNodes.Nodes)
 	edgeNodesByIP := edgeNodesByIPFromEdgeNodes(edgeNodes.Nodes)
+	queryName := dnsAnswerCheckQueryHostname(hostname, dnsNodes.Nodes)
 
 	nodes := make([]dnsAnswerCheckNode, 0, len(dnsNodes.Nodes))
 	pass := len(routeReady) > 0 || dnsTargetOnly
 	for _, node := range dnsNodes.Nodes {
-		if !dnsNodeServesHostname(node, hostname) {
+		if !dnsNodeServesHostname(node, queryName) {
 			continue
 		}
 		nodeReport := dnsAnswerCheckNode{
@@ -351,7 +353,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 			Status:    strings.TrimSpace(node.Status),
 			Healthy:   node.Healthy,
 		}
-		answers, warnings, err := queryDNSNodeAnswers(hostname, node, clientIP)
+		answers, warnings, err := queryDNSNodeAnswers(queryName, node, clientIP)
 		if err != nil {
 			nodeReport.Pass = false
 			nodeReport.Message = err.Error()
@@ -413,6 +415,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 	}
 	return dnsAnswerCheckReport{
 		Hostname:             hostname,
+		QueryName:            queryName,
 		ClientIP:             strings.TrimSpace(clientIP),
 		PolicyReason:         strings.Join(explain.Reasons, "; "),
 		GeneratedAt:          time.Now().UTC(),
@@ -426,6 +429,7 @@ func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP str
 func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 	if err := writeKeyValues(w,
 		kvPair{Key: "hostname", Value: report.Hostname},
+		kvPair{Key: "query_name", Value: firstNonEmpty(report.QueryName, "-")},
 		kvPair{Key: "client_ip", Value: firstNonEmpty(report.ClientIP, "-")},
 		kvPair{Key: "policy_reason", Value: firstNonEmpty(report.PolicyReason, "-")},
 		kvPair{Key: "pass", Value: fmt.Sprintf("%t", report.Pass)},
@@ -573,6 +577,113 @@ func dnsClientSubnetOption(clientIP string) *miekgdns.EDNS0_SUBNET {
 		SourceNetmask: 56,
 		Address:       ip,
 	}
+}
+
+func dnsAnswerCheckQueryHostname(hostname string, nodes []model.DNSNode) string {
+	candidates := []string{hostname}
+	candidates = append(candidates, lookupDNSCNAMECandidates(hostname)...)
+	return dnsAnswerCheckQueryHostnameFromCandidates(hostname, nodes, candidates)
+}
+
+func lookupDNSCNAMECandidates(hostname string) []string {
+	hostname = strings.TrimSpace(hostname)
+	out := []string{}
+	add := func(value string) {
+		value = normalizeDNSHostname(value)
+		if value == "" || stringSliceContains(out, value) {
+			return
+		}
+		out = append(out, value)
+	}
+	if cname, err := net.LookupCNAME(hostname); err == nil {
+		add(cname)
+	}
+	addresses := dnsRecursiveResolverAddresses()
+	for _, address := range addresses {
+		for _, network := range []string{"udp", "tcp"} {
+			cnames, err := queryRecursiveDNSCNAME(hostname, address, network)
+			if err != nil {
+				continue
+			}
+			for _, cname := range cnames {
+				add(cname)
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+func dnsRecursiveResolverAddresses() []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	add := func(address string) {
+		address = strings.TrimSpace(address)
+		if address == "" {
+			return
+		}
+		if _, ok := seen[address]; ok {
+			return
+		}
+		seen[address] = struct{}{}
+		out = append(out, address)
+	}
+	if config, err := miekgdns.ClientConfigFromFile("/etc/resolv.conf"); err == nil && config != nil {
+		port := firstNonEmpty(strings.TrimSpace(config.Port), "53")
+		for _, server := range config.Servers {
+			if strings.TrimSpace(server) == "" {
+				continue
+			}
+			add(net.JoinHostPort(server, port))
+		}
+	}
+	add("1.1.1.1:53")
+	add("8.8.8.8:53")
+	add("9.9.9.9:53")
+	return out
+}
+
+func queryRecursiveDNSCNAME(hostname, address, network string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	msg := new(miekgdns.Msg)
+	msg.SetQuestion(miekgdns.Fqdn(hostname), miekgdns.TypeCNAME)
+	client := &miekgdns.Client{Net: network, Timeout: 2 * time.Second}
+	resp, _, err := client.ExchangeContext(ctx, msg, address)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("empty DNS response")
+	}
+	if resp.Rcode != miekgdns.RcodeSuccess {
+		return nil, fmt.Errorf("rcode=%s", miekgdns.RcodeToString[resp.Rcode])
+	}
+	out := []string{}
+	for _, answer := range resp.Answer {
+		if rr, ok := answer.(*miekgdns.CNAME); ok {
+			out = append(out, rr.Target)
+		}
+	}
+	return uniqueStringsPreserveOrder(out), nil
+}
+
+func dnsAnswerCheckQueryHostnameFromCandidates(hostname string, nodes []model.DNSNode, candidates []string) string {
+	fallback := normalizeDNSHostname(hostname)
+	for _, candidate := range candidates {
+		candidate = normalizeDNSHostname(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, node := range nodes {
+			if dnsNodeServesHostname(node, candidate) {
+				return candidate
+			}
+		}
+	}
+	return fallback
 }
 
 func routeReadyEdgeGroups(explain model.RouteExplainResponse) map[string]bool {

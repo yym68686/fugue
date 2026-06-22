@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+
+	"fugue/internal/model"
+)
 
 func TestDNSAnswerEdgeReadyAllowsDNSTargetInventoryCheck(t *testing.T) {
 	t.Parallel()
@@ -22,6 +26,31 @@ func TestDNSAnswerEdgeReadyRequiresRouteReadyForHTTPRoutes(t *testing.T) {
 	}
 	if dnsAnswerEdgeReady([]string{"edge-group-country-us"}, routeReady, false) {
 		t.Fatal("expected HTTP route answer to fail when no answer edge group is route-ready")
+	}
+}
+
+func TestDNSAnswerCheckQueryHostnameUsesFugueZoneCNAMECandidate(t *testing.T) {
+	t.Parallel()
+
+	nodes := []model.DNSNode{{Zone: "fugue.pro"}}
+	got := dnsAnswerCheckQueryHostnameFromCandidates("api.example.com", nodes, []string{
+		"api.example.com",
+		"d-shared.dns.fugue.pro.",
+	})
+	if got != "d-shared.dns.fugue.pro" {
+		t.Fatalf("expected Fugue DNS target query name, got %q", got)
+	}
+}
+
+func TestDNSAnswerCheckQueryHostnameKeepsServedHostname(t *testing.T) {
+	t.Parallel()
+
+	nodes := []model.DNSNode{{Zone: "fugue.pro"}}
+	got := dnsAnswerCheckQueryHostnameFromCandidates("d-shared.dns.fugue.pro", nodes, []string{
+		"other.example.com",
+	})
+	if got != "d-shared.dns.fugue.pro" {
+		t.Fatalf("expected original served hostname, got %q", got)
 	}
 }
 
