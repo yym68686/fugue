@@ -265,10 +265,8 @@ func (s *Server) handleExecClusterPod(w http.ResponseWriter, r *http.Request) {
 	if req.TimeoutMS > 0 {
 		timeout = time.Duration(req.TimeoutMS) * time.Millisecond
 	}
-	commandCtx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
 	output, attempts, err := runClusterExecWithRetries(
-		commandCtx,
+		r.Context(),
 		runner,
 		req.Namespace,
 		req.Pod,
@@ -276,6 +274,7 @@ func (s *Server) handleExecClusterPod(w http.ResponseWriter, r *http.Request) {
 		req.Command,
 		req.Retries,
 		time.Duration(req.RetryDelayMS)*time.Millisecond,
+		timeout,
 	)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
@@ -1808,6 +1807,7 @@ func runClusterExecWithRetries(
 	command []string,
 	retries int,
 	retryDelay time.Duration,
+	attemptTimeout time.Duration,
 ) ([]byte, int, error) {
 	if retries < 0 {
 		retries = 0
@@ -1818,9 +1818,18 @@ func runClusterExecWithRetries(
 	attempts := 0
 	for {
 		attempts++
-		output, err := runner.Run(ctx, namespace, podName, containerName, nil, command...)
+		attemptCtx := ctx
+		cancelAttempt := func() {}
+		if attemptTimeout > 0 {
+			attemptCtx, cancelAttempt = context.WithTimeout(ctx, attemptTimeout)
+		}
+		output, err := runner.Run(attemptCtx, namespace, podName, containerName, nil, command...)
+		cancelAttempt()
 		if err == nil {
 			return output, attempts, nil
+		}
+		if ctx.Err() != nil {
+			return nil, attempts, ctx.Err()
 		}
 		if attempts >= retries+1 || !isRetryableClusterExecError(err) {
 			return nil, attempts, err

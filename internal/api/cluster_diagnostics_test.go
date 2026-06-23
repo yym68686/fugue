@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
@@ -534,6 +535,53 @@ func TestExecClusterPodRetriesTransientEOF(t *testing.T) {
 	}
 	if len(runner.calls) != 2 {
 		t.Fatalf("expected 2 runner calls, got %+v", runner.calls)
+	}
+}
+
+type freshAttemptTimeoutExecRunner struct {
+	calls     int
+	remaining []time.Duration
+}
+
+func (r *freshAttemptTimeoutExecRunner) Run(ctx context.Context, namespace, podName, containerName string, stdin []byte, command ...string) ([]byte, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		r.remaining = append(r.remaining, time.Until(deadline))
+	} else {
+		r.remaining = append(r.remaining, 0)
+	}
+	r.calls++
+	if r.calls == 1 {
+		time.Sleep(125 * time.Millisecond)
+		return nil, io.EOF
+	}
+	return []byte("ok\n"), nil
+}
+
+func TestRunClusterExecRetriesUseFreshAttemptTimeout(t *testing.T) {
+	runner := &freshAttemptTimeoutExecRunner{}
+
+	output, attempts, err := runClusterExecWithRetries(
+		context.Background(),
+		runner,
+		"kube-system",
+		"coredns-abc",
+		"coredns",
+		[]string{"sh", "-lc", "echo ok"},
+		1,
+		time.Millisecond,
+		200*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("run exec with retries: %v", err)
+	}
+	if string(output) != "ok\n" || attempts != 2 {
+		t.Fatalf("unexpected output=%q attempts=%d", output, attempts)
+	}
+	if len(runner.remaining) != 2 {
+		t.Fatalf("expected two attempts, got %d", len(runner.remaining))
+	}
+	if runner.remaining[1] < 150*time.Millisecond {
+		t.Fatalf("expected retry attempt to receive a fresh timeout, got remaining=%s", runner.remaining[1])
 	}
 }
 

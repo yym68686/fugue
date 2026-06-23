@@ -63,6 +63,8 @@ type clusterExecResponse struct {
 	AttemptCount int      `json:"attempt_count,omitempty"`
 }
 
+const clusterExecHTTPTimeoutPadding = 15 * time.Second
+
 type clusterWebSocketProbeRequest struct {
 	AppID     string            `json:"app_id"`
 	Path      string            `json:"path,omitempty"`
@@ -161,10 +163,51 @@ func (c *Client) ExecClusterPod(req clusterExecRequest) (clusterExecResponse, er
 		req.TimeoutMS = int(req.Timeout.Milliseconds())
 	}
 	var response clusterExecResponse
-	if err := c.doJSON(http.MethodPost, "/v1/cluster/exec", req, &response); err != nil {
+	if err := c.doJSONWithTimeout(http.MethodPost, "/v1/cluster/exec", req, &response, clusterExecControlPlaneRequestTimeout(req)); err != nil {
 		return clusterExecResponse{}, err
 	}
 	return response, nil
+}
+
+func clusterExecControlPlaneRequestTimeout(req clusterExecRequest) time.Duration {
+	attemptTimeout := req.Timeout
+	if attemptTimeout <= 0 && req.TimeoutMS > 0 {
+		attemptTimeout = time.Duration(req.TimeoutMS) * time.Millisecond
+	}
+	if attemptTimeout <= 0 {
+		attemptTimeout = 60 * time.Second
+	}
+
+	retries := req.Retries
+	if retries < 0 {
+		retries = 0
+	}
+
+	retryDelay := req.RetryDelay
+	if retryDelay <= 0 && req.RetryDelayMS > 0 {
+		retryDelay = time.Duration(req.RetryDelayMS) * time.Millisecond
+	}
+	if retryDelay <= 0 {
+		retryDelay = 250 * time.Millisecond
+	}
+
+	maxDuration := time.Duration(1<<63 - 1)
+	attempts := retries + 1
+	if attempts <= 0 || attemptTimeout > maxDuration/time.Duration(attempts) {
+		return 0
+	}
+	timeout := attemptTimeout * time.Duration(attempts)
+	if timeout > maxDuration-clusterExecHTTPTimeoutPadding {
+		return 0
+	}
+	timeout += clusterExecHTTPTimeoutPadding
+	if retries > 0 {
+		if retryDelay > (maxDuration-timeout)/time.Duration(retries) {
+			return 0
+		}
+		timeout += retryDelay * time.Duration(retries)
+	}
+	return timeout
 }
 
 func (c *Client) ResolveClusterDNS(name, server, recordType string) (model.ClusterDNSResolveResult, error) {

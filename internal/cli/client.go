@@ -1238,12 +1238,11 @@ func (c *Client) doJSONWithTimeout(method, relativePath string, requestBody any,
 	if timeout <= 0 || c == nil || c.httpClient == nil {
 		return c.doJSON(method, relativePath, requestBody, responseBody)
 	}
-	previous := c.httpClient.Timeout
-	c.httpClient.Timeout = timeout
-	defer func() {
-		c.httpClient.Timeout = previous
-	}()
-	return c.doJSON(method, relativePath, requestBody, responseBody)
+	scoped := *c
+	httpClient := *c.httpClient
+	httpClient.Timeout = timeout
+	scoped.httpClient = &httpClient
+	return scoped.doJSON(method, relativePath, requestBody, responseBody)
 }
 
 func (c *Client) doJSONRaw(method, relativePath string, requestBody any) ([]byte, error) {

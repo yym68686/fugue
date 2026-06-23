@@ -424,6 +424,7 @@ func (s *Server) runNodeJanitorCommand(ctx context.Context, namespace, podName, 
 		[]string{"/bin/bash", "-lc", script},
 		2,
 		250*time.Millisecond,
+		clusterNodeDiagnosisCommandTimout,
 	)
 	if err != nil {
 		return nil, err

@@ -130,9 +130,9 @@ func (r kubeFilesystemExecRunner) Run(ctx context.Context, namespace, podName, c
 		}
 		combined := strings.TrimSpace(strings.Join(parts, "\n"))
 		if combined == "" {
-			combined = err.Error()
+			return nil, fmt.Errorf("kubernetes exec pod %s container %s failed: %w", podName, containerName, err)
 		}
-		return nil, fmt.Errorf("kubernetes exec pod %s container %s failed: %s", podName, containerName, combined)
+		return nil, fmt.Errorf("kubernetes exec pod %s container %s failed: %s: %w", podName, containerName, combined, err)
 	}
 
 	return append([]byte(nil), stdout.Bytes()...), nil
