@@ -765,11 +765,9 @@ func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testi
 		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	workers := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, 0)
-	triggerPendingOperationWorkers(workers...)
+	if err := svc.dispatchPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport); err != nil {
+		t.Fatalf("dispatch github sync import operations: %v", err)
+	}
 
 	started := map[string]struct{}{
 		waitForStartedImportOperation(t, importer.started): {},
@@ -986,11 +984,9 @@ func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testin
 		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	workers := svc.startPendingOperationWorkers(ctx, operationLaneGitHubSyncImport, 0)
-	triggerPendingOperationWorkers(workers...)
+	if err := svc.dispatchPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport); err != nil {
+		t.Fatalf("dispatch first github sync import operation: %v", err)
+	}
 
 	if started := waitForStartedImportOperation(t, importer.started); started != opOne.ID {
 		t.Fatalf("expected first started operation %s, got %s", opOne.ID, started)
@@ -999,7 +995,9 @@ func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testin
 
 	importer.release(opOne.ID)
 	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
-	triggerPendingOperationWorkers(workers...)
+	if err := svc.dispatchPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport); err != nil {
+		t.Fatalf("dispatch second github sync import operation: %v", err)
+	}
 
 	if started := waitForStartedImportOperation(t, importer.started); started != opTwo.ID {
 		t.Fatalf("expected second started operation %s after release, got %s", opTwo.ID, started)
