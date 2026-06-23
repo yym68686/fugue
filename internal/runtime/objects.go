@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultPostgresImage          = ""
-	defaultPostgresStorage        = "1Gi"
+	defaultPostgresStorage        = model.DefaultManagedPostgresStorageSize
 	defaultPostgresInstances      = 1
 	defaultWorkspaceStorage       = "10Gi"
 	defaultWaitImage              = "busybox:1.36"

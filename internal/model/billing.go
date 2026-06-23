@@ -23,17 +23,17 @@ const (
 
 	DefaultTenantFreeManagedCPUMilliCores    int64 = 500
 	DefaultTenantFreeManagedMemoryMebibytes  int64 = 512
-	DefaultTenantFreeManagedStorageGibibytes int64 = 5
+	DefaultTenantFreeManagedStorageGibibytes int64 = 20
 
 	DefaultManagedAppCPUMilliCores         int64 = 250
 	DefaultManagedAppMemoryMebibytes       int64 = 512
 	DefaultManagedAppStorageGibibytes      int64 = 0
 	DefaultManagedPostgresCPUMilliCores    int64 = 250
 	DefaultManagedPostgresMemoryMebibytes  int64 = 512
-	DefaultManagedPostgresStorageGibibytes int64 = 1
+	DefaultManagedPostgresStorageGibibytes int64 = 20
 
 	DefaultManagedWorkspaceStorageSize = "10Gi"
-	DefaultManagedPostgresStorageSize  = "1Gi"
+	DefaultManagedPostgresStorageSize  = "20Gi"
 )
 
 type ResourceSpec struct {

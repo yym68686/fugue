@@ -544,6 +544,24 @@ func (c *CLI) renderAppDatabaseState(app model.App, operation *model.Operation, 
 		)
 	}
 	if status != nil && status.Enabled {
+		if value := strings.TrimSpace(status.RuntimeID); value != "" {
+			pairs = append(pairs, kvPair{Key: "status_runtime_id", Value: value})
+		}
+		if value := strings.TrimSpace(status.StorageSize); value != "" {
+			pairs = append(pairs, kvPair{Key: "status_storage_size", Value: value})
+		}
+		if value := strings.TrimSpace(status.StorageClassName); value != "" {
+			pairs = append(pairs, kvPair{Key: "status_storage_class", Value: value})
+		}
+		if status.Instances > 0 {
+			pairs = append(pairs, kvPair{Key: "status_instances", Value: fmt.Sprintf("%d", status.Instances)})
+		}
+		if status.SynchronousReplicas > 0 {
+			pairs = append(pairs, kvPair{Key: "status_sync_replicas", Value: fmt.Sprintf("%d", status.SynchronousReplicas)})
+		}
+		if value := strings.TrimSpace(status.PrimaryNodeName); value != "" {
+			pairs = append(pairs, kvPair{Key: "status_primary_node_name", Value: value})
+		}
 		pairs = append(pairs,
 			kvPair{Key: "backup_status", Value: status.BackupStatus},
 			kvPair{Key: "last_backup", Value: status.LastBackup},

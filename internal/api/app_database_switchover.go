@@ -96,6 +96,11 @@ func (s *Server) managedPostgresStatus(app model.App) model.ManagedPostgresStatu
 	status.Owner = strings.TrimSpace(database.User)
 	status.RuntimeID = runtimeID
 	status.FailoverRuntimeID = strings.TrimSpace(database.FailoverTargetRuntimeID)
+	status.StorageSize = strings.TrimSpace(database.StorageSize)
+	status.StorageClassName = strings.TrimSpace(database.StorageClassName)
+	status.Instances = database.Instances
+	status.SynchronousReplicas = database.SynchronousReplicas
+	status.PrimaryNodeName = strings.TrimSpace(database.PrimaryNodeName)
 	status.BackupStatus = "required"
 	status.RestoreStatus = "required"
 	status.GrantVerification = "required"

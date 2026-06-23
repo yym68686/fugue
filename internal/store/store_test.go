@@ -2096,7 +2096,7 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:    750,
 		MemoryMebibytes:  1536,
-		StorageGibibytes: 1,
+		StorageGibibytes: 30,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
@@ -5661,7 +5661,7 @@ func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:    750,
 		MemoryMebibytes:  1536,
-		StorageGibibytes: 1,
+		StorageGibibytes: 30,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
@@ -5910,7 +5910,7 @@ func TestMoveAppProjectMovesOwnedPostgresAtomically(t *testing.T) {
 	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:    1000,
 		MemoryMebibytes:  2048,
-		StorageGibibytes: 2,
+		StorageGibibytes: 30,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}

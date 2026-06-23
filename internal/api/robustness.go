@@ -13,6 +13,8 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/store"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func (s *Server) handleGetRobustnessStatus(w http.ResponseWriter, r *http.Request) {
@@ -718,8 +720,46 @@ func (s *Server) robustnessBackingServiceChecks() ([]model.RobustnessCheck, erro
 			check.Message = "managed Postgres runtime has started but is not ready"
 		}
 		checks = append(checks, check)
+
+		storageSize := strings.TrimSpace(postgres.StorageSize)
+		storageGiB, storageOK := robustnessStorageGiB(storageSize)
+		storageFloorGiB := model.DefaultManagedPostgresStorageGibibytes
+		storagePass := storageOK && storageGiB >= storageFloorGiB
+		storageCheck := model.RobustnessCheck{
+			Name:       "managed_postgres_storage_floor",
+			Pass:       storagePass,
+			Severity:   model.RobustnessSeverityWarning,
+			Subject:    subject,
+			Expected:   fmt.Sprintf("managed postgres storage_size is at least %dGi", storageFloorGiB),
+			Observed:   fmt.Sprintf("storage_size=%s parsed_gib=%d", firstNonEmpty(storageSize, "unset"), storageGiB),
+			Evidence:   map[string]string{"guardian": "node-health", "service_id": strings.TrimSpace(service.ID), "owner_app_id": ownerAppID, "runtime_id": strings.TrimSpace(postgres.RuntimeID), "storage_size": storageSize, "storage_floor_gib": fmt.Sprintf("%d", storageFloorGiB)},
+			RepairHint: "expand small managed Postgres volumes through Fugue before heavy write traffic or long WAL bursts",
+		}
+		if !storageOK {
+			storageCheck.Message = "managed Postgres storage size is missing or could not be parsed"
+		} else if !storagePass {
+			storageCheck.Message = "managed Postgres storage size is below the default safety floor"
+		}
+		checks = append(checks, storageCheck)
 	}
 	return checks, nil
+}
+
+func robustnessStorageGiB(value string) (int64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0, false
+	}
+	bytes := quantity.Value()
+	if bytes <= 0 {
+		return 0, false
+	}
+	const bytesPerGiB = int64(1 << 30)
+	return (bytes + bytesPerGiB - 1) / bytesPerGiB, true
 }
 
 func countManagedPostgresBackingServices(services []model.BackingService) int {
@@ -1043,7 +1083,7 @@ func robustnessRepairPlanForIncident(incident model.RobustnessIncident, dryRun b
 			Risk:        "read-only",
 		})
 	}
-	if incident.CheckName == "managed_postgres_runtime_ready" {
+	if incident.CheckName == "managed_postgres_runtime_ready" || incident.CheckName == "managed_postgres_storage_floor" {
 		ownerAppID := strings.TrimSpace(incident.Evidence["owner_app_id"])
 		serviceID := strings.TrimSpace(incident.Evidence["service_id"])
 		if ownerAppID != "" {
@@ -1067,7 +1107,7 @@ func robustnessRepairPlanForIncident(incident model.RobustnessIncident, dryRun b
 				model.RobustnessRepairAction{
 					Kind:        "expand_managed_postgres_storage",
 					Subject:     incident.Subject,
-					Description: "if logs confirm WAL or data storage exhaustion, expand storage through the database localization path",
+					Description: "expand storage through the database localization path when the current size is below the safety floor or logs confirm WAL/data exhaustion",
 					Command:     "fugue app db configure " + ownerAppID + " --storage-size <larger-than-current> --wait",
 					Automatic:   false,
 					Risk:        "operator must choose a safe target size",

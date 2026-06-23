@@ -43,18 +43,23 @@ type AppMoveDryRunResponse struct {
 }
 
 type ManagedPostgresStatus struct {
-	AppID             string    `json:"app_id"`
-	Enabled           bool      `json:"enabled"`
-	ServiceName       string    `json:"service_name,omitempty"`
-	Owner             string    `json:"owner,omitempty"`
-	RuntimeID         string    `json:"runtime_id,omitempty"`
-	FailoverRuntimeID string    `json:"failover_runtime_id,omitempty"`
-	LastBackup        string    `json:"last_backup,omitempty"`
-	LastRestore       string    `json:"last_restore,omitempty"`
-	BackupStatus      string    `json:"backup_status"`
-	RestoreStatus     string    `json:"restore_status"`
-	GrantVerification string    `json:"grant_verification"`
-	GeneratedAt       time.Time `json:"generated_at"`
+	AppID               string    `json:"app_id"`
+	Enabled             bool      `json:"enabled"`
+	ServiceName         string    `json:"service_name,omitempty"`
+	Owner               string    `json:"owner,omitempty"`
+	RuntimeID           string    `json:"runtime_id,omitempty"`
+	FailoverRuntimeID   string    `json:"failover_runtime_id,omitempty"`
+	StorageSize         string    `json:"storage_size,omitempty"`
+	StorageClassName    string    `json:"storage_class_name,omitempty"`
+	Instances           int       `json:"instances,omitempty"`
+	SynchronousReplicas int       `json:"synchronous_replicas,omitempty"`
+	PrimaryNodeName     string    `json:"primary_node_name,omitempty"`
+	LastBackup          string    `json:"last_backup,omitempty"`
+	LastRestore         string    `json:"last_restore,omitempty"`
+	BackupStatus        string    `json:"backup_status"`
+	RestoreStatus       string    `json:"restore_status"`
+	GrantVerification   string    `json:"grant_verification"`
+	GeneratedAt         time.Time `json:"generated_at"`
 }
 
 type ManagedPostgresStatusResponse struct {

@@ -29,7 +29,7 @@ func TestMoveAppProjectMovesOwnedBackingServiceAtomically(t *testing.T) {
 	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:    1000,
 		MemoryMebibytes:  2048,
-		StorageGibibytes: 2,
+		StorageGibibytes: 30,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}

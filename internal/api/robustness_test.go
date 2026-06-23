@@ -197,6 +197,19 @@ func TestRobustnessStatusDetectsManagedPostgresRuntimeNotReady(t *testing.T) {
 	if incident.Evidence["owner_app_id"] != dbApp.ID || incident.Evidence["storage_size"] != "5Gi" {
 		t.Fatalf("expected postgres evidence, got %+v", incident.Evidence)
 	}
+	var storageIncident *model.RobustnessIncident
+	for index := range response.Status.Incidents {
+		if response.Status.Incidents[index].CheckName == "managed_postgres_storage_floor" {
+			storageIncident = &response.Status.Incidents[index]
+			break
+		}
+	}
+	if storageIncident == nil {
+		t.Fatalf("expected managed postgres storage floor incident, got %+v", response.Status.Incidents)
+	}
+	if storageIncident.Severity != model.RobustnessSeverityWarning || storageIncident.Evidence["storage_floor_gib"] != "20" {
+		t.Fatalf("expected storage warning evidence, got %+v", storageIncident)
+	}
 
 	planRecorder := performJSONRequest(t, server, http.MethodPost, "/v1/admin/robustness/incidents/"+incident.ID+"/repair-plan", platformAdminKey, nil)
 	if planRecorder.Code != http.StatusOK {

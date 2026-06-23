@@ -13,7 +13,6 @@ import (
 
 const (
 	defaultManagedBackingPostgresImage     = ""
-	defaultManagedBackingPostgresStorage   = "1Gi"
 	defaultManagedBackingPostgresInstances = 1
 )
 
@@ -555,7 +554,7 @@ func normalizeManagedPostgresSpec(appName, appRuntimeID string, spec model.AppPo
 	out.FailoverTargetRuntimeID = strings.TrimSpace(out.FailoverTargetRuntimeID)
 	out.PrimaryNodeName = strings.TrimSpace(out.PrimaryNodeName)
 	if strings.TrimSpace(out.StorageSize) == "" {
-		out.StorageSize = defaultManagedBackingPostgresStorage
+		out.StorageSize = model.DefaultManagedPostgresStorageSize
 	}
 	out.StorageClassName = strings.TrimSpace(out.StorageClassName)
 	if out.Instances <= 0 {

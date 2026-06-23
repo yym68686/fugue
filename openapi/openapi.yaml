@@ -18553,6 +18553,16 @@ components:
           type: string
         failover_runtime_id:
           type: string
+        storage_size:
+          type: string
+        storage_class_name:
+          type: string
+        instances:
+          type: integer
+        synchronous_replicas:
+          type: integer
+        primary_node_name:
+          type: string
         last_backup:
           type: string
         last_restore:

@@ -2175,7 +2175,7 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
 		CPUMilliCores:    1000,
 		MemoryMebibytes:  2048,
-		StorageGibibytes: 1,
+		StorageGibibytes: 30,
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
