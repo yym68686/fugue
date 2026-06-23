@@ -593,6 +593,57 @@ func TestRunAppDatabaseConfigureUsesOwnedBackingServiceAsBaseline(t *testing.T) 
 	}
 }
 
+func TestRunAppDatabaseConfigureStorageOnlyUsesLocalizeEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_app","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_app","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_app","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_app","current_replicas":1},"backing_services":[{"id":"svc_pg","tenant_id":"tenant_123","project_id":"project_123","owner_app_id":"app_123","name":"demo","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_db","database":"app","user":"app","password":"service-password-123","service_name":"demo-postgres","storage_size":"5Gi","storage_class_name":"fugue-postgres-rwo","primary_node_name":"node-a"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/database/localize":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode localize body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"operation":{"id":"op_123","app_id":"app_123","type":"database-localize","status":"pending","target_runtime_id":"runtime_db"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/deploy":
+			t.Fatal("storage-only database configure must not use deploy endpoint")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "db", "configure", "demo",
+		"--storage-size", "20Gi",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app db configure: %v stderr=%s", err, stderr.String())
+	}
+
+	if gotBody["target_runtime_id"] != "runtime_db" {
+		t.Fatalf("expected current database runtime target, got %+v", gotBody)
+	}
+	if gotBody["target_node_name"] != "node-a" {
+		t.Fatalf("expected current primary node target, got %+v", gotBody)
+	}
+	if gotBody["storage_size"] != "20Gi" || gotBody["storage_class_name"] != "fugue-postgres-rwo" {
+		t.Fatalf("expected storage resize request, got %+v", gotBody)
+	}
+	if !strings.Contains(stdout.String(), "operation_id=op_123") {
+		t.Fatalf("expected operation in stdout, got %q", stdout.String())
+	}
+}
+
 func TestRunAppDatabaseSwitchoverUsesOwnedBackingService(t *testing.T) {
 	t.Parallel()
 

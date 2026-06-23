@@ -206,6 +206,31 @@ for the managed database. Add flags only for the parts you want to customize.
 				return c.renderAppDatabaseState(app, nil, true, opts.ShowSecrets, nil)
 			}
 
+			if appDatabaseConfigureShouldLocalize(cmd, before) {
+				response, err := client.LocalizeAppDatabaseWithOptions(app.ID, databaseLocalizeRequest{
+					TargetNodeName:   strings.TrimSpace(spec.Postgres.PrimaryNodeName),
+					TargetRuntimeID:  firstNonEmpty(strings.TrimSpace(spec.Postgres.RuntimeID), strings.TrimSpace(app.Spec.RuntimeID)),
+					StorageSize:      strings.TrimSpace(spec.Postgres.StorageSize),
+					StorageClassName: strings.TrimSpace(spec.Postgres.StorageClassName),
+				})
+				if err != nil {
+					return err
+				}
+				finalApp := app
+				if opts.Wait {
+					waitedApp, err := c.waitForSingleApp(client, app.ID, response.Operation, true)
+					if err != nil {
+						return err
+					}
+					if waitedApp != nil {
+						finalApp = *waitedApp
+					}
+				} else {
+					finalApp.Spec = spec
+				}
+				return c.renderAppDatabaseState(finalApp, &response.Operation, false, opts.ShowSecrets, nil)
+			}
+
 			response, err := client.DeployApp(app.ID, &spec)
 			if err != nil {
 				return err
@@ -694,4 +719,43 @@ func serviceResourceName(name string) string {
 func flagChanged(cmd *cobra.Command, name string) bool {
 	flag := cmd.Flags().Lookup(name)
 	return flag != nil && flag.Changed
+}
+
+func appDatabaseConfigureShouldLocalize(cmd *cobra.Command, before *model.AppPostgresSpec) bool {
+	if cmd == nil || before == nil {
+		return false
+	}
+	changed := false
+	for _, name := range []string{
+		"runtime",
+		"runtime-id",
+		"database",
+		"user",
+		"password",
+		"image",
+		"service-name",
+		"storage-size",
+		"storage-class",
+		"cpu-millicores",
+		"memory-mebibytes",
+		"cpu-limit-millicores",
+		"memory-limit-mebibytes",
+		"instances",
+		"sync-replicas",
+		"primary-node",
+		"failover-to",
+		"failover-runtime-id",
+		"clear-failover",
+	} {
+		if !flagChanged(cmd, name) {
+			continue
+		}
+		changed = true
+		switch name {
+		case "storage-size", "storage-class", "primary-node":
+		default:
+			return false
+		}
+	}
+	return changed
 }

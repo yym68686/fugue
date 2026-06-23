@@ -200,6 +200,11 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, backupChecks...)
+	backingServiceChecks, err := s.robustnessBackingServiceChecks()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, backingServiceChecks...)
 	operationChecks, err := s.robustnessOperationChecks()
 	if err != nil {
 		return model.RobustnessStatus{}, err
@@ -252,6 +257,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 			"generated_artifact_inventory",
 			"node_generation_inventory",
 			"backup_restore_inventory",
+			"backing_service_runtime",
 			"operation_inventory",
 			"route_explain",
 		},
@@ -674,6 +680,72 @@ func robustnessTimeValue(value *time.Time) string {
 	return value.UTC().Format(time.RFC3339)
 }
 
+func (s *Server) robustnessBackingServiceChecks() ([]model.RobustnessCheck, error) {
+	services, err := s.store.ListBackingServices("", true)
+	if err != nil {
+		return nil, err
+	}
+	checks := []model.RobustnessCheck{{
+		Name:     "managed_postgres_inventory",
+		Pass:     true,
+		Severity: model.RobustnessSeverityInfo,
+		Subject:  "backing_services",
+		Expected: "managed postgres backing service runtime status is visible",
+		Observed: fmt.Sprintf("managed_postgres=%d", countManagedPostgresBackingServices(services)),
+		Evidence: map[string]string{"guardian": "node-health"},
+	}}
+	for _, service := range services {
+		if !robustnessManagedPostgresBackingService(service) {
+			continue
+		}
+		postgres := service.Spec.Postgres
+		subject := "backing-service:" + strings.TrimSpace(service.ID)
+		started := robustnessTimeValue(service.CurrentRuntimeStartedAt)
+		ready := robustnessTimeValue(service.CurrentRuntimeReadyAt)
+		pass := service.CurrentRuntimeStartedAt == nil || service.CurrentRuntimeReadyAt != nil
+		ownerAppID := strings.TrimSpace(service.OwnerAppID)
+		check := model.RobustnessCheck{
+			Name:       "managed_postgres_runtime_ready",
+			Pass:       pass,
+			Severity:   model.RobustnessSeverityDegraded,
+			Subject:    subject,
+			Expected:   "current_runtime_ready_at is present after managed postgres runtime start",
+			Observed:   fmt.Sprintf("status=%s runtime_id=%s started_at=%s ready_at=%s storage_size=%s primary_node=%s", service.Status, strings.TrimSpace(postgres.RuntimeID), started, ready, strings.TrimSpace(postgres.StorageSize), strings.TrimSpace(postgres.PrimaryNodeName)),
+			Evidence:   map[string]string{"guardian": "node-health", "service_id": strings.TrimSpace(service.ID), "owner_app_id": ownerAppID, "runtime_id": strings.TrimSpace(postgres.RuntimeID), "storage_size": strings.TrimSpace(postgres.StorageSize), "primary_node_name": strings.TrimSpace(postgres.PrimaryNodeName)},
+			RepairHint: "inspect managed Postgres logs and storage state before app rollouts; if WAL or data storage is exhausted, expand or localize the app database through Fugue",
+		}
+		if !pass {
+			check.Message = "managed Postgres runtime has started but is not ready"
+		}
+		checks = append(checks, check)
+	}
+	return checks, nil
+}
+
+func countManagedPostgresBackingServices(services []model.BackingService) int {
+	count := 0
+	for _, service := range services {
+		if robustnessManagedPostgresBackingService(service) {
+			count++
+		}
+	}
+	return count
+}
+
+func robustnessManagedPostgresBackingService(service model.BackingService) bool {
+	if !strings.EqualFold(strings.TrimSpace(service.Type), model.BackingServiceTypePostgres) {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(service.Status), model.BackingServiceStatusDeleted) {
+		return false
+	}
+	provisioner := strings.TrimSpace(strings.ToLower(service.Provisioner))
+	if provisioner != "" && provisioner != model.BackingServiceProvisionerManaged {
+		return false
+	}
+	return service.Spec.Postgres != nil
+}
+
 func (s *Server) robustnessOperationChecks() ([]model.RobustnessCheck, error) {
 	ops, err := s.store.ListOperations("", true)
 	if err != nil {
@@ -970,6 +1042,47 @@ func robustnessRepairPlanForIncident(incident model.RobustnessIncident, dryRun b
 			Automatic:   false,
 			Risk:        "read-only",
 		})
+	}
+	if incident.CheckName == "managed_postgres_runtime_ready" {
+		ownerAppID := strings.TrimSpace(incident.Evidence["owner_app_id"])
+		serviceID := strings.TrimSpace(incident.Evidence["service_id"])
+		if ownerAppID != "" {
+			actions = append(actions,
+				model.RobustnessRepairAction{
+					Kind:        "diagnose_managed_postgres",
+					Subject:     incident.Subject,
+					Description: "inspect the app-owned managed Postgres status",
+					Command:     "fugue app db show " + ownerAppID,
+					Automatic:   false,
+					Risk:        "read-only",
+				},
+				model.RobustnessRepairAction{
+					Kind:        "inspect_managed_postgres_logs",
+					Subject:     incident.Subject,
+					Description: "inspect recent and previous managed Postgres logs for disk, WAL, crashloop, or bootstrap errors",
+					Command:     "fugue app logs runtime " + ownerAppID + " --component postgres --tail 200 --previous",
+					Automatic:   false,
+					Risk:        "read-only",
+				},
+				model.RobustnessRepairAction{
+					Kind:        "expand_managed_postgres_storage",
+					Subject:     incident.Subject,
+					Description: "if logs confirm WAL or data storage exhaustion, expand storage through the database localization path",
+					Command:     "fugue app db configure " + ownerAppID + " --storage-size <larger-than-current> --wait",
+					Automatic:   false,
+					Risk:        "operator must choose a safe target size",
+				},
+			)
+		} else if serviceID != "" {
+			actions = append(actions, model.RobustnessRepairAction{
+				Kind:        "diagnose_managed_postgres",
+				Subject:     incident.Subject,
+				Description: "inspect the managed Postgres backing service status",
+				Command:     "fugue service show " + serviceID,
+				Automatic:   false,
+				Risk:        "read-only",
+			})
+		}
 	}
 	return model.RobustnessRepairPlan{
 		IncidentID:  incident.ID,

@@ -199,14 +199,17 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	}
 
 	switch {
+	case diagnosis.ReadyPods > 0 && httpProbe.attempted && httpProbe.timedOut:
+		diagnosis.Category = "http-timeout"
+		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe timed out", diagnosis.ReadyPods, diagnosis.LivePods)
+		diagnosis.Hint = fmt.Sprintf("Probe the internal service with fugue app request %s /healthz and inspect runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
+	case diagnosis.ReadyPods > 0 && httpProbe.attempted && httpProbe.unhealthy:
+		diagnosis.Category = "http-unhealthy"
+		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP health probe reported an unhealthy response", diagnosis.ReadyPods, diagnosis.LivePods)
+		diagnosis.Hint = fmt.Sprintf("Probe the internal service with fugue app request %s /healthz and inspect runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
 	case diagnosis.ReadyPods > 0 && httpProbe.attempted && !httpProbe.responsive:
-		if httpProbe.timedOut {
-			diagnosis.Category = "http-timeout"
-			diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe timed out", diagnosis.ReadyPods, diagnosis.LivePods)
-		} else {
-			diagnosis.Category = "http-unreachable"
-			diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe could not reach the app", diagnosis.ReadyPods, diagnosis.LivePods)
-		}
+		diagnosis.Category = "http-unreachable"
+		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe could not reach the app", diagnosis.ReadyPods, diagnosis.LivePods)
 		diagnosis.Hint = fmt.Sprintf("Probe the internal service with fugue app request %s /healthz and inspect runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
 	case diagnosis.ReadyPods > 0:
 		diagnosis.Category = "available"
@@ -276,6 +279,7 @@ type appHTTPProbeDiagnosis struct {
 	attempted  bool
 	responsive bool
 	timedOut   bool
+	unhealthy  bool
 	evidence   []string
 }
 
@@ -334,10 +338,28 @@ func (s *Server) diagnoseAppHTTPAvailability(ctx context.Context, app model.App)
 		}
 		diagnosis.responsive = true
 		diagnosis.evidence = append(diagnosis.evidence, fmt.Sprintf("http probe GET %s returned %s after %s", requestPath, status, elapsed))
+		if appDiagnosisHTTPProbeUnhealthyStatus(resp.StatusCode) {
+			diagnosis.unhealthy = true
+			return diagnosis
+		}
+		if requestPath == "/healthz" && appDiagnosisHTTPProbeFallbackStatus(resp.StatusCode) {
+			continue
+		}
 		return diagnosis
 	}
 
 	return diagnosis
+}
+
+func appDiagnosisHTTPProbeUnhealthyStatus(statusCode int) bool {
+	if statusCode <= 0 {
+		return false
+	}
+	return statusCode >= 500
+}
+
+func appDiagnosisHTTPProbeFallbackStatus(statusCode int) bool {
+	return statusCode == http.StatusNotFound || statusCode == http.StatusMethodNotAllowed
 }
 
 func appDiagnosisHTTPProbeTimedOut(err error) bool {
