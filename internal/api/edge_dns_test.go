@@ -1213,7 +1213,39 @@ func TestEdgeDNSLatencyProfilePenalizesSlowRequestBodyReads(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundleDoesNotCreateScopedLatencyProfileWithoutClientScopePolicy(t *testing.T) {
+func TestEdgeDNSLatencyScoreIncludesNetworkDamage(t *testing.T) {
+	t.Parallel()
+
+	clean := edgeDNSLatencyCandidateProfile{
+		TrafficClass:   "large_body_api",
+		SampleCount:    60,
+		TTFBMS:         120,
+		UpstreamMS:     80,
+		TotalMS:        150,
+		UploadBPS:      2 * 1024 * 1024,
+		ScoreBreakdown: map[string]float64{},
+		Confidence:     1,
+	}
+	damaged := clean
+	damaged.ScoreBreakdown = map[string]float64{}
+	damaged.ClientTCPRTTMS = 260
+	damaged.ClientTCPRTTVarMS = 90
+	damaged.ClientTCPRetransRate = 0.15
+	damaged.ClientTCPBytesRetransRate = 0.10
+	damaged.ClientTCPRTORate = 0.08
+	damaged.ClientTCPDeliveryBPS = 64 * 1024
+
+	cleanScore := edgeDNSLatencyScore(clean)
+	damagedScore := edgeDNSLatencyScore(damaged)
+	if damagedScore <= cleanScore {
+		t.Fatalf("expected damaged TCP candidate to score worse, clean=%f damaged=%f", cleanScore, damagedScore)
+	}
+	if damaged.ScoreBreakdown["network"] <= clean.ScoreBreakdown["network"] {
+		t.Fatalf("expected network penalty in score breakdown, clean=%+v damaged=%+v", clean.ScoreBreakdown, damaged.ScoreBreakdown)
+	}
+}
+
+func TestEdgeDNSBundleCreatesScopedLatencyProfileFromClientMetadata(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -1303,8 +1335,9 @@ func TestEdgeDNSBundleDoesNotCreateScopedLatencyProfileWithoutClientScopePolicy(
 	if apiA == nil {
 		t.Fatalf("expected api.fugue.pro A record, got %+v", bundle.Records)
 	}
-	if len(apiA.ScopedCandidates) != 0 {
-		t.Fatalf("samples without client-scope DNS policy must not create scoped profiles, got %+v", apiA.ScopedCandidates)
+	countryScoped := edgeDNSScopedCandidatesByScope(apiA.ScopedCandidates, "country:de")
+	if countryScoped == nil || countryScoped.SelectedEdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected samples with client metadata to create scoped profiles, got %+v", apiA.ScopedCandidates)
 	}
 	if apiA.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindLatencyAware {
 		t.Fatalf("global latency profile should still be available, got %+v", apiA.AnswerPolicy)

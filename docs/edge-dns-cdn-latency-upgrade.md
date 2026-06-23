@@ -180,6 +180,29 @@ candidate_edges(hostname)
 - 使用窗口化评分，避免短时抖动导致 DNS answer 来回切。
 - 所有 latency-based answer 仍必须满足 route-ready 不变量。
 
+当前实现已经把 edge 质量排名拆成更明确的 scoped quality 信号。DNS
+仍然只能按 hostname 和客户端 DNS hint 选择 edge，不能在 DNS 层直接知道
+HTTP path、method 或 request body 大小；因此 traffic class 级别的调查入口是
+read-only CLI/API，而 DNS answer 继续使用 hostname 级 scoped score。
+
+运维调查入口：
+
+```sh
+fugue admin edge quality-rank api.0-0.pro \
+  --traffic-class large_body_api \
+  --method POST \
+  --path-prefix /api \
+  --scope asn:as4134 \
+  --window 30m
+
+fugue admin dns answer-check api.0-0.pro --explain
+```
+
+`quality-rank` 会输出 selected scope、fallback level、hard-gated candidates、
+confidence、score breakdown，以及 network/upload/download/cache/origin/saturation
+等子分。`answer-check --explain` 会在原有 DNS route-ready 检查后附带全局
+quality rank，用于回答“为什么这个 hostname 当前更倾向某个 edge”。
+
 ## Route bundle 升级设计
 
 ### Public route 默认全 edge 兜底

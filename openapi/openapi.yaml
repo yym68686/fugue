@@ -299,6 +299,62 @@ paths:
                 $ref: "#/components/schemas/EdgeNodeQualityResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/quality-rank/{hostname}:
+    get:
+      operationId: getEdgeQualityRank
+      summary: Get Edge Quality Rank
+      tags: [Edge]
+      x-fugue-handler: handleGetEdgeQualityRank
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: traffic_class
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: method
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: path_prefix
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: scope
+          required: false
+          description: "Scope selector: global, country:<country>, region:<country>:<region>, or asn:<asn>."
+          schema:
+            type: string
+        - in: query
+          name: window
+          required: false
+          description: Positive duration such as 30m, 6h, or 24h. Defaults to 30m.
+          schema:
+            type: string
+        - in: query
+          name: since
+          required: false
+          description: Lower bound as a positive duration or RFC3339 timestamp. Overrides window.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeQualityRankResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/nodes/{edge_id}/token:
     post:
       operationId: createEdgeNodeToken
@@ -10316,6 +10372,27 @@ components:
         avg_active_body_buffers:
           type: number
           format: double
+        avg_client_tcp_rtt_ms:
+          type: number
+          format: double
+        avg_client_tcp_min_rtt_ms:
+          type: number
+          format: double
+        avg_client_tcp_rttvar_ms:
+          type: number
+          format: double
+        client_tcp_retrans_rate:
+          type: number
+          format: double
+        client_tcp_bytes_retrans_rate:
+          type: number
+          format: double
+        client_tcp_rto_rate:
+          type: number
+          format: double
+        avg_client_tcp_delivery_rate_bps:
+          type: number
+          format: double
         cache_hit_count:
           type: integer
           format: int32
@@ -10458,6 +10535,27 @@ components:
         avg_active_body_buffers:
           type: number
           format: double
+        avg_client_tcp_rtt_ms:
+          type: number
+          format: double
+        avg_client_tcp_min_rtt_ms:
+          type: number
+          format: double
+        avg_client_tcp_rttvar_ms:
+          type: number
+          format: double
+        client_tcp_retrans_rate:
+          type: number
+          format: double
+        client_tcp_bytes_retrans_rate:
+          type: number
+          format: double
+        client_tcp_rto_rate:
+          type: number
+          format: double
+        avg_client_tcp_delivery_rate_bps:
+          type: number
+          format: double
         cache_hit_count:
           type: integer
           format: int32
@@ -10488,6 +10586,126 @@ components:
         generated_at:
           type: string
           format: date-time
+    EdgeQualityRankResponse:
+      type: object
+      additionalProperties: false
+      required: [hostname, requested_scope, selected_scope, fallback_level, window, since, generated_at]
+      properties:
+        hostname:
+          type: string
+        traffic_class:
+          type: string
+        method:
+          type: string
+        path_prefix_bucket:
+          type: string
+        requested_scope:
+          type: string
+        selected_scope:
+          type: string
+        fallback_level:
+          type: integer
+          format: int32
+        fallback_reason:
+          type: string
+        window:
+          type: string
+        since:
+          type: string
+          format: date-time
+        generated_at:
+          type: string
+          format: date-time
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeQualityRankCandidate"
+        hard_gated:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeQualityRankCandidate"
+    EdgeQualityRankCandidate:
+      type: object
+      additionalProperties: false
+      properties:
+        rank:
+          type: integer
+          format: int32
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        healthy:
+          type: boolean
+        draining:
+          type: boolean
+        route_ready:
+          type: boolean
+        tls_ready:
+          type: boolean
+        excluded:
+          type: boolean
+        exclusion_reason:
+          type: string
+        score:
+          type: number
+          format: double
+        score_breakdown:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+        confidence:
+          type: number
+          format: double
+        confidence_penalty:
+          type: number
+          format: double
+        sample_record_count:
+          type: integer
+          format: int32
+        request_count:
+          type: integer
+          format: int32
+        error_rate:
+          type: number
+          format: double
+        cache_hit_rate:
+          type: number
+          format: double
+        avg_ttfb_ms:
+          type: number
+          format: double
+        avg_total_ms:
+          type: number
+          format: double
+        avg_upload_bps:
+          type: number
+          format: double
+        min_upload_bps:
+          type: integer
+          format: int64
+        avg_response_egress_bps:
+          type: number
+          format: double
+        client_tcp_retrans_rate:
+          type: number
+          format: double
+        client_tcp_bytes_retrans_rate:
+          type: number
+          format: double
+        client_tcp_rto_rate:
+          type: number
+          format: double
+        last_sampled_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
     CreateEdgeNodeTokenRequest:
       type: object
       additionalProperties: false
@@ -10727,6 +10945,36 @@ components:
           type: integer
           format: int32
         memory_alloc_bytes:
+          type: integer
+          format: int64
+        client_tcp_rtt_ms:
+          type: number
+          format: double
+        client_tcp_min_rtt_ms:
+          type: number
+          format: double
+        client_tcp_rttvar_ms:
+          type: number
+          format: double
+        client_tcp_total_retrans:
+          type: integer
+          format: int64
+        client_tcp_retrans_rate:
+          type: number
+          format: double
+        client_tcp_bytes_retrans:
+          type: integer
+          format: int64
+        client_tcp_bytes_retrans_rate:
+          type: number
+          format: double
+        client_tcp_total_rto:
+          type: integer
+          format: int64
+        client_tcp_rto_rate:
+          type: number
+          format: double
+        client_tcp_delivery_rate_bps:
           type: integer
           format: int64
         sampled_at:

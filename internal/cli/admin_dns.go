@@ -125,6 +125,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 	opts := struct {
 		Hostname string
 		ClientIP string
+		Explain  bool
 	}{}
 	cmd := &cobra.Command{
 		Use:   "answer-check <hostname>",
@@ -143,6 +144,13 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if opts.Explain {
+				quality, err := client.GetEdgeQualityRank(opts.Hostname, "", "", "", "global", "30m", "")
+				if err != nil {
+					return err
+				}
+				report.QualityRank = &quality
+			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, report)
 			}
@@ -150,6 +158,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.ClientIP, "client-ip", "", "EDNS client subnet IP to use when probing authoritative answers")
+	cmd.Flags().BoolVar(&opts.Explain, "explain", false, "Include scoped edge quality ranking explanation")
 	return cmd
 }
 
@@ -292,15 +301,16 @@ func writeDNSFullZonePreflight(w io.Writer, response model.DNSFullZonePreflightR
 }
 
 type dnsAnswerCheckReport struct {
-	Hostname             string                     `json:"hostname"`
-	QueryName            string                     `json:"query_name,omitempty"`
-	ClientIP             string                     `json:"client_ip,omitempty"`
-	PolicyReason         string                     `json:"policy_reason,omitempty"`
-	GeneratedAt          time.Time                  `json:"generated_at"`
-	Pass                 bool                       `json:"pass"`
-	RouteExplain         model.RouteExplainResponse `json:"route_explain"`
-	RouteReadyEdgeGroups []string                   `json:"route_ready_edge_groups,omitempty"`
-	Nodes                []dnsAnswerCheckNode       `json:"nodes"`
+	Hostname             string                         `json:"hostname"`
+	QueryName            string                         `json:"query_name,omitempty"`
+	ClientIP             string                         `json:"client_ip,omitempty"`
+	PolicyReason         string                         `json:"policy_reason,omitempty"`
+	GeneratedAt          time.Time                      `json:"generated_at"`
+	Pass                 bool                           `json:"pass"`
+	RouteExplain         model.RouteExplainResponse     `json:"route_explain"`
+	QualityRank          *model.EdgeQualityRankResponse `json:"quality_rank,omitempty"`
+	RouteReadyEdgeGroups []string                       `json:"route_ready_edge_groups,omitempty"`
+	Nodes                []dnsAnswerCheckNode           `json:"nodes"`
 }
 
 type dnsAnswerCheckNode struct {
@@ -445,12 +455,27 @@ func writeDNSAnswerCheck(w io.Writer, report dnsAnswerCheckReport) error {
 		return err
 	}
 	if len(report.Nodes) == 0 {
+		if report.QualityRank != nil {
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
+			return writeEdgeQualityRank(w, *report.QualityRank)
+		}
 		return nil
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-	return writeDNSAnswerCheckTable(w, report.Nodes)
+	if err := writeDNSAnswerCheckTable(w, report.Nodes); err != nil {
+		return err
+	}
+	if report.QualityRank == nil {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "\nQuality rank:"); err != nil {
+		return err
+	}
+	return writeEdgeQualityRank(w, *report.QualityRank)
 }
 
 func writeDNSAnswerCheckTable(w io.Writer, nodes []dnsAnswerCheckNode) error {

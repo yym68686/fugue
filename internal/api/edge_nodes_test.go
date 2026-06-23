@@ -175,6 +175,130 @@ func TestEdgeHeartbeatStoresPerformanceSamples(t *testing.T) {
 	}
 }
 
+func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	for _, node := range []map[string]any{
+		{
+			"edge_id":              "edge-us-1",
+			"edge_group_id":        "edge-group-country-us",
+			"region":               "us-east",
+			"country":              "US",
+			"public_ipv4":          "203.0.113.10",
+			"route_bundle_version": "routegen",
+			"caddy_route_count":    4,
+			"tls_status":           model.EdgeTLSStatusReady,
+			"status":               model.EdgeHealthHealthy,
+			"healthy":              true,
+		},
+		{
+			"edge_id":              "edge-de-1",
+			"edge_group_id":        "edge-group-country-de",
+			"region":               "eu-central",
+			"country":              "DE",
+			"public_ipv4":          "203.0.113.20",
+			"route_bundle_version": "routegen",
+			"caddy_route_count":    4,
+			"tls_status":           model.EdgeTLSStatusReady,
+			"status":               model.EdgeHealthHealthy,
+			"healthy":              true,
+		},
+	} {
+		heartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", node)
+		if heartbeat.Code != http.StatusOK {
+			t.Fatalf("expected heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
+		}
+	}
+	if _, err := storeState.PutEdgeRoutePolicy(model.EdgeRoutePolicy{
+		Hostname:        "api.fugue.pro",
+		AppID:           "app-api",
+		TenantID:        "tenant-api",
+		RoutePolicy:     model.EdgeRoutePolicyEnabled,
+		ExcludedEdgeIDs: []string{"edge-de-1"},
+		ExclusionReason: "test exclusion",
+	}); err != nil {
+		t.Fatalf("put edge route policy: %v", err)
+	}
+	if err := storeState.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{
+		{
+			ID:                   "api-us-large-body-fast",
+			EdgeID:               "edge-us-1",
+			EdgeGroupID:          "edge-group-country-us",
+			Hostname:             "api.fugue.pro",
+			PathPrefix:           "/api",
+			Method:               "POST",
+			TrafficClass:         "large_body_api",
+			ClientCountry:        "cn",
+			ClientASN:            "as4134",
+			DNSPolicy:            "client_scope_header",
+			TTFBMS:               110,
+			UpstreamMS:           80,
+			TotalMS:              140,
+			SampleCount:          60,
+			UploadEffectiveBPS:   2 * 1024 * 1024,
+			MinWindowBPS:         1536 * 1024,
+			BodyReadBlockMS:      40,
+			MaxReadGapMS:         100,
+			ClientTCPRTTMS:       120,
+			ClientTCPRetransRate: 0.01,
+			ClientTCPRTORate:     0.0,
+			ClientTCPDeliveryBPS: 4 * 1024 * 1024,
+			SampledAt:            now.Add(-5 * time.Minute),
+		},
+		{
+			ID:                        "api-de-large-body-slow",
+			EdgeID:                    "edge-de-1",
+			EdgeGroupID:               "edge-group-country-de",
+			Hostname:                  "api.fugue.pro",
+			PathPrefix:                "/api",
+			Method:                    "POST",
+			TrafficClass:              "large_body_api",
+			ClientCountry:             "cn",
+			ClientASN:                 "as4134",
+			DNSPolicy:                 "client_scope_header",
+			TTFBMS:                    130,
+			UpstreamMS:                90,
+			TotalMS:                   180,
+			SampleCount:               60,
+			UploadEffectiveBPS:        64 * 1024,
+			MinWindowBPS:              32 * 1024,
+			BodyReadBlockMS:           1200,
+			MaxReadGapMS:              8000,
+			BodyIncompleteCount:       3,
+			ClientTCPRTTMS:            280,
+			ClientTCPRTTVarMS:         90,
+			ClientTCPRetransRate:      0.15,
+			ClientTCPBytesRetransRate: 0.10,
+			ClientTCPRTORate:          0.08,
+			ClientTCPDeliveryBPS:      64 * 1024,
+			SampledAt:                 now.Add(-5 * time.Minute),
+		},
+	}, time.Time{}); err != nil {
+		t.Fatalf("record performance samples: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-rank/api.fugue.pro?traffic_class=large_body_api&method=POST&path_prefix=/api/responses&scope=asn:as4134&window=6h", platformAdminKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected quality rank status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response model.EdgeQualityRankResponse
+	mustDecodeJSON(t, recorder, &response)
+	if response.SelectedScope != "asn:as4134" || response.TrafficClass != "large_body_api" || response.Method != "POST" {
+		t.Fatalf("unexpected quality rank scope/filter: %+v", response)
+	}
+	if len(response.Candidates) != 1 || response.Candidates[0].EdgeID != "edge-us-1" || response.Candidates[0].Score <= 0 {
+		t.Fatalf("expected non-excluded US edge to rank first, got %+v", response.Candidates)
+	}
+	if response.Candidates[0].ScoreBreakdown["upload"] <= 0 || response.Candidates[0].Confidence <= 0 {
+		t.Fatalf("expected upload/confidence breakdown, got %+v", response.Candidates[0])
+	}
+	if len(response.HardGated) != 1 || response.HardGated[0].EdgeID != "edge-de-1" || !response.HardGated[0].Excluded {
+		t.Fatalf("expected service-excluded DE edge in hard gates, got %+v", response.HardGated)
+	}
+}
+
 func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 	t.Parallel()
 

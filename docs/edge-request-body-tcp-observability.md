@@ -56,6 +56,18 @@ retransmits, unacked/lost packets, bytes received, delivery rate, and receive
 window data. If `client_tcp_info_available=false`, use the accompanying error to
 see why the kernel snapshot was unavailable.
 
+The control-plane performance sample schema now accepts low-cardinality
+client-side TCP quality fields for ranking and diagnostics:
+
+- `client_tcp_rtt_ms`, `client_tcp_min_rtt_ms`, `client_tcp_rttvar_ms`
+- `client_tcp_total_retrans`, `client_tcp_retrans_rate`
+- `client_tcp_bytes_retrans`, `client_tcp_bytes_retrans_rate`
+- `client_tcp_total_rto`, `client_tcp_rto_rate`
+- `client_tcp_delivery_rate_bps`
+
+Old edges can omit these fields. Missing values are treated as incomplete
+network evidence and reduce confidence instead of making the sample invalid.
+
 ## Node TCP metrics
 
 `fugue-edge-front` also reads edge-node `/proc/net/snmp` and
@@ -73,6 +85,15 @@ The Prometheus rules include alerts for:
 - high edge-front client TCP retransmits
 - high node TCP retransmit rate
 - unavailable node TCP proc metrics
+
+`fugue-edge-front` exports additional public TCP summaries for bytes retransmit,
+RTO count, and delivery rate:
+
+```text
+fugue_edge_front_client_tcp_bytes_retrans
+fugue_edge_front_client_tcp_total_rto
+fugue_edge_front_client_tcp_delivery_rate_bps
+```
 
 Request IDs and connection remote addresses stay in logs/events and debug
 endpoints only; Prometheus labels use low-cardinality edge/app/route/client

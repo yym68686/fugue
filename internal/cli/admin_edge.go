@@ -22,7 +22,48 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminEdgeRoutePolicyCommand())
 	cmd.AddCommand(c.newAdminEdgeRouteCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeCacheCheckCommand())
+	cmd.AddCommand(c.newAdminEdgeQualityRankCommand())
 	cmd.AddCommand(c.newAdminEdgeNodesCommand())
+	return cmd
+}
+
+func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
+	opts := struct {
+		TrafficClass string
+		Method       string
+		PathPrefix   string
+		Scope        string
+		Window       string
+		Since        string
+	}{
+		Scope:  "global",
+		Window: "30m",
+	}
+	cmd := &cobra.Command{
+		Use:   "quality-rank <hostname>",
+		Short: "Rank edge nodes for a hostname and client scope",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.GetEdgeQualityRank(args[0], opts.TrafficClass, opts.Method, opts.PathPrefix, opts.Scope, opts.Window, opts.Since)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeQualityRank(c.stdout, response)
+		},
+	}
+	cmd.Flags().StringVar(&opts.TrafficClass, "traffic-class", "", "Traffic class such as dynamic_api, large_body_api, static_cacheable, streaming, sse, or websocket")
+	cmd.Flags().StringVar(&opts.Method, "method", "", "HTTP method such as GET or POST")
+	cmd.Flags().StringVar(&opts.PathPrefix, "path-prefix", "", "Path prefix to bucket before ranking")
+	cmd.Flags().StringVar(&opts.Scope, "scope", opts.Scope, "Client scope: global, country:<country>, region:<country>:<region>, or asn:<asn>")
+	cmd.Flags().StringVar(&opts.Window, "window", opts.Window, "Quality window such as 30m, 6h, or 24h")
+	cmd.Flags().StringVar(&opts.Since, "since", "", "Explicit lower bound as a duration or RFC3339 timestamp; overrides --window")
 	return cmd
 }
 
@@ -717,6 +758,10 @@ func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) e
 		kvPair{Key: "avg_origin_total_ms", Value: formatEdgeNodeQualityMetric(summary.AvgOriginTotalMS)},
 		kvPair{Key: "avg_active_requests", Value: formatEdgeNodeQualityMetric(summary.AvgActiveRequests)},
 		kvPair{Key: "avg_active_body_buffers", Value: formatEdgeNodeQualityMetric(summary.AvgActiveBodyBuffers)},
+		kvPair{Key: "avg_client_tcp_rtt_ms", Value: formatEdgeNodeQualityMetric(summary.AvgClientTCPRTTMS)},
+		kvPair{Key: "avg_client_tcp_rttvar_ms", Value: formatEdgeNodeQualityMetric(summary.AvgClientTCPRTTVarMS)},
+		kvPair{Key: "client_tcp_retrans_rate", Value: formatEdgeNodeQualityRate(summary.ClientTCPRetransRate)},
+		kvPair{Key: "client_tcp_rto_rate", Value: formatEdgeNodeQualityRate(summary.ClientTCPRTORate)},
 		kvPair{Key: "cache_hit_rate", Value: formatEdgeNodeQualityRate(summary.CacheHitRate)},
 		kvPair{Key: "tls_status", Value: strings.TrimSpace(summary.TLSStatus)},
 		kvPair{Key: "cache_status", Value: strings.TrimSpace(summary.CacheStatus)},
@@ -735,6 +780,95 @@ func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) e
 		return err
 	}
 	return writeEdgeNodeQualityRouteTable(w, response.Routes)
+}
+
+func writeEdgeQualityRank(w io.Writer, response model.EdgeQualityRankResponse) error {
+	if err := writeKeyValues(w,
+		kvPair{Key: "hostname", Value: strings.TrimSpace(response.Hostname)},
+		kvPair{Key: "traffic_class", Value: strings.TrimSpace(response.TrafficClass)},
+		kvPair{Key: "method", Value: strings.TrimSpace(response.Method)},
+		kvPair{Key: "path_bucket", Value: strings.TrimSpace(response.PathPrefixBucket)},
+		kvPair{Key: "requested_scope", Value: strings.TrimSpace(response.RequestedScope)},
+		kvPair{Key: "selected_scope", Value: strings.TrimSpace(response.SelectedScope)},
+		kvPair{Key: "fallback_level", Value: fmt.Sprintf("%d", response.FallbackLevel)},
+		kvPair{Key: "fallback_reason", Value: strings.TrimSpace(response.FallbackReason)},
+		kvPair{Key: "window", Value: strings.TrimSpace(response.Window)},
+		kvPair{Key: "since", Value: formatTime(response.Since)},
+		kvPair{Key: "generated_at", Value: formatTime(response.GeneratedAt)},
+	); err != nil {
+		return err
+	}
+	if len(response.Candidates) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if err := writeEdgeQualityRankCandidateTable(w, response.Candidates); err != nil {
+			return err
+		}
+	}
+	if len(response.HardGated) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "\nHard-gated candidates:"); err != nil {
+		return err
+	}
+	return writeEdgeQualityRankCandidateTable(w, response.HardGated)
+}
+
+func writeEdgeQualityRankCandidateTable(w io.Writer, candidates []model.EdgeQualityRankCandidate) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "RANK\tEDGE\tGROUP\tSCORE\tCONF\tREQUESTS\tERROR\tTTFB_MS\tUPLOAD_BPS\tTCP_RETRANS\tTCP_RTO\tBREAKDOWN\tREASON"); err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		rank := "-"
+		if candidate.Rank > 0 {
+			rank = fmt.Sprintf("%d", candidate.Rank)
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			rank,
+			strings.TrimSpace(candidate.EdgeID),
+			strings.TrimSpace(candidate.EdgeGroupID),
+			formatEdgeNodeQualityMetric(candidate.Score),
+			formatEdgeNodeQualityRate(candidate.Confidence),
+			candidate.RequestCount,
+			formatEdgeNodeQualityRate(candidate.ErrorRate),
+			formatEdgeNodeQualityMetric(candidate.AvgTTFBMS),
+			formatEdgeNodeQualityMetric(candidate.AvgUploadBPS),
+			formatEdgeNodeQualityRate(candidate.ClientTCPRetransRate),
+			formatEdgeNodeQualityRate(candidate.ClientTCPRTORate),
+			formatEdgeQualityScoreBreakdown(candidate.ScoreBreakdown),
+			strings.TrimSpace(candidate.Reason),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func formatEdgeQualityScoreBreakdown(values map[string]float64) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := values[key]
+		if value == 0 {
+			continue
+		}
+		parts = append(parts, key+"="+formatEdgeNodeQualityMetric(value))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ",")
 }
 
 func writeEdgeNodeQualityRouteTable(w io.Writer, routes []model.EdgeNodeQualityRoute) error {

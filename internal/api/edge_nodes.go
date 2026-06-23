@@ -286,7 +286,7 @@ func parseEdgeNodeQualitySince(raw string, now time.Time) (time.Time, error) {
 
 func normalizeEdgeTrafficClass(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "large_body_api", "small_api", "static_cacheable", "streaming", "html_dynamic":
+	case "large_body_api", "small_api", "dynamic_api", "static_cacheable", "streaming", "sse", "websocket", "html_dynamic":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return ""
@@ -294,45 +294,54 @@ func normalizeEdgeTrafficClass(value string) string {
 }
 
 type edgeNodeQualityAccumulator struct {
-	sampleRecordCount      int
-	requestCount           int
-	errorCount             int
-	weightedSampleCount    int
-	tlsHandshakeWeighted   int64
-	ttfbWeighted           int64
-	upstreamWeighted       int64
-	totalWeighted          int64
-	uploadWeighted         int64
-	uploadSampleCount      int
-	minUploadBPS           int64
-	bodyReadWeighted       int64
-	bodyReadSampleCount    int
-	maxReadGapWeighted     int64
-	maxReadGapSampleCount  int
-	bodyIncompleteCount    int
-	bodyReadErrorCount     int
-	responseEgressWeighted int64
-	responseEgressSamples  int
-	responseWriteWeighted  int64
-	responseWriteSamples   int
-	originDNSWeighted      int64
-	originDNSSamples       int
-	originConnectWeighted  int64
-	originConnectSamples   int
-	originWriteWeighted    int64
-	originWriteSamples     int
-	originWaitWeighted     int64
-	originWaitSamples      int
-	originTTFBWeighted     int64
-	originTTFBSamples      int
-	originTotalWeighted    int64
-	originTotalSamples     int
-	activeRequestsWeighted int64
-	activeBodyWeighted     int64
-	saturationSamples      int
-	cacheHitCount          int
-	cacheObservationCount  int
-	lastSampledAt          *time.Time
+	sampleRecordCount         int
+	requestCount              int
+	errorCount                int
+	weightedSampleCount       int
+	tlsHandshakeWeighted      int64
+	ttfbWeighted              int64
+	upstreamWeighted          int64
+	totalWeighted             int64
+	uploadWeighted            int64
+	uploadSampleCount         int
+	minUploadBPS              int64
+	bodyReadWeighted          int64
+	bodyReadSampleCount       int
+	maxReadGapWeighted        int64
+	maxReadGapSampleCount     int
+	bodyIncompleteCount       int
+	bodyReadErrorCount        int
+	responseEgressWeighted    int64
+	responseEgressSamples     int
+	responseWriteWeighted     int64
+	responseWriteSamples      int
+	originDNSWeighted         int64
+	originDNSSamples          int
+	originConnectWeighted     int64
+	originConnectSamples      int
+	originWriteWeighted       int64
+	originWriteSamples        int
+	originWaitWeighted        int64
+	originWaitSamples         int
+	originTTFBWeighted        int64
+	originTTFBSamples         int
+	originTotalWeighted       int64
+	originTotalSamples        int
+	activeRequestsWeighted    int64
+	activeBodyWeighted        int64
+	saturationSamples         int
+	clientTCPRTTWeighted      float64
+	clientTCPMinRTTWeighted   float64
+	clientTCPRTTVarWeighted   float64
+	clientTCPSampleCount      int
+	clientTCPTotalRetrans     int64
+	clientTCPBytesRetrans     int64
+	clientTCPTotalRTO         int64
+	clientTCPDeliveryWeighted int64
+	clientTCPDeliverySamples  int
+	cacheHitCount             int
+	cacheObservationCount     int
+	lastSampledAt             *time.Time
 }
 
 func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, samples []model.EdgePerformanceSample, since, generatedAt time.Time) model.EdgeNodeQualityResponse {
@@ -377,44 +386,51 @@ func buildEdgeNodeQualityResponse(node model.EdgeNode, group model.EdgeGroup, sa
 		Node:  node,
 		Group: group,
 		Summary: model.EdgeNodeQualitySummary{
-			EdgeID:                edgeID,
-			EdgeGroupID:           strings.TrimSpace(node.EdgeGroupID),
-			Since:                 since.UTC(),
-			SampleRecordCount:     summary.sampleRecordCount,
-			RequestCount:          summary.requestCount,
-			ErrorCount:            summary.errorCount,
-			ErrorRate:             edgeNodeQualityRate(summary.errorCount, summary.requestCount),
-			AvgTLSHandshakeMS:     summary.average(summary.tlsHandshakeWeighted),
-			AvgTTFBMS:             summary.average(summary.ttfbWeighted),
-			AvgUpstreamMS:         summary.average(summary.upstreamWeighted),
-			AvgTotalMS:            summary.average(summary.totalWeighted),
-			AvgUploadBPS:          summary.averageByCount(summary.uploadWeighted, summary.uploadSampleCount),
-			MinUploadBPS:          summary.minUploadBPS,
-			AvgBodyReadMS:         summary.averageByCount(summary.bodyReadWeighted, summary.bodyReadSampleCount),
-			AvgMaxReadGapMS:       summary.averageByCount(summary.maxReadGapWeighted, summary.maxReadGapSampleCount),
-			BodyIncompleteCount:   summary.bodyIncompleteCount,
-			BodyReadErrorCount:    summary.bodyReadErrorCount,
-			AvgResponseEgressBPS:  summary.averageByCount(summary.responseEgressWeighted, summary.responseEgressSamples),
-			AvgResponseWriteMS:    summary.averageByCount(summary.responseWriteWeighted, summary.responseWriteSamples),
-			AvgOriginDNSMS:        summary.averageByCount(summary.originDNSWeighted, summary.originDNSSamples),
-			AvgOriginConnectMS:    summary.averageByCount(summary.originConnectWeighted, summary.originConnectSamples),
-			AvgOriginWriteMS:      summary.averageByCount(summary.originWriteWeighted, summary.originWriteSamples),
-			AvgOriginWaitMS:       summary.averageByCount(summary.originWaitWeighted, summary.originWaitSamples),
-			AvgOriginTTFBMS:       summary.averageByCount(summary.originTTFBWeighted, summary.originTTFBSamples),
-			AvgOriginTotalMS:      summary.averageByCount(summary.originTotalWeighted, summary.originTotalSamples),
-			AvgActiveRequests:     summary.averageByCount(summary.activeRequestsWeighted, summary.saturationSamples),
-			AvgActiveBodyBuffers:  summary.averageByCount(summary.activeBodyWeighted, summary.saturationSamples),
-			CacheHitCount:         summary.cacheHitCount,
-			CacheObservationCount: summary.cacheObservationCount,
-			CacheHitRate:          edgeNodeQualityRate(summary.cacheHitCount, summary.cacheObservationCount),
-			TLSStatus:             strings.TrimSpace(node.TLSStatus),
-			TLSLastMessage:        strings.TrimSpace(node.TLSLastMessage),
-			TLSReadyAt:            node.TLSReadyAt,
-			CacheStatus:           strings.TrimSpace(node.CacheStatus),
-			CaddyRouteCount:       node.CaddyRouteCount,
-			RouteBundleVersion:    strings.TrimSpace(node.RouteBundleVersion),
-			DNSBundleVersion:      strings.TrimSpace(node.DNSBundleVersion),
-			LastSampledAt:         summary.lastSampledAt,
+			EdgeID:                    edgeID,
+			EdgeGroupID:               strings.TrimSpace(node.EdgeGroupID),
+			Since:                     since.UTC(),
+			SampleRecordCount:         summary.sampleRecordCount,
+			RequestCount:              summary.requestCount,
+			ErrorCount:                summary.errorCount,
+			ErrorRate:                 edgeNodeQualityRate(summary.errorCount, summary.requestCount),
+			AvgTLSHandshakeMS:         summary.average(summary.tlsHandshakeWeighted),
+			AvgTTFBMS:                 summary.average(summary.ttfbWeighted),
+			AvgUpstreamMS:             summary.average(summary.upstreamWeighted),
+			AvgTotalMS:                summary.average(summary.totalWeighted),
+			AvgUploadBPS:              summary.averageByCount(summary.uploadWeighted, summary.uploadSampleCount),
+			MinUploadBPS:              summary.minUploadBPS,
+			AvgBodyReadMS:             summary.averageByCount(summary.bodyReadWeighted, summary.bodyReadSampleCount),
+			AvgMaxReadGapMS:           summary.averageByCount(summary.maxReadGapWeighted, summary.maxReadGapSampleCount),
+			BodyIncompleteCount:       summary.bodyIncompleteCount,
+			BodyReadErrorCount:        summary.bodyReadErrorCount,
+			AvgResponseEgressBPS:      summary.averageByCount(summary.responseEgressWeighted, summary.responseEgressSamples),
+			AvgResponseWriteMS:        summary.averageByCount(summary.responseWriteWeighted, summary.responseWriteSamples),
+			AvgOriginDNSMS:            summary.averageByCount(summary.originDNSWeighted, summary.originDNSSamples),
+			AvgOriginConnectMS:        summary.averageByCount(summary.originConnectWeighted, summary.originConnectSamples),
+			AvgOriginWriteMS:          summary.averageByCount(summary.originWriteWeighted, summary.originWriteSamples),
+			AvgOriginWaitMS:           summary.averageByCount(summary.originWaitWeighted, summary.originWaitSamples),
+			AvgOriginTTFBMS:           summary.averageByCount(summary.originTTFBWeighted, summary.originTTFBSamples),
+			AvgOriginTotalMS:          summary.averageByCount(summary.originTotalWeighted, summary.originTotalSamples),
+			AvgActiveRequests:         summary.averageByCount(summary.activeRequestsWeighted, summary.saturationSamples),
+			AvgActiveBodyBuffers:      summary.averageByCount(summary.activeBodyWeighted, summary.saturationSamples),
+			AvgClientTCPRTTMS:         summary.averageFloatByCount(summary.clientTCPRTTWeighted, summary.clientTCPSampleCount),
+			AvgClientTCPMinRTTMS:      summary.averageFloatByCount(summary.clientTCPMinRTTWeighted, summary.clientTCPSampleCount),
+			AvgClientTCPRTTVarMS:      summary.averageFloatByCount(summary.clientTCPRTTVarWeighted, summary.clientTCPSampleCount),
+			ClientTCPRetransRate:      edgeNodeQualityRate64(summary.clientTCPTotalRetrans, summary.requestCount),
+			ClientTCPBytesRetransRate: edgeNodeQualityRate64(summary.clientTCPBytesRetrans, summary.requestCount),
+			ClientTCPRTORate:          edgeNodeQualityRate64(summary.clientTCPTotalRTO, summary.requestCount),
+			AvgClientTCPDeliveryBPS:   summary.averageByCount(summary.clientTCPDeliveryWeighted, summary.clientTCPDeliverySamples),
+			CacheHitCount:             summary.cacheHitCount,
+			CacheObservationCount:     summary.cacheObservationCount,
+			CacheHitRate:              edgeNodeQualityRate(summary.cacheHitCount, summary.cacheObservationCount),
+			TLSStatus:                 strings.TrimSpace(node.TLSStatus),
+			TLSLastMessage:            strings.TrimSpace(node.TLSLastMessage),
+			TLSReadyAt:                node.TLSReadyAt,
+			CacheStatus:               strings.TrimSpace(node.CacheStatus),
+			CaddyRouteCount:           node.CaddyRouteCount,
+			RouteBundleVersion:        strings.TrimSpace(node.RouteBundleVersion),
+			DNSBundleVersion:          strings.TrimSpace(node.DNSBundleVersion),
+			LastSampledAt:             summary.lastSampledAt,
 		},
 		Routes:      routes,
 		GeneratedAt: generatedAt.UTC(),
@@ -496,6 +512,19 @@ func (a *edgeNodeQualityAccumulator) add(sample model.EdgePerformanceSample) {
 		a.activeBodyWeighted += int64(sample.ActiveBodyBuffers) * int64(weight)
 		a.saturationSamples += weight
 	}
+	if sample.ClientTCPRTTMS > 0 || sample.ClientTCPMinRTTMS > 0 || sample.ClientTCPRTTVarMS > 0 {
+		a.clientTCPRTTWeighted += sample.ClientTCPRTTMS * float64(weight)
+		a.clientTCPMinRTTWeighted += sample.ClientTCPMinRTTMS * float64(weight)
+		a.clientTCPRTTVarWeighted += sample.ClientTCPRTTVarMS * float64(weight)
+		a.clientTCPSampleCount += weight
+	}
+	a.clientTCPTotalRetrans += sample.ClientTCPTotalRetrans
+	a.clientTCPBytesRetrans += sample.ClientTCPBytesRetrans
+	a.clientTCPTotalRTO += sample.ClientTCPTotalRTO
+	if sample.ClientTCPDeliveryBPS > 0 {
+		a.clientTCPDeliveryWeighted += sample.ClientTCPDeliveryBPS * int64(weight)
+		a.clientTCPDeliverySamples += weight
+	}
 	a.cacheHitCount += sample.CacheHitCount
 	a.cacheObservationCount += sample.CacheObservationCount
 	if a.lastSampledAt == nil || sample.SampledAt.After(*a.lastSampledAt) {
@@ -526,44 +555,65 @@ func (a edgeNodeQualityAccumulator) averageByCount(weighted int64, count int) fl
 	return float64(weighted) / float64(count)
 }
 
+func (a edgeNodeQualityAccumulator) averageFloatByCount(weighted float64, count int) float64 {
+	if count <= 0 {
+		return 0
+	}
+	return weighted / float64(count)
+}
+
 func (a edgeNodeQualityRouteAccumulator) route() model.EdgeNodeQualityRoute {
 	return model.EdgeNodeQualityRoute{
-		Hostname:              a.hostname,
-		PathPrefix:            a.pathPrefix,
-		Method:                a.method,
-		TrafficClass:          a.trafficClass,
-		SampleRecordCount:     a.sampleRecordCount,
-		RequestCount:          a.requestCount,
-		ErrorCount:            a.errorCount,
-		ErrorRate:             edgeNodeQualityRate(a.errorCount, a.requestCount),
-		AvgTLSHandshakeMS:     a.average(a.tlsHandshakeWeighted),
-		AvgTTFBMS:             a.average(a.ttfbWeighted),
-		AvgUpstreamMS:         a.average(a.upstreamWeighted),
-		AvgTotalMS:            a.average(a.totalWeighted),
-		AvgUploadBPS:          a.averageByCount(a.uploadWeighted, a.uploadSampleCount),
-		MinUploadBPS:          a.minUploadBPS,
-		AvgBodyReadMS:         a.averageByCount(a.bodyReadWeighted, a.bodyReadSampleCount),
-		AvgMaxReadGapMS:       a.averageByCount(a.maxReadGapWeighted, a.maxReadGapSampleCount),
-		BodyIncompleteCount:   a.bodyIncompleteCount,
-		BodyReadErrorCount:    a.bodyReadErrorCount,
-		AvgResponseEgressBPS:  a.averageByCount(a.responseEgressWeighted, a.responseEgressSamples),
-		AvgResponseWriteMS:    a.averageByCount(a.responseWriteWeighted, a.responseWriteSamples),
-		AvgOriginDNSMS:        a.averageByCount(a.originDNSWeighted, a.originDNSSamples),
-		AvgOriginConnectMS:    a.averageByCount(a.originConnectWeighted, a.originConnectSamples),
-		AvgOriginWriteMS:      a.averageByCount(a.originWriteWeighted, a.originWriteSamples),
-		AvgOriginWaitMS:       a.averageByCount(a.originWaitWeighted, a.originWaitSamples),
-		AvgOriginTTFBMS:       a.averageByCount(a.originTTFBWeighted, a.originTTFBSamples),
-		AvgOriginTotalMS:      a.averageByCount(a.originTotalWeighted, a.originTotalSamples),
-		AvgActiveRequests:     a.averageByCount(a.activeRequestsWeighted, a.saturationSamples),
-		AvgActiveBodyBuffers:  a.averageByCount(a.activeBodyWeighted, a.saturationSamples),
-		CacheHitCount:         a.cacheHitCount,
-		CacheObservationCount: a.cacheObservationCount,
-		CacheHitRate:          edgeNodeQualityRate(a.cacheHitCount, a.cacheObservationCount),
-		LastSampledAt:         a.lastSampledAt,
+		Hostname:                  a.hostname,
+		PathPrefix:                a.pathPrefix,
+		Method:                    a.method,
+		TrafficClass:              a.trafficClass,
+		SampleRecordCount:         a.sampleRecordCount,
+		RequestCount:              a.requestCount,
+		ErrorCount:                a.errorCount,
+		ErrorRate:                 edgeNodeQualityRate(a.errorCount, a.requestCount),
+		AvgTLSHandshakeMS:         a.average(a.tlsHandshakeWeighted),
+		AvgTTFBMS:                 a.average(a.ttfbWeighted),
+		AvgUpstreamMS:             a.average(a.upstreamWeighted),
+		AvgTotalMS:                a.average(a.totalWeighted),
+		AvgUploadBPS:              a.averageByCount(a.uploadWeighted, a.uploadSampleCount),
+		MinUploadBPS:              a.minUploadBPS,
+		AvgBodyReadMS:             a.averageByCount(a.bodyReadWeighted, a.bodyReadSampleCount),
+		AvgMaxReadGapMS:           a.averageByCount(a.maxReadGapWeighted, a.maxReadGapSampleCount),
+		BodyIncompleteCount:       a.bodyIncompleteCount,
+		BodyReadErrorCount:        a.bodyReadErrorCount,
+		AvgResponseEgressBPS:      a.averageByCount(a.responseEgressWeighted, a.responseEgressSamples),
+		AvgResponseWriteMS:        a.averageByCount(a.responseWriteWeighted, a.responseWriteSamples),
+		AvgOriginDNSMS:            a.averageByCount(a.originDNSWeighted, a.originDNSSamples),
+		AvgOriginConnectMS:        a.averageByCount(a.originConnectWeighted, a.originConnectSamples),
+		AvgOriginWriteMS:          a.averageByCount(a.originWriteWeighted, a.originWriteSamples),
+		AvgOriginWaitMS:           a.averageByCount(a.originWaitWeighted, a.originWaitSamples),
+		AvgOriginTTFBMS:           a.averageByCount(a.originTTFBWeighted, a.originTTFBSamples),
+		AvgOriginTotalMS:          a.averageByCount(a.originTotalWeighted, a.originTotalSamples),
+		AvgActiveRequests:         a.averageByCount(a.activeRequestsWeighted, a.saturationSamples),
+		AvgActiveBodyBuffers:      a.averageByCount(a.activeBodyWeighted, a.saturationSamples),
+		AvgClientTCPRTTMS:         a.averageFloatByCount(a.clientTCPRTTWeighted, a.clientTCPSampleCount),
+		AvgClientTCPMinRTTMS:      a.averageFloatByCount(a.clientTCPMinRTTWeighted, a.clientTCPSampleCount),
+		AvgClientTCPRTTVarMS:      a.averageFloatByCount(a.clientTCPRTTVarWeighted, a.clientTCPSampleCount),
+		ClientTCPRetransRate:      edgeNodeQualityRate64(a.clientTCPTotalRetrans, a.requestCount),
+		ClientTCPBytesRetransRate: edgeNodeQualityRate64(a.clientTCPBytesRetrans, a.requestCount),
+		ClientTCPRTORate:          edgeNodeQualityRate64(a.clientTCPTotalRTO, a.requestCount),
+		AvgClientTCPDeliveryBPS:   a.averageByCount(a.clientTCPDeliveryWeighted, a.clientTCPDeliverySamples),
+		CacheHitCount:             a.cacheHitCount,
+		CacheObservationCount:     a.cacheObservationCount,
+		CacheHitRate:              edgeNodeQualityRate(a.cacheHitCount, a.cacheObservationCount),
+		LastSampledAt:             a.lastSampledAt,
 	}
 }
 
 func edgeNodeQualityRate(numerator, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func edgeNodeQualityRate64(numerator int64, denominator int) float64 {
 	if denominator <= 0 {
 		return 0
 	}

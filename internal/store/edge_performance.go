@@ -88,7 +88,10 @@ INSERT INTO fugue_edge_performance_samples (
 	body_incomplete_count, body_read_error_count, response_write_ms, response_bytes, response_egress_bps,
 	origin_dns_ms, origin_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
 	origin_total_ms, streaming_request_count, websocket_request_count, sse_request_count, client_cancel_count,
-	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes, sampled_at
+	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes,
+	client_tcp_rtt_ms, client_tcp_min_rtt_ms, client_tcp_rttvar_ms, client_tcp_total_retrans,
+	client_tcp_retrans_rate, client_tcp_bytes_retrans, client_tcp_bytes_retrans_rate,
+	client_tcp_total_rto, client_tcp_rto_rate, client_tcp_delivery_rate_bps, sampled_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14,
@@ -99,7 +102,9 @@ INSERT INTO fugue_edge_performance_samples (
 	$35, $36, $37, $38, $39,
 	$40, $41, $42, $43, $44,
 	$45, $46, $47, $48, $49,
-	$50, $51, $52
+	$50, $51, $52, $53, $54,
+	$55, $56, $57, $58, $59,
+	$60, $61, $62
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_id = EXCLUDED.edge_id,
@@ -152,6 +157,16 @@ ON CONFLICT (id) DO UPDATE SET
 	active_body_buffers = EXCLUDED.active_body_buffers,
 	goroutine_count = EXCLUDED.goroutine_count,
 	memory_alloc_bytes = EXCLUDED.memory_alloc_bytes,
+	client_tcp_rtt_ms = EXCLUDED.client_tcp_rtt_ms,
+	client_tcp_min_rtt_ms = EXCLUDED.client_tcp_min_rtt_ms,
+	client_tcp_rttvar_ms = EXCLUDED.client_tcp_rttvar_ms,
+	client_tcp_total_retrans = EXCLUDED.client_tcp_total_retrans,
+	client_tcp_retrans_rate = EXCLUDED.client_tcp_retrans_rate,
+	client_tcp_bytes_retrans = EXCLUDED.client_tcp_bytes_retrans,
+	client_tcp_bytes_retrans_rate = EXCLUDED.client_tcp_bytes_retrans_rate,
+	client_tcp_total_rto = EXCLUDED.client_tcp_total_rto,
+	client_tcp_rto_rate = EXCLUDED.client_tcp_rto_rate,
+	client_tcp_delivery_rate_bps = EXCLUDED.client_tcp_delivery_rate_bps,
 	sampled_at = EXCLUDED.sampled_at
 `
 
@@ -231,6 +246,16 @@ func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSa
 			normalized.ActiveBodyBuffers,
 			normalized.GoroutineCount,
 			normalized.MemoryAllocBytes,
+			normalized.ClientTCPRTTMS,
+			normalized.ClientTCPMinRTTMS,
+			normalized.ClientTCPRTTVarMS,
+			normalized.ClientTCPTotalRetrans,
+			normalized.ClientTCPRetransRate,
+			normalized.ClientTCPBytesRetrans,
+			normalized.ClientTCPBytesRetransRate,
+			normalized.ClientTCPTotalRTO,
+			normalized.ClientTCPRTORate,
+			normalized.ClientTCPDeliveryBPS,
 			normalized.SampledAt,
 		); err != nil {
 			return fmt.Errorf("insert edge performance sample: %w", err)
@@ -256,7 +281,10 @@ SELECT id, edge_id, edge_group_id, hostname, client_country, client_region, clie
 	body_incomplete_count, body_read_error_count, response_write_ms, response_bytes, response_egress_bps,
 	origin_dns_ms, origin_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
 	origin_total_ms, streaming_request_count, websocket_request_count, sse_request_count, client_cancel_count,
-	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes, sampled_at
+	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes,
+	client_tcp_rtt_ms, client_tcp_min_rtt_ms, client_tcp_rttvar_ms, client_tcp_total_retrans,
+	client_tcp_retrans_rate, client_tcp_bytes_retrans, client_tcp_bytes_retrans_rate,
+	client_tcp_total_rto, client_tcp_rto_rate, client_tcp_delivery_rate_bps, sampled_at
 FROM fugue_edge_performance_samples
 WHERE 1=1
 `
@@ -285,6 +313,8 @@ WHERE 1=1
 		var requestBodyBytes, requestBodyReadBytes, responseWrite, responseBytes, responseEgress sql.NullInt64
 		var originDNS, originConnect, originWrite, originWait, originTTFB, originTotal sql.NullInt64
 		var memoryAlloc sql.NullInt64
+		var clientTCPRTT, clientTCPMinRTT, clientTCPRTTVar, clientTCPRetransRate, clientTCPBytesRetransRate, clientTCPRTORate sql.NullFloat64
+		var clientTCPTotalRetrans, clientTCPBytesRetrans, clientTCPTotalRTO, clientTCPDeliveryBPS sql.NullInt64
 		var sampleCount, cacheHitCount, cacheObservationCount, errorCount sql.NullInt64
 		var uploadRequestCount, bodyBufferCount, bodyIncompleteCount, bodyReadErrorCount sql.NullInt64
 		var streamingRequestCount, webSocketRequestCount, sseRequestCount, clientCancelCount sql.NullInt64
@@ -341,6 +371,16 @@ WHERE 1=1
 			&activeBodyBuffers,
 			&goroutineCount,
 			&memoryAlloc,
+			&clientTCPRTT,
+			&clientTCPMinRTT,
+			&clientTCPRTTVar,
+			&clientTCPTotalRetrans,
+			&clientTCPRetransRate,
+			&clientTCPBytesRetrans,
+			&clientTCPBytesRetransRate,
+			&clientTCPTotalRTO,
+			&clientTCPRTORate,
+			&clientTCPDeliveryBPS,
 			&sample.SampledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan edge performance sample: %w", err)
@@ -378,6 +418,16 @@ WHERE 1=1
 		sample.OriginTTFBMS = edgePerformanceInt64FromNull(originTTFB)
 		sample.OriginTotalMS = edgePerformanceInt64FromNull(originTotal)
 		sample.MemoryAllocBytes = edgePerformanceInt64FromNull(memoryAlloc)
+		sample.ClientTCPRTTMS = edgePerformanceFloat64FromNull(clientTCPRTT)
+		sample.ClientTCPMinRTTMS = edgePerformanceFloat64FromNull(clientTCPMinRTT)
+		sample.ClientTCPRTTVarMS = edgePerformanceFloat64FromNull(clientTCPRTTVar)
+		sample.ClientTCPTotalRetrans = edgePerformanceInt64FromNull(clientTCPTotalRetrans)
+		sample.ClientTCPRetransRate = edgePerformanceFloat64FromNull(clientTCPRetransRate)
+		sample.ClientTCPBytesRetrans = edgePerformanceInt64FromNull(clientTCPBytesRetrans)
+		sample.ClientTCPBytesRetransRate = edgePerformanceFloat64FromNull(clientTCPBytesRetransRate)
+		sample.ClientTCPTotalRTO = edgePerformanceInt64FromNull(clientTCPTotalRTO)
+		sample.ClientTCPRTORate = edgePerformanceFloat64FromNull(clientTCPRTORate)
+		sample.ClientTCPDeliveryBPS = edgePerformanceInt64FromNull(clientTCPDeliveryBPS)
 		if uploadRequestCount.Valid {
 			sample.UploadRequestCount = int(uploadRequestCount.Int64)
 		}
@@ -551,6 +601,36 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	if sample.MemoryAllocBytes < 0 {
 		sample.MemoryAllocBytes = 0
 	}
+	if sample.ClientTCPRTTMS < 0 {
+		sample.ClientTCPRTTMS = 0
+	}
+	if sample.ClientTCPMinRTTMS < 0 {
+		sample.ClientTCPMinRTTMS = 0
+	}
+	if sample.ClientTCPRTTVarMS < 0 {
+		sample.ClientTCPRTTVarMS = 0
+	}
+	if sample.ClientTCPTotalRetrans < 0 {
+		sample.ClientTCPTotalRetrans = 0
+	}
+	if sample.ClientTCPRetransRate < 0 {
+		sample.ClientTCPRetransRate = 0
+	}
+	if sample.ClientTCPBytesRetrans < 0 {
+		sample.ClientTCPBytesRetrans = 0
+	}
+	if sample.ClientTCPBytesRetransRate < 0 {
+		sample.ClientTCPBytesRetransRate = 0
+	}
+	if sample.ClientTCPTotalRTO < 0 {
+		sample.ClientTCPTotalRTO = 0
+	}
+	if sample.ClientTCPRTORate < 0 {
+		sample.ClientTCPRTORate = 0
+	}
+	if sample.ClientTCPDeliveryBPS < 0 {
+		sample.ClientTCPDeliveryBPS = 0
+	}
 	return sample, nil
 }
 
@@ -578,4 +658,11 @@ func edgePerformanceInt64FromNull(value sql.NullInt64) int64 {
 		return 0
 	}
 	return value.Int64
+}
+
+func edgePerformanceFloat64FromNull(value sql.NullFloat64) float64 {
+	if !value.Valid {
+		return 0
+	}
+	return value.Float64
 }

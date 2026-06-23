@@ -38,33 +38,43 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 			SampledAt:             now.Add(-3 * time.Hour),
 		},
 		{
-			ID:                    "recent-hk",
-			EdgeID:                "edge-hk-1",
-			EdgeGroupID:           "edge-group-country-hk",
-			Hostname:              "demo.fugue.pro",
-			Method:                "post",
-			TrafficClass:          "large_body_api",
-			ClientRegion:          "apac",
-			RuntimeRegion:         "us",
-			TTFBMS:                120,
-			UpstreamMS:            80,
-			TotalMS:               150,
-			StatusCode:            200,
-			SampleCount:           5,
-			CacheHitCount:         5,
-			CacheObservationCount: 5,
-			UploadRequestCount:    5,
-			BodyReadBlockMS:       250,
-			UploadEffectiveBPS:    128 * 1024,
-			MaxReadGapMS:          900,
-			RequestBodyBytes:      2048,
-			RequestBodyReadBytes:  1024,
-			BodyIncompleteCount:   1,
-			ResponseEgressBPS:     512 * 1024,
-			OriginTTFBMS:          90,
-			ActiveRequests:        3,
-			ActiveBodyBuffers:     1,
-			SampledAt:             now.Add(-30 * time.Minute),
+			ID:                        "recent-hk",
+			EdgeID:                    "edge-hk-1",
+			EdgeGroupID:               "edge-group-country-hk",
+			Hostname:                  "demo.fugue.pro",
+			Method:                    "post",
+			TrafficClass:              "large_body_api",
+			ClientRegion:              "apac",
+			RuntimeRegion:             "us",
+			TTFBMS:                    120,
+			UpstreamMS:                80,
+			TotalMS:                   150,
+			StatusCode:                200,
+			SampleCount:               5,
+			CacheHitCount:             5,
+			CacheObservationCount:     5,
+			UploadRequestCount:        5,
+			BodyReadBlockMS:           250,
+			UploadEffectiveBPS:        128 * 1024,
+			MaxReadGapMS:              900,
+			RequestBodyBytes:          2048,
+			RequestBodyReadBytes:      1024,
+			BodyIncompleteCount:       1,
+			ResponseEgressBPS:         512 * 1024,
+			OriginTTFBMS:              90,
+			ActiveRequests:            3,
+			ActiveBodyBuffers:         1,
+			ClientTCPRTTMS:            88.5,
+			ClientTCPMinRTTMS:         70.0,
+			ClientTCPRTTVarMS:         12.5,
+			ClientTCPTotalRetrans:     3,
+			ClientTCPRetransRate:      0.02,
+			ClientTCPBytesRetrans:     4096,
+			ClientTCPBytesRetransRate: 0.03,
+			ClientTCPTotalRTO:         1,
+			ClientTCPRTORate:          0.01,
+			ClientTCPDeliveryBPS:      2 * 1024 * 1024,
+			SampledAt:                 now.Add(-30 * time.Minute),
 		},
 		{
 			ID:          "other-host",
@@ -100,7 +110,12 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 		samples[0].RequestBodyReadBytes != 1024 ||
 		samples[0].BodyIncompleteCount != 1 ||
 		samples[0].OriginTTFBMS != 90 ||
-		samples[0].ActiveBodyBuffers != 1 {
+		samples[0].ActiveBodyBuffers != 1 ||
+		samples[0].ClientTCPRTTMS != 88.5 ||
+		samples[0].ClientTCPTotalRetrans != 3 ||
+		samples[0].ClientTCPBytesRetrans != 4096 ||
+		samples[0].ClientTCPRTORate != 0.01 ||
+		samples[0].ClientTCPDeliveryBPS != 2*1024*1024 {
 		t.Fatalf("unexpected normalized sample: %+v", samples[0])
 	}
 }

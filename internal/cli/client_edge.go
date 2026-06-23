@@ -206,6 +206,37 @@ func (c *Client) GetEdgeNodeQuality(edgeID, since string) (model.EdgeNodeQuality
 	return response, nil
 }
 
+func (c *Client) GetEdgeQualityRank(hostname, trafficClass, method, pathPrefix, scope, window, since string) (model.EdgeQualityRankResponse, error) {
+	apiPath := "/v1/edge/quality-rank/" + url.PathEscape(strings.TrimSpace(hostname))
+	values := url.Values{}
+	if strings.TrimSpace(trafficClass) != "" {
+		values.Set("traffic_class", strings.TrimSpace(trafficClass))
+	}
+	if strings.TrimSpace(method) != "" {
+		values.Set("method", strings.TrimSpace(method))
+	}
+	if strings.TrimSpace(pathPrefix) != "" {
+		values.Set("path_prefix", strings.TrimSpace(pathPrefix))
+	}
+	if strings.TrimSpace(scope) != "" {
+		values.Set("scope", strings.TrimSpace(scope))
+	}
+	if strings.TrimSpace(window) != "" {
+		values.Set("window", strings.TrimSpace(window))
+	}
+	if strings.TrimSpace(since) != "" {
+		values.Set("since", strings.TrimSpace(since))
+	}
+	if encoded := values.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	var response model.EdgeQualityRankResponse
+	if err := c.doJSON(http.MethodGet, apiPath, nil, &response); err != nil {
+		return model.EdgeQualityRankResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) CreateEdgeNodeToken(edgeID string, request createEdgeNodeTokenRequest) (createEdgeNodeTokenResponse, error) {
 	var response createEdgeNodeTokenResponse
 	if err := c.doJSON(http.MethodPost, edgeNodePath(edgeID)+"/token", request, &response); err != nil {

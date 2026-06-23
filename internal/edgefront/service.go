@@ -82,15 +82,21 @@ type edgeFrontActiveTCPConnection struct {
 }
 
 type edgeFrontMetrics struct {
-	ConnectionsTotal      map[edgeFrontMetricKey]uint64
-	ClientToWorkerBytes   map[edgeFrontMetricKey]uint64
-	WorkerToClientBytes   map[edgeFrontMetricKey]uint64
-	DurationCount         map[edgeFrontMetricKey]uint64
-	DurationSum           map[edgeFrontMetricKey]float64
-	ClientTCPRTTCount     map[edgeFrontMetricKey]uint64
-	ClientTCPRTTSum       map[edgeFrontMetricKey]float64
-	ClientTCPRetransCount map[edgeFrontMetricKey]uint64
-	ClientTCPRetransSum   map[edgeFrontMetricKey]float64
+	ConnectionsTotal           map[edgeFrontMetricKey]uint64
+	ClientToWorkerBytes        map[edgeFrontMetricKey]uint64
+	WorkerToClientBytes        map[edgeFrontMetricKey]uint64
+	DurationCount              map[edgeFrontMetricKey]uint64
+	DurationSum                map[edgeFrontMetricKey]float64
+	ClientTCPRTTCount          map[edgeFrontMetricKey]uint64
+	ClientTCPRTTSum            map[edgeFrontMetricKey]float64
+	ClientTCPRetransCount      map[edgeFrontMetricKey]uint64
+	ClientTCPRetransSum        map[edgeFrontMetricKey]float64
+	ClientTCPBytesRetransCount map[edgeFrontMetricKey]uint64
+	ClientTCPBytesRetransSum   map[edgeFrontMetricKey]float64
+	ClientTCPRTOCount          map[edgeFrontMetricKey]uint64
+	ClientTCPRTOSum            map[edgeFrontMetricKey]float64
+	ClientTCPDeliveryCount     map[edgeFrontMetricKey]uint64
+	ClientTCPDeliverySum       map[edgeFrontMetricKey]float64
 }
 
 type edgeFrontMetricKey struct {
@@ -497,6 +503,32 @@ func (s *Service) recordTCPConnection(protocol, slot, firstCompleted string, pro
 		}
 		s.metrics.ClientTCPRetransCount[key]++
 		s.metrics.ClientTCPRetransSum[key] += float64(clientTCPInfo.TotalRetrans)
+		if s.metrics.ClientTCPBytesRetransCount == nil {
+			s.metrics.ClientTCPBytesRetransCount = make(map[edgeFrontMetricKey]uint64)
+		}
+		if s.metrics.ClientTCPBytesRetransSum == nil {
+			s.metrics.ClientTCPBytesRetransSum = make(map[edgeFrontMetricKey]float64)
+		}
+		s.metrics.ClientTCPBytesRetransCount[key]++
+		s.metrics.ClientTCPBytesRetransSum[key] += float64(clientTCPInfo.BytesRetrans)
+		if s.metrics.ClientTCPRTOCount == nil {
+			s.metrics.ClientTCPRTOCount = make(map[edgeFrontMetricKey]uint64)
+		}
+		if s.metrics.ClientTCPRTOSum == nil {
+			s.metrics.ClientTCPRTOSum = make(map[edgeFrontMetricKey]float64)
+		}
+		s.metrics.ClientTCPRTOCount[key]++
+		s.metrics.ClientTCPRTOSum[key] += float64(clientTCPInfo.TotalRTO)
+		if clientTCPInfo.DeliveryRateBPS > 0 {
+			if s.metrics.ClientTCPDeliveryCount == nil {
+				s.metrics.ClientTCPDeliveryCount = make(map[edgeFrontMetricKey]uint64)
+			}
+			if s.metrics.ClientTCPDeliverySum == nil {
+				s.metrics.ClientTCPDeliverySum = make(map[edgeFrontMetricKey]float64)
+			}
+			s.metrics.ClientTCPDeliveryCount[key]++
+			s.metrics.ClientTCPDeliverySum[key] += float64(clientTCPInfo.DeliveryRateBPS)
+		}
 	}
 }
 
@@ -639,6 +671,24 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request, cfg Conf
 		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_retrans_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRetransSum[key])
 		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_retrans_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRetransCount[key])
 	}
+	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_bytes_retrans Client-side retransmitted bytes sampled from Linux TCP_INFO when public connections close.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_bytes_retrans summary")
+	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPBytesRetransCount) {
+		fmt.Fprintf(w, "fugue_edge_front_client_tcp_bytes_retrans_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPBytesRetransSum[key])
+		fmt.Fprintf(w, "fugue_edge_front_client_tcp_bytes_retrans_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPBytesRetransCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_total_rto Client-side RTO count sampled from Linux TCP_INFO when public connections close.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_total_rto summary")
+	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPRTOCount) {
+		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_rto_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRTOSum[key])
+		fmt.Fprintf(w, "fugue_edge_front_client_tcp_total_rto_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPRTOCount[key])
+	}
+	fmt.Fprintln(w, "# HELP fugue_edge_front_client_tcp_delivery_rate_bps Client-side delivery rate sampled from Linux TCP_INFO when public connections close.")
+	fmt.Fprintln(w, "# TYPE fugue_edge_front_client_tcp_delivery_rate_bps summary")
+	for _, key := range sortedEdgeFrontMetricKeys(metrics.ClientTCPDeliveryCount) {
+		fmt.Fprintf(w, "fugue_edge_front_client_tcp_delivery_rate_bps_sum{%s,%s} %.0f\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPDeliverySum[key])
+		fmt.Fprintf(w, "fugue_edge_front_client_tcp_delivery_rate_bps_count{%s,%s} %d\n", identityLabels, edgeFrontMetricLabels(key), metrics.ClientTCPDeliveryCount[key])
+	}
 	fmt.Fprintln(w, "# HELP fugue_edge_node_tcp_counter TCP counters read from the edge node /proc/net files.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_node_tcp_counter counter")
 	for _, metric := range procMetrics {
@@ -661,15 +711,21 @@ func (s *Service) metricsSnapshot() (edgeFrontMetrics, map[edgeFrontActiveMetric
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := edgeFrontMetrics{
-		ConnectionsTotal:      cloneEdgeFrontCounterMap(s.metrics.ConnectionsTotal),
-		ClientToWorkerBytes:   cloneEdgeFrontCounterMap(s.metrics.ClientToWorkerBytes),
-		WorkerToClientBytes:   cloneEdgeFrontCounterMap(s.metrics.WorkerToClientBytes),
-		DurationCount:         cloneEdgeFrontCounterMap(s.metrics.DurationCount),
-		DurationSum:           cloneEdgeFrontFloatMap(s.metrics.DurationSum),
-		ClientTCPRTTCount:     cloneEdgeFrontCounterMap(s.metrics.ClientTCPRTTCount),
-		ClientTCPRTTSum:       cloneEdgeFrontFloatMap(s.metrics.ClientTCPRTTSum),
-		ClientTCPRetransCount: cloneEdgeFrontCounterMap(s.metrics.ClientTCPRetransCount),
-		ClientTCPRetransSum:   cloneEdgeFrontFloatMap(s.metrics.ClientTCPRetransSum),
+		ConnectionsTotal:           cloneEdgeFrontCounterMap(s.metrics.ConnectionsTotal),
+		ClientToWorkerBytes:        cloneEdgeFrontCounterMap(s.metrics.ClientToWorkerBytes),
+		WorkerToClientBytes:        cloneEdgeFrontCounterMap(s.metrics.WorkerToClientBytes),
+		DurationCount:              cloneEdgeFrontCounterMap(s.metrics.DurationCount),
+		DurationSum:                cloneEdgeFrontFloatMap(s.metrics.DurationSum),
+		ClientTCPRTTCount:          cloneEdgeFrontCounterMap(s.metrics.ClientTCPRTTCount),
+		ClientTCPRTTSum:            cloneEdgeFrontFloatMap(s.metrics.ClientTCPRTTSum),
+		ClientTCPRetransCount:      cloneEdgeFrontCounterMap(s.metrics.ClientTCPRetransCount),
+		ClientTCPRetransSum:        cloneEdgeFrontFloatMap(s.metrics.ClientTCPRetransSum),
+		ClientTCPBytesRetransCount: cloneEdgeFrontCounterMap(s.metrics.ClientTCPBytesRetransCount),
+		ClientTCPBytesRetransSum:   cloneEdgeFrontFloatMap(s.metrics.ClientTCPBytesRetransSum),
+		ClientTCPRTOCount:          cloneEdgeFrontCounterMap(s.metrics.ClientTCPRTOCount),
+		ClientTCPRTOSum:            cloneEdgeFrontFloatMap(s.metrics.ClientTCPRTOSum),
+		ClientTCPDeliveryCount:     cloneEdgeFrontCounterMap(s.metrics.ClientTCPDeliveryCount),
+		ClientTCPDeliverySum:       cloneEdgeFrontFloatMap(s.metrics.ClientTCPDeliverySum),
 	}
 	for _, conn := range s.active {
 		key := edgeFrontActiveMetricKey{Protocol: conn.Protocol, Slot: conn.Slot, ProxyProtocol: conn.ProxyProtocol}
