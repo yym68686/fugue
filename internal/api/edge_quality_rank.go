@@ -64,7 +64,10 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if len(rollups) > 0 {
-			response = buildEdgeQualityRankResponseFromRollups(query, nodes, policy, rollups)
+			rollupResponse := buildEdgeQualityRankResponseFromRollups(query, nodes, policy, rollups)
+			if edgeQualityRankRollupResponseFreshEnough(rollupResponse, now) {
+				response = rollupResponse
+			}
 		}
 	}
 	if response.Hostname == "" {
@@ -307,6 +310,22 @@ func buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes [
 		Candidates:       candidates,
 		HardGated:        hardGated,
 	}
+}
+
+func edgeQualityRankRollupResponseFreshEnough(response model.EdgeQualityRankResponse, now time.Time) bool {
+	var latest time.Time
+	for _, candidate := range response.Candidates {
+		if candidate.LastSampledAt == nil || candidate.LastSampledAt.IsZero() {
+			continue
+		}
+		if latest.IsZero() || candidate.LastSampledAt.After(latest) {
+			latest = *candidate.LastSampledAt
+		}
+	}
+	if latest.IsZero() {
+		return false
+	}
+	return !latest.Before(now.UTC().Add(-2 * edgeQualityRollupBuilderInterval))
 }
 
 func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoutePolicy, now time.Time) model.EdgeQualityRankCandidate {

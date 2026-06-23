@@ -328,6 +328,30 @@ func TestEdgeQualityRankResponseUsesPlatformFallbackRollup(t *testing.T) {
 	}
 }
 
+func TestEdgeQualityRankRejectsStaleRollupResponses(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 23, 4, 30, 0, 0, time.UTC)
+	fresh := now.Add(-edgeQualityRollupBuilderInterval)
+	stale := now.Add(-4 * time.Hour)
+
+	if !edgeQualityRankRollupResponseFreshEnough(model.EdgeQualityRankResponse{
+		Candidates: []model.EdgeQualityRankCandidate{{LastSampledAt: &fresh}},
+	}, now) {
+		t.Fatal("expected recent rollup response to be fresh")
+	}
+	if edgeQualityRankRollupResponseFreshEnough(model.EdgeQualityRankResponse{
+		Candidates: []model.EdgeQualityRankCandidate{{LastSampledAt: &stale}},
+	}, now) {
+		t.Fatal("expected stale rollup response to fall back to raw samples")
+	}
+	if edgeQualityRankRollupResponseFreshEnough(model.EdgeQualityRankResponse{
+		Candidates: []model.EdgeQualityRankCandidate{{}},
+	}, now) {
+		t.Fatal("expected response without rollup timestamps to be stale")
+	}
+}
+
 func TestEdgeQualityRecoveryUsesHysteresisCooldown(t *testing.T) {
 	t.Parallel()
 
