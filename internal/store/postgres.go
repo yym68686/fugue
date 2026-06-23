@@ -593,7 +593,7 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_edge_group_sampled ON fugue_edge_performance_samples (edge_group_id, sampled_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_performance_client_scope ON fugue_edge_performance_samples (client_country, client_region, client_asn, sampled_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_edge_quality_rollups (
-		window TEXT NOT NULL DEFAULT '',
+		window_name TEXT NOT NULL DEFAULT '',
 		window_started_at TIMESTAMPTZ NOT NULL,
 		window_ended_at TIMESTAMPTZ NOT NULL,
 		hostname TEXT NOT NULL DEFAULT '',
@@ -649,7 +649,7 @@ var postgresSchemaStatements = []string{
 		score DOUBLE PRECISION NOT NULL DEFAULT 0,
 		score_breakdown_json JSONB NOT NULL DEFAULT '{}'::jsonb,
 		updated_at TIMESTAMPTZ NOT NULL,
-		PRIMARY KEY (window, window_started_at, hostname, traffic_class, method, path_prefix_bucket, client_scope_kind, client_scope_value, edge_group_id, edge_id)
+		PRIMARY KEY (window_name, window_started_at, hostname, traffic_class, method, path_prefix_bucket, client_scope_kind, client_scope_value, edge_group_id, edge_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_quality_rollups_lookup ON fugue_edge_quality_rollups (hostname, traffic_class, client_scope_kind, client_scope_value, window_ended_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_quality_rollups_edge ON fugue_edge_quality_rollups (edge_group_id, edge_id, window_ended_at DESC)`,

@@ -3854,6 +3854,9 @@ func ensureDefaults(state *model.State) {
 	if state.EdgePerformanceSamples == nil {
 		state.EdgePerformanceSamples = []model.EdgePerformanceSample{}
 	}
+	if state.EdgeQualityRollups == nil {
+		state.EdgeQualityRollups = []model.EdgeQualityRollup{}
+	}
 	if state.StorePromotions == nil {
 		state.StorePromotions = []model.StorePromotion{}
 	}

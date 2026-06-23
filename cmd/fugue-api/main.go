@@ -41,6 +41,7 @@ func main() {
 		APIPublicDomain:               cfg.APIPublicDomain,
 		DNSStaticRecordsJSON:          cfg.DNSStaticRecordsJSON,
 		PlatformRoutesJSON:            cfg.PlatformRoutesJSON,
+		EdgeQualityRankingMode:        cfg.EdgeQualityRankingMode,
 		EdgeTLSAskToken:               cfg.EdgeTLSAskToken,
 		AllowLegacyEdgeToken:          cfg.AllowLegacyEdgeToken,
 		RegistryPushBase:              cfg.RegistryPushBase,
@@ -68,6 +69,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	server.StartBackgroundWarmers(ctx)
+	go server.StartBackgroundEdgeQualityRollups(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 	go server.StartBackgroundBackups(ctx)
 

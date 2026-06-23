@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +11,74 @@ import (
 
 	"fugue/internal/model"
 )
+
+func (s *Store) UpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, retentionBefore map[string]time.Time) error {
+	if len(rollups) == 0 && len(retentionBefore) == 0 {
+		return nil
+	}
+	if s.usingDatabase() {
+		return s.pgUpsertEdgeQualityRollups(rollups, retentionBefore)
+	}
+	return s.withLockedState(true, func(state *model.State) error {
+		if len(retentionBefore) > 0 {
+			filtered := state.EdgeQualityRollups[:0]
+			for _, rollup := range state.EdgeQualityRollups {
+				before := retentionBefore[strings.TrimSpace(rollup.Window)]
+				if !before.IsZero() && rollup.WindowEndedAt.Before(before) {
+					continue
+				}
+				filtered = append(filtered, rollup)
+			}
+			state.EdgeQualityRollups = filtered
+		}
+		byKey := make(map[string]int, len(state.EdgeQualityRollups))
+		for index, rollup := range state.EdgeQualityRollups {
+			byKey[edgeQualityRollupKey(rollup)] = index
+		}
+		now := time.Now().UTC()
+		for _, rollup := range rollups {
+			normalized := normalizeEdgeQualityRollupForStore(rollup, now)
+			if normalized.Window == "" || normalized.Hostname == "" || normalized.EdgeGroupID == "" {
+				continue
+			}
+			key := edgeQualityRollupKey(normalized)
+			if index, ok := byKey[key]; ok {
+				state.EdgeQualityRollups[index] = normalized
+				continue
+			}
+			state.EdgeQualityRollups = append(state.EdgeQualityRollups, normalized)
+			byKey[key] = len(state.EdgeQualityRollups) - 1
+		}
+		sortEdgeQualityRollups(state.EdgeQualityRollups)
+		return nil
+	})
+}
+
+func (s *Store) ListEdgeQualityRollups(hostname, window string, since time.Time) ([]model.EdgeQualityRollup, error) {
+	hostname = normalizeEdgePerformanceHostname(hostname)
+	window = strings.TrimSpace(strings.ToLower(window))
+	if s.usingDatabase() {
+		return s.pgListEdgeQualityRollups(hostname, window, since)
+	}
+	var rollups []model.EdgeQualityRollup
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, rollup := range state.EdgeQualityRollups {
+			if hostname != "" && !strings.EqualFold(normalizeEdgePerformanceHostname(rollup.Hostname), hostname) {
+				continue
+			}
+			if window != "" && !strings.EqualFold(strings.TrimSpace(rollup.Window), window) {
+				continue
+			}
+			if !since.IsZero() && rollup.WindowEndedAt.Before(since) {
+				continue
+			}
+			rollups = append(rollups, rollup)
+		}
+		return nil
+	})
+	sortEdgeQualityRollups(rollups)
+	return rollups, err
+}
 
 func (s *Store) RecordEdgePerformanceSamples(samples []model.EdgePerformanceSample, pruneBefore time.Time) error {
 	if len(samples) == 0 && pruneBefore.IsZero() {
@@ -469,6 +538,303 @@ WHERE 1=1
 	return samples, nil
 }
 
+const pgUpsertEdgeQualityRollupSQL = `
+INSERT INTO fugue_edge_quality_rollups (
+	window_name, window_started_at, window_ended_at, hostname, traffic_class, method, path_prefix_bucket,
+	client_scope_kind, client_scope_value, edge_group_id, edge_id,
+	sample_count, request_count, error_count, error_rate,
+	cache_hit_count, cache_observation_count, cache_hit_rate,
+	p50_ttfb_ms, p95_ttfb_ms, p99_ttfb_ms, avg_upstream_ms, avg_total_ms,
+	avg_origin_dns_ms, avg_origin_connect_ms, avg_origin_request_write_ms, avg_origin_response_wait_ms,
+	avg_origin_ttfb_ms, avg_origin_total_ms,
+	avg_upload_effective_bps, p10_upload_effective_bps, avg_min_window_bps, p10_min_window_bps,
+	p95_max_read_gap_ms, avg_body_read_block_ms, body_incomplete_rate, body_read_error_rate,
+	avg_response_egress_bps, p10_response_egress_bps, p95_response_write_ms, client_cancel_rate,
+	avg_client_tcp_rtt_ms, avg_client_tcp_min_rtt_ms, avg_client_tcp_rttvar_ms,
+	client_tcp_retrans_rate, client_tcp_bytes_retrans_rate, client_tcp_rto_rate,
+	avg_client_tcp_delivery_rate_bps, avg_active_requests, avg_active_body_buffers,
+	avg_goroutine_count, avg_memory_alloc_bytes, confidence, score, score_breakdown_json, updated_at
+) VALUES (
+	$1, $2, $3, $4, $5, $6, $7, $8,
+	$9, $10, $11, $12, $13, $14,
+	$15, $16, $17, $18, $19,
+	$20, $21, $22, $23, $24,
+	$25, $26, $27, $28, $29,
+	$30, $31, $32, $33, $34,
+	$35, $36, $37, $38, $39,
+	$40, $41, $42, $43, $44,
+	$45, $46, $47, $48, $49,
+	$50, $51, $52, $53, $54,
+	$55, $56
+)
+ON CONFLICT (window_name, window_started_at, hostname, traffic_class, method, path_prefix_bucket, client_scope_kind, client_scope_value, edge_group_id, edge_id)
+DO UPDATE SET
+	window_ended_at = EXCLUDED.window_ended_at,
+	sample_count = EXCLUDED.sample_count,
+	request_count = EXCLUDED.request_count,
+	error_count = EXCLUDED.error_count,
+	error_rate = EXCLUDED.error_rate,
+	cache_hit_count = EXCLUDED.cache_hit_count,
+	cache_observation_count = EXCLUDED.cache_observation_count,
+	cache_hit_rate = EXCLUDED.cache_hit_rate,
+	p50_ttfb_ms = EXCLUDED.p50_ttfb_ms,
+	p95_ttfb_ms = EXCLUDED.p95_ttfb_ms,
+	p99_ttfb_ms = EXCLUDED.p99_ttfb_ms,
+	avg_upstream_ms = EXCLUDED.avg_upstream_ms,
+	avg_total_ms = EXCLUDED.avg_total_ms,
+	avg_origin_dns_ms = EXCLUDED.avg_origin_dns_ms,
+	avg_origin_connect_ms = EXCLUDED.avg_origin_connect_ms,
+	avg_origin_request_write_ms = EXCLUDED.avg_origin_request_write_ms,
+	avg_origin_response_wait_ms = EXCLUDED.avg_origin_response_wait_ms,
+	avg_origin_ttfb_ms = EXCLUDED.avg_origin_ttfb_ms,
+	avg_origin_total_ms = EXCLUDED.avg_origin_total_ms,
+	avg_upload_effective_bps = EXCLUDED.avg_upload_effective_bps,
+	p10_upload_effective_bps = EXCLUDED.p10_upload_effective_bps,
+	avg_min_window_bps = EXCLUDED.avg_min_window_bps,
+	p10_min_window_bps = EXCLUDED.p10_min_window_bps,
+	p95_max_read_gap_ms = EXCLUDED.p95_max_read_gap_ms,
+	avg_body_read_block_ms = EXCLUDED.avg_body_read_block_ms,
+	body_incomplete_rate = EXCLUDED.body_incomplete_rate,
+	body_read_error_rate = EXCLUDED.body_read_error_rate,
+	avg_response_egress_bps = EXCLUDED.avg_response_egress_bps,
+	p10_response_egress_bps = EXCLUDED.p10_response_egress_bps,
+	p95_response_write_ms = EXCLUDED.p95_response_write_ms,
+	client_cancel_rate = EXCLUDED.client_cancel_rate,
+	avg_client_tcp_rtt_ms = EXCLUDED.avg_client_tcp_rtt_ms,
+	avg_client_tcp_min_rtt_ms = EXCLUDED.avg_client_tcp_min_rtt_ms,
+	avg_client_tcp_rttvar_ms = EXCLUDED.avg_client_tcp_rttvar_ms,
+	client_tcp_retrans_rate = EXCLUDED.client_tcp_retrans_rate,
+	client_tcp_bytes_retrans_rate = EXCLUDED.client_tcp_bytes_retrans_rate,
+	client_tcp_rto_rate = EXCLUDED.client_tcp_rto_rate,
+	avg_client_tcp_delivery_rate_bps = EXCLUDED.avg_client_tcp_delivery_rate_bps,
+	avg_active_requests = EXCLUDED.avg_active_requests,
+	avg_active_body_buffers = EXCLUDED.avg_active_body_buffers,
+	avg_goroutine_count = EXCLUDED.avg_goroutine_count,
+	avg_memory_alloc_bytes = EXCLUDED.avg_memory_alloc_bytes,
+	confidence = EXCLUDED.confidence,
+	score = EXCLUDED.score,
+	score_breakdown_json = EXCLUDED.score_breakdown_json,
+	updated_at = EXCLUDED.updated_at
+`
+
+func (s *Store) pgUpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, retentionBefore map[string]time.Time) error {
+	if err := s.ensureDatabaseReady(); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin edge quality rollup transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	for window, before := range retentionBefore {
+		window = strings.TrimSpace(strings.ToLower(window))
+		if window == "" || before.IsZero() {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_edge_quality_rollups WHERE window_name = $1 AND window_ended_at < $2`, window, before); err != nil {
+			return fmt.Errorf("prune edge quality rollups: %w", err)
+		}
+	}
+	now := time.Now().UTC()
+	for _, rollup := range rollups {
+		normalized := normalizeEdgeQualityRollupForStore(rollup, now)
+		if normalized.Window == "" || normalized.Hostname == "" || normalized.EdgeGroupID == "" {
+			continue
+		}
+		breakdownJSON, err := json.Marshal(normalized.ScoreBreakdown)
+		if err != nil {
+			return fmt.Errorf("marshal edge quality score breakdown: %w", err)
+		}
+		if len(breakdownJSON) == 0 || string(breakdownJSON) == "null" {
+			breakdownJSON = []byte("{}")
+		}
+		if _, err := tx.ExecContext(ctx, pgUpsertEdgeQualityRollupSQL,
+			normalized.Window,
+			normalized.WindowStartedAt,
+			normalized.WindowEndedAt,
+			normalized.Hostname,
+			normalized.TrafficClass,
+			normalized.Method,
+			normalized.PathPrefixBucket,
+			normalized.ClientScopeKind,
+			normalized.ClientScopeValue,
+			normalized.EdgeGroupID,
+			normalized.EdgeID,
+			normalized.SampleCount,
+			normalized.RequestCount,
+			normalized.ErrorCount,
+			normalized.ErrorRate,
+			normalized.CacheHitCount,
+			normalized.CacheObservationCount,
+			normalized.CacheHitRate,
+			normalized.P50TTFBMS,
+			normalized.P95TTFBMS,
+			normalized.P99TTFBMS,
+			normalized.AvgUpstreamMS,
+			normalized.AvgTotalMS,
+			normalized.AvgOriginDNSMS,
+			normalized.AvgOriginConnectMS,
+			normalized.AvgOriginRequestWriteMS,
+			normalized.AvgOriginResponseWaitMS,
+			normalized.AvgOriginTTFBMS,
+			normalized.AvgOriginTotalMS,
+			normalized.AvgUploadEffectiveBPS,
+			normalized.P10UploadEffectiveBPS,
+			normalized.AvgMinWindowBPS,
+			normalized.P10MinWindowBPS,
+			normalized.P95MaxReadGapMS,
+			normalized.AvgBodyReadBlockMS,
+			normalized.BodyIncompleteRate,
+			normalized.BodyReadErrorRate,
+			normalized.AvgResponseEgressBPS,
+			normalized.P10ResponseEgressBPS,
+			normalized.P95ResponseWriteMS,
+			normalized.ClientCancelRate,
+			normalized.AvgClientTCPRTTMS,
+			normalized.AvgClientTCPMinRTTMS,
+			normalized.AvgClientTCPRTTVarMS,
+			normalized.ClientTCPRetransRate,
+			normalized.ClientTCPBytesRetransRate,
+			normalized.ClientTCPRTORate,
+			normalized.AvgClientTCPDeliveryBPS,
+			normalized.AvgActiveRequests,
+			normalized.AvgActiveBodyBuffers,
+			normalized.AvgGoroutineCount,
+			normalized.AvgMemoryAllocBytes,
+			normalized.Confidence,
+			normalized.Score,
+			breakdownJSON,
+			normalized.UpdatedAt,
+		); err != nil {
+			return fmt.Errorf("upsert edge quality rollup: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit edge quality rollup transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) pgListEdgeQualityRollups(hostname, window string, since time.Time) ([]model.EdgeQualityRollup, error) {
+	if err := s.ensureDatabaseReady(); err != nil {
+		return nil, err
+	}
+	query := `
+SELECT window_name, window_started_at, window_ended_at, hostname, traffic_class, method, path_prefix_bucket,
+	client_scope_kind, client_scope_value, edge_group_id, edge_id,
+	sample_count, request_count, error_count, error_rate,
+	cache_hit_count, cache_observation_count, cache_hit_rate,
+	p50_ttfb_ms, p95_ttfb_ms, p99_ttfb_ms, avg_upstream_ms, avg_total_ms,
+	avg_origin_dns_ms, avg_origin_connect_ms, avg_origin_request_write_ms, avg_origin_response_wait_ms,
+	avg_origin_ttfb_ms, avg_origin_total_ms,
+	avg_upload_effective_bps, p10_upload_effective_bps, avg_min_window_bps, p10_min_window_bps,
+	p95_max_read_gap_ms, avg_body_read_block_ms, body_incomplete_rate, body_read_error_rate,
+	avg_response_egress_bps, p10_response_egress_bps, p95_response_write_ms, client_cancel_rate,
+	avg_client_tcp_rtt_ms, avg_client_tcp_min_rtt_ms, avg_client_tcp_rttvar_ms,
+	client_tcp_retrans_rate, client_tcp_bytes_retrans_rate, client_tcp_rto_rate,
+	avg_client_tcp_delivery_rate_bps, avg_active_requests, avg_active_body_buffers,
+	avg_goroutine_count, avg_memory_alloc_bytes, confidence, score, score_breakdown_json, updated_at
+FROM fugue_edge_quality_rollups
+WHERE 1=1
+`
+	args := []any{}
+	if hostname != "" {
+		args = append(args, hostname)
+		query += fmt.Sprintf(" AND hostname = $%d", len(args))
+	}
+	if window != "" {
+		args = append(args, window)
+		query += fmt.Sprintf(" AND window_name = $%d", len(args))
+	}
+	if !since.IsZero() {
+		args = append(args, since)
+		query += fmt.Sprintf(" AND window_ended_at >= $%d", len(args))
+	}
+	query += " ORDER BY window_ended_at ASC, hostname ASC, traffic_class ASC, client_scope_kind ASC, client_scope_value ASC, edge_group_id ASC, edge_id ASC"
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list edge quality rollups: %w", err)
+	}
+	defer rows.Close()
+
+	var rollups []model.EdgeQualityRollup
+	for rows.Next() {
+		var rollup model.EdgeQualityRollup
+		var breakdownJSON []byte
+		if err := rows.Scan(
+			&rollup.Window,
+			&rollup.WindowStartedAt,
+			&rollup.WindowEndedAt,
+			&rollup.Hostname,
+			&rollup.TrafficClass,
+			&rollup.Method,
+			&rollup.PathPrefixBucket,
+			&rollup.ClientScopeKind,
+			&rollup.ClientScopeValue,
+			&rollup.EdgeGroupID,
+			&rollup.EdgeID,
+			&rollup.SampleCount,
+			&rollup.RequestCount,
+			&rollup.ErrorCount,
+			&rollup.ErrorRate,
+			&rollup.CacheHitCount,
+			&rollup.CacheObservationCount,
+			&rollup.CacheHitRate,
+			&rollup.P50TTFBMS,
+			&rollup.P95TTFBMS,
+			&rollup.P99TTFBMS,
+			&rollup.AvgUpstreamMS,
+			&rollup.AvgTotalMS,
+			&rollup.AvgOriginDNSMS,
+			&rollup.AvgOriginConnectMS,
+			&rollup.AvgOriginRequestWriteMS,
+			&rollup.AvgOriginResponseWaitMS,
+			&rollup.AvgOriginTTFBMS,
+			&rollup.AvgOriginTotalMS,
+			&rollup.AvgUploadEffectiveBPS,
+			&rollup.P10UploadEffectiveBPS,
+			&rollup.AvgMinWindowBPS,
+			&rollup.P10MinWindowBPS,
+			&rollup.P95MaxReadGapMS,
+			&rollup.AvgBodyReadBlockMS,
+			&rollup.BodyIncompleteRate,
+			&rollup.BodyReadErrorRate,
+			&rollup.AvgResponseEgressBPS,
+			&rollup.P10ResponseEgressBPS,
+			&rollup.P95ResponseWriteMS,
+			&rollup.ClientCancelRate,
+			&rollup.AvgClientTCPRTTMS,
+			&rollup.AvgClientTCPMinRTTMS,
+			&rollup.AvgClientTCPRTTVarMS,
+			&rollup.ClientTCPRetransRate,
+			&rollup.ClientTCPBytesRetransRate,
+			&rollup.ClientTCPRTORate,
+			&rollup.AvgClientTCPDeliveryBPS,
+			&rollup.AvgActiveRequests,
+			&rollup.AvgActiveBodyBuffers,
+			&rollup.AvgGoroutineCount,
+			&rollup.AvgMemoryAllocBytes,
+			&rollup.Confidence,
+			&rollup.Score,
+			&breakdownJSON,
+			&rollup.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan edge quality rollup: %w", err)
+		}
+		if len(breakdownJSON) > 0 {
+			_ = json.Unmarshal(breakdownJSON, &rollup.ScoreBreakdown)
+		}
+		rollups = append(rollups, normalizeEdgeQualityRollupForStore(rollup, time.Now().UTC()))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate edge quality rollups: %w", err)
+	}
+	return rollups, nil
+}
+
 func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, now time.Time) (model.EdgePerformanceSample, error) {
 	sample.ID = strings.TrimSpace(sample.ID)
 	sample.EdgeID = normalizeEdgeID(sample.EdgeID)
@@ -646,6 +1012,120 @@ func sortEdgePerformanceSamples(samples []model.EdgePerformanceSample) {
 			return samples[i].EdgeGroupID < samples[j].EdgeGroupID
 		}
 		return samples[i].ID < samples[j].ID
+	})
+}
+
+func normalizeEdgeQualityRollupForStore(rollup model.EdgeQualityRollup, now time.Time) model.EdgeQualityRollup {
+	rollup.Window = strings.TrimSpace(strings.ToLower(rollup.Window))
+	rollup.Hostname = normalizeEdgePerformanceHostname(rollup.Hostname)
+	rollup.TrafficClass = strings.TrimSpace(strings.ToLower(rollup.TrafficClass))
+	rollup.Method = strings.ToUpper(strings.TrimSpace(rollup.Method))
+	rollup.PathPrefixBucket = strings.TrimSpace(rollup.PathPrefixBucket)
+	rollup.ClientScopeKind = strings.TrimSpace(strings.ToLower(rollup.ClientScopeKind))
+	if rollup.ClientScopeKind == "" {
+		rollup.ClientScopeKind = "global"
+	}
+	rollup.ClientScopeValue = normalizeEdgeQualityScopeValue(rollup.ClientScopeKind, rollup.ClientScopeValue)
+	rollup.EdgeGroupID = normalizeEdgeGroupID(rollup.EdgeGroupID)
+	rollup.EdgeID = normalizeEdgeID(rollup.EdgeID)
+	if rollup.WindowEndedAt.IsZero() && !rollup.WindowStartedAt.IsZero() {
+		rollup.WindowEndedAt = rollup.WindowStartedAt
+	}
+	if rollup.WindowStartedAt.IsZero() && !rollup.WindowEndedAt.IsZero() {
+		rollup.WindowStartedAt = rollup.WindowEndedAt
+	}
+	if rollup.UpdatedAt.IsZero() {
+		rollup.UpdatedAt = now
+	}
+	if rollup.SampleCount < 0 {
+		rollup.SampleCount = 0
+	}
+	if rollup.RequestCount < 0 {
+		rollup.RequestCount = 0
+	}
+	if rollup.ErrorCount < 0 {
+		rollup.ErrorCount = 0
+	}
+	if rollup.CacheHitCount < 0 {
+		rollup.CacheHitCount = 0
+	}
+	if rollup.CacheObservationCount < rollup.CacheHitCount {
+		rollup.CacheObservationCount = rollup.CacheHitCount
+	}
+	rollup.ErrorRate = clampEdgeQualityRate(rollup.ErrorRate)
+	rollup.CacheHitRate = clampEdgeQualityRate(rollup.CacheHitRate)
+	rollup.BodyIncompleteRate = clampEdgeQualityRate(rollup.BodyIncompleteRate)
+	rollup.BodyReadErrorRate = clampEdgeQualityRate(rollup.BodyReadErrorRate)
+	rollup.ClientCancelRate = clampEdgeQualityRate(rollup.ClientCancelRate)
+	rollup.ClientTCPRetransRate = clampEdgeQualityRate(rollup.ClientTCPRetransRate)
+	rollup.ClientTCPBytesRetransRate = clampEdgeQualityRate(rollup.ClientTCPBytesRetransRate)
+	rollup.ClientTCPRTORate = clampEdgeQualityRate(rollup.ClientTCPRTORate)
+	rollup.Confidence = clampEdgeQualityRate(rollup.Confidence)
+	if rollup.ScoreBreakdown == nil {
+		rollup.ScoreBreakdown = map[string]float64{}
+	}
+	return rollup
+}
+
+func normalizeEdgeQualityScopeValue(kind, value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "global", "":
+		return "global"
+	default:
+		return value
+	}
+}
+
+func clampEdgeQualityRate(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		return 1
+	}
+	return value
+}
+
+func edgeQualityRollupKey(rollup model.EdgeQualityRollup) string {
+	return strings.Join([]string{
+		strings.TrimSpace(rollup.Window),
+		rollup.WindowStartedAt.UTC().Format(time.RFC3339Nano),
+		normalizeEdgePerformanceHostname(rollup.Hostname),
+		strings.TrimSpace(strings.ToLower(rollup.TrafficClass)),
+		strings.ToUpper(strings.TrimSpace(rollup.Method)),
+		strings.TrimSpace(rollup.PathPrefixBucket),
+		strings.TrimSpace(strings.ToLower(rollup.ClientScopeKind)),
+		normalizeEdgeQualityScopeValue(rollup.ClientScopeKind, rollup.ClientScopeValue),
+		normalizeEdgeGroupID(rollup.EdgeGroupID),
+		normalizeEdgeID(rollup.EdgeID),
+	}, "\x00")
+}
+
+func sortEdgeQualityRollups(rollups []model.EdgeQualityRollup) {
+	sort.Slice(rollups, func(i, j int) bool {
+		if !rollups[i].WindowEndedAt.Equal(rollups[j].WindowEndedAt) {
+			return rollups[i].WindowEndedAt.Before(rollups[j].WindowEndedAt)
+		}
+		if rollups[i].Window != rollups[j].Window {
+			return rollups[i].Window < rollups[j].Window
+		}
+		if rollups[i].Hostname != rollups[j].Hostname {
+			return rollups[i].Hostname < rollups[j].Hostname
+		}
+		if rollups[i].TrafficClass != rollups[j].TrafficClass {
+			return rollups[i].TrafficClass < rollups[j].TrafficClass
+		}
+		if rollups[i].ClientScopeKind != rollups[j].ClientScopeKind {
+			return rollups[i].ClientScopeKind < rollups[j].ClientScopeKind
+		}
+		if rollups[i].ClientScopeValue != rollups[j].ClientScopeValue {
+			return rollups[i].ClientScopeValue < rollups[j].ClientScopeValue
+		}
+		if rollups[i].EdgeGroupID != rollups[j].EdgeGroupID {
+			return rollups[i].EdgeGroupID < rollups[j].EdgeGroupID
+		}
+		return rollups[i].EdgeID < rollups[j].EdgeID
 	})
 }
 

@@ -576,6 +576,12 @@ score_breakdown_json
 updated_at
 ```
 
+实现备注：对外模型和 API 字段继续叫 `window`；PostgreSQL 物理列名使用
+`window_name`，避免 `window` 关键字导致 schema 初始化失败。2026-06-23
+上一版 rollout 的 API/controller CrashLoopBackOff 已本地复现为
+`syntax error at or near "window"`，本方案用 `window_name` 和 live
+Postgres schema integration test 固化回归。
+
 ### Retention
 
 建议：
@@ -724,6 +730,91 @@ fugue admin dns answer-check api.0-0.pro --explain
 
 如果对 fugue-web 或外部工具开放，需要先修改 `openapi/openapi.yaml`，再按本仓库 OpenAPI-first 流程生成后端和前端派生产物。
 
+## Operator runbook
+
+### 1. 判断当前模式
+
+控制平面通过 `FUGUE_EDGE_QUALITY_RANKING_MODE` 控制行为：
+
+- `shadow`：默认模式；计算 scoped ranking，DNS answer 仍按旧 geo/legacy 逻辑返回。
+- `active`：允许 scoped ranking 改变 latency-aware DNS candidates / scoped candidates。
+- `legacy`、`off`、`disabled`：kill switch；跳过 scoped quality ranking。
+
+发布路径必须走 GitHub Actions `deploy-control-plane.yml`。不要手工 patch
+Deployment 或 SSH 改线上文件来切换长期配置。
+
+### 2. 查询某个服务的 edge 排名
+
+```sh
+fugue admin edge quality-rank api.0-0.pro \
+  --traffic-class large_body_api \
+  --method POST \
+  --path-prefix /api \
+  --scope asn:4134 \
+  --window 30m
+```
+
+重点看：
+
+- `selected_scope` 和 `fallback_level`：确认是否退到了 country/global/platform。
+- `score_breakdown`：确认是 network、upload、origin、cache、saturation 还是 confidence 导致排名。
+- `hard_gated`：确认 service exclusion、route-ready、TLS-ready、health 是否挡住候选。
+
+### 3. 查询 DNS answer 与 shadow 差异
+
+```sh
+fugue admin dns answer-check api.0-0.pro --explain
+```
+
+在 `shadow` 模式下：
+
+- `answer_policy.selected_edge_group_id` 表示当前 legacy/geo 选择。
+- `answer_policy.shadow_selected_edge_group_id` 表示 scoped ranking 建议选择。
+- `answer_policy.shadow_reason` 表示新 ranking 的理由。
+- `scoped_candidates` 不发布给 DNS server，真实 answer 不被改变。
+
+在 `active` 模式下：
+
+- `answer_policy.policy_kind=latency_aware` 表示新 ranking 已参与 answer。
+- `scoped_candidates` 会按 client scope 被 DNS server 使用。
+
+### 4. 观察 rollup builder
+
+Prometheus 指标：
+
+- `fugue_edge_quality_ranking_active`
+- `fugue_edge_quality_ranking_shadow`
+- `fugue_edge_quality_rollup_runs_total`
+- `fugue_edge_quality_rollup_errors_total`
+- `fugue_edge_quality_rollup_last_duration_seconds`
+- `fugue_edge_quality_rollup_last_count`
+- `fugue_edge_quality_rollup_last_error`
+
+如果 `errors_total` 增长或 `last_error=1`，先查 API pod 日志里的
+`edge quality rollup builder failed`。如果 `last_count=0`，再查 edge heartbeat
+是否继续上报 `performance_samples`。
+
+### 5. 快速止血
+
+如果新 ranking 出现非预期 DNS 分布：
+
+1. 通过仓库变量或发布配置把 `FUGUE_EDGE_QUALITY_RANKING_MODE` 改为 `legacy`。
+2. 走 `main` 分支 push / `deploy-control-plane.yml` 正式发布。
+3. 用 `fugue admin dns answer-check <hostname> --explain` 验证 `shadow_selected_edge_group_id` 为空。
+4. 用 `fugue admin edge quality-rank <hostname> --window 5m` 保留排障视图，不直接改线上 DNS bundle。
+
+### 6. rollout 失败排查
+
+若 API/controller 同时 CrashLoopBackOff，优先怀疑共同启动路径：
+
+- `Store.Init()` / Postgres schema bootstrap。
+- 共享环境变量解析。
+- OpenAPI/generated init-time panic。
+
+先看 GitHub Actions deploy 日志、Kubernetes events 和 pod logs；如果 pod 已被回滚删除，
+用本地 `FUGUE_TEST_DATABASE_URL` 跑 live Postgres schema integration test 复现 schema
+错误。2026-06-23 已新增该 opt-in 测试。
+
 ## Rollout 策略
 
 ### 阶段 1: Shadow mode
@@ -785,7 +876,7 @@ Shadow 至少覆盖：
 
 - [x] 确认本方案覆盖 control plane、DNS、edge proxy、edge-front、CLI 和 store 的变更边界。
 - [x] 确认所有线上行为变更都走正式 GitHub Actions control-plane 发布链路。
-- [ ] 确认第一阶段只做 shadow/read-only，不直接改变 DNS answer。
+- [x] 确认第一阶段只做 shadow/read-only，不直接改变 DNS answer。
 - [x] 确认 service-level edge exclusion 是 hard gate。
 - [x] 确认 route-ready invariant 是 hard gate。
 - [x] 确认新 edge exploration 不绕过 health、route、TLS、service policy gates。
@@ -833,10 +924,10 @@ Shadow 至少覆盖：
 
 ### 4. Rollup builder
 
-- [ ] 实现 5m rollup。
-- [ ] 实现 30m rollup。
-- [ ] 实现 6h rollup。
-- [ ] 实现 24h rollup。
+- [x] 实现 5m rollup。
+- [x] 实现 30m rollup。
+- [x] 实现 6h rollup。
+- [x] 实现 24h rollup。
 - [x] 实现 raw sample 到 `path_prefix_bucket` 的归一化。
 - [x] 实现 raw sample 到 `traffic_class` profile 的映射。
 - [x] 实现 global scope rollup。
@@ -845,10 +936,10 @@ Shadow 至少覆盖：
 - [x] 实现 ASN scope rollup。
 - [x] 实现 edge group rollup。
 - [x] 实现 edge node rollup。
-- [ ] 实现 p50/p95/p99 或近似分位数。
+- [x] 实现 p50/p95/p99 或近似分位数。
 - [x] 实现 confidence 计算。
-- [ ] 实现 rollup retention cleanup。
-- [ ] 增加 rollup builder metrics 和 logs。
+- [x] 实现 rollup retention cleanup。
+- [x] 增加 rollup builder metrics 和 logs。
 
 ### 5. Score engine
 
@@ -868,7 +959,7 @@ Shadow 至少覆盖：
 - [x] 实现 `static_cacheable` 权重 profile。
 - [x] 实现 `html_dynamic` 权重 profile。
 - [x] 实现 `streaming` / `sse` / `websocket` 权重 profile。
-- [ ] 实现 5m severe degrade 逻辑。
+- [x] 实现 5m severe degrade 逻辑。
 - [x] 实现 slow recovery / hysteresis。
 - [x] 实现 score breakdown 输出。
 - [x] 为每个子分加入上限，避免单个 noisy metric 完全支配排名。
@@ -882,7 +973,7 @@ Shadow 至少覆盖：
 - [x] 实现 country fallback。
 - [x] 实现 hostname + traffic class global fallback。
 - [x] 实现 hostname global fallback。
-- [ ] 实现 platform global fallback。
+- [x] 实现 platform global fallback。
 - [x] 在 score decision 中记录 fallback level。
 - [x] 在 score decision 中记录 fallback reason。
 - [x] 在低 confidence 时阻止 aggressive promotion。
@@ -898,7 +989,7 @@ Shadow 至少覆盖：
 - [x] 在 DNS server 中保留 legacy score fallback。
 - [x] 在 DNS answer 中记录 selected edge group 和 edge id。
 - [x] 实现 node-level canary/exploration 与 scoped score 协同。
-- [ ] 增加 kill switch 回退到旧 latency-aware score。
+- [x] 增加 kill switch 回退到旧 latency-aware score。
 
 ### 8. API and CLI
 
@@ -918,7 +1009,7 @@ Shadow 至少覆盖：
 - [x] 输出 fallback level。
 - [x] 输出 hard-gated candidates。
 - [x] 增强 `dns answer-check --explain`。
-- [ ] 如果 fugue-web 需要消费 API，同步 `fugue-web` OpenAPI 派生产物。
+- [x] 当前 fugue-web 不消费该 admin API；若未来消费，再同步 `fugue-web` OpenAPI 派生产物。
 
 ### 9. Tests
 
@@ -930,12 +1021,12 @@ Shadow 至少覆盖：
 - [x] 单测：低 confidence 不 aggressive promote。
 - [x] 单测：TCP retrans/RTO 异常会提高 network score。
 - [x] 单测：large body 请求低 upload bps 会降权。
-- [ ] 单测：static cacheable 请求 cache hit ratio 影响排序。
-- [ ] 单测：streaming 请求不因长 total duration 被误判。
-- [ ] 单测：origin 全局慢不会错误惩罚单一 edge。
-- [ ] 单测：单一 edge 到 origin 慢会影响该 edge。
-- [ ] 单测：5m severe degrade 可快速降权。
-- [ ] 单测：recovery 需要 hysteresis。
+- [x] 单测：static cacheable 请求 cache hit ratio 影响排序。
+- [x] 单测：streaming 请求不因长 total duration 被误判。
+- [x] 单测：origin 全局慢不会错误惩罚单一 edge。
+- [x] 单测：单一 edge 到 origin 慢会影响该 edge。
+- [x] 单测：5m severe degrade 可快速降权。
+- [x] 单测：recovery 需要 hysteresis。
 - [x] 集成测试：DNS bundle 携带 scoped score。
 - [x] 集成测试：DNS server 使用 scoped score 返回 answer。
 - [x] 集成测试：CLI 输出 score breakdown。
@@ -943,13 +1034,13 @@ Shadow 至少覆盖：
 
 ### 10. Shadow rollout
 
-- [ ] 增加 shadow mode 配置。
-- [ ] 记录 legacy selected edge。
-- [ ] 记录 scoped ranking selected edge。
-- [ ] 记录两者差异原因。
-- [ ] 记录预计影响 hostname。
-- [ ] 记录预计影响 traffic class。
-- [ ] 记录预计影响 client scope。
+- [x] 增加 shadow mode 配置。
+- [x] 记录 legacy selected edge。
+- [x] 记录 scoped ranking selected edge。
+- [x] 记录两者差异原因。
+- [x] 记录预计影响 hostname。
+- [x] 记录预计影响 traffic class。
+- [x] 记录预计影响 client scope。
 - [ ] 连续观察 24 小时。
 - [ ] 覆盖国内高峰时段。
 - [ ] 覆盖低流量时段。
@@ -968,7 +1059,7 @@ Shadow 至少覆盖：
 - [ ] 观察 edge saturation。
 - [ ] 扩到 25%。
 - [ ] 全量启用。
-- [ ] 保留 kill switch。
+- [x] 保留 kill switch。
 - [ ] 发布后 24 小时复盘排名和真实质量是否一致。
 
 ### 12. Documentation
@@ -976,7 +1067,7 @@ Shadow 至少覆盖：
 - [x] 更新 edge request body / TCP observability 文档。
 - [x] 更新 DNS latency-aware 文档。
 - [x] 更新 CLI 文档。
-- [ ] 更新 operator runbook。
+- [x] 更新 operator runbook。
 - [x] 记录 score formula 和每个 traffic class profile。
 - [x] 记录 scope fallback 规则。
 - [x] 记录如何调查“为什么这个请求去了这个 edge”。

@@ -34,6 +34,7 @@ type APIConfig struct {
 	APIPublicDomain               string
 	DNSStaticRecordsJSON          string
 	PlatformRoutesJSON            string
+	EdgeQualityRankingMode        string
 	EdgeTLSAskToken               string
 	AllowLegacyEdgeToken          bool
 	RegistryPushBase              string
@@ -249,6 +250,7 @@ func APIFromEnv() APIConfig {
 		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
 		DNSStaticRecordsJSON:          strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
 		PlatformRoutesJSON:            strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
+		EdgeQualityRankingMode:        getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
 		EdgeTLSAskToken:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
 		AllowLegacyEdgeToken:          getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", ""),

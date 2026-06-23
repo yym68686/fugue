@@ -2409,6 +2409,7 @@ type State struct {
 	DNSACMEChallenges          []DNSACMEChallenge          `json:"dns_acme_challenges,omitempty"`
 	EdgeRoutePolicies          []EdgeRoutePolicy           `json:"edge_route_policies,omitempty"`
 	EdgePerformanceSamples     []EdgePerformanceSample     `json:"edge_performance_samples,omitempty"`
+	EdgeQualityRollups         []EdgeQualityRollup         `json:"edge_quality_rollups,omitempty"`
 	EdgeDNSRoutingDecisions    []EdgeDNSRoutingDecision    `json:"edge_dns_routing_decisions,omitempty"`
 	StorePromotions            []StorePromotion            `json:"store_promotions,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`

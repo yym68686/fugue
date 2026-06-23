@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -139,5 +140,19 @@ func TestPostgresSchemaIncludesOperationLookupIndexes(t *testing.T) {
 		if !strings.Contains(schema, indexName) {
 			t.Fatalf("postgres schema is missing %s", indexName)
 		}
+	}
+}
+
+func TestPostgresSchemaAppliesToLiveTestDatabase(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set FUGUE_TEST_DATABASE_URL to run live Postgres schema integration test")
+	}
+	if !strings.Contains(databaseURL, "fugue-pgtest") && !strings.Contains(databaseURL, "fugue_test") {
+		t.Fatalf("refusing to run schema integration test against non-test database URL %q", databaseURL)
+	}
+	s := New("", databaseURL)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store against live test database: %v", err)
 	}
 }

@@ -120,6 +120,72 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 	}
 }
 
+func TestUpsertEdgeQualityRollupsPrunesAndListsByHostname(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	if err := s.UpsertEdgeQualityRollups([]model.EdgeQualityRollup{
+		{
+			Window:                "5m",
+			WindowStartedAt:       now.Add(-10 * time.Minute),
+			WindowEndedAt:         now.Add(-5 * time.Minute),
+			Hostname:              "Old.Fugue.Pro.",
+			ClientScopeKind:       "global",
+			ClientScopeValue:      "global",
+			EdgeGroupID:           "edge-group-country-us",
+			RequestCount:          10,
+			CacheObservationCount: 10,
+			CacheHitRate:          0.5,
+			ScoreBreakdown:        map[string]float64{"latency": 10},
+		},
+		{
+			Window:                "5m",
+			WindowStartedAt:       now.Add(-5 * time.Minute),
+			WindowEndedAt:         now,
+			Hostname:              "Demo.Fugue.Pro.",
+			TrafficClass:          "STATIC_CACHEABLE",
+			Method:                "get",
+			PathPrefixBucket:      "/assets/*",
+			ClientScopeKind:       "ASN",
+			ClientScopeValue:      "AS4134",
+			EdgeGroupID:           "edge-group-country-us",
+			EdgeID:                "edge-us-1",
+			RequestCount:          20,
+			CacheObservationCount: 20,
+			CacheHitRate:          0.9,
+			Score:                 42,
+			ScoreBreakdown:        map[string]float64{"cache": 24},
+		},
+	}, nil); err != nil {
+		t.Fatalf("upsert rollups: %v", err)
+	}
+	if err := s.UpsertEdgeQualityRollups(nil, map[string]time.Time{"5m": now.Add(-2 * time.Minute)}); err != nil {
+		t.Fatalf("prune rollups: %v", err)
+	}
+
+	rollups, err := s.ListEdgeQualityRollups("demo.fugue.pro", "5m", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("list rollups: %v", err)
+	}
+	if len(rollups) != 1 {
+		t.Fatalf("expected one retained rollup, got %+v", rollups)
+	}
+	rollup := rollups[0]
+	if rollup.Hostname != "demo.fugue.pro" ||
+		rollup.TrafficClass != "static_cacheable" ||
+		rollup.Method != "GET" ||
+		rollup.ClientScopeKind != "asn" ||
+		rollup.ClientScopeValue != "as4134" ||
+		rollup.EdgeID != "edge-us-1" ||
+		rollup.ScoreBreakdown["cache"] != 24 {
+		t.Fatalf("unexpected normalized rollup: %+v", rollup)
+	}
+}
+
 func TestPGRecordEdgePerformanceSampleInsertSQLColumnPlaceholderParity(t *testing.T) {
 	t.Parallel()
 
@@ -142,6 +208,32 @@ func TestPGRecordEdgePerformanceSampleInsertSQLColumnPlaceholderParity(t *testin
 	for index := 1; index <= len(columns); index++ {
 		if !seen[index] {
 			t.Fatalf("insert SQL missing placeholder $%d for %d columns", index, len(columns))
+		}
+	}
+}
+
+func TestPGUpsertEdgeQualityRollupSQLColumnPlaceholderParity(t *testing.T) {
+	t.Parallel()
+
+	columns := splitSQLCSVSection(t, pgUpsertEdgeQualityRollupSQL, "INSERT INTO fugue_edge_quality_rollups (", ") VALUES (")
+	placeholderMatches := regexp.MustCompile(`\$(\d+)`).FindAllStringSubmatch(
+		sqlSection(t, pgUpsertEdgeQualityRollupSQL, ") VALUES (", ")\nON CONFLICT"),
+		-1,
+	)
+	if len(columns) != len(placeholderMatches) {
+		t.Fatalf("rollup insert column count %d does not match placeholder count %d", len(columns), len(placeholderMatches))
+	}
+	seen := make(map[int]bool, len(placeholderMatches))
+	for _, match := range placeholderMatches {
+		value, err := strconv.Atoi(match[1])
+		if err != nil {
+			t.Fatalf("parse placeholder %q: %v", match[0], err)
+		}
+		seen[value] = true
+	}
+	for index := 1; index <= len(columns); index++ {
+		if !seen[index] {
+			t.Fatalf("rollup insert SQL missing placeholder $%d for %d columns", index, len(columns))
 		}
 	}
 }

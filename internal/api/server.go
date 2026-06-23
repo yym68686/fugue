@@ -47,6 +47,7 @@ type Server struct {
 	apiPublicDomain               string
 	dnsStaticRecords              []model.EdgeDNSRecord
 	platformRoutes                []model.PlatformRoute
+	edgeQualityRankingMode        string
 	edgeTLSAskToken               string
 	allowLegacyEdgeToken          bool
 	registryPushBase              string
@@ -102,6 +103,14 @@ type Server struct {
 	logStreamTuning               logStreamTuning
 	oomRightSizingMu              sync.Mutex
 	oomRightSizingEvents          map[string]time.Time
+	edgeQualityRollupMu           sync.Mutex
+	edgeQualityRollupLastRun      time.Time
+	edgeQualityRollupLastSuccess  time.Time
+	edgeQualityRollupLastDuration time.Duration
+	edgeQualityRollupLastCount    int
+	edgeQualityRollupRunCount     int64
+	edgeQualityRollupErrorCount   int64
+	edgeQualityRollupLastError    string
 	ready                         atomic.Bool
 }
 
@@ -130,6 +139,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		apiPublicDomain:               strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
 		dnsStaticRecords:              parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
 		platformRoutes:                parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
+		edgeQualityRankingMode:        normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
 		edgeTLSAskToken:               strings.TrimSpace(cfg.EdgeTLSAskToken),
 		allowLegacyEdgeToken:          cfg.AllowLegacyEdgeToken,
 		registryPushBase:              strings.TrimSpace(cfg.RegistryPushBase),
@@ -263,6 +273,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_api_observability_exporters", "Number of active observability exporters visible to the API process.", nil, float64(len(status.Exporters)))
 	s.writeBackupMetrics(w)
 	s.writeRobustnessMetrics(w)
+	s.writeEdgeQualityRollupMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {
@@ -277,6 +288,29 @@ func boolMetric(value bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func normalizeEdgeQualityRankingMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "active":
+		return "active"
+	case "legacy", "off", "disabled":
+		return "legacy"
+	default:
+		return "shadow"
+	}
+}
+
+func (s *Server) edgeQualityRankingActive() bool {
+	return strings.EqualFold(strings.TrimSpace(s.edgeQualityRankingMode), "active")
+}
+
+func (s *Server) edgeQualityRankingShadow() bool {
+	return strings.EqualFold(strings.TrimSpace(s.edgeQualityRankingMode), "shadow")
+}
+
+func (s *Server) edgeQualityRankingDisabled() bool {
+	return strings.EqualFold(strings.TrimSpace(s.edgeQualityRankingMode), "legacy")
 }
 
 func authContextFromPrincipal(principal model.Principal) map[string]any {

@@ -44,11 +44,6 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 		Since:            since,
 		GeneratedAt:      now,
 	}
-	samples, err := s.store.ListEdgePerformanceSamples(hostname, since)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
 	nodes, _, err := s.store.ListEdgeNodes("")
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -61,7 +56,25 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 		s.writeStoreError(w, err)
 		return
 	}
-	response := buildEdgeQualityRankResponse(query, nodes, policy, samples)
+	var response model.EdgeQualityRankResponse
+	if rollupWindow := normalizedEdgeQualityRankWindow(window); rollupWindow != "" {
+		rollups, err := s.store.ListEdgeQualityRollups("", rollupWindow, since)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if len(rollups) > 0 {
+			response = buildEdgeQualityRankResponseFromRollups(query, nodes, policy, rollups)
+		}
+	}
+	if response.Hostname == "" {
+		samples, err := s.store.ListEdgePerformanceSamples(hostname, since)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		response = buildEdgeQualityRankResponse(query, nodes, policy, samples)
+	}
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
@@ -194,6 +207,108 @@ func buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.Edge
 	}
 }
 
+func buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, rollups []model.EdgeQualityRollup) model.EdgeQualityRankResponse {
+	filters := edgeQualityRankFallbackFilters(query)
+	scopes := edgeQualityRankFallbackScopes(query.RequestedScope)
+	hostnames := edgeQualityRankFallbackHostnames(query.Hostname)
+	selectedScope := edgeQualityRankScope{Kind: "global", Value: "global"}
+	selectedFilter := edgeQualityRankFilter{}
+	selectedRollups := []model.EdgeQualityRollup{}
+	fallbackLevel := 0
+	fallbackReason := ""
+	for hostnameIndex, hostname := range hostnames {
+		for filterIndex, filter := range filters {
+			for scopeIndex, scope := range scopes {
+				matched := edgeQualityFilterRollups(rollups, hostname, filter, scope)
+				if len(matched) == 0 {
+					continue
+				}
+				selectedScope = scope
+				selectedFilter = filter
+				selectedRollups = latestEdgeQualityRollups(matched)
+				fallbackLevel = hostnameIndex*len(filters)*len(scopes) + filterIndex*len(scopes) + scopeIndex
+				switch {
+				case hostname == edgeQualityPlatformRollupHostname:
+					fallbackReason = "insufficient hostname rollups; using platform global rollup"
+				case fallbackLevel > 0:
+					fallbackReason = "insufficient rollups for more specific filter or scope"
+				default:
+					fallbackReason = ""
+				}
+				break
+			}
+			if len(selectedRollups) > 0 {
+				break
+			}
+		}
+		if len(selectedRollups) > 0 {
+			break
+		}
+	}
+
+	groupRollups := make(map[string]model.EdgeQualityRollup)
+	nodeRollups := make(map[string]model.EdgeQualityRollup)
+	for _, rollup := range selectedRollups {
+		if strings.TrimSpace(rollup.EdgeID) != "" {
+			nodeRollups[strings.TrimSpace(rollup.EdgeID)] = rollup
+			continue
+		}
+		groupRollups[strings.TrimSpace(rollup.EdgeGroupID)] = rollup
+	}
+
+	candidates := make([]model.EdgeQualityRankCandidate, 0, len(nodes))
+	hardGated := make([]model.EdgeQualityRankCandidate, 0)
+	for _, node := range nodes {
+		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt)
+		if candidate.Excluded || !candidate.Healthy || candidate.Draining || !candidate.RouteReady || !candidate.TLSReady {
+			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, edgeQualityRankGateReason(candidate))
+			hardGated = append(hardGated, candidate)
+			continue
+		}
+		if rollup, ok := nodeRollups[strings.TrimSpace(node.ID)]; ok {
+			edgeQualityApplyRollup(&candidate, rollup)
+		} else if rollup, ok := groupRollups[strings.TrimSpace(node.EdgeGroupID)]; ok {
+			edgeQualityApplyRollup(&candidate, rollup)
+		} else {
+			candidate.Score = 999999
+			candidate.ConfidencePenalty = 250
+			candidate.ScoreBreakdown = map[string]float64{"confidence": 250}
+			candidate.Reason = "no matching rollup for selected scope"
+		}
+		candidates = append(candidates, candidate)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score != candidates[j].Score {
+			return candidates[i].Score < candidates[j].Score
+		}
+		if candidates[i].Confidence != candidates[j].Confidence {
+			return candidates[i].Confidence > candidates[j].Confidence
+		}
+		if candidates[i].EdgeGroupID != candidates[j].EdgeGroupID {
+			return candidates[i].EdgeGroupID < candidates[j].EdgeGroupID
+		}
+		return candidates[i].EdgeID < candidates[j].EdgeID
+	})
+	for index := range candidates {
+		candidates[index].Rank = index + 1
+	}
+	return model.EdgeQualityRankResponse{
+		Hostname:         query.Hostname,
+		TrafficClass:     selectedFilter.TrafficClass,
+		Method:           selectedFilter.Method,
+		PathPrefixBucket: selectedFilter.PathPrefixBucket,
+		RequestedScope:   query.RequestedScope.key(),
+		SelectedScope:    selectedScope.key(),
+		FallbackLevel:    fallbackLevel,
+		FallbackReason:   fallbackReason,
+		Window:           query.Window,
+		Since:            query.Since,
+		GeneratedAt:      query.GeneratedAt,
+		Candidates:       candidates,
+		HardGated:        hardGated,
+	}
+}
+
 func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoutePolicy, now time.Time) model.EdgeQualityRankCandidate {
 	tlsReady := strings.EqualFold(strings.TrimSpace(node.TLSStatus), model.EdgeTLSStatusReady) || node.TLSReadyAt != nil
 	routeReady := strings.TrimSpace(node.RouteBundleVersion) != "" && node.CaddyRouteCount > 0
@@ -233,6 +348,30 @@ func edgeQualityApplyProfile(candidate *model.EdgeQualityRankCandidate, profile 
 	candidate.ClientTCPBytesRetransRate = profile.ClientTCPBytesRetransRate
 	candidate.ClientTCPRTORate = profile.ClientTCPRTORate
 	candidate.Reason = edgeDNSLatencyReason("scoped_quality", profile)
+}
+
+func edgeQualityApplyRollup(candidate *model.EdgeQualityRankCandidate, rollup model.EdgeQualityRollup) {
+	if candidate == nil {
+		return
+	}
+	candidate.Score = rollup.Score
+	candidate.ScoreBreakdown = cloneFloat64Map(rollup.ScoreBreakdown)
+	candidate.Confidence = rollup.Confidence
+	candidate.ConfidencePenalty = edgeDNSLatencyConfidencePenalty(rollup.Confidence)
+	candidate.SampleRecordCount = rollup.SampleCount
+	candidate.RequestCount = rollup.RequestCount
+	candidate.ErrorRate = rollup.ErrorRate
+	candidate.CacheHitRate = rollup.CacheHitRate
+	candidate.AvgTTFBMS = firstPositiveFloat(rollup.P95TTFBMS, rollup.P50TTFBMS)
+	candidate.AvgTotalMS = rollup.AvgTotalMS
+	candidate.AvgUploadBPS = rollup.AvgUploadEffectiveBPS
+	candidate.MinUploadBPS = int64(firstPositiveFloat(rollup.P10UploadEffectiveBPS, rollup.P10MinWindowBPS))
+	candidate.AvgResponseEgressBPS = rollup.AvgResponseEgressBPS
+	candidate.ClientTCPRetransRate = rollup.ClientTCPRetransRate
+	candidate.ClientTCPBytesRetransRate = rollup.ClientTCPBytesRetransRate
+	candidate.ClientTCPRTORate = rollup.ClientTCPRTORate
+	candidate.LastSampledAt = &rollup.WindowEndedAt
+	candidate.Reason = formatEdgeQualityRollupReason(rollup)
 }
 
 func edgeQualityRankGateReason(candidate model.EdgeQualityRankCandidate) string {
@@ -300,6 +439,14 @@ func edgeQualityRankFallbackFilters(query edgeQualityRankQuery) []edgeQualityRan
 	return edgeQualityDeduplicateFilters(out)
 }
 
+func edgeQualityRankFallbackHostnames(hostname string) []string {
+	hostname = normalizeExternalAppDomain(hostname)
+	if hostname == "" {
+		return []string{edgeQualityPlatformRollupHostname}
+	}
+	return []string{hostname, edgeQualityPlatformRollupHostname}
+}
+
 func edgeQualityDeduplicateFilters(filters []edgeQualityRankFilter) []edgeQualityRankFilter {
 	out := make([]edgeQualityRankFilter, 0, len(filters))
 	seen := map[string]bool{}
@@ -348,6 +495,64 @@ func edgeQualityFilterSamples(samples []model.EdgePerformanceSample, filter edge
 	return out
 }
 
+func edgeQualityFilterRollups(rollups []model.EdgeQualityRollup, hostname string, filter edgeQualityRankFilter, scope edgeQualityRankScope) []model.EdgeQualityRollup {
+	out := make([]model.EdgeQualityRollup, 0, len(rollups))
+	hostname = normalizeExternalAppDomain(hostname)
+	for _, rollup := range rollups {
+		if hostname != "" && !strings.EqualFold(strings.TrimSpace(rollup.Hostname), hostname) {
+			continue
+		}
+		if filter.TrafficClass != "" && !strings.EqualFold(strings.TrimSpace(rollup.TrafficClass), filter.TrafficClass) {
+			continue
+		}
+		if filter.Method != "" && !strings.EqualFold(strings.TrimSpace(rollup.Method), filter.Method) {
+			continue
+		}
+		if filter.PathPrefixBucket != "" && strings.TrimSpace(rollup.PathPrefixBucket) != filter.PathPrefixBucket {
+			continue
+		}
+		if !edgeQualityRollupMatchesScope(rollup, scope) {
+			continue
+		}
+		out = append(out, rollup)
+	}
+	return out
+}
+
+func latestEdgeQualityRollups(rollups []model.EdgeQualityRollup) []model.EdgeQualityRollup {
+	if len(rollups) == 0 {
+		return nil
+	}
+	latest := rollups[0].WindowEndedAt
+	for _, rollup := range rollups[1:] {
+		if rollup.WindowEndedAt.After(latest) {
+			latest = rollup.WindowEndedAt
+		}
+	}
+	out := make([]model.EdgeQualityRollup, 0, len(rollups))
+	for _, rollup := range rollups {
+		if rollup.WindowEndedAt.Equal(latest) {
+			out = append(out, rollup)
+		}
+	}
+	return out
+}
+
+func edgeQualityRollupMatchesScope(rollup model.EdgeQualityRollup, scope edgeQualityRankScope) bool {
+	kind := strings.ToLower(strings.TrimSpace(rollup.ClientScopeKind))
+	value := strings.ToLower(strings.TrimSpace(rollup.ClientScopeValue))
+	switch scope.Kind {
+	case "asn":
+		return kind == "asn" && value == strings.ToLower(strings.TrimSpace(scope.ASN))
+	case "region":
+		return kind == "region" && value == strings.ToLower(strings.TrimSpace(scope.Country))+":"+strings.ToLower(strings.TrimSpace(scope.Region))
+	case "country":
+		return kind == "country" && value == strings.ToLower(strings.TrimSpace(scope.Country))
+	default:
+		return kind == "global" || kind == ""
+	}
+}
+
 func parseEdgeQualityRankWindow(rawWindow, rawSince string, now time.Time) (string, time.Time, error) {
 	if strings.TrimSpace(rawSince) != "" {
 		since, err := parseEdgeNodeQualitySince(rawSince, now)
@@ -365,6 +570,16 @@ func parseEdgeQualityRankWindow(rawWindow, rawSince string, now time.Time) (stri
 		return "", time.Time{}, errors.New("window must be a positive duration such as 30m, 6h, or 24h")
 	}
 	return rawWindow, now.Add(-duration), nil
+}
+
+func normalizedEdgeQualityRankWindow(window string) string {
+	window = strings.ToLower(strings.TrimSpace(window))
+	switch window {
+	case "5m", "30m", "6h", "24h":
+		return window
+	default:
+		return ""
+	}
 }
 
 func parseEdgeQualityRankScope(raw string) (edgeQualityRankScope, error) {

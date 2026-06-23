@@ -21,6 +21,7 @@ type ServerConfig struct {
 	APIPublicDomain               string
 	DNSStaticRecordsJSON          string
 	PlatformRoutesJSON            string
+	EdgeQualityRankingMode        string
 	EdgeTLSAskToken               string
 	AllowLegacyEdgeToken          bool
 	RegistryPushBase              string

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -203,6 +204,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 	if err != nil {
 		return model.EdgeDNSBundle{}, err
 	}
+	applyQualityRanking := s.edgeQualityRankingActive()
 	routeReadyByHostnameEdgeGroup := map[string]map[string]bool{}
 	recordRouteHostsByName := map[string][]string{}
 
@@ -260,9 +262,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			"",
 			edgeGroupID,
 			"",
-			edgeDNSAnswerPolicy(options, edgeGroupID, "", answerIPs, edgeCandidateByIP, latencyProfile, platformRoute.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, "", latencyProfile),
-			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, ""),
+			edgeDNSAnswerPolicy(options, edgeGroupID, "", answerIPs, edgeCandidateByIP, latencyProfile, platformRoute.TTL, applyQualityRanking),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, "", latencyProfile, applyQualityRanking),
+			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], edgeGroupID, "", applyQualityRanking),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
@@ -297,9 +299,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile),
-			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL, applyQualityRanking),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile, applyQualityRanking),
+			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, applyQualityRanking),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
@@ -342,9 +344,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile),
-			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL, applyQualityRanking),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile, applyQualityRanking),
+			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, applyQualityRanking),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
@@ -414,9 +416,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			app.TenantID,
 			binding.EdgeGroupID,
 			binding.FallbackEdgeGroupID,
-			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL),
-			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile),
-			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID),
+			edgeDNSAnswerPolicy(options, binding.EdgeGroupID, binding.FallbackEdgeGroupID, answerIPs, edgeCandidateByIP, latencyProfile, options.TTL, applyQualityRanking),
+			edgeDNSCandidatesForAnswerIPs(answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, latencyProfile, applyQualityRanking),
+			latencyProfiles.scopedProfiles(hostname, answerIPs, edgeCandidateByIP, routeReadyByHostnameEdgeGroup[hostname], binding.EdgeGroupID, binding.FallbackEdgeGroupID, applyQualityRanking),
 		)
 		records = append(records, targetRecords...)
 		registerEdgeDNSRecordRouteHost(recordRouteHostsByName, hostname, targetRecords...)
@@ -1198,7 +1200,7 @@ type edgeDNSLatencyScope struct {
 }
 
 func (s *Server) edgeDNSLatencyProfiles(options edgeDNSBundleOptions) (edgeDNSLatencyProfileCatalog, error) {
-	if s.store == nil {
+	if s.store == nil || s.edgeQualityRankingDisabled() {
 		return edgeDNSLatencyProfileCatalog{}, nil
 	}
 	now := time.Now().UTC()
@@ -1216,6 +1218,7 @@ func (s *Server) edgeDNSLatencyProfiles(options edgeDNSBundleOptions) (edgeDNSLa
 			return edgeDNSLatencyProfileCatalog{}, err
 		}
 	}
+	edgeDNSApplySevereDegradeToCatalog(&catalog, samples, now)
 	return catalog, nil
 }
 
@@ -1623,6 +1626,105 @@ func applyEdgeDNSRoutingDecision(profile *edgeDNSLatencyProfile, existing model.
 	}
 }
 
+func edgeDNSApplySevereDegradeToCatalog(catalog *edgeDNSLatencyProfileCatalog, samples []model.EdgePerformanceSample, now time.Time) {
+	if catalog == nil {
+		return
+	}
+	degraded := edgeDNSSevereDegradeGroups(samples, now)
+	if len(degraded) == 0 {
+		return
+	}
+	for hostname, profile := range catalog.Global {
+		if edgeDNSApplySevereDegradeToProfile(profile, degraded) {
+			catalog.Global[hostname] = profile
+		}
+	}
+	for hostname, profiles := range catalog.Scoped {
+		for index := range profiles {
+			edgeDNSApplySevereDegradeToProfile(&profiles[index], degraded)
+		}
+		catalog.Scoped[hostname] = profiles
+	}
+}
+
+func edgeDNSSevereDegradeGroups(samples []model.EdgePerformanceSample, now time.Time) map[string]float64 {
+	startedAt := now.Add(-5 * time.Minute)
+	rollups := buildEdgeQualityRollupsForWindow(samples, "5m", startedAt, now, now)
+	out := map[string]float64{}
+	for _, rollup := range rollups {
+		if strings.TrimSpace(rollup.EdgeID) != "" || rollup.ClientScopeKind != "global" {
+			continue
+		}
+		penalty, _ := edgeQualitySevereDegradePenalty(rollup)
+		if penalty <= 0 {
+			continue
+		}
+		groupID := strings.TrimSpace(rollup.EdgeGroupID)
+		if penalty > out[groupID] {
+			out[groupID] = penalty
+		}
+	}
+	return out
+}
+
+func edgeDNSApplySevereDegradeToProfile(profile *edgeDNSLatencyProfile, degraded map[string]float64) bool {
+	if profile == nil || len(profile.Candidates) == 0 {
+		return false
+	}
+	changed := false
+	for groupID, candidate := range profile.Candidates {
+		penalty := degraded[strings.TrimSpace(groupID)]
+		if penalty <= 0 {
+			continue
+		}
+		if candidate.ScoreBreakdown == nil {
+			candidate.ScoreBreakdown = map[string]float64{}
+		}
+		candidate.ScoreBreakdown["severe_degrade"] = penalty
+		candidate.Score += penalty
+		candidate.Weight = edgeDNSLatencyWeightMin
+		candidate.Reason = edgeDNSLatencyReason("severe_degrade_5m", candidate)
+		profile.Candidates[groupID] = candidate
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	bestGroupID := ""
+	bestScore := math.MaxFloat64
+	worstScore := 0.0
+	for groupID, candidate := range profile.Candidates {
+		if candidate.Score < bestScore {
+			bestScore = candidate.Score
+			bestGroupID = groupID
+		}
+		if candidate.Score > worstScore {
+			worstScore = candidate.Score
+		}
+	}
+	if bestGroupID == "" {
+		return true
+	}
+	scoreSpan := worstScore - bestScore
+	if scoreSpan <= 0 {
+		scoreSpan = 1
+	}
+	for groupID, candidate := range profile.Candidates {
+		if groupID == bestGroupID {
+			candidate.Weight = edgeDNSLatencyWeightMax
+			candidate.Reason = edgeDNSLatencyReason("latency_fast_after_5m_degrade", candidate)
+		} else if degraded[groupID] <= 0 {
+			penalty := candidate.Score - bestScore
+			candidate.Weight = edgeDNSClampLatencyWeight(edgeDNSLatencyWeightMax - int((penalty/scoreSpan)*float64(edgeDNSLatencyWeightMax-edgeDNSLatencyWeightMin)))
+		}
+		profile.Candidates[groupID] = candidate
+	}
+	profile.BestEdgeGroupID = bestGroupID
+	profile.Reason = "latency_aware_5m_severe_degrade"
+	profile.Weight = profile.Candidates[bestGroupID].Weight
+	return true
+}
+
 func (profile *edgeDNSLatencyProfile) promoteSelected(edgeGroupID, reasonPrefix string) {
 	if profile == nil {
 		return
@@ -1675,14 +1777,17 @@ func (catalog edgeDNSLatencyProfileCatalog) globalProfile(hostname string) *edge
 	return catalog.Global[hostname]
 }
 
-func (catalog edgeDNSLatencyProfileCatalog) scopedProfiles(hostname string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string) []model.EdgeDNSScopedAnswerCandidates {
+func (catalog edgeDNSLatencyProfileCatalog) scopedProfiles(hostname string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string, applyLatency bool) []model.EdgeDNSScopedAnswerCandidates {
+	if !applyLatency {
+		return nil
+	}
 	hostname = normalizeExternalAppDomain(hostname)
 	if hostname == "" || len(catalog.Scoped[hostname]) == 0 {
 		return nil
 	}
 	out := make([]model.EdgeDNSScopedAnswerCandidates, 0, len(catalog.Scoped[hostname]))
 	for _, profile := range catalog.Scoped[hostname] {
-		candidates := edgeDNSCandidatesForAnswerIPs(answerIPs, candidateByIP, routeReady, preferredEdgeGroupID, fallbackEdgeGroupID, &profile)
+		candidates := edgeDNSCandidatesForAnswerIPs(answerIPs, candidateByIP, routeReady, preferredEdgeGroupID, fallbackEdgeGroupID, &profile, applyLatency)
 		if len(candidates) == 0 {
 			continue
 		}
@@ -2113,7 +2218,7 @@ func edgeDNSLatencyCandidateReason(profile *edgeDNSLatencyProfile, candidate edg
 	return reason
 }
 
-func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string, latencyProfile *edgeDNSLatencyProfile) []model.EdgeDNSAnswerCandidate {
+func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, routeReady map[string]bool, preferredEdgeGroupID, fallbackEdgeGroupID string, latencyProfile *edgeDNSLatencyProfile, applyLatency bool) []model.EdgeDNSAnswerCandidate {
 	out := make([]model.EdgeDNSAnswerCandidate, 0, len(answerIPs))
 	seen := map[string]bool{}
 	for _, raw := range answerIPs {
@@ -2135,7 +2240,7 @@ func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]
 		}
 		candidate.Priority = edgeDNSCandidatePriority(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
 		candidate.Reason = edgeDNSCandidateReason(groupID, preferredEdgeGroupID, fallbackEdgeGroupID)
-		if latencyProfile != nil && latencyProfile.Enabled {
+		if applyLatency && latencyProfile != nil && latencyProfile.Enabled {
 			latencyCandidate, hasLatencyCandidate := latencyProfile.Candidates[groupID]
 			if hasLatencyCandidate {
 				candidate.Weight = latencyCandidate.Weight
@@ -2181,7 +2286,7 @@ func edgeDNSCandidatesForAnswerIPs(answerIPs []string, candidateByIP map[string]
 	return out
 }
 
-func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fallbackEdgeGroupID string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, latencyProfile *edgeDNSLatencyProfile, ttl int) model.DNSAnswerPolicy {
+func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fallbackEdgeGroupID string, answerIPs []string, candidateByIP map[string]model.EdgeDNSAnswerCandidate, latencyProfile *edgeDNSLatencyProfile, ttl int, applyLatency bool) model.DNSAnswerPolicy {
 	allowed := make([]string, 0, len(answerIPs))
 	for _, ip := range answerIPs {
 		normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
@@ -2202,10 +2307,14 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 	policyKind := model.DNSAnswerPolicyKindGeo
 	reason := "geo_healthy_route_ready"
 	weight := 0
-	selectedEdgeGroupID := ""
+	selectedEdgeGroupID := edgeDNSLegacySelectedEdgeGroup(preferred, allowed)
 	shadowSelectedEdgeGroupID := ""
 	shadowReason := ""
 	if latencyProfile != nil && latencyProfile.Enabled {
+		shadowSelectedEdgeGroupID = strings.TrimSpace(latencyProfile.BestEdgeGroupID)
+		shadowReason = "shadow_" + strings.TrimSpace(latencyProfile.Reason)
+	}
+	if applyLatency && latencyProfile != nil && latencyProfile.Enabled {
 		policyKind = model.DNSAnswerPolicyKindLatencyAware
 		reason = latencyProfile.Reason
 		weight = latencyProfile.Weight
@@ -2240,6 +2349,19 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 		ShadowSelectedEdgeGroupID: shadowSelectedEdgeGroupID,
 		ShadowReason:              shadowReason,
 	}
+}
+
+func edgeDNSLegacySelectedEdgeGroup(preferred, allowed []string) string {
+	for _, groupID := range preferred {
+		groupID = strings.TrimSpace(groupID)
+		if groupID != "" && stringSliceContains(allowed, groupID) {
+			return groupID
+		}
+	}
+	if len(allowed) == 1 {
+		return strings.TrimSpace(allowed[0])
+	}
+	return ""
 }
 
 func edgeDNSCandidatePriority(groupID, preferredEdgeGroupID, fallbackEdgeGroupID string) int {

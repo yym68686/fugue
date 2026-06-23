@@ -6014,6 +6014,7 @@ main() {
   FUGUE_DNS_ROUTE_A_ANSWER_IPS="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
   FUGUE_DNS_STATIC_RECORDS_JSON="${FUGUE_DNS_STATIC_RECORDS_JSON:-}"
   FUGUE_PLATFORM_ROUTES_JSON="${FUGUE_PLATFORM_ROUTES_JSON:-}"
+  FUGUE_EDGE_QUALITY_RANKING_MODE="${FUGUE_EDGE_QUALITY_RANKING_MODE:-shadow}"
   FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
   FUGUE_DNS_GEOIP_OVERRIDES_JSON="${FUGUE_DNS_GEOIP_OVERRIDES_JSON:-}"
@@ -6206,6 +6207,10 @@ except Exception as exc:
     raise SystemExit(1)
 PY
   fi
+  case "${FUGUE_EDGE_QUALITY_RANKING_MODE}" in
+    shadow|active|legacy|off|disabled) ;;
+    *) fail "FUGUE_EDGE_QUALITY_RANKING_MODE must be shadow, active, legacy, off, or disabled" ;;
+  esac
   if [[ -n "$(trim_field "${FUGUE_EDGE_ASSET_CACHE_MAX_BYTES}")" ]] && ! [[ "${FUGUE_EDGE_ASSET_CACHE_MAX_BYTES}" =~ ^[0-9]+$ ]]; then
     fail "FUGUE_EDGE_ASSET_CACHE_MAX_BYTES must be an integer"
   fi
@@ -6330,7 +6335,7 @@ PY
   log "cluster join mesh auth key: $([[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] && printf configured || printf '<none>')"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
-  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
+  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) edge_quality_ranking=${FUGUE_EDGE_QUALITY_RANKING_MODE} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
   log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
   log "mesh recovery: enabled=${FUGUE_MESH_RECOVERY_ENABLED} generation=${FUGUE_MESH_RECOVERY_GENERATION} mode=${FUGUE_MESH_RECOVERY_MODE} login_server=${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
@@ -6459,6 +6464,7 @@ PY
     --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
     --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
     --set-string api.databaseURL="${FUGUE_API_DATABASE_URL}" \
+    --set-string api.edgeQualityRankingMode="${FUGUE_EDGE_QUALITY_RANKING_MODE}" \
     --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
     --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \

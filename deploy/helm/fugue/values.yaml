@@ -175,6 +175,7 @@ api:
   apiPublicDomain: ""
   dnsStaticRecordsJSON: ""
   platformRoutesJSON: ""
+  edgeQualityRankingMode: shadow
   edgeTLSAskToken: ""
   allowLegacyEdgeToken: false
   registryPushBase: ""

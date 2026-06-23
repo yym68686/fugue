@@ -170,6 +170,8 @@ spec:
             - name: FUGUE_PLATFORM_ROUTES_JSON
               value: {{ .Values.api.platformRoutesJSON | quote }}
             {{- end }}
+            - name: FUGUE_EDGE_QUALITY_RANKING_MODE
+              value: {{ .Values.api.edgeQualityRankingMode | quote }}
             - name: FUGUE_EDGE_TLS_ASK_TOKEN
               valueFrom:
                 secretKeyRef:
