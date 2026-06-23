@@ -838,6 +838,9 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if spec["progressDeadlineSeconds"] != appProgressDeadlineSeconds {
 		t.Fatalf("expected progressDeadlineSeconds=%d, got %#v", appProgressDeadlineSeconds, spec["progressDeadlineSeconds"])
 	}
+	if spec["minReadySeconds"] != appServiceMinReadySeconds {
+		t.Fatalf("expected minReadySeconds=%d, got %#v", appServiceMinReadySeconds, spec["minReadySeconds"])
+	}
 	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
 	if rollingUpdate["maxUnavailable"] != 0 {
 		t.Fatalf("expected maxUnavailable=0, got %#v", rollingUpdate["maxUnavailable"])
@@ -945,6 +948,9 @@ func TestBuildAppObjectsSkipsServiceForBackgroundApps(t *testing.T) {
 
 	deployment := objects[1]
 	spec := deployment["spec"].(map[string]any)
+	if _, ok := spec["minReadySeconds"]; ok {
+		t.Fatalf("expected background app to omit minReadySeconds, got %#v", spec["minReadySeconds"])
+	}
 	template := spec["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 	containers := podSpec["containers"].([]map[string]any)

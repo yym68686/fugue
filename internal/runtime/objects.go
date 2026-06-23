@@ -26,6 +26,7 @@ const (
 	defaultHelperMemoryLimit      = "128Mi"
 	defaultHelperEphemeralRequest = "32Mi"
 	appProgressDeadlineSeconds    = 3600
+	appServiceMinReadySeconds     = 10
 	AppFilesVolumeName            = "app-files"
 	appFilesVolumeName            = AppFilesVolumeName
 	appFilesSourceMountPath       = "/fugue-app-files"
@@ -467,22 +468,27 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		deploymentMetadata["annotations"] = rolloutAnnotations
 	}
 
+	deploymentSpec := map[string]any{
+		"replicas":                app.Spec.Replicas,
+		"progressDeadlineSeconds": appProgressDeadlineSeconds,
+		"strategy":                deploymentStrategy(app),
+		"selector": map[string]any{
+			"matchLabels": labels,
+		},
+		"template": map[string]any{
+			"metadata": templateMetadata,
+			"spec":     podSpec,
+		},
+	}
+	if minReadySeconds := deploymentMinReadySeconds(app); minReadySeconds > 0 {
+		deploymentSpec["minReadySeconds"] = minReadySeconds
+	}
+
 	object := map[string]any{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
 		"metadata":   deploymentMetadata,
-		"spec": map[string]any{
-			"replicas":                app.Spec.Replicas,
-			"progressDeadlineSeconds": appProgressDeadlineSeconds,
-			"strategy":                deploymentStrategy(app),
-			"selector": map[string]any{
-				"matchLabels": labels,
-			},
-			"template": map[string]any{
-				"metadata": templateMetadata,
-				"spec":     podSpec,
-			},
-		},
+		"spec":       deploymentSpec,
 	}
 	annotateManagedDeploymentReleaseKey(object)
 	return object
@@ -594,6 +600,13 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 		"timeoutSeconds":      1,
 		"failureThreshold":    30,
 	}
+}
+
+func deploymentMinReadySeconds(app model.App) int {
+	if app.Spec.Replicas <= 0 || !model.AppHasClusterService(app.Spec) {
+		return 0
+	}
+	return appServiceMinReadySeconds
 }
 
 func imagePullPolicyForImage(image string) string {
