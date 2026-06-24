@@ -466,14 +466,19 @@ func configuredManagedImportImageRefs(imageRef, pushBase, pullBase string) (stri
 }
 
 func reusableManagedImageLocation(locations []model.ImageLocation, target deployImageTarget) (model.ImageLocation, bool) {
-	if strings.TrimSpace(target.ClusterNodeName) == "" && strings.TrimSpace(target.RuntimeID) == "" {
-		return model.ImageLocation{}, false
-	}
 	for _, location := range locations {
 		if strings.TrimSpace(location.CacheEndpoint) == "" {
 			continue
 		}
 		if imageLocationPresentOnTarget([]model.ImageLocation{location}, target) {
+			return location, true
+		}
+	}
+	if strings.TrimSpace(target.ClusterNodeName) != "" || strings.TrimSpace(target.RuntimeID) != "" {
+		return model.ImageLocation{}, false
+	}
+	for _, location := range locations {
+		if strings.TrimSpace(location.CacheEndpoint) != "" {
 			return location, true
 		}
 	}
