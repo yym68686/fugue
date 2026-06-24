@@ -824,6 +824,38 @@ func (c *kubeClient) patchCloudNativePGClusterStatus(
 	return err
 }
 
+func (c *kubeClient) patchCloudNativePGManagedRoles(
+	ctx context.Context,
+	namespace, name string,
+	roles []map[string]any,
+) error {
+	body := map[string]any{
+		"spec": map[string]any{
+			"managed": map[string]any{
+				"roles": roles,
+			},
+		},
+	}
+	obj := map[string]any{
+		"apiVersion": runtime.CloudNativePGAPIVersion,
+		"kind":       runtime.CloudNativePGClusterKind,
+		"metadata": map[string]any{
+			"name":      strings.TrimSpace(name),
+			"namespace": strings.TrimSpace(namespace),
+		},
+	}
+	c.writeStats.record("patch_managed_roles_attempted", obj)
+	_, err := c.doRequest(
+		ctx,
+		http.MethodPatch,
+		cloudNativePGClusterAPIPath(c.effectiveNamespace(namespace), name),
+		"application/merge-patch+json",
+		body,
+		nil,
+	)
+	return err
+}
+
 func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) (kubeDeployment, bool, error) {
 	var deployment kubeDeployment
 	status, err := c.doJSON(ctx, http.MethodGet, deploymentAPIPath(c.effectiveNamespace(namespace), name), nil, &deployment)

@@ -556,6 +556,123 @@ func TestReplaceObjectSpecsByKindSkipsExistingCloudNativePGClusterWhenContextReq
 	}
 }
 
+func TestReconcileCloudNativePGManagedRolesPatchesExistingClusterWhenSpecWritesAreSkipped(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	var patch map[string]any
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req.Method+" "+req.URL.Path)
+		if req.URL.Path != "/apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres" {
+			t.Fatalf("unexpected request path %s", req.URL.Path)
+		}
+		switch req.Method {
+		case http.MethodGet:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"apiVersion":"postgresql.cnpg.io/v1",
+					"kind":"Cluster",
+					"metadata":{"name":"demo-postgres","namespace":"tenant-demo"},
+					"spec":{
+						"instances":1,
+						"managed":{
+							"roles":[
+								{"name":"reporting","ensure":"present","login":true,"passwordSecret":{"name":"reporting-secret"}},
+								{"name":"demo_user","ensure":"present","login":true,"passwordSecret":{"name":"old-secret"}}
+							]
+						}
+					}
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		case http.MethodPatch:
+			if got := req.Header.Get("Content-Type"); got != "application/merge-patch+json" {
+				t.Fatalf("expected merge patch content type, got %q", got)
+			}
+			if err := json.NewDecoder(req.Body).Decode(&patch); err != nil {
+				t.Fatalf("decode patch body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request method %s", req.Method)
+		}
+		return nil, nil
+	})
+
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   "tenant-demo",
+	}
+	objects := []map[string]any{{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "Cluster",
+		"metadata": map[string]any{
+			"name": "demo-postgres",
+		},
+		"spec": map[string]any{
+			"instances": 2,
+			"managed": map[string]any{
+				"roles": []map[string]any{{
+					"name":            "demo_user",
+					"ensure":          "present",
+					"login":           true,
+					"superuser":       false,
+					"createdb":        false,
+					"createrole":      false,
+					"inherit":         true,
+					"replication":     false,
+					"bypassrls":       false,
+					"connectionLimit": -1,
+					"passwordSecret": map[string]any{
+						"name": "demo-secret",
+					},
+				}},
+			},
+		},
+	}}
+
+	ctx := withSkipExistingCloudNativePGWrites(context.Background())
+	if err := reconcileCloudNativePGManagedRoles(ctx, client, "tenant-demo", objects); err != nil {
+		t.Fatalf("reconcile managed roles: %v", err)
+	}
+	expected := []string{
+		"GET /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+		"PATCH /apis/postgresql.cnpg.io/v1/namespaces/tenant-demo/clusters/demo-postgres",
+	}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+
+	spec := patch["spec"].(map[string]any)
+	managed := spec["managed"].(map[string]any)
+	roles := managed["roles"].([]any)
+	if len(roles) != 2 {
+		t.Fatalf("expected two managed roles in patch, got %#v", roles)
+	}
+	first := roles[0].(map[string]any)
+	if got := first["name"]; got != "reporting" {
+		t.Fatalf("expected unrelated role to be preserved first, got %#v", got)
+	}
+	second := roles[1].(map[string]any)
+	if got := second["name"]; got != "demo_user" {
+		t.Fatalf("expected app role demo_user, got %#v", got)
+	}
+	passwordSecret := second["passwordSecret"].(map[string]any)
+	if got := passwordSecret["name"]; got != "demo-secret" {
+		t.Fatalf("expected app role password secret demo-secret, got %#v", got)
+	}
+	if got := second["connectionLimit"]; got != float64(-1) {
+		t.Fatalf("expected app role connection limit -1, got %#v", got)
+	}
+}
+
 func TestReplaceObjectSpecsByKindDoesNotSkipRemovedOptionalCloudNativePGFields(t *testing.T) {
 	t.Parallel()
 

@@ -398,6 +398,33 @@ func TestNormalizeRuntimePostgresSpecAllowsAsyncMultiInstance(t *testing.T) {
 	}
 }
 
+func TestBuildPostgresClusterManagesApplicationRolePassword(t *testing.T) {
+	spec := normalizeRuntimePostgresSpec("fugue-web", model.AppPostgresSpec{
+		Database: "fugue",
+		User:     "fugue_web",
+		Password: "secret",
+	})
+
+	cluster := buildPostgresClusterObject("tenant-demo", "demo-secret", "demo-postgres", nil, spec, nil)
+	clusterSpec := cluster["spec"].(map[string]any)
+	managed := clusterSpec["managed"].(map[string]any)
+	roles := managed["roles"].([]map[string]any)
+	if len(roles) != 1 {
+		t.Fatalf("expected one managed role, got %#v", roles)
+	}
+	role := roles[0]
+	if got := role["name"]; got != "fugue_web" {
+		t.Fatalf("expected managed role name fugue_web, got %#v", got)
+	}
+	if got := role["login"]; got != true {
+		t.Fatalf("expected managed role login true, got %#v", got)
+	}
+	passwordSecret := role["passwordSecret"].(map[string]any)
+	if got := passwordSecret["name"]; got != "demo-secret" {
+		t.Fatalf("expected managed role password secret demo-secret, got %#v", got)
+	}
+}
+
 func TestNormalizeRuntimePostgresSpecStripsOfficialPostgresImage(t *testing.T) {
 	spec := normalizeRuntimePostgresSpec("fugue-web", model.AppPostgresSpec{
 		Image: "postgres:16-alpine",
@@ -2053,6 +2080,9 @@ func TestBuildManagedPostgresObjectsUseStableSelectors(t *testing.T) {
 	}
 	if got := secretLabels[FugueLabelOwnerAppID]; got != "app_demo" {
 		t.Fatalf("expected postgres secret label %s=%q, got %#v", FugueLabelOwnerAppID, "app_demo", got)
+	}
+	if got := secretLabels[CloudNativePGReloadLabel]; got != "true" {
+		t.Fatalf("expected postgres secret label %s=%q, got %#v", CloudNativePGReloadLabel, "true", got)
 	}
 
 	postgresAliasService := objects[2]

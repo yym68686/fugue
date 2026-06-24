@@ -41,6 +41,7 @@ const (
 	CloudNativePGClusterKind          = "Cluster"
 	CloudNativePGReconcilePodSpecAnno = "cnpg.io/reconcilePodSpec"
 	CloudNativePGReconcilePodSpecHold = "disabled"
+	CloudNativePGReloadLabel          = "cnpg.io/reload"
 	KubernetesNetworkPolicyAPIVersion = "networking.k8s.io/v1"
 	VolSyncAPIVersion                 = "volsync.backube/v1alpha1"
 	VolSyncReplicationSourceKind      = "ReplicationSource"
@@ -232,13 +233,18 @@ func buildAppSSHAuthorizedKeysSecretObject(namespace, appName string, authorized
 }
 
 func buildPostgresSecretObject(namespace, secretName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
+	secretLabels := make(map[string]string, len(labels)+1)
+	for key, value := range labels {
+		secretLabels[key] = value
+	}
+	secretLabels[CloudNativePGReloadLabel] = "true"
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]any{
 			"name":      secretName,
 			"namespace": namespace,
-			"labels":    labels,
+			"labels":    secretLabels,
 		},
 		"type": "Opaque",
 		"stringData": map[string]string{
@@ -268,6 +274,11 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 		"storage": map[string]any{
 			"size": spec.StorageSize,
 		},
+	}
+	if role := buildPostgresManagedRole(secretName, spec); role != nil {
+		clusterSpec["managed"] = map[string]any{
+			"roles": []map[string]any{role},
+		}
 	}
 	if strings.TrimSpace(spec.StorageClassName) != "" {
 		clusterSpec["storage"].(map[string]any)["storageClass"] = strings.TrimSpace(spec.StorageClassName)
@@ -302,6 +313,29 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 		"kind":       CloudNativePGClusterKind,
 		"metadata":   metadata,
 		"spec":       clusterSpec,
+	}
+}
+
+func buildPostgresManagedRole(secretName string, spec model.AppPostgresSpec) map[string]any {
+	user := strings.TrimSpace(spec.User)
+	secretName = strings.TrimSpace(secretName)
+	if user == "" || secretName == "" {
+		return nil
+	}
+	return map[string]any{
+		"name":            user,
+		"ensure":          "present",
+		"login":           true,
+		"superuser":       false,
+		"createdb":        false,
+		"createrole":      false,
+		"inherit":         true,
+		"replication":     false,
+		"bypassrls":       false,
+		"connectionLimit": -1,
+		"passwordSecret": map[string]any{
+			"name": secretName,
+		},
 	}
 }
 

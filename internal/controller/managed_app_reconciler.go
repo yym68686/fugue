@@ -276,6 +276,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := client.applyObjects(applyCtx, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("apply managed app child objects: %w", err))
 	}
+	if err := reconcileCloudNativePGManagedRoles(ctx, client, namespace, childObjects); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("reconcile managed postgres roles: %w", err))
+	}
 	if err := client.replaceObjectSpecsByKind(ctx, childObjects, "apps/v1", "Deployment"); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed app deployment desired spec: %w", err))
 	}
