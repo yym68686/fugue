@@ -103,6 +103,39 @@ func TestAppSSHConfigRejectsUnsupportedStatus(t *testing.T) {
 	}
 }
 
+func TestAppSSHShowJSONRedactsAppSecretsByDefault(t *testing.T) {
+	t.Parallel()
+
+	server := newCLISSHTestServer(t, model.AppSSHStatus{
+		Supported:  true,
+		Ready:      true,
+		Hostname:   "ssh.fugue.pro",
+		PublicPort: 23417,
+		TargetPort: 22,
+		User:       "fugue",
+	})
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "test-token",
+		"--json",
+		"app", "ssh", "show", "agent",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app ssh show json: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "super-secret-value") {
+		t.Fatalf("expected app ssh JSON output to redact app env secret, got %q", out)
+	}
+	if !strings.Contains(out, `"SECRET_TOKEN": "[redacted]"`) {
+		t.Fatalf("expected app ssh JSON output to contain redacted env, got %q", out)
+	}
+}
+
 func TestSSHKeyListRendersTable(t *testing.T) {
 	t.Parallel()
 
@@ -206,7 +239,10 @@ func newCLISSHTestServer(t *testing.T, status model.AppSSHStatus) *httptest.Serv
 		ProjectID: "project_123",
 		Name:      "agent",
 		Spec: model.AppSpec{
-			Image:    "ghcr.io/example/agent:ssh",
+			Image: "ghcr.io/example/agent:ssh",
+			Env: map[string]string{
+				"SECRET_TOKEN": "super-secret-value",
+			},
 			Replicas: 1,
 		},
 	}

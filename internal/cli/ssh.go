@@ -252,7 +252,7 @@ func (c *CLI) newAppSSHDiagnoseCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, resp)
+				return writeJSON(c.stdout, c.appSSHDiagnosisResponseForOutput(resp))
 			}
 			if err := writeAppSSHStatus(c.stdout, resp.App, resp.SSH, c.showIDs()); err != nil {
 				return err
@@ -300,8 +300,9 @@ func (c *CLI) newAppSSHConfigCommand() *cobra.Command {
 				return err
 			}
 			if c.wantsJSON() {
+				app := c.appForOutput(resp.App)
 				return writeJSON(c.stdout, map[string]any{
-					"app":         resp.App,
+					"app":         app,
 					"ssh":         resp.SSH,
 					"config":      appSSHOpenSSHConfig(resp.App, resp.SSH, identityFile),
 					"ssh_command": appSSHCommand(resp.SSH, identityFile),
@@ -328,8 +329,9 @@ func (c *CLI) runAppSSHConnect(appRef string, opts appSSHConnectOptions) error {
 		return err
 	}
 	if c.wantsJSON() {
+		app := c.appForOutput(resp.App)
 		return writeJSON(c.stdout, map[string]any{
-			"app":         resp.App,
+			"app":         app,
 			"ssh":         resp.SSH,
 			"ssh_command": appSSHCommand(resp.SSH, opts.IdentityFile),
 		})
@@ -367,9 +369,33 @@ func (c *CLI) resolveAppSSHClientAndApp(appRef string) (*Client, model.App, erro
 
 func (c *CLI) writeAppSSHResponse(resp appSSHResponse) error {
 	if c.wantsJSON() {
-		return writeJSON(c.stdout, resp)
+		return writeJSON(c.stdout, c.appSSHResponseForOutput(resp))
 	}
 	return writeAppSSHStatus(c.stdout, resp.App, resp.SSH, c.showIDs())
+}
+
+func (c *CLI) appSSHResponseForOutput(resp appSSHResponse) appSSHResponse {
+	if !c.shouldRedact() {
+		return resp
+	}
+	resp.App = redactAppForOutput(resp.App)
+	resp.Operation = redactOperationPtrForOutput(resp.Operation)
+	return resp
+}
+
+func (c *CLI) appSSHDiagnosisResponseForOutput(resp appSSHDiagnosisResponse) appSSHDiagnosisResponse {
+	if !c.shouldRedact() {
+		return resp
+	}
+	resp.App = redactAppForOutput(resp.App)
+	return resp
+}
+
+func (c *CLI) appForOutput(app model.App) model.App {
+	if !c.shouldRedact() {
+		return app
+	}
+	return redactAppForOutput(app)
 }
 
 func ensureAppSSHConnectable(status model.AppSSHStatus) error {
