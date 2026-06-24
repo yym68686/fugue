@@ -244,6 +244,8 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.Projects = deleteProjectsByTenant(state.Projects, id)
 		state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByTenant(state.ProjectRuntimeReservations, id)
 		state.APIKeys = deleteAPIKeysByTenant(state.APIKeys, id)
+		state.SSHKeys = deleteSSHKeysByTenant(state.SSHKeys, id)
+		state.AppSSHEndpoints = deleteAppSSHEndpointsByTenant(state.AppSSHEndpoints, id)
 		state.EnrollmentTokens = deleteEnrollmentTokensByTenant(state.EnrollmentTokens, id)
 
 		deletedNodeKeyIDs := make(map[string]struct{})
@@ -2478,6 +2480,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
 		state.AppReleases = deleteAppReleasesByApp(state.AppReleases, id)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByApp(state.AppTrafficPolicies, id)
+		state.AppSSHEndpoints = deleteAppSSHEndpointsByApp(state.AppSSHEndpoints, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByApp(state.AppDatabaseImportJobs, id)
 		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByApp(state.AppDatabaseAccessGrants, id)
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
@@ -3776,6 +3779,12 @@ func ensureDefaults(state *model.State) {
 		state.APIKeys = []model.APIKey{}
 	}
 	repairAllAPIKeyStatuses(state)
+	if state.SSHKeys == nil {
+		state.SSHKeys = []model.SSHKey{}
+	}
+	if state.AppSSHEndpoints == nil {
+		state.AppSSHEndpoints = []model.AppSSHEndpoint{}
+	}
 	if state.EnrollmentTokens == nil {
 		state.EnrollmentTokens = []model.EnrollmentToken{}
 	}
@@ -4226,6 +4235,12 @@ func cloneAppSpec(in *model.AppSpec) *model.AppSpec {
 	}
 	if in.NetworkPolicy != nil {
 		out.NetworkPolicy = cloneAppNetworkPolicy(in.NetworkPolicy)
+	}
+	if in.SSH != nil {
+		ssh := *in.SSH
+		ssh.AuthorizedKeyIDs = append([]string(nil), in.SSH.AuthorizedKeyIDs...)
+		ssh.AuthorizedKeys = append([]string(nil), in.SSH.AuthorizedKeys...)
+		out.SSH = &ssh
 	}
 	if in.PersistentStorage != nil {
 		storage := *in.PersistentStorage

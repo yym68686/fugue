@@ -32,6 +32,9 @@ type APIConfig struct {
 	ControlPlaneGitHubToken       string
 	AppBaseDomain                 string
 	APIPublicDomain               string
+	SSHPublicHost                 string
+	SSHPublicPortStart            int
+	SSHPublicPortEnd              int
 	DNSStaticRecordsJSON          string
 	PlatformRoutesJSON            string
 	EdgeQualityRankingMode        string
@@ -248,6 +251,9 @@ func APIFromEnv() APIConfig {
 		ControlPlaneGitHubToken:       strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_TOKEN")),
 		AppBaseDomain:                 getenv("FUGUE_APP_BASE_DOMAIN", ""),
 		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
+		SSHPublicHost:                 strings.TrimSpace(os.Getenv("FUGUE_SSH_PUBLIC_HOST")),
+		SSHPublicPortStart:            getenvInt("FUGUE_SSH_PUBLIC_PORT_START", 22000),
+		SSHPublicPortEnd:              getenvInt("FUGUE_SSH_PUBLIC_PORT_END", 32000),
 		DNSStaticRecordsJSON:          strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
 		PlatformRoutesJSON:            strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
 		EdgeQualityRankingMode:        getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),

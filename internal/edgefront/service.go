@@ -18,6 +18,7 @@ import (
 
 	"fugue/internal/proxyproto"
 	"fugue/internal/tcpdiag"
+	"fugue/internal/tcpproxy"
 )
 
 const (
@@ -61,12 +62,7 @@ type Service struct {
 	sequence uint64
 }
 
-type tcpCopyResult struct {
-	name     string
-	bytes    int64
-	duration time.Duration
-	err      error
-}
+type tcpCopyResult = tcpproxy.CopyResult
 
 type edgeFrontActiveTCPConnection struct {
 	ID               string
@@ -363,50 +359,10 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 	}
 	connectionID := s.startTCPConnection(protocol, slot, target, downstream, upstream, startedAt, cfg.ProxyProtocol)
 	defer s.finishTCPConnection(connectionID)
-	clientToWorker, workerToClient, firstCompleted := proxyConns(downstream, upstream)
+	clientToWorker, workerToClient, firstCompleted := tcpproxy.CopyBidirectional(downstream, upstream, "client_to_worker", "worker_to_client")
 	clientTCPInfo := tcpdiag.SnapshotFromConn(downstream)
 	s.recordTCPConnection(protocol, slot, firstCompleted, cfg.ProxyProtocol, time.Since(startedAt), clientToWorker, workerToClient, clientTCPInfo)
 	s.logTCPConnection(protocol, slot, target, downstream, upstream, startedAt, clientToWorker, workerToClient, firstCompleted, cfg.ProxyProtocol, clientTCPInfo)
-}
-
-func proxyConns(a net.Conn, b net.Conn) (tcpCopyResult, tcpCopyResult, string) {
-	var wg sync.WaitGroup
-	results := make(chan tcpCopyResult, 2)
-	copyAndClose := func(name string, dst net.Conn, src net.Conn) {
-		defer wg.Done()
-		startedAt := time.Now()
-		n, err := io.Copy(dst, src)
-		closeWrite(dst)
-		results <- tcpCopyResult{
-			name:     name,
-			bytes:    n,
-			duration: time.Since(startedAt),
-			err:      err,
-		}
-	}
-	wg.Add(2)
-	go copyAndClose("worker_to_client", a, b)
-	go copyAndClose("client_to_worker", b, a)
-	first := <-results
-	wg.Wait()
-	second := <-results
-	close(results)
-
-	clientToWorker := first
-	workerToClient := second
-	if first.name == "worker_to_client" {
-		clientToWorker = second
-		workerToClient = first
-	}
-	return clientToWorker, workerToClient, first.name
-}
-
-func closeWrite(conn net.Conn) {
-	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		_ = tcpConn.CloseWrite()
-		return
-	}
-	_ = conn.Close()
 }
 
 func (s *Service) startTCPConnection(protocol, slot, target string, downstream, upstream net.Conn, startedAt time.Time, proxyProtocol bool) string {
@@ -467,14 +423,14 @@ func (s *Service) recordTCPConnection(protocol, slot, firstCompleted string, pro
 	if s.metrics.ClientToWorkerBytes == nil {
 		s.metrics.ClientToWorkerBytes = make(map[edgeFrontMetricKey]uint64)
 	}
-	if clientToWorker.bytes > 0 {
-		s.metrics.ClientToWorkerBytes[key] += uint64(clientToWorker.bytes)
+	if clientToWorker.Bytes > 0 {
+		s.metrics.ClientToWorkerBytes[key] += uint64(clientToWorker.Bytes)
 	}
 	if s.metrics.WorkerToClientBytes == nil {
 		s.metrics.WorkerToClientBytes = make(map[edgeFrontMetricKey]uint64)
 	}
-	if workerToClient.bytes > 0 {
-		s.metrics.WorkerToClientBytes[key] += uint64(workerToClient.bytes)
+	if workerToClient.Bytes > 0 {
+		s.metrics.WorkerToClientBytes[key] += uint64(workerToClient.Bytes)
 	}
 	if duration > 0 {
 		if s.metrics.DurationCount == nil {
@@ -792,12 +748,12 @@ func (s *Service) logTCPConnection(protocol, slot, target string, downstream, up
 		connAddr(downstream.LocalAddr()),
 		connAddr(upstream.LocalAddr()),
 		duration.Milliseconds(),
-		clientToWorker.bytes,
-		clientToWorker.duration.Milliseconds(),
-		logSafeTCPError(clientToWorker.err),
-		workerToClient.bytes,
-		workerToClient.duration.Milliseconds(),
-		logSafeTCPError(workerToClient.err),
+		clientToWorker.Bytes,
+		clientToWorker.Duration.Milliseconds(),
+		logSafeTCPError(clientToWorker.Err),
+		workerToClient.Bytes,
+		workerToClient.Duration.Milliseconds(),
+		logSafeTCPError(workerToClient.Err),
 		firstCompleted,
 		proxyProtocol,
 		clientTCPInfo.Available,
@@ -818,12 +774,12 @@ func (s *Service) logTCPConnection(protocol, slot, target string, downstream, up
 		"downstream_local":       connAddr(downstream.LocalAddr()),
 		"upstream_local":         connAddr(upstream.LocalAddr()),
 		"duration_ms":            duration.Milliseconds(),
-		"client_to_worker_bytes": nonNegativeTCPInt64(clientToWorker.bytes),
-		"client_to_worker_ms":    durationTCPMilliseconds(clientToWorker.duration),
-		"client_to_worker_error": logSafeTCPError(clientToWorker.err),
-		"worker_to_client_bytes": nonNegativeTCPInt64(workerToClient.bytes),
-		"worker_to_client_ms":    durationTCPMilliseconds(workerToClient.duration),
-		"worker_to_client_error": logSafeTCPError(workerToClient.err),
+		"client_to_worker_bytes": nonNegativeTCPInt64(clientToWorker.Bytes),
+		"client_to_worker_ms":    durationTCPMilliseconds(clientToWorker.Duration),
+		"client_to_worker_error": logSafeTCPError(clientToWorker.Err),
+		"worker_to_client_bytes": nonNegativeTCPInt64(workerToClient.Bytes),
+		"worker_to_client_ms":    durationTCPMilliseconds(workerToClient.Duration),
+		"worker_to_client_error": logSafeTCPError(workerToClient.Err),
 		"first_completed":        strings.TrimSpace(firstCompleted),
 		"proxy_protocol":         proxyProtocol,
 	}

@@ -55,6 +55,8 @@ controller:
 
 edge:
   enabled: true
+  sshFront:
+    enabled: false
   nodeSelector:
     fugue.io/role.edge: "true"
     fugue.io/schedulable: "true"

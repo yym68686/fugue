@@ -268,6 +268,7 @@ Environment variables:
 		c.newDebugCommand(),
 		c.newSourceUploadCommand(),
 		c.newAuthCommand(),
+		c.newSSHKeyCommand(),
 		c.newTenantCommand(),
 		c.newProjectCommand(),
 		c.newRuntimeCommand(),

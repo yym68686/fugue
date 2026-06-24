@@ -997,6 +997,124 @@ func TestBuildAppObjectsKeepsInternalServiceWithoutPublicRoute(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsRendersSSHPortWithoutChangingHTTPReadiness(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "web-agent",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/agent:ssh",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			SSH: &model.AppSSHSpec{
+				Enabled:        true,
+				TargetPort:     22,
+				User:           "fugue",
+				AuthorizedKeys: []string{"ssh-ed25519 AQIDBAUGBwg= laptop"},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	secret := firstObjectByKind(t, objects, "Secret")
+	stringData := secret["stringData"].(map[string]string)
+	if got := stringData["authorized_keys"]; got != "ssh-ed25519 AQIDBAUGBwg= laptop\n" {
+		t.Fatalf("expected authorized_keys secret content, got %q", got)
+	}
+
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	container := podSpec["containers"].([]map[string]any)[0]
+	readinessProbe := container["readinessProbe"].(map[string]any)
+	tcpSocket := readinessProbe["tcpSocket"].(map[string]any)
+	if tcpSocket["port"] != 8080 {
+		t.Fatalf("expected HTTP readiness to stay on port 8080, got %#v", tcpSocket["port"])
+	}
+	containerPorts := container["ports"].([]map[string]any)
+	if !containerPortsContain(containerPorts, 8080) || !containerPortsContain(containerPorts, 22) {
+		t.Fatalf("expected container ports 8080 and 22, got %#v", containerPorts)
+	}
+	volumeMounts := container["volumeMounts"].([]map[string]any)
+	if got := volumeMounts[0]["mountPath"]; got != model.DefaultAppSSHAuthorizedKeysPath {
+		t.Fatalf("expected authorized_keys mount path, got %#v", got)
+	}
+
+	service := firstObjectByKind(t, objects, "Service")
+	servicePorts := service["spec"].(map[string]any)["ports"].([]map[string]any)
+	if !servicePortsContain(servicePorts, 8080) || !servicePortsContain(servicePorts, 22) {
+		t.Fatalf("expected service ports 8080 and 22, got %#v", servicePorts)
+	}
+}
+
+func TestBuildAppObjectsSSHKeyChecksumRollsTemplate(t *testing.T) {
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "web-agent",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/agent:ssh",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			SSH: &model.AppSSHSpec{
+				Enabled:        true,
+				TargetPort:     22,
+				AuthorizedKeys: []string{"ssh-ed25519 AQIDBAUGBwg= laptop"},
+			},
+		},
+	}
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+	annotations := template["metadata"].(map[string]any)["annotations"].(map[string]string)
+	initialChecksum := annotations["fugue.pro/ssh-authorized-keys-checksum"]
+	if initialChecksum == "" {
+		t.Fatal("expected ssh authorized keys checksum annotation")
+	}
+
+	app.Spec.SSH.AuthorizedKeys = []string{"ssh-ed25519 CQoLDA0ODxA= workstation"}
+	updatedObjects := buildAppObjects(app, SchedulingConstraints{})
+	updatedDeployment := firstObjectByKind(t, updatedObjects, "Deployment")
+	updatedTemplate := updatedDeployment["spec"].(map[string]any)["template"].(map[string]any)
+	updatedAnnotations := updatedTemplate["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if updatedAnnotations["fugue.pro/ssh-authorized-keys-checksum"] == initialChecksum {
+		t.Fatal("expected ssh authorized keys checksum to change when key content changes")
+	}
+}
+
+func TestBuildAppObjectsRendersServiceForBackgroundSSHApp(t *testing.T) {
+	app := model.App{
+		ID:       "app_worker",
+		TenantID: "tenant_demo",
+		Name:     "worker",
+		Spec: model.AppSpec{
+			Image:       "ghcr.io/example/worker:ssh",
+			NetworkMode: model.AppNetworkModeBackground,
+			Replicas:    1,
+			RuntimeID:   "runtime_demo",
+			SSH: &model.AppSSHSpec{
+				Enabled:        true,
+				TargetPort:     22,
+				AuthorizedKeys: []string{"ssh-ed25519 AQIDBAUGBwg= laptop"},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	service := firstObjectByKind(t, objects, "Service")
+	servicePorts := service["spec"].(map[string]any)["ports"].([]map[string]any)
+	if len(servicePorts) != 1 || servicePorts[0]["port"] != 22 {
+		t.Fatalf("expected SSH-only service port 22, got %#v", servicePorts)
+	}
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	container := deployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]map[string]any)[0]
+	if _, ok := container["readinessProbe"]; ok {
+		t.Fatalf("expected background SSH app to omit HTTP readiness, got %#v", container["readinessProbe"])
+	}
+}
+
 func TestBuildAppDeploymentOmitsResourcesWhenUnset(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",
@@ -2242,6 +2360,41 @@ func TestBuildAppObjectsIncludesRestrictedNetworkPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildAppObjectsNetworkPolicyAllowsSSHFront(t *testing.T) {
+	app := model.App{
+		ID:       "app_session",
+		TenantID: "tenant_demo",
+		Name:     "session",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/session:ssh",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			SSH: &model.AppSSHSpec{
+				Enabled:        true,
+				TargetPort:     2222,
+				AuthorizedKeys: []string{"ssh-ed25519 AQIDBAUGBwg= laptop"},
+			},
+			NetworkPolicy: &model.AppNetworkPolicySpec{
+				Ingress: &model.AppNetworkPolicyDirectionSpec{
+					Mode: model.AppNetworkPolicyModeRestricted,
+				},
+			},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	networkPolicy := firstObjectByKind(t, objects, "NetworkPolicy")
+	spec := networkPolicy["spec"].(map[string]any)
+	ingress := spec["ingress"].([]map[string]any)
+	sshRule := networkPolicyIngressRuleByPodSelector(t, ingress, map[string]string{
+		"app.kubernetes.io/component": "fugue-ssh-front",
+	})
+	ports := sshRule["ports"].([]map[string]any)
+	if len(ports) != 1 || ports[0]["port"] != 2222 {
+		t.Fatalf("expected ssh-front ingress port 2222, got %#v", ports)
+	}
+}
+
 func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",
@@ -2344,6 +2497,38 @@ func networkPolicyRuleByPodSelector(t *testing.T, rules []map[string]any, select
 	return nil
 }
 
+func networkPolicyIngressRuleByPodSelector(t *testing.T, rules []map[string]any, selector map[string]string) map[string]any {
+	t.Helper()
+	for _, rule := range rules {
+		targets, ok := rule["from"].([]map[string]any)
+		if !ok {
+			continue
+		}
+		for _, target := range targets {
+			podSelector, ok := target["podSelector"].(map[string]any)
+			if !ok {
+				continue
+			}
+			matchLabels, ok := podSelector["matchLabels"].(map[string]string)
+			if !ok {
+				continue
+			}
+			matched := true
+			for key, value := range selector {
+				if matchLabels[key] != value {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return rule
+			}
+		}
+	}
+	t.Fatalf("expected network policy ingress rule with pod selector %#v in %#v", selector, rules)
+	return nil
+}
+
 func networkPolicyTargetWithPodSelector(t *testing.T, rule map[string]any, selector map[string]string) map[string]any {
 	t.Helper()
 	target := networkPolicyTargetWithPodSelectorMaybe(rule, selector)
@@ -2438,6 +2623,24 @@ func networkPolicyHasPortOnlyDNSRule(rules []map[string]any) bool {
 func stringSliceContains(values []string, needle string) bool {
 	for _, value := range values {
 		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func containerPortsContain(ports []map[string]any, want int) bool {
+	for _, port := range ports {
+		if port["containerPort"] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func servicePortsContain(ports []map[string]any, want int) bool {
+	for _, port := range ports {
+		if port["port"] == want {
 			return true
 		}
 	}

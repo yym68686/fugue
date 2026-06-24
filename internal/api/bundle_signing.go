@@ -28,6 +28,10 @@ func signEdgeRouteBundle(bundle model.EdgeRouteBundle, keyring bundleauth.Keyrin
 	return bundleauth.SignEdgeRouteBundleWithKeyring(bundle, keyring, validFor)
 }
 
+func signEdgeSSHRouteBundle(bundle model.EdgeSSHRouteBundle, keyring bundleauth.Keyring, validFor time.Duration) model.EdgeSSHRouteBundle {
+	return bundleauth.SignEdgeSSHRouteBundleWithKeyring(bundle, keyring, validFor)
+}
+
 func signEdgeDNSBundle(bundle model.EdgeDNSBundle, keyring bundleauth.Keyring, validFor time.Duration) model.EdgeDNSBundle {
 	return bundleauth.SignEdgeDNSBundleWithKeyring(bundle, keyring, validFor)
 }

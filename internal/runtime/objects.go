@@ -15,26 +15,27 @@ import (
 )
 
 const (
-	defaultPostgresImage          = ""
-	defaultPostgresStorage        = model.DefaultManagedPostgresStorageSize
-	defaultPostgresInstances      = 1
-	defaultWorkspaceStorage       = "10Gi"
-	defaultWaitImage              = "busybox:1.36"
-	defaultHelperCPURequest       = "25m"
-	defaultHelperCPULimit         = "100m"
-	defaultHelperMemoryRequest    = "32Mi"
-	defaultHelperMemoryLimit      = "128Mi"
-	defaultHelperEphemeralRequest = "32Mi"
-	appProgressDeadlineSeconds    = 3600
-	appServiceMinReadySeconds     = 10
-	AppFilesVolumeName            = "app-files"
-	appFilesVolumeName            = AppFilesVolumeName
-	appFilesSourceMountPath       = "/fugue-app-files"
-	AppWorkspaceContainerName     = "fugue-workspace"
-	workspaceVolumeName           = "app-workspace"
-	workspaceSidecarName          = AppWorkspaceContainerName
-	persistentStorageRootPath     = "/fugue-persistent-storage"
-	projectSharedStorageComponent = "project-shared-persistent-storage"
+	defaultPostgresImage           = ""
+	defaultPostgresStorage         = model.DefaultManagedPostgresStorageSize
+	defaultPostgresInstances       = 1
+	defaultWorkspaceStorage        = "10Gi"
+	defaultWaitImage               = "busybox:1.36"
+	defaultHelperCPURequest        = "25m"
+	defaultHelperCPULimit          = "100m"
+	defaultHelperMemoryRequest     = "32Mi"
+	defaultHelperMemoryLimit       = "128Mi"
+	defaultHelperEphemeralRequest  = "32Mi"
+	appProgressDeadlineSeconds     = 3600
+	appServiceMinReadySeconds      = 10
+	AppFilesVolumeName             = "app-files"
+	appFilesVolumeName             = AppFilesVolumeName
+	appSSHAuthorizedKeysVolumeName = "app-ssh-authorized-keys"
+	appFilesSourceMountPath        = "/fugue-app-files"
+	AppWorkspaceContainerName      = "fugue-workspace"
+	workspaceVolumeName            = "app-workspace"
+	workspaceSidecarName           = AppWorkspaceContainerName
+	persistentStorageRootPath      = "/fugue-persistent-storage"
+	projectSharedStorageComponent  = "project-shared-persistent-storage"
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
@@ -65,6 +66,9 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 
 	if len(app.Spec.Files) > 0 {
 		objects = append(objects, buildAppFilesSecretObject(namespace, appRuntimeName, app.Spec.Files, labels))
+	}
+	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil && len(ssh.AuthorizedKeys) > 0 {
+		objects = append(objects, buildAppSSHAuthorizedKeysSecretObject(namespace, appRuntimeName, ssh.AuthorizedKeys, labels))
 	}
 
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
@@ -204,6 +208,26 @@ func buildAppFilesSecretObject(namespace, appName string, files []model.AppFile,
 		},
 		"type":       "Opaque",
 		"stringData": stringData,
+	}
+}
+
+func buildAppSSHAuthorizedKeysSecretObject(namespace, appName string, authorizedKeys []string, labels map[string]string) map[string]any {
+	content := strings.TrimSpace(strings.Join(model.NormalizeSSHPublicKeys(authorizedKeys), "\n"))
+	if content != "" {
+		content += "\n"
+	}
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name":      appSSHAuthorizedKeysSecretName(appName),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"type": "Opaque",
+		"stringData": map[string]string{
+			"authorized_keys": content,
+		},
 	}
 }
 
@@ -349,15 +373,17 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	if len(app.Spec.Args) > 0 {
 		container["args"] = app.Spec.Args
 	}
-	if len(app.Spec.Ports) > 0 {
-		ports := make([]map[string]any, 0, len(app.Spec.Ports))
-		for _, port := range app.Spec.Ports {
+	if containerPorts := appContainerPorts(app.Spec); len(containerPorts) > 0 {
+		ports := make([]map[string]any, 0, len(containerPorts))
+		for _, port := range containerPorts {
 			ports = append(ports, map[string]any{
 				"containerPort": port,
 				"protocol":      "TCP",
 			})
 		}
 		container["ports"] = ports
+	}
+	if len(app.Spec.Ports) > 0 {
 		container["readinessProbe"] = buildAppTCPReadinessProbe(app.Spec.Ports[0])
 	}
 	if env := mergedRuntimeEnv(app); len(env) > 0 {
@@ -387,6 +413,21 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			},
 		})
 		volumeMounts = append(volumeMounts, buildAppFileVolumeMounts(app.Spec.Files)...)
+	}
+	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil && len(ssh.AuthorizedKeys) > 0 {
+		volumes = append(volumes, map[string]any{
+			"name": appSSHAuthorizedKeysVolumeName,
+			"secret": map[string]any{
+				"secretName":  appSSHAuthorizedKeysSecretName(resourceName),
+				"defaultMode": 0o444,
+			},
+		})
+		volumeMounts = append(volumeMounts, map[string]any{
+			"name":      appSSHAuthorizedKeysVolumeName,
+			"mountPath": ssh.AuthorizedKeysPath,
+			"subPath":   "authorized_keys",
+			"readOnly":  true,
+		})
 	}
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
 		volumeMounts = append(volumeMounts, map[string]any{
@@ -1048,11 +1089,11 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 }
 
 func buildAppServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
-	if !model.AppHasClusterService(app.Spec) {
+	if !model.AppHasClusterService(app.Spec) && !model.AppSSHEnabled(app.Spec) {
 		return nil
 	}
 
-	servicePorts := appServicePorts(app.Spec.Ports)
+	servicePorts := appServicePortsForSpec(app.Spec)
 	if len(servicePorts) == 0 {
 		return nil
 	}
@@ -1087,6 +1128,31 @@ func appServicePorts(ports []int) []map[string]any {
 	return servicePorts
 }
 
+func appServicePortsForSpec(spec model.AppSpec) []map[string]any {
+	return appServicePorts(appContainerPorts(spec))
+}
+
+func appContainerPorts(spec model.AppSpec) []int {
+	ports := make([]int, 0, len(spec.Ports)+1)
+	seen := map[int]struct{}{}
+	for _, port := range spec.Ports {
+		if port <= 0 || port > 65535 {
+			continue
+		}
+		if _, ok := seen[port]; ok {
+			continue
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+	if sshPort := model.AppSSHTargetPort(spec); sshPort > 0 {
+		if _, ok := seen[sshPort]; !ok {
+			ports = append(ports, sshPort)
+		}
+	}
+	return ports
+}
+
 func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[string]string, postgresResources []postgresRuntimeResource) map[string]any {
 	policy := app.Spec.NetworkPolicy
 	if policy == nil {
@@ -1106,7 +1172,7 @@ func buildAppNetworkPolicyObject(namespace string, app model.App, labels map[str
 	policyTypes := make([]string, 0, 2)
 	if networkPolicyDirectionRestricted(policy.Ingress) {
 		policyTypes = append(policyTypes, "Ingress")
-		spec["ingress"] = buildNetworkPolicyIngressRules(policy.Ingress)
+		spec["ingress"] = buildNetworkPolicyIngressRules(policy.Ingress, app.Spec)
 	}
 	if networkPolicyDirectionRestricted(policy.Egress) {
 		policyTypes = append(policyTypes, "Egress")
@@ -1133,7 +1199,7 @@ func networkPolicyDirectionRestricted(direction *model.AppNetworkPolicyDirection
 	return direction != nil && model.NormalizeAppNetworkPolicyMode(direction.Mode) == model.AppNetworkPolicyModeRestricted
 }
 
-func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSpec) []map[string]any {
+func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSpec, appSpec model.AppSpec) []map[string]any {
 	if direction == nil {
 		return nil
 	}
@@ -1149,7 +1215,31 @@ func buildNetworkPolicyIngressRules(direction *model.AppNetworkPolicyDirectionSp
 		}
 		rules = append(rules, rule)
 	}
+	if sshPort := model.AppSSHTargetPort(appSpec); sshPort > 0 {
+		rules = append(rules, buildNetworkPolicySSHFrontIngressRule(sshPort))
+	}
 	return rules
+}
+
+func buildNetworkPolicySSHFrontIngressRule(port int) map[string]any {
+	return map[string]any{
+		"from": []map[string]any{
+			{
+				"namespaceSelector": map[string]any{},
+				"podSelector": map[string]any{
+					"matchLabels": map[string]string{
+						"app.kubernetes.io/component": "fugue-ssh-front",
+					},
+				},
+			},
+		},
+		"ports": []map[string]any{
+			{
+				"protocol": "TCP",
+				"port":     port,
+			},
+		},
+	}
 }
 
 func buildNetworkPolicyEgressRules(direction *model.AppNetworkPolicyDirectionSpec, postgresResources []postgresRuntimeResource, appObservabilityEndpoint string) []map[string]any {
@@ -1683,6 +1773,9 @@ func buildAppTemplateAnnotations(spec model.AppSpec) map[string]string {
 	if checksum := appFilesChecksum(spec.Files); checksum != "" {
 		annotations["fugue.pro/files-checksum"] = checksum
 	}
+	if checksum := appSSHAuthorizedKeysChecksum(spec); checksum != "" {
+		annotations["fugue.pro/ssh-authorized-keys-checksum"] = checksum
+	}
 	if token := strings.TrimSpace(spec.RestartToken); token != "" {
 		annotations["fugue.pro/restart-token"] = token
 	}
@@ -1690,6 +1783,28 @@ func buildAppTemplateAnnotations(spec model.AppSpec) map[string]string {
 		return nil
 	}
 	return annotations
+}
+
+func appSSHAuthorizedKeysChecksum(spec model.AppSpec) string {
+	ssh := model.NormalizeAppSSHSpec(spec.SSH)
+	if ssh == nil {
+		return ""
+	}
+	payload := struct {
+		AuthorizedKeyIDs   []string `json:"authorized_key_ids,omitempty"`
+		AuthorizedKeys     []string `json:"authorized_keys,omitempty"`
+		AuthorizedKeysPath string   `json:"authorized_keys_path,omitempty"`
+	}{
+		AuthorizedKeyIDs:   ssh.AuthorizedKeyIDs,
+		AuthorizedKeys:     ssh.AuthorizedKeys,
+		AuthorizedKeysPath: ssh.AuthorizedKeysPath,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func appFilesChecksum(files []model.AppFile) string {
@@ -2357,6 +2472,10 @@ fi`
 
 func appFilesSecretName(appName string) string {
 	return appName + "-files"
+}
+
+func appSSHAuthorizedKeysSecretName(appName string) string {
+	return appName + "-ssh-authorized-keys"
 }
 
 func WorkspacePVCName(app model.App) string {

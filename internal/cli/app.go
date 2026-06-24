@@ -85,6 +85,7 @@ in more than one visible project or tenant.
 		c.newAppRequestCommand(),
 		c.newAppRequestsCommand(),
 		c.newAppTracesCommand(),
+		c.newAppSSHCommand(),
 		c.newEnvCommand(),
 		c.newFilesCommand(),
 		c.newFilesystemCommand(),

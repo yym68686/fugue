@@ -45,6 +45,9 @@ type Server struct {
 	appBaseDomain                 string
 	customDomainBaseDomain        string
 	apiPublicDomain               string
+	sshPublicHost                 string
+	sshPublicPortStart            int
+	sshPublicPortEnd              int
 	dnsStaticRecords              []model.EdgeDNSRecord
 	platformRoutes                []model.PlatformRoute
 	edgeQualityRankingMode        string
@@ -137,6 +140,9 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		appBaseDomain:                 strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
 		customDomainBaseDomain:        defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
 		apiPublicDomain:               strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		sshPublicHost:                 defaultSSHPublicHost(cfg.SSHPublicHost, cfg.AppBaseDomain),
+		sshPublicPortStart:            cfg.SSHPublicPortStart,
+		sshPublicPortEnd:              cfg.SSHPublicPortEnd,
 		dnsStaticRecords:              parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
 		platformRoutes:                parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
 		edgeQualityRankingMode:        normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),

@@ -1455,6 +1455,97 @@ func TestEdgeShadowDaemonSetDefaultsToNoPublicTraffic(t *testing.T) {
 	}
 }
 
+func TestSSHFrontDaemonSetDefaultsToHostNetwork(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-ssh-front")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing ssh-front daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`name: ssh-front`,
+		`image: "fugue-edge:latest"`,
+		`- /usr/local/bin/fugue-ssh-front`,
+		`hostNetwork: true`,
+		`dnsPolicy: ClusterFirstWithHostNet`,
+		`app.kubernetes.io/component: fugue-ssh-front`,
+		`fugue.io/rollout-subsystem: public-ssh-data-plane`,
+		`type: OnDelete`,
+		`name: FUGUE_SSH_PUBLIC_PORT_START`,
+		`value: "22000"`,
+		`name: FUGUE_SSH_PUBLIC_PORT_END`,
+		`value: "32000"`,
+		`name: FUGUE_SSH_FRONT_ROUTES_CACHE_PATH`,
+		`value: "/var/lib/fugue/edge/ssh-routes-cache.json"`,
+		`name: FUGUE_SSH_FRONT_MAX_CONNECTIONS_PER_IP`,
+		`value: "0"`,
+		`name: FUGUE_SSH_FRONT_MAX_CONNECTION_ATTEMPTS_PER_IP_PER_MINUTE`,
+		`value: "0"`,
+		`path: "/var/lib/fugue/edge"`,
+		`fugue.io/role.edge: "true"`,
+		`key: fugue.io/tenant`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("ssh-front daemonset missing %q:\n%s", want, doc)
+		}
+	}
+}
+
+func TestSSHFrontDaemonSetCanBeDisabled(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "edge.sshFront.enabled=false")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	if doc := manifestDocumentForKindAndName(string(output), "DaemonSet", "fugue-fugue-edge-ssh-front"); doc != "" {
+		t.Fatalf("ssh-front daemonset should not render when disabled:\n%s", doc)
+	}
+}
+
+func TestProductionHAValuesKeepSSHFrontDisabled(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", "values-production-ha.yaml")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	if doc := manifestDocumentForKindAndName(string(output), "DaemonSet", "fugue-fugue-edge-ssh-front"); doc != "" {
+		t.Fatalf("ssh-front daemonset should not render from production HA values before canary rollout:\n%s", doc)
+	}
+}
+
 func TestEdgeDaemonSetRendersPublicIdentityEnv(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

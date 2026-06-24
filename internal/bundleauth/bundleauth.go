@@ -75,6 +75,19 @@ func SignEdgeRouteBundleWithKeyring(bundle model.EdgeRouteBundle, keyring Keyrin
 	})
 }
 
+func SignEdgeSSHRouteBundle(bundle model.EdgeSSHRouteBundle, key, keyID string, validFor time.Duration) model.EdgeSSHRouteBundle {
+	return SignEdgeSSHRouteBundleWithKeyring(bundle, NewKeyring(key, keyID, "", "", nil), validFor)
+}
+
+func SignEdgeSSHRouteBundleWithKeyring(bundle model.EdgeSSHRouteBundle, keyring Keyring, validFor time.Duration) model.EdgeSSHRouteBundle {
+	return signBundle(bundle, keyring, validFor, bundle.GeneratedAt, func(out *model.EdgeSSHRouteBundle) {
+		out.SchemaVersion = model.BundleSchemaVersionV1
+		if strings.TrimSpace(out.Issuer) == "" {
+			out.Issuer = model.BundleIssuerFugue
+		}
+	})
+}
+
 func SignEdgeDNSBundle(bundle model.EdgeDNSBundle, key, keyID string, validFor time.Duration) model.EdgeDNSBundle {
 	return SignEdgeDNSBundleWithKeyring(bundle, NewKeyring(key, keyID, "", "", nil), validFor)
 }
@@ -104,6 +117,17 @@ func VerifyEdgeRouteBundle(bundle model.EdgeRouteBundle, key, keyID string, now 
 }
 
 func VerifyEdgeRouteBundleWithKeyring(bundle model.EdgeRouteBundle, keyring Keyring, now time.Time) error {
+	if err := validateBundleSchemaVersion(bundle.SchemaVersion); err != nil {
+		return err
+	}
+	return verifyBundleSignature(bundle, keyring, now, bundle.ValidUntil, bundle.KeyID, bundle.Signature, bundle.Signatures)
+}
+
+func VerifyEdgeSSHRouteBundle(bundle model.EdgeSSHRouteBundle, key, keyID string, now time.Time) error {
+	return VerifyEdgeSSHRouteBundleWithKeyring(bundle, NewKeyring(key, keyID, "", "", nil), now)
+}
+
+func VerifyEdgeSSHRouteBundleWithKeyring(bundle model.EdgeSSHRouteBundle, keyring Keyring, now time.Time) error {
 	if err := validateBundleSchemaVersion(bundle.SchemaVersion); err != nil {
 		return err
 	}
@@ -218,6 +242,9 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		case *model.EdgeRouteBundle:
 			typed.ValidUntil = validUntil
 			typed.KeyID = primaryKeyID
+		case *model.EdgeSSHRouteBundle:
+			typed.ValidUntil = validUntil
+			typed.KeyID = primaryKeyID
 		case *model.EdgeDNSBundle:
 			typed.ValidUntil = validUntil
 			typed.KeyID = primaryKeyID
@@ -277,6 +304,18 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		legacyPreviousSignature := appendLegacyEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
 		if legacyPreviousSignature != "" && legacyPreviousSignature != previousSignature {
 			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), legacyPreviousSignature, typed.GeneratedAt, validUntil))
+		}
+		typed.Signatures = signatures
+	case *model.EdgeSSHRouteBundle:
+		typed.ValidUntil = validUntil
+		typed.KeyID = primaryKeyID
+		typed.Signature = signature
+		signatures = signatures[:0]
+		if signature != "" {
+			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, signature, typed.GeneratedAt, validUntil))
+		}
+		if previousSignature != "" {
+			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), previousSignature, typed.GeneratedAt, validUntil))
 		}
 		typed.Signatures = signatures
 	case *model.EdgeDNSBundle:
@@ -439,6 +478,18 @@ func cloneBundleForSigning[T any](bundle T, validUntil time.Time, keyID string) 
 			EdgeGroupID:        typed.EdgeGroupID,
 			Routes:             typed.Routes,
 			TLSAllowlist:       typed.TLSAllowlist,
+		}
+	case model.EdgeSSHRouteBundle:
+		payload = bundleSigningPayload{
+			SchemaVersion: typed.SchemaVersion,
+			Version:       typed.Version,
+			GeneratedAt:   typed.GeneratedAt,
+			ValidUntil:    validUntil,
+			Issuer:        typed.Issuer,
+			KeyID:         keyID,
+			EdgeID:        typed.EdgeID,
+			EdgeGroupID:   typed.EdgeGroupID,
+			Routes:        typed.Routes,
 		}
 	case model.EdgeDNSBundle:
 		payload = bundleSigningPayload{

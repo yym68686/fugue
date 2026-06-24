@@ -14,9 +14,11 @@ on:
       - 'cmd/fugue-image-cache/**'
       - 'cmd/fugue-edge/**'
       - 'cmd/fugue-edge-front/**'
+      - 'cmd/fugue-ssh-front/**'
       - 'cmd/fugue-dns/**'
       - 'cmd/fugue-mesh-agent/**'
       - 'cmd/fugue-mesh-recovery/**'
+      - 'images/app-ssh/**'
       - 'internal/**'
       - 'deploy/helm/fugue/charts/**'
       - 'deploy/helm/fugue/crds/**'
@@ -29,6 +31,7 @@ on:
       - 'Dockerfile.telemetry-agent'
       - 'Dockerfile.image-cache'
       - 'Dockerfile.edge'
+      - 'Dockerfile.app-ssh'
       - 'go.mod'
       - 'go.sum'
       - 'scripts/export_cloudflare_zone_static_records.sh'
@@ -67,6 +70,7 @@ jobs:
       telemetry_agent_image_repository: ${{ steps.meta.outputs.telemetry_agent_image_repository }}
       image_cache_image_repository: ${{ steps.meta.outputs.image_cache_image_repository }}
       edge_image_repository: ${{ steps.meta.outputs.edge_image_repository }}
+      app_ssh_image_repository: ${{ steps.meta.outputs.app_ssh_image_repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,6 +93,7 @@ jobs:
           echo "telemetry_agent_image_repository=ghcr.io/${owner_lc}/fugue-telemetry-agent" >> "${GITHUB_OUTPUT}"
           echo "image_cache_image_repository=ghcr.io/${owner_lc}/fugue-image-cache" >> "${GITHUB_OUTPUT}"
           echo "edge_image_repository=ghcr.io/${owner_lc}/fugue-edge" >> "${GITHUB_OUTPUT}"
+          echo "app_ssh_image_repository=ghcr.io/${owner_lc}/fugue-app-ssh" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4.1.0
@@ -152,6 +157,17 @@ jobs:
           push: true
           tags: |
             ${{ steps.meta.outputs.edge_image_repository }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Build and push fugue-app-ssh
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          file: ./Dockerfile.app-ssh
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.app_ssh_image_repository }}:${{ steps.meta.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
 

@@ -1,0 +1,222 @@
+{{- define "fugue.sshFrontDaemonSet" -}}
+{{- $root := .root -}}
+{{- $name := .name -}}
+{{- $component := .component -}}
+{{- $edgeGroupID := .edgeGroupID -}}
+{{- $apiURL := .apiURL -}}
+{{- $tokenSecretName := .tokenSecretName -}}
+{{- $tokenSecretKey := .tokenSecretKey -}}
+{{- $imageRepository := .imageRepository -}}
+{{- $imageTag := .imageTag -}}
+{{- $imageDigest := .imageDigest -}}
+{{- $imagePullPolicy := .imagePullPolicy -}}
+{{- $nodeSelector := .nodeSelector -}}
+{{- $affinity := .affinity -}}
+{{- $tolerations := .tolerations -}}
+{{- $sshFront := default dict $root.Values.edge.sshFront -}}
+{{- $limits := default dict $sshFront.limits }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" $root "component" $component) | nindent 4 }}
+    fugue.io/rollout-subsystem: public-ssh-data-plane
+    fugue.io/rollout-mode: direct-ondelete-protected
+    fugue.io/downtime-class: online-required
+spec:
+  revisionHistoryLimit: 2
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" $root "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" $root "component" $component) | nindent 8 }}
+        fugue.io/rollout-subsystem: public-ssh-data-plane
+        fugue.io/rollout-mode: direct-ondelete-protected
+        fugue.io/downtime-class: online-required
+        {{- with $root.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config-secret: {{ include "fugue.configSecretChecksum" $root }}
+        checksum/ssh-front-config: {{ toJson $sshFront | sha256sum }}
+        {{- with $root.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ssh-front
+          image: {{ include "fugue.imageRef" (dict "repository" $imageRepository "tag" $imageTag "digest" $imageDigest) | quote }}
+          imagePullPolicy: {{ $imagePullPolicy }}
+          command:
+            - /usr/local/bin/fugue-ssh-front
+          {{- with $sshFront.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ default 7836 $sshFront.healthPort }}
+              protocol: TCP
+          env:
+            - name: FUGUE_API_URL
+              value: {{ $apiURL | quote }}
+            - name: FUGUE_EDGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $tokenSecretName }}
+                  key: {{ $tokenSecretKey }}
+            - name: FUGUE_BUNDLE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" $root }}
+                  key: FUGUE_BUNDLE_SIGNING_KEY
+            - name: FUGUE_BUNDLE_SIGNING_KEY_ID
+              value: {{ $root.Values.bundle.signingKeyID | quote }}
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" $root }}
+                  key: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY
+                  optional: true
+            - name: FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID
+              value: {{ $root.Values.bundle.previousSigningKeyID | quote }}
+            - name: FUGUE_BUNDLE_REVOKED_KEY_IDS
+              value: {{ $root.Values.bundle.revokedKeyIDs | quote }}
+            - name: FUGUE_SSH_FRONT_EDGE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FUGUE_SSH_FRONT_EDGE_GROUP_ID
+              value: {{ $edgeGroupID | quote }}
+            - name: FUGUE_SSH_FRONT_LISTEN_HOST
+              value: {{ default "0.0.0.0" $sshFront.listenHost | quote }}
+            - name: FUGUE_SSH_FRONT_HEALTH_LISTEN_ADDR
+              value: {{ printf ":%v" (default 7836 $sshFront.healthPort) | quote }}
+            - name: FUGUE_SSH_PUBLIC_PORT_START
+              value: {{ printf "%v" (default 22000 $sshFront.publicPortStart) | quote }}
+            - name: FUGUE_SSH_PUBLIC_PORT_END
+              value: {{ printf "%v" (default 32000 $sshFront.publicPortEnd) | quote }}
+            - name: FUGUE_SSH_FRONT_ROUTES_CACHE_PATH
+              value: {{ default "/var/lib/fugue/edge/ssh-routes-cache.json" $sshFront.routesCachePath | quote }}
+            - name: FUGUE_SSH_FRONT_SYNC_INTERVAL
+              value: {{ default "15s" $sshFront.syncInterval | quote }}
+            - name: FUGUE_SSH_FRONT_HTTP_TIMEOUT
+              value: {{ default "10s" $sshFront.httpTimeout | quote }}
+            - name: FUGUE_SSH_FRONT_DIAL_TIMEOUT
+              value: {{ default "10s" $sshFront.dialTimeout | quote }}
+            - name: FUGUE_SSH_FRONT_IDLE_TIMEOUT
+              value: {{ default "0s" $sshFront.idleTimeout | quote }}
+            - name: FUGUE_SSH_FRONT_SHUTDOWN_TIMEOUT
+              value: {{ default "10s" $sshFront.shutdownTimeout | quote }}
+            - name: FUGUE_SSH_FRONT_MAX_CONNECTIONS_PER_IP
+              value: {{ printf "%v" (default 0 $limits.maxConnectionsPerIP) | quote }}
+            - name: FUGUE_SSH_FRONT_MAX_CONNECTION_ATTEMPTS_PER_IP_PER_MINUTE
+              value: {{ printf "%v" (default 0 $limits.maxConnectionAttemptsPerIPPerMinute) | quote }}
+            - name: FUGUE_SSH_FRONT_MAX_CONNECTIONS_PER_APP
+              value: {{ printf "%v" (default 0 $limits.maxConnectionsPerApp) | quote }}
+            - name: FUGUE_SSH_FRONT_MAX_CONNECTIONS_PER_TENANT
+              value: {{ printf "%v" (default 0 $limits.maxConnectionsPerTenant) | quote }}
+          volumeMounts:
+            - name: route-cache
+              mountPath: {{ $root.Values.edge.persistence.mountPath | quote }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml $sshFront.resources | nindent 12 }}
+      volumes:
+        - name: route-cache
+          hostPath:
+            path: {{ $root.Values.edge.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+      {{- with $nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end -}}
+
+{{- $sshFront := default dict .Values.edge.sshFront -}}
+{{- $sshFrontEnabled := true -}}
+{{- if hasKey $sshFront "enabled" }}{{- $sshFrontEnabled = $sshFront.enabled -}}{{- end -}}
+{{- if and .Values.edge.enabled $sshFrontEnabled }}
+{{- $sshImage := default dict $sshFront.image -}}
+{{- $edgeAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL -}}
+{{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
+{{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}
+{{- include "fugue.sshFrontDaemonSet" (dict
+  "root" .
+  "name" (printf "%s-ssh-front" (include "fugue.edgeDaemonSetName" .))
+  "component" "fugue-ssh-front"
+  "edgeGroupID" .Values.edge.edgeGroupID
+  "apiURL" $edgeAPIURL
+  "tokenSecretName" $edgeTokenSecretName
+  "tokenSecretKey" $edgeTokenSecretKey
+  "imageRepository" (default .Values.edge.image.repository $sshImage.repository)
+  "imageTag" (default .Values.edge.image.tag $sshImage.tag)
+  "imageDigest" (default .Values.edge.image.digest $sshImage.digest)
+  "imagePullPolicy" (default .Values.edge.image.pullPolicy $sshImage.pullPolicy)
+  "nodeSelector" (default .Values.edge.nodeSelector $sshFront.nodeSelector)
+  "affinity" (default .Values.edge.affinity $sshFront.affinity)
+  "tolerations" (default .Values.edge.tolerations $sshFront.tolerations)
+) }}
+{{- range $group := .Values.edge.groups }}
+{{- $name := required "edge.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
+{{- $edgeGroupID := required (printf "edge.groups[%s].edgeGroupID is required" $name) $group.edgeGroupID -}}
+{{- if not $group.nodeSelector }}
+{{- fail (printf "edge.groups[%s].nodeSelector is required" $name) }}
+{{- end }}
+{{- $groupImage := default dict $group.image -}}
+{{- $groupTokenSecret := default dict $group.tokenSecret -}}
+{{- $groupSSHFront := default dict $group.sshFront -}}
+{{- $groupSSHImage := default dict $groupSSHFront.image -}}
+{{- include "fugue.sshFrontDaemonSet" (dict
+  "root" $
+  "name" (printf "%s-%s-ssh-front" (include "fugue.edgeDaemonSetName" $) $name)
+  "component" (printf "fugue-ssh-front-%s" $name)
+  "edgeGroupID" $edgeGroupID
+  "apiURL" (default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.edge.apiURL) $group.apiURL)
+  "tokenSecretName" (default (default (include "fugue.configSecretName" $) $.Values.edge.tokenSecret.name) $groupTokenSecret.name)
+  "tokenSecretKey" (default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.edge.tokenSecret.key) $groupTokenSecret.key)
+  "imageRepository" (default (default $.Values.edge.image.repository $groupImage.repository) (default $sshImage.repository $groupSSHImage.repository))
+  "imageTag" (default (default $.Values.edge.image.tag $groupImage.tag) (default $sshImage.tag $groupSSHImage.tag))
+  "imageDigest" (default (default $.Values.edge.image.digest $groupImage.digest) (default $sshImage.digest $groupSSHImage.digest))
+  "imagePullPolicy" (default (default $.Values.edge.image.pullPolicy $groupImage.pullPolicy) (default $sshImage.pullPolicy $groupSSHImage.pullPolicy))
+  "nodeSelector" $group.nodeSelector
+  "affinity" (default $.Values.edge.affinity $group.affinity)
+  "tolerations" (default $.Values.edge.tolerations $group.tolerations)
+) }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,31 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+        openssh-server \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash --uid 1000 fugue \
+    && passwd -d fugue \
+    && mkdir -p /workspace /run/sshd /etc/ssh/fugue-host-keys /home/fugue/.ssh \
+    && chown -R fugue:fugue /workspace /home/fugue/.ssh \
+    && chmod 700 /home/fugue/.ssh
+
+COPY images/app-ssh/entrypoint.sh /usr/local/bin/fugue-app-ssh-entrypoint
+
+RUN chmod +x /usr/local/bin/fugue-app-ssh-entrypoint
+
+ENV FUGUE_SSH_USER=fugue \
+    FUGUE_WORKSPACE=/workspace \
+    FUGUE_SSH_AUTHORIZED_KEYS=/home/fugue/.ssh/authorized_keys \
+    FUGUE_SSH_HOST_KEYS_DIR=/etc/ssh/fugue-host-keys
+
+WORKDIR /workspace
+EXPOSE 22
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fugue-app-ssh-entrypoint"]

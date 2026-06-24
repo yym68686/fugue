@@ -441,6 +441,42 @@ edge:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
   extraEnv: []
+  sshFront:
+    enabled: true
+    image:
+      repository: ""
+      tag: ""
+      digest: ""
+      pullPolicy: ""
+    listenHost: "0.0.0.0"
+    publicPortStart: 22000
+    publicPortEnd: 32000
+    healthPort: 7836
+    routesCachePath: /var/lib/fugue/edge/ssh-routes-cache.json
+    syncInterval: 15s
+    httpTimeout: 10s
+    dialTimeout: 10s
+    idleTimeout: 0s
+    shutdownTimeout: 10s
+    limits:
+      maxConnectionsPerIP: 0
+      maxConnectionAttemptsPerIPPerMinute: 0
+      maxConnectionsPerApp: 0
+      maxConnectionsPerTenant: 0
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+        ephemeral-storage: 16Mi
+      limits:
+        memory: 128Mi
+        ephemeral-storage: 128Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
   groups: []
 
 dns:

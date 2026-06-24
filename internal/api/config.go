@@ -19,6 +19,9 @@ type ServerConfig struct {
 	ControlPlaneGitHubToken       string
 	AppBaseDomain                 string
 	APIPublicDomain               string
+	SSHPublicHost                 string
+	SSHPublicPortStart            int
+	SSHPublicPortEnd              int
 	DNSStaticRecordsJSON          string
 	PlatformRoutesJSON            string
 	EdgeQualityRankingMode        string

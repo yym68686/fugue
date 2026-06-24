@@ -250,6 +250,7 @@ func ApplyAppSpecDefaults(spec *AppSpec) {
 		normalized := NormalizeAppNetworkPolicySpec(*spec.NetworkPolicy)
 		spec.NetworkPolicy = &normalized
 	}
+	spec.SSH = NormalizeAppSSHSpec(spec.SSH)
 	spec.GeneratedEnv = NormalizeAppGeneratedEnvSpecs(spec.GeneratedEnv)
 	spec.WorkloadClass = NormalizeWorkloadClass(spec.WorkloadClass)
 	rightSizing := AppRightSizingSpec{Mode: AppRightSizingModeAuto}
@@ -1522,6 +1523,7 @@ type AppSpec struct {
 	Args                          []string                       `json:"args,omitempty"`
 	Env                           map[string]string              `json:"env,omitempty"`
 	GeneratedEnv                  map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
+	SSH                           *AppSSHSpec                    `json:"ssh,omitempty"`
 	NetworkMode                   string                         `json:"network_mode,omitempty"`
 	NetworkPolicy                 *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
 	WorkloadClass                 string                         `json:"workload_class,omitempty"`
@@ -2386,6 +2388,8 @@ type State struct {
 	ProjectDeleteRequests      map[string]time.Time        `json:"project_delete_requests,omitempty"`
 	ProjectRuntimeReservations []ProjectRuntimeReservation `json:"project_runtime_reservations,omitempty"`
 	APIKeys                    []APIKey                    `json:"api_keys"`
+	SSHKeys                    []SSHKey                    `json:"ssh_keys,omitempty"`
+	AppSSHEndpoints            []AppSSHEndpoint            `json:"app_ssh_endpoints,omitempty"`
 	EnrollmentTokens           []EnrollmentToken           `json:"enrollment_tokens"`
 	NodeKeys                   []NodeKey                   `json:"node_keys"`
 	Machines                   []Machine                   `json:"machines"`

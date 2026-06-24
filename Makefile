@@ -1,7 +1,8 @@
 GOCACHE ?= $(CURDIR)/.gocache
 BIN_DIR ?= $(CURDIR)/bin
+DOCKER ?= docker
 
-.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli run-api run-controller run-agent run-telemetry-agent
+.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
 	bash ./scripts/scan_hardcoded_production_facts.sh
@@ -51,6 +52,8 @@ build-image-cache:
 build-edge:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-edge ./cmd/fugue-edge
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-edge-front ./cmd/fugue-edge-front
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-ssh-front ./cmd/fugue-ssh-front
 
 build-dns:
 	mkdir -p $(BIN_DIR)
@@ -59,6 +62,9 @@ build-dns:
 build-cli:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue ./cmd/fugue
+
+build-app-ssh-image:
+	$(DOCKER) build -f Dockerfile.app-ssh -t fugue-app-ssh:dev .
 
 run-api: build-api
 	FUGUE_BIND_ADDR=:8080 $(BIN_DIR)/fugue-api
