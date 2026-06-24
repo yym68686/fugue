@@ -81,7 +81,12 @@ func (c *CLI) newSSHKeyAddCommand() *cobra.Command {
 			if strings.TrimSpace(label) == "" {
 				label = inferredLabel
 			}
+			tenantID, err := c.resolveTenantSelection(client, c.effectiveTenantID(), c.effectiveTenantName())
+			if err != nil {
+				return err
+			}
 			key, err := client.CreateSSHKey(createSSHKeyRequest{
+				TenantID:  tenantID,
 				Label:     label,
 				PublicKey: publicKey,
 			})
