@@ -116,6 +116,57 @@ func TestHandleGetAppImagesReturnsCurrentAndHistoricalVersions(t *testing.T) {
 	}
 }
 
+func TestHandleGetAppImagesUsesRuntimeImageLocationEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, _, _, app, fakeRegistry, _, newImageRef, _ := setupAppImagesTestServer(t)
+	delete(fakeRegistry.images, newImageRef)
+	runtimeImageRef := server.runtimeImageRefFromManagedRef(newImageRef)
+	if runtimeImageRef == "" || runtimeImageRef == newImageRef {
+		t.Fatalf("expected distinct runtime image ref for %q, got %q", newImageRef, runtimeImageRef)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        app.TenantID,
+		AppID:           app.ID,
+		ImageRef:        runtimeImageRef,
+		RuntimeID:       app.Spec.RuntimeID,
+		ClusterNodeName: "worker-a",
+		Status:          model.ImageLocationStatusPresent,
+		SizeBytes:       123,
+	}); err != nil {
+		t.Fatalf("upsert image location: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/images", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var response appImageInventoryResponse
+	mustDecodeJSON(t, recorder, &response)
+
+	versionByImageRef := make(map[string]appImageVersion, len(response.Versions))
+	for _, version := range response.Versions {
+		versionByImageRef[version.ImageRef] = version
+	}
+	currentVersion, ok := versionByImageRef[newImageRef]
+	if !ok {
+		t.Fatalf("expected current image %q in response: %#v", newImageRef, response.Versions)
+	}
+	if currentVersion.Status != appImageStatusAvailable {
+		t.Fatalf("expected runtime image location evidence to mark current image available, got %#v", currentVersion)
+	}
+	if !currentVersion.RedeploySupported {
+		t.Fatalf("expected current image with location evidence to be redeployable, got %#v", currentVersion)
+	}
+	if currentVersion.DeleteSupported {
+		t.Fatalf("expected image without registry manifest to be non-deletable, got %#v", currentVersion)
+	}
+	if currentVersion.SizeBytes != 123 {
+		t.Fatalf("expected image location size evidence, got %#v", currentVersion)
+	}
+}
+
 func TestHandleListProjectImageUsageReturnsProjectSummary(t *testing.T) {
 	t.Parallel()
 

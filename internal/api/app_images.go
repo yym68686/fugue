@@ -655,10 +655,19 @@ func (s *Server) buildAppImageInventory(
 
 	blobUsageCount := make(map[string]int)
 	keptCandidates := make([]appImageCandidate, 0, len(imageRefs))
+	locationEvidenceByImageRef := make(map[string]model.ImageLocation, len(imageRefs))
 	for _, imageRef := range imageRefs {
 		candidate := candidatesByImageRef[imageRef]
 		inspectResult := inspectResults[imageRef]
-		if !inspectResult.Exists && !candidate.Current {
+		locationEvidence, hasLocationEvidence, err := s.presentAppImageLocationEvidence(app, candidate.ImageRef, candidate.RuntimeImageRef)
+		if err != nil {
+			return builtAppImageInventory{}, err
+		}
+		if hasLocationEvidence {
+			locationEvidenceByImageRef[imageRef] = locationEvidence
+		}
+		imageAvailable := inspectResult.Exists || hasLocationEvidence
+		if !imageAvailable && !candidate.Current {
 			continue
 		}
 		keptCandidates = append(keptCandidates, candidate)
@@ -722,6 +731,11 @@ func (s *Server) buildAppImageInventory(
 			version.SizeBytes = inspectResult.SizeBytes
 			version.DeleteSupported = !candidate.Current
 			version.RedeploySupported = true
+		} else if locationEvidence, ok := locationEvidenceByImageRef[candidate.ImageRef]; ok {
+			version.Status = appImageStatusAvailable
+			version.Digest = strings.TrimSpace(locationEvidence.Digest)
+			version.SizeBytes = locationEvidence.SizeBytes
+			version.RedeploySupported = true
 		}
 		inventory.Response.Versions = append(inventory.Response.Versions, version)
 		inventory.VersionByImageRef[candidate.ImageRef] = builtAppImageVersion{
@@ -747,6 +761,54 @@ func (s *Server) buildAppImageInventory(
 		ReclaimableSizeBytes: sumAppImageBlobSizes(inventory.ReclaimableBlobSizes),
 	}
 	return inventory, nil
+}
+
+func (s *Server) presentAppImageLocationEvidence(app model.App, refs ...string) (model.ImageLocation, bool, error) {
+	if s == nil || s.store == nil {
+		return model.ImageLocation{}, false, nil
+	}
+	for _, ref := range compactAppImageInventoryRefs(refs...) {
+		locations, err := s.store.ListImageLocations(model.ImageLocationFilter{
+			TenantID: strings.TrimSpace(app.TenantID),
+			AppID:    strings.TrimSpace(app.ID),
+			ImageRef: ref,
+			Status:   model.ImageLocationStatusPresent,
+		})
+		if err != nil {
+			return model.ImageLocation{}, false, err
+		}
+		if len(locations) == 0 {
+			locations, err = s.store.ListImageLocations(model.ImageLocationFilter{
+				TenantID: strings.TrimSpace(app.TenantID),
+				ImageRef: ref,
+				Status:   model.ImageLocationStatusPresent,
+			})
+			if err != nil {
+				return model.ImageLocation{}, false, err
+			}
+		}
+		if len(locations) > 0 {
+			return preferredAppImageLocationEvidence(locations), true, nil
+		}
+	}
+	return model.ImageLocation{}, false, nil
+}
+
+func preferredAppImageLocationEvidence(locations []model.ImageLocation) model.ImageLocation {
+	if len(locations) == 0 {
+		return model.ImageLocation{}
+	}
+	preferred := locations[0]
+	for _, location := range locations[1:] {
+		if strings.TrimSpace(preferred.Digest) == "" && strings.TrimSpace(location.Digest) != "" {
+			preferred = location
+			continue
+		}
+		if preferred.SizeBytes <= 0 && location.SizeBytes > 0 {
+			preferred = location
+		}
+	}
+	return preferred
 }
 
 func (s *Server) collectAppImageCandidates(app model.App, ops []model.Operation) map[string]appImageCandidate {
@@ -882,6 +944,23 @@ func shortAppImageCommit(value string) string {
 		return value[:12]
 	}
 	return value
+}
+
+func compactAppImageInventoryRefs(refs ...string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		out = append(out, ref)
+	}
+	return out
 }
 
 func (s *Server) registryRefFromRuntimeImageRef(runtimeImageRef string) string {
