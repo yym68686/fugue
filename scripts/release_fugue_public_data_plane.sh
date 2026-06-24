@@ -562,6 +562,34 @@ delete_daemonset_pods_no_wait() {
   kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pods[@]}" --wait=false >/dev/null
 }
 
+replace_daemonset_pods_one_at_a_time() {
+  local daemonset_name="$1"
+  local display_name="$2"
+  local smoke_front="${3:-false}"
+  local rows
+  local ds pod uid created phase restarts
+
+  rows="$(capture_daemonset_pods "${daemonset_name}")"
+  if [[ -z "$(trim_field "${rows}")" ]]; then
+    log "${display_name} daemonset ${daemonset_name} has no pods to replace"
+    return 0
+  fi
+
+  while IFS='|' read -r ds pod uid created phase restarts; do
+    pod="$(trim_field "${pod}")"
+    uid="$(trim_field "${uid}")"
+    [[ -n "${pod}" && -n "${uid}" ]] || continue
+    log "deleting ${display_name} pod for ${daemonset_name}: ${pod}"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
+      kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pod}" --wait=false >/dev/null
+      wait_daemonset_replaced_and_ready "${daemonset_name}" "${uid}"
+    fi
+    if [[ "${smoke_front}" == "true" ]]; then
+      check_public_smoke_on_front_nodes "${daemonset_name}"
+    fi
+  done <<<"${rows}"
+}
+
 wait_daemonset_replaced_and_ready() {
   local daemonset_name="$1"
   local before_uids="$2"
@@ -1299,7 +1327,6 @@ run_front_ondelete_release() {
   local bases=()
   local base
   local front_ds
-  local before_uids
 
   enable_bluegreen_chart_mode
   while IFS= read -r base; do
@@ -1320,10 +1347,7 @@ run_front_ondelete_release() {
     wait_bluegreen_base_ready "${base}"
     front_ds="$(bluegreen_front_daemonset_name "${base}")"
     patch_front_template "${front_ds}"
-    before_uids="$(daemonset_pod_uids "${front_ds}")"
-    delete_daemonset_pods_no_wait "${front_ds}" "front"
-    wait_daemonset_replaced_and_ready "${front_ds}" "${before_uids}"
-    check_public_smoke_on_front_nodes "${front_ds}"
+    replace_daemonset_pods_one_at_a_time "${front_ds}" "front" "true"
   done
   FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="$(collect_current_active_slots_json "${bases[@]}")"
 }

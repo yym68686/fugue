@@ -18,6 +18,9 @@ assert_eq() {
   fi
 }
 
+bash -n "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+bash -n "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
@@ -35,6 +38,18 @@ if public_data_plane_daemonset_rollout_wait_required; then
   fail "preserved public data-plane daemonsets must not block control-plane rollout"
 fi
 PUBLIC_DATA_PLANE_PRESERVED=false
+
+unset FUGUE_PUBLIC_DATA_PLANE_AUTO_FRONT_RELEASE
+if public_data_plane_auto_front_release_enabled; then
+  fail "public front auto release must be disabled by default"
+fi
+FUGUE_PUBLIC_DATA_PLANE_AUTO_FRONT_RELEASE=false
+if public_data_plane_auto_front_release_enabled; then
+  fail "public front auto release must stay disabled when explicitly false"
+fi
+FUGUE_PUBLIC_DATA_PLANE_AUTO_FRONT_RELEASE=true
+public_data_plane_auto_front_release_enabled || fail "public front auto release must require an explicit true opt-in"
+unset FUGUE_PUBLIC_DATA_PLANE_AUTO_FRONT_RELEASE
 
 ORIGINAL_PATH="${PATH}"
 TMP_CURL_DIR="$(mktemp -d)"

@@ -5625,6 +5625,10 @@ public_data_plane_live_dns_image_changed() {
   return 1
 }
 
+public_data_plane_auto_front_release_enabled() {
+  [[ "${FUGUE_PUBLIC_DATA_PLANE_AUTO_FRONT_RELEASE:-false}" == "true" ]]
+}
+
 release_public_data_plane_if_needed() {
   local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   local worker_changed="false"
@@ -5684,11 +5688,15 @@ release_public_data_plane_if_needed() {
     PUBLIC_DATA_PLANE_RELEASED="true"
   fi
   if [[ "${front_changed}" == "true" ]]; then
-    export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="front-ondelete"
-    export FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="true"
-    log "public data-plane front image changed; starting isolated front-ondelete release after worker readiness checks"
-    bash ./scripts/release_fugue_public_data_plane.sh
-    PUBLIC_DATA_PLANE_RELEASED="true"
+    if public_data_plane_auto_front_release_enabled; then
+      export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="front-ondelete"
+      export FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="true"
+      log "public data-plane front image changed; starting isolated front-ondelete release after worker readiness checks"
+      bash ./scripts/release_fugue_public_data_plane.sh
+      PUBLIC_DATA_PLANE_RELEASED="true"
+    else
+      log "skip public data-plane auto front release because front pods own public 80/443; run scripts/release_fugue_public_data_plane.sh with FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=front-ondelete during an explicit maintenance window"
+    fi
   fi
   if [[ "${dns_changed}" == "true" ]]; then
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="dns-ondelete"
