@@ -1037,7 +1037,6 @@ func TestBuildAppObjectsRendersSSHPortWithoutChangingHTTPReadiness(t *testing.T)
 			SSH: &model.AppSSHSpec{
 				Enabled:        true,
 				TargetPort:     22,
-				User:           "fugue",
 				AuthorizedKeys: []string{"ssh-ed25519 AQIDBAUGBwg= laptop"},
 			},
 		},
@@ -1055,6 +1054,13 @@ func TestBuildAppObjectsRendersSSHPortWithoutChangingHTTPReadiness(t *testing.T)
 	template := spec["template"].(map[string]any)
 	podSpec := template["spec"].(map[string]any)
 	container := podSpec["containers"].([]map[string]any)[0]
+	envObjects := container["env"].([]map[string]any)
+	if got := envValue(envObjects, "FUGUE_SSH_USER"); got != model.DefaultAppSSHUser {
+		t.Fatalf("expected SSH user env %q, got %q", model.DefaultAppSSHUser, got)
+	}
+	if got := envValue(envObjects, "FUGUE_SSH_AUTHORIZED_KEYS"); got != model.DefaultAppSSHAuthorizedKeysPath {
+		t.Fatalf("expected authorized keys env %q, got %q", model.DefaultAppSSHAuthorizedKeysPath, got)
+	}
 	readinessProbe := container["readinessProbe"].(map[string]any)
 	tcpSocket := readinessProbe["tcpSocket"].(map[string]any)
 	if tcpSocket["port"] != 8080 {

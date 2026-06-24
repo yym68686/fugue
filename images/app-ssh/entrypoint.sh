@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ssh_user="${FUGUE_SSH_USER:-fugue}"
+ssh_user="${FUGUE_SSH_USER:-root}"
 workspace="${FUGUE_WORKSPACE:-/workspace}"
-authorized_keys="${FUGUE_SSH_AUTHORIZED_KEYS:-/home/${ssh_user}/.ssh/authorized_keys}"
+if [ -n "${FUGUE_SSH_AUTHORIZED_KEYS:-}" ]; then
+  authorized_keys="${FUGUE_SSH_AUTHORIZED_KEYS}"
+elif [ "${ssh_user}" = "root" ]; then
+  authorized_keys="/root/.ssh/authorized_keys"
+else
+  authorized_keys="/home/${ssh_user}/.ssh/authorized_keys"
+fi
 host_keys_dir="${FUGUE_SSH_HOST_KEYS_DIR:-/etc/ssh/fugue-host-keys}"
 
 if ! id "${ssh_user}" >/dev/null 2>&1; then
@@ -31,7 +37,7 @@ chmod 600 "${host_keys_dir}"/ssh_host_*_key
 cat >/etc/ssh/sshd_config.d/fugue.conf <<EOF
 Port 22
 PasswordAuthentication no
-PermitRootLogin no
+PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 AuthorizedKeysFile ${authorized_keys}
 AllowTcpForwarding no

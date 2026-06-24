@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	DefaultAppSSHUser               = "fugue"
+	DefaultAppSSHUser               = "root"
 	DefaultAppSSHPort               = 22
-	DefaultAppSSHAuthorizedKeysPath = "/home/fugue/.ssh/authorized_keys"
+	DefaultAppSSHAuthorizedKeysPath = "/root/.ssh/authorized_keys"
 	DefaultAppSSHHostKeysPath       = "/etc/ssh/fugue-host-keys"
 
 	DefaultAppSSHPublicPortStart = 22000

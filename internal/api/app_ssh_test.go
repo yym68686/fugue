@@ -46,7 +46,6 @@ func TestAppSSHKeyAndEndpointLifecycle(t *testing.T) {
 	enable := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/ssh", apiKey, map[string]any{
 		"enabled":            true,
 		"target_port":        2222,
-		"user":               "fugue",
 		"authorized_key_ids": []string{createKeyResp.SSHKey.ID},
 	})
 	if enable.Code != http.StatusAccepted {
@@ -60,6 +59,9 @@ func TestAppSSHKeyAndEndpointLifecycle(t *testing.T) {
 	mustDecodeJSON(t, enable, &enableResp)
 	if enableResp.SSH.Hostname != "ssh.fugue.pro" || enableResp.SSH.PublicPort != model.DefaultAppSSHPublicPortStart || enableResp.SSH.TargetPort != 2222 {
 		t.Fatalf("unexpected SSH status after enable: %+v", enableResp.SSH)
+	}
+	if enableResp.SSH.User != model.DefaultAppSSHUser || enableResp.Endpoint.User != model.DefaultAppSSHUser {
+		t.Fatalf("expected default SSH user %q, got status=%q endpoint=%q", model.DefaultAppSSHUser, enableResp.SSH.User, enableResp.Endpoint.User)
 	}
 	if enableResp.Operation.ID == "" {
 		t.Fatalf("expected deploy operation after enabling SSH, got %+v", enableResp.Operation)

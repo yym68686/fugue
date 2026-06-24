@@ -1116,6 +1116,12 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 		merged[key] = value
 	}
 
+	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil {
+		merged["FUGUE_SSH_USER"] = ssh.User
+		merged["FUGUE_SSH_AUTHORIZED_KEYS"] = ssh.AuthorizedKeysPath
+		merged["FUGUE_SSH_HOST_KEYS_DIR"] = ssh.HostKeysPath
+	}
+
 	if len(merged) == 0 {
 		return nil
 	}

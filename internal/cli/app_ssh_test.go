@@ -23,7 +23,6 @@ func TestAppSSHConfigPrintsOpenSSHBlock(t *testing.T) {
 		Hostname:   "ssh.fugue.pro",
 		PublicPort: 23417,
 		TargetPort: 22,
-		User:       "fugue",
 	})
 	defer server.Close()
 
@@ -42,7 +41,7 @@ func TestAppSSHConfigPrintsOpenSSHBlock(t *testing.T) {
 		"Host fugue-agent",
 		"HostName ssh.fugue.pro",
 		"Port 23417",
-		"User fugue",
+		"User root",
 		"IdentityFile ~/.ssh/id_ed25519",
 	} {
 		if !strings.Contains(out, want) {

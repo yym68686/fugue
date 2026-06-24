@@ -12,17 +12,18 @@ RUN apt-get update \
 
 RUN useradd --create-home --shell /bin/bash --uid 1000 fugue \
     && passwd -d fugue \
-    && mkdir -p /workspace /run/sshd /etc/ssh/fugue-host-keys /home/fugue/.ssh \
-    && chown -R fugue:fugue /workspace /home/fugue/.ssh \
-    && chmod 700 /home/fugue/.ssh
+    && mkdir -p /workspace /run/sshd /etc/ssh/fugue-host-keys /root/.ssh /home/fugue/.ssh \
+    && chown -R root:root /workspace /root/.ssh \
+    && chown -R fugue:fugue /home/fugue/.ssh \
+    && chmod 700 /root/.ssh /home/fugue/.ssh
 
 COPY images/app-ssh/entrypoint.sh /usr/local/bin/fugue-app-ssh-entrypoint
 
 RUN chmod +x /usr/local/bin/fugue-app-ssh-entrypoint
 
-ENV FUGUE_SSH_USER=fugue \
+ENV FUGUE_SSH_USER=root \
     FUGUE_WORKSPACE=/workspace \
-    FUGUE_SSH_AUTHORIZED_KEYS=/home/fugue/.ssh/authorized_keys \
+    FUGUE_SSH_AUTHORIZED_KEYS=/root/.ssh/authorized_keys \
     FUGUE_SSH_HOST_KEYS_DIR=/etc/ssh/fugue-host-keys
 
 WORKDIR /workspace

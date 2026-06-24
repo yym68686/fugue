@@ -18,8 +18,8 @@ The container runs a real OpenSSH daemon.
 Example:
 
 ```bash
-ssh -p 23417 fugue@app-abc.ssh.fugue.pro
-scp -P 23417 ./task.py fugue@app-abc.ssh.fugue.pro:/workspace/
+ssh -p 23417 root@app-abc.ssh.fugue.pro
+scp -P 23417 ./task.py root@app-abc.ssh.fugue.pro:/workspace/
 ```
 
 The hostname is used for DNS and regional edge selection. The assigned public
@@ -337,7 +337,7 @@ Suggested response for `GET /v1/apps/{id}/ssh`:
     "hostname": "app-abc.ssh.fugue.pro",
     "public_port": 23417,
     "target_port": 22,
-    "user": "fugue",
+    "user": "root",
     "host_key_fingerprint": "SHA256:..."
   }
 }
@@ -367,7 +367,7 @@ fugue app ssh my-app
 Host fugue-my-app
   HostName app-abc.ssh.fugue.pro
   Port 23417
-  User fugue
+  User root
   IdentitiesOnly yes
 ```
 
@@ -389,9 +389,9 @@ Recommended scopes:
 Minimum policy:
 
 - Disable password authentication.
-- Disable root login.
+- Allow root login only with public key authentication.
 - Use public key authentication only.
-- Default login user is `fugue`.
+- Default login user is `root`.
 - Audit key creation, key deletion, SSH enable/disable, port rotation, and
   connection attempts.
 - Record connection metadata but not full session contents.
@@ -405,9 +405,9 @@ Container-side SSH server defaults:
 
 ```text
 PasswordAuthentication no
-PermitRootLogin no
+PermitRootLogin prohibit-password
 PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
+AuthorizedKeysFile /root/.ssh/authorized_keys
 AllowTcpForwarding no
 X11Forwarding no
 PermitTunnel no
@@ -738,7 +738,7 @@ implementation.
 - [x] Store public key fingerprints.
 - [x] Reject duplicate active public keys per tenant.
 - [x] Disable password authentication in official images.
-- [x] Disable root login in official images.
+- [x] Restrict root login to public-key authentication in official images.
 - [x] Disable TCP forwarding by default.
 - [x] Add optional TCP forwarding flag.
 - [x] Add brute-force rate limiting at edge.

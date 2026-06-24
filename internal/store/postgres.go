@@ -311,7 +311,7 @@ var postgresSchemaStatements = []string{
 		target_service TEXT NOT NULL DEFAULT '',
 		target_host TEXT NOT NULL DEFAULT '',
 		target_port INTEGER NOT NULL DEFAULT 22,
-		ssh_user TEXT NOT NULL DEFAULT 'fugue',
+		ssh_user TEXT NOT NULL DEFAULT 'root',
 		status TEXT NOT NULL DEFAULT 'pending',
 		status_reason TEXT NOT NULL DEFAULT '',
 		host_key_fingerprint TEXT NOT NULL DEFAULT '',
@@ -319,6 +319,7 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL,
 		released_at TIMESTAMPTZ NULL
 	)`,
+	`ALTER TABLE fugue_app_ssh_endpoints ALTER COLUMN ssh_user SET DEFAULT 'root'`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_app_ssh_endpoints_app ON fugue_app_ssh_endpoints (app_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_app_ssh_endpoints_tenant ON fugue_app_ssh_endpoints (tenant_id, updated_at DESC)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_app_ssh_endpoints_public_port_active ON fugue_app_ssh_endpoints (public_port) WHERE status IN ('pending', 'ready', 'unsupported', 'unavailable')`,
