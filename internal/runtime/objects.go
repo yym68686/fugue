@@ -1232,6 +1232,12 @@ func buildNetworkPolicySSHFrontIngressRule(port int) map[string]any {
 					},
 				},
 			},
+			{
+				// ssh-front uses hostNetwork to bind the public port range; CNIs do not reliably match that traffic via podSelector.
+				"ipBlock": map[string]any{
+					"cidr": "0.0.0.0/0",
+				},
+			},
 		},
 		"ports": []map[string]any{
 			{

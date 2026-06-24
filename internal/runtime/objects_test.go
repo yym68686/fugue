@@ -2393,6 +2393,18 @@ func TestBuildAppObjectsNetworkPolicyAllowsSSHFront(t *testing.T) {
 	if len(ports) != 1 || ports[0]["port"] != 2222 {
 		t.Fatalf("expected ssh-front ingress port 2222, got %#v", ports)
 	}
+	from := sshRule["from"].([]map[string]any)
+	hasHostNetworkSource := false
+	for _, target := range from {
+		ipBlock, ok := target["ipBlock"].(map[string]any)
+		if ok && ipBlock["cidr"] == "0.0.0.0/0" {
+			hasHostNetworkSource = true
+			break
+		}
+	}
+	if !hasHostNetworkSource {
+		t.Fatalf("expected ssh-front ingress to allow hostNetwork source ipBlock, got %#v", from)
+	}
 }
 
 func TestBuildAppObjectsNetworkPolicyAllowsBackingPostgres(t *testing.T) {
