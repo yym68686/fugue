@@ -5909,6 +5909,20 @@ main() {
   fi
   FUGUE_IMAGE_CACHE_ENABLED="${FUGUE_IMAGE_CACHE_ENABLED:-true}"
   FUGUE_IMAGE_CACHE_PORT="${FUGUE_IMAGE_CACHE_PORT:-5000}"
+  FUGUE_IMAGE_STORE_MODE="${FUGUE_IMAGE_STORE_MODE:-distributed}"
+  FUGUE_IMAGE_STORE_MIN_REPLICAS="${FUGUE_IMAGE_STORE_MIN_REPLICAS:-2}"
+  FUGUE_IMAGE_STORE_TARGET_REPLICAS="${FUGUE_IMAGE_STORE_TARGET_REPLICAS:-3}"
+  FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL="${FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL:-30s}"
+  FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL="${FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL:-30m}"
+  FUGUE_IMAGE_STORE_VERIFY_INTERVAL="${FUGUE_IMAGE_STORE_VERIFY_INTERVAL:-10m}"
+  FUGUE_REGISTRY_ENABLED="${FUGUE_REGISTRY_ENABLED:-}"
+  if [[ -z "$(trim_field "${FUGUE_REGISTRY_ENABLED}")" ]]; then
+    if [[ "${FUGUE_IMAGE_STORE_MODE}" == "distributed" ]]; then
+      FUGUE_REGISTRY_ENABLED="false"
+    else
+      FUGUE_REGISTRY_ENABLED="true"
+    fi
+  fi
   if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
     require_env FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY
     require_env FUGUE_IMAGE_CACHE_IMAGE_TAG
@@ -5916,8 +5930,13 @@ main() {
     FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY:-fugue-image-cache}"
     FUGUE_IMAGE_CACHE_IMAGE_TAG="${FUGUE_IMAGE_CACHE_IMAGE_TAG:-latest}"
   fi
-  FUGUE_REGISTRY_JANITOR_ENABLED="${FUGUE_REGISTRY_JANITOR_ENABLED:-true}"
-  FUGUE_REGISTRY_GC_ENABLED="${FUGUE_REGISTRY_GC_ENABLED:-true}"
+  if [[ "${FUGUE_IMAGE_STORE_MODE}" == "distributed" ]]; then
+    FUGUE_REGISTRY_JANITOR_ENABLED="${FUGUE_REGISTRY_JANITOR_ENABLED:-false}"
+    FUGUE_REGISTRY_GC_ENABLED="${FUGUE_REGISTRY_GC_ENABLED:-false}"
+  else
+    FUGUE_REGISTRY_JANITOR_ENABLED="${FUGUE_REGISTRY_JANITOR_ENABLED:-true}"
+    FUGUE_REGISTRY_GC_ENABLED="${FUGUE_REGISTRY_GC_ENABLED:-true}"
+  fi
   FUGUE_EDGE_ENABLED="${FUGUE_EDGE_ENABLED:-true}"
   if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
     require_env FUGUE_EDGE_IMAGE_REPOSITORY
@@ -6267,9 +6286,6 @@ PY
     fail "FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME is required when FUGUE_MESH_RECOVERY_MODE=reset"
   fi
 
-  if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
-    FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
-  fi
   if [[ -z "${FUGUE_REGISTRY_PULL_BASE:-}" ]]; then
     FUGUE_REGISTRY_PULL_BASE="$(detect_existing_registry_pull_base || true)"
   fi
@@ -6277,6 +6293,13 @@ PY
     FUGUE_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE}"
   fi
   [[ -n "$(trim_field "${FUGUE_REGISTRY_PULL_BASE}")" ]] || fail "FUGUE_REGISTRY_PULL_BASE must come from DiscoveryBundle, an explicit env var, or FUGUE_DEFAULT_REGISTRY_PULL_BASE"
+  if [[ -z "${FUGUE_REGISTRY_PUSH_BASE:-}" ]]; then
+    if [[ "${FUGUE_IMAGE_STORE_MODE}" == "distributed" ]]; then
+      FUGUE_REGISTRY_PUSH_BASE="${FUGUE_REGISTRY_PULL_BASE}"
+    else
+      FUGUE_REGISTRY_PUSH_BASE="${FUGUE_RELEASE_FULLNAME}-registry.${FUGUE_NAMESPACE}.svc.cluster.local:${FUGUE_REGISTRY_SERVICE_PORT}"
+    fi
+  fi
   if [[ -z "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}" ]]; then
     FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT="${FUGUE_DEFAULT_CLUSTER_JOIN_REGISTRY_ENDPOINT:-}"
   fi
@@ -6442,10 +6465,19 @@ PY
     --set-string observability.agent.maxPayloadBytes="${FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES}" \
     --set-string observability.agent.memoryLimitBytes="${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES}" \
     --set-string observability.agent.retryMaxAttempts="${FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS}" \
+    --set-string imageStore.mode="${FUGUE_IMAGE_STORE_MODE}" \
+    --set imageStore.minReplicas="${FUGUE_IMAGE_STORE_MIN_REPLICAS}" \
+    --set imageStore.targetReplicas="${FUGUE_IMAGE_STORE_TARGET_REPLICAS}" \
+    --set-string imageStore.schedulerInterval="${FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL}" \
+    --set-string imageStore.replicaLeaseTTL="${FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL}" \
+    --set-string imageStore.verifyInterval="${FUGUE_IMAGE_STORE_VERIFY_INTERVAL}" \
     --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
     --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
     --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
     --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}" \
+    --set-string imageCache.registryBase="${FUGUE_REGISTRY_PULL_BASE}" \
+    --set-string imageCache.upstreamBase="$(helm_set_string_value "${FUGUE_IMAGE_CACHE_UPSTREAM_BASE:-}")" \
+    --set registry.enabled="${FUGUE_REGISTRY_ENABLED}" \
     --set registryJanitor.enabled="${FUGUE_REGISTRY_JANITOR_ENABLED}" \
     --set registryGC.enabled="${FUGUE_REGISTRY_GC_ENABLED}" \
     --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
