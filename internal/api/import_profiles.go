@@ -12,7 +12,7 @@ import (
 
 const (
 	defaultImportedConfigPath                 = "/home/api.yaml"
-	defaultImportedMovableRWOStorageClassName = "fugue-local-rwo"
+	defaultImportedMovableRWOStorageClassName = "fugue-workspace-rwo"
 	defaultManagedPostgresStorageClassName    = "fugue-postgres-rwo"
 )
 

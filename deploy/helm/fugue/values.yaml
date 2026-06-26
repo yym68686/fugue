@@ -772,11 +772,15 @@ sharedWorkspaceStorage:
 
 movableRWOStorage:
   enabled: true
-  storageClassName: fugue-local-rwo
-  provisionerName: rancher.io/local-path
+  storageClassName: fugue-workspace-rwo
+  provisionerName: local.csi.openebs.io
   reclaimPolicy: Delete
   volumeBindingMode: WaitForFirstConsumer
-  allowVolumeExpansion: false
+  allowVolumeExpansion: true
+  parameters:
+    storage: "lvm"
+    volgroup: "fugue-vg"
+  allowedTopologies: []
 
 managedPostgresStorage:
   enabled: true
@@ -951,7 +955,7 @@ controlPlanePostgres:
   existingSecretName: ""
   storage:
     size: 10Gi
-    storageClassName: ""
+    storageClassName: fugue-postgres-rwo
   backup:
     enabled: false
     destinationPath: ""

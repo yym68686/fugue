@@ -10,4 +10,12 @@ provisioner: {{ .Values.movableRWOStorage.provisionerName | quote }}
 reclaimPolicy: {{ .Values.movableRWOStorage.reclaimPolicy }}
 volumeBindingMode: {{ .Values.movableRWOStorage.volumeBindingMode }}
 allowVolumeExpansion: {{ .Values.movableRWOStorage.allowVolumeExpansion }}
+{{- with .Values.movableRWOStorage.parameters }}
+parameters:
+{{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.movableRWOStorage.allowedTopologies }}
+allowedTopologies:
+{{- toYaml . | nindent 2 }}
+{{- end }}
 {{- end }}

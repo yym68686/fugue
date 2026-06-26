@@ -1110,6 +1110,39 @@ sharedWorkspaceStorage:
 	}
 }
 
+func TestMovableRWOStorageDefaultsToOpenEBSWorkspaceClass(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	storageClassDoc := manifestDocumentForKindAndName(manifest, "StorageClass", "fugue-workspace-rwo")
+	if storageClassDoc == "" {
+		t.Fatalf("rendered manifest missing workspace RWO StorageClass:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`provisioner: "local.csi.openebs.io"`,
+		"allowVolumeExpansion: true",
+		"storage: lvm",
+		"volgroup: fugue-vg",
+	} {
+		if !strings.Contains(storageClassDoc, want) {
+			t.Fatalf("workspace RWO StorageClass missing %q:\n%s", want, storageClassDoc)
+		}
+	}
+}
+
 func TestRegistryDefaultsToPVCStorage(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -1132,7 +1165,7 @@ func TestRegistryDefaultsToPVCStorage(t *testing.T) {
 		t.Fatalf("rendered manifest missing registry PVC:\n%s", manifest)
 	}
 	for _, want := range []string{
-		`storageClassName: "fugue-local-rwo"`,
+		`storageClassName: "fugue-workspace-rwo"`,
 		"storage: 200Gi",
 	} {
 		if !strings.Contains(pvcDoc, want) {
@@ -1321,7 +1354,7 @@ func TestHeadscaleDefaultsToPVCStorage(t *testing.T) {
 		t.Fatalf("rendered manifest missing headscale PVC:\n%s", manifest)
 	}
 	for _, want := range []string{
-		`storageClassName: "fugue-local-rwo"`,
+		`storageClassName: "fugue-workspace-rwo"`,
 		"storage: 1Gi",
 	} {
 		if !strings.Contains(pvcDoc, want) {
@@ -2775,7 +2808,10 @@ sharedWorkspaceStorage:
 func manifestDocumentForKindAndName(manifest string, kind string, name string) string {
 	for _, doc := range strings.Split(manifest, "\n---") {
 		hasKind := strings.Contains(doc, "\nkind: "+kind+"\n") || strings.Contains(doc, "kind: "+kind+"\n")
-		hasName := strings.Contains(doc, "\n  name: "+name+"\n") || strings.Contains(doc, "\nname: "+name+"\n")
+		hasName := strings.Contains(doc, "\n  name: "+name+"\n") ||
+			strings.Contains(doc, "\n  name: \""+name+"\"\n") ||
+			strings.Contains(doc, "\nname: "+name+"\n") ||
+			strings.Contains(doc, "\nname: \""+name+"\"\n")
 		if hasKind && hasName {
 			return doc
 		}
@@ -2831,6 +2867,7 @@ func TestControlPlanePostgresCNPGCanDriveAPI(t *testing.T) {
 		"instances: 3",
 		"kind: Cluster",
 		"app.kubernetes.io/component: control-plane-postgres",
+		`storageClass: "fugue-postgres-rwo"`,
 		"name: fugue-fugue-control-plane-postgres-app",
 		"node-role.kubernetes.io/control-plane",
 		"podAntiAffinityType: \"preferred\"",
