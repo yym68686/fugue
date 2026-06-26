@@ -638,17 +638,16 @@ imageStore:
     enabled: true
     maxDeleteBytesPerRun: 10Gi
 
-imageCache:
-  diskLimit:
-    enabled: true
-    highWatermarkPercent: 55
-    lowWatermarkPercent: 45
-    minFreeBytes: 50Gi
-    maxDeleteBytesPerRun: 10Gi
-
 registry:
   enabled: true
 ```
+
+`fugue-image-cache` enforces conservative built-in disk pressure defaults:
+high watermark 55%, low watermark 45%, minimum free space 50GiB, and a 10GiB
+per-run delete budget. Those defaults avoid changing the node-local
+image-cache DaemonSet rendered pod spec during ordinary control-plane releases;
+override environment variables should only be introduced through an explicit
+node-local build-plane release.
 
 Rollout modes:
 

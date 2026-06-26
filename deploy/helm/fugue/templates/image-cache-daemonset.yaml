@@ -66,16 +66,6 @@ spec:
               value: {{ printf "127.0.0.1:%v" .Values.imageCache.port | quote }}
             - name: FUGUE_IMAGE_CACHE_UPSTREAM_BASE
               value: {{ include "fugue.imageCacheUpstreamBase" . | quote }}
-            - name: FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED
-              value: {{ .Values.imageCache.diskLimit.enabled | quote }}
-            - name: FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT
-              value: {{ .Values.imageCache.diskLimit.highWatermarkPercent | quote }}
-            - name: FUGUE_IMAGE_CACHE_LOW_WATERMARK_PERCENT
-              value: {{ .Values.imageCache.diskLimit.lowWatermarkPercent | quote }}
-            - name: FUGUE_IMAGE_CACHE_MIN_FREE_BYTES
-              value: {{ .Values.imageCache.diskLimit.minFreeBytes | quote }}
-            - name: FUGUE_IMAGE_CACHE_MAX_DELETE_BYTES_PER_RUN
-              value: {{ .Values.imageCache.diskLimit.maxDeleteBytesPerRun | quote }}
             - name: FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN
               valueFrom:
                 secretKeyRef:
