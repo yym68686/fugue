@@ -20,7 +20,7 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, err
 	}
-	if !shouldPinManagedSharedApp(app) {
+	if s == nil || s.Store == nil || strings.TrimSpace(app.Spec.RuntimeID) == "" {
 		return base, nil
 	}
 	runtimeObj, err := s.Store.GetRuntime(app.Spec.RuntimeID)
@@ -30,6 +30,14 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 	if runtimeObj.Type != model.RuntimeTypeManagedShared {
 		return base, nil
 	}
+	if nodeName, found, err := s.managedSharedPersistentStorageNode(ctx, app); err != nil {
+		return runtimepkg.SchedulingConstraints{}, err
+	} else if found {
+		return schedulingPinnedToNode(base, nodeName), nil
+	}
+	if !shouldPinManagedSharedApp(app) {
+		return base, nil
+	}
 	nodeName, found, err := s.selectManagedSharedAppNode(ctx, app, base.NodeSelector)
 	if err != nil {
 		return runtimepkg.SchedulingConstraints{}, err
@@ -37,20 +45,47 @@ func (s *Service) managedSchedulingConstraintsForApp(ctx context.Context, app mo
 	if !found {
 		return base, nil
 	}
+	return schedulingPinnedToNode(base, nodeName), nil
+}
+
+func shouldPinManagedSharedApp(app model.App) bool {
+	if app.Spec.Workspace != nil {
+		return false
+	}
+	return strings.TrimSpace(app.Spec.RuntimeID) != ""
+}
+
+func (s *Service) managedSharedPersistentStorageNode(ctx context.Context, app model.App) (string, bool, error) {
+	storage := app.Spec.PersistentStorage
+	if storage == nil || model.AppPersistentStorageSpecUsesSharedProjectRWX(storage) {
+		return "", false, nil
+	}
+	claimName := desiredPersistentStorageClaimName(app, *storage)
+	if strings.TrimSpace(claimName) == "" {
+		return "", false, nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("initialize persistent storage placement client for app=%s failed, continuing with shared-pool scheduling: %v", app.ID, err)
+		}
+		return "", false, nil
+	}
+	nodeName, found, err := managedSharedPostgresPVCNode(ctx, client, runtimepkg.NamespaceForTenant(app.TenantID), claimName, nil)
+	if err != nil {
+		return "", false, err
+	}
+	return nodeName, found, nil
+}
+
+func schedulingPinnedToNode(base runtimepkg.SchedulingConstraints, nodeName string) runtimepkg.SchedulingConstraints {
 	out := base
 	out.NodeSelector = clonePlacementStringMap(base.NodeSelector)
 	if out.NodeSelector == nil {
 		out.NodeSelector = map[string]string{}
 	}
-	out.NodeSelector[kubeHostnameLabelKey] = nodeName
-	return out, nil
-}
-
-func shouldPinManagedSharedApp(app model.App) bool {
-	if app.Spec.Workspace != nil || app.Spec.PersistentStorage != nil {
-		return false
-	}
-	return strings.TrimSpace(app.Spec.RuntimeID) != ""
+	out.NodeSelector[kubeHostnameLabelKey] = strings.TrimSpace(nodeName)
+	return out
 }
 
 func (s *Service) selectManagedSharedAppNode(ctx context.Context, app model.App, selector map[string]string) (string, bool, error) {

@@ -944,7 +944,7 @@ func TestExecuteManagedImportOperationImportsUploadSourceThroughRuntimeCache(t *
 	}
 }
 
-func TestExecuteManagedImportOperationResolvesManagedSharedDockerImageImportToSelectedNodeCache(t *testing.T) {
+func TestExecuteManagedImportOperationResolvesManagedSharedPersistentImageImportToSelectedNodeCache(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -985,6 +985,14 @@ func TestExecuteManagedImportOperationResolvesManagedSharedDockerImageImportToSe
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
 		RuntimeID: model.DefaultManagedRuntimeID,
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode:             model.AppPersistentStorageModeMovableRWO,
+			StorageSize:      "1Gi",
+			StorageClassName: "fugue-workspace-rwo",
+			Mounts: []model.AppPersistentStorageMount{
+				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
+			},
+		},
 	}, model.AppSource{
 		Type:     model.AppSourceTypeDockerImage,
 		ImageRef: "nginx:1.27",
