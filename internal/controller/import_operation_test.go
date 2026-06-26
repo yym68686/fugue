@@ -585,6 +585,127 @@ func TestExecuteManagedImportOperationReusesManagedImageLocationForDockerImageSo
 	}
 }
 
+func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuilderRegistryFlag(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://203.0.113.10:9443",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+
+	const imageRef = "registry.fugue.internal:5000/fugue-apps/runtime:git-abc123"
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           "app_template",
+		ImageRef:        imageRef,
+		RuntimeID:       updater.RuntimeID,
+		ClusterNodeName: updater.ClusterNodeName,
+		CacheEndpoint:   "http://203.0.113.10:5000",
+		Status:          model.ImageLocationStatusPresent,
+	}); err != nil {
+		t.Fatalf("record image location: %v", err)
+	}
+
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Replicas:  1,
+		RuntimeID: updater.RuntimeID,
+		Ports:     []int{7777},
+	}, model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: imageRef,
+	}, model.AppRoute{})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	specCopy := app.Spec
+	sourceCopy := *app.Source
+	op, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeImport,
+		RequestedByType: model.ActorTypeAPIKey,
+		RequestedByID:   "test-key",
+		AppID:           app.ID,
+		DesiredSpec:     &specCopy,
+		DesiredSource:   &sourceCopy,
+	})
+	if err != nil {
+		t.Fatalf("create import operation: %v", err)
+	}
+
+	importer := &recordingImporter{}
+	svc := &Service{
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed"},
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		importer:         importer,
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed reuse must not inspect the central registry")
+			return false, nil, nil
+		},
+		resolveManagedImageDigestRef: func(context.Context, string) (string, error) {
+			t.Fatal("strict distributed reuse must not resolve digests through the central registry")
+			return "", nil
+		},
+	}
+
+	if err := svc.executeManagedImportOperation(context.Background(), op, app); err != nil {
+		t.Fatalf("execute managed import operation: %v", err)
+	}
+	if importer.dockerImageReq != nil {
+		t.Fatalf("expected distributed image location reuse to skip docker importer, got request %+v", importer.dockerImageReq)
+	}
+
+	ops, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list app operations: %v", err)
+	}
+	var deployOp model.Operation
+	for _, candidate := range ops {
+		if candidate.Type == model.OperationTypeDeploy {
+			deployOp = candidate
+		}
+	}
+	if deployOp.ID == "" || deployOp.DesiredSpec == nil || deployOp.DesiredSource == nil {
+		t.Fatalf("expected deploy operation with desired spec/source, got %+v", deployOp)
+	}
+	if got := deployOp.DesiredSpec.Image; got != imageRef {
+		t.Fatalf("expected runtime image ref %q, got %q", imageRef, got)
+	}
+	if got := deployOp.DesiredSource.ResolvedImageRef; got != imageRef {
+		t.Fatalf("expected managed resolved image ref %q, got %q", imageRef, got)
+	}
+}
+
 func TestExecuteManagedImportOperationReusesManagedImageLocationWithoutResolvedTarget(t *testing.T) {
 	t.Parallel()
 

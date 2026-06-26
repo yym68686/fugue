@@ -318,7 +318,10 @@ type importImageDestination struct {
 }
 
 func (s *Service) importImageDestination(ctx context.Context, app model.App, op model.Operation) importImageDestination {
-	if s == nil || s.Store == nil || !s.nodeLocalBuilderRegistryEnabled() {
+	if s == nil || s.Store == nil {
+		return importImageDestination{}
+	}
+	if !s.nodeLocalBuilderRegistryEnabled() && !s.imageStoreDistributedMode() {
 		return importImageDestination{}
 	}
 	runtimeID := importOperationRuntimeID(app, op)
@@ -393,7 +396,10 @@ func (s *Service) reuseExistingManagedImageImportOutput(
 	imageRef string,
 	target deployImageTarget,
 ) (sourceimport.GitHubSourceImportOutput, bool) {
-	if s == nil || s.Store == nil || !s.nodeLocalBuilderRegistryEnabled() {
+	if s == nil || s.Store == nil {
+		return sourceimport.GitHubSourceImportOutput{}, false
+	}
+	if !s.nodeLocalBuilderRegistryEnabled() && !s.imageStoreDistributedMode() {
 		return sourceimport.GitHubSourceImportOutput{}, false
 	}
 	managedRef, runtimeRef, ok := configuredManagedImportImageRefs(imageRef, s.registryPushBase, s.registryPullBase)
@@ -1001,9 +1007,6 @@ func (s *Service) resolveImportedManagedImageRef(
 }
 
 func (s *Service) importUsedNodeLocalBuilderRegistry(output sourceimport.GitHubSourceImportOutput) bool {
-	if !s.nodeLocalBuilderRegistryEnabled() {
-		return false
-	}
 	if strings.TrimSpace(output.ImportResult.BuildJobName) != "" {
 		return true
 	}
