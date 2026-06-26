@@ -605,7 +605,7 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
 	}
-	updater, _, err := stateStore.EnrollNodeUpdater(
+	sourceUpdater, _, err := stateStore.EnrollNodeUpdater(
 		nodeSecret,
 		"worker-1",
 		"https://203.0.113.10:9443",
@@ -617,7 +617,21 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
 	)
 	if err != nil {
-		t.Fatalf("enroll node updater: %v", err)
+		t.Fatalf("enroll source node updater: %v", err)
+	}
+	targetUpdater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-2",
+		"https://203.0.113.20:9443",
+		nil,
+		"worker-2",
+		"machine-2",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll target node updater: %v", err)
 	}
 
 	const imageRef = "registry.fugue.internal:5000/fugue-apps/runtime:git-abc123"
@@ -625,8 +639,8 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 		TenantID:        tenant.ID,
 		AppID:           "app_template",
 		ImageRef:        imageRef,
-		RuntimeID:       updater.RuntimeID,
-		ClusterNodeName: updater.ClusterNodeName,
+		RuntimeID:       sourceUpdater.RuntimeID,
+		ClusterNodeName: sourceUpdater.ClusterNodeName,
 		CacheEndpoint:   "http://203.0.113.10:5000",
 		Status:          model.ImageLocationStatusPresent,
 	}); err != nil {
@@ -635,7 +649,7 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 
 	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
 		Replicas:  1,
-		RuntimeID: updater.RuntimeID,
+		RuntimeID: targetUpdater.RuntimeID,
 		Ports:     []int{7777},
 	}, model.AppSource{
 		Type:     model.AppSourceTypeDockerImage,
@@ -703,6 +717,18 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 	}
 	if got := deployOp.DesiredSource.ResolvedImageRef; got != imageRef {
 		t.Fatalf("expected managed resolved image ref %q, got %q", imageRef, got)
+	}
+	locations, err := stateStore.ListImageLocations(model.ImageLocationFilter{
+		TenantID:  tenant.ID,
+		AppID:     app.ID,
+		RuntimeID: sourceUpdater.RuntimeID,
+		Status:    model.ImageLocationStatusPresent,
+	})
+	if err != nil {
+		t.Fatalf("list reused image locations: %v", err)
+	}
+	if len(locations) == 0 {
+		t.Fatal("expected reused source cache location to be recorded for imported app")
 	}
 }
 

@@ -61,8 +61,11 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		if queuedDockerImageRef == "" {
 			return fmt.Errorf("import operation %s missing image_ref", op.ID)
 		}
-		if reusedOutput, reused := s.reuseExistingManagedImageImportOutput(app, *op.DesiredSource, queuedDockerImageRef, imageDestination.Target); reused {
+		if reusedOutput, reusedDestination, reused := s.reuseExistingManagedImageImportOutput(app, *op.DesiredSource, queuedDockerImageRef, imageDestination.Target); reused {
 			output = reusedOutput
+			if strings.TrimSpace(reusedDestination.CacheEndpoint) != "" {
+				imageDestination = reusedDestination
+			}
 		} else {
 			output, err = s.importer.ImportDockerImageSource(importCtx, sourceimport.DockerImageSourceImportRequest{
 				AppName:                     app.Name,
@@ -395,31 +398,38 @@ func (s *Service) reuseExistingManagedImageImportOutput(
 	queuedSource model.AppSource,
 	imageRef string,
 	target deployImageTarget,
-) (sourceimport.GitHubSourceImportOutput, bool) {
+) (sourceimport.GitHubSourceImportOutput, importImageDestination, bool) {
 	if s == nil || s.Store == nil {
-		return sourceimport.GitHubSourceImportOutput{}, false
+		return sourceimport.GitHubSourceImportOutput{}, importImageDestination{}, false
 	}
 	if !s.nodeLocalBuilderRegistryEnabled() && !s.imageStoreDistributedMode() {
-		return sourceimport.GitHubSourceImportOutput{}, false
+		return sourceimport.GitHubSourceImportOutput{}, importImageDestination{}, false
 	}
 	managedRef, runtimeRef, ok := configuredManagedImportImageRefs(imageRef, s.registryPushBase, s.registryPullBase)
 	if !ok {
-		return sourceimport.GitHubSourceImportOutput{}, false
+		return sourceimport.GitHubSourceImportOutput{}, importImageDestination{}, false
 	}
 	locations, err := s.presentImageLocations(app, managedRef, runtimeRef)
 	if err != nil {
 		if s.Logger != nil {
 			s.Logger.Printf("lookup reusable managed image locations app=%s image=%s failed: %v", app.ID, imageRef, err)
 		}
-		return sourceimport.GitHubSourceImportOutput{}, false
+		return sourceimport.GitHubSourceImportOutput{}, importImageDestination{}, false
 	}
 	location, ok := reusableManagedImageLocation(locations, target)
 	if !ok {
-		return sourceimport.GitHubSourceImportOutput{}, false
+		return sourceimport.GitHubSourceImportOutput{}, importImageDestination{}, false
 	}
 	destinationRef := cacheEndpointImageRef(location.CacheEndpoint, managedRef)
 	if destinationRef == "" {
 		destinationRef = runtimeRef
+	}
+	reusedDestination := importImageDestination{
+		CacheEndpoint: strings.TrimRight(strings.TrimSpace(location.CacheEndpoint), "/"),
+		Target: deployImageTarget{
+			RuntimeID:       strings.TrimSpace(location.RuntimeID),
+			ClusterNodeName: strings.TrimSpace(location.ClusterNodeName),
+		},
 	}
 	if s.Logger != nil {
 		s.Logger.Printf(
@@ -449,7 +459,7 @@ func (s *Service) reuseExistingManagedImageImportOutput(
 			ComposeService:   strings.TrimSpace(queuedSource.ComposeService),
 			DetectedProvider: model.AppSourceTypeDockerImage,
 		},
-	}, true
+	}, reusedDestination, true
 }
 
 func configuredManagedImportImageRefs(imageRef, pushBase, pullBase string) (string, string, bool) {
@@ -482,9 +492,6 @@ func reusableManagedImageLocation(locations []model.ImageLocation, target deploy
 		if imageLocationPresentOnTarget([]model.ImageLocation{location}, target) {
 			return location, true
 		}
-	}
-	if strings.TrimSpace(target.ClusterNodeName) != "" || strings.TrimSpace(target.RuntimeID) != "" {
-		return model.ImageLocation{}, false
 	}
 	for _, location := range locations {
 		if strings.TrimSpace(location.CacheEndpoint) != "" {
