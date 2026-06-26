@@ -571,6 +571,10 @@ services:
 	})
 	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
 		Name: "demo-stack",
+		Postgres: &model.AppPostgresSpec{
+			StorageSize:      "5Gi",
+			StorageClassName: "fast-rwo",
+		},
 		ServiceEnv: map[string]map[string]string{
 			"web": {
 				"GATEWAY_ONLY": "1",
@@ -667,6 +671,16 @@ services:
 	}
 	if got := webApp.Spec.Env["GATEWAY_ONLY"]; got != "1" {
 		t.Fatalf("expected web service env override, got %+v", webApp.Spec.Env)
+	}
+	postgres := store.OwnedManagedPostgresSpec(webApp)
+	if postgres == nil {
+		t.Fatalf("expected web app to own managed postgres backing service, got %+v", webApp)
+	}
+	if got := postgres.StorageSize; got != "5Gi" {
+		t.Fatalf("expected postgres storage size override 5Gi, got %q", got)
+	}
+	if got := postgres.StorageClassName; got != "fast-rwo" {
+		t.Fatalf("expected postgres storage class override fast-rwo, got %q", got)
 	}
 
 	workerApp, ok := appsByService["worker"]
