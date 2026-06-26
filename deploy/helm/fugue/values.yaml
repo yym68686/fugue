@@ -782,6 +782,14 @@ movableRWOStorage:
     volgroup: "fugue-vg"
   allowedTopologies: []
 
+legacyLocalRWOStorage:
+  enabled: true
+  storageClassName: fugue-local-rwo
+  provisionerName: rancher.io/local-path
+  reclaimPolicy: Delete
+  volumeBindingMode: WaitForFirstConsumer
+  allowVolumeExpansion: false
+
 managedPostgresStorage:
   enabled: true
   storageClassName: fugue-postgres-rwo

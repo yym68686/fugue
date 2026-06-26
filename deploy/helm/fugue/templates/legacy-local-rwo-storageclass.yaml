@@ -1,0 +1,13 @@
+{{- if and .Values.legacyLocalRWOStorage.enabled (ne .Values.legacyLocalRWOStorage.storageClassName .Values.movableRWOStorage.storageClassName) }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.legacyLocalRWOStorage.storageClassName | quote }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "legacy-local-rwo-storage") | nindent 4 }}
+    fugue.pro/legacy-local-rwo: "true"
+provisioner: {{ .Values.legacyLocalRWOStorage.provisionerName | quote }}
+reclaimPolicy: {{ .Values.legacyLocalRWOStorage.reclaimPolicy }}
+volumeBindingMode: {{ .Values.legacyLocalRWOStorage.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.legacyLocalRWOStorage.allowVolumeExpansion }}
+{{- end }}

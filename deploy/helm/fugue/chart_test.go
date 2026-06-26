@@ -1141,6 +1141,19 @@ func TestMovableRWOStorageDefaultsToOpenEBSWorkspaceClass(t *testing.T) {
 			t.Fatalf("workspace RWO StorageClass missing %q:\n%s", want, storageClassDoc)
 		}
 	}
+
+	legacyStorageClassDoc := manifestDocumentForKindAndName(manifest, "StorageClass", "fugue-local-rwo")
+	if legacyStorageClassDoc == "" {
+		t.Fatalf("rendered manifest should retain legacy local RWO StorageClass:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`provisioner: "rancher.io/local-path"`,
+		"allowVolumeExpansion: false",
+	} {
+		if !strings.Contains(legacyStorageClassDoc, want) {
+			t.Fatalf("legacy local RWO StorageClass missing %q:\n%s", want, legacyStorageClassDoc)
+		}
+	}
 }
 
 func TestRegistryDefaultsToPVCStorage(t *testing.T) {

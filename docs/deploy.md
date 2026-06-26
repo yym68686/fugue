@@ -187,6 +187,7 @@ Registry and cluster-join notes:
 - `api.clusterJoinRegistryEndpoint` is the mirror endpoint written by `/install/join-cluster.sh`; it defaults to the node-local NodePort endpoint and can be overridden for regional mirrors.
 - `imagePrePull.images` can list high-frequency runtime/template image refs that should be warmed on every node by the chart-managed pre-pull DaemonSet.
 - Persistent app/workspace data uses the OpenEBS LVM-backed `fugue-workspace-rwo` StorageClass by default. It is the default movable RWO class exposed to the API as `FUGUE_DEFAULT_MOVABLE_RWO_STORAGE_CLASS_NAME` and is intended for app workspaces and other general durable RWO data volumes.
+- The legacy `fugue-local-rwo` local-path StorageClass is still rendered for compatibility with existing PVCs and explicit overrides, but it is no longer the default for new movable RWO volumes.
 - The bundled registry defaults to a `ReadWriteOnce` PVC (`registry.persistence.mode=pvc`, `200Gi`, `fugue-workspace-rwo`). This avoids the old naked `hostPath` behavior where the singleton registry pod could drift to another node and leave an orphaned registry store behind.
 - Managed Postgres remains on the dedicated OpenEBS LVM-backed `fugue-postgres-rwo` StorageClass so database volumes can be tuned and migrated independently from app workspace volumes.
 - For production, prefer an external registry and set `api.registryPushBase`, `api.registryPullBase`, and `api.clusterJoinRegistryEndpoint` to that registry or its regional mirrors.
