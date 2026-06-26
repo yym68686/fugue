@@ -991,8 +991,14 @@ func (c *imageCache) normalizedDiskLimit() imageCacheDiskLimit {
 	if limit.HighWatermarkPercent <= 0 {
 		limit.HighWatermarkPercent = defaultImageCacheHighWatermarkPercent
 	}
+	if limit.HighWatermarkPercent > 100 {
+		limit.HighWatermarkPercent = 100
+	}
 	if limit.LowWatermarkPercent <= 0 {
 		limit.LowWatermarkPercent = defaultImageCacheLowWatermarkPercent
+	}
+	if limit.LowWatermarkPercent > 100 {
+		limit.LowWatermarkPercent = 100
 	}
 	if limit.LowWatermarkPercent > limit.HighWatermarkPercent {
 		limit.LowWatermarkPercent = limit.HighWatermarkPercent
@@ -1019,6 +1025,7 @@ func (c *imageCache) imageCacheDiskStats(limit imageCacheDiskLimit) (imageCacheD
 	if total > 0 {
 		usedPercent = (float64(used) / float64(total)) * 100
 	}
+	limit.MinFreeBytes = effectiveImageCacheMinFreeBytes(limit, total)
 	overHigh := limit.HighWatermarkPercent > 0 && usedPercent >= limit.HighWatermarkPercent
 	belowFree := limit.MinFreeBytes > 0 && free < limit.MinFreeBytes
 	neededForWatermark := int64(0)
@@ -1051,6 +1058,25 @@ func (c *imageCache) imageCacheDiskStats(limit imageCacheDiskLimit) (imageCacheD
 		BelowMinFree:         belowFree,
 		NeededDeleteBytes:    needed,
 	}, nil
+}
+
+func effectiveImageCacheMinFreeBytes(limit imageCacheDiskLimit, totalBytes int64) int64 {
+	minFreeBytes := limit.MinFreeBytes
+	if minFreeBytes <= 0 || totalBytes <= 0 {
+		return minFreeBytes
+	}
+	maxReachableFreeBytes := totalBytes
+	if limit.LowWatermarkPercent > 0 {
+		targetUsedBytes := int64(float64(totalBytes) * (limit.LowWatermarkPercent / 100))
+		maxReachableFreeBytes = totalBytes - targetUsedBytes
+		if maxReachableFreeBytes < 0 {
+			maxReachableFreeBytes = 0
+		}
+	}
+	if minFreeBytes > maxReachableFreeBytes {
+		return maxReachableFreeBytes
+	}
+	return minFreeBytes
 }
 
 func filesystemUsage(path string) (totalBytes, usedBytes, freeBytes int64, err error) {

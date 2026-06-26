@@ -644,10 +644,13 @@ registry:
 
 `fugue-image-cache` enforces conservative built-in disk pressure defaults:
 high watermark 55%, low watermark 45%, minimum free space 50GiB, and a 10GiB
-per-run delete budget. Those defaults avoid changing the node-local
-image-cache DaemonSet rendered pod spec during ordinary control-plane releases;
-override environment variables should only be introduced through an explicit
-node-local build-plane release.
+per-run delete budget. On small disks, the effective minimum free space is
+clamped to the free space reachable at the low watermark, so a node never keeps
+trying to satisfy an impossible reserve that is larger than the disk can
+provide. Those defaults avoid changing the node-local image-cache DaemonSet
+rendered pod spec during ordinary control-plane releases; override environment
+variables should only be introduced through an explicit node-local build-plane
+release.
 
 Rollout modes:
 

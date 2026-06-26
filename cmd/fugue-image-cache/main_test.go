@@ -968,6 +968,55 @@ func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *t
 	}
 }
 
+func TestImageCacheDiskLimitNormalizationClampsPercentages(t *testing.T) {
+	t.Parallel()
+
+	cache := &imageCache{
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 150,
+			LowWatermarkPercent:  125,
+			MinFreeBytes:         -1,
+			MaxDeleteBytesPerRun: 0,
+		},
+	}
+	limit := cache.normalizedDiskLimit()
+
+	if limit.HighWatermarkPercent != 100 {
+		t.Fatalf("high watermark = %.2f, want 100", limit.HighWatermarkPercent)
+	}
+	if limit.LowWatermarkPercent != 100 {
+		t.Fatalf("low watermark = %.2f, want 100", limit.LowWatermarkPercent)
+	}
+	if limit.MinFreeBytes != 0 {
+		t.Fatalf("min free bytes = %d, want 0", limit.MinFreeBytes)
+	}
+	if limit.MaxDeleteBytesPerRun != defaultImageCacheMaxDeleteBytesPerRun {
+		t.Fatalf("max delete bytes = %d, want default %d", limit.MaxDeleteBytesPerRun, defaultImageCacheMaxDeleteBytesPerRun)
+	}
+}
+
+func TestEffectiveImageCacheMinFreeBytesClampsToReachableLowWatermark(t *testing.T) {
+	t.Parallel()
+
+	const giB = int64(1024 * 1024 * 1024)
+	limit := imageCacheDiskLimit{
+		LowWatermarkPercent: 45,
+		MinFreeBytes:        50 * giB,
+	}
+	totalBytes := int64(42 * giB)
+	want := totalBytes - int64(float64(totalBytes)*0.45)
+
+	if got := effectiveImageCacheMinFreeBytes(limit, totalBytes); got != want {
+		t.Fatalf("effective min free bytes = %d, want %d", got, want)
+	}
+
+	largeDisk := int64(400 * giB)
+	if got := effectiveImageCacheMinFreeBytes(limit, largeDisk); got != limit.MinFreeBytes {
+		t.Fatalf("effective min free bytes on large disk = %d, want configured %d", got, limit.MinFreeBytes)
+	}
+}
+
 func TestHydrateMarksMissingPeerLocationStale(t *testing.T) {
 	t.Parallel()
 
