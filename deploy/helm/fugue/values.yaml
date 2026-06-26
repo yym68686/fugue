@@ -288,7 +288,7 @@ imageStore:
   enabled: false
   mode: bundled-registry
   minReplicas: 2
-  targetReplicas: 3
+  targetReplicas: 2
   requireCrossNodeReplicas: true
   requireCrossRegionReplicas: false
   verifyInterval: 10m

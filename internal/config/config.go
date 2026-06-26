@@ -375,7 +375,7 @@ func ControllerFromEnv() ControllerConfig {
 		ImageRetentionSweepTimeout:    getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT", 5*time.Minute),
 		ImageStoreMode:                getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
 		ImageStoreMinReplicas:         getenvInt("FUGUE_IMAGE_STORE_MIN_REPLICAS", 2),
-		ImageStoreTargetReplicas:      getenvInt("FUGUE_IMAGE_STORE_TARGET_REPLICAS", 3),
+		ImageStoreTargetReplicas:      getenvInt("FUGUE_IMAGE_STORE_TARGET_REPLICAS", 2),
 		ImageStoreSchedulerInterval:   getenvDuration("FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL", 30*time.Second),
 		ImageStoreReplicaLeaseTTL:     getenvDuration("FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL", 30*time.Minute),
 		ImageStoreVerifyInterval:      getenvDuration("FUGUE_IMAGE_STORE_VERIFY_INTERVAL", 10*time.Minute),

@@ -259,7 +259,7 @@ func (s *Service) completeSatisfiedImageReplicationTasks(ctx context.Context) er
 func (s *Service) imageTargetReplicaCount(image model.Image) int {
 	target := s.Config.ImageStoreTargetReplicas
 	if target <= 0 {
-		target = 3
+		target = 2
 	}
 	if image.RequiredReplicaCount > target {
 		target = image.RequiredReplicaCount

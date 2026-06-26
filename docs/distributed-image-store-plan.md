@@ -324,7 +324,7 @@ Registryless mode is a feature-gated chart setting:
 imageStore:
   mode: bundled-registry | distributed | distributed-with-registry-fallback
   minReplicas: 2
-  targetReplicas: 3
+  targetReplicas: 2
   requireCrossNodeReplicas: true
   requireCrossRegionReplicas: false
   verifyInterval: 10m
@@ -629,7 +629,7 @@ imageStore:
   enabled: false
   mode: bundled-registry
   minReplicas: 2
-  targetReplicas: 3
+  targetReplicas: 2
   requireCrossNodeReplicas: true
   verifyInterval: 10m
   replicaLeaseTTL: 30m

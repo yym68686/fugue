@@ -57,7 +57,7 @@ imageStore:
   enabled: true
   mode: distributed
   minReplicas: 2
-  targetReplicas: 3
+  targetReplicas: 2
   verifyInterval: 10m
   replicaLeaseTTL: 30m
   schedulerInterval: 30s
