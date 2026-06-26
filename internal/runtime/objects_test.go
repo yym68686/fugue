@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"path"
 	"reflect"
 	"strings"
 	"testing"
@@ -1035,6 +1036,10 @@ func TestBuildAppObjectsRendersSSHPortWithoutChangingHTTPReadiness(t *testing.T)
 			Ports:     []int{8080},
 			Replicas:  1,
 			RuntimeID: "runtime_demo",
+			Env: map[string]string{
+				"APP_WORKSPACE":      "/workspace",
+				"ARGUS_OPENAI_TOKEN": "argus-openai-v1.demo",
+			},
 			SSH: &model.AppSSHSpec{
 				Enabled:        true,
 				TargetPort:     22,
@@ -1062,6 +1067,9 @@ func TestBuildAppObjectsRendersSSHPortWithoutChangingHTTPReadiness(t *testing.T)
 	if got := envValue(envObjects, "FUGUE_SSH_AUTHORIZED_KEYS"); got != model.DefaultAppSSHAuthorizedKeysPath {
 		t.Fatalf("expected authorized keys env %q, got %q", model.DefaultAppSSHAuthorizedKeysPath, got)
 	}
+	if got := envValue(envObjects, "FUGUE_SSH_SESSION_ENV_CONFIG"); got != AppSSHSessionEnvConfigPath {
+		t.Fatalf("expected SSH session env config path %q, got %q", AppSSHSessionEnvConfigPath, got)
+	}
 	readinessProbe := container["readinessProbe"].(map[string]any)
 	tcpSocket := readinessProbe["tcpSocket"].(map[string]any)
 	if tcpSocket["port"] != 8080 {
@@ -1074,6 +1082,29 @@ func TestBuildAppObjectsRendersSSHPortWithoutChangingHTTPReadiness(t *testing.T)
 	volumeMounts := container["volumeMounts"].([]map[string]any)
 	if got := volumeMounts[0]["mountPath"]; got != model.DefaultAppSSHAuthorizedKeysPath {
 		t.Fatalf("expected authorized_keys mount path, got %#v", got)
+	}
+	if !volumeMountsContainPath(volumeMounts, path.Dir(AppSSHSessionEnvConfigPath)) {
+		t.Fatalf("expected SSH session env config volume mount, got %#v", volumeMounts)
+	}
+	volumes := podSpec["volumes"].([]map[string]any)
+	if !volumesContainSecret(volumes, appSSHSessionEnvVolumeName, appSSHSessionEnvSecretName(RuntimeAppResourceName(app))) {
+		t.Fatalf("expected SSH session env secret volume, got %#v", volumes)
+	}
+
+	sessionEnvSecret := objectByName(t, objects, appSSHSessionEnvSecretName(RuntimeAppResourceName(app)))
+	sessionEnvStringData := sessionEnvSecret["stringData"].(map[string]string)
+	sessionEnvConfig := sessionEnvStringData[appSSHSessionEnvConfigKey]
+	if !strings.HasPrefix(sessionEnvConfig, "SetEnv ") || !strings.HasSuffix(sessionEnvConfig, "\n") {
+		t.Fatalf("expected SSH session env config to be a SetEnv line, got %q", sessionEnvConfig)
+	}
+	for _, want := range []string{
+		"APP_WORKSPACE=/workspace",
+		"ARGUS_OPENAI_TOKEN=argus-openai-v1.demo",
+		"FUGUE_SSH_SESSION_ENV_CONFIG=" + AppSSHSessionEnvConfigPath,
+	} {
+		if !strings.Contains(sessionEnvConfig, want) {
+			t.Fatalf("expected SSH session env config to contain %q, got %q", want, sessionEnvConfig)
+		}
 	}
 
 	service := firstObjectByKind(t, objects, "Service")
@@ -2696,6 +2727,29 @@ func servicePortsContain(ports []map[string]any, want int) bool {
 	return false
 }
 
+func volumeMountsContainPath(volumeMounts []map[string]any, want string) bool {
+	for _, volumeMount := range volumeMounts {
+		if volumeMount["mountPath"] == want {
+			return true
+		}
+	}
+	return false
+}
+
+func volumesContainSecret(volumes []map[string]any, volumeName string, secretName string) bool {
+	for _, volume := range volumes {
+		if volume["name"] != volumeName {
+			continue
+		}
+		secret, ok := volume["secret"].(map[string]any)
+		if !ok {
+			return false
+		}
+		return secret["secretName"] == secretName
+	}
+	return false
+}
+
 func envValue(envObjects []map[string]any, name string) string {
 	for _, entry := range envObjects {
 		if entry["name"] == name {
@@ -2705,6 +2759,21 @@ func envValue(envObjects []map[string]any, name string) string {
 		}
 	}
 	return ""
+}
+
+func objectByName(t *testing.T, objects []map[string]any, name string) map[string]any {
+	t.Helper()
+	for _, object := range objects {
+		metadata, ok := object["metadata"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if metadata["name"] == name {
+			return object
+		}
+	}
+	t.Fatalf("expected object named %q in %#v", name, objects)
+	return nil
 }
 
 func firstObjectByKind(t *testing.T, objects []map[string]any, kind string) map[string]any {

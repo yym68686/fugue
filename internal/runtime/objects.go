@@ -30,6 +30,9 @@ const (
 	AppFilesVolumeName             = "app-files"
 	appFilesVolumeName             = AppFilesVolumeName
 	appSSHAuthorizedKeysVolumeName = "app-ssh-authorized-keys"
+	appSSHSessionEnvVolumeName     = "app-ssh-session-env"
+	appSSHSessionEnvConfigKey      = "sshd_config"
+	AppSSHSessionEnvConfigPath     = "/run/fugue/ssh-session-env/sshd_config"
 	appFilesSourceMountPath        = "/fugue-app-files"
 	AppWorkspaceContainerName      = "fugue-workspace"
 	workspaceVolumeName            = "app-workspace"
@@ -70,6 +73,11 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	}
 	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil && len(ssh.AuthorizedKeys) > 0 {
 		objects = append(objects, buildAppSSHAuthorizedKeysSecretObject(namespace, appRuntimeName, ssh.AuthorizedKeys, labels))
+	}
+	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil {
+		if sessionEnv := sshSessionEnvConfig(mergedRuntimeEnv(app)); sessionEnv != "" {
+			objects = append(objects, buildAppSSHSessionEnvSecretObject(namespace, appRuntimeName, sessionEnv, labels))
+		}
 	}
 
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
@@ -228,6 +236,22 @@ func buildAppSSHAuthorizedKeysSecretObject(namespace, appName string, authorized
 		"type": "Opaque",
 		"stringData": map[string]string{
 			"authorized_keys": content,
+		},
+	}
+}
+
+func buildAppSSHSessionEnvSecretObject(namespace, appName string, sessionEnv string, labels map[string]string) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name":      appSSHSessionEnvSecretName(appName),
+			"namespace": namespace,
+			"labels":    labels,
+		},
+		"type": "Opaque",
+		"stringData": map[string]string{
+			appSSHSessionEnvConfigKey: sessionEnv,
 		},
 	}
 }
@@ -462,6 +486,22 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			"subPath":   "authorized_keys",
 			"readOnly":  true,
 		})
+	}
+	if ssh := model.NormalizeAppSSHSpec(app.Spec.SSH); ssh != nil {
+		if sessionEnv := sshSessionEnvConfig(mergedRuntimeEnv(app)); sessionEnv != "" {
+			volumes = append(volumes, map[string]any{
+				"name": appSSHSessionEnvVolumeName,
+				"secret": map[string]any{
+					"secretName":  appSSHSessionEnvSecretName(resourceName),
+					"defaultMode": 0o400,
+				},
+			})
+			volumeMounts = append(volumeMounts, map[string]any{
+				"name":      appSSHSessionEnvVolumeName,
+				"mountPath": path.Dir(AppSSHSessionEnvConfigPath),
+				"readOnly":  true,
+			})
+		}
 	}
 	if workspaceSpec := normalizeRuntimeAppWorkspaceSpec(app); workspaceSpec != nil {
 		volumeMounts = append(volumeMounts, map[string]any{
@@ -1120,6 +1160,7 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 		merged["FUGUE_SSH_USER"] = ssh.User
 		merged["FUGUE_SSH_AUTHORIZED_KEYS"] = ssh.AuthorizedKeysPath
 		merged["FUGUE_SSH_HOST_KEYS_DIR"] = ssh.HostKeysPath
+		merged["FUGUE_SSH_SESSION_ENV_CONFIG"] = AppSSHSessionEnvConfigPath
 	}
 
 	if len(merged) == 0 {
@@ -1812,6 +1853,63 @@ func buildEnvObjects(env map[string]string) []map[string]any {
 		})
 	}
 	return objects
+}
+
+func sshSessionEnvConfig(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for key, value := range env {
+		if isValidSessionEnvName(key) && isValidSessionEnvValue(value) {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	entries := make([]string, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, key+"="+quoteSSHDConfigValue(env[key]))
+	}
+	return "SetEnv " + strings.Join(entries, " ") + "\n"
+}
+
+func isValidSessionEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, r := range name {
+		if r == '_' || ('A' <= r && r <= 'Z') || ('a' <= r && r <= 'z') || (index > 0 && '0' <= r && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isValidSessionEnvValue(value string) bool {
+	return !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func quoteSSHDConfigValue(value string) string {
+	if value == "" {
+		return `""`
+	}
+	needsQuote := false
+	for _, r := range value {
+		if r == '"' || r == '\\' || r == '#' || r == ' ' || r == '\t' {
+			needsQuote = true
+			break
+		}
+	}
+	if !needsQuote {
+		return value
+	}
+	quoted := strings.ReplaceAll(value, `\`, `\\`)
+	quoted = strings.ReplaceAll(quoted, `"`, `\"`)
+	return `"` + quoted + `"`
 }
 
 func buildAppTemplateAnnotations(spec model.AppSpec) map[string]string {
@@ -2522,6 +2620,10 @@ func appFilesSecretName(appName string) string {
 
 func appSSHAuthorizedKeysSecretName(appName string) string {
 	return appName + "-ssh-authorized-keys"
+}
+
+func appSSHSessionEnvSecretName(appName string) string {
+	return appName + "-ssh-session-env"
 }
 
 func WorkspacePVCName(app model.App) string {
