@@ -247,6 +247,13 @@ func (s *Service) deployImageReplicaAvailable(ctx context.Context, app model.App
 			return false, true, err
 		}
 		healthy := healthyImageReplicas(replicas, now)
+		locations, err := s.presentImageLocations(app, image.ImageRef, image.CanonicalDigest)
+		if err != nil {
+			return false, true, err
+		}
+		if imageLocationPresentOnTarget(locations, target) {
+			return true, true, nil
+		}
 		if len(healthy) == 0 {
 			if s.imageStoreStrictDistributedMode() && strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable {
 				image.LifecycleState = model.ImageLifecycleLost
