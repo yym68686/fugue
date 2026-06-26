@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -555,6 +556,91 @@ func TestStrictDistributedDeploySchedulesTargetReplicaInsteadOfRegistryFallback(
 	}
 	if len(nodeTasks) != 1 || nodeTasks[0].Type != model.NodeUpdateTaskTypeReplicateAppImage {
 		t.Fatalf("expected replicate-app-image node task, got %+v", nodeTasks)
+	}
+}
+
+func TestStrictDistributedDeployPinnedManagedSharedTargetUsesClusterNode(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Pinned Shared Deploy Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-source", "https://worker-source.example.com", nil, "worker-source", "machine-source", "v2", "join-v2", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage}); err != nil {
+		t.Fatalf("enroll source updater: %v", err)
+	}
+	targetUpdater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-target", "https://worker-target.example.com", nil, "worker-target", "machine-target", "v2", "join-v2", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage})
+	if err != nil {
+		t.Fatalf("enroll target updater: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:git-abc",
+		CanonicalDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        tenant.ID,
+		AppID:           image.AppID,
+		NodeID:          "machine-source",
+		ClusterNodeName: "worker-source",
+		CacheEndpoint:   "http://worker-source.example.com:5000",
+		Status:          model.ImageReplicaStatusPresent,
+		LastVerifiedAt:  &now,
+	}); err != nil {
+		t.Fatalf("upsert source replica: %v", err)
+	}
+	app := model.App{
+		ID:       image.AppID,
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:     image.ImageRef,
+			Replicas:  1,
+			RuntimeID: "runtime_managed_shared",
+		},
+		Source: &model.AppSource{ResolvedImageRef: image.ImageRef},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed", ImageStoreMinReplicas: 2, ImageStoreTargetReplicas: 2},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed deploy must not inspect the central registry")
+			return false, nil, nil
+		},
+	}
+
+	target := svc.deployImageTarget(app, runtimepkg.SchedulingConstraints{
+		NodeSelector: map[string]string{kubeHostnameLabelKey: targetUpdater.ClusterNodeName},
+	})
+	if target.RuntimeID != "" || target.ClusterNodeName != targetUpdater.ClusterNodeName {
+		t.Fatalf("expected pinned deploy target to use only cluster node, got %+v", target)
+	}
+	available, err := svc.deployImageRefAvailable(context.Background(), app, target, image.ImageRef)
+	if !errors.Is(err, errDeployImageReplicationPending) {
+		t.Fatalf("expected pending deploy image replication, got available=%v err=%v", available, err)
+	}
+	tasks, err := stateStore.ListImageReplicationTasks(model.ImageReplicationTaskFilter{ImageID: image.ID, PlatformAdmin: true, Status: model.ImageReplicationTaskStatusPending})
+	if err != nil {
+		t.Fatalf("list replication tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Priority != model.ImageReplicationPriorityDeployBlocking || tasks[0].TargetClusterNodeName != targetUpdater.ClusterNodeName {
+		t.Fatalf("expected deploy-blocking target replication task, got %+v", tasks)
 	}
 }
 

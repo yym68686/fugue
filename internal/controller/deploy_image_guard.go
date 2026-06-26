@@ -467,6 +467,9 @@ func (s *Service) deployImageTarget(app model.App, scheduling runtimepkg.Schedul
 	target := deployImageTarget{RuntimeID: strings.TrimSpace(app.Spec.RuntimeID)}
 	if scheduling.NodeSelector != nil {
 		target.ClusterNodeName = strings.TrimSpace(scheduling.NodeSelector[kubeHostnameLabelKey])
+		if target.ClusterNodeName != "" {
+			target.RuntimeID = ""
+		}
 	}
 	if target.ClusterNodeName != "" || target.RuntimeID == "" || s == nil || s.Store == nil {
 		return target
