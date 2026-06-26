@@ -925,9 +925,9 @@ func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *t
 		manifestDir: filepath.Join(storeDir, "_manifests"),
 		diskLimit: imageCacheDiskLimit{
 			Enabled:              true,
-			HighWatermarkPercent: 99,
-			LowWatermarkPercent:  98,
-			MinFreeBytes:         1 << 62,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
 			MaxDeleteBytesPerRun: 1 << 30,
 		},
 	}
