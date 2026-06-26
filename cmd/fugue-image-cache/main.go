@@ -33,28 +33,30 @@ const (
 )
 
 type imageCache struct {
-	apiBase        string
-	apiToken       string
-	reportPath     string
-	lookupPath     string
-	registryBase   string
-	localBase      string
-	upstreamBase   string
-	cacheEndpoint  string
-	clusterNode    string
-	manifestDir    string
-	httpClient     *http.Client
-	registry       http.Handler
-	hydrateTimeout time.Duration
-	hydrateSlots   chan struct{}
-	proxySlots     chan struct{}
-	copyJobs       int
-	copyImageFn    func(context.Context, string, string) error
-	hydrateMu      sync.Mutex
-	hydrateCalls   map[string]*hydrateCall
-	sourceMu       sync.RWMutex
-	sourceByTarget map[string]sourceCacheEntry
-	sourceTTL      time.Duration
+	apiBase         string
+	apiToken        string
+	reportPath      string
+	lookupPath      string
+	registryBase    string
+	localBase       string
+	upstreamBase    string
+	cacheEndpoint   string
+	clusterNode     string
+	manifestDir     string
+	pinStorePath    string
+	managementToken string
+	httpClient      *http.Client
+	registry        http.Handler
+	hydrateTimeout  time.Duration
+	hydrateSlots    chan struct{}
+	proxySlots      chan struct{}
+	copyJobs        int
+	copyImageFn     func(context.Context, string, string) error
+	hydrateMu       sync.Mutex
+	hydrateCalls    map[string]*hydrateCall
+	sourceMu        sync.RWMutex
+	sourceByTarget  map[string]sourceCacheEntry
+	sourceTTL       time.Duration
 }
 
 type hydrateCall struct {
@@ -112,23 +114,25 @@ func main() {
 		}
 	}
 	cache := &imageCache{
-		apiBase:        strings.TrimRight(env("FUGUE_API_BASE", os.Getenv("FUGUE_API_URL")), "/"),
-		apiToken:       apiToken,
-		reportPath:     reportPath,
-		lookupPath:     lookupPath,
-		registryBase:   trimRegistryBase(env("FUGUE_IMAGE_CACHE_REGISTRY_BASE", "registry.fugue.internal:5000")),
-		localBase:      trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
-		upstreamBase:   trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
-		cacheEndpoint:  strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
-		clusterNode:    clusterNode,
-		manifestDir:    filepath.Join(storeDir, "_manifests"),
-		httpClient:     &http.Client{Timeout: 15 * time.Second},
-		registry:       registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
-		hydrateTimeout: envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
-		hydrateSlots:   newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
-		proxySlots:     newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
-		copyJobs:       envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
-		sourceTTL:      envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
+		apiBase:         strings.TrimRight(env("FUGUE_API_BASE", os.Getenv("FUGUE_API_URL")), "/"),
+		apiToken:        apiToken,
+		reportPath:      reportPath,
+		lookupPath:      lookupPath,
+		registryBase:    trimRegistryBase(env("FUGUE_IMAGE_CACHE_REGISTRY_BASE", "registry.fugue.internal:5000")),
+		localBase:       trimRegistryBase(env("FUGUE_IMAGE_CACHE_LOCAL_BASE", "127.0.0.1:5000")),
+		upstreamBase:    trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
+		cacheEndpoint:   strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
+		clusterNode:     clusterNode,
+		manifestDir:     filepath.Join(storeDir, "_manifests"),
+		pinStorePath:    env("FUGUE_IMAGE_CACHE_PIN_STORE", filepath.Join(filepath.Dir(storeDir), "pins.json")),
+		managementToken: strings.TrimSpace(env("FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN", apiToken)),
+		httpClient:      &http.Client{Timeout: 15 * time.Second},
+		registry:        registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		hydrateTimeout:  envDuration("FUGUE_IMAGE_CACHE_HYDRATE_TIMEOUT", 30*time.Minute),
+		hydrateSlots:    newSemaphore(envInt("FUGUE_IMAGE_CACHE_HYDRATE_CONCURRENCY", 1)),
+		proxySlots:      newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
+		copyJobs:        envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
+		sourceTTL:       envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
 		log.Print("control-plane API credentials are not configured; cache will serve local registry storage only")
@@ -158,6 +162,10 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if path == "/healthz" || path == "/readyz" {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
+		return
+	}
+	if strings.HasPrefix(path, "/fugue/cache/v1/") {
+		c.serveManagement(w, r)
 		return
 	}
 	if !isRegistryAPIPath(path) {
@@ -203,6 +211,444 @@ func (c *imageCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.registry.ServeHTTP(w, r)
+}
+
+type cachePin struct {
+	ImageRef  string     `json:"image_ref"`
+	Repo      string     `json:"repo"`
+	Target    string     `json:"target"`
+	Digest    string     `json:"digest"`
+	Reason    string     `json:"reason"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type cachePinsFile struct {
+	Pins []cachePin `json:"pins"`
+}
+
+func (c *imageCache) serveManagement(w http.ResponseWriter, r *http.Request) {
+	path := ""
+	if r != nil && r.URL != nil {
+		path = strings.TrimRight(r.URL.Path, "/")
+	}
+	if path == "/fugue/cache/v1/health" && r.Method == http.MethodGet {
+		writeManagementJSON(w, http.StatusOK, map[string]any{
+			"status":       "ok",
+			"endpoint":     c.cacheEndpoint,
+			"cluster_node": c.clusterNode,
+		})
+		return
+	}
+	if !c.authorizeManagement(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch {
+	case path == "/fugue/cache/v1/inventory" && r.Method == http.MethodGet:
+		c.handleManagementInventory(w, r)
+	case path == "/fugue/cache/v1/verify" && r.Method == http.MethodPost:
+		c.handleManagementVerify(w, r)
+	case path == "/fugue/cache/v1/replicate" && r.Method == http.MethodPost:
+		c.handleManagementReplicate(w, r)
+	case path == "/fugue/cache/v1/pin" && r.Method == http.MethodPost:
+		c.handleManagementPin(w, r)
+	case path == "/fugue/cache/v1/unpin" && r.Method == http.MethodPost:
+		c.handleManagementUnpin(w, r)
+	case path == "/fugue/cache/v1/prune" && r.Method == http.MethodPost:
+		c.handleManagementPrune(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (c *imageCache) authorizeManagement(r *http.Request) bool {
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil && ip.IsLoopback() {
+			return true
+		}
+	}
+	token := strings.TrimSpace(c.managementToken)
+	if token == "" {
+		return false
+	}
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(header), "bearer ") {
+		return strings.TrimSpace(header[len("bearer "):]) == token
+	}
+	return false
+}
+
+func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Request) {
+	manifests, err := c.managementManifestInventory()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pins, err := c.readPins()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeManagementJSON(w, http.StatusOK, map[string]any{
+		"endpoint":     c.cacheEndpoint,
+		"cluster_node": c.clusterNode,
+		"manifests":    manifests,
+		"pins":         pins.Pins,
+	})
+}
+
+func (c *imageCache) handleManagementVerify(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ImageRef string `json:"image_ref"`
+		Repo     string `json:"repo"`
+		Target   string `json:"target"`
+		Digest   string `json:"digest"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	repo, target := c.managementRepoTarget(req.ImageRef, req.Repo, req.Target, req.Digest)
+	available := repo != "" && target != "" && c.localManifestAvailable(repo, target)
+	status := http.StatusOK
+	if !available {
+		status = http.StatusNotFound
+	}
+	writeManagementJSON(w, status, map[string]any{
+		"repo":      repo,
+		"target":    target,
+		"available": available,
+	})
+}
+
+func (c *imageCache) handleManagementReplicate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ImageRef            string `json:"image_ref"`
+		Repo                string `json:"repo"`
+		Target              string `json:"target"`
+		Digest              string `json:"digest"`
+		SourceCacheEndpoint string `json:"source_cache_endpoint"`
+		TaskID              string `json:"task_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	repo, target := c.managementRepoTarget(req.ImageRef, req.Repo, req.Target, req.Digest)
+	if repo == "" || target == "" {
+		http.Error(w, "repo and target are required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	if source := trimRegistryBase(req.SourceCacheEndpoint); source != "" {
+		peerRef, _ := imageRef(source, repo, target)
+		localRef, _ := imageRef(c.localBase, repo, target)
+		if err := c.copyImage(ctx, peerRef, localRef); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if err := c.ensureLocalManifest(ctx, source, repo, target); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	} else if err := c.hydrate(ctx, repo, target); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	logicalRef, digest := imageRef(c.registryBase, repo, target)
+	if digest == "" {
+		digest = strings.TrimSpace(req.Digest)
+	}
+	_ = c.report(ctx, logicalRef, digest, "present", "")
+	writeManagementJSON(w, http.StatusOK, map[string]any{
+		"repo":      repo,
+		"target":    target,
+		"task_id":   strings.TrimSpace(req.TaskID),
+		"available": c.localManifestAvailable(repo, target),
+	})
+}
+
+func (c *imageCache) handleManagementPin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ImageRef  string     `json:"image_ref"`
+		Repo      string     `json:"repo"`
+		Target    string     `json:"target"`
+		Digest    string     `json:"digest"`
+		Reason    string     `json:"reason"`
+		ExpiresAt *time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	repo, target := c.managementRepoTarget(req.ImageRef, req.Repo, req.Target, req.Digest)
+	if repo == "" || target == "" {
+		http.Error(w, "repo and target are required", http.StatusBadRequest)
+		return
+	}
+	pins, err := c.readPins()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pin := cachePin{
+		ImageRef:  strings.TrimSpace(req.ImageRef),
+		Repo:      repo,
+		Target:    target,
+		Digest:    strings.TrimSpace(req.Digest),
+		Reason:    firstNonEmptyCacheString(req.Reason, "user_pin"),
+		ExpiresAt: req.ExpiresAt,
+		CreatedAt: time.Now().UTC(),
+	}
+	replaced := false
+	for idx := range pins.Pins {
+		if pins.Pins[idx].Repo == repo && pins.Pins[idx].Target == target && pins.Pins[idx].Reason == pin.Reason {
+			pins.Pins[idx] = pin
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		pins.Pins = append(pins.Pins, pin)
+	}
+	if err := c.writePins(pins); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeManagementJSON(w, http.StatusOK, map[string]any{"pin": pin})
+}
+
+func (c *imageCache) handleManagementUnpin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ImageRef string `json:"image_ref"`
+		Repo     string `json:"repo"`
+		Target   string `json:"target"`
+		Digest   string `json:"digest"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	repo, target := c.managementRepoTarget(req.ImageRef, req.Repo, req.Target, req.Digest)
+	pins, err := c.readPins()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	next := pins.Pins[:0]
+	removed := 0
+	for _, pin := range pins.Pins {
+		matches := pin.Repo == repo && pin.Target == target && (reason == "" || pin.Reason == reason)
+		if matches {
+			removed++
+			continue
+		}
+		next = append(next, pin)
+	}
+	pins.Pins = next
+	if err := c.writePins(pins); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeManagementJSON(w, http.StatusOK, map[string]any{"removed": removed})
+}
+
+func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DryRun      *bool `json:"dry_run"`
+		AllowDelete bool  `json:"allow_delete"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	dryRun := true
+	if req.DryRun != nil {
+		dryRun = *req.DryRun
+	}
+	manifests, err := c.managementManifestInventory()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pins, err := c.readPins()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pinned := map[string]struct{}{}
+	now := time.Now().UTC()
+	for _, pin := range pins.Pins {
+		if pin.ExpiresAt != nil && pin.ExpiresAt.Before(now) {
+			continue
+		}
+		pinned[pin.Repo+"\x00"+pin.Target] = struct{}{}
+	}
+	candidates := []map[string]any{}
+	for _, manifest := range manifests {
+		repo, _ := manifest["repo"].(string)
+		target, _ := manifest["target"].(string)
+		if _, ok := pinned[repo+"\x00"+target]; ok {
+			continue
+		}
+		candidates = append(candidates, manifest)
+		if !dryRun && req.AllowDelete {
+			_ = c.deletePersistedManifest(repo, target)
+		}
+	}
+	writeManagementJSON(w, http.StatusOK, map[string]any{
+		"dry_run":    dryRun,
+		"deleted":    !dryRun && req.AllowDelete,
+		"candidates": candidates,
+	})
+}
+
+func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
+	entries, err := os.ReadDir(c.manifestDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []map[string]any{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(c.manifestDir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var manifest persistedManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"repo":         strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
+			"target":       strings.TrimSpace(manifest.Target),
+			"digest":       manifestBodyDigest(manifest.Body),
+			"content_type": strings.TrimSpace(manifest.ContentType),
+			"size_bytes":   len(manifest.Body),
+		})
+	}
+	return out, nil
+}
+
+func (c *imageCache) managementRepoTarget(imageRefValue, repoValue, targetValue, digestValue string) (string, string) {
+	repo := strings.Trim(strings.TrimSpace(repoValue), "/")
+	target := strings.TrimSpace(targetValue)
+	if repo != "" && target != "" {
+		return repo, target
+	}
+	if repo != "" && strings.TrimSpace(digestValue) != "" {
+		return repo, strings.TrimSpace(digestValue)
+	}
+	ref := trimRegistryBase(imageRefValue)
+	if c.refStartsWithKnownRegistryBase(ref) {
+		if idx := strings.Index(ref, "/"); idx >= 0 && idx+1 < len(ref) {
+			ref = ref[idx+1:]
+		}
+	}
+	if strings.Contains(ref, "@") {
+		parts := strings.SplitN(ref, "@", 2)
+		return strings.Trim(parts[0], "/"), strings.TrimSpace(parts[1])
+	}
+	if strings.Contains(ref, ":") {
+		idx := strings.LastIndex(ref, ":")
+		if idx > 0 && idx+1 < len(ref) {
+			return strings.Trim(ref[:idx], "/"), strings.TrimSpace(ref[idx+1:])
+		}
+	}
+	if repo != "" {
+		return repo, firstNonEmptyCacheString(target, digestValue, "latest")
+	}
+	return strings.Trim(ref, "/"), firstNonEmptyCacheString(target, digestValue, "latest")
+}
+
+func (c *imageCache) refStartsWithKnownRegistryBase(ref string) bool {
+	ref = trimRegistryBase(ref)
+	if ref == "" {
+		return false
+	}
+	for _, base := range []string{c.registryBase, c.localBase, c.upstreamBase} {
+		base = trimRegistryBase(base)
+		if base != "" && (ref == base || strings.HasPrefix(ref, base+"/")) {
+			return true
+		}
+	}
+	if idx := strings.Index(ref, "/"); idx > 0 {
+		host := ref[:idx]
+		return strings.Contains(host, ".") || strings.Contains(host, ":") || host == "localhost"
+	}
+	return false
+}
+
+func (c *imageCache) readPins() (cachePinsFile, error) {
+	var pins cachePinsFile
+	if c == nil || strings.TrimSpace(c.pinStorePath) == "" {
+		return pins, nil
+	}
+	raw, err := os.ReadFile(c.pinStorePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return pins, nil
+	}
+	if err != nil {
+		return pins, err
+	}
+	if len(raw) == 0 {
+		return pins, nil
+	}
+	if err := json.Unmarshal(raw, &pins); err != nil {
+		return pins, err
+	}
+	return pins, nil
+}
+
+func (c *imageCache) writePins(pins cachePinsFile) error {
+	if c == nil || strings.TrimSpace(c.pinStorePath) == "" {
+		return nil
+	}
+	dir := filepath.Dir(c.pinStorePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(pins, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "pins-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, c.pinStorePath)
+}
+
+func writeManagementJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func firstNonEmptyCacheString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) {

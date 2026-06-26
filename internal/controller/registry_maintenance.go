@@ -39,6 +39,9 @@ type registryMaintenanceStatus struct {
 }
 
 func (s *Service) markRegistryGCNeeded(ctx context.Context, reason string) {
+	if s != nil && !s.imageStoreRegistryFallbackEnabled() {
+		return
+	}
 	var err error
 	if s.requestRegistryGC != nil {
 		err = s.requestRegistryGC(ctx, reason)
@@ -136,13 +139,21 @@ func (s *Service) readRegistryMaintenanceStatus(ctx context.Context) registryMai
 		return status
 	}
 	namespace := s.Config.KubectlNamespace
-	if cronJob, found, err := client.getCronJob(ctx, namespace, s.Config.RegistryJanitorCronJobName); err == nil && found {
-		status.JanitorPresent = cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend
+	if name := strings.TrimSpace(s.Config.RegistryJanitorCronJobName); name != "" {
+		if cronJob, found, err := client.getCronJob(ctx, namespace, name); err == nil && found {
+			status.JanitorPresent = cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend
+		}
 	}
-	if cronJob, found, err := client.getCronJob(ctx, namespace, s.Config.RegistryGCCronJobName); err == nil && found {
-		status.GCCronJobPresent = cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend
+	if name := strings.TrimSpace(s.Config.RegistryGCCronJobName); name != "" {
+		if cronJob, found, err := client.getCronJob(ctx, namespace, name); err == nil && found {
+			status.GCCronJobPresent = cronJob.Spec.Suspend == nil || !*cronJob.Spec.Suspend
+		}
 	}
-	lease, found, err := client.getLease(ctx, namespace, s.Config.RegistryGCLeaseName)
+	leaseName := strings.TrimSpace(s.Config.RegistryGCLeaseName)
+	if leaseName == "" {
+		return status
+	}
+	lease, found, err := client.getLease(ctx, namespace, leaseName)
 	if err != nil || !found {
 		return status
 	}

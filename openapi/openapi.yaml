@@ -5315,6 +5315,271 @@ paths:
                 $ref: "#/components/schemas/ImageLocationResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/images:
+    get:
+      operationId: listImages
+      summary: List Images
+      tags: [Apps]
+      x-fugue-handler: handleListImages
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: tenant_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: image_ref
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: digest
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: lifecycle_state
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/images/{id}:
+    get:
+      operationId: getImage
+      summary: Get Image
+      tags: [Apps]
+      x-fugue-handler: handleGetImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/images/{id}/replicas:
+    get:
+      operationId: listImageReplicas
+      summary: List Image Replicas
+      tags: [Apps]
+      x-fugue-handler: handleListImageReplicas
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicaListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/images/{id}/replicas/report:
+    post:
+      operationId: reportImageReplica
+      summary: Report Image Replica
+      tags: [Apps]
+      x-fugue-handler: handleReportImageReplica
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageReplicaReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicaResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/images/{id}/verify:
+    post:
+      operationId: verifyImage
+      summary: Verify Image
+      tags: [Apps]
+      x-fugue-handler: handleVerifyImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageVerifyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/images/{id}/pins:
+    post:
+      operationId: createImagePin
+      summary: Create Image Pin
+      tags: [Apps]
+      x-fugue-handler: handleCreateImagePin
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateImagePinRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImagePinResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/images/{id}/pins/{pin_id}:
+    delete:
+      operationId: deleteImagePin
+      summary: Delete Image Pin
+      tags: [Apps]
+      x-fugue-handler: handleDeleteImagePin
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: pin_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Successful response
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/image-replication-tasks:
+    get:
+      operationId: listImageReplicationTasks
+      summary: List Image Replication Tasks
+      tags: [Apps]
+      x-fugue-handler: handleListImageReplicationTasks
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: image_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: app_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: priority
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: target_node_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: target_runtime_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: target_cluster_node_name
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicationTaskListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createImageReplicationTask
+      summary: Create Image Replication Task
+      tags: [Apps]
+      x-fugue-handler: handleCreateImageReplicationTask
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateImageReplicationTaskRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicationTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/operations:
     get:
       operationId: listOperations
@@ -5696,6 +5961,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ImageLocationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/image-replicas/report:
+    post:
+      operationId: nodeUpdaterReportImageReplica
+      summary: Node Updater Report Image Replica
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterReportImageReplica
+      security:
+        - NodeUpdaterBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageReplicaReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicaResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/image-replication-tasks:
+    get:
+      operationId: nodeUpdaterImageReplicationTasks
+      summary: Node Updater Image Replication Tasks
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterListImageReplicationTasks
+      security:
+        - NodeUpdaterBearerAuth: []
+      parameters:
+        - in: query
+          name: image_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: priority
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageReplicationTaskListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/tasks:
@@ -15462,6 +15783,311 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ImageLocation"
+    Image:
+      type: object
+      additionalProperties: false
+      required: [id, image_ref, lifecycle_state, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        image_ref:
+          type: string
+        canonical_digest:
+          type: string
+        media_type:
+          type: string
+        manifest_json:
+          type: string
+        manifest_size_bytes:
+          type: integer
+          format: int64
+        blob_bytes:
+          type: integer
+          format: int64
+        source_operation_id:
+          type: string
+        lifecycle_state:
+          type: string
+          enum: [importing, available, deleting, deleted, lost]
+        required_replica_count:
+          type: integer
+          format: int32
+        min_available_replica_count:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ImageResponse:
+      type: object
+      additionalProperties: false
+      required: [image]
+      properties:
+        image:
+          $ref: "#/components/schemas/Image"
+    ImageListResponse:
+      type: object
+      additionalProperties: false
+      required: [images]
+      properties:
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/Image"
+    ImageReplica:
+      type: object
+      additionalProperties: false
+      required: [id, image_id, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        image_id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        digest:
+          type: string
+        node_id:
+          type: string
+        runtime_id:
+          type: string
+        cluster_node_name:
+          type: string
+        cache_endpoint:
+          type: string
+        failure_domain:
+          type: string
+        status:
+          type: string
+          enum: [planned, copying, verifying, present, stale, draining, deleting, missing, failed]
+        source_replica_id:
+          type: string
+        last_verified_at:
+          type: string
+          format: date-time
+        lease_expires_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ImageReplicaReportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        image_id:
+          type: string
+        app_id:
+          type: string
+        digest:
+          type: string
+        node_id:
+          type: string
+        runtime_id:
+          type: string
+        cluster_node_name:
+          type: string
+        cache_endpoint:
+          type: string
+        failure_domain:
+          type: string
+        status:
+          type: string
+          enum: [planned, copying, verifying, present, stale, draining, deleting, missing, failed]
+        last_verified_at:
+          type: string
+          format: date-time
+        lease_expires_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: integer
+          format: int64
+        last_error:
+          type: string
+    ImageReplicaResponse:
+      type: object
+      additionalProperties: false
+      required: [replica]
+      properties:
+        replica:
+          $ref: "#/components/schemas/ImageReplica"
+    ImageReplicaListResponse:
+      type: object
+      additionalProperties: false
+      required: [replicas]
+      properties:
+        replicas:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageReplica"
+    ImagePin:
+      type: object
+      additionalProperties: false
+      required: [id, image_id, reason, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        image_id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        operation_id:
+          type: string
+        reason:
+          type: string
+          enum: [current_deploy, rollback_window, import_result, user_pin, retention, replication_seed]
+        min_replicas:
+          type: integer
+          format: int32
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateImagePinRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        app_id:
+          type: string
+        operation_id:
+          type: string
+        reason:
+          type: string
+        min_replicas:
+          type: integer
+          format: int32
+        expires_at:
+          type: string
+          format: date-time
+    ImagePinResponse:
+      type: object
+      additionalProperties: false
+      required: [pin]
+      properties:
+        pin:
+          $ref: "#/components/schemas/ImagePin"
+    ImageVerifyResponse:
+      type: object
+      additionalProperties: false
+      required: [image, healthy_replicas, healthy_count]
+      properties:
+        image:
+          $ref: "#/components/schemas/Image"
+        healthy_replicas:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageReplica"
+        healthy_count:
+          type: integer
+          format: int32
+    ImageReplicationTask:
+      type: object
+      additionalProperties: false
+      required: [id, image_id, priority, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        image_id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        source_replica_id:
+          type: string
+        source_cache_endpoint:
+          type: string
+        target_node_id:
+          type: string
+        target_runtime_id:
+          type: string
+        target_cluster_node_name:
+          type: string
+        priority:
+          type: string
+          enum: [deploy_blocking, repair, warmup, rebalance]
+        status:
+          type: string
+          enum: [pending, running, completed, failed, canceled]
+        attempts:
+          type: integer
+          format: int32
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    CreateImageReplicationTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [image_id]
+      properties:
+        image_id:
+          type: string
+        app_id:
+          type: string
+        source_replica_id:
+          type: string
+        source_cache_endpoint:
+          type: string
+        target_node_id:
+          type: string
+        target_runtime_id:
+          type: string
+        target_cluster_node_name:
+          type: string
+        priority:
+          type: string
+    ImageReplicationTaskResponse:
+      type: object
+      additionalProperties: false
+      required: [task]
+      properties:
+        task:
+          $ref: "#/components/schemas/ImageReplicationTask"
+    ImageReplicationTaskListResponse:
+      type: object
+      additionalProperties: false
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageReplicationTask"
     NodeUpdaterListResponse:
       type: object
       additionalProperties: false

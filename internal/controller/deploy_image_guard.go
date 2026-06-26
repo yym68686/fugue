@@ -18,6 +18,8 @@ type deployImageTarget struct {
 	ClusterNodeName string
 }
 
+var errDeployImageReplicationPending = errors.New("deploy image replication is pending")
+
 func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
 	if s == nil || app.Spec.Replicas <= 0 {
 		return nil
@@ -31,6 +33,9 @@ func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation,
 
 	exists, err := s.deployImageRefAvailable(ctx, app, target, managedImageRef)
 	if err != nil {
+		if errors.Is(err, errDeployImageReplicationPending) {
+			return s.handlePendingDeployImageReplication(op, err)
+		}
 		return fmt.Errorf("inspect managed image %s before deploy: %w", managedImageRef, err)
 	}
 	if !exists {
@@ -50,6 +55,9 @@ func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation,
 	}
 	exists, err = s.deployImageRefAvailable(ctx, app, target, runtimeInspectionRef, runtimeImageRef)
 	if err != nil {
+		if errors.Is(err, errDeployImageReplicationPending) {
+			return s.handlePendingDeployImageReplication(op, err)
+		}
 		return fmt.Errorf("inspect runtime image %s before deploy using %s: %w", runtimeImageRef, runtimeInspectionRef, err)
 	}
 	if !exists {
@@ -66,6 +74,31 @@ func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, ta
 	refs = compactImageRefs(refs)
 	if len(refs) == 0 {
 		return true, nil
+	}
+	if s.imageStoreDistributedMode() {
+		exists, checked, err := s.deployImageReplicaAvailable(ctx, app, target, refs...)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+		if !s.imageStoreRegistryFallbackEnabled() {
+			if !checked {
+				locations, err := s.presentImageLocations(app, refs...)
+				if err != nil {
+					return false, err
+				}
+				if len(locations) > 0 {
+					if imageLocationPresentOnTarget(locations, target) {
+						return true, nil
+					}
+					s.scheduleImageHydration(ctx, app, target, refs[0])
+					return true, nil
+				}
+			}
+			return false, nil
+		}
 	}
 	var inspectErr error
 	if s.inspectManagedImage != nil {
@@ -140,7 +173,35 @@ func (s *Service) presentImageLocations(app model.App, refs ...string) ([]model.
 	}
 	seen := map[string]struct{}{}
 	out := []model.ImageLocation{}
+	appendLocation := func(location model.ImageLocation) {
+		key := strings.TrimSpace(location.ID)
+		if key == "" {
+			key = strings.Join([]string{location.ImageRef, location.Digest, location.NodeID, location.RuntimeID, location.ClusterNodeName}, "\x00")
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, location)
+	}
 	for _, ref := range compactImageRefs(refs) {
+		images, err := s.distributedImagesForRef(app, ref)
+		if err != nil {
+			return nil, err
+		}
+		for _, image := range images {
+			replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
+				ImageID:  image.ID,
+				TenantID: image.TenantID,
+				Status:   model.ImageReplicaStatusPresent,
+			})
+			if err != nil {
+				return nil, err
+			}
+			for _, replica := range healthyImageReplicas(replicas, time.Now().UTC()) {
+				appendLocation(imageLocationFromDistributedReplica(image, replica))
+			}
+		}
 		locations, err := s.Store.ListImageLocations(model.ImageLocationFilter{
 			TenantID: strings.TrimSpace(app.TenantID),
 			AppID:    strings.TrimSpace(app.ID),
@@ -161,18 +222,156 @@ func (s *Service) presentImageLocations(app model.App, refs ...string) ([]model.
 			}
 		}
 		for _, location := range locations {
-			key := strings.TrimSpace(location.ID)
-			if key == "" {
-				key = strings.Join([]string{location.ImageRef, location.Digest, location.NodeID, location.RuntimeID, location.ClusterNodeName}, "\x00")
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, location)
+			appendLocation(location)
 		}
 	}
 	return out, nil
+}
+
+func (s *Service) deployImageReplicaAvailable(ctx context.Context, app model.App, target deployImageTarget, refs ...string) (bool, bool, error) {
+	images, err := s.distributedImagesForRefs(app, refs...)
+	if err != nil {
+		return false, false, err
+	}
+	if len(images) == 0 {
+		return false, false, nil
+	}
+	now := time.Now().UTC()
+	for _, image := range images {
+		replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
+			ImageID:  image.ID,
+			TenantID: image.TenantID,
+			Status:   model.ImageReplicaStatusPresent,
+		})
+		if err != nil {
+			return false, true, err
+		}
+		healthy := healthyImageReplicas(replicas, now)
+		if len(healthy) == 0 {
+			if s.imageStoreStrictDistributedMode() && strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable {
+				image.LifecycleState = model.ImageLifecycleLost
+				if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {
+					s.Logger.Printf("mark lost distributed image failed image=%s ref=%s: %v", image.ID, image.ImageRef, err)
+				}
+			}
+			continue
+		}
+		if imageLocationPresentOnTarget(imageLocationsFromReplicas(image, healthy), target) {
+			return true, true, nil
+		}
+		scheduled, err := s.scheduleDeployTargetImageReplica(ctx, image, healthy[0], target)
+		if err != nil {
+			return false, true, err
+		}
+		if s.imageStoreStrictDistributedMode() {
+			if scheduled {
+				return false, true, fmt.Errorf("%w: image %s is being replicated to runtime=%s node=%s", errDeployImageReplicationPending, image.ImageRef, target.RuntimeID, target.ClusterNodeName)
+			}
+			return false, true, fmt.Errorf("%w: no image-cache updater can prepare image %s for runtime=%s node=%s", errDeployImageReplicationPending, image.ImageRef, target.RuntimeID, target.ClusterNodeName)
+		}
+		return true, true, nil
+	}
+	return false, true, nil
+}
+
+func (s *Service) distributedImagesForRefs(app model.App, refs ...string) ([]model.Image, error) {
+	seen := map[string]struct{}{}
+	out := []model.Image{}
+	for _, ref := range compactImageRefs(refs) {
+		images, err := s.distributedImagesForRef(app, ref)
+		if err != nil {
+			return nil, err
+		}
+		for _, image := range images {
+			if strings.TrimSpace(image.ID) == "" {
+				continue
+			}
+			if _, ok := seen[image.ID]; ok {
+				continue
+			}
+			seen[image.ID] = struct{}{}
+			out = append(out, image)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) distributedImagesForRef(app model.App, ref string) ([]model.Image, error) {
+	ref = strings.TrimSpace(ref)
+	if s == nil || s.Store == nil || ref == "" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	out := []model.Image{}
+	appendImage := func(image model.Image) {
+		if strings.TrimSpace(image.ID) == "" {
+			return
+		}
+		if _, ok := seen[image.ID]; ok {
+			return
+		}
+		seen[image.ID] = struct{}{}
+		out = append(out, image)
+	}
+	for _, filter := range []model.ImageFilter{
+		{TenantID: app.TenantID, AppID: app.ID, ImageRef: ref},
+		{TenantID: app.TenantID, ImageRef: ref},
+		{TenantID: app.TenantID, AppID: app.ID, CanonicalDigest: imageDigest(ref)},
+		{TenantID: app.TenantID, CanonicalDigest: imageDigest(ref)},
+	} {
+		if filter.ImageRef == "" && filter.CanonicalDigest == "" {
+			continue
+		}
+		images, err := s.Store.ListImages(filter)
+		if err != nil {
+			return nil, err
+		}
+		for _, image := range images {
+			appendImage(image)
+		}
+	}
+	for _, aliasFilter := range []model.ImageAliasFilter{
+		{TenantID: app.TenantID, AliasRef: ref},
+		{TenantID: app.TenantID, Digest: imageDigest(ref)},
+	} {
+		if aliasFilter.AliasRef == "" && aliasFilter.Digest == "" {
+			continue
+		}
+		aliases, err := s.Store.ListImageAliases(aliasFilter)
+		if err != nil {
+			return nil, err
+		}
+		for _, alias := range aliases {
+			image, err := s.Store.GetImage(alias.ImageID, app.TenantID, false)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					continue
+				}
+				return nil, err
+			}
+			appendImage(image)
+		}
+	}
+	return out, nil
+}
+
+func imageLocationsFromReplicas(image model.Image, replicas []model.ImageReplica) []model.ImageLocation {
+	out := make([]model.ImageLocation, 0, len(replicas))
+	for _, replica := range replicas {
+		out = append(out, imageLocationFromDistributedReplica(image, replica))
+	}
+	return out
+}
+
+func (s *Service) handlePendingDeployImageReplication(op model.Operation, cause error) error {
+	message := strings.TrimSpace(cause.Error())
+	if strings.TrimSpace(op.ID) == "" {
+		return cause
+	}
+	if _, err := s.Store.FailOperation(op.ID, message); err != nil {
+		return fmt.Errorf("mark deploy operation pending image replication: %w", err)
+	}
+	return errOperationNoLongerActive
 }
 
 func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operation, app model.App, target deployImageTarget, imageRef, label string) error {
@@ -409,6 +608,205 @@ func (s *Service) recordImportedImageLocationOnTarget(app model.App, op model.Op
 			s.Logger.Printf("record target image location app=%s op=%s image=%s runtime=%s node=%s failed: %v", app.ID, op.ID, ref, target.RuntimeID, target.ClusterNodeName, err)
 		}
 	}
+}
+
+func (s *Service) recordImportedDistributedImage(ctx context.Context, app model.App, op model.Operation, managedImageRef, runtimeImageRef string, destination importImageDestination) error {
+	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
+		return nil
+	}
+	now := time.Now().UTC()
+	if s.now != nil {
+		now = s.now().UTC()
+	}
+	digest, digestRef := s.resolveImportedImageDigest(ctx, managedImageRef, runtimeImageRef)
+	image, err := s.Store.UpsertImage(model.Image{
+		TenantID:                 strings.TrimSpace(app.TenantID),
+		AppID:                    strings.TrimSpace(app.ID),
+		ImageRef:                 strings.TrimSpace(managedImageRef),
+		CanonicalDigest:          digest,
+		SourceOperationID:        strings.TrimSpace(op.ID),
+		LifecycleState:           model.ImageLifecycleAvailable,
+		RequiredReplicaCount:     s.imageTargetReplicaCount(model.Image{}),
+		MinAvailableReplicaCount: s.imageMinReplicaCount(),
+	})
+	if err != nil {
+		return fmt.Errorf("record distributed image: %w", err)
+	}
+	for _, aliasRef := range compactImageRefs([]string{managedImageRef, runtimeImageRef, digestRef}) {
+		if _, err := s.Store.UpsertImageAlias(model.ImageAlias{
+			ImageID:  image.ID,
+			TenantID: image.TenantID,
+			AliasRef: aliasRef,
+			Digest:   digest,
+		}); err != nil {
+			return fmt.Errorf("record distributed image alias %s: %w", aliasRef, err)
+		}
+	}
+	for _, pin := range []model.ImagePin{
+		{
+			ImageID:     image.ID,
+			TenantID:    image.TenantID,
+			AppID:       strings.TrimSpace(app.ID),
+			OperationID: strings.TrimSpace(op.ID),
+			Reason:      model.ImagePinReasonCurrentDeploy,
+			MinReplicas: s.imageMinReplicaCount(),
+		},
+		{
+			ImageID:     image.ID,
+			TenantID:    image.TenantID,
+			AppID:       strings.TrimSpace(app.ID),
+			OperationID: strings.TrimSpace(op.ID),
+			Reason:      model.ImagePinReasonRollbackWindow,
+			MinReplicas: maxInt(1, s.imageMinReplicaCount()),
+			ExpiresAt:   timePointer(now.Add(7 * 24 * time.Hour)),
+		},
+	} {
+		if _, err := s.Store.UpsertImagePin(pin); err != nil {
+			return fmt.Errorf("record distributed image pin %s: %w", pin.Reason, err)
+		}
+	}
+	if strings.TrimSpace(destination.CacheEndpoint) != "" {
+		leaseExpiresAt := now.Add(s.imageReplicaLeaseTTL())
+		replica, err := s.Store.UpsertImageReplica(model.ImageReplica{
+			ImageID:         image.ID,
+			TenantID:        image.TenantID,
+			AppID:           image.AppID,
+			Digest:          digest,
+			RuntimeID:       strings.TrimSpace(destination.Target.RuntimeID),
+			ClusterNodeName: strings.TrimSpace(destination.Target.ClusterNodeName),
+			CacheEndpoint:   strings.TrimRight(strings.TrimSpace(destination.CacheEndpoint), "/"),
+			Status:          model.ImageReplicaStatusPresent,
+			LastVerifiedAt:  &now,
+			LeaseExpiresAt:  &leaseExpiresAt,
+		})
+		if err != nil {
+			return fmt.Errorf("record distributed first replica: %w", err)
+		}
+		_, _ = s.Store.UpsertImageLocation(imageLocationFromDistributedReplica(image, replica))
+	} else if s.imageStoreStrictDistributedMode() {
+		return fmt.Errorf("distributed image import for app %s produced no verified image-cache replica for %s", app.ID, managedImageRef)
+	}
+	replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
+		ImageID:  image.ID,
+		TenantID: image.TenantID,
+		Status:   model.ImageReplicaStatusPresent,
+	})
+	if err != nil {
+		return fmt.Errorf("verify distributed image write quorum: %w", err)
+	}
+	if len(healthyImageReplicas(replicas, now)) == 0 {
+		if s.imageStoreStrictDistributedMode() {
+			return fmt.Errorf("distributed image import for app %s has no healthy source replica for %s", app.ID, managedImageRef)
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("distributed image import completed without a healthy source replica app=%s op=%s image=%s", app.ID, op.ID, managedImageRef)
+		}
+	}
+	if err := s.ensureImageReplicaPolicy(ctx, image); err != nil && s.Logger != nil {
+		s.Logger.Printf("schedule distributed image replicas app=%s op=%s image=%s failed: %v", app.ID, op.ID, image.ID, err)
+	}
+	return nil
+}
+
+func (s *Service) resolveImportedImageDigest(ctx context.Context, refs ...string) (string, string) {
+	for _, ref := range compactImageRefs(refs) {
+		if digest := imageDigest(ref); digest != "" {
+			return digest, imageRefWithDigest(ref, digest)
+		}
+	}
+	if s == nil || s.resolveManagedImageDigestRef == nil || s.imageStoreStrictDistributedMode() {
+		return "", ""
+	}
+	resolveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	for _, ref := range compactImageRefs(refs) {
+		resolved, err := s.resolveManagedImageDigestRef(resolveCtx, ref)
+		if err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("resolve imported distributed image digest failed image=%s: %v", ref, err)
+			}
+			continue
+		}
+		if digest := imageDigest(resolved); digest != "" {
+			return digest, imageRefWithDigest(ref, digest)
+		}
+	}
+	return "", ""
+}
+
+func imageRefWithDigest(ref, digest string) string {
+	ref = strings.TrimSpace(ref)
+	digest = normalizeControllerImageDigest(digest)
+	if ref == "" || digest == "" {
+		return ""
+	}
+	if index := strings.LastIndex(ref, "@sha256:"); index >= 0 {
+		ref = ref[:index]
+	} else if slash := strings.LastIndex(ref, "/"); slash >= 0 {
+		if colon := strings.LastIndex(ref, ":"); colon > slash {
+			ref = ref[:colon]
+		}
+	}
+	if ref == "" {
+		return ""
+	}
+	return ref + "@" + digest
+}
+
+func normalizeControllerImageDigest(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "@sha256:") {
+		raw = strings.TrimPrefix(raw, "@")
+	}
+	if strings.HasPrefix(raw, "sha256:") && len(raw) == len("sha256:")+64 {
+		return strings.ToLower(raw)
+	}
+	return imageDigest(raw)
+}
+
+func imageLocationFromDistributedReplica(image model.Image, replica model.ImageReplica) model.ImageLocation {
+	return model.ImageLocation{
+		TenantID:        replica.TenantID,
+		AppID:           replica.AppID,
+		ImageRef:        firstNonEmptyControllerString(image.ImageRef, image.CanonicalDigest),
+		Digest:          firstNonEmptyControllerString(replica.Digest, image.CanonicalDigest),
+		NodeID:          replica.NodeID,
+		RuntimeID:       replica.RuntimeID,
+		ClusterNodeName: replica.ClusterNodeName,
+		CacheEndpoint:   replica.CacheEndpoint,
+		Status:          imageLocationStatusFromReplicaStatus(replica.Status),
+		LastSeenAt:      replica.LastVerifiedAt,
+		SizeBytes:       replica.SizeBytes,
+		LastError:       replica.LastError,
+	}
+}
+
+func imageLocationStatusFromReplicaStatus(status string) string {
+	switch strings.TrimSpace(status) {
+	case model.ImageReplicaStatusPresent:
+		return model.ImageLocationStatusPresent
+	case model.ImageReplicaStatusCopying, model.ImageReplicaStatusVerifying, model.ImageReplicaStatusPlanned:
+		return model.ImageLocationStatusPulling
+	case model.ImageReplicaStatusMissing, model.ImageReplicaStatusStale:
+		return model.ImageLocationStatusMissing
+	case model.ImageReplicaStatusFailed:
+		return model.ImageLocationStatusFailed
+	default:
+		return model.ImageLocationStatusPresent
+	}
+}
+
+func firstNonEmptyControllerString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func timePointer(value time.Time) *time.Time {
+	return &value
 }
 
 func (s *Service) managedDeployImageRef(app model.App) string {

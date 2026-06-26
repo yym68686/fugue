@@ -117,6 +117,15 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.ImageRetentionSweepTimeout <= 0 {
 		s.Config.ImageRetentionSweepTimeout = 5 * time.Minute
 	}
+	if s.Config.ImageStoreSchedulerInterval <= 0 {
+		s.Config.ImageStoreSchedulerInterval = 30 * time.Second
+	}
+	if s.Config.ImageStoreVerifyInterval <= 0 {
+		s.Config.ImageStoreVerifyInterval = 10 * time.Minute
+	}
+	if s.Config.ImageStoreReplicaLeaseTTL <= 0 {
+		s.Config.ImageStoreReplicaLeaseTTL = 30 * time.Minute
+	}
 	if s.Config.GitHubSyncRetryBaseDelay <= 0 {
 		s.Config.GitHubSyncRetryBaseDelay = 5 * time.Minute
 	}
@@ -175,13 +184,15 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		s.Config.GitHubSyncActivateWorkers = 0
 	}
 	s.Logger.Printf(
-		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s image_tracking_interval=%s image_retention_sweep_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
+		"controller active loop started; event_driven=%v poll_interval=%s fallback_poll_interval=%s github_sync_interval=%s image_tracking_interval=%s image_retention_sweep_interval=%s image_store_mode=%s image_store_scheduler_interval=%s render_dir=%s kubectl_apply=%v foreground_import_workers=%d foreground_activate_workers=%d github_sync_import_workers=%d github_sync_activate_workers=%d worker_limit_note=%q",
 		eventDriven,
 		s.Config.PollInterval,
 		s.Config.FallbackPollInterval,
 		s.Config.GitHubSyncInterval,
 		s.Config.ImageTrackingInterval,
 		s.Config.ImageRetentionSweepInterval,
+		s.Config.ImageStoreMode,
+		s.Config.ImageStoreSchedulerInterval,
 		s.Config.RenderDir,
 		s.Config.KubectlApply,
 		s.Config.ForegroundImportWorkers,
@@ -231,6 +242,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			imageRetentionSweepTicker = time.NewTicker(s.Config.ImageRetentionSweepInterval)
 			defer imageRetentionSweepTicker.Stop()
 		}
+		var imageReplicationTicker *time.Ticker
+		if s.imageStoreDistributedMode() && s.Config.ImageStoreSchedulerInterval > 0 {
+			imageReplicationTicker = time.NewTicker(s.Config.ImageStoreSchedulerInterval)
+			defer imageReplicationTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -256,6 +272,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("managed app image retention sweep error: %v", err)
 				}
+			case <-githubTickerChan(imageReplicationTicker):
+				if err := s.reconcileImageReplication(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("image replication reconcile error: %v", err)
+				}
 			case <-ticker.C:
 			}
 		}
@@ -278,6 +298,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerBackgroundOps()
 		}
 	}
+	if s.imageStoreDistributedMode() {
+		if err := s.reconcileImageReplication(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial image replication reconcile error: %v", err)
+		}
+	}
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
@@ -298,6 +323,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	if s.Config.ImageRetentionSweepInterval > 0 {
 		imageRetentionSweepTicker = time.NewTicker(s.Config.ImageRetentionSweepInterval)
 		defer imageRetentionSweepTicker.Stop()
+	}
+	var imageReplicationTicker *time.Ticker
+	if s.imageStoreDistributedMode() && s.Config.ImageStoreSchedulerInterval > 0 {
+		imageReplicationTicker = time.NewTicker(s.Config.ImageStoreSchedulerInterval)
+		defer imageReplicationTicker.Stop()
 	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
@@ -348,6 +378,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-githubTickerChan(imageRetentionSweepTicker):
 			if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("managed app image retention sweep error: %v", err)
+			}
+		case <-githubTickerChan(imageReplicationTicker):
+			if err := s.reconcileImageReplication(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("image replication reconcile error: %v", err)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {

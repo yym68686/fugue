@@ -81,6 +81,50 @@ func TestHydrateDeduplicatesConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestManagementAPIRejectsUnauthenticatedRemoteRequests(t *testing.T) {
+	t.Parallel()
+
+	cache := &imageCache{
+		managementToken: "secret",
+		manifestDir:     filepath.Join(t.TempDir(), "manifests"),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/fugue/cache/v1/inventory", nil)
+	req.RemoteAddr = "198.51.100.10:43210"
+	recorder := httptest.NewRecorder()
+	cache.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized remote management request, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/fugue/cache/v1/inventory", nil)
+	req.RemoteAddr = "198.51.100.10:43210"
+	req.Header.Set("Authorization", "Bearer secret")
+	recorder = httptest.NewRecorder()
+	cache.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected authorized inventory request, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestManagementRepoTargetPreservesRepositoryPathWithoutRegistryHost(t *testing.T) {
+	t.Parallel()
+
+	cache := &imageCache{
+		registryBase:  "registry.fugue.internal:5000",
+		localBase:     "127.0.0.1:5000",
+		upstreamBase:  "",
+		cacheEndpoint: "http://127.0.0.1:5000",
+	}
+	repo, target := cache.managementRepoTarget("fugue-apps/demo:git-abc", "", "", "")
+	if repo != "fugue-apps/demo" || target != "git-abc" {
+		t.Fatalf("expected repo fugue-apps/demo target git-abc, got repo=%q target=%q", repo, target)
+	}
+	repo, target = cache.managementRepoTarget("registry.fugue.internal:5000/fugue-apps/demo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "", "", "")
+	if repo != "fugue-apps/demo" || target != "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("expected registry host stripped, got repo=%q target=%q", repo, target)
+	}
+}
+
 func TestHydrateLimitsConcurrentCopiesAcrossTargets(t *testing.T) {
 	t.Parallel()
 

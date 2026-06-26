@@ -224,6 +224,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if imageDestination.CacheEndpoint != "" {
 		s.recordImportedImageLocationOnTarget(app, op, imageDestination.Target, imageDestination.CacheEndpoint, managedImageRef, runtimeImageRef)
 	}
+	if err := s.recordImportedDistributedImage(importCtx, app, op, managedImageRef, runtimeImageRef, imageDestination); err != nil {
+		return err
+	}
 	hydrateApp := app
 	hydrateApp.Spec = finalSpec
 	if scheduling, scheduleErr := s.managedSchedulingConstraintsForApp(ctx, hydrateApp); scheduleErr == nil {
@@ -922,7 +925,41 @@ func (s *Service) resolveImportedManagedImageRef(
 	if len(orderedCandidates) == 0 {
 		return "", "", fmt.Errorf("import completed without an image reference and no managed image candidate could be inferred")
 	}
+	if s.imageStoreStrictDistributedMode() {
+		if !allowBuilderRegistryEvidence {
+			return "", "", fmt.Errorf("import completed but strict distributed image store requires verified node-local image-cache evidence for: %s", strings.Join(orderedCandidates, ", "))
+		}
+		for _, candidate := range orderedCandidates {
+			runtimeImageRef, err := s.rewriteImportedRuntimeImageRef(ctx, candidate)
+			if err != nil {
+				if s.Logger != nil {
+					s.Logger.Printf("ignore invalid imported managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
+				}
+				continue
+			}
+			if s.Logger != nil {
+				s.Logger.Printf("accept imported managed image from strict distributed builder evidence app=%s candidate=%s runtime_image=%s", app.ID, candidate, runtimeImageRef)
+			}
+			return candidate, runtimeImageRef, nil
+		}
+		return "", "", fmt.Errorf("import completed but strict distributed image store could not normalize any managed image candidate: %s", strings.Join(orderedCandidates, ", "))
+	}
 	if s.inspectManagedImage == nil {
+		if s.imageStoreDistributedMode() && allowBuilderRegistryEvidence {
+			for _, candidate := range orderedCandidates {
+				runtimeImageRef, err := s.rewriteImportedRuntimeImageRef(ctx, candidate)
+				if err != nil {
+					if s.Logger != nil {
+						s.Logger.Printf("ignore invalid imported managed image ref for app %s candidate=%s: %v", app.ID, candidate, err)
+					}
+					continue
+				}
+				if s.Logger != nil {
+					s.Logger.Printf("accept imported managed image from distributed builder evidence app=%s candidate=%s runtime_image=%s", app.ID, candidate, runtimeImageRef)
+				}
+				return candidate, runtimeImageRef, nil
+			}
+		}
 		return "", "", fmt.Errorf("import completed but controller image inspection is not configured, so image availability could not be confirmed for: %s", strings.Join(orderedCandidates, ", "))
 	}
 
@@ -980,7 +1017,7 @@ func (s *Service) rewriteImportedRuntimeImageRef(ctx context.Context, imageRef s
 		return "", fmt.Errorf("imported image reference is empty")
 	}
 
-	if s != nil && s.resolveManagedImageDigestRef != nil {
+	if s != nil && s.resolveManagedImageDigestRef != nil && !s.imageStoreStrictDistributedMode() {
 		digestRef, err := s.resolveManagedImageDigestRef(ctx, candidate)
 		if err != nil {
 			if s.Logger != nil {

@@ -284,6 +284,20 @@ controller:
       memory: 512Mi
   extraEnv: []
 
+imageStore:
+  enabled: false
+  mode: bundled-registry
+  minReplicas: 2
+  targetReplicas: 3
+  requireCrossNodeReplicas: true
+  requireCrossRegionReplicas: false
+  verifyInterval: 10m
+  replicaLeaseTTL: 30m
+  schedulerInterval: 30s
+  prune:
+    enabled: false
+    maxDeleteBytesPerRun: 10Gi
+
 edge:
   enabled: true
   blueGreen:

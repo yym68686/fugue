@@ -78,6 +78,18 @@ spec:
               value: {{ include "fugue.registryPullBase" . | quote }}
             - name: FUGUE_BUILDER_REGISTRY_PUSH_BASE
               value: {{ include "fugue.builderRegistryPushBase" . | quote }}
+            - name: FUGUE_IMAGE_STORE_MODE
+              value: {{ include "fugue.imageStoreMode" . | quote }}
+            - name: FUGUE_IMAGE_STORE_MIN_REPLICAS
+              value: {{ .Values.imageStore.minReplicas | quote }}
+            - name: FUGUE_IMAGE_STORE_TARGET_REPLICAS
+              value: {{ .Values.imageStore.targetReplicas | quote }}
+            - name: FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL
+              value: {{ .Values.imageStore.schedulerInterval | quote }}
+            - name: FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL
+              value: {{ .Values.imageStore.replicaLeaseTTL | quote }}
+            - name: FUGUE_IMAGE_STORE_VERIFY_INTERVAL
+              value: {{ .Values.imageStore.verifyInterval | quote }}
             - name: FUGUE_SOURCE_UPLOAD_BASE_URL
               value: {{ printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port | quote }}
             {{- if and .Values.observability.enabled .Values.observability.agent.enabled }}
@@ -103,11 +115,11 @@ spec:
             - name: FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT
               value: {{ .Values.controller.imageRetentionSweepTimeout | quote }}
             - name: FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME
-              value: {{ include "fugue.registryGCName" . | quote }}
+              value: {{ include "fugue.registryGCControlName" . | quote }}
             - name: FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME
-              value: {{ include "fugue.registryJanitorName" . | quote }}
+              value: {{ include "fugue.registryJanitorControlName" . | quote }}
             - name: FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME
-              value: {{ include "fugue.registryGCName" . | quote }}
+              value: {{ include "fugue.registryGCControlName" . | quote }}
             - name: FUGUE_RUNTIME_OFFLINE_AFTER
               value: {{ .Values.controller.runtimeOfflineAfter | quote }}
             - name: FUGUE_CONTROLLER_KUBECTL_APPLY

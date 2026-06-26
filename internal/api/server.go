@@ -53,6 +53,7 @@ type Server struct {
 	edgeQualityRankingMode        string
 	edgeTLSAskToken               string
 	allowLegacyEdgeToken          bool
+	imageStoreMode                string
 	registryPushBase              string
 	registryPullBase              string
 	clusterJoinRegistryEndpoint   string
@@ -148,6 +149,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		edgeQualityRankingMode:        normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
 		edgeTLSAskToken:               strings.TrimSpace(cfg.EdgeTLSAskToken),
 		allowLegacyEdgeToken:          cfg.AllowLegacyEdgeToken,
+		imageStoreMode:                strings.TrimSpace(cfg.ImageStoreMode),
 		registryPushBase:              strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:              strings.TrimSpace(cfg.RegistryPullBase),
 		clusterJoinRegistryEndpoint:   strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),

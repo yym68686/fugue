@@ -245,7 +245,13 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 }
 
 func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType string, payload map[string]string) (model.NodeUpdateTask, bool) {
-	if taskType != model.NodeUpdateTaskTypePrepullAppImages {
+	switch taskType {
+	case model.NodeUpdateTaskTypePrepullAppImages,
+		model.NodeUpdateTaskTypeReplicateAppImage,
+		model.NodeUpdateTaskTypeVerifyImageCache,
+		model.NodeUpdateTaskTypePruneImageCache,
+		model.NodeUpdateTaskTypeReportImageCache:
+	default:
 		return model.NodeUpdateTask{}, false
 	}
 	updaterID = strings.TrimSpace(updaterID)
@@ -493,6 +499,14 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypePrepullSystemImages
 	case model.NodeUpdateTaskTypePrepullAppImages:
 		return model.NodeUpdateTaskTypePrepullAppImages
+	case model.NodeUpdateTaskTypeReplicateAppImage:
+		return model.NodeUpdateTaskTypeReplicateAppImage
+	case model.NodeUpdateTaskTypeVerifyImageCache:
+		return model.NodeUpdateTaskTypeVerifyImageCache
+	case model.NodeUpdateTaskTypePruneImageCache:
+		return model.NodeUpdateTaskTypePruneImageCache
+	case model.NodeUpdateTaskTypeReportImageCache:
+		return model.NodeUpdateTaskTypeReportImageCache
 	case model.NodeUpdateTaskTypeVerifySystemdEscape:
 		return model.NodeUpdateTaskTypeVerifySystemdEscape
 	default:

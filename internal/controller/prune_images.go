@@ -10,7 +10,13 @@ import (
 )
 
 func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App) error {
-	if s == nil || s.Store == nil || s.inspectManagedImage == nil || strings.TrimSpace(s.registryPushBase) == "" {
+	if s == nil || s.Store == nil || strings.TrimSpace(s.registryPushBase) == "" {
+		return nil
+	}
+	if s.imageStoreDistributedMode() {
+		return s.scheduleDistributedImagePruneForApp(ctx, app)
+	}
+	if s.inspectManagedImage == nil {
 		return nil
 	}
 
@@ -37,7 +43,13 @@ func (s *Service) pruneExcessManagedAppImagesWithSnapshot(
 	allOps []model.Operation,
 	liveRefs map[string]struct{},
 ) error {
-	if s == nil || s.inspectManagedImage == nil || strings.TrimSpace(s.registryPushBase) == "" {
+	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
+		return nil
+	}
+	if s.imageStoreDistributedMode() {
+		return s.scheduleDistributedImagePruneForApp(ctx, app)
+	}
+	if s.inspectManagedImage == nil {
 		return nil
 	}
 	deleteImage := s.deleteManagedImage

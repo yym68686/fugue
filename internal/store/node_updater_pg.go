@@ -284,7 +284,13 @@ INSERT INTO fugue_node_update_tasks (
 }
 
 func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID, taskType string, payloadJSON []byte) (model.NodeUpdateTask, bool, error) {
-	if taskType != model.NodeUpdateTaskTypePrepullAppImages {
+	switch taskType {
+	case model.NodeUpdateTaskTypePrepullAppImages,
+		model.NodeUpdateTaskTypeReplicateAppImage,
+		model.NodeUpdateTaskTypeVerifyImageCache,
+		model.NodeUpdateTaskTypePruneImageCache,
+		model.NodeUpdateTaskTypeReportImageCache:
+	default:
 		return model.NodeUpdateTask{}, false, nil
 	}
 	args := []any{

@@ -3809,6 +3809,21 @@ func ensureDefaults(state *model.State) {
 	if state.ImageLocations == nil {
 		state.ImageLocations = []model.ImageLocation{}
 	}
+	if state.Images == nil {
+		state.Images = []model.Image{}
+	}
+	if state.ImageAliases == nil {
+		state.ImageAliases = []model.ImageAlias{}
+	}
+	if state.ImageReplicas == nil {
+		state.ImageReplicas = []model.ImageReplica{}
+	}
+	if state.ImagePins == nil {
+		state.ImagePins = []model.ImagePin{}
+	}
+	if state.ImageReplicationTasks == nil {
+		state.ImageReplicationTasks = []model.ImageReplicationTask{}
+	}
 	if state.AppImageTrackings == nil {
 		state.AppImageTrackings = []model.AppImageTracking{}
 	}

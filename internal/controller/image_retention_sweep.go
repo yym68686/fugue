@@ -24,7 +24,13 @@ func (s *Service) runManagedAppImageRetentionSweep(ctx context.Context) error {
 }
 
 func (s *Service) sweepManagedAppImageRetention(ctx context.Context) error {
-	if s == nil || s.Store == nil || s.inspectManagedImage == nil || strings.TrimSpace(s.registryPushBase) == "" {
+	if s == nil || s.Store == nil || strings.TrimSpace(s.registryPushBase) == "" {
+		return nil
+	}
+	if s.imageStoreDistributedMode() {
+		return s.sweepDistributedImageRetention(ctx)
+	}
+	if s.inspectManagedImage == nil {
 		return nil
 	}
 
@@ -83,6 +89,33 @@ func (s *Service) sweepManagedAppImageRetention(ctx context.Context) error {
 		}
 	}
 
+	return errors.Join(errs...)
+}
+
+func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	if err := s.sweepExpiredDistributedImagePins(ctx); err != nil {
+		return err
+	}
+	apps, err := s.Store.ListAppsMetadata("", true)
+	if err != nil {
+		return fmt.Errorf("list apps: %w", err)
+	}
+	var errs []error
+	for _, app := range apps {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("stop distributed image retention sweep: %w", err))
+			break
+		}
+		if err := s.scheduleDistributedImagePruneForApp(ctx, app); err != nil {
+			errs = append(errs, fmt.Errorf("schedule app %s distributed image prune: %w", strings.TrimSpace(app.ID), err))
+			if isContextStopped(ctx, err) {
+				break
+			}
+		}
+	}
 	return errors.Join(errs...)
 }
 

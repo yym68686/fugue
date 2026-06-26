@@ -110,6 +110,40 @@ func inspectManagedImageAlwaysExists(context.Context, string) (bool, map[string]
 	return true, nil, nil
 }
 
+func TestStrictDistributedResolveImportedManagedImageRefUsesBuilderEvidenceWithoutRegistry(t *testing.T) {
+	t.Parallel()
+
+	imageRef := "registry.fugue.internal:5000/fugue-apps/app-1:git-abc"
+	svc := &Service{
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed"},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed import must not inspect the central registry")
+			return false, nil, nil
+		},
+		resolveManagedImageDigestRef: func(context.Context, string) (string, error) {
+			t.Fatal("strict distributed import must not resolve digests through the central registry")
+			return "", nil
+		},
+	}
+
+	managedRef, runtimeRef, err := svc.resolveImportedManagedImageRef(
+		context.Background(),
+		model.App{ID: "app_1", TenantID: "tenant_1"},
+		model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://example.com/app.git"},
+		model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://example.com/app.git"},
+		imageRef,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("resolve imported managed image ref: %v", err)
+	}
+	if managedRef != imageRef || runtimeRef != imageRef {
+		t.Fatalf("expected builder evidence image ref, got managed=%q runtime=%q", managedRef, runtimeRef)
+	}
+}
+
 func resolveManagedImageDigestRefStub(digests map[string]string) func(context.Context, string) (string, error) {
 	return func(_ context.Context, imageRef string) (string, error) {
 		digest, ok := digests[strings.TrimSpace(imageRef)]

@@ -133,6 +133,26 @@ tolerations:
     effect: NoSchedule
 {{- end -}}
 
+{{- define "fugue.imageStoreMode" -}}
+{{- default "bundled-registry" .Values.imageStore.mode | trim -}}
+{{- end -}}
+
+{{- define "fugue.imageStoreValidate" -}}
+{{- $mode := include "fugue.imageStoreMode" . -}}
+{{- if not (has $mode (list "bundled-registry" "distributed-with-registry-fallback" "distributed" "external-registry")) -}}
+{{- fail (printf "unsupported imageStore.mode %q" $mode) -}}
+{{- end -}}
+{{- if and (eq $mode "distributed") .Values.registry.enabled -}}
+{{- fail "imageStore.mode=distributed requires registry.enabled=false so the bundled central registry is not active" -}}
+{{- end -}}
+{{- if and (eq $mode "distributed") (not .Values.imageCache.enabled) -}}
+{{- fail "imageStore.mode=distributed requires imageCache.enabled=true because runtime pulls must be served by distributed image-cache replicas" -}}
+{{- end -}}
+{{- if and (not .Values.registry.enabled) (ne $mode "distributed") -}}
+{{- fail "registry.enabled=false is only allowed when imageStore.mode=distributed; use distributed-with-registry-fallback while the central registry is still part of the rollout" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.registryPushBase" -}}
 {{- if .Values.api.registryPushBase -}}
 {{- .Values.api.registryPushBase -}}
@@ -165,6 +185,16 @@ tolerations:
 {{- end -}}
 {{- end -}}
 
+{{- define "fugue.imageCacheUpstreamBase" -}}
+{{- if eq (include "fugue.imageStoreMode" .) "distributed" -}}
+{{- "" -}}
+{{- else if and (hasKey .Values.imageCache "upstreamBase") (ne (trim .Values.imageCache.upstreamBase) "") -}}
+{{- trim .Values.imageCache.upstreamBase -}}
+{{- else -}}
+{{- include "fugue.registryPushBase" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.sharedWorkspaceNFSName" -}}
 {{- printf "%s-shared-workspace-nfs" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -183,6 +213,22 @@ tolerations:
 
 {{- define "fugue.registryGCName" -}}
 {{- printf "%s-registry-gc" (include "fugue.fullname" .) -}}
+{{- end -}}
+
+{{- define "fugue.registryJanitorControlName" -}}
+{{- if eq (include "fugue.imageStoreMode" .) "distributed" -}}
+{{- "" -}}
+{{- else -}}
+{{- include "fugue.registryJanitorName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "fugue.registryGCControlName" -}}
+{{- if eq (include "fugue.imageStoreMode" .) "distributed" -}}
+{{- "" -}}
+{{- else -}}
+{{- include "fugue.registryGCName" . -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "fugue.registryDataClaimName" -}}

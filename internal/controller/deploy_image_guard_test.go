@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -464,6 +466,194 @@ func TestDeployImageRefAvailableUsesLocationEvidenceWhenNodeLocalBuilderRegistry
 	}
 	if !exists {
 		t.Fatal("expected location evidence to make deploy image available")
+	}
+}
+
+func TestStrictDistributedDeploySchedulesTargetReplicaInsteadOfRegistryFallback(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Distributed Deploy Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-source", "https://worker-source.example.com", nil, "worker-source", "machine-source", "v2", "join-v2", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage}); err != nil {
+		t.Fatalf("enroll source updater: %v", err)
+	}
+	targetUpdater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-target", "https://worker-target.example.com", nil, "worker-target", "machine-target", "v2", "join-v2", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage})
+	if err != nil {
+		t.Fatalf("enroll target updater: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:git-abc",
+		CanonicalDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        tenant.ID,
+		AppID:           image.AppID,
+		NodeID:          "machine-source",
+		ClusterNodeName: "worker-source",
+		CacheEndpoint:   "http://worker-source.example.com:5000",
+		Status:          model.ImageReplicaStatusPresent,
+		LastVerifiedAt:  &now,
+	}); err != nil {
+		t.Fatalf("upsert source replica: %v", err)
+	}
+	app := model.App{
+		ID:       image.AppID,
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:     image.ImageRef,
+			Replicas:  1,
+			RuntimeID: targetUpdater.RuntimeID,
+		},
+		Source: &model.AppSource{ResolvedImageRef: image.ImageRef},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed", ImageStoreMinReplicas: 2, ImageStoreTargetReplicas: 2},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed deploy must not inspect the central registry")
+			return false, nil, nil
+		},
+	}
+
+	available, err := svc.deployImageRefAvailable(context.Background(), app, deployImageTarget{
+		RuntimeID:       targetUpdater.RuntimeID,
+		ClusterNodeName: targetUpdater.ClusterNodeName,
+	}, image.ImageRef)
+	if !errors.Is(err, errDeployImageReplicationPending) {
+		t.Fatalf("expected pending deploy image replication, got available=%v err=%v", available, err)
+	}
+	tasks, err := stateStore.ListImageReplicationTasks(model.ImageReplicationTaskFilter{ImageID: image.ID, PlatformAdmin: true, Status: model.ImageReplicationTaskStatusPending})
+	if err != nil {
+		t.Fatalf("list replication tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Priority != model.ImageReplicationPriorityDeployBlocking || tasks[0].TargetClusterNodeName != targetUpdater.ClusterNodeName {
+		t.Fatalf("expected deploy-blocking target replication task, got %+v", tasks)
+	}
+	nodeTasks, err := stateStore.ListNodeUpdateTasks(tenant.ID, false, targetUpdater.ID, model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list node update tasks: %v", err)
+	}
+	if len(nodeTasks) != 1 || nodeTasks[0].Type != model.NodeUpdateTaskTypeReplicateAppImage {
+		t.Fatalf("expected replicate-app-image node task, got %+v", nodeTasks)
+	}
+}
+
+func TestStrictDistributedDeployWithoutImageIndexDoesNotInspectRegistry(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Registryless Missing Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	imageRef := "registry.fugue.internal:5000/fugue-apps/missing:git-abc"
+	app := model.App{
+		ID:       "app_1",
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:    imageRef,
+			Replicas: 1,
+		},
+		Source: &model.AppSource{ResolvedImageRef: imageRef},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed"},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed deploy must not inspect the central registry when image index is missing")
+			return false, nil, nil
+		},
+	}
+
+	available, err := svc.deployImageRefAvailable(context.Background(), app, deployImageTarget{}, imageRef)
+	if err != nil {
+		t.Fatalf("deploy image ref available: %v", err)
+	}
+	if available {
+		t.Fatal("expected missing registryless image without index or location evidence to be unavailable")
+	}
+}
+
+func TestStrictDistributedDeployUsesLegacyLocationEvidenceWithoutRegistryFallback(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Registryless Location Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	imageRef := "registry.fugue.internal:5000/fugue-apps/legacy:git-abc"
+	app := model.App{
+		ID:       "app_1",
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:     imageRef,
+			Replicas:  1,
+			RuntimeID: "runtime_1",
+		},
+		Source: &model.AppSource{ResolvedImageRef: imageRef},
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        imageRef,
+		RuntimeID:       "runtime_1",
+		ClusterNodeName: "worker-1",
+		CacheEndpoint:   "http://worker-1.example.com:5000",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert legacy image location: %v", err)
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed"},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed deploy must not inspect the central registry when node-local location evidence exists")
+			return false, nil, nil
+		},
+	}
+
+	available, err := svc.deployImageRefAvailable(context.Background(), app, deployImageTarget{
+		RuntimeID:       "runtime_1",
+		ClusterNodeName: "worker-1",
+	}, imageRef)
+	if err != nil {
+		t.Fatalf("deploy image ref available: %v", err)
+	}
+	if !available {
+		t.Fatal("expected node-local location evidence to make strict distributed deploy available")
 	}
 }
 

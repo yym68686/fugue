@@ -27,6 +27,7 @@ type ServerConfig struct {
 	EdgeQualityRankingMode        string
 	EdgeTLSAskToken               string
 	AllowLegacyEdgeToken          bool
+	ImageStoreMode                string
 	RegistryPushBase              string
 	RegistryPullBase              string
 	ClusterJoinRegistryEndpoint   string

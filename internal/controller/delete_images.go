@@ -13,6 +13,9 @@ func (s *Service) cleanupDeletedAppImages(ctx context.Context, app model.App) er
 	if s == nil || s.Store == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return nil
 	}
+	if s.imageStoreDistributedMode() {
+		return s.cleanupDeletedAppDistributedImages(ctx, app)
+	}
 
 	targetOps, err := s.Store.ListOperationsByApp(app.TenantID, true, app.ID)
 	if err != nil {

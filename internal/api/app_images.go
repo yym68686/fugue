@@ -1008,6 +1008,9 @@ func managedImageRefFromFugueAppsPath(imageRef, registryPushBase string) string 
 }
 
 func (s *Server) appImageInventoryConfigured() bool {
+	if s == nil || strings.TrimSpace(s.imageStoreMode) == "distributed" {
+		return false
+	}
 	return strings.TrimSpace(s.registryPushBase) != "" && s.appImageRegistry != nil
 }
 

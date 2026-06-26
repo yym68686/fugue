@@ -15,6 +15,9 @@ func (s *Service) syncTenantBillingImageStorage(ctx context.Context, tenantID st
 	if s == nil || !s.syncBillingImageStorage || s.Store == nil || s.inspectManagedImage == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return nil
 	}
+	if !s.imageStoreRegistryFallbackEnabled() {
+		return nil
+	}
 
 	apps, err := s.Store.ListAppsMetadata(tenantID, false)
 	if err != nil {

@@ -47,6 +47,7 @@ func main() {
 		EdgeQualityRankingMode:        cfg.EdgeQualityRankingMode,
 		EdgeTLSAskToken:               cfg.EdgeTLSAskToken,
 		AllowLegacyEdgeToken:          cfg.AllowLegacyEdgeToken,
+		ImageStoreMode:                cfg.ImageStoreMode,
 		RegistryPushBase:              cfg.RegistryPushBase,
 		RegistryPullBase:              cfg.RegistryPullBase,
 		ClusterJoinRegistryEndpoint:   cfg.ClusterJoinRegistryEndpoint,

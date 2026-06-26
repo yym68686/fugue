@@ -40,6 +40,7 @@ type APIConfig struct {
 	EdgeQualityRankingMode        string
 	EdgeTLSAskToken               string
 	AllowLegacyEdgeToken          bool
+	ImageStoreMode                string
 	RegistryPushBase              string
 	RegistryPullBase              string
 	ClusterJoinRegistryEndpoint   string
@@ -94,6 +95,12 @@ type ControllerConfig struct {
 	ImageTrackingTimeout          time.Duration
 	ImageRetentionSweepInterval   time.Duration
 	ImageRetentionSweepTimeout    time.Duration
+	ImageStoreMode                string
+	ImageStoreMinReplicas         int
+	ImageStoreTargetReplicas      int
+	ImageStoreSchedulerInterval   time.Duration
+	ImageStoreReplicaLeaseTTL     time.Duration
+	ImageStoreVerifyInterval      time.Duration
 	RegistryGCLeaseName           string
 	RegistryJanitorCronJobName    string
 	RegistryGCCronJobName         string
@@ -259,6 +266,7 @@ func APIFromEnv() APIConfig {
 		EdgeQualityRankingMode:        getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
 		EdgeTLSAskToken:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
 		AllowLegacyEdgeToken:          getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
+		ImageStoreMode:                getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
 		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", ""),
 		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
 		ClusterJoinRegistryEndpoint:   strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),
@@ -365,6 +373,12 @@ func ControllerFromEnv() ControllerConfig {
 		ImageTrackingTimeout:          getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_TIMEOUT", 20*time.Second),
 		ImageRetentionSweepInterval:   getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL", 6*time.Hour),
 		ImageRetentionSweepTimeout:    getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT", 5*time.Minute),
+		ImageStoreMode:                getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
+		ImageStoreMinReplicas:         getenvInt("FUGUE_IMAGE_STORE_MIN_REPLICAS", 2),
+		ImageStoreTargetReplicas:      getenvInt("FUGUE_IMAGE_STORE_TARGET_REPLICAS", 3),
+		ImageStoreSchedulerInterval:   getenvDuration("FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL", 30*time.Second),
+		ImageStoreReplicaLeaseTTL:     getenvDuration("FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL", 30*time.Minute),
+		ImageStoreVerifyInterval:      getenvDuration("FUGUE_IMAGE_STORE_VERIFY_INTERVAL", 10*time.Minute),
 		RegistryGCLeaseName:           getenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
 		RegistryJanitorCronJobName:    getenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "fugue-registry-janitor"),
 		RegistryGCCronJobName:         getenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "fugue-registry-gc"),

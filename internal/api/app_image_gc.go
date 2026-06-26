@@ -17,6 +17,9 @@ const (
 )
 
 func (s *Server) requestAppImageRegistryGarbageCollect(ctx context.Context, reason string) error {
+	if s != nil && strings.TrimSpace(s.imageStoreMode) == "distributed" {
+		return nil
+	}
 	if s.requestRegistryGC != nil {
 		return s.requestRegistryGC(ctx, reason)
 	}

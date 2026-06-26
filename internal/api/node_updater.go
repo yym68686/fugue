@@ -417,7 +417,12 @@ func writeNodeUpdaterEnrollEnv(w http.ResponseWriter, updater model.NodeUpdater,
 }
 
 func (s *Server) nodeUpdateTaskForDelivery(task *model.NodeUpdateTask) *model.NodeUpdateTask {
-	if task == nil || task.Type != model.NodeUpdateTaskTypePrepullAppImages || len(task.Payload) == 0 {
+	if task == nil || len(task.Payload) == 0 {
+		return task
+	}
+	switch task.Type {
+	case model.NodeUpdateTaskTypePrepullAppImages, model.NodeUpdateTaskTypeReplicateAppImage, model.NodeUpdateTaskTypeVerifyImageCache:
+	default:
 		return task
 	}
 	normalized := *task
@@ -537,7 +542,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="v9"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,verify-systemd-escape-hatch,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
 FUGUE_NODE_UPDATER_STATE_DIR="${FUGUE_NODE_UPDATER_STATE_DIR:-${FUGUE_NODE_UPDATER_WORK_DIR}}"
@@ -1895,6 +1900,105 @@ prepull_app_images() {
   done
 }
 
+image_cache_api_endpoint() {
+  first_registry_mirror_endpoint
+}
+
+image_cache_api_json() {
+  local path="$1"
+  local body="${2:-{}}"
+  local endpoint=""
+  endpoint="$(image_cache_api_endpoint)"
+  curl -fsS --max-time 300 \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "${body}" \
+    "${endpoint}${path}"
+}
+
+json_escape_shell() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+report_image_replica() {
+  local image_id="$1"
+  local digest="$2"
+  local status="$3"
+  local message="${4:-}"
+  local endpoint=""
+  endpoint="$(image_cache_api_endpoint)"
+  api_form POST /v1/node-updater/image-replicas/report \
+    --data-urlencode "image_id=${image_id}" \
+    --data-urlencode "app_id=${FUGUE_NODE_UPDATE_TASK_APP_ID:-}" \
+    --data-urlencode "digest=${digest}" \
+    --data-urlencode "status=${status}" \
+    --data-urlencode "cache_endpoint=${endpoint}" \
+    --data-urlencode "last_error=${message}" \
+    >/dev/null || true
+}
+
+replicate_app_image() {
+  local image_id="${FUGUE_NODE_UPDATE_TASK_IMAGE_ID:-}"
+  local image_ref="${FUGUE_NODE_UPDATE_TASK_IMAGE_REF:-${FUGUE_NODE_UPDATE_TASK_IMAGES:-}}"
+  local digest="${FUGUE_NODE_UPDATE_TASK_DIGEST:-}"
+  local source="${FUGUE_NODE_UPDATE_TASK_SOURCE_CACHE_ENDPOINT:-}"
+  if [ -z "${image_id}" ] || [ -z "${image_ref}${digest}" ]; then
+    echo "replicate-app-image requires image_id and image_ref or digest" >&2
+    return 2
+  fi
+  local body
+  body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"source_cache_endpoint\":\"$(json_escape_shell "${source}")\",\"task_id\":\"$(json_escape_shell "${FUGUE_NODE_UPDATE_TASK_ID:-}")\"}"
+  report_image_replica "${image_id}" "${digest}" copying ""
+  if image_cache_api_json /fugue/cache/v1/replicate "${body}" >/dev/null; then
+    report_image_replica "${image_id}" "${digest}" present ""
+    log_task "replicated app image ${image_ref:-${digest}}"
+    return 0
+  fi
+  local rc=$?
+  report_image_replica "${image_id}" "${digest}" failed "image-cache replication failed"
+  return "${rc}"
+}
+
+verify_image_cache() {
+  local image_id="${FUGUE_NODE_UPDATE_TASK_IMAGE_ID:-}"
+  local image_ref="${FUGUE_NODE_UPDATE_TASK_IMAGE_REF:-${FUGUE_NODE_UPDATE_TASK_IMAGES:-}}"
+  local digest="${FUGUE_NODE_UPDATE_TASK_DIGEST:-}"
+  if [ -z "${image_id}" ] || [ -z "${image_ref}${digest}" ]; then
+    echo "verify-image-cache requires image_id and image_ref or digest" >&2
+    return 2
+  fi
+  local body
+  body="{\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\"}"
+  if image_cache_api_json /fugue/cache/v1/verify "${body}" >/dev/null; then
+    report_image_replica "${image_id}" "${digest}" present ""
+    log_task "verified image cache for ${image_ref:-${digest}}"
+    return 0
+  fi
+  local rc=$?
+  report_image_replica "${image_id}" "${digest}" missing "image-cache verify failed"
+  return "${rc}"
+}
+
+report_image_cache_inventory() {
+  local endpoint=""
+  endpoint="$(image_cache_api_endpoint)"
+  if curl -fsS --max-time 60 "${endpoint}/fugue/cache/v1/inventory" >/dev/null; then
+    log_task "image-cache inventory endpoint is reachable"
+    return 0
+  fi
+  echo "image-cache inventory endpoint failed" >&2
+  return 1
+}
+
+prune_image_cache() {
+  local dry_run="${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}"
+  local allow_delete="${FUGUE_NODE_UPDATE_TASK_ALLOW_DELETE:-false}"
+  local body
+  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete}}"
+  image_cache_api_json /fugue/cache/v1/prune "${body}" >/dev/null
+  log_task "image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete}"
+}
+
 verify_systemd_escape_hatch() {
   local checked=0
   local unit=""
@@ -1950,6 +2054,18 @@ run_task() {
       ;;
     prepull-app-images)
       prepull_app_images
+      ;;
+    replicate-app-image)
+      replicate_app_image
+      ;;
+    verify-image-cache)
+      verify_image_cache
+      ;;
+    prune-image-cache)
+      prune_image_cache
+      ;;
+    report-image-cache-inventory)
+      report_image_cache_inventory
       ;;
     verify-systemd-escape-hatch)
       verify_systemd_escape_hatch

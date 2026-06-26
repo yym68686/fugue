@@ -65,7 +65,12 @@ spec:
             - name: FUGUE_IMAGE_CACHE_LOCAL_BASE
               value: {{ printf "127.0.0.1:%v" .Values.imageCache.port | quote }}
             - name: FUGUE_IMAGE_CACHE_UPSTREAM_BASE
-              value: {{ default (include "fugue.registryPushBase" .) .Values.imageCache.upstreamBase | quote }}
+              value: {{ include "fugue.imageCacheUpstreamBase" . | quote }}
+            - name: FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.configSecretName" . }}
+                  key: FUGUE_BOOTSTRAP_ADMIN_KEY
             - name: NODE_IP
               valueFrom:
                 fieldRef:

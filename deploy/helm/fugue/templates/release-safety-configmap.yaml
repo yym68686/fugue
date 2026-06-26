@@ -7,7 +7,11 @@ metadata:
 data:
   public-data-plane: "isolated; node-local front plus worker a/b blue-green required for edge image/template changes"
   node-local-build-plane: "isolated; hostPort image-cache rollout blocked unless explicitly released"
+  {{- if eq (include "fugue.imageStoreMode" .) "distributed" }}
+  distributed-image-store: "replicated; deploys depend on node-local image-cache replicas and control-plane replication scheduling"
+  {{- else }}
   registry: "isolated-singleton; blocks new builds and deploys while unavailable"
+  {{- end }}
   mesh-control: "isolated-singleton; blocks node joins while unavailable"
   shared-workspace-storage: "downtime-required; single NFS writer"
   tenant-stateless-apps: "rolling-update; maxUnavailable=0"

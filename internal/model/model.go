@@ -111,6 +111,10 @@ const (
 	NodeUpdateTaskTypeInstallNFSClient    = "install-nfs-client-tools"
 	NodeUpdateTaskTypePrepullSystemImages = "prepull-system-images"
 	NodeUpdateTaskTypePrepullAppImages    = "prepull-app-images"
+	NodeUpdateTaskTypeReplicateAppImage   = "replicate-app-image"
+	NodeUpdateTaskTypeVerifyImageCache    = "verify-image-cache"
+	NodeUpdateTaskTypePruneImageCache     = "prune-image-cache"
+	NodeUpdateTaskTypeReportImageCache    = "report-image-cache-inventory"
 	NodeUpdateTaskTypeVerifySystemdEscape = "verify-systemd-escape-hatch"
 
 	NodeUpdateTaskStatusPending   = "pending"
@@ -139,6 +143,40 @@ const (
 	ImageLocationStatusMissing = "missing"
 	ImageLocationStatusPulling = "pulling"
 	ImageLocationStatusFailed  = "failed"
+
+	ImageLifecycleImporting = "importing"
+	ImageLifecycleAvailable = "available"
+	ImageLifecycleDeleting  = "deleting"
+	ImageLifecycleDeleted   = "deleted"
+	ImageLifecycleLost      = "lost"
+
+	ImageReplicaStatusPlanned   = "planned"
+	ImageReplicaStatusCopying   = "copying"
+	ImageReplicaStatusVerifying = "verifying"
+	ImageReplicaStatusPresent   = "present"
+	ImageReplicaStatusStale     = "stale"
+	ImageReplicaStatusDraining  = "draining"
+	ImageReplicaStatusDeleting  = "deleting"
+	ImageReplicaStatusMissing   = "missing"
+	ImageReplicaStatusFailed    = "failed"
+
+	ImagePinReasonCurrentDeploy   = "current_deploy"
+	ImagePinReasonRollbackWindow  = "rollback_window"
+	ImagePinReasonImportResult    = "import_result"
+	ImagePinReasonUserPin         = "user_pin"
+	ImagePinReasonRetention       = "retention"
+	ImagePinReasonReplicationSeed = "replication_seed"
+
+	ImageReplicationTaskStatusPending   = "pending"
+	ImageReplicationTaskStatusRunning   = "running"
+	ImageReplicationTaskStatusCompleted = "completed"
+	ImageReplicationTaskStatusFailed    = "failed"
+	ImageReplicationTaskStatusCanceled  = "canceled"
+
+	ImageReplicationPriorityDeployBlocking = "deploy_blocking"
+	ImageReplicationPriorityRepair         = "repair"
+	ImageReplicationPriorityWarmup         = "warmup"
+	ImageReplicationPriorityRebalance      = "rebalance"
 
 	IdempotencyScopeAppImportGitHub = "app.import_github"
 	IdempotencyScopeAppImportImage  = "app.import_image"
@@ -1910,6 +1948,139 @@ type ImageLocationFilter struct {
 	PlatformAdmin   bool
 }
 
+type Image struct {
+	ID                       string    `json:"id"`
+	TenantID                 string    `json:"tenant_id,omitempty"`
+	AppID                    string    `json:"app_id,omitempty"`
+	ImageRef                 string    `json:"image_ref"`
+	CanonicalDigest          string    `json:"canonical_digest,omitempty"`
+	MediaType                string    `json:"media_type,omitempty"`
+	ManifestJSON             string    `json:"manifest_json,omitempty"`
+	ManifestSizeBytes        int64     `json:"manifest_size_bytes,omitempty"`
+	BlobBytes                int64     `json:"blob_bytes,omitempty"`
+	SourceOperationID        string    `json:"source_operation_id,omitempty"`
+	LifecycleState           string    `json:"lifecycle_state"`
+	RequiredReplicaCount     int       `json:"required_replica_count,omitempty"`
+	MinAvailableReplicaCount int       `json:"min_available_replica_count,omitempty"`
+	CreatedAt                time.Time `json:"created_at"`
+	UpdatedAt                time.Time `json:"updated_at"`
+}
+
+type ImageFilter struct {
+	TenantID        string
+	AppID           string
+	ImageRef        string
+	CanonicalDigest string
+	LifecycleState  string
+	PlatformAdmin   bool
+}
+
+type ImageAlias struct {
+	ID        string    `json:"id"`
+	ImageID   string    `json:"image_id"`
+	TenantID  string    `json:"tenant_id,omitempty"`
+	AliasRef  string    `json:"alias_ref"`
+	Digest    string    `json:"digest,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type ImageAliasFilter struct {
+	ImageID       string
+	TenantID      string
+	AliasRef      string
+	Digest        string
+	PlatformAdmin bool
+}
+
+type ImageReplica struct {
+	ID              string     `json:"id"`
+	ImageID         string     `json:"image_id"`
+	TenantID        string     `json:"tenant_id,omitempty"`
+	AppID           string     `json:"app_id,omitempty"`
+	Digest          string     `json:"digest,omitempty"`
+	NodeID          string     `json:"node_id,omitempty"`
+	RuntimeID       string     `json:"runtime_id,omitempty"`
+	ClusterNodeName string     `json:"cluster_node_name,omitempty"`
+	CacheEndpoint   string     `json:"cache_endpoint,omitempty"`
+	FailureDomain   string     `json:"failure_domain,omitempty"`
+	Status          string     `json:"status"`
+	SourceReplicaID string     `json:"source_replica_id,omitempty"`
+	LastVerifiedAt  *time.Time `json:"last_verified_at,omitempty"`
+	LeaseExpiresAt  *time.Time `json:"lease_expires_at,omitempty"`
+	SizeBytes       int64      `json:"size_bytes,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type ImageReplicaFilter struct {
+	ImageID         string
+	TenantID        string
+	AppID           string
+	Digest          string
+	NodeID          string
+	RuntimeID       string
+	ClusterNodeName string
+	Status          string
+	PlatformAdmin   bool
+}
+
+type ImagePin struct {
+	ID          string     `json:"id"`
+	ImageID     string     `json:"image_id"`
+	TenantID    string     `json:"tenant_id,omitempty"`
+	AppID       string     `json:"app_id,omitempty"`
+	OperationID string     `json:"operation_id,omitempty"`
+	Reason      string     `json:"reason"`
+	MinReplicas int        `json:"min_replicas,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type ImagePinFilter struct {
+	ImageID       string
+	TenantID      string
+	AppID         string
+	OperationID   string
+	Reason        string
+	PlatformAdmin bool
+}
+
+type ImageReplicationTask struct {
+	ID                    string     `json:"id"`
+	ImageID               string     `json:"image_id"`
+	TenantID              string     `json:"tenant_id,omitempty"`
+	AppID                 string     `json:"app_id,omitempty"`
+	SourceReplicaID       string     `json:"source_replica_id,omitempty"`
+	SourceCacheEndpoint   string     `json:"source_cache_endpoint,omitempty"`
+	TargetNodeID          string     `json:"target_node_id,omitempty"`
+	TargetRuntimeID       string     `json:"target_runtime_id,omitempty"`
+	TargetClusterNodeName string     `json:"target_cluster_node_name,omitempty"`
+	Priority              string     `json:"priority"`
+	Status                string     `json:"status"`
+	Attempts              int        `json:"attempts,omitempty"`
+	LastError             string     `json:"last_error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	StartedAt             *time.Time `json:"started_at,omitempty"`
+	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+}
+
+type ImageReplicationTaskFilter struct {
+	ImageID               string
+	TenantID              string
+	AppID                 string
+	SourceReplicaID       string
+	TargetNodeID          string
+	TargetRuntimeID       string
+	TargetClusterNodeName string
+	Priority              string
+	Status                string
+	PlatformAdmin         bool
+}
+
 type IdempotencyRecord struct {
 	Scope       string    `json:"scope"`
 	TenantID    string    `json:"tenant_id"`
@@ -2396,6 +2567,11 @@ type State struct {
 	NodeUpdaters               []NodeUpdater               `json:"node_updaters,omitempty"`
 	NodeUpdateTasks            []NodeUpdateTask            `json:"node_update_tasks,omitempty"`
 	ImageLocations             []ImageLocation             `json:"image_locations,omitempty"`
+	Images                     []Image                     `json:"images,omitempty"`
+	ImageAliases               []ImageAlias                `json:"image_aliases,omitempty"`
+	ImageReplicas              []ImageReplica              `json:"image_replicas,omitempty"`
+	ImagePins                  []ImagePin                  `json:"image_pins,omitempty"`
+	ImageReplicationTasks      []ImageReplicationTask      `json:"image_replication_tasks,omitempty"`
 	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
 	AppReleases                []AppRelease                `json:"app_releases,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
