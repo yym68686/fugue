@@ -295,7 +295,7 @@ imageStore:
   replicaLeaseTTL: 30m
   schedulerInterval: 30s
   prune:
-    enabled: false
+    enabled: true
     maxDeleteBytesPerRun: 10Gi
 
 edge:
@@ -657,6 +657,12 @@ imageCache:
   registryBase: ""
   upstreamBase: ""
   hostPath: /var/lib/fugue/image-cache
+  diskLimit:
+    enabled: true
+    highWatermarkPercent: 55
+    lowWatermarkPercent: 45
+    minFreeBytes: 50Gi
+    maxDeleteBytesPerRun: 10Gi
   priorityClassName: system-node-critical
   nodeSelector: {}
   affinity: {}

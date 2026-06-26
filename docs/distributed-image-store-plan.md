@@ -635,7 +635,15 @@ imageStore:
   replicaLeaseTTL: 30m
   schedulerInterval: 30s
   prune:
-    enabled: false
+    enabled: true
+    maxDeleteBytesPerRun: 10Gi
+
+imageCache:
+  diskLimit:
+    enabled: true
+    highWatermarkPercent: 55
+    lowWatermarkPercent: 45
+    minFreeBytes: 50Gi
     maxDeleteBytesPerRun: 10Gi
 
 registry:
@@ -828,6 +836,8 @@ fugue node cache status
 - [x] Add dry-run output for prune decisions.
 - [x] Add tests that current deploy, rollback window, and shared images are not
       pruned.
+- [x] Add node-local image-cache disk watermarks and per-run delete budgets so
+      excess-replica prune only becomes destructive under cache disk pressure.
 
 ### P9: Helm and rollout gates
 

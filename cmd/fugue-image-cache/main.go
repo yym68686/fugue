@@ -17,9 +17,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
@@ -32,6 +34,13 @@ const (
 	serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
+const (
+	defaultImageCacheHighWatermarkPercent = 55
+	defaultImageCacheLowWatermarkPercent  = 45
+	defaultImageCacheMinFreeBytes         = int64(50 * 1024 * 1024 * 1024)
+	defaultImageCacheMaxDeleteBytesPerRun = int64(10 * 1024 * 1024 * 1024)
+)
+
 type imageCache struct {
 	apiBase         string
 	apiToken        string
@@ -42,6 +51,7 @@ type imageCache struct {
 	upstreamBase    string
 	cacheEndpoint   string
 	clusterNode     string
+	storeDir        string
 	manifestDir     string
 	pinStorePath    string
 	managementToken string
@@ -52,11 +62,20 @@ type imageCache struct {
 	proxySlots      chan struct{}
 	copyJobs        int
 	copyImageFn     func(context.Context, string, string) error
+	diskLimit       imageCacheDiskLimit
 	hydrateMu       sync.Mutex
 	hydrateCalls    map[string]*hydrateCall
 	sourceMu        sync.RWMutex
 	sourceByTarget  map[string]sourceCacheEntry
 	sourceTTL       time.Duration
+}
+
+type imageCacheDiskLimit struct {
+	Enabled              bool
+	HighWatermarkPercent float64
+	LowWatermarkPercent  float64
+	MinFreeBytes         int64
+	MaxDeleteBytesPerRun int64
 }
 
 type hydrateCall struct {
@@ -123,6 +142,7 @@ func main() {
 		upstreamBase:    trimRegistryBase(os.Getenv("FUGUE_IMAGE_CACHE_UPSTREAM_BASE")),
 		cacheEndpoint:   strings.TrimRight(os.Getenv("FUGUE_IMAGE_CACHE_ENDPOINT"), "/"),
 		clusterNode:     clusterNode,
+		storeDir:        storeDir,
 		manifestDir:     filepath.Join(storeDir, "_manifests"),
 		pinStorePath:    env("FUGUE_IMAGE_CACHE_PIN_STORE", filepath.Join(filepath.Dir(storeDir), "pins.json")),
 		managementToken: strings.TrimSpace(env("FUGUE_IMAGE_CACHE_MANAGEMENT_TOKEN", apiToken)),
@@ -133,6 +153,13 @@ func main() {
 		proxySlots:      newSemaphore(envInt("FUGUE_IMAGE_CACHE_PROXY_CONCURRENCY", 4)),
 		copyJobs:        envInt("FUGUE_IMAGE_CACHE_COPY_JOBS", 1),
 		sourceTTL:       envDuration("FUGUE_IMAGE_CACHE_SOURCE_TTL", 10*time.Minute),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              envBool("FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED", true),
+			HighWatermarkPercent: envFloat("FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT", defaultImageCacheHighWatermarkPercent),
+			LowWatermarkPercent:  envFloat("FUGUE_IMAGE_CACHE_LOW_WATERMARK_PERCENT", defaultImageCacheLowWatermarkPercent),
+			MinFreeBytes:         envBytes("FUGUE_IMAGE_CACHE_MIN_FREE_BYTES", defaultImageCacheMinFreeBytes),
+			MaxDeleteBytesPerRun: envBytes("FUGUE_IMAGE_CACHE_MAX_DELETE_BYTES_PER_RUN", defaultImageCacheMaxDeleteBytesPerRun),
+		},
 	}
 	if cache.apiBase == "" || cache.apiToken == "" {
 		log.Print("control-plane API credentials are not configured; cache will serve local registry storage only")
@@ -143,7 +170,7 @@ func main() {
 	if err := cache.loadPersistedManifests(); err != nil {
 		log.Printf("load persisted image cache manifests failed: %v", err)
 	}
-	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs)
+	log.Printf("fugue-image-cache listening on %s store=%s registry_base=%s local_base=%s endpoint=%s cluster_node=%s upstream=%s hydrate_concurrency=%d proxy_concurrency=%d copy_jobs=%d disk_limit_enabled=%t high_watermark=%.2f low_watermark=%.2f min_free_bytes=%d max_delete_bytes_per_run=%d", listenAddr, filepath.Clean(storeDir), cache.registryBase, cache.localBase, cache.cacheEndpoint, cache.clusterNode, cache.upstreamBase, cap(cache.hydrateSlots), cap(cache.proxySlots), cache.copyJobs, cache.diskLimit.Enabled, cache.diskLimit.HighWatermarkPercent, cache.diskLimit.LowWatermarkPercent, cache.diskLimit.MinFreeBytes, cache.diskLimit.MaxDeleteBytesPerRun)
 	server := &http.Server{
 		Addr:              listenAddr,
 		Handler:           cache,
@@ -290,11 +317,17 @@ func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	disk, err := c.imageCacheDiskStats(c.normalizedDiskLimit())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeManagementJSON(w, http.StatusOK, map[string]any{
 		"endpoint":     c.cacheEndpoint,
 		"cluster_node": c.clusterNode,
 		"manifests":    manifests,
 		"pins":         pins.Pins,
+		"disk":         disk,
 	})
 }
 
@@ -458,8 +491,13 @@ func (c *imageCache) handleManagementUnpin(w http.ResponseWriter, r *http.Reques
 
 func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DryRun      *bool `json:"dry_run"`
-		AllowDelete bool  `json:"allow_delete"`
+		DryRun         *bool  `json:"dry_run"`
+		AllowDelete    bool   `json:"allow_delete"`
+		ImageRef       string `json:"image_ref"`
+		Repo           string `json:"repo"`
+		Target         string `json:"target"`
+		Digest         string `json:"digest"`
+		MaxDeleteBytes string `json:"max_delete_bytes"`
 	}
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -468,7 +506,7 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 	if req.DryRun != nil {
 		dryRun = *req.DryRun
 	}
-	manifests, err := c.managementManifestInventory()
+	records, err := c.managementManifestRecords()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -486,26 +524,412 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		}
 		pinned[pin.Repo+"\x00"+pin.Target] = struct{}{}
 	}
-	candidates := []map[string]any{}
-	for _, manifest := range manifests {
-		repo, _ := manifest["repo"].(string)
-		target, _ := manifest["target"].(string)
-		if _, ok := pinned[repo+"\x00"+target]; ok {
-			continue
-		}
-		candidates = append(candidates, manifest)
-		if !dryRun && req.AllowDelete {
-			_ = c.deletePersistedManifest(repo, target)
+	repo, target := c.managementRepoTarget(req.ImageRef, req.Repo, req.Target, req.Digest)
+	requestMaxDeleteBytes, err := parseImageCacheByteSize(req.MaxDeleteBytes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	plan, err := c.planImageCachePrune(imageCachePruneRequest{
+		repo:            repo,
+		target:          target,
+		digest:          normalizeImageCacheDigest(req.Digest),
+		allowDelete:     req.AllowDelete,
+		requestMaxBytes: requestMaxDeleteBytes,
+	}, records, pinned)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !dryRun && req.AllowDelete {
+		if err := c.executeImageCachePrunePlan(&plan); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 	}
 	writeManagementJSON(w, http.StatusOK, map[string]any{
-		"dry_run":    dryRun,
-		"deleted":    !dryRun && req.AllowDelete,
-		"candidates": candidates,
+		"dry_run":              dryRun,
+		"allow_delete":         req.AllowDelete,
+		"deleted":              !dryRun && req.AllowDelete && plan.Deleted,
+		"planned_delete_bytes": plan.PlannedDeleteBytes,
+		"deleted_bytes":        plan.DeletedBytes,
+		"deleted_manifests":    plan.DeletedManifests,
+		"deleted_blobs":        plan.DeletedBlobs,
+		"candidate_count":      len(plan.Candidates),
+		"selected_count":       len(plan.SelectedManifests),
+		"candidates":           plan.Candidates,
+		"selected_manifests":   plan.SelectedManifests,
+		"unreferenced_blobs":   plan.UnreferencedBlobs,
+		"delete_budget_bytes":  plan.DeleteBudgetBytes,
+		"needed_delete_bytes":  plan.NeededDeleteBytes,
+		"skipped_reason":       plan.SkippedReason,
+		"disk":                 plan.Disk,
+		"target_repo":          repo,
+		"target":               target,
+		"target_digest":        normalizeImageCacheDigest(req.Digest),
 	})
 }
 
+type imageCachePruneRequest struct {
+	repo            string
+	target          string
+	digest          string
+	allowDelete     bool
+	requestMaxBytes int64
+}
+
+type imageCachePrunePlan struct {
+	Disk               imageCacheDiskStats       `json:"disk"`
+	Candidates         []imageCacheManifestEntry `json:"candidates"`
+	SelectedManifests  []imageCacheManifestEntry `json:"selected_manifests"`
+	UnreferencedBlobs  []imageCacheBlobEntry     `json:"unreferenced_blobs"`
+	DeleteBudgetBytes  int64                     `json:"delete_budget_bytes"`
+	NeededDeleteBytes  int64                     `json:"needed_delete_bytes"`
+	PlannedDeleteBytes int64                     `json:"planned_delete_bytes"`
+	DeletedBytes       int64                     `json:"deleted_bytes"`
+	Deleted            bool                      `json:"deleted"`
+	DeletedManifests   []imageCacheManifestEntry `json:"deleted_manifests"`
+	DeletedBlobs       []imageCacheBlobEntry     `json:"deleted_blobs"`
+	SkippedReason      string                    `json:"skipped_reason,omitempty"`
+
+	deleteManifests []imageCacheManifestRecord
+	deleteBlobs     []imageCacheBlobRecord
+}
+
+type imageCacheDiskStats struct {
+	Enabled              bool    `json:"enabled"`
+	TotalBytes           int64   `json:"total_bytes"`
+	UsedBytes            int64   `json:"used_bytes"`
+	FreeBytes            int64   `json:"free_bytes"`
+	UsedPercent          float64 `json:"used_percent"`
+	CacheBytes           int64   `json:"cache_bytes"`
+	HighWatermarkPercent float64 `json:"high_watermark_percent"`
+	LowWatermarkPercent  float64 `json:"low_watermark_percent"`
+	MinFreeBytes         int64   `json:"min_free_bytes"`
+	MaxDeleteBytesPerRun int64   `json:"max_delete_bytes_per_run"`
+	OverHighWatermark    bool    `json:"over_high_watermark"`
+	BelowMinFree         bool    `json:"below_min_free"`
+	NeededDeleteBytes    int64   `json:"needed_delete_bytes"`
+}
+
+type imageCacheManifestRecord struct {
+	Repo            string
+	Target          string
+	Digest          string
+	ContentType     string
+	Path            string
+	SizeBytes       int64
+	ModifiedAt      time.Time
+	ReferencedBlobs []string
+}
+
+type imageCacheManifestEntry struct {
+	Repo                string   `json:"repo"`
+	Target              string   `json:"target"`
+	Digest              string   `json:"digest"`
+	ContentType         string   `json:"content_type"`
+	SizeBytes           int64    `json:"size_bytes"`
+	ReferencedBlobs     []string `json:"referenced_blobs,omitempty"`
+	ReferencedBlobBytes int64    `json:"referenced_blob_bytes"`
+	ModifiedAt          string   `json:"modified_at,omitempty"`
+}
+
+type imageCacheBlobRecord struct {
+	Digest     string
+	Path       string
+	SizeBytes  int64
+	ModifiedAt time.Time
+}
+
+type imageCacheBlobEntry struct {
+	Digest     string `json:"digest"`
+	SizeBytes  int64  `json:"size_bytes"`
+	ModifiedAt string `json:"modified_at,omitempty"`
+}
+
+func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []imageCacheManifestRecord, pinned map[string]struct{}) (imageCachePrunePlan, error) {
+	limit := c.normalizedDiskLimit()
+	disk, err := c.imageCacheDiskStats(limit)
+	if err != nil {
+		return imageCachePrunePlan{}, err
+	}
+	blobs, err := c.imageCacheBlobRecords()
+	if err != nil {
+		return imageCachePrunePlan{}, err
+	}
+	blobByDigest := make(map[string]imageCacheBlobRecord, len(blobs))
+	for _, blob := range blobs {
+		blobByDigest[blob.Digest] = blob
+	}
+	candidates := make([]imageCacheManifestRecord, 0, len(records))
+	for _, record := range records {
+		if _, ok := pinned[record.Repo+"\x00"+record.Target]; ok {
+			continue
+		}
+		candidates = append(candidates, record)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].ModifiedAt.Before(candidates[j].ModifiedAt)
+	})
+
+	targeted := strings.TrimSpace(req.repo) != "" && (strings.TrimSpace(req.target) != "" || strings.TrimSpace(req.digest) != "")
+	selected := []imageCacheManifestRecord{}
+	if targeted {
+		selectedDigestByRepo := map[string]map[string]struct{}{}
+		for _, candidate := range candidates {
+			if !manifestMatchesPruneTarget(candidate, req) {
+				continue
+			}
+			if selectedDigestByRepo[candidate.Repo] == nil {
+				selectedDigestByRepo[candidate.Repo] = map[string]struct{}{}
+			}
+			selectedDigestByRepo[candidate.Repo][candidate.Digest] = struct{}{}
+		}
+		for _, candidate := range candidates {
+			if digests := selectedDigestByRepo[candidate.Repo]; digests != nil {
+				if _, ok := digests[candidate.Digest]; ok {
+					selected = append(selected, candidate)
+				}
+			}
+		}
+	}
+
+	selectedKeys := make(map[string]struct{}, len(selected))
+	for _, record := range selected {
+		selectedKeys[record.Repo+"\x00"+record.Target] = struct{}{}
+	}
+	remainingReferenced := map[string]struct{}{}
+	for _, record := range records {
+		if _, ok := selectedKeys[record.Repo+"\x00"+record.Target]; ok {
+			continue
+		}
+		for _, digest := range record.ReferencedBlobs {
+			remainingReferenced[digest] = struct{}{}
+		}
+	}
+	unreferenced := make([]imageCacheBlobRecord, 0, len(blobs))
+	for _, blob := range blobs {
+		if _, ok := remainingReferenced[blob.Digest]; ok {
+			continue
+		}
+		unreferenced = append(unreferenced, blob)
+	}
+	sort.SliceStable(unreferenced, func(i, j int) bool {
+		if unreferenced[i].ModifiedAt.Equal(unreferenced[j].ModifiedAt) {
+			return unreferenced[i].SizeBytes > unreferenced[j].SizeBytes
+		}
+		return unreferenced[i].ModifiedAt.Before(unreferenced[j].ModifiedAt)
+	})
+
+	budget := limit.MaxDeleteBytesPerRun
+	if req.requestMaxBytes > 0 && (budget <= 0 || req.requestMaxBytes < budget) {
+		budget = req.requestMaxBytes
+	}
+	plan := imageCachePrunePlan{
+		Disk:              disk,
+		Candidates:        manifestEntries(candidates, blobByDigest),
+		SelectedManifests: manifestEntries(selected, blobByDigest),
+		UnreferencedBlobs: blobEntries(unreferenced),
+		DeleteBudgetBytes: budget,
+		NeededDeleteBytes: disk.NeededDeleteBytes,
+	}
+	if !req.allowDelete {
+		plan.SkippedReason = "allow_delete_false"
+		return plan, nil
+	}
+	if !limit.Enabled {
+		plan.SkippedReason = "disk_limit_disabled"
+		return plan, nil
+	}
+	if disk.NeededDeleteBytes <= 0 {
+		plan.SkippedReason = "below_watermark"
+		return plan, nil
+	}
+	if budget <= 0 {
+		plan.SkippedReason = "delete_budget_zero"
+		return plan, nil
+	}
+	if targeted && len(selected) == 0 && len(unreferenced) == 0 {
+		plan.SkippedReason = "no_matching_unpinned_manifest_or_unreferenced_blob"
+		return plan, nil
+	}
+	planned := int64(0)
+	if targeted {
+		for _, record := range selected {
+			plan.deleteManifests = append(plan.deleteManifests, record)
+			planned += record.SizeBytes
+		}
+	}
+	blobBudget := budget - planned
+	if blobBudget < 0 {
+		blobBudget = 0
+	}
+	blobNeed := disk.NeededDeleteBytes - planned
+	if blobNeed < 0 {
+		blobNeed = 0
+	}
+	for _, blob := range unreferenced {
+		if blobBudget <= 0 || blobNeed <= 0 {
+			break
+		}
+		if blob.SizeBytes > blobBudget {
+			continue
+		}
+		plan.deleteBlobs = append(plan.deleteBlobs, blob)
+		planned += blob.SizeBytes
+		blobBudget -= blob.SizeBytes
+		blobNeed -= blob.SizeBytes
+	}
+	plan.PlannedDeleteBytes = planned
+	if len(plan.deleteManifests) == 0 && len(plan.deleteBlobs) == 0 {
+		plan.SkippedReason = "no_deletable_candidate_within_budget"
+	}
+	return plan, nil
+}
+
+func (c *imageCache) executeImageCachePrunePlan(plan *imageCachePrunePlan) error {
+	if plan == nil {
+		return nil
+	}
+	for _, record := range plan.deleteManifests {
+		if err := c.deleteLocalManifest(record.Repo, record.Target); err != nil {
+			return err
+		}
+		plan.Deleted = true
+		plan.DeletedBytes += record.SizeBytes
+		plan.DeletedManifests = append(plan.DeletedManifests, manifestEntry(record, nil))
+	}
+	for _, blob := range plan.deleteBlobs {
+		if err := os.Remove(blob.Path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("delete blob %s: %w", blob.Digest, err)
+		}
+		plan.Deleted = true
+		plan.DeletedBytes += blob.SizeBytes
+		plan.DeletedBlobs = append(plan.DeletedBlobs, blobEntry(blob))
+	}
+	return nil
+}
+
+func (c *imageCache) deleteLocalManifest(repo, target string) error {
+	if c != nil && c.registry != nil {
+		req := httptestRequest(http.MethodDelete, "/v2/"+strings.Trim(strings.TrimSpace(repo), "/")+"/manifests/"+strings.TrimSpace(target), "", nil)
+		rec := &memoryResponseWriter{header: http.Header{}}
+		c.registry.ServeHTTP(rec, req)
+		status := rec.statusCode()
+		if status < 200 || status >= 300 {
+			body := strings.TrimSpace(rec.body.String())
+			if status != http.StatusNotFound {
+				return fmt.Errorf("delete registry manifest repo=%s target=%s status=%d body=%s", repo, target, status, body)
+			}
+		}
+	}
+	return c.deletePersistedManifest(repo, target)
+}
+
+func manifestMatchesPruneTarget(record imageCacheManifestRecord, req imageCachePruneRequest) bool {
+	if strings.TrimSpace(record.Repo) != strings.Trim(strings.TrimSpace(req.repo), "/") {
+		return false
+	}
+	target := strings.TrimSpace(req.target)
+	digest := normalizeImageCacheDigest(req.digest)
+	switch {
+	case target != "" && record.Target == target:
+		return true
+	case target != "" && record.Digest == normalizeImageCacheDigest(target):
+		return true
+	case digest != "" && record.Target == digest:
+		return true
+	case digest != "" && record.Digest == digest:
+		return true
+	default:
+		return false
+	}
+}
+
+func manifestEntries(records []imageCacheManifestRecord, blobByDigest map[string]imageCacheBlobRecord) []imageCacheManifestEntry {
+	out := make([]imageCacheManifestEntry, 0, len(records))
+	for _, record := range records {
+		out = append(out, manifestEntry(record, blobByDigest))
+	}
+	return out
+}
+
+func manifestEntry(record imageCacheManifestRecord, blobByDigest map[string]imageCacheBlobRecord) imageCacheManifestEntry {
+	referencedBytes := int64(0)
+	if blobByDigest != nil {
+		seen := map[string]struct{}{}
+		for _, digest := range record.ReferencedBlobs {
+			if _, ok := seen[digest]; ok {
+				continue
+			}
+			seen[digest] = struct{}{}
+			referencedBytes += blobByDigest[digest].SizeBytes
+		}
+	}
+	modifiedAt := ""
+	if !record.ModifiedAt.IsZero() {
+		modifiedAt = record.ModifiedAt.UTC().Format(time.RFC3339)
+	}
+	return imageCacheManifestEntry{
+		Repo:                record.Repo,
+		Target:              record.Target,
+		Digest:              record.Digest,
+		ContentType:         record.ContentType,
+		SizeBytes:           record.SizeBytes,
+		ReferencedBlobs:     append([]string(nil), record.ReferencedBlobs...),
+		ReferencedBlobBytes: referencedBytes,
+		ModifiedAt:          modifiedAt,
+	}
+}
+
+func blobEntries(records []imageCacheBlobRecord) []imageCacheBlobEntry {
+	out := make([]imageCacheBlobEntry, 0, len(records))
+	for _, record := range records {
+		out = append(out, blobEntry(record))
+	}
+	return out
+}
+
+func blobEntry(record imageCacheBlobRecord) imageCacheBlobEntry {
+	modifiedAt := ""
+	if !record.ModifiedAt.IsZero() {
+		modifiedAt = record.ModifiedAt.UTC().Format(time.RFC3339)
+	}
+	return imageCacheBlobEntry{Digest: record.Digest, SizeBytes: record.SizeBytes, ModifiedAt: modifiedAt}
+}
+
 func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
+	records, err := c.managementManifestRecords()
+	if err != nil {
+		return nil, err
+	}
+	blobByDigest := map[string]imageCacheBlobRecord{}
+	if blobs, err := c.imageCacheBlobRecords(); err == nil {
+		for _, blob := range blobs {
+			blobByDigest[blob.Digest] = blob
+		}
+	}
+	out := []map[string]any{}
+	for _, record := range records {
+		entry := manifestEntry(record, blobByDigest)
+		out = append(out, map[string]any{
+			"repo":                  entry.Repo,
+			"target":                entry.Target,
+			"digest":                entry.Digest,
+			"content_type":          entry.ContentType,
+			"size_bytes":            entry.SizeBytes,
+			"referenced_blobs":      entry.ReferencedBlobs,
+			"referenced_blob_bytes": entry.ReferencedBlobBytes,
+			"modified_at":           entry.ModifiedAt,
+		})
+	}
+	return out, nil
+}
+
+func (c *imageCache) managementManifestRecords() ([]imageCacheManifestRecord, error) {
 	entries, err := os.ReadDir(c.manifestDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -513,12 +937,17 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []map[string]any{}
+	out := []imageCacheManifestRecord{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(c.manifestDir, entry.Name()))
+		path := filepath.Join(c.manifestDir, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
@@ -526,15 +955,240 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 		if err := json.Unmarshal(raw, &manifest); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{
-			"repo":         strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
-			"target":       strings.TrimSpace(manifest.Target),
-			"digest":       manifestBodyDigest(manifest.Body),
-			"content_type": strings.TrimSpace(manifest.ContentType),
-			"size_bytes":   len(manifest.Body),
+		referenced := []string{}
+		seenReferenced := map[string]struct{}{}
+		for _, descriptor := range manifestReferencedTargets(manifest.Body) {
+			if descriptor.kind != registryTargetBlob {
+				continue
+			}
+			digest := normalizeImageCacheDigest(descriptor.target)
+			if digest == "" {
+				continue
+			}
+			if _, ok := seenReferenced[digest]; ok {
+				continue
+			}
+			seenReferenced[digest] = struct{}{}
+			referenced = append(referenced, digest)
+		}
+		sort.Strings(referenced)
+		out = append(out, imageCacheManifestRecord{
+			Repo:            strings.Trim(strings.TrimSpace(manifest.Repo), "/"),
+			Target:          strings.TrimSpace(manifest.Target),
+			Digest:          normalizeImageCacheDigest(manifestBodyDigest(manifest.Body)),
+			ContentType:     strings.TrimSpace(manifest.ContentType),
+			Path:            path,
+			SizeBytes:       info.Size(),
+			ModifiedAt:      info.ModTime(),
+			ReferencedBlobs: referenced,
 		})
 	}
 	return out, nil
+}
+
+func (c *imageCache) normalizedDiskLimit() imageCacheDiskLimit {
+	limit := c.diskLimit
+	if limit.HighWatermarkPercent <= 0 {
+		limit.HighWatermarkPercent = defaultImageCacheHighWatermarkPercent
+	}
+	if limit.LowWatermarkPercent <= 0 {
+		limit.LowWatermarkPercent = defaultImageCacheLowWatermarkPercent
+	}
+	if limit.LowWatermarkPercent > limit.HighWatermarkPercent {
+		limit.LowWatermarkPercent = limit.HighWatermarkPercent
+	}
+	if limit.MinFreeBytes < 0 {
+		limit.MinFreeBytes = 0
+	}
+	if limit.MaxDeleteBytesPerRun <= 0 {
+		limit.MaxDeleteBytesPerRun = defaultImageCacheMaxDeleteBytesPerRun
+	}
+	return limit
+}
+
+func (c *imageCache) imageCacheDiskStats(limit imageCacheDiskLimit) (imageCacheDiskStats, error) {
+	total, used, free, err := filesystemUsage(c.storeDir)
+	if err != nil {
+		return imageCacheDiskStats{}, err
+	}
+	cacheBytes, err := directorySize(c.storeDir)
+	if err != nil {
+		return imageCacheDiskStats{}, err
+	}
+	usedPercent := 0.0
+	if total > 0 {
+		usedPercent = (float64(used) / float64(total)) * 100
+	}
+	overHigh := limit.HighWatermarkPercent > 0 && usedPercent >= limit.HighWatermarkPercent
+	belowFree := limit.MinFreeBytes > 0 && free < limit.MinFreeBytes
+	neededForWatermark := int64(0)
+	if overHigh && total > 0 {
+		targetUsed := int64(float64(total) * (limit.LowWatermarkPercent / 100))
+		if used > targetUsed {
+			neededForWatermark = used - targetUsed
+		}
+	}
+	neededForReserve := int64(0)
+	if belowFree {
+		neededForReserve = limit.MinFreeBytes - free
+	}
+	needed := neededForWatermark
+	if neededForReserve > needed {
+		needed = neededForReserve
+	}
+	return imageCacheDiskStats{
+		Enabled:              limit.Enabled,
+		TotalBytes:           total,
+		UsedBytes:            used,
+		FreeBytes:            free,
+		UsedPercent:          usedPercent,
+		CacheBytes:           cacheBytes,
+		HighWatermarkPercent: limit.HighWatermarkPercent,
+		LowWatermarkPercent:  limit.LowWatermarkPercent,
+		MinFreeBytes:         limit.MinFreeBytes,
+		MaxDeleteBytesPerRun: limit.MaxDeleteBytesPerRun,
+		OverHighWatermark:    overHigh,
+		BelowMinFree:         belowFree,
+		NeededDeleteBytes:    needed,
+	}, nil
+}
+
+func filesystemUsage(path string) (totalBytes, usedBytes, freeBytes int64, err error) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || path == "." {
+		path = "."
+	}
+	statPath := path
+	for {
+		var stats syscall.Statfs_t
+		if err := syscall.Statfs(statPath, &stats); err == nil {
+			blockSize := int64(stats.Bsize)
+			total := int64(stats.Blocks) * blockSize
+			used := int64(stats.Blocks-stats.Bfree) * blockSize
+			free := int64(stats.Bavail) * blockSize
+			return total, used, free, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return 0, 0, 0, fmt.Errorf("stat image-cache filesystem %s: %w", statPath, err)
+		}
+		parent := filepath.Dir(statPath)
+		if parent == statPath || parent == "." {
+			return 0, 0, 0, fmt.Errorf("stat image-cache filesystem %s: %w", path, os.ErrNotExist)
+		}
+		statPath = parent
+	}
+}
+
+func directorySize(root string) (int64, error) {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" || root == "." {
+		return 0, nil
+	}
+	total := int64(0)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		_ = path
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	return total, err
+}
+
+func (c *imageCache) imageCacheBlobRecords() ([]imageCacheBlobRecord, error) {
+	storeDir := filepath.Clean(strings.TrimSpace(c.storeDir))
+	if storeDir == "" || storeDir == "." {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(storeDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := []imageCacheBlobRecord{}
+	for _, algorithmEntry := range entries {
+		if !algorithmEntry.IsDir() {
+			continue
+		}
+		algorithm := strings.TrimSpace(algorithmEntry.Name())
+		if strings.HasPrefix(algorithm, "_") || algorithm == "" {
+			continue
+		}
+		algorithmDir := filepath.Join(storeDir, algorithm)
+		blobEntries, err := os.ReadDir(algorithmDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		for _, blobEntry := range blobEntries {
+			if blobEntry.IsDir() {
+				continue
+			}
+			digest := normalizeImageCacheDigest(algorithm + ":" + blobEntry.Name())
+			if digest == "" {
+				continue
+			}
+			info, err := blobEntry.Info()
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, err
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			out = append(out, imageCacheBlobRecord{
+				Digest:     digest,
+				Path:       filepath.Join(algorithmDir, blobEntry.Name()),
+				SizeBytes:  info.Size(),
+				ModifiedAt: info.ModTime(),
+			})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Digest < out[j].Digest
+	})
+	return out, nil
+}
+
+func normalizeImageCacheDigest(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return ""
+	}
+	for _, r := range parts[1] {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return ""
+		}
+	}
+	return strings.TrimSpace(parts[0]) + ":" + strings.TrimSpace(parts[1])
 }
 
 func (c *imageCache) managementRepoTarget(imageRefValue, repoValue, targetValue, digestValue string) (string, string) {
@@ -1826,6 +2480,82 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func envBytes(key string, fallback int64) int64 {
+	parsed, err := parseImageCacheByteSize(os.Getenv(key))
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func parseImageCacheByteSize(raw string) (int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	compact := strings.ToUpper(strings.ReplaceAll(value, " ", ""))
+	units := []struct {
+		suffix     string
+		multiplier float64
+	}{
+		{"TIB", 1024 * 1024 * 1024 * 1024},
+		{"TI", 1024 * 1024 * 1024 * 1024},
+		{"TB", 1024 * 1024 * 1024 * 1024},
+		{"T", 1024 * 1024 * 1024 * 1024},
+		{"GIB", 1024 * 1024 * 1024},
+		{"GI", 1024 * 1024 * 1024},
+		{"GB", 1024 * 1024 * 1024},
+		{"G", 1024 * 1024 * 1024},
+		{"MIB", 1024 * 1024},
+		{"MI", 1024 * 1024},
+		{"MB", 1024 * 1024},
+		{"M", 1024 * 1024},
+		{"KIB", 1024},
+		{"KI", 1024},
+		{"KB", 1024},
+		{"K", 1024},
+		{"B", 1},
+	}
+	multiplier := float64(1)
+	number := compact
+	for _, unit := range units {
+		if strings.HasSuffix(compact, unit.suffix) {
+			multiplier = unit.multiplier
+			number = strings.TrimSuffix(compact, unit.suffix)
+			break
+		}
+	}
+	parsed, err := strconv.ParseFloat(number, 64)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("invalid byte size %q", raw)
+	}
+	return int64(parsed * multiplier), nil
 }
 
 func envInt(key string, fallback int) int {

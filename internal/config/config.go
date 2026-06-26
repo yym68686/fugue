@@ -101,6 +101,8 @@ type ControllerConfig struct {
 	ImageStoreSchedulerInterval   time.Duration
 	ImageStoreReplicaLeaseTTL     time.Duration
 	ImageStoreVerifyInterval      time.Duration
+	ImageStorePruneEnabled        bool
+	ImageStorePruneMaxDeleteBytes string
 	RegistryGCLeaseName           string
 	RegistryJanitorCronJobName    string
 	RegistryGCCronJobName         string
@@ -379,6 +381,8 @@ func ControllerFromEnv() ControllerConfig {
 		ImageStoreSchedulerInterval:   getenvDuration("FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL", 30*time.Second),
 		ImageStoreReplicaLeaseTTL:     getenvDuration("FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL", 30*time.Minute),
 		ImageStoreVerifyInterval:      getenvDuration("FUGUE_IMAGE_STORE_VERIFY_INTERVAL", 10*time.Minute),
+		ImageStorePruneEnabled:        getenvBool("FUGUE_IMAGE_STORE_PRUNE_ENABLED", true),
+		ImageStorePruneMaxDeleteBytes: getenv("FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN", "10Gi"),
 		RegistryGCLeaseName:           getenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
 		RegistryJanitorCronJobName:    getenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "fugue-registry-janitor"),
 		RegistryGCCronJobName:         getenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "fugue-registry-gc"),

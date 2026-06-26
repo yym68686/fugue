@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -873,6 +874,100 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	}
 }
 
+func TestImageCachePruneSkipsDeleteBelowWatermark(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 100,
+			LowWatermarkPercent:  99,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 20,
+		},
+	}
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("layer-a"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-a", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-a","max_delete_bytes":"1Mi"}`)
+
+	if result.Deleted {
+		t.Fatalf("expected prune to skip deletion below watermark, got %+v", result)
+	}
+	if result.SkippedReason != "below_watermark" {
+		t.Fatalf("skipped_reason = %q, want below_watermark", result.SkippedReason)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, layerDigest)); err != nil {
+		t.Fatalf("expected layer blob to remain: %v", err)
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("manifest records: %v", err)
+	}
+	if len(records) != 1 || records[0].Target != "image-a" {
+		t.Fatalf("expected manifest to remain, got %+v", records)
+	}
+}
+
+func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 99,
+			LowWatermarkPercent:  98,
+			MinFreeBytes:         1 << 62,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	sharedDigest := writeTestImageCacheBlob(t, storeDir, []byte("shared-layer"))
+	onlyADigest := writeTestImageCacheBlob(t, storeDir, []byte("only-a"))
+	configADigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"a"}`))
+	configBDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"b"}`))
+	manifestA := testImageCacheManifest(configADigest, onlyADigest, sharedDigest)
+	manifestB := testImageCacheManifest(configBDigest, sharedDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-a", "application/vnd.oci.image.manifest.v1+json", []byte(manifestA)); err != nil {
+		t.Fatalf("persist manifest a: %v", err)
+	}
+	if err := cache.persistManifest("fugue-apps/demo", "image-b", "application/vnd.oci.image.manifest.v1+json", []byte(manifestB)); err != nil {
+		t.Fatalf("persist manifest b: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-a","max_delete_bytes":"1Gi"}`)
+
+	if !result.Deleted {
+		t.Fatalf("expected prune to delete selected image, got %+v", result)
+	}
+	for _, digest := range []string{onlyADigest, configADigest} {
+		if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected blob %s to be deleted, stat err=%v", digest, err)
+		}
+	}
+	for _, digest := range []string{sharedDigest, configBDigest} {
+		if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); err != nil {
+			t.Fatalf("expected blob %s to remain: %v", digest, err)
+		}
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("manifest records: %v", err)
+	}
+	if len(records) != 1 || records[0].Target != "image-b" {
+		t.Fatalf("expected only image-b manifest to remain, got %+v", records)
+	}
+}
+
 func TestHydrateMarksMissingPeerLocationStale(t *testing.T) {
 	t.Parallel()
 
@@ -1044,6 +1139,57 @@ func TestReportIncludesClusterNodeIdentity(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected image location report")
 	}
+}
+
+type imageCachePruneTestResult struct {
+	Deleted       bool   `json:"deleted"`
+	SkippedReason string `json:"skipped_reason"`
+	DeletedBytes  int64  `json:"deleted_bytes"`
+}
+
+func postImageCachePrune(t *testing.T, cache *imageCache, body string) imageCachePruneTestResult {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://image-cache.test/fugue/cache/v1/prune", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	cache.handleManagementPrune(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prune status = %d, body=%q", rec.Code, rec.Body.String())
+	}
+	var result imageCachePruneTestResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode prune response: %v; body=%s", err, rec.Body.String())
+	}
+	return result
+}
+
+func writeTestImageCacheBlob(t *testing.T, storeDir string, body []byte) string {
+	t.Helper()
+	sum := sha256.Sum256(body)
+	digest := fmt.Sprintf("sha256:%x", sum[:])
+	path := imageCacheBlobPath(storeDir, digest)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir blob dir: %v", err)
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("write blob: %v", err)
+	}
+	return digest
+}
+
+func imageCacheBlobPath(storeDir, digest string) string {
+	parts := strings.SplitN(digest, ":", 2)
+	if len(parts) != 2 {
+		return filepath.Join(storeDir, "invalid")
+	}
+	return filepath.Join(storeDir, parts[0], parts[1])
+}
+
+func testImageCacheManifest(configDigest string, layerDigests ...string) string {
+	layers := make([]string, 0, len(layerDigests))
+	for _, digest := range layerDigests {
+		layers = append(layers, fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.layer.v1.tar","digest":%q,"size":1}`, digest))
+	}
+	return fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":%q,"size":2},"layers":[%s]}`, configDigest, strings.Join(layers, ","))
 }
 
 func TestFetchKubernetesPodNodeName(t *testing.T) {

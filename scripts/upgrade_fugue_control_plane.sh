@@ -5915,6 +5915,13 @@ main() {
   FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL="${FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL:-30s}"
   FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL="${FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL:-30m}"
   FUGUE_IMAGE_STORE_VERIFY_INTERVAL="${FUGUE_IMAGE_STORE_VERIFY_INTERVAL:-10m}"
+  FUGUE_IMAGE_STORE_PRUNE_ENABLED="${FUGUE_IMAGE_STORE_PRUNE_ENABLED:-true}"
+  FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN="${FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN:-10Gi}"
+  FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED="${FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED:-true}"
+  FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT="${FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT:-55}"
+  FUGUE_IMAGE_CACHE_LOW_WATERMARK_PERCENT="${FUGUE_IMAGE_CACHE_LOW_WATERMARK_PERCENT:-45}"
+  FUGUE_IMAGE_CACHE_MIN_FREE_BYTES="${FUGUE_IMAGE_CACHE_MIN_FREE_BYTES:-50Gi}"
+  FUGUE_IMAGE_CACHE_MAX_DELETE_BYTES_PER_RUN="${FUGUE_IMAGE_CACHE_MAX_DELETE_BYTES_PER_RUN:-10Gi}"
   FUGUE_REGISTRY_ENABLED="${FUGUE_REGISTRY_ENABLED:-}"
   if [[ -z "$(trim_field "${FUGUE_REGISTRY_ENABLED}")" ]]; then
     if [[ "${FUGUE_IMAGE_STORE_MODE}" == "distributed" ]]; then
@@ -6471,12 +6478,19 @@ PY
     --set-string imageStore.schedulerInterval="${FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL}" \
     --set-string imageStore.replicaLeaseTTL="${FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL}" \
     --set-string imageStore.verifyInterval="${FUGUE_IMAGE_STORE_VERIFY_INTERVAL}" \
+    --set imageStore.prune.enabled="${FUGUE_IMAGE_STORE_PRUNE_ENABLED}" \
+    --set-string imageStore.prune.maxDeleteBytesPerRun="${FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN}" \
     --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
     --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
     --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
     --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}" \
     --set-string imageCache.registryBase="${FUGUE_REGISTRY_PULL_BASE}" \
     --set-string imageCache.upstreamBase="$(helm_set_string_value "${FUGUE_IMAGE_CACHE_UPSTREAM_BASE:-}")" \
+    --set imageCache.diskLimit.enabled="${FUGUE_IMAGE_CACHE_DISK_LIMIT_ENABLED}" \
+    --set imageCache.diskLimit.highWatermarkPercent="${FUGUE_IMAGE_CACHE_HIGH_WATERMARK_PERCENT}" \
+    --set imageCache.diskLimit.lowWatermarkPercent="${FUGUE_IMAGE_CACHE_LOW_WATERMARK_PERCENT}" \
+    --set-string imageCache.diskLimit.minFreeBytes="${FUGUE_IMAGE_CACHE_MIN_FREE_BYTES}" \
+    --set-string imageCache.diskLimit.maxDeleteBytesPerRun="${FUGUE_IMAGE_CACHE_MAX_DELETE_BYTES_PER_RUN}" \
     --set registry.enabled="${FUGUE_REGISTRY_ENABLED}" \
     --set registryJanitor.enabled="${FUGUE_REGISTRY_JANITOR_ENABLED}" \
     --set registryGC.enabled="${FUGUE_REGISTRY_GC_ENABLED}" \

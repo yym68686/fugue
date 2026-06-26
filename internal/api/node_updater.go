@@ -1993,9 +1993,19 @@ report_image_cache_inventory() {
 prune_image_cache() {
   local dry_run="${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}"
   local allow_delete="${FUGUE_NODE_UPDATE_TASK_ALLOW_DELETE:-false}"
+  local image_id="${FUGUE_NODE_UPDATE_TASK_IMAGE_ID:-}"
+  local image_ref="${FUGUE_NODE_UPDATE_TASK_IMAGE_REF:-${FUGUE_NODE_UPDATE_TASK_IMAGES:-}}"
+  local digest="${FUGUE_NODE_UPDATE_TASK_DIGEST:-}"
+  local max_delete_bytes="${FUGUE_NODE_UPDATE_TASK_MAX_DELETE_BYTES:-}"
   local body
-  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete}}"
-  image_cache_api_json /fugue/cache/v1/prune "${body}" >/dev/null
+  local response
+  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\"}"
+  response="$(image_cache_api_json /fugue/cache/v1/prune "${body}")"
+  if printf '%s' "${response}" | grep -Eq '"deleted"[[:space:]]*:[[:space:]]*true'; then
+    if [ -n "${image_id}" ]; then
+      report_image_replica "${image_id}" "${digest}" missing "image-cache prune deleted local replica"
+    fi
+  fi
   log_task "image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete}"
 }
 

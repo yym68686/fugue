@@ -131,21 +131,28 @@ func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model
 		if !supported {
 			continue
 		}
+		dryRun := "true"
+		allowDelete := "false"
+		if s.Config.ImageStorePruneEnabled {
+			dryRun = "false"
+			allowDelete = "true"
+		}
 		_, err = s.Store.CreateNodeUpdateTask(model.Principal{
 			ActorType: model.ActorTypeSystem,
 			ActorID:   "fugue-controller/image-prune",
 			TenantID:  strings.TrimSpace(image.TenantID),
 			Scopes:    map[string]struct{}{"platform.admin": {}},
 		}, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
-			"image_id":     image.ID,
-			"image_ref":    image.ImageRef,
-			"digest":       image.CanonicalDigest,
-			"app_id":       image.AppID,
-			"dry_run":      "true",
-			"allow_delete": "false",
-			"replica_id":   replica.ID,
-			"prune_reason": "unpinned-excess-replica",
-			"min_replicas": fmt.Sprint(s.imageMinReplicaCount()),
+			"image_id":         image.ID,
+			"image_ref":        image.ImageRef,
+			"digest":           image.CanonicalDigest,
+			"app_id":           image.AppID,
+			"dry_run":          dryRun,
+			"allow_delete":     allowDelete,
+			"replica_id":       replica.ID,
+			"prune_reason":     "unpinned-excess-replica",
+			"min_replicas":     fmt.Sprint(s.imageMinReplicaCount()),
+			"max_delete_bytes": strings.TrimSpace(s.Config.ImageStorePruneMaxDeleteBytes),
 		})
 		if err != nil && !errors.Is(err, store.ErrInvalidInput) {
 			return err
