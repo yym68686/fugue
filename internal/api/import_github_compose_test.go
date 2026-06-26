@@ -540,6 +540,109 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	}
 }
 
+func TestImportResolvedGitHubTopologyAppliesManagedPostgresOverridesToBackingService(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Compose Postgres Override Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain:    "apps.example.com",
+		RegistryPushBase: "registry.internal.example",
+	})
+
+	result, err := server.importResolvedGitHubTopology(
+		model.Principal{ActorType: model.ActorTypeAPIKey, ActorID: "key"},
+		tenant.ID,
+		importGitHubRequest{
+			ProjectID:      project.ID,
+			RepoURL:        "https://github.com/example/demo",
+			RepoVisibility: "public",
+			Postgres: &model.AppPostgresSpec{
+				StorageSize:         "5Gi",
+				StorageClassName:    "fast-rwo",
+				Instances:           2,
+				SynchronousReplicas: 1,
+			},
+		},
+		"runtime_managed_shared",
+		1,
+		"Imported from GitHub",
+		"demo",
+		sourceimport.NormalizedTopology{
+			PrimaryService: "web",
+			Services: []sourceimport.ComposeService{
+				{
+					Name:         "web",
+					Kind:         sourceimport.ComposeServiceKindApp,
+					ServiceType:  sourceimport.ServiceTypeApp,
+					Image:        "ghcr.io/example/web:latest",
+					InternalPort: 8080,
+					Published:    true,
+					Environment: map[string]string{
+						"DATABASE_URL": "postgresql://postgres:secret@db:5432/appdb",
+					},
+					DependsOn: []string{"db"},
+				},
+				{
+					Name:           "db",
+					Kind:           sourceimport.ComposeServiceKindPostgres,
+					ServiceType:    sourceimport.ServiceTypePostgres,
+					BackingService: true,
+					Image:          "postgres:16-alpine",
+					Environment: map[string]string{
+						"POSTGRES_DB":       "appdb",
+						"POSTGRES_USER":     "postgres",
+						"POSTGRES_PASSWORD": "secret",
+					},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("import resolved topology: %v", err)
+	}
+
+	var webApp model.App
+	for _, app := range result.Apps {
+		if app.Source != nil && app.Source.ComposeService == "web" {
+			webApp = app
+			break
+		}
+	}
+	if webApp.ID == "" {
+		t.Fatalf("expected web app in topology import result, got %+v", result.Apps)
+	}
+	postgres := store.OwnedManagedPostgresSpec(webApp)
+	if postgres == nil {
+		t.Fatalf("expected managed postgres backing spec on web app, got %+v", webApp)
+	}
+	if got := postgres.StorageSize; got != "5Gi" {
+		t.Fatalf("expected postgres storage size override 5Gi, got %q", got)
+	}
+	if got := postgres.StorageClassName; got != "fast-rwo" {
+		t.Fatalf("expected postgres storage class override fast-rwo, got %q", got)
+	}
+	if got := postgres.Instances; got != 2 {
+		t.Fatalf("expected postgres instances override 2, got %d", got)
+	}
+	if got := postgres.SynchronousReplicas; got != 1 {
+		t.Fatalf("expected postgres synchronous replicas override 1, got %d", got)
+	}
+}
+
 func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *testing.T) {
 	t.Parallel()
 

@@ -70,6 +70,57 @@ func TestNormalizeGenericPostgresSpecKeepsCNPGImage(t *testing.T) {
 	}
 }
 
+func TestNormalizeGenericPostgresSpecKeepsManagedPostgresOverrides(t *testing.T) {
+	resources := &model.ResourceSpec{
+		CPUMilliCores:   300,
+		MemoryMebibytes: 768,
+	}
+	spec, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
+		RuntimeID:                        "runtime_primary",
+		FailoverTargetRuntimeID:          "runtime_failover",
+		PrimaryNodeName:                  "node-a",
+		PrimaryPlacementPendingRebalance: true,
+		StorageSize:                      "5Gi",
+		StorageClassName:                 "fast-rwo",
+		Instances:                        2,
+		SynchronousReplicas:              1,
+		Resources:                        resources,
+	})
+	if err != nil {
+		t.Fatalf("normalize postgres spec: %v", err)
+	}
+	if spec.RuntimeID != "runtime_primary" {
+		t.Fatalf("expected runtime override to be preserved, got %q", spec.RuntimeID)
+	}
+	if spec.FailoverTargetRuntimeID != "runtime_failover" {
+		t.Fatalf("expected failover runtime override to be preserved, got %q", spec.FailoverTargetRuntimeID)
+	}
+	if spec.PrimaryNodeName != "node-a" {
+		t.Fatalf("expected primary node override to be preserved, got %q", spec.PrimaryNodeName)
+	}
+	if !spec.PrimaryPlacementPendingRebalance {
+		t.Fatal("expected primary placement rebalance override to be preserved")
+	}
+	if spec.StorageSize != "5Gi" {
+		t.Fatalf("expected storage size override 5Gi, got %q", spec.StorageSize)
+	}
+	if spec.StorageClassName != "fast-rwo" {
+		t.Fatalf("expected storage class override fast-rwo, got %q", spec.StorageClassName)
+	}
+	if spec.Instances != 2 {
+		t.Fatalf("expected instances override 2, got %d", spec.Instances)
+	}
+	if spec.SynchronousReplicas != 1 {
+		t.Fatalf("expected synchronous replicas override 1, got %d", spec.SynchronousReplicas)
+	}
+	if spec.Resources == nil || spec.Resources.CPUMilliCores != 300 || spec.Resources.MemoryMebibytes != 768 {
+		t.Fatalf("expected resource override to be preserved, got %+v", spec.Resources)
+	}
+	if spec.Resources == resources {
+		t.Fatal("expected resources override to be cloned")
+	}
+}
+
 func TestNormalizeGenericPostgresSpecRejectsReservedCNPGUser(t *testing.T) {
 	_, err := normalizeGenericPostgresSpec("fugue-web", &model.AppPostgresSpec{
 		User: "postgres",

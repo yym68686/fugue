@@ -375,23 +375,7 @@ func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpe
 		Database:    appName,
 		ServiceName: appName + "-postgres",
 	}
-	if override != nil {
-		if strings.TrimSpace(override.Image) != "" {
-			spec.Image = model.NormalizeManagedPostgresImage(override.Image)
-		}
-		if strings.TrimSpace(override.Database) != "" {
-			spec.Database = strings.TrimSpace(override.Database)
-		}
-		if strings.TrimSpace(override.User) != "" {
-			spec.User = strings.TrimSpace(override.User)
-		}
-		if strings.TrimSpace(override.Password) != "" {
-			spec.Password = strings.TrimSpace(override.Password)
-		}
-		if strings.TrimSpace(override.ServiceName) != "" {
-			spec.ServiceName = strings.TrimSpace(override.ServiceName)
-		}
-	}
+	applyManagedPostgresOverrides(&spec, override)
 	spec.Image = model.NormalizeManagedPostgresImage(spec.Image)
 	if spec.User == "" {
 		spec.User = model.DefaultManagedPostgresUser(appName)
@@ -407,6 +391,54 @@ func normalizeGenericPostgresSpec(appName string, override *model.AppPostgresSpe
 		spec.Password = password
 	}
 	return spec, nil
+}
+
+func applyManagedPostgresOverrides(spec *model.AppPostgresSpec, override *model.AppPostgresSpec) {
+	if spec == nil || override == nil {
+		return
+	}
+	if value := strings.TrimSpace(override.Image); value != "" {
+		spec.Image = model.NormalizeManagedPostgresImage(value)
+	}
+	if value := strings.TrimSpace(override.Database); value != "" {
+		spec.Database = value
+	}
+	if value := strings.TrimSpace(override.User); value != "" {
+		spec.User = value
+	}
+	if value := strings.TrimSpace(override.Password); value != "" {
+		spec.Password = value
+	}
+	if value := strings.TrimSpace(override.ServiceName); value != "" {
+		spec.ServiceName = value
+	}
+	if value := strings.TrimSpace(override.RuntimeID); value != "" {
+		spec.RuntimeID = value
+	}
+	if value := strings.TrimSpace(override.FailoverTargetRuntimeID); value != "" {
+		spec.FailoverTargetRuntimeID = value
+	}
+	if value := strings.TrimSpace(override.PrimaryNodeName); value != "" {
+		spec.PrimaryNodeName = value
+	}
+	if override.PrimaryPlacementPendingRebalance {
+		spec.PrimaryPlacementPendingRebalance = true
+	}
+	if value := strings.TrimSpace(override.StorageSize); value != "" {
+		spec.StorageSize = value
+	}
+	if value := strings.TrimSpace(override.StorageClassName); value != "" {
+		spec.StorageClassName = value
+	}
+	if override.Instances > 0 {
+		spec.Instances = override.Instances
+	}
+	if override.SynchronousReplicas > 0 {
+		spec.SynchronousReplicas = override.SynchronousReplicas
+	}
+	if override.Resources != nil {
+		spec.Resources = cloneResourceSpec(override.Resources)
+	}
 }
 
 func randomHex(numBytes int) (string, error) {

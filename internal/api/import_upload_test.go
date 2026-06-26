@@ -154,6 +154,76 @@ func TestImportUploadAppQueuesPendingImportWithPersistentStorage(t *testing.T) {
 	}
 }
 
+func TestImportUploadAppPreservesManagedPostgresStorageOverride(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := s.CreateTenant("Upload Postgres Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "uploader", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{
+		AppBaseDomain: "apps.example.com",
+	})
+
+	archiveBytes := mustTarGz(t, map[string]string{
+		"Dockerfile": "FROM nginx:alpine\n",
+	})
+	body, contentType := newImportUploadMultipartBody(t, importUploadRequest{
+		Name:          "demo-api",
+		BuildStrategy: model.AppBuildStrategyDockerfile,
+		Postgres: &model.AppPostgresSpec{
+			Database:         "appdb",
+			User:             "app_user",
+			Password:         "secret",
+			StorageSize:      "5Gi",
+			StorageClassName: "fast-rwo",
+		},
+	}, "demo-api.tgz", archiveBytes)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/apps/import-upload", body)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", contentType)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		App       model.App       `json:"app"`
+		Operation model.Operation `json:"operation"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	app, err := s.GetApp(response.App.ID)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	postgres := store.OwnedManagedPostgresSpec(app)
+	if postgres == nil {
+		t.Fatalf("expected owned managed postgres spec, got %+v", app)
+	}
+	if got := postgres.StorageSize; got != "5Gi" {
+		t.Fatalf("expected postgres storage size 5Gi, got %q", got)
+	}
+	if got := postgres.StorageClassName; got != "fast-rwo" {
+		t.Fatalf("expected postgres storage class fast-rwo, got %q", got)
+	}
+}
+
 func TestImportUploadAppDerivesNameFromArchiveWhenRequestNameBlank(t *testing.T) {
 	t.Parallel()
 

@@ -39,6 +39,7 @@ type topologyImportOptions struct {
 	Env                      map[string]string
 	ServiceEnv               map[string]map[string]string
 	ServicePersistentStorage map[string]model.ServicePersistentStorageOverride
+	Postgres                 *model.AppPostgresSpec
 	AuditAction              string
 	BuildSource              topologySourceBuilder
 	DesiredOriginSource      func(existing *model.App, source model.AppSource) *model.AppSource
@@ -91,6 +92,7 @@ func (s *Server) importResolvedGitHubTopology(principal model.Principal, tenantI
 		Env:                      req.Env,
 		ServiceEnv:               normalizedImportServiceEnv(req.ServiceEnv),
 		ServicePersistentStorage: normalizedImportServicePersistentStorage(req.ServicePersistentStorage),
+		Postgres:                 req.Postgres,
 		AuditAction:              "app.import_github",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedComposeServiceSource(req, service, composeDependsOn)
@@ -292,6 +294,7 @@ func (s *Server) importResolvedUploadTopology(principal model.Principal, tenantI
 		Env:                      req.Env,
 		ServiceEnv:               normalizedImportServiceEnv(req.ServiceEnv),
 		ServicePersistentStorage: normalizedImportServicePersistentStorage(req.ServicePersistentStorage),
+		Postgres:                 req.Postgres,
 		AuditAction:              "app.import_upload",
 		BuildSource: func(service sourceimport.ComposeService, composeDependsOn []string) (model.AppSource, error) {
 			return buildQueuedUploadComposeServiceSource(upload, service, composeDependsOn)
@@ -378,6 +381,7 @@ func (s *Server) importResolvedTopology(principal model.Principal, tenantID stri
 		if specErr != nil {
 			return importedGitHubTopology{}, invalidComposeImport(specErr)
 		}
+		applyManagedPostgresOverrides(&spec, options.Postgres)
 		deployment.ManagedPostgresByOwner[backing.OwnerService] = spec
 	}
 
