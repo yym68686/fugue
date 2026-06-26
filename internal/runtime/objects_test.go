@@ -117,15 +117,16 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	}
 	containers := appPodSpec["containers"].([]map[string]any)
 	envObjects := containers[0]["env"].([]map[string]any)
-	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres-rw" {
-		t.Fatalf("expected inline postgres DB_HOST to use rw service, got %q", got)
+	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres" {
+		t.Fatalf("expected inline postgres DB_HOST to use Fugue-managed primary service, got %q", got)
 	}
 	if got := initContainers[0]["name"]; got != "wait-postgres" {
 		t.Fatalf("expected wait-postgres init container, got %#v", got)
 	}
 	command := initContainers[0]["command"].([]string)
-	if got := command[2]; got != "until nc -z uni-api-demo-postgres-rw 5432; do sleep 1; done" {
-		t.Fatalf("expected wait-postgres init container to target rw service, got %q", got)
+	expectedWaitCommand := `host="uni-api-demo-postgres"; env_host="${UNI_API_DEMO_POSTGRES_SERVICE_HOST:-}"; if [ -n "$env_host" ]; then host="$env_host"; fi; until nc -z "$host" 5432; do sleep 1; done`
+	if got := command[2]; got != expectedWaitCommand {
+		t.Fatalf("expected wait-postgres init container to prefer service ClusterIP env, got %q", got)
 	}
 	assertHelperResources(t, initContainers[0]["resources"])
 	volumeMounts, ok := containers[0]["volumeMounts"].([]map[string]any)
@@ -259,7 +260,7 @@ func TestBuildAppObjectsUseDNS1035PostgresServiceNames(t *testing.T) {
 	}
 	appDeployment := objects[4]
 	containers := appDeployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]map[string]any)
-	if got := envValue(containers[0]["env"].([]map[string]any), "DB_HOST"); got != "postgres-001-demo-postgres-rw" {
+	if got := envValue(containers[0]["env"].([]map[string]any), "DB_HOST"); got != "postgres-001-demo-postgres" {
 		t.Fatalf("expected app env to point at DNS-1035 postgres service, got %q", got)
 	}
 	appService := objects[5]
@@ -2284,8 +2285,8 @@ func TestMergedRuntimeEnvRepairsLegacyManagedPostgresBindingHost(t *testing.T) {
 	}
 
 	env := mergedRuntimeEnv(app)
-	if got := env["DB_HOST"]; got != "demo-postgres-rw" {
-		t.Fatalf("expected runtime env DB_HOST to be repaired to rw service, got %q", got)
+	if got := env["DB_HOST"]; got != "demo-postgres" {
+		t.Fatalf("expected runtime env DB_HOST to be repaired to Fugue-managed primary service, got %q", got)
 	}
 	if got := env["DB_USER"]; got != "root" {
 		t.Fatalf("expected runtime env DB_USER to follow backing service spec, got %q", got)

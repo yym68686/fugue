@@ -515,7 +515,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 				"command": []string{
 					"sh",
 					"-c",
-					"until nc -z " + model.PostgresRWServiceName(postgres.spec.ServiceName) + " 5432; do sleep 1; done",
+					postgresWaitCommand(postgres.spec.ServiceName),
 				},
 				"resources": runtimeHelperResourceRequirements(),
 			})
@@ -2601,12 +2601,25 @@ func runtimeBackingServiceBaseName(serviceName, fallback string) string {
 func defaultRuntimePostgresEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     model.PostgresRWServiceName(spec.ServiceName),
+		"DB_HOST":     strings.TrimSpace(spec.ServiceName),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,
 		"DB_NAME":     spec.Database,
 	}
+}
+
+func postgresWaitCommand(serviceName string) string {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return "until nc -z localhost 5432; do sleep 1; done"
+	}
+	envName := postgresServiceHostEnvVar(serviceName)
+	return "host=\"" + serviceName + "\"; env_host=\"${" + envName + ":-}\"; if [ -n \"$env_host\" ]; then host=\"$env_host\"; fi; until nc -z \"$host\" 5432; do sleep 1; done"
+}
+
+func postgresServiceHostEnvVar(serviceName string) string {
+	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(serviceName), "-", "_")) + "_SERVICE_HOST"
 }
 
 func postgresRWServiceName(clusterName string) string {

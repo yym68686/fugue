@@ -44,8 +44,8 @@ func TestMergedAppEnvRepairsLegacyManagedPostgresBindingHost(t *testing.T) {
 	}
 
 	env := mergedAppEnv(app)
-	if got := env["DB_HOST"]; got != "demo-postgres-rw" {
-		t.Fatalf("expected merged env DB_HOST to be repaired to rw service, got %q", got)
+	if got := env["DB_HOST"]; got != "demo-postgres" {
+		t.Fatalf("expected merged env DB_HOST to be repaired to Fugue-managed primary service, got %q", got)
 	}
 	if got := env["DB_USER"]; got != "root" {
 		t.Fatalf("expected merged env DB_USER to follow backing service spec, got %q", got)

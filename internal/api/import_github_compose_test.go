@@ -21,16 +21,16 @@ func TestRewriteComposeEnvironmentRewritesInternalServiceHosts(t *testing.T) {
 
 	got := rewriteComposeEnvironment(env, map[string]string{
 		"api": "uni-api-web-api",
-		"db":  "uni-api-web-api-db-postgres-rw",
+		"db":  "uni-api-web-api-db-postgres",
 	})
 
 	if got["API_BASE_URL"] != "http://uni-api-web-api:8000/v1" {
 		t.Fatalf("unexpected API_BASE_URL rewrite: %q", got["API_BASE_URL"])
 	}
-	if got["DATABASE_URL"] != "postgresql://demo:secret@uni-api-web-api-db-postgres-rw:5432/demo" {
+	if got["DATABASE_URL"] != "postgresql://demo:secret@uni-api-web-api-db-postgres:5432/demo" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
 	}
-	if got["DB_HOST"] != "uni-api-web-api-db-postgres-rw" {
+	if got["DB_HOST"] != "uni-api-web-api-db-postgres" {
 		t.Fatalf("unexpected DB_HOST rewrite: %q", got["DB_HOST"])
 	}
 }
@@ -52,10 +52,10 @@ func TestApplyManagedPostgresEnvironmentRewritesGeneratedDatabaseURL(t *testing.
 		Password:    "secret-pass",
 	})
 
-	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres-rw:5432/uniapi" {
+	if got["DATABASE_URL"] != "postgresql+asyncpg://uniapi:secret-pass@uni-api-web-api-db-postgres:5432/uniapi" {
 		t.Fatalf("unexpected DATABASE_URL rewrite: %q", got["DATABASE_URL"])
 	}
-	if got["DATABASE_HOST"] != "uni-api-web-api-db-postgres-rw" {
+	if got["DATABASE_HOST"] != "uni-api-web-api-db-postgres" {
 		t.Fatalf("unexpected DATABASE_HOST rewrite: %q", got["DATABASE_HOST"])
 	}
 	if got["DATABASE_PORT"] != "5432" {
@@ -509,7 +509,7 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 	if got := primaryApp.Spec.Env["REDIS_URL"]; got != "redis://"+runtime.ComposeServiceAliasName(project.ID, "redis")+":6379" {
 		t.Fatalf("expected REDIS_URL to target mirrored redis app, got %q", got)
 	}
-	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@claude-code-hub-postgres-postgres-rw:5432/claude_code_hub" {
+	if got := primaryApp.Spec.Env["DSN"]; got != "postgresql://claude_code_hub:postgres@claude-code-hub-postgres-postgres:5432/claude_code_hub" {
 		t.Fatalf("expected DSN rewrite to managed postgres host, got %q", got)
 	}
 	if primaryApp.Spec.PersistentStorage == nil || len(primaryApp.Spec.PersistentStorage.Mounts) != 2 {

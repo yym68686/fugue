@@ -124,7 +124,7 @@ func TestQueryAppDatabaseQualifiesManagedPostgresHost(t *testing.T) {
 	if !ok || bound.Service.Spec.Postgres == nil {
 		t.Fatalf("expected managed postgres binding, got app=%+v", storedApp)
 	}
-	expectedHost := model.PostgresRWServiceName(bound.Service.Spec.Postgres.ServiceName) + "." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
+	expectedHost := bound.Service.Spec.Postgres.ServiceName + "." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
 	expectedDSN := "postgresql://demo:secret@" + expectedHost + ":5432/demo?sslmode=disable"
 	server.openAppDatabase = func(driverName, dsn string) (*sql.DB, error) {
 		if driverName != "pgx" {

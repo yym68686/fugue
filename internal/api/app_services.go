@@ -215,7 +215,7 @@ func isManagedBackingService(service model.BackingService) bool {
 func defaultAPIBindingPostgresEnv(spec model.AppPostgresSpec) map[string]string {
 	return map[string]string{
 		"DB_TYPE":     "postgres",
-		"DB_HOST":     model.PostgresRWServiceName(spec.ServiceName),
+		"DB_HOST":     strings.TrimSpace(spec.ServiceName),
 		"DB_PORT":     "5432",
 		"DB_USER":     spec.User,
 		"DB_PASSWORD": spec.Password,

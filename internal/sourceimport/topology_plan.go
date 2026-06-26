@@ -165,7 +165,7 @@ func ResolveTopologyServiceEnvironment(plan TopologyPlan, serviceName string, de
 		if !ok || strings.TrimSpace(spec.ServiceName) == "" {
 			continue
 		}
-		hosts[backingService] = model.PostgresRWServiceName(spec.ServiceName)
+		hosts[backingService] = strings.TrimSpace(spec.ServiceName)
 	}
 
 	original := cloneStringMapLocal(service.Environment)
@@ -405,7 +405,7 @@ func applyManagedPostgresBindingEnvironment(ownerService string, env map[string]
 		return nil, nil
 	}
 	out := cloneStringMapLocal(env)
-	host := model.PostgresRWServiceName(spec.ServiceName)
+	host := strings.TrimSpace(spec.ServiceName)
 	overrideManagedEnvIfPresent(out, "DB_HOST", host)
 	overrideManagedEnvIfPresent(out, "POSTGRES_HOST", host)
 	overrideManagedEnvIfPresent(out, "DATABASE_HOST", host)
@@ -449,9 +449,9 @@ func rewriteManagedPostgresURL(value string, spec model.AppPostgresSpec) (string
 	if !strings.Contains(strings.ToLower(parsed.Scheme), "postgres") {
 		return value, false
 	}
-	legacyHost := strings.TrimSpace(spec.ServiceName)
-	host := model.PostgresRWServiceName(spec.ServiceName)
-	if !strings.EqualFold(parsed.Hostname(), legacyHost) && !strings.EqualFold(parsed.Hostname(), host) {
+	host := strings.TrimSpace(spec.ServiceName)
+	rwHost := model.PostgresRWServiceName(spec.ServiceName)
+	if !strings.EqualFold(parsed.Hostname(), host) && !strings.EqualFold(parsed.Hostname(), rwHost) {
 		return value, false
 	}
 	port := parsed.Port()

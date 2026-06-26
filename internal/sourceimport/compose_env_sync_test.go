@@ -73,7 +73,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 	if got := workerEnv["API_BASE_URL"]; got != "http://demo-api:8000/v1" {
 		t.Fatalf("expected worker API_BASE_URL rewrite, got %q", got)
 	}
-	if got := workerEnv["DATABASE_URL"]; got != "postgresql://demo:secret@demo-api-postgres-rw:5432/demo" {
+	if got := workerEnv["DATABASE_URL"]; got != "postgresql://demo:secret@demo-api-postgres:5432/demo" {
 		t.Fatalf("expected worker DATABASE_URL host rewrite, got %q", got)
 	}
 	if got := workerEnv["ARGUS_FUGUE_RUNTIME_COMPOSE_SERVICE"]; got != "api" {
@@ -84,10 +84,10 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("suggest api env: %v", err)
 	}
-	if got := apiEnv["DB_HOST"]; got != "demo-api-postgres-rw" {
+	if got := apiEnv["DB_HOST"]; got != "demo-api-postgres" {
 		t.Fatalf("expected api DB_HOST rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_HOST"]; got != "demo-api-postgres-rw" {
+	if got := apiEnv["DATABASE_HOST"]; got != "demo-api-postgres" {
 		t.Fatalf("expected api DATABASE_HOST rewrite, got %q", got)
 	}
 	if got := apiEnv["DATABASE_PORT"]; got != "5432" {
@@ -102,7 +102,7 @@ func TestSuggestComposeServiceEnvRewritesCurrentTopologyHosts(t *testing.T) {
 	if got := apiEnv["DATABASE_DBNAME"]; got != "demo" {
 		t.Fatalf("expected api DATABASE_DBNAME rewrite, got %q", got)
 	}
-	if got := apiEnv["DATABASE_URL"]; got != "postgresql://demo:secret-pass@demo-api-postgres-rw:5432/demo" {
+	if got := apiEnv["DATABASE_URL"]; got != "postgresql://demo:secret-pass@demo-api-postgres:5432/demo" {
 		t.Fatalf("expected api DATABASE_URL managed postgres rewrite, got %q", got)
 	}
 	if err := ValidateNoMissingRequiredComposeEnv("api", apiEnv); err != nil {

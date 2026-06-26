@@ -1971,8 +1971,8 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	if got := service.Spec.Postgres.SynchronousReplicas; got != 0 {
 		t.Fatalf("expected default synchronous replicas 0 for single-instance postgres, got %d", got)
 	}
-	if got := app.Bindings[0].Env["DB_HOST"]; got != model.PostgresRWServiceName(service.Spec.Postgres.ServiceName) {
-		t.Fatalf("expected binding DB_HOST=%q, got %q", model.PostgresRWServiceName(service.Spec.Postgres.ServiceName), got)
+	if got := app.Bindings[0].Env["DB_HOST"]; got != service.Spec.Postgres.ServiceName {
+		t.Fatalf("expected binding DB_HOST=%q, got %q", service.Spec.Postgres.ServiceName, got)
 	}
 
 	persisted, err := s.GetApp(app.ID)
