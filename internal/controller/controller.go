@@ -817,6 +817,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err != nil {
 				return fmt.Errorf("render managed app manifest for app %s: %w", app.ID, err)
 			}
+			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
+				if err := s.preflightManagedAppZeroDowntimeRolloutCapacity(ctx, app, scheduling); err != nil {
+					return fmt.Errorf("preflight managed app rollout capacity %s: %w", app.ID, err)
+				}
+				timer.Mark("capacity_preflight")
+			}
 			if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 )
 
@@ -14,6 +15,29 @@ type rolloutCapacityCandidate struct {
 	remainingCPUMilli      int64
 	remainingMemoryBytes   int64
 	remainingEphemeralByte int64
+}
+
+func (s *Service) preflightManagedAppZeroDowntimeRolloutCapacity(ctx context.Context, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
+	if s == nil || app.Spec.Replicas <= 0 {
+		return nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes capacity preflight client: %w", err)
+	}
+	app = s.Renderer.PrepareApp(app)
+	deployment, found := expectedManagedAppDeployment(app, scheduling)
+	if !found {
+		return nil
+	}
+	message, err := zeroDowntimeRolloutCapacityBlockMessage(ctx, client, deployment, app.Spec.Replicas)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(message) != "" {
+		return fmt.Errorf("%s", message)
+	}
+	return nil
 }
 
 func zeroDowntimeRolloutCapacityBlockMessage(ctx context.Context, client *kubeClient, deployment kubeDeployment, desiredReplicas int) (string, error) {

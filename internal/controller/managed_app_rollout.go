@@ -103,15 +103,6 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 			}
 		}
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
-			if !ready && expectedDeploymentFound {
-				capacityMessage, err := zeroDowntimeRolloutCapacityBlockMessage(waitCtx, client, expectedDeployment, app.Spec.Replicas)
-				if err != nil {
-					return err
-				}
-				if strings.TrimSpace(capacityMessage) != "" {
-					return fmt.Errorf("managed app %s/%s rollout blocked: %s", namespace, managedAppName, capacityMessage)
-				}
-			}
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
 			if err != nil {
 				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
