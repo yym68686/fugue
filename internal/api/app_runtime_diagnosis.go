@@ -162,7 +162,7 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	}
 
 	evictedPod := newestEvictedPod(pods)
-	schedulingEvent := newestFailedSchedulingEvent(rawNamespaceEvents)
+	schedulingEvent := newestFailedSchedulingEventForPods(rawNamespaceEvents, pods)
 	volumeAffinityConflict := schedulingEvent != nil && containsVolumeAffinityConflict(schedulingEvent.Message)
 	if schedulingEvent != nil {
 		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "scheduling: "+strings.TrimSpace(schedulingEvent.Message))
@@ -211,6 +211,13 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		diagnosis.Category = "http-unreachable"
 		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe could not reach the app", diagnosis.ReadyPods, diagnosis.LivePods)
 		diagnosis.Hint = fmt.Sprintf("Probe the internal service with fugue app request %s /healthz and inspect runtime logs with fugue app logs runtime %s --previous.", strings.TrimSpace(app.Name), strings.TrimSpace(app.Name))
+	case diagnosis.ReadyPods > 0 && schedulingEvent != nil:
+		diagnosis.Category = "rollout-unschedulable"
+		diagnosis.Summary = firstNonEmptyString(
+			fmt.Sprintf("%d/%d runtime pods are ready, but a replacement pod is unschedulable: %s", diagnosis.ReadyPods, diagnosis.LivePods, strings.TrimSpace(schedulingEvent.Message)),
+			fmt.Sprintf("%d/%d runtime pods are ready, but a replacement pod is unschedulable", diagnosis.ReadyPods, diagnosis.LivePods),
+		)
+		diagnosis.Hint = buildAppDiagnosisHint(app, diagnosis.ImplicatedNode)
 	case diagnosis.ReadyPods > 0:
 		diagnosis.Category = "available"
 		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready", diagnosis.ReadyPods, diagnosis.LivePods)
@@ -556,6 +563,27 @@ func filterAppDiagnosisEvents(events []corev1.Event, pods []kubePodInfo) []model
 
 func newestFailedSchedulingEvent(events []coreEventOrZero) *coreEventOrZero {
 	for index := range events {
+		if strings.EqualFold(strings.TrimSpace(events[index].Event.Reason), "FailedScheduling") {
+			return &events[index]
+		}
+	}
+	return nil
+}
+
+func newestFailedSchedulingEventForPods(events []coreEventOrZero, pods []kubePodInfo) *coreEventOrZero {
+	if len(events) == 0 || len(pods) == 0 {
+		return nil
+	}
+	podNames := make(map[string]struct{}, len(pods))
+	for _, pod := range pods {
+		if name := strings.TrimSpace(pod.Metadata.Name); name != "" {
+			podNames[name] = struct{}{}
+		}
+	}
+	for index := range events {
+		if _, ok := podNames[strings.TrimSpace(events[index].Name)]; !ok {
+			continue
+		}
 		if strings.EqualFold(strings.TrimSpace(events[index].Event.Reason), "FailedScheduling") {
 			return &events[index]
 		}

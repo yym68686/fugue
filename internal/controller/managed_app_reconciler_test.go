@@ -1500,8 +1500,8 @@ func TestBuildManagedAppStatusKeepsUnschedulablePodsProgressing(t *testing.T) {
 	if status.Phase != runtime.ManagedAppPhaseProgressing {
 		t.Fatalf("expected phase progressing, got %q message=%q", status.Phase, status.Message)
 	}
-	if strings.Contains(status.Message, "Unschedulable") || strings.Contains(status.Message, "volume node affinity conflict") {
-		t.Fatalf("expected scheduling failure to stay out of terminal status message, got %q", status.Message)
+	if !strings.Contains(status.Message, "Unschedulable") || !strings.Contains(status.Message, "volume node affinity conflict") {
+		t.Fatalf("expected scheduling block to stay visible in progressing status message, got %q", status.Message)
 	}
 }
 

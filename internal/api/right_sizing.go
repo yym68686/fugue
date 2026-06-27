@@ -18,11 +18,18 @@ const (
 	defaultRightSizingMinSamples  = 12
 	maxRightSizingWindowHours     = 168
 
-	rightSizingAutoApplyRequestedByID   = "fugue-api/right-sizing"
-	rightSizingAutoApplyMinCPUIncrease  = int64(50)
-	rightSizingAutoApplyMinMemIncrease  = int64(128)
-	rightSizingAutoApplyMinCPUIncreaseR = 0.25
-	rightSizingAutoApplyMinMemIncreaseR = 0.20
+	rightSizingAutoApplyRequestedByID     = "fugue-api/right-sizing"
+	rightSizingAutoDownscaleRequestedByID = "fugue-api/right-sizing/downscale"
+	rightSizingAutoApplyMinCPUIncrease    = int64(50)
+	rightSizingAutoApplyMinMemIncrease    = int64(128)
+	rightSizingAutoApplyMinCPUIncreaseR   = 0.25
+	rightSizingAutoApplyMinMemIncreaseR   = 0.20
+	rightSizingAutoApplyMinCPUDecrease    = int64(100)
+	rightSizingAutoApplyMinMemDecrease    = int64(256)
+	rightSizingAutoApplyMinCPUDecreaseR   = 0.20
+	rightSizingAutoApplyMinMemDecreaseR   = 0.20
+	rightSizingAutoDownscaleStepRatio     = 0.75
+	rightSizingAutoDownscaleOOMWindow     = 48 * time.Hour
 )
 
 func (s *Server) handleGetAppResourceRecommendation(w http.ResponseWriter, r *http.Request) {
@@ -212,18 +219,26 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	if err != nil {
 		return recommendation, nil, false, err
 	}
-	if !recommendation.App.Ready ||
-		recommendation.App.Recommended == nil ||
-		!autoRightSizingAppResourceChangeAllowed(spec.Resources, recommendation.App.Recommended) {
+	decision := autoRightSizingAppResourceChange(spec.Resources, recommendation.App.Recommended)
+	if !recommendation.App.Ready || !decision.allowed {
 		return recommendation, nil, true, nil
 	}
 
-	spec.Resources = cloneResourceSpec(recommendation.App.Recommended)
 	if hasActive, err := s.appHasActiveDeployOperation(app); err != nil {
 		return recommendation, nil, false, err
 	} else if hasActive {
 		return recommendation, nil, true, nil
 	}
+	if decision.downscale {
+		hasRecentOOM, err := s.appHasRecentOOMRightSizingOperation(app, time.Now().UTC().Add(-rightSizingAutoDownscaleOOMWindow))
+		if err != nil {
+			return recommendation, nil, false, err
+		}
+		if hasRecentOOM {
+			return recommendation, nil, true, nil
+		}
+	}
+	spec.Resources = cloneResourceSpec(decision.resources)
 	if err := s.validateAutoscalingTenantEnvelope(app, spec); err != nil {
 		return recommendation, nil, false, err
 	}
@@ -231,7 +246,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     model.ActorTypeSystem,
-		RequestedByID:       rightSizingAutoApplyRequestedByID,
+		RequestedByID:       decision.requestedByID,
 		AppID:               app.ID,
 		DesiredSpec:         &spec,
 		DesiredSource:       source,
@@ -243,31 +258,64 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	return recommendation, &op, false, nil
 }
 
-func autoRightSizingAppResourceChangeAllowed(current, recommended *model.ResourceSpec) bool {
+type autoRightSizingAppResourceDecision struct {
+	allowed       bool
+	downscale     bool
+	requestedByID string
+	resources     *model.ResourceSpec
+}
+
+func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) autoRightSizingAppResourceDecision {
+	decision := autoRightSizingAppResourceDecision{
+		requestedByID: rightSizingAutoApplyRequestedByID,
+	}
 	if recommended == nil {
-		return false
+		return decision
 	}
 	effectiveCurrent := model.DefaultManagedAppResources()
 	if current != nil {
 		effectiveCurrent = *current
 	}
 	if resourceSpecsEqual(&effectiveCurrent, recommended) {
-		return false
+		return decision
 	}
 	if resourceSpecHasDecrease(effectiveCurrent, *recommended) {
-		return false
+		if resourceSpecHasIncrease(effectiveCurrent, *recommended) ||
+			!materialResourceDecrease(
+				effectiveCurrent.CPUMilliCores,
+				recommended.CPUMilliCores,
+				rightSizingAutoApplyMinCPUDecrease,
+				rightSizingAutoApplyMinCPUDecreaseR,
+			) && !materialResourceDecrease(
+				effectiveCurrent.MemoryMebibytes,
+				recommended.MemoryMebibytes,
+				rightSizingAutoApplyMinMemDecrease,
+				rightSizingAutoApplyMinMemDecreaseR,
+			) {
+			return decision
+		}
+		decision.allowed = true
+		decision.downscale = true
+		decision.requestedByID = rightSizingAutoDownscaleRequestedByID
+		decision.resources = autoRightSizingDownscaleTarget(effectiveCurrent, *recommended)
+		return decision
 	}
-	return materialResourceIncrease(
-		effectiveCurrent.CPUMilliCores,
-		recommended.CPUMilliCores,
-		rightSizingAutoApplyMinCPUIncrease,
-		rightSizingAutoApplyMinCPUIncreaseR,
-	) || materialResourceIncrease(
-		effectiveCurrent.MemoryMebibytes,
-		recommended.MemoryMebibytes,
-		rightSizingAutoApplyMinMemIncrease,
-		rightSizingAutoApplyMinMemIncreaseR,
-	)
+	if resourceSpecHasIncrease(effectiveCurrent, *recommended) &&
+		(materialResourceIncrease(
+			effectiveCurrent.CPUMilliCores,
+			recommended.CPUMilliCores,
+			rightSizingAutoApplyMinCPUIncrease,
+			rightSizingAutoApplyMinCPUIncreaseR,
+		) || materialResourceIncrease(
+			effectiveCurrent.MemoryMebibytes,
+			recommended.MemoryMebibytes,
+			rightSizingAutoApplyMinMemIncrease,
+			rightSizingAutoApplyMinMemIncreaseR,
+		)) {
+		decision.allowed = true
+		decision.resources = cloneResourceSpec(recommended)
+	}
+	return decision
 }
 
 func resourceSpecHasDecrease(current, recommended model.ResourceSpec) bool {
@@ -275,6 +323,13 @@ func resourceSpecHasDecrease(current, recommended model.ResourceSpec) bool {
 		recommended.MemoryMebibytes < current.MemoryMebibytes ||
 		recommended.CPULimitMilliCores < current.CPULimitMilliCores ||
 		recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes
+}
+
+func resourceSpecHasIncrease(current, recommended model.ResourceSpec) bool {
+	return recommended.CPUMilliCores > current.CPUMilliCores ||
+		recommended.MemoryMebibytes > current.MemoryMebibytes ||
+		recommended.CPULimitMilliCores > current.CPULimitMilliCores ||
+		recommended.MemoryLimitMebibytes > current.MemoryLimitMebibytes
 }
 
 func materialResourceIncrease(current, recommended, minIncrease int64, minRatio float64) bool {
@@ -286,6 +341,44 @@ func materialResourceIncrease(current, recommended, minIncrease int64, minRatio 
 	}
 	increase := recommended - current
 	return increase >= minIncrease && float64(increase)/float64(current) >= minRatio
+}
+
+func materialResourceDecrease(current, recommended, minDecrease int64, minRatio float64) bool {
+	if recommended >= current {
+		return false
+	}
+	if current <= 0 {
+		return false
+	}
+	decrease := current - recommended
+	return decrease >= minDecrease && float64(decrease)/float64(current) >= minRatio
+}
+
+func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec) *model.ResourceSpec {
+	defaults := model.DefaultManagedAppResources()
+	target := recommended
+	if recommended.CPUMilliCores < current.CPUMilliCores {
+		floor := roundUpInt64(int64(math.Ceil(float64(current.CPUMilliCores)*rightSizingAutoDownscaleStepRatio)), 5)
+		target.CPUMilliCores = maxInt64(recommended.CPUMilliCores, floor)
+		target.CPUMilliCores = maxInt64(target.CPUMilliCores, defaults.CPUMilliCores)
+	}
+	if recommended.MemoryMebibytes < current.MemoryMebibytes {
+		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
+		target.MemoryMebibytes = maxInt64(recommended.MemoryMebibytes, floor)
+		target.MemoryMebibytes = maxInt64(target.MemoryMebibytes, defaults.MemoryMebibytes)
+		if target.MemoryLimitMebibytes > 0 {
+			target.MemoryLimitMebibytes = maxInt64(target.MemoryMebibytes+128, target.MemoryMebibytes*2)
+		}
+	}
+	if recommended.CPULimitMilliCores < current.CPULimitMilliCores {
+		floor := roundUpInt64(int64(math.Ceil(float64(current.CPULimitMilliCores)*rightSizingAutoDownscaleStepRatio)), 5)
+		target.CPULimitMilliCores = maxInt64(recommended.CPULimitMilliCores, floor)
+	}
+	if recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes && target.MemoryLimitMebibytes > 0 {
+		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryLimitMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
+		target.MemoryLimitMebibytes = maxInt64(target.MemoryLimitMebibytes, floor)
+	}
+	return &target
 }
 
 func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {
@@ -519,6 +612,24 @@ func (s *Server) appHasActiveDeployOperation(app model.App) (bool, error) {
 		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
 			return true, nil
 		}
+	}
+	return false, nil
+}
+
+func (s *Server) appHasRecentOOMRightSizingOperation(app model.App, since time.Time) (bool, error) {
+	ops, err := s.store.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, op := range ops {
+		if !strings.HasPrefix(strings.TrimSpace(op.RequestedByID), model.OperationRequestedByOOMRightSizing+"/") &&
+			strings.TrimSpace(op.RequestedByID) != model.OperationRequestedByOOMRightSizing {
+			continue
+		}
+		if op.CreatedAt.IsZero() || op.CreatedAt.Before(since) {
+			continue
+		}
+		return true, nil
 	}
 	return false, nil
 }

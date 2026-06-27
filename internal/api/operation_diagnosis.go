@@ -88,6 +88,9 @@ func (s *Server) diagnoseOperation(ctx context.Context, op model.Operation) (mod
 		if imageDiagnosis != nil {
 			return *imageDiagnosis, nil
 		}
+		if runtimeDiagnosis, ok := s.diagnoseRunningDeployRuntimeBlock(ctx, op, app, appFound); ok {
+			return runtimeDiagnosis, nil
+		}
 		summary := firstNonEmpty(strings.TrimSpace(op.ResultMessage), "operation has been claimed and is running")
 		return model.OperationDiagnosis{
 			Category: "running",
@@ -118,6 +121,34 @@ func (s *Server) diagnoseOperation(ctx context.Context, op model.Operation) (mod
 			Service:  diagnosisComposeService(op, app, appFound),
 		}, nil
 	}
+}
+
+func (s *Server) diagnoseRunningDeployRuntimeBlock(ctx context.Context, op model.Operation, app model.App, appFound bool) (model.OperationDiagnosis, bool) {
+	if !appFound || !strings.EqualFold(strings.TrimSpace(op.Type), model.OperationTypeDeploy) {
+		return model.OperationDiagnosis{}, false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+	if err != nil {
+		return model.OperationDiagnosis{}, false
+	}
+	runtimeDiagnosis, err := s.diagnoseAppRuntime(req, app, "app")
+	if err != nil {
+		return model.OperationDiagnosis{}, false
+	}
+	category := strings.TrimSpace(runtimeDiagnosis.Category)
+	switch category {
+	case "rollout-unschedulable", "unschedulable", "volume-affinity-conflict", "evicted-disk-pressure-volume-affinity":
+	default:
+		return model.OperationDiagnosis{}, false
+	}
+	return model.OperationDiagnosis{
+		Category: "rollout-unschedulable",
+		Summary:  firstNonEmpty(strings.TrimSpace(runtimeDiagnosis.Summary), "deploy rollout is blocked by Kubernetes scheduling"),
+		Hint:     firstNonEmpty(strings.TrimSpace(runtimeDiagnosis.Hint), "Inspect node capacity, taints, and the app runtime pod events before retrying the deploy."),
+		AppName:  diagnosisAppName(app, appFound),
+		Service:  diagnosisComposeService(op, app, appFound),
+		Evidence: append([]string(nil), runtimeDiagnosis.Evidence...),
+	}, true
 }
 
 func (s *Server) diagnoseFailedOperation(ctx context.Context, op model.Operation, app model.App, appFound bool) (model.OperationDiagnosis, error) {

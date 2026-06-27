@@ -103,6 +103,15 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 			}
 		}
 		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
+			if !ready && expectedDeploymentFound {
+				capacityMessage, err := zeroDowntimeRolloutCapacityBlockMessage(waitCtx, client, expectedDeployment, app.Spec.Replicas)
+				if err != nil {
+					return err
+				}
+				if strings.TrimSpace(capacityMessage) != "" {
+					return fmt.Errorf("managed app %s/%s rollout blocked: %s", namespace, managedAppName, capacityMessage)
+				}
+			}
 			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppPodLabelSelector(app))
 			if err != nil {
 				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
@@ -114,6 +123,9 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(namespace, app)...)
 				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
 					return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
+				}
+				if blockingMessage := deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
+					message = blockingMessage
 				}
 			}
 		}
@@ -738,6 +750,18 @@ func deploymentTemplatePodFailureMessage(pods []kubePod, deployment kubeDeployme
 			continue
 		}
 		if summary := summarizeManagedAppPodFailure(pod); summary != "" {
+			return summary
+		}
+	}
+	return ""
+}
+
+func deploymentTemplatePodSchedulingBlockMessage(pods []kubePod, deployment kubeDeployment) string {
+	for _, pod := range pods {
+		if !podHasDeploymentTemplateIdentity(pod, deployment) {
+			continue
+		}
+		if summary := summarizeManagedAppPodSchedulingBlock(pod); summary != "" {
 			return summary
 		}
 	}

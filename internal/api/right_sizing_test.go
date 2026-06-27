@@ -212,7 +212,7 @@ func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testi
 	}
 }
 
-func TestAutoRightSizingSkipsDownsizeAndPostgresRecommendation(t *testing.T) {
+func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 	t.Parallel()
 
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
@@ -273,8 +273,21 @@ func TestAutoRightSizingSkipsDownsizeAndPostgresRecommendation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply auto recommendation: %v", err)
 	}
-	if !alreadyCurrent || op != nil {
-		t.Fatalf("expected auto right-sizing to skip downsize/postgres-only recommendation, already_current=%v op=%+v", alreadyCurrent, op)
+	if alreadyCurrent || op == nil || op.DesiredSpec == nil {
+		t.Fatalf("expected auto right-sizing to queue safe downscale, already_current=%v op=%+v", alreadyCurrent, op)
+	}
+	if got := op.RequestedByID; got != rightSizingAutoDownscaleRequestedByID {
+		t.Fatalf("expected downscale requester %q, got %q", rightSizingAutoDownscaleRequestedByID, got)
+	}
+	resources := op.DesiredSpec.Resources
+	if resources == nil {
+		t.Fatal("expected desired app resources")
+	}
+	if resources.CPUMilliCores != 375 || resources.MemoryMebibytes != 512 || resources.MemoryLimitMebibytes != 1024 {
+		t.Fatalf("expected gradual CPU-only downscale with memory floor preserved, got %+v", resources)
+	}
+	if op.DesiredSpec.Postgres != nil {
+		t.Fatalf("auto right-sizing must not mutate postgres resources, got %+v", op.DesiredSpec.Postgres)
 	}
 	if !recommendation.App.Ready || len(recommendation.BackingServices) != 1 || !recommendation.BackingServices[0].Ready {
 		t.Fatalf("expected ready app and postgres recommendations, got %+v", recommendation)
@@ -283,8 +296,80 @@ func TestAutoRightSizingSkipsDownsizeAndPostgresRecommendation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list operations: %v", err)
 	}
-	if len(operations) != 0 {
-		t.Fatalf("expected no auto deploy operation, got %+v", operations)
+	if len(operations) != 1 {
+		t.Fatalf("expected one auto deploy operation, got %+v", operations)
+	}
+}
+
+func TestAutoRightSizingSkipsDownscaleAfterRecentOOMRightSizing(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Auto Right Size OOM Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        1000,
+			MemoryMebibytes:      2048,
+			MemoryLimitMebibytes: 4096,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	oomOp, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByOOMRightSizing + "/test",
+		AppID:           app.ID,
+		DesiredSpec:     &app.Spec,
+	})
+	if err != nil {
+		t.Fatalf("create oom operation: %v", err)
+	}
+	if _, err := stateStore.CompleteManagedOperation(oomOp.ID, "", "oom right-sizing complete"); err != nil {
+		t.Fatalf("complete oom operation: %v", err)
+	}
+
+	samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
+		{cpuMilli: 80, memoryMiB: 256},
+		{cpuMilli: 90, memoryMiB: 320},
+		{cpuMilli: 100, memoryMiB: 384},
+	})
+	if err := stateStore.RecordResourceUsageSamples(samples, time.Time{}); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	_, op, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+	if err != nil {
+		t.Fatalf("apply auto recommendation: %v", err)
+	}
+	if !alreadyCurrent || op != nil {
+		t.Fatalf("expected recent OOM right-sizing to block auto downscale, already_current=%v op=%+v", alreadyCurrent, op)
+	}
+	operations, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("expected only the prior OOM operation, got %+v", operations)
 	}
 }
 

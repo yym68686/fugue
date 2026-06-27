@@ -285,6 +285,90 @@ func TestDeploymentTemplatePodFailureMessageIgnoresUnschedulableTemplatePod(t *t
 	if got := deploymentTemplatePodFailureMessage([]kubePod{pod}, deployment); got != "" {
 		t.Fatalf("expected unschedulable pod to wait instead of failing rollout, got %q", got)
 	}
+	if got := deploymentTemplatePodSchedulingBlockMessage([]kubePod{pod}, deployment); !strings.Contains(got, "Insufficient cpu") {
+		t.Fatalf("expected unschedulable pod scheduling message, got %q", got)
+	}
+}
+
+func TestZeroDowntimeRolloutCapacityBlockMessageReportsInsufficientCPU(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:    "registry.example/fugue-apps/demo:v2",
+			Replicas: 1,
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:   700,
+				MemoryMebibytes: 512,
+			},
+		},
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected managed app deployment fixture")
+	}
+	existingPod := kubePod{}
+	existingPod.Metadata.Name = "demo-old"
+	existingPod.Spec.NodeName = "node-a"
+	existingPod.Spec.Containers = []kubeContainerSpec{{
+		Name: "demo",
+		Resources: kubeResourceRequirements{
+			Requests: map[string]string{
+				"cpu":    "900m",
+				"memory": "512Mi",
+			},
+		},
+	}}
+	existingPod.Status.Phase = "Running"
+
+	node := kubeNode{}
+	node.Metadata.Name = "node-a"
+	node.Status.Conditions = []kubeNodeCondition{{Type: "Ready", Status: "True"}}
+	node.Status.Allocatable = map[string]string{
+		"cpu":    "1500m",
+		"memory": "4Gi",
+	}
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/pods":
+			if err := json.NewEncoder(w).Encode(kubePodList{Items: []kubePod{existingPod}}); err != nil {
+				t.Fatalf("encode pods: %v", err)
+			}
+		case "/api/v1/nodes":
+			if err := json.NewEncoder(w).Encode(kubeNodeList{Items: []kubeNode{node}}); err != nil {
+				t.Fatalf("encode nodes: %v", err)
+			}
+		case "/api/v1/nodes/node-a":
+			if err := json.NewEncoder(w).Encode(node); err != nil {
+				t.Fatalf("encode node: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+
+	client := &kubeClient{
+		client:      kubeServer.Client(),
+		baseURL:     kubeServer.URL,
+		bearerToken: "test",
+	}
+	message, err := zeroDowntimeRolloutCapacityBlockMessage(context.Background(), client, deployment, 1)
+	if err != nil {
+		t.Fatalf("capacity preflight: %v", err)
+	}
+	if !strings.Contains(message, "zero-downtime rollout blocked") ||
+		!strings.Contains(message, "node-a") ||
+		!strings.Contains(message, "600m CPU") ||
+		!strings.Contains(message, "700m CPU") {
+		t.Fatalf("expected actionable insufficient CPU message, got %q", message)
+	}
 }
 
 func TestDeploymentRolloutReadyRequiresExpectedRelease(t *testing.T) {

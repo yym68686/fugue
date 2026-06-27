@@ -726,8 +726,10 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 		allowPodFailure = false
 	}
 	podFailureMessage := ""
+	podSchedulingBlockMessage := ""
 	if allowPodFailure {
 		podFailureMessage = managedAppPodFailureMessage(pods, podFailureCutoff)
+		podSchedulingBlockMessage = managedAppPodSchedulingBlockMessage(pods, podFailureCutoff)
 	}
 
 	switch {
@@ -749,6 +751,9 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 	case hasDeploymentFailureCondition(deployment.Status.Conditions):
 		status.Phase = runtime.ManagedAppPhaseError
 		status.Message = deploymentFailureMessage(deployment.Status.Conditions)
+	case podSchedulingBlockMessage != "":
+		status.Phase = runtime.ManagedAppPhaseProgressing
+		status.Message = podSchedulingBlockMessage
 	default:
 		status.Phase = runtime.ManagedAppPhaseProgressing
 		status.Message = managedDeploymentProgressMessage(deployment, app.Spec.Replicas, runtime.RuntimeAppResourceName(app))
@@ -954,6 +959,37 @@ func managedAppPodFailureMessage(pods []kubePod, notBefore *time.Time) string {
 	return ""
 }
 
+func managedAppPodSchedulingBlockMessage(pods []kubePod, notBefore *time.Time) string {
+	for _, pod := range pods {
+		if notBefore != nil && pod.Metadata.CreationTimestamp.Before(notBefore.UTC()) {
+			continue
+		}
+		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
+			continue
+		}
+		if summary := summarizeManagedAppPodSchedulingBlock(pod); summary != "" {
+			return summary
+		}
+	}
+	return ""
+}
+
+func summarizeManagedAppPodSchedulingBlock(pod kubePod) string {
+	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
+	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
+		prefix += " on node " + node
+	}
+	for _, condition := range pod.Status.Conditions {
+		if !strings.EqualFold(strings.TrimSpace(condition.Type), "PodScheduled") ||
+			!strings.EqualFold(strings.TrimSpace(condition.Status), "False") ||
+			!strings.EqualFold(strings.TrimSpace(condition.Reason), "Unschedulable") {
+			continue
+		}
+		return summarizeManagedAppProgressLine(prefix, strings.TrimSpace(condition.Reason), strings.TrimSpace(condition.Message))
+	}
+	return ""
+}
+
 func summarizeManagedAppPodFailure(pod kubePod) string {
 	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
 	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
@@ -988,6 +1024,22 @@ func summarizeManagedAppPodFailure(pod kubePod) string {
 		return fmt.Sprintf("%s failed with phase %s", prefix, phase)
 	}
 	return ""
+}
+
+func summarizeManagedAppProgressLine(subject, reason, message string) string {
+	subject = strings.TrimSpace(subject)
+	reason = strings.TrimSpace(reason)
+	message = strings.TrimSpace(message)
+	switch {
+	case reason != "" && message != "":
+		return fmt.Sprintf("%s blocked: %s: %s", subject, reason, message)
+	case reason != "":
+		return fmt.Sprintf("%s blocked: %s", subject, reason)
+	case message != "":
+		return fmt.Sprintf("%s blocked: %s", subject, message)
+	default:
+		return fmt.Sprintf("%s blocked", subject)
+	}
 }
 
 func managedAppContainerRecovered(status kubeContainerStatus) bool {
