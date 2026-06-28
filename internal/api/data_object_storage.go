@@ -29,6 +29,10 @@ const (
 	minDataPresignTTL                 = 5 * time.Minute
 	maxDataPresignTTL                 = 24 * time.Hour
 	dataMultipartPartSize       int64 = 64 * 1024 * 1024
+	dataMultipartMinPartSize    int64 = 5 * 1024 * 1024
+	dataMultipartMaxPartSize    int64 = 5 * 1024 * 1024 * 1024
+	dataMultipartMaxParts       int64 = 10000
+	dataMultipartAbortTimeout         = 30 * time.Second
 	dataObjectDeleteConcurrency       = 8
 )
 
@@ -179,6 +183,17 @@ func (b *dataObjectBackend) getObject(ctx context.Context, objectKey string) (io
 }
 
 func (b *dataObjectBackend) putObject(ctx context.Context, objectKey string, body io.Reader, size int64) error {
+	if size > dataMultipartPartSize {
+		partSize, err := dataMultipartPartSizeForObject(size)
+		if err != nil {
+			return err
+		}
+		return b.putObjectMultipart(ctx, objectKey, body, size, partSize)
+	}
+	return b.putObjectSingle(ctx, objectKey, body, size)
+}
+
+func (b *dataObjectBackend) putObjectSingle(ctx context.Context, objectKey string, body io.Reader, size int64) error {
 	url, _, err := b.presignPut(ctx, objectKey, dataPresignTTL())
 	if err != nil {
 		return err
@@ -201,6 +216,144 @@ func (b *dataObjectBackend) putObject(ctx context.Context, objectKey string, bod
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+func (b *dataObjectBackend) putObjectMultipart(ctx context.Context, objectKey string, body io.Reader, size int64, partSize int64) (err error) {
+	if size < 0 {
+		return fmt.Errorf("multipart upload for %s requires a known object size", objectKey)
+	}
+	if size == 0 {
+		return b.putObjectSingle(ctx, objectKey, body, size)
+	}
+	if partSize < dataMultipartMinPartSize {
+		partSize = dataMultipartMinPartSize
+	}
+	if partSize > dataMultipartMaxPartSize {
+		return fmt.Errorf("multipart part size %d exceeds maximum %d", partSize, dataMultipartMaxPartSize)
+	}
+	if ((size-1)/partSize)+1 > dataMultipartMaxParts {
+		if dynamicPartSize, partSizeErr := dataMultipartPartSizeForObject(size); partSizeErr != nil {
+			return partSizeErr
+		} else {
+			partSize = dynamicPartSize
+		}
+	}
+
+	uploadID, err := b.createMultipartUpload(ctx, objectKey)
+	if err != nil {
+		return err
+	}
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		abortParent := context.Background()
+		if ctx != nil {
+			abortParent = context.WithoutCancel(ctx)
+		}
+		abortCtx, cancel := context.WithTimeout(abortParent, dataMultipartAbortTimeout)
+		defer cancel()
+		if abortErr := b.abortMultipartUpload(abortCtx, objectKey, uploadID); abortErr != nil {
+			err = errors.Join(err, fmt.Errorf("abort multipart upload %s: %w", objectKey, abortErr))
+		}
+	}()
+
+	parts := make([]model.DataTransferPart, 0, int(((size-1)/partSize)+1))
+	remaining := size
+	for partNumber := int32(1); remaining > 0; partNumber++ {
+		if int64(partNumber) > dataMultipartMaxParts {
+			return fmt.Errorf("multipart upload for %s requires more than %d parts", objectKey, dataMultipartMaxParts)
+		}
+		currentPartSize := partSize
+		if remaining < currentPartSize {
+			currentPartSize = remaining
+		}
+		partReader := &countingReader{r: io.LimitReader(body, currentPartSize)}
+		etag, uploadErr := b.putMultipartPart(ctx, objectKey, uploadID, partNumber, partReader, currentPartSize)
+		if uploadErr != nil {
+			return fmt.Errorf("upload multipart part %d for %s: %w", partNumber, objectKey, uploadErr)
+		}
+		if partReader.n != currentPartSize {
+			return fmt.Errorf("upload multipart part %d for %s read %d bytes, expected %d", partNumber, objectKey, partReader.n, currentPartSize)
+		}
+		parts = append(parts, model.DataTransferPart{
+			PartNumber: partNumber,
+			Size:       currentPartSize,
+			ETag:       etag,
+			Completed:  true,
+		})
+		remaining -= currentPartSize
+	}
+	if err := b.completeMultipartUpload(ctx, objectKey, uploadID, parts); err != nil {
+		return fmt.Errorf("complete multipart upload for %s: %w", objectKey, err)
+	}
+	completed = true
+	return nil
+}
+
+func (b *dataObjectBackend) putMultipartPart(ctx context.Context, objectKey, uploadID string, partNumber int32, body io.Reader, size int64) (string, error) {
+	url, _, err := b.presignUploadPart(ctx, objectKey, uploadID, partNumber, dataPresignTTL())
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, body)
+	if err != nil {
+		return "", err
+	}
+	req.ContentLength = size
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("put multipart part %d for object %s returned %s: %s", partNumber, objectKey, resp.Status, strings.TrimSpace(string(message)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
+	if etag == "" {
+		return "", fmt.Errorf("put multipart part %d for object %s returned empty etag", partNumber, objectKey)
+	}
+	return etag, nil
+}
+
+func dataMultipartPartSizeForObject(size int64) (int64, error) {
+	partSize := dataMultipartPartSize
+	if size <= 0 {
+		return partSize, nil
+	}
+	minPartSize := ((size - 1) / dataMultipartMaxParts) + 1
+	if minPartSize > partSize {
+		partSize = roundUpToMultiple(minPartSize, dataMultipartMinPartSize)
+	}
+	if partSize > dataMultipartMaxPartSize {
+		return 0, fmt.Errorf("object size %d exceeds multipart upload limit", size)
+	}
+	return partSize, nil
+}
+
+func roundUpToMultiple(value, multiple int64) int64 {
+	if multiple <= 0 {
+		return value
+	}
+	remainder := value % multiple
+	if remainder == 0 {
+		return value
+	}
+	return value + multiple - remainder
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.n += int64(n)
+	return n, err
 }
 
 func (b *dataObjectBackend) createMultipartUpload(ctx context.Context, objectKey string) (string, error) {
