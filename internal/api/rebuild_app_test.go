@@ -289,6 +289,48 @@ func TestRebuildAppQueuesImportForDockerImageSource(t *testing.T) {
 	}
 }
 
+func TestRebuildAppRejectsActiveAutomaticImageOperation(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, tenant, project := setupRebuildAppTestServer(t)
+	app := createImportedAppForRebuildTest(t, s, tenant.ID, project.ID, "demo-active-op", model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/acme/api:main",
+		ImageNameSuffix:  "api",
+		ComposeService:   "api",
+		DetectedProvider: "docker-image",
+	})
+	spec := app.Spec
+	activeOp, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByImageTracking,
+		AppID:           app.ID,
+		DesiredSpec:     &spec,
+	})
+	if err != nil {
+		t.Fatalf("create active operation: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/rebuild", apiKey, map[string]any{
+		"image_ref": "ghcr.io/acme/api:main",
+	})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "active automatic image update") {
+		t.Fatalf("expected automatic image update error body, got %s", recorder.Body.String())
+	}
+	ops, err := s.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 || ops[0].ID != activeOp.ID {
+		t.Fatalf("expected only active operation %s, got %+v", activeOp.ID, ops)
+	}
+}
+
 func TestRebuildAppReturnsNotFoundWhenUploadArchiveMetadataIsMissing(t *testing.T) {
 	t.Parallel()
 

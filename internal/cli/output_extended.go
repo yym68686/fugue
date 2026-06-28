@@ -292,6 +292,7 @@ func writeAppImageTrackingSummary(w io.Writer, tracking model.AppImageTracking) 
 		kvPair{Key: "last_queued_digest", Value: tracking.LastQueuedDigest},
 		kvPair{Key: "last_deployed_digest", Value: tracking.LastDeployedDigest},
 		kvPair{Key: "last_operation_id", Value: tracking.LastOperationID},
+		kvPair{Key: "last_event", Value: tracking.LastEvent},
 		kvPair{Key: "last_checked_at", Value: formatOptionalTimePtr(tracking.LastCheckedAt)},
 		kvPair{Key: "last_triggered_at", Value: formatOptionalTimePtr(tracking.LastTriggeredAt)},
 		kvPair{Key: "last_error", Value: tracking.LastError},

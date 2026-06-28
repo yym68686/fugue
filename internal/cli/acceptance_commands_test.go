@@ -291,6 +291,8 @@ func newDiagnosticEvidenceTestServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"bindings":[],"backing_services":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
 			_, _ = w.Write([]byte(`{"operations":[{"id":"op_deploy_123","tenant_id":"tenant_123","type":"deploy","status":"failed","execution_mode":"async","requested_by_type":"user","requested_by_id":"user_123","app_id":"app_123","result_message":"deploy failed while serving req-123","created_at":"2026-04-20T00:20:00Z","updated_at":"2026-04-20T00:25:00Z","started_at":"2026-04-20T00:21:00Z","completed_at":"2026-04-20T00:25:00Z"},{"id":"op_import_123","tenant_id":"tenant_123","type":"import","status":"completed","execution_mode":"async","requested_by_type":"user","requested_by_id":"user_123","app_id":"app_123","result_message":"import completed for req-123","created_at":"2026-04-20T00:10:00Z","updated_at":"2026-04-20T00:15:00Z","started_at":"2026-04-20T00:11:00Z","completed_at":"2026-04-20T00:15:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/image-tracking":
+			_, _ = w.Write([]byte(`{"app_id":"app_123"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"image inventory not available"}`))

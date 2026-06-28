@@ -29,6 +29,15 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
+	hasAutomaticImageOperation, err := s.appHasActiveAutomaticImageOperation(app.TenantID, principal.IsPlatformAdmin(), app.ID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if hasAutomaticImageOperation {
+		httpx.WriteError(w, http.StatusConflict, "app has an active automatic image update; rebuild was not queued")
+		return
+	}
 	spec, _, err := s.recoverAppDeployBaseline(app)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -237,4 +246,28 @@ func (s *Server) handleRebuildApp(w http.ResponseWriter, r *http.Request) {
 			"clear_files":        req.ClearFiles,
 		},
 	})
+}
+
+func (s *Server) appHasActiveAutomaticImageOperation(tenantID string, platformAdmin bool, appID string) (bool, error) {
+	operations, err := s.store.ListOperationsByApp(tenantID, platformAdmin, appID)
+	if err != nil {
+		return false, err
+	}
+	for _, op := range operations {
+		if strings.TrimSpace(op.AppID) != appID {
+			continue
+		}
+		switch strings.TrimSpace(op.Status) {
+		case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:
+		default:
+			continue
+		}
+		switch strings.TrimSpace(op.RequestedByID) {
+		case model.OperationRequestedByGitHubSyncController, model.OperationRequestedByImageTracking:
+			return true, nil
+		default:
+			continue
+		}
+	}
+	return false, nil
 }

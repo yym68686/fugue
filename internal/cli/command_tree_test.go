@@ -2359,6 +2359,8 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 			_, _ = w.Write([]byte(`{"bindings":[{"id":"binding_123","tenant_id":"tenant_123","app_id":"app_123","service_id":"svc_123","alias":"postgres","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"backing_services":[{"id":"svc_123","tenant_id":"tenant_123","project_id":"project_123","name":"app-db","type":"postgres","status":"active","spec":{"postgres":{"runtime_id":"runtime_managed_shared","database":"app","user":"app"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
 			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/image-tracking":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","tracking":{"id":"imgtrack_123","tenant_id":"tenant_123","app_id":"app_123","image_ref":"ghcr.io/acme/demo:main","enabled":true,"last_seen_digest":"sha256:abcdef123456","last_queued_digest":"sha256:abcdef123456","last_deployed_digest":"sha256:123456abcdef","last_operation_id":"op_auto","last_event":"poll","last_checked_at":"2026-04-02T00:01:00Z","last_triggered_at":"2026-04-02T00:01:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:01:00Z"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo:abc123","status":"ready","current":true,"size_bytes":1048576}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
@@ -2384,7 +2386,7 @@ func TestRunAppOverviewAggregatesRelatedState(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "pods", "demo-8c9f6d74f7", "operations", "op_123"} {
+	for _, want := range []string{"app=demo", "project=demo", "runtime=shared", "domains", "www.example.com", "services", "postgres", "images", "versions=1", "image_tracking", "ghcr.io/acme/demo:main", "last_event=poll", "sync_now=fugue app release tracking sync 'demo'", "pods", "demo-8c9f6d74f7", "operations", "op_123"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, out)
 		}
@@ -2805,6 +2807,8 @@ func TestRunAppBuildLogsExplainsWhenPushWasNotObserved(t *testing.T) {
 					"updated_at":"2026-04-02T00:01:00Z"
 				}
 			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/image-tracking":
+			_, _ = w.Write([]byte(`{"app_id":"app_123"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456","runtime_image_ref":"registry.example.com/demo-runtime:git-def456","status":"missing","current":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
@@ -2923,6 +2927,8 @@ func TestRunAppOverviewDiagnosisExplainsMissingRuntimeImage(t *testing.T) {
 					"updated_at":"2026-04-02T00:01:00Z"
 				}
 			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/image-tracking":
+			_, _ = w.Write([]byte(`{"app_id":"app_123"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":0,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/demo-managed:sha256","runtime_image_ref":"registry.example.com/demo-runtime:sha256","status":"missing","current":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
@@ -3018,6 +3024,8 @@ func TestRunAppOverviewPrefersLatestImportFailureOverRuntimeNoise(t *testing.T) 
 					"updated_at":"2026-04-02T00:03:00Z"
 				}
 			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/image-tracking":
+			_, _ = w.Write([]byte(`{"app_id":"app_123"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[{"image_ref":"registry.example.com/fugue-apps/demo-managed:git-def456","runtime_image_ref":"registry.example.com/demo-runtime:git-def456","status":"missing","current":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
@@ -4948,6 +4956,8 @@ func newAppOverviewSecretFixtureServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"bindings":[{"id":"binding_123","tenant_id":"tenant_123","app_id":"app_123","service_id":"svc_123","alias":"postgres","env":{"DATABASE_URL":"postgres://demo:binding-secret-123@db"},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}],"backing_services":[{"id":"svc_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo-db","type":"postgres","provisioner":"managed","status":"active","spec":{"postgres":{"runtime_id":"runtime_managed_shared","database":"demo","user":"demo","password":"service-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/operations":
 			_, _ = w.Write([]byte(`{"operations":[{"id":"op_123","tenant_id":"tenant_123","app_id":"app_123","type":"deploy","status":"completed","execution_mode":"managed","requested_by_type":"api-key","requested_by_id":"key_123","desired_source":{"type":"github-private","repo_url":"https://github.com/acme/demo","repo_auth_token":"operation-repo-token-123"},"desired_spec":{"image":"ghcr.io/acme/demo:next","runtime_id":"runtime_managed_shared","replicas":1,"env":{"OP_SECRET":"operation-secret-123"},"postgres":{"database":"demo","user":"demo","password":"operation-db-password-123"}},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/image-tracking":
+			_, _ = w.Write([]byte(`{"app_id":"app_123"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/images":
 			_, _ = w.Write([]byte(`{"app_id":"app_123","registry_configured":true,"summary":{"version_count":1,"current_version_count":1,"stale_version_count":0,"reclaimable_size_bytes":0},"versions":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/runtime-pods":
