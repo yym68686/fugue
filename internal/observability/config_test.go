@@ -16,7 +16,7 @@ func TestConfigNormalizeKeepsObservabilityDisabledByDefault(t *testing.T) {
 	if cfg.Mode() != "disabled" {
 		t.Fatalf("expected disabled mode, got %s", cfg.Mode())
 	}
-	if cfg.QueueSize != 32768 || cfg.BatchSize != 512 || cfg.MaxPayloadBytes != DefaultMaxPayloadBytes || cfg.MemoryLimitBytes != 128<<20 {
+	if cfg.QueueSize != 32768 || cfg.BatchSize != 512 || cfg.MaxPayloadBytes != DefaultMaxPayloadBytes || cfg.ClickHouseQueryMaxPayloadBytes != DefaultClickHouseQueryMaxPayloadBytes || cfg.MemoryLimitBytes != 128<<20 {
 		t.Fatalf("expected telemetry pipeline defaults, got %+v", cfg.Status())
 	}
 	if cfg.KubernetesLogTailLines != 2000 || cfg.KubernetesLogMaxLinesPerCycle != 20000 {

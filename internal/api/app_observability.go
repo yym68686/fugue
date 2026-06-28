@@ -1216,7 +1216,7 @@ func (s *Server) queryAppObservabilityClickHouse(ctx context.Context, queryText 
 	cfg := s.observabilityConfig.Normalize()
 	client := &http.Client{Timeout: cfg.ExportTimeout}
 	exporter := observability.NewClickHouseExporter(cfg.ClickHouseDSN, client)
-	return exporter.QueryJSONEachRow(ctx, queryText, cfg.MaxPayloadBytes)
+	return exporter.QueryJSONEachRow(ctx, queryText, cfg.ClickHouseQueryMaxPayloadBytes)
 }
 
 func (s *Server) queryAppObservabilityDiagnosis(ctx context.Context, appID string, window appObservabilityWindow) (appObservabilityDiagnosis, error) {

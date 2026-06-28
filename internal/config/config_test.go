@@ -38,6 +38,7 @@ func TestObservabilityFromEnvDefaultsToDisabledTwentyFourHourRetention(t *testin
 		"FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES",
 		"FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES",
 		"FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR",
+		"FUGUE_OBSERVABILITY_CLICKHOUSE_QUERY_MAX_PAYLOAD_BYTES",
 		"FUGUE_OBSERVABILITY_COMPONENT",
 	} {
 		t.Setenv(key, "")
@@ -75,6 +76,7 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	t.Setenv("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE", "55")
 	t.Setenv("FUGUE_OBSERVABILITY_QUEUE_SIZE", "66")
 	t.Setenv("FUGUE_OBSERVABILITY_BATCH_SIZE", "11")
+	t.Setenv("FUGUE_OBSERVABILITY_CLICKHOUSE_QUERY_MAX_PAYLOAD_BYTES", "888")
 	t.Setenv("FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES", "777")
 	t.Setenv("FUGUE_OBSERVABILITY_TENANT_EVENT_QUOTA_PER_MINUTE", "1000")
 	t.Setenv("FUGUE_OBSERVABILITY_APP_EVENT_QUOTA_PER_MINUTE", "100")
@@ -112,7 +114,7 @@ func TestObservabilityFromEnvReadsExporterConfiguration(t *testing.T) {
 	if cfg.KubernetesLogLabelSelector != "app.kubernetes.io/managed-by=fugue" || cfg.KubernetesLogPollInterval != 7*time.Second || cfg.KubernetesLogTailLines != 33 || cfg.KubernetesLogMaxPods != 44 || cfg.KubernetesLogMaxLinesPerCycle != 55 {
 		t.Fatalf("expected Kubernetes log settings from env, got %+v", cfg)
 	}
-	if cfg.QueueSize != 66 || cfg.BatchSize != 11 || cfg.MemoryLimitBytes != 777 {
+	if cfg.QueueSize != 66 || cfg.BatchSize != 11 || cfg.ClickHouseQueryMaxPayloadBytes != 888 || cfg.MemoryLimitBytes != 777 {
 		t.Fatalf("expected telemetry pipeline sizing from env, got %+v", cfg)
 	}
 	if cfg.TenantEventQuotaPerMinute != 1000 || cfg.AppEventQuotaPerMinute != 100 {

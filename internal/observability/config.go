@@ -9,19 +9,20 @@ import (
 )
 
 const (
-	DefaultRetention                     = 24 * time.Hour
-	DefaultExportTimeout                 = 5 * time.Second
-	DefaultQueueSize                     = 32768
-	DefaultSampleRate                    = 1.0
-	DefaultScrapeInterval                = 30 * time.Second
-	DefaultBatchSize                     = 512
-	DefaultMaxPayloadBytes               = 1 << 20
-	DefaultMemoryLimit                   = 128 << 20
-	DefaultRetryAttempts                 = 3
-	DefaultKubernetesLogPollInterval     = 15 * time.Second
-	DefaultKubernetesLogTailLines        = 2000
-	DefaultKubernetesLogMaxPods          = 500
-	DefaultKubernetesLogMaxLinesPerCycle = 20000
+	DefaultRetention                      = 24 * time.Hour
+	DefaultExportTimeout                  = 5 * time.Second
+	DefaultQueueSize                      = 32768
+	DefaultSampleRate                     = 1.0
+	DefaultScrapeInterval                 = 30 * time.Second
+	DefaultBatchSize                      = 512
+	DefaultMaxPayloadBytes                = 1 << 20
+	DefaultClickHouseQueryMaxPayloadBytes = 16 << 20
+	DefaultMemoryLimit                    = 128 << 20
+	DefaultRetryAttempts                  = 3
+	DefaultKubernetesLogPollInterval      = 15 * time.Second
+	DefaultKubernetesLogTailLines         = 2000
+	DefaultKubernetesLogMaxPods           = 500
+	DefaultKubernetesLogMaxLinesPerCycle  = 20000
 )
 
 type Config struct {
@@ -48,6 +49,7 @@ type Config struct {
 	KubernetesLogMaxLinesPerCycle  int
 	BatchSize                      int
 	MaxPayloadBytes                int64
+	ClickHouseQueryMaxPayloadBytes int64
 	MemoryLimitBytes               int64
 	RetryMaxAttempts               int
 	TenantEventQuotaPerMinute      int
@@ -66,28 +68,29 @@ type Identity struct {
 }
 
 type Status struct {
-	Enabled                       bool     `json:"enabled"`
-	Mode                          string   `json:"mode"`
-	Retention                     string   `json:"retention"`
-	MetricsConfigured             bool     `json:"metrics_configured"`
-	MetricsQueryConfigured        bool     `json:"metrics_query_configured"`
-	LogsConfigured                bool     `json:"logs_configured"`
-	AnalyticsConfigured           bool     `json:"analytics_configured"`
-	OTLPConfigured                bool     `json:"otlp_configured"`
-	RuntimeLogPipelineConfigured  bool     `json:"runtime_log_pipeline_configured"`
-	PrometheusScrapeConfigured    bool     `json:"prometheus_scrape_configured"`
-	KubernetesLogsConfigured      bool     `json:"kubernetes_logs_configured"`
-	IdentityConfigured            bool     `json:"identity_configured"`
-	QueueSize                     int      `json:"queue_size"`
-	BatchSize                     int      `json:"batch_size"`
-	MaxPayloadBytes               int64    `json:"max_payload_bytes"`
-	MemoryLimitBytes              int64    `json:"memory_limit_bytes"`
-	RetryMaxAttempts              int      `json:"retry_max_attempts"`
-	TenantEventQuotaPerMinute     int      `json:"tenant_event_quota_per_minute,omitempty"`
-	AppEventQuotaPerMinute        int      `json:"app_event_quota_per_minute,omitempty"`
-	TenantEventQuotaOverrideCount int      `json:"tenant_event_quota_override_count,omitempty"`
-	AppRetentionOverrideCount     int      `json:"app_retention_override_count,omitempty"`
-	Exporters                     []string `json:"exporters,omitempty"`
+	Enabled                        bool     `json:"enabled"`
+	Mode                           string   `json:"mode"`
+	Retention                      string   `json:"retention"`
+	MetricsConfigured              bool     `json:"metrics_configured"`
+	MetricsQueryConfigured         bool     `json:"metrics_query_configured"`
+	LogsConfigured                 bool     `json:"logs_configured"`
+	AnalyticsConfigured            bool     `json:"analytics_configured"`
+	OTLPConfigured                 bool     `json:"otlp_configured"`
+	RuntimeLogPipelineConfigured   bool     `json:"runtime_log_pipeline_configured"`
+	PrometheusScrapeConfigured     bool     `json:"prometheus_scrape_configured"`
+	KubernetesLogsConfigured       bool     `json:"kubernetes_logs_configured"`
+	IdentityConfigured             bool     `json:"identity_configured"`
+	QueueSize                      int      `json:"queue_size"`
+	BatchSize                      int      `json:"batch_size"`
+	MaxPayloadBytes                int64    `json:"max_payload_bytes"`
+	ClickHouseQueryMaxPayloadBytes int64    `json:"clickhouse_query_max_payload_bytes"`
+	MemoryLimitBytes               int64    `json:"memory_limit_bytes"`
+	RetryMaxAttempts               int      `json:"retry_max_attempts"`
+	TenantEventQuotaPerMinute      int      `json:"tenant_event_quota_per_minute,omitempty"`
+	AppEventQuotaPerMinute         int      `json:"app_event_quota_per_minute,omitempty"`
+	TenantEventQuotaOverrideCount  int      `json:"tenant_event_quota_override_count,omitempty"`
+	AppRetentionOverrideCount      int      `json:"app_retention_override_count,omitempty"`
+	Exporters                      []string `json:"exporters,omitempty"`
 }
 
 func (c Config) Normalize() Config {
@@ -137,6 +140,9 @@ func (c Config) Normalize() Config {
 	}
 	if c.MaxPayloadBytes <= 0 {
 		c.MaxPayloadBytes = DefaultMaxPayloadBytes
+	}
+	if c.ClickHouseQueryMaxPayloadBytes <= 0 {
+		c.ClickHouseQueryMaxPayloadBytes = DefaultClickHouseQueryMaxPayloadBytes
 	}
 	if c.MemoryLimitBytes <= 0 {
 		c.MemoryLimitBytes = DefaultMemoryLimit
@@ -197,28 +203,29 @@ func (c Config) HasExporters() bool {
 func (c Config) Status() Status {
 	c = c.Normalize()
 	return Status{
-		Enabled:                       c.Enabled,
-		Mode:                          c.Mode(),
-		Retention:                     c.Retention.String(),
-		MetricsConfigured:             c.MetricsRemoteWriteURL != "",
-		MetricsQueryConfigured:        c.MetricsQueryURL != "",
-		LogsConfigured:                c.LokiURL != "",
-		AnalyticsConfigured:           c.ClickHouseDSN != "",
-		OTLPConfigured:                c.OTLPEndpoint != "",
-		RuntimeLogPipelineConfigured:  len(c.RuntimeLogPaths) > 0,
-		PrometheusScrapeConfigured:    len(c.PrometheusScrapeURLs) > 0,
-		KubernetesLogsConfigured:      c.KubernetesLogsEnabled,
-		IdentityConfigured:            c.Identity.HasResourceIdentity(),
-		QueueSize:                     c.QueueSize,
-		BatchSize:                     c.BatchSize,
-		MaxPayloadBytes:               c.MaxPayloadBytes,
-		MemoryLimitBytes:              c.MemoryLimitBytes,
-		RetryMaxAttempts:              c.RetryMaxAttempts,
-		TenantEventQuotaPerMinute:     c.TenantEventQuotaPerMinute,
-		AppEventQuotaPerMinute:        c.AppEventQuotaPerMinute,
-		TenantEventQuotaOverrideCount: len(c.TenantEventQuotaOverrides),
-		AppRetentionOverrideCount:     len(c.AppRetentionOverrides),
-		Exporters:                     c.Exporters(),
+		Enabled:                        c.Enabled,
+		Mode:                           c.Mode(),
+		Retention:                      c.Retention.String(),
+		MetricsConfigured:              c.MetricsRemoteWriteURL != "",
+		MetricsQueryConfigured:         c.MetricsQueryURL != "",
+		LogsConfigured:                 c.LokiURL != "",
+		AnalyticsConfigured:            c.ClickHouseDSN != "",
+		OTLPConfigured:                 c.OTLPEndpoint != "",
+		RuntimeLogPipelineConfigured:   len(c.RuntimeLogPaths) > 0,
+		PrometheusScrapeConfigured:     len(c.PrometheusScrapeURLs) > 0,
+		KubernetesLogsConfigured:       c.KubernetesLogsEnabled,
+		IdentityConfigured:             c.Identity.HasResourceIdentity(),
+		QueueSize:                      c.QueueSize,
+		BatchSize:                      c.BatchSize,
+		MaxPayloadBytes:                c.MaxPayloadBytes,
+		ClickHouseQueryMaxPayloadBytes: c.ClickHouseQueryMaxPayloadBytes,
+		MemoryLimitBytes:               c.MemoryLimitBytes,
+		RetryMaxAttempts:               c.RetryMaxAttempts,
+		TenantEventQuotaPerMinute:      c.TenantEventQuotaPerMinute,
+		AppEventQuotaPerMinute:         c.AppEventQuotaPerMinute,
+		TenantEventQuotaOverrideCount:  len(c.TenantEventQuotaOverrides),
+		AppRetentionOverrideCount:      len(c.AppRetentionOverrides),
+		Exporters:                      c.Exporters(),
 	}
 }
 

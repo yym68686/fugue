@@ -479,6 +479,39 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityRequestsUseClickHouseQueryPayloadLimit(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var maxResultBytes string
+	row := `{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_123","request_id":"request_123","path_template":"/v1/items","method":"POST","status_code":200,"duration_ms":80,"ttfb_ms":20,"summary_json":"{\"provider\":\"` + strings.Repeat("x", 128) + `\"}"}`
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		maxResultBytes = r.URL.Query().Get("max_result_bytes")
+		_, _ = w.Write([]byte(row + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:                        true,
+		ClickHouseDSN:                  clickHouse.URL + "?database=fugue_observability",
+		MaxPayloadBytes:                64,
+		ClickHouseQueryMaxPayloadBytes: 4096,
+	}.Normalize()
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/observability/requests?since=15m&limit=10", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Source   appObservabilitySourceStatus `json:"source"`
+		Requests []map[string]any             `json:"requests"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Source.Available || response.Source.Status != "available" || len(response.Requests) != 1 {
+		t.Fatalf("expected available analytics source with one request, got source=%+v requests=%+v", response.Source, response.Requests)
+	}
+	if maxResultBytes != "4096" {
+		t.Fatalf("max_result_bytes = %q, want query payload limit", maxResultBytes)
+	}
+}
+
 func TestAppObservabilityRequestsStreamDisabledEnds(t *testing.T) {
 	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
 

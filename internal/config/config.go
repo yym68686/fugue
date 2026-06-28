@@ -334,6 +334,7 @@ func ObservabilityFromEnv() observability.Config {
 		KubernetesLogMaxLinesPerCycle:  getenvInt("FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE", observability.DefaultKubernetesLogMaxLinesPerCycle),
 		BatchSize:                      getenvInt("FUGUE_OBSERVABILITY_BATCH_SIZE", observability.DefaultBatchSize),
 		MaxPayloadBytes:                int64(getenvInt("FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES", observability.DefaultMaxPayloadBytes)),
+		ClickHouseQueryMaxPayloadBytes: int64(getenvInt("FUGUE_OBSERVABILITY_CLICKHOUSE_QUERY_MAX_PAYLOAD_BYTES", observability.DefaultClickHouseQueryMaxPayloadBytes)),
 		MemoryLimitBytes:               int64(getenvInt("FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES", observability.DefaultMemoryLimit)),
 		RetryMaxAttempts:               getenvInt("FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS", observability.DefaultRetryAttempts),
 		TenantEventQuotaPerMinute:      getenvInt("FUGUE_OBSERVABILITY_TENANT_EVENT_QUOTA_PER_MINUTE", 0),

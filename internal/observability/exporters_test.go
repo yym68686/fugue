@@ -376,6 +376,22 @@ func TestClickHouseExporterQueriesJSONEachRow(t *testing.T) {
 	}
 }
 
+func TestClickHouseExporterDetectsTruncatedJSONEachRowResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"trace_id":"trace_123","stage":"` + strings.Repeat("x", 128) + `"}` + "\n"))
+	}))
+	defer server.Close()
+
+	exporter := NewClickHouseExporter(server.URL+"?database=fugue_observability", server.Client())
+	_, err := exporter.QueryJSONEachRow(context.Background(), "SELECT * FROM request_spans FORMAT JSONEachRow", 64)
+	if err == nil {
+		t.Fatal("expected max payload error")
+	}
+	if !strings.Contains(err.Error(), "ClickHouse JSONEachRow response exceeded max payload bytes (64)") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestStructuredLogCanBecomeSpanEvent(t *testing.T) {
 	event, redacted := EventFromLogLine("runtime", `{"event_type":"request_span","stage":"db","stage_ms":12,"token":"secret"}`)
 	if redacted == 0 {

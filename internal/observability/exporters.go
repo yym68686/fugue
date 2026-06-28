@@ -611,12 +611,19 @@ func (e ClickHouseExporter) QueryJSONEachRow(ctx context.Context, queryText stri
 		return nil, fmt.Errorf("query ClickHouse: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPayloadBytes))
+	readLimit := maxPayloadBytes
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 	if err != nil {
 		return nil, fmt.Errorf("read ClickHouse query response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("query ClickHouse returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if int64(len(body)) > maxPayloadBytes {
+		return nil, fmt.Errorf("ClickHouse JSONEachRow response exceeded max payload bytes (%d)", maxPayloadBytes)
 	}
 	rows := []map[string]any{}
 	for _, line := range bytes.Split(body, []byte("\n")) {
