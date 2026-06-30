@@ -130,6 +130,54 @@ func TestBuildPythonOverlayFilesSkipsTestOnlyImports(t *testing.T) {
 	}
 }
 
+func TestBuildPythonOverlayFilesSkipsArchivedRuntimeImports(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte("from fastapi import FastAPI\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	oldDir := filepath.Join(repoDir, "old")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatalf("create old dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "legacy_service.py"), []byte("import missing_legacy_dependency\n"), 0o644); err != nil {
+		t.Fatalf("write archived service: %v", err)
+	}
+
+	_, analysis, err := buildPythonOverlayFiles(repoDir, ".")
+	if err != nil {
+		t.Fatalf("build python overlay files: %v", err)
+	}
+	if !slices.Equal(analysis.InferredRequirements, []string{"fastapi"}) {
+		t.Fatalf("unexpected inferred requirements: got %v want %v", analysis.InferredRequirements, []string{"fastapi"})
+	}
+}
+
+func TestBuildPythonOverlayFilesTreatsNestedSrcPackagesAsLocal(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	packageDir := filepath.Join(repoDir, "services", "api", "src", "local_service")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatalf("create package dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "__init__.py"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write package init: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "main.py"), []byte("from local_service.api import router\nfrom fastapi import FastAPI\n"), 0o644); err != nil {
+		t.Fatalf("write package main: %v", err)
+	}
+
+	_, analysis, err := buildPythonOverlayFiles(repoDir, ".")
+	if err != nil {
+		t.Fatalf("build python overlay files: %v", err)
+	}
+	if !slices.Equal(analysis.InferredRequirements, []string{"fastapi"}) {
+		t.Fatalf("unexpected inferred requirements: got %v want %v", analysis.InferredRequirements, []string{"fastapi"})
+	}
+}
+
 func TestBuildPythonOverlayFilesSkipsProjectsWithExplicitManifest(t *testing.T) {
 	t.Parallel()
 

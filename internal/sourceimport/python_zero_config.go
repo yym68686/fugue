@@ -212,20 +212,7 @@ func collectPythonSourceFiles(appDir string) (map[string]struct{}, []string, err
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		parts := strings.Split(rel, "/")
-		switch len(parts) {
-		case 0:
-			return nil
-		case 1:
-			moduleName := strings.TrimSuffix(parts[0], ".py")
-			if moduleName != "__init__" && pythonImportNamePattern.MatchString(moduleName) {
-				localModules[moduleName] = struct{}{}
-			}
-		default:
-			if pythonImportNamePattern.MatchString(parts[0]) {
-				localModules[parts[0]] = struct{}{}
-			}
-		}
+		addPythonLocalModulesForPath(localModules, rel)
 		return nil
 	})
 	if err != nil {
@@ -238,7 +225,7 @@ func collectPythonSourceFiles(appDir string) (map[string]struct{}, []string, err
 func shouldSkipPythonScanDir(name string) bool {
 	switch name {
 	case ".git", ".hg", ".svn", ".venv", ".tox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-		"__pycache__", "__tests__", "build", "dist", "env", "node_modules", "site-packages", "test", "tests", "venv":
+		"__pycache__", "__tests__", "archive", "archived", "archives", "build", "dist", "doc", "docs", "env", "example", "examples", "legacy", "node_modules", "old", "site-packages", "test", "tests", "venv":
 		return true
 	default:
 		return strings.HasPrefix(name, ".")
@@ -248,6 +235,37 @@ func shouldSkipPythonScanDir(name string) bool {
 func shouldSkipPythonScanFile(name string) bool {
 	baseName := strings.TrimSuffix(name, filepath.Ext(name))
 	return strings.HasPrefix(baseName, "test_") || strings.HasSuffix(baseName, "_test")
+}
+
+func addPythonLocalModulesForPath(localModules map[string]struct{}, rel string) {
+	parts := strings.Split(filepath.ToSlash(strings.TrimSpace(rel)), "/")
+	if len(parts) == 0 {
+		return
+	}
+
+	fileName := parts[len(parts)-1]
+	if len(parts) == 1 {
+		addPythonLocalModule(localModules, strings.TrimSuffix(fileName, ".py"))
+		return
+	}
+
+	addPythonLocalModule(localModules, parts[0])
+	if fileName == "__init__.py" {
+		addPythonLocalModule(localModules, parts[len(parts)-2])
+	}
+	for i := 0; i < len(parts)-2; i++ {
+		if parts[i] == "src" {
+			addPythonLocalModule(localModules, parts[i+1])
+		}
+	}
+}
+
+func addPythonLocalModule(localModules map[string]struct{}, moduleName string) {
+	moduleName = strings.TrimSpace(moduleName)
+	if moduleName == "" || moduleName == "__init__" || !pythonImportNamePattern.MatchString(moduleName) {
+		return
+	}
+	localModules[moduleName] = struct{}{}
 }
 
 func collectPythonImportPaths(content string) []string {
