@@ -88,13 +88,14 @@ func TestInferPythonRequirementsSkipsAdditionalStdlibModules(t *testing.T) {
 	imports := map[string]struct{}{
 		"atexit":     {},
 		"fastapi":    {},
+		"github":     {},
 		"locale":     {},
 		"py_compile": {},
 		"tomllib":    {},
 	}
 
 	got := inferPythonRequirements(imports, nil)
-	want := []string{"fastapi"}
+	want := []string{"PyGithub", "fastapi"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected inferred requirements: got %v want %v", got, want)
 	}

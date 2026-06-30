@@ -48,6 +48,7 @@ var pythonDependencyAliasByImport = map[string]string{
 	"dotenv":               "python-dotenv",
 	"fastapi":              "fastapi",
 	"fitz":                 "PyMuPDF",
+	"github":               "PyGithub",
 	"google.generativeai":  "google-generativeai",
 	"googleapiclient":      "google-api-python-client",
 	"jwt":                  "PyJWT",
