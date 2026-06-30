@@ -765,9 +765,14 @@ func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testi
 		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
-	if err := svc.dispatchPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport); err != nil {
-		t.Fatalf("dispatch github sync import operations: %v", err)
-	}
+	doneOne := make(chan error, 1)
+	doneTwo := make(chan error, 1)
+	go func() {
+		doneOne <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
+	go func() {
+		doneTwo <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
 
 	started := map[string]struct{}{
 		waitForStartedImportOperation(t, importer.started): {},
@@ -783,8 +788,11 @@ func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testi
 	importer.release(opOne.ID)
 	importer.release(opTwo.ID)
 
-	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
-	waitForOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+	waitForDrain(t, doneOne, "first different-app github sync import drain")
+	waitForDrain(t, doneTwo, "second different-app github sync import drain")
+
+	assertOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	assertOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
 }
 
 func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {

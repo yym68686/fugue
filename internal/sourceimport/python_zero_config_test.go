@@ -100,6 +100,36 @@ func TestInferPythonRequirementsSkipsAdditionalStdlibModules(t *testing.T) {
 	}
 }
 
+func TestBuildPythonOverlayFilesSkipsTestOnlyImports(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte("from fastapi import FastAPI\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	testsDir := filepath.Join(repoDir, "tests")
+	if err := os.MkdirAll(testsDir, 0o755); err != nil {
+		t.Fatalf("create tests dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(testsDir, "test_compliance_checks.py"), []byte("from check_constraints import check_constraints\n"), 0o644); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	files, analysis, err := buildPythonOverlayFiles(repoDir, ".")
+	if err != nil {
+		t.Fatalf("build python overlay files: %v", err)
+	}
+	if !slices.Equal(analysis.InferredRequirements, []string{"fastapi"}) {
+		t.Fatalf("unexpected inferred requirements: got %v want %v", analysis.InferredRequirements, []string{"fastapi"})
+	}
+	if len(files) == 0 || files[0].RelativePath != "requirements.txt" {
+		t.Fatalf("expected requirements.txt overlay, got %v", files)
+	}
+	if strings.Contains(files[0].Content, "check_constraints") {
+		t.Fatalf("expected test-only import to be excluded from requirements, got %q", files[0].Content)
+	}
+}
+
 func TestBuildPythonOverlayFilesSkipsProjectsWithExplicitManifest(t *testing.T) {
 	t.Parallel()
 

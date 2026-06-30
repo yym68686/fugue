@@ -202,6 +202,9 @@ func collectPythonSourceFiles(appDir string) (map[string]struct{}, []string, err
 		if filepath.Ext(entry.Name()) != ".py" {
 			return nil
 		}
+		if shouldSkipPythonScanFile(entry.Name()) {
+			return nil
+		}
 
 		pythonFiles = append(pythonFiles, path)
 		rel, err := filepath.Rel(appDir, path)
@@ -235,11 +238,16 @@ func collectPythonSourceFiles(appDir string) (map[string]struct{}, []string, err
 func shouldSkipPythonScanDir(name string) bool {
 	switch name {
 	case ".git", ".hg", ".svn", ".venv", ".tox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-		"__pycache__", "build", "dist", "env", "node_modules", "site-packages", "venv":
+		"__pycache__", "__tests__", "build", "dist", "env", "node_modules", "site-packages", "test", "tests", "venv":
 		return true
 	default:
 		return strings.HasPrefix(name, ".")
 	}
+}
+
+func shouldSkipPythonScanFile(name string) bool {
+	baseName := strings.TrimSuffix(name, filepath.Ext(name))
+	return strings.HasPrefix(baseName, "test_") || strings.HasSuffix(baseName, "_test")
 }
 
 func collectPythonImportPaths(content string) []string {
