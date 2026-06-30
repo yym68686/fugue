@@ -82,6 +82,24 @@ func TestBuildPythonOverlayFilesGeneratesRequirementsManifest(t *testing.T) {
 	}
 }
 
+func TestInferPythonRequirementsSkipsAdditionalStdlibModules(t *testing.T) {
+	t.Parallel()
+
+	imports := map[string]struct{}{
+		"atexit":     {},
+		"fastapi":    {},
+		"locale":     {},
+		"py_compile": {},
+		"tomllib":    {},
+	}
+
+	got := inferPythonRequirements(imports, nil)
+	want := []string{"fastapi"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected inferred requirements: got %v want %v", got, want)
+	}
+}
+
 func TestBuildPythonOverlayFilesSkipsProjectsWithExplicitManifest(t *testing.T) {
 	t.Parallel()
 
