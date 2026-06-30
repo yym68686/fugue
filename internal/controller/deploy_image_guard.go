@@ -276,6 +276,9 @@ func (s *Service) deployImageReplicaAvailable(ctx context.Context, app model.App
 		if imageLocationPresentOnTarget(imageLocationsFromReplicas(image, healthy), target) {
 			return true, true, nil
 		}
+		if !s.deployImageTargetRequiresExactReplica(target) {
+			return true, true, nil
+		}
 		scheduled, err := s.scheduleDeployTargetImageReplica(ctx, image, healthy[0], target)
 		if err != nil {
 			return false, true, err
@@ -289,6 +292,24 @@ func (s *Service) deployImageReplicaAvailable(ctx context.Context, app model.App
 		return true, true, nil
 	}
 	return false, true, nil
+}
+
+func (s *Service) deployImageTargetRequiresExactReplica(target deployImageTarget) bool {
+	if strings.TrimSpace(target.ClusterNodeName) != "" {
+		return true
+	}
+	runtimeID := strings.TrimSpace(target.RuntimeID)
+	if runtimeID == "" {
+		return false
+	}
+	if s == nil || s.Store == nil {
+		return true
+	}
+	runtimeObj, err := s.Store.GetRuntime(runtimeID)
+	if err != nil {
+		return true
+	}
+	return strings.TrimSpace(runtimeObj.ClusterNodeName) != "" || runtimeObj.Type != model.RuntimeTypeManagedShared
 }
 
 func (s *Service) distributedImagesForRefs(app model.App, refs ...string) ([]model.Image, error) {

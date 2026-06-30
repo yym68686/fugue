@@ -765,6 +765,92 @@ func TestStrictDistributedDeployPinnedManagedSharedTargetUsesClusterNode(t *test
 	}
 }
 
+func TestStrictDistributedDeployAllowsAbstractManagedSharedTargetWithHealthyReplica(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Abstract Shared Deploy Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	sourceUpdater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-source", "https://worker-source.example.com", nil, "worker-source", "machine-source", "v2", "join-v2", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage})
+	if err != nil {
+		t.Fatalf("enroll source updater: %v", err)
+	}
+	sharedRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "managed-shared-abstract", model.RuntimeTypeManagedShared, "", nil)
+	if err != nil {
+		t.Fatalf("create shared runtime: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:git-abc",
+		CanonicalDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        tenant.ID,
+		AppID:           image.AppID,
+		NodeID:          sourceUpdater.MachineID,
+		RuntimeID:       sourceUpdater.RuntimeID,
+		ClusterNodeName: sourceUpdater.ClusterNodeName,
+		CacheEndpoint:   "http://worker-source.example.com:5000",
+		Status:          model.ImageReplicaStatusPresent,
+		LastVerifiedAt:  &now,
+	}); err != nil {
+		t.Fatalf("upsert source replica: %v", err)
+	}
+	app := model.App{
+		ID:       image.AppID,
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:     image.ImageRef,
+			Replicas:  1,
+			RuntimeID: sharedRuntime.ID,
+		},
+		Source: &model.AppSource{ResolvedImageRef: image.ImageRef},
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed", ImageStoreMinReplicas: 2, ImageStoreTargetReplicas: 2},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed deploy must not inspect the central registry")
+			return false, nil, nil
+		},
+	}
+
+	available, err := svc.deployImageRefAvailable(context.Background(), app, deployImageTarget{
+		RuntimeID: sharedRuntime.ID,
+	}, image.ImageRef)
+	if err != nil {
+		t.Fatalf("deploy image ref available: %v", err)
+	}
+	if !available {
+		t.Fatal("expected healthy replica to allow abstract managed-shared deploy target")
+	}
+	tasks, err := stateStore.ListImageReplicationTasks(model.ImageReplicationTaskFilter{ImageID: image.ID, PlatformAdmin: true, Status: model.ImageReplicationTaskStatusPending})
+	if err != nil {
+		t.Fatalf("list replication tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("expected no deploy-blocking replication task for abstract target, got %+v", tasks)
+	}
+}
+
 func TestStrictDistributedDeployWithoutImageIndexDoesNotInspectRegistry(t *testing.T) {
 	t.Parallel()
 
