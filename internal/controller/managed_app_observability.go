@@ -46,7 +46,7 @@ func managedAppRolloutDecisionFromObjects(ctx context.Context, namespace string,
 		return decision
 	}
 	decision.Strategy = deploymentStrategyTypeFromObject(deployment)
-	annotations := objectStringMap(nestedObjectMap(deployment, "metadata", "annotations"))
+	annotations := objectStringMapValue(nestedObjectValue(deployment, "metadata", "annotations"))
 	decision.DowntimeClass = strings.TrimSpace(annotations["fugue.io/downtime-class"])
 	decision.Reason = strings.TrimSpace(annotations["fugue.io/rollout-reason"])
 	decision.RolloutMode = strings.TrimSpace(annotations["fugue.io/rollout-mode"])
@@ -76,14 +76,26 @@ func deploymentStrategyTypeFromObject(object map[string]any) string {
 	return strings.TrimSpace(stringFromMap(strategy, "type"))
 }
 
+func nestedObjectValue(root map[string]any, path ...string) any {
+	var current any = root
+	for _, part := range path {
+		values, ok := current.(map[string]any)
+		if !ok || values == nil {
+			return nil
+		}
+		current = values[part]
+	}
+	return current
+}
+
 func nestedObjectMap(root map[string]any, path ...string) map[string]any {
 	current := root
 	for _, part := range path {
 		if current == nil {
 			return nil
 		}
-		next, _ := current[part].(map[string]any)
-		if next == nil {
+		next := objectMapValue(current[part])
+		if len(next) == 0 {
 			return nil
 		}
 		current = next
@@ -91,17 +103,39 @@ func nestedObjectMap(root map[string]any, path ...string) map[string]any {
 	return current
 }
 
-func objectStringMap(in map[string]any) map[string]string {
-	if len(in) == 0 {
+func objectMapValue(raw any) map[string]any {
+	switch values := raw.(type) {
+	case map[string]any:
+		return values
+	case map[string]string:
+		out := make(map[string]any, len(values))
+		for key, value := range values {
+			out[key] = value
+		}
+		return out
+	default:
 		return nil
 	}
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		if text, ok := value.(string); ok {
-			out[key] = text
-		}
+}
+
+func objectStringMapValue(raw any) map[string]string {
+	if raw == nil {
+		return nil
 	}
-	return out
+	switch values := raw.(type) {
+	case map[string]string:
+		return values
+	case map[string]any:
+		out := make(map[string]string, len(values))
+		for key, value := range values {
+			if text, ok := value.(string); ok {
+				out[key] = text
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func stringFromMap(values map[string]any, key string) string {
