@@ -539,3 +539,54 @@ func TestGetAppDiagnosisIncludesCrashLogSnippetForPodFailure(t *testing.T) {
 		t.Fatalf("expected crash log evidence, got %+v", response.Diagnosis.Evidence)
 	}
 }
+
+func TestGetAppDiagnosisClassifiesServiceProcessExit(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	pod := fakePod("demo-exited", "Succeeded", time.Date(2026, 4, 16, 0, 3, 0, 0, time.UTC), containerName)
+	pod.Metadata.Namespace = namespace
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Image: "ghcr.io/example/demo:latest",
+		Ready: false,
+		State: kubeRuntimeState{
+			Terminated: &kubeStateDetail{
+				Reason:   "Completed",
+				ExitCode: 0,
+			},
+		},
+	}}
+	fake.setPods(selector, []kubePodInfo{pod})
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Category != "process-exited" {
+		t.Fatalf("expected process-exited diagnosis, got %+v", response.Diagnosis)
+	}
+	if !strings.Contains(response.Diagnosis.Summary, "exited successfully") {
+		t.Fatalf("expected process exit summary, got %q", response.Diagnosis.Summary)
+	}
+}

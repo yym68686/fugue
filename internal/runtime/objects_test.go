@@ -1463,6 +1463,9 @@ func TestBuildAppObjectsIncludesPersistentStorageMounts(t *testing.T) {
 	if got := command[len(command)-2]; got != "storage-reset-1" {
 		t.Fatalf("expected persistent storage reset token in init container command, got %q", got)
 	}
+	if !strings.Contains(command[2], "chmod a+rwX") {
+		t.Fatalf("expected persistent storage init script to make directory mounts writable, got %q", command[2])
+	}
 	if got := command[len(command)-1]; !strings.Contains(got, "file\tmount-") {
 		t.Fatalf("expected persistent storage mount plan to include file mount metadata, got %q", got)
 	}

@@ -2577,6 +2577,7 @@ printf '%s\n' "$plan" | while IFS='	' read -r kind key mode seed; do
       if [ -n "$mode" ] && [ "$mode" != "0" ]; then
         chmod "$mode" "$target" 2>/dev/null || true
       fi
+      chmod a+rwX "$target" 2>/dev/null || true
       ;;
     file)
       mkdir -p "$(dirname "$target")"

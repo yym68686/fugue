@@ -194,13 +194,13 @@ func resolveAppCommandValue(args []string, flagValue string) (string, error) {
 func (c *CLI) renderAppStartupCommandState(app model.App, operation *model.Operation, startupCommand string, args []string, alreadyCurrent bool) error {
 	if c.wantsJSON() {
 		payload := map[string]any{
-			"app":             app,
+			"app":             redactAppForOutput(app),
 			"startup_command": startupCommand,
 			"args":            args,
 			"already_current": alreadyCurrent,
 		}
 		if operation != nil {
-			payload["operation"] = operation
+			payload["operation"] = redactOperationPtrForOutput(operation)
 		}
 		return writeJSON(c.stdout, payload)
 	}

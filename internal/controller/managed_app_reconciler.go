@@ -30,6 +30,7 @@ func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App
 	if err := validateManagedAppDeployableImage(app); err != nil {
 		return err
 	}
+	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app = s.Renderer.PrepareApp(app)
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
@@ -146,7 +147,7 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		return s.cleanupOrphanManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: spec.appID is empty")
 	} else if storedApp, err := s.Store.GetApp(appID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return s.markOrphanManagedAppObservedOnly(ctx, client, namespace, managed, app, "observed-only managed app: app not found in store; retaining local workload until explicit delete")
+			return s.disableMissingStoreManagedApp(ctx, client, namespace, managed, app, "orphaned managed app: app not found in store; disabled workload and retained storage for audit")
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
 	} else {
@@ -225,6 +226,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		return nil
 	}
 	if syncStoredManagedAppSnapshot {
+		app = s.appWithResolvedLaunchOverride(ctx, app)
 		app = s.Renderer.PrepareApp(app)
 		desiredScheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 		if err != nil {
@@ -247,8 +249,12 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		managed.Spec.Scheduling = cloneControllerSchedulingConstraints(desiredScheduling)
 	}
 
+	app = s.appWithResolvedLaunchOverride(ctx, app)
 	app = s.Renderer.PrepareApp(app)
 	if err := validateManagedAppDeployableImage(app); err != nil {
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
+	}
+	if err := s.ensureManagedDeployImageReady(ctx, app); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	ownerRef := runtime.ManagedAppOwnerReference(managed)
@@ -693,9 +699,52 @@ func (s *Service) markOrphanManagedAppObservedOnly(ctx context.Context, client *
 	return nil
 }
 
+func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
+	managedName := strings.TrimSpace(managed.Metadata.Name)
+	if managedName == "" {
+		managedName = runtime.ManagedAppResourceName(app)
+	}
+	if managedName == "" {
+		return nil
+	}
+	reason = strings.TrimSpace(reason)
+	if !managedAppDisabledOrphanStatusCurrent(managed.Status, reason) {
+		status := managedAppBaseStatus(managed, app)
+		status.Phase = runtime.ManagedAppPhaseDisabled
+		status.Message = reason
+		status.ReadyReplicas = 0
+		if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
+			return fmt.Errorf("patch disabled orphan managed app status %s/%s: %w", namespace, managedName, err)
+		}
+	}
+
+	resourceName := runtime.RuntimeAppResourceName(app)
+	if resourceName != "" {
+		if err := client.scaleDeployment(ctx, namespace, resourceName, 0); err != nil && !isKubernetesResourceNotFound(err) {
+			return fmt.Errorf("scale orphan managed app deployment %s/%s to zero: %w", namespace, resourceName, err)
+		}
+	}
+	serviceName := runtime.RuntimeAppServiceName(app)
+	if serviceName != "" {
+		if err := client.deleteService(ctx, namespace, serviceName); err != nil && !isKubernetesResourceNotFound(err) {
+			return fmt.Errorf("delete orphan managed app service %s/%s: %w", namespace, serviceName, err)
+		}
+	}
+	if s.Logger != nil {
+		s.Logger.Printf("disabled orphan managed app %s/%s: %s", namespace, managedName, reason)
+	}
+	return nil
+}
+
 func managedAppObservedOnlyStatusCurrent(status runtime.ManagedAppStatus, reason string) bool {
 	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseError) &&
 		strings.TrimSpace(status.Message) == strings.TrimSpace(reason)
+}
+
+func managedAppDisabledOrphanStatusCurrent(status runtime.ManagedAppStatus, reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseDisabled) &&
+		strings.TrimSpace(status.Message) == strings.TrimSpace(reason) &&
+		status.ReadyReplicas == 0
 }
 
 func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, cause error) error {
@@ -1002,11 +1051,29 @@ func summarizeManagedAppPodFailure(pod kubePod) string {
 		return summary
 	}
 
-	statuses := append([]kubeContainerStatus(nil), pod.Status.InitContainerStatuses...)
-	statuses = append(statuses, pod.Status.ContainerStatuses...)
-	for _, status := range statuses {
+	for _, status := range pod.Status.InitContainerStatuses {
 		if status.State.Terminated != nil && isFailingManagedAppTermination(*status.State.Terminated) {
 			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.State.Terminated)
+		}
+		if !managedAppContainerRecovered(status) && status.LastState.Terminated != nil && isFailingManagedAppTermination(*status.LastState.Terminated) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.LastState.Terminated)
+		}
+		if status.State.Waiting != nil && isFailingManagedAppWaitingReason(status.State.Waiting.Reason) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "waiting", *status.State.Waiting)
+		}
+		if !managedAppContainerRecovered(status) && status.LastState.Waiting != nil && isFailingManagedAppWaitingReason(status.LastState.Waiting.Reason) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "waiting", *status.LastState.Waiting)
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Terminated != nil && managedAppServiceProcessExitedSuccessfully(*status.State.Terminated) && !status.Ready {
+			return summarizeManagedAppServiceProcessExit(prefix, status.Name, "")
+		}
+		if status.State.Terminated != nil && isFailingManagedAppTermination(*status.State.Terminated) {
+			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.State.Terminated)
+		}
+		if !managedAppContainerRecovered(status) && status.LastState.Terminated != nil && managedAppServiceProcessExitedSuccessfully(*status.LastState.Terminated) && status.State.Waiting != nil {
+			return summarizeManagedAppServiceProcessExit(prefix, status.Name, strings.TrimSpace(status.State.Waiting.Reason))
 		}
 		if !managedAppContainerRecovered(status) && status.LastState.Terminated != nil && isFailingManagedAppTermination(*status.LastState.Terminated) {
 			return summarizeManagedAppContainerFailure(prefix, status.Name, "terminated", *status.LastState.Terminated)
@@ -1042,6 +1109,18 @@ func summarizeManagedAppProgressLine(subject, reason, message string) string {
 	}
 }
 
+func summarizeManagedAppServiceProcessExit(prefix, containerName, waitingReason string) string {
+	subject := strings.TrimSpace(prefix)
+	if strings.TrimSpace(containerName) != "" {
+		subject += " container " + strings.TrimSpace(containerName)
+	}
+	waitingReason = strings.TrimSpace(waitingReason)
+	if waitingReason != "" {
+		return fmt.Sprintf("%s failed: process exited successfully and is now waiting: %s", subject, waitingReason)
+	}
+	return fmt.Sprintf("%s failed: process exited successfully instead of staying online", subject)
+}
+
 func managedAppContainerRecovered(status kubeContainerStatus) bool {
 	if status.Ready {
 		return true
@@ -1050,6 +1129,10 @@ func managedAppContainerRecovered(status kubeContainerStatus) bool {
 		return true
 	}
 	return false
+}
+
+func managedAppServiceProcessExitedSuccessfully(detail kubeStateDetail) bool {
+	return detail.ExitCode == 0 && strings.EqualFold(strings.TrimSpace(detail.Reason), "Completed")
 }
 
 func summarizeManagedAppContainerFailure(prefix, containerName, state string, detail kubeStateDetail) string {

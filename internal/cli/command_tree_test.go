@@ -514,6 +514,42 @@ func TestRunAppCommandSetUsesStartupCommandPatch(t *testing.T) {
 	}
 }
 
+func TestRunAppCommandShowRedactsAppSecretsInJSON(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1,"env":{"API_TOKEN":"raw-secret"},"command":["sh","-lc","python app.py"]},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "command", "show", "demo",
+		"-o", "json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app command show: %v", err)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "raw-secret") {
+		t.Fatalf("expected app command JSON output to redact env secret, got %s", out)
+	}
+	if !strings.Contains(out, `"API_TOKEN": "[redacted]"`) {
+		t.Fatalf("expected redacted env marker, got %s", out)
+	}
+}
+
 func TestRunAppRouteCheckUsesPathPrefix(t *testing.T) {
 	t.Parallel()
 

@@ -24,6 +24,9 @@ func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation,
 	if s == nil || app.Spec.Replicas <= 0 {
 		return nil
 	}
+	if !s.deployImageAvailabilityCheckEnabled() {
+		return nil
+	}
 
 	managedImageRef := strings.TrimSpace(s.managedDeployImageRef(app))
 	if managedImageRef == "" {
@@ -64,6 +67,13 @@ func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation,
 		return s.handleMissingDeployImage(ctx, op, app, target, runtimeImageRef, "runtime image")
 	}
 	return nil
+}
+
+func (s *Service) deployImageAvailabilityCheckEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.inspectManagedImage != nil || s.imageStoreDistributedMode()
 }
 
 func (s *Service) ensureManagedDeployImageReady(ctx context.Context, app model.App) error {

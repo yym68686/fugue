@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -3231,6 +3232,33 @@ func TestBackfillManagedAppSourceDoesNotOverrideManagedSnapshot(t *testing.T) {
 	}
 }
 
+func TestSummarizeManagedAppPodFailureReportsServiceProcessExit(t *testing.T) {
+	t.Parallel()
+
+	pod := kubePod{}
+	pod.Metadata.Name = "demo-exited"
+	pod.Spec.NodeName = "worker-1"
+	pod.Status.Phase = "Succeeded"
+	pod.Status.InitContainerStatuses = []kubeContainerStatus{{
+		Name: "init-persistent-storage",
+		State: kubeRuntimeState{
+			Terminated: &kubeStateDetail{Reason: "Completed", ExitCode: 0},
+		},
+	}}
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  "demo",
+		Ready: false,
+		State: kubeRuntimeState{
+			Terminated: &kubeStateDetail{Reason: "Completed", ExitCode: 0},
+		},
+	}}
+
+	summary := summarizeManagedAppPodFailure(pod)
+	if !strings.Contains(summary, "process exited successfully instead of staying online") {
+		t.Fatalf("expected service process exit summary, got %q", summary)
+	}
+}
+
 func TestManagedAppCloudNativePGApplyContextSkipsExistingForOnlineIntent(t *testing.T) {
 	t.Parallel()
 
@@ -3437,6 +3465,7 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	var patchedStatus runtime.ManagedAppStatus
 	patches := 0
 	var deleted []string
+	var scaled []string
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
@@ -3449,6 +3478,21 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 				t.Fatalf("decode managed app status patch: %v", err)
 			}
 			patchedStatus = body.Status
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.Method == http.MethodPatch && req.URL.Path == deploymentAPIPath(namespace, managedName):
+			var body struct {
+				Spec struct {
+					Replicas int `json:"replicas"`
+				} `json:"spec"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode deployment scale patch: %v", err)
+			}
+			scaled = append(scaled, fmt.Sprintf("%s=%d", req.URL.Path, body.Spec.Replicas))
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(`{}`)),
@@ -3510,24 +3554,27 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 		t.Fatalf("reconcile orphaned managed app: %v", err)
 	}
 
-	if patchedStatus.Phase != runtime.ManagedAppPhaseError {
-		t.Fatalf("expected observed-only orphan status phase %q, got %q", runtime.ManagedAppPhaseError, patchedStatus.Phase)
+	if patchedStatus.Phase != runtime.ManagedAppPhaseDisabled {
+		t.Fatalf("expected disabled orphan status phase %q, got %q", runtime.ManagedAppPhaseDisabled, patchedStatus.Phase)
 	}
-	if !strings.Contains(patchedStatus.Message, "observed-only") || !strings.Contains(patchedStatus.Message, "app not found in store") {
+	if !strings.Contains(patchedStatus.Message, "app not found in store") || !strings.Contains(patchedStatus.Message, "retained storage") {
 		t.Fatalf("expected orphan status message to mention missing store app, got %q", patchedStatus.Message)
 	}
-	if len(deleted) != 0 {
-		t.Fatalf("expected observed-only reconcile to retain local resources, got deletes %v", deleted)
+	if len(scaled) != 1 || scaled[0] != deploymentAPIPath(namespace, managedName)+"=0" {
+		t.Fatalf("expected orphan reconcile to scale deployment to zero, got %v", scaled)
+	}
+	if len(deleted) != 1 || deleted[0] != "DELETE /api/v1/namespaces/fg-tenant-demo/services/app-demo" {
+		t.Fatalf("expected orphan reconcile to delete only app service, got deletes %v", deleted)
 	}
 	if patches != 1 {
-		t.Fatalf("expected one observed-only status patch, got %d", patches)
+		t.Fatalf("expected one disabled status patch, got %d", patches)
 	}
 
 	managed.Status = patchedStatus
 	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
-		t.Fatalf("reconcile unchanged observed-only managed app: %v", err)
+		t.Fatalf("reconcile unchanged disabled orphan managed app: %v", err)
 	}
 	if patches != 1 {
-		t.Fatalf("expected unchanged observed-only status to skip patch, got %d patches", patches)
+		t.Fatalf("expected unchanged disabled orphan status to skip patch, got %d patches", patches)
 	}
 }

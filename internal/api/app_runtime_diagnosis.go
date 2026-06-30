@@ -160,6 +160,7 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			crashLogEvidence = readAppDiagnosisCrashEvidence(r.Context(), logClient, namespace, *pod)
 		}
 	}
+	processExitSummary := newestServiceProcessExitSummary(pods)
 
 	evictedPod := newestEvictedPod(pods)
 	schedulingEvent := newestFailedSchedulingEventForPods(rawNamespaceEvents, pods)
@@ -255,6 +256,10 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		diagnosis.Category = "evicted"
 		diagnosis.Summary = summarizeKubePodFailure(*evictedPod)
 		diagnosis.Hint = buildAppDiagnosisHint(app, diagnosis.ImplicatedNode)
+	case processExitSummary != "":
+		diagnosis.Category = "process-exited"
+		diagnosis.Summary = processExitSummary
+		diagnosis.Hint = fmt.Sprintf("Configure a startup command for %s that keeps the service process running, then redeploy.", strings.TrimSpace(app.Name))
 	case len(podSummaries) > 0:
 		diagnosis.Category = "pod-failure"
 		diagnosis.Summary = podSummaries[0]
@@ -617,6 +622,50 @@ func newestProblemPod(pods []kubePodInfo) *kubePodInfo {
 		}
 	}
 	return nil
+}
+
+func newestServiceProcessExitSummary(pods []kubePodInfo) string {
+	for index := len(pods) - 1; index >= 0; index-- {
+		if summary := summarizeServiceProcessExit(pods[index]); summary != "" {
+			return summary
+		}
+	}
+	return ""
+}
+
+func summarizeServiceProcessExit(pod kubePodInfo) string {
+	prefix := "pod " + strings.TrimSpace(pod.Metadata.Name)
+	if node := strings.TrimSpace(pod.Spec.NodeName); node != "" {
+		prefix += " on node " + node
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		subject := prefix
+		if name := strings.TrimSpace(status.Name); name != "" {
+			subject += " container " + name
+		}
+		if status.State.Terminated != nil && serviceProcessExitedSuccessfully(*status.State.Terminated) && !status.Ready {
+			return subject + " exited successfully instead of staying online"
+		}
+		if status.LastState.Terminated != nil && serviceProcessExitedSuccessfully(*status.LastState.Terminated) && !status.Ready && status.State.Waiting != nil {
+			reason := strings.TrimSpace(status.State.Waiting.Reason)
+			message := strings.TrimSpace(status.State.Waiting.Message)
+			switch {
+			case reason != "" && message != "":
+				return fmt.Sprintf("%s exited successfully and is now waiting: %s: %s", subject, reason, message)
+			case reason != "":
+				return fmt.Sprintf("%s exited successfully and is now waiting: %s", subject, reason)
+			case message != "":
+				return fmt.Sprintf("%s exited successfully and is now waiting: %s", subject, message)
+			default:
+				return subject + " exited successfully and is now waiting to restart"
+			}
+		}
+	}
+	return ""
+}
+
+func serviceProcessExitedSuccessfully(detail kubeStateDetail) bool {
+	return detail.ExitCode == 0 && strings.EqualFold(strings.TrimSpace(detail.Reason), "Completed")
 }
 
 func readAppDiagnosisCrashEvidence(ctx context.Context, logClient appLogsClient, namespace string, pod kubePodInfo) string {
