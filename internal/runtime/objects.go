@@ -1770,6 +1770,7 @@ func appRolloutIntentIsOnlineDurable(intent string) bool {
 	switch strings.TrimSpace(intent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate,
 		model.AppRolloutIntentOnlineImageUpdate,
+		model.AppRolloutIntentOnlineConfigUpdate,
 		model.AppRolloutIntentOnlineRestart,
 		model.AppRolloutIntentOnlineResourceUpdate:
 		return true
@@ -1796,6 +1797,8 @@ func onlineDurableRolloutReason(intent string) string {
 		return "lifecycle-only"
 	case model.AppRolloutIntentOnlineImageUpdate:
 		return "image-only"
+	case model.AppRolloutIntentOnlineConfigUpdate:
+		return "config-file-only"
 	case model.AppRolloutIntentOnlineResourceUpdate:
 		return "resource-only"
 	default:

@@ -66,6 +66,46 @@ type kubeDeployment struct {
 	} `json:"status"`
 }
 
+type kubeReplicaSetList struct {
+	Items []kubeReplicaSet `json:"items"`
+}
+
+type kubeReplicaSet struct {
+	Metadata struct {
+		Name              string            `json:"name"`
+		Namespace         string            `json:"namespace,omitempty"`
+		CreationTimestamp time.Time         `json:"creationTimestamp,omitempty"`
+		Annotations       map[string]string `json:"annotations,omitempty"`
+		Labels            map[string]string `json:"labels,omitempty"`
+	} `json:"metadata"`
+	Status struct {
+		Replicas          int `json:"replicas,omitempty"`
+		ReadyReplicas     int `json:"readyReplicas,omitempty"`
+		AvailableReplicas int `json:"availableReplicas,omitempty"`
+	} `json:"status,omitempty"`
+}
+
+type kubeEndpointSliceList struct {
+	Items []kubeEndpointSlice `json:"items"`
+}
+
+type kubeEndpointSlice struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels,omitempty"`
+	} `json:"metadata"`
+	Endpoints []kubeEndpoint `json:"endpoints,omitempty"`
+}
+
+type kubeEndpoint struct {
+	Addresses  []string `json:"addresses,omitempty"`
+	Conditions struct {
+		Ready       *bool `json:"ready,omitempty"`
+		Serving     *bool `json:"serving,omitempty"`
+		Terminating *bool `json:"terminating,omitempty"`
+	} `json:"conditions,omitempty"`
+}
+
 type kubeCloudNativePGCluster struct {
 	Metadata struct {
 		Name              string            `json:"name"`
@@ -866,6 +906,72 @@ func (c *kubeClient) getDeployment(ctx context.Context, namespace, name string) 
 		return kubeDeployment{}, false, err
 	}
 	return deployment, true, nil
+}
+
+func (c *kubeClient) listReplicaSetsBySelector(ctx context.Context, namespace, labelSelector string) ([]kubeReplicaSet, error) {
+	query := url.Values{}
+	if strings.TrimSpace(labelSelector) != "" {
+		query.Set("labelSelector", labelSelector)
+	}
+	apiPath := "/apis/apps/v1/namespaces/" + c.effectiveNamespace(namespace) + "/replicasets"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+
+	var list kubeReplicaSetList
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
+	if err != nil {
+		if status == http.StatusForbidden || status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Slice(list.Items, func(i, j int) bool {
+		left := list.Items[i]
+		right := list.Items[j]
+		leftRevision := kubeReplicaSetRevision(left)
+		rightRevision := kubeReplicaSetRevision(right)
+		if leftRevision != rightRevision {
+			return leftRevision > rightRevision
+		}
+		if !left.Metadata.CreationTimestamp.Equal(right.Metadata.CreationTimestamp) {
+			return left.Metadata.CreationTimestamp.After(right.Metadata.CreationTimestamp)
+		}
+		return left.Metadata.Name < right.Metadata.Name
+	})
+	return list.Items, nil
+}
+
+func kubeReplicaSetRevision(replicaSet kubeReplicaSet) int {
+	raw := strings.TrimSpace(replicaSet.Metadata.Annotations["deployment.kubernetes.io/revision"])
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func (c *kubeClient) listEndpointSlicesForService(ctx context.Context, namespace, serviceName string) ([]kubeEndpointSlice, error) {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return nil, nil
+	}
+	query := url.Values{}
+	query.Set("labelSelector", "kubernetes.io/service-name="+serviceName)
+	apiPath := "/apis/discovery.k8s.io/v1/namespaces/" + c.effectiveNamespace(namespace) + "/endpointslices?" + query.Encode()
+
+	var list kubeEndpointSliceList
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
+	if err != nil {
+		if status == http.StatusForbidden || status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 func (c *kubeClient) getRawDeployment(ctx context.Context, namespace, name string) (map[string]any, bool, error) {

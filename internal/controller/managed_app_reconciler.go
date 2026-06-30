@@ -227,11 +227,13 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	}
 	if syncStoredManagedAppSnapshot {
 		app = s.appWithResolvedLaunchOverride(ctx, app)
+		app = storedManagedAppDesiredWithRolloutIntent(runtime.AppFromManagedApp(managed), app)
 		app = s.Renderer.PrepareApp(app)
 		desiredScheduling, err := s.managedSchedulingConstraintsForApp(ctx, app)
 		if err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve stored managed app scheduling: %w", err))
 		}
+		desiredScheduling = s.onlineDurableRolloutScheduling(ctx, runtime.AppFromManagedApp(managed), app, desiredScheduling)
 		desiredObjects := runtime.BuildManagedAppStateObjects(app, desiredScheduling)
 		if err := client.applyObjects(ctx, desiredObjects); err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("sync managed app desired snapshot from store: %w", err))
@@ -271,6 +273,10 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.ensureManagedPostgresDataSafety(ctx, client, namespace, managed, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
+	rolloutDecision := managedAppRolloutDecisionFromObjects(ctx, namespace, managed, app, childObjects)
+	if s.controllerObservabilityEndpointConfigured() {
+		rolloutDecision.OldReplicaSet = s.latestManagedAppReplicaSetName(ctx, client, namespace, app)
+	}
 	stabilizedPostgresStorage, err := s.stabilizeManagedPostgresStorageSpecs(ctx, client, namespace, childObjects)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
@@ -288,6 +294,10 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := client.replaceObjectSpecsByKind(ctx, childObjects, "apps/v1", "Deployment"); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed app deployment desired spec: %w", err))
 	}
+	if s.controllerObservabilityEndpointConfigured() {
+		rolloutDecision.NewReplicaSet = s.latestManagedAppReplicaSetName(ctx, client, namespace, app)
+	}
+	s.recordManagedAppRolloutDecision(ctx, app, rolloutDecision)
 	if err := client.replaceObjectSpecsByKind(applyCtx, childObjects, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("replace managed postgres desired spec: %w", err))
 	}
@@ -335,6 +345,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
 	}
+	s.sampleManagedAppReadyEndpoints(ctx, client, namespace, app, status)
 	if err := s.Store.SyncManagedAppRuntimeStatus(app.ID, managedStatusTimePointer(status.CurrentReleaseStartedAt), managedStatusTimePointer(status.CurrentReleaseReadyAt), backingServiceRuntimeStatuses(status.BackingServices)); err != nil {
 		return fmt.Errorf("sync managed app runtime status for %s: %w", app.ID, err)
 	}
@@ -494,6 +505,8 @@ func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model
 		return managedAppLifecycleRolloutSnapshotMatchesStored(managedSnapshot, stored)
 	case model.AppRolloutIntentOnlineRestart:
 		return managedAppRestartRolloutSnapshotMatchesStored(managedSnapshot, stored)
+	case model.AppRolloutIntentOnlineConfigUpdate:
+		return managedAppConfigRolloutSnapshotMatchesStored(managedSnapshot, stored)
 	default:
 		return reflect.DeepEqual(
 			comparableManagedAppRolloutSnapshot(managedSnapshot),
@@ -549,6 +562,16 @@ func managedAppRolloutSnapshotIdentityEqual(left, right model.App) bool {
 	return reflect.DeepEqual(leftSnapshot, rightSnapshot)
 }
 
+func storedManagedAppDesiredWithRolloutIntent(managedSnapshot, storedDesired model.App) model.App {
+	if strings.TrimSpace(storedDesired.Spec.RolloutIntent) != "" {
+		return storedDesired
+	}
+	if intent := rolloutIntentForManagedDesiredState(managedSnapshot, storedDesired); intent != "" {
+		storedDesired.Spec.RolloutIntent = intent
+	}
+	return storedDesired
+}
+
 func managedAppImageRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
 	if strings.TrimSpace(managedSnapshot.Spec.Image) == "" ||
 		strings.TrimSpace(managedSnapshot.Spec.Image) != strings.TrimSpace(stored.Spec.Image) {
@@ -585,6 +608,13 @@ func managedAppRestartRolloutSnapshotMatchesStored(managedSnapshot, stored model
 	left := comparableRestartSpec(managedSnapshot.Spec)
 	right := comparableRestartSpec(stored.Spec)
 	return reflect.DeepEqual(left, right)
+}
+
+func managedAppConfigRolloutSnapshotMatchesStored(managedSnapshot, stored model.App) bool {
+	return reflect.DeepEqual(
+		comparableManagedAppRolloutSnapshot(managedSnapshot),
+		comparableManagedAppRolloutSnapshot(stored),
+	)
 }
 
 func derefControllerAppSpec(spec *model.AppSpec) model.AppSpec {

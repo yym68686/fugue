@@ -832,7 +832,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				}
 				timer.Mark("capacity_preflight")
 			}
-			if err := s.applyManagedAppDesiredState(ctx, app, scheduling); err != nil {
+			applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
+			if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
 			timer.Mark("apply_desired_state")

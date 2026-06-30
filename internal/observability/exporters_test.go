@@ -239,6 +239,7 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 				"app_id":           "app_123",
 				"trace_id":         "trace_123",
 				"request_id":       "request_123",
+				"path_template":    "/v1/responses",
 				"status_code":      "200",
 				"duration_ms":      "42",
 				"model":            "gpt-5.5",
@@ -312,6 +313,7 @@ func TestClickHouseExporterRoutesStructuredEvents(t *testing.T) {
 		"INSERT INTO fugue_observability.request_spans FORMAT JSONEachRow",
 		"INSERT INTO fugue_observability.app_events FORMAT JSONEachRow",
 		`"duration_ms":42`,
+		`"path_template":"/v1/responses"`,
 		`\"category\":\"demo\"`,
 		`\"model\":\"gpt-5.5\"`,
 		`\"provider\":\"primary\"`,
@@ -340,6 +342,55 @@ func TestParseClickHouseTargetSupportsClickHouseScheme(t *testing.T) {
 	}
 	if target.Database != "fugue_observability" || target.Username != "user" || target.Password != "pass" {
 		t.Fatalf("unexpected target: %+v", target)
+	}
+}
+
+func TestClickHouseExporterReroutesIncompleteRequestFact(t *testing.T) {
+	var inserts []struct {
+		table string
+		body  string
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		inserts = append(inserts, struct {
+			table string
+			body  string
+		}{
+			table: r.URL.Query().Get("query"),
+			body:  string(body),
+		})
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exporter := NewClickHouseExporter(server.URL+"?database=fugue_observability", server.Client())
+	err := exporter.Export(context.Background(), []Event{{
+		Timestamp: time.Unix(200, 0).UTC(),
+		Kind:      EventKindLog,
+		Message:   "request summary missing core fields",
+		Attributes: map[string]string{
+			"event_type": "request_summary",
+			"request_id": "request_missing_fields",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("export ClickHouse rows: %v", err)
+	}
+	if len(inserts) != 1 {
+		t.Fatalf("expected one ClickHouse insert, got %+v", inserts)
+	}
+	if !strings.Contains(inserts[0].table, ".app_events ") {
+		t.Fatalf("expected incomplete request fact to be routed to app_events, got %s", inserts[0].table)
+	}
+	for _, want := range []string{
+		`"event_type":"request_fact_incomplete"`,
+		`"severity":"warning"`,
+		`\"missing_fields\":\"app_id,path,status_code\"`,
+		`\"original_event_type\":\"request_summary\"`,
+	} {
+		if !strings.Contains(inserts[0].body, want) {
+			t.Fatalf("incomplete request fact export missing %q in:\n%s", want, inserts[0].body)
+		}
 	}
 }
 

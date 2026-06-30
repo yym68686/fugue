@@ -219,6 +219,108 @@ func TestMaybeHandleAppProxyUsesCustomDomainLookup(t *testing.T) {
 	}
 }
 
+func TestAppProxyForwardsInboundTraceHeaders(t *testing.T) {
+	t.Parallel()
+
+	target, err := url.Parse("http://app-demo.tenant-demo.svc.cluster.local:8080")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const traceparent = "00-" + traceID + "-00f067aa0ba902b7-01"
+	const requestID = "req_123"
+	const edgeRequestID = "edge_123"
+
+	var forwarded http.Header
+	server := &Server{
+		appProxyTransport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			forwarded = req.Header.Clone()
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		}),
+	}
+	observed := appProxyObservation{}
+	proxy := server.newAppReverseProxy("demo.example.com", target, model.App{ID: "app_demo"}, &observed)
+	req := httptest.NewRequest(http.MethodGet, "http://demo.example.com/v1/responses", nil)
+	req.Header.Set("traceparent", traceparent)
+	req.Header.Set(appProxyTraceIDHeader, traceID)
+	req.Header.Set("X-Request-Id", requestID)
+	req.Header.Set(appProxyEdgeRequestIDHeader, edgeRequestID)
+
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	if forwarded.Get("traceparent") != traceparent {
+		t.Fatalf("expected traceparent to be preserved, got %q", forwarded.Get("traceparent"))
+	}
+	if forwarded.Get(appProxyTraceIDHeader) != traceID {
+		t.Fatalf("expected trace id %q, got %q", traceID, forwarded.Get(appProxyTraceIDHeader))
+	}
+	if forwarded.Get("X-Request-Id") != requestID {
+		t.Fatalf("expected request id %q, got %q", requestID, forwarded.Get("X-Request-Id"))
+	}
+	if forwarded.Get(appProxyEdgeRequestIDHeader) != edgeRequestID {
+		t.Fatalf("expected edge request id %q, got %q", edgeRequestID, forwarded.Get(appProxyEdgeRequestIDHeader))
+	}
+	if observed.TraceID != traceID || observed.RequestID != requestID || observed.EdgeReqID != edgeRequestID {
+		t.Fatalf("expected observation ids to match forwarded headers, got %+v", observed)
+	}
+}
+
+func TestAppProxyGeneratesTraceHeadersWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	target, err := url.Parse("http://app-demo.tenant-demo.svc.cluster.local:8080")
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	var forwarded http.Header
+	server := &Server{
+		appProxyTransport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			forwarded = req.Header.Clone()
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		}),
+	}
+	observed := appProxyObservation{}
+	proxy := server.newAppReverseProxy("demo.example.com", target, model.App{ID: "app_demo"}, &observed)
+
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://demo.example.com/v1/responses", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	traceID := forwarded.Get(appProxyTraceIDHeader)
+	if len(traceID) != 32 {
+		t.Fatalf("expected generated 32-character trace id, got %q", traceID)
+	}
+	if !strings.Contains(forwarded.Get("traceparent"), traceID) {
+		t.Fatalf("expected generated traceparent to contain trace id %q, got %q", traceID, forwarded.Get("traceparent"))
+	}
+	if forwarded.Get("X-Request-Id") == "" {
+		t.Fatal("expected generated request id")
+	}
+	if observed.TraceID != traceID || observed.RequestID != forwarded.Get("X-Request-Id") {
+		t.Fatalf("expected observation ids to match generated headers, got observed=%+v headers=%+v", observed, forwarded)
+	}
+}
+
 func TestAppProxyProxiesWebsocketUpgrades(t *testing.T) {
 	t.Parallel()
 

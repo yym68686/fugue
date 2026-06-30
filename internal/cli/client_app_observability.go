@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 type appObservabilitySourceStatus struct {
@@ -61,6 +62,23 @@ type appObservabilityRequestsOptions struct {
 
 type appObservabilityDiagnosisOptions struct {
 	appObservabilityWindowOptions
+}
+
+type appRolloutTimelineOptions struct {
+	Around string
+	Window time.Duration
+}
+
+type appRolloutTimelineResponse struct {
+	Source      appObservabilitySourceStatus `json:"source"`
+	App         map[string]any               `json:"app"`
+	Around      map[string]any               `json:"around"`
+	Window      appObservabilityWindow       `json:"window"`
+	Operations  []map[string]any             `json:"operations"`
+	Events      []map[string]any             `json:"events"`
+	Requests5xx []map[string]any             `json:"requests_5xx"`
+	Kubernetes  map[string]any               `json:"kubernetes"`
+	Warnings    []string                     `json:"warnings,omitempty"`
 }
 
 type appObservabilityMetricsSummaryResponse struct {
@@ -202,6 +220,25 @@ func (c *Client) GetAppObservabilityDiagnosis(id string, opts appObservabilityDi
 	var response appObservabilityDiagnosisResponse
 	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
 		return appObservabilityDiagnosisResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppRolloutTimeline(id string, opts appRolloutTimelineOptions) (appRolloutTimelineResponse, error) {
+	values := url.Values{}
+	if around := strings.TrimSpace(opts.Around); around != "" {
+		values.Set("around", around)
+	}
+	if opts.Window > 0 {
+		values.Set("window", opts.Window.String())
+	}
+	relative := path.Join("/v1/apps", strings.TrimSpace(id), "rollout", "timeline")
+	if encoded := values.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response appRolloutTimelineResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appRolloutTimelineResponse{}, err
 	}
 	return response, nil
 }

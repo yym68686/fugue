@@ -2243,6 +2243,98 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(
 	}
 }
 
+func TestStoredManagedAppDesiredWithRolloutIntentInfersConfigUpdate(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:        "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n", Mode: 0o644},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	storedDesired := managedSnapshot
+	persistent := *managedSnapshot.Spec.PersistentStorage
+	persistent.Mounts = append([]model.AppPersistentStorageMount(nil), managedSnapshot.Spec.PersistentStorage.Mounts...)
+	storedDesired.Spec.PersistentStorage = &persistent
+	storedDesired.Spec.RestartToken = "restart_new"
+	storedDesired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
+
+	got := storedManagedAppDesiredWithRolloutIntent(managedSnapshot, storedDesired)
+	if got.Spec.RolloutIntent != model.AppRolloutIntentOnlineConfigUpdate {
+		t.Fatalf("expected online config rollout intent, got %q", got.Spec.RolloutIntent)
+	}
+	objects := runtime.BuildManagedAppChildObjects(got, runtime.SchedulingConstraints{}, runtime.ManagedAppOwnerReference(runtime.ManagedAppObject{}))
+	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
+	spec, _ := deployment["spec"].(map[string]any)
+	strategy, _ := spec["strategy"].(map[string]any)
+	if gotStrategy := strategy["type"]; gotStrategy != "RollingUpdate" {
+		t.Fatalf("expected config update to use RollingUpdate, got %#v", gotStrategy)
+	}
+	metadata, _ := deployment["metadata"].(map[string]any)
+	annotations, _ := metadata["annotations"].(map[string]string)
+	if gotClass := annotations["fugue.io/downtime-class"]; gotClass != "online-required" {
+		t.Fatalf("expected online downtime class, got %q", gotClass)
+	}
+	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != "config-file-only" {
+		t.Fatalf("expected config-file-only rollout reason, got %q", gotReason)
+	}
+}
+
+func TestStoredManagedAppDesiredWithRolloutIntentKeepsStorageStructureChangeRecreate(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n", Mode: 0o644},
+				},
+			},
+		},
+	}
+	storedDesired := managedSnapshot
+	persistent := *managedSnapshot.Spec.PersistentStorage
+	persistent.Mounts = append([]model.AppPersistentStorageMount(nil), managedSnapshot.Spec.PersistentStorage.Mounts...)
+	storedDesired.Spec.PersistentStorage = &persistent
+	storedDesired.Spec.PersistentStorage.Mounts[0].Path = "/home/config/api.yaml"
+	storedDesired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
+
+	got := storedManagedAppDesiredWithRolloutIntent(managedSnapshot, storedDesired)
+	if got.Spec.RolloutIntent != "" {
+		t.Fatalf("expected no inferred rollout intent for storage structure change, got %q", got.Spec.RolloutIntent)
+	}
+	objects := runtime.BuildManagedAppChildObjects(got, runtime.SchedulingConstraints{}, runtime.ManagedAppOwnerReference(runtime.ManagedAppObject{}))
+	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
+	spec, _ := deployment["spec"].(map[string]any)
+	strategy, _ := spec["strategy"].(map[string]any)
+	if gotStrategy := strategy["type"]; gotStrategy != "Recreate" {
+		t.Fatalf("expected storage structure change to use Recreate, got %#v", gotStrategy)
+	}
+}
+
 func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteSourceDrift(t *testing.T) {
 	t.Parallel()
 
@@ -3381,6 +3473,17 @@ func deploymentContainerEnv(obj map[string]any) map[string]string {
 		env[name] = value
 	}
 	return env
+}
+
+func controllerTestFirstObjectByKind(t *testing.T, objects []map[string]any, kind string) map[string]any {
+	t.Helper()
+	for _, object := range objects {
+		if got, _ := object["kind"].(string); got == kind {
+			return object
+		}
+	}
+	t.Fatalf("expected object kind %s in %#v", kind, objects)
+	return nil
 }
 
 func deploymentTemplateNodeSelector(obj map[string]any) map[string]string {

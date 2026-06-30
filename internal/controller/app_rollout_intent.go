@@ -11,6 +11,9 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 	if managedDeployOperationIsRestartOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineRestart
 	}
+	if managedDeployOperationIsConfigFileOnly(op, currentApp, desiredApp) {
+		return model.AppRolloutIntentOnlineConfigUpdate
+	}
 	if managedDeployOperationIsImageOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineImageUpdate
 	}
@@ -21,6 +24,13 @@ func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp
 		return model.AppRolloutIntentOnlineLifecycleUpdate
 	}
 	return ""
+}
+
+func rolloutIntentForManagedDesiredState(currentApp, desiredApp model.App) string {
+	return rolloutIntentForManagedOperation(model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desiredApp.Spec,
+	}, currentApp, desiredApp)
 }
 
 func managedDeployOperationIsRestartOnly(op model.Operation, currentApp, desiredApp model.App) bool {
@@ -45,6 +55,78 @@ func managedDeployOperationIsRestartOnly(op model.Operation, currentApp, desired
 		return false
 	}
 	return true
+}
+
+func managedDeployOperationIsConfigFileOnly(op model.Operation, currentApp, desiredApp model.App) bool {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
+		return false
+	}
+	if !managedAppConfigOrRestartChanged(currentApp.Spec, desiredApp.Spec) {
+		return false
+	}
+	currentSpec := comparableConfigFileUpdateSpec(currentApp.Spec)
+	desiredSpec := comparableConfigFileUpdateSpec(desiredApp.Spec)
+	if !reflect.DeepEqual(currentSpec, desiredSpec) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppOriginSource(currentApp), model.AppOriginSource(desiredApp)) {
+		return false
+	}
+	if !reflect.DeepEqual(model.AppBuildSource(currentApp), model.AppBuildSource(desiredApp)) {
+		return false
+	}
+	return true
+}
+
+func managedAppConfigOrRestartChanged(currentSpec, desiredSpec model.AppSpec) bool {
+	if strings.TrimSpace(currentSpec.RestartToken) != strings.TrimSpace(desiredSpec.RestartToken) {
+		return true
+	}
+	if !reflect.DeepEqual(appFilesContentOnly(currentSpec.Files), appFilesContentOnly(desiredSpec.Files)) {
+		return true
+	}
+	return !reflect.DeepEqual(persistentStorageSeedContentOnly(currentSpec.PersistentStorage), persistentStorageSeedContentOnly(desiredSpec.PersistentStorage))
+}
+
+func appFilesContentOnly(files []model.AppFile) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]string, len(files))
+	for i, file := range files {
+		out[i] = file.Content
+	}
+	return out
+}
+
+func persistentStorageSeedContentOnly(spec *model.AppPersistentStorageSpec) []string {
+	if spec == nil || len(spec.Mounts) == 0 {
+		return nil
+	}
+	out := make([]string, len(spec.Mounts))
+	for i, mount := range spec.Mounts {
+		out[i] = mount.SeedContent
+	}
+	return out
+}
+
+func comparableConfigFileUpdateSpec(spec model.AppSpec) model.AppSpec {
+	normalized, _ := model.StripFugueInjectedAppEnvFromSpec(spec)
+	normalized.RestartToken = ""
+	normalized.RolloutIntent = ""
+	for i := range normalized.Files {
+		normalized.Files[i].Content = ""
+	}
+	if normalized.PersistentStorage != nil && len(normalized.PersistentStorage.Mounts) > 0 {
+		persistent := *normalized.PersistentStorage
+		persistent.Mounts = append([]model.AppPersistentStorageMount(nil), normalized.PersistentStorage.Mounts...)
+		for i := range persistent.Mounts {
+			persistent.Mounts[i].SeedContent = ""
+		}
+		normalized.PersistentStorage = &persistent
+	}
+	model.ApplyAppSpecDefaults(&normalized)
+	return normalized
 }
 
 func comparableRestartSpec(spec model.AppSpec) model.AppSpec {

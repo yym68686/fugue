@@ -4357,6 +4357,38 @@ paths:
                 $ref: "#/components/schemas/AppObservabilityDiagnosisResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/rollout/timeline:
+    get:
+      operationId: getAppRolloutTimeline
+      summary: Get App Rollout Timeline
+      tags: [Apps]
+      x-fugue-handler: handleGetAppRolloutTimeline
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: around
+          required: true
+          schema:
+            type: string
+          description: RFC3339 timestamp, request id, or trace id used as the center of the rollout timeline.
+        - in: query
+          name: window
+          required: false
+          schema:
+            type: string
+            default: 10m
+          description: Duration on each side of the around point, such as 10m.
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRolloutTimelineResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/env:
     get:
       operationId: getAppEnv
@@ -18459,6 +18491,43 @@ components:
           $ref: "#/components/schemas/ObservabilityWindow"
         diagnosis:
           $ref: "#/components/schemas/ObservabilityDiagnosis"
+    AppRolloutTimelineResponse:
+      type: object
+      additionalProperties: true
+      required: [source, app, around, window, operations, events, requests_5xx, kubernetes]
+      properties:
+        source:
+          $ref: "#/components/schemas/ObservabilitySourceStatus"
+        app:
+          type: object
+          additionalProperties: true
+        around:
+          type: object
+          additionalProperties: true
+        window:
+          $ref: "#/components/schemas/ObservabilityWindow"
+        operations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        requests_5xx:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        kubernetes:
+          type: object
+          additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
     AppDiagnosisResponse:
       type: object
       additionalProperties: false

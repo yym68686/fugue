@@ -22,6 +22,8 @@ import (
 	"fugue/internal/store"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 )
 
 const serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
@@ -266,6 +268,55 @@ func (c *kubeLogsClient) listReplicaSetsBySelector(ctx context.Context, namespac
 		return nil, err
 	}
 	return replicaSets.Items, nil
+}
+
+func (c *kubeLogsClient) getDeployment(ctx context.Context, namespace, name string) (appsv1.Deployment, bool, error) {
+	var deployment appsv1.Deployment
+	apiPath := "/apis/apps/v1/namespaces/" + c.effectiveNamespace(namespace) + "/deployments/" + url.PathEscape(strings.TrimSpace(name))
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &deployment); err != nil {
+		if isKubeNotFound(err) {
+			return appsv1.Deployment{}, false, nil
+		}
+		return appsv1.Deployment{}, false, err
+	}
+	return deployment, true, nil
+}
+
+func (c *kubeLogsClient) listEndpointSlicesForService(ctx context.Context, namespace, serviceName string) ([]discoveryv1.EndpointSlice, error) {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return nil, nil
+	}
+	query := url.Values{}
+	query.Set("labelSelector", "kubernetes.io/service-name="+serviceName)
+	var slices discoveryv1.EndpointSliceList
+	apiPath := "/apis/discovery.k8s.io/v1/namespaces/" + c.effectiveNamespace(namespace) + "/endpointslices?" + query.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &slices); err != nil {
+		if isKubeNotFound(err) || isForbiddenStatusError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return slices.Items, nil
+}
+
+func (c *kubeLogsClient) listEventsByInvolvedObjectName(ctx context.Context, namespace, name string) ([]corev1.Event, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	query := url.Values{}
+	query.Set("fieldSelector", "involvedObject.name="+name)
+	query.Set("limit", "50")
+	var events corev1.EventList
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/events?" + query.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &events); err != nil {
+		if isKubeNotFound(err) || isForbiddenStatusError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return events.Items, nil
 }
 
 func (c *kubeLogsClient) readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error) {

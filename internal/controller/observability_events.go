@@ -1,9 +1,13 @@
 package controller
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,20 +18,38 @@ import (
 var controllerStructuredLogMu sync.Mutex
 
 func (s *Service) logOperationAppEvent(action, severity string, op model.Operation, app model.App, message string, attrs map[string]any) {
-	if s == nil || s.Logger == nil {
+	if s == nil {
 		return
 	}
 	fields := controllerOperationAppEventFields(action, severity, op, app, message, attrs)
 	if len(fields) == 0 {
 		return
 	}
-	body, err := json.Marshal(fields)
-	if err != nil {
+	s.writeControllerStructuredEvent(context.Background(), fields)
+}
+
+func (s *Service) logControllerAppEvent(ctx context.Context, eventType, severity string, app model.App, message string, attrs map[string]any) {
+	if s == nil {
 		return
 	}
-	controllerStructuredLogMu.Lock()
-	defer controllerStructuredLogMu.Unlock()
-	writeControllerStructuredLog(s.Logger.Writer(), body)
+	fields := controllerAppEventFields(eventType, severity, app, message, attrs)
+	if len(fields) == 0 {
+		return
+	}
+	s.writeControllerStructuredEvent(ctx, fields)
+}
+
+func (s *Service) writeControllerStructuredEvent(ctx context.Context, fields map[string]any) {
+	if s == nil || len(fields) == 0 {
+		return
+	}
+	body, err := json.Marshal(fields)
+	if err == nil && s.Logger != nil {
+		controllerStructuredLogMu.Lock()
+		writeControllerStructuredLog(s.Logger.Writer(), body)
+		controllerStructuredLogMu.Unlock()
+	}
+	s.postControllerStructuredEvent(ctx, fields)
 }
 
 func writeControllerStructuredLog(w io.Writer, body []byte) {
@@ -35,6 +57,64 @@ func writeControllerStructuredLog(w io.Writer, body []byte) {
 		return
 	}
 	_, _ = fmt.Fprintln(w, string(body))
+}
+
+func (s *Service) postControllerStructuredEvent(ctx context.Context, fields map[string]any) {
+	endpoint := controllerObservabilityLogsURL(s.Config.AppObservabilityEndpoint)
+	if endpoint == "" || len(fields) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	body, err := json.Marshal(map[string]any{"events": []map[string]any{fields}})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("controller observability event post failed: %v", err)
+		}
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if s.Logger != nil {
+			s.Logger.Printf("controller observability event post returned status=%s", resp.Status)
+		}
+	}
+}
+
+func controllerObservabilityLogsURL(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if !strings.Contains(endpoint, "://") {
+		endpoint = "http://" + endpoint
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || strings.TrimSpace(parsed.Host) == "" {
+		return ""
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if parsed.Path == "" {
+		parsed.Path = "/v1/logs"
+	} else if !strings.HasSuffix(parsed.Path, "/v1/logs") {
+		parsed.Path += "/v1/logs"
+	}
+	return parsed.String()
 }
 
 func controllerOperationAppEventFields(action, severity string, op model.Operation, app model.App, message string, attrs map[string]any) map[string]any {
@@ -74,6 +154,9 @@ func controllerOperationAppEventFields(action, severity string, op model.Operati
 	}
 	attributesJSON, _ := json.Marshal(summary)
 	return map[string]any{
+		"timestamp":       time.Now().UTC().Format(time.RFC3339Nano),
+		"kind":            "log",
+		"fugue_table":     "app_events",
 		"event_type":      eventType,
 		"severity":        strings.TrimSpace(severity),
 		"message":         strings.TrimSpace(message),
@@ -83,6 +166,59 @@ func controllerOperationAppEventFields(action, severity string, op model.Operati
 		"operation_id":    strings.TrimSpace(op.ID),
 		"runtime_id":      firstNonEmptyString(strings.TrimSpace(op.AssignedRuntimeID), strings.TrimSpace(op.TargetRuntimeID), strings.TrimSpace(app.Status.CurrentRuntimeID)),
 		"attributes_json": string(attributesJSON),
+	}
+}
+
+func controllerAppEventFields(eventType, severity string, app model.App, message string, attrs map[string]any) map[string]any {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" || strings.TrimSpace(app.ID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(severity) == "" {
+		severity = "info"
+	}
+	if strings.TrimSpace(message) == "" {
+		message = eventType
+	}
+	summary := map[string]any{}
+	for key, value := range attrs {
+		key = strings.TrimSpace(key)
+		if key == "" || controllerEventAttributeSensitive(key) {
+			continue
+		}
+		summary[key] = value
+	}
+	attributesJSON, _ := json.Marshal(summary)
+	return map[string]any{
+		"timestamp":       time.Now().UTC().Format(time.RFC3339Nano),
+		"kind":            "log",
+		"fugue_table":     "app_events",
+		"event_type":      eventType,
+		"severity":        strings.TrimSpace(severity),
+		"message":         strings.TrimSpace(message),
+		"tenant_id":       strings.TrimSpace(app.TenantID),
+		"project_id":      strings.TrimSpace(app.ProjectID),
+		"app_id":          strings.TrimSpace(app.ID),
+		"runtime_id":      firstNonEmptyString(strings.TrimSpace(app.Spec.RuntimeID), strings.TrimSpace(app.Status.CurrentRuntimeID)),
+		"operation_id":    stringFromAny(summary["operation_id"]),
+		"deployment_id":   stringFromAny(summary["deployment_id"]),
+		"attributes_json": string(attributesJSON),
+	}
+}
+
+func controllerEventAttributeSensitive(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return strings.Contains(key, "token") ||
+		strings.Contains(key, "secret") ||
+		strings.Contains(key, "password")
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return ""
 	}
 }
 

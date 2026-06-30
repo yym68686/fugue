@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/model"
@@ -27,6 +31,13 @@ const (
 	defaultAppProxyReplayBodyLimit = 512 << 10
 )
 
+const (
+	appProxyTraceIDHeader       = "X-Fugue-Trace-Id"
+	appProxyEdgeRequestIDHeader = "X-Fugue-Edge-Request-Id"
+)
+
+var appProxyRequestSequence uint64
+
 func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) bool {
 	startedAt := time.Now()
 	host := strings.TrimSpace(strings.ToLower(r.Host))
@@ -39,6 +50,7 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 	if s.isReservedAppHostname(host) || isInternalControlPlaneHost(host) {
 		return false
 	}
+	identity := appProxyRequestIdentityForProxy(r)
 
 	app, err := s.loadAppByRouteCached(host, r.URL.Path)
 	if err != nil {
@@ -53,6 +65,9 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 					WebSocket:  appProxyRequestIsWebSocket(r),
 					SSE:        appProxyRequestWantsSSE(r),
 					RouteState: "missing",
+					TraceID:    identity.TraceID,
+					RequestID:  identity.RequestID,
+					EdgeReqID:  identity.EdgeRequestID,
 				})
 				http.NotFound(w, r)
 				return true
@@ -68,6 +83,9 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 			WebSocket:  appProxyRequestIsWebSocket(r),
 			SSE:        appProxyRequestWantsSSE(r),
 			RouteState: "lookup-error",
+			TraceID:    identity.TraceID,
+			RequestID:  identity.RequestID,
+			EdgeReqID:  identity.EdgeRequestID,
 		})
 		http.Error(w, "app lookup failed", http.StatusInternalServerError)
 		return true
@@ -83,6 +101,9 @@ func (s *Server) maybeHandleAppProxy(w http.ResponseWriter, r *http.Request) boo
 		WebSocket:  appProxyRequestIsWebSocket(r),
 		SSE:        appProxyRequestWantsSSE(r),
 		RouteState: "active",
+		TraceID:    identity.TraceID,
+		RequestID:  identity.RequestID,
+		EdgeReqID:  identity.EdgeRequestID,
 	}
 	if app.Spec.Replicas == 0 {
 		observed.StatusCode = http.StatusServiceUnavailable
@@ -142,6 +163,13 @@ func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App,
 			req.SetXForwarded()
 			req.Out.Host = target.Host
 			req.Out.Header.Set("X-Forwarded-Host", host)
+			identity := appProxyRequestIdentityForProxy(req.In)
+			applyAppProxyTraceHeaders(req.Out.Header, identity)
+			if observed != nil {
+				observed.TraceID = identity.TraceID
+				observed.RequestID = identity.RequestID
+				observed.EdgeReqID = identity.EdgeRequestID
+			}
 		},
 		Transport: transport,
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
@@ -162,6 +190,12 @@ func (s *Server) newAppReverseProxy(host string, target *url.URL, app model.App,
 			}
 			http.Error(rw, "upstream app is unavailable", http.StatusBadGateway)
 		},
+		ModifyResponse: func(resp *http.Response) error {
+			if observed != nil && resp != nil && strings.TrimSpace(observed.RequestID) == "" {
+				observed.RequestID = appProxyRequestIDFromHeader(resp.Header)
+			}
+			return nil
+		},
 	}
 }
 
@@ -179,6 +213,9 @@ type appProxyObservation struct {
 	UpstreamError string
 	WebSocket     bool
 	SSE           bool
+	TraceID       string
+	RequestID     string
+	EdgeReqID     string
 }
 
 func (s *Server) logAppProxyObservation(observed appProxyObservation) {
@@ -192,7 +229,7 @@ func (s *Server) logAppProxyObservation(observed appProxyObservation) {
 		observed.RouteState = "unknown"
 	}
 	s.log.Printf(
-		"route_a_app_proxy_request host=%s app=%s tenant=%s runtime=%s method=%s path=%s status=%d duration_ms=%d target=%s route_state=%s upstream_error=%t websocket=%t sse=%t",
+		"route_a_app_proxy_request host=%s app=%s tenant=%s runtime=%s method=%s path=%s status=%d duration_ms=%d target=%s route_state=%s trace_id=%s request_id=%s edge_request_id=%s upstream_error=%t websocket=%t sse=%t",
 		observed.Host,
 		observed.AppID,
 		observed.TenantID,
@@ -203,10 +240,144 @@ func (s *Server) logAppProxyObservation(observed appProxyObservation) {
 		observed.Duration.Milliseconds(),
 		observed.Target,
 		observed.RouteState,
+		strings.TrimSpace(observed.TraceID),
+		strings.TrimSpace(observed.RequestID),
+		strings.TrimSpace(observed.EdgeReqID),
 		strings.TrimSpace(observed.UpstreamError) != "",
 		observed.WebSocket,
 		observed.SSE,
 	)
+}
+
+type appProxyTraceIdentity struct {
+	TraceID       string
+	RequestID     string
+	EdgeRequestID string
+}
+
+func appProxyRequestIdentityForProxy(r *http.Request) appProxyTraceIdentity {
+	identity := appProxyTraceIdentity{}
+	if r != nil {
+		identity.TraceID = appProxyTraceIDFromHeader(r.Header)
+		identity.RequestID = appProxyRequestIDFromHeader(r.Header)
+		identity.EdgeRequestID = strings.TrimSpace(r.Header.Get(appProxyEdgeRequestIDHeader))
+	}
+	if identity.TraceID == "" {
+		identity.TraceID = appProxyTraceIDForProxy()
+	}
+	if identity.RequestID == "" {
+		identity.RequestID = identity.EdgeRequestID
+	}
+	if identity.RequestID == "" {
+		identity.RequestID = appProxyRequestIDForProxy()
+	}
+	return identity
+}
+
+func applyAppProxyTraceHeaders(header http.Header, identity appProxyTraceIdentity) {
+	if header == nil {
+		return
+	}
+	if requestID := strings.TrimSpace(identity.RequestID); requestID != "" {
+		header.Set("X-Request-Id", requestID)
+	}
+	if edgeRequestID := strings.TrimSpace(identity.EdgeRequestID); edgeRequestID != "" {
+		header.Set(appProxyEdgeRequestIDHeader, edgeRequestID)
+	}
+	traceID := strings.TrimSpace(identity.TraceID)
+	if traceID == "" {
+		traceID = appProxyTraceIDForProxy()
+	}
+	header.Set(appProxyTraceIDHeader, traceID)
+	if strings.TrimSpace(header.Get("traceparent")) == "" {
+		header.Set("traceparent", appProxyTraceparentForProxy(traceID, identity.RequestID))
+	}
+}
+
+func appProxyTraceIDFromHeader(header http.Header) string {
+	if header == nil {
+		return ""
+	}
+	if traceID := normalizeAppProxyTraceID(header.Get(appProxyTraceIDHeader)); traceID != "" {
+		return traceID
+	}
+	traceparent := strings.TrimSpace(header.Get("traceparent"))
+	parts := strings.Split(traceparent, "-")
+	if len(parts) >= 4 {
+		return normalizeAppProxyTraceID(parts[1])
+	}
+	return ""
+}
+
+func normalizeAppProxyTraceID(raw string) string {
+	traceID := strings.ToLower(strings.TrimSpace(raw))
+	if len(traceID) != 32 || appProxyAllZeroHex(traceID) {
+		return ""
+	}
+	if _, err := hex.DecodeString(traceID); err != nil {
+		return ""
+	}
+	return traceID
+}
+
+func appProxyRequestIDFromHeader(header http.Header) string {
+	if header == nil {
+		return ""
+	}
+	for _, headerName := range []string{"X-Request-Id", "X-Request-ID", "X-Correlation-ID"} {
+		if value := strings.TrimSpace(header.Get(headerName)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func appProxyTraceIDForProxy() string {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err == nil && !appProxyAllZeroHex(hex.EncodeToString(random[:])) {
+		return hex.EncodeToString(random[:])
+	}
+	sequence := atomic.AddUint64(&appProxyRequestSequence, 1)
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d", time.Now().UnixNano(), sequence)))
+	return hex.EncodeToString(sum[:16])
+}
+
+func appProxyRequestIDForProxy() string {
+	sequence := atomic.AddUint64(&appProxyRequestSequence, 1)
+	return fmt.Sprintf("app_%x_%x", time.Now().UnixNano(), sequence)
+}
+
+func appProxyTraceparentForProxy(traceID string, requestID string) string {
+	traceID = normalizeAppProxyTraceID(traceID)
+	if traceID == "" {
+		traceID = appProxyTraceIDForProxy()
+	}
+	return "00-" + traceID + "-" + appProxySpanIDForProxy(requestID) + "-01"
+}
+
+func appProxySpanIDForProxy(requestID string) string {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		requestID = appProxyRequestIDForProxy()
+	}
+	sum := sha256.Sum256([]byte(requestID))
+	spanID := hex.EncodeToString(sum[:8])
+	if appProxyAllZeroHex(spanID) {
+		return "0000000000000001"
+	}
+	return spanID
+}
+
+func appProxyAllZeroHex(value string) bool {
+	if value == "" {
+		return true
+	}
+	for _, char := range value {
+		if char != '0' {
+			return false
+		}
+	}
+	return true
 }
 
 type appProxyObservationResponseWriter struct {

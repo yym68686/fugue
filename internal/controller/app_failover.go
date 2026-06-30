@@ -354,7 +354,8 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 			return err
 		}
 		if s.Config.KubectlApply {
-			if err := s.applyManagedAppDesiredState(ctx, fencedApp, scheduling); err != nil {
+			applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
+			if err := s.applyManagedAppDesiredState(applyCtx, fencedApp, scheduling); err != nil {
 				return fmt.Errorf("apply fenced managed app state %s: %w", app.ID, err)
 			}
 			if err := s.waitForManagedAppRollout(ctx, fencedApp, ""); err != nil {
@@ -387,7 +388,8 @@ func (s *Service) executeManagedFailoverOperation(ctx context.Context, op model.
 		return fmt.Errorf("render failover manifest for app %s: %w", app.ID, err)
 	}
 	if s.Config.KubectlApply {
-		if err := s.applyManagedAppDesiredState(ctx, failedOverApp, scheduling); err != nil {
+		applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
+		if err := s.applyManagedAppDesiredState(applyCtx, failedOverApp, scheduling); err != nil {
 			return fmt.Errorf("apply failed-over managed app state %s: %w", app.ID, err)
 		}
 		if err := s.waitForManagedAppRollout(ctx, failedOverApp, ""); err != nil {

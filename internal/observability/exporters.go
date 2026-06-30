@@ -692,6 +692,9 @@ func parseClickHouseTarget(raw string) (clickHouseTarget, error) {
 func clickHouseRowForEvent(event Event) (string, any, error) {
 	switch clickHouseTableForEvent(event) {
 	case "request_facts":
+		if !requestFactEventComplete(event) {
+			return "app_events", clickHouseIncompleteRequestFactAppEventRow(event), nil
+		}
 		return "request_facts", clickHouseRequestFactRow(event), nil
 	case "request_spans":
 		return "request_spans", clickHouseRequestSpanRow(event), nil
@@ -724,7 +727,7 @@ func clickHouseTableForEvent(event Event) string {
 			return "request_facts"
 		case "request_span", "trace_span":
 			return "request_spans"
-		case "app_event", "operation_event", "deploy_event", "runtime_event", "platform_event", "edge_event", "edge_request_body_buffer_progress", "edge_request_body_buffer_slow", "edge_front_tcp_connection":
+		case "app_event", "operation_event", "deploy_event", "runtime_event", "platform_event", "edge_event", "request_fact_incomplete", "edge_request_body_buffer_progress", "edge_request_body_buffer_slow", "edge_front_tcp_connection":
 			return "app_events"
 		default:
 			return ""
@@ -822,7 +825,7 @@ func clickHouseRequestFactRow(event Event) requestFactRow {
 		RequestID:    eventAttr(event, "request_id"),
 		RouteID:      eventAttr(event, "route_id"),
 		Hostname:     eventAttr(event, "hostname"),
-		PathTemplate: eventAttr(event, "path_template"),
+		PathTemplate: firstAttr(event, "path_template", "path", "route"),
 		Method:       eventAttr(event, "method"),
 		StatusCode:   uint16Attr(event, "status_code"),
 		StatusClass:  firstAttr(event, "status_class", "status"),
@@ -837,6 +840,46 @@ func clickHouseRequestFactRow(event Event) requestFactRow {
 		OperationID:  eventAttr(event, "operation_id"),
 		SummaryJSON:  summaryJSON(event),
 	}
+}
+
+func requestFactEventComplete(event Event) bool {
+	return eventAttr(event, "app_id") != "" &&
+		(firstAttr(event, "request_id", "trace_id") != "") &&
+		firstAttr(event, "path_template", "path", "route") != "" &&
+		uint16Attr(event, "status_code") > 0
+}
+
+func clickHouseIncompleteRequestFactAppEventRow(event Event) appEventRow {
+	attrs := map[string]string{}
+	for key, value := range event.Attributes {
+		attrs[key] = value
+	}
+	attrs["event_type"] = "request_fact_incomplete"
+	attrs["severity"] = "warning"
+	attrs["original_event_type"] = firstAttr(event, "event_type", "kind")
+	attrs["missing_fields"] = strings.Join(missingRequestFactFields(event), ",")
+	attrs["fugue_table"] = "app_events"
+	incomplete := event
+	incomplete.Message = "incomplete request fact rejected"
+	incomplete.Attributes = attrs
+	return clickHouseAppEventRow(incomplete)
+}
+
+func missingRequestFactFields(event Event) []string {
+	missing := []string{}
+	if eventAttr(event, "app_id") == "" {
+		missing = append(missing, "app_id")
+	}
+	if firstAttr(event, "request_id", "trace_id") == "" {
+		missing = append(missing, "request_id_or_trace_id")
+	}
+	if firstAttr(event, "path_template", "path", "route") == "" {
+		missing = append(missing, "path")
+	}
+	if uint16Attr(event, "status_code") == 0 {
+		missing = append(missing, "status_code")
+	}
+	return missing
 }
 
 func clickHouseRequestSpanRow(event Event) requestSpanRow {

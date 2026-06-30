@@ -222,6 +222,7 @@ const (
 	AppRolloutIntentOnlineImageUpdate        = "online_image_update"
 	AppRolloutIntentOnlineRestart            = "online_restart"
 	AppRolloutIntentOnlineResourceUpdate     = "online_resource_update"
+	AppRolloutIntentOnlineConfigUpdate       = "online_config_update"
 	AppVolumeReplicationModeDisabled         = "disabled"
 	AppVolumeReplicationModeManual           = "manual"
 	AppVolumeReplicationModeScheduled        = "scheduled"

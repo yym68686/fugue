@@ -108,6 +108,7 @@ in more than one visible project or tenant.
 		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
 		c.newAppRollbackShortcutCommand(),
 		c.newAppReleaseCommand(),
+		c.newAppRolloutCommand(),
 		hideCompatCommand(c.newAppContinuityCommand(), "fugue app failover"),
 		c.newAppFailoverCommand(),
 		c.newAppRestartCommand(),

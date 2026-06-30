@@ -37,6 +37,81 @@ func TestRolloutIntentForManagedOperationDetectsRestartOnlyDeploy(t *testing.T) 
 	}
 }
 
+func TestRolloutIntentForManagedOperationDetectsConfigFileOnlyDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:        "ghcr.io/example/demo:latest",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+			Files: []model.AppFile{
+				{Path: "/etc/demo/config.yaml", Content: "mode: old\n", Mode: 0o644},
+			},
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Files = append([]model.AppFile(nil), current.Spec.Files...)
+	persistent := *current.Spec.PersistentStorage
+	persistent.Mounts = append([]model.AppPersistentStorageMount(nil), current.Spec.PersistentStorage.Mounts...)
+	desired.Spec.PersistentStorage = &persistent
+	desired.Spec.RestartToken = "restart_new"
+	desired.Spec.Files[0].Content = "mode: new\n"
+	desired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineConfigUpdate {
+		t.Fatalf("expected online config rollout intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsPersistentStorageStructureChange(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
+				},
+			},
+		},
+	}
+	desired := current
+	persistent := *current.Spec.PersistentStorage
+	persistent.Mounts = append([]model.AppPersistentStorageMount(nil), current.Spec.PersistentStorage.Mounts...)
+	desired.Spec.PersistentStorage = &persistent
+	desired.Spec.PersistentStorage.Mounts[0].Path = "/home/config/api.yaml"
+	desired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected no rollout intent for persistent storage structure change, got %q", got)
+	}
+}
+
 func TestRolloutIntentForManagedOperationRejectsImageAndLifecycleDeploy(t *testing.T) {
 	current := model.App{
 		ID:       "app_demo",
