@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -3108,34 +3109,69 @@ func TestApplyManagedAppDesiredStateUsesRequestedSchedulingWhenManagedAppReadIsS
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	targetRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "agent", model.RuntimeTypeManagedOwned, "", nil)
+	targetRuntime, _, err := stateStore.CreateRuntime(tenant.ID, "shared-us", model.RuntimeTypeManagedShared, "", nil)
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)
 	}
-	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "ghcr.io/example/demo:latest",
+	imageRef := "registry.fugue.internal:5000/fugue-apps/demo:git-current"
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     imageRef,
 		Ports:     []int{8080},
 		Replicas:  1,
 		RuntimeID: targetRuntime.ID,
-	})
+	}, model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         imageRef,
+		ResolvedImageRef: imageRef,
+	}, model.AppRoute{})
 	if err != nil {
 		t.Fatalf("create app: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        imageRef,
+		CanonicalDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		LifecycleState:  model.ImageLifecycleLost,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		NodeID:          "machine-target",
+		RuntimeID:       "runtime_target_physical",
+		ClusterNodeName: "worker-target",
+		CacheEndpoint:   "http://worker-target.example.com:5000",
+		Status:          model.ImageReplicaStatusStale,
+		LastVerifiedAt:  &now,
+	}); err != nil {
+		t.Fatalf("upsert stale target replica: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        imageRef,
+		Digest:          image.CanonicalDigest,
+		NodeID:          "machine-target",
+		RuntimeID:       "runtime_target_physical",
+		ClusterNodeName: "worker-target",
+		CacheEndpoint:   "http://worker-target.example.com:5000",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert target image location: %v", err)
 	}
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	managedName := runtime.ManagedAppResourceName(app)
 	deploymentName := runtime.RuntimeAppResourceName(app)
 	targetScheduling := runtime.SchedulingConstraints{
 		NodeSelector: map[string]string{
-			runtime.RuntimeIDLabelKey: targetRuntime.ID,
-			runtime.TenantIDLabelKey:  tenant.ID,
-		},
-		Tolerations: []runtime.Toleration{
-			{
-				Key:      runtime.TenantTaintKey,
-				Operator: "Equal",
-				Value:    tenant.ID,
-				Effect:   "NoSchedule",
-			},
+			runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue,
+			kubeHostnameLabelKey:       "worker-target",
 		},
 	}
 	staleManagedApp := runtime.BuildManagedAppObject(app, runtime.SchedulingConstraints{
@@ -3186,6 +3222,7 @@ func TestApplyManagedAppDesiredStateUsesRequestedSchedulingWhenManagedAppReadIsS
 
 	svc := &Service{
 		Store:    stateStore,
+		Config:   config.ControllerConfig{ImageStoreMode: "distributed", ImageStoreMinReplicas: 2, ImageStoreTargetReplicas: 2},
 		Renderer: runtime.Renderer{},
 		newKubeClient: func(namespace string) (*kubeClient, error) {
 			return &kubeClient{
@@ -3205,6 +3242,13 @@ func TestApplyManagedAppDesiredStateUsesRequestedSchedulingWhenManagedAppReadIsS
 	}
 	if got := deploymentTemplateNodeSelector(recordedDeployment); !stringMapsEqual(got, targetScheduling.NodeSelector) {
 		t.Fatalf("expected deployment to use target runtime scheduling, got %#v", got)
+	}
+	refreshedImage, err := stateStore.GetImage(image.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatalf("get refreshed image: %v", err)
+	}
+	if refreshedImage.LifecycleState != model.ImageLifecycleAvailable {
+		t.Fatalf("expected target image location evidence to restore lost image, got %q", refreshedImage.LifecycleState)
 	}
 }
 

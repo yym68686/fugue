@@ -76,8 +76,8 @@ func (s *Service) deployImageAvailabilityCheckEnabled() bool {
 	return s.inspectManagedImage != nil || s.imageStoreDistributedMode()
 }
 
-func (s *Service) ensureManagedDeployImageReady(ctx context.Context, app model.App) error {
-	return s.ensureDeployableImage(ctx, model.Operation{}, app, runtimepkg.SchedulingConstraints{})
+func (s *Service) ensureManagedDeployImageReady(ctx context.Context, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
+	return s.ensureDeployableImage(ctx, model.Operation{}, app, scheduling)
 }
 
 func (s *Service) deployImageRefAvailable(ctx context.Context, app model.App, target deployImageTarget, refs ...string) (bool, error) {
@@ -261,10 +261,16 @@ func (s *Service) deployImageReplicaAvailable(ctx context.Context, app model.App
 		if err != nil {
 			return false, true, err
 		}
+		if len(locations) > 0 {
+			s.restoreLostDistributedImageFromLocations(image, locations)
+		}
 		if imageLocationPresentOnTarget(locations, target) {
 			return true, true, nil
 		}
 		if len(healthy) == 0 {
+			if len(locations) > 0 {
+				continue
+			}
 			if s.imageStoreStrictDistributedMode() && strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable {
 				image.LifecycleState = model.ImageLifecycleLost
 				if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {
@@ -424,6 +430,11 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 		}
 		return fmt.Errorf("deploy blocked because %s %s is missing; rebuild operation %s is already active", label, imageRef, existing.ID)
 	}
+	if evidence, err := s.deployImageInventoryEvidence(app, target, imageRef); err == nil && evidence.PresentLocations > 0 {
+		return fmt.Errorf("deploy blocked because %s %s is not verified by a healthy image-cache replica; %s", label, imageRef, evidence.Message(target))
+	} else if err != nil && s.Logger != nil {
+		s.Logger.Printf("inspect missing deploy image inventory app=%s image=%s failed: %v", app.ID, imageRef, err)
+	}
 	source := model.AppBuildSource(app)
 	if !deployImageSourceCanRebuild(source) {
 		return fmt.Errorf("deploy blocked because %s %s is missing and app has no rebuildable source", label, imageRef)
@@ -463,6 +474,91 @@ func (s *Service) handleMissingDeployImage(ctx context.Context, op model.Operati
 	}
 	_ = ctx
 	return errOperationNoLongerActive
+}
+
+type deployImageInventoryEvidence struct {
+	Images                 int
+	ImageStates            []string
+	PresentLocations       int
+	TargetPresentLocations int
+	PresentReplicas        int
+	HealthyReplicas        int
+	ExpiredPresentReplicas int
+	StaleReplicas          int
+}
+
+func (s *Service) deployImageInventoryEvidence(app model.App, target deployImageTarget, refs ...string) (deployImageInventoryEvidence, error) {
+	evidence := deployImageInventoryEvidence{}
+	if s == nil || s.Store == nil {
+		return evidence, nil
+	}
+	refs = compactImageRefs(refs)
+	images, err := s.distributedImagesForRefs(app, refs...)
+	if err != nil {
+		return evidence, err
+	}
+	evidence.Images = len(images)
+	seenStates := map[string]struct{}{}
+	now := time.Now().UTC()
+	for _, image := range images {
+		state := strings.TrimSpace(image.LifecycleState)
+		if state == "" {
+			state = model.ImageLifecycleAvailable
+		}
+		if _, ok := seenStates[state]; !ok {
+			seenStates[state] = struct{}{}
+			evidence.ImageStates = append(evidence.ImageStates, state)
+		}
+		replicas, err := s.Store.ListImageReplicas(model.ImageReplicaFilter{
+			ImageID:  image.ID,
+			TenantID: image.TenantID,
+		})
+		if err != nil {
+			return evidence, err
+		}
+		for _, replica := range replicas {
+			switch strings.TrimSpace(replica.Status) {
+			case model.ImageReplicaStatusPresent:
+				evidence.PresentReplicas++
+				if replica.LeaseExpiresAt != nil && replica.LeaseExpiresAt.Before(now) {
+					evidence.ExpiredPresentReplicas++
+				} else {
+					evidence.HealthyReplicas++
+				}
+			case model.ImageReplicaStatusStale:
+				evidence.StaleReplicas++
+			}
+		}
+	}
+	locations, err := s.presentImageLocations(app, refs...)
+	if err != nil {
+		return evidence, err
+	}
+	evidence.PresentLocations = len(locations)
+	for _, location := range locations {
+		if imageLocationPresentOnTarget([]model.ImageLocation{location}, target) {
+			evidence.TargetPresentLocations++
+		}
+	}
+	return evidence, nil
+}
+
+func (e deployImageInventoryEvidence) Message(target deployImageTarget) string {
+	parts := []string{
+		fmt.Sprintf("image-cache inventory is stale/incomplete: images=%d", e.Images),
+		fmt.Sprintf("present_locations=%d", e.PresentLocations),
+		fmt.Sprintf("target_present_locations=%d", e.TargetPresentLocations),
+		fmt.Sprintf("healthy_replicas=%d", e.HealthyReplicas),
+		fmt.Sprintf("expired_present_replicas=%d", e.ExpiredPresentReplicas),
+		fmt.Sprintf("stale_replicas=%d", e.StaleReplicas),
+	}
+	if len(e.ImageStates) > 0 {
+		parts = append(parts, "image_states="+strings.Join(e.ImageStates, ","))
+	}
+	if targetText := deployImageTargetDescription(target); targetText != "" {
+		parts = append(parts, "target="+targetText)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (s *Service) activeImportOperationForApp(app model.App) (model.Operation, bool) {
@@ -529,6 +625,30 @@ func imageLocationPresentOnTarget(locations []model.ImageLocation, target deploy
 		}
 	}
 	return false
+}
+
+func deployImageTargetDescription(target deployImageTarget) string {
+	parts := []string{}
+	if runtimeID := strings.TrimSpace(target.RuntimeID); runtimeID != "" {
+		parts = append(parts, "runtime="+runtimeID)
+	}
+	if node := strings.TrimSpace(target.ClusterNodeName); node != "" {
+		parts = append(parts, "node="+node)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (s *Service) restoreLostDistributedImageFromLocations(image model.Image, locations []model.ImageLocation) {
+	if s == nil || s.Store == nil || len(locations) == 0 {
+		return
+	}
+	if strings.TrimSpace(image.LifecycleState) != model.ImageLifecycleLost {
+		return
+	}
+	image.LifecycleState = model.ImageLifecycleAvailable
+	if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {
+		s.Logger.Printf("restore lost distributed image from present location failed image=%s ref=%s: %v", image.ID, image.ImageRef, err)
+	}
 }
 
 func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, target deployImageTarget, imageRef string) {

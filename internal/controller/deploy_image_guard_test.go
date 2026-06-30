@@ -350,7 +350,7 @@ func TestEnsureManagedDeployImageReadyInspectsPullBaseRuntimeViaPushBase(t *test
 		},
 	}
 
-	if err := svc.ensureManagedDeployImageReady(context.Background(), app); err != nil {
+	if err := svc.ensureManagedDeployImageReady(context.Background(), app, runtimepkg.SchedulingConstraints{}); err != nil {
 		t.Fatalf("ensure deploy image ready: %v", err)
 	}
 	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
@@ -413,7 +413,7 @@ func TestEnsureManagedDeployImageReadyDoesNotInspectPullBaseAliasAfterPushRefMis
 		},
 	}
 
-	if err := svc.ensureManagedDeployImageReady(context.Background(), app); err != nil {
+	if err := svc.ensureManagedDeployImageReady(context.Background(), app, runtimepkg.SchedulingConstraints{}); err != nil {
 		t.Fatalf("ensure deploy image ready: %v", err)
 	}
 	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
@@ -677,6 +677,166 @@ func TestStrictDistributedDeployUsesTargetLocationWhenReplicaLeaseExpired(t *tes
 	}
 	if len(nodeTasks) != 0 {
 		t.Fatalf("expected no node update task when location is present, got %+v", nodeTasks)
+	}
+}
+
+func TestStrictDistributedDeployReportsStaleInventoryInsteadOfRebuildWhenLocationExists(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Distributed Stale Inventory Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	imageRef := "registry.fugue.internal:5000/fugue-apps/demo:git-abc"
+	app := model.App{
+		ID:       "app_1",
+		TenantID: tenant.ID,
+		Spec: model.AppSpec{
+			Image:     imageRef,
+			Replicas:  1,
+			RuntimeID: "runtime_abstract_shared",
+		},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         imageRef,
+			ResolvedImageRef: imageRef,
+		},
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        imageRef,
+		CanonicalDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		LifecycleState:  model.ImageLifecycleLost,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		NodeID:          "machine-target",
+		RuntimeID:       "runtime_physical",
+		ClusterNodeName: "worker-target",
+		CacheEndpoint:   "http://worker-target.example.com:5000",
+		Status:          model.ImageReplicaStatusStale,
+		LastVerifiedAt:  &now,
+	}); err != nil {
+		t.Fatalf("upsert stale target replica: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		ImageRef:        imageRef,
+		Digest:          image.CanonicalDigest,
+		NodeID:          "machine-target",
+		RuntimeID:       "runtime_physical",
+		ClusterNodeName: "worker-target",
+		CacheEndpoint:   "http://worker-target.example.com:5000",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert target image location: %v", err)
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Config:           config.ControllerConfig{ImageStoreMode: "distributed", ImageStoreMinReplicas: 2, ImageStoreTargetReplicas: 2},
+		registryPushBase: "registry.fugue.internal:5000",
+		registryPullBase: "registry.fugue.internal:5000",
+		inspectManagedImage: func(context.Context, string) (bool, map[string]int64, error) {
+			t.Fatal("strict distributed deploy must not inspect the central registry when image index exists")
+			return false, nil, nil
+		},
+	}
+
+	err = svc.ensureManagedDeployImageReady(context.Background(), app, runtimepkg.SchedulingConstraints{})
+	if err == nil {
+		t.Fatal("expected stale inventory error")
+	}
+	if !strings.Contains(err.Error(), "image-cache inventory is stale/incomplete") {
+		t.Fatalf("expected stale inventory evidence, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "needs rebuild") {
+		t.Fatalf("expected stale inventory error not rebuild guidance, got %q", err.Error())
+	}
+	refreshedImage, err := stateStore.GetImage(image.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatalf("get refreshed image: %v", err)
+	}
+	if refreshedImage.LifecycleState != model.ImageLifecycleAvailable {
+		t.Fatalf("expected location evidence to restore lost image, got %q", refreshedImage.LifecycleState)
+	}
+}
+
+func TestImageReplicaPolicyRestoresLostImageWhenLocationEvidenceExists(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Replica Policy Location Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        tenant.ID,
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:git-abc",
+		CanonicalDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		LifecycleState:  model.ImageLifecycleLost,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        tenant.ID,
+		AppID:           image.AppID,
+		NodeID:          "machine-target",
+		RuntimeID:       "runtime_physical",
+		ClusterNodeName: "worker-target",
+		CacheEndpoint:   "http://worker-target.example.com:5000",
+		Status:          model.ImageReplicaStatusStale,
+		LastVerifiedAt:  &now,
+	}); err != nil {
+		t.Fatalf("upsert stale replica: %v", err)
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:        tenant.ID,
+		AppID:           image.AppID,
+		ImageRef:        image.ImageRef,
+		Digest:          image.CanonicalDigest,
+		NodeID:          "machine-target",
+		RuntimeID:       "runtime_physical",
+		ClusterNodeName: "worker-target",
+		CacheEndpoint:   "http://worker-target.example.com:5000",
+		Status:          model.ImageLocationStatusPresent,
+		LastSeenAt:      &now,
+	}); err != nil {
+		t.Fatalf("upsert image location: %v", err)
+	}
+	svc := &Service{
+		Store:  stateStore,
+		Config: config.ControllerConfig{ImageStoreMode: "distributed", ImageStoreMinReplicas: 2, ImageStoreTargetReplicas: 2},
+	}
+
+	if err := svc.ensureImageReplicaPolicy(context.Background(), image); err != nil {
+		t.Fatalf("ensure image replica policy: %v", err)
+	}
+	refreshedImage, err := stateStore.GetImage(image.ID, tenant.ID, false)
+	if err != nil {
+		t.Fatalf("get refreshed image: %v", err)
+	}
+	if refreshedImage.LifecycleState != model.ImageLifecycleAvailable {
+		t.Fatalf("expected location evidence to restore lost image, got %q", refreshedImage.LifecycleState)
 	}
 }
 

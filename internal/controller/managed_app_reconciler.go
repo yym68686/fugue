@@ -254,7 +254,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := validateManagedAppDeployableImage(app); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	if err := s.ensureManagedDeployImageReady(ctx, app); err != nil {
+	if err := s.ensureManagedDeployImageReady(ctx, app, managed.Spec.Scheduling); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
 	ownerRef := runtime.ManagedAppOwnerReference(managed)

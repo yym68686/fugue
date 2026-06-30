@@ -94,12 +94,22 @@ func (s *Service) ensureImageReplicaPolicy(ctx context.Context, image model.Imag
 	if len(healthy) >= target {
 		return nil
 	}
-	if len(healthy) == 0 && s.imageStoreStrictDistributedMode() && strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable {
-		image.LifecycleState = model.ImageLifecycleLost
-		if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {
-			s.Logger.Printf("mark lost distributed image failed image=%s ref=%s: %v", image.ID, image.ImageRef, err)
+	if len(healthy) == 0 {
+		locations, err := s.presentImageLocations(model.App{ID: image.AppID, TenantID: image.TenantID}, image.ImageRef, image.CanonicalDigest)
+		if err != nil {
+			return err
 		}
-		return nil
+		if len(locations) > 0 {
+			s.restoreLostDistributedImageFromLocations(image, locations)
+			return nil
+		}
+		if s.imageStoreStrictDistributedMode() && strings.TrimSpace(image.LifecycleState) == model.ImageLifecycleAvailable {
+			image.LifecycleState = model.ImageLifecycleLost
+			if _, err := s.Store.UpsertImage(image); err != nil && s.Logger != nil {
+				s.Logger.Printf("mark lost distributed image failed image=%s ref=%s: %v", image.ID, image.ImageRef, err)
+			}
+			return nil
+		}
 	}
 	updaters, err := s.Store.ListNodeUpdaters("", true)
 	if err != nil {
