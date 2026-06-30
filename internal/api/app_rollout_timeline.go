@@ -27,6 +27,10 @@ type endpointSliceTimelineClient interface {
 	listEndpointSlicesForService(ctx context.Context, namespace, serviceName string) ([]discoveryv1.EndpointSlice, error)
 }
 
+type endpointTimelineClient interface {
+	getEndpointsForService(ctx context.Context, namespace, serviceName string) (corev1.Endpoints, bool, error)
+}
+
 type eventTimelineClient interface {
 	listEventsByInvolvedObjectName(ctx context.Context, namespace, name string) ([]corev1.Event, error)
 }
@@ -325,7 +329,24 @@ func (s *Server) rolloutTimelineKubernetes(ctx context.Context, app model.App) (
 		if err != nil {
 			warnings = append(warnings, "endpoints: "+err.Error())
 		} else {
-			result["endpoints"] = rolloutTimelineEndpointSummary(serviceName, slices)
+			result["endpoints"] = rolloutTimelineEndpointSliceSummary(serviceName, slices)
+			if len(slices) == 0 {
+				if legacyClient, ok := any(client).(endpointTimelineClient); ok {
+					endpoints, found, err := legacyClient.getEndpointsForService(ctx, namespace, serviceName)
+					if err != nil {
+						warnings = append(warnings, "endpoints: "+err.Error())
+					} else if found {
+						result["endpoints"] = rolloutTimelineLegacyEndpointSummary(serviceName, endpoints)
+					}
+				}
+			}
+		}
+	} else if legacyClient, ok := any(client).(endpointTimelineClient); ok {
+		endpoints, found, err := legacyClient.getEndpointsForService(ctx, namespace, serviceName)
+		if err != nil {
+			warnings = append(warnings, "endpoints: "+err.Error())
+		} else if found {
+			result["endpoints"] = rolloutTimelineLegacyEndpointSummary(serviceName, endpoints)
 		}
 	}
 	if eventClient, ok := any(client).(eventTimelineClient); ok {
@@ -402,7 +423,7 @@ func rolloutTimelinePods(pods []kubePodInfo) []map[string]any {
 	return out
 }
 
-func rolloutTimelineEndpointSummary(serviceName string, slices []discoveryv1.EndpointSlice) map[string]any {
+func rolloutTimelineEndpointSliceSummary(serviceName string, slices []discoveryv1.EndpointSlice) map[string]any {
 	ready := 0
 	total := 0
 	for _, slice := range slices {
@@ -422,9 +443,26 @@ func rolloutTimelineEndpointSummary(serviceName string, slices []discoveryv1.End
 	}
 	return map[string]any{
 		"service_name":    serviceName,
+		"source":          "endpointslice",
 		"ready_endpoints": ready,
 		"total_endpoints": total,
 		"slice_count":     len(slices),
+	}
+}
+
+func rolloutTimelineLegacyEndpointSummary(serviceName string, endpoints corev1.Endpoints) map[string]any {
+	ready := 0
+	total := 0
+	for _, subset := range endpoints.Subsets {
+		ready += len(subset.Addresses)
+		total += len(subset.Addresses) + len(subset.NotReadyAddresses)
+	}
+	return map[string]any{
+		"service_name":    serviceName,
+		"source":          "endpoints",
+		"ready_endpoints": ready,
+		"total_endpoints": total,
+		"slice_count":     0,
 	}
 }
 

@@ -300,6 +300,22 @@ func (c *kubeLogsClient) listEndpointSlicesForService(ctx context.Context, names
 	return slices.Items, nil
 }
 
+func (c *kubeLogsClient) getEndpointsForService(ctx context.Context, namespace, serviceName string) (corev1.Endpoints, bool, error) {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return corev1.Endpoints{}, false, nil
+	}
+	var endpoints corev1.Endpoints
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/endpoints/" + url.PathEscape(serviceName)
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &endpoints); err != nil {
+		if isKubeNotFound(err) || isForbiddenStatusError(err) {
+			return corev1.Endpoints{}, false, nil
+		}
+		return corev1.Endpoints{}, false, err
+	}
+	return endpoints, true, nil
+}
+
 func (c *kubeLogsClient) listEventsByInvolvedObjectName(ctx context.Context, namespace, name string) ([]corev1.Event, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {

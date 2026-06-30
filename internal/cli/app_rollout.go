@@ -76,6 +76,7 @@ func renderAppRolloutTimeline(w io.Writer, response appRolloutTimelineResponse) 
 	if endpoints := mapField(response.Kubernetes, "endpoints"); len(endpoints) > 0 {
 		if err := writeKeyValues(w,
 			kvPair{Key: "service_name", Value: strings.TrimSpace(fmt.Sprint(endpoints["service_name"]))},
+			kvPair{Key: "endpoint_source", Value: strings.TrimSpace(fmt.Sprint(endpoints["source"]))},
 			kvPair{Key: "ready_endpoints", Value: strings.TrimSpace(fmt.Sprint(endpoints["ready_endpoints"]))},
 			kvPair{Key: "total_endpoints", Value: strings.TrimSpace(fmt.Sprint(endpoints["total_endpoints"]))},
 		); err != nil {

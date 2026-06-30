@@ -106,6 +106,17 @@ type kubeEndpoint struct {
 	} `json:"conditions,omitempty"`
 }
 
+type kubeEndpoints struct {
+	Subsets []struct {
+		Addresses []struct {
+			IP string `json:"ip,omitempty"`
+		} `json:"addresses,omitempty"`
+		NotReadyAddresses []struct {
+			IP string `json:"ip,omitempty"`
+		} `json:"notReadyAddresses,omitempty"`
+	} `json:"subsets,omitempty"`
+}
+
 type kubeCloudNativePGCluster struct {
 	Metadata struct {
 		Name              string            `json:"name"`
@@ -972,6 +983,24 @@ func (c *kubeClient) listEndpointSlicesForService(ctx context.Context, namespace
 		return nil, err
 	}
 	return list.Items, nil
+}
+
+func (c *kubeClient) getEndpointsForService(ctx context.Context, namespace, serviceName string) (kubeEndpoints, bool, error) {
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return kubeEndpoints{}, false, nil
+	}
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/endpoints/" + url.PathEscape(serviceName)
+
+	var endpoints kubeEndpoints
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &endpoints)
+	if err != nil {
+		if status == http.StatusForbidden || status == http.StatusNotFound {
+			return kubeEndpoints{}, false, nil
+		}
+		return kubeEndpoints{}, false, err
+	}
+	return endpoints, true, nil
 }
 
 func (c *kubeClient) getRawDeployment(ctx context.Context, namespace, name string) (map[string]any, bool, error) {

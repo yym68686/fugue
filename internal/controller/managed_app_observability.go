@@ -182,6 +182,22 @@ func (s *Service) sampleManagedAppReadyEndpoints(ctx context.Context, client *ku
 		return
 	}
 	ready, total := countReadyEndpointAddresses(slices)
+	endpointSource := "endpointslice"
+	if len(slices) == 0 && total == 0 {
+		endpoints, found, err := client.getEndpointsForService(ctx, namespace, serviceName)
+		if err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("get endpoints app=%s service=%s failed: %v", app.ID, serviceName, err)
+			}
+			return
+		}
+		if found {
+			ready, total = countReadyLegacyEndpointAddresses(endpoints)
+			endpointSource = "endpoints"
+		} else {
+			endpointSource = "none"
+		}
+	}
 	eventType := "managed_app_ready_endpoints_sample"
 	severity := "info"
 	message := "managed app service ready endpoints sampled"
@@ -193,6 +209,7 @@ func (s *Service) sampleManagedAppReadyEndpoints(ctx context.Context, client *ku
 	s.logControllerAppEvent(ctx, eventType, severity, app, message, map[string]any{
 		"service_name":        serviceName,
 		"namespace":           namespace,
+		"endpoint_source":     endpointSource,
 		"ready_endpoints":     ready,
 		"total_endpoints":     total,
 		"desired_replicas":    app.Spec.Replicas,
@@ -218,6 +235,16 @@ func countReadyEndpointAddresses(slices []kubeEndpointSlice) (int, int) {
 			}
 			ready += addressCount
 		}
+	}
+	return ready, total
+}
+
+func countReadyLegacyEndpointAddresses(endpoints kubeEndpoints) (int, int) {
+	ready := 0
+	total := 0
+	for _, subset := range endpoints.Subsets {
+		ready += len(subset.Addresses)
+		total += len(subset.Addresses) + len(subset.NotReadyAddresses)
 	}
 	return ready, total
 }
