@@ -13,6 +13,8 @@ import (
 
 type imageConfigInspector func(ctx context.Context, imageRef string) (*v1.ConfigFile, error)
 
+const defaultCNBLauncherPath = "/cnb/lifecycle/launcher"
+
 func (s *Service) appWithResolvedLaunchOverride(ctx context.Context, app model.App) model.App {
 	if len(app.Spec.Command) == 0 || strings.TrimSpace(app.Spec.Image) == "" {
 		return app
@@ -20,7 +22,7 @@ func (s *Service) appWithResolvedLaunchOverride(ctx context.Context, app model.A
 
 	inspect := s.inspectManagedImageConfig
 	if inspect == nil {
-		return app
+		return appWithBuildpacksLauncherFallback(app)
 	}
 
 	candidates := s.launchOverrideInspectionImageRefs(app)
@@ -34,7 +36,7 @@ func (s *Service) appWithResolvedLaunchOverride(ctx context.Context, app model.A
 
 		command, args, ok := resolveCompanionLauncherOverride(configFile, app.Spec.Command, app.Spec.Args)
 		if !ok {
-			return app
+			return appWithBuildpacksLauncherFallback(app)
 		}
 
 		app.Spec.Command = command
@@ -45,7 +47,7 @@ func (s *Service) appWithResolvedLaunchOverride(ctx context.Context, app model.A
 	if inspectErr != nil && s.Logger != nil {
 		s.Logger.Printf("skip launch override inspection for image %s via refs %v: %v", app.Spec.Image, candidates, inspectErr)
 	}
-	return app
+	return appWithBuildpacksLauncherFallback(app)
 }
 
 func resolveCompanionLauncherOverride(configFile *v1.ConfigFile, command, args []string) ([]string, []string, bool) {
@@ -64,6 +66,32 @@ func resolveCompanionLauncherOverride(configFile *v1.ConfigFile, command, args [
 	launcherArgs := append([]string(nil), command...)
 	launcherArgs = append(launcherArgs, args...)
 	return []string{launcherPath}, launcherArgs, true
+}
+
+func appWithBuildpacksLauncherFallback(app model.App) model.App {
+	if !appHasBuildpacksSource(app) || len(app.Spec.Command) == 0 {
+		return app
+	}
+	if strings.TrimSpace(app.Spec.Command[0]) == defaultCNBLauncherPath {
+		return app
+	}
+	launcherArgs := append([]string(nil), app.Spec.Command...)
+	launcherArgs = append(launcherArgs, app.Spec.Args...)
+	app.Spec.Command = []string{defaultCNBLauncherPath}
+	app.Spec.Args = launcherArgs
+	return app
+}
+
+func appHasBuildpacksSource(app model.App) bool {
+	for _, source := range []*model.AppSource{app.Source, app.BuildSource, app.OriginSource, model.AppBuildSource(app)} {
+		if source == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(source.BuildStrategy), model.AppBuildStrategyBuildpacks) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) launchOverrideInspectionImageRefs(app model.App) []string {

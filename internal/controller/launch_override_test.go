@@ -202,3 +202,87 @@ func TestAppWithResolvedLaunchOverrideSkipsPullBaseRuntimeFallback(t *testing.T)
 		t.Fatalf("expected command to remain unchanged, got %#v", resolved.Spec.Command)
 	}
 }
+
+func TestAppWithResolvedLaunchOverrideUsesBuildpacksFallbackWhenInspectionFails(t *testing.T) {
+	svc := &Service{
+		registryPushBase: "registry.internal.example",
+		inspectManagedImageConfig: func(ctx context.Context, imageRef string) (*v1.ConfigFile, error) {
+			return nil, errors.New("manifest unknown")
+		},
+	}
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:   "registry.internal.example/fugue-apps/demo:upload-abc123",
+			Command: []string{"sh", "-lc", "node server.js"},
+		},
+		BuildSource: &model.AppSource{
+			Type:          model.AppSourceTypeUpload,
+			BuildStrategy: model.AppBuildStrategyBuildpacks,
+		},
+	}
+
+	resolved := svc.appWithResolvedLaunchOverride(context.Background(), app)
+	if len(resolved.Spec.Command) != 1 || resolved.Spec.Command[0] != defaultCNBLauncherPath {
+		t.Fatalf("expected buildpacks fallback launcher command, got %#v", resolved.Spec.Command)
+	}
+	if len(resolved.Spec.Args) != 3 || resolved.Spec.Args[0] != "sh" || resolved.Spec.Args[1] != "-lc" || resolved.Spec.Args[2] != "node server.js" {
+		t.Fatalf("unexpected buildpacks fallback launcher args: %#v", resolved.Spec.Args)
+	}
+}
+
+func TestAppWithResolvedLaunchOverrideUsesBuildpacksFallbackWhenEntrypointIsNotProcess(t *testing.T) {
+	svc := &Service{
+		registryPushBase: "registry.internal.example",
+		inspectManagedImageConfig: func(ctx context.Context, imageRef string) (*v1.ConfigFile, error) {
+			return &v1.ConfigFile{
+				Config: v1.Config{
+					Entrypoint: []string{"/usr/local/bin/entrypoint"},
+				},
+			}, nil
+		},
+	}
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:   "registry.internal.example/fugue-apps/demo:upload-abc123",
+			Command: []string{"sh", "-lc", "node server.js"},
+		},
+		BuildSource: &model.AppSource{
+			Type:          model.AppSourceTypeUpload,
+			BuildStrategy: model.AppBuildStrategyBuildpacks,
+		},
+	}
+
+	resolved := svc.appWithResolvedLaunchOverride(context.Background(), app)
+	if len(resolved.Spec.Command) != 1 || resolved.Spec.Command[0] != defaultCNBLauncherPath {
+		t.Fatalf("expected buildpacks fallback launcher command, got %#v", resolved.Spec.Command)
+	}
+}
+
+func TestAppWithResolvedLaunchOverrideDoesNotUseFallbackForDockerImageSource(t *testing.T) {
+	svc := &Service{
+		registryPushBase: "registry.internal.example",
+		inspectManagedImageConfig: func(ctx context.Context, imageRef string) (*v1.ConfigFile, error) {
+			return nil, errors.New("manifest unknown")
+		},
+	}
+
+	app := model.App{
+		Spec: model.AppSpec{
+			Image:   "registry.internal.example/fugue-apps/demo:image-abc123",
+			Command: []string{"sh", "-lc", "node server.js"},
+		},
+		BuildSource: &model.AppSource{
+			Type: model.AppSourceTypeDockerImage,
+		},
+	}
+
+	resolved := svc.appWithResolvedLaunchOverride(context.Background(), app)
+	if len(resolved.Spec.Command) != 3 || resolved.Spec.Command[0] != "sh" || resolved.Spec.Command[2] != "node server.js" {
+		t.Fatalf("expected docker image source command to remain unchanged, got %#v", resolved.Spec.Command)
+	}
+	if len(resolved.Spec.Args) != 0 {
+		t.Fatalf("expected docker image source args to remain empty, got %#v", resolved.Spec.Args)
+	}
+}
