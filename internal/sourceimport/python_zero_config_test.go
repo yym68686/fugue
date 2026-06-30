@@ -105,6 +105,73 @@ func TestBuildPythonOverlayFilesSkipsProjectsWithExplicitManifest(t *testing.T) 
 	}
 }
 
+func TestBuildPythonOverlayFilesGeneratesProcfileForPollingEntrypointWithManifest(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "requirements.txt"), []byte("aiogram==3.25.0\n"), 0o644); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte(`import asyncio
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+`), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+
+	files, analysis, err := buildPythonOverlayFiles(repoDir, ".")
+	if err != nil {
+		t.Fatalf("build python overlay files: %v", err)
+	}
+	if got := analysis.SuggestedStartCommand; got != "python main.py" {
+		t.Fatalf("expected suggested startup command %q, got %q", "python main.py", got)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected one overlay file, got %d", len(files))
+	}
+	if files[0].RelativePath != "Procfile" {
+		t.Fatalf("expected Procfile overlay, got %q", files[0].RelativePath)
+	}
+	if files[0].Content != "web: python main.py\n" {
+		t.Fatalf("unexpected Procfile content: %q", files[0].Content)
+	}
+	if !files[0].OnlyIfMissing {
+		t.Fatal("expected generated Procfile to only write when missing")
+	}
+}
+
+func TestBuildPythonOverlayFilesKeepsExplicitProcfile(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "requirements.txt"), []byte("aiogram==3.25.0\n"), 0o644); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "Procfile"), []byte("web: custom\n"), 0o644); err != nil {
+		t.Fatalf("write Procfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte(`if __name__ == "__main__":
+    app.run_polling()
+`), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+
+	files, analysis, err := buildPythonOverlayFiles(repoDir, ".")
+	if err != nil {
+		t.Fatalf("build python overlay files: %v", err)
+	}
+	if !analysis.HasProcfile {
+		t.Fatal("expected explicit Procfile to be detected")
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected no overlay files when Procfile already exists, got %d", len(files))
+	}
+}
+
 func TestAnalyzePythonProjectSuggestsExecutableWebScriptStartupCommand(t *testing.T) {
 	t.Parallel()
 
@@ -135,6 +202,36 @@ if __name__ == "__main__":
 	}
 	if analysis.DetectedPort != 5000 {
 		t.Fatalf("expected detected port 5000, got %d", analysis.DetectedPort)
+	}
+}
+
+func TestAnalyzePythonProjectSuggestsPollingScriptStartupCommand(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.py"), []byte(`import asyncio
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+`), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "requirements.txt"), []byte("aiogram\n"), 0o644); err != nil {
+		t.Fatalf("write requirements.txt: %v", err)
+	}
+
+	analysis, err := analyzePythonProject(repoDir, ".")
+	if err != nil {
+		t.Fatalf("analyze python project: %v", err)
+	}
+	if got := analysis.SuggestedStartCommand; got != "python main.py" {
+		t.Fatalf("expected suggested startup command %q, got %q", "python main.py", got)
+	}
+	if !analysis.HasPollingEntrypoint {
+		t.Fatal("expected polling entrypoint to be detected")
 	}
 }
 

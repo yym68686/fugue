@@ -14,6 +14,7 @@ import (
 type pythonProjectAnalysis struct {
 	IsPythonProject       bool
 	HasDependencyManifest bool
+	HasProcfile           bool
 	HasWebEntrypoint      bool
 	HasWebhookEntrypoint  bool
 	HasPollingEntrypoint  bool
@@ -98,6 +99,7 @@ func analyzePythonProject(repoDir, sourceDir string) (pythonProjectAnalysis, err
 func analyzePythonProjectInDir(appDir string) (pythonProjectAnalysis, error) {
 	analysis := pythonProjectAnalysis{
 		HasDependencyManifest: hasPythonDependencyManifest(appDir),
+		HasProcfile:           pathExists(filepath.Join(appDir, "Procfile")),
 	}
 
 	localModules, pythonFiles, err := collectPythonSourceFiles(appDir)
@@ -155,17 +157,26 @@ func buildPythonOverlayFiles(repoDir, sourceDir string) ([]sourceOverlayFile, py
 	if err != nil {
 		return nil, analysis, err
 	}
-	if !analysis.IsPythonProject || analysis.HasDependencyManifest {
+	if !analysis.IsPythonProject {
 		return nil, analysis, nil
 	}
 
-	return []sourceOverlayFile{
-		{
+	files := make([]sourceOverlayFile, 0, 2)
+	if !analysis.HasDependencyManifest {
+		files = append(files, sourceOverlayFile{
 			RelativePath:  "requirements.txt",
 			Content:       buildGeneratedPythonRequirements(analysis.InferredRequirements),
 			OnlyIfMissing: true,
-		},
-	}, analysis, nil
+		})
+	}
+	if !analysis.HasProcfile && strings.TrimSpace(analysis.SuggestedStartCommand) != "" {
+		files = append(files, sourceOverlayFile{
+			RelativePath:  "Procfile",
+			Content:       "web: " + strings.TrimSpace(analysis.SuggestedStartCommand) + "\n",
+			OnlyIfMissing: true,
+		})
+	}
+	return files, analysis, nil
 }
 
 func hasPythonDependencyManifest(appDir string) bool {
@@ -357,6 +368,13 @@ func inferPythonStartupCommandCandidate(appDir, filePath, content string, detect
 			Command:      "python " + shellArgForStartupCommand(relativePath),
 			RelativePath: relativePath,
 			Score:        300 + rootBonus - scorePenalty,
+		}, true
+	}
+	if pythonMainGuardPattern.MatchString(content) && pythonFileLooksLikePollingEntrypoint(content) {
+		return pythonStartupCommandCandidate{
+			Command:      "python " + shellArgForStartupCommand(relativePath),
+			RelativePath: relativePath,
+			Score:        260 + rootBonus - scorePenalty,
 		}, true
 	}
 
