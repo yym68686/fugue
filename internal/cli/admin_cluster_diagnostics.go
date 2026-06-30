@@ -335,6 +335,7 @@ func (c *CLI) newAdminClusterWorkloadShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			workload = sanitizeClusterWorkloadForOutput(workload, c.shouldRedact())
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"workload": workload})
 			}

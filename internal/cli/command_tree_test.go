@@ -4012,6 +4012,103 @@ func TestRunAPIRequestRedactsNestedJSONBodyString(t *testing.T) {
 	}
 }
 
+func TestRunAdminClusterWorkloadShowRedactsManifestSecrets(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/cluster/workloads/fg/deployment/app" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"workload": {
+				"api_version": "apps/v1",
+				"kind": "Deployment",
+				"namespace": "fg",
+				"name": "app",
+				"annotations": {"fugue.pro/restart-token": "restart-secret"},
+				"conditions": [{"type": "Progressing", "status": "False", "message": "Authorization: Bearer bearer-secret"}],
+				"pods": [{
+					"namespace": "fg",
+					"name": "app-123",
+					"phase": "Running",
+					"ready": false,
+					"containers": [{
+						"name": "app",
+						"image": "registry.fugue.internal:5000/fugue-apps/app:latest",
+						"ready": false,
+						"restart_count": 1,
+						"state": "waiting",
+						"message": "token=pod-secret"
+					}]
+				}],
+				"manifest": {
+					"apiVersion": "apps/v1",
+					"kind": "Deployment",
+					"spec": {
+						"template": {
+							"spec": {
+								"containers": [{
+									"name": "app",
+									"env": [
+										{"name": "FUGUE_TOKEN", "value": "runtime-secret"},
+										{"name": "APP_PUBLIC_URL", "value": "https://demo.example.com"},
+										{"name": "DB_PASSWORD", "valueFrom": {"secretKeyRef": {"name": "db-secret", "key": "password"}}}
+									]
+								}]
+							}
+						}
+					}
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"-o", "json",
+		"admin", "cluster", "workload", "show", "fg", "deployment", "app",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run cluster workload show: %v", err)
+	}
+
+	out := stdout.String()
+	for _, leaked := range []string{"restart-secret", "bearer-secret", "pod-secret", "runtime-secret", "https://demo.example.com", "db-secret"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("expected workload output to redact %q, got %q", leaked, out)
+		}
+	}
+	for _, want := range []string{`"name": "FUGUE_TOKEN"`, `"name": "APP_PUBLIC_URL"`, redactedSecretValue} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected workload output to contain %q, got %q", want, out)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	err = runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--redact=false",
+		"--confirm-raw-output",
+		"-o", "json",
+		"admin", "cluster", "workload", "show", "fg", "deployment", "app",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run raw cluster workload show: %v", err)
+	}
+	for _, want := range []string{"restart-secret", "runtime-secret", "https://demo.example.com"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected raw workload output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
 func TestRunDiagnoseTimingCapturesRequests(t *testing.T) {
 	t.Parallel()
 
