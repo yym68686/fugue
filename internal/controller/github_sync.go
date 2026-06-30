@@ -27,6 +27,9 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		if !shouldAutoSyncGitHubApp(app) {
 			continue
 		}
+		if !gitHubSourceSyncCheckReady(app.Status.SourceSync, currentTime) {
+			continue
+		}
 		hasActiveOp, err := s.Store.HasActiveOperationByApp(app.TenantID, true, app.ID)
 		if err != nil {
 			s.Logger.Printf("github sync active operation check failed for app=%s: %v", app.ID, err)
@@ -40,15 +43,10 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		latestCommit, resolvedBranch, err := s.resolveLatestGitHubCommit(checkCtx, *originSource)
 		cancel()
 		if err != nil {
-			s.Logger.Printf(
-				"github sync check failed for app=%s repo=%s branch=%s: %v",
-				app.ID,
-				strings.TrimSpace(originSource.RepoURL),
-				strings.TrimSpace(originSource.RepoBranch),
-				err,
-			)
+			s.recordGitHubSourceSyncFailure(app, *originSource, err, currentTime)
 			continue
 		}
+		s.recordGitHubSourceSyncSuccess(app, currentTime)
 		latestCommit = strings.TrimSpace(latestCommit)
 		if latestCommit == "" || latestCommit == strings.TrimSpace(originSource.CommitSHA) {
 			continue

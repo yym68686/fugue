@@ -166,6 +166,9 @@ Controller GitHub sync knobs:
 - `FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS`: controller-side concurrency cap for auto-triggered GitHub import/build operations. Set `0` to remove the cap so every ready import can start immediately; same-app ordering is still preserved, and compose dependency checks still gate activation/deploy.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_ACTIVATE_WORKERS`: controller-side concurrency cap for auto-triggered GitHub deploy/activation operations. Set `0` to remove the cap; same-app ordering and compose dependency checks still gate activation.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT`: timeout for each upstream GitHub check.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_CHECK_RETRY_BASE_DELAY`: base retry delay after a GitHub source discovery check fails before any operation is queued. Defaults to `5m`.
+- `FUGUE_CONTROLLER_GITHUB_SYNC_CHECK_RETRY_MAX_DELAY`: maximum retry delay for repeated GitHub source discovery check failures. Defaults to `6h`.
+- GitHub source discovery marks authentication, repository, invalid URL, and missing branch failures as user-actionable. After `3` consecutive user-actionable check failures, automatic source discovery is suspended for that app until the GitHub source is rebound or resumed.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY`: base retry delay after a tracked commit fails during auto sync. Repeated auto failures for the same commit back off from this value while automatic retries remain available.
 - `FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY`: maximum retry delay for repeated auto failures of the same tracked commit.
 - GitHub sync stops auto retrying a tracked commit after `3` failed auto-triggered import or deploy attempts for the same app and commit. The controller only re-arms that commit after a non-`github-sync` GitHub rebuild or deploy is triggered manually, or after a release for that commit completes successfully.

@@ -2353,7 +2353,41 @@ func (s *Store) UpdateAppOriginSource(id string, source model.AppSource) (model.
 			return ErrNotFound
 		}
 		model.SetAppSourceState(&app, &source, model.AppBuildSource(app))
-		app.UpdatedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		app.Status.SourceSync = nil
+		app.Status.UpdatedAt = now
+		app.UpdatedAt = now
+		state.Apps[index] = app
+		normalizeAppStatusForRead(&app)
+		hydrateAppBackingServices(state, &app)
+		return nil
+	})
+	return app, err
+}
+
+func (s *Store) UpdateAppSourceSyncStatus(id string, sourceSync *model.AppSourceSyncStatus) (model.App, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateAppSourceSyncStatus(id, sourceSync)
+	}
+
+	var app model.App
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findApp(state, id)
+		if index < 0 {
+			return ErrNotFound
+		}
+		app = state.Apps[index]
+		if isDeletedApp(app) {
+			return ErrNotFound
+		}
+		now := time.Now().UTC()
+		app.Status.SourceSync = model.CloneAppSourceSyncStatus(sourceSync)
+		app.Status.UpdatedAt = now
+		app.UpdatedAt = now
 		state.Apps[index] = app
 		normalizeAppStatusForRead(&app)
 		hydrateAppBackingServices(state, &app)

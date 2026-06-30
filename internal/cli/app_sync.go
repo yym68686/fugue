@@ -17,6 +17,7 @@ func (c *CLI) newAppSyncCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAppSyncStatusCommand(),
 		c.newAppSyncRunCommand(),
+		c.newAppSyncResumeCommand(),
 	)
 	return cmd
 }
@@ -70,6 +71,9 @@ func (c *CLI) newAppSyncStatusCommand() *cobra.Command {
 				{Key: "repo_branch", Value: sourceField(originSource, func(source *model.AppSource) string { return source.RepoBranch })},
 				{Key: "commit_sha", Value: sourceField(originSource, func(source *model.AppSource) string { return source.CommitSHA })},
 				{Key: "build_strategy", Value: sourceField(originSource, func(source *model.AppSource) string { return source.BuildStrategy })},
+			}
+			if app.Status.SourceSync != nil {
+				pairs = append(pairs, appSourceSyncStatusPairs(app.Status.SourceSync)...)
 			}
 			if latest != nil {
 				pairs = append(pairs,
@@ -158,6 +162,46 @@ func (c *CLI) newAppSyncRunCommand() *cobra.Command {
 	return cmd
 }
 
+func (c *CLI) newAppSyncResumeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <app>",
+		Short: "Resume automatic source sync for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			originSource := model.AppOriginSource(app)
+			if originSource == nil || !model.IsGitHubAppSourceType(originSource.Type) {
+				return fmt.Errorf("app does not have a GitHub origin source to resume")
+			}
+			response, err := client.PatchAppOriginSource(app.ID, originSource)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"app": response.App,
+				})
+			}
+			return writeKeyValues(c.stdout,
+				kvPair{Key: "app_id", Value: response.App.ID},
+				kvPair{Key: "source_ref", Value: sourceRef(model.AppOriginSource(response.App))},
+				kvPair{Key: "source_sync_phase", Value: sourceSyncPhase(response.App.Status.SourceSync)},
+			)
+		},
+	}
+}
+
 func sourceTypeForSync(source *model.AppSource) string {
 	if source == nil {
 		return ""
@@ -170,4 +214,30 @@ func sourceField(source *model.AppSource, fn func(*model.AppSource) string) stri
 		return ""
 	}
 	return strings.TrimSpace(fn(source))
+}
+
+func appSourceSyncStatusPairs(status *model.AppSourceSyncStatus) []kvPair {
+	if status == nil {
+		return nil
+	}
+	return []kvPair{
+		{Key: "source_sync_provider", Value: strings.TrimSpace(status.Provider)},
+		{Key: "source_sync_phase", Value: strings.TrimSpace(status.Phase)},
+		{Key: "source_sync_failures", Value: fmt.Sprintf("%d", status.ConsecutiveFailures)},
+		{Key: "source_sync_last_checked_at", Value: formatOptionalTimePtr(status.LastCheckedAt)},
+		{Key: "source_sync_last_success_at", Value: formatOptionalTimePtr(status.LastSuccessAt)},
+		{Key: "source_sync_last_error_at", Value: formatOptionalTimePtr(status.LastErrorAt)},
+		{Key: "source_sync_last_error_code", Value: strings.TrimSpace(status.LastErrorCode)},
+		{Key: "source_sync_last_error", Value: strings.TrimSpace(status.LastErrorMessage)},
+		{Key: "source_sync_next_check_at", Value: formatOptionalTimePtr(status.NextCheckAt)},
+		{Key: "source_sync_suspended_at", Value: formatOptionalTimePtr(status.SuspendedAt)},
+		{Key: "source_sync_needs_user_action", Value: fmt.Sprintf("%t", status.NeedsUserAction)},
+	}
+}
+
+func sourceSyncPhase(status *model.AppSourceSyncStatus) string {
+	if status == nil {
+		return model.AppSourceSyncPhaseOK
+	}
+	return strings.TrimSpace(status.Phase)
 }

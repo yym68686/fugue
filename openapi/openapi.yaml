@@ -12680,6 +12680,40 @@ components:
         updated_at:
           type: string
           format: date-time
+    AppSourceSyncStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          enum: [github]
+        phase:
+          type: string
+          enum: [ok, degraded, suspended]
+        consecutive_failures:
+          type: integer
+          format: int32
+        last_checked_at:
+          type: string
+          format: date-time
+        last_success_at:
+          type: string
+          format: date-time
+        last_error_at:
+          type: string
+          format: date-time
+        last_error_code:
+          type: string
+        last_error_message:
+          type: string
+        next_check_at:
+          type: string
+          format: date-time
+        suspended_at:
+          type: string
+          format: date-time
+        needs_user_action:
+          type: boolean
     AppStatus:
       type: object
       additionalProperties: false
@@ -12705,6 +12739,8 @@ components:
         updated_at:
           type: string
           format: date-time
+        source_sync:
+          $ref: "#/components/schemas/AppSourceSyncStatus"
     AppSpec:
       type: object
       additionalProperties: false

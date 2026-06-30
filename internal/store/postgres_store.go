@@ -2654,12 +2654,50 @@ func (s *Store) pgUpdateAppOriginSource(id string, source model.AppSource) (mode
 	}
 
 	model.SetAppSourceState(&app, &source, model.AppBuildSource(app))
-	app.UpdatedAt = time.Now().UTC()
+	now := time.Now().UTC()
+	app.Status.SourceSync = nil
+	app.Status.UpdatedAt = now
+	app.UpdatedAt = now
 	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
 		return model.App{}, mapDBErr(err)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.App{}, fmt.Errorf("commit update app origin source transaction: %w", err)
+	}
+	normalizeAppStatusForRead(&app)
+	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {
+		return model.App{}, err
+	}
+	return app, nil
+}
+
+func (s *Store) pgUpdateAppSourceSyncStatus(id string, sourceSync *model.AppSourceSyncStatus) (model.App, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, fmt.Errorf("begin update app source sync status transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.App{}, ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	app.Status.SourceSync = model.CloneAppSourceSyncStatus(sourceSync)
+	app.Status.UpdatedAt = now
+	app.UpdatedAt = now
+	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.App{}, fmt.Errorf("commit update app source sync status transaction: %w", err)
 	}
 	normalizeAppStatusForRead(&app)
 	if err := s.pgHydrateAppBackingServices(context.Background(), &app); err != nil {

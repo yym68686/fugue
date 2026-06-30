@@ -43,6 +43,12 @@ const (
 	AppSourceTypeDockerImage   = "docker-image"
 	AppSourceTypeUpload        = "upload"
 
+	AppSourceSyncProviderGitHub = "github"
+
+	AppSourceSyncPhaseOK        = "ok"
+	AppSourceSyncPhaseDegraded  = "degraded"
+	AppSourceSyncPhaseSuspended = "suspended"
+
 	AppBuildStrategyAuto       = "auto"
 	AppBuildStrategyStaticSite = "static-site"
 	AppBuildStrategyDockerfile = "dockerfile"
@@ -1789,15 +1795,58 @@ type ServiceBinding struct {
 	UpdatedAt time.Time         `json:"updated_at"`
 }
 
+type AppSourceSyncStatus struct {
+	Provider            string     `json:"provider,omitempty"`
+	Phase               string     `json:"phase,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures,omitempty"`
+	LastCheckedAt       *time.Time `json:"last_checked_at,omitempty"`
+	LastSuccessAt       *time.Time `json:"last_success_at,omitempty"`
+	LastErrorAt         *time.Time `json:"last_error_at,omitempty"`
+	LastErrorCode       string     `json:"last_error_code,omitempty"`
+	LastErrorMessage    string     `json:"last_error_message,omitempty"`
+	NextCheckAt         *time.Time `json:"next_check_at,omitempty"`
+	SuspendedAt         *time.Time `json:"suspended_at,omitempty"`
+	NeedsUserAction     bool       `json:"needs_user_action,omitempty"`
+}
+
+func CloneAppSourceSyncStatus(in *AppSourceSyncStatus) *AppSourceSyncStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.LastCheckedAt != nil {
+		value := *in.LastCheckedAt
+		out.LastCheckedAt = &value
+	}
+	if in.LastSuccessAt != nil {
+		value := *in.LastSuccessAt
+		out.LastSuccessAt = &value
+	}
+	if in.LastErrorAt != nil {
+		value := *in.LastErrorAt
+		out.LastErrorAt = &value
+	}
+	if in.NextCheckAt != nil {
+		value := *in.NextCheckAt
+		out.NextCheckAt = &value
+	}
+	if in.SuspendedAt != nil {
+		value := *in.SuspendedAt
+		out.SuspendedAt = &value
+	}
+	return &out
+}
+
 type AppStatus struct {
-	Phase                   string     `json:"phase"`
-	CurrentRuntimeID        string     `json:"current_runtime_id,omitempty"`
-	CurrentReplicas         int        `json:"current_replicas"`
-	CurrentReleaseStartedAt *time.Time `json:"current_release_started_at,omitempty"`
-	CurrentReleaseReadyAt   *time.Time `json:"current_release_ready_at,omitempty"`
-	LastOperationID         string     `json:"last_operation_id,omitempty"`
-	LastMessage             string     `json:"last_message,omitempty"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	Phase                   string               `json:"phase"`
+	CurrentRuntimeID        string               `json:"current_runtime_id,omitempty"`
+	CurrentReplicas         int                  `json:"current_replicas"`
+	CurrentReleaseStartedAt *time.Time           `json:"current_release_started_at,omitempty"`
+	CurrentReleaseReadyAt   *time.Time           `json:"current_release_ready_at,omitempty"`
+	LastOperationID         string               `json:"last_operation_id,omitempty"`
+	LastMessage             string               `json:"last_message,omitempty"`
+	UpdatedAt               time.Time            `json:"updated_at"`
+	SourceSync              *AppSourceSyncStatus `json:"source_sync,omitempty"`
 }
 
 type App struct {

@@ -135,6 +135,15 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.GitHubSyncRetryMaxDelay < s.Config.GitHubSyncRetryBaseDelay {
 		s.Config.GitHubSyncRetryMaxDelay = s.Config.GitHubSyncRetryBaseDelay
 	}
+	if s.Config.GitHubSyncCheckRetryBaseDelay <= 0 {
+		s.Config.GitHubSyncCheckRetryBaseDelay = 5 * time.Minute
+	}
+	if s.Config.GitHubSyncCheckRetryMaxDelay <= 0 {
+		s.Config.GitHubSyncCheckRetryMaxDelay = 6 * time.Hour
+	}
+	if s.Config.GitHubSyncCheckRetryMaxDelay < s.Config.GitHubSyncCheckRetryBaseDelay {
+		s.Config.GitHubSyncCheckRetryMaxDelay = s.Config.GitHubSyncCheckRetryBaseDelay
+	}
 	if s.Config.ManagedAppRolloutTimeout <= 0 {
 		s.Config.ManagedAppRolloutTimeout = config.DefaultManagedAppRolloutTimeout
 	}

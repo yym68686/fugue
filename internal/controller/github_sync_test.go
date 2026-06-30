@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -106,6 +107,236 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 	}
 	if app.Status.Phase != "importing" {
 		t.Fatalf("expected app phase importing, got %q", app.Status.Phase)
+	}
+}
+
+func TestSyncGitHubAppsBacksOffAndSuspendsDiscoveryFailures(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+		CommitSHA:     "oldcommit",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	now := time.Date(2026, 6, 30, 1, 0, 0, 0, time.UTC)
+	attempts := 0
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			GitHubSyncTimeout:             time.Second,
+			GitHubSyncCheckRetryBaseDelay: 5 * time.Minute,
+			GitHubSyncCheckRetryMaxDelay:  30 * time.Minute,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			attempts++
+			return "", "", errors.New("git ls-remote HEAD: exit status 128: fatal: could not read Username for 'https://github.com': terminal prompts disabled")
+		},
+		now: func() time.Time {
+			return now
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps first failure: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected one upstream check, got %d", attempts)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after first failure: %v", err)
+	}
+	if app.Status.SourceSync == nil || app.Status.SourceSync.Phase != model.AppSourceSyncPhaseDegraded {
+		t.Fatalf("expected degraded source sync status, got %#v", app.Status.SourceSync)
+	}
+	if app.Status.SourceSync.ConsecutiveFailures != 1 || app.Status.SourceSync.LastErrorCode != "auth_required" || !app.Status.SourceSync.NeedsUserAction {
+		t.Fatalf("unexpected first failure status: %#v", app.Status.SourceSync)
+	}
+	firstNextCheck := app.Status.SourceSync.NextCheckAt
+	if firstNextCheck == nil || !firstNextCheck.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("expected first next check at %s, got %#v", now.Add(5*time.Minute), firstNextCheck)
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps during backoff: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected backoff to skip upstream check, got %d attempts", attempts)
+	}
+
+	now = firstNextCheck.Add(time.Second)
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps second failure: %v", err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after second failure: %v", err)
+	}
+	if attempts != 2 || app.Status.SourceSync == nil || app.Status.SourceSync.ConsecutiveFailures != 2 {
+		t.Fatalf("expected second failure to be recorded, attempts=%d status=%#v", attempts, app.Status.SourceSync)
+	}
+	secondNextCheck := app.Status.SourceSync.NextCheckAt
+	if secondNextCheck == nil || !secondNextCheck.Equal(now.Add(10*time.Minute)) {
+		t.Fatalf("expected second next check at %s, got %#v", now.Add(10*time.Minute), secondNextCheck)
+	}
+
+	now = secondNextCheck.Add(time.Second)
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps third failure: %v", err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after third failure: %v", err)
+	}
+	if attempts != 3 || app.Status.SourceSync == nil || app.Status.SourceSync.Phase != model.AppSourceSyncPhaseSuspended {
+		t.Fatalf("expected source sync to suspend, attempts=%d status=%#v", attempts, app.Status.SourceSync)
+	}
+	if app.Status.SourceSync.NextCheckAt != nil || app.Status.SourceSync.SuspendedAt == nil {
+		t.Fatalf("expected suspended status without next check, got %#v", app.Status.SourceSync)
+	}
+
+	now = now.Add(24 * time.Hour)
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps after suspension: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected suspended app to skip upstream checks, got %d attempts", attempts)
+	}
+	ops, err := stateStore.ListOperations("", true)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("expected discovery failures to avoid creating operations, got %d", len(ops))
+	}
+
+	originSource := model.AppOriginSource(app)
+	if originSource == nil {
+		t.Fatal("expected app origin source")
+	}
+	app, err = stateStore.UpdateAppOriginSource(app.ID, *originSource)
+	if err != nil {
+		t.Fatalf("rebind app origin source: %v", err)
+	}
+	if app.Status.SourceSync != nil {
+		t.Fatalf("expected source rebind to clear sync status, got %#v", app.Status.SourceSync)
+	}
+}
+
+func TestSyncGitHubAppsRecordsDiscoveryRecovery(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	tenant, err := stateStore.CreateTenant("Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "web", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateImportedApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "registry.example.com/demo:git-old",
+		Ports:     []int{80},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	}, model.AppSource{
+		Type:          model.AppSourceTypeGitHubPublic,
+		RepoURL:       "https://github.com/example/demo",
+		RepoBranch:    "main",
+		BuildStrategy: model.AppBuildStrategyStaticSite,
+		CommitSHA:     "oldcommit",
+	}, model.AppRoute{
+		Hostname:    "demo.example.com",
+		BaseDomain:  "example.com",
+		PublicURL:   "https://demo.example.com",
+		ServicePort: 80,
+	})
+	if err != nil {
+		t.Fatalf("create imported app: %v", err)
+	}
+
+	failedAt := time.Date(2026, 6, 30, 1, 0, 0, 0, time.UTC)
+	nextCheckAt := failedAt.Add(5 * time.Minute)
+	if _, err := stateStore.UpdateAppSourceSyncStatus(app.ID, &model.AppSourceSyncStatus{
+		Provider:            model.AppSourceSyncProviderGitHub,
+		Phase:               model.AppSourceSyncPhaseDegraded,
+		ConsecutiveFailures: 1,
+		LastCheckedAt:       &failedAt,
+		LastErrorAt:         &failedAt,
+		LastErrorCode:       "network",
+		LastErrorMessage:    "temporary network failure",
+		NextCheckAt:         &nextCheckAt,
+	}); err != nil {
+		t.Fatalf("seed source sync status: %v", err)
+	}
+
+	now := nextCheckAt.Add(time.Second)
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			GitHubSyncTimeout:             time.Second,
+			GitHubSyncCheckRetryBaseDelay: 5 * time.Minute,
+			GitHubSyncCheckRetryMaxDelay:  30 * time.Minute,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
+			return "oldcommit", "main", nil
+		},
+		now: func() time.Time {
+			return now
+		},
+	}
+
+	if err := svc.syncGitHubApps(context.Background()); err != nil {
+		t.Fatalf("sync github apps after recovery: %v", err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after recovery: %v", err)
+	}
+	if app.Status.SourceSync == nil || app.Status.SourceSync.Phase != model.AppSourceSyncPhaseOK {
+		t.Fatalf("expected recovered source sync status, got %#v", app.Status.SourceSync)
+	}
+	if app.Status.SourceSync.ConsecutiveFailures != 0 || app.Status.SourceSync.LastErrorAt != nil || app.Status.SourceSync.NextCheckAt != nil {
+		t.Fatalf("expected recovery to clear failure fields, got %#v", app.Status.SourceSync)
+	}
+	if app.Status.SourceSync.LastSuccessAt == nil || !app.Status.SourceSync.LastSuccessAt.Equal(now) {
+		t.Fatalf("expected last success at %s, got %#v", now, app.Status.SourceSync.LastSuccessAt)
 	}
 }
 
