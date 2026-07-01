@@ -912,6 +912,47 @@ func TestBuildMachineNodeMergePatchBlocksDiskPressureNodes(t *testing.T) {
 	}
 }
 
+func TestBuildClusterNodePolicyStatusFlagsFilesystemPressureBeforeDiskPressure(t *testing.T) {
+	t.Parallel()
+
+	imageUsage := 91.2
+	nodeUsage := 12.3
+	snapshot := clusterNodeSnapshot{
+		node: model.ClusterNode{
+			Name: "worker-storage-hot",
+			Conditions: map[string]model.ClusterNodeCondition{
+				clusterNodeConditionReady: {Status: "true"},
+				clusterNodeConditionDisk:  {Status: "false"},
+			},
+			EphemeralStorage: &model.ClusterNodeStorageStats{
+				UsagePercent: &nodeUsage,
+			},
+			ImageFilesystem: &model.ClusterNodeStorageStats{
+				UsagePercent: &imageUsage,
+			},
+		},
+	}
+
+	status := buildClusterNodePolicyStatus(snapshot, nil, nil, nil)
+	if !status.Ready || status.DiskPressure || !status.NodeSchedulable {
+		t.Fatalf("expected node to be Ready without DiskPressure, got %+v", status)
+	}
+	if !status.FilesystemPressure {
+		t.Fatalf("expected filesystem pressure before kubelet DiskPressure, got %+v", status)
+	}
+	if status.FilesystemUsage == nil || *status.FilesystemUsage != imageUsage {
+		t.Fatalf("expected filesystem usage %.1f, got %+v", imageUsage, status.FilesystemUsage)
+	}
+	if !status.BlockRollout || !strings.Contains(status.GateReason, "image filesystem") || !strings.Contains(status.GateReason, "image-gc high watermark") {
+		t.Fatalf("expected filesystem pressure to gate rollout, got block=%v reason=%q", status.BlockRollout, status.GateReason)
+	}
+
+	summary := summarizeClusterNodePolicyStatuses([]model.ClusterNodePolicyStatus{status})
+	if summary.FilesystemPressure != 1 || summary.DiskPressure != 0 || summary.Ready != 1 {
+		t.Fatalf("unexpected filesystem pressure summary: %+v", summary)
+	}
+}
+
 func TestReconcileSharedPoolPolicyDriftFromSnapshotsRemovesBootstrapControlPlaneLabel(t *testing.T) {
 	t.Parallel()
 

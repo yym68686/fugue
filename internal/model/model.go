@@ -872,6 +872,7 @@ type ClusterNode struct {
 	CPU              *ClusterNodeCPUStats            `json:"cpu,omitempty"`
 	Memory           *ClusterNodeMemoryStats         `json:"memory,omitempty"`
 	EphemeralStorage *ClusterNodeStorageStats        `json:"ephemeral_storage,omitempty"`
+	ImageFilesystem  *ClusterNodeStorageStats        `json:"image_filesystem,omitempty"`
 	RuntimeID        string                          `json:"runtime_id,omitempty"`
 	TenantID         string                          `json:"tenant_id,omitempty"`
 	Machine          *ClusterNodeMachine             `json:"machine,omitempty"`
@@ -929,6 +930,9 @@ type ClusterNodePolicyStatus struct {
 	Conditions          map[string]ClusterNodeCondition `json:"conditions,omitempty"`
 	Ready               bool                            `json:"ready"`
 	DiskPressure        bool                            `json:"disk_pressure"`
+	FilesystemPressure  bool                            `json:"filesystem_pressure"`
+	FilesystemUsage     *float64                        `json:"filesystem_usage_percent,omitempty"`
+	FilesystemReason    string                          `json:"filesystem_pressure_reason,omitempty"`
 	NodeSchedulable     bool                            `json:"node_schedulable"`
 	Reconciled          bool                            `json:"reconciled"`
 	ReconcileReasons    []string                        `json:"reconcile_reasons,omitempty"`
@@ -939,12 +943,13 @@ type ClusterNodePolicyStatus struct {
 }
 
 type ClusterNodePolicyStatusSummary struct {
-	Total           int `json:"total"`
-	Reconciled      int `json:"reconciled"`
-	Drifted         int `json:"drifted"`
-	Ready           int `json:"ready"`
-	DiskPressure    int `json:"disk_pressure"`
-	BlockedByHealth int `json:"blocked_by_health"`
+	Total              int `json:"total"`
+	Reconciled         int `json:"reconciled"`
+	Drifted            int `json:"drifted"`
+	Ready              int `json:"ready"`
+	DiskPressure       int `json:"disk_pressure"`
+	FilesystemPressure int `json:"filesystem_pressure"`
+	BlockedByHealth    int `json:"blocked_by_health"`
 }
 
 type ControlPlaneComponent struct {

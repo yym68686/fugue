@@ -588,13 +588,13 @@ func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNode
 		return strings.Compare(sorted[i].NodeName, sorted[j].NodeName) < 0
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tDEDICATED\tCP\tREADY\tDISK\tHEALTH\tRECONCILED\tBLOCK\tGATE\tREASONS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NODE\tRUNTIME\tAPP\tBUILD\tSHARED\tEDGE\tDNS\tINTERNAL\tDEDICATED\tCP\tREADY\tDISK\tFS\tHEALTH\tRECONCILED\tBLOCK\tGATE\tREASONS"); err != nil {
 		return err
 	}
 	for _, status := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			status.NodeName,
 			firstNonEmpty(status.RuntimeID, "-"),
 			firstNonEmpty(formatClusterNodePolicyToggle(status.Policy, func(policy *model.ClusterNodePolicy) bool { return policy.AllowAppRuntime }, func(policy *model.ClusterNodePolicy) bool { return policy.EffectiveAppRuntime }), "-"),
@@ -607,6 +607,7 @@ func writeClusterNodePolicyStatusTable(w io.Writer, statuses []model.ClusterNode
 			firstNonEmpty(clusterNodePolicyControlPlane(status.Policy), "-"),
 			clusterNodeBoolLabel(status.Ready),
 			clusterNodeBoolLabel(status.DiskPressure),
+			clusterNodeFilesystemLabel(status),
 			firstNonEmpty(clusterNodePolicyHealth(status), "-"),
 			clusterNodeBoolLabel(status.Reconciled),
 			clusterNodeBoolLabel(status.BlockRollout),
@@ -627,6 +628,9 @@ func writeClusterNodePolicyDetails(w io.Writer, status model.ClusterNodePolicySt
 		kvPair{Key: "machine", Value: firstNonEmpty(status.MachineID, "-")},
 		kvPair{Key: "ready", Value: clusterNodeBoolLabel(status.Ready)},
 		kvPair{Key: "disk_pressure", Value: clusterNodeBoolLabel(status.DiskPressure)},
+		kvPair{Key: "filesystem_pressure", Value: clusterNodeBoolLabel(status.FilesystemPressure)},
+		kvPair{Key: "filesystem_usage", Value: clusterNodeFilesystemUsageLabel(status)},
+		kvPair{Key: "filesystem_pressure_reason", Value: firstNonEmpty(status.FilesystemReason, "-")},
 		kvPair{Key: "node_schedulable", Value: clusterNodeBoolLabel(status.NodeSchedulable)},
 		kvPair{Key: "reconciled", Value: clusterNodeBoolLabel(status.Reconciled)},
 		kvPair{Key: "block_rollout", Value: clusterNodeBoolLabel(status.BlockRollout)},
@@ -743,6 +747,20 @@ func clusterNodeBoolLabel(value bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func clusterNodeFilesystemLabel(status model.ClusterNodePolicyStatus) string {
+	if status.FilesystemUsage != nil {
+		return fmt.Sprintf("%s/%.1f%%", clusterNodeBoolLabel(status.FilesystemPressure), *status.FilesystemUsage)
+	}
+	return clusterNodeBoolLabel(status.FilesystemPressure)
+}
+
+func clusterNodeFilesystemUsageLabel(status model.ClusterNodePolicyStatus) string {
+	if status.FilesystemUsage == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f%%", *status.FilesystemUsage)
 }
 
 func clusterNodePolicyHealth(status model.ClusterNodePolicyStatus) string {

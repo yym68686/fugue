@@ -201,8 +201,9 @@ type clusterNodeResourceRequirements struct {
 }
 
 type kubeNodeSummary struct {
-	Node kubeNodeSummaryNode  `json:"node"`
-	Pods []kubeNodeSummaryPod `json:"pods,omitempty"`
+	Node    kubeNodeSummaryNode    `json:"node"`
+	Runtime kubeNodeSummaryRuntime `json:"runtime,omitempty"`
+	Pods    []kubeNodeSummaryPod   `json:"pods,omitempty"`
 }
 
 type kubeNodeSummaryNode struct {
@@ -226,6 +227,10 @@ type kubeNodeSummaryFS struct {
 	AvailableBytes *uint64 `json:"availableBytes,omitempty"`
 	CapacityBytes  *uint64 `json:"capacityBytes,omitempty"`
 	UsedBytes      *uint64 `json:"usedBytes,omitempty"`
+}
+
+type kubeNodeSummaryRuntime struct {
+	ImageFS kubeNodeSummaryFS `json:"imageFs,omitempty"`
 }
 
 type kubeNodeSummaryPod struct {
@@ -1299,6 +1304,7 @@ func buildClusterNode(node kubeNode, summary *kubeNodeSummary, pods []clusterNod
 		CPU:              buildClusterNodeCPUStats(node, summary, clusterNodeRequestedCPU(requests)),
 		Memory:           buildClusterNodeMemoryStats(node, summary, clusterNodeRequestedMemory(requests)),
 		EphemeralStorage: buildClusterNodeStorageStats(node, summary, clusterNodeRequestedEphemeralStorage(requests)),
+		ImageFilesystem:  buildClusterNodeImageFilesystemStats(summary),
 	}
 	if createdAt := parseClusterNodeTimestamp(node.Metadata.CreationTimestamp); createdAt != nil {
 		out.CreatedAt = createdAt
@@ -1827,6 +1833,19 @@ func buildClusterNodeStorageStats(node kubeNode, summary *kubeNodeSummary, reque
 	return stats
 }
 
+func buildClusterNodeImageFilesystemStats(summary *kubeNodeSummary) *model.ClusterNodeStorageStats {
+	used, capacity := clusterNodeImageFilesystemUsage(summary)
+	stats := &model.ClusterNodeStorageStats{
+		CapacityBytes: capacity,
+		UsedBytes:     used,
+		UsagePercent:  usagePercent(used, capacity),
+	}
+	if isEmptyClusterNodeStorageStats(stats) {
+		return nil
+	}
+	return stats
+}
+
 // Kubelet can leave node.status.ephemeral-storage stale after a root disk resize
 // while stats/summary already reflects the new filesystem size. Use the summary
 // capacity as the displayed total so used bytes, percent, and capacity stay in
@@ -1927,6 +1946,28 @@ func clusterNodeStorageUsage(summary *kubeNodeSummary) (*int64, *int64) {
 		return nil, capacity
 	}
 	value := int64(*summary.Node.FS.CapacityBytes - *summary.Node.FS.AvailableBytes)
+	return &value, capacity
+}
+
+func clusterNodeImageFilesystemUsage(summary *kubeNodeSummary) (*int64, *int64) {
+	if summary == nil {
+		return nil, nil
+	}
+
+	var capacity *int64
+	if summary.Runtime.ImageFS.CapacityBytes != nil {
+		capacity = uint64PointerToInt64(summary.Runtime.ImageFS.CapacityBytes)
+	}
+	if summary.Runtime.ImageFS.UsedBytes != nil {
+		return uint64PointerToInt64(summary.Runtime.ImageFS.UsedBytes), capacity
+	}
+	if summary.Runtime.ImageFS.AvailableBytes == nil || summary.Runtime.ImageFS.CapacityBytes == nil {
+		return nil, capacity
+	}
+	if *summary.Runtime.ImageFS.AvailableBytes > *summary.Runtime.ImageFS.CapacityBytes {
+		return nil, capacity
+	}
+	value := int64(*summary.Runtime.ImageFS.CapacityBytes - *summary.Runtime.ImageFS.AvailableBytes)
 	return &value, capacity
 }
 

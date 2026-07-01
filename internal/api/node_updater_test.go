@@ -385,6 +385,76 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterPrepullAppImagesSkipsMissingManifestRefs(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+reports="${tmpdir}/reports"
+logs="${tmpdir}/logs"
+log_task() {
+  printf '%s\n' "$*" >>"${logs}"
+}
+report_image_location() {
+  printf '%s\t%s\n' "$1" "$2" >>"${reports}"
+}
+verify_image_cache_manifest() {
+  return 0
+}
+pull_container_image() {
+  case "$1" in
+    *missing*)
+      printf 'rpc error: code = NotFound desc = failed to resolve reference "registry.example/app:missing": registry.example/app:missing: not found'
+      return 1
+      ;;
+    *retryable*)
+      printf 'rpc error: code = Unavailable desc = connection refused'
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+FUGUE_NODE_UPDATE_TASK_IMAGES="registry.example/app:present,registry.example/app:missing"
+if ! prepull_app_images; then
+  echo "missing manifest should not fail non-blocking pre-pull"
+  cat "${logs}" || true
+  exit 1
+fi
+grep -q $'registry.example/app:present\tpresent' "${reports}"
+grep -q $'registry.example/app:missing\tmissing' "${reports}"
+grep -q 'skipping stale app image registry.example/app:missing' "${logs}"
+
+: >"${reports}"
+: >"${logs}"
+FUGUE_NODE_UPDATE_TASK_IMAGES="registry.example/app:retryable"
+if prepull_app_images; then
+  echo "retryable pull failure should still fail"
+  exit 1
+fi
+grep -q $'registry.example/app:retryable\tfailed' "${reports}"
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-prepull-missing-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater prepull harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater prepull harness failed: %v\n%s", err, output)
+	}
+}
+
 func ageTaskInStoreFile(t *testing.T, storePath, taskID string, updatedAt time.Time) {
 	t.Helper()
 	raw, err := os.ReadFile(storePath)

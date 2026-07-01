@@ -1872,10 +1872,23 @@ prepull_system_images() {
   done
 }
 
+prepull_app_image_missing_manifest() {
+  local output=""
+  output="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "${output}" in
+    *"manifest_unknown"*|*"manifest unknown"*|*"unknown manifest"*|*"name_unknown"*|*"code = notfound"*|*" not found"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 prepull_app_images() {
   local raw="${FUGUE_NODE_UPDATE_TASK_IMAGES:-${FUGUE_NODE_UPDATE_TASK_IMAGE_REF:-}}"
   local image=""
   local pull_output=""
+  local missing_count=0
+  local present_count=0
   if [ -z "${raw}" ]; then
     log_task "no app images requested for pre-pull"
     return 0
@@ -1892,12 +1905,22 @@ prepull_app_images() {
       fi
       log_task "pre-pulled app image ${image}"
       report_image_location "${image}" present ""
+      present_count=$((present_count + 1))
     else
+      if prepull_app_image_missing_manifest "${pull_output}"; then
+        log_task "skipping stale app image ${image}: registry manifest is missing"
+        report_image_location "${image}" missing "${pull_output}"
+        missing_count=$((missing_count + 1))
+        continue
+      fi
       log_task "failed to pre-pull app image ${image}: ${pull_output}"
       report_image_location "${image}" failed "${pull_output}"
       return 1
     fi
   done
+  if [ "${missing_count}" -gt 0 ]; then
+    log_task "pre-pull completed with ${missing_count} missing stale app image(s) and ${present_count} present app image(s)"
+  fi
 }
 
 image_cache_api_endpoint() {

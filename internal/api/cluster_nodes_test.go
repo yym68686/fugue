@@ -1516,6 +1516,37 @@ func TestBuildClusterNodeStorageStatsReconcilesStaleNodeCapacity(t *testing.T) {
 	}
 }
 
+func TestBuildClusterNodeCapturesRuntimeImageFilesystemStats(t *testing.T) {
+	t.Parallel()
+
+	imageCapacity := uint64(40_000)
+	imageUsed := uint64(36_500)
+	node := kubeNode{}
+	node.Metadata.Name = "worker-imagefs-hot"
+
+	built := buildClusterNode(node, &kubeNodeSummary{
+		Runtime: kubeNodeSummaryRuntime{
+			ImageFS: kubeNodeSummaryFS{
+				CapacityBytes: &imageCapacity,
+				UsedBytes:     &imageUsed,
+			},
+		},
+	}, nil, false)
+
+	if built.ImageFilesystem == nil {
+		t.Fatal("expected image filesystem stats")
+	}
+	if built.ImageFilesystem.CapacityBytes == nil || *built.ImageFilesystem.CapacityBytes != int64(imageCapacity) {
+		t.Fatalf("expected image filesystem capacity %d, got %#v", imageCapacity, built.ImageFilesystem)
+	}
+	if built.ImageFilesystem.UsedBytes == nil || *built.ImageFilesystem.UsedBytes != int64(imageUsed) {
+		t.Fatalf("expected image filesystem used %d, got %#v", imageUsed, built.ImageFilesystem)
+	}
+	if built.ImageFilesystem.UsagePercent == nil || *built.ImageFilesystem.UsagePercent != 91.3 {
+		t.Fatalf("expected image filesystem usage percent 91.3, got %#v", built.ImageFilesystem)
+	}
+}
+
 func TestLoadClusterNodeInventoryReturnsStaleSnapshotWhileBackgroundRefreshUpdatesCache(t *testing.T) {
 	t.Parallel()
 

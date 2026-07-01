@@ -979,6 +979,7 @@ func (c *CLI) newAdminClusterNodePolicyStatusCommand() *cobra.Command {
 				kvPair{Key: "drifted", Value: formatInt(summary.Drifted)},
 				kvPair{Key: "ready", Value: formatInt(summary.Ready)},
 				kvPair{Key: "disk_pressure", Value: formatInt(summary.DiskPressure)},
+				kvPair{Key: "filesystem_pressure", Value: formatInt(summary.FilesystemPressure)},
 				kvPair{Key: "blocked_by_health", Value: formatInt(summary.BlockedByHealth)},
 			); err != nil {
 				return err

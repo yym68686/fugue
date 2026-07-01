@@ -138,7 +138,7 @@ func (c *CLI) renderAdminCockpit(payload adminCockpitPayload, redacted bool) err
 		body = append(body, fmt.Sprintf("backup=%s billable_backup_bytes=%d", summarizeAdminBackupPosture(payload.Backup.Posture), payload.Backup.Usage.BillableBytes))
 	}
 	if payload.NodePolicySummary != nil {
-		body = append(body, fmt.Sprintf("node_policy_drifted=%d blocked_by_health=%d", payload.NodePolicySummary.Drifted, payload.NodePolicySummary.BlockedByHealth))
+		body = append(body, fmt.Sprintf("node_policy_drifted=%d blocked_by_health=%d filesystem_pressure=%d", payload.NodePolicySummary.Drifted, payload.NodePolicySummary.BlockedByHealth, payload.NodePolicySummary.FilesystemPressure))
 	}
 	if payload.Users != nil {
 		body = append(body, fmt.Sprintf("users=%d admins=%d blocked=%d", payload.Users.Summary.UserCount, payload.Users.Summary.AdminCount, payload.Users.Summary.BlockedCount))

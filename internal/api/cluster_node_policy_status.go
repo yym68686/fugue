@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+const clusterNodeFilesystemPressureHighWatermarkPercent = 85.0
 
 func (s *Server) handleListClusterNodePolicies(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -113,18 +116,22 @@ func (s *Server) loadClusterNodePolicyStatuses(ctx context.Context, principal mo
 func buildClusterNodePolicyStatus(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime, policy *model.ClusterNodePolicy) model.ClusterNodePolicyStatus {
 	ready := clusterNodeConditionIsTrue(snapshot.node, clusterNodeConditionReady)
 	diskPressure := clusterNodeConditionIsTrue(snapshot.node, clusterNodeConditionDisk)
+	filesystemPressure, filesystemUsage, filesystemReason := clusterNodeFilesystemPressure(snapshot)
 	reasons := clusterNodePolicyReconcileReasons(snapshot, machine, runtimeObj)
 	out := model.ClusterNodePolicyStatus{
-		NodeName:         snapshot.node.Name,
-		Policy:           policy,
-		Labels:           cloneStringMap(snapshot.labels),
-		Taints:           clusterNodePolicyTaintViews(snapshot.taints),
-		Conditions:       cloneClusterNodeConditions(snapshot.node.Conditions),
-		Ready:            ready,
-		DiskPressure:     diskPressure,
-		NodeSchedulable:  clusterNodeSnapshotSchedulable(snapshot),
-		Reconciled:       len(reasons) == 0,
-		ReconcileReasons: reasons,
+		NodeName:           snapshot.node.Name,
+		Policy:             policy,
+		Labels:             cloneStringMap(snapshot.labels),
+		Taints:             clusterNodePolicyTaintViews(snapshot.taints),
+		Conditions:         cloneClusterNodeConditions(snapshot.node.Conditions),
+		Ready:              ready,
+		DiskPressure:       diskPressure,
+		FilesystemPressure: filesystemPressure,
+		FilesystemUsage:    filesystemUsage,
+		FilesystemReason:   filesystemReason,
+		NodeSchedulable:    clusterNodeSnapshotSchedulable(snapshot),
+		Reconciled:         len(reasons) == 0,
+		ReconcileReasons:   reasons,
 	}
 	out.BlockRollout, out.GateReason = clusterNodePolicyRolloutGate(out)
 	if out.BlockRollout {
@@ -154,6 +161,12 @@ func clusterNodePolicyRolloutGate(status model.ClusterNodePolicyStatus) (bool, s
 		return true, "node is not ready"
 	case status.DiskPressure:
 		return true, "node reports disk pressure"
+	case status.FilesystemPressure:
+		reason := strings.TrimSpace(status.FilesystemReason)
+		if reason == "" {
+			reason = "node filesystem usage is above high watermark"
+		}
+		return true, reason
 	case !status.NodeSchedulable:
 		return true, "node is not schedulable"
 	case !status.Reconciled:
@@ -161,6 +174,39 @@ func clusterNodePolicyRolloutGate(status model.ClusterNodePolicyStatus) (bool, s
 	default:
 		return false, ""
 	}
+}
+
+func clusterNodeFilesystemPressure(snapshot clusterNodeSnapshot) (bool, *float64, string) {
+	imagePressure, imageUsage, imageReason := clusterNodeStoragePressure(
+		snapshot.node.ImageFilesystem,
+		"image filesystem",
+	)
+	if imagePressure {
+		return true, imageUsage, imageReason
+	}
+	nodePressure, nodeUsage, nodeReason := clusterNodeStoragePressure(
+		snapshot.node.EphemeralStorage,
+		"node filesystem",
+	)
+	if nodePressure {
+		return true, nodeUsage, nodeReason
+	}
+	if imageUsage != nil {
+		return false, imageUsage, ""
+	}
+	return false, nodeUsage, ""
+}
+
+func clusterNodeStoragePressure(stats *model.ClusterNodeStorageStats, source string) (bool, *float64, string) {
+	if stats == nil || stats.UsagePercent == nil {
+		return false, nil, ""
+	}
+	usage := *stats.UsagePercent
+	usagePtr := &usage
+	if usage < clusterNodeFilesystemPressureHighWatermarkPercent {
+		return false, usagePtr, ""
+	}
+	return true, usagePtr, fmt.Sprintf("%s usage %.1f%% is at or above %.0f%% kubelet image-gc high watermark", source, usage, clusterNodeFilesystemPressureHighWatermarkPercent)
 }
 
 func clusterNodePolicyReconcileReasons(snapshot clusterNodeSnapshot, machine *model.Machine, runtimeObj *model.Runtime) []string {
@@ -247,6 +293,9 @@ func summarizeClusterNodePolicyStatuses(statuses []model.ClusterNodePolicyStatus
 		}
 		if status.DiskPressure {
 			summary.DiskPressure++
+		}
+		if status.FilesystemPressure {
+			summary.FilesystemPressure++
 		}
 		if !status.NodeSchedulable {
 			summary.BlockedByHealth++

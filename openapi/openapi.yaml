@@ -13490,6 +13490,8 @@ components:
           $ref: "#/components/schemas/ClusterNodeMemoryStats"
         ephemeral_storage:
           $ref: "#/components/schemas/ClusterNodeStorageStats"
+        image_filesystem:
+          $ref: "#/components/schemas/ClusterNodeStorageStats"
         runtime_id:
           type: string
         tenant_id:
@@ -13600,7 +13602,7 @@ components:
     ClusterNodePolicyStatus:
       type: object
       additionalProperties: false
-      required: [node_name, ready, disk_pressure, node_schedulable, reconciled]
+      required: [node_name, ready, disk_pressure, filesystem_pressure, node_schedulable, reconciled]
       properties:
         node_name:
           type: string
@@ -13628,6 +13630,12 @@ components:
           type: boolean
         disk_pressure:
           type: boolean
+        filesystem_pressure:
+          type: boolean
+        filesystem_usage_percent:
+          type: number
+        filesystem_pressure_reason:
+          type: string
         node_schedulable:
           type: boolean
         reconciled:
@@ -13647,7 +13655,7 @@ components:
     ClusterNodePolicyStatusSummary:
       type: object
       additionalProperties: false
-      required: [total, reconciled, drifted, ready, disk_pressure, blocked_by_health]
+      required: [total, reconciled, drifted, ready, disk_pressure, filesystem_pressure, blocked_by_health]
       properties:
         total:
           type: integer
@@ -13662,6 +13670,9 @@ components:
           type: integer
           format: int32
         disk_pressure:
+          type: integer
+          format: int32
+        filesystem_pressure:
           type: integer
           format: int32
         blocked_by_health:
