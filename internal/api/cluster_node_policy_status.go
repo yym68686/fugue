@@ -161,12 +161,6 @@ func clusterNodePolicyRolloutGate(status model.ClusterNodePolicyStatus) (bool, s
 		return true, "node is not ready"
 	case status.DiskPressure:
 		return true, "node reports disk pressure"
-	case status.FilesystemPressure:
-		reason := strings.TrimSpace(status.FilesystemReason)
-		if reason == "" {
-			reason = "node filesystem usage is above high watermark"
-		}
-		return true, reason
 	case !status.NodeSchedulable:
 		return true, "node is not schedulable"
 	case !status.Reconciled:

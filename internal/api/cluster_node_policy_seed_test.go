@@ -912,7 +912,7 @@ func TestBuildMachineNodeMergePatchBlocksDiskPressureNodes(t *testing.T) {
 	}
 }
 
-func TestBuildClusterNodePolicyStatusFlagsFilesystemPressureBeforeDiskPressure(t *testing.T) {
+func TestBuildClusterNodePolicyStatusSurfacesFilesystemPressureBeforeDiskPressure(t *testing.T) {
 	t.Parallel()
 
 	imageUsage := 91.2
@@ -943,8 +943,11 @@ func TestBuildClusterNodePolicyStatusFlagsFilesystemPressureBeforeDiskPressure(t
 	if status.FilesystemUsage == nil || *status.FilesystemUsage != imageUsage {
 		t.Fatalf("expected filesystem usage %.1f, got %+v", imageUsage, status.FilesystemUsage)
 	}
-	if !status.BlockRollout || !strings.Contains(status.GateReason, "image filesystem") || !strings.Contains(status.GateReason, "image-gc high watermark") {
-		t.Fatalf("expected filesystem pressure to gate rollout, got block=%v reason=%q", status.BlockRollout, status.GateReason)
+	if status.FilesystemReason == "" || !strings.Contains(status.FilesystemReason, "image filesystem") || !strings.Contains(status.FilesystemReason, "image-gc high watermark") {
+		t.Fatalf("expected filesystem pressure reason, got %q", status.FilesystemReason)
+	}
+	if status.BlockRollout || status.GateReason != "" {
+		t.Fatalf("expected filesystem pressure to stay visible without blocking rollout, got block=%v reason=%q", status.BlockRollout, status.GateReason)
 	}
 
 	summary := summarizeClusterNodePolicyStatuses([]model.ClusterNodePolicyStatus{status})
