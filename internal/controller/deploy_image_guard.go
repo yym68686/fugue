@@ -20,6 +20,8 @@ type deployImageTarget struct {
 
 var errDeployImageReplicationPending = errors.New("deploy image replication is pending")
 
+const imageHydrationMissingRetryAfter = 6 * time.Hour
+
 func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation, app model.App, scheduling runtimepkg.SchedulingConstraints) error {
 	if s == nil || app.Spec.Replicas <= 0 {
 		return nil
@@ -662,6 +664,9 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 	if strings.TrimSpace(target.ClusterNodeName) == "" && strings.TrimSpace(target.RuntimeID) == "" {
 		return
 	}
+	if s.recentMissingImageLocation(app, target, imageRef, imageHydrationMissingRetryAfter) {
+		return
+	}
 	supported, err := s.Store.NodeUpdaterTargetSupportsTask("", target.ClusterNodeName, target.RuntimeID, model.NodeUpdateTaskTypePrepullAppImages)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -689,6 +694,40 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 		s.Logger.Printf("schedule image hydrate task app=%s image=%s runtime=%s node=%s failed: %v", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, err)
 	}
 	_ = ctx
+}
+
+func (s *Service) recentMissingImageLocation(app model.App, target deployImageTarget, imageRef string, retryAfter time.Duration) bool {
+	if s == nil || s.Store == nil || retryAfter <= 0 {
+		return false
+	}
+	locations, err := s.Store.ListImageLocations(model.ImageLocationFilter{
+		TenantID: strings.TrimSpace(app.TenantID),
+		ImageRef: imageRef,
+		Status:   model.ImageLocationStatusMissing,
+	})
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("list missing image locations for hydrate suppression app=%s image=%s failed: %v", app.ID, imageRef, err)
+		}
+		return false
+	}
+	cutoff := time.Now().UTC().Add(-retryAfter)
+	for _, location := range locations {
+		if !imageLocationPresentOnTarget([]model.ImageLocation{location}, target) {
+			continue
+		}
+		if !imageLocationObservedAt(location).Before(cutoff) {
+			return true
+		}
+	}
+	return false
+}
+
+func imageLocationObservedAt(location model.ImageLocation) time.Time {
+	if location.LastSeenAt != nil && !location.LastSeenAt.IsZero() {
+		return location.LastSeenAt.UTC()
+	}
+	return location.UpdatedAt.UTC()
 }
 
 func (s *Service) nodeHydrationImageRef(imageRef string) string {
