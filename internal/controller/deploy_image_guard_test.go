@@ -1224,6 +1224,10 @@ func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
+	reportTenant, err := stateStore.CreateTenant("Image Reporter Tenant")
+	if err != nil {
+		t.Fatalf("create reporter tenant: %v", err)
+	}
 	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
 	if err != nil {
 		t.Fatalf("create node key: %v", err)
@@ -1251,8 +1255,8 @@ func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 	imageRef := "registry.example/app@sha256:abc"
 	seenAt := time.Now().UTC()
 	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
-		TenantID:        tenant.ID,
-		AppID:           app.ID,
+		TenantID:        reportTenant.ID,
+		AppID:           "app_reporter",
 		ImageRef:        imageRef,
 		RuntimeID:       updater.RuntimeID,
 		ClusterNodeName: updater.ClusterNodeName,

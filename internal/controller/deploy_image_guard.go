@@ -701,9 +701,9 @@ func (s *Service) recentMissingImageLocation(app model.App, target deployImageTa
 		return false
 	}
 	locations, err := s.Store.ListImageLocations(model.ImageLocationFilter{
-		TenantID: strings.TrimSpace(app.TenantID),
-		ImageRef: imageRef,
-		Status:   model.ImageLocationStatusMissing,
+		ImageRef:      imageRef,
+		Status:        model.ImageLocationStatusMissing,
+		PlatformAdmin: true,
 	})
 	if err != nil {
 		if s.Logger != nil {
