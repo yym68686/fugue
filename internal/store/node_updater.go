@@ -321,13 +321,35 @@ func (s *Store) ListPendingNodeUpdateTasks(updaterID string, limit int) ([]model
 				continue
 			}
 			tasks = append(tasks, redactNodeUpdateTask(task))
-			if len(tasks) >= limit {
-				break
-			}
 		}
 		return nil
 	})
+	sortNodeUpdateTasksForDelivery(tasks)
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+	}
 	return tasks, err
+}
+
+func sortNodeUpdateTasksForDelivery(tasks []model.NodeUpdateTask) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		priorityI := nodeUpdateTaskDeliveryPriority(tasks[i])
+		priorityJ := nodeUpdateTaskDeliveryPriority(tasks[j])
+		if priorityI != priorityJ {
+			return priorityI < priorityJ
+		}
+		if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+			return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+		}
+		return tasks[i].ID < tasks[j].ID
+	})
+}
+
+func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
+	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
+		return 0
+	}
+	return 1
 }
 
 func (s *Store) FailStaleRunningNodeUpdateTasks(updaterID string, staleAfter time.Duration) (int, error) {

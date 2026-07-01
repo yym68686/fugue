@@ -264,6 +264,69 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}
 }
 
+func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgrade(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater Priority Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		nil,
+		"worker-1",
+		"machine-1",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages, model.NodeUpdateTaskTypeUpgradeUpdater},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	requester := model.Principal{
+		ActorType: model.ActorTypeAPIKey,
+		ActorID:   "apikey_test",
+		TenantID:  tenant.ID,
+	}
+	prepull, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePrepullAppImages, map[string]string{
+		"app_id": "app_1",
+		"images": "registry.example/app:stale",
+	})
+	if err != nil {
+		t.Fatalf("create prepull task: %v", err)
+	}
+	upgrade, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeUpgradeUpdater, nil)
+	if err != nil {
+		t.Fatalf("create updater upgrade task: %v", err)
+	}
+
+	pending, err := s.ListPendingNodeUpdateTasks(updater.ID, 1)
+	if err != nil {
+		t.Fatalf("list pending tasks: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != upgrade.ID {
+		t.Fatalf("expected updater upgrade to be delivered first, got %+v", pending)
+	}
+
+	pending, err = s.ListPendingNodeUpdateTasks(updater.ID, 10)
+	if err != nil {
+		t.Fatalf("list all pending tasks: %v", err)
+	}
+	if len(pending) != 2 || pending[0].ID != upgrade.ID || pending[1].ID != prepull.ID {
+		t.Fatalf("expected upgrade before prepull, got %+v", pending)
+	}
+}
+
 func TestFailStaleRunningNodeUpdateTasks(t *testing.T) {
 	t.Parallel()
 
