@@ -724,10 +724,14 @@ func (s *Service) recentMissingImageLocation(app model.App, target deployImageTa
 }
 
 func imageLocationObservedAt(location model.ImageLocation) time.Time {
+	observedAt := location.UpdatedAt.UTC()
 	if location.LastSeenAt != nil && !location.LastSeenAt.IsZero() {
-		return location.LastSeenAt.UTC()
+		lastSeenAt := location.LastSeenAt.UTC()
+		if lastSeenAt.After(observedAt) {
+			return lastSeenAt
+		}
 	}
-	return location.UpdatedAt.UTC()
+	return observedAt
 }
 
 func (s *Service) nodeHydrationImageRef(imageRef string) string {

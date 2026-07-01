@@ -3,9 +3,11 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1216,7 +1218,8 @@ func TestScheduleImageHydrationCreatesTaskForCapableUpdater(t *testing.T) {
 func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1253,7 +1256,7 @@ func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 	}
 	app := model.App{ID: "app_1", TenantID: tenant.ID}
 	imageRef := "registry.example/app@sha256:abc"
-	seenAt := time.Now().UTC()
+	seenAt := time.Now().UTC().Add(-imageHydrationMissingRetryAfter - time.Minute)
 	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID:        reportTenant.ID,
 		AppID:           "app_reporter",
@@ -1280,7 +1283,8 @@ func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := store.New(storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1314,7 +1318,7 @@ func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 	app := model.App{ID: "app_1", TenantID: tenant.ID}
 	imageRef := "registry.example/app@sha256:abc"
 	seenAt := time.Now().UTC().Add(-imageHydrationMissingRetryAfter - time.Minute)
-	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+	location, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID:        tenant.ID,
 		AppID:           app.ID,
 		ImageRef:        imageRef,
@@ -1322,9 +1326,11 @@ func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 		ClusterNodeName: updater.ClusterNodeName,
 		Status:          model.ImageLocationStatusMissing,
 		LastSeenAt:      &seenAt,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("upsert old missing image location: %v", err)
 	}
+	ageImageLocationInStoreFile(t, storePath, location.ID, seenAt)
 
 	svc.scheduleImageHydration(context.Background(), app, deployImageTarget{RuntimeID: updater.RuntimeID, ClusterNodeName: updater.ClusterNodeName}, imageRef)
 
@@ -1338,6 +1344,33 @@ func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 	if tasks[0].Type != model.NodeUpdateTaskTypePrepullAppImages || tasks[0].Payload["images"] != imageRef {
 		t.Fatalf("unexpected hydrate retry task: %+v", tasks[0])
 	}
+}
+
+func ageImageLocationInStoreFile(t *testing.T, storePath, locationID string, updatedAt time.Time) {
+	t.Helper()
+
+	raw, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("read store: %v", err)
+	}
+	var state model.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode store: %v", err)
+	}
+	for i := range state.ImageLocations {
+		if state.ImageLocations[i].ID == locationID {
+			state.ImageLocations[i].UpdatedAt = updatedAt
+			encoded, err := json.MarshalIndent(state, "", "  ")
+			if err != nil {
+				t.Fatalf("encode store: %v", err)
+			}
+			if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
+				t.Fatalf("write store: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatalf("image location %s not found", locationID)
 }
 
 func TestScheduleImageHydrationNormalizesLegacyManagedRegistryRef(t *testing.T) {
