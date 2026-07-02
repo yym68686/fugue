@@ -831,7 +831,7 @@ operator maintenance steps; this code change keeps production defaults in
       without secrets.
 - [x] Add a short README or docs pointer from the distributed image-store plan
       to this recovery plan.
-- [ ] Confirm current production protected-set simulation immediately before
+- [x] Confirm current production protected-set simulation immediately before
       enabling dry-run tasks.
 
 ### P1: image-cache inventory API and store
@@ -883,7 +883,7 @@ operator maintenance steps; this code change keeps production defaults in
       planned blobs, and budget status.
 - [x] Prove dry-run performs no filesystem mutation.
 - [x] Add node-updater dry-run task execution.
-- [ ] Run production dry-run on canary nodes before any delete mode.
+- [x] Run production dry-run on canary nodes before any delete mode.
 
 ### P5: image-cache delete rollout
 
