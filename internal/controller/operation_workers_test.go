@@ -992,9 +992,10 @@ func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testin
 		inspectManagedImage: inspectManagedImageAlwaysExists,
 	}
 
-	if err := svc.dispatchPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport); err != nil {
-		t.Fatalf("dispatch first github sync import operation: %v", err)
-	}
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.drainPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport)
+	}()
 
 	if started := waitForStartedImportOperation(t, importer.started); started != opOne.ID {
 		t.Fatalf("expected first started operation %s, got %s", opOne.ID, started)
@@ -1003,15 +1004,14 @@ func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testin
 
 	importer.release(opOne.ID)
 	waitForOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
-	if err := svc.dispatchPendingOperationsInLane(context.Background(), operationLaneGitHubSyncImport); err != nil {
-		t.Fatalf("dispatch second github sync import operation: %v", err)
-	}
 
 	if started := waitForStartedImportOperation(t, importer.started); started != opTwo.ID {
 		t.Fatalf("expected second started operation %s after release, got %s", opTwo.ID, started)
 	}
 	importer.release(opTwo.ID)
-	waitForOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
+	waitForDrain(t, done, "unbounded same-app github sync import drain")
+	assertOperationStatus(t, stateStore, opOne.ID, model.OperationStatusCompleted)
+	assertOperationStatus(t, stateStore, opTwo.ID, model.OperationStatusCompleted)
 }
 
 func TestForegroundImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
