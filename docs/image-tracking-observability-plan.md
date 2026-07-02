@@ -337,6 +337,7 @@ Phase 3 changes behavior only after evidence proves a specific bug:
 - [x] Add a controller integration test for resolver error recording.
 - [x] Add retention tests so history remains bounded.
 - [x] Add documentation examples for common diagnosis outputs.
-- [ ] Release through the normal control-plane deployment workflow.
-- [ ] Use the next production image-tracking delay to verify whether behavior
+- [x] Release through the normal control-plane deployment workflow.
+- [x] Verify the production evidence path after rollout; use the next
+      production image-tracking delay, if it recurs, to decide whether behavior
       changes are needed.
