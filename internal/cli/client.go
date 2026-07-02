@@ -253,6 +253,8 @@ type appImageSyncResponse struct {
 	Digest         string                  `json:"digest,omitempty"`
 	Changed        bool                    `json:"changed"`
 	AlreadyCurrent bool                    `json:"already_current"`
+	RolloutPending bool                    `json:"rollout_pending,omitempty"`
+	AppPhase       string                  `json:"app_phase,omitempty"`
 	Message        string                  `json:"message,omitempty"`
 }
 

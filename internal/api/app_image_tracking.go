@@ -37,6 +37,8 @@ type appImageSyncResponse struct {
 	Digest         string                  `json:"digest,omitempty"`
 	Changed        bool                    `json:"changed"`
 	AlreadyCurrent bool                    `json:"already_current"`
+	RolloutPending bool                    `json:"rollout_pending,omitempty"`
+	AppPhase       string                  `json:"app_phase,omitempty"`
 	Message        string                  `json:"message,omitempty"`
 }
 
@@ -153,30 +155,54 @@ func (s *Server) handleSyncAppImage(w http.ResponseWriter, r *http.Request) {
 		if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, req.DeliveryID, eventNameOrDefault(req.Event), ""); err == nil {
 			tracking = updated
 		}
-		httpx.WriteJSON(w, http.StatusOK, appImageSyncResponse{
+
+		activeOp, err := s.latestActiveOperationForApp(app)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		rolloutPending := appImageSyncRolloutPending(app)
+		status := http.StatusOK
+		message := "tracked image digest already matches app desired source"
+		if activeOp != nil {
+			status = http.StatusAccepted
+			rolloutPending = true
+			message = "tracked image digest already matches app desired source; active operation is still in progress"
+		} else if rolloutPending {
+			status = http.StatusAccepted
+			message = "tracked image digest already matches app desired source; app rollout is still pending"
+		}
+
+		httpx.WriteJSON(w, status, appImageSyncResponse{
 			AppID:          app.ID,
 			Tracking:       &tracking,
+			Operation:      activeOp,
 			Digest:         digest,
 			AlreadyCurrent: true,
-			Message:        "tracked image digest is already deployed",
+			RolloutPending: rolloutPending,
+			AppPhase:       strings.TrimSpace(app.Status.Phase),
+			Message:        message,
 		})
 		return
 	}
 
-	hasActiveOp, err := s.store.HasActiveOperationByApp(app.TenantID, true, app.ID)
+	activeOp, err := s.latestActiveOperationForApp(app)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	if hasActiveOp {
+	if activeOp != nil {
 		if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, req.DeliveryID, eventNameOrDefault(req.Event), "app has an active operation"); err == nil {
 			tracking = updated
 		}
 		httpx.WriteJSON(w, http.StatusAccepted, appImageSyncResponse{
-			AppID:    app.ID,
-			Tracking: &tracking,
-			Digest:   digest,
-			Message:  "app has an active operation; image sync was not queued",
+			AppID:          app.ID,
+			Tracking:       &tracking,
+			Operation:      activeOp,
+			Digest:         digest,
+			RolloutPending: true,
+			AppPhase:       strings.TrimSpace(app.Status.Phase),
+			Message:        "app has an active operation; image sync was not queued",
 		})
 		return
 	}
@@ -207,6 +233,37 @@ func (s *Server) handleSyncAppImage(w http.ResponseWriter, r *http.Request) {
 		Changed:   true,
 		Message:   "tracked image digest changed; import queued",
 	})
+}
+
+func (s *Server) latestActiveOperationForApp(app model.App) (*model.Operation, error) {
+	ops, err := s.store.ListOperationsFiltered(app.TenantID, true, store.OperationListFilter{
+		AppID: app.ID,
+		Statuses: []string{
+			model.OperationStatusPending,
+			model.OperationStatusRunning,
+			model.OperationStatusWaitingAgent,
+		},
+		Limit: 1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(ops) == 0 {
+		return nil, nil
+	}
+	op := sanitizeOperationForAPI(ops[len(ops)-1])
+	return &op, nil
+}
+
+func appImageSyncRolloutPending(app model.App) bool {
+	if app.Spec.Replicas <= 0 {
+		return false
+	}
+	if app.Status.CurrentReplicas < app.Spec.Replicas {
+		return true
+	}
+	phase := strings.ToLower(strings.TrimSpace(app.Status.Phase))
+	return phase != "" && phase != "deployed"
 }
 
 func (s *Server) resolveTrackedImageDigest(r *http.Request, imageRef string) (string, error) {

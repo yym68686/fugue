@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const appImageSyncRolloutWaitTimeout = 2 * time.Minute
+
 func (c *CLI) newAppReleaseCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "release",
@@ -459,14 +461,9 @@ func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.SyncAppImage(app.ID, "", "manual", "")
+			response, err := c.syncAppImageAndWait(client, app.ID, opts.Wait)
 			if err != nil {
 				return err
-			}
-			if response.Operation != nil {
-				if err := c.waitForOptionalOperation(client, response.Operation, opts.Wait); err != nil {
-					return err
-				}
 			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, response)
@@ -476,6 +473,12 @@ func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
 				{Key: "digest", Value: response.Digest},
 				{Key: "changed", Value: fmt.Sprintf("%t", response.Changed)},
 				{Key: "already_current", Value: fmt.Sprintf("%t", response.AlreadyCurrent)},
+			}
+			if response.RolloutPending {
+				pairs = append(pairs, kvPair{Key: "rollout_pending", Value: "true"})
+			}
+			if strings.TrimSpace(response.AppPhase) != "" {
+				pairs = append(pairs, kvPair{Key: "app_phase", Value: strings.TrimSpace(response.AppPhase)})
 			}
 			if response.Operation != nil {
 				pairs = append(pairs, kvPair{Key: "operation_id", Value: response.Operation.ID})
@@ -488,6 +491,117 @@ func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for queued operation completion")
 	return cmd
+}
+
+func (c *CLI) syncAppImageAndWait(client *Client, appID string, wait bool) (appImageSyncResponse, error) {
+	const maxAttempts = 3
+	var response appImageSyncResponse
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		var err error
+		response, err = client.SyncAppImage(appID, "", "manual", "")
+		if err != nil {
+			return appImageSyncResponse{}, err
+		}
+		if !wait {
+			return response, nil
+		}
+
+		deferredByActiveOperation := response.Operation != nil && !response.Changed && !response.AlreadyCurrent
+		if response.Operation != nil {
+			app, op, err := c.waitForAppImageSyncOperation(client, appID, *response.Operation)
+			if err != nil {
+				return appImageSyncResponse{}, err
+			}
+			if op != nil {
+				response.Operation = op
+			}
+			if app != nil {
+				response.AppPhase = strings.TrimSpace(app.Status.Phase)
+				response.RolloutPending = appImageSyncCLIRolloutPending(*app)
+			}
+		}
+
+		if response.RolloutPending {
+			app, err := c.waitForAppImageSyncRollout(client, appID)
+			if err != nil {
+				return appImageSyncResponse{}, err
+			}
+			response.AppPhase = strings.TrimSpace(app.Status.Phase)
+			response.RolloutPending = appImageSyncCLIRolloutPending(app)
+		}
+
+		if deferredByActiveOperation && attempt < maxAttempts-1 {
+			continue
+		}
+		return response, nil
+	}
+	return response, nil
+}
+
+func (c *CLI) waitForAppImageSyncOperation(client *Client, appID string, op model.Operation) (*model.App, *model.Operation, error) {
+	app, finalOp, err := c.waitForSingleAppOperation(client, appID, op, true)
+	if err != nil {
+		return app, finalOp, err
+	}
+	if finalOp == nil ||
+		!strings.EqualFold(strings.TrimSpace(finalOp.Type), model.OperationTypeImport) ||
+		!strings.EqualFold(strings.TrimSpace(finalOp.Status), model.OperationStatusCompleted) {
+		return app, finalOp, nil
+	}
+	deployID := queuedDeployOperationID(finalOp.ResultMessage)
+	if deployID == "" {
+		return app, finalOp, nil
+	}
+	deployOp, err := client.GetOperation(deployID)
+	if err != nil {
+		return app, finalOp, err
+	}
+	return c.waitForSingleAppOperation(client, appID, deployOp, true)
+}
+
+func (c *CLI) waitForAppImageSyncRollout(client *Client, appID string) (model.App, error) {
+	deadline := time.Now().Add(appImageSyncRolloutWaitTimeout)
+	transientErrors := deployWaitTransientErrorTracker{}
+	lastPhase := ""
+	for {
+		app, err := client.GetApp(appID)
+		if err != nil {
+			retry, retryErr := transientErrors.shouldRetry(c, err)
+			if retryErr != nil {
+				return model.App{}, retryErr
+			}
+			if retry {
+				sleepDeployWaitPoll()
+				continue
+			}
+			return model.App{}, err
+		}
+		transientErrors.reset()
+		if !appImageSyncCLIRolloutPending(app) {
+			return app, nil
+		}
+		phase := strings.TrimSpace(app.Status.Phase)
+		if phase != lastPhase {
+			c.progressf("app_phase=%s rollout_pending=true", phase)
+			lastPhase = phase
+		}
+		if time.Now().After(deadline) {
+			c.progressf("warning=app rollout still pending after %s; returning latest status", appImageSyncRolloutWaitTimeout)
+			return app, nil
+		}
+		sleepDeployWaitPoll()
+	}
+}
+
+func appImageSyncCLIRolloutPending(app model.App) bool {
+	if app.Spec.Replicas <= 0 {
+		return false
+	}
+	if app.Status.CurrentReplicas < app.Spec.Replicas {
+		return true
+	}
+	phase := strings.ToLower(strings.TrimSpace(app.Status.Phase))
+	return phase != "" && phase != "deployed"
 }
 
 func (c *CLI) newAppReleaseListCommand() *cobra.Command {

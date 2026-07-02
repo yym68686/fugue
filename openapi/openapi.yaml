@@ -15379,6 +15379,10 @@ components:
           type: boolean
         already_current:
           type: boolean
+        rollout_pending:
+          type: boolean
+        app_phase:
+          type: string
         message:
           type: string
     AppImageInventoryResponse:
