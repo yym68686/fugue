@@ -126,6 +126,15 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.Config.ImageStoreReplicaLeaseTTL <= 0 {
 		s.Config.ImageStoreReplicaLeaseTTL = 30 * time.Minute
 	}
+	if s.Config.ImageCacheInventoryInterval <= 0 {
+		s.Config.ImageCacheInventoryInterval = 30 * time.Minute
+	}
+	if s.Config.ImageCacheInventoryTTL <= 0 {
+		s.Config.ImageCacheInventoryTTL = 2 * time.Hour
+	}
+	if s.Config.ImageStoreOrphanPruneGracePeriod <= 0 {
+		s.Config.ImageStoreOrphanPruneGracePeriod = 24 * time.Hour
+	}
 	if s.Config.GitHubSyncRetryBaseDelay <= 0 {
 		s.Config.GitHubSyncRetryBaseDelay = 5 * time.Minute
 	}
@@ -256,6 +265,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			imageReplicationTicker = time.NewTicker(s.Config.ImageStoreSchedulerInterval)
 			defer imageReplicationTicker.Stop()
 		}
+		var imageCacheMaintenanceTicker *time.Ticker
+		if s.Config.ImageCacheInventoryInterval > 0 {
+			imageCacheMaintenanceTicker = time.NewTicker(s.Config.ImageCacheInventoryInterval)
+			defer imageCacheMaintenanceTicker.Stop()
+		}
 
 		for {
 			if err := s.reconcileOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -284,6 +298,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			case <-githubTickerChan(imageReplicationTicker):
 				if err := s.reconcileImageReplication(ctx); err != nil && !errors.Is(err, context.Canceled) {
 					s.Logger.Printf("image replication reconcile error: %v", err)
+				}
+			case <-githubTickerChan(imageCacheMaintenanceTicker):
+				if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+					s.Logger.Printf("image-cache storage maintenance error: %v", err)
 				}
 			case <-ticker.C:
 			}
@@ -338,6 +356,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		imageReplicationTicker = time.NewTicker(s.Config.ImageStoreSchedulerInterval)
 		defer imageReplicationTicker.Stop()
 	}
+	var imageCacheMaintenanceTicker *time.Ticker
+	if s.Config.ImageCacheInventoryInterval > 0 {
+		imageCacheMaintenanceTicker = time.NewTicker(s.Config.ImageCacheInventoryInterval)
+		defer imageCacheMaintenanceTicker.Stop()
+	}
 	operationEvents := listenForOperationEvents(ctx, s.Logger, s.Config.DatabaseURL)
 
 	for {
@@ -391,6 +414,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 		case <-githubTickerChan(imageReplicationTicker):
 			if err := s.reconcileImageReplication(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.Logger.Printf("image replication reconcile error: %v", err)
+			}
+		case <-githubTickerChan(imageCacheMaintenanceTicker):
+			if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.Logger.Printf("image-cache storage maintenance error: %v", err)
 			}
 		case <-staleTicker.C:
 			if err := s.markRuntimeOfflineStale(); err != nil {

@@ -94,6 +94,22 @@ spec:
               value: {{ .Values.imageStore.prune.enabled | quote }}
             - name: FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN
               value: {{ .Values.imageStore.prune.maxDeleteBytesPerRun | quote }}
+            - name: FUGUE_IMAGE_CACHE_INVENTORY_ENABLED
+              value: {{ .Values.imageStore.imageCacheInventory.enabled | quote }}
+            - name: FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL
+              value: {{ .Values.imageStore.imageCacheInventory.interval | quote }}
+            - name: FUGUE_IMAGE_CACHE_INVENTORY_TTL
+              value: {{ .Values.imageStore.imageCacheInventory.ttl | quote }}
+            - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE
+              value: {{ .Values.imageStore.orphanPrune.mode | quote }}
+            - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD
+              value: {{ .Values.imageStore.orphanPrune.gracePeriod | quote }}
+            - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE
+              value: {{ .Values.imageStore.orphanPrune.maxTargetsPerNode | quote }}
+            - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE
+              value: {{ .Values.imageStore.orphanPrune.maxDeleteBytesPerNode | quote }}
+            - name: FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT
+              value: {{ .Values.imageStore.orphanPrune.minReplicaCount | quote }}
             - name: FUGUE_SOURCE_UPLOAD_BASE_URL
               value: {{ printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port | quote }}
             {{- if and .Values.observability.enabled .Values.observability.agent.enabled }}

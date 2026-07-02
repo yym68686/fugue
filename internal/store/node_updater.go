@@ -250,7 +250,9 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 		model.NodeUpdateTaskTypeReplicateAppImage,
 		model.NodeUpdateTaskTypeVerifyImageCache,
 		model.NodeUpdateTaskTypePruneImageCache,
-		model.NodeUpdateTaskTypeReportImageCache:
+		model.NodeUpdateTaskTypeReportImageCache,
+		model.NodeUpdateTaskTypeReportLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV:
 	default:
 		return model.NodeUpdateTask{}, false
 	}
@@ -529,6 +531,10 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypePruneImageCache
 	case model.NodeUpdateTaskTypeReportImageCache:
 		return model.NodeUpdateTaskTypeReportImageCache
+	case model.NodeUpdateTaskTypeReportLocalPV:
+		return model.NodeUpdateTaskTypeReportLocalPV
+	case model.NodeUpdateTaskTypeDecommissionLocalPV:
+		return model.NodeUpdateTaskTypeDecommissionLocalPV
 	case model.NodeUpdateTaskTypeVerifySystemdEscape:
 		return model.NodeUpdateTaskTypeVerifySystemdEscape
 	default:

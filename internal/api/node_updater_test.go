@@ -154,6 +154,78 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterLocalPVDecommissionCompletionWritesAudit(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Updater LocalPV Audit Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, updaterToken, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-1",
+		"https://worker-1.example.com",
+		nil,
+		"machine-1",
+		"fingerprint-worker-1",
+		"v10",
+		"join-v10",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypeDecommissionLocalPV},
+	)
+	if err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	task, err := s.CreateNodeUpdateTask(model.Principal{
+		ActorType: model.ActorTypeSystem,
+		ActorID:   "test",
+		TenantID:  tenant.ID,
+		Scopes:    map[string]struct{}{"platform.admin": {}},
+	}, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeDecommissionLocalPV, map[string]string{
+		"dry_run":                    "false",
+		"allow_delete":               "true",
+		"allow_localpv_decommission": "true",
+		"expected_image_size_bytes":  "1024",
+		"expected_lv_count":          "0",
+		"expected_bound_pv_count":    "0",
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := s.ClaimNodeUpdateTask(task.ID, updater.ID); err != nil {
+		t.Fatalf("claim task: %v", err)
+	}
+	completeForm := url.Values{}
+	completeForm.Set("status", model.NodeUpdateTaskStatusCompleted)
+	completeForm.Set("message", `LocalPV decommission completed {"expected_freed_bytes":1024}`)
+	completeRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+task.ID+"/complete", updaterToken, completeForm)
+	if completeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, completeRecorder.Code, completeRecorder.Body.String())
+	}
+	events, err := s.ListAuditEvents("", true, 10)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	for _, event := range events {
+		if event.Action != "localpv_decommission_completed" {
+			continue
+		}
+		if event.TargetID != task.ID || event.Metadata["allow_delete"] != "true" || event.Metadata["expected_lv_count"] != "0" {
+			t.Fatalf("unexpected audit event: %+v", event)
+		}
+		return
+	}
+	t.Fatalf("expected localpv decommission audit event, got %+v", events)
+}
+
 func TestNodeUpdaterTaskPollExpiresStaleRunningTasks(t *testing.T) {
 	t.Parallel()
 
@@ -344,7 +416,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v9"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v10"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -369,6 +441,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`reconcile_node_dns_escape_hatch`,
 		`bind-interfaces`,
 		`discovery_generation=`,
+		`import os`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)
@@ -382,6 +455,69 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestPrepareLocalPVNodeRolePolicyDryRun(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	scriptPath := filepath.Join("..", "..", "scripts", "prepare_fugue_lvm_localpv_node.sh")
+	for _, tt := range []struct {
+		name     string
+		args     []string
+		wantOK   bool
+		wantText string
+		envRoles string
+	}{
+		{
+			name:     "storage agent allowed",
+			args:     []string{"--size-gib", "1", "--node-role", "storage-agent", "--dry-run"},
+			wantOK:   true,
+			wantText: "LocalPV preallocation dry-run",
+		},
+		{
+			name:     "edge refused",
+			args:     []string{"--size-gib", "1", "--node-role", "edge", "--dry-run"},
+			wantText: "disabled for edge, DNS, and control-plane-only roles",
+		},
+		{
+			name:     "control plane refused",
+			args:     []string{"--size-gib", "1", "--node-role", "control-plane-only", "--dry-run"},
+			wantText: "disabled for edge, DNS, and control-plane-only roles",
+		},
+		{
+			name:     "env dns refused",
+			args:     []string{"--size-gib", "1", "--dry-run"},
+			envRoles: "dns",
+			wantText: "disabled for edge, DNS, and control-plane-only roles",
+		},
+		{
+			name:     "explicit maintenance override allowed",
+			args:     []string{"--size-gib", "1", "--node-role", "edge", "--allow-localpv", "--dry-run"},
+			wantOK:   true,
+			wantText: "allow_localpv=true",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("bash", append([]string{scriptPath}, tt.args...)...)
+			if tt.envRoles != "" {
+				cmd.Env = append(os.Environ(), "FUGUE_NODE_ROLES="+tt.envRoles)
+			}
+			output, err := cmd.CombinedOutput()
+			if tt.wantOK && err != nil {
+				t.Fatalf("expected success, got %v\n%s", err, output)
+			}
+			if !tt.wantOK && err == nil {
+				t.Fatalf("expected failure, got success\n%s", output)
+			}
+			if !strings.Contains(string(output), tt.wantText) {
+				t.Fatalf("expected output to contain %q, got\n%s", tt.wantText, output)
+			}
+		})
 	}
 }
 

@@ -554,6 +554,127 @@ paths:
                 $ref: "#/components/schemas/PlatformDomainBindingListResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/image-cache/inventory:
+    get:
+      operationId: adminListImageCacheInventory
+      summary: List Image Cache Inventory
+      tags: [Admin]
+      x-fugue-handler: handleAdminListImageCacheInventory
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: node_id
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageCacheInventoryListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/image-cache/prune-plan:
+    get:
+      operationId: adminGetImageCachePrunePlan
+      summary: Get Image Cache Prune Plan
+      tags: [Admin]
+      x-fugue-handler: handleAdminGetImageCachePrunePlan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: node_id
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          schema:
+            type: string
+        - in: query
+          name: mode
+          schema:
+            type: string
+            enum: [observe, dry-run, delete]
+        - in: query
+          name: persist
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageCachePrunePlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: adminCreateImageCachePrunePlanTask
+      summary: Create Image Cache Prune Plan Task
+      tags: [Admin]
+      x-fugue-handler: handleAdminCreateImageCachePrunePlanTask
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateImageCachePrunePlanTaskRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageCachePrunePlanTaskResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/localpv/inventory:
+    get:
+      operationId: adminListLocalPVInventory
+      summary: List LVM LocalPV Inventory
+      tags: [Admin]
+      x-fugue-handler: handleAdminListLocalPVInventory
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: node_id
+          schema:
+            type: string
+        - in: query
+          name: cluster_node_name
+          schema:
+            type: string
+        - in: query
+          name: runtime_id
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalPVInventoryListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/control-plane/store/status:
     get:
       operationId: getControlPlaneStoreStatus
@@ -6016,6 +6137,52 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ImageReplicaResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/image-cache/inventory:
+    post:
+      operationId: nodeUpdaterReportImageCacheInventory
+      summary: Node Updater Report Image Cache Inventory
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterReportImageCacheInventory
+      security:
+        - NodeUpdaterBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageCacheInventoryReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageCacheInventoryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/node-updater/localpv/inventory:
+    post:
+      operationId: nodeUpdaterReportLocalPVInventory
+      summary: Node Updater Report LVM LocalPV Inventory
+      tags: [Node Updater]
+      x-fugue-handler: handleNodeUpdaterReportLocalPVInventory
+      security:
+        - NodeUpdaterBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalPVInventoryReportRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalPVInventoryResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-updater/image-replication-tasks:
@@ -16171,6 +16338,354 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ImageReplicationTask"
+    ImageCacheNodeInventory:
+      type: object
+      additionalProperties: false
+      required: [id, observed_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        node_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        cache_endpoint:
+          type: string
+        store_path:
+          type: string
+        filesystem_total_bytes:
+          type: integer
+          format: int64
+        filesystem_free_bytes:
+          type: integer
+          format: int64
+        filesystem_used_percent:
+          type: number
+          format: double
+        cache_bytes:
+          type: integer
+          format: int64
+        manifest_count:
+          type: integer
+          format: int32
+        blob_count:
+          type: integer
+          format: int32
+        pin_count:
+          type: integer
+          format: int32
+        observed_at:
+          type: string
+          format: date-time
+        reported_by_node_updater_id:
+          type: string
+        status:
+          type: string
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ImageCacheManifest:
+      type: object
+      additionalProperties: false
+      required: [id, repo, target, last_seen_at, present, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        node_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        image_ref:
+          type: string
+        repo:
+          type: string
+        target:
+          type: string
+        digest:
+          type: string
+        media_type:
+          type: string
+        manifest_size_bytes:
+          type: integer
+          format: int64
+        total_blob_bytes:
+          type: integer
+          format: int64
+        referenced_blobs:
+          type: array
+          items:
+            type: string
+        created_at_observed:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        pinned_locally:
+          type: boolean
+        present:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ImageCacheInventoryReportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        node:
+          $ref: "#/components/schemas/ImageCacheNodeInventory"
+        manifests:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCacheManifest"
+        observed_at:
+          type: string
+          format: date-time
+    ImageCacheInventoryResponse:
+      type: object
+      additionalProperties: false
+      required: [node]
+      properties:
+        node:
+          $ref: "#/components/schemas/ImageCacheNodeInventory"
+    ImageCacheInventoryListResponse:
+      type: object
+      additionalProperties: false
+      required: [nodes, manifests]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCacheNodeInventory"
+        manifests:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCacheManifest"
+    ImageCachePruneCandidate:
+      type: object
+      additionalProperties: false
+      required: [repo, target, protected]
+      properties:
+        image_ref:
+          type: string
+        repo:
+          type: string
+        target:
+          type: string
+        digest:
+          type: string
+        reason:
+          type: string
+        skip_reason:
+          type: string
+        protected:
+          type: boolean
+        planned_delete_bytes:
+          type: integer
+          format: int64
+        referenced_blobs:
+          type: array
+          items:
+            type: string
+        last_seen_at:
+          type: string
+        created_at_observed:
+          type: string
+    ImageCachePrunePlan:
+      type: object
+      additionalProperties: false
+      required:
+        [id, mode, candidate_manifest_count, protected_manifest_count, created_at, status]
+      properties:
+        id:
+          type: string
+        node_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        mode:
+          type: string
+          enum: [observe, dry-run, delete]
+        candidate_manifest_count:
+          type: integer
+          format: int32
+        protected_manifest_count:
+          type: integer
+          format: int32
+        planned_delete_bytes:
+          type: integer
+          format: int64
+        max_delete_bytes:
+          type: integer
+          format: int64
+        min_manifest_age:
+          type: string
+        protection_summary:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        candidate_summary:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCachePruneCandidate"
+        created_at:
+          type: string
+          format: date-time
+        executed_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [planned, scheduled, completed, failed]
+        error:
+          type: string
+    ImageCachePrunePlanResponse:
+      type: object
+      additionalProperties: false
+      required: [plan]
+      properties:
+        plan:
+          $ref: "#/components/schemas/ImageCachePrunePlan"
+    CreateImageCachePrunePlanTaskRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        node_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        mode:
+          type: string
+          enum: [observe, dry-run, delete]
+        allow_delete:
+          type: boolean
+        max_delete_bytes:
+          type: integer
+          format: int64
+        dry_run:
+          type: boolean
+    ImageCachePrunePlanTaskResponse:
+      type: object
+      additionalProperties: false
+      required: [plan]
+      properties:
+        plan:
+          $ref: "#/components/schemas/ImageCachePrunePlan"
+        task:
+          $ref: "#/components/schemas/NodeUpdateTask"
+    LocalPVInventory:
+      type: object
+      additionalProperties: false
+      required:
+        [id, lv_count, active_lv_count, bound_pv_count, safe_to_decommission, observed_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        node_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        node_roles:
+          type: array
+          items:
+            type: string
+        vg_name:
+          type: string
+        image_path:
+          type: string
+        image_size_bytes:
+          type: integer
+          format: int64
+        loop_device:
+          type: string
+        loop_backing_file:
+          type: string
+        pv_size_bytes:
+          type: integer
+          format: int64
+        pv_free_bytes:
+          type: integer
+          format: int64
+        lv_count:
+          type: integer
+          format: int32
+        lv_names:
+          type: array
+          items:
+            type: string
+        active_lv_count:
+          type: integer
+          format: int32
+        bound_pv_count:
+          type: integer
+          format: int32
+        bound_pvc_refs:
+          type: array
+          items:
+            type: string
+        safe_to_decommission:
+          type: boolean
+        unsafe_reasons:
+          type: array
+          items:
+            type: string
+        observed_at:
+          type: string
+          format: date-time
+        reported_by_node_updater_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    LocalPVInventoryReportRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        inventory:
+          $ref: "#/components/schemas/LocalPVInventory"
+    LocalPVInventoryResponse:
+      type: object
+      additionalProperties: false
+      required: [inventory]
+      properties:
+        inventory:
+          $ref: "#/components/schemas/LocalPVInventory"
+    LocalPVInventoryListResponse:
+      type: object
+      additionalProperties: false
+      required: [inventories]
+      properties:
+        inventories:
+          type: array
+          items:
+            $ref: "#/components/schemas/LocalPVInventory"
     NodeUpdaterListResponse:
       type: object
       additionalProperties: false

@@ -896,7 +896,7 @@ func TestImageCachePruneSkipsDeleteBelowWatermark(t *testing.T) {
 		t.Fatalf("persist manifest: %v", err)
 	}
 
-	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"image_ref":"registry.fugue.internal:5000/fugue-apps/demo:image-a","max_delete_bytes":"1Mi"}`)
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"max_delete_bytes":"1Mi"}`)
 
 	if result.Deleted {
 		t.Fatalf("expected prune to skip deletion below watermark, got %+v", result)
@@ -965,6 +965,163 @@ func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *t
 	}
 	if len(records) != 1 || records[0].Target != "image-b" {
 		t.Fatalf("expected only image-b manifest to remain, got %+v", records)
+	}
+}
+
+func TestImageCacheBatchPruneDryRunDoesNotMutateFilesystem(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 100,
+			LowWatermarkPercent:  99,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("layer-a"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-a", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, `{"dry_run":true,"allow_delete":false,"targets":[{"repo":"fugue-apps/demo","target":"image-a"}],"max_delete_bytes":"1Gi"}`)
+
+	if result.Deleted {
+		t.Fatalf("dry-run unexpectedly deleted data: %+v", result)
+	}
+	if result.SelectedCount != 1 {
+		t.Fatalf("selected_count = %d, want 1; result=%+v", result.SelectedCount, result)
+	}
+	if result.PlannedDeleteBytes <= 0 {
+		t.Fatalf("planned_delete_bytes = %d, want positive; result=%+v", result.PlannedDeleteBytes, result)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, layerDigest)); err != nil {
+		t.Fatalf("expected layer blob to remain after dry-run: %v", err)
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("manifest records: %v", err)
+	}
+	if len(records) != 1 || records[0].Target != "image-a" {
+		t.Fatalf("expected manifest to remain after dry-run, got %+v", records)
+	}
+}
+
+func TestImageCachePruneAllowDeleteFalseDoesNotMutateFilesystem(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("layer-a"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-a", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":false,"targets":[{"repo":"fugue-apps/demo","target":"image-a"}],"max_delete_bytes":"1Gi"}`)
+
+	if result.Deleted {
+		t.Fatalf("allow_delete=false unexpectedly deleted data: %+v", result)
+	}
+	if result.SkippedReason != "allow_delete_false" {
+		t.Fatalf("skipped_reason = %q, want allow_delete_false", result.SkippedReason)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, layerDigest)); err != nil {
+		t.Fatalf("expected layer blob to remain: %v", err)
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("manifest records: %v", err)
+	}
+	if len(records) != 1 || records[0].Target != "image-a" {
+		t.Fatalf("expected manifest to remain, got %+v", records)
+	}
+}
+
+func TestImageCachePruneMinManifestAgeProtectsFreshManifest(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("layer-a"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-a", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"targets":[{"repo":"fugue-apps/demo","target":"image-a"}],"max_delete_bytes":"1Gi","min_manifest_age":"24h"}`)
+
+	if result.Deleted {
+		t.Fatalf("fresh manifest unexpectedly deleted: %+v", result)
+	}
+	if result.SelectedCount != 0 {
+		t.Fatalf("selected_count = %d, want 0", result.SelectedCount)
+	}
+	if len(result.SkippedManifests) != 1 {
+		t.Fatalf("skipped manifest count = %d, want 1; result=%+v", len(result.SkippedManifests), result)
+	}
+}
+
+func TestImageCachePruneBudgetExhaustedBeforeManifestDelete(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1,
+		},
+	}
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("layer-a"))
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte("{}"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-a", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"targets":[{"repo":"fugue-apps/demo","target":"image-a"}],"max_delete_bytes":"1"}`)
+
+	if result.Deleted {
+		t.Fatalf("budget-exhausted prune unexpectedly deleted data: %+v", result)
+	}
+	if !result.BudgetExhausted {
+		t.Fatalf("budget_exhausted = false, want true; result=%+v", result)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, layerDigest)); err != nil {
+		t.Fatalf("expected layer blob to remain: %v", err)
 	}
 }
 
@@ -1191,9 +1348,14 @@ func TestReportIncludesClusterNodeIdentity(t *testing.T) {
 }
 
 type imageCachePruneTestResult struct {
-	Deleted       bool   `json:"deleted"`
-	SkippedReason string `json:"skipped_reason"`
-	DeletedBytes  int64  `json:"deleted_bytes"`
+	Deleted            bool                      `json:"deleted"`
+	SkippedReason      string                    `json:"skipped_reason"`
+	DeletedBytes       int64                     `json:"deleted_bytes"`
+	PlannedDeleteBytes int64                     `json:"planned_delete_bytes"`
+	SelectedCount      int                       `json:"selected_count"`
+	BudgetExhausted    bool                      `json:"budget_exhausted"`
+	SkippedManifests   []imageCacheManifestEntry `json:"skipped_manifests"`
+	SelectedManifests  []imageCacheManifestEntry `json:"selected_manifests"`
 }
 
 func postImageCachePrune(t *testing.T, cache *imageCache, body string) imageCachePruneTestResult {

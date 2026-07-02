@@ -22,6 +22,7 @@ func (c *CLI) newAdminClusterNodeCommand() *cobra.Command {
 		c.newAdminClusterNodeDiskCommand(),
 		c.newAdminClusterNodeJournalCommand(),
 		c.newAdminClusterNodeMetricsCommand(),
+		c.newAdminClusterNodeLocalPVCommand(),
 	)
 	return cmd
 }

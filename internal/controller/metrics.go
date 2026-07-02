@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/observability"
 )
 
@@ -85,6 +86,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_bytes", "Registry blob bytes not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobBytes))
 	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
 	observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
+	s.writeImageCacheLocalPVMetrics(w)
 }
 
 func boolGauge(value bool) float64 {
@@ -92,4 +94,65 @@ func boolGauge(value bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	now := time.Now().UTC()
+	if nodes, err := s.Store.ListImageCacheNodeInventories(model.ImageCacheNodeInventoryFilter{}); err == nil {
+		observability.WriteMetricHeader(w, "fugue_image_cache_inventory_age_seconds", "Age of the latest node-local image-cache inventory report.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_manifest_count", "Number of manifests reported by each node-local image-cache inventory.", "gauge")
+		for _, node := range nodes {
+			labels := imageCacheMetricNodeLabels(node.NodeID, node.ClusterNodeName, node.RuntimeID)
+			age := float64(0)
+			if !node.ObservedAt.IsZero() {
+				age = now.Sub(node.ObservedAt).Seconds()
+			}
+			observability.WriteMetricSample(w, "fugue_image_cache_inventory_age_seconds", labels, age)
+			observability.WriteMetricSample(w, "fugue_image_cache_manifest_count", labels, float64(node.ManifestCount))
+		}
+	}
+	if plans, err := s.Store.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Limit: 200}); err == nil {
+		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_manifest_count", "Candidate manifest count in recent image-cache prune plans.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_prune_planned_bytes", "Planned delete bytes in recent image-cache prune plans.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_prune_skipped_count", "Protected manifest count in recent image-cache prune plans.", "gauge")
+		for _, plan := range plans {
+			labels := imageCacheMetricNodeLabels(plan.NodeID, plan.ClusterNodeName, plan.RuntimeID)
+			labels["mode"] = plan.Mode
+			labels["status"] = plan.Status
+			observability.WriteMetricSample(w, "fugue_image_cache_candidate_manifest_count", labels, float64(plan.CandidateManifestCount))
+			observability.WriteMetricSample(w, "fugue_image_cache_prune_planned_bytes", labels, float64(plan.PlannedDeleteBytes))
+			observability.WriteMetricSample(w, "fugue_image_cache_prune_skipped_count", labels, float64(plan.ProtectedManifestCount))
+		}
+	}
+	if inventories, err := s.Store.ListLocalPVInventories(model.LocalPVInventoryFilter{}); err == nil {
+		observability.WriteMetricHeader(w, "fugue_localpv_inventory_age_seconds", "Age of the latest LVM LocalPV inventory report.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_backing_file_bytes", "LVM LocalPV backing file size reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_active_lv_count", "Active LVM LV count reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_bound_pv_count", "Bound Kubernetes PV count reported by each node.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_localpv_decommission_eligible", "Whether the latest LVM LocalPV inventory is eligible for explicit decommission.", "gauge")
+		for _, inventory := range inventories {
+			labels := imageCacheMetricNodeLabels(inventory.NodeID, inventory.ClusterNodeName, inventory.RuntimeID)
+			labels["vg"] = inventory.VGName
+			age := float64(0)
+			if !inventory.ObservedAt.IsZero() {
+				age = now.Sub(inventory.ObservedAt).Seconds()
+			}
+			observability.WriteMetricSample(w, "fugue_localpv_inventory_age_seconds", labels, age)
+			observability.WriteMetricSample(w, "fugue_localpv_backing_file_bytes", labels, float64(inventory.ImageSizeBytes))
+			observability.WriteMetricSample(w, "fugue_localpv_active_lv_count", labels, float64(inventory.ActiveLVCount))
+			observability.WriteMetricSample(w, "fugue_localpv_bound_pv_count", labels, float64(inventory.BoundPVCount))
+			observability.WriteMetricSample(w, "fugue_localpv_decommission_eligible", labels, boolGauge(inventory.SafeToDecommission))
+		}
+	}
+}
+
+func imageCacheMetricNodeLabels(nodeID, clusterNodeName, runtimeID string) map[string]string {
+	return map[string]string{
+		"node_id":           strings.TrimSpace(nodeID),
+		"cluster_node_name": strings.TrimSpace(clusterNodeName),
+		"runtime_id":        strings.TrimSpace(runtimeID),
+	}
 }

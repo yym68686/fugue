@@ -95,11 +95,16 @@ func (c *CLI) newAdminNodeUpdaterTaskListCommand() *cobra.Command {
 
 func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 	opts := struct {
-		NodeUpdaterID   string
-		ClusterNodeName string
-		RuntimeRef      string
-		Type            string
-		Payload         []string
+		NodeUpdaterID          string
+		ClusterNodeName        string
+		RuntimeRef             string
+		Type                   string
+		Payload                []string
+		DryRun                 bool
+		AllowDelete            bool
+		ExpectedLVCount        int
+		ExpectedPVCount        int
+		ExpectedImageSizeBytes int64
 	}{}
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -116,6 +121,27 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 			payload, err := parseEnvAssignments(opts.Payload)
 			if err != nil {
 				return err
+			}
+			if flagChanged(cmd, "dry-run") {
+				payload["dry_run"] = fmt.Sprintf("%t", opts.DryRun)
+			}
+			if flagChanged(cmd, "allow-delete") {
+				payload["allow_delete"] = fmt.Sprintf("%t", opts.AllowDelete)
+			}
+			if flagChanged(cmd, "expected-lv-count") {
+				payload["expected_lv_count"] = fmt.Sprintf("%d", opts.ExpectedLVCount)
+			}
+			if flagChanged(cmd, "expected-bound-pv-count") {
+				payload["expected_bound_pv_count"] = fmt.Sprintf("%d", opts.ExpectedPVCount)
+			}
+			if flagChanged(cmd, "expected-image-size-bytes") {
+				payload["expected_image_size_bytes"] = fmt.Sprintf("%d", opts.ExpectedImageSizeBytes)
+			}
+			if taskType == model.NodeUpdateTaskTypeDecommissionLocalPV && (flagChanged(cmd, "dry-run") || flagChanged(cmd, "allow-delete")) {
+				payload["allow_localpv_decommission"] = "true"
+				if flagChanged(cmd, "allow-delete") && opts.AllowDelete && !flagChanged(cmd, "dry-run") {
+					payload["dry_run"] = "false"
+				}
 			}
 			client, err := c.newClient()
 			if err != nil {
@@ -151,6 +177,11 @@ func (c *CLI) newAdminNodeUpdaterTaskCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.RuntimeRef, "runtime", "", "Target runtime name or ID")
 	cmd.Flags().StringVar(&opts.Type, "type", "", "Task type")
 	cmd.Flags().StringArrayVar(&opts.Payload, "payload", nil, "Task payload as KEY=VALUE (repeatable)")
+	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", true, "Set dry_run task payload")
+	cmd.Flags().BoolVar(&opts.AllowDelete, "allow-delete", false, "Set allow_delete task payload")
+	cmd.Flags().IntVar(&opts.ExpectedLVCount, "expected-lv-count", 0, "Expected LocalPV LV count for decommission preflight")
+	cmd.Flags().IntVar(&opts.ExpectedPVCount, "expected-bound-pv-count", 0, "Expected bound LocalPV PV count for decommission preflight")
+	cmd.Flags().Int64Var(&opts.ExpectedImageSizeBytes, "expected-image-size-bytes", 0, "Expected LocalPV backing file size in bytes")
 	_ = cmd.Flags().MarkHidden("node-updater-id")
 	return cmd
 }
@@ -165,6 +196,12 @@ func nodeUpdateTaskTypes() []string {
 		model.NodeUpdateTaskTypeInstallNFSClient,
 		model.NodeUpdateTaskTypePrepullSystemImages,
 		model.NodeUpdateTaskTypePrepullAppImages,
+		model.NodeUpdateTaskTypeReplicateAppImage,
+		model.NodeUpdateTaskTypeVerifyImageCache,
+		model.NodeUpdateTaskTypePruneImageCache,
+		model.NodeUpdateTaskTypeReportImageCache,
+		model.NodeUpdateTaskTypeReportLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV,
 		model.NodeUpdateTaskTypeVerifySystemdEscape,
 	}
 }

@@ -289,7 +289,9 @@ func (s *Store) pgDuplicatePendingNodeUpdateTask(ctx context.Context, updaterID,
 		model.NodeUpdateTaskTypeReplicateAppImage,
 		model.NodeUpdateTaskTypeVerifyImageCache,
 		model.NodeUpdateTaskTypePruneImageCache,
-		model.NodeUpdateTaskTypeReportImageCache:
+		model.NodeUpdateTaskTypeReportImageCache,
+		model.NodeUpdateTaskTypeReportLocalPV,
+		model.NodeUpdateTaskTypeDecommissionLocalPV:
 	default:
 		return model.NodeUpdateTask{}, false, nil
 	}

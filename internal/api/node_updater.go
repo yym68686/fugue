@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion   = "v8"
+	nodeUpdaterScriptVersion   = "v10"
 	staleNodeUpdateTaskTimeout = 2 * time.Hour
 )
 
@@ -272,7 +272,83 @@ func (s *Server) handleNodeUpdaterCompleteTask(w http.ResponseWriter, r *http.Re
 		s.writeStoreError(w, err)
 		return
 	}
+	s.appendNodeUpdateTaskMaintenanceAudit(principal, task)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
+func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal, task model.NodeUpdateTask) {
+	action := ""
+	switch task.Type {
+	case model.NodeUpdateTaskTypePruneImageCache:
+		if task.Status == model.NodeUpdateTaskStatusCompleted && taskPayloadTruthy(task.Payload, "dry_run") {
+			action = "image_cache_orphan_prune_dry_run_completed"
+		} else if task.Status == model.NodeUpdateTaskStatusCompleted && taskPayloadTruthy(task.Payload, "allow_delete") {
+			action = "image_cache_orphan_prune_delete_completed"
+		} else if task.Status == model.NodeUpdateTaskStatusFailed {
+			action = "image_cache_orphan_prune_failed"
+		}
+	case model.NodeUpdateTaskTypeDecommissionLocalPV:
+		if task.Status == model.NodeUpdateTaskStatusCompleted && taskPayloadTruthy(task.Payload, "dry_run") {
+			action = "localpv_decommission_dry_run_completed"
+		} else if task.Status == model.NodeUpdateTaskStatusCompleted && taskPayloadTruthy(task.Payload, "allow_delete") {
+			action = "localpv_decommission_completed"
+		} else if task.Status == model.NodeUpdateTaskStatusFailed {
+			action = "localpv_decommission_refused"
+		}
+	default:
+		return
+	}
+	if action == "" {
+		return
+	}
+	metadata := map[string]string{
+		"task_id":           task.ID,
+		"task_type":         task.Type,
+		"status":            task.Status,
+		"node_updater_id":   task.NodeUpdaterID,
+		"node_id":           task.MachineID,
+		"cluster_node_name": task.ClusterNodeName,
+		"runtime_id":        task.RuntimeID,
+		"dry_run":           task.Payload["dry_run"],
+		"allow_delete":      task.Payload["allow_delete"],
+	}
+	for _, key := range []string{
+		"prune_plan_id",
+		"max_delete_bytes",
+		"min_manifest_age",
+		"expected_image_size_bytes",
+		"expected_lv_count",
+		"expected_bound_pv_count",
+		"allow_localpv_decommission",
+	} {
+		if value := strings.TrimSpace(task.Payload[key]); value != "" {
+			metadata[key] = value
+		}
+	}
+	if task.ResultMessage != "" {
+		metadata["result_message"] = truncateAuditValue(task.ResultMessage, 600)
+	}
+	if task.ErrorMessage != "" {
+		metadata["error_message"] = truncateAuditValue(task.ErrorMessage, 600)
+	}
+	s.appendAudit(principal, action, "node_update_task", task.ID, task.TenantID, metadata)
+}
+
+func taskPayloadTruthy(payload map[string]string, key string) bool {
+	switch strings.TrimSpace(strings.ToLower(payload[key])) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func truncateAuditValue(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "...truncated"
 }
 
 type nodeUpdaterEnrollRequest struct {
@@ -540,9 +616,9 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v9"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v10"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,verify-systemd-escape-hatch,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
 FUGUE_NODE_UPDATER_STATE_DIR="${FUGUE_NODE_UPDATER_STATE_DIR:-${FUGUE_NODE_UPDATER_WORK_DIR}}"
@@ -560,6 +636,9 @@ FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN="${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN:-/etc
 FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC:-32}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC:-64}"
 FUGUE_NODE_UPDATER_CLOCK_SKEW_REPAIR_THRESHOLD_SEC="${FUGUE_NODE_UPDATER_CLOCK_SKEW_REPAIR_THRESHOLD_SEC:-5}"
+FUGUE_LOCALPV_VG_NAME="${FUGUE_LOCALPV_VG_NAME:-fugue-vg}"
+FUGUE_LOCALPV_IMAGE_PATH="${FUGUE_LOCALPV_IMAGE_PATH:-/var/lib/fugue/lvm-localpv/${FUGUE_LOCALPV_VG_NAME}.img}"
+FUGUE_LOCALPV_LOOP_SERVICE="${FUGUE_LOCALPV_LOOP_SERVICE:-fugue-lvm-localpv-loop.service}"
 
 log() {
   printf '[fugue-node-updater] %s\n' "$*" >&2
@@ -835,6 +914,7 @@ discovery_bundle_not_older_than_cache() {
   fi
   python3 - "${current}" "${candidate}" <<'PY_DISCOVERY_ROLLBACK'
 import json
+import os
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
@@ -993,6 +1073,7 @@ desired_node_policy_label() {
   fi
   python3 - "${state_file}" "${key}" <<'PY_NODE_LABEL'
 import json
+import os
 import sys
 
 state_path, key = sys.argv[1:3]
@@ -1628,6 +1709,16 @@ api_form() {
     "$@"
 }
 
+api_json() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-{}}"
+  curl -fsSL --retry 3 --retry-delay 2 -X "${method}" "${FUGUE_API_BASE}${path}" \
+    -H "Authorization: Bearer ${FUGUE_NODE_UPDATER_TOKEN:?FUGUE_NODE_UPDATER_TOKEN is required}" \
+    -H "Content-Type: application/json" \
+    --data "${body}"
+}
+
 heartbeat() {
   local current_k3s=""
   current_k3s="$(k3s_version)"
@@ -2004,13 +2095,115 @@ verify_image_cache() {
 
 report_image_cache_inventory() {
   local endpoint=""
+  local inventory_file=""
+  local chunk_dir=""
+  local summary_file=""
+  local chunk_file=""
   endpoint="$(image_cache_api_endpoint)"
-  if curl -fsS --max-time 60 "${endpoint}/fugue/cache/v1/inventory" >/dev/null; then
-    log_task "image-cache inventory endpoint is reachable"
-    return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required for image-cache inventory chunking" >&2
+    return 2
   fi
-  echo "image-cache inventory endpoint failed" >&2
-  return 1
+  inventory_file="$(mktemp)"
+  chunk_dir="$(mktemp -d)"
+  summary_file="${chunk_dir}/summary.env"
+  if ! curl -fsS --max-time 60 "${endpoint}/fugue/cache/v1/inventory" -o "${inventory_file}"; then
+    rm -f "${inventory_file}"
+    rm -rf "${chunk_dir}"
+    echo "image-cache inventory endpoint failed" >&2
+    return 1
+  fi
+  if ! python3 - "${inventory_file}" "${chunk_dir}" "${endpoint}" "${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-${FUGUE_JOIN_NODE_NAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)}}" <<'PY_IMAGE_CACHE_INVENTORY'
+import copy
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+inventory_path, chunk_dir, endpoint, cluster_node = sys.argv[1:5]
+with open(inventory_path, "r", encoding="utf-8") as fh:
+    inventory = json.load(fh)
+
+manifests = inventory.get("manifests") or []
+if not isinstance(manifests, list):
+    raise SystemExit("image-cache inventory manifests is not a list")
+
+normalized = []
+for manifest in manifests:
+    if not isinstance(manifest, dict):
+        continue
+    item = dict(manifest)
+    if item.get("content_type") and not item.get("media_type"):
+        item["media_type"] = item.get("content_type")
+    if item.get("size_bytes") is not None and not item.get("manifest_size_bytes"):
+        item["manifest_size_bytes"] = item.get("size_bytes")
+    if item.get("referenced_blob_bytes") is not None and not item.get("total_blob_bytes"):
+        item["total_blob_bytes"] = item.get("referenced_blob_bytes")
+    if item.get("modified_at") and not item.get("created_at_observed"):
+        item["created_at_observed"] = item.get("modified_at")
+    normalized.append(item)
+
+disk = inventory.get("disk") if isinstance(inventory.get("disk"), dict) else {}
+pins = inventory.get("pins") if isinstance(inventory.get("pins"), list) else []
+observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+cache_bytes = int(disk.get("cache_bytes") or 0)
+free_bytes = int(disk.get("free_bytes") or 0)
+chunk_size = 500
+chunk_count = max(1, (len(normalized) + chunk_size - 1) // chunk_size)
+
+base = copy.deepcopy(inventory)
+base["endpoint"] = (inventory.get("endpoint") or endpoint).rstrip("/")
+base["cluster_node"] = inventory.get("cluster_node") or cluster_node
+base["observed_at"] = observed_at
+base["manifest_total_count"] = len(normalized)
+base["node"] = {
+    "cluster_node_name": base["cluster_node"],
+    "cache_endpoint": base["endpoint"],
+    "filesystem_total_bytes": int(disk.get("total_bytes") or 0),
+    "filesystem_free_bytes": free_bytes,
+    "filesystem_used_percent": float(disk.get("used_percent") or 0),
+    "cache_bytes": cache_bytes,
+    "manifest_count": len(normalized),
+    "pin_count": len(pins),
+    "observed_at": observed_at,
+    "status": "reported",
+}
+
+paths = []
+for idx in range(chunk_count):
+    payload = copy.deepcopy(base)
+    payload["chunk_index"] = idx
+    payload["chunk_count"] = chunk_count
+    payload["manifests"] = normalized[idx * chunk_size:(idx + 1) * chunk_size]
+    path = os.path.join(chunk_dir, f"chunk-{idx:05d}.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, separators=(",", ":"))
+    paths.append(path)
+
+with open(os.path.join(chunk_dir, "chunks.list"), "w", encoding="utf-8") as fh:
+    for path in paths:
+        fh.write(path + "\n")
+with open(os.path.join(chunk_dir, "summary.env"), "w", encoding="utf-8") as fh:
+    fh.write(f"manifest_count={len(normalized)}\n")
+    fh.write(f"chunk_count={chunk_count}\n")
+    fh.write(f"cache_bytes={cache_bytes}\n")
+    fh.write(f"filesystem_free_bytes={free_bytes}\n")
+PY_IMAGE_CACHE_INVENTORY
+  then
+    rm -f "${inventory_file}"
+    rm -rf "${chunk_dir}"
+    echo "failed to normalize image-cache inventory" >&2
+    return 1
+  fi
+  while IFS= read -r chunk_file; do
+    [ -n "${chunk_file}" ] || continue
+    api_json POST /v1/node-updater/image-cache/inventory "$(cat "${chunk_file}")" >/dev/null
+  done <"${chunk_dir}/chunks.list"
+  # shellcheck disable=SC1090
+  . "${summary_file}"
+  log_task "reported image-cache inventory manifests=${manifest_count:-0} chunks=${chunk_count:-0} cache_bytes=${cache_bytes:-0} filesystem_free_bytes=${filesystem_free_bytes:-0}"
+  rm -f "${inventory_file}"
+  rm -rf "${chunk_dir}"
 }
 
 prune_image_cache() {
@@ -2020,9 +2213,17 @@ prune_image_cache() {
   local image_ref="${FUGUE_NODE_UPDATE_TASK_IMAGE_REF:-${FUGUE_NODE_UPDATE_TASK_IMAGES:-}}"
   local digest="${FUGUE_NODE_UPDATE_TASK_DIGEST:-}"
   local max_delete_bytes="${FUGUE_NODE_UPDATE_TASK_MAX_DELETE_BYTES:-}"
+  local min_manifest_age="${FUGUE_NODE_UPDATE_TASK_MIN_MANIFEST_AGE:-}"
+  local targets_json="${FUGUE_NODE_UPDATE_TASK_TARGETS_JSON:-[]}"
   local body
   local response
-  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\"}"
+  case "${dry_run}" in true|false) ;; *) dry_run=true ;; esac
+  case "${allow_delete}" in true|false) ;; *) allow_delete=false ;; esac
+  case "${targets_json}" in
+    \[*\]) ;;
+    *) targets_json="[]" ;;
+  esac
+  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\",\"min_manifest_age\":\"$(json_escape_shell "${min_manifest_age}")\",\"targets\":${targets_json}}"
   response="$(image_cache_api_json /fugue/cache/v1/prune "${body}")"
   if printf '%s' "${response}" | grep -Eq '"deleted"[[:space:]]*:[[:space:]]*true'; then
     if [ -n "${image_id}" ]; then
@@ -2030,6 +2231,364 @@ prune_image_cache() {
     fi
   fi
   log_task "image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete}"
+}
+
+localpv_inventory_json() {
+  local vg_name="${FUGUE_NODE_UPDATE_TASK_VG_NAME:-${FUGUE_LOCALPV_VG_NAME}}"
+  local image_path="${FUGUE_NODE_UPDATE_TASK_IMAGE_PATH:-${FUGUE_LOCALPV_IMAGE_PATH}}"
+  local cluster_node="${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-${FUGUE_JOIN_NODE_NAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)}}"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required for LocalPV inventory" >&2
+    return 2
+  fi
+  python3 - "${vg_name}" "${image_path}" "${cluster_node}" <<'PY_LOCALPV_INVENTORY'
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+vg_name, image_path, cluster_node = sys.argv[1:4]
+
+def run(cmd):
+    try:
+        proc = subprocess.run(cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+def load_json(raw):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+def lvm_rows(raw, key):
+    data = load_json(raw)
+    if not data:
+        return []
+    reports = data.get("report") or []
+    if not reports:
+        return []
+    rows = reports[0].get(key) or []
+    return rows if isinstance(rows, list) else []
+
+def parse_int(value):
+    if value is None:
+        return 0
+    text = str(value).strip()
+    text = re.sub(r"[^0-9.]", "", text)
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+def real(path):
+    if not path:
+        return ""
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+unsafe = []
+node_roles = []
+lv_names = []
+active_lv_count = 0
+pv_size_bytes = 0
+pv_free_bytes = 0
+loop_device = ""
+loop_backing_file = ""
+bound_pvc_refs = []
+
+image_size_bytes = 0
+if os.path.exists(image_path):
+    image_size_bytes = os.stat(image_path).st_size
+else:
+    unsafe.append("image_path_missing")
+
+vgs_raw = run(["vgs", vg_name, "--units", "b", "--nosuffix", "--reportformat", "json", "-o", "vg_name,vg_size,vg_free"])
+lvs_raw = run(["lvs", "--reportformat", "json", "-o", "lv_name,vg_name,lv_active,lv_attr"])
+pvs_raw = run(["pvs", "--units", "b", "--nosuffix", "--reportformat", "json", "-o", "pv_name,vg_name,pv_size,pv_free"])
+if vgs_raw is None or lvs_raw is None or pvs_raw is None:
+    unsafe.append("lvm_tools_unavailable_or_vg_missing")
+
+for row in lvm_rows(vgs_raw, "vg"):
+    if str(row.get("vg_name", "")).strip() == vg_name:
+        pv_size_bytes = parse_int(row.get("vg_size"))
+        pv_free_bytes = parse_int(row.get("vg_free"))
+        break
+
+for row in lvm_rows(lvs_raw, "lv"):
+    if str(row.get("vg_name", "")).strip() != vg_name:
+        continue
+    name = str(row.get("lv_name", "")).strip()
+    if name:
+        lv_names.append(name)
+    active = str(row.get("lv_active", "")).strip().lower()
+    attr = str(row.get("lv_attr", "")).strip().lower()
+    if active in ("active", "yes") or (len(attr) > 4 and attr[4] == "a"):
+        active_lv_count += 1
+
+loop_raw = run(["losetup", "--json"])
+loop_data = load_json(loop_raw)
+if loop_data is None:
+    unsafe.append("losetup_unavailable")
+else:
+    wanted = real(image_path)
+    for item in loop_data.get("loopdevices") or []:
+        backing = item.get("back-file") or item.get("back_file") or item.get("backing_file") or ""
+        if real(backing) == wanted:
+            loop_device = item.get("name") or ""
+            loop_backing_file = backing
+            break
+    if not loop_device and image_size_bytes > 0:
+        unsafe.append("loop_device_missing")
+
+if loop_device and real(loop_backing_file) != real(image_path):
+    unsafe.append("loop_backing_mismatch")
+
+node_raw = run(["kubectl", "get", "node", cluster_node, "-o", "json"]) if cluster_node else None
+node_data = load_json(node_raw)
+if node_data:
+    labels = (node_data.get("metadata") or {}).get("labels") or {}
+    for key, value in labels.items():
+        if key.startswith("node-role.kubernetes.io/"):
+            role = key.split("/", 1)[1]
+            if role:
+                node_roles.append(role)
+        if key in ("fugue.io/node-role", "fugue.io/roles", "fugue.dev/node-role", "fugue.dev/roles"):
+            node_roles.extend([part.strip() for part in str(value).replace(";", ",").split(",") if part.strip()])
+
+pv_raw = run(["kubectl", "get", "pv", "-o", "json"])
+pv_data = load_json(pv_raw)
+pvc_data = load_json(run(["kubectl", "get", "pvc", "-A", "-o", "json"]))
+if pv_data is None:
+    unsafe.append("kubectl_pv_unavailable")
+else:
+    pvc_lookup = {}
+    if pvc_data:
+        for pvc in pvc_data.get("items") or []:
+            meta = pvc.get("metadata") or {}
+            spec = pvc.get("spec") or {}
+            volume = spec.get("volumeName")
+            if volume:
+                pvc_lookup[volume] = f"{meta.get('namespace', '')}/{meta.get('name', '')}".strip("/")
+
+    def pv_targets_node(pv):
+        if not cluster_node:
+            return False
+        affinity = (((pv.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {})
+        terms = affinity.get("nodeSelectorTerms") or []
+        for term in terms:
+            for expr in term.get("matchExpressions") or []:
+                key = expr.get("key")
+                values = [str(v) for v in (expr.get("values") or [])]
+                if key in ("kubernetes.io/hostname", "node.kubernetes.io/instance") and cluster_node in values:
+                    return True
+        return False
+
+    for pv in pv_data.get("items") or []:
+        spec = pv.get("spec") or {}
+        status = pv.get("status") or {}
+        phase = str(status.get("phase") or "")
+        local_path = ((spec.get("local") or {}).get("path") or "")
+        storage_class = str(spec.get("storageClassName") or "")
+        if phase != "Bound":
+            continue
+        if not local_path and "local" not in storage_class.lower() and "lvm" not in storage_class.lower():
+            continue
+        if cluster_node and not pv_targets_node(pv):
+            continue
+        name = (pv.get("metadata") or {}).get("name") or ""
+        ref = pvc_lookup.get(name)
+        if not ref:
+            claim = spec.get("claimRef") or {}
+            ref = f"{claim.get('namespace', '')}/{claim.get('name', '')}".strip("/")
+        bound_pvc_refs.append(ref or name)
+
+if lv_names:
+    unsafe.append("active_lvs_present")
+if active_lv_count:
+    unsafe.append("active_lvs_present")
+if bound_pvc_refs:
+    unsafe.append("bound_pvs_present")
+if not loop_device and image_size_bytes > 0:
+    unsafe.append("loop_device_missing")
+unsafe = sorted(set(reason for reason in unsafe if reason))
+
+inventory = {
+    "cluster_node_name": cluster_node,
+    "node_roles": sorted(set(node_roles)),
+    "vg_name": vg_name,
+    "image_path": image_path,
+    "image_size_bytes": image_size_bytes,
+    "loop_device": loop_device,
+    "loop_backing_file": loop_backing_file,
+    "pv_size_bytes": pv_size_bytes,
+    "pv_free_bytes": pv_free_bytes,
+    "lv_count": len(lv_names),
+    "lv_names": sorted(lv_names),
+    "active_lv_count": active_lv_count,
+    "bound_pv_count": len(bound_pvc_refs),
+    "bound_pvc_refs": sorted(set(bound_pvc_refs)),
+    "safe_to_decommission": not unsafe,
+    "unsafe_reasons": unsafe,
+    "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+print(json.dumps({"inventory": inventory}, separators=(",", ":")))
+PY_LOCALPV_INVENTORY
+}
+
+report_lvm_localpv_inventory() {
+  local payload=""
+  payload="$(localpv_inventory_json)"
+  api_json POST /v1/node-updater/localpv/inventory "${payload}" >/dev/null
+  log_task "reported LocalPV inventory"
+}
+
+localpv_decommission_decision_json() {
+  local inventory_file="$1"
+  local dry_run="$2"
+  local allow_delete="$3"
+  local allow_policy="$4"
+  local expected_image_size="${5:-}"
+  local expected_lv_count="${6:-}"
+  local expected_bound_pv_count="${7:-}"
+  python3 - "${inventory_file}" "${dry_run}" "${allow_delete}" "${allow_policy}" "${expected_image_size}" "${expected_lv_count}" "${expected_bound_pv_count}" <<'PY_LOCALPV_DECISION'
+import json
+import sys
+
+path, dry_run_raw, allow_delete_raw, allow_policy_raw, expected_image_raw, expected_lv_raw, expected_bound_raw = sys.argv[1:8]
+with open(path, "r", encoding="utf-8") as fh:
+    inventory = (json.load(fh).get("inventory") or {})
+
+def truthy(value):
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+def parse_expected(raw):
+    raw = str(raw or "").strip()
+    if raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+dry_run = truthy(dry_run_raw)
+allow_delete = truthy(allow_delete_raw)
+allow_policy = truthy(allow_policy_raw) or str(allow_policy_raw).strip().lower() in ("localpv-removable", "allow-delete", "decommission-allowed")
+unsafe = list(inventory.get("unsafe_reasons") or [])
+
+if int(inventory.get("lv_count") or 0) != 0:
+    unsafe.append("active_lvs_present")
+if int(inventory.get("bound_pv_count") or 0) != 0:
+    unsafe.append("bound_pvs_present")
+if not inventory.get("image_path"):
+    unsafe.append("image_path_missing")
+if int(inventory.get("image_size_bytes") or 0) <= 0:
+    unsafe.append("image_path_missing")
+if not inventory.get("loop_device"):
+    unsafe.append("loop_device_missing")
+if os.path.realpath(str(inventory.get("loop_backing_file") or "")) != os.path.realpath(str(inventory.get("image_path") or "")):
+    unsafe.append("loop_backing_mismatch")
+if not allow_policy:
+    unsafe.append("node_role_policy_not_allowed")
+
+if not dry_run:
+    if not allow_delete:
+        unsafe.append("allow_delete_false")
+    expected_image = parse_expected(expected_image_raw)
+    expected_lv = parse_expected(expected_lv_raw)
+    expected_bound = parse_expected(expected_bound_raw)
+    if expected_image is None or expected_lv is None or expected_bound is None:
+        unsafe.append("missing_expected_preflight")
+    else:
+        if expected_image != int(inventory.get("image_size_bytes") or 0):
+            unsafe.append("expected_image_size_mismatch")
+        if expected_lv != int(inventory.get("lv_count") or 0):
+            unsafe.append("expected_lv_count_mismatch")
+        if expected_bound != int(inventory.get("bound_pv_count") or 0):
+            unsafe.append("expected_bound_pv_count_mismatch")
+
+unsafe = sorted(set(reason for reason in unsafe if reason))
+commands = [
+    f"systemctl stop {inventory.get('service', 'fugue-lvm-localpv-loop.service')}",
+    f"losetup -d {inventory.get('loop_device', '')}",
+    f"systemctl disable {inventory.get('service', 'fugue-lvm-localpv-loop.service')}",
+    f"rm -f -- {inventory.get('image_path', '')}",
+]
+print(json.dumps({
+    "safe": not unsafe,
+    "dry_run": dry_run,
+    "allow_delete": allow_delete,
+    "unsafe_reasons": unsafe,
+    "expected_freed_bytes": int(inventory.get("image_size_bytes") or 0),
+    "commands": commands,
+}, separators=(",", ":")))
+PY_LOCALPV_DECISION
+}
+
+decommission_lvm_localpv() {
+  local dry_run="${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}"
+  local allow_delete="${FUGUE_NODE_UPDATE_TASK_ALLOW_DELETE:-false}"
+  local allow_policy="${FUGUE_NODE_UPDATE_TASK_ALLOW_LOCALPV_DECOMMISSION:-${FUGUE_NODE_UPDATE_TASK_NODE_ROLE_POLICY:-false}}"
+  local expected_image_size="${FUGUE_NODE_UPDATE_TASK_EXPECTED_IMAGE_SIZE_BYTES:-}"
+  local expected_lv_count="${FUGUE_NODE_UPDATE_TASK_EXPECTED_LV_COUNT:-}"
+  local expected_bound_pv_count="${FUGUE_NODE_UPDATE_TASK_EXPECTED_BOUND_PV_COUNT:-}"
+  local service="${FUGUE_NODE_UPDATE_TASK_LOOP_SERVICE:-${FUGUE_LOCALPV_LOOP_SERVICE}}"
+  local inventory_file=""
+  local decision_file=""
+  local payload=""
+  case "${dry_run}" in true|false) ;; *) dry_run=true ;; esac
+  case "${allow_delete}" in true|false) ;; *) allow_delete=false ;; esac
+  inventory_file="$(mktemp)"
+  decision_file="$(mktemp)"
+  payload="$(localpv_inventory_json)"
+  printf '%s' "${payload}" >"${inventory_file}"
+  api_json POST /v1/node-updater/localpv/inventory "${payload}" >/dev/null || true
+  localpv_decommission_decision_json "${inventory_file}" "${dry_run}" "${allow_delete}" "${allow_policy}" "${expected_image_size}" "${expected_lv_count}" "${expected_bound_pv_count}" >"${decision_file}"
+  if ! grep -Eq '"safe"[[:space:]]*:[[:space:]]*true' "${decision_file}"; then
+    log_task "LocalPV decommission refused $(cat "${decision_file}")"
+    rm -f "${inventory_file}" "${decision_file}"
+    return 1
+  fi
+  if [ "${dry_run}" = "true" ]; then
+    log_task "LocalPV decommission dry-run $(cat "${decision_file}")"
+    rm -f "${inventory_file}" "${decision_file}"
+    return 0
+  fi
+  if [ "${allow_delete}" != "true" ]; then
+    log_task "LocalPV decommission refused allow_delete=false"
+    rm -f "${inventory_file}" "${decision_file}"
+    return 1
+  fi
+  local loop_device=""
+  local image_path=""
+  loop_device="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("inventory") or {}).get("loop_device",""))' "${inventory_file}")"
+  image_path="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("inventory") or {}).get("image_path",""))' "${inventory_file}")"
+  if [ -z "${loop_device}" ] || [ -z "${image_path}" ]; then
+    log_task "LocalPV decommission refused missing verified loop device or image path"
+    rm -f "${inventory_file}" "${decision_file}"
+    return 1
+  fi
+  systemctl stop "${service}"
+  losetup -d "${loop_device}"
+  systemctl disable "${service}"
+  rm -f -- "${image_path}"
+  payload="$(localpv_inventory_json || true)"
+  if [ -n "${payload}" ]; then
+    api_json POST /v1/node-updater/localpv/inventory "${payload}" >/dev/null || true
+  fi
+  log_task "LocalPV decommission completed $(cat "${decision_file}")"
+  rm -f "${inventory_file}" "${decision_file}"
 }
 
 verify_systemd_escape_hatch() {
@@ -2099,6 +2658,12 @@ run_task() {
       ;;
     report-image-cache-inventory)
       report_image_cache_inventory
+      ;;
+    report-lvm-localpv-inventory)
+      report_lvm_localpv_inventory
+      ;;
+    decommission-lvm-localpv)
+      decommission_lvm_localpv
       ;;
     verify-systemd-escape-hatch)
       verify_systemd_escape_hatch

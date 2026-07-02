@@ -121,6 +121,8 @@ const (
 	NodeUpdateTaskTypeVerifyImageCache    = "verify-image-cache"
 	NodeUpdateTaskTypePruneImageCache     = "prune-image-cache"
 	NodeUpdateTaskTypeReportImageCache    = "report-image-cache-inventory"
+	NodeUpdateTaskTypeReportLocalPV       = "report-lvm-localpv-inventory"
+	NodeUpdateTaskTypeDecommissionLocalPV = "decommission-lvm-localpv"
 	NodeUpdateTaskTypeVerifySystemdEscape = "verify-systemd-escape-hatch"
 
 	NodeUpdateTaskStatusPending   = "pending"
@@ -183,6 +185,15 @@ const (
 	ImageReplicationPriorityRepair         = "repair"
 	ImageReplicationPriorityWarmup         = "warmup"
 	ImageReplicationPriorityRebalance      = "rebalance"
+
+	ImageCachePruneModeObserve = "observe"
+	ImageCachePruneModeDryRun  = "dry-run"
+	ImageCachePruneModeDelete  = "delete"
+
+	ImageCachePrunePlanStatusPlanned   = "planned"
+	ImageCachePrunePlanStatusScheduled = "scheduled"
+	ImageCachePrunePlanStatusCompleted = "completed"
+	ImageCachePrunePlanStatusFailed    = "failed"
 
 	IdempotencyScopeAppImportGitHub = "app.import_github"
 	IdempotencyScopeAppImportImage  = "app.import_image"
@@ -2136,6 +2147,143 @@ type ImageReplicationTaskFilter struct {
 	PlatformAdmin         bool
 }
 
+type ImageCacheNodeInventory struct {
+	ID                      string    `json:"id"`
+	NodeID                  string    `json:"node_id,omitempty"`
+	ClusterNodeName         string    `json:"cluster_node_name,omitempty"`
+	RuntimeID               string    `json:"runtime_id,omitempty"`
+	CacheEndpoint           string    `json:"cache_endpoint,omitempty"`
+	StorePath               string    `json:"store_path,omitempty"`
+	FilesystemTotalBytes    int64     `json:"filesystem_total_bytes,omitempty"`
+	FilesystemFreeBytes     int64     `json:"filesystem_free_bytes,omitempty"`
+	FilesystemUsedPercent   float64   `json:"filesystem_used_percent,omitempty"`
+	CacheBytes              int64     `json:"cache_bytes,omitempty"`
+	ManifestCount           int       `json:"manifest_count,omitempty"`
+	BlobCount               int       `json:"blob_count,omitempty"`
+	PinCount                int       `json:"pin_count,omitempty"`
+	ObservedAt              time.Time `json:"observed_at"`
+	ReportedByNodeUpdaterID string    `json:"reported_by_node_updater_id,omitempty"`
+	Status                  string    `json:"status,omitempty"`
+	LastError               string    `json:"last_error,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
+}
+
+type ImageCacheNodeInventoryFilter struct {
+	NodeID          string
+	ClusterNodeName string
+	RuntimeID       string
+	StaleAfter      time.Time
+}
+
+type ImageCacheManifest struct {
+	ID                string     `json:"id"`
+	NodeID            string     `json:"node_id,omitempty"`
+	ClusterNodeName   string     `json:"cluster_node_name,omitempty"`
+	RuntimeID         string     `json:"runtime_id,omitempty"`
+	ImageRef          string     `json:"image_ref,omitempty"`
+	Repo              string     `json:"repo"`
+	Target            string     `json:"target"`
+	Digest            string     `json:"digest,omitempty"`
+	MediaType         string     `json:"media_type,omitempty"`
+	ManifestSizeBytes int64      `json:"manifest_size_bytes,omitempty"`
+	TotalBlobBytes    int64      `json:"total_blob_bytes,omitempty"`
+	ReferencedBlobs   []string   `json:"referenced_blobs,omitempty"`
+	CreatedAtObserved *time.Time `json:"created_at_observed,omitempty"`
+	LastSeenAt        time.Time  `json:"last_seen_at"`
+	PinnedLocally     bool       `json:"pinned_locally,omitempty"`
+	Present           bool       `json:"present"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+type ImageCacheManifestFilter struct {
+	NodeID          string
+	ClusterNodeName string
+	RuntimeID       string
+	Repo            string
+	Target          string
+	Digest          string
+	SeenAfter       time.Time
+	PresentOnly     bool
+}
+
+type ImageCachePruneCandidate struct {
+	ImageRef           string   `json:"image_ref,omitempty"`
+	Repo               string   `json:"repo"`
+	Target             string   `json:"target"`
+	Digest             string   `json:"digest,omitempty"`
+	Reason             string   `json:"reason,omitempty"`
+	SkipReason         string   `json:"skip_reason,omitempty"`
+	Protected          bool     `json:"protected"`
+	PlannedDeleteBytes int64    `json:"planned_delete_bytes,omitempty"`
+	ReferencedBlobs    []string `json:"referenced_blobs,omitempty"`
+	LastSeenAt         string   `json:"last_seen_at,omitempty"`
+	CreatedAtObserved  string   `json:"created_at_observed,omitempty"`
+}
+
+type ImageCachePrunePlan struct {
+	ID                     string                     `json:"id"`
+	NodeID                 string                     `json:"node_id,omitempty"`
+	ClusterNodeName        string                     `json:"cluster_node_name,omitempty"`
+	RuntimeID              string                     `json:"runtime_id,omitempty"`
+	Mode                   string                     `json:"mode"`
+	CandidateManifestCount int                        `json:"candidate_manifest_count"`
+	ProtectedManifestCount int                        `json:"protected_manifest_count"`
+	PlannedDeleteBytes     int64                      `json:"planned_delete_bytes,omitempty"`
+	MaxDeleteBytes         int64                      `json:"max_delete_bytes,omitempty"`
+	MinManifestAge         string                     `json:"min_manifest_age,omitempty"`
+	ProtectionSummary      map[string]int             `json:"protection_summary,omitempty"`
+	CandidateSummary       map[string]int             `json:"candidate_summary,omitempty"`
+	Candidates             []ImageCachePruneCandidate `json:"candidates,omitempty"`
+	CreatedAt              time.Time                  `json:"created_at"`
+	ExecutedAt             *time.Time                 `json:"executed_at,omitempty"`
+	Status                 string                     `json:"status"`
+	Error                  string                     `json:"error,omitempty"`
+}
+
+type ImageCachePrunePlanFilter struct {
+	NodeID          string
+	ClusterNodeName string
+	RuntimeID       string
+	Mode            string
+	Status          string
+	Limit           int
+}
+
+type LocalPVInventory struct {
+	ID                      string    `json:"id"`
+	NodeID                  string    `json:"node_id,omitempty"`
+	ClusterNodeName         string    `json:"cluster_node_name,omitempty"`
+	RuntimeID               string    `json:"runtime_id,omitempty"`
+	NodeRoles               []string  `json:"node_roles,omitempty"`
+	VGName                  string    `json:"vg_name,omitempty"`
+	ImagePath               string    `json:"image_path,omitempty"`
+	ImageSizeBytes          int64     `json:"image_size_bytes,omitempty"`
+	LoopDevice              string    `json:"loop_device,omitempty"`
+	LoopBackingFile         string    `json:"loop_backing_file,omitempty"`
+	PVSizeBytes             int64     `json:"pv_size_bytes,omitempty"`
+	PVFreeBytes             int64     `json:"pv_free_bytes,omitempty"`
+	LVCount                 int       `json:"lv_count"`
+	LVNames                 []string  `json:"lv_names,omitempty"`
+	ActiveLVCount           int       `json:"active_lv_count"`
+	BoundPVCount            int       `json:"bound_pv_count"`
+	BoundPVCRefs            []string  `json:"bound_pvc_refs,omitempty"`
+	SafeToDecommission      bool      `json:"safe_to_decommission"`
+	UnsafeReasons           []string  `json:"unsafe_reasons,omitempty"`
+	ObservedAt              time.Time `json:"observed_at"`
+	ReportedByNodeUpdaterID string    `json:"reported_by_node_updater_id,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
+}
+
+type LocalPVInventoryFilter struct {
+	NodeID          string
+	ClusterNodeName string
+	RuntimeID       string
+	StaleAfter      time.Time
+}
+
 type IdempotencyRecord struct {
 	Scope       string    `json:"scope"`
 	TenantID    string    `json:"tenant_id"`
@@ -2627,6 +2775,10 @@ type State struct {
 	ImageReplicas              []ImageReplica              `json:"image_replicas,omitempty"`
 	ImagePins                  []ImagePin                  `json:"image_pins,omitempty"`
 	ImageReplicationTasks      []ImageReplicationTask      `json:"image_replication_tasks,omitempty"`
+	ImageCacheNodes            []ImageCacheNodeInventory   `json:"image_cache_nodes,omitempty"`
+	ImageCacheManifests        []ImageCacheManifest        `json:"image_cache_manifests,omitempty"`
+	ImageCachePrunePlans       []ImageCachePrunePlan       `json:"image_cache_prune_plans,omitempty"`
+	LocalPVInventories         []LocalPVInventory          `json:"localpv_inventories,omitempty"`
 	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
 	AppReleases                []AppRelease                `json:"app_releases,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`

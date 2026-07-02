@@ -74,59 +74,67 @@ type TelemetryAgentConfig struct {
 }
 
 type ControllerConfig struct {
-	MetricsBindAddr               string
-	StorePath                     string
-	DatabaseURL                   string
-	APIPublicDomain               string
-	AppObservabilityEndpoint      string
-	WorkloadIdentitySigningKey    string
-	RegistryPushBase              string
-	RegistryPullBase              string
-	BuilderRegistryPushBase       string
-	SourceUploadBaseURL           string
-	ImportWorkDir                 string
-	ForegroundImportWorkers       int
-	ForegroundActivateWorkers     int
-	GitHubSyncImportWorkers       int
-	GitHubSyncActivateWorkers     int
-	GitHubSyncInterval            time.Duration
-	GitHubSyncTimeout             time.Duration
-	GitHubSyncRetryBaseDelay      time.Duration
-	GitHubSyncRetryMaxDelay       time.Duration
-	GitHubSyncCheckRetryBaseDelay time.Duration
-	GitHubSyncCheckRetryMaxDelay  time.Duration
-	ImageTrackingInterval         time.Duration
-	ImageTrackingTimeout          time.Duration
-	ImageRetentionSweepInterval   time.Duration
-	ImageRetentionSweepTimeout    time.Duration
-	ImageStoreMode                string
-	ImageStoreMinReplicas         int
-	ImageStoreTargetReplicas      int
-	ImageStoreSchedulerInterval   time.Duration
-	ImageStoreReplicaLeaseTTL     time.Duration
-	ImageStoreVerifyInterval      time.Duration
-	ImageStorePruneEnabled        bool
-	ImageStorePruneMaxDeleteBytes string
-	RegistryGCLeaseName           string
-	RegistryJanitorCronJobName    string
-	RegistryGCCronJobName         string
-	ManagedAppRolloutTimeout      time.Duration
-	PollInterval                  time.Duration
-	FallbackPollInterval          time.Duration
-	RuntimeOfflineAfter           time.Duration
-	RenderDir                     string
-	KubectlApply                  bool
-	KubectlNamespace              string
-	LeaderElectionEnabled         bool
-	LeaderElectionLeaseName       string
-	LeaderElectionLeaseNamespace  string
-	LeaderElectionLeaseDuration   time.Duration
-	LeaderElectionRenewDeadline   time.Duration
-	LeaderElectionRetryPeriod     time.Duration
-	LeaderElectionIdentity        string
-	LegacyControllerLabelSelector string
-	LegacyControllerContainerName string
-	LegacyControllerCheckInterval time.Duration
+	MetricsBindAddr                            string
+	StorePath                                  string
+	DatabaseURL                                string
+	APIPublicDomain                            string
+	AppObservabilityEndpoint                   string
+	WorkloadIdentitySigningKey                 string
+	RegistryPushBase                           string
+	RegistryPullBase                           string
+	BuilderRegistryPushBase                    string
+	SourceUploadBaseURL                        string
+	ImportWorkDir                              string
+	ForegroundImportWorkers                    int
+	ForegroundActivateWorkers                  int
+	GitHubSyncImportWorkers                    int
+	GitHubSyncActivateWorkers                  int
+	GitHubSyncInterval                         time.Duration
+	GitHubSyncTimeout                          time.Duration
+	GitHubSyncRetryBaseDelay                   time.Duration
+	GitHubSyncRetryMaxDelay                    time.Duration
+	GitHubSyncCheckRetryBaseDelay              time.Duration
+	GitHubSyncCheckRetryMaxDelay               time.Duration
+	ImageTrackingInterval                      time.Duration
+	ImageTrackingTimeout                       time.Duration
+	ImageRetentionSweepInterval                time.Duration
+	ImageRetentionSweepTimeout                 time.Duration
+	ImageStoreMode                             string
+	ImageStoreMinReplicas                      int
+	ImageStoreTargetReplicas                   int
+	ImageStoreSchedulerInterval                time.Duration
+	ImageStoreReplicaLeaseTTL                  time.Duration
+	ImageStoreVerifyInterval                   time.Duration
+	ImageStorePruneEnabled                     bool
+	ImageStorePruneMaxDeleteBytes              string
+	ImageCacheInventoryEnabled                 bool
+	ImageCacheInventoryInterval                time.Duration
+	ImageCacheInventoryTTL                     time.Duration
+	ImageStoreOrphanPruneMode                  string
+	ImageStoreOrphanPruneGracePeriod           time.Duration
+	ImageStoreOrphanPruneMaxTargetsPerNode     int
+	ImageStoreOrphanPruneMaxDeleteBytesPerNode string
+	ImageStoreOrphanPruneMinReplicaCount       int
+	RegistryGCLeaseName                        string
+	RegistryJanitorCronJobName                 string
+	RegistryGCCronJobName                      string
+	ManagedAppRolloutTimeout                   time.Duration
+	PollInterval                               time.Duration
+	FallbackPollInterval                       time.Duration
+	RuntimeOfflineAfter                        time.Duration
+	RenderDir                                  string
+	KubectlApply                               bool
+	KubectlNamespace                           string
+	LeaderElectionEnabled                      bool
+	LeaderElectionLeaseName                    string
+	LeaderElectionLeaseNamespace               string
+	LeaderElectionLeaseDuration                time.Duration
+	LeaderElectionRenewDeadline                time.Duration
+	LeaderElectionRetryPeriod                  time.Duration
+	LeaderElectionIdentity                     string
+	LegacyControllerLabelSelector              string
+	LegacyControllerContainerName              string
+	LegacyControllerCheckInterval              time.Duration
 }
 
 type AgentConfig struct {
@@ -359,59 +367,67 @@ func ObservabilityFromEnv() observability.Config {
 
 func ControllerFromEnv() ControllerConfig {
 	cfg := ControllerConfig{
-		MetricsBindAddr:               strings.TrimSpace(os.Getenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR")),
-		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
-		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
-		AppObservabilityEndpoint:      getenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", ""),
-		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
-		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
-		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
-		BuilderRegistryPushBase:       strings.TrimSpace(os.Getenv("FUGUE_BUILDER_REGISTRY_PUSH_BASE")),
-		SourceUploadBaseURL:           getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
-		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
-		ForegroundImportWorkers:       getenvInt("FUGUE_CONTROLLER_FOREGROUND_IMPORT_WORKERS", 0),
-		ForegroundActivateWorkers:     getenvInt("FUGUE_CONTROLLER_FOREGROUND_ACTIVATE_WORKERS", 4),
-		GitHubSyncImportWorkers:       getenvInt("FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS", 0),
-		GitHubSyncActivateWorkers:     getenvInt("FUGUE_CONTROLLER_GITHUB_SYNC_ACTIVATE_WORKERS", 4),
-		GitHubSyncInterval:            getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL", time.Minute),
-		GitHubSyncTimeout:             getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT", 20*time.Second),
-		GitHubSyncRetryBaseDelay:      getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY", 5*time.Minute),
-		GitHubSyncRetryMaxDelay:       getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY", time.Hour),
-		GitHubSyncCheckRetryBaseDelay: getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_CHECK_RETRY_BASE_DELAY", 5*time.Minute),
-		GitHubSyncCheckRetryMaxDelay:  getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_CHECK_RETRY_MAX_DELAY", 6*time.Hour),
-		ImageTrackingInterval:         getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_INTERVAL", time.Minute),
-		ImageTrackingTimeout:          getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_TIMEOUT", 20*time.Second),
-		ImageRetentionSweepInterval:   getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL", 6*time.Hour),
-		ImageRetentionSweepTimeout:    getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT", 5*time.Minute),
-		ImageStoreMode:                getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
-		ImageStoreMinReplicas:         getenvInt("FUGUE_IMAGE_STORE_MIN_REPLICAS", 2),
-		ImageStoreTargetReplicas:      getenvInt("FUGUE_IMAGE_STORE_TARGET_REPLICAS", 2),
-		ImageStoreSchedulerInterval:   getenvDuration("FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL", 30*time.Second),
-		ImageStoreReplicaLeaseTTL:     getenvDuration("FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL", 30*time.Minute),
-		ImageStoreVerifyInterval:      getenvDuration("FUGUE_IMAGE_STORE_VERIFY_INTERVAL", 10*time.Minute),
-		ImageStorePruneEnabled:        getenvBool("FUGUE_IMAGE_STORE_PRUNE_ENABLED", true),
-		ImageStorePruneMaxDeleteBytes: getenv("FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN", "10Gi"),
-		RegistryGCLeaseName:           getenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
-		RegistryJanitorCronJobName:    getenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "fugue-registry-janitor"),
-		RegistryGCCronJobName:         getenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "fugue-registry-gc"),
-		ManagedAppRolloutTimeout:      getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", DefaultManagedAppRolloutTimeout),
-		PollInterval:                  getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 15*time.Second),
-		FallbackPollInterval:          getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
-		RuntimeOfflineAfter:           getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
-		RenderDir:                     getenv("FUGUE_RENDER_DIR", "./data/rendered"),
-		KubectlApply:                  getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
-		KubectlNamespace:              os.Getenv("FUGUE_CONTROLLER_KUBECTL_NAMESPACE"),
-		LeaderElectionEnabled:         getenvBool("FUGUE_CONTROLLER_LEADER_ELECTION_ENABLED", false),
-		LeaderElectionLeaseName:       getenv("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAME", "fugue-controller"),
-		LeaderElectionLeaseNamespace:  os.Getenv("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAMESPACE"),
-		LeaderElectionLeaseDuration:   getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_DURATION", 15*time.Second),
-		LeaderElectionRenewDeadline:   getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RENEW_DEADLINE", 10*time.Second),
-		LeaderElectionRetryPeriod:     getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RETRY_PERIOD", 2*time.Second),
-		LeaderElectionIdentity:        getenv("FUGUE_CONTROLLER_LEADER_ELECTION_IDENTITY", hostnameFallback()),
-		LegacyControllerLabelSelector: getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR", ""),
-		LegacyControllerContainerName: getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME", "controller"),
-		LegacyControllerCheckInterval: getenvDuration("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL", 2*time.Second),
+		MetricsBindAddr:                            strings.TrimSpace(os.Getenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR")),
+		StorePath:                                  getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                                getenv("FUGUE_DATABASE_URL", ""),
+		APIPublicDomain:                            getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
+		AppObservabilityEndpoint:                   getenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", ""),
+		WorkloadIdentitySigningKey:                 strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
+		RegistryPushBase:                           getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
+		RegistryPullBase:                           strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
+		BuilderRegistryPushBase:                    strings.TrimSpace(os.Getenv("FUGUE_BUILDER_REGISTRY_PUSH_BASE")),
+		SourceUploadBaseURL:                        getenv("FUGUE_SOURCE_UPLOAD_BASE_URL", "http://127.0.0.1:8080"),
+		ImportWorkDir:                              getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
+		ForegroundImportWorkers:                    getenvInt("FUGUE_CONTROLLER_FOREGROUND_IMPORT_WORKERS", 0),
+		ForegroundActivateWorkers:                  getenvInt("FUGUE_CONTROLLER_FOREGROUND_ACTIVATE_WORKERS", 4),
+		GitHubSyncImportWorkers:                    getenvInt("FUGUE_CONTROLLER_GITHUB_SYNC_IMPORT_WORKERS", 0),
+		GitHubSyncActivateWorkers:                  getenvInt("FUGUE_CONTROLLER_GITHUB_SYNC_ACTIVATE_WORKERS", 4),
+		GitHubSyncInterval:                         getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_INTERVAL", time.Minute),
+		GitHubSyncTimeout:                          getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_TIMEOUT", 20*time.Second),
+		GitHubSyncRetryBaseDelay:                   getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_BASE_DELAY", 5*time.Minute),
+		GitHubSyncRetryMaxDelay:                    getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_RETRY_MAX_DELAY", time.Hour),
+		GitHubSyncCheckRetryBaseDelay:              getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_CHECK_RETRY_BASE_DELAY", 5*time.Minute),
+		GitHubSyncCheckRetryMaxDelay:               getenvDuration("FUGUE_CONTROLLER_GITHUB_SYNC_CHECK_RETRY_MAX_DELAY", 6*time.Hour),
+		ImageTrackingInterval:                      getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_INTERVAL", time.Minute),
+		ImageTrackingTimeout:                       getenvDuration("FUGUE_CONTROLLER_IMAGE_TRACKING_TIMEOUT", 20*time.Second),
+		ImageRetentionSweepInterval:                getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_INTERVAL", 6*time.Hour),
+		ImageRetentionSweepTimeout:                 getenvDuration("FUGUE_CONTROLLER_IMAGE_RETENTION_SWEEP_TIMEOUT", 5*time.Minute),
+		ImageStoreMode:                             getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
+		ImageStoreMinReplicas:                      getenvInt("FUGUE_IMAGE_STORE_MIN_REPLICAS", 2),
+		ImageStoreTargetReplicas:                   getenvInt("FUGUE_IMAGE_STORE_TARGET_REPLICAS", 2),
+		ImageStoreSchedulerInterval:                getenvDuration("FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL", 30*time.Second),
+		ImageStoreReplicaLeaseTTL:                  getenvDuration("FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL", 30*time.Minute),
+		ImageStoreVerifyInterval:                   getenvDuration("FUGUE_IMAGE_STORE_VERIFY_INTERVAL", 10*time.Minute),
+		ImageStorePruneEnabled:                     getenvBool("FUGUE_IMAGE_STORE_PRUNE_ENABLED", true),
+		ImageStorePruneMaxDeleteBytes:              getenv("FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN", "10Gi"),
+		ImageCacheInventoryEnabled:                 getenvBool("FUGUE_IMAGE_CACHE_INVENTORY_ENABLED", true),
+		ImageCacheInventoryInterval:                getenvDuration("FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL", 30*time.Minute),
+		ImageCacheInventoryTTL:                     getenvDuration("FUGUE_IMAGE_CACHE_INVENTORY_TTL", 2*time.Hour),
+		ImageStoreOrphanPruneMode:                  getenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "observe"),
+		ImageStoreOrphanPruneGracePeriod:           getenvDuration("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD", 24*time.Hour),
+		ImageStoreOrphanPruneMaxTargetsPerNode:     getenvInt("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE", 50),
+		ImageStoreOrphanPruneMaxDeleteBytesPerNode: getenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE", "1073741824"),
+		ImageStoreOrphanPruneMinReplicaCount:       getenvInt("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT", 1),
+		RegistryGCLeaseName:                        getenv("FUGUE_CONTROLLER_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
+		RegistryJanitorCronJobName:                 getenv("FUGUE_CONTROLLER_REGISTRY_JANITOR_CRONJOB_NAME", "fugue-registry-janitor"),
+		RegistryGCCronJobName:                      getenv("FUGUE_CONTROLLER_REGISTRY_GC_CRONJOB_NAME", "fugue-registry-gc"),
+		ManagedAppRolloutTimeout:                   getenvDuration("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", DefaultManagedAppRolloutTimeout),
+		PollInterval:                               getenvDuration("FUGUE_CONTROLLER_POLL_INTERVAL", 15*time.Second),
+		FallbackPollInterval:                       getenvDuration("FUGUE_CONTROLLER_FALLBACK_POLL_INTERVAL", 30*time.Second),
+		RuntimeOfflineAfter:                        getenvDuration("FUGUE_RUNTIME_OFFLINE_AFTER", 90*time.Second),
+		RenderDir:                                  getenv("FUGUE_RENDER_DIR", "./data/rendered"),
+		KubectlApply:                               getenvBool("FUGUE_CONTROLLER_KUBECTL_APPLY", false),
+		KubectlNamespace:                           os.Getenv("FUGUE_CONTROLLER_KUBECTL_NAMESPACE"),
+		LeaderElectionEnabled:                      getenvBool("FUGUE_CONTROLLER_LEADER_ELECTION_ENABLED", false),
+		LeaderElectionLeaseName:                    getenv("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAME", "fugue-controller"),
+		LeaderElectionLeaseNamespace:               os.Getenv("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_NAMESPACE"),
+		LeaderElectionLeaseDuration:                getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_LEASE_DURATION", 15*time.Second),
+		LeaderElectionRenewDeadline:                getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RENEW_DEADLINE", 10*time.Second),
+		LeaderElectionRetryPeriod:                  getenvDuration("FUGUE_CONTROLLER_LEADER_ELECTION_RETRY_PERIOD", 2*time.Second),
+		LeaderElectionIdentity:                     getenv("FUGUE_CONTROLLER_LEADER_ELECTION_IDENTITY", hostnameFallback()),
+		LegacyControllerLabelSelector:              getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_LABEL_SELECTOR", ""),
+		LegacyControllerContainerName:              getenv("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CONTAINER_NAME", "controller"),
+		LegacyControllerCheckInterval:              getenvDuration("FUGUE_CONTROLLER_LEGACY_CONTROLLER_CHECK_INTERVAL", 2*time.Second),
 	}
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase

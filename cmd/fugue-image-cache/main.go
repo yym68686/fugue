@@ -491,13 +491,15 @@ func (c *imageCache) handleManagementUnpin(w http.ResponseWriter, r *http.Reques
 
 func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DryRun         *bool  `json:"dry_run"`
-		AllowDelete    bool   `json:"allow_delete"`
-		ImageRef       string `json:"image_ref"`
-		Repo           string `json:"repo"`
-		Target         string `json:"target"`
-		Digest         string `json:"digest"`
-		MaxDeleteBytes string `json:"max_delete_bytes"`
+		DryRun         *bool                   `json:"dry_run"`
+		AllowDelete    bool                    `json:"allow_delete"`
+		ImageRef       string                  `json:"image_ref"`
+		Repo           string                  `json:"repo"`
+		Target         string                  `json:"target"`
+		Digest         string                  `json:"digest"`
+		Targets        []imageCachePruneTarget `json:"targets"`
+		MaxDeleteBytes string                  `json:"max_delete_bytes"`
+		MinManifestAge string                  `json:"min_manifest_age"`
 	}
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -530,12 +532,28 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	minManifestAge, err := parseImageCacheDuration(req.MinManifestAge)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	targets := append([]imageCachePruneTarget(nil), req.Targets...)
+	if repo != "" && (target != "" || strings.TrimSpace(req.Digest) != "") {
+		targets = append(targets, imageCachePruneTarget{
+			ImageRef: strings.TrimSpace(req.ImageRef),
+			Repo:     repo,
+			Target:   target,
+			Digest:   normalizeImageCacheDigest(req.Digest),
+		})
+	}
 	plan, err := c.planImageCachePrune(imageCachePruneRequest{
 		repo:            repo,
 		target:          target,
 		digest:          normalizeImageCacheDigest(req.Digest),
+		targets:         targets,
 		allowDelete:     req.AllowDelete,
 		requestMaxBytes: requestMaxDeleteBytes,
+		minManifestAge:  minManifestAge,
 	}, records, pinned)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -560,8 +578,10 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		"candidates":           plan.Candidates,
 		"selected_manifests":   plan.SelectedManifests,
 		"unreferenced_blobs":   plan.UnreferencedBlobs,
+		"skipped_manifests":    plan.SkippedManifests,
 		"delete_budget_bytes":  plan.DeleteBudgetBytes,
 		"needed_delete_bytes":  plan.NeededDeleteBytes,
+		"budget_exhausted":     plan.BudgetExhausted,
 		"skipped_reason":       plan.SkippedReason,
 		"disk":                 plan.Disk,
 		"target_repo":          repo,
@@ -570,24 +590,35 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+type imageCachePruneTarget struct {
+	ImageRef string `json:"image_ref"`
+	Repo     string `json:"repo"`
+	Target   string `json:"target"`
+	Digest   string `json:"digest"`
+}
+
 type imageCachePruneRequest struct {
 	repo            string
 	target          string
 	digest          string
+	targets         []imageCachePruneTarget
 	allowDelete     bool
 	requestMaxBytes int64
+	minManifestAge  time.Duration
 }
 
 type imageCachePrunePlan struct {
 	Disk               imageCacheDiskStats       `json:"disk"`
 	Candidates         []imageCacheManifestEntry `json:"candidates"`
 	SelectedManifests  []imageCacheManifestEntry `json:"selected_manifests"`
+	SkippedManifests   []imageCacheManifestEntry `json:"skipped_manifests"`
 	UnreferencedBlobs  []imageCacheBlobEntry     `json:"unreferenced_blobs"`
 	DeleteBudgetBytes  int64                     `json:"delete_budget_bytes"`
 	NeededDeleteBytes  int64                     `json:"needed_delete_bytes"`
 	PlannedDeleteBytes int64                     `json:"planned_delete_bytes"`
 	DeletedBytes       int64                     `json:"deleted_bytes"`
 	Deleted            bool                      `json:"deleted"`
+	BudgetExhausted    bool                      `json:"budget_exhausted"`
 	DeletedManifests   []imageCacheManifestEntry `json:"deleted_manifests"`
 	DeletedBlobs       []imageCacheBlobEntry     `json:"deleted_blobs"`
 	SkippedReason      string                    `json:"skipped_reason,omitempty"`
@@ -662,8 +693,15 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		blobByDigest[blob.Digest] = blob
 	}
 	candidates := make([]imageCacheManifestRecord, 0, len(records))
+	skipped := make([]imageCacheManifestRecord, 0)
+	now := time.Now().UTC()
 	for _, record := range records {
 		if _, ok := pinned[record.Repo+"\x00"+record.Target]; ok {
+			skipped = append(skipped, record)
+			continue
+		}
+		if req.minManifestAge > 0 && !record.ModifiedAt.IsZero() && now.Sub(record.ModifiedAt) < req.minManifestAge {
+			skipped = append(skipped, record)
 			continue
 		}
 		candidates = append(candidates, record)
@@ -672,12 +710,13 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		return candidates[i].ModifiedAt.Before(candidates[j].ModifiedAt)
 	})
 
-	targeted := strings.TrimSpace(req.repo) != "" && (strings.TrimSpace(req.target) != "" || strings.TrimSpace(req.digest) != "")
+	targets := normalizeImageCachePruneTargets(req)
+	targeted := len(targets) > 0
 	selected := []imageCacheManifestRecord{}
 	if targeted {
 		selectedDigestByRepo := map[string]map[string]struct{}{}
 		for _, candidate := range candidates {
-			if !manifestMatchesPruneTarget(candidate, req) {
+			if !manifestMatchesAnyPruneTarget(candidate, targets) {
 				continue
 			}
 			if selectedDigestByRepo[candidate.Repo] == nil {
@@ -729,21 +768,10 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		Disk:              disk,
 		Candidates:        manifestEntries(candidates, blobByDigest),
 		SelectedManifests: manifestEntries(selected, blobByDigest),
+		SkippedManifests:  manifestEntries(skipped, blobByDigest),
 		UnreferencedBlobs: blobEntries(unreferenced),
 		DeleteBudgetBytes: budget,
 		NeededDeleteBytes: disk.NeededDeleteBytes,
-	}
-	if !req.allowDelete {
-		plan.SkippedReason = "allow_delete_false"
-		return plan, nil
-	}
-	if !limit.Enabled {
-		plan.SkippedReason = "disk_limit_disabled"
-		return plan, nil
-	}
-	if disk.NeededDeleteBytes <= 0 {
-		plan.SkippedReason = "below_watermark"
-		return plan, nil
 	}
 	if budget <= 0 {
 		plan.SkippedReason = "delete_budget_zero"
@@ -753,9 +781,21 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		plan.SkippedReason = "no_matching_unpinned_manifest_or_unreferenced_blob"
 		return plan, nil
 	}
+	if !targeted && !limit.Enabled {
+		plan.SkippedReason = "disk_limit_disabled"
+		return plan, nil
+	}
+	if !targeted && disk.NeededDeleteBytes <= 0 {
+		plan.SkippedReason = "below_watermark"
+		return plan, nil
+	}
 	planned := int64(0)
 	if targeted {
 		for _, record := range selected {
+			if planned+record.SizeBytes > budget {
+				plan.BudgetExhausted = true
+				continue
+			}
 			plan.deleteManifests = append(plan.deleteManifests, record)
 			planned += record.SizeBytes
 		}
@@ -768,11 +808,18 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	if blobNeed < 0 {
 		blobNeed = 0
 	}
+	if targeted {
+		blobNeed = blobBudget
+	}
 	for _, blob := range unreferenced {
 		if blobBudget <= 0 || blobNeed <= 0 {
+			if blobNeed > 0 {
+				plan.BudgetExhausted = true
+			}
 			break
 		}
 		if blob.SizeBytes > blobBudget {
+			plan.BudgetExhausted = true
 			continue
 		}
 		plan.deleteBlobs = append(plan.deleteBlobs, blob)
@@ -781,6 +828,9 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		blobNeed -= blob.SizeBytes
 	}
 	plan.PlannedDeleteBytes = planned
+	if !req.allowDelete {
+		plan.SkippedReason = "allow_delete_false"
+	}
 	if len(plan.deleteManifests) == 0 && len(plan.deleteBlobs) == 0 {
 		plan.SkippedReason = "no_deletable_candidate_within_budget"
 	}
@@ -847,6 +897,79 @@ func manifestMatchesPruneTarget(record imageCacheManifestRecord, req imageCacheP
 	default:
 		return false
 	}
+}
+
+func normalizeImageCachePruneTargets(req imageCachePruneRequest) []imageCachePruneTarget {
+	out := make([]imageCachePruneTarget, 0, len(req.targets)+1)
+	appendTarget := func(target imageCachePruneTarget) {
+		repo, parsedTarget := "", ""
+		if target.Repo != "" {
+			repo, parsedTarget = strings.Trim(strings.TrimSpace(target.Repo), "/"), strings.TrimSpace(target.Target)
+			if parsedTarget == "" && strings.TrimSpace(target.Digest) != "" {
+				parsedTarget = strings.TrimSpace(target.Digest)
+			}
+		}
+		if repo == "" || parsedTarget == "" {
+			repo, parsedTarget = parseImageCacheRepoTarget(target.ImageRef, target.Repo, target.Target, target.Digest)
+		}
+		digest := normalizeImageCacheDigest(target.Digest)
+		if repo == "" || (parsedTarget == "" && digest == "") {
+			return
+		}
+		out = append(out, imageCachePruneTarget{
+			ImageRef: strings.TrimSpace(target.ImageRef),
+			Repo:     repo,
+			Target:   parsedTarget,
+			Digest:   digest,
+		})
+	}
+	for _, target := range req.targets {
+		appendTarget(target)
+	}
+	if strings.TrimSpace(req.repo) != "" && (strings.TrimSpace(req.target) != "" || strings.TrimSpace(req.digest) != "") {
+		appendTarget(imageCachePruneTarget{Repo: req.repo, Target: req.target, Digest: req.digest})
+	}
+	return out
+}
+
+func parseImageCacheRepoTarget(imageRefValue, repoValue, targetValue, digestValue string) (string, string) {
+	repo := strings.Trim(strings.TrimSpace(repoValue), "/")
+	target := strings.TrimSpace(targetValue)
+	if repo != "" && target != "" {
+		return repo, target
+	}
+	if repo != "" && strings.TrimSpace(digestValue) != "" {
+		return repo, strings.TrimSpace(digestValue)
+	}
+	ref := trimRegistryBase(imageRefValue)
+	if strings.Contains(ref, "@") {
+		parts := strings.SplitN(ref, "@", 2)
+		return strings.Trim(parts[0], "/"), strings.TrimSpace(parts[1])
+	}
+	if strings.Contains(ref, ":") {
+		idx := strings.LastIndex(ref, ":")
+		if idx > 0 && idx+1 < len(ref) {
+			return strings.Trim(ref[:idx], "/"), strings.TrimSpace(ref[idx+1:])
+		}
+	}
+	if repo != "" {
+		return repo, firstNonEmptyCacheString(target, digestValue, "latest")
+	}
+	return strings.Trim(ref, "/"), firstNonEmptyCacheString(target, digestValue, "latest")
+}
+
+func manifestMatchesAnyPruneTarget(record imageCacheManifestRecord, targets []imageCachePruneTarget) bool {
+	for _, target := range targets {
+		req := imageCachePruneRequest{
+			repo:   target.Repo,
+			target: target.Target,
+			digest: target.Digest,
+		}
+		if manifestMatchesPruneTarget(record, req) {
+			return true
+		}
+	}
+	return false
 }
 
 func manifestEntries(records []imageCacheManifestRecord, blobByDigest map[string]imageCacheBlobRecord) []imageCacheManifestEntry {
@@ -2582,6 +2705,18 @@ func parseImageCacheByteSize(raw string) (int64, error) {
 		return 0, fmt.Errorf("invalid byte size %q", raw)
 	}
 	return int64(parsed * multiplier), nil
+}
+
+func parseImageCacheDuration(raw string) (time.Duration, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("invalid duration %q", raw)
+	}
+	return parsed, nil
 }
 
 func envInt(key string, fallback int) int {

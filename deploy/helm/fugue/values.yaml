@@ -297,6 +297,16 @@ imageStore:
   prune:
     enabled: true
     maxDeleteBytesPerRun: 10Gi
+  imageCacheInventory:
+    enabled: true
+    interval: 30m
+    ttl: 2h
+  orphanPrune:
+    mode: observe
+    gracePeriod: 24h
+    maxTargetsPerNode: 50
+    maxDeleteBytesPerNode: "1073741824"
+    minReplicaCount: 1
 
 edge:
   enabled: true

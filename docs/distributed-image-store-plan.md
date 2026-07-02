@@ -12,6 +12,13 @@ image routing, Helm chart, or platform traffic rules must be released through
 the normal Fugue repository workflow and the
 `.github/workflows/deploy-control-plane.yml` control-plane deployment path.
 
+For the production disk-pressure follow-up around image-cache orphan cleanup
+and LVM LocalPV backing-file recovery, see
+`docs/image-cache-localpv-storage-recovery-plan.md`. That recovery plan is the
+authoritative scope for manifest-level cache cleanup and explicit LocalPV
+decommission work; this document remains the broader distributed image-store
+architecture plan.
+
 ## 1. Goal
 
 Reach this target architecture:
