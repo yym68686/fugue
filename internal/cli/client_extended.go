@@ -823,6 +823,28 @@ func (c *Client) GetAppImageTracking(id string) (appImageTrackingResponse, error
 	return response, nil
 }
 
+func (c *Client) GetAppImageTrackingHistory(id string, limit int) (appImageTrackingHistoryResponse, error) {
+	relative := path.Join("/v1/apps", id, "image-tracking", "history")
+	if limit > 0 {
+		query := url.Values{}
+		query.Set("limit", fmt.Sprintf("%d", limit))
+		relative += "?" + query.Encode()
+	}
+	var response appImageTrackingHistoryResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return appImageTrackingHistoryResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) GetAppImageTrackingDiagnosis(id string) (appImageTrackingDiagnosisResponse, error) {
+	var response appImageTrackingDiagnosisResponse
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/apps", id, "image-tracking", "diagnosis"), nil, &response); err != nil {
+		return appImageTrackingDiagnosisResponse{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) PutAppImageTracking(id, imageRef string, enabled bool) (appImageTrackingResponse, error) {
 	var response appImageTrackingResponse
 	request := map[string]any{

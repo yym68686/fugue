@@ -3447,6 +3447,50 @@ paths:
                 $ref: "#/components/schemas/AppImageTrackingResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/image-tracking/history:
+    get:
+      operationId: getAppImageTrackingHistory
+      summary: Get App Image Tracking History
+      tags: [Apps]
+      x-fugue-handler: handleGetAppImageTrackingHistory
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageTrackingHistoryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/image-tracking/diagnosis:
+    get:
+      operationId: getAppImageTrackingDiagnosis
+      summary: Get App Image Tracking Diagnosis
+      tags: [Apps]
+      x-fugue-handler: handleGetAppImageTrackingDiagnosis
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppImageTrackingDiagnosisResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/releases:
     get:
       operationId: listAppReleases
@@ -15153,6 +15197,56 @@ components:
         updated_at:
           type: string
           format: date-time
+    AppImageTrackingCheck:
+      type: object
+      additionalProperties: false
+      required:
+        [id, tenant_id, app_id, tracking_id, image_ref, decision, duration_ms, checked_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        tracking_id:
+          type: string
+        image_ref:
+          type: string
+        observed_digest:
+          type: string
+        current_app_digest:
+          type: string
+        last_queued_digest:
+          type: string
+        last_deployed_digest:
+          type: string
+        decision:
+          type: string
+          enum:
+            [queued, already_deployed, no_change, replicas_zero, active_operation, retry_suppressed, resolver_error, queue_conflict, queue_error]
+        skip_reason:
+          type: string
+        operation_id:
+          type: string
+        active_operation_id:
+          type: string
+        resolver_error:
+          type: string
+        delivery_id:
+          type: string
+        event:
+          type: string
+        duration_ms:
+          type: integer
+          format: int64
+        controller_pod:
+          type: string
+        controller_leader_identity:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
     AppImageTrackingRequest:
       type: object
       additionalProperties: false
@@ -15171,6 +15265,63 @@ components:
           type: string
         tracking:
           $ref: "#/components/schemas/AppImageTracking"
+    AppImageTrackingHistoryResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, checks]
+      properties:
+        app_id:
+          type: string
+        tracking:
+          $ref: "#/components/schemas/AppImageTracking"
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppImageTrackingCheck"
+    AppImageTrackingDiagnosis:
+      type: object
+      additionalProperties: false
+      required: [category, summary, app_id, recent_checks, evidence, warnings]
+      properties:
+        category:
+          type: string
+        summary:
+          type: string
+        hint:
+          type: string
+        app_id:
+          type: string
+        tracking:
+          $ref: "#/components/schemas/AppImageTracking"
+        latest_check:
+          $ref: "#/components/schemas/AppImageTrackingCheck"
+        recent_checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppImageTrackingCheck"
+        remote_digest:
+          type: string
+        current_app_digest:
+          type: string
+        active_operation:
+          $ref: "#/components/schemas/Operation"
+        evidence:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    AppImageTrackingDiagnosisResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, diagnosis]
+      properties:
+        app_id:
+          type: string
+        diagnosis:
+          $ref: "#/components/schemas/AppImageTrackingDiagnosis"
     AppRelease:
       type: object
       additionalProperties: false
@@ -19391,6 +19542,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ClusterEvent"
+        image_tracking:
+          $ref: "#/components/schemas/AppImageTrackingDiagnosis"
     AppFilesResponse:
       type: object
       additionalProperties: false

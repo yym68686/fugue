@@ -18,32 +18,49 @@ import (
 )
 
 type Service struct {
-	Store                          *store.Store
-	Config                         config.ControllerConfig
-	Renderer                       runtime.Renderer
-	Logger                         *log.Logger
-	importer                       sourceImporter
-	registryPushBase               string
-	registryPullBase               string
-	builderRegistryPushBase        string
-	inspectManagedImage            appimages.InspectFunc
-	inspectManagedImageConfig      imageConfigInspector
-	deleteManagedImage             func(context.Context, string) (appimages.DeleteResult, error)
-	requestRegistryGC              func(context.Context, string) error
-	readRegistryMaintenance        func(context.Context) registryMaintenanceStatus
-	resolveManagedImageDigestRef   func(context.Context, string) (string, error)
-	resolveRemoteImageDigest       func(context.Context, string) (string, error)
-	syncBillingImageStorage        bool
-	latestGitHubCommit             func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	newKubeClient                  func(namespace string) (*kubeClient, error)
-	kubeClientMu                   sync.Mutex
-	kubeClients                    map[string]*kubeClient
-	managedPostgresStorageNoticeMu sync.Mutex
-	managedPostgresStorageNotices  map[string]struct{}
-	importImageInspectRetryDelay   time.Duration
-	importImageInspectMaxAttempts  int
-	now                            func() time.Time
-	metricsStartedAt               time.Time
+	Store                           *store.Store
+	Config                          config.ControllerConfig
+	Renderer                        runtime.Renderer
+	Logger                          *log.Logger
+	importer                        sourceImporter
+	registryPushBase                string
+	registryPullBase                string
+	builderRegistryPushBase         string
+	inspectManagedImage             appimages.InspectFunc
+	inspectManagedImageConfig       imageConfigInspector
+	deleteManagedImage              func(context.Context, string) (appimages.DeleteResult, error)
+	requestRegistryGC               func(context.Context, string) error
+	readRegistryMaintenance         func(context.Context) registryMaintenanceStatus
+	resolveManagedImageDigestRef    func(context.Context, string) (string, error)
+	resolveRemoteImageDigest        func(context.Context, string) (string, error)
+	syncBillingImageStorage         bool
+	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	newKubeClient                   func(namespace string) (*kubeClient, error)
+	kubeClientMu                    sync.Mutex
+	kubeClients                     map[string]*kubeClient
+	managedPostgresStorageNoticeMu  sync.Mutex
+	managedPostgresStorageNotices   map[string]struct{}
+	importImageInspectRetryDelay    time.Duration
+	importImageInspectMaxAttempts   int
+	now                             func() time.Time
+	metricsStartedAt                time.Time
+	controllerHealthMu              sync.RWMutex
+	activeLoopRunning               bool
+	activeLoopStartedAt             time.Time
+	leaderActive                    bool
+	leaderIdentity                  string
+	imageTrackingMetricsMu          sync.RWMutex
+	imageTrackingDecisionCounts     map[string]int64
+	imageTrackingLastCheckAt        time.Time
+	imageTrackingLastQueuedAt       time.Time
+	imageTrackingLastErrorAt        time.Time
+	imageTrackingLastError          string
+	imageTrackingSyncRunning        bool
+	imageTrackingLastSyncStartedAt  time.Time
+	imageTrackingLastSyncFinishedAt time.Time
+	imageTrackingLastSyncDuration   time.Duration
+	imageTrackingLastSyncErrorAt    time.Time
+	imageTrackingLastSyncError      string
 }
 
 type sourceImporter interface {
@@ -88,6 +105,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		newKubeClient:                newKubeClient,
 		now:                          time.Now,
 		metricsStartedAt:             time.Now().UTC(),
+		imageTrackingDecisionCounts:  map[string]int64{},
 	}
 }
 
@@ -188,6 +206,9 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) runActiveLoop(ctx context.Context) error {
+	s.markActiveLoopRunning(true)
+	defer s.markActiveLoopRunning(false)
+
 	eventDriven := strings.TrimSpace(s.Config.DatabaseURL) != ""
 	if s.Config.ForegroundImportWorkers < 0 {
 		s.Config.ForegroundImportWorkers = 0
@@ -427,6 +448,18 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 				s.Logger.Printf("zombie build job cleanup error: %v", err)
 			}
 		}
+	}
+}
+
+func (s *Service) markActiveLoopRunning(running bool) {
+	if s == nil {
+		return
+	}
+	s.controllerHealthMu.Lock()
+	defer s.controllerHealthMu.Unlock()
+	s.activeLoopRunning = running
+	if running {
+		s.activeLoopStartedAt = time.Now().UTC()
 	}
 }
 

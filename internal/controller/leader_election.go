@@ -148,6 +148,7 @@ func (s *Service) runWithLeaderElection(ctx context.Context) error {
 	stopLeaderLoop := func(reason string) {
 		if leaderLoopCancel == nil {
 			isLeader = false
+			s.markLeadership(false, elector.identity)
 			return
 		}
 		if reason != "" {
@@ -156,6 +157,7 @@ func (s *Service) runWithLeaderElection(ctx context.Context) error {
 		leaderLoopCancel()
 		leaderLoopCancel = nil
 		isLeader = false
+		s.markLeadership(false, elector.identity)
 	}
 
 	startLeaderLoop := func() {
@@ -167,6 +169,7 @@ func (s *Service) runWithLeaderElection(ctx context.Context) error {
 		leaderLoopCancel = cancel
 		leaderLoopDoneCh = doneCh
 		isLeader = true
+		s.markLeadership(true, elector.identity)
 		s.Logger.Printf("controller leadership acquired")
 		go func() {
 			doneCh <- s.runLeaderLoop(leaderCtx, client)
@@ -227,6 +230,16 @@ func (s *Service) runWithLeaderElection(ctx context.Context) error {
 			renew(time.Now().UTC())
 		}
 	}
+}
+
+func (s *Service) markLeadership(active bool, identity string) {
+	if s == nil {
+		return
+	}
+	s.controllerHealthMu.Lock()
+	defer s.controllerHealthMu.Unlock()
+	s.leaderActive = active
+	s.leaderIdentity = strings.TrimSpace(identity)
 }
 
 func (s *Service) runLeaderLoop(ctx context.Context, client *kubeClient) error {

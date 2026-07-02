@@ -2348,12 +2348,55 @@ type AppImageTracking struct {
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
+const (
+	AppImageTrackingDecisionQueued          = "queued"
+	AppImageTrackingDecisionAlreadyDeployed = "already_deployed"
+	AppImageTrackingDecisionNoChange        = "no_change"
+	AppImageTrackingDecisionReplicasZero    = "replicas_zero"
+	AppImageTrackingDecisionActiveOperation = "active_operation"
+	AppImageTrackingDecisionRetrySuppressed = "retry_suppressed"
+	AppImageTrackingDecisionResolverError   = "resolver_error"
+	AppImageTrackingDecisionQueueConflict   = "queue_conflict"
+	AppImageTrackingDecisionQueueError      = "queue_error"
+)
+
 type AppImageTrackingFilter struct {
 	TenantID      string
 	PlatformAdmin bool
 	AppID         string
 	ImageRef      string
 	Enabled       *bool
+}
+
+type AppImageTrackingCheck struct {
+	ID                       string    `json:"id"`
+	TenantID                 string    `json:"tenant_id"`
+	AppID                    string    `json:"app_id"`
+	TrackingID               string    `json:"tracking_id"`
+	ImageRef                 string    `json:"image_ref"`
+	ObservedDigest           string    `json:"observed_digest,omitempty"`
+	CurrentAppDigest         string    `json:"current_app_digest,omitempty"`
+	LastQueuedDigest         string    `json:"last_queued_digest,omitempty"`
+	LastDeployedDigest       string    `json:"last_deployed_digest,omitempty"`
+	Decision                 string    `json:"decision"`
+	SkipReason               string    `json:"skip_reason,omitempty"`
+	OperationID              string    `json:"operation_id,omitempty"`
+	ActiveOperationID        string    `json:"active_operation_id,omitempty"`
+	ResolverError            string    `json:"resolver_error,omitempty"`
+	DeliveryID               string    `json:"delivery_id,omitempty"`
+	Event                    string    `json:"event,omitempty"`
+	DurationMilliseconds     int64     `json:"duration_ms"`
+	ControllerPod            string    `json:"controller_pod,omitempty"`
+	ControllerLeaderIdentity string    `json:"controller_leader_identity,omitempty"`
+	CheckedAt                time.Time `json:"checked_at"`
+}
+
+type AppImageTrackingCheckFilter struct {
+	TenantID      string
+	PlatformAdmin bool
+	AppID         string
+	TrackingID    string
+	Limit         int
 }
 
 type Operation struct {
@@ -2781,6 +2824,7 @@ type State struct {
 	ImageCachePrunePlans       []ImageCachePrunePlan       `json:"image_cache_prune_plans,omitempty"`
 	LocalPVInventories         []LocalPVInventory          `json:"localpv_inventories,omitempty"`
 	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
+	AppImageTrackingChecks     []AppImageTrackingCheck     `json:"app_image_tracking_checks,omitempty"`
 	AppReleases                []AppRelease                `json:"app_releases,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`

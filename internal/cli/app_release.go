@@ -365,6 +365,8 @@ func (c *CLI) newAppReleaseTrackingCommand() *cobra.Command {
 		c.newAppReleaseTrackingSetCommand(),
 		c.newAppReleaseTrackingDisableCommand(),
 		c.newAppReleaseTrackingSyncCommand(),
+		c.newAppReleaseTrackingHistoryCommand(),
+		c.newAppReleaseTrackingDiagnoseCommand(),
 	)
 	return cmd
 }
@@ -491,6 +493,63 @@ func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for queued operation completion")
 	return cmd
+}
+
+func (c *CLI) newAppReleaseTrackingHistoryCommand() *cobra.Command {
+	opts := struct {
+		Limit int
+	}{Limit: 20}
+	cmd := &cobra.Command{
+		Use:   "history <app>",
+		Short: "Show recent image tracking decisions for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppImageTrackingHistory(app.ID, opts.Limit)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeAppImageTrackingHistory(c.stdout, response)
+		},
+	}
+	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "Maximum recent decisions to show")
+	return cmd
+}
+
+func (c *CLI) newAppReleaseTrackingDiagnoseCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "diagnose <app>",
+		Short: "Explain the current image tracking state for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAppImageTrackingDiagnosis(app.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeAppImageTrackingDiagnosis(c.stdout, response.Diagnosis)
+		},
+	}
 }
 
 func (c *CLI) syncAppImageAndWait(client *Client, appID string, wait bool) (appImageSyncResponse, error) {

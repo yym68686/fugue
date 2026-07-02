@@ -261,6 +261,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.ProjectRouteTables = deleteProjectRouteTablesByTenant(state.ProjectRouteTables, id)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
+		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByTenant(state.AppImageTrackingChecks, id)
 		state.AppReleases = deleteAppReleasesByTenant(state.AppReleases, id)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByTenant(state.AppTrafficPolicies, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
@@ -2516,6 +2517,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
 		deleteAppDomainsByApp(state, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
+		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByApp(state.AppImageTrackingChecks, id)
 		state.AppReleases = deleteAppReleasesByApp(state.AppReleases, id)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByApp(state.AppTrafficPolicies, id)
 		state.AppSSHEndpoints = deleteAppSSHEndpointsByApp(state.AppSSHEndpoints, id)
@@ -3865,6 +3867,9 @@ func ensureDefaults(state *model.State) {
 	if state.AppImageTrackings == nil {
 		state.AppImageTrackings = []model.AppImageTracking{}
 	}
+	if state.AppImageTrackingChecks == nil {
+		state.AppImageTrackingChecks = []model.AppImageTrackingCheck{}
+	}
 	if state.AppReleases == nil {
 		state.AppReleases = []model.AppRelease{}
 	}
@@ -4923,6 +4928,17 @@ func deleteAppImageTrackingsByTenant(trackings []model.AppImageTracking, tenantI
 	return filtered
 }
 
+func deleteAppImageTrackingChecksByTenant(checks []model.AppImageTrackingCheck, tenantID string) []model.AppImageTrackingCheck {
+	filtered := checks[:0]
+	for _, check := range checks {
+		if check.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, check)
+	}
+	return filtered
+}
+
 func deleteAppImageTrackingsByApp(trackings []model.AppImageTracking, appID string) []model.AppImageTracking {
 	filtered := trackings[:0]
 	for _, tracking := range trackings {
@@ -4930,6 +4946,17 @@ func deleteAppImageTrackingsByApp(trackings []model.AppImageTracking, appID stri
 			continue
 		}
 		filtered = append(filtered, tracking)
+	}
+	return filtered
+}
+
+func deleteAppImageTrackingChecksByApp(checks []model.AppImageTrackingCheck, appID string) []model.AppImageTrackingCheck {
+	filtered := checks[:0]
+	for _, check := range checks {
+		if check.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, check)
 	}
 	return filtered
 }

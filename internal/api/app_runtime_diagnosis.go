@@ -27,19 +27,20 @@ const (
 var appDiagnosisHTTPProbePaths = []string{"/healthz", "/"}
 
 type appDiagnosis struct {
-	Category       string               `json:"category"`
-	Summary        string               `json:"summary"`
-	Hint           string               `json:"hint,omitempty"`
-	Component      string               `json:"component,omitempty"`
-	Namespace      string               `json:"namespace,omitempty"`
-	Selector       string               `json:"selector,omitempty"`
-	ImplicatedNode string               `json:"implicated_node,omitempty"`
-	ImplicatedPod  string               `json:"implicated_pod,omitempty"`
-	LivePods       int                  `json:"live_pods,omitempty"`
-	ReadyPods      int                  `json:"ready_pods,omitempty"`
-	Evidence       []string             `json:"evidence"`
-	Warnings       []string             `json:"warnings"`
-	Events         []model.ClusterEvent `json:"events"`
+	Category       string                     `json:"category"`
+	Summary        string                     `json:"summary"`
+	Hint           string                     `json:"hint,omitempty"`
+	Component      string                     `json:"component,omitempty"`
+	Namespace      string                     `json:"namespace,omitempty"`
+	Selector       string                     `json:"selector,omitempty"`
+	ImplicatedNode string                     `json:"implicated_node,omitempty"`
+	ImplicatedPod  string                     `json:"implicated_pod,omitempty"`
+	LivePods       int                        `json:"live_pods,omitempty"`
+	ReadyPods      int                        `json:"ready_pods,omitempty"`
+	Evidence       []string                   `json:"evidence"`
+	Warnings       []string                   `json:"warnings"`
+	Events         []model.ClusterEvent       `json:"events"`
+	ImageTracking  *appImageTrackingDiagnosis `json:"image_tracking,omitempty"`
 }
 
 func (s *Server) handleGetAppDiagnosis(w http.ResponseWriter, r *http.Request) {
@@ -71,11 +72,37 @@ func (s *Server) handleGetAppDiagnosis(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	if component == "app" {
+		s.attachAppImageTrackingEvidence(r.Context(), principal, app, &diagnosis)
+	}
 
 	s.appendAudit(principal, "app.diagnosis.read", "app", app.ID, app.TenantID, map[string]string{
 		"component": component,
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": diagnosis})
+}
+
+func (s *Server) attachAppImageTrackingEvidence(ctx context.Context, principal model.Principal, app model.App, diagnosis *appDiagnosis) {
+	if s == nil || diagnosis == nil {
+		return
+	}
+	imageDiagnosis, err := s.buildAppImageTrackingDiagnosis(ctx, principal, app, false)
+	if err != nil {
+		diagnosis.Warnings = append(diagnosis.Warnings, fmt.Sprintf("image tracking diagnosis unavailable: %v", err))
+		return
+	}
+	if imageDiagnosis.Tracking == nil && len(imageDiagnosis.RecentChecks) == 0 {
+		return
+	}
+	diagnosis.ImageTracking = &imageDiagnosis
+	diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "image tracking: "+imageDiagnosis.Summary)
+	if imageDiagnosis.LatestCheck != nil {
+		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf(
+			"image tracking latest decision=%s checked_at=%s",
+			imageDiagnosis.LatestCheck.Decision,
+			imageDiagnosis.LatestCheck.CheckedAt.Format(time.RFC3339),
+		))
+	}
 }
 
 func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component string) (appDiagnosis, error) {

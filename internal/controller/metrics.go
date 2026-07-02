@@ -57,6 +57,16 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_controller_kubectl_apply_enabled", "Whether the controller applies Kubernetes resources.", nil, boolGauge(s.Config.KubectlApply))
 	observability.WriteGaugeMetric(w, "fugue_controller_poll_interval_seconds", "Configured foreground controller poll interval.", nil, s.Config.PollInterval.Seconds())
 	observability.WriteGaugeMetric(w, "fugue_controller_fallback_poll_interval_seconds", "Configured fallback controller poll interval.", nil, s.Config.FallbackPollInterval.Seconds())
+	activeLoopRunning, activeLoopStartedAt, leaderActive, leaderIdentity := s.controllerHealthSnapshot()
+	observability.WriteGaugeMetric(w, "fugue_controller_active_loop_running", "Whether this controller process is currently running the active reconciliation loop.", nil, boolGauge(activeLoopRunning))
+	activeLoopStarted := float64(0)
+	if !activeLoopStartedAt.IsZero() {
+		activeLoopStarted = float64(activeLoopStartedAt.Unix())
+	}
+	observability.WriteGaugeMetric(w, "fugue_controller_active_loop_started_timestamp_seconds", "Unix timestamp for the current active controller loop start.", nil, activeLoopStarted)
+	observability.WriteMetricHeader(w, "fugue_controller_leader_active", "Whether this controller identity currently holds leadership.", "gauge")
+	observability.WriteMetricSample(w, "fugue_controller_leader_active", map[string]string{"identity": leaderIdentity}, boolGauge(leaderActive))
+	s.writeImageTrackingMetrics(w)
 	observability.WriteMetricHeader(w, "fugue_controller_workers_configured", "Configured controller worker slots by lane; zero means unbounded.", "gauge")
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_import"}, float64(s.Config.ForegroundImportWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_activate"}, float64(s.Config.ForegroundActivateWorkers))
@@ -87,6 +97,175 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
 	observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 	s.writeImageCacheLocalPVMetrics(w)
+}
+
+func (s *Service) controllerHealthSnapshot() (bool, time.Time, bool, string) {
+	if s == nil {
+		return false, time.Time{}, false, ""
+	}
+	s.controllerHealthMu.RLock()
+	defer s.controllerHealthMu.RUnlock()
+	return s.activeLoopRunning, s.activeLoopStartedAt, s.leaderActive, strings.TrimSpace(s.leaderIdentity)
+}
+
+func (s *Service) observeImageTrackingDecision(check model.AppImageTrackingCheck) {
+	if s == nil {
+		return
+	}
+	decision := strings.TrimSpace(check.Decision)
+	if decision == "" {
+		decision = "unknown"
+	}
+	s.imageTrackingMetricsMu.Lock()
+	defer s.imageTrackingMetricsMu.Unlock()
+	if s.imageTrackingDecisionCounts == nil {
+		s.imageTrackingDecisionCounts = map[string]int64{}
+	}
+	s.imageTrackingDecisionCounts[decision]++
+	if !check.CheckedAt.IsZero() && (s.imageTrackingLastCheckAt.IsZero() || check.CheckedAt.After(s.imageTrackingLastCheckAt)) {
+		s.imageTrackingLastCheckAt = check.CheckedAt
+	}
+	if decision == model.AppImageTrackingDecisionQueued && !check.CheckedAt.IsZero() {
+		s.imageTrackingLastQueuedAt = check.CheckedAt
+	}
+	if strings.TrimSpace(check.ResolverError) != "" || decision == model.AppImageTrackingDecisionQueueError || decision == model.AppImageTrackingDecisionResolverError {
+		if !check.CheckedAt.IsZero() {
+			s.imageTrackingLastErrorAt = check.CheckedAt
+		}
+		s.imageTrackingLastError = firstNonEmptyImageTrackingMetric(check.ResolverError, check.SkipReason, decision)
+	}
+}
+
+func (s *Service) markImageTrackingSyncStarted() {
+	if s == nil {
+		return
+	}
+	now := time.Now().UTC()
+	s.imageTrackingMetricsMu.Lock()
+	defer s.imageTrackingMetricsMu.Unlock()
+	s.imageTrackingSyncRunning = true
+	s.imageTrackingLastSyncStartedAt = now
+}
+
+func (s *Service) markImageTrackingSyncFinished(startedAt time.Time, syncErr error) {
+	if s == nil {
+		return
+	}
+	finishedAt := time.Now().UTC()
+	duration := finishedAt.Sub(startedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	s.imageTrackingMetricsMu.Lock()
+	defer s.imageTrackingMetricsMu.Unlock()
+	s.imageTrackingSyncRunning = false
+	s.imageTrackingLastSyncFinishedAt = finishedAt
+	s.imageTrackingLastSyncDuration = duration
+	if syncErr != nil {
+		s.imageTrackingLastSyncErrorAt = finishedAt
+		s.imageTrackingLastSyncError = syncErr.Error()
+	}
+}
+
+func (s *Service) imageTrackingMetricsSnapshot() (map[string]int64, time.Time, time.Time, time.Time, string) {
+	if s == nil {
+		return map[string]int64{}, time.Time{}, time.Time{}, time.Time{}, ""
+	}
+	s.imageTrackingMetricsMu.RLock()
+	defer s.imageTrackingMetricsMu.RUnlock()
+	counts := make(map[string]int64, len(s.imageTrackingDecisionCounts))
+	for key, value := range s.imageTrackingDecisionCounts {
+		counts[key] = value
+	}
+	return counts, s.imageTrackingLastCheckAt, s.imageTrackingLastQueuedAt, s.imageTrackingLastErrorAt, strings.TrimSpace(s.imageTrackingLastError)
+}
+
+func (s *Service) imageTrackingSyncMetricsSnapshot() (bool, time.Time, time.Time, time.Duration, time.Time, string) {
+	if s == nil {
+		return false, time.Time{}, time.Time{}, 0, time.Time{}, ""
+	}
+	s.imageTrackingMetricsMu.RLock()
+	defer s.imageTrackingMetricsMu.RUnlock()
+	return s.imageTrackingSyncRunning,
+		s.imageTrackingLastSyncStartedAt,
+		s.imageTrackingLastSyncFinishedAt,
+		s.imageTrackingLastSyncDuration,
+		s.imageTrackingLastSyncErrorAt,
+		strings.TrimSpace(s.imageTrackingLastSyncError)
+}
+
+func (s *Service) writeImageTrackingMetrics(w http.ResponseWriter) {
+	counts, lastCheckAt, lastQueuedAt, lastErrorAt, _ := s.imageTrackingMetricsSnapshot()
+	syncRunning, syncStartedAt, syncFinishedAt, syncDuration, syncErrorAt, _ := s.imageTrackingSyncMetricsSnapshot()
+	observability.WriteMetricHeader(w, "fugue_image_tracking_decisions_total", "Image tracking check decisions made by this controller process.", "counter")
+	for _, decision := range knownImageTrackingMetricDecisions(counts) {
+		observability.WriteMetricSample(w, "fugue_image_tracking_decisions_total", map[string]string{"decision": decision}, float64(counts[decision]))
+	}
+	lastCheck := float64(0)
+	if !lastCheckAt.IsZero() {
+		lastCheck = float64(lastCheckAt.Unix())
+	}
+	lastQueued := float64(0)
+	if !lastQueuedAt.IsZero() {
+		lastQueued = float64(lastQueuedAt.Unix())
+	}
+	lastErrorTs := float64(0)
+	if !lastErrorAt.IsZero() {
+		lastErrorTs = float64(lastErrorAt.Unix())
+	}
+	observability.WriteGaugeMetric(w, "fugue_image_tracking_last_check_timestamp_seconds", "Unix timestamp for the latest image tracking check handled by this controller process.", nil, lastCheck)
+	observability.WriteGaugeMetric(w, "fugue_image_tracking_last_queued_timestamp_seconds", "Unix timestamp for the latest image tracking queued import handled by this controller process.", nil, lastQueued)
+	observability.WriteGaugeMetric(w, "fugue_image_tracking_last_error_timestamp_seconds", "Unix timestamp for the latest image tracking resolver or queue error handled by this controller process.", nil, lastErrorTs)
+	syncStarted := float64(0)
+	if !syncStartedAt.IsZero() {
+		syncStarted = float64(syncStartedAt.Unix())
+	}
+	syncFinished := float64(0)
+	if !syncFinishedAt.IsZero() {
+		syncFinished = float64(syncFinishedAt.Unix())
+	}
+	syncError := float64(0)
+	if !syncErrorAt.IsZero() {
+		syncError = float64(syncErrorAt.Unix())
+	}
+	observability.WriteGaugeMetric(w, "fugue_controller_image_tracking_sync_running", "Whether this controller process is currently running an image tracking sync.", nil, boolGauge(syncRunning))
+	observability.WriteGaugeMetric(w, "fugue_controller_image_tracking_sync_started_timestamp_seconds", "Unix timestamp for the latest image tracking sync start.", nil, syncStarted)
+	observability.WriteGaugeMetric(w, "fugue_controller_last_image_tracking_sync_timestamp_seconds", "Unix timestamp for the latest completed image tracking sync.", nil, syncFinished)
+	observability.WriteGaugeMetric(w, "fugue_controller_image_tracking_sync_duration_seconds", "Duration of the latest completed image tracking sync.", nil, syncDuration.Seconds())
+	observability.WriteGaugeMetric(w, "fugue_controller_image_tracking_sync_last_error_timestamp_seconds", "Unix timestamp for the latest image tracking sync-level error.", nil, syncError)
+}
+
+func knownImageTrackingMetricDecisions(counts map[string]int64) []string {
+	decisions := []string{
+		model.AppImageTrackingDecisionQueued,
+		model.AppImageTrackingDecisionAlreadyDeployed,
+		model.AppImageTrackingDecisionNoChange,
+		model.AppImageTrackingDecisionReplicasZero,
+		model.AppImageTrackingDecisionActiveOperation,
+		model.AppImageTrackingDecisionRetrySuppressed,
+		model.AppImageTrackingDecisionResolverError,
+		model.AppImageTrackingDecisionQueueConflict,
+		model.AppImageTrackingDecisionQueueError,
+	}
+	seen := map[string]struct{}{}
+	for _, decision := range decisions {
+		seen[decision] = struct{}{}
+	}
+	for decision := range counts {
+		if _, ok := seen[decision]; !ok {
+			decisions = append(decisions, decision)
+		}
+	}
+	return decisions
+}
+
+func firstNonEmptyImageTrackingMetric(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func boolGauge(value bool) float64 {

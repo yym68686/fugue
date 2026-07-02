@@ -98,6 +98,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/{id}/image-sync", s.auth.RequireAPI(http.HandlerFunc(s.handleSyncAppImage)))
 	mux.Handle("GET /v1/apps/{id}/image-tracking", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppImageTracking)))
 	mux.Handle("PUT /v1/apps/{id}/image-tracking", s.auth.RequireAPI(http.HandlerFunc(s.handlePutAppImageTracking)))
+	mux.Handle("GET /v1/apps/{id}/image-tracking/diagnosis", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppImageTrackingDiagnosis)))
+	mux.Handle("GET /v1/apps/{id}/image-tracking/history", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppImageTrackingHistory)))
 	mux.Handle("GET /v1/apps/{id}/images", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppImages)))
 	mux.Handle("POST /v1/apps/{id}/images/delete", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteAppImage)))
 	mux.Handle("POST /v1/apps/{id}/images/redeploy", s.auth.RequireAPI(http.HandlerFunc(s.handleRedeployAppImage)))

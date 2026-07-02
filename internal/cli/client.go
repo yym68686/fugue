@@ -246,6 +246,32 @@ type appImageTrackingResponse struct {
 	Tracking *model.AppImageTracking `json:"tracking,omitempty"`
 }
 
+type appImageTrackingHistoryResponse struct {
+	AppID    string                        `json:"app_id"`
+	Tracking *model.AppImageTracking       `json:"tracking,omitempty"`
+	Checks   []model.AppImageTrackingCheck `json:"checks"`
+}
+
+type appImageTrackingDiagnosis struct {
+	Category         string                        `json:"category"`
+	Summary          string                        `json:"summary"`
+	Hint             string                        `json:"hint,omitempty"`
+	AppID            string                        `json:"app_id"`
+	Tracking         *model.AppImageTracking       `json:"tracking,omitempty"`
+	LatestCheck      *model.AppImageTrackingCheck  `json:"latest_check,omitempty"`
+	RecentChecks     []model.AppImageTrackingCheck `json:"recent_checks"`
+	RemoteDigest     string                        `json:"remote_digest,omitempty"`
+	CurrentAppDigest string                        `json:"current_app_digest,omitempty"`
+	ActiveOperation  *model.Operation              `json:"active_operation,omitempty"`
+	Evidence         []string                      `json:"evidence"`
+	Warnings         []string                      `json:"warnings"`
+}
+
+type appImageTrackingDiagnosisResponse struct {
+	AppID     string                    `json:"app_id"`
+	Diagnosis appImageTrackingDiagnosis `json:"diagnosis"`
+}
+
 type appImageSyncResponse struct {
 	AppID          string                  `json:"app_id"`
 	Tracking       *model.AppImageTracking `json:"tracking,omitempty"`

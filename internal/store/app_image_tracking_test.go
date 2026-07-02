@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -251,6 +252,99 @@ func TestAppImageTrackingClearsDeployDigestWhenDifferentSourceDeploys(t *testing
 	}
 	if updated.LastOperationID != uploadDeployOp.ID {
 		t.Fatalf("expected last operation %s, got %s", uploadDeployOp.ID, updated.LastOperationID)
+	}
+}
+
+func TestAppImageTrackingCheckHistoryRecordsAndFilters(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newAppImageTrackingTestStore(t)
+	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/api:main",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	check, err := s.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
+		TenantID:         tenant.ID,
+		AppID:            app.ID,
+		TrackingID:       tracking.ID,
+		ImageRef:         tracking.ImageRef,
+		ObservedDigest:   "sha256:abc123",
+		CurrentAppDigest: "sha256:def456",
+		Decision:         model.AppImageTrackingDecisionQueued,
+		OperationID:      "op_123",
+		Event:            "poll",
+	})
+	if err != nil {
+		t.Fatalf("create check: %v", err)
+	}
+	if check.ID == "" {
+		t.Fatal("expected generated check id")
+	}
+	if check.TenantID != tenant.ID || check.AppID != app.ID || check.TrackingID != tracking.ID {
+		t.Fatalf("unexpected check scope: %+v", check)
+	}
+
+	checks, err := s.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatalf("list checks: %v", err)
+	}
+	if len(checks) != 1 || checks[0].ID != check.ID {
+		t.Fatalf("expected one recorded check, got %+v", checks)
+	}
+	if checks[0].Decision != model.AppImageTrackingDecisionQueued {
+		t.Fatalf("expected queued decision, got %q", checks[0].Decision)
+	}
+}
+
+func TestAppImageTrackingCheckRetentionKeepsBoundedRecentHistory(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newAppImageTrackingTestStore(t)
+	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/api:main",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	now := time.Now().UTC()
+	for i := 0; i < appImageTrackingCheckRetentionLimit+5; i++ {
+		if _, err := s.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
+			TenantID:   tenant.ID,
+			AppID:      app.ID,
+			TrackingID: tracking.ID,
+			ImageRef:   tracking.ImageRef,
+			Decision:   model.AppImageTrackingDecisionNoChange,
+			SkipReason: "test",
+			CheckedAt:  now.Add(-time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("create check %d: %v", i, err)
+		}
+	}
+	checks, err := s.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		Limit:    appImageTrackingCheckRetentionLimit + 10,
+	})
+	if err != nil {
+		t.Fatalf("list checks: %v", err)
+	}
+	if len(checks) != appImageTrackingCheckRetentionLimit {
+		t.Fatalf("expected %d checks after retention, got %d", appImageTrackingCheckRetentionLimit, len(checks))
+	}
+	if checks[0].CheckedAt.Before(checks[len(checks)-1].CheckedAt) {
+		t.Fatalf("expected newest-first order, got first=%s last=%s", checks[0].CheckedAt, checks[len(checks)-1].CheckedAt)
 	}
 }
 

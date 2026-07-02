@@ -68,19 +68,20 @@ type clusterNodeDiagnosis struct {
 }
 
 type appDiagnosis struct {
-	Category       string               `json:"category"`
-	Summary        string               `json:"summary"`
-	Hint           string               `json:"hint,omitempty"`
-	Component      string               `json:"component,omitempty"`
-	Namespace      string               `json:"namespace,omitempty"`
-	Selector       string               `json:"selector,omitempty"`
-	ImplicatedNode string               `json:"implicated_node,omitempty"`
-	ImplicatedPod  string               `json:"implicated_pod,omitempty"`
-	LivePods       int                  `json:"live_pods,omitempty"`
-	ReadyPods      int                  `json:"ready_pods,omitempty"`
-	Evidence       []string             `json:"evidence"`
-	Warnings       []string             `json:"warnings"`
-	Events         []model.ClusterEvent `json:"events"`
+	Category       string                     `json:"category"`
+	Summary        string                     `json:"summary"`
+	Hint           string                     `json:"hint,omitempty"`
+	Component      string                     `json:"component,omitempty"`
+	Namespace      string                     `json:"namespace,omitempty"`
+	Selector       string                     `json:"selector,omitempty"`
+	ImplicatedNode string                     `json:"implicated_node,omitempty"`
+	ImplicatedPod  string                     `json:"implicated_pod,omitempty"`
+	LivePods       int                        `json:"live_pods,omitempty"`
+	ReadyPods      int                        `json:"ready_pods,omitempty"`
+	Evidence       []string                   `json:"evidence"`
+	Warnings       []string                   `json:"warnings"`
+	Events         []model.ClusterEvent       `json:"events"`
+	ImageTracking  *appImageTrackingDiagnosis `json:"image_tracking,omitempty"`
 }
 
 func (c *Client) GetClusterNodeDiagnosis(name string) (clusterNodeDiagnosis, error) {

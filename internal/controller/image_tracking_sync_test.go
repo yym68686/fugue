@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"path/filepath"
@@ -56,7 +57,7 @@ func TestSyncTrackedAppImagesQueuesWhenHistoryMatchesButCurrentSourceDiffers(t *
 			return "sha256:abc123", nil
 		},
 		now: func() time.Time {
-			return time.Date(2026, time.May, 18, 12, 0, 0, 0, time.UTC)
+			return time.Now().UTC()
 		},
 	}
 
@@ -84,6 +85,13 @@ func TestSyncTrackedAppImagesQueuesWhenHistoryMatchesButCurrentSourceDiffers(t *
 	}
 	if updated.LastQueuedDigest != "sha256:abc123" {
 		t.Fatalf("expected digest to be queued, got %q", updated.LastQueuedDigest)
+	}
+	check := latestImageTrackingCheckForTest(t, s, tenant.ID, app.ID)
+	if check.Decision != model.AppImageTrackingDecisionQueued {
+		t.Fatalf("expected queued decision, got %+v", check)
+	}
+	if check.OperationID == "" {
+		t.Fatalf("expected queued decision to include operation id, got %+v", check)
 	}
 }
 
@@ -131,7 +139,7 @@ func TestSyncTrackedAppImagesNoopsWhenFugueMirrorTagMatchesDigest(t *testing.T) 
 			return fullDigest, nil
 		},
 		now: func() time.Time {
-			return time.Date(2026, time.May, 18, 12, 0, 0, 0, time.UTC)
+			return time.Now().UTC()
 		},
 	}
 
@@ -153,6 +161,211 @@ func TestSyncTrackedAppImagesNoopsWhenFugueMirrorTagMatchesDigest(t *testing.T) 
 	}
 	if updated.LastOperationID != tracking.LastOperationID {
 		t.Fatalf("expected no queued operation, got last operation %q", updated.LastOperationID)
+	}
+	check := latestImageTrackingCheckForTest(t, s, tenant.ID, app.ID)
+	if check.Decision != model.AppImageTrackingDecisionAlreadyDeployed {
+		t.Fatalf("expected already_deployed decision, got %+v", check)
+	}
+}
+
+func TestSyncTrackedAppImagesRecordsActiveOperationSkip(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newImageTrackingSyncTestStore(t)
+	if _, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/api:main",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	desiredSpec := app.Spec
+	activeOp, err := s.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeBootstrap,
+		RequestedByID:   "test",
+		DesiredSpec:     &desiredSpec,
+	})
+	if err != nil {
+		t.Fatalf("create active op: %v", err)
+	}
+	svc := newImageTrackingSyncTestService(s, "sha256:new")
+
+	if err := svc.syncTrackedAppImages(context.Background()); err != nil {
+		t.Fatalf("sync tracked images: %v", err)
+	}
+
+	check := latestImageTrackingCheckForTest(t, s, tenant.ID, app.ID)
+	if check.Decision != model.AppImageTrackingDecisionActiveOperation {
+		t.Fatalf("expected active_operation decision, got %+v", check)
+	}
+	if check.ActiveOperationID != activeOp.ID {
+		t.Fatalf("expected active operation %s, got %+v", activeOp.ID, check)
+	}
+}
+
+func TestSyncTrackedAppImagesRecordsResolverError(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newImageTrackingSyncTestStore(t)
+	if _, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/api:main",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	svc := newImageTrackingSyncTestService(s, "")
+	svc.resolveRemoteImageDigest = func(context.Context, string) (string, error) {
+		return "", errors.New("registry timeout")
+	}
+
+	if err := svc.syncTrackedAppImages(context.Background()); err != nil {
+		t.Fatalf("sync tracked images: %v", err)
+	}
+
+	check := latestImageTrackingCheckForTest(t, s, tenant.ID, app.ID)
+	if check.Decision != model.AppImageTrackingDecisionResolverError {
+		t.Fatalf("expected resolver_error decision, got %+v", check)
+	}
+	if check.ResolverError != "registry timeout" {
+		t.Fatalf("expected resolver error evidence, got %+v", check)
+	}
+}
+
+func TestSyncTrackedAppImagesRecordsReplicasZeroSkip(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newImageTrackingSyncTestStore(t)
+	scaledSpec := app.Spec
+	scaledSpec.Replicas = 0
+	scaleOp, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		AppID:       app.ID,
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &scaledSpec,
+	})
+	if err != nil {
+		t.Fatalf("create scale operation: %v", err)
+	}
+	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+		t.Fatalf("claim scale operation: %v", err)
+	} else if !found {
+		t.Fatal("expected scale operation")
+	}
+	if _, err := s.CompleteManagedOperation(scaleOp.ID, "/tmp/api.yaml", "scaled to zero"); err != nil {
+		t.Fatalf("complete scale operation: %v", err)
+	}
+	app, err = s.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get scaled app: %v", err)
+	}
+	if app.Spec.Replicas != 0 {
+		t.Fatalf("expected replicas=0 after scale, got %d", app.Spec.Replicas)
+	}
+	if _, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/api:main",
+		Enabled:  true,
+	}); err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	svc := newImageTrackingSyncTestService(s, "sha256:new")
+
+	if err := svc.syncTrackedAppImages(context.Background()); err != nil {
+		t.Fatalf("sync tracked images: %v", err)
+	}
+
+	check := latestImageTrackingCheckForTest(t, s, tenant.ID, app.ID)
+	if check.Decision != model.AppImageTrackingDecisionReplicasZero {
+		t.Fatalf("expected replicas_zero decision, got %+v", check)
+	}
+}
+
+func TestSyncTrackedAppImagesRecordsRetrySuppressed(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newImageTrackingSyncTestStore(t)
+	lastTriggered := time.Now().UTC()
+	if _, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID:         tenant.ID,
+		AppID:            app.ID,
+		ImageRef:         "ghcr.io/acme/api:main",
+		Enabled:          true,
+		LastQueuedDigest: "sha256:abc123",
+		LastTriggeredAt:  &lastTriggered,
+	}); err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	svc := newImageTrackingSyncTestService(s, "sha256:abc123")
+	svc.now = func() time.Time {
+		return lastTriggered.Add(time.Minute)
+	}
+
+	if err := svc.syncTrackedAppImages(context.Background()); err != nil {
+		t.Fatalf("sync tracked images: %v", err)
+	}
+
+	check := latestImageTrackingCheckForTest(t, s, tenant.ID, app.ID)
+	if check.Decision != model.AppImageTrackingDecisionRetrySuppressed {
+		t.Fatalf("expected retry_suppressed decision, got %+v", check)
+	}
+}
+
+func TestRecordAppImageTrackingDecisionAcceptsKnownDecisionValues(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newImageTrackingSyncTestStore(t)
+	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		ImageRef: "ghcr.io/acme/api:main",
+		Enabled:  true,
+	})
+	if err != nil {
+		t.Fatalf("upsert tracking: %v", err)
+	}
+	svc := newImageTrackingSyncTestService(s, "sha256:new")
+	decisions := []string{
+		model.AppImageTrackingDecisionQueued,
+		model.AppImageTrackingDecisionAlreadyDeployed,
+		model.AppImageTrackingDecisionNoChange,
+		model.AppImageTrackingDecisionReplicasZero,
+		model.AppImageTrackingDecisionActiveOperation,
+		model.AppImageTrackingDecisionRetrySuppressed,
+		model.AppImageTrackingDecisionResolverError,
+		model.AppImageTrackingDecisionQueueConflict,
+		model.AppImageTrackingDecisionQueueError,
+	}
+	for _, decision := range decisions {
+		svc.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			App:       app,
+			Tracking:  tracking,
+			Decision:  decision,
+			StartedAt: time.Now().UTC(),
+		})
+	}
+	checks, err := s.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+		TenantID: tenant.ID,
+		AppID:    app.ID,
+		Limit:    len(decisions),
+	})
+	if err != nil {
+		t.Fatalf("list checks: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, check := range checks {
+		seen[check.Decision] = true
+	}
+	for _, decision := range decisions {
+		if !seen[decision] {
+			t.Fatalf("expected decision %s in %+v", decision, checks)
+		}
 	}
 }
 
@@ -187,4 +400,36 @@ func newImageTrackingSyncTestStore(t *testing.T) (*store.Store, model.Tenant, mo
 		t.Fatalf("raise billing cap: %v", err)
 	}
 	return s, tenant, project, app
+}
+
+func newImageTrackingSyncTestService(s *store.Store, digest string) *Service {
+	return &Service{
+		Store: s,
+		Config: config.ControllerConfig{
+			ImageTrackingTimeout: time.Second,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		resolveRemoteImageDigest: func(context.Context, string) (string, error) {
+			return digest, nil
+		},
+		now: func() time.Time {
+			return time.Now().UTC()
+		},
+	}
+}
+
+func latestImageTrackingCheckForTest(t *testing.T, s *store.Store, tenantID, appID string) model.AppImageTrackingCheck {
+	t.Helper()
+	checks, err := s.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+		TenantID: tenantID,
+		AppID:    appID,
+		Limit:    1,
+	})
+	if err != nil {
+		t.Fatalf("list image tracking checks: %v", err)
+	}
+	if len(checks) == 0 {
+		t.Fatal("expected image tracking check")
+	}
+	return checks[0]
 }

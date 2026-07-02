@@ -299,6 +299,88 @@ func writeAppImageTrackingSummary(w io.Writer, tracking model.AppImageTracking) 
 	)
 }
 
+func writeAppImageTrackingHistory(w io.Writer, response appImageTrackingHistoryResponse) error {
+	if response.Tracking == nil {
+		if err := writeKeyValues(w, kvPair{Key: "app_id", Value: response.AppID}, kvPair{Key: "tracking", Value: "not_configured"}); err != nil {
+			return err
+		}
+	} else if err := writeAppImageTrackingSummary(w, *response.Tracking); err != nil {
+		return err
+	}
+	if len(response.Checks) == 0 {
+		_, err := fmt.Fprintln(w, "checks=none")
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "CHECKED_AT\tDECISION\tDIGEST\tCURRENT\tOPERATION\tACTIVE_OP\tREASON"); err != nil {
+		return err
+	}
+	for _, check := range response.Checks {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			formatTime(check.CheckedAt),
+			check.Decision,
+			shortImageTrackingDigest(check.ObservedDigest),
+			shortImageTrackingDigest(check.CurrentAppDigest),
+			check.OperationID,
+			check.ActiveOperationID,
+			firstNonEmptyTrimmed(check.SkipReason, check.ResolverError),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeAppImageTrackingDiagnosis(w io.Writer, diagnosis appImageTrackingDiagnosis) error {
+	pairs := []kvPair{
+		{Key: "category", Value: strings.TrimSpace(diagnosis.Category)},
+		{Key: "summary", Value: strings.TrimSpace(diagnosis.Summary)},
+		{Key: "hint", Value: strings.TrimSpace(diagnosis.Hint)},
+		{Key: "app_id", Value: strings.TrimSpace(diagnosis.AppID)},
+		{Key: "remote_digest", Value: shortImageTrackingDigest(diagnosis.RemoteDigest)},
+		{Key: "current_app_digest", Value: shortImageTrackingDigest(diagnosis.CurrentAppDigest)},
+	}
+	if diagnosis.ActiveOperation != nil {
+		pairs = append(pairs, kvPair{Key: "active_operation_id", Value: diagnosis.ActiveOperation.ID})
+	}
+	if diagnosis.LatestCheck != nil {
+		pairs = append(pairs,
+			kvPair{Key: "latest_decision", Value: diagnosis.LatestCheck.Decision},
+			kvPair{Key: "latest_checked_at", Value: formatTime(diagnosis.LatestCheck.CheckedAt)},
+		)
+	}
+	if err := writeKeyValues(w, pairs...); err != nil {
+		return err
+	}
+	for _, evidence := range diagnosis.Evidence {
+		if _, err := fmt.Fprintf(w, "evidence=%s\n", evidence); err != nil {
+			return err
+		}
+	}
+	for _, warning := range diagnosis.Warnings {
+		if _, err := fmt.Fprintf(w, "warning=%s\n", warning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func shortImageTrackingDigest(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 19 {
+		return value
+	}
+	if strings.HasPrefix(value, "sha256:") {
+		return value[:19]
+	}
+	return value
+}
+
 func writeProjectUsageTable(w io.Writer, projects []projectImageUsageSummary) error {
 	return writeProjectUsageTableWithContext(w, projects, nil, false)
 }

@@ -53,6 +53,60 @@ func TestSyncAppImageReturnsActiveOperationWhenTrackedDigestMatchesDesiredSource
 	}
 }
 
+func TestGetAppImageTrackingHistoryReturnsRecordedChecks(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, app, _ := setupAppImageSyncTestServer(t)
+	tracking, err := stateStore.GetAppImageTracking(app.TenantID, true, app.ID)
+	if err != nil {
+		t.Fatalf("get tracking: %v", err)
+	}
+	recorded, err := stateStore.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
+		TenantID:         app.TenantID,
+		AppID:            app.ID,
+		TrackingID:       tracking.ID,
+		ImageRef:         tracking.ImageRef,
+		ObservedDigest:   "sha256:new",
+		CurrentAppDigest: "sha256:old",
+		Decision:         model.AppImageTrackingDecisionActiveOperation,
+		SkipReason:       "app has an active operation",
+	})
+	if err != nil {
+		t.Fatalf("create tracking check: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/image-tracking/history?limit=5", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageTrackingHistoryResponse
+	mustDecodeJSON(t, recorder, &response)
+	if response.Tracking == nil || response.Tracking.ID != tracking.ID {
+		t.Fatalf("expected tracking in history response, got %+v", response.Tracking)
+	}
+	if len(response.Checks) != 1 || response.Checks[0].ID != recorded.ID {
+		t.Fatalf("expected recorded check, got %+v", response.Checks)
+	}
+}
+
+func TestGetAppImageTrackingDiagnosisResolvesRemoteDigest(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app, digest := setupAppImageSyncTestServer(t)
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/image-tracking/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response appImageTrackingDiagnosisResponse
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Tracking == nil {
+		t.Fatalf("expected tracking diagnosis, got %+v", response.Diagnosis)
+	}
+	if response.Diagnosis.RemoteDigest != digest {
+		t.Fatalf("expected remote digest %q, got %+v", digest, response.Diagnosis)
+	}
+}
+
 func setupAppImageSyncTestServer(t *testing.T) (*store.Store, *Server, string, model.App, string) {
 	t.Helper()
 
