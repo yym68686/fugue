@@ -268,6 +268,39 @@ func TestDefaultControlPlaneResourceEnvelopeKeepsK3SHeadroom(t *testing.T) {
 	}
 }
 
+func TestAPIDefaultStartupProbeCoversDatabaseBootstrapLockWait(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if apiDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-api deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"startupProbe:",
+		"path: /healthz",
+		"failureThreshold: 180",
+		"periodSeconds: 2",
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment startup probe should cover database bootstrap lock waits; missing %q:\n%s", want, apiDoc)
+		}
+	}
+}
+
 func TestAPIAndControllerReceivePublicAPIDomain(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

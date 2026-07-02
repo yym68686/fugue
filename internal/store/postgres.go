@@ -22,8 +22,10 @@ const (
 	PostgresOperationChannel string = "fugue_operations"
 	postgresPingTimeout             = 20 * time.Second
 	// Bootstrap can serialize across concurrently starting replicas while it
-	// waits on the advisory lock and runs startup repair queries.
-	postgresBootstrapTimeout = 2 * time.Minute
+	// waits on the advisory lock and runs startup repair queries. Keep this
+	// below the API startup probe window so waiting replicas are not killed
+	// during normal rolling schema changes.
+	postgresBootstrapTimeout = 5 * time.Minute
 	// When schema changes do need to run DDL, fail fast on blocked relation
 	// locks so bootstrap can retry instead of hanging the whole API startup.
 	postgresBootstrapLockTimeout = 5 * time.Second

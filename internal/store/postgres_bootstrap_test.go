@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -123,6 +124,17 @@ func TestIsRetryableBootstrapError(t *testing.T) {
 
 	if isRetryableBootstrapError(sql.ErrNoRows) {
 		t.Fatal("expected non-postgres errors to stay non-retryable")
+	}
+}
+
+func TestPostgresBootstrapTimeoutCoversRollingStartupContention(t *testing.T) {
+	t.Parallel()
+
+	if postgresBootstrapTimeout < 5*time.Minute {
+		t.Fatalf("postgres bootstrap timeout should cover rolling startup lock contention, got %s", postgresBootstrapTimeout)
+	}
+	if postgresPingTimeout+postgresBootstrapTimeout > 6*time.Minute {
+		t.Fatalf("postgres bootstrap and ping timeout should fit within the default API startup probe window, got ping=%s bootstrap=%s", postgresPingTimeout, postgresBootstrapTimeout)
 	}
 }
 
