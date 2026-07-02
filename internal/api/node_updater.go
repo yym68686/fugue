@@ -2195,12 +2195,53 @@ PY_IMAGE_CACHE_INVENTORY
     echo "failed to normalize image-cache inventory" >&2
     return 1
   fi
+  if ! . "${summary_file}"; then
+    rm -f "${inventory_file}"
+    rm -rf "${chunk_dir}"
+    echo "failed to load image-cache inventory summary" >&2
+    return 1
+  fi
+  local expected_chunks="${chunk_count:-0}"
+  case "${expected_chunks}" in
+    ''|*[!0-9]*|0)
+      rm -f "${inventory_file}"
+      rm -rf "${chunk_dir}"
+      echo "image-cache inventory produced invalid chunk_count=${expected_chunks}" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -s "${chunk_dir}/chunks.list" ]; then
+    rm -f "${inventory_file}"
+    rm -rf "${chunk_dir}"
+    echo "image-cache inventory produced no chunks" >&2
+    return 1
+  fi
+  local chunk_file_count="0"
+  chunk_file_count="$(wc -l <"${chunk_dir}/chunks.list" | tr -d '[:space:]')"
+  if [ "${chunk_file_count}" -ne "${expected_chunks}" ]; then
+    rm -f "${inventory_file}"
+    rm -rf "${chunk_dir}"
+    echo "image-cache inventory chunk list count ${chunk_file_count} did not match expected ${expected_chunks}" >&2
+    return 1
+  fi
+  local posted_chunks=0
   while IFS= read -r chunk_file; do
     [ -n "${chunk_file}" ] || continue
+    if [ ! -s "${chunk_file}" ]; then
+      rm -f "${inventory_file}"
+      rm -rf "${chunk_dir}"
+      echo "image-cache inventory chunk file is missing or empty: ${chunk_file}" >&2
+      return 1
+    fi
     api_json POST /v1/node-updater/image-cache/inventory "$(cat "${chunk_file}")" >/dev/null
+    posted_chunks=$((posted_chunks + 1))
   done <"${chunk_dir}/chunks.list"
-  # shellcheck disable=SC1090
-  . "${summary_file}"
+  if [ "${posted_chunks}" -ne "${expected_chunks}" ]; then
+    rm -f "${inventory_file}"
+    rm -rf "${chunk_dir}"
+    echo "image-cache inventory posted ${posted_chunks} chunks, expected ${expected_chunks}" >&2
+    return 1
+  fi
   log_task "reported image-cache inventory manifests=${manifest_count:-0} chunks=${chunk_count:-0} cache_bytes=${cache_bytes:-0} filesystem_free_bytes=${filesystem_free_bytes:-0}"
   rm -f "${inventory_file}"
   rm -rf "${chunk_dir}"

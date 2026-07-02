@@ -98,6 +98,49 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	}
 }
 
+func TestImageCacheInventoryAndLocalPVAdminListsReturnEmptyArrays(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Empty Storage Admin Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, adminSecret, err := stateStore.CreateAPIKey(tenant.ID, "platform-admin", []string{"platform.admin"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+
+	imageInventory := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/inventory?cluster_node_name=missing-node", adminSecret, nil)
+	if imageInventory.Code != http.StatusOK {
+		t.Fatalf("image inventory status=%d body=%s", imageInventory.Code, imageInventory.Body.String())
+	}
+	var imageResponse struct {
+		Nodes     []model.ImageCacheNodeInventory `json:"nodes"`
+		Manifests []model.ImageCacheManifest      `json:"manifests"`
+	}
+	mustDecodeJSON(t, imageInventory, &imageResponse)
+	if imageResponse.Nodes == nil || imageResponse.Manifests == nil || len(imageResponse.Nodes) != 0 || len(imageResponse.Manifests) != 0 {
+		t.Fatalf("expected empty arrays, got %+v", imageResponse)
+	}
+
+	localPVInventory := performFormRequest(t, server, http.MethodGet, "/v1/admin/localpv/inventory?cluster_node_name=missing-node", adminSecret, nil)
+	if localPVInventory.Code != http.StatusOK {
+		t.Fatalf("localpv inventory status=%d body=%s", localPVInventory.Code, localPVInventory.Body.String())
+	}
+	var localPVResponse struct {
+		Inventories []model.LocalPVInventory `json:"inventories"`
+	}
+	mustDecodeJSON(t, localPVInventory, &localPVResponse)
+	if localPVResponse.Inventories == nil || len(localPVResponse.Inventories) != 0 {
+		t.Fatalf("expected empty inventories array, got %+v", localPVResponse)
+	}
+}
+
 func TestLocalPVInventoryAPIRecomputesEligibility(t *testing.T) {
 	t.Parallel()
 

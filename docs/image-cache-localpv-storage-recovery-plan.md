@@ -860,6 +860,10 @@ operator maintenance steps; this code change keeps production defaults in
       keeping updater self-upgrade as the highest-priority task.
 - [x] Deduplicate scheduled inventory report tasks while an equivalent pending
       or running report already exists.
+- [x] Fail `report-image-cache-inventory` tasks when no inventory chunks were
+      posted or the posted chunk count differs from the generated chunk count.
+- [x] Return empty JSON arrays, not `null`, for empty image-cache and LocalPV
+      admin inventory responses.
 
 ### P3: image-cache orphan planner
 

@@ -127,6 +127,12 @@ func (s *Server) handleAdminListImageCacheInventory(w http.ResponseWriter, r *ht
 		s.writeStoreError(w, err)
 		return
 	}
+	if nodes == nil {
+		nodes = []model.ImageCacheNodeInventory{}
+	}
+	if manifests == nil {
+		manifests = []model.ImageCacheManifest{}
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"nodes":     nodes,
 		"manifests": manifests,
@@ -266,6 +272,9 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	if inventories == nil {
+		inventories = []model.LocalPVInventory{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"inventories": inventories})
 }

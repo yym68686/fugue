@@ -442,6 +442,9 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`bind-interfaces`,
 		`discovery_generation=`,
 		`import os`,
+		`image-cache inventory produced no chunks`,
+		`image-cache inventory chunk list count ${chunk_file_count} did not match expected ${expected_chunks}`,
+		`image-cache inventory posted ${posted_chunks} chunks, expected ${expected_chunks}`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)
