@@ -586,8 +586,11 @@ release_diff_new_ref() {
 
 values_file_changes_limited_to_yaml_path() {
   local file="$1"
-  local allowed_path="$2"
+  shift
+  local allowed_paths=("$@")
   local old_ref new_ref
+
+  [[ "${#allowed_paths[@]}" -gt 0 ]] || return 1
 
   old_ref="$(release_diff_old_ref)" || return 1
   new_ref="$(release_diff_new_ref)" || return 1
@@ -597,13 +600,19 @@ values_file_changes_limited_to_yaml_path() {
   [[ "${old_ref}" != "${new_ref}" ]] || return 1
   command_exists python3 || return 1
 
-  python3 - "${REPO_ROOT}" "${old_ref}" "${new_ref}" "${file}" "${allowed_path}" <<'PY'
+  python3 - "${REPO_ROOT}" "${old_ref}" "${new_ref}" "${file}" "${allowed_paths[@]}" <<'PY'
 import difflib
 import subprocess
 import sys
 
-repo, old_ref, new_ref, file_path, allowed_path = sys.argv[1:6]
-allowed = tuple(part for part in allowed_path.split(".") if part)
+repo, old_ref, new_ref, file_path = sys.argv[1:5]
+allowed_paths = [
+    tuple(part for part in raw.split(".") if part)
+    for raw in sys.argv[5:]
+    if raw.strip()
+]
+if not allowed_paths:
+    raise SystemExit(1)
 
 def read_lines(ref):
     try:
@@ -647,7 +656,7 @@ def yaml_paths(lines):
     return paths
 
 def line_allowed(path):
-    return len(path) >= len(allowed) and path[: len(allowed)] == allowed
+    return any(len(path) >= len(allowed) and path[: len(allowed)] == allowed for allowed in allowed_paths)
 
 old_lines = read_lines(old_ref)
 new_lines = read_lines(new_ref)
@@ -1023,16 +1032,28 @@ node_local_build_plane_preflight_override_allowed() {
       Dockerfile.image-cache|\
       internal/sourceimport/*|\
       internal/config/config.go|\
+      internal/model/model.go|\
+      internal/api/image_cache_localpv_admin.go|\
+      internal/api/image_cache_localpv_admin_test.go|\
       internal/controller/controller.go|\
       internal/controller/deploy_image_guard.go|\
       internal/controller/deploy_image_guard_test.go|\
+      internal/controller/image_cache_orphan_cleanup.go|\
+      internal/controller/image_cache_orphan_cleanup_test.go|\
       internal/controller/import_operation.go|\
       internal/controller/import_operation_test.go|\
       internal/controller/managed_app_reconciler.go|\
       internal/controller/managed_app_reconciler_test.go|\
       internal/controller/managed_app_rollout.go|\
       internal/controller/managed_app_rollout_test.go|\
+      internal/controller/metrics.go|\
+      internal/store/image_cache_localpv.go|\
+      internal/store/image_cache_localpv_pg.go|\
+      internal/store/image_cache_localpv_test.go|\
       internal/store/machines.go|\
+      internal/store/node_updater.go|\
+      internal/store/node_updater_pg.go|\
+      internal/store/postgres.go|\
       internal/store/store_test.go|\
       internal/api/cluster_nodes.go|\
       internal/api/cluster_nodes_test.go|\
@@ -1049,15 +1070,28 @@ node_local_build_plane_preflight_override_allowed() {
       internal/api/node_updater_test.go|\
       internal/api/runtime_pool.go|\
       internal/api/server_test.go|\
+      scripts/prepare_fugue_lvm_localpv_node.sh|\
       deploy/helm/fugue/templates/_helpers.tpl|\
       deploy/helm/fugue/templates/controller-deployment.yaml|\
       scripts/upgrade_fugue_control_plane.sh|\
       scripts/test_release_domain_safety.sh)
         saw_allowed="true"
         ;;
+      .github/workflows/deploy-control-plane.yml|\
+      docs/*|\
+      fugue-cli-acceptance.md|\
+      openapi/openapi.yaml|\
+      internal/api/routes_gen.go|\
+      internal/apispec/spec_gen.go|\
+      internal/cli/*)
+        ;;
       deploy/helm/fugue/values.yaml|\
       deploy/helm/fugue/values-production-ha.yaml)
-        values_file_changes_limited_to_yaml_path "${file}" "imageCache.resources" || return 1
+        values_file_changes_limited_to_yaml_path \
+          "${file}" \
+          "imageCache.resources" \
+          "imageStore.imageCacheInventory" \
+          "imageStore.orphanPrune" || return 1
         saw_allowed="true"
         ;;
       *)

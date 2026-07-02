@@ -139,6 +139,9 @@ node_local_build_plane_preflight_override_allowed || fail "builder registry rout
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/join_cluster.go\ninternal/api/node_updater.go\ninternal/api/node_updater_test.go'
 node_local_build_plane_preflight_override_allowed || fail "node updater registry mirror reload fixes must be allowed to bypass registry/node-policy preflight"
 
+FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\ncmd/fugue-image-cache/main.go\ndocs/image-cache-localpv-storage-recovery-plan.md\ninternal/api/image_cache_localpv_admin.go\ninternal/api/routes_gen.go\ninternal/apispec/spec_gen.go\ninternal/cli/admin_image_cache.go\ninternal/config/config.go\ninternal/controller/image_cache_orphan_cleanup.go\ninternal/controller/metrics.go\ninternal/model/model.go\ninternal/store/image_cache_localpv.go\ninternal/store/postgres.go\nopenapi/openapi.yaml\nscripts/prepare_fugue_lvm_localpv_node.sh\nscripts/upgrade_fugue_control_plane.sh'
+node_local_build_plane_preflight_override_allowed || fail "image-cache LocalPV maintenance fixes must bypass existing node-policy preflight"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/cluster_node_policy.go\ninternal/api/cluster_node_policy_seed_test.go\ninternal/api/cluster_node_policy_status.go\ninternal/api/cluster_node_views.go\ninternal/api/cluster_node_views_test.go\ninternal/api/join_cluster.go\ninternal/api/runtime_pool.go\ninternal/api/server_test.go\ninternal/store/machines.go\ninternal/store/store_test.go'
 node_local_build_plane_preflight_override_allowed || fail "node-policy join fixes must be allowed to bypass existing node-policy preflight"
 
@@ -210,6 +213,18 @@ imageCache:
     limits:
       memory: 512Mi
 
+imageStore:
+  imageCacheInventory:
+    enabled: true
+    interval: 30m
+    ttl: 2h
+  orphanPrune:
+    mode: observe
+    gracePeriod: 24h
+    maxTargetsPerNode: 50
+    maxDeleteBytesPerNode: "1073741824"
+    minReplicaCount: 1
+
 registry:
   persistence:
     mode: hostPath
@@ -267,6 +282,19 @@ PY
 git -C "${TMP_REPO_ROOT}" add .
 git -C "${TMP_REPO_ROOT}" commit -q -m image-cache-resources
 IMAGE_CACHE_RESOURCES_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("    interval: 30m\n", "    interval: 15m\n", 1)
+text = text.replace("    maxTargetsPerNode: 50\n", "    maxTargetsPerNode: 25\n", 1)
+path.write_text(text)
+PY
+git -C "${TMP_REPO_ROOT}" add .
+git -C "${TMP_REPO_ROOT}" commit -q -m image-store-maintenance
+IMAGE_STORE_MAINTENANCE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
 python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
 import pathlib
 import sys
@@ -367,6 +395,13 @@ FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/values.yaml'
 node_local_build_plane_resource_values_changed || fail "image-cache resource values must be recognized"
 node_local_build_plane_preflight_override_allowed || fail "image-cache resource values must bypass registry/node-policy preflight"
 BEFORE_SHA="${IMAGE_CACHE_RESOURCES_REF}"
+AFTER_SHA="${IMAGE_STORE_MAINTENANCE_REF}"
+FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/values.yaml'
+if node_local_build_plane_resource_values_changed; then
+  fail "image-store maintenance values must not be treated as image-cache resource changes"
+fi
+node_local_build_plane_preflight_override_allowed || fail "image-store maintenance values must bypass registry/node-policy preflight"
+BEFORE_SHA="${IMAGE_STORE_MAINTENANCE_REF}"
 AFTER_SHA="${REGISTRY_GC_RESOURCES_REF}"
 if node_local_build_plane_resource_values_changed; then
   fail "registryGC values must not be recognized as image-cache resource values"
