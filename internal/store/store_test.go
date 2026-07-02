@@ -264,7 +264,7 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}
 }
 
-func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeAndInventoryReports(t *testing.T) {
+func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageMaintenance(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -293,6 +293,8 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeAndInventoryReports(
 			"tasks",
 			model.NodeUpdateTaskTypePrepullAppImages,
 			model.NodeUpdateTaskTypeReportImageCache,
+			model.NodeUpdateTaskTypePruneImageCache,
+			model.NodeUpdateTaskTypeDecommissionLocalPV,
 			model.NodeUpdateTaskTypeUpgradeUpdater,
 		},
 	)
@@ -317,6 +319,18 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeAndInventoryReports(
 	if err != nil {
 		t.Fatalf("create inventory report task: %v", err)
 	}
+	prune, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		"dry_run": "true",
+	})
+	if err != nil {
+		t.Fatalf("create image-cache prune task: %v", err)
+	}
+	decommission, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeDecommissionLocalPV, map[string]string{
+		"dry_run": "true",
+	})
+	if err != nil {
+		t.Fatalf("create localpv decommission task: %v", err)
+	}
 	upgrade, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeUpgradeUpdater, nil)
 	if err != nil {
 		t.Fatalf("create updater upgrade task: %v", err)
@@ -334,8 +348,13 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeAndInventoryReports(
 	if err != nil {
 		t.Fatalf("list all pending tasks: %v", err)
 	}
-	if len(pending) != 3 || pending[0].ID != upgrade.ID || pending[1].ID != report.ID || pending[2].ID != prepull.ID {
-		t.Fatalf("expected upgrade then inventory report then prepull, got %+v", pending)
+	if len(pending) != 5 ||
+		pending[0].ID != upgrade.ID ||
+		pending[1].ID != report.ID ||
+		pending[2].ID != prune.ID ||
+		pending[3].ID != decommission.ID ||
+		pending[4].ID != prepull.ID {
+		t.Fatalf("expected upgrade, inventory, storage maintenance, then prepull, got %+v", pending)
 	}
 }
 

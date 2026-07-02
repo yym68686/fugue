@@ -354,8 +354,10 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 	switch task.Type {
 	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
 		return 1
-	default:
+	case model.NodeUpdateTaskTypePruneImageCache, model.NodeUpdateTaskTypeDecommissionLocalPV:
 		return 2
+	default:
+		return 3
 	}
 }
 

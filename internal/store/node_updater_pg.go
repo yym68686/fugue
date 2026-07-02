@@ -383,7 +383,8 @@ WHERE node_updater_id = $1 AND status = $2
 ORDER BY CASE
 	WHEN task_type = 'upgrade-node-updater' THEN 0
 	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 1
-	ELSE 2
+	WHEN task_type IN ('prune-image-cache', 'decommission-lvm-localpv') THEN 2
+	ELSE 3
 END, created_at ASC, id ASC
 LIMIT $3
 `, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, limit)
