@@ -31,7 +31,7 @@ func (s *Server) StartBackgroundEdgeQualityRollups(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
 	}
-	s.runEdgeQualityRollupBuilder(time.Now().UTC())
+	s.runEdgeQualityRollupBuilder(ctx, time.Now().UTC())
 	timer := time.NewTicker(edgeQualityRollupBuilderInterval)
 	defer timer.Stop()
 	for {
@@ -39,15 +39,32 @@ func (s *Server) StartBackgroundEdgeQualityRollups(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-timer.C:
-			s.runEdgeQualityRollupBuilder(now.UTC())
+			s.runEdgeQualityRollupBuilder(ctx, now.UTC())
 		}
 	}
 }
 
-func (s *Server) runEdgeQualityRollupBuilder(now time.Time) {
+func (s *Server) runEdgeQualityRollupBuilder(ctx context.Context, now time.Time) {
 	started := time.Now().UTC()
-	count, err := s.rebuildEdgeQualityRollups(now)
+	count := 0
+	acquired := true
+	var err error
+	if s.store != nil {
+		acquired, err = s.store.WithAdvisoryLock(ctx, "edge-quality-rollup-builder", func() error {
+			var buildErr error
+			count, buildErr = s.rebuildEdgeQualityRollups(now)
+			return buildErr
+		})
+	} else {
+		count, err = s.rebuildEdgeQualityRollups(now)
+	}
 	duration := time.Since(started)
+	if !acquired {
+		if s.log != nil {
+			s.log.Printf("edge quality rollup builder skipped: another writer holds lock")
+		}
+		return
+	}
 	s.edgeQualityRollupMu.Lock()
 	s.edgeQualityRollupLastRun = started
 	s.edgeQualityRollupLastDuration = duration

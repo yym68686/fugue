@@ -166,6 +166,12 @@ spec:
             - name: FUGUE_DNS_STATIC_RECORDS_JSON
               value: {{ .Values.api.dnsStaticRecordsJSON | quote }}
             {{- end }}
+            {{- if .Values.dns.routeAAnswerIPs }}
+            - name: FUGUE_DNS_ROUTE_A_ANSWER_IPS
+              value: {{ join "," .Values.dns.routeAAnswerIPs | quote }}
+            {{- end }}
+            - name: FUGUE_DNS_TTL
+              value: {{ printf "%v" .Values.dns.ttl | quote }}
             {{- if .Values.api.platformRoutesJSON }}
             - name: FUGUE_PLATFORM_ROUTES_JSON
               value: {{ .Values.api.platformRoutesJSON | quote }}

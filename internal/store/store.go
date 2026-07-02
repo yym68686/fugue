@@ -32,6 +32,10 @@ type Store struct {
 	db          *sql.DB
 	dbInitMu    sync.Mutex
 	dbReady     bool
+
+	advisoryLockMu          sync.Mutex
+	edgeDNSBundleArtifactMu sync.Mutex
+	edgeDNSBundleArtifacts  map[string]EdgeDNSBundleArtifact
 }
 
 type ProjectUpdate struct {

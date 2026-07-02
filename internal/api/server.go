@@ -49,6 +49,8 @@ type Server struct {
 	sshPublicPortStart            int
 	sshPublicPortEnd              int
 	dnsStaticRecords              []model.EdgeDNSRecord
+	dnsRouteAAnswerIPs            []string
+	dnsBundleTTL                  int
 	platformRoutes                []model.PlatformRoute
 	edgeQualityRankingMode        string
 	edgeTLSAskToken               string
@@ -115,12 +117,31 @@ type Server struct {
 	edgeQualityRollupRunCount     int64
 	edgeQualityRollupErrorCount   int64
 	edgeQualityRollupLastError    string
+	edgeDNSArtifactMu             sync.Mutex
+	edgeDNSArtifactLastRun        time.Time
+	edgeDNSArtifactLastSuccess    time.Time
+	edgeDNSArtifactLastDuration   time.Duration
+	edgeDNSArtifactLastCount      int
+	edgeDNSArtifactLastDecisions  int
+	edgeDNSArtifactRunCount       int64
+	edgeDNSArtifactSkippedCount   int64
+	edgeDNSArtifactErrorCount     int64
+	edgeDNSArtifactLastError      string
 	ready                         atomic.Bool
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
 	if logger == nil {
 		logger = log.Default()
+	}
+	dnsRouteAAnswerIPs, err := parseOptionalEdgeDNSAnswerIPs(cfg.DNSRouteAAnswerIPs)
+	if err != nil {
+		logger.Printf("ignoring FUGUE_DNS_ROUTE_A_ANSWER_IPS for edge DNS artifact publisher: %v", err)
+		dnsRouteAAnswerIPs = nil
+	}
+	dnsBundleTTL := cfg.DNSBundleTTL
+	if dnsBundleTTL <= 0 || dnsBundleTTL > 3600 {
+		dnsBundleTTL = defaultEdgeDNSTTL
 	}
 	server := &Server{
 		store:                         store,
@@ -145,6 +166,8 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		sshPublicPortStart:            cfg.SSHPublicPortStart,
 		sshPublicPortEnd:              cfg.SSHPublicPortEnd,
 		dnsStaticRecords:              parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
+		dnsRouteAAnswerIPs:            dnsRouteAAnswerIPs,
+		dnsBundleTTL:                  dnsBundleTTL,
 		platformRoutes:                parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
 		edgeQualityRankingMode:        normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
 		edgeTLSAskToken:               strings.TrimSpace(cfg.EdgeTLSAskToken),
@@ -282,6 +305,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	s.writeBackupMetrics(w)
 	s.writeRobustnessMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)
+	s.writeEdgeDNSArtifactMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

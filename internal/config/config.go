@@ -36,6 +36,8 @@ type APIConfig struct {
 	SSHPublicPortStart            int
 	SSHPublicPortEnd              int
 	DNSStaticRecordsJSON          string
+	DNSRouteAAnswerIPs            []string
+	DNSBundleTTL                  int
 	PlatformRoutesJSON            string
 	EdgeQualityRankingMode        string
 	EdgeTLSAskToken               string
@@ -266,6 +268,8 @@ func APIFromEnv() APIConfig {
 		SSHPublicPortStart:            getenvInt("FUGUE_SSH_PUBLIC_PORT_START", 22000),
 		SSHPublicPortEnd:              getenvInt("FUGUE_SSH_PUBLIC_PORT_END", 32000),
 		DNSStaticRecordsJSON:          strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
+		DNSRouteAAnswerIPs:            getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
+		DNSBundleTTL:                  getenvInt("FUGUE_DNS_TTL", 60),
 		PlatformRoutesJSON:            strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
 		EdgeQualityRankingMode:        getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
 		EdgeTLSAskToken:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),

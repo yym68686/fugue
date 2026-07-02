@@ -43,6 +43,8 @@ func main() {
 		SSHPublicPortStart:            cfg.SSHPublicPortStart,
 		SSHPublicPortEnd:              cfg.SSHPublicPortEnd,
 		DNSStaticRecordsJSON:          cfg.DNSStaticRecordsJSON,
+		DNSRouteAAnswerIPs:            cfg.DNSRouteAAnswerIPs,
+		DNSBundleTTL:                  cfg.DNSBundleTTL,
 		PlatformRoutesJSON:            cfg.PlatformRoutesJSON,
 		EdgeQualityRankingMode:        cfg.EdgeQualityRankingMode,
 		EdgeTLSAskToken:               cfg.EdgeTLSAskToken,
@@ -74,6 +76,7 @@ func main() {
 	defer stop()
 	server.StartBackgroundWarmers(ctx)
 	go server.StartBackgroundEdgeQualityRollups(ctx)
+	go server.StartBackgroundEdgeDNSArtifacts(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 	go server.StartBackgroundBackups(ctx)
 

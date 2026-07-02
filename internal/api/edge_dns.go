@@ -57,12 +57,22 @@ func (s *Server) handleEdgeDNSBundle(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "dns token cannot access another DNS zone")
 		return
 	}
+	if bundle, ok, err := s.edgeDNSBundleArtifactForOptions(options, time.Now().UTC()); err == nil && ok {
+		writeEdgeDNSBundleResponse(w, bundle)
+		return
+	} else if err != nil && s.log != nil {
+		s.log.Printf("edge dns artifact lookup failed; falling back to read-only derive: dns_node_id=%s edge_group_id=%s zone=%s err=%v", options.DNSNodeID, options.EdgeGroupID, options.Zone, err)
+	}
+
 	bundle, err := s.deriveEdgeDNSBundle(r, options)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	writeEdgeDNSBundleResponse(w, bundle)
+}
 
+func writeEdgeDNSBundleResponse(w http.ResponseWriter, bundle model.EdgeDNSBundle) {
 	etag := edgeRouteBundleETag(bundle.Version)
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, no-cache")
@@ -1199,7 +1209,7 @@ type edgeDNSLatencyScope struct {
 	ASN     string
 }
 
-func (s *Server) edgeDNSLatencyProfiles(options edgeDNSBundleOptions) (edgeDNSLatencyProfileCatalog, error) {
+func (s *Server) edgeDNSLatencyProfiles(_ edgeDNSBundleOptions) (edgeDNSLatencyProfileCatalog, error) {
 	if s.store == nil || s.edgeQualityRankingDisabled() {
 		return edgeDNSLatencyProfileCatalog{}, nil
 	}
@@ -1212,14 +1222,34 @@ func (s *Server) edgeDNSLatencyProfiles(options edgeDNSBundleOptions) (edgeDNSLa
 	if err != nil {
 		return edgeDNSLatencyProfileCatalog{}, err
 	}
-	catalog, updates := edgeDNSLatencyProfilesByHostname(samples, decisions, now)
-	if len(updates) > 0 {
-		if err := s.store.UpsertEdgeDNSRoutingDecisions(updates); err != nil {
-			return edgeDNSLatencyProfileCatalog{}, err
-		}
-	}
+	catalog, _ := edgeDNSLatencyProfilesByHostname(samples, decisions, now)
 	edgeDNSApplySevereDegradeToCatalog(&catalog, samples, now)
 	return catalog, nil
+}
+
+func (s *Server) reconcileEdgeDNSRoutingDecisions(now time.Time) (int, error) {
+	if s.store == nil || s.edgeQualityRankingDisabled() {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	samples, err := s.store.ListEdgePerformanceSamples("", now.Add(-edgeDNSLatencyWindow))
+	if err != nil {
+		return 0, err
+	}
+	decisions, err := s.store.ListEdgeDNSRoutingDecisions("")
+	if err != nil {
+		return 0, err
+	}
+	_, updates := edgeDNSLatencyProfilesByHostname(samples, decisions, now)
+	if len(updates) > 0 {
+		sortEdgeDNSRoutingDecisionUpdates(updates)
+		if err := s.store.UpsertEdgeDNSRoutingDecisions(updates); err != nil {
+			return 0, err
+		}
+	}
+	return len(updates), nil
 }
 
 func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
@@ -1255,8 +1285,20 @@ func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, dec
 		Scoped: make(map[string][]edgeDNSLatencyProfile),
 	}
 	updates := []model.EdgeDNSRoutingDecision{}
-	for hostname, scopes := range byHostnameScope {
-		for scopeKey, groups := range scopes {
+	hostnames := make([]string, 0, len(byHostnameScope))
+	for hostname := range byHostnameScope {
+		hostnames = append(hostnames, hostname)
+	}
+	sort.Strings(hostnames)
+	for _, hostname := range hostnames {
+		scopes := byHostnameScope[hostname]
+		scopeKeys := make([]string, 0, len(scopes))
+		for scopeKey := range scopes {
+			scopeKeys = append(scopeKeys, scopeKey)
+		}
+		sort.Strings(scopeKeys)
+		for _, scopeKey := range scopeKeys {
+			groups := scopes[scopeKey]
 			scope := edgeDNSLatencyScopeFromKey(scopeKey)
 			profile := buildEdgeDNSLatencyProfile(hostname, scope, groups)
 			if profile == nil || !profile.Enabled {
@@ -1272,12 +1314,24 @@ func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, dec
 			catalog.Scoped[hostname] = append(catalog.Scoped[hostname], *profile)
 		}
 	}
+	sortEdgeDNSRoutingDecisionUpdates(updates)
 	for hostname := range catalog.Scoped {
 		sort.Slice(catalog.Scoped[hostname], func(i, j int) bool {
 			return catalog.Scoped[hostname][i].Scope.key() < catalog.Scoped[hostname][j].Scope.key()
 		})
 	}
 	return catalog, updates
+}
+
+func sortEdgeDNSRoutingDecisionUpdates(decisions []model.EdgeDNSRoutingDecision) {
+	sort.Slice(decisions, func(i, j int) bool {
+		leftHost := normalizeExternalAppDomain(decisions[i].Hostname)
+		rightHost := normalizeExternalAppDomain(decisions[j].Hostname)
+		if leftHost != rightHost {
+			return leftHost < rightHost
+		}
+		return strings.TrimSpace(strings.ToLower(decisions[i].ScopeKey)) < strings.TrimSpace(strings.ToLower(decisions[j].ScopeKey))
+	})
 }
 
 func edgeDNSRoutingDecisionKey(hostname, scopeKey string) string {

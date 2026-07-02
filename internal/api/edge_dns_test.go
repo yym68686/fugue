@@ -167,6 +167,72 @@ func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSBundleServesPublishedArtifact(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	options := edgeDNSBundleOptions{
+		DNSNodeID:       "dns-us-1",
+		EdgeGroupID:     "edge-group-country-us",
+		Zone:            "fugue.pro",
+		AnswerIPs:       []string{"203.0.113.10"},
+		RouteAAnswerIPs: []string{"136.112.185.40"},
+		TTL:             60,
+	}
+	bundle := model.EdgeDNSBundle{
+		SchemaVersion: model.BundleSchemaVersionV1,
+		Version:       "dnsgen_published_artifact",
+		Generation:    "dnsgen_published_artifact",
+		GeneratedAt:   now,
+		ValidUntil:    now.Add(10 * time.Minute),
+		Issuer:        model.BundleIssuerFugue,
+		DNSNodeID:     options.DNSNodeID,
+		EdgeGroupID:   options.EdgeGroupID,
+		Zone:          options.Zone,
+		Records: []model.EdgeDNSRecord{{
+			Name:       "artifact.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindProbe,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}
+	if err := storeState.UpsertEdgeDNSBundleArtifact(store.EdgeDNSBundleArtifact{
+		ScopeKey:        edgeDNSBundleArtifactScopeKey(options),
+		Zone:            options.Zone,
+		DNSNodeID:       options.DNSNodeID,
+		EdgeGroupID:     options.EdgeGroupID,
+		AnswerIPs:       options.AnswerIPs,
+		RouteAAnswerIPs: options.RouteAAnswerIPs,
+		Version:         bundle.Version,
+		ETag:            edgeRouteBundleETag(bundle.Version),
+		Bundle:          bundle,
+		GeneratedAt:     bundle.GeneratedAt,
+		ValidUntil:      bundle.ValidUntil,
+		ActivatedAt:     now,
+		UpdatedAt:       now,
+	}); err != nil {
+		t.Fatalf("publish artifact: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&dns_node_id=dns-us-1&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=203.0.113.10&route_a_answer_ip=136.112.185.40&ttl=60", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var got model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &got)
+	if got.Version != bundle.Version {
+		t.Fatalf("expected published artifact version %s, got %s", bundle.Version, got.Version)
+	}
+	if edgeDNSRecordByNameAndType(got.Records, "artifact.fugue.pro", model.EdgeDNSRecordTypeA) == nil {
+		t.Fatalf("expected artifact record, got %+v", got.Records)
+	}
+}
+
 func TestEdgeDNSBundlePublishesCustomDomainTargetsBeforeVerification(t *testing.T) {
 	t.Parallel()
 
@@ -1122,6 +1188,25 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 		apiA.AnswerPolicy.ExplorationPercent != edgeDNSExplorationPercent ||
 		apiA.AnswerPolicy.SwitchCooldownSec != int(edgeDNSDecisionCooldown.Seconds()) {
 		t.Fatalf("expected latency-aware policy with safety gates, got %+v", apiA.AnswerPolicy)
+	}
+	decisions, err := storeState.ListEdgeDNSRoutingDecisions("api.fugue.pro")
+	if err != nil {
+		t.Fatalf("list routing decisions: %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("GET /v1/edge/dns must not persist routing decisions, got %+v", decisions)
+	}
+	if written, err := server.reconcileEdgeDNSRoutingDecisions(now); err != nil {
+		t.Fatalf("reconcile routing decisions: %v", err)
+	} else if written == 0 {
+		t.Fatal("expected background reconciler to persist routing decisions")
+	}
+	decisions, err = storeState.ListEdgeDNSRoutingDecisions("api.fugue.pro")
+	if err != nil {
+		t.Fatalf("list reconciled routing decisions: %v", err)
+	}
+	if len(decisions) == 0 {
+		t.Fatal("expected background reconciler decisions")
 	}
 	var usCandidate, deCandidate *model.EdgeDNSAnswerCandidate
 	for index := range apiA.Candidates {
