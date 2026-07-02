@@ -416,7 +416,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v11"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v12"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -444,11 +444,16 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`import os`,
 		`image-cache inventory produced no chunks`,
 		`image-cache inventory chunk list count ${chunk_file_count} did not match expected ${expected_chunks}`,
+		`--data-binary @"${chunk_file}"`,
+		`image-cache inventory POST failed for chunk ${next_chunk_number}/${expected_chunks}`,
 		`image-cache inventory posted ${posted_chunks} chunks, expected ${expected_chunks}`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)
 		}
+	}
+	if strings.Contains(script, `api_json POST /v1/node-updater/image-cache/inventory "$(cat "${chunk_file}")"`) {
+		t.Fatalf("node-updater script must not pass image-cache inventory chunks through argv")
 	}
 	scriptPath := filepath.Join(t.TempDir(), "node-updater.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {

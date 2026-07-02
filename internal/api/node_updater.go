@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion   = "v11"
+	nodeUpdaterScriptVersion   = "v12"
 	staleNodeUpdateTaskTimeout = 2 * time.Hour
 )
 
@@ -616,7 +616,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v11"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v12"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -2233,7 +2233,16 @@ PY_IMAGE_CACHE_INVENTORY
       echo "image-cache inventory chunk file is missing or empty: ${chunk_file}" >&2
       return 1
     fi
-    api_json POST /v1/node-updater/image-cache/inventory "$(cat "${chunk_file}")" >/dev/null
+    local next_chunk_number=$((posted_chunks + 1))
+    if ! curl -fsSL --retry 3 --retry-delay 2 -X POST "${FUGUE_API_BASE}/v1/node-updater/image-cache/inventory" \
+      -H "Authorization: Bearer ${FUGUE_NODE_UPDATER_TOKEN:?FUGUE_NODE_UPDATER_TOKEN is required}" \
+      -H "Content-Type: application/json" \
+      --data-binary @"${chunk_file}" >/dev/null; then
+      rm -f "${inventory_file}"
+      rm -rf "${chunk_dir}"
+      echo "image-cache inventory POST failed for chunk ${next_chunk_number}/${expected_chunks}" >&2
+      return 1
+    fi
     posted_chunks=$((posted_chunks + 1))
   done <"${chunk_dir}/chunks.list"
   if [ "${posted_chunks}" -ne "${expected_chunks}" ]; then
