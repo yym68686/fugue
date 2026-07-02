@@ -264,7 +264,7 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	}
 }
 
-func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgrade(t *testing.T) {
+func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeAndInventoryReports(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -288,7 +288,13 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgrade(t *testing.T) {
 		"machine-1",
 		"v2",
 		"join-v2",
-		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages, model.NodeUpdateTaskTypeUpgradeUpdater},
+		[]string{
+			"heartbeat",
+			"tasks",
+			model.NodeUpdateTaskTypePrepullAppImages,
+			model.NodeUpdateTaskTypeReportImageCache,
+			model.NodeUpdateTaskTypeUpgradeUpdater,
+		},
 	)
 	if err != nil {
 		t.Fatalf("enroll node updater: %v", err)
@@ -304,6 +310,12 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgrade(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create prepull task: %v", err)
+	}
+	report, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReportImageCache, map[string]string{
+		"reason": "test-inventory",
+	})
+	if err != nil {
+		t.Fatalf("create inventory report task: %v", err)
 	}
 	upgrade, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeUpgradeUpdater, nil)
 	if err != nil {
@@ -322,8 +334,8 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list all pending tasks: %v", err)
 	}
-	if len(pending) != 2 || pending[0].ID != upgrade.ID || pending[1].ID != prepull.ID {
-		t.Fatalf("expected upgrade before prepull, got %+v", pending)
+	if len(pending) != 3 || pending[0].ID != upgrade.ID || pending[1].ID != report.ID || pending[2].ID != prepull.ID {
+		t.Fatalf("expected upgrade then inventory report then prepull, got %+v", pending)
 	}
 }
 

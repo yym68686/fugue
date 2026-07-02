@@ -33,6 +33,9 @@ func TestScheduleImageCacheInventoryReportsRequiresCapability(t *testing.T) {
 	if err := svc.scheduleImageCacheInventoryReports(context.Background()); err != nil {
 		t.Fatalf("schedule inventory: %v", err)
 	}
+	if err := svc.scheduleImageCacheInventoryReports(context.Background()); err != nil {
+		t.Fatalf("reschedule inventory: %v", err)
+	}
 	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)

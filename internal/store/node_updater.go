@@ -351,7 +351,12 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
 		return 0
 	}
-	return 1
+	switch task.Type {
+	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func (s *Store) FailStaleRunningNodeUpdateTasks(updaterID string, staleAfter time.Duration) (int, error) {

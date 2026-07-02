@@ -380,7 +380,11 @@ func (s *Store) pgListPendingNodeUpdateTasks(updaterID string, limit int) ([]mod
 SELECT id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
 FROM fugue_node_update_tasks
 WHERE node_updater_id = $1 AND status = $2
-ORDER BY CASE WHEN task_type = 'upgrade-node-updater' THEN 0 ELSE 1 END, created_at ASC, id ASC
+ORDER BY CASE
+	WHEN task_type = 'upgrade-node-updater' THEN 0
+	WHEN task_type IN ('report-image-cache-inventory', 'report-lvm-localpv-inventory') THEN 1
+	ELSE 2
+END, created_at ASC, id ASC
 LIMIT $3
 `, strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusPending, limit)
 	if err != nil {

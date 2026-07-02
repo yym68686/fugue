@@ -856,6 +856,10 @@ operator maintenance steps; this code change keeps production defaults in
       bytes, and inventory age.
 - [x] Add capability gating so old updaters are not assigned unsupported
       inventory or prune tasks.
+- [x] Prioritize inventory report tasks ahead of replication backlog while
+      keeping updater self-upgrade as the highest-priority task.
+- [x] Deduplicate scheduled inventory report tasks while an equivalent pending
+      or running report already exists.
 
 ### P3: image-cache orphan planner
 
