@@ -55,6 +55,74 @@ func TestImageCacheInventoryUpsertAndStaleFilters(t *testing.T) {
 	}
 }
 
+func TestImageCacheInventoryCompleteSnapshotMarksMissingManifestsAbsent(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	firstSeen := time.Now().UTC().Add(-time.Hour)
+	secondSeen := time.Now().UTC()
+	node := model.ImageCacheNodeInventory{
+		NodeID:           "machine-1",
+		ClusterNodeName:  "worker-1",
+		RuntimeID:        "runtime-1",
+		ManifestCount:    3,
+		ObservedAt:       firstSeen,
+		Status:           "reported",
+		SnapshotComplete: true,
+	}
+	if _, err := s.UpsertImageCacheInventory(node, []model.ImageCacheManifest{
+		{Repo: "fugue-apps/demo", Target: "keep-a", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Present: true},
+		{Repo: "fugue-apps/demo", Target: "keep-b", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Present: true},
+		{Repo: "fugue-apps/demo", Target: "gone", Digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Present: true},
+	}); err != nil {
+		t.Fatalf("upsert first inventory: %v", err)
+	}
+
+	chunkNode := node
+	chunkNode.ManifestCount = 2
+	chunkNode.ObservedAt = secondSeen
+	chunkNode.SnapshotComplete = false
+	if _, err := s.UpsertImageCacheInventory(chunkNode, []model.ImageCacheManifest{
+		{Repo: "fugue-apps/demo", Target: "keep-a", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Present: true},
+	}); err != nil {
+		t.Fatalf("upsert first chunk: %v", err)
+	}
+	manifests, err := s.ListImageCacheManifests(model.ImageCacheManifestFilter{ClusterNodeName: "worker-1", PresentOnly: true})
+	if err != nil {
+		t.Fatalf("list first chunk manifests: %v", err)
+	}
+	if len(manifests) != 3 {
+		t.Fatalf("first chunk should not mark old manifests absent, got %+v", manifests)
+	}
+
+	finalChunkNode := chunkNode
+	finalChunkNode.SnapshotComplete = true
+	if _, err := s.UpsertImageCacheInventory(finalChunkNode, []model.ImageCacheManifest{
+		{Repo: "fugue-apps/demo", Target: "keep-b", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Present: true},
+	}); err != nil {
+		t.Fatalf("upsert final chunk: %v", err)
+	}
+	manifests, err = s.ListImageCacheManifests(model.ImageCacheManifestFilter{ClusterNodeName: "worker-1", PresentOnly: true})
+	if err != nil {
+		t.Fatalf("list final manifests: %v", err)
+	}
+	if len(manifests) != 2 {
+		t.Fatalf("expected only current snapshot manifests present, got %+v", manifests)
+	}
+	all, err := s.ListImageCacheManifests(model.ImageCacheManifestFilter{ClusterNodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("list all manifests: %v", err)
+	}
+	for _, manifest := range all {
+		if manifest.Target == "gone" && manifest.Present {
+			t.Fatalf("missing manifest still marked present: %+v", manifest)
+		}
+	}
+}
+
 func TestLocalPVInventoryUpsertReplacesNodeSnapshot(t *testing.T) {
 	t.Parallel()
 

@@ -337,6 +337,93 @@ func TestEvaluateLocalPVDecommissionSafetyGates(t *testing.T) {
 	}
 }
 
+func TestImageCacheInventoryChunkedSnapshotMarksMissingManifestsAbsent(t *testing.T) {
+	t.Parallel()
+
+	_, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Image Cache Chunked Snapshot Tenant")
+	firstObserved := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	secondObserved := time.Now().UTC().Format(time.RFC3339Nano)
+	oldCreated := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+
+	report := func(body map[string]any) {
+		t.Helper()
+		recorder := performJSONRequest(t, server, http.MethodPost, "/v1/node-updater/image-cache/inventory", updaterToken, body)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("report inventory status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	manifest := func(target, digest string) map[string]any {
+		return map[string]any{
+			"repo":                "fugue-apps/demo",
+			"target":              target,
+			"digest":              digest,
+			"manifest_size_bytes": 50,
+			"total_blob_bytes":    500,
+			"created_at_observed": oldCreated,
+			"present":             true,
+		}
+	}
+	base := func(observedAt string, total, chunkIndex, chunkCount int, manifests []map[string]any) map[string]any {
+		return map[string]any{
+			"endpoint":             "http://worker-1:5000",
+			"cluster_node":         "worker-1",
+			"observed_at":          observedAt,
+			"manifest_total_count": total,
+			"chunk_index":          chunkIndex,
+			"chunk_count":          chunkCount,
+			"disk": map[string]any{
+				"total_bytes": 1000,
+				"free_bytes":  200,
+				"cache_bytes": 300,
+			},
+			"manifests": manifests,
+		}
+	}
+
+	report(base(firstObserved, 3, 0, 1, []map[string]any{
+		manifest("keep-a", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		manifest("keep-b", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+		manifest("gone", "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+	}))
+	report(base(secondObserved, 2, 0, 2, []map[string]any{
+		manifest("keep-a", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+	}))
+
+	var inventoryResponse struct {
+		Nodes     []model.ImageCacheNodeInventory `json:"nodes"`
+		Manifests []model.ImageCacheManifest      `json:"manifests"`
+	}
+	inventory := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/inventory?cluster_node_name=worker-1", adminSecret, nil)
+	if inventory.Code != http.StatusOK {
+		t.Fatalf("admin inventory after first chunk status=%d body=%s", inventory.Code, inventory.Body.String())
+	}
+	mustDecodeJSON(t, inventory, &inventoryResponse)
+	if len(inventoryResponse.Manifests) != 3 {
+		t.Fatalf("first chunk should not mark old manifests absent: %+v", inventoryResponse.Manifests)
+	}
+
+	report(base(secondObserved, 2, 1, 2, []map[string]any{
+		manifest("keep-b", "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+	}))
+	inventory = performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/inventory?cluster_node_name=worker-1", adminSecret, nil)
+	if inventory.Code != http.StatusOK {
+		t.Fatalf("admin inventory after final chunk status=%d body=%s", inventory.Code, inventory.Body.String())
+	}
+	inventoryResponse = struct {
+		Nodes     []model.ImageCacheNodeInventory `json:"nodes"`
+		Manifests []model.ImageCacheManifest      `json:"manifests"`
+	}{}
+	mustDecodeJSON(t, inventory, &inventoryResponse)
+	if len(inventoryResponse.Manifests) != 2 {
+		t.Fatalf("expected current snapshot manifests only: %+v", inventoryResponse.Manifests)
+	}
+	for _, manifest := range inventoryResponse.Manifests {
+		if manifest.Target == "gone" {
+			t.Fatalf("missing manifest still returned as present: %+v", manifest)
+		}
+	}
+}
+
 func newImageCacheAdminAPITest(t *testing.T, tenantName string) (*store.Store, string, string, *Server) {
 	t.Helper()
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))

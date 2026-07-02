@@ -340,6 +340,7 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 	node.PinCount = firstNonZeroInt(node.PinCount, len(req.Pins))
 	node.ObservedAt = observedAt
 	node.ManifestCount = firstNonZeroInt(node.ManifestCount, req.TotalCount, len(req.Manifests))
+	node.SnapshotComplete = imageCacheInventorySnapshotComplete(req, len(req.Manifests))
 	manifests := make([]model.ImageCacheManifest, 0, len(req.Manifests))
 	pinned := map[string]struct{}{}
 	for _, pin := range req.Pins {
@@ -379,6 +380,19 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 		manifests = append(manifests, manifest)
 	}
 	return node, manifests, nil
+}
+
+func imageCacheInventorySnapshotComplete(req imageCacheInventoryReport, reportedManifestCount int) bool {
+	if req.ChunkCount > 1 {
+		return req.ChunkIndex >= req.ChunkCount-1
+	}
+	if req.ChunkCount == 1 {
+		return true
+	}
+	if req.TotalCount > 0 {
+		return req.TotalCount == reportedManifestCount
+	}
+	return true
 }
 
 func (s *Server) computeImageCachePrunePlan(r *http.Request, filter model.ImageCachePrunePlanFilter) (model.ImageCachePrunePlan, error) {

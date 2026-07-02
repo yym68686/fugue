@@ -61,6 +61,18 @@ func (s *Store) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, ma
 				state.ImageCacheManifests = append(state.ImageCacheManifests, manifest)
 			}
 		}
+		if node.SnapshotComplete {
+			for idx, manifest := range state.ImageCacheManifests {
+				if !imageCacheManifestBelongsToNode(manifest, node) || !manifest.Present {
+					continue
+				}
+				if manifest.LastSeenAt.Before(node.ObservedAt) {
+					manifest.Present = false
+					manifest.UpdatedAt = now
+					state.ImageCacheManifests[idx] = manifest
+				}
+			}
+		}
 		return nil
 	})
 	return out, err
@@ -396,6 +408,18 @@ func imageCacheManifestMatchesFilter(in model.ImageCacheManifest, filter model.I
 		return false
 	}
 	return true
+}
+
+func imageCacheManifestBelongsToNode(manifest model.ImageCacheManifest, node model.ImageCacheNodeInventory) bool {
+	nodeID := strings.TrimSpace(node.NodeID)
+	clusterNodeName := strings.TrimSpace(node.ClusterNodeName)
+	if nodeID != "" && strings.TrimSpace(manifest.NodeID) != nodeID {
+		return false
+	}
+	if clusterNodeName != "" && strings.TrimSpace(manifest.ClusterNodeName) != clusterNodeName {
+		return false
+	}
+	return nodeID != "" || clusterNodeName != ""
 }
 
 func imageCachePrunePlanMatchesFilter(in model.ImageCachePrunePlan, filter model.ImageCachePrunePlanFilter) bool {

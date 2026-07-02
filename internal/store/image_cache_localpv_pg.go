@@ -136,11 +136,38 @@ ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 			return model.ImageCacheNodeInventory{}, mapDBErr(err)
 		}
 	}
+	if node.SnapshotComplete {
+		if err := pgMarkMissingImageCacheManifestsAbsent(ctx, tx, node, now); err != nil {
+			return model.ImageCacheNodeInventory{}, err
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return model.ImageCacheNodeInventory{}, mapDBErr(err)
 	}
 	return node, nil
+}
+
+func pgMarkMissingImageCacheManifestsAbsent(ctx context.Context, tx *sql.Tx, node model.ImageCacheNodeInventory, now time.Time) error {
+	clauses := []string{"present = TRUE", "last_seen_at < $1"}
+	args := []any{node.ObservedAt}
+	if node.NodeID != "" {
+		args = append(args, node.NodeID)
+		clauses = append(clauses, fmt.Sprintf("node_id = $%d", len(args)))
+	}
+	if node.ClusterNodeName != "" {
+		args = append(args, node.ClusterNodeName)
+		clauses = append(clauses, fmt.Sprintf("cluster_node_name = $%d", len(args)))
+	}
+	if len(args) == 1 {
+		return nil
+	}
+	args = append(args, now)
+	query := `UPDATE fugue_image_cache_manifests SET present = FALSE, updated_at = $` + fmt.Sprint(len(args)) + ` WHERE ` + strings.Join(clauses, " AND ")
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return mapDBErr(err)
+	}
+	return nil
 }
 
 func (s *Store) pgListImageCacheNodeInventories(filter model.ImageCacheNodeInventoryFilter) ([]model.ImageCacheNodeInventory, error) {
