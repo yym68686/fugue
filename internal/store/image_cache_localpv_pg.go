@@ -37,6 +37,7 @@ func (s *Store) pgUpsertImageCacheInventory(node model.ImageCacheNodeInventory, 
 	defer tx.Rollback()
 
 	now := time.Now().UTC()
+	snapshotComplete := node.SnapshotComplete
 	existing, err := scanImageCacheNodeInventory(tx.QueryRowContext(ctx, `
 SELECT `+imageCacheNodeColumns()+`
 FROM fugue_image_cache_nodes
@@ -88,6 +89,7 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 	} else {
 		return model.ImageCacheNodeInventory{}, mapDBErr(err)
 	}
+	node.SnapshotComplete = snapshotComplete
 
 	for _, manifest := range manifests {
 		manifest = normalizeImageCacheManifest(manifest)
