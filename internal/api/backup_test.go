@@ -1001,6 +1001,46 @@ func TestRecoverStaleBackupRunMarksFailedAndSchedulesRetry(t *testing.T) {
 	}
 }
 
+func TestBackupRunIsStaleDoesNotFailRecentlyDuePendingRetry(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	nextRetryAt := now.Add(-30 * time.Second)
+	run := model.BackupRun{
+		Trigger:     model.BackupRunTriggerRetry,
+		Status:      model.BackupRunStatusPending,
+		Attempt:     2,
+		RetryCount:  1,
+		NextRetryAt: &nextRetryAt,
+		CreatedAt:   nextRetryAt.Add(-30 * time.Minute),
+		UpdatedAt:   nextRetryAt.Add(-30 * time.Minute),
+	}
+
+	if backupRunIsStale(run, now) {
+		t.Fatalf("recently due retry should not be stale: %+v", run)
+	}
+}
+
+func TestBackupRunIsStaleFailsPendingRetryAfterDueGrace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	nextRetryAt := now.Add(-10 * time.Minute)
+	run := model.BackupRun{
+		Trigger:     model.BackupRunTriggerRetry,
+		Status:      model.BackupRunStatusPending,
+		Attempt:     2,
+		RetryCount:  1,
+		NextRetryAt: &nextRetryAt,
+		CreatedAt:   nextRetryAt.Add(-30 * time.Minute),
+		UpdatedAt:   nextRetryAt.Add(-30 * time.Minute),
+	}
+
+	if !backupRunIsStale(run, now) {
+		t.Fatalf("old due retry should be stale: %+v", run)
+	}
+}
+
 func newBackupFakeS3(t *testing.T) (string, map[string][]byte) {
 	t.Helper()
 	var mu sync.Mutex

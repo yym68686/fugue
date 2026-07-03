@@ -196,6 +196,9 @@ func backupRunIsStale(run model.BackupRun, now time.Time) bool {
 	if run.HeartbeatAt != nil {
 		lastSeen = *run.HeartbeatAt
 	}
+	if run.Status == model.BackupRunStatusPending && run.Trigger == model.BackupRunTriggerRetry && run.NextRetryAt != nil && run.NextRetryAt.After(lastSeen) {
+		lastSeen = *run.NextRetryAt
+	}
 	if lastSeen.IsZero() {
 		lastSeen = run.CreatedAt
 	}
