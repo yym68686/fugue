@@ -68,6 +68,18 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	if mode == "" {
 		return nil
 	}
+	if mode == model.ImageCachePruneModeDelete {
+		failedTask, halted, err := s.controllerImageCacheAutomaticPruneFailedTask()
+		if err != nil {
+			return err
+		}
+		if halted {
+			if s.Logger != nil {
+				s.Logger.Printf("halt image-cache orphan auto prune: previous controller prune task failed task=%s node=%s error=%s", failedTask.ID, failedTask.ClusterNodeName, failedTask.ErrorMessage)
+			}
+			return nil
+		}
+	}
 	ttl := s.Config.ImageCacheInventoryTTL
 	if ttl <= 0 {
 		ttl = 2 * time.Hour
@@ -85,10 +97,11 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	updaters, err := s.Store.ListNodeUpdaters("", true)
-	if err != nil {
-		return err
+	type nodePlan struct {
+		node model.ImageCacheNodeInventory
+		plan model.ImageCachePrunePlan
 	}
+	plans := make([]nodePlan, 0, len(nodes))
 	for _, node := range nodes {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -101,7 +114,32 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if mode == model.ImageCachePruneModeObserve || plan.CandidateManifestCount == 0 {
+		plans = append(plans, nodePlan{node: node, plan: plan})
+	}
+	if mode == model.ImageCachePruneModeObserve {
+		return nil
+	}
+	if mode == model.ImageCachePruneModeDelete {
+		for _, item := range plans {
+			if reason := controllerImageCacheAutomaticDeleteUnsafeReason(item.plan); reason != "" {
+				if s.Logger != nil {
+					s.Logger.Printf("halt image-cache orphan auto prune: unsafe candidate reason=%s node=%s plan=%s", reason, item.plan.ClusterNodeName, item.plan.ID)
+				}
+				return nil
+			}
+		}
+	}
+	updaters, err := s.Store.ListNodeUpdaters("", true)
+	if err != nil {
+		return err
+	}
+	for _, item := range plans {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		node := item.node
+		plan := item.plan
+		if plan.CandidateManifestCount == 0 {
 			continue
 		}
 		updater, ok := controllerImageCacheUpdaterForNode(updaters, node)
@@ -116,6 +154,16 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			return err
 		}
 		if !supported {
+			continue
+		}
+		active, err := s.controllerImageCacheHasActivePruneTask(updater.ID)
+		if err != nil {
+			return err
+		}
+		if active {
+			if s.Logger != nil {
+				s.Logger.Printf("skip image-cache orphan prune for node=%s updater=%s: prune task already pending or running", plan.ClusterNodeName, updater.ID)
+			}
 			continue
 		}
 		targets := controllerImageCachePruneTargets(plan.Candidates, s.Config.ImageStoreOrphanPruneMaxTargetsPerNode)
@@ -141,6 +189,52 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) controllerImageCacheAutomaticPruneFailedTask() (model.NodeUpdateTask, bool, error) {
+	if s == nil || s.Store == nil {
+		return model.NodeUpdateTask{}, false, nil
+	}
+	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusFailed)
+	if err != nil {
+		return model.NodeUpdateTask{}, false, err
+	}
+	principal := controllerImageCachePrunePrincipal()
+	for _, task := range tasks {
+		if task.Type != model.NodeUpdateTaskTypePruneImageCache {
+			continue
+		}
+		if strings.TrimSpace(task.RequestedByID) != principal.ActorID {
+			continue
+		}
+		if strings.TrimSpace(task.Payload["prune_reason"]) != "image-cache-orphan" {
+			continue
+		}
+		return task, true, nil
+	}
+	return model.NodeUpdateTask{}, false, nil
+}
+
+func (s *Service) controllerImageCacheHasActivePruneTask(updaterID string) (bool, error) {
+	if s == nil || s.Store == nil {
+		return false, nil
+	}
+	updaterID = strings.TrimSpace(updaterID)
+	if updaterID == "" {
+		return false, nil
+	}
+	for _, status := range []string{model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning} {
+		tasks, err := s.Store.ListNodeUpdateTasks("", true, updaterID, status)
+		if err != nil {
+			return false, err
+		}
+		for _, task := range tasks {
+			if task.Type == model.NodeUpdateTaskTypePruneImageCache {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func controllerImageCacheUpdaterForNode(updaters []model.NodeUpdater, node model.ImageCacheNodeInventory) (model.NodeUpdater, bool) {
@@ -533,6 +627,25 @@ func controllerImageCachePruneTargets(candidates []model.ImageCachePruneCandidat
 	return out
 }
 
+func controllerImageCacheAutomaticDeleteUnsafeReason(plan model.ImageCachePrunePlan) string {
+	for _, candidate := range plan.Candidates {
+		if candidate.Protected {
+			return "protected_candidate"
+		}
+		reason := strings.TrimSpace(candidate.Reason)
+		switch reason {
+		case "missing_control_plane_image", "lost_image":
+			continue
+		default:
+			if reason == "" {
+				return "empty_candidate_reason"
+			}
+			return reason
+		}
+	}
+	return ""
+}
+
 func normalizeControllerImageCachePruneMode(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "", "off", "disabled", "none":
@@ -566,7 +679,7 @@ func (s *Service) controllerImageCacheGracePeriod() time.Duration {
 func (s *Service) controllerImageCacheMaxDeleteBytesString() string {
 	value := strings.TrimSpace(s.Config.ImageStoreOrphanPruneMaxDeleteBytesPerNode)
 	if value == "" {
-		return "1073741824"
+		return "104857600"
 	}
 	return value
 }
@@ -593,7 +706,7 @@ func controllerImageCachePrunePrincipal() model.Principal {
 func parseControllerImageCacheByteSize(raw string) int64 {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return 1 << 30
+		return 100 << 20
 	}
 	multiplier := int64(1)
 	lower := strings.ToLower(raw)
@@ -616,7 +729,7 @@ func parseControllerImageCacheByteSize(raw string) int64 {
 	}
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil || value <= 0 {
-		return 1 << 30
+		return 100 << 20
 	}
 	return int64(value * float64(multiplier))
 }

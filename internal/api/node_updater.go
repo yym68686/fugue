@@ -2280,6 +2280,10 @@ prune_image_cache() {
       report_image_replica "${image_id}" "${digest}" missing "image-cache prune deleted local replica"
     fi
   fi
+  if [ "${dry_run}" = "false" ] && [ "${allow_delete}" = "true" ]; then
+    log_task "image-cache prune delete completed; reporting post-prune inventory"
+    report_image_cache_inventory
+  fi
   log_task "image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete}"
 }
 

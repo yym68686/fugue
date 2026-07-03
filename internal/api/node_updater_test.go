@@ -447,6 +447,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`--data-binary @"${chunk_file}"`,
 		`image-cache inventory POST failed for chunk ${next_chunk_number}/${expected_chunks}`,
 		`image-cache inventory posted ${posted_chunks} chunks, expected ${expected_chunks}`,
+		`image-cache prune delete completed; reporting post-prune inventory`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)

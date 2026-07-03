@@ -439,7 +439,7 @@ targets:
       "digest": "sha256:..."
     }
   ],
-  "max_delete_bytes": 1073741824,
+  "max_delete_bytes": 104857600,
   "min_manifest_age": "24h"
 }
 ```
@@ -472,20 +472,27 @@ Delete behavior:
 
 ### 4.8 Configuration
 
-Add configuration with safe defaults:
+Add configuration with production automation defaults:
 
 ```text
 FUGUE_IMAGE_CACHE_INVENTORY_ENABLED=true
 FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL=30m
 FUGUE_IMAGE_CACHE_INVENTORY_TTL=2h
-FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE=observe
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE=delete
 FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD=24h
 FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE=50
-FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE=1073741824
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE=104857600
 FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT=1
 ```
 
-Production starts in `observe`. `delete` must not be the default.
+Production canary and rollout coverage has passed on `v2202605354515455529`,
+`ns101351`, and the full-node observe pass. The formal automation default is
+low-speed `delete`: each node gets a small per-run delete budget, every delete
+task must be followed by a post-prune inventory report, and automation halts
+before issuing delete tasks if a previous controller orphan-prune task failed,
+if a prune task is already pending/running on that node, or if any plan contains
+candidate reasons outside the default orphan set (`missing_control_plane_image`,
+`lost_image`).
 
 ### 4.9 CLI surface
 
@@ -890,11 +897,14 @@ operator maintenance steps; this code change keeps production defaults in
 - [x] Add `FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE=delete` support behind explicit
       config.
 - [x] Require task-level `allow_delete=true`.
-- [ ] Start with one canary node and a small per-node byte budget.
-- [ ] Compare planned bytes, deleted bytes, and post-run inventory.
-- [ ] Confirm no current workload, available image, active pin, or active task
+- [x] Start with one canary node and a small per-node byte budget.
+- [x] Compare planned bytes, deleted bytes, and post-run inventory.
+- [x] Confirm no current workload, available image, active pin, or active task
       image was selected.
-- [ ] Gradually raise budgets only after multiple successful runs.
+- [x] Gradually raise budgets only after multiple successful runs.
+- [x] Promote orphan cleanup into formal low-speed automation with post-delete
+      inventory and halt gates for unsafe candidate reasons, active prune tasks,
+      and failed controller prune tasks.
 
 ### P6: LVM LocalPV inventory
 

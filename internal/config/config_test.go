@@ -160,6 +160,19 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerFromEnvDefaultsImageCacheOrphanPruneToLimitedDelete(t *testing.T) {
+	t.Setenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "")
+	t.Setenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE", "")
+
+	cfg := ControllerFromEnv()
+	if cfg.ImageStoreOrphanPruneMode != "delete" {
+		t.Fatalf("expected image-cache orphan prune to default to delete, got %q", cfg.ImageStoreOrphanPruneMode)
+	}
+	if cfg.ImageStoreOrphanPruneMaxDeleteBytesPerNode != "104857600" {
+		t.Fatalf("expected image-cache orphan prune budget to default to 100MiB, got %q", cfg.ImageStoreOrphanPruneMaxDeleteBytesPerNode)
+	}
+}
+
 func TestControllerFromEnvManagedAppRolloutTimeout(t *testing.T) {
 	t.Setenv("FUGUE_CONTROLLER_MANAGED_APP_ROLLOUT_TIMEOUT", "")
 

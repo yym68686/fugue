@@ -302,10 +302,10 @@ imageStore:
     interval: 30m
     ttl: 2h
   orphanPrune:
-    mode: observe
+    mode: delete
     gracePeriod: 24h
     maxTargetsPerNode: 50
-    maxDeleteBytesPerNode: "1073741824"
+    maxDeleteBytesPerNode: "104857600"
     minReplicaCount: 1
 
 edge:

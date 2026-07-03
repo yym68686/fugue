@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -113,6 +114,206 @@ func TestScheduleOrphanImageCachePruneDryRunCreatesNonDeletingTask(t *testing.T)
 	}
 	if tasks[0].Payload["dry_run"] != "true" || tasks[0].Payload["allow_delete"] != "false" || tasks[0].Payload["targets_json"] == "" {
 		t.Fatalf("unexpected prune payload: %+v", tasks[0].Payload)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	upsertControllerImageCacheManifest(t, stateStore)
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "104857600",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Type != model.NodeUpdateTaskTypePruneImageCache {
+		t.Fatalf("unexpected tasks: %+v", tasks)
+	}
+	if tasks[0].Payload["dry_run"] != "false" ||
+		tasks[0].Payload["allow_delete"] != "true" ||
+		tasks[0].Payload["max_delete_bytes"] != "104857600" ||
+		tasks[0].Payload["prune_reason"] != "image-cache-orphan" {
+		t.Fatalf("unexpected prune payload: %+v", tasks[0].Payload)
+	}
+	var targets []map[string]string
+	if err := json.Unmarshal([]byte(tasks[0].Payload["targets_json"]), &targets); err != nil {
+		t.Fatalf("decode targets: %v", err)
+	}
+	if len(targets) != 1 || targets[0]["repo"] != "fugue-apps/demo" {
+		t.Fatalf("unexpected targets: %+v", targets)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneDeleteHaltsUnsafeCandidateReasons(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	digest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	image, err := stateStore.UpsertImage(model.Image{
+		TenantID:        "tenant_1",
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
+		CanonicalDigest: digest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+		ImageID:         image.ID,
+		TenantID:        image.TenantID,
+		AppID:           image.AppID,
+		Digest:          digest,
+		NodeID:          "machine-1",
+		RuntimeID:       "runtime-1",
+		ClusterNodeName: "worker-1",
+		Status:          model.ImageReplicaStatusStale,
+	}); err != nil {
+		t.Fatalf("upsert stale replica: %v", err)
+	}
+	now := time.Now().UTC()
+	for _, node := range []string{"worker-2", "worker-3"} {
+		if _, err := stateStore.UpsertImageReplica(model.ImageReplica{
+			ImageID:         image.ID,
+			TenantID:        image.TenantID,
+			AppID:           image.AppID,
+			Digest:          digest,
+			ClusterNodeName: node,
+			Status:          model.ImageReplicaStatusPresent,
+			LastVerifiedAt:  &now,
+		}); err != nil {
+			t.Fatalf("upsert healthy replica: %v", err)
+		}
+	}
+	upsertControllerImageCacheManifestWithDigest(t, stateStore, digest)
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "104857600",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	plans, err := stateStore.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Mode: model.ImageCachePruneModeDelete})
+	if err != nil {
+		t.Fatalf("list plans: %v", err)
+	}
+	if len(plans) != 1 || plans[0].CandidateSummary["stale_replica"] != 1 {
+		t.Fatalf("expected persisted unsafe plan, got %+v", plans)
+	}
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("unsafe candidate reason created prune tasks: %+v", tasks)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneSkipsWhenPruneAlreadyActive(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
+	if err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	upsertControllerImageCacheManifest(t, stateStore)
+	if _, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		"prune_reason": "manual-canary",
+	}); err != nil {
+		t.Fatalf("create active prune task: %v", err)
+	}
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "104857600",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].Payload["prune_reason"] != "manual-canary" {
+		t.Fatalf("expected only existing prune task, got %+v", tasks)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneHaltsAfterControllerFailure(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
+	if err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	upsertControllerImageCacheManifest(t, stateStore)
+	task, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		"prune_reason": "image-cache-orphan",
+	})
+	if err != nil {
+		t.Fatalf("create prune task: %v", err)
+	}
+	if _, err := stateStore.ClaimNodeUpdateTask(task.ID, updater.ID); err != nil {
+		t.Fatalf("claim prune task: %v", err)
+	}
+	if _, err := stateStore.CompleteNodeUpdateTask(task.ID, updater.ID, model.NodeUpdateTaskStatusFailed, "failed", "post inventory failed"); err != nil {
+		t.Fatalf("fail prune task: %v", err)
+	}
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "104857600",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	pending, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list pending tasks: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("failed controller prune did not halt automation: %+v", pending)
 	}
 }
 
