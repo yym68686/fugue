@@ -1149,3 +1149,44 @@ func TestCustomResourceListingsIgnoreMissingAPI(t *testing.T) {
 		})
 	}
 }
+
+func TestKubeClientGetsPodLogsAndSortedObjectEvents(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/namespaces/tenant-a/pods/pod-a/log":
+			if r.URL.Query().Get("container") != "api" || r.URL.Query().Get("previous") != "true" || r.URL.Query().Get("tailLines") != "200" {
+				t.Fatalf("unexpected log query: %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte("previous log tail"))
+		case "/api/v1/namespaces/tenant-a/events":
+			if !strings.Contains(r.URL.Query().Get("fieldSelector"), "involvedObject.name=pod-a") || !strings.Contains(r.URL.Query().Get("fieldSelector"), "involvedObject.kind=Pod") {
+				t.Fatalf("unexpected event field selector: %s", r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(kubeEventList{Items: []kubeEvent{
+				{Reason: "BackOff", Message: "later", LastTimestamp: "2026-07-03T02:00:00Z"},
+				{Reason: "FailedScheduling", Message: "earlier", LastTimestamp: "2026-07-03T01:00:00Z"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := &kubeClient{client: server.Client(), baseURL: server.URL, bearerToken: "token", namespace: "tenant-a"}
+	logs, found, err := client.getPodLogs(context.Background(), "tenant-a", "pod-a", "api", true, 200)
+	if err != nil || !found {
+		t.Fatalf("get pod logs found=%v err=%v", found, err)
+	}
+	if logs != "previous log tail" {
+		t.Fatalf("unexpected log payload %q", logs)
+	}
+	events, err := client.listEventsForObject(context.Background(), "tenant-a", "Pod", "pod-a")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 2 || events[0].Reason != "FailedScheduling" || events[1].Reason != "BackOff" {
+		t.Fatalf("expected events sorted oldest first, got %+v", events)
+	}
+}

@@ -93,6 +93,25 @@ func TestSyncTrackedAppImagesQueuesWhenHistoryMatchesButCurrentSourceDiffers(t *
 	if check.OperationID == "" {
 		t.Fatalf("expected queued decision to include operation id, got %+v", check)
 	}
+	attempts, err := s.ListReleaseAttempts(model.ReleaseAttemptFilter{TenantID: tenant.ID, AppID: app.ID})
+	if err != nil {
+		t.Fatalf("list release attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("expected one release attempt, got %+v", attempts)
+	}
+	if attempts[0].TriggerType != model.ReleaseAttemptTriggerImageTrackingAuto || attempts[0].SourceOperationID != queued.ID || attempts[0].TargetDigest != "sha256:abc123" {
+		t.Fatalf("unexpected release attempt: %+v", attempts[0])
+	}
+	steps, err := s.ListReleaseSteps(tenant.ID, false, attempts[0].ID)
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	for _, want := range []string{model.ReleaseStepTypeTriggerReceived, model.ReleaseStepTypeImageTrackingCheck, model.ReleaseStepTypeImageImport} {
+		if !releaseStepHasType(steps, want) {
+			t.Fatalf("expected release step %s, got %+v", want, steps)
+		}
+	}
 }
 
 func TestSyncTrackedAppImagesNoopsWhenFugueMirrorTagMatchesDigest(t *testing.T) {
@@ -432,4 +451,13 @@ func latestImageTrackingCheckForTest(t *testing.T, s *store.Store, tenantID, app
 		t.Fatal("expected image tracking check")
 	}
 	return checks[0]
+}
+
+func releaseStepHasType(steps []model.ReleaseStep, typ string) bool {
+	for _, step := range steps {
+		if step.Type == typ {
+			return true
+		}
+	}
+	return false
 }

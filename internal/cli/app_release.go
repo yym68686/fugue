@@ -2,8 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"fugue/internal/model"
@@ -27,6 +29,10 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 		c.newAppReleasePromoteCommand(),
 		c.newAppReleaseAbortCommand(),
 		c.newAppReleaseListCommand(),
+		c.newAppReleaseAttemptsCommand(),
+		c.newAppReleaseStatusCommand(),
+		c.newAppReleaseExplainCommand(),
+		c.newAppReleaseDebugBundleCommand(),
 		c.newAppReleaseTrackingCommand(),
 		c.newAppReleasePruneCommand(),
 		c.newAppReleasePolicyCommand(),
@@ -34,6 +40,196 @@ func (c *CLI) newAppReleaseCommand() *cobra.Command {
 		hideCompatCommand(c.newAppReleaseRebuildCommand(), "fugue app build"),
 		hideCompatCommand(c.newAppReleaseRollbackCommand(), "fugue app rollback"),
 	)
+	return cmd
+}
+
+func (c *CLI) newAppReleaseAttemptsCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "attempts <app>",
+		Short: "List user-visible release attempts for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			attempts, err := client.ListAppReleaseAttempts(app.ID)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"release_attempts": attempts})
+			}
+			return writeReleaseAttemptTable(c.stdout, attempts)
+		},
+	}
+	return cmd
+}
+
+func (c *CLI) newAppReleaseStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status <app>",
+		Short: "Show the latest release attempt status for an app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			attempts, err := client.ListAppReleaseAttempts(app.ID)
+			if err != nil {
+				return err
+			}
+			if len(attempts) == 0 {
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{"release_attempt": nil})
+				}
+				_, err := fmt.Fprintln(c.stdout, "no release attempts recorded")
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"release_attempt": attempts[0]})
+			}
+			return writeReleaseAttemptSummary(c.stdout, attempts[0])
+		},
+	}
+}
+
+func (c *CLI) newAppReleaseExplainCommand() *cobra.Command {
+	opts := struct {
+		AttemptID string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "explain <app>",
+		Short: "Explain a release attempt timeline and evidence",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			attemptID := strings.TrimSpace(opts.AttemptID)
+			if attemptID == "" {
+				attempts, err := client.ListAppReleaseAttempts(app.ID)
+				if err != nil {
+					return err
+				}
+				if len(attempts) == 0 {
+					return fmt.Errorf("no release attempts recorded for app %s", app.Name)
+				}
+				attemptID = attempts[0].ID
+			}
+			attempt, err := client.GetAppReleaseAttempt(app.ID, attemptID)
+			if err != nil {
+				return err
+			}
+			timeline, err := client.GetAppReleaseAttemptTimeline(app.ID, attemptID)
+			if err != nil {
+				return err
+			}
+			evidence, err := client.GetAppReleaseAttemptEvidence(app.ID, attemptID, false)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"release_attempt": attempt, "timeline": timeline, "evidence": evidence})
+			}
+			if err := writeReleaseAttemptSummary(c.stdout, attempt); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(c.stdout); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(c.stdout, "[timeline]"); err != nil {
+				return err
+			}
+			if err := writeReleaseTimelineTable(c.stdout, timeline); err != nil {
+				return err
+			}
+			if len(evidence) == 0 {
+				return nil
+			}
+			if _, err := fmt.Fprintln(c.stdout); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(c.stdout, "[evidence]"); err != nil {
+				return err
+			}
+			return writeOperationEvidenceTable(c.stdout, evidence)
+		},
+	}
+	cmd.Flags().StringVar(&opts.AttemptID, "attempt", "", "Release attempt id to explain; defaults to latest")
+	return cmd
+}
+
+func (c *CLI) newAppReleaseDebugBundleCommand() *cobra.Command {
+	opts := struct {
+		AttemptID string
+		Output    string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "debug-bundle <app>",
+		Short: "Export a redacted release attempt debug bundle",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			attemptID := strings.TrimSpace(opts.AttemptID)
+			if attemptID == "" {
+				attempts, err := client.ListAppReleaseAttempts(app.ID)
+				if err != nil {
+					return err
+				}
+				if len(attempts) == 0 {
+					return fmt.Errorf("no release attempts recorded for app %s", app.Name)
+				}
+				attemptID = attempts[0].ID
+			}
+			bundle, err := client.GetAppReleaseAttemptDebugBundle(app.ID, attemptID)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(opts.Output) != "" {
+				if shouldWriteZipBundle(opts.Output) {
+					data, err := client.GetAppReleaseAttemptDebugBundleZip(app.ID, attemptID)
+					if err != nil {
+						return err
+					}
+					if err := writeBytesFile(opts.Output, data); err != nil {
+						return err
+					}
+				} else if err := writeJSONFile(opts.Output, bundle); err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{"output": opts.Output})
+				}
+				_, err := fmt.Fprintf(c.stdout, "wrote release debug bundle: %s\n", opts.Output)
+				return err
+			}
+			return writeJSON(c.stdout, map[string]any{"bundle": bundle})
+		},
+	}
+	cmd.Flags().StringVar(&opts.AttemptID, "attempt", "", "Release attempt id; defaults to latest")
+	cmd.Flags().StringVar(&opts.Output, "output", "", "Write the debug bundle JSON to a local file")
 	return cmd
 }
 
@@ -482,8 +678,19 @@ func (c *CLI) newAppReleaseTrackingSyncCommand() *cobra.Command {
 			if strings.TrimSpace(response.AppPhase) != "" {
 				pairs = append(pairs, kvPair{Key: "app_phase", Value: strings.TrimSpace(response.AppPhase)})
 			}
+			if response.ReleaseAttempt != nil {
+				pairs = append(pairs,
+					kvPair{Key: "release_attempt_id", Value: response.ReleaseAttempt.ID},
+					kvPair{Key: "release_attempt_status", Value: response.ReleaseAttempt.Status},
+				)
+			}
 			if response.Operation != nil {
 				pairs = append(pairs, kvPair{Key: "operation_id", Value: response.Operation.ID})
+				if strings.EqualFold(response.Operation.Type, model.OperationTypeImport) {
+					pairs = append(pairs, kvPair{Key: "phase", Value: "image_import"})
+				} else if strings.EqualFold(response.Operation.Type, model.OperationTypeDeploy) {
+					pairs = append(pairs, kvPair{Key: "phase", Value: "deploy_rollout"})
+				}
 			}
 			if strings.TrimSpace(response.Message) != "" {
 				pairs = append(pairs, kvPair{Key: "message", Value: response.Message})
@@ -1163,6 +1370,72 @@ func writeGateSummary(w interface{ Write([]byte) (int, error) }, gate model.AppR
 		pairs = append(pairs, kvPair{Key: fmt.Sprintf("warning_%d", idx+1), Value: warning})
 	}
 	return writeKeyValues(w, pairs...)
+}
+
+func writeReleaseAttemptSummary(w io.Writer, attempt model.ReleaseAttempt) error {
+	return writeKeyValues(w,
+		kvPair{Key: "release_attempt_id", Value: attempt.ID},
+		kvPair{Key: "app_id", Value: attempt.AppID},
+		kvPair{Key: "status", Value: attempt.Status},
+		kvPair{Key: "confidence", Value: attempt.Confidence},
+		kvPair{Key: "trigger_type", Value: attempt.TriggerType},
+		kvPair{Key: "root_operation_id", Value: attempt.RootOperationID},
+		kvPair{Key: "source_operation_id", Value: attempt.SourceOperationID},
+		kvPair{Key: "image_ref", Value: attempt.ImageRef},
+		kvPair{Key: "target_digest", Value: shortDigest(attempt.TargetDigest)},
+		kvPair{Key: "previous_digest", Value: shortDigest(attempt.PreviousDigest)},
+		kvPair{Key: "failure_operation_id", Value: attempt.FailureOperationID},
+		kvPair{Key: "failure_evidence_id", Value: attempt.FailureEvidenceID},
+		kvPair{Key: "summary", Value: attempt.Summary},
+		kvPair{Key: "started_at", Value: formatTime(attempt.StartedAt)},
+		kvPair{Key: "finished_at", Value: formatOptionalTimePtr(attempt.FinishedAt)},
+	)
+}
+
+func writeReleaseAttemptTable(w io.Writer, attempts []model.ReleaseAttempt) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "STARTED_AT\tATTEMPT\tSTATUS\tCONFIDENCE\tTRIGGER\tTARGET_DIGEST\tROOT_OPERATION\tSUMMARY"); err != nil {
+		return err
+	}
+	for _, attempt := range attempts {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			formatTime(attempt.StartedAt),
+			attempt.ID,
+			attempt.Status,
+			attempt.Confidence,
+			attempt.TriggerType,
+			shortDigest(attempt.TargetDigest),
+			attempt.RootOperationID,
+			oneLine(attempt.Summary),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeReleaseTimelineTable(w io.Writer, entries []model.ReleaseTimelineEntry) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "AT\tTYPE\tSTATUS\tOPERATION\tEVIDENCE\tSUMMARY"); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\n",
+			formatTime(entry.At),
+			entry.Type,
+			entry.Status,
+			entry.OperationID,
+			entry.EvidenceID,
+			oneLine(entry.Summary),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 func intPtr(value int) *int {

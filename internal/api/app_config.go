@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -115,13 +116,15 @@ func (s *Server) handlePatchAppEnv(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	releaseAttempt := s.recordEnvPatchReleaseAttemptBestEffort(principal, app, op, req.Set, deleteKeys, source)
 
 	s.appendAudit(principal, "app.env.patch", "operation", op.ID, app.TenantID, map[string]string{"app_id": app.ID})
 	envDetails := stripFugueInjectedAppEnvDetails(mergedAppEnvDetails(app, spec))
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
-		"env":       defaultStringMap(envDetails.Env),
-		"entries":   envDetails.Entries,
-		"operation": sanitizeOperationForAPI(op),
+		"env":             defaultStringMap(envDetails.Env),
+		"entries":         envDetails.Entries,
+		"operation":       sanitizeOperationForAPI(op),
+		"release_attempt": releaseAttempt,
 	})
 }
 
@@ -386,6 +389,112 @@ func validateNoFugueInjectedAppEnvSet(set map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) recordEnvPatchReleaseAttemptBestEffort(principal model.Principal, app model.App, op model.Operation, set map[string]string, deleted []string, source *model.AppSource) *model.ReleaseAttempt {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	setKeys := sortedStringMapKeys(set)
+	deleteKeys := sortedStringsCopy(deleted)
+	desired := map[string]any{
+		"schema_version": 1,
+		"set_keys":       setKeys,
+		"delete_keys":    deleteKeys,
+		"set_count":      len(setKeys),
+		"delete_count":   len(deleteKeys),
+		"values":         "redacted",
+	}
+	if source != nil {
+		if imageRef := strings.TrimSpace(source.ImageRef); imageRef != "" {
+			desired["image_ref"] = imageRef
+		}
+		if digest := model.ImageDigestFromReference(source.ResolvedImageRef); digest != "" {
+			desired["resolved_digest"] = digest
+		}
+	}
+	attempt, err := s.store.CreateReleaseAttempt(model.ReleaseAttempt{
+		TenantID:          app.TenantID,
+		ProjectID:         app.ProjectID,
+		AppID:             app.ID,
+		TriggerType:       model.ReleaseAttemptTriggerEnvPatch,
+		TriggerActorType:  principal.ActorType,
+		TriggerActorID:    principal.ActorID,
+		SourceOperationID: op.ID,
+		RootOperationID:   op.ID,
+		DesiredSource:     desired,
+		Status:            model.ReleaseAttemptStatusDeploying,
+		Confidence:        model.OperationEvidenceConfidenceEvidenceBacked,
+		Summary:           "app env patch queued deploy operation",
+		StartedAt:         now,
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("record env patch release attempt failed app=%s operation=%s: %v", app.ID, op.ID, err)
+		}
+		return nil
+	}
+	if _, err := s.store.RecordReleaseStep(model.ReleaseStep{
+		TenantID:         app.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeTriggerReceived,
+		Status:           model.ReleaseStepStatusCompleted,
+		Summary:          "app env patch accepted",
+		StartedAt:        now,
+		FinishedAt:       &now,
+		Payload: map[string]any{
+			"schema_version": 1,
+			"set_keys":       setKeys,
+			"delete_keys":    deleteKeys,
+			"values":         "redacted",
+		},
+	}); err != nil && s.log != nil {
+		s.log.Printf("record env patch release trigger step failed attempt=%s operation=%s: %v", attempt.ID, op.ID, err)
+	}
+	if _, err := s.store.RecordReleaseStep(model.ReleaseStep{
+		TenantID:         app.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeDeployQueued,
+		Status:           model.ReleaseStepStatusPending,
+		Summary:          "deploy operation queued after env patch",
+		StartedAt:        now,
+	}); err != nil && s.log != nil {
+		s.log.Printf("record env patch deploy queued step failed attempt=%s operation=%s: %v", attempt.ID, op.ID, err)
+	}
+	return &attempt
+}
+
+func sortedStringMapKeys(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for rawKey := range values {
+		key := strings.TrimSpace(rawKey)
+		if key != "" {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sortedStringsCopy(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func stripFugueInjectedAppEnvDetails(details appEnvDetails) appEnvDetails {

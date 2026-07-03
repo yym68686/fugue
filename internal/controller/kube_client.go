@@ -60,6 +60,31 @@ type kubePodList struct {
 	Items []kubePod `json:"items"`
 }
 
+type kubeEventList struct {
+	Items []kubeEvent `json:"items"`
+}
+
+type kubeEvent struct {
+	Metadata struct {
+		Name              string    `json:"name,omitempty"`
+		Namespace         string    `json:"namespace,omitempty"`
+		CreationTimestamp time.Time `json:"creationTimestamp,omitempty"`
+	} `json:"metadata"`
+	InvolvedObject struct {
+		Kind      string `json:"kind,omitempty"`
+		Namespace string `json:"namespace,omitempty"`
+		Name      string `json:"name,omitempty"`
+		UID       string `json:"uid,omitempty"`
+	} `json:"involvedObject,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Count          int    `json:"count,omitempty"`
+	FirstTimestamp string `json:"firstTimestamp,omitempty"`
+	LastTimestamp  string `json:"lastTimestamp,omitempty"`
+	EventTime      string `json:"eventTime,omitempty"`
+}
+
 type kubeNodeList struct {
 	Items []kubeNode `json:"items"`
 }
@@ -233,9 +258,11 @@ type kubeRuntimeState struct {
 }
 
 type kubeStateDetail struct {
-	Reason   string `json:"reason,omitempty"`
-	Message  string `json:"message,omitempty"`
-	ExitCode int    `json:"exitCode,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message,omitempty"`
+	ExitCode   int    `json:"exitCode,omitempty"`
+	StartedAt  string `json:"startedAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
 }
 
 func newKubeClient(namespace string) (*kubeClient, error) {
@@ -537,6 +564,67 @@ func (c *kubeClient) listPodsBySelector(ctx context.Context, namespace, labelSel
 	return podList.Items, nil
 }
 
+func (c *kubeClient) getPodLogs(ctx context.Context, namespace, podName, containerName string, previous bool, tailLines int) (string, bool, error) {
+	podName = strings.TrimSpace(podName)
+	if podName == "" {
+		return "", false, nil
+	}
+	query := url.Values{}
+	if strings.TrimSpace(containerName) != "" {
+		query.Set("container", strings.TrimSpace(containerName))
+	}
+	if previous {
+		query.Set("previous", "true")
+	}
+	if tailLines > 0 {
+		query.Set("tailLines", fmt.Sprintf("%d", tailLines))
+	}
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods/" + url.PathEscape(podName) + "/log"
+	if encoded := query.Encode(); encoded != "" {
+		apiPath += "?" + encoded
+	}
+	status, data, err := c.doRaw(ctx, http.MethodGet, apiPath, nil, "")
+	if err != nil {
+		if status == http.StatusNotFound || status == http.StatusBadRequest {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return string(data), true, nil
+}
+
+func (c *kubeClient) listEventsForObject(ctx context.Context, namespace, kind, name string) ([]kubeEvent, error) {
+	namespace = c.effectiveNamespace(namespace)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	query := url.Values{}
+	fields := []string{"involvedObject.name=" + name}
+	if strings.TrimSpace(kind) != "" {
+		fields = append(fields, "involvedObject.kind="+strings.TrimSpace(kind))
+	}
+	query.Set("fieldSelector", strings.Join(fields, ","))
+	apiPath := "/api/v1/namespaces/" + namespace + "/events?" + query.Encode()
+	var list kubeEventList
+	status, err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &list)
+	if err != nil {
+		if status == http.StatusForbidden || status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.SliceStable(list.Items, func(i, j int) bool {
+		left := kubeEventTime(list.Items[i])
+		right := kubeEventTime(list.Items[j])
+		if left.Equal(right) {
+			return list.Items[i].Metadata.Name < list.Items[j].Metadata.Name
+		}
+		return left.Before(right)
+	})
+	return list.Items, nil
+}
+
 func (c *kubeClient) listAllPods(ctx context.Context) ([]kubePod, bool, error) {
 	var podList kubePodList
 	status, err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods", nil, &podList)
@@ -621,6 +709,36 @@ func (c *kubeClient) doJSON(ctx context.Context, method, apiPath string, body an
 		}
 	}
 	return resp.StatusCode, nil
+}
+
+func (c *kubeClient) doRaw(ctx context.Context, method, apiPath string, body io.Reader, contentType string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("create kubernetes request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	if strings.TrimSpace(contentType) != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("kubernetes request %s %s: %w", method, apiPath, err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return resp.StatusCode, responseBody, fmt.Errorf("kubernetes request %s %s failed: status=%d body=%s", method, apiPath, resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return resp.StatusCode, responseBody, nil
+}
+
+func kubeEventTime(event kubeEvent) time.Time {
+	for _, raw := range []string{event.EventTime, event.LastTimestamp, event.FirstTimestamp} {
+		if parsed := parseKubeTimestamp(raw); !parsed.IsZero() {
+			return parsed
+		}
+	}
+	return event.Metadata.CreationTimestamp.UTC()
 }
 
 func parseKubeTimestamp(value string) time.Time {

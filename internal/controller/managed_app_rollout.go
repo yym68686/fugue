@@ -113,6 +113,10 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 			if len(pods) > 0 {
 				watchTargets = append(watchTargets, managedAppPodRolloutWatchTargets(namespace, app)...)
 				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
+					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
+					if strings.TrimSpace(primaryEvidenceID) != "" {
+						failureMessage = fmt.Sprintf("%s (primary_evidence_id=%s)", failureMessage, primaryEvidenceID)
+					}
 					return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 				}
 				if blockingMessage := deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
@@ -158,6 +162,7 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 			return nil
 		}
 		if failureMessage := managedAppRolloutFailure(managed, foundManagedApp, expectedManagedAppSpecHash); failureMessage != "" {
+			s.captureManagedAppRolloutFailureEvidence(waitCtx, app, operationID, namespace, managed, failureMessage)
 			return fmt.Errorf("managed app %s/%s rollout failed: %s", namespace, managedAppName, failureMessage)
 		}
 		if strings.TrimSpace(message) != "" {

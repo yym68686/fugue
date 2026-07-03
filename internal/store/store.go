@@ -263,12 +263,15 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
 		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByTenant(state.AppImageTrackingChecks, id)
 		state.AppReleases = deleteAppReleasesByTenant(state.AppReleases, id)
+		state.ReleaseAttempts = deleteReleaseAttemptsByTenant(state.ReleaseAttempts, id)
+		state.ReleaseSteps = deleteReleaseStepsByTenant(state.ReleaseSteps, id)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByTenant(state.AppTrafficPolicies, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
 		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByTenant(state.AppDatabaseAccessGrants, id)
 		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
 		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
 		state.Operations = deleteOperationsByTenant(state.Operations, id)
+		state.OperationEvidence = deleteOperationEvidenceByTenant(state.OperationEvidence, id)
 		state.AuditEvents = deleteAuditEventsByTenant(state.AuditEvents, id)
 		state.TenantBilling = deleteTenantBillingRecords(state.TenantBilling, id)
 		state.BillingEvents = deleteTenantBillingEvents(state.BillingEvents, id)
@@ -2519,6 +2522,9 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
 		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByApp(state.AppImageTrackingChecks, id)
 		state.AppReleases = deleteAppReleasesByApp(state.AppReleases, id)
+		deletedReleaseAttemptIDs := releaseAttemptIDsByApp(state.ReleaseAttempts, id)
+		state.ReleaseAttempts = deleteReleaseAttemptsByApp(state.ReleaseAttempts, id)
+		state.ReleaseSteps = deleteReleaseStepsByAttemptIDs(state.ReleaseSteps, deletedReleaseAttemptIDs)
 		state.AppTrafficPolicies = deleteAppTrafficPoliciesByApp(state.AppTrafficPolicies, id)
 		state.AppSSHEndpoints = deleteAppSSHEndpointsByApp(state.AppSSHEndpoints, id)
 		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByApp(state.AppDatabaseImportJobs, id)
@@ -2526,6 +2532,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
 		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
 		state.Operations = deleteOperationsByApp(state.Operations, id)
+		state.OperationEvidence = deleteOperationEvidenceByApp(state.OperationEvidence, id)
 		return maybeFinalizeRequestedProjectDelete(state, app.ProjectID)
 	})
 	return app, err
@@ -3873,6 +3880,12 @@ func ensureDefaults(state *model.State) {
 	if state.AppReleases == nil {
 		state.AppReleases = []model.AppRelease{}
 	}
+	if state.ReleaseAttempts == nil {
+		state.ReleaseAttempts = []model.ReleaseAttempt{}
+	}
+	if state.ReleaseSteps == nil {
+		state.ReleaseSteps = []model.ReleaseStep{}
+	}
 	if state.AppTrafficPolicies == nil {
 		state.AppTrafficPolicies = []model.AppTrafficPolicy{}
 	}
@@ -3938,6 +3951,9 @@ func ensureDefaults(state *model.State) {
 	}
 	for idx := range state.Operations {
 		model.NormalizeOperationSourceState(&state.Operations[idx])
+	}
+	if state.OperationEvidence == nil {
+		state.OperationEvidence = []model.OperationEvidence{}
 	}
 	if state.AuditEvents == nil {
 		state.AuditEvents = []model.AuditEvent{}
@@ -4983,6 +4999,66 @@ func deleteAppReleasesByApp(releases []model.AppRelease, appID string) []model.A
 	return filtered
 }
 
+func deleteReleaseAttemptsByTenant(attempts []model.ReleaseAttempt, tenantID string) []model.ReleaseAttempt {
+	filtered := attempts[:0]
+	for _, attempt := range attempts {
+		if attempt.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, attempt)
+	}
+	return filtered
+}
+
+func deleteReleaseAttemptsByApp(attempts []model.ReleaseAttempt, appID string) []model.ReleaseAttempt {
+	filtered := attempts[:0]
+	for _, attempt := range attempts {
+		if attempt.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, attempt)
+	}
+	return filtered
+}
+
+func releaseAttemptIDsByApp(attempts []model.ReleaseAttempt, appID string) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, attempt := range attempts {
+		if attempt.AppID != appID {
+			continue
+		}
+		if id := strings.TrimSpace(attempt.ID); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func deleteReleaseStepsByTenant(steps []model.ReleaseStep, tenantID string) []model.ReleaseStep {
+	filtered := steps[:0]
+	for _, step := range steps {
+		if step.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, step)
+	}
+	return filtered
+}
+
+func deleteReleaseStepsByAttemptIDs(steps []model.ReleaseStep, attemptIDs map[string]struct{}) []model.ReleaseStep {
+	if len(attemptIDs) == 0 {
+		return steps
+	}
+	filtered := steps[:0]
+	for _, step := range steps {
+		if _, ok := attemptIDs[strings.TrimSpace(step.ReleaseAttemptID)]; ok {
+			continue
+		}
+		filtered = append(filtered, step)
+	}
+	return filtered
+}
+
 func deleteAppTrafficPoliciesByTenant(policies []model.AppTrafficPolicy, tenantID string) []model.AppTrafficPolicy {
 	filtered := policies[:0]
 	for _, policy := range policies {
@@ -5007,6 +5083,28 @@ func deleteAppTrafficPoliciesByApp(policies []model.AppTrafficPolicy, appID stri
 
 func deleteOperationsByApp(ops []model.Operation, appID string) []model.Operation {
 	return deleteOperationsByAppIDs(ops, []string{appID})
+}
+
+func deleteOperationEvidenceByTenant(evidence []model.OperationEvidence, tenantID string) []model.OperationEvidence {
+	filtered := evidence[:0]
+	for _, item := range evidence {
+		if item.TenantID == tenantID {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func deleteOperationEvidenceByApp(evidence []model.OperationEvidence, appID string) []model.OperationEvidence {
+	filtered := evidence[:0]
+	for _, item := range evidence {
+		if item.AppID == appID {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 func deleteOperationsByAppIDs(ops []model.Operation, appIDs []string) []model.Operation {

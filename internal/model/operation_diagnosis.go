@@ -7,16 +7,29 @@ type ServicePersistentStorageOverride struct {
 }
 
 type OperationDiagnosis struct {
-	Category         string                      `json:"category"`
-	Summary          string                      `json:"summary"`
-	Hint             string                      `json:"hint,omitempty"`
-	AppName          string                      `json:"app_name,omitempty"`
-	Service          string                      `json:"service,omitempty"`
-	Evidence         []string                    `json:"evidence,omitempty"`
-	BuilderPlacement *BuilderPlacementInspection `json:"builder_placement,omitempty"`
-	DependencyChain  []string                    `json:"dependency_chain,omitempty"`
-	BlockedBy        []OperationDiagnosisBlocker `json:"blocked_by,omitempty"`
-	ControllerLane   *OperationControllerLane    `json:"controller_lane,omitempty"`
+	Category               string                      `json:"category"`
+	Summary                string                      `json:"summary"`
+	Hint                   string                      `json:"hint,omitempty"`
+	AppName                string                      `json:"app_name,omitempty"`
+	Service                string                      `json:"service,omitempty"`
+	Evidence               []string                    `json:"evidence,omitempty"`
+	Confidence             string                      `json:"confidence,omitempty"`
+	PrimaryEvidenceID      string                      `json:"primary_evidence_id,omitempty"`
+	MissingEvidence        []string                    `json:"missing_evidence,omitempty"`
+	ConfirmedCause         *OperationDiagnosisCause    `json:"confirmed_cause,omitempty"`
+	ProbableCause          *OperationDiagnosisCause    `json:"probable_cause,omitempty"`
+	RecommendedNextActions []string                    `json:"recommended_next_actions,omitempty"`
+	BuilderPlacement       *BuilderPlacementInspection `json:"builder_placement,omitempty"`
+	DependencyChain        []string                    `json:"dependency_chain,omitempty"`
+	BlockedBy              []OperationDiagnosisBlocker `json:"blocked_by,omitempty"`
+	ControllerLane         *OperationControllerLane    `json:"controller_lane,omitempty"`
+}
+
+type OperationDiagnosisCause struct {
+	Category string `json:"category,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 type OperationDiagnosisBlocker struct {

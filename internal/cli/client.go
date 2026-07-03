@@ -229,10 +229,11 @@ type appResourceRecommendationApplyResponse struct {
 }
 
 type appEnvResponse struct {
-	Env            map[string]string   `json:"env"`
-	Entries        []model.AppEnvEntry `json:"entries,omitempty"`
-	AlreadyCurrent bool                `json:"already_current,omitempty"`
-	Operation      *model.Operation    `json:"operation,omitempty"`
+	Env            map[string]string     `json:"env"`
+	Entries        []model.AppEnvEntry   `json:"entries,omitempty"`
+	AlreadyCurrent bool                  `json:"already_current,omitempty"`
+	Operation      *model.Operation      `json:"operation,omitempty"`
+	ReleaseAttempt *model.ReleaseAttempt `json:"release_attempt,omitempty"`
 }
 
 type appFilesResponse struct {
@@ -276,6 +277,7 @@ type appImageSyncResponse struct {
 	AppID          string                  `json:"app_id"`
 	Tracking       *model.AppImageTracking `json:"tracking,omitempty"`
 	Operation      *model.Operation        `json:"operation,omitempty"`
+	ReleaseAttempt *model.ReleaseAttempt   `json:"release_attempt,omitempty"`
 	Digest         string                  `json:"digest,omitempty"`
 	Changed        bool                    `json:"changed"`
 	AlreadyCurrent bool                    `json:"already_current"`
@@ -728,6 +730,48 @@ func (c *Client) GetOperationDiagnosis(id string) (model.OperationDiagnosis, err
 		return model.OperationDiagnosis{}, err
 	}
 	return response.Diagnosis, nil
+}
+
+func (c *Client) GetOperationEvidence(id string, includePayload bool) ([]model.OperationEvidence, error) {
+	var response struct {
+		Evidence []model.OperationEvidence `json:"evidence"`
+	}
+	apiPath := path.Join("/v1/operations", id, "evidence")
+	if includePayload {
+		apiPath += "?include_payload=true"
+	}
+	if err := c.doJSON(http.MethodGet, apiPath, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Evidence, nil
+}
+
+func (c *Client) GetOperationTimeline(id string, includePayload bool) ([]model.OperationTimelineEntry, error) {
+	var response struct {
+		Timeline []model.OperationTimelineEntry `json:"timeline"`
+	}
+	apiPath := path.Join("/v1/operations", id, "timeline")
+	if includePayload {
+		apiPath += "?include_payload=true"
+	}
+	if err := c.doJSON(http.MethodGet, apiPath, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Timeline, nil
+}
+
+func (c *Client) GetOperationDebugBundleZip(id string) ([]byte, error) {
+	return c.doJSONRaw(http.MethodGet, path.Join("/v1/operations", id, "debug-bundle")+"?format=zip", nil)
+}
+
+func (c *Client) GetOperationDebugBundle(id string) (model.OperationDebugBundle, error) {
+	var response struct {
+		Bundle model.OperationDebugBundle `json:"bundle"`
+	}
+	if err := c.doJSON(http.MethodGet, path.Join("/v1/operations", id, "debug-bundle"), nil, &response); err != nil {
+		return model.OperationDebugBundle{}, err
+	}
+	return response.Bundle, nil
 }
 
 func (c *Client) TryGetOperationDiagnosis(id string) (*model.OperationDiagnosis, error) {

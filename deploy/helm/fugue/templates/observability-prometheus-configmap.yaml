@@ -162,6 +162,37 @@ data:
             annotations:
               summary: "Fugue app restarted repeatedly"
               description: "An app restarted more than 3 times in 10 minutes."
+      - name: fugue-operation-evidence
+        rules:
+          - alert: FugueRolloutEvidenceCaptureFailed
+            expr: sum(fugue_rollout_failure_evidence_capture_total{result="error"}) > 0
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue rollout evidence capture is failing"
+              description: "At least one rollout evidence collector error has been retained by the control plane. Inspect operation evidence before trusting root-cause diagnosis completeness."
+          - alert: FugueOperationInsufficientEvidenceRatioHigh
+            expr: |
+              (
+                sum(fugue_operation_evidence_records_total{confidence="insufficient_evidence"})
+                /
+                clamp_min(sum(fugue_operation_evidence_records_total), 1)
+              ) > 0.20
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue operation evidence is frequently insufficient"
+              description: "More than 20% of retained operation evidence records are marked insufficient_evidence. Collector coverage or permissions may be incomplete."
+          - alert: FugueReleaseAttemptStuck
+            expr: sum(fugue_release_attempts_total{status=~"pending|importing|deploying|rolling_out|health_checking"}) > 0
+            for: 30m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue release attempt may be stuck"
+              description: "At least one release attempt has remained in a non-terminal status long enough to require investigation. Use fugue app release attempts/status/explain to inspect the phase timeline."
       - name: fugue-edge-request-body
         rules:
           - alert: FugueEdgeSlowRequestBodyRead

@@ -137,8 +137,9 @@ func TestPatchAppEnvAndRestartCreateDeployOperations(t *testing.T) {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
 	}
 	var patchResponse struct {
-		Env       map[string]string `json:"env"`
-		Operation model.Operation   `json:"operation"`
+		Env            map[string]string     `json:"env"`
+		Operation      model.Operation       `json:"operation"`
+		ReleaseAttempt *model.ReleaseAttempt `json:"release_attempt"`
 	}
 	mustDecodeJSON(t, recorder, &patchResponse)
 	if patchResponse.Operation.DesiredSpec == nil {
@@ -149,6 +150,25 @@ func TestPatchAppEnvAndRestartCreateDeployOperations(t *testing.T) {
 	}
 	if got := patchResponse.Env["OLD"]; got != "3" {
 		t.Fatalf("expected OLD env to be updated, got %q", got)
+	}
+	if patchResponse.ReleaseAttempt == nil {
+		t.Fatal("expected env patch release attempt")
+	}
+	if patchResponse.ReleaseAttempt.TriggerType != model.ReleaseAttemptTriggerEnvPatch {
+		t.Fatalf("expected env_patch release attempt, got %+v", patchResponse.ReleaseAttempt)
+	}
+	if patchResponse.ReleaseAttempt.RootOperationID != patchResponse.Operation.ID {
+		t.Fatalf("expected release attempt to reference deploy operation %s, got %+v", patchResponse.Operation.ID, patchResponse.ReleaseAttempt)
+	}
+	if patchResponse.ReleaseAttempt.DesiredSource["values"] != "redacted" {
+		t.Fatalf("expected env patch desired source to redact values, got %+v", patchResponse.ReleaseAttempt.DesiredSource)
+	}
+	releaseTimeline, err := s.ListReleaseTimeline(app.TenantID, false, patchResponse.ReleaseAttempt.ID)
+	if err != nil {
+		t.Fatalf("list release timeline: %v", err)
+	}
+	if len(releaseTimeline) < 2 {
+		t.Fatalf("expected env patch release timeline, got %+v", releaseTimeline)
 	}
 
 	completeNextManagedOperation(t, s)

@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"sort"
 	"strings"
@@ -27,9 +29,108 @@ func (c *CLI) newOpsCommand() *cobra.Command {
 		c.newOpsListCommand(),
 		c.newOpsShowCommand(),
 		c.newOpsExplainCommand(),
+		c.newOpsEvidenceCommand(),
+		c.newOpsTimelineCommand(),
+		c.newOpsDebugBundleCommand(),
 		c.newOpsWatchCommand(),
 		c.newOpsAuditCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newOpsEvidenceCommand() *cobra.Command {
+	opts := struct {
+		IncludePayload bool
+	}{}
+	cmd := &cobra.Command{
+		Use:   "evidence <operation>",
+		Short: "Show durable evidence captured for an operation",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			evidence, err := client.GetOperationEvidence(args[0], opts.IncludePayload)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"evidence": evidence})
+			}
+			return writeOperationEvidenceTable(c.stdout, evidence)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.IncludePayload, "include-payload", false, "Include structured evidence payloads")
+	return cmd
+}
+
+func (c *CLI) newOpsTimelineCommand() *cobra.Command {
+	opts := struct {
+		IncludePayload bool
+	}{}
+	cmd := &cobra.Command{
+		Use:   "timeline <operation>",
+		Short: "Show an operation timeline with captured evidence",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			timeline, err := client.GetOperationTimeline(args[0], opts.IncludePayload)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"timeline": timeline})
+			}
+			return writeOperationTimelineTable(c.stdout, timeline)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.IncludePayload, "include-payload", false, "Include structured timeline payloads")
+	return cmd
+}
+
+func (c *CLI) newOpsDebugBundleCommand() *cobra.Command {
+	opts := struct {
+		Output string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "debug-bundle <operation>",
+		Short: "Export a redacted operation debug bundle",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			bundle, err := client.GetOperationDebugBundle(args[0])
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(opts.Output) != "" {
+				if shouldWriteZipBundle(opts.Output) {
+					data, err := client.GetOperationDebugBundleZip(args[0])
+					if err != nil {
+						return err
+					}
+					if err := writeBytesFile(opts.Output, data); err != nil {
+						return err
+					}
+				} else if err := writeJSONFile(opts.Output, bundle); err != nil {
+					return err
+				}
+				if c.wantsJSON() {
+					return writeJSON(c.stdout, map[string]any{"output": opts.Output})
+				}
+				_, err := fmt.Fprintf(c.stdout, "wrote debug bundle: %s\n", opts.Output)
+				return err
+			}
+			return writeJSON(c.stdout, map[string]any{"bundle": bundle})
+		},
+	}
+	cmd.Flags().StringVar(&opts.Output, "output", "", "Write the debug bundle JSON to a local file")
 	return cmd
 }
 
@@ -442,6 +543,78 @@ func renderOperation(w io.Writer, op model.Operation) error {
 	return renderOperationWithDiagnosis(w, op, nil)
 }
 
+func writeOperationEvidenceTable(w io.Writer, evidence []model.OperationEvidence) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "COLLECTED_AT\tEVIDENCE\tTYPE\tSEVERITY\tCONFIDENCE\tSUBJECT\tSUMMARY"); err != nil {
+		return err
+	}
+	for _, item := range evidence {
+		subject := firstNonEmpty(item.PodName, item.DeploymentName, item.ReplicaSetName, item.SubjectName, item.OperationID)
+		if item.ContainerName != "" {
+			subject += "/" + item.ContainerName
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			formatTime(item.CollectedAt),
+			item.ID,
+			item.Type,
+			item.Severity,
+			item.Confidence,
+			subject,
+			oneLine(item.Summary),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeOperationTimelineTable(w io.Writer, timeline []model.OperationTimelineEntry) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "AT\tTYPE\tSEVERITY\tCONFIDENCE\tEVIDENCE\tSUMMARY"); err != nil {
+		return err
+	}
+	for _, entry := range timeline {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\n",
+			formatTime(entry.At),
+			entry.Type,
+			entry.Severity,
+			entry.Confidence,
+			entry.EvidenceID,
+			oneLine(entry.Summary),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeBytesFile(path string, data []byte) error {
+	return os.WriteFile(strings.TrimSpace(path), data, 0o600)
+}
+
+func shouldWriteZipBundle(path string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(path)), ".zip")
+}
+
+func writeJSONFile(path string, payload any) error {
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal debug bundle: %w", err)
+	}
+	return os.WriteFile(strings.TrimSpace(path), append(data, '\n'), 0o600)
+}
+
+func oneLine(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.Join(strings.Fields(value), " ")
+}
+
 func renderOperationWithDiagnosis(w io.Writer, op model.Operation, diagnosis *model.OperationDiagnosis) error {
 	pairs := []kvPair{
 		{Key: "operation_id", Value: op.ID},
@@ -470,6 +643,8 @@ func renderOperationWithDiagnosis(w io.Writer, op model.Operation, diagnosis *mo
 	if diagnosis != nil {
 		pairs = append(pairs,
 			kvPair{Key: "diagnosis_category", Value: diagnosis.Category},
+			kvPair{Key: "diagnosis_confidence", Value: diagnosis.Confidence},
+			kvPair{Key: "diagnosis_primary_evidence_id", Value: diagnosis.PrimaryEvidenceID},
 			kvPair{Key: "diagnosis_summary", Value: diagnosis.Summary},
 			kvPair{Key: "diagnosis_hint", Value: diagnosis.Hint},
 			kvPair{Key: "diagnosis_service", Value: diagnosis.Service},

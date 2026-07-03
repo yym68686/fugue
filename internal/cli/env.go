@@ -19,12 +19,13 @@ type envMutationOptions struct {
 }
 
 type envCommandResult struct {
-	AppName        string              `json:"app_name,omitempty"`
-	AppID          string              `json:"app_id,omitempty"`
-	Env            map[string]string   `json:"env"`
-	Entries        []model.AppEnvEntry `json:"entries,omitempty"`
-	Operation      *model.Operation    `json:"operation,omitempty"`
-	AlreadyCurrent bool                `json:"already_current,omitempty"`
+	AppName        string                `json:"app_name,omitempty"`
+	AppID          string                `json:"app_id,omitempty"`
+	Env            map[string]string     `json:"env"`
+	Entries        []model.AppEnvEntry   `json:"entries,omitempty"`
+	Operation      *model.Operation      `json:"operation,omitempty"`
+	ReleaseAttempt *model.ReleaseAttempt `json:"release_attempt,omitempty"`
+	AlreadyCurrent bool                  `json:"already_current,omitempty"`
 }
 
 func (c *CLI) newEnvCommand() *cobra.Command {
@@ -167,6 +168,7 @@ Inline values override keys loaded from --file when both are provided.
 				Env:            response.Env,
 				Entries:        response.Entries,
 				Operation:      response.Operation,
+				ReleaseAttempt: response.ReleaseAttempt,
 				AlreadyCurrent: response.AlreadyCurrent,
 			})
 		},
@@ -220,6 +222,7 @@ func (c *CLI) newEnvRemoveCommand() *cobra.Command {
 				Env:            response.Env,
 				Entries:        response.Entries,
 				Operation:      response.Operation,
+				ReleaseAttempt: response.ReleaseAttempt,
 				AlreadyCurrent: response.AlreadyCurrent,
 			})
 		},
@@ -469,6 +472,12 @@ func (c *CLI) renderEnvCommandResult(result envCommandResult) error {
 	}
 	if result.Operation != nil {
 		pairs = append(pairs, kvPair{Key: "operation_id", Value: result.Operation.ID})
+	}
+	if result.ReleaseAttempt != nil {
+		pairs = append(pairs, kvPair{Key: "release_attempt_id", Value: result.ReleaseAttempt.ID})
+		if strings.TrimSpace(result.ReleaseAttempt.Status) != "" {
+			pairs = append(pairs, kvPair{Key: "release_attempt_status", Value: result.ReleaseAttempt.Status})
+		}
 	}
 	if result.AlreadyCurrent {
 		pairs = append(pairs, kvPair{Key: "already_current", Value: "true"})

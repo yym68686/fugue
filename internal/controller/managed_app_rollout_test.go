@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 func TestWaitForManagedAppRolloutFailsWhenManagedAppReportsError(t *testing.T) {
@@ -1606,5 +1608,230 @@ func readyTemplatePod(name string, deployment kubeDeployment, resources kubeReso
 func setKubeDeploymentPrimaryImage(deployment *kubeDeployment, name, image string) {
 	deployment.Spec.Template.Spec.Containers = []kubeContainerSpec{
 		{Name: name, Image: image},
+	}
+}
+
+func TestCaptureDeploymentRolloutFailureEvidenceCapturesLogsEventsSnapshotsAndReleaseLink(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Collector Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "ops", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{Image: "registry.example/fugue-apps/demo:broken", Replicas: 1})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	app = runtime.Renderer{}.PrepareApp(app)
+	spec := app.Spec
+	op, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &spec})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	attempt, err := stateStore.CreateReleaseAttempt(model.ReleaseAttempt{
+		TenantID:          tenant.ID,
+		ProjectID:         project.ID,
+		AppID:             app.ID,
+		TriggerType:       model.ReleaseAttemptTriggerImageTrackingManualSync,
+		TriggerActorType:  model.ReleaseAttemptActorUser,
+		SourceOperationID: op.ID,
+		RootOperationID:   op.ID,
+		Status:            model.ReleaseAttemptStatusRollingOut,
+		Confidence:        model.OperationEvidenceConfidenceEvidenceBacked,
+	})
+	if err != nil {
+		t.Fatalf("create release attempt: %v", err)
+	}
+
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deployment, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	if !found {
+		t.Fatal("expected deployment fixture")
+	}
+	deployment.Metadata.Name = runtime.RuntimeAppResourceName(app)
+	deployment.Metadata.Namespace = namespace
+	deployment.Metadata.Generation = 7
+	deployment.Status.ObservedGeneration = 7
+	deployment.Status.Replicas = 1
+	deployment.Status.UpdatedReplicas = 1
+
+	pod := readyTemplatePod("demo-crash", deployment, kubeResourceRequirements{})
+	pod.Status.Phase = "Running"
+	pod.Spec.NodeName = "node-a"
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name: "demo",
+		State: kubeRuntimeState{Terminated: &kubeStateDetail{
+			Reason:     "Error",
+			Message:    "process exited",
+			ExitCode:   1,
+			StartedAt:  time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339),
+			FinishedAt: time.Now().UTC().Format(time.RFC3339),
+		}},
+		RestartCount: 1,
+	}}
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/log"):
+			if r.URL.Query().Get("previous") == "true" {
+				_, _ = w.Write([]byte("startup failed token=super-secret user@example.com\n"))
+				return
+			}
+			_, _ = w.Write([]byte("current log line\n"))
+		case r.URL.Path == "/api/v1/namespaces/"+namespace+"/events":
+			_ = json.NewEncoder(w).Encode(kubeEventList{Items: []kubeEvent{{
+				Type:    "Warning",
+				Reason:  "BackOff",
+				Message: "Back-off restarting failed container demo",
+			}}})
+		case r.URL.Path == "/apis/apps/v1/namespaces/"+namespace+"/replicasets":
+			_ = json.NewEncoder(w).Encode(kubeReplicaSetList{Items: []kubeReplicaSet{{}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+	client := &kubeClient{client: kubeServer.Client(), baseURL: kubeServer.URL, bearerToken: "test", namespace: namespace}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+
+	primaryID := svc.captureDeploymentRolloutFailureEvidence(context.Background(), client, app, op.ID, namespace, deployment, []kubePod{pod}, "pod demo-crash failed")
+	if primaryID == "" {
+		t.Fatal("expected primary evidence id")
+	}
+	evidence, err := stateStore.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: tenant.ID, OperationID: op.ID, Limit: 100})
+	if err != nil {
+		t.Fatalf("list evidence: %v", err)
+	}
+	for _, typ := range []string{
+		model.OperationEvidenceTypeRolloutContainerTerminated,
+		model.OperationEvidenceTypeRolloutPodSnapshot,
+		model.OperationEvidenceTypeRolloutPreviousLogs,
+		model.OperationEvidenceTypeRolloutCurrentLogs,
+		model.OperationEvidenceTypeRolloutKubernetesEvent,
+		model.OperationEvidenceTypeRolloutDeploymentSnapshot,
+		model.OperationEvidenceTypeRolloutReplicaSetSnapshot,
+	} {
+		if !operationEvidenceHasType(evidence, typ) {
+			t.Fatalf("expected evidence type %s in %+v", typ, evidence)
+		}
+	}
+	for _, item := range evidence {
+		if item.ReleaseAttemptID != attempt.ID {
+			t.Fatalf("expected evidence %s linked to release attempt %s, got %q", item.ID, attempt.ID, item.ReleaseAttemptID)
+		}
+		if item.Type == model.OperationEvidenceTypeRolloutPreviousLogs {
+			logTail, _ := item.Payload["log_tail"].(string)
+			if strings.Contains(logTail, "super-secret") || strings.Contains(logTail, "user@example.com") {
+				t.Fatalf("expected previous log payload redacted, got %q", logTail)
+			}
+			if item.RedactionStatus != model.OperationEvidenceRedactionRedacted {
+				t.Fatalf("expected redaction status redacted for previous logs, got %+v", item)
+			}
+		}
+	}
+}
+
+func TestCaptureDeploymentRolloutFailureEvidenceCollectorErrorDoesNotHidePrimaryFailure(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, _ := stateStore.CreateTenant("Collector Error Tenant")
+	project, _ := stateStore.CreateProject(tenant.ID, "ops", "")
+	app, _ := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{Image: "registry.example/fugue-apps/demo:broken", Replicas: 1})
+	app = runtime.Renderer{}.PrepareApp(app)
+	spec := app.Spec
+	op, _ := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &spec})
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deployment, _ := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
+	deployment.Metadata.Name = runtime.RuntimeAppResourceName(app)
+	pod := readyTemplatePod("demo-crash", deployment, kubeResourceRequirements{})
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{Name: "demo", State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "CrashLoopBackOff", Message: "back-off restarting failed container"}}}}
+
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "collector backend unavailable", http.StatusInternalServerError)
+	}))
+	defer kubeServer.Close()
+	client := &kubeClient{client: kubeServer.Client(), baseURL: kubeServer.URL, bearerToken: "test", namespace: namespace}
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+
+	primaryID := svc.captureDeploymentRolloutFailureEvidence(context.Background(), client, app, op.ID, namespace, deployment, []kubePod{pod}, "pod demo-crash failed")
+	if primaryID == "" {
+		t.Fatal("expected primary evidence id despite collector errors")
+	}
+	evidence, err := stateStore.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: tenant.ID, OperationID: op.ID, Limit: 100})
+	if err != nil {
+		t.Fatalf("list evidence: %v", err)
+	}
+	if !operationEvidenceHasType(evidence, model.OperationEvidenceTypeRolloutContainerTerminated) {
+		t.Fatalf("expected primary pod failure evidence, got %+v", evidence)
+	}
+	if !operationEvidenceHasType(evidence, model.OperationEvidenceTypeCollectorError) {
+		t.Fatalf("expected collector_error evidence, got %+v", evidence)
+	}
+}
+
+func TestClassifyKubernetesEventEvidenceTypes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		event kubeEvent
+		want  string
+	}{
+		{name: "scheduling", event: kubeEvent{Reason: "FailedScheduling", Message: "0/3 nodes are available"}, want: model.OperationEvidenceTypeSchedulerFailure},
+		{name: "image pull", event: kubeEvent{Reason: "ErrImagePull", Message: "pull access denied"}, want: model.OperationEvidenceTypeImagePullFailure},
+		{name: "mount", event: kubeEvent{Reason: "FailedMount", Message: "Unable to attach or mount volumes"}, want: model.OperationEvidenceTypeVolumeMountFailure},
+		{name: "readiness", event: kubeEvent{Reason: "Unhealthy", Message: "Readiness probe failed: HTTP 500"}, want: model.OperationEvidenceTypeReadinessProbeFailure},
+		{name: "liveness", event: kubeEvent{Reason: "Unhealthy", Message: "Liveness probe failed: timeout"}, want: model.OperationEvidenceTypeLivenessProbeFailure},
+		{name: "startup", event: kubeEvent{Reason: "Unhealthy", Message: "Startup probe failed: timeout"}, want: model.OperationEvidenceTypeStartupProbeFailure},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyKubernetesEventEvidenceType(tc.event); got != tc.want {
+				t.Fatalf("expected %s, got %s", tc.want, got)
+			}
+		})
+	}
+}
+
+func operationEvidenceHasType(items []model.OperationEvidence, typ string) bool {
+	for _, item := range items {
+		if item.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPrimaryFailingContainerStatusPrefersInitContainerFailure(t *testing.T) {
+	t.Parallel()
+
+	pod := kubePod{}
+	pod.Status.InitContainerStatuses = []kubeContainerStatus{{
+		Name:  "init-db",
+		State: kubeRuntimeState{Terminated: &kubeStateDetail{Reason: "Error", Message: "migration failed", ExitCode: 2}},
+	}}
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  "api",
+		State: kubeRuntimeState{Waiting: &kubeStateDetail{Reason: "CrashLoopBackOff", Message: "backoff"}},
+	}}
+	status, detail, stateKind := primaryFailingContainerStatus(pod)
+	if status.Name != "init-db" || detail.ExitCode != 2 || stateKind != "terminated" {
+		t.Fatalf("expected init container failure to be primary, status=%+v detail=%+v state=%s", status, detail, stateKind)
+	}
+	if got := classifyPodFailureEvidenceType(pod, status, detail); got != model.OperationEvidenceTypeRolloutContainerTerminated {
+		t.Fatalf("expected terminated evidence type, got %s", got)
 	}
 }

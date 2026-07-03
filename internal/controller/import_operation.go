@@ -255,6 +255,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	if err != nil {
 		return fmt.Errorf("queue deploy after import: %w", err)
 	}
+	s.recordImportQueuedDeployReleaseSteps(op, app, deployOp)
 	timer.Mark("queue_deploy")
 	s.updateOperationProgress(op.ID, fmt.Sprintf("import build completed; queued deploy operation %s", deployOp.ID))
 

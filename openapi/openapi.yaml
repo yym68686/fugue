@@ -3534,6 +3534,155 @@ paths:
                 $ref: "#/components/schemas/AppReleaseResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/release-attempts:
+    get:
+      operationId: listAppReleaseAttempts
+      summary: List App Release Attempts
+      tags: [Apps]
+      x-fugue-handler: handleListAppReleaseAttempts
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseAttemptListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/release-attempts/{attempt_id}:
+    get:
+      operationId: getAppReleaseAttempt
+      summary: Get App Release Attempt
+      tags: [Apps]
+      x-fugue-handler: handleGetAppReleaseAttempt
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: attempt_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseAttemptResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/release-attempts/{attempt_id}/timeline:
+    get:
+      operationId: getAppReleaseAttemptTimeline
+      summary: Get App Release Attempt Timeline
+      tags: [Apps]
+      x-fugue-handler: handleGetAppReleaseAttemptTimeline
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: attempt_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseTimelineResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/release-attempts/{attempt_id}/evidence:
+    get:
+      operationId: getAppReleaseAttemptEvidence
+      summary: Get App Release Attempt Evidence
+      tags: [Apps]
+      x-fugue-handler: handleGetAppReleaseAttemptEvidence
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: attempt_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: include_payload
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationEvidenceListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/release-attempts/{attempt_id}/debug-bundle:
+    get:
+      operationId: getAppReleaseAttemptDebugBundle
+      summary: Get App Release Attempt Debug Bundle
+      tags: [Apps]
+      x-fugue-handler: handleGetAppReleaseAttemptDebugBundle
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: path
+          name: attempt_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: format
+          required: false
+          schema:
+            type: string
+            enum: [json, zip]
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseDebugBundleResponse"
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/traffic:
     get:
       operationId: getAppTrafficPolicy
@@ -5883,6 +6032,114 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationDiagnosisResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/operations/{id}/evidence:
+    get:
+      operationId: getOperationEvidence
+      summary: Get Operation Evidence
+      tags: [Operations]
+      x-fugue-handler: handleGetOperationEvidence
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: type
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - in: query
+          name: severity
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+        - in: query
+          name: since
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: include_payload
+          required: false
+          schema:
+            type: boolean
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationEvidenceListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/operations/{id}/timeline:
+    get:
+      operationId: getOperationTimeline
+      summary: Get Operation Timeline
+      tags: [Operations]
+      x-fugue-handler: handleGetOperationTimeline
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: include_payload
+          required: false
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationTimelineResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/operations/{id}/debug-bundle:
+    get:
+      operationId: getOperationDebugBundle
+      summary: Get Operation Debug Bundle
+      tags: [Operations]
+      x-fugue-handler: handleGetOperationDebugBundle
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - in: query
+          name: format
+          required: false
+          schema:
+            type: string
+            enum: [json, zip]
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationDebugBundleResponse"
+            application/zip:
+              schema:
+                type: string
+                format: binary
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/audit-events:
@@ -14328,6 +14585,297 @@ components:
             $ref: "#/components/schemas/OperationDiagnosisBlocker"
         controller_lane:
           $ref: "#/components/schemas/OperationControllerLane"
+        confidence:
+          type: string
+        primary_evidence_id:
+          type: string
+        missing_evidence:
+          type: array
+          items:
+            type: string
+        confirmed_cause:
+          $ref: "#/components/schemas/OperationDiagnosisCause"
+        probable_cause:
+          $ref: "#/components/schemas/OperationDiagnosisCause"
+        recommended_next_actions:
+          type: array
+          items:
+            type: string
+    OperationDiagnosisCause:
+      type: object
+      additionalProperties: false
+      properties:
+        category:
+          type: string
+        source:
+          type: string
+        message:
+          type: string
+        reason:
+          type: string
+    OperationEvidence:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, operation_id, type, source, severity, confidence, observed_at, collected_at, summary, redaction_status, payload_version, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        operation_id:
+          type: string
+        release_attempt_id:
+          type: string
+        type:
+          type: string
+        source:
+          type: string
+        severity:
+          type: string
+        confidence:
+          type: string
+        subject_kind:
+          type: string
+        subject_name:
+          type: string
+        subject_namespace:
+          type: string
+        subject_uid:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        collected_at:
+          type: string
+          format: date-time
+        summary:
+          type: string
+        message:
+          type: string
+        reason:
+          type: string
+        exit_code:
+          type: integer
+          format: int32
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        container_name:
+          type: string
+        pod_name:
+          type: string
+        deployment_name:
+          type: string
+        replica_set_name:
+          type: string
+        node_name:
+          type: string
+        redaction_status:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        payload_version:
+          type: integer
+          format: int32
+        created_at:
+          type: string
+          format: date-time
+    OperationTimelineEntry:
+      type: object
+      additionalProperties: false
+      required: [id, operation_id, type, summary, at]
+      properties:
+        id:
+          type: string
+        operation_id:
+          type: string
+        release_attempt_id:
+          type: string
+        type:
+          type: string
+        source:
+          type: string
+        severity:
+          type: string
+        confidence:
+          type: string
+        summary:
+          type: string
+        message:
+          type: string
+        reason:
+          type: string
+        evidence_id:
+          type: string
+        at:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: true
+    ReleaseAttempt:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, project_id, app_id, trigger_type, trigger_actor_type, status, confidence, started_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        trigger_type:
+          type: string
+        trigger_actor_type:
+          type: string
+        trigger_actor_id:
+          type: string
+        source_operation_id:
+          type: string
+        root_operation_id:
+          type: string
+        image_ref:
+          type: string
+        target_digest:
+          type: string
+        previous_digest:
+          type: string
+        desired_source:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+        confidence:
+          type: string
+        failure_operation_id:
+          type: string
+        failure_evidence_id:
+          type: string
+        summary:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ReleaseTimelineEntry:
+      type: object
+      additionalProperties: false
+      required: [id, release_attempt_id, type, summary, at]
+      properties:
+        id:
+          type: string
+        release_attempt_id:
+          type: string
+        operation_id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        evidence_id:
+          type: string
+        at:
+          type: string
+          format: date-time
+        payload:
+          type: object
+          additionalProperties: true
+    OperationDebugBundle:
+      type: object
+      additionalProperties: false
+      required: [metadata, operation, timeline, evidence]
+      properties:
+        metadata:
+          type: object
+          additionalProperties: true
+        operation:
+          $ref: "#/components/schemas/Operation"
+        app:
+          $ref: "#/components/schemas/App"
+        image_tracking:
+          $ref: "#/components/schemas/AppImageTracking"
+        image_tracking_checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppImageTrackingCheck"
+        metrics_summary:
+          type: object
+          additionalProperties: true
+        diagnosis:
+          $ref: "#/components/schemas/OperationDiagnosis"
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationTimelineEntry"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationEvidence"
+        release_attempt:
+          $ref: "#/components/schemas/ReleaseAttempt"
+        release_timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseTimelineEntry"
+        redaction_report:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    ReleaseDebugBundle:
+      type: object
+      additionalProperties: false
+      required: [metadata, release_attempt, release_timeline, evidence]
+      properties:
+        metadata:
+          type: object
+          additionalProperties: true
+        release_attempt:
+          $ref: "#/components/schemas/ReleaseAttempt"
+        app:
+          $ref: "#/components/schemas/App"
+        image_tracking:
+          $ref: "#/components/schemas/AppImageTracking"
+        image_tracking_checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppImageTrackingCheck"
+        metrics_summary:
+          type: object
+          additionalProperties: true
+        release_timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseTimelineEntry"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationEvidence"
+        redaction_report:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
     OperationControllerLaneOccupant:
       type: object
       additionalProperties: false
@@ -15691,6 +16239,8 @@ components:
           $ref: "#/components/schemas/AppImageTracking"
         operation:
           $ref: "#/components/schemas/Operation"
+        release_attempt:
+          $ref: "#/components/schemas/ReleaseAttempt"
         digest:
           type: string
         changed:
@@ -19231,6 +19781,8 @@ components:
           type: boolean
         operation:
           $ref: "#/components/schemas/Operation"
+        release_attempt:
+          $ref: "#/components/schemas/ReleaseAttempt"
     AppEnvEntry:
       type: object
       additionalProperties: false
@@ -19850,6 +20402,63 @@ components:
       properties:
         diagnosis:
           $ref: "#/components/schemas/OperationDiagnosis"
+    OperationEvidenceListResponse:
+      type: object
+      additionalProperties: false
+      required: [evidence]
+      properties:
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationEvidence"
+    OperationTimelineResponse:
+      type: object
+      additionalProperties: false
+      required: [timeline]
+      properties:
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/OperationTimelineEntry"
+    OperationDebugBundleResponse:
+      type: object
+      additionalProperties: false
+      required: [bundle]
+      properties:
+        bundle:
+          $ref: "#/components/schemas/OperationDebugBundle"
+    ReleaseAttemptResponse:
+      type: object
+      additionalProperties: false
+      required: [release_attempt]
+      properties:
+        release_attempt:
+          $ref: "#/components/schemas/ReleaseAttempt"
+    ReleaseAttemptListResponse:
+      type: object
+      additionalProperties: false
+      required: [release_attempts]
+      properties:
+        release_attempts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseAttempt"
+    ReleaseTimelineResponse:
+      type: object
+      additionalProperties: false
+      required: [timeline]
+      properties:
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseTimelineEntry"
+    ReleaseDebugBundleResponse:
+      type: object
+      additionalProperties: false
+      required: [bundle]
+      properties:
+        bundle:
+          $ref: "#/components/schemas/ReleaseDebugBundle"
     AppDisableResponse:
       type: object
       additionalProperties: false

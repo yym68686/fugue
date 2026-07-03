@@ -129,3 +129,51 @@ func (c *Client) AbortAppRelease(appID, releaseID string, markFailed bool, reaso
 	err := c.doJSON(http.MethodPost, path.Join("/v1/apps", strings.TrimSpace(appID), "releases", strings.TrimSpace(releaseID), "abort"), req, &response)
 	return response, err
 }
+
+func (c *Client) ListAppReleaseAttempts(appID string) ([]model.ReleaseAttempt, error) {
+	var response struct {
+		ReleaseAttempts []model.ReleaseAttempt `json:"release_attempts"`
+	}
+	err := c.doJSON(http.MethodGet, path.Join("/v1/apps", strings.TrimSpace(appID), "release-attempts"), nil, &response)
+	return response.ReleaseAttempts, err
+}
+
+func (c *Client) GetAppReleaseAttempt(appID, attemptID string) (model.ReleaseAttempt, error) {
+	var response struct {
+		ReleaseAttempt model.ReleaseAttempt `json:"release_attempt"`
+	}
+	err := c.doJSON(http.MethodGet, path.Join("/v1/apps", strings.TrimSpace(appID), "release-attempts", strings.TrimSpace(attemptID)), nil, &response)
+	return response.ReleaseAttempt, err
+}
+
+func (c *Client) GetAppReleaseAttemptTimeline(appID, attemptID string) ([]model.ReleaseTimelineEntry, error) {
+	var response struct {
+		Timeline []model.ReleaseTimelineEntry `json:"timeline"`
+	}
+	err := c.doJSON(http.MethodGet, path.Join("/v1/apps", strings.TrimSpace(appID), "release-attempts", strings.TrimSpace(attemptID), "timeline"), nil, &response)
+	return response.Timeline, err
+}
+
+func (c *Client) GetAppReleaseAttemptEvidence(appID, attemptID string, includePayload bool) ([]model.OperationEvidence, error) {
+	var response struct {
+		Evidence []model.OperationEvidence `json:"evidence"`
+	}
+	apiPath := path.Join("/v1/apps", strings.TrimSpace(appID), "release-attempts", strings.TrimSpace(attemptID), "evidence")
+	if includePayload {
+		apiPath += "?include_payload=true"
+	}
+	err := c.doJSON(http.MethodGet, apiPath, nil, &response)
+	return response.Evidence, err
+}
+
+func (c *Client) GetAppReleaseAttemptDebugBundleZip(appID, attemptID string) ([]byte, error) {
+	return c.doJSONRaw(http.MethodGet, path.Join("/v1/apps", strings.TrimSpace(appID), "release-attempts", strings.TrimSpace(attemptID), "debug-bundle")+"?format=zip", nil)
+}
+
+func (c *Client) GetAppReleaseAttemptDebugBundle(appID, attemptID string) (model.ReleaseDebugBundle, error) {
+	var response struct {
+		Bundle model.ReleaseDebugBundle `json:"bundle"`
+	}
+	err := c.doJSON(http.MethodGet, path.Join("/v1/apps", strings.TrimSpace(appID), "release-attempts", strings.TrimSpace(attemptID), "debug-bundle"), nil, &response)
+	return response.Bundle, err
+}

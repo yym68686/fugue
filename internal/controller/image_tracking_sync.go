@@ -163,6 +163,7 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 		} else {
 			tracking = updated
 		}
+		s.createImageTrackingReleaseAttemptBestEffort(app, tracking, op, digest, model.ReleaseAttemptTriggerImageTrackingAuto, "image tracking poll queued import")
 		s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
 			App:            app,
 			Tracking:       tracking,

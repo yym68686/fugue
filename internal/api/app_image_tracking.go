@@ -60,6 +60,7 @@ type appImageSyncResponse struct {
 	AppID          string                  `json:"app_id"`
 	Tracking       *model.AppImageTracking `json:"tracking,omitempty"`
 	Operation      *model.Operation        `json:"operation,omitempty"`
+	ReleaseAttempt *model.ReleaseAttempt   `json:"release_attempt,omitempty"`
 	Digest         string                  `json:"digest,omitempty"`
 	Changed        bool                    `json:"changed"`
 	AlreadyCurrent bool                    `json:"already_current"`
@@ -337,6 +338,7 @@ func (s *Server) handleSyncAppImage(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	releaseAttempt := s.createImageTrackingReleaseAttemptBestEffort(app, tracking, op, principal, digest, model.ReleaseAttemptTriggerImageTrackingManualSync)
 	s.recordAppImageSyncDecision(app, tracking, appImageTrackingDecisionInputAPI{
 		ObservedDigest: digest,
 		Decision:       model.AppImageTrackingDecisionQueued,
@@ -354,13 +356,70 @@ func (s *Server) handleSyncAppImage(w http.ResponseWriter, r *http.Request) {
 	})
 	sanitized := sanitizeOperationForAPI(op)
 	httpx.WriteJSON(w, http.StatusAccepted, appImageSyncResponse{
-		AppID:     app.ID,
-		Tracking:  &tracking,
-		Operation: &sanitized,
-		Digest:    digest,
-		Changed:   true,
-		Message:   "tracked image digest changed; import queued",
+		AppID:          app.ID,
+		Tracking:       &tracking,
+		Operation:      &sanitized,
+		ReleaseAttempt: releaseAttempt,
+		Digest:         digest,
+		Changed:        true,
+		Message:        "tracked image digest changed; import queued",
 	})
+}
+
+func (s *Server) createImageTrackingReleaseAttemptBestEffort(app model.App, tracking model.AppImageTracking, op model.Operation, principal model.Principal, digest, triggerType string) *model.ReleaseAttempt {
+	attempt, err := s.store.CreateReleaseAttempt(model.ReleaseAttempt{
+		TenantID:          app.TenantID,
+		ProjectID:         app.ProjectID,
+		AppID:             app.ID,
+		TriggerType:       triggerType,
+		TriggerActorType:  principal.ActorType,
+		TriggerActorID:    principal.ActorID,
+		SourceOperationID: op.ID,
+		RootOperationID:   op.ID,
+		ImageRef:          tracking.ImageRef,
+		TargetDigest:      digest,
+		PreviousDigest:    tracking.LastDeployedDigest,
+		Status:            model.ReleaseAttemptStatusImporting,
+		Confidence:        model.OperationEvidenceConfidenceEvidenceBacked,
+		Summary:           "tracked image digest changed; import queued",
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("create image tracking release attempt failed app=%s op=%s: %v", app.ID, op.ID, err)
+		}
+		return nil
+	}
+	_, _ = s.store.RecordReleaseStep(model.ReleaseStep{
+		TenantID:         app.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeTriggerReceived,
+		Status:           model.ReleaseStepStatusCompleted,
+		Summary:          "image tracking sync requested",
+	})
+	_, _ = s.store.RecordReleaseStep(model.ReleaseStep{
+		TenantID:         app.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeImageTrackingCheck,
+		Status:           model.ReleaseStepStatusCompleted,
+		Summary:          "tracked digest changed",
+		Payload: map[string]any{
+			"image_ref":       tracking.ImageRef,
+			"observed_digest": digest,
+			"previous_digest": tracking.LastDeployedDigest,
+			"tracking_id":     tracking.ID,
+		},
+	})
+	_, _ = s.store.RecordReleaseStep(model.ReleaseStep{
+		TenantID:         app.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeImageImport,
+		Status:           model.ReleaseStepStatusPending,
+		Summary:          "image import queued",
+	})
+	return &attempt
 }
 
 type appImageTrackingDecisionInputAPI struct {

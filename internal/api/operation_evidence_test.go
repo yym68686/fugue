@@ -1,0 +1,274 @@
+package api
+
+import (
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"fugue/internal/auth"
+	"fugue/internal/model"
+	"fugue/internal/store"
+)
+
+func setupOperationEvidenceAPITest(t *testing.T) (*store.Store, *Server, string, model.App, model.Operation) {
+	t.Helper()
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Evidence API Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+	project, err := stateStore.CreateProject(tenant.ID, "ops", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	_, apiKey, err := stateStore.CreateAPIKey(tenant.ID, "reader", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "api", "", model.AppSpec{Image: "ghcr.io/example/api", Replicas: 1})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	spec := app.Spec
+	op, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &spec})
+	if err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	return stateStore, server, apiKey, app, op
+}
+
+func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, app, op := setupOperationEvidenceAPITest(t)
+	recorded, err := stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     op.ID,
+		Type:            model.OperationEvidenceTypeRolloutPreviousLogs,
+		Source:          model.OperationEvidenceSourceAppLogs,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceConfirmed,
+		Summary:         "captured previous logs",
+		Message:         "startup failed",
+		RedactionStatus: model.OperationEvidenceRedactionRedacted,
+		Payload:         map[string]any{"log_tail": "startup failed: apply schema"},
+	})
+	if err != nil {
+		t.Fatalf("record evidence: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/evidence", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected evidence status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var evidenceResponse struct {
+		Evidence []model.OperationEvidence `json:"evidence"`
+	}
+	mustDecodeJSON(t, recorder, &evidenceResponse)
+	if len(evidenceResponse.Evidence) != 1 || evidenceResponse.Evidence[0].ID != recorded.ID {
+		t.Fatalf("expected recorded evidence, got %+v", evidenceResponse.Evidence)
+	}
+	if len(evidenceResponse.Evidence[0].Payload) != 0 {
+		t.Fatalf("expected payload omitted by default, got %+v", evidenceResponse.Evidence[0].Payload)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/evidence?include_payload=true", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected evidence payload status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &evidenceResponse)
+	if evidenceResponse.Evidence[0].Payload["log_tail"] != "startup failed: apply schema" {
+		t.Fatalf("expected payload when requested, got %+v", evidenceResponse.Evidence[0].Payload)
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/timeline", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected timeline status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), model.OperationEvidenceTypeOperationCreated) || !strings.Contains(recorder.Body.String(), recorded.ID) {
+		t.Fatalf("expected timeline to include operation and evidence, got %s", recorder.Body.String())
+	}
+
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/debug-bundle", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected debug bundle status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "operation_debug_bundle") || !strings.Contains(recorder.Body.String(), recorded.ID) {
+		t.Fatalf("expected debug bundle metadata/evidence, got %s", recorder.Body.String())
+	}
+
+	otherTenant, err := stateStore.CreateTenant("Other Tenant")
+	if err != nil {
+		t.Fatalf("create other tenant: %v", err)
+	}
+	_, otherKey, err := stateStore.CreateAPIKey(otherTenant.ID, "reader", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create other api key: %v", err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/evidence", otherKey, nil)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected tenant isolation status 403, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestOperationDiagnosisConfidenceUsesEvidenceAndMissingEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, app, op := setupOperationEvidenceAPITest(t)
+	failed, err := stateStore.FailOperation(op.ID, "managed app rollout failed")
+	if err != nil {
+		t.Fatalf("fail operation: %v", err)
+	}
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+failed.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected diagnosis status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var diagnosisResponse struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &diagnosisResponse)
+	if diagnosisResponse.Diagnosis.Confidence != model.OperationEvidenceConfidenceInsufficientEvidence {
+		t.Fatalf("expected insufficient evidence diagnosis, got %+v", diagnosisResponse.Diagnosis)
+	}
+	if !containsString(diagnosisResponse.Diagnosis.MissingEvidence, "previous_container_logs") {
+		t.Fatalf("expected previous logs missing evidence, got %+v", diagnosisResponse.Diagnosis.MissingEvidence)
+	}
+
+	secondSpec := app.Spec
+	secondOp, err := stateStore.CreateOperation(model.Operation{TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &secondSpec})
+	if err != nil {
+		t.Fatalf("create second operation: %v", err)
+	}
+	failed, err = stateStore.FailOperation(secondOp.ID, "managed app rollout failed")
+	if err != nil {
+		t.Fatalf("fail second operation: %v", err)
+	}
+	evidence, err := stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     failed.ID,
+		Type:            model.OperationEvidenceTypeRolloutPreviousLogs,
+		Source:          model.OperationEvidenceSourceAppLogs,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceConfirmed,
+		Summary:         "captured previous logs",
+		Message:         "startup failed",
+		RedactionStatus: model.OperationEvidenceRedactionRedacted,
+		Payload:         map[string]any{"log_tail": "startup failed: apply schema: ERROR: deadlock detected"},
+	})
+	if err != nil {
+		t.Fatalf("record previous log evidence: %v", err)
+	}
+	diagnosisResponse = struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}{}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+failed.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected confirmed diagnosis status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &diagnosisResponse)
+	if diagnosisResponse.Diagnosis.Confidence != model.OperationEvidenceConfidenceConfirmed || diagnosisResponse.Diagnosis.PrimaryEvidenceID != evidence.ID {
+		t.Fatalf("expected confirmed diagnosis with primary evidence, got %+v", diagnosisResponse.Diagnosis)
+	}
+	if diagnosisResponse.Diagnosis.ConfirmedCause == nil || diagnosisResponse.Diagnosis.ConfirmedCause.Category != "application_startup_failure" {
+		t.Fatalf("expected confirmed application startup cause, got %+v", diagnosisResponse.Diagnosis.ConfirmedCause)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestOperationDiagnosisConfidenceUsesKubernetesEventAndProbableEvidence(t *testing.T) {
+	t.Parallel()
+
+	stateStore, server, apiKey, app, op := setupOperationEvidenceAPITest(t)
+	failed, err := stateStore.FailOperation(op.ID, "managed app rollout failed")
+	if err != nil {
+		t.Fatalf("fail operation: %v", err)
+	}
+	evidence, err := stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     failed.ID,
+		Type:            model.OperationEvidenceTypeImagePullFailure,
+		Source:          model.OperationEvidenceSourceKubernetesAPI,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceConfirmed,
+		Summary:         "ErrImagePull",
+		Message:         "pull access denied",
+		Reason:          "ErrImagePull",
+		RedactionStatus: model.OperationEvidenceRedactionNone,
+	})
+	if err != nil {
+		t.Fatalf("record image pull evidence: %v", err)
+	}
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+failed.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected diagnosis status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var diagnosisResponse struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &diagnosisResponse)
+	if diagnosisResponse.Diagnosis.Confidence != model.OperationEvidenceConfidenceConfirmed || diagnosisResponse.Diagnosis.PrimaryEvidenceID != evidence.ID {
+		t.Fatalf("expected confirmed event diagnosis, got %+v", diagnosisResponse.Diagnosis)
+	}
+	if diagnosisResponse.Diagnosis.ConfirmedCause == nil || diagnosisResponse.Diagnosis.ConfirmedCause.Category != "image_pull_failure" {
+		t.Fatalf("expected image pull confirmed cause, got %+v", diagnosisResponse.Diagnosis.ConfirmedCause)
+	}
+
+	spec := app.Spec
+	secondOp, err := stateStore.CreateOperation(model.Operation{TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &spec})
+	if err != nil {
+		t.Fatalf("create second operation: %v", err)
+	}
+	failed, err = stateStore.FailOperation(secondOp.ID, "managed app rollout failed")
+	if err != nil {
+		t.Fatalf("fail second operation: %v", err)
+	}
+	evidence, err = stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     failed.ID,
+		Type:            model.OperationEvidenceTypeRolloutPodFailure,
+		Source:          model.OperationEvidenceSourceRolloutObserver,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceEvidenceBacked,
+		Summary:         "pod failed without previous logs",
+		RedactionStatus: model.OperationEvidenceRedactionNone,
+	})
+	if err != nil {
+		t.Fatalf("record probable evidence: %v", err)
+	}
+	diagnosisResponse = struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}{}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+failed.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected probable diagnosis status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &diagnosisResponse)
+	if diagnosisResponse.Diagnosis.Confidence != model.OperationEvidenceConfidenceEvidenceBacked || diagnosisResponse.Diagnosis.PrimaryEvidenceID != evidence.ID {
+		t.Fatalf("expected evidence-backed diagnosis, got %+v", diagnosisResponse.Diagnosis)
+	}
+	if diagnosisResponse.Diagnosis.ProbableCause == nil || diagnosisResponse.Diagnosis.ConfirmedCause != nil {
+		t.Fatalf("expected probable cause only, got confirmed=%+v probable=%+v", diagnosisResponse.Diagnosis.ConfirmedCause, diagnosisResponse.Diagnosis.ProbableCause)
+	}
+}

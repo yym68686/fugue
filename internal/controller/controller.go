@@ -713,6 +713,7 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 			if failed, failErr := s.Store.FailOperation(op.ID, err.Error()); failErr != nil {
 				s.Logger.Printf("operation %s fail update error: %v", op.ID, failErr)
 			} else {
+				s.failReleaseAttemptForOperation(failed, err.Error())
 				s.logOperationAppEvent("failed", "error", failed, s.appForOperationEvent(failed), err.Error(), map[string]any{
 					"elapsed_ms": operationElapsedMilliseconds(failed, time.Now().UTC()),
 				})
@@ -742,6 +743,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	currentApp := app
 	timer.Mark("load_app")
 	var completionDesiredSpec *model.AppSpec
+	s.markReleaseAttemptOperationRunning(op, app)
 
 	switch op.Type {
 	case model.OperationTypeImport:
@@ -897,6 +899,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
 			timer.Mark("apply_desired_state")
+			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
+				s.markReleaseAttemptRolloutWaiting(op, app)
+			}
 			if err := s.waitForManagedAppRolloutWithScheduling(ctx, app, op.ID, scheduling); err != nil {
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
 			}
@@ -926,6 +931,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	s.logOperationAppEvent("completed", "info", completed, app, message, map[string]any{
 		"elapsed_ms": operationElapsedMilliseconds(completed, time.Now().UTC()),
 	})
+	if op.Type == model.OperationTypeDeploy {
+		s.completeReleaseAttemptForOperation(completed, app, message)
+	}
 	if op.Type == model.OperationTypeDeploy {
 		deployedApp, appErr := s.Store.GetApp(app.ID)
 		if appErr != nil {

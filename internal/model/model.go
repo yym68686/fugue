@@ -2826,6 +2826,8 @@ type State struct {
 	AppImageTrackings          []AppImageTracking          `json:"app_image_trackings,omitempty"`
 	AppImageTrackingChecks     []AppImageTrackingCheck     `json:"app_image_tracking_checks,omitempty"`
 	AppReleases                []AppRelease                `json:"app_releases,omitempty"`
+	ReleaseAttempts            []ReleaseAttempt            `json:"release_attempts,omitempty"`
+	ReleaseSteps               []ReleaseStep               `json:"release_steps,omitempty"`
 	AppTrafficPolicies         []AppTrafficPolicy          `json:"app_traffic_policies,omitempty"`
 	Runtimes                   []Runtime                   `json:"runtimes"`
 	RuntimeGrants              []RuntimeAccessGrant        `json:"runtime_grants"`
@@ -2847,6 +2849,7 @@ type State struct {
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
 	Operations                 []Operation                 `json:"operations"`
+	OperationEvidence          []OperationEvidence         `json:"operation_evidence,omitempty"`
 	AuditEvents                []AuditEvent                `json:"audit_events"`
 	Idempotency                []IdempotencyRecord         `json:"idempotency"`
 	TenantBilling              []TenantBilling             `json:"tenant_billing"`

@@ -68,6 +68,8 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteMetricHeader(w, "fugue_controller_leader_active", "Whether this controller identity currently holds leadership.", "gauge")
 	observability.WriteMetricSample(w, "fugue_controller_leader_active", map[string]string{"identity": leaderIdentity}, boolGauge(leaderActive))
 	s.writeImageTrackingMetrics(w)
+	s.writeOperationEvidenceMetrics(w)
+	s.writeReleaseAttemptMetrics(w)
 	observability.WriteMetricHeader(w, "fugue_controller_workers_configured", "Configured controller worker slots by lane; zero means unbounded.", "gauge")
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_import"}, float64(s.Config.ForegroundImportWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_activate"}, float64(s.Config.ForegroundActivateWorkers))
@@ -98,6 +100,156 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
 	observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 	s.writeImageCacheLocalPVMetrics(w)
+}
+
+func (s *Service) writeOperationEvidenceMetrics(w http.ResponseWriter) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	records, captures, rollouts, err := s.Store.CountOperationEvidenceMetricGroups()
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("operation evidence metrics unavailable: %v", err)
+		}
+		return
+	}
+	observability.WriteMetricHeader(w, "fugue_operation_evidence_records_total", "Operation evidence records retained by the control plane, grouped only by low-cardinality evidence type, severity, and confidence.", "gauge")
+	for _, item := range records {
+		observability.WriteMetricSample(w, "fugue_operation_evidence_records_total", map[string]string{
+			"evidence_type": safeMetricLabelValue(item.Type, "unknown"),
+			"severity":      safeMetricLabelValue(item.Severity, "unknown"),
+			"confidence":    safeMetricLabelValue(item.Confidence, "unknown"),
+		}, float64(item.Count))
+	}
+	observability.WriteMetricHeader(w, "fugue_rollout_failure_evidence_capture_total", "Rollout evidence capture outcomes retained by the control plane.", "gauge")
+	for _, item := range captures {
+		observability.WriteMetricSample(w, "fugue_rollout_failure_evidence_capture_total", map[string]string{
+			"result": safeMetricLabelValue(item.Result, "unknown"),
+		}, float64(item.Count))
+	}
+	observability.WriteMetricHeader(w, "fugue_rollout_failures_total", "Rollout failures with durable evidence retained by the control plane, grouped by low-cardinality reason and confidence.", "gauge")
+	for _, item := range rollouts {
+		observability.WriteMetricSample(w, "fugue_rollout_failures_total", map[string]string{
+			"reason":     safeMetricLabelValue(item.Reason, "unknown"),
+			"confidence": safeMetricLabelValue(item.Confidence, "unknown"),
+		}, float64(item.Count))
+	}
+}
+
+func (s *Service) writeReleaseAttemptMetrics(w http.ResponseWriter) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	attempts, err := s.Store.CountReleaseAttemptMetricGroups()
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("release attempt metrics unavailable: %v", err)
+		}
+		return
+	}
+	observability.WriteMetricHeader(w, "fugue_release_attempts_total", "Release attempts retained by the control plane, grouped only by trigger type and status.", "gauge")
+	for _, item := range attempts {
+		observability.WriteMetricSample(w, "fugue_release_attempts_total", map[string]string{
+			"trigger_type": safeMetricLabelValue(item.TriggerType, "unknown"),
+			"status":       safeMetricLabelValue(item.Status, "unknown"),
+		}, float64(item.Count))
+	}
+	s.writeReleaseDurationMetrics(w)
+}
+
+func (s *Service) writeReleaseDurationMetrics(w http.ResponseWriter) {
+	attempts, err := s.Store.ListReleaseAttempts(model.ReleaseAttemptFilter{PlatformAdmin: true, Limit: 500})
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("release duration metrics unavailable: %v", err)
+		}
+		return
+	}
+	attemptDurations := map[string]durationMetricAggregate{}
+	importToDeploy := map[string]durationMetricAggregate{}
+	deployToReady := map[string]durationMetricAggregate{}
+	for _, attempt := range attempts {
+		status := safeMetricLabelValue(attempt.Status, "unknown")
+		trigger := safeMetricLabelValue(attempt.TriggerType, "unknown")
+		if attempt.FinishedAt != nil && !attempt.StartedAt.IsZero() {
+			key := trigger + "\x00" + status
+			attemptDurations[key] = attemptDurations[key].add(attempt.FinishedAt.Sub(attempt.StartedAt).Seconds(), map[string]string{"trigger_type": trigger, "status": status})
+		}
+		steps, err := s.Store.ListReleaseSteps(attempt.TenantID, true, attempt.ID)
+		if err != nil {
+			continue
+		}
+		if seconds, ok := releaseStepDurationSeconds(steps, model.ReleaseStepTypeImageImport, model.ReleaseStepTypeDeployQueued); ok {
+			importToDeploy[status] = importToDeploy[status].add(seconds, map[string]string{"status": status})
+		}
+		if seconds, ok := releaseStepDurationSeconds(steps, model.ReleaseStepTypeDeployApply, model.ReleaseStepTypeFinalize); ok {
+			deployToReady[status] = deployToReady[status].add(seconds, map[string]string{"status": status})
+		}
+	}
+	writeAverageDurationMetric(w, "fugue_release_attempt_duration_seconds", "Average retained release attempt duration by trigger type and terminal status.", attemptDurations)
+	writeAverageDurationMetric(w, "fugue_image_import_to_deploy_duration_seconds", "Average retained duration between image import start and deploy queue step by release status.", importToDeploy)
+	writeAverageDurationMetric(w, "fugue_deploy_to_ready_duration_seconds", "Average retained duration between deploy apply and release finalization by release status.", deployToReady)
+}
+
+type durationMetricAggregate struct {
+	Labels map[string]string
+	Sum    float64
+	Count  int
+}
+
+func (a durationMetricAggregate) add(seconds float64, labels map[string]string) durationMetricAggregate {
+	if seconds < 0 {
+		seconds = 0
+	}
+	a.Labels = labels
+	a.Sum += seconds
+	a.Count++
+	return a
+}
+
+func writeAverageDurationMetric(w http.ResponseWriter, name, help string, values map[string]durationMetricAggregate) {
+	observability.WriteMetricHeader(w, name, help, "gauge")
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := values[key]
+		if value.Count == 0 {
+			continue
+		}
+		observability.WriteMetricSample(w, name, value.Labels, value.Sum/float64(value.Count))
+	}
+}
+
+func releaseStepDurationSeconds(steps []model.ReleaseStep, startType, finishType string) (float64, bool) {
+	var started time.Time
+	var finished time.Time
+	for _, step := range steps {
+		if started.IsZero() && step.Type == startType {
+			started = step.StartedAt
+		}
+		if step.Type == finishType {
+			if step.FinishedAt != nil {
+				finished = *step.FinishedAt
+			} else {
+				finished = step.StartedAt
+			}
+		}
+	}
+	if started.IsZero() || finished.IsZero() || finished.Before(started) {
+		return 0, false
+	}
+	return finished.Sub(started).Seconds(), true
+}
+
+func safeMetricLabelValue(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func (s *Service) controllerHealthSnapshot() (bool, time.Time, bool, string) {

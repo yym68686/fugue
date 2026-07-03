@@ -67,7 +67,7 @@ func TestRunAppReleaseTrackingSyncWaitsForQueuedDeployAfterImport(t *testing.T) 
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
 			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"deploying","current_replicas":0}}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/apps/app_123/image-sync":
-			_, _ = w.Write([]byte(`{"app_id":"app_123","digest":"sha256:def456","changed":true,"already_current":false,"operation":{"id":"op_import","tenant_id":"tenant_123","app_id":"app_123","type":"import","status":"pending"},"message":"tracked image digest changed; import queued"}`))
+			_, _ = w.Write([]byte(`{"app_id":"app_123","digest":"sha256:def456","changed":true,"already_current":false,"release_attempt":{"id":"rel_123","tenant_id":"tenant_123","project_id":"project_123","app_id":"app_123","trigger_type":"image_tracking_manual_sync","trigger_actor_type":"user","status":"importing","confidence":"evidence_backed","started_at":"2026-07-03T00:00:00Z","created_at":"2026-07-03T00:00:00Z","updated_at":"2026-07-03T00:00:00Z"},"operation":{"id":"op_import","tenant_id":"tenant_123","app_id":"app_123","type":"import","status":"pending"},"message":"tracked image digest changed; import queued"}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/operations/"):
 			opID := strings.TrimPrefix(r.URL.Path, "/v1/operations/")
 			operationPolls[opID]++
@@ -100,8 +100,10 @@ func TestRunAppReleaseTrackingSyncWaitsForQueuedDeployAfterImport(t *testing.T) 
 	if operationPolls["op_import"] == 0 || operationPolls["op_deploy"] == 0 {
 		t.Fatalf("expected import and queued deploy to be polled, got %v", operationPolls)
 	}
-	if !strings.Contains(stdout.String(), "operation_id=op_deploy") {
-		t.Fatalf("expected final operation to be queued deploy, got %q", stdout.String())
+	for _, want := range []string{"operation_id=op_deploy", "release_attempt_id=rel_123", "release_attempt_status=importing", "phase=deploy_rollout"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected final output to contain %q, got %q", want, stdout.String())
+		}
 	}
 }
 
