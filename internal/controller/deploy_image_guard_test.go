@@ -423,6 +423,70 @@ func TestEnsureManagedDeployImageReadyDoesNotInspectPullBaseAliasAfterPushRefMis
 	}
 }
 
+func TestEnsureManagedDeployImageReadyAllowsRuntimeDigestWhenManagedSourceTagIsStale(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	managedRef := "registry.push.example/fugue-apps/demo:git-old"
+	runtimePullRef := "registry.pull.example/fugue-apps/demo@sha256:abc123"
+	runtimePushRef := "registry.push.example/fugue-apps/demo@sha256:abc123"
+	app := model.App{
+		ID:       "app_1",
+		TenantID: "tenant_1",
+		Spec: model.AppSpec{
+			Image:     runtimePullRef,
+			Replicas:  1,
+			RuntimeID: "runtime_1",
+		},
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeGitHubPublic,
+			RepoURL:          "https://github.com/example/demo",
+			CommitSHA:        "old",
+			ResolvedImageRef: managedRef,
+		},
+	}
+	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
+		TenantID:  app.TenantID,
+		AppID:     app.ID,
+		ImageRef:  runtimePullRef,
+		RuntimeID: app.Spec.RuntimeID,
+		Status:    model.ImageLocationStatusPresent,
+	}); err != nil {
+		t.Fatalf("record runtime digest location: %v", err)
+	}
+
+	inspected := make([]string, 0, 2)
+	svc := &Service{
+		Store:                         stateStore,
+		registryPushBase:              "registry.push.example",
+		registryPullBase:              "registry.pull.example",
+		importImageInspectMaxAttempts: 1,
+		inspectManagedImage: func(_ context.Context, imageRef string) (bool, map[string]int64, error) {
+			inspected = append(inspected, imageRef)
+			switch imageRef {
+			case managedRef, runtimePushRef:
+				return false, nil, nil
+			case runtimePullRef:
+				t.Fatalf("controller should not inspect node-only registry pull ref %q", imageRef)
+			default:
+				t.Fatalf("unexpected image ref %q", imageRef)
+			}
+			return false, nil, nil
+		},
+	}
+
+	if err := svc.ensureManagedDeployImageReady(context.Background(), app, runtimepkg.SchedulingConstraints{}); err != nil {
+		t.Fatalf("expected runtime digest evidence to satisfy stale managed source tag, got %v", err)
+	}
+	if len(inspected) != 2 || inspected[0] != managedRef || inspected[1] != runtimePushRef {
+		t.Fatalf("expected inspect refs [%q %q], got %v", managedRef, runtimePushRef, inspected)
+	}
+}
+
 func TestDeployImageRefAvailableUsesLocationEvidenceWhenNodeLocalBuilderRegistryEnabled(t *testing.T) {
 	t.Parallel()
 

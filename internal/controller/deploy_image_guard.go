@@ -44,6 +44,9 @@ func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation,
 		return fmt.Errorf("inspect managed image %s before deploy: %w", managedImageRef, err)
 	}
 	if !exists {
+		if strings.TrimSpace(op.ID) == "" && s.runtimeDigestCoversStaleManagedImageRef(ctx, app, target, managedImageRef) {
+			return nil
+		}
 		return s.handleMissingDeployImage(ctx, op, app, target, managedImageRef, "managed image")
 	}
 	runtimeImageRef := strings.TrimSpace(app.Spec.Image)
@@ -69,6 +72,31 @@ func (s *Service) ensureDeployableImage(ctx context.Context, op model.Operation,
 		return s.handleMissingDeployImage(ctx, op, app, target, runtimeImageRef, "runtime image")
 	}
 	return nil
+}
+
+func (s *Service) runtimeDigestCoversStaleManagedImageRef(ctx context.Context, app model.App, target deployImageTarget, managedImageRef string) bool {
+	runtimeImageRef := strings.TrimSpace(app.Spec.Image)
+	if runtimeImageRef == "" || model.ImageDigestFromReference(runtimeImageRef) == "" {
+		return false
+	}
+	runtimeInspectionRef := strings.TrimSpace(s.runtimeImageInspectionRef(runtimeImageRef))
+	if runtimeInspectionRef == "" {
+		runtimeInspectionRef = runtimeImageRef
+	}
+	managedImageRef = strings.TrimSpace(managedImageRef)
+	if runtimeInspectionRef == "" ||
+		runtimeInspectionRef == managedImageRef ||
+		runtimeImageRef == managedImageRef {
+		return false
+	}
+	exists, err := s.deployImageRefAvailable(ctx, app, target, runtimeInspectionRef, runtimeImageRef)
+	if err != nil {
+		if s != nil && s.Logger != nil {
+			s.Logger.Printf("inspect runtime digest fallback for stale managed image app=%s image=%s runtime=%s failed: %v", app.ID, managedImageRef, runtimeImageRef, err)
+		}
+		return false
+	}
+	return exists
 }
 
 func (s *Service) deployImageAvailabilityCheckEnabled() bool {

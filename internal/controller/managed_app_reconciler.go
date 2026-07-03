@@ -738,6 +738,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		return nil
 	}
 	reason = strings.TrimSpace(reason)
+	statusChanged := false
 	if !managedAppDisabledOrphanStatusCurrent(managed.Status, reason) {
 		status := managedAppBaseStatus(managed, app)
 		status.Phase = runtime.ManagedAppPhaseDisabled
@@ -746,6 +747,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
 			return fmt.Errorf("patch disabled orphan managed app status %s/%s: %w", namespace, managedName, err)
 		}
+		statusChanged = true
 	}
 
 	resourceName := runtime.RuntimeAppResourceName(app)
@@ -760,7 +762,7 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 			return fmt.Errorf("delete orphan managed app service %s/%s: %w", namespace, serviceName, err)
 		}
 	}
-	if s.Logger != nil {
+	if statusChanged && s.Logger != nil {
 		s.Logger.Printf("disabled orphan managed app %s/%s: %s", namespace, managedName, reason)
 	}
 	return nil

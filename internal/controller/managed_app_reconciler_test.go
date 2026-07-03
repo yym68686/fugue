@@ -3676,7 +3676,11 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 		bearerToken: "token",
 		namespace:   "fugue-system",
 	}
-	svc := &Service{Store: stateStore}
+	var logs bytes.Buffer
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(&logs, "", 0),
+	}
 
 	managed := runtime.ManagedAppObject{
 		Metadata: runtime.ManagedAppMeta{
@@ -3700,6 +3704,10 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
 		t.Fatalf("reconcile orphaned managed app: %v", err)
 	}
+	if !strings.Contains(logs.String(), "disabled orphan managed app") {
+		t.Fatalf("expected initial orphan disable to be logged, got %q", logs.String())
+	}
+	logs.Reset()
 
 	if patchedStatus.Phase != runtime.ManagedAppPhaseDisabled {
 		t.Fatalf("expected disabled orphan status phase %q, got %q", runtime.ManagedAppPhaseDisabled, patchedStatus.Phase)
@@ -3723,5 +3731,8 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	}
 	if patches != 1 {
 		t.Fatalf("expected unchanged disabled orphan status to skip patch, got %d patches", patches)
+	}
+	if strings.Contains(logs.String(), "disabled orphan managed app") {
+		t.Fatalf("expected unchanged disabled orphan status to skip repeated log, got %q", logs.String())
 	}
 }
