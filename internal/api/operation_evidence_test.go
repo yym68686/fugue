@@ -182,6 +182,63 @@ func TestOperationDiagnosisConfidenceUsesEvidenceAndMissingEvidence(t *testing.T
 	if diagnosisResponse.Diagnosis.ConfirmedCause == nil || diagnosisResponse.Diagnosis.ConfirmedCause.Category != "application_startup_failure" {
 		t.Fatalf("expected confirmed application startup cause, got %+v", diagnosisResponse.Diagnosis.ConfirmedCause)
 	}
+
+	thirdSpec := app.Spec
+	thirdOp, err := stateStore.CreateOperation(model.Operation{TenantID: app.TenantID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &thirdSpec})
+	if err != nil {
+		t.Fatalf("create third operation: %v", err)
+	}
+	failed, err = stateStore.FailOperation(thirdOp.ID, "managed app rollout failed")
+	if err != nil {
+		t.Fatalf("fail third operation: %v", err)
+	}
+	_, err = stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     failed.ID,
+		Type:            model.OperationEvidenceTypeRolloutContainerTerminated,
+		Source:          model.OperationEvidenceSourceRolloutObserver,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceConfirmed,
+		Summary:         "container exited",
+		Reason:          "Error",
+		RedactionStatus: model.OperationEvidenceRedactionNone,
+	})
+	if err != nil {
+		t.Fatalf("record container evidence: %v", err)
+	}
+	currentLogEvidence, err := stateStore.RecordOperationEvidence(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     failed.ID,
+		Type:            model.OperationEvidenceTypeRolloutCurrentLogs,
+		Source:          model.OperationEvidenceSourceAppLogs,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceConfirmed,
+		Summary:         "captured current logs",
+		Message:         "startup failed",
+		RedactionStatus: model.OperationEvidenceRedactionRedacted,
+		Payload:         map[string]any{"log_tail": "startup failed: apply schema: ERROR: deadlock detected"},
+	})
+	if err != nil {
+		t.Fatalf("record current log evidence: %v", err)
+	}
+	diagnosisResponse = struct {
+		Diagnosis model.OperationDiagnosis `json:"diagnosis"`
+	}{}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+failed.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected current log diagnosis status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &diagnosisResponse)
+	if diagnosisResponse.Diagnosis.PrimaryEvidenceID != currentLogEvidence.ID {
+		t.Fatalf("expected current log evidence to beat container termination, got %+v", diagnosisResponse.Diagnosis)
+	}
+	if diagnosisResponse.Diagnosis.ConfirmedCause == nil || diagnosisResponse.Diagnosis.ConfirmedCause.Source != "current_container_logs" {
+		t.Fatalf("expected current container log cause, got %+v", diagnosisResponse.Diagnosis.ConfirmedCause)
+	}
 }
 
 func containsString(values []string, target string) bool {

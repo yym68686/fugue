@@ -94,8 +94,8 @@ func (s *Server) attachOperationEvidenceDiagnosis(ctx context.Context, op model.
 			evidenceLine = fmt.Sprintf("primary evidence %s (%s)", best.ID, best.Type)
 		}
 		diagnosis.Evidence = appendUniqueStrings(diagnosis.Evidence, evidenceLine)
-		if strings.TrimSpace(diagnosis.Hint) == "" && best.Type == model.OperationEvidenceTypeRolloutPreviousLogs {
-			diagnosis.Hint = "Inspect the confirmed previous container log evidence before retrying the deploy."
+		if strings.TrimSpace(diagnosis.Hint) == "" && (best.Type == model.OperationEvidenceTypeRolloutPreviousLogs || best.Type == model.OperationEvidenceTypeRolloutCurrentLogs) {
+			diagnosis.Hint = "Inspect the confirmed container log evidence before retrying the deploy."
 		}
 	}
 	if strings.EqualFold(op.Status, model.OperationStatusFailed) && !ok && shouldRequireFailureEvidence(diagnosis.Category) {
@@ -143,6 +143,7 @@ func shouldRequireFailureEvidence(category string) bool {
 func primaryDiagnosisEvidence(items []model.OperationEvidence) (model.OperationEvidence, bool) {
 	priority := map[string]int{
 		model.OperationEvidenceTypeRolloutPreviousLogs:        100,
+		model.OperationEvidenceTypeRolloutCurrentLogs:         99,
 		model.OperationEvidenceTypeImagePullFailure:           95,
 		model.OperationEvidenceTypeSchedulerFailure:           95,
 		model.OperationEvidenceTypeVolumeMountFailure:         95,
@@ -182,6 +183,9 @@ func operationDiagnosisCauseFromEvidence(e model.OperationEvidence) model.Operat
 	case model.OperationEvidenceTypeRolloutPreviousLogs:
 		category = "application_startup_failure"
 		source = "previous_container_logs"
+	case model.OperationEvidenceTypeRolloutCurrentLogs:
+		category = "application_startup_failure"
+		source = "current_container_logs"
 	case model.OperationEvidenceTypeImagePullFailure:
 		category = "image_pull_failure"
 		source = "kubernetes_event"
