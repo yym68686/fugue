@@ -1200,10 +1200,22 @@ build image -> run migration job -> deploy web -> verify -> mark release complet
 - [x] 如 API 影响前端消费，在 `fugue-web` 运行 `npm run openapi:sync`。
 - [x] 如 API 影响前端消费，在 `fugue-web` 运行 `npm run openapi:generate`。
 - [x] 如 API 影响前端消费，在 `fugue-web` 运行 `npm run contract:check`。
-- [ ] 控制平面变更通过 git push 到 `main` 触发 `.github/workflows/deploy-control-plane.yml`。
-- [ ] 部署后用 synthetic failing app 验证 evidence capture。
-- [ ] 部署后用成功 release 验证 release attempt completed timeline。
-- [ ] 部署后用失败 release 验证 confirmed/insufficient evidence 输出符合预期。
+- [x] 控制平面变更通过 git push 到 `main` 触发 `.github/workflows/deploy-control-plane.yml`。
+- [x] 部署后用 synthetic failing app 验证 evidence capture。
+- [x] 部署后用成功 release 验证 release attempt completed timeline。
+- [x] 部署后用失败 release 验证 confirmed/insufficient evidence 输出符合预期。
+
+
+### 发布后验证记录（2026-07-03）
+
+- 控制平面发布：`deploy-control-plane` workflow run `28645070952` 成功完成；随后诊断优先级修正 run `28645863570` 成功完成。
+- Synthetic app：`fugue-evidence-synth-1783063725`，tenant `ming ryan workspace 2faf73`，project `fugue-observability-synthetic`。
+- 成功 release：env patch `SYNTHETIC_OK=...` 创建 release attempt `rel_1783063918_e833db6609a4`，最终 `status=completed`，timeline 包含 `trigger_received`、`deploy_apply`、`rollout_wait`、`finalize`。
+- 失败 release：env patch `FAIL_STARTUP=1` 创建 release attempt `rel_1783063977_047e9eb6a48d`，operation `op_1783063977_a19f1acdebe0` 失败并采集 rollout evidence。
+- Evidence capture：失败 operation 捕获 `rollout_container_terminated`、`rollout_current_logs`、`rollout_kubernetes_event`、`rollout_deployment_snapshot`、`rollout_replicaset_snapshot`；首次启动即退出没有 previous logs 是 Kubernetes 语义预期，current logs 作为 confirmed application log evidence 使用。
+- Diagnosis：`fugue operation diagnose op_1783063977_a19f1acdebe0` 返回 `confidence=confirmed`，`primary_evidence_id=evid_1783063992_f129bf94895b`，`confirmed_cause.source=current_container_logs`，message 包含 `deadlock detected (SQLSTATE 40P01)`。
+- Debug bundle：operation debug bundle 包含 `metadata`、`operation`、`timeline`、`evidence`、`release_attempt`、`release_timeline`、`metrics_summary.release_research`；migration/schema/SQLSTATE/deadlock research counters 均有 confirmed synthetic 样本。
+- Cleanup：synthetic app 已执行 `app stop --wait`，保留 app/evidence 记录但释放运行意图。
 
 ## 21. 完成后的理想排障体验
 
