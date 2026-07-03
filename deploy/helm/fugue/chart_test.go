@@ -585,6 +585,8 @@ func TestObservabilityPrometheusIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"job_name: fugue-managed-postgres-pods",
 		"kubernetes_sd_configs:",
 		"regex: \"api|controller|edge|dns|telemetry-agent|observability-prometheus|.*-front\"",
+		"regex: \"api;http\"",
+		"action: drop",
 		"regex: \"http|metrics|health\"",
 		"replacement: /api/v1/nodes/$1/proxy/metrics",
 		"replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor",

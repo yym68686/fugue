@@ -46,6 +46,9 @@ data:
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
             regex: "api|controller|edge|dns|telemetry-agent|observability-prometheus|.*-front"
             action: keep
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component, __meta_kubernetes_pod_container_port_name]
+            regex: "api;http"
+            action: drop
           - source_labels: [__meta_kubernetes_pod_container_port_name]
             regex: "http|metrics|health"
             action: keep
