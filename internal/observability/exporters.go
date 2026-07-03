@@ -78,6 +78,10 @@ func (e MultiExporter) Export(ctx context.Context, events []Event) error {
 }
 
 func (e MultiExporter) ExportWithRetry(ctx context.Context, events []Event, attempts int) error {
+	return e.ExportWithRetryTimeout(ctx, events, attempts, 0)
+}
+
+func (e MultiExporter) ExportWithRetryTimeout(ctx context.Context, events []Event, attempts int, timeout time.Duration) error {
 	if attempts < 1 {
 		attempts = 1
 	}
@@ -87,7 +91,10 @@ func (e MultiExporter) ExportWithRetry(ctx context.Context, events []Event, atte
 		errs = nil
 		failed := remaining[:0]
 		for _, exporter := range remaining {
-			if err := exporter.Export(ctx, events); err != nil {
+			attemptCtx, cancel := exportAttemptContext(ctx, timeout)
+			err := exporter.Export(attemptCtx, events)
+			cancel()
+			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %w", exporter.Name(), err))
 				failed = append(failed, exporter)
 			}
@@ -105,6 +112,13 @@ func (e MultiExporter) ExportWithRetry(ctx context.Context, events []Event, atte
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func exportAttemptContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 type PrometheusRemoteWriteExporter struct {

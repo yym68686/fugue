@@ -150,6 +150,22 @@ func TestKubernetesLogCollectorKeepsNewestLinesWhenCapped(t *testing.T) {
 	}
 }
 
+func TestKubernetesLogTailLinesForRequestUsesFairShareCap(t *testing.T) {
+	cfg := Config{KubernetesLogTailLines: 2000}
+	if got := kubernetesLogTailLinesForRequest(cfg, 125); got != 125 {
+		t.Fatalf("expected request TailLines to use fair-share cap, got %d", got)
+	}
+	if got := kubernetesLogTailLinesForRequest(cfg, 5000); got != 2000 {
+		t.Fatalf("expected request TailLines to keep configured cap, got %d", got)
+	}
+	if got := kubernetesLogTailLinesForRequest(Config{}, 3); got != 3 {
+		t.Fatalf("expected default TailLines to still respect maxLines, got %d", got)
+	}
+	if got := kubernetesLogTailLinesForRequest(cfg, 0); got != 0 {
+		t.Fatalf("expected zero maxLines to disable log request, got %d", got)
+	}
+}
+
 func TestKubernetesLogCollectorRetainsPriorityRequestFactsWhenCapped(t *testing.T) {
 	pipeline := NewPipeline(Config{
 		Enabled:                       true,

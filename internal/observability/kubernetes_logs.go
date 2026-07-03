@@ -169,7 +169,7 @@ func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod c
 	if sinceSeconds < 5 {
 		sinceSeconds = 5
 	}
-	tailLines := cfg.KubernetesLogTailLines
+	tailLines := kubernetesLogTailLinesForRequest(cfg, maxLines)
 	options := &corev1.PodLogOptions{
 		Container:    container,
 		Timestamps:   true,
@@ -191,6 +191,20 @@ func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod c
 	defer stream.Close()
 
 	return c.ingestLogStream(logCtx, stream, pod, container, maxLines)
+}
+
+func kubernetesLogTailLinesForRequest(cfg Config, maxLines int) int64 {
+	tailLines := cfg.KubernetesLogTailLines
+	if tailLines <= 0 {
+		tailLines = DefaultKubernetesLogTailLines
+	}
+	if maxLines <= 0 {
+		return 0
+	}
+	if int64(maxLines) < tailLines {
+		return int64(maxLines)
+	}
+	return tailLines
 }
 
 func (c *kubernetesLogCollector) ingestLogStream(ctx context.Context, stream io.Reader, pod corev1.Pod, container string, maxLines int) int {

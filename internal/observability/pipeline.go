@@ -544,8 +544,6 @@ func (p *Pipeline) runBatchExporter() {
 
 func (p *Pipeline) exportBatch(batch []Event) {
 	p.batches.Add(1)
-	ctx, cancel := context.WithTimeout(p.ctx, p.cfg.ExportTimeout)
-	defer cancel()
 
 	attempts := p.cfg.RetryMaxAttempts
 	if attempts < 1 {
@@ -553,14 +551,20 @@ func (p *Pipeline) exportBatch(batch []Event) {
 	}
 	var err error
 	if multi, ok := p.exporter.(MultiExporter); ok {
-		err = multi.ExportWithRetry(ctx, batch, attempts)
+		ctx, cancel := context.WithTimeout(p.ctx, exportBatchTimeout(p.cfg.ExportTimeout, attempts, len(multi.exporters)))
+		defer cancel()
+		err = multi.ExportWithRetryTimeout(ctx, batch, attempts, p.cfg.ExportTimeout)
 		if err == nil {
 			p.exported.Add(uint64(len(batch)))
 			return
 		}
 	} else {
+		ctx, cancel := context.WithTimeout(p.ctx, exportBatchTimeout(p.cfg.ExportTimeout, attempts, 1))
+		defer cancel()
 		for attempt := 1; attempt <= attempts; attempt++ {
-			err = p.exporter.Export(ctx, batch)
+			attemptCtx, attemptCancel := exportAttemptContext(ctx, p.cfg.ExportTimeout)
+			err = p.exporter.Export(attemptCtx, batch)
+			attemptCancel()
 			if err == nil {
 				p.exported.Add(uint64(len(batch)))
 				return
@@ -576,6 +580,20 @@ func (p *Pipeline) exportBatch(batch []Event) {
 	}
 	p.exportErrors.Add(1)
 	p.recordError(fmt.Errorf("export via %s failed: %w", p.exporter.Name(), err))
+}
+
+func exportBatchTimeout(exportTimeout time.Duration, attempts int, exporterCount int) time.Duration {
+	if exportTimeout <= 0 {
+		exportTimeout = DefaultExportTimeout
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	if exporterCount < 1 {
+		exporterCount = 1
+	}
+	backoff := time.Duration(attempts*(attempts-1)/2) * 100 * time.Millisecond
+	return exportTimeout*time.Duration(attempts*exporterCount) + backoff + time.Second
 }
 
 func (p *Pipeline) runRuntimeLogTail(path string) {

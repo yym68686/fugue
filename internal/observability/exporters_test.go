@@ -154,6 +154,28 @@ func TestMultiExporterRetriesOnlyFailedExporters(t *testing.T) {
 	}
 }
 
+func TestMultiExporterTimeoutIsScopedPerExporter(t *testing.T) {
+	slow := &blockingExporter{name: "metrics"}
+	fast := &contextRecordingExporter{name: "analytics"}
+	multi := MultiExporter{exporters: []Exporter{slow, fast}}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	err := multi.ExportWithRetryTimeout(ctx, []Event{{Kind: EventKindLog}}, 1, 20*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "metrics") {
+		t.Fatalf("expected slow exporter error, got %v", err)
+	}
+	if slow.calls != 1 {
+		t.Fatalf("expected slow exporter to be called once, got %d", slow.calls)
+	}
+	if fast.calls != 1 {
+		t.Fatalf("expected later exporter to run with its own context, got %d calls", fast.calls)
+	}
+	if fast.lastErr != nil {
+		t.Fatalf("expected later exporter to receive a live context, got %v", fast.lastErr)
+	}
+}
+
 func TestLokiExporterPushesLogEventsWithAllowedLabels(t *testing.T) {
 	var payload lokiPushRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -495,6 +517,37 @@ func (e *recordingExporter) Export(context.Context, []Event) error {
 		return errors.New("temporary exporter failure")
 	}
 	return nil
+}
+
+type blockingExporter struct {
+	name  string
+	calls int
+}
+
+func (e *blockingExporter) Name() string {
+	return e.name
+}
+
+func (e *blockingExporter) Export(ctx context.Context, _ []Event) error {
+	e.calls++
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type contextRecordingExporter struct {
+	name    string
+	calls   int
+	lastErr error
+}
+
+func (e *contextRecordingExporter) Name() string {
+	return e.name
+}
+
+func (e *contextRecordingExporter) Export(ctx context.Context, _ []Event) error {
+	e.calls++
+	e.lastErr = ctx.Err()
+	return e.lastErr
 }
 
 func readAllString(t *testing.T, r *http.Request) string {

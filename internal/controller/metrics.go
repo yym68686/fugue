@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -297,10 +298,8 @@ func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
 		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_manifest_count", "Candidate manifest count in recent image-cache prune plans.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_prune_planned_bytes", "Planned delete bytes in recent image-cache prune plans.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_prune_skipped_count", "Protected manifest count in recent image-cache prune plans.", "gauge")
-		for _, plan := range plans {
-			labels := imageCacheMetricNodeLabels(plan.NodeID, plan.ClusterNodeName, plan.RuntimeID)
-			labels["mode"] = plan.Mode
-			labels["status"] = plan.Status
+		for _, plan := range latestImageCachePrunePlansByMetricLabels(plans) {
+			labels := imageCachePrunePlanMetricLabels(plan)
 			observability.WriteMetricSample(w, "fugue_image_cache_candidate_manifest_count", labels, float64(plan.CandidateManifestCount))
 			observability.WriteMetricSample(w, "fugue_image_cache_prune_planned_bytes", labels, float64(plan.PlannedDeleteBytes))
 			observability.WriteMetricSample(w, "fugue_image_cache_prune_skipped_count", labels, float64(plan.ProtectedManifestCount))
@@ -326,6 +325,51 @@ func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
 			observability.WriteMetricSample(w, "fugue_localpv_decommission_eligible", labels, boolGauge(inventory.SafeToDecommission))
 		}
 	}
+}
+
+func latestImageCachePrunePlansByMetricLabels(plans []model.ImageCachePrunePlan) []model.ImageCachePrunePlan {
+	latest := map[string]model.ImageCachePrunePlan{}
+	for _, plan := range plans {
+		key := imageCachePrunePlanMetricKey(plan)
+		current, ok := latest[key]
+		if !ok || plan.CreatedAt.After(current.CreatedAt) {
+			latest[key] = plan
+		}
+	}
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]model.ImageCachePrunePlan, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, latest[key])
+	}
+	return out
+}
+
+func imageCachePrunePlanMetricLabels(plan model.ImageCachePrunePlan) map[string]string {
+	labels := imageCacheMetricNodeLabels(plan.NodeID, plan.ClusterNodeName, plan.RuntimeID)
+	labels["mode"] = strings.TrimSpace(plan.Mode)
+	labels["status"] = strings.TrimSpace(plan.Status)
+	return labels
+}
+
+func imageCachePrunePlanMetricKey(plan model.ImageCachePrunePlan) string {
+	labels := imageCachePrunePlanMetricLabels(plan)
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var builder strings.Builder
+	for _, key := range keys {
+		builder.WriteString(key)
+		builder.WriteByte(0)
+		builder.WriteString(labels[key])
+		builder.WriteByte(0)
+	}
+	return builder.String()
 }
 
 func imageCacheMetricNodeLabels(nodeID, clusterNodeName, runtimeID string) map[string]string {
