@@ -968,6 +968,56 @@ func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *t
 	}
 }
 
+func TestImageCachePruneKeepsBlobsWhenDigestManifestStillServed(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: manifestDir,
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 0.01,
+			LowWatermarkPercent:  0.01,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 30,
+		},
+	}
+	configDigest := writeTestImageCacheBlob(t, storeDir, []byte(`{"config":"live"}`))
+	layerDigest := writeTestImageCacheBlob(t, storeDir, []byte("live-layer"))
+	manifest := testImageCacheManifest(configDigest, layerDigest)
+	manifestDigest := manifestBodyDigest([]byte(manifest))
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test/v2/fugue-apps/demo/manifests/fugue-live-abcdef123456", strings.NewReader(manifest))
+	put.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+	putRec := httptest.NewRecorder()
+	cache.registry.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("put status = %d, want %d; body=%q", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+	if err := cache.persistManifest("fugue-apps/demo", "fugue-live-abcdef123456", "application/vnd.oci.image.manifest.v1+json", []byte(manifest)); err != nil {
+		t.Fatalf("persist tag manifest: %v", err)
+	}
+
+	result := postImageCachePrune(t, cache, fmt.Sprintf(`{"dry_run":false,"allow_delete":true,"targets":[{"repo":"fugue-apps/demo","target":"fugue-live-abcdef123456","digest":%q}],"max_delete_bytes":"1Gi"}`, manifestDigest))
+
+	if !result.Deleted {
+		t.Fatalf("expected prune to delete selected manifest entries, got %+v", result)
+	}
+	head := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/manifests/"+manifestDigest, nil)
+	headRec := httptest.NewRecorder()
+	cache.ServeHTTP(headRec, head)
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("digest manifest status = %d, want %d; body=%q", headRec.Code, http.StatusOK, headRec.Body.String())
+	}
+	for _, digest := range []string{configDigest, layerDigest} {
+		if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); err != nil {
+			t.Fatalf("expected blob %s to remain while digest manifest is served: %v", digest, err)
+		}
+	}
+}
+
 func TestImageCacheBatchPruneDryRunDoesNotMutateFilesystem(t *testing.T) {
 	t.Parallel()
 

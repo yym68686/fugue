@@ -154,6 +154,68 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
+	t.Parallel()
+
+	stateStore, _, updaterToken, server := newImageCacheAdminAPITest(t, "Node Updater Image Cache Claim Tenant")
+	updaters, err := stateStore.ListNodeUpdaters("", true)
+	if err != nil {
+		t.Fatalf("list updaters: %v", err)
+	}
+	if len(updaters) != 1 {
+		t.Fatalf("expected one updater, got %+v", updaters)
+	}
+	updater := updaters[0]
+	digest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
+	reportImageCacheTestManifest(t, server, updaterToken, digest)
+	if _, err := stateStore.UpsertImage(model.Image{
+		TenantID:        "tenant_1",
+		AppID:           "app_1",
+		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo@" + digest,
+		CanonicalDigest: digest,
+		LifecycleState:  model.ImageLifecycleAvailable,
+	}); err != nil {
+		t.Fatalf("upsert image: %v", err)
+	}
+	rawTargets, err := json.Marshal([]map[string]string{{
+		"repo":   "fugue-apps/demo",
+		"target": "old",
+		"digest": digest,
+	}})
+	if err != nil {
+		t.Fatalf("marshal targets: %v", err)
+	}
+	task, err := stateStore.CreateNodeUpdateTask(model.Principal{
+		ActorType: model.ActorTypeSystem,
+		ActorID:   "test",
+		TenantID:  "tenant_1",
+		Scopes:    map[string]struct{}{"platform.admin": {}},
+	}, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		"dry_run":          "false",
+		"allow_delete":     "true",
+		"prune_reason":     "image-cache-orphan",
+		"targets_json":     string(rawTargets),
+		"min_manifest_age": "24h",
+	})
+	if err != nil {
+		t.Fatalf("create prune task: %v", err)
+	}
+	claim := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+task.ID+"/claim", updaterToken, nil)
+	if claim.Code != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d body=%s", claim.Code, claim.Body.String())
+	}
+	if !strings.Contains(claim.Body.String(), "not present in the latest prune plan") {
+		t.Fatalf("expected latest plan refusal, got %s", claim.Body.String())
+	}
+	failed, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusFailed)
+	if err != nil {
+		t.Fatalf("list failed tasks: %v", err)
+	}
+	if len(failed) != 1 || failed[0].ID != task.ID || !strings.Contains(failed[0].ErrorMessage, "latest prune plan") {
+		t.Fatalf("expected task to be failed by claim guard, got %+v", failed)
+	}
+}
+
 func TestNodeUpdaterLocalPVDecommissionCompletionWritesAudit(t *testing.T) {
 	t.Parallel()
 

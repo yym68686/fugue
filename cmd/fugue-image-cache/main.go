@@ -841,6 +841,7 @@ func (c *imageCache) executeImageCachePrunePlan(plan *imageCachePrunePlan) error
 	if plan == nil {
 		return nil
 	}
+	stillReferenced := map[string]struct{}{}
 	for _, record := range plan.deleteManifests {
 		if err := c.deleteLocalManifest(record.Repo, record.Target); err != nil {
 			return err
@@ -848,8 +849,14 @@ func (c *imageCache) executeImageCachePrunePlan(plan *imageCachePrunePlan) error
 		plan.Deleted = true
 		plan.DeletedBytes += record.SizeBytes
 		plan.DeletedManifests = append(plan.DeletedManifests, manifestEntry(record, nil))
+		for _, digest := range c.localManifestReferencedBlobDigests(record.Repo, record.Digest) {
+			stillReferenced[digest] = struct{}{}
+		}
 	}
 	for _, blob := range plan.deleteBlobs {
+		if _, ok := stillReferenced[blob.Digest]; ok {
+			continue
+		}
 		if err := os.Remove(blob.Path); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -877,6 +884,40 @@ func (c *imageCache) deleteLocalManifest(repo, target string) error {
 		}
 	}
 	return c.deletePersistedManifest(repo, target)
+}
+
+func (c *imageCache) localManifestReferencedBlobDigests(repo, target string) []string {
+	if c == nil || c.registry == nil {
+		return nil
+	}
+	target = normalizeImageCacheDigest(target)
+	if target == "" {
+		return nil
+	}
+	path := "/v2/" + strings.Trim(strings.TrimSpace(repo), "/") + "/manifests/" + target
+	req := httptestRequest(http.MethodGet, path, "", nil)
+	rec := &memoryResponseWriter{header: http.Header{}}
+	c.registry.ServeHTTP(rec, req)
+	if rec.statusCode() < 200 || rec.statusCode() >= 300 || rec.body.Len() == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, descriptor := range manifestReferencedTargets(rec.body.Bytes()) {
+		if descriptor.kind != registryTargetBlob {
+			continue
+		}
+		digest := normalizeImageCacheDigest(descriptor.target)
+		if digest == "" {
+			continue
+		}
+		if _, ok := seen[digest]; ok {
+			continue
+		}
+		seen[digest] = struct{}{}
+		out = append(out, digest)
+	}
+	return out
 }
 
 func manifestMatchesPruneTarget(record imageCacheManifestRecord, req imageCachePruneRequest) bool {

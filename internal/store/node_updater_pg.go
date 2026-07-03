@@ -482,6 +482,23 @@ RETURNING id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, c
 	return redactNodeUpdateTask(task), nil
 }
 
+func (s *Store) pgFailNodeUpdateTask(taskID, updaterID, message, errorMessage string) (model.NodeUpdateTask, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	task, err := scanNodeUpdateTask(s.db.QueryRowContext(ctx, `
+UPDATE fugue_node_update_tasks
+SET status = $3, result_message = $4, error_message = $5, completed_at = $6, updated_at = $6
+WHERE id = $1 AND node_updater_id = $2 AND status IN ($7, $8)
+RETURNING id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
+`, strings.TrimSpace(taskID), strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusFailed, strings.TrimSpace(message), strings.TrimSpace(errorMessage), now, model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning))
+	if err != nil {
+		return model.NodeUpdateTask{}, mapDBErr(err)
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
 func (s *Store) pgFindNodeUpdaterTarget(ctx context.Context, q sqlQueryer, updaterID, clusterNodeName, runtimeID string) (model.NodeUpdater, error) {
 	clauses := []string{}
 	args := []any{}
@@ -511,6 +528,16 @@ LIMIT 1`
 		return model.NodeUpdater{}, mapDBErr(err)
 	}
 	return updater, nil
+}
+
+func (s *Store) pgGetNodeUpdateTaskForUpdaterPublic(taskID, updaterID string) (model.NodeUpdateTask, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	task, err := s.pgGetNodeUpdateTaskForUpdater(ctx, taskID, updaterID)
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	return redactNodeUpdateTask(task), nil
 }
 
 func (s *Store) pgGetNodeUpdateTaskForUpdater(ctx context.Context, taskID, updaterID string) (model.NodeUpdateTask, error) {

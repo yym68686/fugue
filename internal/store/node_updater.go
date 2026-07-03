@@ -333,6 +333,28 @@ func (s *Store) ListPendingNodeUpdateTasks(updaterID string, limit int) ([]model
 	return tasks, err
 }
 
+func (s *Store) GetNodeUpdateTaskForUpdater(taskID, updaterID string) (model.NodeUpdateTask, error) {
+	if s.usingDatabase() {
+		return s.pgGetNodeUpdateTaskForUpdaterPublic(taskID, updaterID)
+	}
+	var task model.NodeUpdateTask
+	err := s.withLockedState(false, func(state *model.State) error {
+		index := findNodeUpdateTask(state, taskID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
+			return ErrNotFound
+		}
+		task = state.NodeUpdateTasks[index]
+		return nil
+	})
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
 func sortNodeUpdateTasksForDelivery(tasks []model.NodeUpdateTask) {
 	sort.SliceStable(tasks, func(i, j int) bool {
 		priorityI := nodeUpdateTaskDeliveryPriority(tasks[i])
@@ -448,6 +470,39 @@ func (s *Store) AppendNodeUpdateTaskLog(taskID, updaterID, message string) (mode
 			At:      now,
 			Message: strings.TrimSpace(message),
 		})
+		state.NodeUpdateTasks[index].UpdatedAt = now
+		task = state.NodeUpdateTasks[index]
+		return nil
+	})
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
+func (s *Store) FailNodeUpdateTask(taskID, updaterID, message, errorMessage string) (model.NodeUpdateTask, error) {
+	if s.usingDatabase() {
+		return s.pgFailNodeUpdateTask(taskID, updaterID, message, errorMessage)
+	}
+	var task model.NodeUpdateTask
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findNodeUpdateTask(state, taskID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
+			return ErrNotFound
+		}
+		switch state.NodeUpdateTasks[index].Status {
+		case model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning:
+		default:
+			return ErrConflict
+		}
+		now := time.Now().UTC()
+		state.NodeUpdateTasks[index].Status = model.NodeUpdateTaskStatusFailed
+		state.NodeUpdateTasks[index].ResultMessage = strings.TrimSpace(message)
+		state.NodeUpdateTasks[index].ErrorMessage = strings.TrimSpace(errorMessage)
+		state.NodeUpdateTasks[index].CompletedAt = &now
 		state.NodeUpdateTasks[index].UpdatedAt = now
 		task = state.NodeUpdateTasks[index]
 		return nil

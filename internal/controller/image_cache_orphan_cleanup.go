@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/imagecachekeys"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -735,73 +736,15 @@ func parseControllerImageCacheByteSize(raw string) int64 {
 }
 
 func controllerImageReferenceKeys(imageRef, digest string) []string {
-	imageRef = strings.TrimSpace(imageRef)
-	keys := []string{}
-	if imageRef != "" {
-		keys = append(keys, strings.ToLower(imageRef))
-		ref := strings.TrimPrefix(imageRef, "http://")
-		ref = strings.TrimPrefix(ref, "https://")
-		withoutRegistry := ref
-		firstSegment := strings.SplitN(withoutRegistry, "/", 2)[0]
-		if strings.Contains(firstSegment, ".") || strings.Contains(firstSegment, ":") {
-			if slash := strings.Index(withoutRegistry, "/"); slash >= 0 {
-				withoutRegistry = withoutRegistry[slash+1:]
-			}
-		}
-		if repo, target, ok := splitControllerImageRepoTarget(withoutRegistry); ok {
-			keys = append(keys, controllerManifestReferenceKeys(repo, target, digest, "")...)
-		}
-	}
-	if digest = normalizeControllerImageCacheDigest(digest); digest != "" {
-		keys = append(keys, digest)
-	}
-	return dedupeControllerStrings(keys)
+	return imagecachekeys.ImageReferenceKeys(imageRef, digest)
 }
 
 func controllerManifestReferenceKeys(repo, target, digest, imageRef string) []string {
-	repo = strings.Trim(strings.TrimSpace(repo), "/")
-	target = strings.TrimSpace(target)
-	digest = normalizeControllerImageCacheDigest(digest)
-	keys := []string{}
-	if repo != "" && target != "" {
-		keys = append(keys, strings.ToLower(repo+":"+target))
-	}
-	if repo != "" && digest != "" {
-		keys = append(keys, strings.ToLower(repo+"@"+digest))
-	}
-	if digest != "" {
-		keys = append(keys, digest)
-	}
-	if imageRef != "" {
-		keys = append(keys, controllerImageReferenceKeys(imageRef, digest)...)
-	}
-	return dedupeControllerStrings(keys)
-}
-
-func splitControllerImageRepoTarget(ref string) (string, string, bool) {
-	ref = strings.Trim(strings.TrimSpace(ref), "/")
-	if ref == "" {
-		return "", "", false
-	}
-	if strings.Contains(ref, "@") {
-		parts := strings.SplitN(ref, "@", 2)
-		return strings.Trim(parts[0], "/"), strings.TrimSpace(parts[1]), true
-	}
-	if idx := strings.LastIndex(ref, ":"); idx > 0 && idx+1 < len(ref) {
-		return strings.Trim(ref[:idx], "/"), strings.TrimSpace(ref[idx+1:]), true
-	}
-	return ref, "latest", true
+	return imagecachekeys.ManifestReferenceKeys(repo, target, digest, imageRef)
 }
 
 func normalizeControllerImageCacheDigest(digest string) string {
-	digest = strings.ToLower(strings.TrimSpace(digest))
-	if strings.HasPrefix(digest, "@") {
-		digest = strings.TrimPrefix(digest, "@")
-	}
-	if strings.HasPrefix(digest, "sha256:") {
-		return digest
-	}
-	return ""
+	return imagecachekeys.NormalizeDigest(digest)
 }
 
 func addControllerImageKeys(set map[string]struct{}, keys ...string) {

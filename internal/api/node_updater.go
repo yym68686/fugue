@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -16,8 +17,9 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion   = "v12"
-	staleNodeUpdateTaskTimeout = 2 * time.Hour
+	nodeUpdaterScriptVersion        = "v12"
+	staleNodeUpdateTaskTimeout      = 2 * time.Hour
+	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 )
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -237,12 +239,158 @@ func (s *Server) handleNodeUpdaterTasks(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleNodeUpdaterClaimTask(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	current, err := s.store.GetNodeUpdateTaskForUpdater(r.PathValue("id"), principal.ActorID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if reason, err := s.refuseUnsafeNodeUpdateTaskClaim(r, current); err != nil {
+		s.writeStoreError(w, err)
+		return
+	} else if reason != "" {
+		failed, failErr := s.store.FailNodeUpdateTask(current.ID, principal.ActorID, "node update task refused before execution", reason)
+		if failErr != nil {
+			s.writeStoreError(w, failErr)
+			return
+		}
+		s.appendNodeUpdateTaskMaintenanceAudit(principal, failed)
+		httpx.WriteError(w, http.StatusConflict, reason)
+		return
+	}
 	task, err := s.store.ClaimNodeUpdateTask(r.PathValue("id"), principal.ActorID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"task": task})
+}
+
+func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.NodeUpdateTask) (string, error) {
+	if task.Type != model.NodeUpdateTaskTypePruneImageCache {
+		return "", nil
+	}
+	if !nodeUpdatePayloadBool(task.Payload["allow_delete"]) || nodeUpdatePayloadBool(task.Payload["dry_run"]) {
+		return "", nil
+	}
+	targets, err := imageCachePruneTaskValidationTargets(task.Payload)
+	if err != nil {
+		return "", err
+	}
+	if len(targets) == 0 {
+		if strings.TrimSpace(task.Payload["prune_reason"]) == "image-cache-orphan" {
+			return "refuse prune-image-cache delete task before execution: orphan delete task has no explicit targets_json", nil
+		}
+		return "", nil
+	}
+	if !task.CreatedAt.IsZero() && time.Since(task.CreatedAt) > imageCachePruneDeleteTaskMaxAge {
+		return fmt.Sprintf("refuse prune-image-cache delete task before execution: task age %s exceeds %s; recompute a fresh plan", time.Since(task.CreatedAt).Round(time.Second), imageCachePruneDeleteTaskMaxAge), nil
+	}
+	plan, err := s.computeImageCachePrunePlanWithOptions(r, model.ImageCachePrunePlanFilter{
+		NodeID:          task.MachineID,
+		ClusterNodeName: task.ClusterNodeName,
+		RuntimeID:       task.RuntimeID,
+		Mode:            model.ImageCachePruneModeDelete,
+	}, imageCachePrunePlanOptions{skipNodeUpdateTaskID: task.ID})
+	if err != nil {
+		return "", err
+	}
+	for _, target := range targets {
+		candidate, ok := imageCachePrunePlanCandidateForTaskTarget(plan.Candidates, target)
+		if !ok {
+			return fmt.Sprintf("refuse prune-image-cache delete task before execution: target %s is not present in the latest prune plan for node %s; it is stale or protected by current control-plane state", target.String(), firstNonEmptyImageAPIString(task.ClusterNodeName, task.MachineID, task.RuntimeID)), nil
+		}
+		if unsafe := imageCacheAutomaticDeleteUnsafeCandidateReason(candidate.Reason); unsafe != "" {
+			return fmt.Sprintf("refuse prune-image-cache delete task before execution: target %s now has unsafe candidate reason %q", target.String(), candidate.Reason), nil
+		}
+		if candidate.Protected {
+			return fmt.Sprintf("refuse prune-image-cache delete task before execution: target %s is protected by %q", target.String(), candidate.SkipReason), nil
+		}
+	}
+	return "", nil
+}
+
+type imageCachePruneTaskValidationTarget struct {
+	Repo     string `json:"repo"`
+	Target   string `json:"target"`
+	Digest   string `json:"digest"`
+	ImageRef string `json:"image_ref"`
+}
+
+func (target imageCachePruneTaskValidationTarget) String() string {
+	if strings.TrimSpace(target.ImageRef) != "" {
+		return strings.TrimSpace(target.ImageRef)
+	}
+	if strings.TrimSpace(target.Repo) != "" && strings.TrimSpace(target.Digest) != "" {
+		return strings.Trim(strings.TrimSpace(target.Repo), "/") + "@" + strings.TrimSpace(target.Digest)
+	}
+	if strings.TrimSpace(target.Repo) != "" && strings.TrimSpace(target.Target) != "" {
+		return strings.Trim(strings.TrimSpace(target.Repo), "/") + ":" + strings.TrimSpace(target.Target)
+	}
+	return strings.TrimSpace(target.Digest)
+}
+
+func imageCachePruneTaskValidationTargets(payload map[string]string) ([]imageCachePruneTaskValidationTarget, error) {
+	out := []imageCachePruneTaskValidationTarget{}
+	if raw := strings.TrimSpace(payload["targets_json"]); raw != "" {
+		var targets []imageCachePruneTaskValidationTarget
+		if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+			return nil, fmt.Errorf("decode image-cache prune targets_json: %w", err)
+		}
+		out = append(out, targets...)
+	}
+	if imageRef := strings.TrimSpace(payload["image_ref"]); imageRef != "" || strings.TrimSpace(payload["digest"]) != "" {
+		out = append(out, imageCachePruneTaskValidationTarget{
+			ImageRef: imageRef,
+			Digest:   strings.TrimSpace(payload["digest"]),
+		})
+	}
+	return out, nil
+}
+
+func imageCachePrunePlanCandidateForTaskTarget(candidates []model.ImageCachePruneCandidate, target imageCachePruneTaskValidationTarget) (model.ImageCachePruneCandidate, bool) {
+	targetKeys := manifestReferenceKeys(target.Repo, target.Target, target.Digest, target.ImageRef)
+	if len(targetKeys) == 0 {
+		targetKeys = imageReferenceKeys(target.ImageRef, target.Digest)
+	}
+	for _, candidate := range candidates {
+		candidateKeys := manifestReferenceKeys(candidate.Repo, candidate.Target, candidate.Digest, candidate.ImageRef)
+		if keySetContainsAny(keySetFromValues(candidateKeys), targetKeys...) {
+			return candidate, true
+		}
+	}
+	return model.ImageCachePruneCandidate{}, false
+}
+
+func keySetFromValues(values []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out[value] = struct{}{}
+	}
+	return out
+}
+
+func imageCacheAutomaticDeleteUnsafeCandidateReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "missing_control_plane_image", "lost_image":
+		return ""
+	case "":
+		return "missing candidate reason"
+	default:
+		return "unsafe candidate reason " + reason
+	}
+}
+
+func nodeUpdatePayloadBool(value string) bool {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleNodeUpdaterLogTask(w http.ResponseWriter, r *http.Request) {

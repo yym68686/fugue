@@ -161,6 +161,37 @@ func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testin
 	}
 }
 
+func TestControllerImageCacheProtectsDigestWorkloadRef(t *testing.T) {
+	t.Parallel()
+
+	digest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
+	protected := controllerImageCacheProtectedSet{
+		availableRefs:        map[string]struct{}{},
+		lostRefs:             map[string]struct{}{},
+		deletedRefs:          map[string]struct{}{},
+		pinnedRefs:           map[string]struct{}{},
+		liveRefs:             map[string]struct{}{},
+		taskRefs:             map[string]struct{}{},
+		minReplicaRefs:       map[string]struct{}{},
+		replicaCandidateRefs: map[string][]controllerImageCacheReplicaCandidate{},
+	}
+	addControllerImageKeys(protected.liveRefs, controllerImageReferenceKeys("registry.fugue.internal:5000/fugue-apps/demo@"+digest, "")...)
+	created := time.Now().UTC().Add(-48 * time.Hour)
+	candidate := (&Service{}).controllerImageCacheCandidate(model.ImageCacheManifest{
+		Repo:              "fugue-apps/demo",
+		Target:            "fugue-live-570d3b2870631",
+		Digest:            digest,
+		ManifestSizeBytes: 100,
+		TotalBlobBytes:    500,
+		CreatedAtObserved: &created,
+		LastSeenAt:        created,
+		Present:           true,
+	}, protected, time.Now().UTC())
+	if !candidate.Protected || candidate.SkipReason != "current_workload" {
+		t.Fatalf("expected digest workload ref to protect cache manifest, got %+v", candidate)
+	}
+}
+
 func TestScheduleOrphanImageCachePruneDeleteHaltsUnsafeCandidateReasons(t *testing.T) {
 	t.Parallel()
 

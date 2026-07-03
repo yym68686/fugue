@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/imagecachekeys"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -19,6 +20,10 @@ const (
 	defaultImageCachePruneMaxDeleteByte = int64(1 << 30)
 	defaultImageCachePruneMaxTargets    = 50
 )
+
+type imageCachePrunePlanOptions struct {
+	skipNodeUpdateTaskID string
+}
 
 func (s *Server) handleNodeUpdaterReportImageCacheInventory(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -396,6 +401,10 @@ func imageCacheInventorySnapshotComplete(req imageCacheInventoryReport, reported
 }
 
 func (s *Server) computeImageCachePrunePlan(r *http.Request, filter model.ImageCachePrunePlanFilter) (model.ImageCachePrunePlan, error) {
+	return s.computeImageCachePrunePlanWithOptions(r, filter, imageCachePrunePlanOptions{})
+}
+
+func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter model.ImageCachePrunePlanFilter, options imageCachePrunePlanOptions) (model.ImageCachePrunePlan, error) {
 	mode := normalizeImageCachePruneAPIMode(filter.Mode)
 	if mode == "" {
 		mode = model.ImageCachePruneModeObserve
@@ -425,7 +434,9 @@ func (s *Server) computeImageCachePrunePlan(r *http.Request, filter model.ImageC
 		return model.ImageCachePrunePlan{}, err
 	}
 	protected := imageCacheProtectedSet{}
-	if err := s.populateImageCacheProtectedSet(r, &protected); err != nil {
+	if err := s.populateImageCacheProtectedSetWithOptions(r, &protected, imageCacheProtectedSetOptions{
+		skipNodeUpdateTaskID: options.skipNodeUpdateTaskID,
+	}); err != nil {
 		return model.ImageCachePrunePlan{}, err
 	}
 	now := time.Now().UTC()
@@ -489,7 +500,15 @@ type imageCacheReplicaCandidate struct {
 	Reason          string
 }
 
+type imageCacheProtectedSetOptions struct {
+	skipNodeUpdateTaskID string
+}
+
 func (s *Server) populateImageCacheProtectedSet(r *http.Request, protected *imageCacheProtectedSet) error {
+	return s.populateImageCacheProtectedSetWithOptions(r, protected, imageCacheProtectedSetOptions{})
+}
+
+func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, protected *imageCacheProtectedSet, options imageCacheProtectedSetOptions) error {
 	protected.availableRefs = map[string]struct{}{}
 	protected.lostRefs = map[string]struct{}{}
 	protected.deletedRefs = map[string]struct{}{}
@@ -555,6 +574,9 @@ func (s *Server) populateImageCacheProtectedSet(r *http.Request, protected *imag
 			return err
 		}
 		for _, task := range tasks {
+			if strings.TrimSpace(options.skipNodeUpdateTaskID) != "" && task.ID == strings.TrimSpace(options.skipNodeUpdateTaskID) {
+				continue
+			}
 			addKeys(protected.taskRefs, imageReferenceKeys(task.Payload["image_ref"], task.Payload["digest"])...)
 			addKeys(protected.taskRefs, imageReferenceKeys(task.Payload["images"], "")...)
 			if raw := strings.TrimSpace(task.Payload["targets_json"]); raw != "" {
@@ -817,54 +839,11 @@ func normalizeImageCachePruneAPIMode(raw string) string {
 }
 
 func imageReferenceKeys(ref, digest string) []string {
-	refs := strings.Fields(strings.NewReplacer(",", " ").Replace(strings.TrimSpace(ref)))
-	out := []string{}
-	for _, value := range refs {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		out = append(out, value)
-		withoutRegistry := value
-		if idx := strings.Index(withoutRegistry, "/"); idx >= 0 && strings.Contains(withoutRegistry[:idx], ".") || strings.Contains(strings.SplitN(withoutRegistry, "/", 2)[0], ":") {
-			if slash := strings.Index(withoutRegistry, "/"); slash >= 0 {
-				withoutRegistry = withoutRegistry[slash+1:]
-			}
-		}
-		out = append(out, withoutRegistry)
-		if strings.Contains(withoutRegistry, "@") {
-			parts := strings.SplitN(withoutRegistry, "@", 2)
-			out = append(out, parts[0], parts[1])
-		} else if idx := strings.LastIndex(withoutRegistry, ":"); idx > 0 {
-			out = append(out, withoutRegistry[:idx], withoutRegistry[idx+1:])
-		}
-	}
-	if strings.TrimSpace(digest) != "" {
-		out = append(out, strings.TrimSpace(digest))
-	}
-	return uniqueNonEmptyStrings(out)
+	return imagecachekeys.ImageReferenceKeys(ref, digest)
 }
 
 func manifestReferenceKeys(repo, target, digest, imageRef string) []string {
-	keys := imageReferenceKeys(imageRef, digest)
-	repo = strings.Trim(strings.TrimSpace(repo), "/")
-	target = strings.TrimSpace(target)
-	if repo != "" {
-		keys = append(keys, repo)
-		if target != "" {
-			keys = append(keys, repo+":"+target, repo+"@"+target)
-		}
-	}
-	if target != "" {
-		keys = append(keys, target)
-	}
-	if digest != "" {
-		keys = append(keys, digest)
-		if repo != "" {
-			keys = append(keys, repo+"@"+digest)
-		}
-	}
-	return uniqueNonEmptyStrings(keys)
+	return imagecachekeys.ManifestReferenceKeys(repo, target, digest, imageRef)
 }
 
 func addKeys(set map[string]struct{}, values ...string) {
