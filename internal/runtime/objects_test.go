@@ -867,8 +867,8 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if spec["progressDeadlineSeconds"] != appProgressDeadlineSeconds {
 		t.Fatalf("expected progressDeadlineSeconds=%d, got %#v", appProgressDeadlineSeconds, spec["progressDeadlineSeconds"])
 	}
-	if spec["minReadySeconds"] != appServiceMinReadySeconds {
-		t.Fatalf("expected minReadySeconds=%d, got %#v", appServiceMinReadySeconds, spec["minReadySeconds"])
+	if spec["minReadySeconds"] != int(appStrictDrainSeconds) {
+		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", appStrictDrainSeconds, spec["minReadySeconds"])
 	}
 	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
 	if rollingUpdate["maxUnavailable"] != 0 {
@@ -907,11 +907,63 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if got := containers[0]["imagePullPolicy"]; got != "Always" {
 		t.Fatalf("expected tagged images to use imagePullPolicy Always, got %#v", got)
 	}
+	lifecycle := containers[0]["lifecycle"].(map[string]any)
+	preStop := lifecycle["preStop"].(map[string]any)
+	sleep := preStop["sleep"].(map[string]any)
+	if got := sleep["seconds"]; got != appStrictDrainSeconds {
+		t.Fatalf("expected steady-state stateless app strict drain sleep=%d, got %#v", appStrictDrainSeconds, got)
+	}
+	if got := podSpec["terminationGracePeriodSeconds"]; got != appStrictDrainSeconds+appStrictDrainStopBuffer {
+		t.Fatalf("expected steady-state stateless app terminationGracePeriodSeconds=%d, got %#v", appStrictDrainSeconds+appStrictDrainStopBuffer, got)
+	}
+	if got := annotations["fugue.io/drain-mode"]; got != "strict-zero-downtime" {
+		t.Fatalf("expected steady-state stateless app strict drain annotation, got %#v", got)
+	}
+}
+
+func TestBuildAppDeploymentDoesNotAddStrictDrainForDowntimeRequiredDurableSteadyState(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+			Workspace: &model.AppWorkspaceSpec{},
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	var deployment map[string]any
+	for _, object := range objects {
+		if object["kind"] == "Deployment" {
+			deployment = object
+			break
+		}
+	}
+	if deployment == nil {
+		t.Fatal("expected Deployment object")
+	}
+	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if annotations["fugue.io/downtime-class"] != "downtime-required" {
+		t.Fatalf("expected durable steady-state app downtime-required, got %#v", annotations["fugue.io/downtime-class"])
+	}
+	spec := deployment["spec"].(map[string]any)
+	template := spec["template"].(map[string]any)
+	podSpec := template["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
 	if _, ok := containers[0]["lifecycle"]; ok {
-		t.Fatalf("expected steady-state stateless app not to get strict drain lifecycle without online rollout intent")
+		t.Fatalf("expected downtime-required durable steady-state app not to get strict drain lifecycle")
 	}
 	if _, ok := podSpec["terminationGracePeriodSeconds"]; ok {
-		t.Fatalf("expected steady-state stateless app not to set terminationGracePeriodSeconds without explicit app spec or online rollout intent")
+		t.Fatalf("expected downtime-required durable steady-state app not to set terminationGracePeriodSeconds")
+	}
+	if got := spec["minReadySeconds"]; got != appServiceMinReadySeconds {
+		t.Fatalf("expected default minReadySeconds=%d for durable steady-state app, got %#v", appServiceMinReadySeconds, got)
+	}
+	if got := annotations["fugue.io/drain-mode"]; got != "" {
+		t.Fatalf("expected no strict drain annotation for durable steady-state app, got %#v", got)
 	}
 }
 

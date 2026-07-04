@@ -1914,9 +1914,13 @@ func appRolloutIntentIsOnlineDurable(intent string) bool {
 }
 
 func appUsesStrictZeroDowntimeDrain(app model.App) bool {
-	return appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) &&
-		model.AppHasClusterService(app.Spec) &&
-		app.Spec.Replicas > 0
+	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
+		return false
+	}
+	if appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) {
+		return true
+	}
+	return normalizeRuntimeAppWorkspaceSpec(app) == nil && normalizeRuntimeAppPersistentStorageSpec(app) == nil
 }
 
 func deploymentRolloutAnnotations(app model.App) map[string]string {
