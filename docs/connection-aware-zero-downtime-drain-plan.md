@@ -799,6 +799,7 @@ fixed-sleep
 - drain-agent readiness 先于 app 容器。
 - 在 manifest 测试和 e2e 测试覆盖。
 - 如 capability 不满足，fallback fixed-sleep。
+- drain-agent 收到 `SIGTERM` / `SIGINT` 时不得立刻退出：必须保持 HTTP server 存活，等待 app container `preStop` 请求开始并完成；只有没有收到 `preStop` 请求时才按短等待退出。
 
 ### 风险 4：proc 观测不准确
 
@@ -810,6 +811,7 @@ fixed-sleep
 - quiet period。
 - 只在稳定验证后扩大默认启用。
 - 日志记录每次采样和最终 reason。
+- sample 日志必须节流；`fugue_drain_start` / `fugue_drain_complete` 必打，`fugue_drain_sample` 只在首条、连接数/状态变化、或固定间隔时输出，避免长连接 drain 的高频 sample 淹没最终 reason。
 
 ### 风险 5：control plane 升级引发全量 app rollout
 
@@ -830,6 +832,107 @@ fixed-sleep
 - connection-aware strict drain Pod 启用 `shareProcessNamespace: true`。
 - runtime manifest 测试覆盖 connection-aware 启用该字段、fixed-sleep fallback 不启用该字段。
 - 排障时同时查看 drain-agent 日志、Pod `deletionTimestamp` / `deletionGracePeriodSeconds`、业务容器 `ps -ef`，确认是否是 PID 1 signal 语义导致。
+
+### 风险 7：native sidecar 先收到终止信号，打断 preStop 观测
+
+现象：Kubelet 开始删除 Pod 时，native sidecar drain-agent 和 app container 会出现同一秒 `Stopping container ...` event；如果 drain-agent 按默认信号语义立即退出，app container 的 `preStop` HTTP hook 可能在 quiet period / timeout 完成前被打断，导致缺少 `fugue_drain_complete` 证据，甚至失去 connection-aware drain 保护。
+
+缓解：
+
+- drain-agent 安装 `SIGTERM` / `SIGINT` handler。
+- 收到首个终止信号时记录 `termination_signal action=wait_for_prestop_or_drain`，继续服务 `/drain/prestop`。
+- 若 `preStop` 已开始或稍后开始，则等待 drain 完成后再关闭 HTTP server。
+- 若没有 `preStop` 请求，则最多短等 `defaultPreStopSignalWait=30s` 后退出，避免异常场景无限阻塞。
+- 第二个终止信号强制退出，保留人工止血能力。
+
+### 风险 8：短生命周期终止日志未进入 app logs backend
+
+现象：canary 短 drain 在 Kubernetes `cluster logs` 中可读，但 `fugue app logs query` 有时没有摄取到旧 Pod 终止瞬间的 drain-agent 日志；这会影响事后从 app logs backend 直接查 `reason=idle/timeout`。
+
+缓解：
+
+- drain-agent sample 日志节流到默认 10s，降低日志量，避免高频 sample 淹没 `complete`。
+- runbook 以 `fugue admin cluster logs --namespace <ns> --pod <pod> --container fugue-drain-agent` 作为终止窗口内的一手证据。
+- CLI diagnosis / runbook 必须同时支持 Kubernetes events、cluster logs、metrics 三类证据；如果 app logs backend 无法给出完整 reason，不把它当作唯一事实源。
+
+## 最终线上验证数据（2026-07-04 UTC）
+
+### 发布与控制平面
+
+- 最终代码提交：`370c5c9344d505c1e66a33f971689bed887449ad`。
+- GitHub Actions：`deploy-control-plane` run `28717201884` 成功；build `5m25s`，deploy `1m40s`。
+- 线上控制平面：`version=370c5c9344d505c1e66a33f971689bed887449ad`，`live_version=370c5c9344d505c1e66a33f971689bed887449ad`，`status=ready`。
+- 线上 controller env：
+  - `FUGUE_STRICT_DRAIN_MODE=connection-aware`
+  - `FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS=600`
+  - `FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS=2`
+  - `FUGUE_STRICT_DRAIN_MIN_READY_SECONDS=10`
+  - `FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED=true`
+  - `FUGUE_DRAIN_AGENT_IMAGE_TAG=370c5c9344d505c1e66a33f971689bed887449ad`
+
+### canary 验证：`drain-canary-0705`
+
+- 当前稳定状态：`status=deployed`，operation `op_1783194242_6e9627279eed`，Pod `app-1783188884-8facd2b054e6-97bcd8cd9-cqw9r` ready/running。
+- 当前 Pod 使用 `fugue-drain-agent:370c5c9344d505c1e66a33f971689bed887449ad`。
+- manifest 证据：
+  - `shareProcessNamespace: true`
+  - `terminationGracePeriodSeconds: 630`
+  - app container `preStop.httpGet.path=/drain/prestop`
+  - app container `preStop.httpGet.port=19090`
+  - native sidecar initContainer `fugue-drain-agent` `restartPolicy=Always`
+- 无连接 rollout：
+  - operation `op_1783193868_91b2009f513a`
+  - 新 Pod first ready：`2026-07-04T19:37:57Z`
+  - 旧 Pod `app-1783188884-8facd2b054e6-68597fd7db-f599h` `Killing` event：`2026-07-04T19:38:06Z`
+  - 旧 Pod 没有等待 600s；从新 Pod ready 到旧 Pod Killing 约 9s。
+- 长连接 rollout：
+  - operation `op_1783194044_ca8a1670f27b`
+  - 测试请求：`/stream?seconds=40&interval=1`
+  - curl 退出码 `0`，收到 `40/40` 行。
+  - rollout 期间旧 rev11 Pod 保留到 stream 完成后才退出，未提前中断连接。
+- 600s hard timeout rollout：
+  - operation `op_1783194242_6e9627279eed`
+  - 测试请求：`/stream?seconds=700&interval=1`
+  - 旧 Pod drain-agent cluster logs 最后活跃样本：`waited_ms=599617 active_connections=1 states=ESTABLISHED:1`
+  - stream 在 `627/700` 行结束；整体测试 elapsed `630s`，证明没有早于 600s 掐断，也没有等待到 700s，自然受 hard deadline 截断。
+- drain-agent idle 日志 / metrics：
+  - 手动调用当前 Pod `/drain/prestop` 返回 `{"reason":"idle","waited_ms":2599,"active_connections":0,"max_active_connections":0,"observer_errors":0}`。
+  - cluster logs 包含 `fugue_drain_complete reason=idle waited_ms=2599 active_connections=0 max_active_connections=0 observer_errors=0`。
+  - metrics 包含：
+    - `fugue_app_drain_prestop_requests_total 1`
+    - `fugue_app_drain_early_exit_total 1`
+    - `fugue_app_drain_wait_seconds 2.599`
+- drain-agent timeout 日志：
+  - 在当前 Pod 上打开 700s stream 后手动调用 `/drain/prestop`，返回 `{"reason":"timeout","waited_ms":600399,"active_connections":1,"max_active_connections":1,"observer_errors":0}`。
+  - cluster logs 包含 `fugue_drain_complete reason=timeout waited_ms=600399 active_connections=1 max_active_connections=1 observer_errors=0`。
+
+### 0-0 验证：`uni-api-web-api`
+
+- 当前稳定状态：`status=deployed`，Pod `app-1778958829-7a965e0863ed-59b497d8b8-47bv8` ready/running。
+- 当前 Pod 使用 `fugue-drain-agent:370c5c9344d505c1e66a33f971689bed887449ad`。
+- manifest 证据：
+  - `shareProcessNamespace: true`
+  - `terminationGracePeriodSeconds: 630`
+  - app container `preStop.httpGet.path=/drain/prestop`
+  - app container `preStop.httpGet.port=19090`
+  - native sidecar initContainer `fugue-drain-agent` `restartPolicy=Always`
+- runtime diagnosis evidence：`strict drain mode=connection-aware timeout_seconds=600 quiet_period_seconds=2 agent_port=19090 termination_grace_min_seconds=630`。
+- 0-0 drain-agent 升级 rollout：
+  - 新 Pod `app-1778958829-7a965e0863ed-59b497d8b8-47bv8` 创建 / pull drain-agent `370c5c...`：`2026-07-04T19:36:14Z`
+  - 旧 Pod `app-1778958829-7a965e0863ed-d7f757d6c-hhc9r` `Killing` / `SuccessfulDelete`：`2026-07-04T19:36:27Z`
+  - 旧 Pod 没有等待 600s。
+- 0-0 image tracking / image-only operation：
+  - 当前 `last_operation_id=op_1783186750_fddb86d87beb`
+  - image tracking latest decision：tracked digest already matches app desired source / already deployed。
+  - 自 `2026-07-04T17:38:00Z` 起，Fugue edge 5xx count `0`。
+  - 自 `2026-07-04T17:38:00Z` 起，0-0 业务表 `llm_usage_events` 5xx total `0`。
+- 最终控制平面发布窗口：
+  - 自 `2026-07-04T19:29:00Z` 起，Fugue edge 5xx count `0`。
+  - 自 `2026-07-04T19:29:00Z` 起，0-0 业务表 `llm_usage_events` 5xx total `0`。
+- `context.Canceled` / client canceled 验证：
+  - 受控客户端主动断开 streaming request 后，0-0 业务表 `llm_usage_events` 在 `2026-07-04T19:47:37.726847Z` 记录 `/v1/responses` `status_code=499`。
+  - 该 499 记录 `input_tokens=0`、`output_tokens=0`、`total_tokens=0`，符合 client/request canceled 不扣费预期。
+  - Fugue edge request logs 对已经发出 response header 的 streaming 请求可能仍显示 edge-level `200`；判断 0-0 应用层 cancel 语义必须以业务表 `llm_usage_events.status_code=499` 为准。
 
 ## 回滚方案
 
@@ -872,6 +975,8 @@ preStop:
 - [x] 实现 fail-closed observer error 策略。
 - [x] 实现结构化日志。
 - [x] 实现 Prometheus metrics。
+- [x] 实现 drain-agent 收到 SIGTERM / SIGINT 后等待 preStop drain 完成，避免 native sidecar 提前退出。
+- [x] 实现 drain sample 日志节流，避免长连接 drain 高频 sample 淹没最终 reason。
 - [x] 新增 `Dockerfile.drain-agent`。
 
 ### drain-agent 测试
@@ -886,6 +991,9 @@ preStop:
 - [x] 测试 timeout。
 - [x] 测试 proc read error fail-closed。
 - [x] 测试 metrics 输出。
+- [x] 测试 termination signal 会等待稍后到来的 preStop drain 完成。
+- [x] 测试没有 preStop 请求时 termination signal 不会无限挂住。
+- [x] 测试 sample 日志节流后 `fugue_drain_complete` 仍必定输出。
 
 ### runtime renderer
 
@@ -927,25 +1035,25 @@ preStop:
 
 ### 灰度验证
 
-- [ ] 在测试 app 开启 connection-aware。
-- [ ] 无连接 rollout 验证旧 Pod 小于 10s 退出。
-- [ ] 长连接 rollout 验证不中断 stream。
-- [ ] 超长连接验证最多等待 600s。
-- [ ] 检查 drain-agent 日志 reason=idle / timeout。
-- [ ] 检查 metrics 正常上报。
-- [ ] 对 0-0 开启 connection-aware。
-- [ ] 0-0 image-only rollout 验证无 503 尖刺。
-- [ ] 0-0 验证 `context.Canceled` 仍记录 499。
-- [ ] 0-0 验证无连接时旧 Pod 快速退出。
+- [x] 在测试 app 开启 connection-aware。
+- [x] 无连接 rollout 验证旧 Pod 小于 10s 退出。
+- [x] 长连接 rollout 验证不中断 stream。
+- [x] 超长连接验证最多等待 600s。
+- [x] 检查 drain-agent 日志 reason=idle / timeout。
+- [x] 检查 metrics 正常上报。
+- [x] 对 0-0 开启 connection-aware。
+- [x] 0-0 image-only rollout 验证无 503 尖刺。
+- [x] 0-0 验证 `context.Canceled` 仍记录 499。
+- [x] 0-0 验证无连接时旧 Pod 快速退出。
 
 ### 默认启用与收尾
 
-- [ ] connection-aware 在 0-0 稳定运行后设为 strict drain 默认模式。
+- [x] connection-aware 在 0-0 稳定运行后设为 strict drain 默认模式。
 - [x] 保留 `fixed-sleep` 回滚开关。
 - [x] 更新 `docs/zero-downtime-rollout-incidents.md` 的当前不变量。
 - [x] 更新运维 runbook，说明如何判断 drain reason。
 - [x] 更新 CLI/diagnosis 输出，展示 drain mode 和最近 drain 结果。
-- [ ] 记录最终线上验证数据和 commit / workflow / rollout evidence。
+- [x] 记录最终线上验证数据和 commit / workflow / rollout evidence。
 
 ## 最终完成定义
 
