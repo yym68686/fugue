@@ -26,6 +26,7 @@ const (
 	defaultDrainTimeout           = 600 * time.Second
 	defaultQuietPeriod            = 2 * time.Second
 	defaultPollInterval           = 200 * time.Millisecond
+	defaultSampleLogInterval      = 10 * time.Second
 	defaultPreStopSignalWait      = 30 * time.Second
 	defaultShutdownGrace          = 5 * time.Second
 	defaultProcTCPPath            = "/proc/net/tcp"
@@ -45,6 +46,7 @@ type config struct {
 	Timeout      time.Duration
 	QuietPeriod  time.Duration
 	PollInterval time.Duration
+	SampleLog    time.Duration
 	ProcTCPPath  string
 	ProcTCP6Path string
 	FailClosed   bool
@@ -112,7 +114,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(sigCh)
 
-	logger.Printf("%s started bind_addr=%s ports=%s timeout_seconds=%d quiet_period_seconds=%d poll_interval_ms=%d fail_closed=%t", componentName, cfg.BindAddr, formatPorts(cfg.AppPorts), int(cfg.Timeout.Seconds()), int(cfg.QuietPeriod.Seconds()), int(cfg.PollInterval/time.Millisecond), cfg.FailClosed)
+	logger.Printf("%s started bind_addr=%s ports=%s timeout_seconds=%d quiet_period_seconds=%d poll_interval_ms=%d sample_log_interval_seconds=%d fail_closed=%t", componentName, cfg.BindAddr, formatPorts(cfg.AppPorts), int(cfg.Timeout.Seconds()), int(cfg.QuietPeriod.Seconds()), int(cfg.PollInterval/time.Millisecond), int(cfg.SampleLog.Seconds()), cfg.FailClosed)
 
 	go func() {
 		errCh <- httpServer.ListenAndServe()
@@ -188,6 +190,9 @@ func newServer(cfg config, logger *log.Logger) *server {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
+	if cfg.SampleLog <= 0 {
+		cfg.SampleLog = defaultSampleLogInterval
+	}
 	return &server{
 		cfg:            cfg,
 		logger:         logger,
@@ -225,6 +230,7 @@ func configFromEnv() (config, error) {
 		Timeout:      getenvDurationSeconds("FUGUE_DRAIN_TIMEOUT_SECONDS", defaultDrainTimeout),
 		QuietPeriod:  getenvDurationSeconds("FUGUE_DRAIN_QUIET_PERIOD_SECONDS", defaultQuietPeriod),
 		PollInterval: getenvDurationMillis("FUGUE_DRAIN_POLL_INTERVAL_MS", defaultPollInterval),
+		SampleLog:    getenvDurationSeconds("FUGUE_DRAIN_SAMPLE_LOG_INTERVAL_SECONDS", defaultSampleLogInterval),
 		ProcTCPPath:  getenv("FUGUE_DRAIN_PROC_TCP_PATH", defaultProcTCPPath),
 		ProcTCP6Path: getenv("FUGUE_DRAIN_PROC_TCP6_PATH", defaultProcTCP6Path),
 		FailClosed:   getenvBool("FUGUE_DRAIN_FAIL_CLOSED", true),
@@ -312,6 +318,9 @@ func (s *server) drain(ctx context.Context) drainResult {
 	var idleSince time.Time
 	maxActive := 0
 	observerErrors := 0
+	var lastSampleLogAt time.Time
+	var lastSampleActive *int
+	lastSampleStates := ""
 
 	s.metrics.mu.Lock()
 	s.metrics.PreStopRequests++
@@ -338,7 +347,14 @@ func (s *server) drain(ctx context.Context) drainResult {
 			s.metrics.mu.Lock()
 			s.metrics.Active = observed.Active
 			s.metrics.mu.Unlock()
-			s.logger.Printf("fugue_drain_sample active_connections=%d states=%s waited_ms=%d", observed.Active, formatStateCounts(observed.States), now.Sub(start).Milliseconds())
+			states := formatStateCounts(observed.States)
+			if shouldLogSample(now, s.cfg.SampleLog, lastSampleLogAt, lastSampleActive, observed.Active, lastSampleStates, states) {
+				s.logger.Printf("fugue_drain_sample active_connections=%d states=%s waited_ms=%d", observed.Active, states, now.Sub(start).Milliseconds())
+				lastSampleLogAt = now
+				active := observed.Active
+				lastSampleActive = &active
+				lastSampleStates = states
+			}
 			if observed.Active == 0 {
 				if idleSince.IsZero() {
 					idleSince = now
@@ -361,6 +377,16 @@ func (s *server) drain(ctx context.Context) drainResult {
 			return s.complete("context_canceled", start, 0, maxActive, observerErrors)
 		}
 	}
+}
+
+func shouldLogSample(now time.Time, interval time.Duration, last time.Time, lastActive *int, active int, lastStates, states string) bool {
+	if lastActive == nil || last.IsZero() {
+		return true
+	}
+	if *lastActive != active || lastStates != states {
+		return true
+	}
+	return now.Sub(last) >= interval
 }
 
 func (s *server) complete(reason string, start time.Time, active, maxActive, observerErrors int) drainResult {

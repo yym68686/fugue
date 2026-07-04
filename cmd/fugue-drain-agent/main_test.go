@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http/httptest"
 	"os"
 	"strconv"
@@ -155,6 +157,41 @@ func TestDrainTimeout(t *testing.T) {
 	result := srv.drain(context.Background())
 	if result.Reason != "timeout" {
 		t.Fatalf("expected timeout, got %+v", result)
+	}
+}
+
+func TestDrainSampleLogsAreThrottledButCompleteIsAlwaysLogged(t *testing.T) {
+	active := "  sl  local_address rem_address   st\n   0: 0100007F:1F90 0100007F:C001 01 00000000:00000000 00:00000000 00000000 0 0 1\n"
+	path := writeTempFile(t, active)
+	var logs bytes.Buffer
+	srv := newServer(config{
+		AppPorts:     map[int]struct{}{8080: {}},
+		ProcTCPPath:  path,
+		ProcTCP6Path: path,
+		Timeout:      time.Second,
+		QuietPeriod:  time.Hour,
+		PollInterval: 100 * time.Millisecond,
+		SampleLog:    2 * time.Second,
+		FailClosed:   true,
+	}, log.New(&logs, "", 0))
+	start := time.Unix(0, 0)
+	now := start
+	srv.now = func() time.Time { return now }
+	srv.sleep = func(context.Context, time.Duration) error {
+		now = now.Add(100 * time.Millisecond)
+		return nil
+	}
+
+	result := srv.drain(context.Background())
+	if result.Reason != "timeout" {
+		t.Fatalf("expected timeout, got %+v", result)
+	}
+	output := logs.String()
+	if count := strings.Count(output, "fugue_drain_sample"); count != 1 {
+		t.Fatalf("expected one throttled sample log, got %d in\n%s", count, output)
+	}
+	if !strings.Contains(output, "fugue_drain_complete reason=timeout") {
+		t.Fatalf("missing complete log in\n%s", output)
 	}
 }
 
