@@ -2084,6 +2084,48 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineImageRolloutSnapshot(t 
 	}
 }
 
+func TestSelectManagedAppDesiredAppPreservesStatelessOnlineImageRolloutSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stored := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "ghcr.io/example/demo:latest",
+			ResolvedImageRef: "registry.push.example/demo:image-new",
+		},
+		Spec: model.AppSpec{
+			Image:     "registry.fugue.internal:5000/fugue-apps/demo@sha256:new",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+	managedSnapshot := stored
+	managedSnapshot.Spec.RolloutIntent = model.AppRolloutIntentOnlineImageUpdate
+
+	selected, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false)
+	if useStored {
+		t.Fatal("expected stateless online image rollout snapshot to keep driving reconcile")
+	}
+	if got := selected.Spec.RolloutIntent; got != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected image rollout intent to be preserved, got %q", got)
+	}
+
+	changedStored := stored
+	changedStored.Spec.Image = "registry.fugue.internal:5000/fugue-apps/demo@sha256:other"
+	selected, useStored = selectManagedAppDesiredApp(managedSnapshot, changedStored, false)
+	if !useStored {
+		t.Fatal("expected stored app to win after a newer stateless image")
+	}
+	if got := selected.Spec.Image; got != changedStored.Spec.Image {
+		t.Fatalf("expected changed stored image %q, got %q", changedStored.Spec.Image, got)
+	}
+}
+
 func TestRefreshStoredManagedAppDesiredBeforeApplyUsesLatestOnlineRolloutSnapshot(t *testing.T) {
 	t.Parallel()
 

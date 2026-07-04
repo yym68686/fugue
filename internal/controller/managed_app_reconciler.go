@@ -490,7 +490,7 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 }
 
 func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model.App) bool {
-	if !appUsesOnlineDurableRolloutIntent(managedSnapshot) {
+	if !appHasOnlineRolloutIntent(managedSnapshot) {
 		return false
 	}
 	if !managedAppRolloutSnapshotIdentityEqual(managedSnapshot, stored) {
