@@ -554,6 +554,7 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 		"volumes":    volumes,
 	}
 	if appUsesStrictZeroDowntimeDrain(app) && options.StrictDrain.ConnectionAwareEnabled() {
+		podSpec["shareProcessNamespace"] = true
 		initContainers = append([]map[string]any{buildStrictZeroDowntimeDrainAgentContainer(app, options.StrictDrain)}, initContainers...)
 	}
 	if grace := appTerminationGracePeriodSeconds(app, options.StrictDrain); grace > 0 {
@@ -1208,7 +1209,7 @@ func deploymentRuntimeKeyIgnoresAnnotation(key string) bool {
 func deploymentTemplateSpecForRuntimeKey(spec map[string]any) map[string]any {
 	out := make(map[string]any, len(spec))
 	for key, value := range spec {
-		if key == "terminationGracePeriodSeconds" {
+		if key == "terminationGracePeriodSeconds" || key == "shareProcessNamespace" {
 			continue
 		}
 		out[key] = value

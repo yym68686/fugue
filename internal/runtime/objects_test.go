@@ -920,6 +920,9 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if got := podSpec["terminationGracePeriodSeconds"]; got != DefaultStrictDrainConfig().TerminationGraceMinSeconds() {
 		t.Fatalf("expected steady-state stateless app terminationGracePeriodSeconds=%d, got %#v", DefaultStrictDrainConfig().TerminationGraceMinSeconds(), got)
 	}
+	if got := podSpec["shareProcessNamespace"]; got != true {
+		t.Fatalf("expected connection-aware strict drain to enable shareProcessNamespace, got %#v", got)
+	}
 	initContainers := podSpec["initContainers"].([]map[string]any)
 	if len(initContainers) == 0 || initContainers[0]["name"] != "fugue-drain-agent" {
 		t.Fatalf("expected connection-aware drain-agent native sidecar, got %#v", initContainers)
@@ -1049,6 +1052,9 @@ func TestBuildAppDeploymentUsesFixedSleepFallbackWhenNativeSidecarDisabled(t *te
 	}
 	if _, ok := podSpec["initContainers"]; ok {
 		t.Fatalf("expected fixed-sleep fallback not to inject drain-agent, got %#v", podSpec["initContainers"])
+	}
+	if _, ok := podSpec["shareProcessNamespace"]; ok {
+		t.Fatalf("expected fixed-sleep fallback not to enable shareProcessNamespace, got %#v", podSpec["shareProcessNamespace"])
 	}
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
 	if got := annotations["fugue.io/drain-mode"]; got != StrictDrainModeFixedSleep {

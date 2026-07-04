@@ -379,6 +379,9 @@ spec:
         fugue.io/drain-agent-port: "19090"
         fugue.io/termination-grace-min-seconds: "630"
     spec:
+      # Avoid Linux PID 1 default signal semantics keeping the app alive until
+      # the 600s hard deadline after drain-agent has already returned idle.
+      shareProcessNamespace: true
       terminationGracePeriodSeconds: 630
       initContainers:
         - name: fugue-drain-agent
@@ -430,6 +433,20 @@ terminationGracePeriodSeconds: 630
 ```
 
 fallback 必须继续可用，确保生产可回滚。
+
+### shareProcessNamespace
+
+connection-aware strict drain Pod 必须设置：
+
+```yaml
+shareProcessNamespace: true
+```
+
+线上 canary 验证发现：`preStop.httpGet /drain/prestop` 即使已经 `reason=idle` 快速返回，某些业务进程如果作为容器内 PID 1 运行，仍可能因为 Linux PID 1 的默认 signal 语义而忽略 kubelet 后续发送的 `SIGTERM`，最终旧 Pod 会一直等到 `terminationGracePeriodSeconds=630` 的 hard deadline。
+
+开启 Pod 级 process namespace sharing 后，业务进程不再是该 PID namespace 的 PID 1；drain hook 返回后，kubelet 对业务容器进程发送 `SIGTERM` 时会恢复普通进程默认行为，从而让“无 active connection 时快速退出”真正成立。
+
+该设置只在 `connection-aware` 模式下启用；`fixed-sleep` fallback 不启用，避免改变回滚模式的语义。
 
 ### minReadySeconds
 
@@ -804,6 +821,16 @@ fixed-sleep
 - 单独判断 drain-agent 相关文件变化。
 - release safety 测试防止非预期 blast radius。
 
+### 风险 6：业务进程作为 PID 1 忽略 SIGTERM
+
+现象：drain-agent 日志已经出现 `fugue_drain_complete reason=idle waited_ms≈2000 active_connections=0`，且 `preStop` HTTP 连接已经关闭，但旧 Pod 内业务进程仍作为 PID 1 存活，Pod 一直等到 `terminationGracePeriodSeconds` hard deadline。
+
+缓解：
+
+- connection-aware strict drain Pod 启用 `shareProcessNamespace: true`。
+- runtime manifest 测试覆盖 connection-aware 启用该字段、fixed-sleep fallback 不启用该字段。
+- 排障时同时查看 drain-agent 日志、Pod `deletionTimestamp` / `deletionGracePeriodSeconds`、业务容器 `ps -ef`，确认是否是 PID 1 signal 语义导致。
+
 ## 回滚方案
 
 任何阶段发现异常时：
@@ -869,6 +896,7 @@ preStop:
 - [x] 实现 `connection-aware` mode。
 - [x] strict drain app 注入 drain-agent native sidecar。
 - [x] app container `preStop` 改为 `httpGet /drain/prestop`。
+- [x] connection-aware strict drain Pod 启用 `shareProcessNamespace`，避免业务 PID 1 默认忽略 SIGTERM 后等满 hard deadline。
 - [x] `terminationGracePeriodSeconds` 保持至少 `timeout + buffer`。
 - [x] `minReadySeconds` 改用独立配置，默认 10 或 30，不再用 600。
 - [x] annotations 增加 drain mode / quiet period / agent port。
@@ -882,6 +910,7 @@ preStop:
 - [x] 测试 durable downtime-required steady-state 不注入。
 - [x] 测试无 port app 不注入。
 - [x] 测试 fixed-sleep fallback manifest。
+- [x] 测试 connection-aware manifest 包含 `shareProcessNamespace: true`，fixed-sleep fallback 不启用。
 - [x] 测试 rollout policy readiness。
 - [x] 测试 SIGTERM during rolling update 不误判。
 - [x] 测试 image pull failure 时旧 Pod 不被删除。
