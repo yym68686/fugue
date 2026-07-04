@@ -914,6 +914,8 @@ func clusterNodePoliciesConverged(statuses []model.ClusterNodePolicyStatus) bool
 	return len(statuses) > 0
 }
 
+// activeEdgeNodesForPolicy treats node-policy status as authoritative cluster membership.
+// Stored edge rows for nodes absent from the current cluster must not block autonomy.
 func activeEdgeNodesForPolicy(nodes []model.EdgeNode, statuses []model.ClusterNodePolicyStatus) []model.EdgeNode {
 	if len(nodes) == 0 || len(statuses) == 0 {
 		return nodes
@@ -925,7 +927,10 @@ func activeEdgeNodesForPolicy(nodes []model.EdgeNode, statuses []model.ClusterNo
 	out := make([]model.EdgeNode, 0, len(nodes))
 	for _, node := range nodes {
 		status, ok := statusByName[strings.TrimSpace(node.ID)]
-		if ok && status.Policy != nil && !status.Policy.EffectiveEdge {
+		if !ok {
+			continue
+		}
+		if status.Policy != nil && !status.Policy.EffectiveEdge {
 			continue
 		}
 		out = append(out, node)
@@ -944,7 +949,10 @@ func activeDNSNodesForPolicy(nodes []model.DNSNode, statuses []model.ClusterNode
 	out := make([]model.DNSNode, 0, len(nodes))
 	for _, node := range nodes {
 		status, ok := statusByName[strings.TrimSpace(node.ID)]
-		if ok && status.Policy != nil && !status.Policy.EffectiveDNS {
+		if !ok {
+			continue
+		}
+		if status.Policy != nil && !status.Policy.EffectiveDNS {
 			continue
 		}
 		out = append(out, node)
@@ -992,7 +1000,7 @@ func activeInventoryMessage(activeCount, totalCount int) string {
 	if activeCount == totalCount {
 		return ""
 	}
-	return fmt.Sprintf("active=%d total=%d; retired nodes excluded by node policy", activeCount, totalCount)
+	return fmt.Sprintf("active=%d total=%d; retired or absent nodes excluded by node policy", activeCount, totalCount)
 }
 
 func edgeInventoryHealthy(nodes []model.EdgeNode) bool {

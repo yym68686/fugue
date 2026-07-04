@@ -423,3 +423,84 @@ func TestActiveInventoryFiltersNodesRetiredByNodePolicy(t *testing.T) {
 		t.Fatalf("expected discovery groups to keep only active inventory groups, got %#v", groups)
 	}
 }
+
+func TestActiveInventoryFiltersNodesAbsentFromNodePolicyInventory(t *testing.T) {
+	now := time.Now().UTC()
+	policies := []model.ClusterNodePolicyStatus{
+		{
+			NodeName: "vps-591f4447",
+			Policy: &model.ClusterNodePolicy{
+				EffectiveEdge: true,
+				EffectiveDNS:  true,
+			},
+		},
+	}
+
+	edgeNodes := []model.EdgeNode{
+		{
+			ID:                 "vps-591f4447",
+			EdgeGroupID:        "edge-group-country-us",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_live",
+			ServingGeneration:  "routegen_live",
+			CaddyRouteCount:    99,
+			LastHeartbeatAt:    &now,
+		},
+		{
+			ID:                 "bwg",
+			EdgeGroupID:        "edge-group-country-us",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_stale",
+			ServingGeneration:  "routegen_stale",
+			CaddyRouteCount:    99,
+			LastHeartbeatAt:    &now,
+		},
+	}
+	dnsNodes := []model.DNSNode{
+		{
+			ID:                "vps-591f4447",
+			EdgeGroupID:       "edge-group-country-us",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			DNSBundleVersion:  "dnsgen_live",
+			ServingGeneration: "dnsgen_live",
+			LastHeartbeatAt:   &now,
+		},
+		{
+			ID:                "bwg",
+			EdgeGroupID:       "edge-group-country-us",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			DNSBundleVersion:  "dnsgen_stale",
+			ServingGeneration: "dnsgen_stale",
+			LastHeartbeatAt:   &now,
+		},
+	}
+
+	activeEdges := activeEdgeNodesForPolicy(edgeNodes, policies)
+	if len(activeEdges) != 1 || activeEdges[0].ID != "vps-591f4447" {
+		t.Fatalf("expected absent edge node to be treated as retired, got %#v", activeEdges)
+	}
+	activeDNS := activeDNSNodesForPolicy(dnsNodes, policies)
+	if len(activeDNS) != 1 || activeDNS[0].ID != "vps-591f4447" {
+		t.Fatalf("expected absent DNS node to be treated as retired, got %#v", activeDNS)
+	}
+
+	rejoinedPolicies := append(append([]model.ClusterNodePolicyStatus(nil), policies...), model.ClusterNodePolicyStatus{
+		NodeName: "bwg",
+		Policy: &model.ClusterNodePolicy{
+			EffectiveEdge: true,
+			EffectiveDNS:  true,
+		},
+	})
+	activeEdges = activeEdgeNodesForPolicy(edgeNodes, rejoinedPolicies)
+	if len(activeEdges) != 2 {
+		t.Fatalf("expected rejoined edge node to be admitted, got %#v", activeEdges)
+	}
+	activeDNS = activeDNSNodesForPolicy(dnsNodes, rejoinedPolicies)
+	if len(activeDNS) != 2 {
+		t.Fatalf("expected rejoined DNS node to be admitted, got %#v", activeDNS)
+	}
+}
