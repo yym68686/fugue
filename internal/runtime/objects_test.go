@@ -907,6 +907,57 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if got := containers[0]["imagePullPolicy"]; got != "Always" {
 		t.Fatalf("expected tagged images to use imagePullPolicy Always, got %#v", got)
 	}
+	if _, ok := containers[0]["lifecycle"]; ok {
+		t.Fatalf("expected steady-state stateless app not to get strict drain lifecycle without online rollout intent")
+	}
+	if _, ok := podSpec["terminationGracePeriodSeconds"]; ok {
+		t.Fatalf("expected steady-state stateless app not to set terminationGracePeriodSeconds without explicit app spec or online rollout intent")
+	}
+}
+
+func TestBuildAppDeploymentAddsStrictDrainForOnlineImageUpdate(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:                         "ghcr.io/example/demo:latest",
+			Ports:                         []int{8080},
+			Replicas:                      1,
+			RuntimeID:                     "runtime_demo",
+			RolloutIntent:                 model.AppRolloutIntentOnlineImageUpdate,
+			TerminationGracePeriodSeconds: 30,
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	deployment := objects[1]
+	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if got := annotations["fugue.io/drain-mode"]; got != "strict-zero-downtime" {
+		t.Fatalf("expected strict drain mode annotation, got %#v", got)
+	}
+	if got := annotations["fugue.io/drain-timeout-seconds"]; got != "600" {
+		t.Fatalf("expected drain timeout annotation 600, got %#v", got)
+	}
+	spec := deployment["spec"].(map[string]any)
+	if got := spec["minReadySeconds"]; got != int(appStrictDrainSeconds) {
+		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", appStrictDrainSeconds, got)
+	}
+	template := spec["template"].(map[string]any)
+	templateAnnotations := template["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if got := templateAnnotations["fugue.io/drain-mode"]; got != "strict-zero-downtime" {
+		t.Fatalf("expected template strict drain mode annotation, got %#v", got)
+	}
+	podSpec := template["spec"].(map[string]any)
+	if got := podSpec["terminationGracePeriodSeconds"]; got != int64(630) {
+		t.Fatalf("expected terminationGracePeriodSeconds=630 for strict drain, got %#v", got)
+	}
+	containers := podSpec["containers"].([]map[string]any)
+	lifecycle := containers[0]["lifecycle"].(map[string]any)
+	preStop := lifecycle["preStop"].(map[string]any)
+	sleep := preStop["sleep"].(map[string]any)
+	if got := sleep["seconds"]; got != int64(600) {
+		t.Fatalf("expected preStop sleep seconds=600, got %#v", got)
+	}
 }
 
 func TestBuildAppDeploymentUsesIfNotPresentForDigestPinnedImages(t *testing.T) {
@@ -1703,6 +1754,9 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageLifecycleUpda
 	if got := strategy["type"]; got != "RollingUpdate" {
 		t.Fatalf("expected online lifecycle update to use RollingUpdate, got %#v", got)
 	}
+	if got := spec["minReadySeconds"]; got != int(appStrictDrainSeconds) {
+		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", appStrictDrainSeconds, got)
+	}
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
 	if got := annotations["fugue.io/rollout-reason"]; got != "lifecycle-only" {
 		t.Fatalf("expected lifecycle-only rollout reason, got %#v", got)
@@ -1710,6 +1764,13 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageLifecycleUpda
 	podSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
 	if got := podSpec["terminationGracePeriodSeconds"]; got != int64(2100) {
 		t.Fatalf("expected terminationGracePeriodSeconds=2100, got %#v", got)
+	}
+	containers := podSpec["containers"].([]map[string]any)
+	lifecycle := containers[0]["lifecycle"].(map[string]any)
+	preStop := lifecycle["preStop"].(map[string]any)
+	sleep := preStop["sleep"].(map[string]any)
+	if got := sleep["seconds"]; got != int64(600) {
+		t.Fatalf("expected lifecycle preStop sleep seconds=600, got %#v", got)
 	}
 }
 

@@ -27,6 +27,8 @@ const (
 	defaultHelperEphemeralRequest  = "32Mi"
 	appProgressDeadlineSeconds     = 3600
 	appServiceMinReadySeconds      = 10
+	appStrictDrainSeconds          = int64(600)
+	appStrictDrainStopBuffer       = int64(30)
 	AppFilesVolumeName             = "app-files"
 	appFilesVolumeName             = AppFilesVolumeName
 	appSSHAuthorizedKeysVolumeName = "app-ssh-authorized-keys"
@@ -444,6 +446,9 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	if len(app.Spec.Ports) > 0 {
 		container["readinessProbe"] = buildAppTCPReadinessProbe(app.Spec.Ports[0])
 	}
+	if appUsesStrictZeroDowntimeDrain(app) {
+		container["lifecycle"] = buildStrictZeroDowntimeDrainLifecycle()
+	}
 	if env := mergedRuntimeEnv(app); len(env) > 0 {
 		container["env"] = buildEnvObjects(env)
 	}
@@ -535,8 +540,8 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"containers": []map[string]any{container},
 		"volumes":    volumes,
 	}
-	if app.Spec.TerminationGracePeriodSeconds > 0 {
-		podSpec["terminationGracePeriodSeconds"] = app.Spec.TerminationGracePeriodSeconds
+	if grace := appTerminationGracePeriodSeconds(app); grace > 0 {
+		podSpec["terminationGracePeriodSeconds"] = grace
 	}
 	if len(sidecars) > 0 {
 		podSpec["containers"] = append(podSpec["containers"].([]map[string]any), sidecars...)
@@ -717,9 +722,33 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 	}
 }
 
+func buildStrictZeroDowntimeDrainLifecycle() map[string]any {
+	return map[string]any{
+		"preStop": map[string]any{
+			"sleep": map[string]any{
+				"seconds": appStrictDrainSeconds,
+			},
+		},
+	}
+}
+
+func appTerminationGracePeriodSeconds(app model.App) int64 {
+	grace := app.Spec.TerminationGracePeriodSeconds
+	if appUsesStrictZeroDowntimeDrain(app) {
+		minGrace := appStrictDrainSeconds + appStrictDrainStopBuffer
+		if grace < minGrace {
+			return minGrace
+		}
+	}
+	return grace
+}
+
 func deploymentMinReadySeconds(app model.App) int {
 	if app.Spec.Replicas <= 0 || !model.AppHasClusterService(app.Spec) {
 		return 0
+	}
+	if appUsesStrictZeroDowntimeDrain(app) {
+		return int(appStrictDrainSeconds)
 	}
 	return appServiceMinReadySeconds
 }
@@ -1034,6 +1063,9 @@ func deploymentTemplateForRuntimeKey(template any) any {
 	for key, value := range templateMap {
 		out[key] = value
 	}
+	if spec, ok := templateMap["spec"].(map[string]any); ok {
+		out["spec"] = deploymentTemplateSpecForRuntimeKey(spec)
+	}
 	metadata, ok := templateMap["metadata"].(map[string]any)
 	if !ok {
 		return out
@@ -1046,7 +1078,7 @@ func deploymentTemplateForRuntimeKey(template any) any {
 	case map[string]string:
 		annotationsCopy := make(map[string]string, len(annotations))
 		for key, value := range annotations {
-			if key == FugueAnnotationReleaseKey {
+			if deploymentRuntimeKeyIgnoresAnnotation(key) {
 				continue
 			}
 			annotationsCopy[key] = value
@@ -1055,7 +1087,7 @@ func deploymentTemplateForRuntimeKey(template any) any {
 	case map[string]any:
 		annotationsCopy := make(map[string]any, len(annotations))
 		for key, value := range annotations {
-			if key == FugueAnnotationReleaseKey {
+			if deploymentRuntimeKeyIgnoresAnnotation(key) {
 				continue
 			}
 			annotationsCopy[key] = value
@@ -1064,6 +1096,108 @@ func deploymentTemplateForRuntimeKey(template any) any {
 	}
 	out["metadata"] = metadataCopy
 	return out
+}
+
+func deploymentRuntimeKeyIgnoresAnnotation(key string) bool {
+	switch strings.TrimSpace(key) {
+	case FugueAnnotationReleaseKey,
+		"fugue.io/drain-mode",
+		"fugue.io/drain-timeout-seconds",
+		"fugue.io/termination-grace-min-seconds":
+		return true
+	default:
+		return false
+	}
+}
+
+func deploymentTemplateSpecForRuntimeKey(spec map[string]any) map[string]any {
+	out := make(map[string]any, len(spec))
+	for key, value := range spec {
+		if key == "terminationGracePeriodSeconds" {
+			continue
+		}
+		out[key] = value
+	}
+	if containers := containersForRuntimeKey(spec["containers"]); containers != nil {
+		out["containers"] = containers
+	}
+	if initContainers := containersForRuntimeKey(spec["initContainers"]); initContainers != nil {
+		out["initContainers"] = initContainers
+	}
+	return out
+}
+
+func containersForRuntimeKey(value any) any {
+	switch containers := value.(type) {
+	case []map[string]any:
+		out := make([]map[string]any, 0, len(containers))
+		for _, container := range containers {
+			out = append(out, containerForRuntimeKey(container))
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(containers))
+		for _, item := range containers {
+			container, ok := item.(map[string]any)
+			if !ok {
+				out = append(out, item)
+				continue
+			}
+			out = append(out, containerForRuntimeKey(container))
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func containerForRuntimeKey(container map[string]any) map[string]any {
+	out := make(map[string]any, len(container))
+	for key, value := range container {
+		if key == "lifecycle" && isStrictZeroDowntimeDrainLifecycle(value) {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func isStrictZeroDowntimeDrainLifecycle(value any) bool {
+	lifecycle, ok := value.(map[string]any)
+	if !ok || len(lifecycle) != 1 {
+		return false
+	}
+	preStop, ok := lifecycle["preStop"].(map[string]any)
+	if !ok || len(preStop) != 1 {
+		return false
+	}
+	sleep, ok := preStop["sleep"].(map[string]any)
+	if !ok || len(sleep) != 1 {
+		return false
+	}
+	seconds, ok := int64FromRuntimeKeyValue(sleep["seconds"])
+	return ok && seconds == appStrictDrainSeconds
+}
+
+func int64FromRuntimeKeyValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case float64:
+		if typed == float64(int64(typed)) {
+			return int64(typed), true
+		}
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 func annotateManagedDeploymentReleaseKey(obj map[string]any) {
@@ -1779,16 +1913,22 @@ func appRolloutIntentIsOnlineDurable(intent string) bool {
 	}
 }
 
+func appUsesStrictZeroDowntimeDrain(app model.App) bool {
+	return appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) &&
+		model.AppHasClusterService(app.Spec) &&
+		app.Spec.Replicas > 0
+}
+
 func deploymentRolloutAnnotations(app model.App) map[string]string {
 	if !appUsesOnlineDurableRolloutStrategy(app) {
 		return appRolloutAnnotations(app)
 	}
-	return map[string]string{
+	return mergeStringMaps(map[string]string{
 		"fugue.io/rollout-mode":    "rolling-restart",
 		"fugue.io/downtime-class":  "online-required",
 		"fugue.io/rollout-reason":  onlineDurableRolloutReason(app.Spec.RolloutIntent),
 		"fugue.io/rollout-surface": "tenant-app",
-	}
+	}, strictZeroDowntimeDrainAnnotations(app))
 }
 
 func onlineDurableRolloutReason(intent string) string {
@@ -1808,17 +1948,28 @@ func onlineDurableRolloutReason(intent string) string {
 
 func appRolloutAnnotations(app model.App) map[string]string {
 	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
-		return map[string]string{
+		return mergeStringMaps(map[string]string{
 			"fugue.io/rollout-mode":    "isolated-singleton",
 			"fugue.io/downtime-class":  "downtime-required",
 			"fugue.io/rollout-reason":  "single-writer-storage",
 			"fugue.io/rollout-surface": "tenant-app",
-		}
+		}, strictZeroDowntimeDrainAnnotations(app))
 	}
-	return map[string]string{
+	return mergeStringMaps(map[string]string{
 		"fugue.io/rollout-mode":    "rolling-update",
 		"fugue.io/downtime-class":  "online-required",
 		"fugue.io/rollout-surface": "tenant-app",
+	}, strictZeroDowntimeDrainAnnotations(app))
+}
+
+func strictZeroDowntimeDrainAnnotations(app model.App) map[string]string {
+	if !appUsesStrictZeroDowntimeDrain(app) {
+		return nil
+	}
+	return map[string]string{
+		"fugue.io/drain-mode":                    "strict-zero-downtime",
+		"fugue.io/drain-timeout-seconds":         strconv.FormatInt(appStrictDrainSeconds, 10),
+		"fugue.io/termination-grace-min-seconds": strconv.FormatInt(appStrictDrainSeconds+appStrictDrainStopBuffer, 10),
 	}
 }
 
