@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -190,6 +192,34 @@ func TestMetricsOutput(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("metrics missing %q in\n%s", want, out)
 		}
+	}
+}
+
+func TestPreStopResponseClosesConnection(t *testing.T) {
+	tcpPath := writeTempFile(t, "  sl  local_address rem_address   st\n")
+	srv := newTestServer(t, config{
+		AppPorts:     map[int]struct{}{8080: {}},
+		ProcTCPPath:  tcpPath,
+		ProcTCP6Path: tcpPath,
+		Timeout:      time.Second,
+		QuietPeriod:  time.Millisecond,
+		PollInterval: time.Millisecond,
+		FailClosed:   true,
+	})
+	rw := httptest.NewRecorder()
+	srv.handlePreStop(rw, httptest.NewRequest("GET", "/drain/prestop", nil))
+	if got := rw.Header().Get("Connection"); got != "close" {
+		t.Fatalf("expected Connection: close, got %q", got)
+	}
+	if got := rw.Header().Get("Content-Length"); got != strconv.Itoa(rw.Body.Len()) {
+		t.Fatalf("expected Content-Length %d, got %q", rw.Body.Len(), got)
+	}
+	var result drainResult
+	if err := json.Unmarshal(rw.Body.Bytes(), &result); err != nil {
+		t.Fatalf("preStop response is not JSON: %v", err)
+	}
+	if result.Reason != "idle" {
+		t.Fatalf("expected idle response, got %+v", result)
 	}
 }
 

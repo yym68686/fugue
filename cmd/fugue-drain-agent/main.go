@@ -463,9 +463,20 @@ func (s *server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		http.Error(w, `{"ok":false,"error":"json_encode_failed"}`+"\n", http.StatusInternalServerError)
+		return
+	}
+	payload = append(payload, '\n')
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+	w.Header().Set("Connection", "close")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(payload)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func formatPorts(ports map[int]struct{}) string {
