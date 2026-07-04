@@ -10,29 +10,33 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const (
 	componentName = "fugue-drain-agent"
 
-	defaultBindAddr          = ":19090"
-	defaultDrainTimeout      = 600 * time.Second
-	defaultQuietPeriod       = 2 * time.Second
-	defaultPollInterval      = 200 * time.Millisecond
-	defaultProcTCPPath       = "/proc/net/tcp"
-	defaultProcTCP6Path      = "/proc/net/tcp6"
-	tcpStateEstablished byte = 0x01
-	tcpStateSynRecv     byte = 0x03
-	tcpStateFinWait1    byte = 0x04
-	tcpStateFinWait2    byte = 0x05
-	tcpStateCloseWait   byte = 0x08
-	tcpStateClosing     byte = 0x0B
-	tcpStateLastAck     byte = 0x09
+	defaultBindAddr               = ":19090"
+	defaultDrainTimeout           = 600 * time.Second
+	defaultQuietPeriod            = 2 * time.Second
+	defaultPollInterval           = 200 * time.Millisecond
+	defaultPreStopSignalWait      = 30 * time.Second
+	defaultShutdownGrace          = 5 * time.Second
+	defaultProcTCPPath            = "/proc/net/tcp"
+	defaultProcTCP6Path           = "/proc/net/tcp6"
+	tcpStateEstablished      byte = 0x01
+	tcpStateSynRecv          byte = 0x03
+	tcpStateFinWait1         byte = 0x04
+	tcpStateFinWait2         byte = 0x05
+	tcpStateCloseWait        byte = 0x08
+	tcpStateClosing          byte = 0x0B
+	tcpStateLastAck          byte = 0x09
 )
 
 type config struct {
@@ -78,11 +82,15 @@ type metrics struct {
 }
 
 type server struct {
-	cfg     config
-	logger  *log.Logger
-	metrics *metrics
-	now     func() time.Time
-	sleep   func(context.Context, time.Duration) error
+	cfg            config
+	logger         *log.Logger
+	metrics        *metrics
+	now            func() time.Time
+	sleep          func(context.Context, time.Duration) error
+	drainStarted   chan struct{}
+	drainCompleted chan struct{}
+	startOnce      sync.Once
+	completeOnce   sync.Once
 }
 
 func main() {
@@ -94,10 +102,86 @@ func main() {
 	srv := newServer(cfg, logger)
 	mux := http.NewServeMux()
 	srv.register(mux)
-	logger.Printf("%s started bind_addr=%s ports=%s timeout_seconds=%d quiet_period_seconds=%d poll_interval_ms=%d fail_closed=%t", componentName, cfg.BindAddr, formatPorts(cfg.AppPorts), int(cfg.Timeout.Seconds()), int(cfg.QuietPeriod.Seconds()), int(cfg.PollInterval/time.Millisecond), cfg.FailClosed)
-	if err := http.ListenAndServe(cfg.BindAddr, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Fatalf("%s listen error: %v", componentName, err)
+	httpServer := &http.Server{
+		Addr:    cfg.BindAddr,
+		Handler: mux,
 	}
+
+	errCh := make(chan error, 1)
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+
+	logger.Printf("%s started bind_addr=%s ports=%s timeout_seconds=%d quiet_period_seconds=%d poll_interval_ms=%d fail_closed=%t", componentName, cfg.BindAddr, formatPorts(cfg.AppPorts), int(cfg.Timeout.Seconds()), int(cfg.QuietPeriod.Seconds()), int(cfg.PollInterval/time.Millisecond), cfg.FailClosed)
+
+	go func() {
+		errCh <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Fatalf("%s listen error: %v", componentName, err)
+		}
+	case sig := <-sigCh:
+		logger.Printf("%s termination_signal signal=%s action=wait_for_prestop_or_drain", componentName, sig)
+		go func() {
+			second := <-sigCh
+			logger.Printf("%s termination_signal signal=%s action=force_exit", componentName, second)
+			os.Exit(128 + signalExitCode(second))
+		}()
+		waitCtx, cancel := context.WithTimeout(context.Background(), cfg.Timeout+defaultPreStopSignalWait)
+		outcome := srv.waitForDrainAfterSignal(waitCtx, defaultPreStopSignalWait)
+		cancel()
+		logger.Printf("%s termination_signal_done signal=%s outcome=%s", componentName, sig, outcome)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultShutdownGrace)
+		defer shutdownCancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Fatalf("%s shutdown error: %v", componentName, err)
+		}
+	}
+}
+
+func signalExitCode(sig os.Signal) int {
+	if value, ok := sig.(syscall.Signal); ok {
+		return int(value)
+	}
+	return 1
+}
+
+func (s *server) waitForDrainAfterSignal(ctx context.Context, preStopWait time.Duration) string {
+	timer := time.NewTimer(preStopWait)
+	defer timer.Stop()
+
+	select {
+	case <-s.drainStarted:
+	case <-s.drainCompleted:
+		return "drain_complete"
+	case <-ctx.Done():
+		return "deadline_before_prestop"
+	case <-timer.C:
+		return "no_prestop_request"
+	}
+
+	select {
+	case <-s.drainCompleted:
+		return "drain_complete"
+	case <-ctx.Done():
+		return "deadline"
+	}
+}
+
+func (s *server) markDrainStarted() {
+	s.startOnce.Do(func() {
+		close(s.drainStarted)
+	})
+}
+
+func (s *server) markDrainCompleted() {
+	s.completeOnce.Do(func() {
+		s.markDrainStarted()
+		close(s.drainCompleted)
+	})
 }
 
 func newServer(cfg config, logger *log.Logger) *server {
@@ -105,10 +189,12 @@ func newServer(cfg config, logger *log.Logger) *server {
 		logger = log.New(io.Discard, "", 0)
 	}
 	return &server{
-		cfg:     cfg,
-		logger:  logger,
-		metrics: &metrics{},
-		now:     time.Now,
+		cfg:            cfg,
+		logger:         logger,
+		metrics:        &metrics{},
+		now:            time.Now,
+		drainStarted:   make(chan struct{}),
+		drainCompleted: make(chan struct{}),
 		sleep: func(ctx context.Context, d time.Duration) error {
 			t := time.NewTimer(d)
 			defer t.Stop()
@@ -214,8 +300,10 @@ func (s *server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) handlePreStop(w http.ResponseWriter, r *http.Request) {
+	s.markDrainStarted()
 	result := s.drain(r.Context())
 	writeJSON(w, http.StatusOK, result)
+	s.markDrainCompleted()
 }
 
 func (s *server) drain(ctx context.Context) drainResult {

@@ -223,6 +223,53 @@ func TestPreStopResponseClosesConnection(t *testing.T) {
 	}
 }
 
+func TestTerminationSignalWaitsForLatePreStopDrain(t *testing.T) {
+	srv := newTestServer(t, config{AppPorts: map[int]struct{}{8080: {}}})
+	done := make(chan string, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	go func() {
+		done <- srv.waitForDrainAfterSignal(ctx, 100*time.Millisecond)
+	}()
+
+	select {
+	case outcome := <-done:
+		t.Fatalf("signal wait returned before preStop started: %s", outcome)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	srv.markDrainStarted()
+
+	select {
+	case outcome := <-done:
+		t.Fatalf("signal wait returned before preStop completed: %s", outcome)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	srv.markDrainCompleted()
+
+	select {
+	case outcome := <-done:
+		if outcome != "drain_complete" {
+			t.Fatalf("expected drain_complete, got %s", outcome)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("signal wait did not return after preStop completed")
+	}
+}
+
+func TestTerminationSignalWithoutPreStopDoesNotHangForever(t *testing.T) {
+	srv := newTestServer(t, config{AppPorts: map[int]struct{}{8080: {}}})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	outcome := srv.waitForDrainAfterSignal(ctx, time.Millisecond)
+	if outcome != "no_prestop_request" {
+		t.Fatalf("expected no_prestop_request, got %s", outcome)
+	}
+}
+
 func writeTempFile(t *testing.T, content string) string {
 	t.Helper()
 	path := t.TempDir() + "/tcp"
