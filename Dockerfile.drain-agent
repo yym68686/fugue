@@ -1,0 +1,16 @@
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.mod ./
+COPY go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-drain-agent ./cmd/fugue-drain-agent
+
+FROM --platform=$TARGETPLATFORM alpine:3.21
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/fugue-drain-agent /usr/local/bin/fugue-drain-agent
+ENTRYPOINT ["/usr/local/bin/fugue-drain-agent"]

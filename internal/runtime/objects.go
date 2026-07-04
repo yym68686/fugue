@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"path"
 	"sort"
@@ -27,8 +28,6 @@ const (
 	defaultHelperEphemeralRequest  = "32Mi"
 	appProgressDeadlineSeconds     = 3600
 	appServiceMinReadySeconds      = 10
-	appStrictDrainSeconds          = int64(600)
-	appStrictDrainStopBuffer       = int64(30)
 	AppFilesVolumeName             = "app-files"
 	appFilesVolumeName             = AppFilesVolumeName
 	appSSHAuthorizedKeysVolumeName = "app-ssh-authorized-keys"
@@ -58,10 +57,19 @@ func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[stri
 }
 
 func buildAppObjectsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints) []map[string]any {
-	return buildAppObjectsWithOwner(app, scheduling, postgresPlacements, nil)
+	return buildAppObjectsWithPlacementsAndOptions(app, scheduling, postgresPlacements, defaultRenderOptions())
+}
+
+func buildAppObjectsWithPlacementsAndOptions(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, options RenderOptions) []map[string]any {
+	return buildAppObjectsWithOwnerAndOptions(app, scheduling, postgresPlacements, nil, options)
 }
 
 func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
+	return buildAppObjectsWithOwnerAndOptions(app, scheduling, postgresPlacements, ownerRef, defaultRenderOptions())
+}
+
+func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference, options RenderOptions) []map[string]any {
+	options = normalizeRenderOptions(options)
 	namespace := NamespaceForTenant(app.TenantID)
 	appRuntimeName := RuntimeAppResourceName(app)
 	postgresResources := managedPostgresResources(namespace, app, postgresPlacements)
@@ -105,7 +113,7 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 	}
 
 	if appRuntimeDeploymentRequired(app) {
-		objects = append(objects, buildAppDeploymentObject(namespace, app, labels, scheduling, postgresResources))
+		objects = append(objects, buildAppDeploymentObjectWithOptions(namespace, app, labels, scheduling, postgresResources, options))
 	}
 	if serviceObject := buildAppServiceObject(namespace, app, labels); serviceObject != nil {
 		objects = append(objects, serviceObject)
@@ -416,6 +424,11 @@ func buildManagedPostgresObjects(namespace string, resource postgresRuntimeResou
 }
 
 func buildAppDeploymentObject(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource) map[string]any {
+	return buildAppDeploymentObjectWithOptions(namespace, app, labels, scheduling, postgresResources, defaultRenderOptions())
+}
+
+func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource, options RenderOptions) map[string]any {
+	options = normalizeRenderOptions(options)
 	resourceName := RuntimeAppResourceName(app)
 	container := map[string]any{
 		"name":  sanitizeName(app.Name),
@@ -447,7 +460,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		container["readinessProbe"] = buildAppTCPReadinessProbe(app.Spec.Ports[0])
 	}
 	if appUsesStrictZeroDowntimeDrain(app) {
-		container["lifecycle"] = buildStrictZeroDowntimeDrainLifecycle()
+		container["lifecycle"] = buildStrictZeroDowntimeDrainLifecycle(options.StrictDrain)
 	}
 	if env := mergedRuntimeEnv(app); len(env) > 0 {
 		container["env"] = buildEnvObjects(env)
@@ -540,7 +553,10 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"containers": []map[string]any{container},
 		"volumes":    volumes,
 	}
-	if grace := appTerminationGracePeriodSeconds(app); grace > 0 {
+	if appUsesStrictZeroDowntimeDrain(app) && options.StrictDrain.ConnectionAwareEnabled() {
+		initContainers = append([]map[string]any{buildStrictZeroDowntimeDrainAgentContainer(app, options.StrictDrain)}, initContainers...)
+	}
+	if grace := appTerminationGracePeriodSeconds(app, options.StrictDrain); grace > 0 {
 		podSpec["terminationGracePeriodSeconds"] = grace
 	}
 	if len(sidecars) > 0 {
@@ -575,7 +591,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 	templateMetadata := map[string]any{
 		"labels": labels,
 	}
-	templateRolloutAnnotations := appRolloutAnnotations(app)
+	templateRolloutAnnotations := appRolloutAnnotations(app, options.StrictDrain)
 	if annotations := mergeStringMaps(templateRolloutAnnotations, buildAppTemplateAnnotations(app.Spec)); len(annotations) > 0 {
 		templateMetadata["annotations"] = annotations
 	}
@@ -584,7 +600,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 		"namespace": namespace,
 		"labels":    labels,
 	}
-	if rolloutAnnotations := deploymentRolloutAnnotations(app); len(rolloutAnnotations) > 0 {
+	if rolloutAnnotations := deploymentRolloutAnnotations(app, options.StrictDrain); len(rolloutAnnotations) > 0 {
 		deploymentMetadata["annotations"] = rolloutAnnotations
 	}
 
@@ -600,7 +616,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 			"spec":     podSpec,
 		},
 	}
-	if minReadySeconds := deploymentMinReadySeconds(app); minReadySeconds > 0 {
+	if minReadySeconds := deploymentMinReadySeconds(app, options.StrictDrain); minReadySeconds > 0 {
 		deploymentSpec["minReadySeconds"] = minReadySeconds
 	}
 
@@ -722,20 +738,92 @@ func buildAppTCPReadinessProbe(port int) map[string]any {
 	}
 }
 
-func buildStrictZeroDowntimeDrainLifecycle() map[string]any {
+func buildStrictZeroDowntimeDrainLifecycle(config StrictDrainConfig) map[string]any {
+	config = config.Normalize()
+	if config.ConnectionAwareEnabled() {
+		return map[string]any{
+			"preStop": map[string]any{
+				"httpGet": map[string]any{
+					"path":   "/drain/prestop",
+					"port":   config.AgentPort,
+					"scheme": "HTTP",
+				},
+			},
+		}
+	}
 	return map[string]any{
 		"preStop": map[string]any{
 			"sleep": map[string]any{
-				"seconds": appStrictDrainSeconds,
+				"seconds": config.DrainTimeoutSeconds(),
 			},
 		},
 	}
 }
 
-func appTerminationGracePeriodSeconds(app model.App) int64 {
+func buildStrictZeroDowntimeDrainAgentContainer(app model.App, config StrictDrainConfig) map[string]any {
+	config = config.Normalize()
+	container := map[string]any{
+		"name":            "fugue-drain-agent",
+		"image":           config.AgentImageRef(),
+		"imagePullPolicy": config.AgentImagePullPolicy,
+		"restartPolicy":   "Always",
+		"ports": []map[string]any{
+			{
+				"name":          "drain-agent",
+				"containerPort": config.AgentPort,
+				"protocol":      "TCP",
+			},
+		},
+		"env": []map[string]any{
+			{"name": "FUGUE_DRAIN_AGENT_BIND_ADDR", "value": fmt.Sprintf(":%d", config.AgentPort)},
+			{"name": "FUGUE_DRAIN_APP_PORTS", "value": appPortsCSV(app.Spec.Ports)},
+			{"name": "FUGUE_DRAIN_TIMEOUT_SECONDS", "value": strconv.FormatInt(config.TimeoutSeconds, 10)},
+			{"name": "FUGUE_DRAIN_QUIET_PERIOD_SECONDS", "value": strconv.Itoa(config.QuietPeriodSeconds)},
+			{"name": "FUGUE_DRAIN_POLL_INTERVAL_MS", "value": strconv.Itoa(config.PollIntervalMilliseconds)},
+			{"name": "FUGUE_DRAIN_FAIL_CLOSED", "value": "true"},
+			{
+				"name": "POD_NAME",
+				"valueFrom": map[string]any{
+					"fieldRef": map[string]any{"fieldPath": "metadata.name"},
+				},
+			},
+			{
+				"name": "POD_NAMESPACE",
+				"valueFrom": map[string]any{
+					"fieldRef": map[string]any{"fieldPath": "metadata.namespace"},
+				},
+			},
+		},
+		"resources": map[string]any{
+			"requests": map[string]any{
+				"cpu":    "5m",
+				"memory": "16Mi",
+			},
+			"limits": map[string]any{
+				"cpu":    "50m",
+				"memory": "64Mi",
+			},
+		},
+	}
+	return container
+}
+
+func appPortsCSV(ports []int) string {
+	items := make([]string, 0, len(ports))
+	for _, port := range ports {
+		if port <= 0 {
+			continue
+		}
+		items = append(items, strconv.Itoa(port))
+	}
+	return strings.Join(items, ",")
+}
+
+func appTerminationGracePeriodSeconds(app model.App, config StrictDrainConfig) int64 {
+	config = config.Normalize()
 	grace := app.Spec.TerminationGracePeriodSeconds
 	if appUsesStrictZeroDowntimeDrain(app) {
-		minGrace := appStrictDrainSeconds + appStrictDrainStopBuffer
+		minGrace := config.TerminationGraceMinSeconds()
 		if grace < minGrace {
 			return minGrace
 		}
@@ -743,12 +831,13 @@ func appTerminationGracePeriodSeconds(app model.App) int64 {
 	return grace
 }
 
-func deploymentMinReadySeconds(app model.App) int {
+func deploymentMinReadySeconds(app model.App, config StrictDrainConfig) int {
+	config = config.Normalize()
 	if app.Spec.Replicas <= 0 || !model.AppHasClusterService(app.Spec) {
 		return 0
 	}
 	if appUsesStrictZeroDowntimeDrain(app) {
-		return int(appStrictDrainSeconds)
+		return config.MinReadySeconds
 	}
 	return appServiceMinReadySeconds
 }
@@ -943,8 +1032,12 @@ type ManagedBackingServiceDeployment struct {
 }
 
 func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
+	return ManagedAppReleaseKeyWithOptions(app, scheduling, defaultRenderOptions())
+}
+
+func ManagedAppReleaseKeyWithOptions(app model.App, scheduling SchedulingConstraints, options RenderOptions) string {
 	namespace := NamespaceForTenant(app.TenantID)
-	object := buildAppDeploymentObject(namespace, app, appLabels(app), scheduling, managedPostgresResources(namespace, app, nil))
+	object := buildAppDeploymentObjectWithOptions(namespace, app, appLabels(app), scheduling, managedPostgresResources(namespace, app, nil), options)
 	return managedDeploymentRuntimeKey(object)
 }
 
@@ -1103,6 +1196,8 @@ func deploymentRuntimeKeyIgnoresAnnotation(key string) bool {
 	case FugueAnnotationReleaseKey,
 		"fugue.io/drain-mode",
 		"fugue.io/drain-timeout-seconds",
+		"fugue.io/drain-quiet-period-seconds",
+		"fugue.io/drain-agent-port",
 		"fugue.io/termination-grace-min-seconds":
 		return true
 	default:
@@ -1132,6 +1227,9 @@ func containersForRuntimeKey(value any) any {
 	case []map[string]any:
 		out := make([]map[string]any, 0, len(containers))
 		for _, container := range containers {
+			if containerIgnoredForRuntimeKey(container) {
+				continue
+			}
 			out = append(out, containerForRuntimeKey(container))
 		}
 		return out
@@ -1143,12 +1241,20 @@ func containersForRuntimeKey(value any) any {
 				out = append(out, item)
 				continue
 			}
+			if containerIgnoredForRuntimeKey(container) {
+				continue
+			}
 			out = append(out, containerForRuntimeKey(container))
 		}
 		return out
 	default:
 		return nil
 	}
+}
+
+func containerIgnoredForRuntimeKey(container map[string]any) bool {
+	name, _ := container["name"].(string)
+	return strings.TrimSpace(name) == "fugue-drain-agent"
 }
 
 func containerForRuntimeKey(container map[string]any) map[string]any {
@@ -1171,12 +1277,19 @@ func isStrictZeroDowntimeDrainLifecycle(value any) bool {
 	if !ok || len(preStop) != 1 {
 		return false
 	}
-	sleep, ok := preStop["sleep"].(map[string]any)
-	if !ok || len(sleep) != 1 {
+	if sleep, ok := preStop["sleep"].(map[string]any); ok {
+		if len(sleep) != 1 {
+			return false
+		}
+		seconds, ok := int64FromRuntimeKeyValue(sleep["seconds"])
+		return ok && seconds == DefaultStrictDrainConfig().DrainTimeoutSeconds()
+	}
+	httpGet, ok := preStop["httpGet"].(map[string]any)
+	if !ok || len(httpGet) == 0 {
 		return false
 	}
-	seconds, ok := int64FromRuntimeKeyValue(sleep["seconds"])
-	return ok && seconds == appStrictDrainSeconds
+	path, _ := httpGet["path"].(string)
+	return strings.TrimSpace(path) == "/drain/prestop"
 }
 
 func int64FromRuntimeKeyValue(value any) (int64, bool) {
@@ -1923,16 +2036,16 @@ func appUsesStrictZeroDowntimeDrain(app model.App) bool {
 	return normalizeRuntimeAppWorkspaceSpec(app) == nil && normalizeRuntimeAppPersistentStorageSpec(app) == nil
 }
 
-func deploymentRolloutAnnotations(app model.App) map[string]string {
+func deploymentRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]string {
 	if !appUsesOnlineDurableRolloutStrategy(app) {
-		return appRolloutAnnotations(app)
+		return appRolloutAnnotations(app, config)
 	}
 	return mergeStringMaps(map[string]string{
 		"fugue.io/rollout-mode":    "rolling-restart",
 		"fugue.io/downtime-class":  "online-required",
 		"fugue.io/rollout-reason":  onlineDurableRolloutReason(app.Spec.RolloutIntent),
 		"fugue.io/rollout-surface": "tenant-app",
-	}, strictZeroDowntimeDrainAnnotations(app))
+	}, strictZeroDowntimeDrainAnnotations(app, config))
 }
 
 func onlineDurableRolloutReason(intent string) string {
@@ -1950,31 +2063,37 @@ func onlineDurableRolloutReason(intent string) string {
 	}
 }
 
-func appRolloutAnnotations(app model.App) map[string]string {
+func appRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]string {
 	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
 		return mergeStringMaps(map[string]string{
 			"fugue.io/rollout-mode":    "isolated-singleton",
 			"fugue.io/downtime-class":  "downtime-required",
 			"fugue.io/rollout-reason":  "single-writer-storage",
 			"fugue.io/rollout-surface": "tenant-app",
-		}, strictZeroDowntimeDrainAnnotations(app))
+		}, strictZeroDowntimeDrainAnnotations(app, config))
 	}
 	return mergeStringMaps(map[string]string{
 		"fugue.io/rollout-mode":    "rolling-update",
 		"fugue.io/downtime-class":  "online-required",
 		"fugue.io/rollout-surface": "tenant-app",
-	}, strictZeroDowntimeDrainAnnotations(app))
+	}, strictZeroDowntimeDrainAnnotations(app, config))
 }
 
-func strictZeroDowntimeDrainAnnotations(app model.App) map[string]string {
+func strictZeroDowntimeDrainAnnotations(app model.App, config StrictDrainConfig) map[string]string {
+	config = config.Normalize()
 	if !appUsesStrictZeroDowntimeDrain(app) {
 		return nil
 	}
-	return map[string]string{
-		"fugue.io/drain-mode":                    "strict-zero-downtime",
-		"fugue.io/drain-timeout-seconds":         strconv.FormatInt(appStrictDrainSeconds, 10),
-		"fugue.io/termination-grace-min-seconds": strconv.FormatInt(appStrictDrainSeconds+appStrictDrainStopBuffer, 10),
+	annotations := map[string]string{
+		"fugue.io/drain-mode":                    config.ModeOrFallback(),
+		"fugue.io/drain-timeout-seconds":         strconv.FormatInt(config.DrainTimeoutSeconds(), 10),
+		"fugue.io/termination-grace-min-seconds": strconv.FormatInt(config.TerminationGraceMinSeconds(), 10),
 	}
+	if config.ConnectionAwareEnabled() {
+		annotations["fugue.io/drain-quiet-period-seconds"] = strconv.Itoa(config.QuietPeriodSeconds)
+		annotations["fugue.io/drain-agent-port"] = strconv.Itoa(config.AgentPort)
+	}
+	return annotations
 }
 
 func mergeStringMaps(maps ...map[string]string) map[string]string {

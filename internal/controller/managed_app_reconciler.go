@@ -264,7 +264,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("resolve postgres placements: %w", err))
 	}
-	childObjects := runtime.BuildManagedAppChildObjectsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements, ownerRef)
+	childObjects := s.Renderer.BuildManagedAppChildObjectsWithPlacements(app, managed.Spec.Scheduling, postgresPlacements, ownerRef)
 	fenceEpoch, err := s.currentAppFenceEpoch(ctx, client, app)
 	if err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app fence epoch: %w", err))
@@ -273,7 +273,8 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 	if err := s.ensureManagedPostgresDataSafety(ctx, client, namespace, managed, app, childObjects); err != nil {
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, err)
 	}
-	rolloutDecision := managedAppRolloutDecisionFromObjects(ctx, namespace, managed, app, childObjects)
+	releaseKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(app, managed.Spec.Scheduling))
+	rolloutDecision := managedAppRolloutDecisionFromObjects(ctx, namespace, managed, app, childObjects, releaseKey)
 	if s.controllerObservabilityEndpointConfigured() {
 		rolloutDecision.OldReplicaSet = s.latestManagedAppReplicaSetName(ctx, client, namespace, app)
 	}
@@ -341,7 +342,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 		}
 	}
 
-	status := buildManagedAppStatus(managed, app, deployment, found, appPods, backingServiceStatuses)
+	status := buildManagedAppStatus(managed, app, deployment, found, appPods, backingServiceStatuses, releaseKey)
 	if err := client.patchManagedAppStatus(ctx, namespace, managed.Metadata.Name, status); err != nil {
 		return fmt.Errorf("patch managed app status for %s/%s: %w", namespace, managed.Metadata.Name, err)
 	}
@@ -795,15 +796,22 @@ func patchManagedAppErrorStatus(ctx context.Context, client *kubeClient, namespa
 	return cause
 }
 
-func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool, pods []kubePod, backingServiceStatuses []runtime.ManagedBackingServiceStatus) runtime.ManagedAppStatus {
+func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, deployment kubeDeployment, found bool, pods []kubePod, backingServiceStatuses []runtime.ManagedBackingServiceStatus, releaseKeys ...string) runtime.ManagedAppStatus {
 	status := managedAppBaseStatus(managed, app)
 	if found {
 		status.ReadyReplicas = maxInt(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
 		status.Conditions = append([]runtime.ManagedAppCondition(nil), deployment.Status.Conditions...)
 	}
 	status.BackingServices = append([]runtime.ManagedBackingServiceStatus(nil), backingServiceStatuses...)
-	podFailureCutoff, allowPodFailure := managedAppPodFailureCutoff(managed.Status, app, managed.Spec.Scheduling)
-	if allowPodFailure && managedAppReleaseAttemptAdvanced(managed.Status, managed.Metadata.Generation, app, managed.Spec.Scheduling) {
+	releaseKey := ""
+	if len(releaseKeys) > 0 {
+		releaseKey = strings.TrimSpace(releaseKeys[0])
+	}
+	if releaseKey == "" {
+		releaseKey = strings.TrimSpace(runtime.ManagedAppReleaseKey(app, managed.Spec.Scheduling))
+	}
+	podFailureCutoff, allowPodFailure := managedAppPodFailureCutoff(managed.Status, releaseKey)
+	if allowPodFailure && managedAppReleaseAttemptAdvanced(managed.Status, managed.Metadata.Generation, releaseKey) {
 		allowPodFailure = false
 	}
 	podFailureMessage := ""
@@ -839,7 +847,7 @@ func buildManagedAppStatus(managed runtime.ManagedAppObject, app model.App, depl
 		status.Phase = runtime.ManagedAppPhaseProgressing
 		status.Message = managedDeploymentProgressMessage(deployment, app.Spec.Replicas, runtime.RuntimeAppResourceName(app))
 	}
-	applyManagedAppReleaseStatus(&status, managed.Status, app, managed.Spec.Scheduling)
+	applyManagedAppReleaseStatus(&status, managed.Status, app, releaseKey)
 	return status
 }
 
@@ -972,8 +980,8 @@ func managedAppPodLabelSelector(app model.App) string {
 	return strings.Join(selectors, ",")
 }
 
-func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, app model.App, scheduling runtime.SchedulingConstraints) (*time.Time, bool) {
-	releaseKey := strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, releaseKey string) (*time.Time, bool) {
+	releaseKey = strings.TrimSpace(releaseKey)
 	if releaseKey == "" {
 		return nil, true
 	}
@@ -999,8 +1007,8 @@ func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, app model.App
 	return nil, true
 }
 
-func managedAppReleaseAttemptAdvanced(previous runtime.ManagedAppStatus, generation int64, app model.App, scheduling runtime.SchedulingConstraints) bool {
-	releaseKey := strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+func managedAppReleaseAttemptAdvanced(previous runtime.ManagedAppStatus, generation int64, releaseKey string) bool {
+	releaseKey = strings.TrimSpace(releaseKey)
 	if releaseKey == "" {
 		return false
 	}
@@ -1280,7 +1288,7 @@ func isFailingManagedAppTermination(detail kubeStateDetail) bool {
 	return !strings.EqualFold(reason, "Completed")
 }
 
-func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous runtime.ManagedAppStatus, app model.App, scheduling runtime.SchedulingConstraints) {
+func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous runtime.ManagedAppStatus, app model.App, releaseKey string) {
 	if status == nil {
 		return
 	}
@@ -1293,7 +1301,7 @@ func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous run
 		return
 	}
 
-	releaseKey := strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
+	releaseKey = strings.TrimSpace(releaseKey)
 	currentKey := strings.TrimSpace(previous.CurrentReleaseKey)
 	currentStartedAt := strings.TrimSpace(previous.CurrentReleaseStartedAt)
 	currentReadyAt := strings.TrimSpace(previous.CurrentReleaseReadyAt)

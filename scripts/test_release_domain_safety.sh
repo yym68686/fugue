@@ -133,6 +133,57 @@ FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go'
 node_local_build_plane_changed || fail "image-cache code changes must mark build-plane changed"
 node_local_build_plane_preflight_override_allowed || fail "image-cache fixes must be allowed to bypass registry/node-policy preflight"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/api/server.go'
+if strict_drain_agent_image_changed; then
+  fail "generic control-plane changes must not mark strict drain-agent image changed"
+fi
+
+FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-drain-agent/main.go'
+strict_drain_agent_image_changed || fail "drain-agent code changes must mark strict drain-agent image changed"
+
+FUGUE_RELEASE_CHANGED_FILES=$'Dockerfile.drain-agent'
+strict_drain_agent_image_changed || fail "drain-agent Dockerfile changes must mark strict drain-agent image changed"
+
+(
+  FUGUE_RELEASE_CHANGED_FILES=$'internal/api/server.go'
+  FUGUE_STRICT_DRAIN_MODE=connection-aware
+  FUGUE_RELEASE_FULLNAME=fugue
+  FUGUE_CONTROLLER_DEPLOYMENT_NAME=fugue-controller
+  FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY=ghcr.io/acme/fugue-drain-agent
+  FUGUE_DRAIN_AGENT_IMAGE_TAG=target
+  FUGUE_DRAIN_AGENT_IMAGE_DIGEST=""
+  FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY=Always
+  deployment_exists() { [[ "$1" == "fugue-controller" ]]; }
+  live_deployment_container_env_value() {
+    case "$3" in
+      FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY) printf '%s' "ghcr.io/acme/live-drain-agent" ;;
+      FUGUE_DRAIN_AGENT_IMAGE_TAG) printf '%s' "live-sha" ;;
+      FUGUE_DRAIN_AGENT_IMAGE_DIGEST) printf '%s' "" ;;
+      FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY) printf '%s' "IfNotPresent" ;;
+    esac
+  }
+  preserve_strict_drain_agent_image_from_live
+  assert_eq "${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}" "ghcr.io/acme/live-drain-agent" "strict drain-agent repository preserves live image"
+  assert_eq "${FUGUE_DRAIN_AGENT_IMAGE_TAG}" "live-sha" "strict drain-agent tag preserves live image"
+  assert_eq "${FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY}" "IfNotPresent" "strict drain-agent pull policy preserves live image"
+  assert_eq "${STRICT_DRAIN_AGENT_IMAGE_PRESERVED}" "true" "strict drain-agent preserve flag"
+)
+
+(
+  FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-drain-agent/main.go'
+  FUGUE_STRICT_DRAIN_MODE=connection-aware
+  FUGUE_RELEASE_FULLNAME=fugue
+  FUGUE_CONTROLLER_DEPLOYMENT_NAME=fugue-controller
+  FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY=ghcr.io/acme/fugue-drain-agent
+  FUGUE_DRAIN_AGENT_IMAGE_TAG=target
+  deployment_exists() { return 0; }
+  live_deployment_container_env_value() { printf '%s' "unexpected"; }
+  preserve_strict_drain_agent_image_from_live
+  assert_eq "${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}" "ghcr.io/acme/fugue-drain-agent" "drain-agent source change must not preserve live repository"
+  assert_eq "${FUGUE_DRAIN_AGENT_IMAGE_TAG}" "target" "drain-agent source change must not preserve live tag"
+  assert_eq "${STRICT_DRAIN_AGENT_IMAGE_PRESERVED}" "false" "strict drain-agent source changes are not preserved"
+)
+
 FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go\ninternal/controller/deploy_image_guard.go\ndeploy/helm/fugue/templates/controller-deployment.yaml'
 node_local_build_plane_preflight_override_allowed || fail "builder registry routing fixes must be allowed to bypass registry/node-policy preflight"
 

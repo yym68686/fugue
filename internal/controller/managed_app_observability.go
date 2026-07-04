@@ -26,14 +26,14 @@ type managedAppRolloutDecision struct {
 	Namespace      string
 }
 
-func managedAppRolloutDecisionFromObjects(ctx context.Context, namespace string, managed runtime.ManagedAppObject, app model.App, objects []map[string]any) managedAppRolloutDecision {
+func managedAppRolloutDecisionFromObjects(ctx context.Context, namespace string, managed runtime.ManagedAppObject, app model.App, objects []map[string]any, releaseKey string) managedAppRolloutDecision {
 	applyCtx := managedAppApplySourceFromContext(ctx)
 	decision := managedAppRolloutDecision{
 		Source:         applyCtx.Source,
 		OperationID:    applyCtx.OperationID,
 		RolloutIntent:  strings.TrimSpace(app.Spec.RolloutIntent),
 		OldReleaseKey:  strings.TrimSpace(managed.Status.CurrentReleaseKey),
-		NewReleaseKey:  strings.TrimSpace(runtime.ManagedAppReleaseKey(app, managed.Spec.Scheduling)),
+		NewReleaseKey:  strings.TrimSpace(releaseKey),
 		DeploymentName: runtime.RuntimeAppResourceName(app),
 		ManagedAppName: strings.TrimSpace(managed.Metadata.Name),
 		Namespace:      strings.TrimSpace(namespace),

@@ -160,6 +160,37 @@ func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	}
 }
 
+func TestControllerFromEnvReadsStrictDrainConfiguration(t *testing.T) {
+	t.Setenv("FUGUE_STRICT_DRAIN_MODE", "fixed-sleep")
+	t.Setenv("FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS", "321")
+	t.Setenv("FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS", "33")
+	t.Setenv("FUGUE_STRICT_DRAIN_MIN_READY_SECONDS", "11")
+	t.Setenv("FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS", "3")
+	t.Setenv("FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS", "250")
+	t.Setenv("FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED", "false")
+	t.Setenv("FUGUE_DRAIN_AGENT_PORT", "19191")
+	t.Setenv("FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY", "ghcr.io/example/drain")
+	t.Setenv("FUGUE_DRAIN_AGENT_IMAGE_TAG", "sha-test")
+	t.Setenv("FUGUE_DRAIN_AGENT_IMAGE_DIGEST", "sha256:abc")
+	t.Setenv("FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY", "Always")
+
+	cfg := ControllerFromEnv()
+	if cfg.StrictDrainMode != "fixed-sleep" ||
+		cfg.StrictDrainTimeoutSeconds != 321 ||
+		cfg.StrictDrainTerminationGraceBufferSeconds != 33 ||
+		cfg.StrictDrainMinReadySeconds != 11 ||
+		cfg.StrictDrainQuietPeriodSeconds != 3 ||
+		cfg.StrictDrainPollIntervalMilliseconds != 250 ||
+		cfg.StrictDrainNativeSidecarEnabled ||
+		cfg.StrictDrainAgentPort != 19191 ||
+		cfg.StrictDrainAgentImageRepository != "ghcr.io/example/drain" ||
+		cfg.StrictDrainAgentImageTag != "sha-test" ||
+		cfg.StrictDrainAgentImageDigest != "sha256:abc" ||
+		cfg.StrictDrainAgentImagePullPolicy != "Always" {
+		t.Fatalf("unexpected strict drain config: %+v", cfg)
+	}
+}
+
 func TestControllerFromEnvDefaultsImageCacheOrphanPruneToLimitedDelete(t *testing.T) {
 	t.Setenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE", "")
 	t.Setenv("FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE", "")

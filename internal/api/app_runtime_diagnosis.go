@@ -22,6 +22,7 @@ const (
 	appDiagnosisEventLimit         = 12
 	appDiagnosisHTTPProbeTimeout   = 2 * time.Second
 	appDiagnosisHTTPProbeUserAgent = "fugue-app-diagnosis/1.0"
+	appDiagnosisDrainAgentName     = "fugue-drain-agent"
 )
 
 var appDiagnosisHTTPProbePaths = []string{"/healthz", "/"}
@@ -175,6 +176,9 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	platformEnvDrift := false
 	if clusterErr == nil && component == "app" {
 		platformEnvDrift = s.appendAppPlatformEnvDrift(r.Context(), clusterClient, app, namespace, &diagnosis)
+	}
+	if component == "app" {
+		s.appendAppStrictDrainEvidence(r.Context(), clusterClient, logClient, app, namespace, pods, &diagnosis)
 	}
 
 	podSummaries := summarizeAppDiagnosisPods(pods)
@@ -414,6 +418,139 @@ func appDiagnosisHTTPProbeTimedOut(err error) bool {
 	}
 	normalized := strings.ToLower(err.Error())
 	return strings.Contains(normalized, "timeout") || strings.Contains(normalized, "deadline exceeded")
+}
+
+func (s *Server) appendAppStrictDrainEvidence(ctx context.Context, client *clusterNodeClient, logClient appLogsClient, app model.App, namespace string, pods []kubePodInfo, diagnosis *appDiagnosis) {
+	if diagnosis == nil {
+		return
+	}
+	drainMode := ""
+	if client != nil {
+		deploymentName := runtime.RuntimeAppResourceName(app)
+		deployment, found, err := client.readDeploymentObject(ctx, namespace, deploymentName)
+		if err != nil {
+			diagnosis.Warnings = appendUniqueString(diagnosis.Warnings, fmt.Sprintf("strict drain inspection unavailable: %v", err))
+		} else if found {
+			evidence, mode := appStrictDrainDeploymentEvidence(deployment)
+			drainMode = mode
+			if evidence != "" {
+				diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, evidence)
+			}
+		}
+	}
+	if strings.EqualFold(drainMode, "connection-aware") || appPodsIncludeDrainAgent(pods) {
+		if podName, line := latestDrainAgentResultLine(ctx, logClient, namespace, pods); line != "" {
+			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf("strict drain recent result pod=%s %s", podName, line))
+		}
+	}
+}
+
+func appStrictDrainDeploymentEvidence(deployment appsv1.Deployment) (string, string) {
+	mode := appStrictDrainAnnotation(deployment, "fugue.io/drain-mode")
+	if mode == "" {
+		return "", ""
+	}
+	parts := []string{
+		"strict drain mode=" + mode,
+	}
+	if timeout := appStrictDrainAnnotation(deployment, "fugue.io/drain-timeout-seconds"); timeout != "" {
+		parts = append(parts, "timeout_seconds="+timeout)
+	}
+	if quiet := appStrictDrainAnnotation(deployment, "fugue.io/drain-quiet-period-seconds"); quiet != "" {
+		parts = append(parts, "quiet_period_seconds="+quiet)
+	}
+	if port := appStrictDrainAnnotation(deployment, "fugue.io/drain-agent-port"); port != "" {
+		parts = append(parts, "agent_port="+port)
+	}
+	if grace := appStrictDrainAnnotation(deployment, "fugue.io/termination-grace-min-seconds"); grace != "" {
+		parts = append(parts, "termination_grace_min_seconds="+grace)
+	}
+	return strings.Join(parts, " "), mode
+}
+
+func appStrictDrainAnnotation(deployment appsv1.Deployment, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	if value := strings.TrimSpace(deployment.Spec.Template.Annotations[key]); value != "" {
+		return value
+	}
+	return strings.TrimSpace(deployment.Annotations[key])
+}
+
+func appPodsIncludeDrainAgent(pods []kubePodInfo) bool {
+	for _, pod := range pods {
+		if podIncludesDrainAgent(pod) {
+			return true
+		}
+	}
+	return false
+}
+
+func podIncludesDrainAgent(pod kubePodInfo) bool {
+	for _, container := range pod.Spec.InitContainers {
+		if strings.TrimSpace(container.Name) == appDiagnosisDrainAgentName {
+			return true
+		}
+	}
+	for _, container := range pod.Spec.Containers {
+		if strings.TrimSpace(container.Name) == appDiagnosisDrainAgentName {
+			return true
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if strings.TrimSpace(status.Name) == appDiagnosisDrainAgentName {
+			return true
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if strings.TrimSpace(status.Name) == appDiagnosisDrainAgentName {
+			return true
+		}
+	}
+	return false
+}
+
+func latestDrainAgentResultLine(ctx context.Context, logClient appLogsClient, namespace string, pods []kubePodInfo) (string, string) {
+	if logClient == nil || len(pods) == 0 {
+		return "", ""
+	}
+	for index := len(pods) - 1; index >= 0; index-- {
+		pod := pods[index]
+		if !podIncludesDrainAgent(pod) {
+			continue
+		}
+		logs, err := logClient.readPodLogs(ctx, namespace, strings.TrimSpace(pod.Metadata.Name), kubeLogOptions{
+			Container: appDiagnosisDrainAgentName,
+			TailLines: 80,
+		})
+		if err != nil {
+			continue
+		}
+		if line := lastDrainAgentLine(logs, "fugue_drain_complete"); line != "" {
+			return strings.TrimSpace(pod.Metadata.Name), line
+		}
+		if line := lastDrainAgentLine(logs, "fugue_drain_start"); line != "" {
+			return strings.TrimSpace(pod.Metadata.Name), line
+		}
+	}
+	return "", ""
+}
+
+func lastDrainAgentLine(logs, marker string) string {
+	lines := strings.Split(logs, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || !strings.Contains(line, marker) {
+			continue
+		}
+		if len(line) > 300 {
+			line = strings.TrimSpace(line[:300]) + "..."
+		}
+		return line
+	}
+	return ""
 }
 
 func (s *Server) appendAppPlatformEnvDrift(ctx context.Context, client *clusterNodeClient, app model.App, namespace string, diagnosis *appDiagnosis) bool {

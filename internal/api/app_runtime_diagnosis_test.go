@@ -285,6 +285,127 @@ func TestGetAppDiagnosisCountsOnlyActivePodsWhenReadyReplicaExists(t *testing.T)
 	}
 }
 
+func TestGetAppDiagnosisIncludesStrictDrainEvidence(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+	})
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	selector, containerName, err := runtimeLogTarget(app, "app")
+	if err != nil {
+		t.Fatalf("runtime log target: %v", err)
+	}
+
+	fake := newFakeAppLogsClient()
+	pod := fakePod("demo-ready", "Running", time.Date(2026, 7, 5, 0, 1, 0, 0, time.UTC), containerName)
+	pod.Metadata.Namespace = namespace
+	pod.Spec.InitContainers = []struct {
+		Name  string `json:"name"`
+		Image string `json:"image,omitempty"`
+	}{{Name: "fugue-drain-agent", Image: "ghcr.io/acme/fugue-drain-agent:live"}}
+	pod.Status.InitContainerStatuses = []kubeContainerStatus{{
+		Name:  "fugue-drain-agent",
+		Image: "ghcr.io/acme/fugue-drain-agent:live",
+		Ready: true,
+		State: kubeRuntimeState{Running: &struct{}{}},
+	}}
+	pod.Status.ContainerStatuses = []kubeContainerStatus{{
+		Name:  containerName,
+		Image: "ghcr.io/example/demo:latest",
+		Ready: true,
+		State: kubeRuntimeState{Running: &struct{}{}},
+	}}
+	fake.setPods(selector, []kubePodInfo{pod})
+	fake.setLogLines(namespace, pod.Metadata.Name, "fugue-drain-agent", false,
+		"2026/07/05 00:00:00 fugue_drain_start pod=demo-ready namespace="+namespace+" ports=8080 timeout_seconds=600 quiet_period_seconds=2 poll_interval_ms=200",
+		"2026/07/05 00:00:03 fugue_drain_complete reason=idle waited_ms=3200 active_connections=0 max_active_connections=2 observer_errors=0",
+	)
+	server.newLogsClient = func(namespace string) (appLogsClient, error) {
+		return fake, nil
+	}
+	server.appRequestHTTPClient = &http.Client{
+		Transport: diagnosticRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				Status:     "404 Not Found",
+				StatusCode: http.StatusNotFound,
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	kubeServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/nodes", "/api/v1/pods", "/api/v1/namespaces/" + namespace + "/events":
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
+		case "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + runtime.RuntimeAppResourceName(app):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"name":      runtime.RuntimeAppResourceName(app),
+					"namespace": namespace,
+					"annotations": map[string]string{
+						"fugue.io/drain-mode":                    "connection-aware",
+						"fugue.io/drain-timeout-seconds":         "600",
+						"fugue.io/drain-quiet-period-seconds":    "2",
+						"fugue.io/drain-agent-port":              "19090",
+						"fugue.io/termination-grace-min-seconds": "630",
+					},
+				},
+				"spec": map[string]any{
+					"template": map[string]any{
+						"metadata": map[string]any{
+							"annotations": map[string]string{
+								"fugue.io/drain-mode":                    "connection-aware",
+								"fugue.io/drain-timeout-seconds":         "600",
+								"fugue.io/drain-quiet-period-seconds":    "2",
+								"fugue.io/drain-agent-port":              "19090",
+								"fugue.io/termination-grace-min-seconds": "630",
+							},
+						},
+						"spec": map[string]any{"containers": []map[string]any{{"name": containerName}}},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer kubeServer.Close()
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/diagnosis", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response struct {
+		Diagnosis appDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
+	for _, want := range []string{
+		"strict drain mode=connection-aware timeout_seconds=600 quiet_period_seconds=2 agent_port=19090 termination_grace_min_seconds=630",
+		"strict drain recent result pod=demo-ready",
+		"fugue_drain_complete reason=idle waited_ms=3200 active_connections=0 max_active_connections=2 observer_errors=0",
+	} {
+		if !strings.Contains(joinedEvidence, want) {
+			t.Fatalf("expected evidence to contain %q, got %+v", want, response.Diagnosis.Evidence)
+		}
+	}
+}
+
 func TestGetAppDiagnosisDetectsReadyPodHTTPTimeout(t *testing.T) {
 	t.Parallel()
 

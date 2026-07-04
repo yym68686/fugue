@@ -1041,6 +1041,47 @@ func TestStatelessControlPlaneTopologySpreadAllowsFailover(t *testing.T) {
 	}
 }
 
+func TestControllerRendersStrictDrainConfiguration(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set-string", "runtime.strictDrain.agent.image.repository=ghcr.io/example/fugue-drain-agent",
+		"--set-string", "runtime.strictDrain.agent.image.tag=test-sha",
+		"--set", "runtime.strictDrain.minReadySeconds=12",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	doc := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing controller deployment:\n%s", output)
+	}
+	for _, want := range []string{
+		"name: FUGUE_STRICT_DRAIN_MODE",
+		"value: \"connection-aware\"",
+		"name: FUGUE_STRICT_DRAIN_MIN_READY_SECONDS",
+		"value: \"12\"",
+		"name: FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY",
+		"value: \"ghcr.io/example/fugue-drain-agent\"",
+		"name: FUGUE_DRAIN_AGENT_IMAGE_TAG",
+		"value: \"test-sha\"",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("controller deployment missing strict drain fragment %q:\n%s", want, doc)
+		}
+	}
+}
+
 func TestControlPlaneSingletonSelectorOverridesPrimaryNodeSelector(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

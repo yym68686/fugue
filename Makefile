@@ -2,7 +2,7 @@ GOCACHE ?= $(CURDIR)/.gocache
 BIN_DIR ?= $(CURDIR)/bin
 DOCKER ?= docker
 
-.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
+.PHONY: test test-scripts generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
 	bash ./scripts/scan_hardcoded_production_facts.sh
@@ -23,7 +23,7 @@ generate-openapi:
 generate-openapi-check:
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 
-build: build-api build-controller build-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli
+build: build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli
 
 build-api:
 	mkdir -p $(BIN_DIR)
@@ -36,6 +36,10 @@ build-controller:
 build-agent:
 	mkdir -p $(BIN_DIR)
 	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-agent ./cmd/fugue-agent
+
+build-drain-agent:
+	mkdir -p $(BIN_DIR)
+	env GOCACHE=$(GOCACHE) go build -o $(BIN_DIR)/fugue-drain-agent ./cmd/fugue-drain-agent
 
 build-telemetry-agent:
 	mkdir -p $(BIN_DIR)

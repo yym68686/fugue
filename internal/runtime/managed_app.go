@@ -198,7 +198,11 @@ func BuildManagedAppChildObjects(app model.App, scheduling SchedulingConstraints
 }
 
 func BuildManagedAppChildObjectsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
-	objects := buildAppObjectsWithOwner(app, scheduling, postgresPlacements, ownerRef)
+	return BuildManagedAppChildObjectsWithPlacementsAndOptions(app, scheduling, postgresPlacements, ownerRef, defaultRenderOptions())
+}
+
+func BuildManagedAppChildObjectsWithPlacementsAndOptions(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference, options RenderOptions) []map[string]any {
+	objects := buildAppObjectsWithOwnerAndOptions(app, scheduling, postgresPlacements, ownerRef, options)
 	if len(objects) == 0 {
 		return nil
 	}

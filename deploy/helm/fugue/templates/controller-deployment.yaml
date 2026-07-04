@@ -142,6 +142,30 @@ spec:
               value: {{ include "fugue.registryGCControlName" . | quote }}
             - name: FUGUE_RUNTIME_OFFLINE_AFTER
               value: {{ .Values.controller.runtimeOfflineAfter | quote }}
+            - name: FUGUE_STRICT_DRAIN_MODE
+              value: {{ .Values.runtime.strictDrain.mode | quote }}
+            - name: FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS
+              value: {{ .Values.runtime.strictDrain.timeoutSeconds | quote }}
+            - name: FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS
+              value: {{ .Values.runtime.strictDrain.terminationGraceBufferSeconds | quote }}
+            - name: FUGUE_STRICT_DRAIN_MIN_READY_SECONDS
+              value: {{ .Values.runtime.strictDrain.minReadySeconds | quote }}
+            - name: FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS
+              value: {{ .Values.runtime.strictDrain.quietPeriodSeconds | quote }}
+            - name: FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS
+              value: {{ .Values.runtime.strictDrain.pollIntervalMilliseconds | quote }}
+            - name: FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED
+              value: {{ .Values.runtime.strictDrain.nativeSidecarEnabled | quote }}
+            - name: FUGUE_DRAIN_AGENT_PORT
+              value: {{ .Values.runtime.strictDrain.agent.port | quote }}
+            - name: FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY
+              value: {{ .Values.runtime.strictDrain.agent.image.repository | quote }}
+            - name: FUGUE_DRAIN_AGENT_IMAGE_TAG
+              value: {{ .Values.runtime.strictDrain.agent.image.tag | quote }}
+            - name: FUGUE_DRAIN_AGENT_IMAGE_DIGEST
+              value: {{ .Values.runtime.strictDrain.agent.image.digest | quote }}
+            - name: FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY
+              value: {{ .Values.runtime.strictDrain.agent.image.pullPolicy | quote }}
             - name: FUGUE_CONTROLLER_KUBECTL_APPLY
               value: {{ .Values.controller.kubectlApply | quote }}
             - name: FUGUE_CONTROLLER_KUBECTL_NAMESPACE

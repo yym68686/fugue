@@ -18,6 +18,7 @@ type Renderer struct {
 	BaseDir          string
 	WorkloadIdentity WorkloadIdentityConfig
 	AppObservability AppObservabilityConfig
+	StrictDrain      StrictDrainConfig
 }
 
 type WorkloadIdentityConfig struct {
@@ -59,7 +60,7 @@ func (r Renderer) RenderAppBundleWithPlacements(app model.App, scheduling Schedu
 		return Bundle{}, fmt.Errorf("create render directory: %w", err)
 	}
 
-	objects := buildAppObjectsWithPlacements(app, scheduling, postgresPlacements)
+	objects := buildAppObjectsWithPlacementsAndOptions(app, scheduling, postgresPlacements, r.renderOptions())
 	manifest, err := marshalObjectsToManifest(objects)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("render manifest: %w", err)
@@ -109,6 +110,22 @@ func (r Renderer) RenderManagedAppBundleWithPlacements(app model.App, scheduling
 
 func (r Renderer) PrepareApp(app model.App) model.App {
 	return r.withPlatformEnv(app)
+}
+
+func (r Renderer) renderOptions() RenderOptions {
+	return normalizeRenderOptions(RenderOptions{StrictDrain: r.StrictDrain})
+}
+
+func (r Renderer) ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
+	return ManagedAppReleaseKeyWithOptions(app, scheduling, r.renderOptions())
+}
+
+func (r Renderer) BuildManagedAppChildObjects(app model.App, scheduling SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
+	return BuildManagedAppChildObjectsWithPlacementsAndOptions(app, scheduling, nil, ownerRef, r.renderOptions())
+}
+
+func (r Renderer) BuildManagedAppChildObjectsWithPlacements(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
+	return BuildManagedAppChildObjectsWithPlacementsAndOptions(app, scheduling, postgresPlacements, ownerRef, r.renderOptions())
 }
 
 func (r Renderer) withPlatformEnv(app model.App) model.App {

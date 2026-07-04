@@ -113,23 +113,24 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected wait-postgres init container")
 	}
-	if len(initContainers) != 1 {
-		t.Fatalf("expected only wait-postgres init container, got %d", len(initContainers))
+	if len(initContainers) < 1 {
+		t.Fatalf("expected wait-postgres init container, got %d", len(initContainers))
 	}
 	containers := appPodSpec["containers"].([]map[string]any)
 	envObjects := containers[0]["env"].([]map[string]any)
 	if got := envValue(envObjects, "DB_HOST"); got != "uni-api-demo-postgres" {
 		t.Fatalf("expected inline postgres DB_HOST to use Fugue-managed primary service, got %q", got)
 	}
-	if got := initContainers[0]["name"]; got != "wait-postgres" {
+	waitPostgres := initContainers[len(initContainers)-1]
+	if got := waitPostgres["name"]; got != "wait-postgres" {
 		t.Fatalf("expected wait-postgres init container, got %#v", got)
 	}
-	command := initContainers[0]["command"].([]string)
+	command := waitPostgres["command"].([]string)
 	expectedWaitCommand := `host="uni-api-demo-postgres"; env_host="${UNI_API_DEMO_POSTGRES_SERVICE_HOST:-}"; if [ -n "$env_host" ]; then host="$env_host"; fi; until nc -z "$host" 5432; do sleep 1; done`
 	if got := command[2]; got != expectedWaitCommand {
 		t.Fatalf("expected wait-postgres init container to prefer service ClusterIP env, got %q", got)
 	}
-	assertHelperResources(t, initContainers[0]["resources"])
+	assertHelperResources(t, waitPostgres["resources"])
 	volumeMounts, ok := containers[0]["volumeMounts"].([]map[string]any)
 	if !ok {
 		t.Fatalf("expected declarative app files to be mounted into the app container")
@@ -867,8 +868,8 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	if spec["progressDeadlineSeconds"] != appProgressDeadlineSeconds {
 		t.Fatalf("expected progressDeadlineSeconds=%d, got %#v", appProgressDeadlineSeconds, spec["progressDeadlineSeconds"])
 	}
-	if spec["minReadySeconds"] != int(appStrictDrainSeconds) {
-		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", appStrictDrainSeconds, spec["minReadySeconds"])
+	if spec["minReadySeconds"] != DefaultStrictDrainConfig().MinReadySeconds {
+		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", DefaultStrictDrainConfig().MinReadySeconds, spec["minReadySeconds"])
 	}
 	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
 	if rollingUpdate["maxUnavailable"] != 0 {
@@ -909,15 +910,25 @@ func TestBuildAppDeploymentUsesRollingUpdateAndReadinessProbe(t *testing.T) {
 	}
 	lifecycle := containers[0]["lifecycle"].(map[string]any)
 	preStop := lifecycle["preStop"].(map[string]any)
-	sleep := preStop["sleep"].(map[string]any)
-	if got := sleep["seconds"]; got != appStrictDrainSeconds {
-		t.Fatalf("expected steady-state stateless app strict drain sleep=%d, got %#v", appStrictDrainSeconds, got)
+	httpGet := preStop["httpGet"].(map[string]any)
+	if got := httpGet["path"]; got != "/drain/prestop" {
+		t.Fatalf("expected connection-aware preStop hook path, got %#v", got)
 	}
-	if got := podSpec["terminationGracePeriodSeconds"]; got != appStrictDrainSeconds+appStrictDrainStopBuffer {
-		t.Fatalf("expected steady-state stateless app terminationGracePeriodSeconds=%d, got %#v", appStrictDrainSeconds+appStrictDrainStopBuffer, got)
+	if got := httpGet["port"]; got != DefaultStrictDrainConfig().AgentPort {
+		t.Fatalf("expected connection-aware preStop hook port %d, got %#v", DefaultStrictDrainConfig().AgentPort, got)
 	}
-	if got := annotations["fugue.io/drain-mode"]; got != "strict-zero-downtime" {
-		t.Fatalf("expected steady-state stateless app strict drain annotation, got %#v", got)
+	if got := podSpec["terminationGracePeriodSeconds"]; got != DefaultStrictDrainConfig().TerminationGraceMinSeconds() {
+		t.Fatalf("expected steady-state stateless app terminationGracePeriodSeconds=%d, got %#v", DefaultStrictDrainConfig().TerminationGraceMinSeconds(), got)
+	}
+	initContainers := podSpec["initContainers"].([]map[string]any)
+	if len(initContainers) == 0 || initContainers[0]["name"] != "fugue-drain-agent" {
+		t.Fatalf("expected connection-aware drain-agent native sidecar, got %#v", initContainers)
+	}
+	if got := initContainers[0]["restartPolicy"]; got != "Always" {
+		t.Fatalf("expected drain-agent native sidecar restartPolicy Always, got %#v", got)
+	}
+	if got := annotations["fugue.io/drain-mode"]; got != StrictDrainModeConnectionAware {
+		t.Fatalf("expected steady-state stateless app connection-aware drain annotation, got %#v", got)
 	}
 }
 
@@ -984,19 +995,19 @@ func TestBuildAppDeploymentAddsStrictDrainForOnlineImageUpdate(t *testing.T) {
 	objects := buildAppObjects(app, SchedulingConstraints{})
 	deployment := objects[1]
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
-	if got := annotations["fugue.io/drain-mode"]; got != "strict-zero-downtime" {
+	if got := annotations["fugue.io/drain-mode"]; got != StrictDrainModeConnectionAware {
 		t.Fatalf("expected strict drain mode annotation, got %#v", got)
 	}
 	if got := annotations["fugue.io/drain-timeout-seconds"]; got != "600" {
 		t.Fatalf("expected drain timeout annotation 600, got %#v", got)
 	}
 	spec := deployment["spec"].(map[string]any)
-	if got := spec["minReadySeconds"]; got != int(appStrictDrainSeconds) {
-		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", appStrictDrainSeconds, got)
+	if got := spec["minReadySeconds"]; got != DefaultStrictDrainConfig().MinReadySeconds {
+		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", DefaultStrictDrainConfig().MinReadySeconds, got)
 	}
 	template := spec["template"].(map[string]any)
 	templateAnnotations := template["metadata"].(map[string]any)["annotations"].(map[string]string)
-	if got := templateAnnotations["fugue.io/drain-mode"]; got != "strict-zero-downtime" {
+	if got := templateAnnotations["fugue.io/drain-mode"]; got != StrictDrainModeConnectionAware {
 		t.Fatalf("expected template strict drain mode annotation, got %#v", got)
 	}
 	podSpec := template["spec"].(map[string]any)
@@ -1006,9 +1017,68 @@ func TestBuildAppDeploymentAddsStrictDrainForOnlineImageUpdate(t *testing.T) {
 	containers := podSpec["containers"].([]map[string]any)
 	lifecycle := containers[0]["lifecycle"].(map[string]any)
 	preStop := lifecycle["preStop"].(map[string]any)
+	httpGet := preStop["httpGet"].(map[string]any)
+	if got := httpGet["path"]; got != "/drain/prestop" {
+		t.Fatalf("expected preStop httpGet path /drain/prestop, got %#v", got)
+	}
+}
+
+func TestBuildAppDeploymentUsesFixedSleepFallbackWhenNativeSidecarDisabled(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+	options := defaultRenderOptions()
+	options.StrictDrain.Mode = StrictDrainModeConnectionAware
+	options.StrictDrain.NativeSidecarEnabled = false
+
+	deployment := firstObjectByKind(t, buildAppObjectsWithPlacementsAndOptions(app, SchedulingConstraints{}, nil, options), "Deployment")
+	spec := deployment["spec"].(map[string]any)
+	podSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	preStop := containers[0]["lifecycle"].(map[string]any)["preStop"].(map[string]any)
 	sleep := preStop["sleep"].(map[string]any)
-	if got := sleep["seconds"]; got != int64(600) {
-		t.Fatalf("expected preStop sleep seconds=600, got %#v", got)
+	if got := sleep["seconds"]; got != DefaultStrictDrainConfig().DrainTimeoutSeconds() {
+		t.Fatalf("expected fixed-sleep fallback seconds=%d, got %#v", DefaultStrictDrainConfig().DrainTimeoutSeconds(), got)
+	}
+	if _, ok := podSpec["initContainers"]; ok {
+		t.Fatalf("expected fixed-sleep fallback not to inject drain-agent, got %#v", podSpec["initContainers"])
+	}
+	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
+	if got := annotations["fugue.io/drain-mode"]; got != StrictDrainModeFixedSleep {
+		t.Fatalf("expected fixed-sleep drain mode annotation, got %#v", got)
+	}
+}
+
+func TestBuildAppDeploymentDoesNotInjectConnectionAwareDrainWithoutServicePort(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "worker",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/worker:latest",
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	deployment := firstObjectByKind(t, buildAppObjects(app, SchedulingConstraints{}), "Deployment")
+	spec := deployment["spec"].(map[string]any)
+	if _, ok := spec["minReadySeconds"]; ok {
+		t.Fatalf("expected app without cluster service to omit minReadySeconds, got %#v", spec["minReadySeconds"])
+	}
+	podSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
+	containers := podSpec["containers"].([]map[string]any)
+	if _, ok := containers[0]["lifecycle"]; ok {
+		t.Fatalf("expected app without cluster service not to get drain lifecycle")
+	}
+	if _, ok := podSpec["initContainers"]; ok {
+		t.Fatalf("expected app without cluster service not to get drain-agent")
 	}
 }
 
@@ -1806,8 +1876,8 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageLifecycleUpda
 	if got := strategy["type"]; got != "RollingUpdate" {
 		t.Fatalf("expected online lifecycle update to use RollingUpdate, got %#v", got)
 	}
-	if got := spec["minReadySeconds"]; got != int(appStrictDrainSeconds) {
-		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", appStrictDrainSeconds, got)
+	if got := spec["minReadySeconds"]; got != DefaultStrictDrainConfig().MinReadySeconds {
+		t.Fatalf("expected strict drain minReadySeconds=%d, got %#v", DefaultStrictDrainConfig().MinReadySeconds, got)
 	}
 	annotations := deployment["metadata"].(map[string]any)["annotations"].(map[string]string)
 	if got := annotations["fugue.io/rollout-reason"]; got != "lifecycle-only" {
@@ -1820,9 +1890,9 @@ func TestBuildAppObjectsUsesRollingUpdateForOnlinePersistentStorageLifecycleUpda
 	containers := podSpec["containers"].([]map[string]any)
 	lifecycle := containers[0]["lifecycle"].(map[string]any)
 	preStop := lifecycle["preStop"].(map[string]any)
-	sleep := preStop["sleep"].(map[string]any)
-	if got := sleep["seconds"]; got != int64(600) {
-		t.Fatalf("expected lifecycle preStop sleep seconds=600, got %#v", got)
+	httpGet := preStop["httpGet"].(map[string]any)
+	if got := httpGet["path"]; got != "/drain/prestop" {
+		t.Fatalf("expected lifecycle preStop httpGet path /drain/prestop, got %#v", got)
 	}
 }
 

@@ -320,6 +320,7 @@ HELM_POST_RENDERER_ARGS=()
 NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="false"
 PRESERVE_REGISTRY_ZERO_REPLICAS="false"
 RELEASE_CHANGED_FILES_EFFECTIVE=""
+STRICT_DRAIN_AGENT_IMAGE_PRESERVED=false
 
 release_changed_files() {
   if [[ -n "${RELEASE_CHANGED_FILES_EFFECTIVE:-}" ]]; then
@@ -503,6 +504,23 @@ public_data_plane_daemonset_rollout_wait_required() {
 
 node_local_build_plane_changed() {
   release_changed_files_match build
+}
+
+strict_drain_agent_image_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      cmd/fugue-drain-agent/*|\
+      Dockerfile.drain-agent)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
 }
 
 node_local_build_plane_manifest_changed() {
@@ -1951,6 +1969,30 @@ live_deployment_container_image() {
     -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
 }
 
+live_deployment_container_env_value() {
+  local deployment_name="$1"
+  local container_name="$2"
+  local env_name="$3"
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+container_name, env_name = sys.argv[1], sys.argv[2]
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    if container.get("name") != container_name:
+        continue
+    for item in container.get("env") or []:
+        if item.get("name") == env_name and item.get("value") is not None:
+            print(str(item.get("value")))
+            raise SystemExit(0)
+' "${container_name}" "${env_name}" 2>/dev/null || true
+}
+
 live_daemonset_container_image() {
   local daemonset_name="$1"
   local container_name="$2"
@@ -2316,6 +2358,50 @@ preserve_node_local_build_plane_from_live() {
       NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
       log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
     fi
+  fi
+}
+
+preserve_strict_drain_agent_image_from_live() {
+  local mode
+  local controller_deployment
+  local repository tag digest pull_policy
+
+  STRICT_DRAIN_AGENT_IMAGE_PRESERVED=false
+  mode="$(trim_field "${FUGUE_STRICT_DRAIN_MODE:-}")"
+  if [[ "${mode}" != "connection-aware" ]]; then
+    return 0
+  fi
+  if strict_drain_agent_image_changed; then
+    log "strict drain-agent image source changed; allowing drain-agent image rollout to ${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}:${FUGUE_DRAIN_AGENT_IMAGE_TAG}"
+    return 0
+  fi
+
+  controller_deployment="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-controller}"
+  if ! deployment_exists "${controller_deployment}"; then
+    log "strict drain-agent image preserve skipped; live controller deployment ${controller_deployment} was not found"
+    return 0
+  fi
+
+  repository="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY")")"
+  tag="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_TAG")")"
+  digest="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_DIGEST")")"
+  pull_policy="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY")")"
+  if [[ -z "${repository}" || ( -z "${tag}" && -z "${digest}" ) ]]; then
+    log "strict drain-agent image preserve skipped; live controller env does not contain a usable drain-agent image"
+    return 0
+  fi
+
+  FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY="${repository}"
+  FUGUE_DRAIN_AGENT_IMAGE_TAG="${tag}"
+  FUGUE_DRAIN_AGENT_IMAGE_DIGEST="${digest}"
+  if [[ -n "${pull_policy}" ]]; then
+    FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY="${pull_policy}"
+  fi
+  STRICT_DRAIN_AGENT_IMAGE_PRESERVED=true
+  if [[ -n "${digest}" ]]; then
+    log "strict drain-agent image preserved from live controller ${controller_deployment}: ${repository}@${digest}"
+  else
+    log "strict drain-agent image preserved from live controller ${controller_deployment}: ${repository}:${tag}"
   fi
 }
 
@@ -5553,6 +5639,8 @@ prepare_release_domains() {
   else
     log "maintenance agent release explicitly allowed"
   fi
+
+  preserve_strict_drain_agent_image_from_live
 }
 
 public_data_plane_front_daemonsets_ready() {
@@ -5941,6 +6029,23 @@ main() {
     FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY:-fugue-telemetry-agent}"
     FUGUE_TELEMETRY_AGENT_IMAGE_TAG="${FUGUE_TELEMETRY_AGENT_IMAGE_TAG:-latest}"
   fi
+  FUGUE_STRICT_DRAIN_MODE="${FUGUE_STRICT_DRAIN_MODE:-connection-aware}"
+  FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS="${FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS:-600}"
+  FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS="${FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS:-30}"
+  FUGUE_STRICT_DRAIN_MIN_READY_SECONDS="${FUGUE_STRICT_DRAIN_MIN_READY_SECONDS:-10}"
+  FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS="${FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS:-2}"
+  FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS="${FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS:-200}"
+  FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED="${FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED:-true}"
+  FUGUE_DRAIN_AGENT_PORT="${FUGUE_DRAIN_AGENT_PORT:-19090}"
+  if [[ "${FUGUE_STRICT_DRAIN_MODE}" == "connection-aware" ]]; then
+    require_env FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY
+    require_env FUGUE_DRAIN_AGENT_IMAGE_TAG
+  else
+    FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY="${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-drain-agent}"
+    FUGUE_DRAIN_AGENT_IMAGE_TAG="${FUGUE_DRAIN_AGENT_IMAGE_TAG:-latest}"
+  fi
+  FUGUE_DRAIN_AGENT_IMAGE_DIGEST="${FUGUE_DRAIN_AGENT_IMAGE_DIGEST:-}"
+  FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY="${FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY:-IfNotPresent}"
   FUGUE_IMAGE_CACHE_ENABLED="${FUGUE_IMAGE_CACHE_ENABLED:-true}"
   FUGUE_IMAGE_CACHE_PORT="${FUGUE_IMAGE_CACHE_PORT:-5000}"
   FUGUE_IMAGE_STORE_MODE="${FUGUE_IMAGE_STORE_MODE:-distributed}"
@@ -6386,6 +6491,7 @@ PY
   log "upgrading ${FUGUE_RELEASE_NAME} in namespace ${FUGUE_NAMESPACE}"
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
   log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
+  log "strict drain: mode=${FUGUE_STRICT_DRAIN_MODE} timeout=${FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS}s min_ready=${FUGUE_STRICT_DRAIN_MIN_READY_SECONDS}s agent=${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}:${FUGUE_DRAIN_AGENT_IMAGE_TAG}"
   log "telemetry agent image: ${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}:${FUGUE_TELEMETRY_AGENT_IMAGE_TAG} enabled=${FUGUE_TELEMETRY_AGENT_ENABLED} observability=${FUGUE_OBSERVABILITY_ENABLED} retention=${FUGUE_OBSERVABILITY_RETENTION}"
   log "telemetry Kubernetes logs: enabled=${FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED} namespaces=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES:-${FUGUE_NAMESPACE}} prefixes=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES:-<none>} poll=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL} tail=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES} max_lines=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE} queue=${FUGUE_OBSERVABILITY_QUEUE_SIZE} batch=${FUGUE_OBSERVABILITY_BATCH_SIZE} memory_limit_bytes=${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES}"
   log "observability metrics plane: enabled=${FUGUE_OBSERVABILITY_METRICS_ENABLED} image=${FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY}:${FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG} retention=${FUGUE_OBSERVABILITY_METRICS_RETENTION}"
@@ -6464,6 +6570,18 @@ PY
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
     --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
+    --set-string runtime.strictDrain.mode="${FUGUE_STRICT_DRAIN_MODE}" \
+    --set runtime.strictDrain.timeoutSeconds="${FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS}" \
+    --set runtime.strictDrain.terminationGraceBufferSeconds="${FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS}" \
+    --set runtime.strictDrain.minReadySeconds="${FUGUE_STRICT_DRAIN_MIN_READY_SECONDS}" \
+    --set runtime.strictDrain.quietPeriodSeconds="${FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS}" \
+    --set runtime.strictDrain.pollIntervalMilliseconds="${FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS}" \
+    --set runtime.strictDrain.nativeSidecarEnabled="${FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED}" \
+    --set runtime.strictDrain.agent.port="${FUGUE_DRAIN_AGENT_PORT}" \
+    --set-string runtime.strictDrain.agent.image.repository="${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}" \
+    --set-string runtime.strictDrain.agent.image.tag="${FUGUE_DRAIN_AGENT_IMAGE_TAG}" \
+    --set-string runtime.strictDrain.agent.image.digest="${FUGUE_DRAIN_AGENT_IMAGE_DIGEST}" \
+    --set-string runtime.strictDrain.agent.image.pullPolicy="${FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY}" \
     --set observability.enabled="${FUGUE_OBSERVABILITY_ENABLED}" \
     --set-string observability.retention="${FUGUE_OBSERVABILITY_RETENTION}" \
     --set-string observability.exporterSecret.existingSecretName="${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}" \

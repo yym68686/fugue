@@ -79,6 +79,18 @@ type ControllerConfig struct {
 	DatabaseURL                                string
 	APIPublicDomain                            string
 	AppObservabilityEndpoint                   string
+	StrictDrainMode                            string
+	StrictDrainTimeoutSeconds                  int64
+	StrictDrainTerminationGraceBufferSeconds   int64
+	StrictDrainMinReadySeconds                 int
+	StrictDrainQuietPeriodSeconds              int
+	StrictDrainPollIntervalMilliseconds        int
+	StrictDrainAgentImageRepository            string
+	StrictDrainAgentImageTag                   string
+	StrictDrainAgentImageDigest                string
+	StrictDrainAgentImagePullPolicy            string
+	StrictDrainAgentPort                       int
+	StrictDrainNativeSidecarEnabled            bool
 	WorkloadIdentitySigningKey                 string
 	RegistryPushBase                           string
 	RegistryPullBase                           string
@@ -372,6 +384,18 @@ func ControllerFromEnv() ControllerConfig {
 		DatabaseURL:                                getenv("FUGUE_DATABASE_URL", ""),
 		APIPublicDomain:                            getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
 		AppObservabilityEndpoint:                   getenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", ""),
+		StrictDrainMode:                            getenv("FUGUE_STRICT_DRAIN_MODE", "connection-aware"),
+		StrictDrainTimeoutSeconds:                  int64(getenvInt("FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS", 600)),
+		StrictDrainTerminationGraceBufferSeconds:   int64(getenvInt("FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS", 30)),
+		StrictDrainMinReadySeconds:                 getenvInt("FUGUE_STRICT_DRAIN_MIN_READY_SECONDS", 10),
+		StrictDrainQuietPeriodSeconds:              getenvInt("FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS", 2),
+		StrictDrainPollIntervalMilliseconds:        getenvInt("FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS", 200),
+		StrictDrainAgentImageRepository:            getenv("FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY", "ghcr.io/yym68686/fugue-drain-agent"),
+		StrictDrainAgentImageTag:                   getenv("FUGUE_DRAIN_AGENT_IMAGE_TAG", "latest"),
+		StrictDrainAgentImageDigest:                strings.TrimSpace(os.Getenv("FUGUE_DRAIN_AGENT_IMAGE_DIGEST")),
+		StrictDrainAgentImagePullPolicy:            getenv("FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY", "IfNotPresent"),
+		StrictDrainAgentPort:                       getenvInt("FUGUE_DRAIN_AGENT_PORT", 19090),
+		StrictDrainNativeSidecarEnabled:            getenvBool("FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED", true),
 		WorkloadIdentitySigningKey:                 strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
 		RegistryPushBase:                           getenv("FUGUE_REGISTRY_PUSH_BASE", "127.0.0.1:30500"),
 		RegistryPullBase:                           strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),

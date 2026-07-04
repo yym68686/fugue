@@ -31,10 +31,10 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 		return fmt.Errorf("initialize kubernetes rollout client: %w", err)
 	}
 	app = s.Renderer.PrepareApp(app)
-	expectedReleaseKey := expectedManagedAppReleaseKey(app, scheduling)
+	expectedReleaseKey := s.expectedManagedAppReleaseKey(app, scheduling)
 	expectedImage := strings.TrimSpace(app.Spec.Image)
 	expectedManagedAppSpecHash := expectedManagedAppSpecHash(app, scheduling)
-	expectedDeployment, expectedDeploymentFound := expectedManagedAppDeployment(app, scheduling)
+	expectedDeployment, expectedDeploymentFound := s.expectedManagedAppDeployment(app, scheduling)
 
 	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
 	defer cancel()
@@ -580,6 +580,13 @@ func expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingCo
 	return strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
 }
 
+func (s *Service) expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingConstraints) string {
+	if strings.TrimSpace(app.Spec.Image) == "" {
+		return ""
+	}
+	return strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(app, scheduling))
+}
+
 func expectedManagedAppSpecHash(app model.App, scheduling runtime.SchedulingConstraints) string {
 	managed, err := runtime.ManagedAppObjectFromMap(runtime.BuildManagedAppObject(app, scheduling))
 	if err != nil {
@@ -590,6 +597,24 @@ func expectedManagedAppSpecHash(app model.App, scheduling runtime.SchedulingCons
 
 func expectedManagedAppDeployment(app model.App, scheduling runtime.SchedulingConstraints) (kubeDeployment, bool) {
 	for _, object := range runtime.BuildManagedAppChildObjects(app, scheduling, nil) {
+		if !strings.EqualFold(strings.TrimSpace(objectStringField(object, "kind")), "Deployment") {
+			continue
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			return kubeDeployment{}, false
+		}
+		var deployment kubeDeployment
+		if err := json.Unmarshal(data, &deployment); err != nil {
+			return kubeDeployment{}, false
+		}
+		return deployment, true
+	}
+	return kubeDeployment{}, false
+}
+
+func (s *Service) expectedManagedAppDeployment(app model.App, scheduling runtime.SchedulingConstraints) (kubeDeployment, bool) {
+	for _, object := range s.Renderer.BuildManagedAppChildObjects(app, scheduling, nil) {
 		if !strings.EqualFold(strings.TrimSpace(objectStringField(object, "kind")), "Deployment") {
 			continue
 		}

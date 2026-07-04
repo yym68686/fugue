@@ -43,7 +43,7 @@ func TestManagedAppRolloutDecisionParsesStringMapAnnotations(t *testing.T) {
 		},
 	}
 
-	decision := managedAppRolloutDecisionFromObjects(context.Background(), "namespace", managed, app, objects)
+	decision := managedAppRolloutDecisionFromObjects(context.Background(), "namespace", managed, app, objects, runtime.ManagedAppReleaseKey(app, managed.Spec.Scheduling))
 	if decision.Strategy != "Recreate" {
 		t.Fatalf("expected strategy to be parsed, got %q", decision.Strategy)
 	}
