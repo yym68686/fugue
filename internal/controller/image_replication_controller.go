@@ -601,6 +601,12 @@ func (s *Service) obsoletePendingNodeImageUpdateTaskReason(task model.NodeUpdate
 		if imageCacheReplicationTaskObsoleteForController(model.ImageReplicationTask{Priority: priority}, image) {
 			return "obsolete_image_generation", nil
 		}
+		if replicationTaskID := strings.TrimSpace(task.Payload["replication_task_id"]); replicationTaskID != "" {
+			reason, err := s.obsoleteLinkedImageReplicationTaskReason(imageID, replicationTaskID)
+			if err != nil || reason != "" {
+				return reason, err
+			}
+		}
 	}
 	if priority == model.ImageReplicationPriorityDeployBlocking {
 		return "", nil
@@ -615,6 +621,27 @@ func (s *Service) obsoletePendingNodeImageUpdateTaskReason(task model.NodeUpdate
 		return reason, nil
 	}
 	return "", nil
+}
+
+func (s *Service) obsoleteLinkedImageReplicationTaskReason(imageID, replicationTaskID string) (string, error) {
+	tasks, err := s.Store.ListImageReplicationTasks(model.ImageReplicationTaskFilter{ImageID: imageID, PlatformAdmin: true})
+	if err != nil {
+		return "", err
+	}
+	for _, replicationTask := range tasks {
+		if strings.TrimSpace(replicationTask.ID) != replicationTaskID {
+			continue
+		}
+		switch strings.TrimSpace(replicationTask.Status) {
+		case model.ImageReplicationTaskStatusPending, model.ImageReplicationTaskStatusRunning:
+			return "", nil
+		case "":
+			return "linked_replication_task_not_pending", nil
+		default:
+			return "linked_replication_task_" + strings.TrimSpace(replicationTask.Status), nil
+		}
+	}
+	return "linked_replication_task_missing", nil
 }
 
 func imageCacheReplicationTaskObsoleteForController(task model.ImageReplicationTask, image model.Image) bool {

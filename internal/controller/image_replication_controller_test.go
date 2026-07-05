@@ -181,3 +181,119 @@ func TestCancelObsoletePendingNodeImageUpdateTasksSkipsEdgeBacklog(t *testing.T)
 		t.Fatalf("expected app repair task preserved, got %+v", got)
 	}
 }
+
+func TestCancelObsoletePendingNodeImageUpdateTasksCancelsOrphanReplicationLinks(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	_, secret, err := stateStore.CreateScopedNodeKey("", "platform", model.NodeKeyScopePlatformNode)
+	if err != nil {
+		t.Fatalf("create platform key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		secret,
+		"app-node",
+		"https://app-node.example.com",
+		map[string]string{runtimepkg.AppRuntimeRoleLabelKey: runtimepkg.NodeRoleLabelValue},
+		"app-node",
+		"app-fingerprint",
+		"v1",
+		"join-v1",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypeReplicateAppImage},
+	)
+	if err != nil {
+		t.Fatalf("enroll app updater: %v", err)
+	}
+	image, err := stateStore.UpsertImage(model.Image{
+		ID:             "img_keep",
+		TenantID:       "tenant",
+		AppID:          "app",
+		ImageRef:       "registry.fugue.internal:5000/fugue-apps/demo:current",
+		LifecycleState: model.ImageLifecycleAvailable,
+	})
+	if err != nil {
+		t.Fatalf("create image: %v", err)
+	}
+	completedReplication, err := stateStore.UpsertImageReplicationTask(model.ImageReplicationTask{
+		ID:                    "imgtask_done",
+		ImageID:               image.ID,
+		TenantID:              image.TenantID,
+		AppID:                 image.AppID,
+		TargetNodeID:          updater.MachineID,
+		TargetRuntimeID:       updater.RuntimeID,
+		TargetClusterNodeName: updater.ClusterNodeName,
+		Priority:              model.ImageReplicationPriorityRepair,
+		Status:                model.ImageReplicationTaskStatusCompleted,
+	})
+	if err != nil {
+		t.Fatalf("create completed replication task: %v", err)
+	}
+	pendingReplication, err := stateStore.UpsertImageReplicationTask(model.ImageReplicationTask{
+		ID:                    "imgtask_pending",
+		ImageID:               image.ID,
+		TenantID:              image.TenantID,
+		AppID:                 image.AppID,
+		TargetNodeID:          updater.MachineID,
+		TargetRuntimeID:       updater.RuntimeID,
+		TargetClusterNodeName: updater.ClusterNodeName,
+		Priority:              model.ImageReplicationPriorityRepair,
+		Status:                model.ImageReplicationTaskStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending replication task: %v", err)
+	}
+
+	admin := model.Principal{ActorType: model.ActorTypeSystem, ActorID: "test", TenantID: image.TenantID, Scopes: map[string]struct{}{"platform.admin": {}}}
+	completedTask, err := stateStore.CreateNodeUpdateTask(admin, updater.ID, "", "", model.NodeUpdateTaskTypeReplicateAppImage, map[string]string{
+		"image_id":            image.ID,
+		"replication_task_id": completedReplication.ID,
+		"priority":            model.ImageReplicationPriorityRepair,
+	})
+	if err != nil {
+		t.Fatalf("create completed-linked node task: %v", err)
+	}
+	missingTask, err := stateStore.CreateNodeUpdateTask(admin, updater.ID, "", "", model.NodeUpdateTaskTypeReplicateAppImage, map[string]string{
+		"image_id":            image.ID,
+		"replication_task_id": "imgtask_missing",
+		"priority":            model.ImageReplicationPriorityRepair,
+	})
+	if err != nil {
+		t.Fatalf("create missing-linked node task: %v", err)
+	}
+	pendingTask, err := stateStore.CreateNodeUpdateTask(admin, updater.ID, "", "", model.NodeUpdateTaskTypeReplicateAppImage, map[string]string{
+		"image_id":            image.ID,
+		"replication_task_id": pendingReplication.ID,
+		"priority":            model.ImageReplicationPriorityRepair,
+	})
+	if err != nil {
+		t.Fatalf("create pending-linked node task: %v", err)
+	}
+
+	svc := &Service{Store: stateStore}
+	eligibility, err := svc.loadImageReplicationEligibility()
+	if err != nil {
+		t.Fatalf("load eligibility: %v", err)
+	}
+	if err := svc.cancelObsoletePendingNodeImageUpdateTasks(context.Background(), eligibility); err != nil {
+		t.Fatalf("cancel obsolete pending node update tasks: %v", err)
+	}
+
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", "")
+	if err != nil {
+		t.Fatalf("list node tasks: %v", err)
+	}
+	byID := map[string]model.NodeUpdateTask{}
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	if got := byID[completedTask.ID]; got.Status != model.NodeUpdateTaskStatusCanceled || !strings.Contains(got.ResultMessage, "linked_replication_task_completed") {
+		t.Fatalf("expected completed-linked task canceled, got %+v", got)
+	}
+	if got := byID[missingTask.ID]; got.Status != model.NodeUpdateTaskStatusCanceled || !strings.Contains(got.ResultMessage, "linked_replication_task_missing") {
+		t.Fatalf("expected missing-linked task canceled, got %+v", got)
+	}
+	if got := byID[pendingTask.ID]; got.Status != model.NodeUpdateTaskStatusPending {
+		t.Fatalf("expected pending-linked task preserved, got %+v", got)
+	}
+}
