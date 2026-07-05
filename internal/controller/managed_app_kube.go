@@ -728,9 +728,13 @@ func kubeApplyPhase(obj map[string]any) int {
 		return 1
 	case apiVersion == "v1" && (kind == "Secret" || kind == "PersistentVolumeClaim" || kind == "Service"):
 		return 1
+	case apiVersion == runtime.KubernetesRBACAPIVersion && kind == "Role":
+		return 1
 	case apiVersion == runtime.VolSyncAPIVersion && kind == runtime.VolSyncReplicationDestinationKind:
 		return 1
 	case apiVersion == runtime.CloudNativePGAPIVersion && kind == runtime.CloudNativePGClusterKind:
+		return 2
+	case apiVersion == runtime.KubernetesRBACAPIVersion && kind == "RoleBinding":
 		return 2
 	case apiVersion == runtime.VolSyncAPIVersion && kind == runtime.VolSyncReplicationSourceKind:
 		return 2

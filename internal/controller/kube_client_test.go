@@ -152,6 +152,81 @@ func TestApplyObjectsAppliesSamePhaseConcurrently(t *testing.T) {
 	}
 }
 
+func TestApplyObjectsAppliesRoleBeforeRoleBinding(t *testing.T) {
+	t.Parallel()
+
+	roleApplied := false
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Fatalf("unexpected request method %s", r.Method)
+		}
+		requests = append(requests, r.URL.Path)
+		switch r.URL.Path {
+		case "/apis/rbac.authorization.k8s.io/v1/namespaces/tenant-demo/roles/app-demo-drain-events":
+			roleApplied = true
+			_, _ = w.Write([]byte(`{}`))
+		case "/apis/rbac.authorization.k8s.io/v1/namespaces/tenant-demo/rolebindings/app-demo-drain-events":
+			if !roleApplied {
+				http.Error(w, `{"kind":"Status","status":"Failure","reason":"NotFound"}`, http.StatusNotFound)
+				return
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &kubeClient{
+		client:           server.Client(),
+		baseURL:          server.URL,
+		bearerToken:      "token",
+		namespace:        "tenant-demo",
+		applyConcurrency: 2,
+	}
+	objects := []map[string]any{
+		{
+			"apiVersion": "rbac.authorization.k8s.io/v1",
+			"kind":       "RoleBinding",
+			"metadata": map[string]any{
+				"name":      "app-demo-drain-events",
+				"namespace": "tenant-demo",
+			},
+			"roleRef": map[string]any{
+				"apiGroup": "rbac.authorization.k8s.io",
+				"kind":     "Role",
+				"name":     "app-demo-drain-events",
+			},
+			"subjects": []map[string]any{
+				{"kind": "ServiceAccount", "name": "default", "namespace": "tenant-demo"},
+			},
+		},
+		{
+			"apiVersion": "rbac.authorization.k8s.io/v1",
+			"kind":       "Role",
+			"metadata": map[string]any{
+				"name":      "app-demo-drain-events",
+				"namespace": "tenant-demo",
+			},
+			"rules": []map[string]any{
+				{"apiGroups": []string{""}, "resources": []string{"events"}, "verbs": []string{"create", "patch", "update"}},
+			},
+		},
+	}
+
+	if err := client.applyObjects(context.Background(), objects); err != nil {
+		t.Fatalf("apply objects: %v", err)
+	}
+	expected := []string{
+		"/apis/rbac.authorization.k8s.io/v1/namespaces/tenant-demo/roles/app-demo-drain-events",
+		"/apis/rbac.authorization.k8s.io/v1/namespaces/tenant-demo/rolebindings/app-demo-drain-events",
+	}
+	if strings.Join(requests, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf("expected request sequence %v, got %v", expected, requests)
+	}
+}
+
 func TestReplaceObjectSpecsByKindUsesExactJSONPatch(t *testing.T) {
 	t.Parallel()
 
