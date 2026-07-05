@@ -785,13 +785,6 @@ func TestDeploymentRolloutPolicyReadyRejectsRecreateForOnlineRestart(t *testing.
 			RuntimeID:     "runtime_agent",
 			RestartToken:  "restart_new",
 			RolloutIntent: model.AppRolloutIntentOnlineRestart,
-			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
-				Mounts: []model.AppPersistentStorageMount{
-					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
-					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
-				},
-			},
 		},
 	}
 	expected, found := expectedManagedAppDeployment(app, runtime.SchedulingConstraints{})
@@ -799,15 +792,10 @@ func TestDeploymentRolloutPolicyReadyRejectsRecreateForOnlineRestart(t *testing.
 		t.Fatal("expected deployment object")
 	}
 
-	recreateApp := app
-	recreateApp.Spec.RolloutIntent = ""
-	recreate, found := expectedManagedAppDeployment(recreateApp, runtime.SchedulingConstraints{})
-	if !found {
-		t.Fatal("expected recreate deployment object")
-	}
-	if deploymentReleaseKey(recreate) != deploymentReleaseKey(expected) {
-		t.Fatalf("expected release key to ignore rollout policy: recreate=%q expected=%q", deploymentReleaseKey(recreate), deploymentReleaseKey(expected))
-	}
+	recreate := expected
+	recreate.Spec.Strategy.Type = "Recreate"
+	recreate.Spec.Strategy.RollingUpdate.MaxUnavailable = nil
+	recreate.Spec.Strategy.RollingUpdate.MaxSurge = nil
 
 	ready, message := deploymentRolloutPolicyReady(recreate, true, expected)
 	if ready {

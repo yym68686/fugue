@@ -1954,7 +1954,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshot(t *test
 			RuntimeID:                     "runtime_demo",
 			TerminationGracePeriodSeconds: 2100,
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode: model.AppPersistentStorageModeSharedProjectRWX,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
 				},
@@ -2005,7 +2005,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineResourceRolloutSnapshot
 				MemoryMebibytes: 512,
 			},
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode: model.AppPersistentStorageModeSharedProjectRWX,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
 				},
@@ -2054,7 +2054,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineImageRolloutSnapshot(t 
 			RuntimeID:    "runtime_demo",
 			RestartToken: "restart_new",
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode: model.AppPersistentStorageModeSharedProjectRWX,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
@@ -2149,13 +2149,6 @@ func TestRefreshStoredManagedAppDesiredBeforeApplyUsesLatestOnlineRolloutSnapsho
 		Resources: &model.ResourceSpec{
 			CPUMilliCores:   680,
 			MemoryMebibytes: 768,
-		},
-		PersistentStorage: &model.AppPersistentStorageSpec{
-			Mode:             model.AppPersistentStorageModeMovableRWO,
-			StorageClassName: "fugue-local-rwo",
-			Mounts: []model.AppPersistentStorageMount{
-				{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
-			},
 		},
 	}, model.AppSource{
 		Type:             model.AppSourceTypeDockerImage,
@@ -2255,7 +2248,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(
 			RuntimeID:    "runtime_demo",
 			RestartToken: "restart_new",
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode: model.AppPersistentStorageModeSharedProjectRWX,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
@@ -2285,7 +2278,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(
 	}
 }
 
-func TestStoredManagedAppDesiredWithRolloutIntentInfersConfigUpdate(t *testing.T) {
+func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForSingleWriterStorage(t *testing.T) {
 	t.Parallel()
 
 	managedSnapshot := model.App{
@@ -2316,23 +2309,23 @@ func TestStoredManagedAppDesiredWithRolloutIntentInfersConfigUpdate(t *testing.T
 	storedDesired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
 
 	got := storedManagedAppDesiredWithRolloutIntent(managedSnapshot, storedDesired)
-	if got.Spec.RolloutIntent != model.AppRolloutIntentOnlineConfigUpdate {
-		t.Fatalf("expected online config rollout intent, got %q", got.Spec.RolloutIntent)
+	if got.Spec.RolloutIntent != "" {
+		t.Fatalf("expected no online rollout intent for single-writer storage, got %q", got.Spec.RolloutIntent)
 	}
 	objects := runtime.BuildManagedAppChildObjects(got, runtime.SchedulingConstraints{}, runtime.ManagedAppOwnerReference(runtime.ManagedAppObject{}))
 	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
 	spec, _ := deployment["spec"].(map[string]any)
 	strategy, _ := spec["strategy"].(map[string]any)
-	if gotStrategy := strategy["type"]; gotStrategy != "RollingUpdate" {
-		t.Fatalf("expected config update to use RollingUpdate, got %#v", gotStrategy)
+	if gotStrategy := strategy["type"]; gotStrategy != "Recreate" {
+		t.Fatalf("expected single-writer config update to use Recreate, got %#v", gotStrategy)
 	}
 	metadata, _ := deployment["metadata"].(map[string]any)
 	annotations, _ := metadata["annotations"].(map[string]string)
-	if gotClass := annotations["fugue.io/downtime-class"]; gotClass != "online-required" {
-		t.Fatalf("expected online downtime class, got %q", gotClass)
+	if gotClass := annotations["fugue.io/downtime-class"]; gotClass != "downtime-required" {
+		t.Fatalf("expected downtime-required class, got %q", gotClass)
 	}
-	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != "config-file-only" {
-		t.Fatalf("expected config-file-only rollout reason, got %q", gotReason)
+	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != "single-writer-storage" {
+		t.Fatalf("expected single-writer-storage rollout reason, got %q", gotReason)
 	}
 }
 
@@ -2402,7 +2395,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteS
 			},
 			TerminationGracePeriodSeconds: 2101,
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode: model.AppPersistentStorageModeSharedProjectRWX,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/data"},
 				},

@@ -8,6 +8,9 @@ import (
 )
 
 func rolloutIntentForManagedOperation(op model.Operation, currentApp, desiredApp model.App) string {
+	if !appSupportsOnlineRolloutIntent(desiredApp) {
+		return ""
+	}
 	if managedDeployOperationIsRestartOnly(op, currentApp, desiredApp) {
 		return model.AppRolloutIntentOnlineRestart
 	}

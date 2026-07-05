@@ -17,12 +17,6 @@ func TestRolloutIntentForManagedOperationDetectsRestartOnlyDeploy(t *testing.T) 
 			Replicas:     1,
 			RuntimeID:    "runtime_demo",
 			RestartToken: "restart_old",
-			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
-				Mounts: []model.AppPersistentStorageMount{
-					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
-				},
-			},
 		},
 	}
 	desired := current
@@ -51,23 +45,12 @@ func TestRolloutIntentForManagedOperationDetectsConfigFileOnlyDeploy(t *testing.
 			Files: []model.AppFile{
 				{Path: "/etc/demo/config.yaml", Content: "mode: old\n", Mode: 0o644},
 			},
-			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
-				Mounts: []model.AppPersistentStorageMount{
-					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n"},
-					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
-				},
-			},
 		},
 	}
 	desired := current
 	desired.Spec.Files = append([]model.AppFile(nil), current.Spec.Files...)
-	persistent := *current.Spec.PersistentStorage
-	persistent.Mounts = append([]model.AppPersistentStorageMount(nil), current.Spec.PersistentStorage.Mounts...)
-	desired.Spec.PersistentStorage = &persistent
 	desired.Spec.RestartToken = "restart_new"
 	desired.Spec.Files[0].Content = "mode: new\n"
-	desired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
 	op := model.Operation{
 		Type:        model.OperationTypeDeploy,
 		DesiredSpec: &desired.Spec,
@@ -155,13 +138,6 @@ func TestRolloutIntentForManagedOperationDetectsImageOnlyDeploy(t *testing.T) {
 			Replicas:     1,
 			RuntimeID:    "runtime_demo",
 			RestartToken: "restart_old",
-			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
-				Mounts: []model.AppPersistentStorageMount{
-					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
-					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
-				},
-			},
 		},
 	}
 	model.NormalizeAppSourceState(&current)
@@ -181,6 +157,39 @@ func TestRolloutIntentForManagedOperationDetectsImageOnlyDeploy(t *testing.T) {
 
 	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineImageUpdate {
 		t.Fatalf("expected online image rollout intent, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationRejectsSingleWriterImageOnlyDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:        "registry.pull.example/fugue-apps/demo@sha256:old",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	desired := current
+	desired.Spec.Image = "registry.pull.example/fugue-apps/demo@sha256:new"
+	desired.Spec.RestartToken = "restart_new"
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
+		t.Fatalf("expected no online rollout intent for single-writer storage, got %q", got)
 	}
 }
 

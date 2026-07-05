@@ -2056,7 +2056,7 @@ func deploymentStrategy(app model.App) map[string]any {
 	if appUsesOnlineDurableRolloutStrategy(app) {
 		return rollingUpdateDeploymentStrategy()
 	}
-	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
+	if appUsesSingleWriterStorage(app) {
 		return map[string]any{"type": "Recreate"}
 	}
 	return rollingUpdateDeploymentStrategy()
@@ -2080,7 +2080,8 @@ func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
 	return appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) &&
 		model.AppHasClusterService(app.Spec) &&
 		app.Spec.Replicas > 0 &&
-		(normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil)
+		!appUsesSingleWriterStorage(app) &&
+		normalizeRuntimeAppPersistentStorageSpec(app) != nil
 }
 
 func appRolloutIntentIsOnlineDurable(intent string) bool {
@@ -2098,6 +2099,9 @@ func appRolloutIntentIsOnlineDurable(intent string) bool {
 
 func appUsesStrictZeroDowntimeDrain(app model.App) bool {
 	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
+		return false
+	}
+	if appUsesSingleWriterStorage(app) {
 		return false
 	}
 	if appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) {
@@ -2134,7 +2138,7 @@ func onlineDurableRolloutReason(intent string) string {
 }
 
 func appRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]string {
-	if normalizeRuntimeAppWorkspaceSpec(app) != nil || normalizeRuntimeAppPersistentStorageSpec(app) != nil {
+	if appUsesSingleWriterStorage(app) {
 		return mergeStringMaps(map[string]string{
 			"fugue.io/rollout-mode":    "isolated-singleton",
 			"fugue.io/downtime-class":  "downtime-required",
@@ -2147,6 +2151,17 @@ func appRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]s
 		"fugue.io/downtime-class":  "online-required",
 		"fugue.io/rollout-surface": "tenant-app",
 	}, strictZeroDowntimeDrainAnnotations(app, config))
+}
+
+func appUsesSingleWriterStorage(app model.App) bool {
+	if normalizeRuntimeAppWorkspaceSpec(app) != nil {
+		return true
+	}
+	storage := normalizeRuntimeAppPersistentStorageSpec(app)
+	if storage == nil {
+		return false
+	}
+	return !model.AppPersistentStorageSpecUsesSharedProjectRWX(storage)
 }
 
 func strictZeroDowntimeDrainAnnotations(app model.App, config StrictDrainConfig) map[string]string {

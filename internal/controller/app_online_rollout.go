@@ -53,6 +53,9 @@ func appUsesOnlineDurableRolloutIntent(app model.App) bool {
 }
 
 func appHasOnlineRolloutIntent(app model.App) bool {
+	if !appSupportsOnlineRolloutIntent(app) {
+		return false
+	}
 	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
 		return false
 	}
@@ -66,6 +69,16 @@ func appHasOnlineRolloutIntent(app model.App) bool {
 	default:
 		return false
 	}
+}
+
+func appSupportsOnlineRolloutIntent(app model.App) bool {
+	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
+		return false
+	}
+	if app.Spec.Workspace != nil {
+		return false
+	}
+	return !appPersistentStorageRequiresSameNodeOnlineRollout(app.Spec.PersistentStorage)
 }
 
 func appPersistentStorageRequiresSameNodeOnlineRollout(spec *model.AppPersistentStorageSpec) bool {
