@@ -132,6 +132,155 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 	}
 }
 
+func TestCreateAutoscalingDeployOperationRejectsActiveDeployAtomically(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Autoscaling Active Guard")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{CPUMilliCores: 2000, MemoryMebibytes: 4096}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   500,
+			MemoryMebibytes: 512,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desired := app.Spec
+	desired.Resources = &model.ResourceSpec{CPUMilliCores: 750, MemoryMebibytes: 768}
+	first, outcome, err := s.CreateAutoscalingDeployOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByRightSizing,
+		AppID:           app.ID,
+		DesiredSpec:     &desired,
+	})
+	if err != nil {
+		t.Fatalf("create first autoscaling deploy: %v", err)
+	}
+	if outcome.Decision != AutoscalingDeployDecisionQueued || first.ID == "" {
+		t.Fatalf("expected queued first operation, op=%+v outcome=%+v", first, outcome)
+	}
+	second, outcome, err := s.CreateAutoscalingDeployOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByRightSizing,
+		AppID:           app.ID,
+		DesiredSpec:     &desired,
+	})
+	if err != nil {
+		t.Fatalf("second autoscaling deploy should be a benign decision: %v", err)
+	}
+	if outcome.Decision != AutoscalingDeployDecisionActiveDeployExists || outcome.ExistingOperationID != first.ID {
+		t.Fatalf("expected active deploy skip for %s, op=%+v outcome=%+v", first.ID, second, outcome)
+	}
+	if second.ID != "" {
+		t.Fatalf("expected no second operation to be created, got %+v", second)
+	}
+	ops, err := s.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected exactly one operation, got %+v", ops)
+	}
+}
+
+func TestCreateAutoscalingDeployOperationRejectsAlreadyCurrentState(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Autoscaling Noop Guard")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{CPUMilliCores: 2000, MemoryMebibytes: 4096}); err != nil {
+		t.Fatalf("raise billing cap: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:   500,
+			MemoryMebibytes: 512,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desired := app.Spec
+	desired.Resources = &model.ResourceSpec{CPUMilliCores: 750, MemoryMebibytes: 768}
+	first, outcome, err := s.CreateAutoscalingDeployOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByRightSizing,
+		AppID:           app.ID,
+		DesiredSpec:     &desired,
+	})
+	if err != nil {
+		t.Fatalf("create first autoscaling deploy: %v", err)
+	}
+	if outcome.Decision != AutoscalingDeployDecisionQueued {
+		t.Fatalf("expected queued first operation, outcome=%+v", outcome)
+	}
+	if _, err := s.CompleteManagedOperation(first.ID, "/tmp/demo.yaml", "autoscaling applied"); err != nil {
+		t.Fatalf("complete first autoscaling deploy: %v", err)
+	}
+	noop, outcome, err := s.CreateAutoscalingDeployOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByRightSizing,
+		AppID:           app.ID,
+		DesiredSpec:     &desired,
+	})
+	if err != nil {
+		t.Fatalf("already-current autoscaling deploy should be a benign decision: %v", err)
+	}
+	if outcome.Decision != AutoscalingDeployDecisionAlreadyCurrent {
+		t.Fatalf("expected already-current skip, op=%+v outcome=%+v", noop, outcome)
+	}
+	if noop.ID != "" {
+		t.Fatalf("expected no noop operation to be created, got %+v", noop)
+	}
+	ops, err := s.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 1 {
+		t.Fatalf("expected only the completed operation, got %+v", ops)
+	}
+}
+
 func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	t.Parallel()
 

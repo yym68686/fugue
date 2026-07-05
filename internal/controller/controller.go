@@ -884,6 +884,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	timer.Mark("movable_rwo_storage")
 
+	if err := s.refuseRightSizingDowntimeIfNeeded(ctx, op, app, scheduling, postgresPlacements); err != nil {
+		return err
+	}
+	timer.Mark("right_sizing_downtime_guard")
+
 	bundle, err := s.Renderer.RenderAppBundleWithPlacements(app, scheduling, postgresPlacements)
 	if err != nil {
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)

@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
 const (
@@ -18,8 +19,8 @@ const (
 	defaultRightSizingMinSamples  = 12
 	maxRightSizingWindowHours     = 168
 
-	rightSizingAutoApplyRequestedByID     = "fugue-api/right-sizing"
-	rightSizingAutoDownscaleRequestedByID = "fugue-api/right-sizing/downscale"
+	rightSizingAutoApplyRequestedByID     = model.OperationRequestedByRightSizing
+	rightSizingAutoDownscaleRequestedByID = model.OperationRequestedByRightSizingDownscale
 	rightSizingAutoApplyMinCPUIncrease    = int64(50)
 	rightSizingAutoApplyMinMemIncrease    = int64(128)
 	rightSizingAutoApplyMinCPUIncreaseR   = 0.25
@@ -221,28 +222,56 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	}
 	decision := autoRightSizingAppResourceChange(spec.Resources, recommendation.App.Recommended)
 	if !recommendation.App.Ready || !decision.allowed {
+		if !recommendation.App.Ready {
+			s.logRightSizingDecision(app, "recommendation_not_ready", "right-sizing auto apply skipped because recommendation is not ready", map[string]any{
+				"sample_count":  recommendation.App.SampleCount,
+				"min_samples":   recommendation.App.Policy.MinSamples,
+				"window_hours":  recommendation.App.WindowHours,
+				"requested_by":  rightSizingAutoApplyRequestedByID,
+				"target_kind":   recommendation.App.TargetKind,
+				"target_id":     recommendation.App.TargetID,
+				"target_name":   recommendation.App.TargetName,
+				"current":       rightSizingResourceSummary(recommendation.App.Current),
+				"recommended":   rightSizingResourceSummary(recommendation.App.Recommended),
+				"last_observed": recommendation.App.LastSampleObservedAt,
+			})
+		} else {
+			s.logRightSizingDecision(app, "change_below_threshold", "right-sizing auto apply skipped because recommendation is already current or below threshold", map[string]any{
+				"sample_count": recommendation.App.SampleCount,
+				"min_samples":  recommendation.App.Policy.MinSamples,
+				"window_hours": recommendation.App.WindowHours,
+				"requested_by": rightSizingAutoApplyRequestedByID,
+				"current":      rightSizingResourceSummary(spec.Resources),
+				"recommended":  rightSizingResourceSummary(recommendation.App.Recommended),
+			})
+		}
 		return recommendation, nil, true, nil
 	}
 
-	if hasActive, err := s.appHasActiveDeployOperation(app); err != nil {
-		return recommendation, nil, false, err
-	} else if hasActive {
-		return recommendation, nil, true, nil
-	}
 	if decision.downscale {
 		hasRecentOOM, err := s.appHasRecentOOMRightSizingOperation(app, time.Now().UTC().Add(-rightSizingAutoDownscaleOOMWindow))
 		if err != nil {
 			return recommendation, nil, false, err
 		}
 		if hasRecentOOM {
+			s.logRightSizingDecision(app, "recent_oom_blocked", "right-sizing auto downscale skipped because a recent OOM right-sizing operation exists", map[string]any{
+				"requested_by": decision.requestedByID,
+				"current":      rightSizingResourceSummary(spec.Resources),
+				"target":       rightSizingResourceSummary(decision.resources),
+			})
 			return recommendation, nil, true, nil
 		}
 	}
 	spec.Resources = cloneResourceSpec(decision.resources)
 	if err := s.validateAutoscalingTenantEnvelope(app, spec); err != nil {
+		s.logRightSizingDecision(app, "billing_cap_blocked", "right-sizing auto apply skipped because tenant billing/resource envelope would be exceeded", map[string]any{
+			"requested_by": decision.requestedByID,
+			"target":       rightSizingResourceSummary(spec.Resources),
+			"error":        err.Error(),
+		})
 		return recommendation, nil, false, err
 	}
-	op, err := s.store.CreateOperation(model.Operation{
+	op, outcome, err := s.store.CreateAutoscalingDeployOperation(model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     model.ActorTypeSystem,
@@ -253,7 +282,38 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		DesiredOriginSource: model.AppOriginSource(app),
 	})
 	if err != nil {
+		s.logRightSizingDecision(app, "queue_error", "right-sizing auto apply failed while creating deploy operation", map[string]any{
+			"requested_by": decision.requestedByID,
+			"target":       rightSizingResourceSummary(spec.Resources),
+			"error":        err.Error(),
+		})
 		return recommendation, nil, false, err
+	}
+	switch outcome.Decision {
+	case store.AutoscalingDeployDecisionActiveDeployExists:
+		s.logRightSizingDecision(app, string(outcome.Decision), "right-sizing auto apply skipped because an active deploy already exists", map[string]any{
+			"requested_by":            decision.requestedByID,
+			"existing_operation_id":   outcome.ExistingOperationID,
+			"target":                  rightSizingResourceSummary(spec.Resources),
+			"downscale":               decision.downscale,
+			"autoscaling_benign_skip": true,
+		})
+		return recommendation, nil, true, nil
+	case store.AutoscalingDeployDecisionAlreadyCurrent:
+		s.logRightSizingDecision(app, string(outcome.Decision), "right-sizing auto apply skipped because desired resources are already current", map[string]any{
+			"requested_by":            decision.requestedByID,
+			"target":                  rightSizingResourceSummary(spec.Resources),
+			"downscale":               decision.downscale,
+			"autoscaling_benign_skip": true,
+		})
+		return recommendation, nil, true, nil
+	default:
+		s.logRightSizingDecision(app, string(outcome.Decision), "right-sizing auto apply queued deploy operation", map[string]any{
+			"requested_by": decision.requestedByID,
+			"operation_id": op.ID,
+			"target":       rightSizingResourceSummary(spec.Resources),
+			"downscale":    decision.downscale,
+		})
 	}
 	return recommendation, &op, false, nil
 }
@@ -401,12 +461,27 @@ func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) {
 }
 
 func (s *Server) applyAutoRightSizingOnce() {
+	acquired, lockErr := s.store.WithAdvisoryLock(context.Background(), "background:right-sizing:auto-apply", func() error {
+		return s.applyAutoRightSizingOnceLocked()
+	})
+	if lockErr != nil {
+		if s.log != nil {
+			s.log.Printf("right-sizing auto apply skipped because advisory lock failed: %v", lockErr)
+		}
+		return
+	}
+	if !acquired && s.log != nil {
+		s.log.Printf("right-sizing auto apply skipped because another fugue-api replica holds the advisory lock")
+	}
+}
+
+func (s *Server) applyAutoRightSizingOnceLocked() error {
 	apps, err := s.store.ListApps("", true)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("list apps for right-sizing auto apply failed: %v", err)
 		}
-		return
+		return err
 	}
 	for _, app := range apps {
 		spec := model.AppRightSizingSpec{Mode: model.AppRightSizingModeAuto}
@@ -424,6 +499,7 @@ func (s *Server) applyAutoRightSizingOnce() {
 			s.log.Printf("right-sizing auto apply for app=%s failed: %v", app.ID, err)
 		}
 	}
+	return nil
 }
 
 func buildRightSizingRecommendation(

@@ -12,7 +12,21 @@ func (s *Service) completeStaleDeployOperationIfNeeded(op model.Operation, curre
 		return false, nil
 	}
 	if deployOperationDesiredStateMatchesApp(op, currentApp) {
-		return false, nil
+		message := "deploy skipped because desired state is already current"
+		currentSpec := cloneControllerAppSpec(&currentApp.Spec)
+		currentBuildSource := model.AppBuildSource(currentApp)
+		currentOriginSource := model.AppOriginSource(currentApp)
+		completed, err := s.Store.CompleteManagedOperationWithSourceState(op.ID, "", message, currentSpec, currentBuildSource, currentOriginSource)
+		if err != nil {
+			return false, fmt.Errorf("complete no-op deploy operation %s: %w", op.ID, err)
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("operation %s skipped no-op deploy state", op.ID)
+		}
+		s.logOperationAppEvent("completed", "info", completed, currentApp, message, map[string]any{
+			"noop_deploy_skipped": true,
+		})
+		return true, nil
 	}
 
 	newer, found, err := s.completedDeployAfterOperationMatchingCurrentApp(op, currentApp)

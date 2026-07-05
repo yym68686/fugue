@@ -19,6 +19,21 @@ func hasInFlightOperationForApp(ops []model.Operation, appID string) bool {
 	return false
 }
 
+func firstActiveDeployOperationForApp(ops []model.Operation, appID string) (model.Operation, bool) {
+	active := make([]model.Operation, 0, 1)
+	for _, op := range ops {
+		if op.AppID != appID || op.Type != model.OperationTypeDeploy || !isActiveOperationStatus(op.Status) {
+			continue
+		}
+		active = append(active, op)
+	}
+	if len(active) == 0 {
+		return model.Operation{}, false
+	}
+	sortActiveOperations(active)
+	return active[0], true
+}
+
 func isActiveOperationStatus(status string) bool {
 	switch status {
 	case model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent:

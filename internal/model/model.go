@@ -217,6 +217,8 @@ const (
 	OperationRequestedByAutoFailover         = "fugue-controller/auto-failover"
 	OperationRequestedByImageRebuild         = "fugue-controller/image-rebuild"
 	OperationRequestedByOOMRightSizing       = "fugue-api/oom-right-sizing"
+	OperationRequestedByRightSizing          = "fugue-api/right-sizing"
+	OperationRequestedByRightSizingDownscale = "fugue-api/right-sizing/downscale"
 
 	ClusterNodeWorkloadKindApp            = "app"
 	ClusterNodeWorkloadKindBackingService = "backing_service"

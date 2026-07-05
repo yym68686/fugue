@@ -846,6 +846,7 @@ func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	}
 
 	specOne := appOne.Spec
+	specOne.RestartToken = "restart-one"
 	sourceOne := *appOne.Source
 	opOne, err := stateStore.CreateOperation(model.Operation{
 		TenantID:        tenant.ID,
@@ -860,6 +861,7 @@ func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 		t.Fatalf("create first deploy operation: %v", err)
 	}
 	specTwo := appTwo.Spec
+	specTwo.RestartToken = "restart-two"
 	sourceTwo := *appTwo.Source
 	opTwo, err := stateStore.CreateOperation(model.Operation{
 		TenantID:        tenant.ID,

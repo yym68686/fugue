@@ -301,6 +301,152 @@ func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 	}
 }
 
+func TestAutoRightSizingActiveDeployReturnsBenignSkip(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Auto Right Size Active Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        500,
+			MemoryMebibytes:      512,
+			MemoryLimitMebibytes: 1024,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	desired := app.Spec
+	desired.Resources = &model.ResourceSpec{CPUMilliCores: 375, MemoryMebibytes: 512, MemoryLimitMebibytes: 1024}
+	activeOp, outcome, err := stateStore.CreateAutoscalingDeployOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeDeploy,
+		RequestedByType: model.ActorTypeSystem,
+		RequestedByID:   model.OperationRequestedByRightSizingDownscale,
+		AppID:           app.ID,
+		DesiredSpec:     &desired,
+	})
+	if err != nil {
+		t.Fatalf("create active autoscaling operation: %v", err)
+	}
+	if outcome.Decision != store.AutoscalingDeployDecisionQueued {
+		t.Fatalf("expected active operation queued, outcome=%+v", outcome)
+	}
+	samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
+		{cpuMilli: 20, memoryMiB: 64},
+		{cpuMilli: 30, memoryMiB: 80},
+		{cpuMilli: 50, memoryMiB: 100},
+	})
+	if err := stateStore.RecordResourceUsageSamples(samples, time.Time{}); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	_, op, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+	if err != nil {
+		t.Fatalf("apply auto recommendation: %v", err)
+	}
+	if !alreadyCurrent || op != nil {
+		t.Fatalf("expected active deploy benign skip, already_current=%v op=%+v", alreadyCurrent, op)
+	}
+	operations, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 1 || operations[0].ID != activeOp.ID {
+		t.Fatalf("expected only active operation %s, got %+v", activeOp.ID, operations)
+	}
+}
+
+func TestAutoRightSizingAlreadyCurrentReturnsBenignSkipWithoutOperation(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Auto Right Size Noop Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raiseManagedTestCap(t, stateStore, tenant.ID)
+
+	source := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo:latest",
+		ResolvedImageRef: "ghcr.io/example/demo:latest",
+	}
+	app, err := stateStore.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		Ports:     []int{8080},
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Resources: &model.ResourceSpec{
+			CPUMilliCores:        500,
+			MemoryMebibytes:      512,
+			MemoryLimitMebibytes: 1024,
+		},
+	}, source)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	samples := rightSizingUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, app.ID, []rightSizingUsageValue{
+		{cpuMilli: 20, memoryMiB: 64},
+		{cpuMilli: 30, memoryMiB: 80},
+		{cpuMilli: 50, memoryMiB: 100},
+	})
+	if err := stateStore.RecordResourceUsageSamples(samples, time.Time{}); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	_, first, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+	if err != nil {
+		t.Fatalf("apply initial auto recommendation: %v", err)
+	}
+	if alreadyCurrent || first == nil {
+		t.Fatalf("expected first recommendation to queue operation, already_current=%v op=%+v", alreadyCurrent, first)
+	}
+	if _, err := stateStore.CompleteManagedOperation(first.ID, "/tmp/demo.yaml", "autoscaling applied"); err != nil {
+		t.Fatalf("complete first autoscaling operation: %v", err)
+	}
+
+	_, duplicate, alreadyCurrent, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
+	if err != nil {
+		t.Fatalf("apply duplicate auto recommendation: %v", err)
+	}
+	if !alreadyCurrent || duplicate != nil {
+		t.Fatalf("expected already-current benign skip, already_current=%v op=%+v", alreadyCurrent, duplicate)
+	}
+	operations, err := stateStore.ListOperationsByApp(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("expected no duplicate operation after already-current skip, got %+v", operations)
+	}
+}
+
 func TestAutoRightSizingSkipsDownscaleAfterRecentOOMRightSizing(t *testing.T) {
 	t.Parallel()
 

@@ -75,6 +75,7 @@ func (s *Server) handleGetAppDiagnosis(w http.ResponseWriter, r *http.Request) {
 	}
 	if component == "app" {
 		s.attachAppImageTrackingEvidence(r.Context(), principal, app, &diagnosis)
+		s.attachAppRightSizingEvidence(r.Context(), app, &diagnosis)
 	}
 
 	s.appendAudit(principal, "app.diagnosis.read", "app", app.ID, app.TenantID, map[string]string{

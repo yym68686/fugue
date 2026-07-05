@@ -24,6 +24,8 @@ var (
 	ErrConflict            = errors.New("conflict")
 	ErrInvalidInput        = errors.New("invalid input")
 	ErrIdempotencyMismatch = errors.New("idempotency key mismatch")
+	ErrActiveDeployExists  = errors.New("active deploy exists")
+	ErrAlreadyCurrent      = errors.New("already current")
 )
 
 type Store struct {
@@ -2679,13 +2681,19 @@ func isForegroundPendingOperation(op model.Operation) bool {
 }
 
 func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
+	created, _, err := s.createOperationWithPolicy(op, operationCreatePolicy{})
+	return created, err
+}
+
+func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCreatePolicy) (model.Operation, operationCreateOutcome, error) {
 	if op.TenantID == "" || op.Type == "" || op.AppID == "" {
-		return model.Operation{}, ErrInvalidInput
+		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgCreateOperation(op)
+		return s.pgCreateOperation(op, policy)
 	}
 
+	var outcome operationCreateOutcome
 	err := s.withLockedState(true, func(state *model.State) error {
 		appIndex := findApp(state, op.AppID)
 		if appIndex < 0 {
@@ -2761,6 +2769,17 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
+			if policy.RejectActiveDeployForApp {
+				if active, found := firstActiveDeployOperationForApp(state.Operations, app.ID); found {
+					outcome.Decision = AutoscalingDeployDecisionActiveDeployExists
+					outcome.ExistingOperationID = active.ID
+					return nil
+				}
+			}
+			if policy.RejectNoopDeploy && deployOperationDesiredStateAlreadyCurrent(op, app) {
+				outcome.Decision = AutoscalingDeployDecisionAlreadyCurrent
+				return nil
+			}
 		case model.OperationTypeScale:
 			if op.DesiredReplicas == nil || *op.DesiredReplicas < 0 {
 				return ErrInvalidInput
@@ -3025,9 +3044,10 @@ func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
 			return err
 		}
 		op = state.Operations[len(state.Operations)-1]
+		outcome.Decision = AutoscalingDeployDecisionQueued
 		return nil
 	})
-	return op, err
+	return op, outcome, err
 }
 
 func duplicateOOMRightSizingOperation(operations []model.Operation, candidate model.Operation) bool {

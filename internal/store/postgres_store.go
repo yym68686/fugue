@@ -2980,179 +2980,195 @@ WHERE scope = $1
 	return nil
 }
 
-func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
+func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePolicy) (model.Operation, operationCreateOutcome, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.Operation{}, fmt.Errorf("begin create operation transaction: %w", err)
+		return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("begin create operation transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	app, err := s.pgGetAppTx(ctx, tx, op.AppID, false)
+	lockApp := op.Type == model.OperationTypeDeploy || policy.RejectActiveDeployForApp || policy.RejectNoopDeploy
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, lockApp)
 	if err != nil {
-		return model.Operation{}, mapDBErr(err)
+		return model.Operation{}, operationCreateOutcome{}, mapDBErr(err)
 	}
 	if app.TenantID != op.TenantID {
-		return model.Operation{}, ErrNotFound
+		return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 	}
 	if err := s.pgHydrateAppBackingServicesWithQueryer(ctx, tx, &app); err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if op.DesiredSpec != nil {
 		if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := ensureManagedPostgresPasswordWithExisting(op.DesiredSpec.Postgres, OwnedManagedPostgresSpec(app)); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 	}
 
 	switch op.Type {
 	case model.OperationTypeImport:
 		if op.DesiredSpec == nil || op.DesiredSource == nil {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if !isQueuedImportSourceType(op.DesiredSource.Type) {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if !runtimeUsable {
-			return model.Operation{}, ErrNotFound
+			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
 		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if op.DesiredSpec.Failover != nil {
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if !runtimeUsable {
-				return model.Operation{}, ErrNotFound
+				return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 			}
 			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
 		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if !runtimeUsable {
-				return model.Operation{}, ErrNotFound
+				return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 			}
 			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(runtimeType); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.RuntimeID, op.TenantID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if !runtimeUsable {
-			return model.Operation{}, ErrNotFound
+			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
 		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if op.DesiredSpec.Failover != nil {
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if !runtimeUsable {
-				return model.Operation{}, ErrNotFound
+				return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 			}
 			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
 		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if !runtimeUsable {
-				return model.Operation{}, ErrNotFound
+				return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 			}
 			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(runtimeType); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
+		if policy.RejectActiveDeployForApp {
+			active, found, err := s.pgFirstActiveDeployOperationForAppTx(ctx, tx, app.ID, op.TenantID)
+			if err != nil {
+				return model.Operation{}, operationCreateOutcome{}, err
+			}
+			if found {
+				return model.Operation{}, operationCreateOutcome{
+					Decision:            AutoscalingDeployDecisionActiveDeployExists,
+					ExistingOperationID: active.ID,
+				}, nil
+			}
+		}
+		if policy.RejectNoopDeploy && deployOperationDesiredStateAlreadyCurrent(op, app) {
+			return model.Operation{}, operationCreateOutcome{Decision: AutoscalingDeployDecisionAlreadyCurrent}, nil
+		}
 	case model.OperationTypeScale:
 		if op.DesiredReplicas == nil || *op.DesiredReplicas < 0 {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		op.TargetRuntimeID = app.Spec.RuntimeID
 	case model.OperationTypeDelete:
 		if strings.TrimSpace(app.Spec.RuntimeID) == "" {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
 		op.TargetRuntimeID = app.Spec.RuntimeID
@@ -3160,94 +3176,94 @@ func (s *Store) pgCreateOperation(op model.Operation) (model.Operation, error) {
 		targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
 		if op.DesiredSpec != nil {
 			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if strings.TrimSpace(op.DesiredSpec.RuntimeID) == "" {
 				op.DesiredSpec.RuntimeID = targetRuntimeID
 			}
 			if strings.TrimSpace(op.DesiredSpec.RuntimeID) != targetRuntimeID {
-				return model.Operation{}, ErrInvalidInput
+				return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 			}
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.RuntimeID, op.TenantID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if !runtimeUsable {
-				return model.Operation{}, ErrNotFound
+				return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 			}
 			runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if op.DesiredSpec.Failover != nil {
 				runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, op.DesiredSpec.Failover.TargetRuntimeID, op.TenantID)
 				if err != nil {
-					return model.Operation{}, err
+					return model.Operation{}, operationCreateOutcome{}, err
 				}
 				if !runtimeUsable {
-					return model.Operation{}, ErrNotFound
+					return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 				}
 				targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.Failover.TargetRuntimeID)
 				if err != nil {
-					return model.Operation{}, err
+					return model.Operation{}, operationCreateOutcome{}, err
 				}
 				if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-					return model.Operation{}, err
+					return model.Operation{}, operationCreateOutcome{}, err
 				}
 			}
 			for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
 				runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 				if err != nil {
-					return model.Operation{}, err
+					return model.Operation{}, operationCreateOutcome{}, err
 				}
 				if !runtimeUsable {
-					return model.Operation{}, ErrNotFound
+					return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 				}
 				runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, runtimeID)
 				if err != nil {
-					return model.Operation{}, err
+					return model.Operation{}, operationCreateOutcome{}, err
 				}
 				if err := validateFailoverTargetRuntimeType(runtimeType); err != nil {
-					return model.Operation{}, err
+					return model.Operation{}, operationCreateOutcome{}, err
 				}
 			}
 			targetRuntimeID = op.DesiredSpec.RuntimeID
 		}
 		if targetRuntimeID == "" {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if !visible {
-			return model.Operation{}, ErrNotFound
+			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
 		if hasMigrationBlockingPersistentWorkspace(app) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if appHasManagedPostgresService(app) {
 			targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
 			if err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 			if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-				return model.Operation{}, err
+				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
 		op.TargetRuntimeID = targetRuntimeID
@@ -3260,44 +3276,44 @@ FROM fugue_operations
 WHERE app_id = $1
   AND status IN ($2, $3, $4)
 `, app.ID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&inFlightCount); err != nil {
-			return model.Operation{}, fmt.Errorf("count in-flight app operations: %w", err)
+			return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("count in-flight app operations: %w", err)
 		}
 		if inFlightCount > 0 {
-			return model.Operation{}, ErrConflict
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 		targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
 		if targetRuntimeID == "" && app.Spec.Failover != nil {
 			targetRuntimeID = strings.TrimSpace(app.Spec.Failover.TargetRuntimeID)
 		}
 		if targetRuntimeID == "" {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if !visible {
-			return model.Operation{}, ErrNotFound
+			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
 		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		sourceRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, app.Spec.RuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(sourceRuntimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if strings.TrimSpace(app.Spec.RuntimeID) == targetRuntimeID {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if err := validateFailoverVolumeReplication(app); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		op.SourceRuntimeID = app.Spec.RuntimeID
 		op.TargetRuntimeID = targetRuntimeID
@@ -3309,49 +3325,49 @@ WHERE app_id = $1
 	WHERE app_id = $1
 	  AND status IN ($2, $3, $4)
 	`, app.ID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&inFlightCount); err != nil {
-			return model.Operation{}, fmt.Errorf("count in-flight app operations: %w", err)
+			return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("count in-flight app operations: %w", err)
 		}
 		if inFlightCount > 0 {
-			return model.Operation{}, ErrConflict
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 		targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
 		if targetRuntimeID == "" {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if !visible {
-			return model.Operation{}, ErrNotFound
+			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
 		postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
 		if postgresSpec == nil {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
 		if sourceRuntimeID == "" {
 			sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 		}
 		if sourceRuntimeID == "" {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		sourceRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, sourceRuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(sourceRuntimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if sourceRuntimeID == targetRuntimeID {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		op.SourceRuntimeID = sourceRuntimeID
 		op.TargetRuntimeID = targetRuntimeID
@@ -3366,14 +3382,14 @@ WHERE app_id = $1
 		WHERE app_id = $1
 		  AND status IN ($2, $3, $4)
 		`, app.ID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent).Scan(&inFlightCount); err != nil {
-			return model.Operation{}, fmt.Errorf("count in-flight app operations: %w", err)
+			return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("count in-flight app operations: %w", err)
 		}
 		if inFlightCount > 0 {
-			return model.Operation{}, ErrConflict
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 		postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
 		if postgresSpec == nil {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
 		if sourceRuntimeID == "" {
@@ -3387,40 +3403,40 @@ WHERE app_id = $1
 			targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 		}
 		if sourceRuntimeID == "" || targetRuntimeID == "" {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, targetRuntimeID, op.TenantID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if !visible {
-			return model.Operation{}, ErrNotFound
+			return model.Operation{}, operationCreateOutcome{}, ErrNotFound
 		}
 		targetRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, targetRuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(targetRuntimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		sourceRuntimeType, err := s.pgRuntimeTypeTx(ctx, tx, sourceRuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverTargetRuntimeType(sourceRuntimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if op.DesiredSpec == nil {
 			op.DesiredSpec = cloneAppSpec(&app.Spec)
 		}
 		if op.DesiredSpec == nil {
-			return model.Operation{}, ErrInvalidInput
+			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 		}
 		if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if op.DesiredSpec.Postgres == nil {
 			postgresCopy := *postgresSpec
@@ -3436,28 +3452,28 @@ WHERE app_id = $1
 		op.DesiredSpec.Postgres.SynchronousReplicas = 0
 		op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance = false
 		if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		runtimeType, err := s.pgRuntimeTypeTx(ctx, tx, op.DesiredSpec.RuntimeID)
 		if err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateWorkspaceSpecForRuntime(*op.DesiredSpec, runtimeType); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateFailoverSpec(*op.DesiredSpec); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		if err := validateManagedPostgresRuntimeSpec(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)); err != nil {
-			return model.Operation{}, err
+			return model.Operation{}, operationCreateOutcome{}, err
 		}
 		op.SourceRuntimeID = sourceRuntimeID
 		op.TargetRuntimeID = targetRuntimeID
 	default:
-		return model.Operation{}, ErrInvalidInput
+		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 	}
 	if err := pgValidateOperationRuntimeReservationsTx(ctx, tx, app.ProjectID, op); err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 
 	now := time.Now().UTC()
@@ -3466,15 +3482,15 @@ WHERE app_id = $1
 	op.DesiredOriginSource = cloneAppSource(op.DesiredOriginSource)
 	billing, billingState, _, err := s.pgAccrueTenantBillingTx(ctx, tx, app.TenantID, now)
 	if err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	currentTotal, nextTotal, err := projectedTenantManagedTotalsWithBilling(&billingState, app, op, billing)
 	if err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	currentPublicHourlyRateMicroCents, nextPublicHourlyRateMicroCents, err := projectedTenantPublicRuntimeHourlyRates(&billingState, app, op)
 	if err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if err := validateTenantOperationBilling(
 		billing,
@@ -3483,7 +3499,7 @@ WHERE app_id = $1
 		currentPublicHourlyRateMicroCents,
 		nextPublicHourlyRateMicroCents,
 	); err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	op.ID = model.NewID("op")
 	op.Status = model.OperationStatusPending
@@ -3494,31 +3510,31 @@ WHERE app_id = $1
 
 	desiredSpecJSON, err := marshalNullableJSON(op.DesiredSpec)
 	if err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	desiredSourceJSON, err := marshalOperationSourceState(op)
 	if err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at)
 	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, '', '', '', $16, $17, NULL, NULL)
 `, op.ID, op.TenantID, op.Type, op.Status, op.ExecutionMode, op.RequestedByType, op.RequestedByID, op.AppID, op.ServiceID, op.SourceRuntimeID, op.TargetRuntimeID, intPointerValue(op.DesiredReplicas), desiredSpecJSON, desiredSourceJSON, op.ResultMessage, op.CreatedAt, op.UpdatedAt); err != nil {
-		return model.Operation{}, mapDBErr(err)
+		return model.Operation{}, operationCreateOutcome{}, mapDBErr(err)
 	}
 	if err := applyInFlightOperationToAppModel(&app, &op); err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if err := s.pgUpdateAppTx(ctx, tx, app); err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
-		return model.Operation{}, err
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return model.Operation{}, fmt.Errorf("commit create operation transaction: %w", err)
+		return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("commit create operation transaction: %w", err)
 	}
-	return op, nil
+	return op, operationCreateOutcome{Decision: AutoscalingDeployDecisionQueued}, nil
 }
 
 func (s *Store) pgListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
@@ -3921,6 +3937,26 @@ ORDER BY created_at ASC, id ASC
 		return nil, fmt.Errorf("iterate active operations: %w", err)
 	}
 	return ops, nil
+}
+
+func (s *Store) pgFirstActiveDeployOperationForAppTx(ctx context.Context, tx *sql.Tx, appID, tenantID string) (model.Operation, bool, error) {
+	op, err := scanOperation(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE app_id = $1
+  AND tenant_id = $2
+  AND type = $3
+  AND status IN ($4, $5, $6)
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+`, appID, tenantID, model.OperationTypeDeploy, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Operation{}, false, nil
+		}
+		return model.Operation{}, false, fmt.Errorf("query active deploy operation for app %s: %w", appID, err)
+	}
+	return op, true, nil
 }
 
 func (s *Store) pgGetOperation(id string) (model.Operation, error) {
