@@ -445,6 +445,39 @@ func TestLatestDrainAgentEventConclusionIgnoresOtherAppPods(t *testing.T) {
 	}
 }
 
+func TestSameNodeOnlineMountUnsupportedDiagnosisEvidence(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec: model.AppSpec{
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueWorkspaceRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
+				},
+			},
+		},
+	}
+	event := coreEventOrZero{
+		Name:    "demo-replacement",
+		Message: "MountVolume.SetUp failed for volume \"pvc\" : verifyMount: device already mounted",
+		Event: model.ClusterEvent{
+			Reason: "FailedMount",
+		},
+	}
+	if !isSameNodeOnlineMountUnsupportedEvent(event) {
+		t.Fatal("expected FailedMount verifyMount device already mounted to be classified")
+	}
+	evidence := sameNodeOnlineMountUnsupportedEvidence(app, event)
+	if !strings.Contains(evidence, "storage class fugue-workspace-rwo does not support same-node online dual mount") {
+		t.Fatalf("expected storage class capability evidence, got %q", evidence)
+	}
+	if !strings.Contains(evidence, "pod=demo-replacement") {
+		t.Fatalf("expected implicated pod in evidence, got %q", evidence)
+	}
+}
+
 func TestGetAppDiagnosisDetectsReadyPodHTTPTimeout(t *testing.T) {
 	t.Parallel()
 

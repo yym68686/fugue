@@ -297,6 +297,8 @@ func (s *Service) captureKubernetesEventsEvidence(ctx context.Context, client *k
 		if redactedMessage.Changed {
 			status = model.OperationEvidenceRedactionRedacted
 		}
+		payload := objectToPayloadMap(event)
+		augmentKubernetesEventEvidencePayload(app, event, payload)
 		s.recordOperationEvidenceBestEffort(model.OperationEvidence{
 			TenantID:         app.TenantID,
 			ProjectID:        app.ProjectID,
@@ -310,11 +312,11 @@ func (s *Service) captureKubernetesEventsEvidence(ctx context.Context, client *k
 			SubjectName:      name,
 			SubjectNamespace: namespace,
 			ObservedAt:       kubeEventTime(event),
-			Summary:          firstNonEmptyControllerString(event.Reason, "kubernetes event"),
+			Summary:          kubernetesEventEvidenceSummary(app, event),
 			Message:          redactedMessage.Text,
 			Reason:           event.Reason,
 			RedactionStatus:  status,
-			Payload:          objectToPayloadMap(event),
+			Payload:          payload,
 		})
 	}
 }
@@ -412,6 +414,39 @@ func classifyKubernetesEventEvidenceType(event kubeEvent) string {
 	default:
 		return model.OperationEvidenceTypeRolloutKubernetesEvent
 	}
+}
+
+func kubernetesEventEvidenceSummary(app model.App, event kubeEvent) string {
+	if kubernetesEventIndicatesSameNodeOnlineMountUnsupported(event) {
+		return model.AppStorageClassSameNodeOnlineMountUnsupportedSummary(appStorageClassNameForController(app))
+	}
+	return firstNonEmptyControllerString(event.Reason, "kubernetes event")
+}
+
+func augmentKubernetesEventEvidencePayload(app model.App, event kubeEvent, payload map[string]any) {
+	if payload == nil || !kubernetesEventIndicatesSameNodeOnlineMountUnsupported(event) {
+		return
+	}
+	payload["storage_class_name"] = appStorageClassNameForController(app)
+	payload["storage_rollout_failure"] = "same_node_online_dual_mount_unsupported"
+	payload["same_node_online_mount_supported"] = false
+}
+
+func kubernetesEventIndicatesSameNodeOnlineMountUnsupported(event kubeEvent) bool {
+	return strings.EqualFold(strings.TrimSpace(event.Reason), "FailedMount") &&
+		model.StorageEventIndicatesSameNodeOnlineMountUnsupported(event.Message)
+}
+
+func appStorageClassNameForController(app model.App) string {
+	if storage := app.Spec.PersistentStorage; storage != nil {
+		if value := strings.TrimSpace(storage.StorageClassName); value != "" {
+			return value
+		}
+	}
+	if workspace := app.Spec.Workspace; workspace != nil {
+		return strings.TrimSpace(workspace.StorageClassName)
+	}
+	return ""
 }
 
 func objectToPayloadMap(value any) map[string]any {

@@ -1794,6 +1794,40 @@ func TestClassifyKubernetesEventEvidenceTypes(t *testing.T) {
 	}
 }
 
+func TestKubernetesEventEvidenceSummarizesSameNodeOnlineMountUnsupported(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		Spec: model.AppSpec{
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueWorkspaceRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/workspace"},
+				},
+			},
+		},
+	}
+	event := kubeEvent{
+		Reason:  "FailedMount",
+		Message: "MountVolume.SetUp failed for volume \"pvc\" : rpc error: code = Internal desc = verifyMount: device already mounted",
+	}
+	if got := classifyKubernetesEventEvidenceType(event); got != model.OperationEvidenceTypeVolumeMountFailure {
+		t.Fatalf("expected volume mount evidence type, got %s", got)
+	}
+	if got := kubernetesEventEvidenceSummary(app, event); got != "storage class fugue-workspace-rwo does not support same-node online dual mount" {
+		t.Fatalf("expected storage class capability summary, got %q", got)
+	}
+	payload := map[string]any{}
+	augmentKubernetesEventEvidencePayload(app, event, payload)
+	if got := payload["storage_rollout_failure"]; got != "same_node_online_dual_mount_unsupported" {
+		t.Fatalf("expected storage rollout failure payload, got %#v", payload)
+	}
+	if got := payload["same_node_online_mount_supported"]; got != false {
+		t.Fatalf("expected same-node mount support=false payload, got %#v", payload)
+	}
+}
+
 func operationEvidenceHasType(items []model.OperationEvidence, typ string) bool {
 	for _, item := range items {
 		if item.Type == typ {

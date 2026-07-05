@@ -8,7 +8,12 @@ import (
 	"strings"
 )
 
-const appPersistentStorageMountRootDirName = "mounts"
+const (
+	appPersistentStorageMountRootDirName = "mounts"
+
+	AppStorageClassFugueLocalRWO     = "fugue-local-rwo"
+	AppStorageClassFugueWorkspaceRWO = "fugue-workspace-rwo"
+)
 
 func NormalizeAppPersistentStorageMode(raw string) (string, error) {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
@@ -38,6 +43,62 @@ func AppPersistentStorageSpecUsesMovableRWO(spec *AppPersistentStorageSpec) bool
 
 func AppPersistentStorageSpecIsMigratable(spec *AppPersistentStorageSpec) bool {
 	return AppPersistentStorageSpecUsesSharedProjectRWX(spec) || AppPersistentStorageSpecUsesMovableRWO(spec)
+}
+
+func AppRWOStorageClassSupportsSameNodeOnlineMount(storageClassName string) bool {
+	switch normalizeAppStorageClassName(storageClassName) {
+	case AppStorageClassFugueLocalRWO:
+		return true
+	default:
+		return false
+	}
+}
+
+func AppRWOStorageClassDisallowsSameNodeOnlineMount(storageClassName string) bool {
+	switch normalizeAppStorageClassName(storageClassName) {
+	case AppStorageClassFugueWorkspaceRWO:
+		return true
+	default:
+		return false
+	}
+}
+
+func AppWorkspaceSpecSupportsSameNodeOnlineRollout(spec *AppWorkspaceSpec) bool {
+	if spec == nil {
+		return false
+	}
+	return AppRWOStorageClassSupportsSameNodeOnlineMount(spec.StorageClassName)
+}
+
+func AppPersistentStorageSpecSupportsSameNodeOnlineRollout(spec *AppPersistentStorageSpec) bool {
+	if spec == nil || len(spec.Mounts) == 0 {
+		return false
+	}
+	if AppPersistentStorageSpecUsesSharedProjectRWX(spec) {
+		return false
+	}
+	if _, err := NormalizeAppPersistentStorageMode(spec.Mode); err != nil {
+		return false
+	}
+	return AppRWOStorageClassSupportsSameNodeOnlineMount(spec.StorageClassName)
+}
+
+func AppStorageClassSameNodeOnlineMountUnsupportedSummary(storageClassName string) string {
+	storageClassName = strings.TrimSpace(storageClassName)
+	if storageClassName == "" {
+		return "storage class does not advertise same-node online dual mount support"
+	}
+	return fmt.Sprintf("storage class %s does not support same-node online dual mount", storageClassName)
+}
+
+func StorageEventIndicatesSameNodeOnlineMountUnsupported(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(normalized, "verifymount") &&
+		strings.Contains(normalized, "device already mounted")
+}
+
+func normalizeAppStorageClassName(storageClassName string) string {
+	return strings.TrimSpace(strings.ToLower(storageClassName))
 }
 
 func AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(spec *AppPersistentStorageSpec) bool {

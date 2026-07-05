@@ -2278,7 +2278,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRestartRolloutSnapshot(
 	}
 }
 
-func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForSingleWriterStorage(t *testing.T) {
+func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForWorkspaceRWOStorage(t *testing.T) {
 	t.Parallel()
 
 	managedSnapshot := model.App{
@@ -2293,7 +2293,8 @@ func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForSingl
 			RuntimeID:    "runtime_demo",
 			RestartToken: "restart_old",
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueWorkspaceRWO,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n", Mode: 0o644},
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
@@ -2310,14 +2311,14 @@ func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForSingl
 
 	got := storedManagedAppDesiredWithRolloutIntent(managedSnapshot, storedDesired)
 	if got.Spec.RolloutIntent != "" {
-		t.Fatalf("expected no online rollout intent for single-writer storage, got %q", got.Spec.RolloutIntent)
+		t.Fatalf("expected no online rollout intent for workspace RWO storage, got %q", got.Spec.RolloutIntent)
 	}
 	objects := runtime.BuildManagedAppChildObjects(got, runtime.SchedulingConstraints{}, runtime.ManagedAppOwnerReference(runtime.ManagedAppObject{}))
 	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
 	spec, _ := deployment["spec"].(map[string]any)
 	strategy, _ := spec["strategy"].(map[string]any)
 	if gotStrategy := strategy["type"]; gotStrategy != "Recreate" {
-		t.Fatalf("expected single-writer config update to use Recreate, got %#v", gotStrategy)
+		t.Fatalf("expected workspace RWO config update to use Recreate, got %#v", gotStrategy)
 	}
 	metadata, _ := deployment["metadata"].(map[string]any)
 	annotations, _ := metadata["annotations"].(map[string]string)
@@ -2326,6 +2327,58 @@ func TestStoredManagedAppDesiredWithRolloutIntentSkipsOnlineConfigUpdateForSingl
 	}
 	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != "single-writer-storage" {
 		t.Fatalf("expected single-writer-storage rollout reason, got %q", gotReason)
+	}
+}
+
+func TestStoredManagedAppDesiredWithRolloutIntentKeepsOnlineConfigUpdateForLocalRWOStorage(t *testing.T) {
+	t.Parallel()
+
+	managedSnapshot := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:        "registry.fugue.internal:5000/fugue-apps/demo@sha256:abc",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml", SeedContent: "providers: []\n", Mode: 0o644},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	storedDesired := managedSnapshot
+	persistent := *managedSnapshot.Spec.PersistentStorage
+	persistent.Mounts = append([]model.AppPersistentStorageMount(nil), managedSnapshot.Spec.PersistentStorage.Mounts...)
+	storedDesired.Spec.PersistentStorage = &persistent
+	storedDesired.Spec.RestartToken = "restart_new"
+	storedDesired.Spec.PersistentStorage.Mounts[0].SeedContent = "providers:\n- openai\n"
+
+	got := storedManagedAppDesiredWithRolloutIntent(managedSnapshot, storedDesired)
+	if got.Spec.RolloutIntent != model.AppRolloutIntentOnlineConfigUpdate {
+		t.Fatalf("expected local RWO online config rollout intent, got %q", got.Spec.RolloutIntent)
+	}
+	objects := runtime.BuildManagedAppChildObjects(got, runtime.SchedulingConstraints{}, runtime.ManagedAppOwnerReference(runtime.ManagedAppObject{}))
+	deployment := controllerTestFirstObjectByKind(t, objects, "Deployment")
+	spec, _ := deployment["spec"].(map[string]any)
+	strategy, _ := spec["strategy"].(map[string]any)
+	if gotStrategy := strategy["type"]; gotStrategy != "RollingUpdate" {
+		t.Fatalf("expected local RWO config update to use RollingUpdate, got %#v", gotStrategy)
+	}
+	metadata, _ := deployment["metadata"].(map[string]any)
+	annotations, _ := metadata["annotations"].(map[string]string)
+	if gotClass := annotations["fugue.io/downtime-class"]; gotClass != "online-required" {
+		t.Fatalf("expected online-required class, got %q", gotClass)
+	}
+	if gotReason := annotations["fugue.io/rollout-reason"]; gotReason != "config-file-only" {
+		t.Fatalf("expected config-file-only rollout reason, got %q", gotReason)
 	}
 }
 

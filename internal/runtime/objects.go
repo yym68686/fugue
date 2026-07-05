@@ -2056,7 +2056,7 @@ func deploymentStrategy(app model.App) map[string]any {
 	if appUsesOnlineDurableRolloutStrategy(app) {
 		return rollingUpdateDeploymentStrategy()
 	}
-	if appUsesSingleWriterStorage(app) {
+	if appUsesDurableStorage(app) {
 		return map[string]any{"type": "Recreate"}
 	}
 	return rollingUpdateDeploymentStrategy()
@@ -2077,11 +2077,22 @@ func appUsesOnlineRestartStrategy(app model.App) bool {
 }
 
 func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
-	return appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) &&
-		model.AppHasClusterService(app.Spec) &&
-		app.Spec.Replicas > 0 &&
-		!appUsesSingleWriterStorage(app) &&
-		normalizeRuntimeAppPersistentStorageSpec(app) != nil
+	if !appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) ||
+		!model.AppHasClusterService(app.Spec) ||
+		app.Spec.Replicas <= 0 {
+		return false
+	}
+	if workspace := normalizeRuntimeAppWorkspaceSpec(app); workspace != nil {
+		return model.AppWorkspaceSpecSupportsSameNodeOnlineRollout(workspace)
+	}
+	storage := normalizeRuntimeAppPersistentStorageSpec(app)
+	if storage == nil {
+		return false
+	}
+	if model.AppPersistentStorageSpecUsesSharedProjectRWX(storage) {
+		return true
+	}
+	return model.AppPersistentStorageSpecSupportsSameNodeOnlineRollout(storage)
 }
 
 func appRolloutIntentIsOnlineDurable(intent string) bool {
@@ -2101,11 +2112,8 @@ func appUsesStrictZeroDowntimeDrain(app model.App) bool {
 	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
 		return false
 	}
-	if appUsesSingleWriterStorage(app) {
-		return false
-	}
 	if appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) {
-		return true
+		return !appUsesDurableStorage(app) || appUsesOnlineDurableRolloutStrategy(app)
 	}
 	return normalizeRuntimeAppWorkspaceSpec(app) == nil && normalizeRuntimeAppPersistentStorageSpec(app) == nil
 }
@@ -2138,7 +2146,7 @@ func onlineDurableRolloutReason(intent string) string {
 }
 
 func appRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]string {
-	if appUsesSingleWriterStorage(app) {
+	if appUsesDurableStorage(app) {
 		return mergeStringMaps(map[string]string{
 			"fugue.io/rollout-mode":    "isolated-singleton",
 			"fugue.io/downtime-class":  "downtime-required",
@@ -2153,15 +2161,11 @@ func appRolloutAnnotations(app model.App, config StrictDrainConfig) map[string]s
 	}, strictZeroDowntimeDrainAnnotations(app, config))
 }
 
-func appUsesSingleWriterStorage(app model.App) bool {
+func appUsesDurableStorage(app model.App) bool {
 	if normalizeRuntimeAppWorkspaceSpec(app) != nil {
 		return true
 	}
-	storage := normalizeRuntimeAppPersistentStorageSpec(app)
-	if storage == nil {
-		return false
-	}
-	return !model.AppPersistentStorageSpecUsesSharedProjectRWX(storage)
+	return normalizeRuntimeAppPersistentStorageSpec(app) != nil
 }
 
 func strictZeroDowntimeDrainAnnotations(app model.App, config StrictDrainConfig) map[string]string {

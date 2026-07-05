@@ -46,17 +46,15 @@ func appUsesOnlineDurableRolloutIntent(app model.App) bool {
 	if !appHasOnlineRolloutIntent(app) {
 		return false
 	}
-	if app.Spec.Workspace == nil && !appPersistentStorageRequiresSameNodeOnlineRollout(app.Spec.PersistentStorage) {
-		return false
-	}
-	return true
+	return appWorkspaceRequiresSameNodeOnlineRollout(app.Spec.Workspace) ||
+		appPersistentStorageRequiresSameNodeOnlineRollout(app.Spec.PersistentStorage)
 }
 
 func appHasOnlineRolloutIntent(app model.App) bool {
-	if !appSupportsOnlineRolloutIntent(app) {
+	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
 		return false
 	}
-	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
+	if !appSupportsOnlineRolloutIntent(app) {
 		return false
 	}
 	switch strings.TrimSpace(app.Spec.RolloutIntent) {
@@ -76,20 +74,23 @@ func appSupportsOnlineRolloutIntent(app model.App) bool {
 		return false
 	}
 	if app.Spec.Workspace != nil {
-		return false
+		return model.AppWorkspaceSpecSupportsSameNodeOnlineRollout(app.Spec.Workspace)
 	}
-	return !appPersistentStorageRequiresSameNodeOnlineRollout(app.Spec.PersistentStorage)
+	if app.Spec.PersistentStorage != nil {
+		if model.AppPersistentStorageSpecUsesSharedProjectRWX(app.Spec.PersistentStorage) {
+			return true
+		}
+		return model.AppPersistentStorageSpecSupportsSameNodeOnlineRollout(app.Spec.PersistentStorage)
+	}
+	return true
+}
+
+func appWorkspaceRequiresSameNodeOnlineRollout(spec *model.AppWorkspaceSpec) bool {
+	return model.AppWorkspaceSpecSupportsSameNodeOnlineRollout(spec)
 }
 
 func appPersistentStorageRequiresSameNodeOnlineRollout(spec *model.AppPersistentStorageSpec) bool {
-	if spec == nil || len(spec.Mounts) == 0 {
-		return false
-	}
-	if model.AppPersistentStorageSpecUsesSharedProjectRWX(spec) {
-		return false
-	}
-	_, err := model.NormalizeAppPersistentStorageMode(spec.Mode)
-	return err == nil
+	return model.AppPersistentStorageSpecSupportsSameNodeOnlineRollout(spec)
 }
 
 func (s *Service) currentReadyAppNodeForOnlineRollout(ctx context.Context, app model.App) (string, bool) {

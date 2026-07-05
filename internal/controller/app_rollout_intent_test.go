@@ -160,7 +160,7 @@ func TestRolloutIntentForManagedOperationDetectsImageOnlyDeploy(t *testing.T) {
 	}
 }
 
-func TestRolloutIntentForManagedOperationRejectsSingleWriterImageOnlyDeploy(t *testing.T) {
+func TestRolloutIntentForManagedOperationRejectsWorkspaceRWOImageOnlyDeploy(t *testing.T) {
 	current := model.App{
 		ID:       "app_demo",
 		TenantID: "tenant_demo",
@@ -172,7 +172,8 @@ func TestRolloutIntentForManagedOperationRejectsSingleWriterImageOnlyDeploy(t *t
 			RuntimeID:    "runtime_demo",
 			RestartToken: "restart_old",
 			PersistentStorage: &model.AppPersistentStorageSpec{
-				Mode: model.AppPersistentStorageModeMovableRWO,
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueWorkspaceRWO,
 				Mounts: []model.AppPersistentStorageMount{
 					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
 					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
@@ -189,7 +190,53 @@ func TestRolloutIntentForManagedOperationRejectsSingleWriterImageOnlyDeploy(t *t
 	}
 
 	if got := rolloutIntentForManagedOperation(op, current, desired); got != "" {
-		t.Fatalf("expected no online rollout intent for single-writer storage, got %q", got)
+		t.Fatalf("expected no online rollout intent for workspace RWO storage, got %q", got)
+	}
+}
+
+func TestRolloutIntentForManagedOperationDetectsLocalRWOImageOnlyDeploy(t *testing.T) {
+	current := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Source: &model.AppSource{
+			Type:             model.AppSourceTypeDockerImage,
+			ImageRef:         "ghcr.io/example/demo:latest",
+			ResolvedImageRef: "registry.push.example/demo:image-old",
+		},
+		Spec: model.AppSpec{
+			Image:        "registry.pull.example/fugue-apps/demo@sha256:old",
+			Ports:        []int{8080},
+			Replicas:     1,
+			RuntimeID:    "runtime_demo",
+			RestartToken: "restart_old",
+			PersistentStorage: &model.AppPersistentStorageSpec{
+				Mode:             model.AppPersistentStorageModeMovableRWO,
+				StorageClassName: model.AppStorageClassFugueLocalRWO,
+				Mounts: []model.AppPersistentStorageMount{
+					{Kind: model.AppPersistentStorageMountKindFile, Path: "/home/api.yaml"},
+					{Kind: model.AppPersistentStorageMountKindDirectory, Path: "/home/data"},
+				},
+			},
+		},
+	}
+	model.NormalizeAppSourceState(&current)
+	desired := current
+	desired.Spec.Image = "registry.pull.example/fugue-apps/demo@sha256:new"
+	desired.Spec.RestartToken = "restart_new"
+	nextSource := model.AppSource{
+		Type:             model.AppSourceTypeDockerImage,
+		ImageRef:         "ghcr.io/example/demo:latest",
+		ResolvedImageRef: "registry.push.example/demo:image-new",
+	}
+	model.SetAppSourceState(&desired, &nextSource, &nextSource)
+	op := model.Operation{
+		Type:        model.OperationTypeDeploy,
+		DesiredSpec: &desired.Spec,
+	}
+
+	if got := rolloutIntentForManagedOperation(op, current, desired); got != model.AppRolloutIntentOnlineImageUpdate {
+		t.Fatalf("expected local RWO online image rollout intent, got %q", got)
 	}
 }
 

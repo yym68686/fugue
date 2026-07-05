@@ -197,8 +197,12 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	evictedPod := newestEvictedPod(pods)
 	schedulingEvent := newestFailedSchedulingEventForPods(rawNamespaceEvents, pods)
 	volumeAffinityConflict := schedulingEvent != nil && containsVolumeAffinityConflict(schedulingEvent.Message)
+	sameNodeMountEvent := newestSameNodeOnlineMountUnsupportedEventForPods(rawNamespaceEvents, pods)
 	if schedulingEvent != nil {
 		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "scheduling: "+strings.TrimSpace(schedulingEvent.Message))
+	}
+	if sameNodeMountEvent != nil {
+		diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, sameNodeOnlineMountUnsupportedEvidence(app, *sameNodeMountEvent))
 	}
 
 	var nodeSnapshot *clusterNodeSnapshot
@@ -212,6 +216,11 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 			if clusterNodeConditionIsTrue(snapshot.node, clusterNodeConditionDisk) {
 				diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf("node %s condition DiskPressure=True", snapshot.node.Name))
 			}
+		}
+	}
+	if diagnosis.ImplicatedPod == "" {
+		if sameNodeMountEvent != nil {
+			diagnosis.ImplicatedPod = strings.TrimSpace(sameNodeMountEvent.Name)
 		}
 	}
 	if diagnosis.ImplicatedPod == "" {
@@ -232,6 +241,13 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 	}
 
 	switch {
+	case sameNodeMountEvent != nil:
+		diagnosis.Category = "storage-online-rollout-unsupported"
+		diagnosis.Summary = firstNonEmptyString(
+			fmt.Sprintf("%d/%d runtime pods are ready, but the replacement pod cannot mount storage concurrently: %s", diagnosis.ReadyPods, diagnosis.LivePods, appStorageSameNodeOnlineMountUnsupportedSummary(app)),
+			appStorageSameNodeOnlineMountUnsupportedSummary(app),
+		)
+		diagnosis.Hint = "Use a Recreate rollout for this storage class, or move the app storage to RWX / a same-node concurrent RWO storage class before claiming zero downtime."
 	case diagnosis.ReadyPods > 0 && httpProbe.attempted && httpProbe.timedOut:
 		diagnosis.Category = "http-timeout"
 		diagnosis.Summary = fmt.Sprintf("%d/%d runtime pods are ready, but the internal HTTP probe timed out", diagnosis.ReadyPods, diagnosis.LivePods)
@@ -823,6 +839,62 @@ func newestFailedSchedulingEventForPods(events []coreEventOrZero, pods []kubePod
 		}
 	}
 	return nil
+}
+
+func newestSameNodeOnlineMountUnsupportedEventForPods(events []coreEventOrZero, pods []kubePodInfo) *coreEventOrZero {
+	if len(events) == 0 || len(pods) == 0 {
+		return nil
+	}
+	podNames := make(map[string]struct{}, len(pods))
+	for _, pod := range pods {
+		if name := strings.TrimSpace(pod.Metadata.Name); name != "" {
+			podNames[name] = struct{}{}
+		}
+	}
+	for index := range events {
+		if _, ok := podNames[strings.TrimSpace(events[index].Name)]; !ok {
+			continue
+		}
+		if isSameNodeOnlineMountUnsupportedEvent(events[index]) {
+			return &events[index]
+		}
+	}
+	return nil
+}
+
+func isSameNodeOnlineMountUnsupportedEvent(event coreEventOrZero) bool {
+	return strings.EqualFold(strings.TrimSpace(event.Event.Reason), "FailedMount") &&
+		model.StorageEventIndicatesSameNodeOnlineMountUnsupported(event.Message)
+}
+
+func sameNodeOnlineMountUnsupportedEvidence(app model.App, event coreEventOrZero) string {
+	parts := []string{
+		"storage rollout:",
+		appStorageSameNodeOnlineMountUnsupportedSummary(app),
+	}
+	if podName := strings.TrimSpace(event.Name); podName != "" {
+		parts = append(parts, "pod="+podName)
+	}
+	if message := strings.TrimSpace(event.Message); message != "" {
+		parts = append(parts, "event="+truncateTimelineMessage(message))
+	}
+	return strings.Join(parts, " ")
+}
+
+func appStorageSameNodeOnlineMountUnsupportedSummary(app model.App) string {
+	return model.AppStorageClassSameNodeOnlineMountUnsupportedSummary(appStorageClassNameForDiagnosis(app))
+}
+
+func appStorageClassNameForDiagnosis(app model.App) string {
+	if storage := app.Spec.PersistentStorage; storage != nil {
+		if value := strings.TrimSpace(storage.StorageClassName); value != "" {
+			return value
+		}
+	}
+	if workspace := app.Spec.Workspace; workspace != nil {
+		return strings.TrimSpace(workspace.StorageClassName)
+	}
+	return ""
 }
 
 func summarizeAppDiagnosisPods(pods []kubePodInfo) []string {
