@@ -1279,6 +1279,67 @@ func TestScheduleImageHydrationCreatesTaskForCapableUpdater(t *testing.T) {
 	}
 }
 
+func TestScheduleImageHydrationSkipsFilesystemPressureTarget(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Image Hydration Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, _, err := stateStore.EnrollNodeUpdater(
+		nodeSecret,
+		"worker-pressure",
+		"https://worker-pressure.example.com",
+		nil,
+		"worker-pressure",
+		"machine-pressure",
+		"v2",
+		"join-v2",
+		[]string{"heartbeat", "tasks", model.NodeUpdateTaskTypePrepullAppImages},
+	)
+	if err != nil {
+		t.Fatalf("enroll node updater: %v", err)
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:                updater.MachineID,
+		RuntimeID:             updater.RuntimeID,
+		ClusterNodeName:       updater.ClusterNodeName,
+		FilesystemUsedPercent: 90,
+		ObservedAt:            time.Now().UTC(),
+		Status:                "pressure",
+	}, nil); err != nil {
+		t.Fatalf("upsert pressure inventory: %v", err)
+	}
+
+	var logs bytes.Buffer
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(&logs, "", 0),
+	}
+	app := model.App{ID: "app_1", TenantID: tenant.ID}
+
+	svc.scheduleImageHydration(context.Background(), app, deployImageTarget{RuntimeID: updater.RuntimeID, ClusterNodeName: updater.ClusterNodeName}, "registry.example/app@sha256:abc")
+
+	tasks, err := stateStore.ListNodeUpdateTasks(tenant.ID, false, updater.ID, "")
+	if err != nil {
+		t.Fatalf("list node update tasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Fatalf("expected pressure target to skip hydrate task, got %+v", tasks)
+	}
+	if !strings.Contains(logs.String(), "filesystem_pressure") {
+		t.Fatalf("expected filesystem_pressure skip log, got %q", logs.String())
+	}
+}
+
 func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 	t.Parallel()
 

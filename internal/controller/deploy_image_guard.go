@@ -708,6 +708,29 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 	if !supported {
 		return
 	}
+	updater, found, err := s.nodeUpdaterForImageHydrationTarget(target)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("inspect image hydrate eligibility app=%s image=%s runtime=%s node=%s failed: %v", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, err)
+		}
+		return
+	}
+	if !found {
+		return
+	}
+	eligibility, err := s.loadImageReplicationEligibility()
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("load image hydrate eligibility app=%s image=%s runtime=%s node=%s failed: %v", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, err)
+		}
+		return
+	}
+	if ok, reason := s.nodeEligibleForAppImageReplication(updater, model.ImageReplicationPriorityRepair, target, eligibility); !ok {
+		if s.Logger != nil {
+			s.Logger.Printf("skip image hydrate task app=%s image=%s runtime=%s node=%s reason=%s", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, reason)
+		}
+		return
+	}
 	_, err = s.Store.CreateNodeUpdateTask(model.Principal{
 		ActorType: model.ActorTypeSystem,
 		ActorID:   "fugue-controller/image-hydrate",
@@ -722,6 +745,40 @@ func (s *Service) scheduleImageHydration(ctx context.Context, app model.App, tar
 		s.Logger.Printf("schedule image hydrate task app=%s image=%s runtime=%s node=%s failed: %v", app.ID, imageRef, target.RuntimeID, target.ClusterNodeName, err)
 	}
 	_ = ctx
+}
+
+func (s *Service) nodeUpdaterForImageHydrationTarget(target deployImageTarget) (model.NodeUpdater, bool, error) {
+	if s == nil || s.Store == nil {
+		return model.NodeUpdater{}, false, nil
+	}
+	clusterNodeName := strings.TrimSpace(target.ClusterNodeName)
+	runtimeID := strings.TrimSpace(target.RuntimeID)
+	if clusterNodeName == "" && runtimeID == "" {
+		return model.NodeUpdater{}, false, nil
+	}
+	updaters, err := s.Store.ListNodeUpdaters("", true)
+	if err != nil {
+		return model.NodeUpdater{}, false, err
+	}
+	var fallback model.NodeUpdater
+	found := false
+	for _, updater := range updaters {
+		if clusterNodeName != "" {
+			if strings.TrimSpace(updater.ClusterNodeName) != clusterNodeName {
+				continue
+			}
+		} else if runtimeID != "" && strings.TrimSpace(updater.RuntimeID) != runtimeID {
+			continue
+		}
+		if !found {
+			fallback = updater
+			found = true
+		}
+		if strings.TrimSpace(updater.Status) == model.NodeUpdaterStatusActive {
+			return updater, true, nil
+		}
+	}
+	return fallback, found, nil
 }
 
 func (s *Service) recentMissingImageLocation(app model.App, target deployImageTarget, imageRef string, retryAfter time.Duration) bool {
