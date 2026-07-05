@@ -47,9 +47,11 @@ const (
 	CloudNativePGReconcilePodSpecHold = "disabled"
 	CloudNativePGReloadLabel          = "cnpg.io/reload"
 	KubernetesNetworkPolicyAPIVersion = "networking.k8s.io/v1"
+	KubernetesRBACAPIVersion          = "rbac.authorization.k8s.io/v1"
 	VolSyncAPIVersion                 = "volsync.backube/v1alpha1"
 	VolSyncReplicationSourceKind      = "ReplicationSource"
 	VolSyncReplicationDestinationKind = "ReplicationDestination"
+	appDrainAgentEventRecorderSuffix  = "drain-events"
 )
 
 func buildAppObjects(app model.App, scheduling SchedulingConstraints) []map[string]any {
@@ -127,6 +129,12 @@ func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingCons
 	if networkPolicyObject := buildAppNetworkPolicyObject(namespace, app, labels, postgresResources); networkPolicyObject != nil {
 		objects = append(objects, networkPolicyObject)
 	}
+	if appNeedsDrainAgentEventRecorder(app, options) {
+		objects = append(objects,
+			buildDrainAgentEventRecorderRoleObject(namespace, app, labels),
+			buildDrainAgentEventRecorderRoleBindingObject(namespace, app, labels),
+		)
+	}
 	attachOwnerReference(objects, ownerRef)
 	return objects
 }
@@ -141,6 +149,67 @@ func buildNamespaceObject(namespace string) map[string]any {
 		"kind":       "Namespace",
 		"metadata": map[string]any{
 			"name": namespace,
+		},
+	}
+}
+
+func appNeedsDrainAgentEventRecorder(app model.App, options RenderOptions) bool {
+	options = normalizeRenderOptions(options)
+	return appRuntimeDeploymentRequired(app) &&
+		appUsesStrictZeroDowntimeDrain(app) &&
+		options.StrictDrain.ConnectionAwareEnabled()
+}
+
+func drainAgentEventRecorderRoleName(app model.App) string {
+	return model.DNS1035Label(RuntimeAppResourceName(app)+"-"+appDrainAgentEventRecorderSuffix, "fugue-drain-events")
+}
+
+func buildDrainAgentEventRecorderRoleObject(namespace string, app model.App, labels map[string]string) map[string]any {
+	roleName := drainAgentEventRecorderRoleName(app)
+	return map[string]any{
+		"apiVersion": KubernetesRBACAPIVersion,
+		"kind":       "Role",
+		"metadata": map[string]any{
+			"name":      roleName,
+			"namespace": namespace,
+			"labels":    mergeStringMaps(labels),
+		},
+		"rules": []map[string]any{
+			{
+				"apiGroups": []string{""},
+				"resources": []string{"events"},
+				"verbs":     []string{"create", "patch", "update"},
+			},
+			{
+				"apiGroups": []string{"events.k8s.io"},
+				"resources": []string{"events"},
+				"verbs":     []string{"create", "patch", "update"},
+			},
+		},
+	}
+}
+
+func buildDrainAgentEventRecorderRoleBindingObject(namespace string, app model.App, labels map[string]string) map[string]any {
+	roleName := drainAgentEventRecorderRoleName(app)
+	return map[string]any{
+		"apiVersion": KubernetesRBACAPIVersion,
+		"kind":       "RoleBinding",
+		"metadata": map[string]any{
+			"name":      roleName,
+			"namespace": namespace,
+			"labels":    mergeStringMaps(labels),
+		},
+		"roleRef": map[string]any{
+			"apiGroup": KubernetesRBACAPIVersion,
+			"kind":     "Role",
+			"name":     roleName,
+		},
+		"subjects": []map[string]any{
+			{
+				"kind":      "ServiceAccount",
+				"name":      "default",
+				"namespace": namespace,
+			},
 		},
 	}
 }

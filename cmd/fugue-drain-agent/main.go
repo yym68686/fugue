@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -22,22 +26,26 @@ import (
 const (
 	componentName = "fugue-drain-agent"
 
-	defaultBindAddr               = ":19090"
-	defaultDrainTimeout           = 600 * time.Second
-	defaultQuietPeriod            = 2 * time.Second
-	defaultPollInterval           = 200 * time.Millisecond
-	defaultSampleLogInterval      = 10 * time.Second
-	defaultPreStopSignalWait      = 30 * time.Second
-	defaultShutdownGrace          = 5 * time.Second
-	defaultProcTCPPath            = "/proc/net/tcp"
-	defaultProcTCP6Path           = "/proc/net/tcp6"
-	tcpStateEstablished      byte = 0x01
-	tcpStateSynRecv          byte = 0x03
-	tcpStateFinWait1         byte = 0x04
-	tcpStateFinWait2         byte = 0x05
-	tcpStateCloseWait        byte = 0x08
-	tcpStateClosing          byte = 0x0B
-	tcpStateLastAck          byte = 0x09
+	defaultBindAddr                    = ":19090"
+	defaultDrainTimeout                = 600 * time.Second
+	defaultQuietPeriod                 = 2 * time.Second
+	defaultPollInterval                = 200 * time.Millisecond
+	defaultSampleLogInterval           = 10 * time.Second
+	defaultPreStopSignalWait           = 30 * time.Second
+	defaultShutdownGrace               = 5 * time.Second
+	defaultTerminationLogPath          = "/dev/termination-log"
+	defaultKubernetesEventTimeout      = 2 * time.Second
+	defaultProcTCPPath                 = "/proc/net/tcp"
+	defaultProcTCP6Path                = "/proc/net/tcp6"
+	defaultServiceAccountToken         = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	defaultServiceAccountCA            = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	tcpStateEstablished           byte = 0x01
+	tcpStateSynRecv               byte = 0x03
+	tcpStateFinWait1              byte = 0x04
+	tcpStateFinWait2              byte = 0x05
+	tcpStateCloseWait             byte = 0x08
+	tcpStateClosing               byte = 0x0B
+	tcpStateLastAck               byte = 0x09
 )
 
 type config struct {
@@ -52,6 +60,13 @@ type config struct {
 	FailClosed   bool
 	PodName      string
 	Namespace    string
+
+	TerminationLogPath      string
+	KubernetesEventEnabled  bool
+	KubernetesEventTimeout  time.Duration
+	KubernetesAPIURL        string
+	ServiceAccountTokenPath string
+	ServiceAccountCAPath    string
 }
 
 type tcpEntry struct {
@@ -236,6 +251,13 @@ func configFromEnv() (config, error) {
 		FailClosed:   getenvBool("FUGUE_DRAIN_FAIL_CLOSED", true),
 		PodName:      strings.TrimSpace(os.Getenv("POD_NAME")),
 		Namespace:    strings.TrimSpace(os.Getenv("POD_NAMESPACE")),
+
+		TerminationLogPath:      getenv("FUGUE_DRAIN_TERMINATION_LOG_PATH", defaultTerminationLogPath),
+		KubernetesEventEnabled:  getenvBool("FUGUE_DRAIN_EVENT_ENABLED", getenvBool("FUGUE_DRAIN_KUBERNETES_EVENT_ENABLED", true)),
+		KubernetesEventTimeout:  getenvDurationMillis("FUGUE_DRAIN_EVENT_TIMEOUT_MS", defaultKubernetesEventTimeout),
+		KubernetesAPIURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("FUGUE_DRAIN_KUBE_API_URL")), "/"),
+		ServiceAccountTokenPath: getenv("FUGUE_DRAIN_SERVICE_ACCOUNT_TOKEN_PATH", defaultServiceAccountToken),
+		ServiceAccountCAPath:    getenv("FUGUE_DRAIN_SERVICE_ACCOUNT_CA_PATH", defaultServiceAccountCA),
 	}, nil
 }
 
@@ -390,7 +412,8 @@ func shouldLogSample(now time.Time, interval time.Duration, last time.Time, last
 }
 
 func (s *server) complete(reason string, start time.Time, active, maxActive, observerErrors int) drainResult {
-	waited := s.now().Sub(start)
+	completedAt := s.now().UTC()
+	waited := completedAt.Sub(start)
 	if waited < 0 {
 		waited = 0
 	}
@@ -405,7 +428,7 @@ func (s *server) complete(reason string, start time.Time, active, maxActive, obs
 	s.metrics.Active = active
 	s.metrics.mu.Unlock()
 	s.logger.Printf("fugue_drain_complete reason=%s waited_ms=%d active_connections=%d max_active_connections=%d observer_errors=%d", reason, waited.Milliseconds(), active, maxActive, observerErrors)
-	return drainResult{
+	result := drainResult{
 		OK:                true,
 		Reason:            reason,
 		WaitedMS:          waited.Milliseconds(),
@@ -413,6 +436,223 @@ func (s *server) complete(reason string, start time.Time, active, maxActive, obs
 		MaxActive:         maxActive,
 		ObserverErrors:    observerErrors,
 	}
+	s.writeTerminationLog(result, completedAt)
+	s.recordKubernetesEvent(context.Background(), result, completedAt)
+	return result
+}
+
+type drainTerminationMessage struct {
+	Component   string      `json:"component"`
+	Pod         string      `json:"pod,omitempty"`
+	Namespace   string      `json:"namespace,omitempty"`
+	CompletedAt string      `json:"completed_at"`
+	Result      drainResult `json:"result"`
+}
+
+func (s *server) writeTerminationLog(result drainResult, completedAt time.Time) {
+	path := strings.TrimSpace(s.cfg.TerminationLogPath)
+	if path == "" {
+		return
+	}
+	payload, err := json.Marshal(drainTerminationMessage{
+		Component:   componentName,
+		Pod:         strings.TrimSpace(s.cfg.PodName),
+		Namespace:   strings.TrimSpace(s.cfg.Namespace),
+		CompletedAt: completedAt.UTC().Format(time.RFC3339Nano),
+		Result:      result,
+	})
+	if err != nil {
+		s.logger.Printf("fugue_drain_termination_log_error error=%q", err.Error())
+		return
+	}
+	payload = append(payload, '\n')
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		s.logger.Printf("fugue_drain_termination_log_error path=%q error=%q", path, err.Error())
+	}
+}
+
+func (s *server) recordKubernetesEvent(ctx context.Context, result drainResult, completedAt time.Time) {
+	if !s.cfg.KubernetesEventEnabled {
+		return
+	}
+	if strings.TrimSpace(s.cfg.PodName) == "" || strings.TrimSpace(s.cfg.Namespace) == "" {
+		return
+	}
+	recorder, err := newKubernetesEventRecorder(s.cfg)
+	if err != nil {
+		s.logger.Printf("fugue_drain_kubernetes_event_error error=%q", err.Error())
+		return
+	}
+	timeout := s.cfg.KubernetesEventTimeout
+	if timeout <= 0 {
+		timeout = defaultKubernetesEventTimeout
+	}
+	eventCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := recorder.recordDrainResult(eventCtx, s.cfg, result, completedAt); err != nil {
+		s.logger.Printf("fugue_drain_kubernetes_event_error error=%q", err.Error())
+	}
+}
+
+type kubernetesEventRecorder struct {
+	client      *http.Client
+	baseURL     string
+	bearerToken string
+}
+
+func newKubernetesEventRecorder(cfg config) (*kubernetesEventRecorder, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.KubernetesAPIURL), "/")
+	if baseURL == "" {
+		host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
+		port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
+		if host == "" || port == "" {
+			return nil, fmt.Errorf("kubernetes service host/port unavailable")
+		}
+		baseURL = "https://" + host + ":" + port
+	}
+	tokenPath := strings.TrimSpace(cfg.ServiceAccountTokenPath)
+	if tokenPath == "" {
+		tokenPath = defaultServiceAccountToken
+	}
+	token, err := os.ReadFile(tokenPath)
+	if err != nil {
+		return nil, fmt.Errorf("read service account token: %w", err)
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if strings.HasPrefix(baseURL, "https://") {
+		caPath := strings.TrimSpace(cfg.ServiceAccountCAPath)
+		if caPath == "" {
+			caPath = defaultServiceAccountCA
+		}
+		caData, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read service account CA: %w", err)
+		}
+		rootCAs := x509.NewCertPool()
+		if !rootCAs.AppendCertsFromPEM(caData) {
+			return nil, fmt.Errorf("load service account CA")
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
+	}
+
+	return &kubernetesEventRecorder{
+		client:      &http.Client{Transport: transport},
+		baseURL:     baseURL,
+		bearerToken: strings.TrimSpace(string(token)),
+	}, nil
+}
+
+func (r *kubernetesEventRecorder) recordDrainResult(ctx context.Context, cfg config, result drainResult, completedAt time.Time) error {
+	namespace := strings.TrimSpace(cfg.Namespace)
+	podName := strings.TrimSpace(cfg.PodName)
+	if namespace == "" || podName == "" {
+		return nil
+	}
+	message := fmt.Sprintf(
+		"reason=%s waited_ms=%d active_connections=%d max_active_connections=%d observer_errors=%d",
+		result.Reason,
+		result.WaitedMS,
+		result.ActiveConnections,
+		result.MaxActive,
+		result.ObserverErrors,
+	)
+	annotations := map[string]string{
+		"fugue.io/drain-reason":                 result.Reason,
+		"fugue.io/drain-waited-ms":              strconv.FormatInt(result.WaitedMS, 10),
+		"fugue.io/drain-active-connections":     strconv.Itoa(result.ActiveConnections),
+		"fugue.io/drain-max-active-connections": strconv.Itoa(result.MaxActive),
+		"fugue.io/drain-observer-errors":        strconv.Itoa(result.ObserverErrors),
+	}
+	payload := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Event",
+		"metadata": map[string]any{
+			"name":        drainEventName(podName, result.Reason, completedAt),
+			"namespace":   namespace,
+			"annotations": annotations,
+		},
+		"involvedObject": map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"name":       podName,
+			"namespace":  namespace,
+		},
+		"reason":         result.Reason,
+		"message":        message,
+		"type":           drainEventType(result.Reason),
+		"source":         map[string]any{"component": componentName},
+		"firstTimestamp": completedAt.UTC().Format(time.RFC3339Nano),
+		"lastTimestamp":  completedAt.UTC().Format(time.RFC3339Nano),
+		"count":          1,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal kubernetes event: %w", err)
+	}
+	endpoint := strings.TrimRight(r.baseURL, "/") + "/api/v1/namespaces/" + url.PathEscape(namespace) + "/events"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create kubernetes event request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+r.bearerToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("post kubernetes event: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("post kubernetes event returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func drainEventType(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "timeout", "context_canceled":
+		return "Warning"
+	default:
+		return "Normal"
+	}
+}
+
+func drainEventName(podName, reason string, completedAt time.Time) string {
+	base := sanitizeEventNamePart(podName)
+	if base == "" {
+		base = "pod"
+	}
+	name := base + ".fugue-drain." + sanitizeEventNamePart(reason) + "." + strconv.FormatInt(completedAt.UnixNano(), 10)
+	if len(name) <= 253 {
+		return name
+	}
+	return strings.Trim(name[len(name)-253:], ".-")
+}
+
+func sanitizeEventNamePart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastSep := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastSep = false
+		case r == '-' || r == '.':
+			if !lastSep {
+				b.WriteRune(r)
+				lastSep = true
+			}
+		default:
+			if !lastSep {
+				b.WriteByte('-')
+				lastSep = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), ".-")
 }
 
 func (s *server) observe() (observeResult, error) {

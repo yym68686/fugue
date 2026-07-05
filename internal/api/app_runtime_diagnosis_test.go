@@ -397,7 +397,8 @@ func TestGetAppDiagnosisIncludesStrictDrainEvidence(t *testing.T) {
 	joinedEvidence := strings.Join(response.Diagnosis.Evidence, "\n")
 	for _, want := range []string{
 		"strict drain mode=connection-aware timeout_seconds=600 quiet_period_seconds=2 agent_port=19090 termination_grace_min_seconds=630",
-		"strict drain recent result pod=demo-ready",
+		"strict drain completed reason=idle waited_ms=3200 active_connections=0 max_active_connections=2 pod=demo-ready source=stdout",
+		"strict drain recent stdout pod=demo-ready",
 		"fugue_drain_complete reason=idle waited_ms=3200 active_connections=0 max_active_connections=2 observer_errors=0",
 	} {
 		if !strings.Contains(joinedEvidence, want) {

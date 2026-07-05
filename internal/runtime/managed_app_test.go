@@ -169,8 +169,8 @@ func TestBuildManagedAppChildObjectsAddsOwnerReferences(t *testing.T) {
 	}
 
 	objects := BuildManagedAppChildObjects(app, SchedulingConstraints{}, ManagedAppOwnerReference(managed))
-	if len(objects) != 2 {
-		t.Fatalf("expected app deployment + service, got %d", len(objects))
+	if len(objects) != 4 {
+		t.Fatalf("expected app deployment + service + drain RBAC, got %d", len(objects))
 	}
 
 	for _, obj := range objects {
@@ -287,8 +287,8 @@ func TestManagedAppRoundTripPreservesSourceForComposeAliases(t *testing.T) {
 	}
 
 	objects := BuildManagedAppChildObjects(roundTrip, SchedulingConstraints{}, nil)
-	if len(objects) != 4 {
-		t.Fatalf("expected deployment + service + compose alias + legacy app-name alias, got %d", len(objects))
+	if len(objects) != 6 {
+		t.Fatalf("expected deployment + service + compose alias + legacy app-name alias + drain RBAC, got %d", len(objects))
 	}
 
 	aliasService := objects[2]

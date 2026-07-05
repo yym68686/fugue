@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type endpointTimelineClient interface {
 
 type eventTimelineClient interface {
 	listEventsByInvolvedObjectName(ctx context.Context, namespace, name string) ([]corev1.Event, error)
+}
+
+type namespaceEventTimelineClient interface {
+	listEvents(ctx context.Context, namespace string) ([]corev1.Event, error)
 }
 
 func (s *Server) handleGetAppRolloutTimeline(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +90,7 @@ func (s *Server) handleGetAppRolloutTimeline(w http.ResponseWriter, r *http.Requ
 	}
 
 	clickHouseWarnings := []string{}
+	drainLogs := []map[string]any{}
 	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
 		source.Status = "available"
 		source.Available = true
@@ -109,8 +115,16 @@ func (s *Server) handleGetAppRolloutTimeline(w http.ResponseWriter, r *http.Requ
 		timeline["events"] = []map[string]any{}
 		timeline["requests_5xx"] = []map[string]any{}
 	}
+	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "logs") {
+		logs, err := s.queryRolloutTimelineDrainLogs(r.Context(), app.ID, window)
+		if err != nil {
+			clickHouseWarnings = append(clickHouseWarnings, "logs: "+err.Error())
+		} else {
+			drainLogs = logs
+		}
+	}
 
-	kubernetes, kubeWarnings := s.rolloutTimelineKubernetes(r.Context(), app)
+	kubernetes, kubeWarnings := s.rolloutTimelineKubernetes(r.Context(), app, drainLogs)
 	timeline["kubernetes"] = kubernetes
 	warnings := append(clickHouseWarnings, kubeWarnings...)
 	if len(warnings) > 0 {
@@ -285,7 +299,29 @@ func (s *Server) queryRolloutTimeline5xx(ctx context.Context, appID string, wind
 	return out, nil
 }
 
-func (s *Server) rolloutTimelineKubernetes(ctx context.Context, app model.App) (map[string]any, []string) {
+func (s *Server) queryRolloutTimelineDrainLogs(ctx context.Context, appID string, window appObservabilityWindow) ([]map[string]any, error) {
+	query := url.Values{}
+	query.Set("grep", "fugue_drain_")
+	query.Set("limit", "1000")
+	logs, err := s.queryAppObservabilityLogs(ctx, appID, window, query)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]map[string]any, 0, len(logs))
+	for _, entry := range logs {
+		message := strings.TrimSpace(fmt.Sprint(entry["message"]))
+		if !strings.Contains(message, "fugue_drain_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return strings.TrimSpace(fmt.Sprint(filtered[i]["timestamp"])) < strings.TrimSpace(fmt.Sprint(filtered[j]["timestamp"]))
+	})
+	return filtered, nil
+}
+
+func (s *Server) rolloutTimelineKubernetes(ctx context.Context, app model.App, drainLogs []map[string]any) (map[string]any, []string) {
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	selector, _, err := runtimeLogTarget(app, "app")
 	if err != nil {
@@ -352,20 +388,69 @@ func (s *Server) rolloutTimelineKubernetes(ctx context.Context, app model.App) (
 	if eventClient, ok := any(client).(eventTimelineClient); ok {
 		names := rolloutTimelineEventObjectNames(deploymentName, result)
 		events := []map[string]any{}
-		for _, name := range names {
-			items, err := eventClient.listEventsByInvolvedObjectName(ctx, namespace, name)
+		if namespaceEventClient, ok := any(client).(namespaceEventTimelineClient); ok {
+			items, err := namespaceEventClient.listEvents(ctx, namespace)
 			if err != nil {
-				warnings = append(warnings, "events "+name+": "+err.Error())
-				continue
+				warnings = append(warnings, "events: "+err.Error())
+			} else {
+				events = append(events, rolloutTimelineKubernetesEvents(filterRolloutTimelineNamespaceEvents(items, deploymentName, names))...)
 			}
-			events = append(events, rolloutTimelineKubernetesEvents(items)...)
+		} else {
+			for _, name := range names {
+				items, err := eventClient.listEventsByInvolvedObjectName(ctx, namespace, name)
+				if err != nil {
+					warnings = append(warnings, "events "+name+": "+err.Error())
+					continue
+				}
+				events = append(events, rolloutTimelineKubernetesEvents(items)...)
+			}
 		}
 		sort.Slice(events, func(i, j int) bool {
 			return strings.TrimSpace(fmt.Sprint(events[i]["timestamp"])) < strings.TrimSpace(fmt.Sprint(events[j]["timestamp"]))
 		})
 		result["events"] = events
 	}
+	events, _ := result["events"].([]map[string]any)
+	if drain := rolloutTimelineDrainSummary(drainLogs, events); len(drain) > 0 {
+		result["drain"] = drain
+	}
 	return result, warnings
+}
+
+func filterRolloutTimelineNamespaceEvents(events []corev1.Event, deploymentName string, names []string) []corev1.Event {
+	nameSet := map[string]struct{}{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			nameSet[name] = struct{}{}
+		}
+	}
+	prefix := strings.TrimSpace(deploymentName)
+	out := make([]corev1.Event, 0, len(events))
+	for _, event := range events {
+		involvedName := strings.TrimSpace(event.InvolvedObject.Name)
+		if _, ok := nameSet[involvedName]; ok {
+			out = append(out, event)
+			continue
+		}
+		if prefix != "" && strings.HasPrefix(involvedName, prefix+"-") {
+			out = append(out, event)
+			continue
+		}
+		if isDrainFinalReason(strings.TrimSpace(event.Reason)) && strings.Contains(strings.TrimSpace(event.Message), "waited_ms=") {
+			if prefix == "" || strings.HasPrefix(involvedName, prefix+"-") {
+				out = append(out, event)
+			}
+			continue
+		}
+		if strings.TrimSpace(event.Reason) == "SuccessfulDelete" {
+			message := strings.TrimSpace(event.Message)
+			if prefix != "" && strings.Contains(message, "Deleted pod: "+prefix+"-") {
+				out = append(out, event)
+			}
+		}
+	}
+	return out
 }
 
 func rolloutTimelineDeployment(deployment appsv1.Deployment) map[string]any {
@@ -515,6 +600,150 @@ func rolloutTimelineKubernetesEvents(events []corev1.Event) []map[string]any {
 		})
 	}
 	return out
+}
+
+func rolloutTimelineDrainSummary(logs []map[string]any, events []map[string]any) []map[string]any {
+	records := map[string]map[string]any{}
+	ensure := func(pod string) map[string]any {
+		pod = strings.TrimSpace(pod)
+		if pod == "" {
+			pod = "unknown"
+		}
+		record := records[pod]
+		if record == nil {
+			record = map[string]any{"pod": pod}
+			records[pod] = record
+		}
+		return record
+	}
+
+	for _, entry := range logs {
+		message := strings.TrimSpace(fmt.Sprint(entry["message"]))
+		if !strings.Contains(message, "fugue_drain_") {
+			continue
+		}
+		kv := parseRolloutDrainKeyValues(message)
+		pod := firstNonEmptyString(strings.TrimSpace(fmt.Sprint(entry["pod"])), kv["pod"])
+		record := ensure(pod)
+		timestamp := strings.TrimSpace(fmt.Sprint(entry["timestamp"]))
+		switch {
+		case strings.Contains(message, "fugue_drain_start"):
+			record["old_pod_drain_start"] = timestamp
+			record["drain_start_message"] = truncateTimelineMessage(message)
+		case strings.Contains(message, "fugue_drain_sample"):
+			record["last_sample"] = timestamp
+			if value := kv["active_connections"]; value != "" {
+				record["last_sample_active_connections"] = value
+			}
+			if value := kv["waited_ms"]; value != "" {
+				record["last_sample_waited_ms"] = value
+			}
+			if value := kv["states"]; value != "" {
+				record["last_sample_states"] = value
+			}
+			record["last_sample_message"] = truncateTimelineMessage(message)
+		case strings.Contains(message, "fugue_drain_complete"):
+			applyDrainFinalResult(record, timestamp, "stdout", kv)
+		}
+	}
+
+	for _, event := range events {
+		reason := strings.TrimSpace(fmt.Sprint(event["reason"]))
+		message := strings.TrimSpace(fmt.Sprint(event["message"]))
+		involvedKind := strings.TrimSpace(fmt.Sprint(event["involved_kind"]))
+		involvedName := strings.TrimSpace(fmt.Sprint(event["involved_name"]))
+		timestamp := strings.TrimSpace(fmt.Sprint(event["timestamp"]))
+		switch {
+		case involvedKind == "Pod" && isDrainFinalReason(reason) && strings.Contains(message, "waited_ms="):
+			kv := parseRolloutDrainKeyValues(message)
+			kv["reason"] = reason
+			applyDrainFinalResult(ensure(involvedName), timestamp, "kubernetes_event", kv)
+		case reason == "SuccessfulDelete" && strings.Contains(message, "Deleted pod:"):
+			pod := strings.TrimSpace(strings.TrimPrefix(message[strings.Index(message, "Deleted pod:"):], "Deleted pod:"))
+			if pod != "" {
+				record := ensure(pod)
+				record["old_pod_actual_disappear_time"] = timestamp
+				record["old_pod_actual_disappear_time_source"] = "kubernetes_event_successful_delete"
+			}
+		case reason == "Killing" && involvedKind == "Pod":
+			record := ensure(involvedName)
+			if _, ok := record["old_pod_actual_disappear_time"]; !ok {
+				record["old_pod_actual_disappear_time"] = timestamp
+				record["old_pod_actual_disappear_time_source"] = "kubernetes_event_killing"
+			}
+		}
+	}
+
+	out := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		if _, ok := record["final_reason"]; !ok {
+			record["final_result_missing"] = true
+		}
+		out = append(out, record)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left := firstNonEmptyString(strings.TrimSpace(fmt.Sprint(out[i]["old_pod_drain_start"])), strings.TrimSpace(fmt.Sprint(out[i]["last_sample"])), strings.TrimSpace(fmt.Sprint(out[i]["final_time"])), strings.TrimSpace(fmt.Sprint(out[i]["old_pod_actual_disappear_time"])))
+		right := firstNonEmptyString(strings.TrimSpace(fmt.Sprint(out[j]["old_pod_drain_start"])), strings.TrimSpace(fmt.Sprint(out[j]["last_sample"])), strings.TrimSpace(fmt.Sprint(out[j]["final_time"])), strings.TrimSpace(fmt.Sprint(out[j]["old_pod_actual_disappear_time"])))
+		return left < right
+	})
+	return out
+}
+
+func applyDrainFinalResult(record map[string]any, timestamp, source string, kv map[string]string) {
+	if record == nil {
+		return
+	}
+	record["final_time"] = timestamp
+	if reason := strings.TrimSpace(kv["reason"]); reason != "" {
+		record["final_reason"] = reason
+	}
+	if waited := strings.TrimSpace(kv["waited_ms"]); waited != "" {
+		record["waited_ms"] = waited
+	}
+	if active := strings.TrimSpace(kv["active_connections"]); active != "" {
+		record["active_connections"] = active
+	}
+	if maxActive := strings.TrimSpace(kv["max_active_connections"]); maxActive != "" {
+		record["max_active_connections"] = maxActive
+	}
+	if observerErrors := strings.TrimSpace(kv["observer_errors"]); observerErrors != "" {
+		record["observer_errors"] = observerErrors
+	}
+	record["final_result_source"] = source
+	delete(record, "final_result_missing")
+}
+
+func isDrainFinalReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "idle", "timeout", "context_canceled", "observer_error_open":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseRolloutDrainKeyValues(message string) map[string]string {
+	values := map[string]string{}
+	for _, field := range strings.Fields(message) {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"`)
+		if key != "" {
+			values[key] = value
+		}
+	}
+	return values
+}
+
+func truncateTimelineMessage(message string) string {
+	message = strings.TrimSpace(message)
+	if len(message) <= 300 {
+		return message
+	}
+	return strings.TrimSpace(message[:300]) + "..."
 }
 
 func ptrInt32Value(value *int32) int32 {

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
@@ -192,6 +194,88 @@ func TestDrainSampleLogsAreThrottledButCompleteIsAlwaysLogged(t *testing.T) {
 	}
 	if !strings.Contains(output, "fugue_drain_complete reason=timeout") {
 		t.Fatalf("missing complete log in\n%s", output)
+	}
+}
+
+func TestDrainWritesTerminationLog(t *testing.T) {
+	tcpPath := writeTempFile(t, "  sl  local_address rem_address   st\n")
+	terminationLog := t.TempDir() + "/termination-log"
+	srv := newTestServer(t, config{
+		AppPorts:           map[int]struct{}{8080: {}},
+		ProcTCPPath:        tcpPath,
+		ProcTCP6Path:       tcpPath,
+		TerminationLogPath: terminationLog,
+		PodName:            "demo-abc",
+		Namespace:          "tenant-demo",
+	})
+
+	result := srv.drain(context.Background())
+	if result.Reason != "idle" {
+		t.Fatalf("expected idle result, got %+v", result)
+	}
+	payload, err := os.ReadFile(terminationLog)
+	if err != nil {
+		t.Fatalf("read termination log: %v", err)
+	}
+	var message drainTerminationMessage
+	if err := json.Unmarshal(bytes.TrimSpace(payload), &message); err != nil {
+		t.Fatalf("decode termination log: %v body=%s", err, payload)
+	}
+	if message.Component != componentName || message.Pod != "demo-abc" || message.Namespace != "tenant-demo" {
+		t.Fatalf("unexpected termination metadata: %+v", message)
+	}
+	if message.Result.Reason != "idle" || message.Result.ActiveConnections != 0 {
+		t.Fatalf("unexpected termination result: %+v", message.Result)
+	}
+}
+
+func TestDrainRecordsKubernetesEvent(t *testing.T) {
+	tcpPath := writeTempFile(t, "  sl  local_address rem_address   st\n")
+	tokenPath := writeTempFile(t, "test-token")
+	requests := 0
+	var eventPayload map[string]any
+	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/namespaces/tenant-demo/events" {
+			t.Fatalf("unexpected event request %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("unexpected authorization header %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&eventPayload); err != nil {
+			t.Fatalf("decode event payload: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer kube.Close()
+
+	srv := newTestServer(t, config{
+		AppPorts:                map[int]struct{}{8080: {}},
+		ProcTCPPath:             tcpPath,
+		ProcTCP6Path:            tcpPath,
+		PodName:                 "demo-abc",
+		Namespace:               "tenant-demo",
+		KubernetesEventEnabled:  true,
+		KubernetesAPIURL:        kube.URL,
+		ServiceAccountTokenPath: tokenPath,
+		KubernetesEventTimeout:  time.Second,
+	})
+	result := srv.drain(context.Background())
+	if result.Reason != "idle" {
+		t.Fatalf("expected idle result, got %+v", result)
+	}
+	if requests != 1 {
+		t.Fatalf("expected one event request, got %d", requests)
+	}
+	if got := eventPayload["reason"]; got != "idle" {
+		t.Fatalf("expected event reason idle, got %#v", got)
+	}
+	if got := eventPayload["message"]; !strings.Contains(fmt.Sprint(got), "reason=idle waited_ms=") || !strings.Contains(fmt.Sprint(got), "active_connections=0") || !strings.Contains(fmt.Sprint(got), "max_active_connections=0") {
+		t.Fatalf("unexpected event message %#v", got)
+	}
+	involved := eventPayload["involvedObject"].(map[string]any)
+	if involved["kind"] != "Pod" || involved["name"] != "demo-abc" || involved["namespace"] != "tenant-demo" {
+		t.Fatalf("unexpected involved object %#v", involved)
 	}
 }
 

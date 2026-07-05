@@ -335,6 +335,20 @@ func (c *kubeLogsClient) listEventsByInvolvedObjectName(ctx context.Context, nam
 	return events.Items, nil
 }
 
+func (c *kubeLogsClient) listEvents(ctx context.Context, namespace string) ([]corev1.Event, error) {
+	query := url.Values{}
+	query.Set("limit", "200")
+	var events corev1.EventList
+	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/events?" + query.Encode()
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, &events); err != nil {
+		if isKubeNotFound(err) || isForbiddenStatusError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return events.Items, nil
+}
+
 func (c *kubeLogsClient) readPodLogs(ctx context.Context, namespace, podName string, opts kubeLogOptions) (string, error) {
 	apiPath := c.podLogsAPIPath(namespace, podName, opts)
 	return c.doText(ctx, http.MethodGet, apiPath)

@@ -178,7 +178,7 @@ func (s *Server) diagnoseAppRuntime(r *http.Request, app model.App, component st
 		platformEnvDrift = s.appendAppPlatformEnvDrift(r.Context(), clusterClient, app, namespace, &diagnosis)
 	}
 	if component == "app" {
-		s.appendAppStrictDrainEvidence(r.Context(), clusterClient, logClient, app, namespace, pods, &diagnosis)
+		s.appendAppStrictDrainEvidence(r.Context(), clusterClient, logClient, app, namespace, pods, rawNamespaceEvents, &diagnosis)
 	}
 
 	podSummaries := summarizeAppDiagnosisPods(pods)
@@ -420,7 +420,7 @@ func appDiagnosisHTTPProbeTimedOut(err error) bool {
 	return strings.Contains(normalized, "timeout") || strings.Contains(normalized, "deadline exceeded")
 }
 
-func (s *Server) appendAppStrictDrainEvidence(ctx context.Context, client *clusterNodeClient, logClient appLogsClient, app model.App, namespace string, pods []kubePodInfo, diagnosis *appDiagnosis) {
+func (s *Server) appendAppStrictDrainEvidence(ctx context.Context, client *clusterNodeClient, logClient appLogsClient, app model.App, namespace string, pods []kubePodInfo, events []coreEventOrZero, diagnosis *appDiagnosis) {
 	if diagnosis == nil {
 		return
 	}
@@ -439,8 +439,14 @@ func (s *Server) appendAppStrictDrainEvidence(ctx context.Context, client *clust
 		}
 	}
 	if strings.EqualFold(drainMode, "connection-aware") || appPodsIncludeDrainAgent(pods) {
-		if podName, line := latestDrainAgentResultLine(ctx, logClient, namespace, pods); line != "" {
-			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, fmt.Sprintf("strict drain recent result pod=%s %s", podName, line))
+		if conclusion, detail := latestDrainAgentResultConclusion(ctx, logClient, namespace, pods, events); conclusion != "" {
+			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, conclusion)
+			if detail != "" {
+				diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, detail)
+			}
+		} else {
+			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, "strict drain final result missing")
+			diagnosis.Warnings = appendUniqueString(diagnosis.Warnings, "strict drain final result missing")
 		}
 	}
 }
@@ -512,7 +518,10 @@ func podIncludesDrainAgent(pod kubePodInfo) bool {
 	return false
 }
 
-func latestDrainAgentResultLine(ctx context.Context, logClient appLogsClient, namespace string, pods []kubePodInfo) (string, string) {
+func latestDrainAgentResultConclusion(ctx context.Context, logClient appLogsClient, namespace string, pods []kubePodInfo, events []coreEventOrZero) (string, string) {
+	if conclusion, detail := latestDrainAgentEventConclusion(events); conclusion != "" {
+		return conclusion, detail
+	}
 	if logClient == nil || len(pods) == 0 {
 		return "", ""
 	}
@@ -529,13 +538,55 @@ func latestDrainAgentResultLine(ctx context.Context, logClient appLogsClient, na
 			continue
 		}
 		if line := lastDrainAgentLine(logs, "fugue_drain_complete"); line != "" {
-			return strings.TrimSpace(pod.Metadata.Name), line
-		}
-		if line := lastDrainAgentLine(logs, "fugue_drain_start"); line != "" {
-			return strings.TrimSpace(pod.Metadata.Name), line
+			podName := strings.TrimSpace(pod.Metadata.Name)
+			kv := parseRolloutDrainKeyValues(line)
+			return formatStrictDrainCompletedConclusion(podName, "stdout", kv), fmt.Sprintf("strict drain recent stdout pod=%s %s", podName, line)
 		}
 	}
 	return "", ""
+}
+
+func latestDrainAgentEventConclusion(events []coreEventOrZero) (string, string) {
+	for _, event := range events {
+		if !strings.EqualFold(strings.TrimSpace(event.Event.ObjectKind), "Pod") {
+			continue
+		}
+		reason := strings.TrimSpace(event.Event.Reason)
+		if !isDrainFinalReason(reason) {
+			continue
+		}
+		message := strings.TrimSpace(event.Message)
+		if !strings.Contains(message, "waited_ms=") {
+			continue
+		}
+		kv := parseRolloutDrainKeyValues(message)
+		kv["reason"] = reason
+		podName := firstNonEmptyString(strings.TrimSpace(event.Event.ObjectName), strings.TrimSpace(event.Name))
+		detail := fmt.Sprintf("strict drain recent kubernetes_event pod=%s reason=%s message=%s", podName, reason, truncateTimelineMessage(message))
+		return formatStrictDrainCompletedConclusion(podName, "kubernetes_event", kv), detail
+	}
+	return "", ""
+}
+
+func formatStrictDrainCompletedConclusion(podName, source string, kv map[string]string) string {
+	parts := []string{
+		"strict drain completed",
+		"reason=" + firstNonEmptyString(strings.TrimSpace(kv["reason"]), "unknown"),
+		"waited_ms=" + firstNonEmptyString(strings.TrimSpace(kv["waited_ms"]), "unknown"),
+	}
+	if value := strings.TrimSpace(kv["active_connections"]); value != "" {
+		parts = append(parts, "active_connections="+value)
+	}
+	if value := strings.TrimSpace(kv["max_active_connections"]); value != "" {
+		parts = append(parts, "max_active_connections="+value)
+	}
+	if podName = strings.TrimSpace(podName); podName != "" {
+		parts = append(parts, "pod="+podName)
+	}
+	if source = strings.TrimSpace(source); source != "" {
+		parts = append(parts, "source="+source)
+	}
+	return strings.Join(parts, " ")
 }
 
 func lastDrainAgentLine(logs, marker string) string {

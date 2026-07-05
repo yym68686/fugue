@@ -123,6 +123,10 @@ func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) 
 		return "/api/v1/namespaces/" + namespace + "/pods/" + name, nil
 	case apiVersion == "apps/v1" && kind == "Deployment":
 		return "/apis/apps/v1/namespaces/" + namespace + "/deployments/" + name, nil
+	case apiVersion == KubernetesRBACAPIVersion && kind == "Role":
+		return "/apis/rbac.authorization.k8s.io/v1/namespaces/" + namespace + "/roles/" + name, nil
+	case apiVersion == KubernetesRBACAPIVersion && kind == "RoleBinding":
+		return "/apis/rbac.authorization.k8s.io/v1/namespaces/" + namespace + "/rolebindings/" + name, nil
 	case apiVersion == KubernetesNetworkPolicyAPIVersion && kind == "NetworkPolicy":
 		return "/apis/networking.k8s.io/v1/namespaces/" + namespace + "/networkpolicies/" + name, nil
 	case apiVersion == CloudNativePGAPIVersion && kind == CloudNativePGClusterKind:

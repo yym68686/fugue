@@ -117,6 +117,9 @@ func renderAppRolloutTimeline(w io.Writer, response appRolloutTimelineResponse) 
 	if err := renderTimelineSection(w, "pods", mapSliceField(response.Kubernetes, "pods")); err != nil {
 		return err
 	}
+	if err := renderTimelineSection(w, "drain", mapSliceField(response.Kubernetes, "drain")); err != nil {
+		return err
+	}
 	return renderTimelineSection(w, "kubernetes_events", mapSliceField(response.Kubernetes, "events"))
 }
 

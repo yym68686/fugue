@@ -48,8 +48,8 @@ func TestBuildAppObjectsIncludesStatefulResources(t *testing.T) {
 		},
 	})
 
-	if len(objects) != 7 {
-		t.Fatalf("expected 7 objects, got %d", len(objects))
+	if len(objects) != 9 {
+		t.Fatalf("expected 9 objects, got %d", len(objects))
 	}
 	if kind, _ := objects[1]["kind"].(string); kind != "Secret" {
 		t.Fatalf("expected app files secret, got %#v", objects[1]["kind"])
@@ -172,8 +172,8 @@ func TestBuildAppObjectsUseAppIDScopedRuntimeNames(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 4 {
-		t.Fatalf("expected 4 objects, got %d", len(objects))
+	if len(objects) != 6 {
+		t.Fatalf("expected 6 objects, got %d", len(objects))
 	}
 
 	appFilesSecret := objects[1]
@@ -219,8 +219,8 @@ func TestBuildAppObjectsUseDNS1035ServiceAliases(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 5 {
-		t.Fatalf("expected namespace + deployment + service + compose alias + legacy alias, got %d", len(objects))
+	if len(objects) != 7 {
+		t.Fatalf("expected namespace + deployment + service + compose alias + legacy alias + drain RBAC, got %d", len(objects))
 	}
 
 	appService := objects[2]
@@ -253,8 +253,8 @@ func TestBuildAppObjectsUseDNS1035PostgresServiceNames(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 6 {
-		t.Fatalf("expected namespace + postgres secret/service/cluster + app deployment/service, got %d", len(objects))
+	if len(objects) != 8 {
+		t.Fatalf("expected namespace + postgres secret/service/cluster + app deployment/service + drain RBAC, got %d", len(objects))
 	}
 	postgresService := objects[2]
 	if got := postgresService["metadata"].(map[string]any)["name"]; got != "postgres-001-demo-postgres" {
@@ -327,8 +327,8 @@ func TestBuildAppObjectsIncludeComposeServiceAlias(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 5 {
-		t.Fatalf("expected 5 objects, got %d", len(objects))
+	if len(objects) != 7 {
+		t.Fatalf("expected 7 objects, got %d", len(objects))
 	}
 
 	aliasService := objects[3]
@@ -1088,6 +1088,43 @@ func TestBuildAppDeploymentDoesNotInjectConnectionAwareDrainWithoutServicePort(t
 	}
 }
 
+func TestBuildAppObjectsAddsDrainAgentEventRecorderRBAC(t *testing.T) {
+	app := model.App{
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:latest",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	objects := buildAppObjects(app, SchedulingConstraints{})
+	role := firstObjectByKind(t, objects, "Role")
+	if got := role["apiVersion"]; got != KubernetesRBACAPIVersion {
+		t.Fatalf("expected drain-agent event recorder Role apiVersion %s, got %#v", KubernetesRBACAPIVersion, got)
+	}
+	roleMeta := role["metadata"].(map[string]any)
+	roleName := drainAgentEventRecorderRoleName(app)
+	if roleMeta["name"] != roleName || roleMeta["namespace"] != NamespaceForTenant(app.TenantID) {
+		t.Fatalf("unexpected drain-agent event recorder Role metadata %#v", roleMeta)
+	}
+	rules := role["rules"].([]map[string]any)
+	if len(rules) != 2 {
+		t.Fatalf("expected core and events.k8s.io event rules, got %#v", rules)
+	}
+	roleBinding := firstObjectByKind(t, objects, "RoleBinding")
+	roleRef := roleBinding["roleRef"].(map[string]any)
+	if roleRef["kind"] != "Role" || roleRef["name"] != roleName {
+		t.Fatalf("unexpected drain-agent event recorder RoleBinding roleRef %#v", roleRef)
+	}
+	subjects := roleBinding["subjects"].([]map[string]any)
+	if len(subjects) != 1 || subjects[0]["kind"] != "ServiceAccount" || subjects[0]["name"] != "default" {
+		t.Fatalf("unexpected drain-agent event recorder RoleBinding subjects %#v", subjects)
+	}
+}
+
 func TestBuildAppDeploymentUsesIfNotPresentForDigestPinnedImages(t *testing.T) {
 	app := model.App{
 		TenantID: "tenant_demo",
@@ -1181,8 +1218,8 @@ func TestBuildAppObjectsKeepsInternalServiceWithoutPublicRoute(t *testing.T) {
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 3 {
-		t.Fatalf("expected namespace, deployment, and service, got %d objects", len(objects))
+	if len(objects) != 5 {
+		t.Fatalf("expected namespace, deployment, service, and drain RBAC, got %d objects", len(objects))
 	}
 	if kind, _ := objects[2]["kind"].(string); kind != "Service" {
 		t.Fatalf("expected service object, got %#v", objects[2]["kind"])
@@ -2210,8 +2247,8 @@ func TestBuildAppObjectsUsesBackingServicesWithoutDuplicatingLegacyInlinePostgre
 	}
 
 	objects := buildAppObjects(app, SchedulingConstraints{})
-	if len(objects) != 7 {
-		t.Fatalf("expected 7 objects, got %d", len(objects))
+	if len(objects) != 9 {
+		t.Fatalf("expected 9 objects, got %d", len(objects))
 	}
 
 	appDeployment := objects[5]
