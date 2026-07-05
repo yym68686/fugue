@@ -1116,7 +1116,7 @@ func TestBuildAppObjectsAddsDrainAgentEventRecorderRBAC(t *testing.T) {
 	}
 	roleBinding := firstObjectByKind(t, objects, "RoleBinding")
 	roleRef := roleBinding["roleRef"].(map[string]any)
-	if roleRef["kind"] != "Role" || roleRef["name"] != roleName {
+	if roleRef["apiGroup"] != "rbac.authorization.k8s.io" || roleRef["kind"] != "Role" || roleRef["name"] != roleName {
 		t.Fatalf("unexpected drain-agent event recorder RoleBinding roleRef %#v", roleRef)
 	}
 	subjects := roleBinding["subjects"].([]map[string]any)

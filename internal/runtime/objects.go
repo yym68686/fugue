@@ -200,7 +200,7 @@ func buildDrainAgentEventRecorderRoleBindingObject(namespace string, app model.A
 			"labels":    mergeStringMaps(labels),
 		},
 		"roleRef": map[string]any{
-			"apiGroup": KubernetesRBACAPIVersion,
+			"apiGroup": "rbac.authorization.k8s.io",
 			"kind":     "Role",
 			"name":     roleName,
 		},
