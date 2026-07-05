@@ -1058,6 +1058,8 @@ node_local_build_plane_preflight_override_allowed() {
       internal/controller/deploy_image_guard_test.go|\
       internal/controller/image_cache_orphan_cleanup.go|\
       internal/controller/image_cache_orphan_cleanup_test.go|\
+      internal/controller/image_replication_controller.go|\
+      internal/controller/image_replication_controller_test.go|\
       internal/controller/import_operation.go|\
       internal/controller/import_operation_test.go|\
       internal/controller/managed_app_reconciler.go|\
