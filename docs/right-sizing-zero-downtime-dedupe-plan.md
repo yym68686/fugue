@@ -332,3 +332,8 @@ CreateAutoscalingDeployOperation(op model.Operation) (model.Operation, Autoscali
 - [x] 监控 `fugue-api` / `fugue-controller` 新版本 ready。
 - [x] 监控 `uni-api-ember` 后续 right-sizing / deploy timeline，确认不再出现同类重复 deploy + Recreate。
 - [x] 监控 `0-0` 503 请求，确认没有复现同类窗口。
+
+### F. 上线监控发现的非预期行为
+
+- [x] 修复 `app diagnose` strict drain 结论按 namespace 取最近事件导致串到其他 app 的问题：Kubernetes Event 结论现在按 app pod 名前缀过滤，避免把另一个 app 的 drain final result 展示到当前 app。
+- [x] 增加回归测试：同一 namespace 中其他 app 的 drain final event 不会污染当前 app 的诊断结论。

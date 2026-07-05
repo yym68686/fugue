@@ -440,7 +440,8 @@ func (s *Server) appendAppStrictDrainEvidence(ctx context.Context, client *clust
 		}
 	}
 	if strings.EqualFold(drainMode, "connection-aware") || appPodsIncludeDrainAgent(pods) {
-		if conclusion, detail := latestDrainAgentResultConclusion(ctx, logClient, namespace, pods, events); conclusion != "" {
+		podNamePrefix := runtime.RuntimeAppResourceName(app)
+		if conclusion, detail := latestDrainAgentResultConclusion(ctx, logClient, namespace, pods, events, podNamePrefix); conclusion != "" {
 			diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, conclusion)
 			if detail != "" {
 				diagnosis.Evidence = appendUniqueString(diagnosis.Evidence, detail)
@@ -519,8 +520,8 @@ func podIncludesDrainAgent(pod kubePodInfo) bool {
 	return false
 }
 
-func latestDrainAgentResultConclusion(ctx context.Context, logClient appLogsClient, namespace string, pods []kubePodInfo, events []coreEventOrZero) (string, string) {
-	if conclusion, detail := latestDrainAgentEventConclusion(events); conclusion != "" {
+func latestDrainAgentResultConclusion(ctx context.Context, logClient appLogsClient, namespace string, pods []kubePodInfo, events []coreEventOrZero, podNamePrefix string) (string, string) {
+	if conclusion, detail := latestDrainAgentEventConclusion(events, podNamePrefix); conclusion != "" {
 		return conclusion, detail
 	}
 	if logClient == nil || len(pods) == 0 {
@@ -547,7 +548,7 @@ func latestDrainAgentResultConclusion(ctx context.Context, logClient appLogsClie
 	return "", ""
 }
 
-func latestDrainAgentEventConclusion(events []coreEventOrZero) (string, string) {
+func latestDrainAgentEventConclusion(events []coreEventOrZero, podNamePrefix string) (string, string) {
 	for _, event := range events {
 		if !strings.EqualFold(strings.TrimSpace(event.Event.ObjectKind), "Pod") {
 			continue
@@ -560,13 +561,25 @@ func latestDrainAgentEventConclusion(events []coreEventOrZero) (string, string) 
 		if !strings.Contains(message, "waited_ms=") {
 			continue
 		}
+		podName := firstNonEmptyString(strings.TrimSpace(event.Event.ObjectName), strings.TrimSpace(event.Name))
+		if !drainEventPodMatchesApp(podName, podNamePrefix) {
+			continue
+		}
 		kv := parseRolloutDrainKeyValues(message)
 		kv["reason"] = reason
-		podName := firstNonEmptyString(strings.TrimSpace(event.Event.ObjectName), strings.TrimSpace(event.Name))
 		detail := fmt.Sprintf("strict drain recent kubernetes_event pod=%s reason=%s message=%s", podName, reason, truncateTimelineMessage(message))
 		return formatStrictDrainCompletedConclusion(podName, "kubernetes_event", kv), detail
 	}
 	return "", ""
+}
+
+func drainEventPodMatchesApp(podName, podNamePrefix string) bool {
+	podName = strings.TrimSpace(podName)
+	podNamePrefix = strings.TrimSpace(podNamePrefix)
+	if podName == "" || podNamePrefix == "" {
+		return true
+	}
+	return strings.HasPrefix(podName, podNamePrefix+"-")
 }
 
 func formatStrictDrainCompletedConclusion(podName, source string, kv map[string]string) string {

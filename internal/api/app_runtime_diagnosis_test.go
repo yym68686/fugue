@@ -407,6 +407,44 @@ func TestGetAppDiagnosisIncludesStrictDrainEvidence(t *testing.T) {
 	}
 }
 
+func TestLatestDrainAgentEventConclusionIgnoresOtherAppPods(t *testing.T) {
+	t.Parallel()
+
+	events := []coreEventOrZero{
+		{
+			Name:    "app-other-12345-deadbeef",
+			Message: "reason=idle waited_ms=999 active_connections=0 max_active_connections=99 observer_errors=0",
+			Event: model.ClusterEvent{
+				Reason:     "idle",
+				ObjectKind: "Pod",
+				ObjectName: "app-other-12345-deadbeef",
+			},
+		},
+		{
+			Name:    "app-target-abcde-live",
+			Message: "reason=idle waited_ms=42 active_connections=0 max_active_connections=1 observer_errors=0",
+			Event: model.ClusterEvent{
+				Reason:     "idle",
+				ObjectKind: "Pod",
+				ObjectName: "app-target-abcde-live",
+			},
+		},
+	}
+
+	conclusion, detail := latestDrainAgentEventConclusion(events, "app-target-abcde")
+	if !strings.Contains(conclusion, "waited_ms=42") || !strings.Contains(conclusion, "pod=app-target-abcde-live") {
+		t.Fatalf("expected target app drain conclusion, got conclusion=%q detail=%q", conclusion, detail)
+	}
+	if strings.Contains(conclusion, "waited_ms=999") || strings.Contains(detail, "app-other-12345") {
+		t.Fatalf("expected other app event to be ignored, got conclusion=%q detail=%q", conclusion, detail)
+	}
+
+	conclusion, detail = latestDrainAgentEventConclusion(events[:1], "app-target-abcde")
+	if conclusion != "" || detail != "" {
+		t.Fatalf("expected no conclusion for only other app events, got conclusion=%q detail=%q", conclusion, detail)
+	}
+}
+
 func TestGetAppDiagnosisDetectsReadyPodHTTPTimeout(t *testing.T) {
 	t.Parallel()
 
