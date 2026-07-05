@@ -360,6 +360,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			triggerBackgroundOps()
 		}
 	}
+	if s.imageStoreDistributedMode() && s.Config.ImageRetentionSweepInterval > 0 {
+		if err := s.runManagedAppImageRetentionSweep(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial managed app image retention sweep error: %v", err)
+		}
+	}
 	if s.imageStoreDistributedMode() {
 		if err := s.reconcileImageReplication(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.Logger.Printf("initial image replication reconcile error: %v", err)
