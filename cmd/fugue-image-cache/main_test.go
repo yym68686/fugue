@@ -916,6 +916,36 @@ func TestImageCachePruneSkipsDeleteBelowWatermark(t *testing.T) {
 	}
 }
 
+func TestImageCachePruneDeletesUnreferencedBlobsBelowWatermarkWhenIncluded(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir:    storeDir,
+		manifestDir: filepath.Join(storeDir, "_manifests"),
+		diskLimit: imageCacheDiskLimit{
+			Enabled:              true,
+			HighWatermarkPercent: 100,
+			LowWatermarkPercent:  99,
+			MinFreeBytes:         0,
+			MaxDeleteBytesPerRun: 1 << 20,
+		},
+	}
+	orphanDigest := writeTestImageCacheBlob(t, storeDir, []byte("orphan-layer"))
+
+	result := postImageCachePrune(t, cache, `{"dry_run":false,"allow_delete":true,"include_unreferenced_blobs":true,"max_delete_bytes":"1Mi"}`)
+
+	if !result.Deleted {
+		t.Fatalf("expected include_unreferenced_blobs prune to delete below watermark, got %+v", result)
+	}
+	if result.DeletedBytes == 0 || result.PlannedDeleteBytes == 0 {
+		t.Fatalf("expected deleted/planned bytes, got %+v", result)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, orphanDigest)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected orphan blob to be deleted, stat err=%v", err)
+	}
+}
+
 func TestImageCachePruneDeletesOnlySelectedUnpinnedManifestAndUnsharedBlobs(t *testing.T) {
 	t.Parallel()
 

@@ -31,6 +31,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		c.newAdminDiscoveryCommand(),
 		c.newAdminNodeUpdaterCommand(),
 		c.newAdminImageCacheCommand(),
+		c.newAdminImageRetentionCommand(),
 		c.newAdminClusterCommand(),
 		c.newAdminControlPlaneCommand(),
 		c.newAdminEdgeCommand(),

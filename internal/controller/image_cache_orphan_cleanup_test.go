@@ -192,7 +192,44 @@ func TestControllerImageCacheProtectsDigestWorkloadRef(t *testing.T) {
 	}
 }
 
-func TestScheduleOrphanImageCachePruneDeleteHaltsUnsafeCandidateReasons(t *testing.T) {
+func TestControllerImageCacheDoesNotProtectSameRepoHistoryWithCurrentTag(t *testing.T) {
+	t.Parallel()
+
+	currentDigest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	protected := controllerImageCacheProtectedSet{
+		availableRefs:        map[string]struct{}{},
+		lostRefs:             map[string]struct{}{},
+		deletedRefs:          map[string]struct{}{},
+		pinnedRefs:           map[string]struct{}{},
+		liveRefs:             map[string]struct{}{},
+		taskRefs:             map[string]struct{}{},
+		minReplicaRefs:       map[string]struct{}{},
+		imageIDsByRef:        map[string][]string{},
+		pinIDsByRef:          map[string][]string{},
+		taskIDsByRef:         map[string][]string{},
+		workloadRefsByRef:    map[string][]string{},
+		replicaIDsByRef:      map[string][]string{},
+		replicaCandidateRefs: map[string][]controllerImageCacheReplicaCandidate{},
+	}
+	addControllerImageKeys(protected.liveRefs, controllerImageReferenceKeys("registry.fugue.internal:5000/fugue-apps/demo@"+currentDigest, "")...)
+	created := time.Now().UTC().Add(-48 * time.Hour)
+	candidate := (&Service{}).controllerImageCacheCandidate(model.ImageCacheManifest{
+		Repo:              "fugue-apps/demo",
+		Target:            "old",
+		Digest:            oldDigest,
+		ManifestSizeBytes: 100,
+		TotalBlobBytes:    500,
+		CreatedAtObserved: &created,
+		LastSeenAt:        created,
+		Present:           true,
+	}, protected, time.Now().UTC())
+	if candidate.Protected || candidate.Reason == "" {
+		t.Fatalf("expected same-repo historical tag to be a prune candidate, got %+v", candidate)
+	}
+}
+
+func TestScheduleOrphanImageCachePruneDeleteAllowsStaleReplicaCandidateReasons(t *testing.T) {
 	t.Parallel()
 
 	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
@@ -262,8 +299,8 @@ func TestScheduleOrphanImageCachePruneDeleteHaltsUnsafeCandidateReasons(t *testi
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
-	if len(tasks) != 0 {
-		t.Fatalf("unsafe candidate reason created prune tasks: %+v", tasks)
+	if len(tasks) != 1 {
+		t.Fatalf("expected stale replica candidate to create one prune task, got %+v", tasks)
 	}
 }
 

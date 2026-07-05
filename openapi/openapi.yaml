@@ -645,6 +645,32 @@ paths:
                 $ref: "#/components/schemas/ImageCachePrunePlanTaskResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/image-retention/plan:
+    get:
+      operationId: adminGetImageRetentionPlan
+      summary: Get Distributed Image Retention Plan
+      tags: [Admin]
+      x-fugue-handler: handleAdminGetImageRetentionPlan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: app
+          schema:
+            type: string
+        - in: query
+          name: all
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImageRetentionPlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/localpv/inventory:
     get:
       operationId: adminListLocalPVInventory
@@ -17039,6 +17065,81 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ImageReplicationTask"
+    ImageRetentionDecision:
+      type: object
+      additionalProperties: false
+      required: [image_id, image_ref, current_workload, active_operation, user_pinned, rank, keep, reason]
+      properties:
+        image_id:
+          type: string
+        image_ref:
+          type: string
+        source_operation_id:
+          type: string
+        lifecycle_state:
+          type: string
+        last_deployed_at:
+          type: string
+          format: date-time
+        current_workload:
+          type: boolean
+        active_operation:
+          type: boolean
+        user_pinned:
+          type: boolean
+        rank:
+          type: integer
+          format: int32
+        keep:
+          type: boolean
+        reason:
+          type: string
+    DistributedImageRetentionPlan:
+      type: object
+      additionalProperties: false
+      required: [app_id, effective_limit, keep_image_ids, drop_image_ids, image_decisions]
+      properties:
+        tenant_id:
+          type: string
+        app_id:
+          type: string
+        app_name:
+          type: string
+        effective_limit:
+          type: integer
+          format: int32
+        keep_image_ids:
+          type: array
+          items:
+            type: string
+        drop_image_ids:
+          type: array
+          items:
+            type: string
+        image_decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageRetentionDecision"
+        would_delete_pins:
+          type: integer
+          format: int32
+        would_cancel_tasks:
+          type: integer
+          format: int32
+        would_normalize_images:
+          type: integer
+          format: int32
+    ImageRetentionPlanResponse:
+      type: object
+      additionalProperties: false
+      required: [plans]
+      properties:
+        plan:
+          $ref: "#/components/schemas/DistributedImageRetentionPlan"
+        plans:
+          type: array
+          items:
+            $ref: "#/components/schemas/DistributedImageRetentionPlan"
     ImageCacheNodeInventory:
       type: object
       additionalProperties: false
@@ -17077,6 +17178,16 @@ components:
         pin_count:
           type: integer
           format: int32
+        unreferenced_blob_count:
+          type: integer
+          format: int32
+        unreferenced_blob_bytes:
+          type: integer
+          format: int64
+        unreferenced_blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCachePruneBlobCandidate"
         observed_at:
           type: string
           format: date-time
@@ -17151,9 +17262,25 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ImageCacheManifest"
+        unreferenced_blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCacheInventoryBlobReport"
         observed_at:
           type: string
           format: date-time
+    ImageCacheInventoryBlobReport:
+      type: object
+      additionalProperties: false
+      required: [digest]
+      properties:
+        digest:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        modified_at:
+          type: string
     ImageCacheInventoryResponse:
       type: object
       additionalProperties: false
@@ -17181,6 +17308,8 @@ components:
       properties:
         image_ref:
           type: string
+        node_name:
+          type: string
         repo:
           type: string
         target:
@@ -17191,6 +17320,10 @@ components:
           type: string
         skip_reason:
           type: string
+        skip_details:
+          type: array
+          items:
+            type: string
         protected:
           type: boolean
         planned_delete_bytes:
@@ -17200,9 +17333,54 @@ components:
           type: array
           items:
             type: string
+        referenced_blob_count:
+          type: integer
+          format: int32
+        referenced_blob_bytes:
+          type: integer
+          format: int64
+        matched_image_ids:
+          type: array
+          items:
+            type: string
+        matched_pin_ids:
+          type: array
+          items:
+            type: string
+        matched_task_ids:
+          type: array
+          items:
+            type: string
+        matched_workload_refs:
+          type: array
+          items:
+            type: string
+        matched_replica_ids:
+          type: array
+          items:
+            type: string
         last_seen_at:
           type: string
         created_at_observed:
+          type: string
+    ImageCachePruneBlobCandidate:
+      type: object
+      additionalProperties: false
+      required: [digest]
+      properties:
+        node_name:
+          type: string
+        digest:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        reason:
+          type: string
+        planned_delete_bytes:
+          type: integer
+          format: int64
+        last_seen_at:
           type: string
     ImageCachePrunePlan:
       type: object
@@ -17227,6 +17405,15 @@ components:
         protected_manifest_count:
           type: integer
           format: int32
+        candidate_blob_count:
+          type: integer
+          format: int32
+        candidate_blob_bytes:
+          type: integer
+          format: int64
+        protected_blob_count:
+          type: integer
+          format: int32
         planned_delete_bytes:
           type: integer
           format: int64
@@ -17249,6 +17436,22 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ImageCachePruneCandidate"
+        protected_manifests:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCachePruneCandidate"
+        skipped_manifests:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCachePruneCandidate"
+        unreferenced_blobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageCachePruneBlobCandidate"
+        node_pressure:
+          type: boolean
+        budget_exhausted:
+          type: boolean
         created_at:
           type: string
           format: date-time

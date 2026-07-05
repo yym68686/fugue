@@ -304,8 +304,8 @@ runtime:
 imageStore:
   enabled: false
   mode: bundled-registry
-  minReplicas: 2
-  targetReplicas: 2
+  minReplicas: 1
+  targetReplicas: 1
   requireCrossNodeReplicas: true
   requireCrossRegionReplicas: false
   verifyInterval: 10m
@@ -322,7 +322,7 @@ imageStore:
     mode: delete
     gracePeriod: 24h
     maxTargetsPerNode: 50
-    maxDeleteBytesPerNode: "104857600"
+    maxDeleteBytesPerNode: "10Gi"
     minReplicaCount: 1
 
 edge:

@@ -2034,6 +2034,33 @@ type Image struct {
 	UpdatedAt                time.Time `json:"updated_at"`
 }
 
+type DistributedImageRetentionPlan struct {
+	TenantID             string                   `json:"tenant_id,omitempty"`
+	AppID                string                   `json:"app_id"`
+	AppName              string                   `json:"app_name,omitempty"`
+	EffectiveLimit       int                      `json:"effective_limit"`
+	KeepImageIDs         []string                 `json:"keep_image_ids"`
+	DropImageIDs         []string                 `json:"drop_image_ids"`
+	ImageDecisions       []ImageRetentionDecision `json:"image_decisions"`
+	WouldDeletePins      int                      `json:"would_delete_pins,omitempty"`
+	WouldCancelTasks     int                      `json:"would_cancel_tasks,omitempty"`
+	WouldNormalizeImages int                      `json:"would_normalize_images,omitempty"`
+}
+
+type ImageRetentionDecision struct {
+	ImageID           string     `json:"image_id"`
+	ImageRef          string     `json:"image_ref"`
+	SourceOperationID string     `json:"source_operation_id,omitempty"`
+	LifecycleState    string     `json:"lifecycle_state,omitempty"`
+	LastDeployedAt    *time.Time `json:"last_deployed_at,omitempty"`
+	CurrentWorkload   bool       `json:"current_workload"`
+	ActiveOperation   bool       `json:"active_operation"`
+	UserPinned        bool       `json:"user_pinned"`
+	Rank              int        `json:"rank"`
+	Keep              bool       `json:"keep"`
+	Reason            string     `json:"reason"`
+}
+
 type ImageFilter struct {
 	TenantID        string
 	AppID           string
@@ -2150,26 +2177,29 @@ type ImageReplicationTaskFilter struct {
 }
 
 type ImageCacheNodeInventory struct {
-	ID                      string    `json:"id"`
-	NodeID                  string    `json:"node_id,omitempty"`
-	ClusterNodeName         string    `json:"cluster_node_name,omitempty"`
-	RuntimeID               string    `json:"runtime_id,omitempty"`
-	CacheEndpoint           string    `json:"cache_endpoint,omitempty"`
-	StorePath               string    `json:"store_path,omitempty"`
-	FilesystemTotalBytes    int64     `json:"filesystem_total_bytes,omitempty"`
-	FilesystemFreeBytes     int64     `json:"filesystem_free_bytes,omitempty"`
-	FilesystemUsedPercent   float64   `json:"filesystem_used_percent,omitempty"`
-	CacheBytes              int64     `json:"cache_bytes,omitempty"`
-	ManifestCount           int       `json:"manifest_count,omitempty"`
-	BlobCount               int       `json:"blob_count,omitempty"`
-	PinCount                int       `json:"pin_count,omitempty"`
-	ObservedAt              time.Time `json:"observed_at"`
-	ReportedByNodeUpdaterID string    `json:"reported_by_node_updater_id,omitempty"`
-	Status                  string    `json:"status,omitempty"`
-	LastError               string    `json:"last_error,omitempty"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
-	SnapshotComplete        bool      `json:"-"`
+	ID                      string                         `json:"id"`
+	NodeID                  string                         `json:"node_id,omitempty"`
+	ClusterNodeName         string                         `json:"cluster_node_name,omitempty"`
+	RuntimeID               string                         `json:"runtime_id,omitempty"`
+	CacheEndpoint           string                         `json:"cache_endpoint,omitempty"`
+	StorePath               string                         `json:"store_path,omitempty"`
+	FilesystemTotalBytes    int64                          `json:"filesystem_total_bytes,omitempty"`
+	FilesystemFreeBytes     int64                          `json:"filesystem_free_bytes,omitempty"`
+	FilesystemUsedPercent   float64                        `json:"filesystem_used_percent,omitempty"`
+	CacheBytes              int64                          `json:"cache_bytes,omitempty"`
+	ManifestCount           int                            `json:"manifest_count,omitempty"`
+	BlobCount               int                            `json:"blob_count,omitempty"`
+	UnreferencedBlobCount   int                            `json:"unreferenced_blob_count,omitempty"`
+	UnreferencedBlobBytes   int64                          `json:"unreferenced_blob_bytes,omitempty"`
+	UnreferencedBlobs       []ImageCachePruneBlobCandidate `json:"unreferenced_blobs,omitempty"`
+	PinCount                int                            `json:"pin_count,omitempty"`
+	ObservedAt              time.Time                      `json:"observed_at"`
+	ReportedByNodeUpdaterID string                         `json:"reported_by_node_updater_id,omitempty"`
+	Status                  string                         `json:"status,omitempty"`
+	LastError               string                         `json:"last_error,omitempty"`
+	CreatedAt               time.Time                      `json:"created_at"`
+	UpdatedAt               time.Time                      `json:"updated_at"`
+	SnapshotComplete        bool                           `json:"-"`
 }
 
 type ImageCacheNodeInventoryFilter struct {
@@ -2212,37 +2242,63 @@ type ImageCacheManifestFilter struct {
 }
 
 type ImageCachePruneCandidate struct {
-	ImageRef           string   `json:"image_ref,omitempty"`
-	Repo               string   `json:"repo"`
-	Target             string   `json:"target"`
-	Digest             string   `json:"digest,omitempty"`
-	Reason             string   `json:"reason,omitempty"`
-	SkipReason         string   `json:"skip_reason,omitempty"`
-	Protected          bool     `json:"protected"`
-	PlannedDeleteBytes int64    `json:"planned_delete_bytes,omitempty"`
-	ReferencedBlobs    []string `json:"referenced_blobs,omitempty"`
-	LastSeenAt         string   `json:"last_seen_at,omitempty"`
-	CreatedAtObserved  string   `json:"created_at_observed,omitempty"`
+	ImageRef            string   `json:"image_ref,omitempty"`
+	NodeName            string   `json:"node_name,omitempty"`
+	Repo                string   `json:"repo"`
+	Target              string   `json:"target"`
+	Digest              string   `json:"digest,omitempty"`
+	Reason              string   `json:"reason,omitempty"`
+	SkipReason          string   `json:"skip_reason,omitempty"`
+	SkipDetails         []string `json:"skip_details,omitempty"`
+	Protected           bool     `json:"protected"`
+	PlannedDeleteBytes  int64    `json:"planned_delete_bytes,omitempty"`
+	ReferencedBlobs     []string `json:"referenced_blobs,omitempty"`
+	ReferencedBlobCount int      `json:"referenced_blob_count,omitempty"`
+	ReferencedBlobBytes int64    `json:"referenced_blob_bytes,omitempty"`
+	MatchedImageIDs     []string `json:"matched_image_ids,omitempty"`
+	MatchedPinIDs       []string `json:"matched_pin_ids,omitempty"`
+	MatchedTaskIDs      []string `json:"matched_task_ids,omitempty"`
+	MatchedWorkloadRefs []string `json:"matched_workload_refs,omitempty"`
+	MatchedReplicaIDs   []string `json:"matched_replica_ids,omitempty"`
+	LastSeenAt          string   `json:"last_seen_at,omitempty"`
+	CreatedAtObserved   string   `json:"created_at_observed,omitempty"`
+}
+
+type ImageCachePruneBlobCandidate struct {
+	NodeName           string `json:"node_name,omitempty"`
+	Digest             string `json:"digest"`
+	SizeBytes          int64  `json:"size_bytes,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	PlannedDeleteBytes int64  `json:"planned_delete_bytes,omitempty"`
+	LastSeenAt         string `json:"last_seen_at,omitempty"`
 }
 
 type ImageCachePrunePlan struct {
-	ID                     string                     `json:"id"`
-	NodeID                 string                     `json:"node_id,omitempty"`
-	ClusterNodeName        string                     `json:"cluster_node_name,omitempty"`
-	RuntimeID              string                     `json:"runtime_id,omitempty"`
-	Mode                   string                     `json:"mode"`
-	CandidateManifestCount int                        `json:"candidate_manifest_count"`
-	ProtectedManifestCount int                        `json:"protected_manifest_count"`
-	PlannedDeleteBytes     int64                      `json:"planned_delete_bytes,omitempty"`
-	MaxDeleteBytes         int64                      `json:"max_delete_bytes,omitempty"`
-	MinManifestAge         string                     `json:"min_manifest_age,omitempty"`
-	ProtectionSummary      map[string]int             `json:"protection_summary,omitempty"`
-	CandidateSummary       map[string]int             `json:"candidate_summary,omitempty"`
-	Candidates             []ImageCachePruneCandidate `json:"candidates,omitempty"`
-	CreatedAt              time.Time                  `json:"created_at"`
-	ExecutedAt             *time.Time                 `json:"executed_at,omitempty"`
-	Status                 string                     `json:"status"`
-	Error                  string                     `json:"error,omitempty"`
+	ID                     string                         `json:"id"`
+	NodeID                 string                         `json:"node_id,omitempty"`
+	ClusterNodeName        string                         `json:"cluster_node_name,omitempty"`
+	RuntimeID              string                         `json:"runtime_id,omitempty"`
+	Mode                   string                         `json:"mode"`
+	CandidateManifestCount int                            `json:"candidate_manifest_count"`
+	ProtectedManifestCount int                            `json:"protected_manifest_count"`
+	CandidateBlobCount     int                            `json:"candidate_blob_count,omitempty"`
+	CandidateBlobBytes     int64                          `json:"candidate_blob_bytes,omitempty"`
+	ProtectedBlobCount     int                            `json:"protected_blob_count,omitempty"`
+	PlannedDeleteBytes     int64                          `json:"planned_delete_bytes,omitempty"`
+	MaxDeleteBytes         int64                          `json:"max_delete_bytes,omitempty"`
+	MinManifestAge         string                         `json:"min_manifest_age,omitempty"`
+	ProtectionSummary      map[string]int                 `json:"protection_summary,omitempty"`
+	CandidateSummary       map[string]int                 `json:"candidate_summary,omitempty"`
+	Candidates             []ImageCachePruneCandidate     `json:"candidates,omitempty"`
+	ProtectedManifests     []ImageCachePruneCandidate     `json:"protected_manifests,omitempty"`
+	SkippedManifests       []ImageCachePruneCandidate     `json:"skipped_manifests,omitempty"`
+	UnreferencedBlobs      []ImageCachePruneBlobCandidate `json:"unreferenced_blobs,omitempty"`
+	NodePressure           bool                           `json:"node_pressure,omitempty"`
+	BudgetExhausted        bool                           `json:"budget_exhausted,omitempty"`
+	CreatedAt              time.Time                      `json:"created_at"`
+	ExecutedAt             *time.Time                     `json:"executed_at,omitempty"`
+	Status                 string                         `json:"status"`
+	Error                  string                         `json:"error,omitempty"`
 }
 
 type ImageCachePrunePlanFilter struct {

@@ -14,7 +14,16 @@ func (s *Service) pruneExcessManagedAppImages(ctx context.Context, app model.App
 		return nil
 	}
 	if s.imageStoreDistributedMode() {
-		return s.scheduleDistributedImagePruneForApp(ctx, app)
+		targetOps, err := s.Store.ListOperationsByApp(app.TenantID, true, app.ID)
+		if err != nil {
+			return err
+		}
+		allApps, err := s.Store.ListAppsMetadata("", true)
+		if err != nil {
+			return err
+		}
+		_, err = s.reconcileDistributedImageRetentionForApp(ctx, app, targetOps, s.liveManagedImageRefSet(ctx, allApps))
+		return err
 	}
 	if s.inspectManagedImage == nil {
 		return nil
@@ -47,7 +56,8 @@ func (s *Service) pruneExcessManagedAppImagesWithSnapshot(
 		return nil
 	}
 	if s.imageStoreDistributedMode() {
-		return s.scheduleDistributedImagePruneForApp(ctx, app)
+		_, err := s.reconcileDistributedImageRetentionForApp(ctx, app, targetOps, liveRefs)
+		return err
 	}
 	if s.inspectManagedImage == nil {
 		return nil

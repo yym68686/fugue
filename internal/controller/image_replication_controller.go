@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -56,6 +57,13 @@ func (s *Service) reconcileImageReplication(ctx context.Context) error {
 	if err := s.completeSatisfiedImageReplicationTasks(ctx); err != nil {
 		return err
 	}
+	eligibility, err := s.loadImageReplicationEligibility()
+	if err != nil {
+		return err
+	}
+	if err := s.cancelObsoletePendingImageReplicationTasks(ctx, eligibility); err != nil {
+		return err
+	}
 	images, err := s.Store.ListImages(model.ImageFilter{PlatformAdmin: true})
 	if err != nil {
 		return err
@@ -69,7 +77,7 @@ func (s *Service) reconcileImageReplication(ctx context.Context) error {
 		default:
 			continue
 		}
-		if err := s.ensureImageReplicaPolicy(ctx, image); err != nil {
+		if err := s.ensureImageReplicaPolicyWithEligibility(ctx, image, eligibility); err != nil {
 			return err
 		}
 	}
@@ -77,6 +85,14 @@ func (s *Service) reconcileImageReplication(ctx context.Context) error {
 }
 
 func (s *Service) ensureImageReplicaPolicy(ctx context.Context, image model.Image) error {
+	eligibility, err := s.loadImageReplicationEligibility()
+	if err != nil {
+		return err
+	}
+	return s.ensureImageReplicaPolicyWithEligibility(ctx, image, eligibility)
+}
+
+func (s *Service) ensureImageReplicaPolicyWithEligibility(ctx context.Context, image model.Image, eligibility imageReplicationEligibility) error {
 	target := s.imageTargetReplicaCount(image)
 	if target <= 0 {
 		return nil
@@ -126,6 +142,12 @@ func (s *Service) ensureImageReplicaPolicy(ctx context.Context, image model.Imag
 		if !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) {
 			continue
 		}
+		if ok, reason := s.nodeEligibleForAppImageReplication(updater, model.ImageReplicationPriorityRepair, deployImageTarget{}, eligibility); !ok {
+			if s.Logger != nil && reason != "" {
+				s.Logger.Printf("skip image repair replication target image=%s node=%s reason=%s", image.ID, updater.ClusterNodeName, reason)
+			}
+			continue
+		}
 		if imageReplicaExistsOnTarget(healthy, updater) {
 			continue
 		}
@@ -160,6 +182,10 @@ func (s *Service) scheduleDeployTargetImageReplica(ctx context.Context, image mo
 	if s == nil || s.Store == nil {
 		return false, nil
 	}
+	eligibility, err := s.loadImageReplicationEligibility()
+	if err != nil {
+		return false, err
+	}
 	updaters, err := s.Store.ListNodeUpdaters("", true)
 	if err != nil {
 		return false, err
@@ -172,6 +198,9 @@ func (s *Service) scheduleDeployTargetImageReplica(ctx context.Context, image mo
 			continue
 		}
 		if strings.TrimSpace(target.RuntimeID) != "" && strings.TrimSpace(updater.RuntimeID) != strings.TrimSpace(target.RuntimeID) {
+			continue
+		}
+		if ok, _ := s.nodeEligibleForAppImageReplication(updater, model.ImageReplicationPriorityDeployBlocking, target, eligibility); !ok {
 			continue
 		}
 		supported, err := s.Store.NodeUpdaterTargetSupportsTask(updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeReplicateAppImage)
@@ -269,17 +298,17 @@ func (s *Service) completeSatisfiedImageReplicationTasks(ctx context.Context) er
 func (s *Service) imageTargetReplicaCount(image model.Image) int {
 	target := s.Config.ImageStoreTargetReplicas
 	if target <= 0 {
-		target = 2
+		target = 1
 	}
-	if image.RequiredReplicaCount > target {
+	if image.RequiredReplicaCount > target && !legacyDefaultReplicaCount(image.RequiredReplicaCount, target) {
 		target = image.RequiredReplicaCount
 	}
-	if image.MinAvailableReplicaCount > target {
+	if image.MinAvailableReplicaCount > target && !legacyDefaultReplicaCount(image.MinAvailableReplicaCount, target) {
 		target = image.MinAvailableReplicaCount
 	}
 	min := s.Config.ImageStoreMinReplicas
 	if min <= 0 {
-		min = 2
+		min = 1
 	}
 	if target < min {
 		target = min
@@ -289,9 +318,13 @@ func (s *Service) imageTargetReplicaCount(image model.Image) int {
 
 func (s *Service) imageMinReplicaCount() int {
 	if s == nil || s.Config.ImageStoreMinReplicas <= 0 {
-		return 2
+		return 1
 	}
 	return s.Config.ImageStoreMinReplicas
+}
+
+func legacyDefaultReplicaCount(count, fallback int) bool {
+	return count == 2 && fallback <= 1
 }
 
 func (s *Service) imageReplicaLeaseTTL() time.Duration {
@@ -328,4 +361,200 @@ func imageReplicaExistsOnTarget(replicas []model.ImageReplica, updater model.Nod
 		}
 	}
 	return false
+}
+
+type imageReplicationEligibility struct {
+	runtimeByID      map[string]model.Runtime
+	machineByID      map[string]model.Machine
+	machineByNode    map[string]model.Machine
+	pressureByTarget map[string]struct{}
+}
+
+func (s *Service) loadImageReplicationEligibility() (imageReplicationEligibility, error) {
+	out := imageReplicationEligibility{
+		runtimeByID:      map[string]model.Runtime{},
+		machineByID:      map[string]model.Machine{},
+		machineByNode:    map[string]model.Machine{},
+		pressureByTarget: map[string]struct{}{},
+	}
+	if s == nil || s.Store == nil {
+		return out, nil
+	}
+	if runtimes, err := s.Store.ListRuntimes("", true); err == nil {
+		for _, runtimeObj := range runtimes {
+			if strings.TrimSpace(runtimeObj.ID) != "" {
+				out.runtimeByID[strings.TrimSpace(runtimeObj.ID)] = runtimeObj
+			}
+		}
+	} else {
+		return out, err
+	}
+	if machines, err := s.Store.ListMachines("", true); err == nil {
+		for _, machine := range machines {
+			if strings.TrimSpace(machine.ID) != "" {
+				out.machineByID[strings.TrimSpace(machine.ID)] = machine
+			}
+			if strings.TrimSpace(machine.ClusterNodeName) != "" {
+				out.machineByNode[strings.TrimSpace(machine.ClusterNodeName)] = machine
+			}
+		}
+	} else {
+		return out, err
+	}
+	if nodes, err := s.Store.ListImageCacheNodeInventories(model.ImageCacheNodeInventoryFilter{}); err == nil {
+		for _, node := range nodes {
+			if !controllerImageCacheNodePressure(node) {
+				continue
+			}
+			for _, key := range imageReplicationTargetKeys(node.NodeID, node.RuntimeID, node.ClusterNodeName) {
+				out.pressureByTarget[key] = struct{}{}
+			}
+		}
+	} else {
+		return out, err
+	}
+	return out, nil
+}
+
+func (s *Service) nodeEligibleForAppImageReplication(updater model.NodeUpdater, priority string, target deployImageTarget, eligibility imageReplicationEligibility) (bool, string) {
+	if !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) {
+		return false, "node_updater_inactive"
+	}
+	if strings.TrimSpace(priority) == model.ImageReplicationPriorityDeployBlocking {
+		if strings.TrimSpace(target.ClusterNodeName) != "" && strings.TrimSpace(updater.ClusterNodeName) != strings.TrimSpace(target.ClusterNodeName) {
+			return false, "not_deploy_target_node"
+		}
+		if strings.TrimSpace(target.RuntimeID) != "" && strings.TrimSpace(updater.RuntimeID) != strings.TrimSpace(target.RuntimeID) {
+			return false, "not_deploy_target_runtime"
+		}
+	}
+	if runtimeID := strings.TrimSpace(updater.RuntimeID); runtimeID != "" {
+		if runtimeObj, ok := eligibility.runtimeByID[runtimeID]; ok {
+			if strings.TrimSpace(runtimeObj.Status) != model.RuntimeStatusActive {
+				return false, "runtime_not_active"
+			}
+			if !labelsAllowAppReplication(runtimeObj.Labels) && labelsEdgeOrDNSOnly(runtimeObj.Labels) {
+				return false, "runtime_edge_or_dns_only"
+			}
+		}
+	}
+	if strings.TrimSpace(priority) != model.ImageReplicationPriorityDeployBlocking {
+		for _, key := range imageReplicationTargetKeys(updater.MachineID, updater.RuntimeID, updater.ClusterNodeName) {
+			if _, ok := eligibility.pressureByTarget[key]; ok {
+				return false, "filesystem_pressure"
+			}
+		}
+	}
+	machine, hasMachine := eligibility.machineByID[strings.TrimSpace(updater.MachineID)]
+	if !hasMachine && strings.TrimSpace(updater.ClusterNodeName) != "" {
+		machine, hasMachine = eligibility.machineByNode[strings.TrimSpace(updater.ClusterNodeName)]
+	}
+	if hasMachine {
+		if !machine.Policy.AllowAppRuntime && !machine.Policy.AllowSharedPool {
+			if machine.Policy.AllowEdge || machine.Policy.AllowDNS {
+				return false, "edge_or_dns_only"
+			}
+			if role := model.NormalizeMachineControlPlaneRole(machine.Policy.DesiredControlPlaneRole); role == model.MachineControlPlaneRoleMember || role == model.MachineControlPlaneRoleCandidate {
+				return false, "control_plane_only"
+			}
+			return false, "app_runtime_not_allowed"
+		}
+	}
+	if !labelsAllowAppReplication(updater.Labels) && labelsEdgeOrDNSOnly(updater.Labels) {
+		return false, "updater_edge_or_dns_only"
+	}
+	if !labelsAllowAppReplication(updater.Labels) {
+		if role := model.NormalizeMachineControlPlaneRole(updater.Labels[runtimepkg.ControlPlaneDesiredRoleKey]); role == model.MachineControlPlaneRoleMember || role == model.MachineControlPlaneRoleCandidate {
+			return false, "control_plane_only"
+		}
+	}
+	return true, ""
+}
+
+func labelsAllowAppReplication(labels map[string]string) bool {
+	if len(labels) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(labels[runtimepkg.AppRuntimeRoleLabelKey]), runtimepkg.NodeRoleLabelValue) ||
+		strings.EqualFold(strings.TrimSpace(labels[runtimepkg.SharedPoolLabelKey]), runtimepkg.SharedPoolLabelValue)
+}
+
+func labelsEdgeOrDNSOnly(labels map[string]string) bool {
+	if len(labels) == 0 {
+		return false
+	}
+	edge := strings.EqualFold(strings.TrimSpace(labels[runtimepkg.EdgeRoleLabelKey]), runtimepkg.NodeRoleLabelValue)
+	dns := strings.EqualFold(strings.TrimSpace(labels[runtimepkg.DNSRoleLabelKey]), runtimepkg.NodeRoleLabelValue)
+	return (edge || dns) && !labelsAllowAppReplication(labels)
+}
+
+func imageReplicationTargetKeys(nodeID, runtimeID, clusterNodeName string) []string {
+	values := []string{
+		"node:" + strings.TrimSpace(nodeID),
+		"runtime:" + strings.TrimSpace(runtimeID),
+		"cluster:" + strings.TrimSpace(clusterNodeName),
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.HasSuffix(value, ":") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+func (s *Service) cancelObsoletePendingImageReplicationTasks(ctx context.Context, eligibility imageReplicationEligibility) error {
+	if s == nil || s.Store == nil {
+		return nil
+	}
+	tasks, err := s.Store.ListImageReplicationTasks(model.ImageReplicationTaskFilter{Status: model.ImageReplicationTaskStatusPending, PlatformAdmin: true})
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		image, err := s.Store.GetImage(task.ImageID, "", true)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			task.Status = model.ImageReplicationTaskStatusCanceled
+			task.LastError = "missing_image"
+		} else if imageCacheReplicationTaskObsoleteForController(task, image) {
+			task.Status = model.ImageReplicationTaskStatusCanceled
+			task.LastError = "obsolete_image_generation"
+		} else if strings.TrimSpace(task.Priority) != model.ImageReplicationPriorityDeployBlocking {
+			updater := model.NodeUpdater{
+				MachineID:       task.TargetNodeID,
+				RuntimeID:       task.TargetRuntimeID,
+				ClusterNodeName: task.TargetClusterNodeName,
+				Status:          model.NodeUpdaterStatusActive,
+			}
+			if ok, reason := s.nodeEligibleForAppImageReplication(updater, task.Priority, deployImageTarget{}, eligibility); !ok {
+				task.Status = model.ImageReplicationTaskStatusCanceled
+				task.LastError = reason
+			}
+		}
+		if task.Status != model.ImageReplicationTaskStatusCanceled {
+			continue
+		}
+		now := time.Now().UTC()
+		task.CompletedAt = &now
+		if _, err := s.Store.UpsertImageReplicationTask(task); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func imageCacheReplicationTaskObsoleteForController(task model.ImageReplicationTask, image model.Image) bool {
+	switch strings.TrimSpace(image.LifecycleState) {
+	case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted, model.ImageLifecycleLost:
+		return strings.TrimSpace(task.Priority) != model.ImageReplicationPriorityDeployBlocking
+	default:
+		return false
+	}
 }

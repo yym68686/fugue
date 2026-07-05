@@ -199,8 +199,8 @@ func TestControllerFromEnvDefaultsImageCacheOrphanPruneToLimitedDelete(t *testin
 	if cfg.ImageStoreOrphanPruneMode != "delete" {
 		t.Fatalf("expected image-cache orphan prune to default to delete, got %q", cfg.ImageStoreOrphanPruneMode)
 	}
-	if cfg.ImageStoreOrphanPruneMaxDeleteBytesPerNode != "104857600" {
-		t.Fatalf("expected image-cache orphan prune budget to default to 100MiB, got %q", cfg.ImageStoreOrphanPruneMaxDeleteBytesPerNode)
+	if cfg.ImageStoreOrphanPruneMaxDeleteBytesPerNode != "10Gi" {
+		t.Fatalf("expected image-cache orphan prune budget to default to 10Gi, got %q", cfg.ImageStoreOrphanPruneMaxDeleteBytesPerNode)
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 )
 
 func imageCacheNodeColumns() string {
-	return `id, node_id, cluster_node_name, runtime_id, cache_endpoint, store_path, filesystem_total_bytes, filesystem_free_bytes, filesystem_used_percent, cache_bytes, manifest_count, blob_count, pin_count, observed_at, reported_by_node_updater_id, status, last_error, created_at, updated_at`
+	return `id, node_id, cluster_node_name, runtime_id, cache_endpoint, store_path, filesystem_total_bytes, filesystem_free_bytes, filesystem_used_percent, cache_bytes, manifest_count, blob_count, unreferenced_blob_count, unreferenced_blob_bytes, unreferenced_blobs_json, pin_count, observed_at, reported_by_node_updater_id, status, last_error, created_at, updated_at`
 }
 
 func imageCacheManifestColumns() string {
@@ -20,7 +20,7 @@ func imageCacheManifestColumns() string {
 }
 
 func imageCachePrunePlanColumns() string {
-	return `id, node_id, cluster_node_name, runtime_id, mode, candidate_manifest_count, protected_manifest_count, planned_delete_bytes, max_delete_bytes, min_manifest_age, protection_summary_json, candidate_summary_json, candidates_json, created_at, executed_at, status, error`
+	return `id, node_id, cluster_node_name, runtime_id, mode, candidate_manifest_count, protected_manifest_count, candidate_blob_count, candidate_blob_bytes, protected_blob_count, planned_delete_bytes, max_delete_bytes, min_manifest_age, protection_summary_json, candidate_summary_json, candidates_json, protected_manifests_json, skipped_manifests_json, unreferenced_blobs_json, node_pressure, budget_exhausted, created_at, executed_at, status, error`
 }
 
 func localPVInventoryColumns() string {
@@ -51,16 +51,21 @@ FOR UPDATE
 		node.ID = existing.ID
 		node.CreatedAt = existing.CreatedAt
 		node.UpdatedAt = now
+		unreferencedBlobsJSON, jsonErr := marshalNullableJSON(node.UnreferencedBlobs)
+		if jsonErr != nil {
+			return model.ImageCacheNodeInventory{}, jsonErr
+		}
 		updated, updateErr := scanImageCacheNodeInventory(tx.QueryRowContext(ctx, `
 UPDATE fugue_image_cache_nodes
 SET node_id = $2, cluster_node_name = $3, runtime_id = $4, cache_endpoint = $5,
 	store_path = $6, filesystem_total_bytes = $7, filesystem_free_bytes = $8,
 	filesystem_used_percent = $9, cache_bytes = $10, manifest_count = $11,
-	blob_count = $12, pin_count = $13, observed_at = $14,
-	reported_by_node_updater_id = $15, status = $16, last_error = $17,
-	updated_at = $18
+	blob_count = $12, unreferenced_blob_count = $13, unreferenced_blob_bytes = $14,
+	unreferenced_blobs_json = $15, pin_count = $16, observed_at = $17,
+	reported_by_node_updater_id = $18, status = $19, last_error = $20,
+	updated_at = $21
 WHERE id = $1
-RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.UpdatedAt))
+RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.UpdatedAt))
 		if updateErr != nil {
 			return model.ImageCacheNodeInventory{}, mapDBErr(updateErr)
 		}
@@ -69,19 +74,25 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 		node.ID = firstNonEmptyImageCacheString(node.ID, model.NewID("imgcache"))
 		node.CreatedAt = now
 		node.UpdatedAt = now
+		unreferencedBlobsJSON, jsonErr := marshalNullableJSON(node.UnreferencedBlobs)
+		if jsonErr != nil {
+			return model.ImageCacheNodeInventory{}, jsonErr
+		}
 		inserted, insertErr := scanImageCacheNodeInventory(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_image_cache_nodes (
 	id, node_id, cluster_node_name, runtime_id, cache_endpoint, store_path,
 	filesystem_total_bytes, filesystem_free_bytes, filesystem_used_percent,
-	cache_bytes, manifest_count, blob_count, pin_count, observed_at,
+	cache_bytes, manifest_count, blob_count, unreferenced_blob_count,
+	unreferenced_blob_bytes, unreferenced_blobs_json, pin_count, observed_at,
 	reported_by_node_updater_id, status, last_error, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6,
 	$7, $8, $9,
-	$10, $11, $12, $13, $14,
-	$15, $16, $17, $18, $19
+	$10, $11, $12, $13,
+	$14, $15, $16, $17,
+	$18, $19, $20, $21, $22
 )
-RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.CreatedAt, node.UpdatedAt))
+RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.CreatedAt, node.UpdatedAt))
 		if insertErr != nil {
 			return model.ImageCacheNodeInventory{}, mapDBErr(insertErr)
 		}
@@ -293,17 +304,35 @@ func (s *Store) pgUpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (mod
 	if err != nil {
 		return model.ImageCachePrunePlan{}, err
 	}
+	protectedManifestsJSON, err := marshalNullableJSON(plan.ProtectedManifests)
+	if err != nil {
+		return model.ImageCachePrunePlan{}, err
+	}
+	skippedManifestsJSON, err := marshalNullableJSON(plan.SkippedManifests)
+	if err != nil {
+		return model.ImageCachePrunePlan{}, err
+	}
+	unreferencedBlobsJSON, err := marshalNullableJSON(plan.UnreferencedBlobs)
+	if err != nil {
+		return model.ImageCachePrunePlan{}, err
+	}
 	out, err := scanImageCachePrunePlan(s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_image_cache_prune_plans (
 	id, node_id, cluster_node_name, runtime_id, mode, candidate_manifest_count,
-	protected_manifest_count, planned_delete_bytes, max_delete_bytes,
+	protected_manifest_count, candidate_blob_count, candidate_blob_bytes,
+	protected_blob_count, planned_delete_bytes, max_delete_bytes,
 	min_manifest_age, protection_summary_json, candidate_summary_json,
-	candidates_json, created_at, executed_at, status, error
+	candidates_json, protected_manifests_json, skipped_manifests_json,
+	unreferenced_blobs_json, node_pressure, budget_exhausted, created_at,
+	executed_at, status, error
 ) VALUES (
 	$1, $2, $3, $4, $5, $6,
 	$7, $8, $9,
 	$10, $11, $12,
-	$13, $14, $15, $16, $17
+	$13, $14, $15,
+	$16, $17, $18,
+	$19, $20, $21, $22,
+	$23, $24, $25
 )
 ON CONFLICT (id) DO UPDATE SET
 	node_id = EXCLUDED.node_id,
@@ -312,16 +341,24 @@ ON CONFLICT (id) DO UPDATE SET
 	mode = EXCLUDED.mode,
 	candidate_manifest_count = EXCLUDED.candidate_manifest_count,
 	protected_manifest_count = EXCLUDED.protected_manifest_count,
+	candidate_blob_count = EXCLUDED.candidate_blob_count,
+	candidate_blob_bytes = EXCLUDED.candidate_blob_bytes,
+	protected_blob_count = EXCLUDED.protected_blob_count,
 	planned_delete_bytes = EXCLUDED.planned_delete_bytes,
 	max_delete_bytes = EXCLUDED.max_delete_bytes,
 	min_manifest_age = EXCLUDED.min_manifest_age,
 	protection_summary_json = EXCLUDED.protection_summary_json,
 	candidate_summary_json = EXCLUDED.candidate_summary_json,
 	candidates_json = EXCLUDED.candidates_json,
+	protected_manifests_json = EXCLUDED.protected_manifests_json,
+	skipped_manifests_json = EXCLUDED.skipped_manifests_json,
+	unreferenced_blobs_json = EXCLUDED.unreferenced_blobs_json,
+	node_pressure = EXCLUDED.node_pressure,
+	budget_exhausted = EXCLUDED.budget_exhausted,
 	executed_at = EXCLUDED.executed_at,
 	status = EXCLUDED.status,
 	error = EXCLUDED.error
-RETURNING `+imageCachePrunePlanColumns(), plan.ID, plan.NodeID, plan.ClusterNodeName, plan.RuntimeID, plan.Mode, plan.CandidateManifestCount, plan.ProtectedManifestCount, plan.PlannedDeleteBytes, plan.MaxDeleteBytes, plan.MinManifestAge, protectionJSON, candidateSummaryJSON, candidatesJSON, plan.CreatedAt, plan.ExecutedAt, plan.Status, plan.Error))
+RETURNING `+imageCachePrunePlanColumns(), plan.ID, plan.NodeID, plan.ClusterNodeName, plan.RuntimeID, plan.Mode, plan.CandidateManifestCount, plan.ProtectedManifestCount, plan.CandidateBlobCount, plan.CandidateBlobBytes, plan.ProtectedBlobCount, plan.PlannedDeleteBytes, plan.MaxDeleteBytes, plan.MinManifestAge, protectionJSON, candidateSummaryJSON, candidatesJSON, protectedManifestsJSON, skippedManifestsJSON, unreferencedBlobsJSON, plan.NodePressure, plan.BudgetExhausted, plan.CreatedAt, plan.ExecutedAt, plan.Status, plan.Error))
 	if err != nil {
 		return model.ImageCachePrunePlan{}, mapDBErr(err)
 	}
@@ -515,6 +552,7 @@ func (s *Store) pgListLocalPVInventories(filter model.LocalPVInventoryFilter) ([
 
 func scanImageCacheNodeInventory(scanner sqlScanner) (model.ImageCacheNodeInventory, error) {
 	var out model.ImageCacheNodeInventory
+	var unreferencedBlobsRaw []byte
 	if err := scanner.Scan(
 		&out.ID,
 		&out.NodeID,
@@ -528,6 +566,9 @@ func scanImageCacheNodeInventory(scanner sqlScanner) (model.ImageCacheNodeInvent
 		&out.CacheBytes,
 		&out.ManifestCount,
 		&out.BlobCount,
+		&out.UnreferencedBlobCount,
+		&out.UnreferencedBlobBytes,
+		&unreferencedBlobsRaw,
 		&out.PinCount,
 		&out.ObservedAt,
 		&out.ReportedByNodeUpdaterID,
@@ -538,6 +579,11 @@ func scanImageCacheNodeInventory(scanner sqlScanner) (model.ImageCacheNodeInvent
 	); err != nil {
 		return model.ImageCacheNodeInventory{}, err
 	}
+	blobs, err := decodeJSONValue[[]model.ImageCachePruneBlobCandidate](unreferencedBlobsRaw)
+	if err != nil {
+		return model.ImageCacheNodeInventory{}, err
+	}
+	out.UnreferencedBlobs = blobs
 	return out, nil
 }
 
@@ -580,7 +626,7 @@ func scanImageCacheManifest(scanner sqlScanner) (model.ImageCacheManifest, error
 
 func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, error) {
 	var out model.ImageCachePrunePlan
-	var protectionRaw, candidateSummaryRaw, candidatesRaw []byte
+	var protectionRaw, candidateSummaryRaw, candidatesRaw, protectedManifestsRaw, skippedManifestsRaw, unreferencedBlobsRaw []byte
 	var executedAt sql.NullTime
 	if err := scanner.Scan(
 		&out.ID,
@@ -590,12 +636,20 @@ func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, err
 		&out.Mode,
 		&out.CandidateManifestCount,
 		&out.ProtectedManifestCount,
+		&out.CandidateBlobCount,
+		&out.CandidateBlobBytes,
+		&out.ProtectedBlobCount,
 		&out.PlannedDeleteBytes,
 		&out.MaxDeleteBytes,
 		&out.MinManifestAge,
 		&protectionRaw,
 		&candidateSummaryRaw,
 		&candidatesRaw,
+		&protectedManifestsRaw,
+		&skippedManifestsRaw,
+		&unreferencedBlobsRaw,
+		&out.NodePressure,
+		&out.BudgetExhausted,
 		&out.CreatedAt,
 		&executedAt,
 		&out.Status,
@@ -615,9 +669,24 @@ func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, err
 	if err != nil {
 		return model.ImageCachePrunePlan{}, err
 	}
+	protectedManifests, err := decodeJSONValue[[]model.ImageCachePruneCandidate](protectedManifestsRaw)
+	if err != nil {
+		return model.ImageCachePrunePlan{}, err
+	}
+	skippedManifests, err := decodeJSONValue[[]model.ImageCachePruneCandidate](skippedManifestsRaw)
+	if err != nil {
+		return model.ImageCachePrunePlan{}, err
+	}
+	unreferencedBlobs, err := decodeJSONValue[[]model.ImageCachePruneBlobCandidate](unreferencedBlobsRaw)
+	if err != nil {
+		return model.ImageCachePrunePlan{}, err
+	}
 	out.ProtectionSummary = protection
 	out.CandidateSummary = candidateSummary
 	out.Candidates = candidates
+	out.ProtectedManifests = protectedManifests
+	out.SkippedManifests = skippedManifests
+	out.UnreferencedBlobs = unreferencedBlobs
 	if executedAt.Valid {
 		out.ExecutedAt = &executedAt.Time
 	}

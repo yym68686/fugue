@@ -34,6 +34,21 @@ func TestImageReferenceKeysNormalizeRepoColonDigestForm(t *testing.T) {
 	}
 }
 
+func TestExactReferenceKeysDoNotProtectWholeRepository(t *testing.T) {
+	t.Parallel()
+
+	current := keySet(ExactImageReferenceKeys("registry.fugue.internal:5000/fugue-apps/demo:current", ""))
+	oldManifest := ExactManifestReferenceKeys("fugue-apps/demo", "old", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
+	if _, ok := current["fugue-apps/demo"]; ok {
+		t.Fatalf("exact keys must not include bare repo: %+v", current)
+	}
+	for _, key := range oldManifest {
+		if _, ok := current[key]; ok {
+			t.Fatalf("current exact key %q unexpectedly matches old manifest keys %+v", key, oldManifest)
+		}
+	}
+}
+
 func keySet(values []string) map[string]struct{} {
 	out := map[string]struct{}{}
 	for _, value := range values {

@@ -220,7 +220,7 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		s.writeStoreError(w, err)
 		return
 	}
-	if plan.CandidateManifestCount == 0 || mode == model.ImageCachePruneModeObserve {
+	if (plan.CandidateManifestCount == 0 && plan.CandidateBlobCount == 0) || mode == model.ImageCachePruneModeObserve {
 		httpx.WriteJSON(w, http.StatusCreated, map[string]any{"plan": plan})
 		return
 	}
@@ -241,12 +241,16 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 	}
 	allowDelete := req.AllowDelete && !dryRun && mode == model.ImageCachePruneModeDelete
 	task, err := s.store.CreateNodeUpdateTask(principal, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
-		"prune_plan_id":    plan.ID,
-		"dry_run":          fmt.Sprintf("%t", dryRun),
-		"allow_delete":     fmt.Sprintf("%t", allowDelete),
-		"targets_json":     string(targetsRaw),
-		"max_delete_bytes": fmt.Sprintf("%d", plan.MaxDeleteBytes),
-		"prune_reason":     "image-cache-orphan",
+		"prune_plan_id":              plan.ID,
+		"dry_run":                    fmt.Sprintf("%t", dryRun),
+		"allow_delete":               fmt.Sprintf("%t", allowDelete),
+		"targets_json":               string(targetsRaw),
+		"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
+		"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
+		"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
+		"candidate_manifest_count":   fmt.Sprintf("%d", plan.CandidateManifestCount),
+		"candidate_blob_count":       fmt.Sprintf("%d", plan.CandidateBlobCount),
+		"prune_reason":               "image-cache-orphan",
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -285,16 +289,17 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 }
 
 type imageCacheInventoryReport struct {
-	Node        model.ImageCacheNodeInventory       `json:"node"`
-	Manifests   []imageCacheInventoryManifestReport `json:"manifests"`
-	ObservedAt  *time.Time                          `json:"observed_at"`
-	TotalCount  int                                 `json:"manifest_total_count"`
-	ChunkIndex  int                                 `json:"chunk_index"`
-	ChunkCount  int                                 `json:"chunk_count"`
-	Endpoint    string                              `json:"endpoint"`
-	ClusterNode string                              `json:"cluster_node"`
-	Pins        []any                               `json:"pins"`
-	Disk        imageCacheInventoryDiskReport       `json:"disk"`
+	Node              model.ImageCacheNodeInventory       `json:"node"`
+	Manifests         []imageCacheInventoryManifestReport `json:"manifests"`
+	UnreferencedBlobs []imageCacheInventoryBlobReport     `json:"unreferenced_blobs"`
+	ObservedAt        *time.Time                          `json:"observed_at"`
+	TotalCount        int                                 `json:"manifest_total_count"`
+	ChunkIndex        int                                 `json:"chunk_index"`
+	ChunkCount        int                                 `json:"chunk_count"`
+	Endpoint          string                              `json:"endpoint"`
+	ClusterNode       string                              `json:"cluster_node"`
+	Pins              []any                               `json:"pins"`
+	Disk              imageCacheInventoryDiskReport       `json:"disk"`
 }
 
 type imageCacheInventoryDiskReport struct {
@@ -322,6 +327,12 @@ type imageCacheInventoryManifestReport struct {
 	ModifiedAt              string `json:"modified_at"`
 }
 
+type imageCacheInventoryBlobReport struct {
+	Digest     string `json:"digest"`
+	SizeBytes  int64  `json:"size_bytes"`
+	ModifiedAt string `json:"modified_at"`
+}
+
 func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater) (model.ImageCacheNodeInventory, []model.ImageCacheManifest, error) {
 	var req imageCacheInventoryReport
 	if err := httpx.DecodeJSON(r, &req); err != nil {
@@ -343,6 +354,26 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 	}
 	node.CacheBytes = firstNonZeroInt64(node.CacheBytes, req.Disk.CacheBytes)
 	node.PinCount = firstNonZeroInt(node.PinCount, len(req.Pins))
+	if len(req.UnreferencedBlobs) > 0 {
+		node.UnreferencedBlobs = make([]model.ImageCachePruneBlobCandidate, 0, len(req.UnreferencedBlobs))
+		for _, blob := range req.UnreferencedBlobs {
+			digest := strings.TrimSpace(blob.Digest)
+			if digest == "" {
+				continue
+			}
+			item := model.ImageCachePruneBlobCandidate{
+				NodeName:           firstNonEmptyImageAPIString(node.ClusterNodeName, node.NodeID, node.RuntimeID),
+				Digest:             digest,
+				SizeBytes:          blob.SizeBytes,
+				Reason:             "unreferenced_blob",
+				PlannedDeleteBytes: blob.SizeBytes,
+				LastSeenAt:         strings.TrimSpace(blob.ModifiedAt),
+			}
+			node.UnreferencedBlobs = append(node.UnreferencedBlobs, item)
+			node.UnreferencedBlobBytes += blob.SizeBytes
+		}
+		node.UnreferencedBlobCount = len(node.UnreferencedBlobs)
+	}
 	node.ObservedAt = observedAt
 	node.ManifestCount = firstNonZeroInt(node.ManifestCount, req.TotalCount, len(req.Manifests))
 	node.SnapshotComplete = imageCacheInventorySnapshotComplete(req, len(req.Manifests))
@@ -454,6 +485,27 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		plan.NodeID = nodes[0].NodeID
 		plan.ClusterNodeName = nodes[0].ClusterNodeName
 		plan.RuntimeID = nodes[0].RuntimeID
+		plan.NodePressure = imageCacheNodePressure(nodes[0])
+		for _, blob := range nodes[0].UnreferencedBlobs {
+			if strings.TrimSpace(blob.Digest) == "" {
+				continue
+			}
+			if blob.Reason == "" {
+				blob.Reason = "unreferenced_blob"
+			}
+			if blob.PlannedDeleteBytes == 0 {
+				blob.PlannedDeleteBytes = firstNonZeroInt64(blob.SizeBytes, 0)
+			}
+			if strings.TrimSpace(blob.NodeName) == "" {
+				blob.NodeName = firstNonEmptyImageAPIString(nodes[0].ClusterNodeName, nodes[0].NodeID, nodes[0].RuntimeID)
+			}
+			plan.UnreferencedBlobs = append(plan.UnreferencedBlobs, blob)
+			plan.CandidateBlobCount++
+			blobBytes := firstNonZeroInt64(blob.PlannedDeleteBytes, blob.SizeBytes)
+			plan.CandidateBlobBytes += blobBytes
+			plan.PlannedDeleteBytes += blobBytes
+			plan.CandidateSummary[blob.Reason]++
+		}
 	} else {
 		plan.NodeID = strings.TrimSpace(filter.NodeID)
 		plan.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
@@ -464,6 +516,8 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		if candidate.Protected {
 			plan.ProtectedManifestCount++
 			plan.ProtectionSummary[candidate.SkipReason]++
+			plan.ProtectedManifests = append(plan.ProtectedManifests, candidate)
+			plan.SkippedManifests = append(plan.SkippedManifests, candidate)
 			continue
 		}
 		plan.CandidateManifestCount++
@@ -478,8 +532,12 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 		return plan.Candidates[i].PlannedDeleteBytes > plan.Candidates[j].PlannedDeleteBytes
 	})
 	if plan.PlannedDeleteBytes > plan.MaxDeleteBytes {
+		plan.BudgetExhausted = true
 		plan.PlannedDeleteBytes = plan.MaxDeleteBytes
 	}
+	sort.SliceStable(plan.ProtectedManifests, func(i, j int) bool {
+		return plan.ProtectedManifests[i].PlannedDeleteBytes > plan.ProtectedManifests[j].PlannedDeleteBytes
+	})
 	return plan, nil
 }
 
@@ -490,6 +548,13 @@ type imageCacheProtectedSet struct {
 	pinnedRefs           map[string]struct{}
 	liveRefs             map[string]struct{}
 	taskRefs             map[string]struct{}
+	minReplicaRefs       map[string]struct{}
+	imageIDsByRef        map[string][]string
+	pinIDsByRef          map[string][]string
+	taskIDsByRef         map[string][]string
+	workloadRefsByRef    map[string][]string
+	replicaIDsByRef      map[string][]string
+	minReplicaKeeperRefs map[string][]imageCacheReplicaCandidate
 	replicaCandidateRefs map[string][]imageCacheReplicaCandidate
 }
 
@@ -498,6 +563,7 @@ type imageCacheReplicaCandidate struct {
 	RuntimeID       string
 	ClusterNodeName string
 	Reason          string
+	ReplicaID       string
 }
 
 type imageCacheProtectedSetOptions struct {
@@ -515,6 +581,13 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	protected.pinnedRefs = map[string]struct{}{}
 	protected.liveRefs = map[string]struct{}{}
 	protected.taskRefs = map[string]struct{}{}
+	protected.minReplicaRefs = map[string]struct{}{}
+	protected.imageIDsByRef = map[string][]string{}
+	protected.pinIDsByRef = map[string][]string{}
+	protected.taskIDsByRef = map[string][]string{}
+	protected.workloadRefsByRef = map[string][]string{}
+	protected.replicaIDsByRef = map[string][]string{}
+	protected.minReplicaKeeperRefs = map[string][]imageCacheReplicaCandidate{}
 	protected.replicaCandidateRefs = map[string][]imageCacheReplicaCandidate{}
 
 	images, err := s.store.ListImages(model.ImageFilter{PlatformAdmin: true})
@@ -524,10 +597,12 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	imageByID := map[string]model.Image{}
 	for _, image := range images {
 		imageByID[image.ID] = image
-		keys := imageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		addImageCacheDetail(protected.imageIDsByRef, keys, image.ID)
 		switch strings.TrimSpace(image.LifecycleState) {
 		case model.ImageLifecycleAvailable:
-			addKeys(protected.availableRefs, keys...)
+			// Available images are protected by node-aware minimum replica
+			// keepers below, not by a repo-wide available-image key.
 		case model.ImageLifecycleLost:
 			addKeys(protected.lostRefs, keys...)
 		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
@@ -540,10 +615,12 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	}
 	for _, alias := range aliases {
 		image := imageByID[alias.ImageID]
-		keys := imageReferenceKeys(alias.AliasRef, firstNonEmptyImageAPIString(alias.Digest, image.CanonicalDigest))
+		keys := exactImageReferenceKeys(alias.AliasRef, firstNonEmptyImageAPIString(alias.Digest, image.CanonicalDigest))
+		addImageCacheDetail(protected.imageIDsByRef, keys, image.ID)
 		switch strings.TrimSpace(image.LifecycleState) {
 		case model.ImageLifecycleAvailable:
-			addKeys(protected.availableRefs, keys...)
+			// Available aliases are protected by node-aware minimum replica
+			// keepers below, not by a repo-wide available-image key.
 		case model.ImageLifecycleLost:
 			addKeys(protected.lostRefs, keys...)
 		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
@@ -560,12 +637,16 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			continue
 		}
 		image := imageByID[pin.ImageID]
-		addKeys(protected.pinnedRefs, imageReferenceKeys(image.ImageRef, image.CanonicalDigest)...)
+		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		addKeys(protected.pinnedRefs, keys...)
+		addImageCacheDetail(protected.pinIDsByRef, keys, pin.ID)
 	}
 	apps, err := s.store.ListAppsMetadata("", true)
 	if err == nil {
 		for ref := range s.liveManagedImageRefSet(r.Context(), apps) {
-			addKeys(protected.liveRefs, imageReferenceKeys(ref, "")...)
+			keys := exactImageReferenceKeys(ref, "")
+			addKeys(protected.liveRefs, keys...)
+			addImageCacheDetail(protected.workloadRefsByRef, keys, ref)
 		}
 	}
 	for _, status := range []string{model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning} {
@@ -577,8 +658,15 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			if strings.TrimSpace(options.skipNodeUpdateTaskID) != "" && task.ID == strings.TrimSpace(options.skipNodeUpdateTaskID) {
 				continue
 			}
-			addKeys(protected.taskRefs, imageReferenceKeys(task.Payload["image_ref"], task.Payload["digest"])...)
-			addKeys(protected.taskRefs, imageReferenceKeys(task.Payload["images"], "")...)
+			if imageCacheNodeUpdateTaskObsolete(task, imageByID) {
+				continue
+			}
+			keys := exactImageReferenceKeys(task.Payload["image_ref"], task.Payload["digest"])
+			addKeys(protected.taskRefs, keys...)
+			addImageCacheDetail(protected.taskIDsByRef, keys, task.ID)
+			keys = exactImageReferenceKeys(task.Payload["images"], "")
+			addKeys(protected.taskRefs, keys...)
+			addImageCacheDetail(protected.taskIDsByRef, keys, task.ID)
 			if raw := strings.TrimSpace(task.Payload["targets_json"]); raw != "" {
 				var targets []struct {
 					Repo   string `json:"repo"`
@@ -587,7 +675,9 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 				}
 				if json.Unmarshal([]byte(raw), &targets) == nil {
 					for _, target := range targets {
-						addKeys(protected.taskRefs, manifestReferenceKeys(target.Repo, target.Target, target.Digest, "")...)
+						keys := exactManifestReferenceKeys(target.Repo, target.Target, target.Digest, "")
+						addKeys(protected.taskRefs, keys...)
+						addImageCacheDetail(protected.taskIDsByRef, keys, task.ID)
 					}
 				}
 			}
@@ -600,11 +690,84 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 		}
 		for _, task := range tasks {
 			image := imageByID[task.ImageID]
-			addKeys(protected.taskRefs, imageReferenceKeys(image.ImageRef, image.CanonicalDigest)...)
+			if strings.TrimSpace(image.ID) == "" || imageCacheReplicationTaskObsolete(task, image) {
+				continue
+			}
+			keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+			addKeys(protected.taskRefs, keys...)
+			addImageCacheDetail(protected.taskIDsByRef, keys, task.ID)
 		}
 	}
 	if err := s.populateImageCacheReplicaCandidateRefs(protected, images); err != nil {
 		return err
+	}
+	if err := s.populateImageCacheMinimumReplicaRefs(protected, images); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) populateImageCacheMinimumReplicaRefs(protected *imageCacheProtectedSet, images []model.Image) error {
+	if protected == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	for _, image := range images {
+		switch strings.TrimSpace(image.LifecycleState) {
+		case "", model.ImageLifecycleAvailable, model.ImageLifecycleImporting:
+		default:
+			continue
+		}
+		replicas, err := s.store.ListImageReplicas(model.ImageReplicaFilter{
+			ImageID:       image.ID,
+			Status:        model.ImageReplicaStatusPresent,
+			PlatformAdmin: true,
+		})
+		if err != nil {
+			return err
+		}
+		healthy := healthyImageReplicasAPI(replicas, now)
+		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		if len(healthy) == 0 {
+			addKeys(protected.minReplicaRefs, keys...)
+			addImageCacheDetail(protected.imageIDsByRef, keys, image.ID)
+			continue
+		}
+		sort.SliceStable(healthy, func(i, j int) bool {
+			left := healthy[i].UpdatedAt
+			if healthy[i].LastVerifiedAt != nil {
+				left = *healthy[i].LastVerifiedAt
+			}
+			right := healthy[j].UpdatedAt
+			if healthy[j].LastVerifiedAt != nil {
+				right = *healthy[j].LastVerifiedAt
+			}
+			if !left.Equal(right) {
+				return left.After(right)
+			}
+			return healthy[i].ID < healthy[j].ID
+		})
+		for idx, replica := range healthy {
+			if idx < 1 {
+				addImageCacheReplicaCandidate(protected.minReplicaKeeperRefs, keys, imageCacheReplicaCandidate{
+					NodeID:          strings.TrimSpace(replica.NodeID),
+					RuntimeID:       strings.TrimSpace(replica.RuntimeID),
+					ClusterNodeName: strings.TrimSpace(replica.ClusterNodeName),
+					Reason:          "minimum_replica_count",
+					ReplicaID:       strings.TrimSpace(replica.ID),
+				})
+				addImageCacheDetail(protected.replicaIDsByRef, keys, replica.ID)
+				addImageCacheDetail(protected.imageIDsByRef, keys, image.ID)
+				continue
+			}
+			addImageCacheReplicaCandidate(protected.replicaCandidateRefs, keys, imageCacheReplicaCandidate{
+				NodeID:          strings.TrimSpace(replica.NodeID),
+				RuntimeID:       strings.TrimSpace(replica.RuntimeID),
+				ClusterNodeName: strings.TrimSpace(replica.ClusterNodeName),
+				Reason:          "excess_replica",
+				ReplicaID:       strings.TrimSpace(replica.ID),
+			})
+		}
 	}
 	return nil
 }
@@ -622,7 +785,7 @@ func (s *Server) populateImageCacheReplicaCandidateRefs(protected *imageCachePro
 		if err != nil {
 			return err
 		}
-		keys := imageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		keys := exactImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
 		for _, replica := range replicas {
 			reason := imageCacheReplicaCandidateReason(replica.Status)
 			if reason == "" {
@@ -633,6 +796,7 @@ func (s *Server) populateImageCacheReplicaCandidateRefs(protected *imageCachePro
 				RuntimeID:       strings.TrimSpace(replica.RuntimeID),
 				ClusterNodeName: strings.TrimSpace(replica.ClusterNodeName),
 				Reason:          reason,
+				ReplicaID:       strings.TrimSpace(replica.ID),
 			})
 		}
 	}
@@ -640,15 +804,18 @@ func (s *Server) populateImageCacheReplicaCandidateRefs(protected *imageCachePro
 }
 
 func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, protected imageCacheProtectedSet, now time.Time) model.ImageCachePruneCandidate {
-	keys := manifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
+	keys := exactManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
 	out := model.ImageCachePruneCandidate{
-		ImageRef:           manifest.ImageRef,
-		Repo:               manifest.Repo,
-		Target:             manifest.Target,
-		Digest:             manifest.Digest,
-		ReferencedBlobs:    append([]string(nil), manifest.ReferencedBlobs...),
-		PlannedDeleteBytes: firstNonZeroInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
-		LastSeenAt:         manifest.LastSeenAt.UTC().Format(time.RFC3339),
+		ImageRef:            manifest.ImageRef,
+		NodeName:            firstNonEmptyImageAPIString(manifest.ClusterNodeName, manifest.NodeID, manifest.RuntimeID),
+		Repo:                manifest.Repo,
+		Target:              manifest.Target,
+		Digest:              manifest.Digest,
+		ReferencedBlobs:     append([]string(nil), manifest.ReferencedBlobs...),
+		PlannedDeleteBytes:  firstNonZeroInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
+		ReferencedBlobCount: len(manifest.ReferencedBlobs),
+		ReferencedBlobBytes: manifest.TotalBlobBytes,
+		LastSeenAt:          manifest.LastSeenAt.UTC().Format(time.RFC3339),
 	}
 	if manifest.CreatedAtObserved != nil {
 		out.CreatedAtObserved = manifest.CreatedAtObserved.UTC().Format(time.RFC3339)
@@ -656,21 +823,37 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 	if manifest.PinnedLocally {
 		out.Protected = true
 		out.SkipReason = "local_pin"
+		out.SkipDetails = []string{"manifest is pinned locally on the node"}
 		return out
 	}
 	if keySetContainsAny(protected.liveRefs, keys...) {
 		out.Protected = true
 		out.SkipReason = "current_workload"
+		out.MatchedWorkloadRefs = imageCacheDetailsForKeys(protected.workloadRefsByRef, keys)
+		out.SkipDetails = []string{"exact image generation is used by a live workload"}
 		return out
 	}
 	if keySetContainsAny(protected.pinnedRefs, keys...) {
 		out.Protected = true
 		out.SkipReason = "active_pin"
+		out.MatchedPinIDs = imageCacheDetailsForKeys(protected.pinIDsByRef, keys)
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
+		out.SkipDetails = []string{"exact image generation has an active image pin"}
 		return out
 	}
 	if keySetContainsAny(protected.taskRefs, keys...) {
 		out.Protected = true
 		out.SkipReason = "active_task"
+		out.MatchedTaskIDs = imageCacheDetailsForKeys(protected.taskIDsByRef, keys)
+		out.SkipDetails = []string{"exact image generation is referenced by an active node/image replication task"}
+		return out
+	}
+	if ids := imageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys); len(ids) > 0 {
+		out.Protected = true
+		out.SkipReason = "minimum_replica_count"
+		out.MatchedReplicaIDs = ids
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
+		out.SkipDetails = []string{"node-aware minimum replica keeper protects this local copy"}
 		return out
 	}
 	ageBase := manifest.LastSeenAt
@@ -680,25 +863,31 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 	if !ageBase.IsZero() && now.Sub(ageBase) < defaultImageCacheOrphanGracePeriod {
 		out.Protected = true
 		out.SkipReason = "recent_manifest"
+		out.SkipDetails = []string{"manifest is newer than the configured minimum age"}
 		return out
-	}
-	if keySetContainsAny(protected.availableRefs, keys...) {
-		if _, ok := imageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys); !ok {
-			out.Protected = true
-			out.SkipReason = "available_image"
-			return out
-		}
 	}
 	if keySetContainsAny(protected.lostRefs, keys...) {
 		out.Reason = "lost_image"
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
 		return out
 	}
 	if keySetContainsAny(protected.deletedRefs, keys...) {
 		out.Reason = "deleted_image_generation"
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
 		return out
 	}
 	if reason, ok := imageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys); ok {
 		out.Reason = reason
+		out.MatchedReplicaIDs = imageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys)
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
+		return out
+	}
+	if keySetContainsAny(protected.minReplicaRefs, keys...) {
+		out.Protected = true
+		out.SkipReason = "minimum_replica_count"
+		out.MatchedReplicaIDs = imageCacheDetailsForKeys(protected.replicaIDsByRef, keys)
+		out.MatchedImageIDs = imageCacheDetailsForKeys(protected.imageIDsByRef, keys)
+		out.SkipDetails = []string{"no healthy replica exists; keep one exact image generation until repair or retention marks it removable"}
 		return out
 	}
 	out.Reason = "missing_control_plane_image"
@@ -719,7 +908,7 @@ func addImageCacheReplicaCandidate(set map[string][]imageCacheReplicaCandidate, 
 		return
 	}
 	for _, key := range keys {
-		key = strings.TrimSpace(key)
+		key = strings.ToLower(strings.TrimSpace(key))
 		if key == "" {
 			continue
 		}
@@ -729,13 +918,26 @@ func addImageCacheReplicaCandidate(set map[string][]imageCacheReplicaCandidate, 
 
 func imageCacheReplicaCandidateForManifest(set map[string][]imageCacheReplicaCandidate, manifest model.ImageCacheManifest, keys []string) (string, bool) {
 	for _, key := range keys {
-		for _, candidate := range set[strings.TrimSpace(key)] {
+		for _, candidate := range set[strings.ToLower(strings.TrimSpace(key))] {
 			if imageCacheReplicaCandidateMatchesManifest(candidate, manifest) {
 				return candidate.Reason, true
 			}
 		}
 	}
 	return "", false
+}
+
+func imageCacheReplicaIDsForManifest(set map[string][]imageCacheReplicaCandidate, manifest model.ImageCacheManifest, keys []string) []string {
+	out := []string{}
+	for _, key := range keys {
+		for _, candidate := range set[strings.ToLower(strings.TrimSpace(key))] {
+			if candidate.ReplicaID == "" || !imageCacheReplicaCandidateMatchesManifest(candidate, manifest) {
+				continue
+			}
+			out = append(out, candidate.ReplicaID)
+		}
+	}
+	return uniqueNonEmptyStrings(out)
 }
 
 func imageCacheReplicaCandidateMatchesManifest(candidate imageCacheReplicaCandidate, manifest model.ImageCacheManifest) bool {
@@ -842,13 +1044,21 @@ func imageReferenceKeys(ref, digest string) []string {
 	return imagecachekeys.ImageReferenceKeys(ref, digest)
 }
 
+func exactImageReferenceKeys(ref, digest string) []string {
+	return imagecachekeys.ExactImageReferenceKeys(ref, digest)
+}
+
 func manifestReferenceKeys(repo, target, digest, imageRef string) []string {
 	return imagecachekeys.ManifestReferenceKeys(repo, target, digest, imageRef)
 }
 
+func exactManifestReferenceKeys(repo, target, digest, imageRef string) []string {
+	return imagecachekeys.ExactManifestReferenceKeys(repo, target, digest, imageRef)
+}
+
 func addKeys(set map[string]struct{}, values ...string) {
 	for _, value := range values {
-		value = strings.TrimSpace(value)
+		value = strings.ToLower(strings.TrimSpace(value))
 		if value == "" {
 			continue
 		}
@@ -856,9 +1066,76 @@ func addKeys(set map[string]struct{}, values ...string) {
 	}
 }
 
+func addImageCacheDetail(set map[string][]string, keys []string, value string) {
+	value = strings.TrimSpace(value)
+	if set == nil || value == "" {
+		return
+	}
+	for _, key := range keys {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		set[key] = append(set[key], value)
+	}
+}
+
+func imageCacheDetailsForKeys(set map[string][]string, keys []string) []string {
+	out := []string{}
+	for _, key := range keys {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		out = append(out, set[key]...)
+	}
+	return uniqueNonEmptyStrings(out)
+}
+
+func healthyImageReplicasAPI(replicas []model.ImageReplica, now time.Time) []model.ImageReplica {
+	out := make([]model.ImageReplica, 0, len(replicas))
+	for _, replica := range replicas {
+		if replica.Status != model.ImageReplicaStatusPresent {
+			continue
+		}
+		if replica.LeaseExpiresAt != nil && replica.LeaseExpiresAt.Before(now) {
+			continue
+		}
+		out = append(out, replica)
+	}
+	return out
+}
+
+func imageCacheReplicationTaskObsolete(task model.ImageReplicationTask, image model.Image) bool {
+	switch strings.TrimSpace(image.LifecycleState) {
+	case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted, model.ImageLifecycleLost:
+		return strings.TrimSpace(task.Priority) != model.ImageReplicationPriorityDeployBlocking
+	default:
+		return false
+	}
+}
+
+func imageCacheNodeUpdateTaskObsolete(task model.NodeUpdateTask, imageByID map[string]model.Image) bool {
+	if task.Type != model.NodeUpdateTaskTypeReplicateAppImage {
+		return false
+	}
+	image := imageByID[strings.TrimSpace(task.Payload["image_id"])]
+	if strings.TrimSpace(image.ID) == "" {
+		return strings.TrimSpace(task.Payload["image_id"]) != ""
+	}
+	return imageCacheReplicationTaskObsolete(model.ImageReplicationTask{Priority: task.Payload["priority"]}, image)
+}
+
+func imageCacheNodePressure(node model.ImageCacheNodeInventory) bool {
+	if node.FilesystemUsedPercent >= 85 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(node.Status)), "pressure")
+}
+
 func keySetContainsAny(set map[string]struct{}, values ...string) bool {
 	for _, value := range values {
-		if _, ok := set[strings.TrimSpace(value)]; ok {
+		if _, ok := set[strings.ToLower(strings.TrimSpace(value))]; ok {
 			return true
 		}
 	}

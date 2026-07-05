@@ -103,16 +103,52 @@ func (s *Service) sweepDistributedImageRetention(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list apps: %w", err)
 	}
+	ops, err := s.Store.ListOperations("", true)
+	if err != nil {
+		return fmt.Errorf("list operations: %w", err)
+	}
+	opsByAppID := make(map[string][]model.Operation)
+	for _, op := range ops {
+		appID := strings.TrimSpace(op.AppID)
+		if appID == "" {
+			continue
+		}
+		opsByAppID[appID] = append(opsByAppID[appID], op)
+	}
+	liveRefs := s.liveManagedImageRefSet(ctx, apps)
+	tenantIDs := make(map[string]struct{})
 	var errs []error
 	for _, app := range apps {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, fmt.Errorf("stop distributed image retention sweep: %w", err))
 			break
 		}
-		if err := s.scheduleDistributedImagePruneForApp(ctx, app); err != nil {
-			errs = append(errs, fmt.Errorf("schedule app %s distributed image prune: %w", strings.TrimSpace(app.ID), err))
+		if tenantID := strings.TrimSpace(app.TenantID); tenantID != "" {
+			tenantIDs[tenantID] = struct{}{}
+		}
+		plan, err := s.reconcileDistributedImageRetentionForApp(ctx, app, opsByAppID[app.ID], liveRefs)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("reconcile app %s distributed image retention: %w", strings.TrimSpace(app.ID), err))
 			if isContextStopped(ctx, err) {
 				break
+			}
+			continue
+		}
+		if s.Logger != nil && len(plan.DropImageIDs) > 0 {
+			s.Logger.Printf("distributed image retention reconciled %s", distributedImageRetentionPlanSummary(plan))
+		}
+	}
+	if s.syncBillingImageStorage {
+		for tenantID := range tenantIDs {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, fmt.Errorf("stop distributed tenant billing image storage sync: %w", err))
+				break
+			}
+			if err := s.syncTenantBillingImageStorage(ctx, tenantID); err != nil {
+				errs = append(errs, fmt.Errorf("sync tenant %s billing image storage: %w", tenantID, err))
+				if isContextStopped(ctx, err) {
+					break
+				}
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -266,6 +267,9 @@ func (s *Server) handleNodeUpdaterClaimTask(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.NodeUpdateTask) (string, error) {
+	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage {
+		return s.refuseUnsafeReplicateAppImageTaskClaim(task)
+	}
 	if task.Type != model.NodeUpdateTaskTypePruneImageCache {
 		return "", nil
 	}
@@ -277,6 +281,21 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 		return "", err
 	}
 	if len(targets) == 0 {
+		if strings.TrimSpace(task.Payload["prune_reason"]) == "image-cache-orphan" && nodeUpdatePayloadBool(task.Payload["include_unreferenced_blobs"]) {
+			plan, err := s.computeImageCachePrunePlanWithOptions(r, model.ImageCachePrunePlanFilter{
+				NodeID:          task.MachineID,
+				ClusterNodeName: task.ClusterNodeName,
+				RuntimeID:       task.RuntimeID,
+				Mode:            model.ImageCachePruneModeDelete,
+			}, imageCachePrunePlanOptions{skipNodeUpdateTaskID: task.ID})
+			if err != nil {
+				return "", err
+			}
+			if plan.CandidateBlobCount > 0 || plan.CandidateBlobBytes > 0 {
+				return "", nil
+			}
+			return "refuse prune-image-cache delete task before execution: latest plan has no unreferenced blob candidates", nil
+		}
 		if strings.TrimSpace(task.Payload["prune_reason"]) == "image-cache-orphan" {
 			return "refuse prune-image-cache delete task before execution: orphan delete task has no explicit targets_json", nil
 		}
@@ -307,6 +326,47 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 		}
 	}
 	return "", nil
+}
+
+func (s *Server) refuseUnsafeReplicateAppImageTaskClaim(task model.NodeUpdateTask) (string, error) {
+	imageID := strings.TrimSpace(task.Payload["image_id"])
+	if imageID == "" {
+		return "", nil
+	}
+	image, err := s.store.GetImage(imageID, "", true)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "refuse replicate-app-image task before execution: image no longer exists", nil
+		}
+		return "", err
+	}
+	priority := strings.TrimSpace(task.Payload["priority"])
+	if priority != model.ImageReplicationPriorityDeployBlocking {
+		switch strings.TrimSpace(image.LifecycleState) {
+		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted, model.ImageLifecycleLost:
+			return "refuse replicate-app-image task before execution: image generation is no longer eligible for replication", nil
+		}
+	}
+	replicationTaskID := strings.TrimSpace(task.Payload["replication_task_id"])
+	if replicationTaskID == "" {
+		return "", nil
+	}
+	tasks, err := s.store.ListImageReplicationTasks(model.ImageReplicationTaskFilter{ImageID: imageID, PlatformAdmin: true})
+	if err != nil {
+		return "", err
+	}
+	for _, replicationTask := range tasks {
+		if replicationTask.ID != replicationTaskID {
+			continue
+		}
+		switch strings.TrimSpace(replicationTask.Status) {
+		case model.ImageReplicationTaskStatusPending, model.ImageReplicationTaskStatusRunning:
+			return "", nil
+		default:
+			return "refuse replicate-app-image task before execution: linked replication task is no longer pending", nil
+		}
+	}
+	return "refuse replicate-app-image task before execution: linked replication task no longer exists", nil
 }
 
 type imageCachePruneTaskValidationTarget struct {
@@ -375,7 +435,7 @@ func keySetFromValues(values []string) map[string]struct{} {
 
 func imageCacheAutomaticDeleteUnsafeCandidateReason(reason string) string {
 	switch strings.TrimSpace(reason) {
-	case "missing_control_plane_image", "lost_image":
+	case "missing_control_plane_image", "lost_image", "deleted_image_generation", "stale_replica", "excess_replica":
 		return ""
 	case "":
 		return "missing candidate reason"
@@ -464,6 +524,9 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		"prune_plan_id",
 		"max_delete_bytes",
 		"min_manifest_age",
+		"include_unreferenced_blobs",
+		"candidate_blob_count",
+		"candidate_blob_bytes",
 		"expected_image_size_bytes",
 		"expected_lv_count",
 		"expected_bound_pv_count",
@@ -2412,17 +2475,25 @@ prune_image_cache() {
   local digest="${FUGUE_NODE_UPDATE_TASK_DIGEST:-}"
   local max_delete_bytes="${FUGUE_NODE_UPDATE_TASK_MAX_DELETE_BYTES:-}"
   local min_manifest_age="${FUGUE_NODE_UPDATE_TASK_MIN_MANIFEST_AGE:-}"
+  local include_unreferenced_blobs="${FUGUE_NODE_UPDATE_TASK_INCLUDE_UNREFERENCED_BLOBS:-false}"
   local targets_json="${FUGUE_NODE_UPDATE_TASK_TARGETS_JSON:-[]}"
   local body
   local response
+  local planned_delete_bytes
+  local deleted_bytes
+  local candidate_count
   case "${dry_run}" in true|false) ;; *) dry_run=true ;; esac
   case "${allow_delete}" in true|false) ;; *) allow_delete=false ;; esac
+  case "${include_unreferenced_blobs}" in true|false) ;; *) include_unreferenced_blobs=false ;; esac
   case "${targets_json}" in
     \[*\]) ;;
     *) targets_json="[]" ;;
   esac
-  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\",\"min_manifest_age\":\"$(json_escape_shell "${min_manifest_age}")\",\"targets\":${targets_json}}"
+  body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\",\"min_manifest_age\":\"$(json_escape_shell "${min_manifest_age}")\",\"include_unreferenced_blobs\":${include_unreferenced_blobs},\"targets\":${targets_json}}"
   response="$(image_cache_api_json /fugue/cache/v1/prune "${body}")"
+  planned_delete_bytes="$(printf '%s' "${response}" | sed -n 's/.*"planned_delete_bytes"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"
+  deleted_bytes="$(printf '%s' "${response}" | sed -n 's/.*"deleted_bytes"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"
+  candidate_count="$(printf '%s' "${response}" | sed -n 's/.*"candidate_count"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"
   if printf '%s' "${response}" | grep -Eq '"deleted"[[:space:]]*:[[:space:]]*true'; then
     if [ -n "${image_id}" ]; then
       report_image_replica "${image_id}" "${digest}" missing "image-cache prune deleted local replica"
@@ -2432,7 +2503,9 @@ prune_image_cache() {
     log_task "image-cache prune delete completed; reporting post-prune inventory"
     report_image_cache_inventory
   fi
-  log_task "image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete}"
+  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE="image-cache prune completed dry_run=${dry_run} allow_delete=${allow_delete} planned_delete_bytes=${planned_delete_bytes:-0} deleted_bytes=${deleted_bytes:-0} candidate_count=${candidate_count:-0}"
+  export FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE
+  log_task "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE}"
 }
 
 localpv_inventory_json() {
@@ -2909,9 +2982,10 @@ run_once() {
   fi
   log "claiming task ${FUGUE_NODE_UPDATE_TASK_ID} (${FUGUE_NODE_UPDATE_TASK_TYPE})"
   claim_task
+  FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE=""
   if run_task; then
     clear_last_error
-    complete_task completed "node update task completed"
+    complete_task completed "${FUGUE_NODE_UPDATE_TASK_RESULT_MESSAGE:-node update task completed}"
     heartbeat || true
     return 0
   else

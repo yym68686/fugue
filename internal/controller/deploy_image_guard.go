@@ -881,7 +881,7 @@ func (s *Service) recordImportedDistributedImage(ctx context.Context, app model.
 			AppID:       strings.TrimSpace(app.ID),
 			OperationID: strings.TrimSpace(op.ID),
 			Reason:      model.ImagePinReasonCurrentDeploy,
-			MinReplicas: s.imageMinReplicaCount(),
+			MinReplicas: 1,
 		},
 		{
 			ImageID:     image.ID,
@@ -889,7 +889,7 @@ func (s *Service) recordImportedDistributedImage(ctx context.Context, app model.
 			AppID:       strings.TrimSpace(app.ID),
 			OperationID: strings.TrimSpace(op.ID),
 			Reason:      model.ImagePinReasonRollbackWindow,
-			MinReplicas: maxInt(1, s.imageMinReplicaCount()),
+			MinReplicas: 1,
 			ExpiresAt:   timePointer(now.Add(7 * 24 * time.Hour)),
 		},
 	} {

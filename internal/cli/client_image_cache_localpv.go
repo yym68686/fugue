@@ -22,6 +22,11 @@ type imageCachePrunePlanTaskResponse struct {
 	Task model.NodeUpdateTask      `json:"task,omitempty"`
 }
 
+type imageRetentionPlanResponse struct {
+	Plan  model.DistributedImageRetentionPlan   `json:"plan,omitempty"`
+	Plans []model.DistributedImageRetentionPlan `json:"plans"`
+}
+
 type createImageCachePrunePlanTaskRequest struct {
 	NodeID          string `json:"node_id,omitempty"`
 	ClusterNodeName string `json:"cluster_node_name,omitempty"`
@@ -92,6 +97,28 @@ func (c *Client) CreateImageCachePrunePlanTask(request createImageCachePrunePlan
 		return model.ImageCachePrunePlan{}, model.NodeUpdateTask{}, err
 	}
 	return response.Plan, response.Task, nil
+}
+
+func (c *Client) GetImageRetentionPlan(appSelector string, all bool) ([]model.DistributedImageRetentionPlan, error) {
+	query := url.Values{}
+	if strings.TrimSpace(appSelector) != "" {
+		query.Set("app", strings.TrimSpace(appSelector))
+	}
+	if all {
+		query.Set("all", "true")
+	}
+	relative := "/v1/admin/image-retention/plan"
+	if encoded := query.Encode(); encoded != "" {
+		relative += "?" + encoded
+	}
+	var response imageRetentionPlanResponse
+	if err := c.doJSON(http.MethodGet, relative, nil, &response); err != nil {
+		return nil, err
+	}
+	if len(response.Plans) == 0 && strings.TrimSpace(response.Plan.AppID) != "" {
+		response.Plans = []model.DistributedImageRetentionPlan{response.Plan}
+	}
+	return response.Plans, nil
 }
 
 func (c *Client) ListLocalPVInventories(nodeID, clusterNodeName, runtimeID string) ([]model.LocalPVInventory, error) {

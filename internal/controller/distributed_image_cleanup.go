@@ -104,7 +104,12 @@ func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model
 		return err
 	}
 	healthy := healthyImageReplicas(replicas, now)
-	if len(healthy) <= s.imageMinReplicaCount() {
+	minKeep := s.imageMinReplicaCount()
+	switch strings.TrimSpace(image.LifecycleState) {
+	case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted, model.ImageLifecycleLost:
+		minKeep = 0
+	}
+	if len(healthy) <= minKeep {
 		return nil
 	}
 	updaters, err := s.Store.ListNodeUpdaters("", true)
@@ -115,7 +120,7 @@ func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model
 	for _, updater := range updaters {
 		updatersByTarget[distributedImageReplicaTargetKey(updater.MachineID, updater.RuntimeID, updater.ClusterNodeName)] = updater
 	}
-	for idx := s.imageMinReplicaCount(); idx < len(healthy); idx++ {
+	for idx := minKeep; idx < len(healthy); idx++ {
 		replica := healthy[idx]
 		updater, ok := updatersByTarget[distributedImageReplicaTargetKey(replica.NodeID, replica.RuntimeID, replica.ClusterNodeName)]
 		if !ok || !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) {
@@ -151,7 +156,7 @@ func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model
 			"allow_delete":     allowDelete,
 			"replica_id":       replica.ID,
 			"prune_reason":     "unpinned-excess-replica",
-			"min_replicas":     fmt.Sprint(s.imageMinReplicaCount()),
+			"min_replicas":     fmt.Sprint(minKeep),
 			"max_delete_bytes": strings.TrimSpace(s.Config.ImageStorePruneMaxDeleteBytes),
 		})
 		if err != nil && !errors.Is(err, store.ErrInvalidInput) {

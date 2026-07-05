@@ -15,6 +15,12 @@ import (
 	"fugue/internal/store"
 )
 
+const (
+	defaultImageCachePruneGlobalConcurrency = 1
+	defaultImageCachePruneNodeCooldown      = 30 * time.Minute
+	defaultImageCachePressurePruneBudget    = int64(25 << 30)
+)
+
 func (s *Service) runImageCacheStorageMaintenance(ctx context.Context) error {
 	if err := s.scheduleImageCacheInventoryReports(ctx); err != nil {
 		return err
@@ -134,13 +140,23 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	activeGlobal, err := s.controllerImageCacheActivePruneTaskCount()
+	if err != nil {
+		return err
+	}
+	if activeGlobal >= defaultImageCachePruneGlobalConcurrency {
+		if s.Logger != nil {
+			s.Logger.Printf("skip image-cache orphan prune scheduling: global prune concurrency limit reached active=%d limit=%d", activeGlobal, defaultImageCachePruneGlobalConcurrency)
+		}
+		return nil
+	}
 	for _, item := range plans {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		node := item.node
 		plan := item.plan
-		if plan.CandidateManifestCount == 0 {
+		if plan.CandidateManifestCount == 0 && plan.CandidateBlobCount == 0 {
 			continue
 		}
 		updater, ok := controllerImageCacheUpdaterForNode(updaters, node)
@@ -167,8 +183,18 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			}
 			continue
 		}
+		coolingDown, cooldownUntil, err := s.controllerImageCacheNodePruneCoolingDown(updater.ID)
+		if err != nil {
+			return err
+		}
+		if coolingDown {
+			if s.Logger != nil {
+				s.Logger.Printf("skip image-cache orphan prune for node=%s updater=%s: cooldown until %s", plan.ClusterNodeName, updater.ID, cooldownUntil.Format(time.RFC3339))
+			}
+			continue
+		}
 		targets := controllerImageCachePruneTargets(plan.Candidates, s.Config.ImageStoreOrphanPruneMaxTargetsPerNode)
-		if len(targets) == 0 {
+		if len(targets) == 0 && plan.CandidateBlobCount == 0 {
 			continue
 		}
 		targetsRaw, err := json.Marshal(targets)
@@ -178,15 +204,25 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		dryRun := mode != model.ImageCachePruneModeDelete
 		allowDelete := mode == model.ImageCachePruneModeDelete
 		if _, err := s.Store.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
-			"prune_plan_id":    plan.ID,
-			"dry_run":          fmt.Sprintf("%t", dryRun),
-			"allow_delete":     fmt.Sprintf("%t", allowDelete),
-			"targets_json":     string(targetsRaw),
-			"max_delete_bytes": s.controllerImageCacheMaxDeleteBytesString(),
-			"min_manifest_age": s.controllerImageCacheGracePeriod().String(),
-			"prune_reason":     "image-cache-orphan",
-		}); err != nil && !errors.Is(err, store.ErrInvalidInput) {
-			return err
+			"prune_plan_id":              plan.ID,
+			"dry_run":                    fmt.Sprintf("%t", dryRun),
+			"allow_delete":               fmt.Sprintf("%t", allowDelete),
+			"targets_json":               string(targetsRaw),
+			"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
+			"min_manifest_age":           s.controllerImageCacheGracePeriod().String(),
+			"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
+			"candidate_blob_count":       fmt.Sprintf("%d", plan.CandidateBlobCount),
+			"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
+			"prune_reason":               "image-cache-orphan",
+		}); err != nil {
+			if !errors.Is(err, store.ErrInvalidInput) {
+				return err
+			}
+		} else {
+			activeGlobal++
+			if activeGlobal >= defaultImageCachePruneGlobalConcurrency {
+				break
+			}
 		}
 	}
 	return nil
@@ -238,6 +274,70 @@ func (s *Service) controllerImageCacheHasActivePruneTask(updaterID string) (bool
 	return false, nil
 }
 
+func (s *Service) controllerImageCacheActivePruneTaskCount() (int, error) {
+	if s == nil || s.Store == nil {
+		return 0, nil
+	}
+	count := 0
+	for _, status := range []string{model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning} {
+		tasks, err := s.Store.ListNodeUpdateTasks("", true, "", status)
+		if err != nil {
+			return 0, err
+		}
+		for _, task := range tasks {
+			if controllerImageCacheControllerPruneTask(task) {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
+func (s *Service) controllerImageCacheNodePruneCoolingDown(updaterID string) (bool, time.Time, error) {
+	if s == nil || s.Store == nil {
+		return false, time.Time{}, nil
+	}
+	updaterID = strings.TrimSpace(updaterID)
+	if updaterID == "" {
+		return false, time.Time{}, nil
+	}
+	now := time.Now().UTC()
+	for _, status := range []string{model.NodeUpdateTaskStatusCompleted, model.NodeUpdateTaskStatusFailed} {
+		tasks, err := s.Store.ListNodeUpdateTasks("", true, updaterID, status)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		for _, task := range tasks {
+			if !controllerImageCacheControllerPruneTask(task) {
+				continue
+			}
+			finished := task.UpdatedAt
+			if task.CompletedAt != nil {
+				finished = *task.CompletedAt
+			}
+			if finished.IsZero() {
+				finished = task.CreatedAt
+			}
+			cooldownUntil := finished.UTC().Add(defaultImageCachePruneNodeCooldown)
+			if cooldownUntil.After(now) {
+				return true, cooldownUntil, nil
+			}
+			break
+		}
+	}
+	return false, time.Time{}, nil
+}
+
+func controllerImageCacheControllerPruneTask(task model.NodeUpdateTask) bool {
+	if task.Type != model.NodeUpdateTaskTypePruneImageCache {
+		return false
+	}
+	if strings.TrimSpace(task.RequestedByID) != controllerImageCachePrunePrincipal().ActorID {
+		return false
+	}
+	return strings.TrimSpace(task.Payload["prune_reason"]) == "image-cache-orphan"
+}
+
 func controllerImageCacheUpdaterForNode(updaters []model.NodeUpdater, node model.ImageCacheNodeInventory) (model.NodeUpdater, bool) {
 	for _, updater := range updaters {
 		if !strings.EqualFold(strings.TrimSpace(updater.Status), model.NodeUpdaterStatusActive) {
@@ -278,18 +378,41 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 		ClusterNodeName:   node.ClusterNodeName,
 		RuntimeID:         node.RuntimeID,
 		Mode:              mode,
-		MaxDeleteBytes:    s.controllerImageCacheMaxDeleteBytes(),
+		MaxDeleteBytes:    s.controllerImageCacheMaxDeleteBytesForNode(node),
 		MinManifestAge:    s.controllerImageCacheGracePeriod().String(),
 		ProtectionSummary: map[string]int{},
 		CandidateSummary:  map[string]int{},
 		CreatedAt:         now,
 		Status:            model.ImageCachePrunePlanStatusPlanned,
+		NodePressure:      controllerImageCacheNodePressure(node),
+	}
+	for _, blob := range node.UnreferencedBlobs {
+		if strings.TrimSpace(blob.Digest) == "" {
+			continue
+		}
+		if blob.Reason == "" {
+			blob.Reason = "unreferenced_blob"
+		}
+		if blob.PlannedDeleteBytes == 0 {
+			blob.PlannedDeleteBytes = firstNonZeroControllerInt64(blob.SizeBytes)
+		}
+		if strings.TrimSpace(blob.NodeName) == "" {
+			blob.NodeName = firstNonEmptyImageCacheControllerString(node.ClusterNodeName, node.NodeID, node.RuntimeID)
+		}
+		plan.UnreferencedBlobs = append(plan.UnreferencedBlobs, blob)
+		plan.CandidateBlobCount++
+		blobBytes := firstNonZeroControllerInt64(blob.PlannedDeleteBytes, blob.SizeBytes)
+		plan.CandidateBlobBytes += blobBytes
+		plan.PlannedDeleteBytes += blobBytes
+		plan.CandidateSummary[blob.Reason]++
 	}
 	for _, manifest := range manifests {
 		candidate := s.controllerImageCacheCandidate(manifest, protected, now)
 		if candidate.Protected {
 			plan.ProtectedManifestCount++
 			plan.ProtectionSummary[candidate.SkipReason]++
+			plan.ProtectedManifests = append(plan.ProtectedManifests, candidate)
+			plan.SkippedManifests = append(plan.SkippedManifests, candidate)
 			continue
 		}
 		plan.CandidateManifestCount++
@@ -304,8 +427,12 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 		return plan.Candidates[i].PlannedDeleteBytes > plan.Candidates[j].PlannedDeleteBytes
 	})
 	if plan.MaxDeleteBytes > 0 && plan.PlannedDeleteBytes > plan.MaxDeleteBytes {
+		plan.BudgetExhausted = true
 		plan.PlannedDeleteBytes = plan.MaxDeleteBytes
 	}
+	sort.SliceStable(plan.ProtectedManifests, func(i, j int) bool {
+		return plan.ProtectedManifests[i].PlannedDeleteBytes > plan.ProtectedManifests[j].PlannedDeleteBytes
+	})
 	_ = ctx
 	return plan, nil
 }
@@ -318,6 +445,12 @@ type controllerImageCacheProtectedSet struct {
 	liveRefs             map[string]struct{}
 	taskRefs             map[string]struct{}
 	minReplicaRefs       map[string]struct{}
+	imageIDsByRef        map[string][]string
+	pinIDsByRef          map[string][]string
+	taskIDsByRef         map[string][]string
+	workloadRefsByRef    map[string][]string
+	replicaIDsByRef      map[string][]string
+	minReplicaKeeperRefs map[string][]controllerImageCacheReplicaCandidate
 	replicaCandidateRefs map[string][]controllerImageCacheReplicaCandidate
 }
 
@@ -326,6 +459,7 @@ type controllerImageCacheReplicaCandidate struct {
 	RuntimeID       string
 	ClusterNodeName string
 	Reason          string
+	ReplicaID       string
 }
 
 func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (controllerImageCacheProtectedSet, error) {
@@ -337,6 +471,12 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 		liveRefs:             map[string]struct{}{},
 		taskRefs:             map[string]struct{}{},
 		minReplicaRefs:       map[string]struct{}{},
+		imageIDsByRef:        map[string][]string{},
+		pinIDsByRef:          map[string][]string{},
+		taskIDsByRef:         map[string][]string{},
+		workloadRefsByRef:    map[string][]string{},
+		replicaIDsByRef:      map[string][]string{},
+		minReplicaKeeperRefs: map[string][]controllerImageCacheReplicaCandidate{},
 		replicaCandidateRefs: map[string][]controllerImageCacheReplicaCandidate{},
 	}
 	images, err := s.Store.ListImages(model.ImageFilter{PlatformAdmin: true})
@@ -347,9 +487,11 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 	for _, image := range images {
 		imageByID[image.ID] = image
 		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		addControllerImageDetails(protected.imageIDsByRef, keys, image.ID)
 		switch strings.TrimSpace(image.LifecycleState) {
 		case model.ImageLifecycleAvailable:
-			addControllerImageKeys(protected.availableRefs, keys...)
+			// Available images are protected by node-aware minimum replica
+			// keepers below, not by a repo-wide available-image key.
 		case model.ImageLifecycleLost:
 			addControllerImageKeys(protected.lostRefs, keys...)
 		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
@@ -363,9 +505,11 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 	for _, alias := range aliases {
 		image := imageByID[alias.ImageID]
 		keys := controllerImageReferenceKeys(alias.AliasRef, firstNonEmptyImageCacheControllerString(alias.Digest, image.CanonicalDigest))
+		addControllerImageDetails(protected.imageIDsByRef, keys, image.ID)
 		switch strings.TrimSpace(image.LifecycleState) {
 		case model.ImageLifecycleAvailable:
-			addControllerImageKeys(protected.availableRefs, keys...)
+			// Available aliases are protected by node-aware minimum replica
+			// keepers below, not by a repo-wide available-image key.
 		case model.ImageLifecycleLost:
 			addControllerImageKeys(protected.lostRefs, keys...)
 		case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted:
@@ -382,12 +526,16 @@ func (s *Service) controllerImageCacheProtectedSet(ctx context.Context) (control
 			continue
 		}
 		image := imageByID[pin.ImageID]
-		addControllerImageKeys(protected.pinnedRefs, controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)...)
+		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		addControllerImageKeys(protected.pinnedRefs, keys...)
+		addControllerImageDetails(protected.pinIDsByRef, keys, pin.ID)
 	}
 	apps, err := s.Store.ListAppsMetadata("", true)
 	if err == nil {
 		for ref := range s.liveManagedImageRefSet(ctx, apps) {
-			addControllerImageKeys(protected.liveRefs, controllerImageReferenceKeys(ref, "")...)
+			keys := controllerImageReferenceKeys(ref, "")
+			addControllerImageKeys(protected.liveRefs, keys...)
+			addControllerImageDetails(protected.workloadRefsByRef, keys, ref)
 		}
 	}
 	if err := s.populateControllerImageTaskRefs(&protected, imageByID); err != nil {
@@ -409,8 +557,15 @@ func (s *Service) populateControllerImageTaskRefs(protected *controllerImageCach
 			return err
 		}
 		for _, task := range tasks {
-			addControllerImageKeys(protected.taskRefs, controllerImageReferenceKeys(task.Payload["image_ref"], task.Payload["digest"])...)
-			addControllerImageKeys(protected.taskRefs, controllerImageReferenceKeys(task.Payload["images"], "")...)
+			if controllerNodeUpdateTaskObsolete(task, imageByID) {
+				continue
+			}
+			keys := controllerImageReferenceKeys(task.Payload["image_ref"], task.Payload["digest"])
+			addControllerImageKeys(protected.taskRefs, keys...)
+			addControllerImageDetails(protected.taskIDsByRef, keys, task.ID)
+			keys = controllerImageReferenceKeys(task.Payload["images"], "")
+			addControllerImageKeys(protected.taskRefs, keys...)
+			addControllerImageDetails(protected.taskIDsByRef, keys, task.ID)
 			if raw := strings.TrimSpace(task.Payload["targets_json"]); raw != "" {
 				var targets []struct {
 					Repo   string `json:"repo"`
@@ -419,7 +574,9 @@ func (s *Service) populateControllerImageTaskRefs(protected *controllerImageCach
 				}
 				if json.Unmarshal([]byte(raw), &targets) == nil {
 					for _, target := range targets {
-						addControllerImageKeys(protected.taskRefs, controllerManifestReferenceKeys(target.Repo, target.Target, target.Digest, "")...)
+						keys := controllerManifestReferenceKeys(target.Repo, target.Target, target.Digest, "")
+						addControllerImageKeys(protected.taskRefs, keys...)
+						addControllerImageDetails(protected.taskIDsByRef, keys, task.ID)
 					}
 				}
 			}
@@ -432,7 +589,12 @@ func (s *Service) populateControllerImageTaskRefs(protected *controllerImageCach
 		}
 		for _, task := range tasks {
 			image := imageByID[task.ImageID]
-			addControllerImageKeys(protected.taskRefs, controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)...)
+			if strings.TrimSpace(image.ID) == "" || controllerImageReplicationTaskObsolete(task, image) {
+				continue
+			}
+			keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+			addControllerImageKeys(protected.taskRefs, keys...)
+			addControllerImageDetails(protected.taskIDsByRef, keys, task.ID)
 		}
 	}
 	return nil
@@ -458,8 +620,47 @@ func (s *Service) populateControllerImageMinimumReplicaRefs(protected *controlle
 		if err != nil {
 			return err
 		}
-		if len(healthyImageReplicas(replicas, now)) <= minReplicas {
-			addControllerImageKeys(protected.minReplicaRefs, controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)...)
+		healthy := healthyImageReplicas(replicas, now)
+		keys := controllerImageReferenceKeys(image.ImageRef, image.CanonicalDigest)
+		if len(healthy) == 0 {
+			addControllerImageKeys(protected.minReplicaRefs, keys...)
+			addControllerImageDetails(protected.imageIDsByRef, keys, image.ID)
+			continue
+		}
+		sort.SliceStable(healthy, func(i, j int) bool {
+			left := healthy[i].UpdatedAt
+			if healthy[i].LastVerifiedAt != nil {
+				left = *healthy[i].LastVerifiedAt
+			}
+			right := healthy[j].UpdatedAt
+			if healthy[j].LastVerifiedAt != nil {
+				right = *healthy[j].LastVerifiedAt
+			}
+			if !left.Equal(right) {
+				return left.After(right)
+			}
+			return healthy[i].ID < healthy[j].ID
+		})
+		for idx, replica := range healthy {
+			if idx < minReplicas {
+				addControllerImageCacheReplicaCandidate(protected.minReplicaKeeperRefs, keys, controllerImageCacheReplicaCandidate{
+					NodeID:          strings.TrimSpace(replica.NodeID),
+					RuntimeID:       strings.TrimSpace(replica.RuntimeID),
+					ClusterNodeName: strings.TrimSpace(replica.ClusterNodeName),
+					Reason:          "minimum_replica_count",
+					ReplicaID:       strings.TrimSpace(replica.ID),
+				})
+				addControllerImageDetails(protected.replicaIDsByRef, keys, replica.ID)
+				addControllerImageDetails(protected.imageIDsByRef, keys, image.ID)
+				continue
+			}
+			addControllerImageCacheReplicaCandidate(protected.replicaCandidateRefs, keys, controllerImageCacheReplicaCandidate{
+				NodeID:          strings.TrimSpace(replica.NodeID),
+				RuntimeID:       strings.TrimSpace(replica.RuntimeID),
+				ClusterNodeName: strings.TrimSpace(replica.ClusterNodeName),
+				Reason:          "excess_replica",
+				ReplicaID:       strings.TrimSpace(replica.ID),
+			})
 		}
 	}
 	return nil
@@ -489,6 +690,7 @@ func (s *Service) populateControllerImageReplicaCandidateRefs(protected *control
 				RuntimeID:       strings.TrimSpace(replica.RuntimeID),
 				ClusterNodeName: strings.TrimSpace(replica.ClusterNodeName),
 				Reason:          reason,
+				ReplicaID:       strings.TrimSpace(replica.ID),
 			})
 		}
 	}
@@ -498,13 +700,16 @@ func (s *Service) populateControllerImageReplicaCandidateRefs(protected *control
 func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifest, protected controllerImageCacheProtectedSet, now time.Time) model.ImageCachePruneCandidate {
 	keys := controllerManifestReferenceKeys(manifest.Repo, manifest.Target, manifest.Digest, manifest.ImageRef)
 	out := model.ImageCachePruneCandidate{
-		ImageRef:           manifest.ImageRef,
-		Repo:               manifest.Repo,
-		Target:             manifest.Target,
-		Digest:             manifest.Digest,
-		ReferencedBlobs:    append([]string(nil), manifest.ReferencedBlobs...),
-		PlannedDeleteBytes: firstNonZeroControllerInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
-		LastSeenAt:         manifest.LastSeenAt.UTC().Format(time.RFC3339),
+		ImageRef:            manifest.ImageRef,
+		NodeName:            firstNonEmptyImageCacheControllerString(manifest.ClusterNodeName, manifest.NodeID, manifest.RuntimeID),
+		Repo:                manifest.Repo,
+		Target:              manifest.Target,
+		Digest:              manifest.Digest,
+		ReferencedBlobs:     append([]string(nil), manifest.ReferencedBlobs...),
+		PlannedDeleteBytes:  firstNonZeroControllerInt64(manifest.TotalBlobBytes, manifest.ManifestSizeBytes),
+		ReferencedBlobCount: len(manifest.ReferencedBlobs),
+		ReferencedBlobBytes: manifest.TotalBlobBytes,
+		LastSeenAt:          manifest.LastSeenAt.UTC().Format(time.RFC3339),
 	}
 	if manifest.CreatedAtObserved != nil {
 		out.CreatedAtObserved = manifest.CreatedAtObserved.UTC().Format(time.RFC3339)
@@ -516,17 +721,41 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 		{protected.liveRefs, "current_workload"},
 		{protected.pinnedRefs, "active_pin"},
 		{protected.taskRefs, "active_task"},
-		{protected.minReplicaRefs, "minimum_replica_count"},
 	} {
 		if controllerKeySetContainsAny(rule.refs, keys...) {
 			out.Protected = true
 			out.SkipReason = rule.reason
+			switch rule.reason {
+			case "current_workload":
+				out.MatchedWorkloadRefs = controllerImageDetailsForKeys(protected.workloadRefsByRef, keys)
+				out.SkipDetails = []string{"exact image generation is used by a live workload"}
+			case "active_pin":
+				out.MatchedPinIDs = controllerImageDetailsForKeys(protected.pinIDsByRef, keys)
+				out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
+				out.SkipDetails = []string{"exact image generation has an active image pin"}
+			case "active_task":
+				out.MatchedTaskIDs = controllerImageDetailsForKeys(protected.taskIDsByRef, keys)
+				out.SkipDetails = []string{"exact image generation is referenced by an active node/image replication task"}
+			case "minimum_replica_count":
+				out.MatchedReplicaIDs = controllerImageDetailsForKeys(protected.replicaIDsByRef, keys)
+				out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
+				out.SkipDetails = []string{"node-aware minimum replica keeper protects this local copy"}
+			}
 			return out
 		}
 	}
 	if manifest.PinnedLocally {
 		out.Protected = true
 		out.SkipReason = "local_pin"
+		out.SkipDetails = []string{"manifest is pinned locally on the node"}
+		return out
+	}
+	if ids := controllerImageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys); len(ids) > 0 {
+		out.Protected = true
+		out.SkipReason = "minimum_replica_count"
+		out.MatchedReplicaIDs = ids
+		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
+		out.SkipDetails = []string{"node-aware minimum replica keeper protects this local copy"}
 		return out
 	}
 	ageBase := manifest.LastSeenAt
@@ -536,25 +765,31 @@ func (s *Service) controllerImageCacheCandidate(manifest model.ImageCacheManifes
 	if !ageBase.IsZero() && now.Sub(ageBase) < s.controllerImageCacheGracePeriod() {
 		out.Protected = true
 		out.SkipReason = "recent_manifest"
+		out.SkipDetails = []string{"manifest is newer than the configured minimum age"}
 		return out
-	}
-	if controllerKeySetContainsAny(protected.availableRefs, keys...) {
-		if _, ok := controllerImageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys); !ok {
-			out.Protected = true
-			out.SkipReason = "available_image"
-			return out
-		}
 	}
 	if controllerKeySetContainsAny(protected.lostRefs, keys...) {
 		out.Reason = "lost_image"
+		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
 		return out
 	}
 	if controllerKeySetContainsAny(protected.deletedRefs, keys...) {
 		out.Reason = "deleted_image_generation"
+		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
 		return out
 	}
 	if reason, ok := controllerImageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys); ok {
 		out.Reason = reason
+		out.MatchedReplicaIDs = controllerImageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys)
+		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
+		return out
+	}
+	if controllerKeySetContainsAny(protected.minReplicaRefs, keys...) {
+		out.Protected = true
+		out.SkipReason = "minimum_replica_count"
+		out.MatchedReplicaIDs = controllerImageDetailsForKeys(protected.replicaIDsByRef, keys)
+		out.MatchedImageIDs = controllerImageDetailsForKeys(protected.imageIDsByRef, keys)
+		out.SkipDetails = []string{"no healthy replica exists; keep one exact image generation until repair or retention marks it removable"}
 		return out
 	}
 	out.Reason = "missing_control_plane_image"
@@ -592,6 +827,19 @@ func controllerImageCacheReplicaCandidateForManifest(set map[string][]controller
 		}
 	}
 	return "", false
+}
+
+func controllerImageCacheReplicaIDsForManifest(set map[string][]controllerImageCacheReplicaCandidate, manifest model.ImageCacheManifest, keys []string) []string {
+	out := []string{}
+	for _, key := range keys {
+		for _, candidate := range set[strings.ToLower(strings.TrimSpace(key))] {
+			if candidate.ReplicaID == "" || !controllerImageCacheReplicaCandidateMatchesManifest(candidate, manifest) {
+				continue
+			}
+			out = append(out, candidate.ReplicaID)
+		}
+	}
+	return dedupeControllerStrings(out)
 }
 
 func controllerImageCacheReplicaCandidateMatchesManifest(candidate controllerImageCacheReplicaCandidate, manifest model.ImageCacheManifest) bool {
@@ -635,7 +883,7 @@ func controllerImageCacheAutomaticDeleteUnsafeReason(plan model.ImageCachePruneP
 		}
 		reason := strings.TrimSpace(candidate.Reason)
 		switch reason {
-		case "missing_control_plane_image", "lost_image":
+		case "missing_control_plane_image", "lost_image", "deleted_image_generation", "stale_replica", "excess_replica":
 			continue
 		default:
 			if reason == "" {
@@ -680,13 +928,21 @@ func (s *Service) controllerImageCacheGracePeriod() time.Duration {
 func (s *Service) controllerImageCacheMaxDeleteBytesString() string {
 	value := strings.TrimSpace(s.Config.ImageStoreOrphanPruneMaxDeleteBytesPerNode)
 	if value == "" {
-		return "104857600"
+		return "10Gi"
 	}
 	return value
 }
 
 func (s *Service) controllerImageCacheMaxDeleteBytes() int64 {
 	return parseControllerImageCacheByteSize(s.controllerImageCacheMaxDeleteBytesString())
+}
+
+func (s *Service) controllerImageCacheMaxDeleteBytesForNode(node model.ImageCacheNodeInventory) int64 {
+	value := s.controllerImageCacheMaxDeleteBytes()
+	if controllerImageCacheNodePressure(node) && value > 0 && value < defaultImageCachePressurePruneBudget {
+		return defaultImageCachePressurePruneBudget
+	}
+	return value
 }
 
 func (s *Service) controllerImageCacheMinReplicaCount() int {
@@ -707,7 +963,7 @@ func controllerImageCachePrunePrincipal() model.Principal {
 func parseControllerImageCacheByteSize(raw string) int64 {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return 100 << 20
+		return 10 << 30
 	}
 	multiplier := int64(1)
 	lower := strings.ToLower(raw)
@@ -730,17 +986,17 @@ func parseControllerImageCacheByteSize(raw string) int64 {
 	}
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil || value <= 0 {
-		return 100 << 20
+		return 10 << 30
 	}
 	return int64(value * float64(multiplier))
 }
 
 func controllerImageReferenceKeys(imageRef, digest string) []string {
-	return imagecachekeys.ImageReferenceKeys(imageRef, digest)
+	return imagecachekeys.ExactImageReferenceKeys(imageRef, digest)
 }
 
 func controllerManifestReferenceKeys(repo, target, digest, imageRef string) []string {
-	return imagecachekeys.ManifestReferenceKeys(repo, target, digest, imageRef)
+	return imagecachekeys.ExactManifestReferenceKeys(repo, target, digest, imageRef)
 }
 
 func normalizeControllerImageCacheDigest(digest string) string {
@@ -756,6 +1012,32 @@ func addControllerImageKeys(set map[string]struct{}, keys ...string) {
 	}
 }
 
+func addControllerImageDetails(set map[string][]string, keys []string, value string) {
+	value = strings.TrimSpace(value)
+	if set == nil || value == "" {
+		return
+	}
+	for _, key := range keys {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		set[key] = append(set[key], value)
+	}
+}
+
+func controllerImageDetailsForKeys(set map[string][]string, keys []string) []string {
+	out := []string{}
+	for _, key := range keys {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			continue
+		}
+		out = append(out, set[key]...)
+	}
+	return dedupeControllerStrings(out)
+}
+
 func controllerKeySetContainsAny(set map[string]struct{}, keys ...string) bool {
 	for _, key := range keys {
 		if _, ok := set[strings.ToLower(strings.TrimSpace(key))]; ok {
@@ -763,6 +1045,33 @@ func controllerKeySetContainsAny(set map[string]struct{}, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+func controllerImageCacheNodePressure(node model.ImageCacheNodeInventory) bool {
+	if node.FilesystemUsedPercent >= 85 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(node.Status)), "pressure")
+}
+
+func controllerNodeUpdateTaskObsolete(task model.NodeUpdateTask, imageByID map[string]model.Image) bool {
+	if task.Type != model.NodeUpdateTaskTypeReplicateAppImage {
+		return false
+	}
+	image := imageByID[strings.TrimSpace(task.Payload["image_id"])]
+	if strings.TrimSpace(image.ID) == "" {
+		return strings.TrimSpace(task.Payload["image_id"]) != ""
+	}
+	return controllerImageReplicationTaskObsolete(model.ImageReplicationTask{Priority: task.Payload["priority"]}, image)
+}
+
+func controllerImageReplicationTaskObsolete(task model.ImageReplicationTask, image model.Image) bool {
+	switch strings.TrimSpace(image.LifecycleState) {
+	case model.ImageLifecycleDeleting, model.ImageLifecycleDeleted, model.ImageLifecycleLost:
+		return strings.TrimSpace(task.Priority) != model.ImageReplicationPriorityDeployBlocking
+	default:
+		return false
+	}
 }
 
 func dedupeControllerStrings(values []string) []string {

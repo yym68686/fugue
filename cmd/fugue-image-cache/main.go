@@ -322,12 +322,18 @@ func (c *imageCache) handleManagementInventory(w http.ResponseWriter, _ *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	unreferenced, err := c.managementUnreferencedBlobInventory()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeManagementJSON(w, http.StatusOK, map[string]any{
-		"endpoint":     c.cacheEndpoint,
-		"cluster_node": c.clusterNode,
-		"manifests":    manifests,
-		"pins":         pins.Pins,
-		"disk":         disk,
+		"endpoint":           c.cacheEndpoint,
+		"cluster_node":       c.clusterNode,
+		"manifests":          manifests,
+		"unreferenced_blobs": unreferenced,
+		"pins":               pins.Pins,
+		"disk":               disk,
 	})
 }
 
@@ -500,6 +506,7 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		Targets        []imageCachePruneTarget `json:"targets"`
 		MaxDeleteBytes string                  `json:"max_delete_bytes"`
 		MinManifestAge string                  `json:"min_manifest_age"`
+		IncludeUnreferencedBlobs bool         `json:"include_unreferenced_blobs"`
 	}
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -554,6 +561,7 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		allowDelete:     req.AllowDelete,
 		requestMaxBytes: requestMaxDeleteBytes,
 		minManifestAge:  minManifestAge,
+		includeUnreferencedBlobs: req.IncludeUnreferencedBlobs,
 	}, records, pinned)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -605,6 +613,7 @@ type imageCachePruneRequest struct {
 	allowDelete     bool
 	requestMaxBytes int64
 	minManifestAge  time.Duration
+	includeUnreferencedBlobs bool
 }
 
 type imageCachePrunePlan struct {
@@ -777,7 +786,7 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		plan.SkippedReason = "delete_budget_zero"
 		return plan, nil
 	}
-	if targeted && len(selected) == 0 && len(unreferenced) == 0 {
+	if targeted && len(selected) == 0 && (!req.includeUnreferencedBlobs || len(unreferenced) == 0) {
 		plan.SkippedReason = "no_matching_unpinned_manifest_or_unreferenced_blob"
 		return plan, nil
 	}
@@ -785,7 +794,7 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 		plan.SkippedReason = "disk_limit_disabled"
 		return plan, nil
 	}
-	if !targeted && disk.NeededDeleteBytes <= 0 {
+	if !targeted && disk.NeededDeleteBytes <= 0 && !req.includeUnreferencedBlobs {
 		plan.SkippedReason = "below_watermark"
 		return plan, nil
 	}
@@ -808,7 +817,7 @@ func (c *imageCache) planImageCachePrune(req imageCachePruneRequest, records []i
 	if blobNeed < 0 {
 		blobNeed = 0
 	}
-	if targeted {
+	if targeted || req.includeUnreferencedBlobs {
 		blobNeed = blobBudget
 	}
 	for _, blob := range unreferenced {
@@ -1091,6 +1100,39 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 		})
 	}
 	return out, nil
+}
+
+func (c *imageCache) managementUnreferencedBlobInventory() ([]imageCacheBlobEntry, error) {
+	records, err := c.managementManifestRecords()
+	if err != nil {
+		return nil, err
+	}
+	blobs, err := c.imageCacheBlobRecords()
+	if err != nil {
+		return nil, err
+	}
+	referenced := map[string]struct{}{}
+	for _, record := range records {
+		for _, digest := range record.ReferencedBlobs {
+			if digest != "" {
+				referenced[digest] = struct{}{}
+			}
+		}
+	}
+	unreferenced := make([]imageCacheBlobRecord, 0, len(blobs))
+	for _, blob := range blobs {
+		if _, ok := referenced[blob.Digest]; ok {
+			continue
+		}
+		unreferenced = append(unreferenced, blob)
+	}
+	sort.SliceStable(unreferenced, func(i, j int) bool {
+		if unreferenced[i].ModifiedAt.Equal(unreferenced[j].ModifiedAt) {
+			return unreferenced[i].SizeBytes > unreferenced[j].SizeBytes
+		}
+		return unreferenced[i].ModifiedAt.Before(unreferenced[j].ModifiedAt)
+	})
+	return blobEntries(unreferenced), nil
 }
 
 func (c *imageCache) managementManifestRecords() ([]imageCacheManifestRecord, error) {

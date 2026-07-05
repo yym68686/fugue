@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -436,6 +437,8 @@ func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
 	if nodes, err := s.Store.ListImageCacheNodeInventories(model.ImageCacheNodeInventoryFilter{}); err == nil {
 		observability.WriteMetricHeader(w, "fugue_image_cache_inventory_age_seconds", "Age of the latest node-local image-cache inventory report.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_manifest_count", "Number of manifests reported by each node-local image-cache inventory.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_unreferenced_blob_count", "Unreferenced image-cache blobs reported by each node-local inventory.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_unreferenced_blob_bytes", "Unreferenced image-cache blob bytes reported by each node-local inventory.", "gauge")
 		for _, node := range nodes {
 			labels := imageCacheMetricNodeLabels(node.NodeID, node.ClusterNodeName, node.RuntimeID)
 			age := float64(0)
@@ -444,19 +447,32 @@ func (s *Service) writeImageCacheLocalPVMetrics(w http.ResponseWriter) {
 			}
 			observability.WriteMetricSample(w, "fugue_image_cache_inventory_age_seconds", labels, age)
 			observability.WriteMetricSample(w, "fugue_image_cache_manifest_count", labels, float64(node.ManifestCount))
+			observability.WriteMetricSample(w, "fugue_image_cache_unreferenced_blob_count", labels, float64(node.UnreferencedBlobCount))
+			observability.WriteMetricSample(w, "fugue_image_cache_unreferenced_blob_bytes", labels, float64(node.UnreferencedBlobBytes))
 		}
 	}
 	if plans, err := s.Store.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Limit: 200}); err == nil {
 		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_manifest_count", "Candidate manifest count in recent image-cache prune plans.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_blob_count", "Candidate unreferenced blob count in recent image-cache prune plans.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_candidate_blob_bytes", "Candidate unreferenced blob bytes in recent image-cache prune plans.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_prune_planned_bytes", "Planned delete bytes in recent image-cache prune plans.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_image_cache_prune_skipped_count", "Protected manifest count in recent image-cache prune plans.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_image_cache_prune_skip_reason_count", "Protected manifest count in recent image-cache prune plans grouped by skip reason.", "gauge")
 		for _, plan := range latestImageCachePrunePlansByMetricLabels(plans) {
 			labels := imageCachePrunePlanMetricLabels(plan)
 			observability.WriteMetricSample(w, "fugue_image_cache_candidate_manifest_count", labels, float64(plan.CandidateManifestCount))
+			observability.WriteMetricSample(w, "fugue_image_cache_candidate_blob_count", labels, float64(plan.CandidateBlobCount))
+			observability.WriteMetricSample(w, "fugue_image_cache_candidate_blob_bytes", labels, float64(plan.CandidateBlobBytes))
 			observability.WriteMetricSample(w, "fugue_image_cache_prune_planned_bytes", labels, float64(plan.PlannedDeleteBytes))
 			observability.WriteMetricSample(w, "fugue_image_cache_prune_skipped_count", labels, float64(plan.ProtectedManifestCount))
+			for reason, count := range plan.ProtectionSummary {
+				reasonLabels := cloneMetricLabels(labels)
+				reasonLabels["reason"] = safeMetricLabelValue(reason, "unknown")
+				observability.WriteMetricSample(w, "fugue_image_cache_prune_skip_reason_count", reasonLabels, float64(count))
+			}
 		}
 	}
+	s.writeImageCachePruneTaskResultMetrics(w)
 	if inventories, err := s.Store.ListLocalPVInventories(model.LocalPVInventoryFilter{}); err == nil {
 		observability.WriteMetricHeader(w, "fugue_localpv_inventory_age_seconds", "Age of the latest LVM LocalPV inventory report.", "gauge")
 		observability.WriteMetricHeader(w, "fugue_localpv_backing_file_bytes", "LVM LocalPV backing file size reported by each node.", "gauge")
@@ -500,6 +516,61 @@ func latestImageCachePrunePlansByMetricLabels(plans []model.ImageCachePrunePlan)
 	return out
 }
 
+func (s *Service) writeImageCachePruneTaskResultMetrics(w http.ResponseWriter) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusCompleted)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("image-cache prune task result metrics unavailable: %v", err)
+		}
+		return
+	}
+	observability.WriteMetricHeader(w, "fugue_image_cache_prune_deleted_bytes", "Deleted bytes reported by completed node-local image-cache prune tasks.", "gauge")
+	observability.WriteMetricHeader(w, "fugue_image_cache_prune_completed_task_count", "Completed node-local image-cache prune tasks that reported a result.", "gauge")
+	for _, task := range latestImageCachePruneTasksByMetricLabels(tasks) {
+		if task.Type != model.NodeUpdateTaskTypePruneImageCache {
+			continue
+		}
+		if strings.TrimSpace(task.Payload["prune_reason"]) != "image-cache-orphan" {
+			continue
+		}
+		labels := imageCacheMetricNodeLabels(task.MachineID, task.ClusterNodeName, task.RuntimeID)
+		labels["dry_run"] = safeMetricLabelValue(task.Payload["dry_run"], "unknown")
+		labels["allow_delete"] = safeMetricLabelValue(task.Payload["allow_delete"], "unknown")
+		observability.WriteMetricSample(w, "fugue_image_cache_prune_completed_task_count", labels, 1)
+		observability.WriteMetricSample(w, "fugue_image_cache_prune_deleted_bytes", labels, float64(parseMetricKeyValueInt64(task.ResultMessage, "deleted_bytes")))
+	}
+}
+
+func latestImageCachePruneTasksByMetricLabels(tasks []model.NodeUpdateTask) []model.NodeUpdateTask {
+	latest := map[string]model.NodeUpdateTask{}
+	for _, task := range tasks {
+		if task.Type != model.NodeUpdateTaskTypePruneImageCache {
+			continue
+		}
+		labels := imageCacheMetricNodeLabels(task.MachineID, task.ClusterNodeName, task.RuntimeID)
+		labels["dry_run"] = strings.TrimSpace(task.Payload["dry_run"])
+		labels["allow_delete"] = strings.TrimSpace(task.Payload["allow_delete"])
+		key := metricLabelKey(labels)
+		current, ok := latest[key]
+		if !ok || task.UpdatedAt.After(current.UpdatedAt) {
+			latest[key] = task
+		}
+	}
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]model.NodeUpdateTask, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, latest[key])
+	}
+	return out
+}
+
 func imageCachePrunePlanMetricLabels(plan model.ImageCachePrunePlan) map[string]string {
 	labels := imageCacheMetricNodeLabels(plan.NodeID, plan.ClusterNodeName, plan.RuntimeID)
 	labels["mode"] = strings.TrimSpace(plan.Mode)
@@ -508,7 +579,10 @@ func imageCachePrunePlanMetricLabels(plan model.ImageCachePrunePlan) map[string]
 }
 
 func imageCachePrunePlanMetricKey(plan model.ImageCachePrunePlan) string {
-	labels := imageCachePrunePlanMetricLabels(plan)
+	return metricLabelKey(imageCachePrunePlanMetricLabels(plan))
+}
+
+func metricLabelKey(labels map[string]string) string {
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -524,10 +598,37 @@ func imageCachePrunePlanMetricKey(plan model.ImageCachePrunePlan) string {
 	return builder.String()
 }
 
+func parseMetricKeyValueInt64(message, key string) int64 {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0
+	}
+	for _, field := range strings.Fields(message) {
+		name, value, ok := strings.Cut(field, "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+		return 0
+	}
+	return 0
+}
+
 func imageCacheMetricNodeLabels(nodeID, clusterNodeName, runtimeID string) map[string]string {
 	return map[string]string{
 		"node_id":           strings.TrimSpace(nodeID),
 		"cluster_node_name": strings.TrimSpace(clusterNodeName),
 		"runtime_id":        strings.TrimSpace(runtimeID),
 	}
+}
+
+func cloneMetricLabels(labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+1)
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
 }

@@ -9,12 +9,14 @@ implementation plan for two separate recovery tracks:
    per-node maintenance task and must not be folded into automatic GC.
 
 The plan is based on read-only production investigation performed on
-2026-07-02. It does not prescribe manual production hotfixes. Any change that
-affects the control plane, node-updater, image-cache, cluster bootstrap, Helm
-values, registry behavior, runtime routing, or platform traffic rules must be
-released through the normal Fugue repository path: commit to `main`, push, then
-let `.github/workflows/deploy-control-plane.yml` update the remote control
-plane.
+2026-07-02. The 2026-07-06 follow-up for distributed image-store retention,
+replica-policy, prune-plan explainability, and unreferenced-blob cleanup is
+tracked in `docs/distributed-image-store-retention-prune-fix-plan.md`. It does
+not prescribe manual production hotfixes. Any change that affects the control
+plane, node-updater, image-cache, cluster bootstrap, Helm values, registry
+behavior, runtime routing, or platform traffic rules must be released through
+the normal Fugue repository path: commit to `main`, push, then let
+`.github/workflows/deploy-control-plane.yml` update the remote control plane.
 
 ## 1. Scope
 

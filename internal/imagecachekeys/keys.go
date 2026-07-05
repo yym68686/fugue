@@ -23,6 +23,26 @@ func ImageReferenceKeys(ref, digest string) []string {
 	return uniqueKeys(out)
 }
 
+// ExactImageReferenceKeys returns only generation-exact matching keys for an
+// image reference. Unlike ImageReferenceKeys it intentionally omits bare repo
+// and bare tag keys, because those keys are suitable for grouping but too broad
+// for deletion protection decisions.
+func ExactImageReferenceKeys(ref, digest string) []string {
+	out := []string{}
+	for _, value := range splitReferenceList(ref) {
+		out = append(out, value)
+		withoutRegistry := StripRegistry(value)
+		out = append(out, withoutRegistry)
+		if repo, target, ok := SplitRepoTarget(withoutRegistry); ok {
+			out = appendExactManifestKeys(out, repo, target, digest)
+		}
+	}
+	if normalized := NormalizeDigest(digest); normalized != "" {
+		out = append(out, normalized)
+	}
+	return uniqueKeys(out)
+}
+
 // ManifestReferenceKeys returns the key universe for a registry manifest row.
 // It intentionally includes both repo:tag and repo@digest forms so inventory
 // rows can match current workload refs regardless of which syntax each caller
@@ -30,6 +50,14 @@ func ImageReferenceKeys(ref, digest string) []string {
 func ManifestReferenceKeys(repo, target, digest, imageRef string) []string {
 	keys := ImageReferenceKeys(imageRef, digest)
 	keys = appendManifestKeys(keys, repo, target, digest)
+	return uniqueKeys(keys)
+}
+
+// ExactManifestReferenceKeys returns generation-exact keys for a manifest row.
+// It is the deletion-protection counterpart to ManifestReferenceKeys.
+func ExactManifestReferenceKeys(repo, target, digest, imageRef string) []string {
+	keys := ExactImageReferenceKeys(imageRef, digest)
+	keys = appendExactManifestKeys(keys, repo, target, digest)
 	return uniqueKeys(keys)
 }
 
@@ -49,6 +77,28 @@ func appendManifestKeys(keys []string, repo, target, digest string) []string {
 	}
 	if target != "" {
 		keys = append(keys, target)
+	}
+	if digest != "" {
+		keys = append(keys, digest)
+	}
+	return keys
+}
+
+func appendExactManifestKeys(keys []string, repo, target, digest string) []string {
+	repo = strings.Trim(strings.TrimSpace(repo), "/")
+	target = strings.TrimSpace(target)
+	digest = firstNonEmptyString(NormalizeDigest(digest), NormalizeDigest(target))
+	if repo != "" {
+		if target != "" {
+			keys = append(keys, repo+":"+target)
+			if NormalizeDigest(target) != "" {
+				keys = append(keys, repo+"@"+target)
+			}
+		}
+		if digest != "" {
+			keys = append(keys, repo+"@"+digest)
+			keys = append(keys, repo+":sha256:"+strings.TrimPrefix(digest, "sha256:"))
+		}
 	}
 	if digest != "" {
 		keys = append(keys, digest)

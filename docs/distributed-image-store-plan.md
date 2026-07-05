@@ -14,10 +14,13 @@ the normal Fugue repository workflow and the
 
 For the production disk-pressure follow-up around image-cache orphan cleanup
 and LVM LocalPV backing-file recovery, see
-`docs/image-cache-localpv-storage-recovery-plan.md`. That recovery plan is the
-authoritative scope for manifest-level cache cleanup and explicit LocalPV
-decommission work; this document remains the broader distributed image-store
-architecture plan.
+`docs/image-cache-localpv-storage-recovery-plan.md`. For the distributed
+image-store retention, replica-policy, prune-plan explainability, and
+unreferenced-blob cleanup fix plan, see
+`docs/distributed-image-store-retention-prune-fix-plan.md`. That recovery plan
+and the retention/prune fix plan are the authoritative scopes for production
+storage cleanup work; this document remains the broader distributed
+image-store architecture plan.
 
 ## 1. Goal
 

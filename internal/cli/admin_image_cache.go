@@ -74,7 +74,20 @@ func (c *CLI) newAdminImageCachePrunePlanCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "prune-plan",
 		Short: "Compute an image-cache orphan prune plan without executing it",
-		Args:  cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Compute an image-cache orphan prune plan without executing node-local deletion.
+
+Modes:
+  observe  recomputes explainability only; no node-updater task is created.
+  dry-run  computes the delete set that a node-updater dry-run task would verify.
+  delete   computes the delete set using delete-mode safety gates; use prune
+           --allow-delete to actually create a node-updater task.
+
+The plan includes protected manifest skip details and unreferenced blob
+candidates so operators can explain why large manifests are kept or whether a
+blob-only GC pass is available.
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -91,7 +104,7 @@ func (c *CLI) newAdminImageCachePrunePlanCommand() *cobra.Command {
 		},
 	}
 	addImageCacheNodeFilterFlags(cmd, &opts.adminImageCacheNodeFilter)
-	cmd.Flags().StringVar(&opts.Mode, "mode", "observe", "Plan mode: observe, dry-run, or delete")
+	cmd.Flags().StringVar(&opts.Mode, "mode", "observe", "Plan mode: observe (explain only), dry-run (verify only), or delete (delete-mode safety gates)")
 	cmd.Flags().BoolVar(&opts.Persist, "persist", false, "Persist the computed observe plan")
 	return cmd
 }
@@ -106,7 +119,16 @@ func (c *CLI) newAdminImageCachePruneCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Create a node-updater task for an image-cache prune plan",
-		Args:  cobra.NoArgs,
+		Long: strings.TrimSpace(`
+Create a node-updater image-cache prune task for one selected node.
+
+By default this creates a dry-run task that only asks the node to verify the
+current plan. Passing --allow-delete switches the task to delete mode, still
+bounded by the control-plane plan, node-local safety checks, and the per-node
+max-delete budget. Blob-only garbage collection is allowed when the plan has
+unreferenced blob candidates even if there are no manifest candidates.
+`),
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if opts.NodeID == "" && opts.ClusterNodeName == "" && opts.RuntimeID == "" {
 				return fmt.Errorf("--node, --node-id, or --runtime is required")
@@ -232,10 +254,15 @@ func writeImageCachePrunePlan(w io.Writer, plan model.ImageCachePrunePlan) error
 		kvPair{Key: "node", Value: firstNonEmpty(strings.TrimSpace(plan.ClusterNodeName), strings.TrimSpace(plan.NodeID), "-")},
 		kvPair{Key: "status", Value: firstNonEmpty(strings.TrimSpace(plan.Status), "-")},
 		kvPair{Key: "candidate_manifests", Value: formatInt(plan.CandidateManifestCount)},
+		kvPair{Key: "candidate_blobs", Value: formatInt(plan.CandidateBlobCount)},
+		kvPair{Key: "candidate_blob_bytes", Value: formatBytes(plan.CandidateBlobBytes)},
 		kvPair{Key: "protected_manifests", Value: formatInt(plan.ProtectedManifestCount)},
+		kvPair{Key: "protected_blobs", Value: formatInt(plan.ProtectedBlobCount)},
 		kvPair{Key: "planned_delete_bytes", Value: formatBytes(plan.PlannedDeleteBytes)},
 		kvPair{Key: "max_delete_bytes", Value: formatBytes(plan.MaxDeleteBytes)},
 		kvPair{Key: "min_manifest_age", Value: firstNonEmpty(strings.TrimSpace(plan.MinManifestAge), "-")},
+		kvPair{Key: "node_pressure", Value: fmt.Sprintf("%t", plan.NodePressure)},
+		kvPair{Key: "budget_exhausted", Value: fmt.Sprintf("%t", plan.BudgetExhausted)},
 		kvPair{Key: "protection_summary", Value: formatImageCacheSummary(plan.ProtectionSummary)},
 		kvPair{Key: "candidate_summary", Value: formatImageCacheSummary(plan.CandidateSummary)},
 		kvPair{Key: "created_at", Value: formatTime(plan.CreatedAt)},
@@ -243,35 +270,103 @@ func writeImageCachePrunePlan(w io.Writer, plan model.ImageCachePrunePlan) error
 	); err != nil {
 		return err
 	}
-	if len(plan.Candidates) == 0 {
-		return nil
+	if len(plan.Candidates) > 0 {
+		if _, err := fmt.Fprintln(w, "\n[candidates]"); err != nil {
+			return err
+		}
+		if err := writeImageCachePruneCandidateTable(w, plan.Candidates); err != nil {
+			return err
+		}
 	}
-	if _, err := fmt.Fprintln(w, "\n[candidates]"); err != nil {
-		return err
+	if len(plan.SkippedManifests) > 0 {
+		if _, err := fmt.Fprintln(w, "\n[protected_manifests]"); err != nil {
+			return err
+		}
+		if err := writeImageCachePruneCandidateTable(w, plan.SkippedManifests); err != nil {
+			return err
+		}
 	}
-	return writeImageCachePruneCandidateTable(w, plan.Candidates)
+	if len(plan.UnreferencedBlobs) > 0 {
+		if _, err := fmt.Fprintln(w, "\n[unreferenced_blobs]"); err != nil {
+			return err
+		}
+		if err := writeImageCacheBlobCandidateTable(w, plan.UnreferencedBlobs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeImageCachePruneCandidateTable(w io.Writer, candidates []model.ImageCachePruneCandidate) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "REPO\tTARGET\tDIGEST\tREASON\tPROTECTED\tSKIP\tBYTES\tLAST_SEEN"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NODE\tREPO\tTARGET\tDIGEST\tREASON\tPROTECTED\tSKIP\tDETAILS\tMATCHES\tBYTES\tBLOBS\tLAST_SEEN"); err != nil {
 		return err
 	}
 	for _, candidate := range candidates {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%t\t%s\t%s\t%s\t%s\t%d/%s\t%s\n",
+			firstNonEmpty(strings.TrimSpace(candidate.NodeName), "-"),
 			firstNonEmpty(strings.TrimSpace(candidate.Repo), "-"),
 			firstNonEmpty(strings.TrimSpace(candidate.Target), "-"),
 			firstNonEmpty(shortDigest(candidate.Digest), "-"),
 			firstNonEmpty(strings.TrimSpace(candidate.Reason), "-"),
 			candidate.Protected,
 			firstNonEmpty(strings.TrimSpace(candidate.SkipReason), "-"),
+			formatImageCacheSkipDetails(candidate.SkipDetails),
+			formatImageCacheCandidateMatches(candidate),
 			formatBytes(candidate.PlannedDeleteBytes),
+			candidate.ReferencedBlobCount,
+			formatBytes(candidate.ReferencedBlobBytes),
 			firstNonEmpty(strings.TrimSpace(candidate.LastSeenAt), "-"),
 		); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+func writeImageCacheBlobCandidateTable(w io.Writer, candidates []model.ImageCachePruneBlobCandidate) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NODE\tDIGEST\tREASON\tBYTES\tLAST_SEEN"); err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			firstNonEmpty(strings.TrimSpace(candidate.NodeName), "-"),
+			firstNonEmpty(shortDigest(candidate.Digest), "-"),
+			firstNonEmpty(strings.TrimSpace(candidate.Reason), "-"),
+			formatBytes(firstNonZeroCLIInt64(candidate.PlannedDeleteBytes, candidate.SizeBytes)),
+			firstNonEmpty(strings.TrimSpace(candidate.LastSeenAt), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func formatImageCacheSkipDetails(details []string) string {
+	if len(details) == 0 {
+		return "-"
+	}
+	return strings.Join(details, ";")
+}
+
+func formatImageCacheCandidateMatches(candidate model.ImageCachePruneCandidate) string {
+	parts := []string{}
+	appendIDs := func(label string, values []string) {
+		if len(values) == 0 {
+			return
+		}
+		parts = append(parts, label+"="+strings.Join(values, ","))
+	}
+	appendIDs("images", candidate.MatchedImageIDs)
+	appendIDs("pins", candidate.MatchedPinIDs)
+	appendIDs("tasks", candidate.MatchedTaskIDs)
+	appendIDs("workloads", candidate.MatchedWorkloadRefs)
+	appendIDs("replicas", candidate.MatchedReplicaIDs)
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ";")
 }
 
 func formatImageCacheSummary(summary map[string]int) string {

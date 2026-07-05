@@ -21,6 +21,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/image-cache/inventory", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminListImageCacheInventory)))
 	mux.Handle("GET /v1/admin/image-cache/prune-plan", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetImageCachePrunePlan)))
 	mux.Handle("POST /v1/admin/image-cache/prune-plan", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminCreateImageCachePrunePlanTask)))
+	mux.Handle("GET /v1/admin/image-retention/plan", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminGetImageRetentionPlan)))
 	mux.Handle("GET /v1/admin/localpv/inventory", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminListLocalPVInventory)))
 	mux.Handle("GET /v1/admin/platform/autonomy/status", s.auth.RequireAPI(http.HandlerFunc(s.handlePlatformAutonomyStatus)))
 	mux.Handle("POST /v1/admin/platform/failure-drills", s.auth.RequireAPI(http.HandlerFunc(s.handleRunPlatformFailureDrill)))

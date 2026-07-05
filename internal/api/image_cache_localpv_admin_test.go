@@ -249,9 +249,15 @@ func TestImageCachePrunePlanProtectsDigestWorkloadRefAPI(t *testing.T) {
 		pinnedRefs:           map[string]struct{}{},
 		liveRefs:             map[string]struct{}{},
 		taskRefs:             map[string]struct{}{},
+		minReplicaRefs:       map[string]struct{}{},
+		imageIDsByRef:        map[string][]string{},
+		pinIDsByRef:          map[string][]string{},
+		taskIDsByRef:         map[string][]string{},
+		workloadRefsByRef:    map[string][]string{},
+		replicaIDsByRef:      map[string][]string{},
 		replicaCandidateRefs: map[string][]imageCacheReplicaCandidate{},
 	}
-	addKeys(protected.liveRefs, imageReferenceKeys("registry.fugue.internal:5000/fugue-apps/demo@"+digest, "")...)
+	addKeys(protected.liveRefs, exactImageReferenceKeys("registry.fugue.internal:5000/fugue-apps/demo@"+digest, "")...)
 	created := time.Now().UTC().Add(-48 * time.Hour)
 	candidate := imageCachePruneCandidateForManifest(model.ImageCacheManifest{
 		Repo:              "fugue-apps/demo",
@@ -265,6 +271,43 @@ func TestImageCachePrunePlanProtectsDigestWorkloadRefAPI(t *testing.T) {
 	}, protected, time.Now().UTC())
 	if !candidate.Protected || candidate.SkipReason != "current_workload" {
 		t.Fatalf("expected digest workload ref to protect cache manifest, got %+v", candidate)
+	}
+}
+
+func TestImageCachePrunePlanDoesNotProtectSameRepoHistoryWithCurrentTagAPI(t *testing.T) {
+	t.Parallel()
+
+	currentDigest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
+	oldDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	protected := imageCacheProtectedSet{
+		availableRefs:        map[string]struct{}{},
+		lostRefs:             map[string]struct{}{},
+		deletedRefs:          map[string]struct{}{},
+		pinnedRefs:           map[string]struct{}{},
+		liveRefs:             map[string]struct{}{},
+		taskRefs:             map[string]struct{}{},
+		minReplicaRefs:       map[string]struct{}{},
+		imageIDsByRef:        map[string][]string{},
+		pinIDsByRef:          map[string][]string{},
+		taskIDsByRef:         map[string][]string{},
+		workloadRefsByRef:    map[string][]string{},
+		replicaIDsByRef:      map[string][]string{},
+		replicaCandidateRefs: map[string][]imageCacheReplicaCandidate{},
+	}
+	addKeys(protected.liveRefs, exactImageReferenceKeys("registry.fugue.internal:5000/fugue-apps/demo@"+currentDigest, "")...)
+	created := time.Now().UTC().Add(-48 * time.Hour)
+	candidate := imageCachePruneCandidateForManifest(model.ImageCacheManifest{
+		Repo:              "fugue-apps/demo",
+		Target:            "old",
+		Digest:            oldDigest,
+		ManifestSizeBytes: 100,
+		TotalBlobBytes:    500,
+		CreatedAtObserved: &created,
+		LastSeenAt:        created,
+		Present:           true,
+	}, protected, time.Now().UTC())
+	if candidate.Protected || candidate.Reason == "" {
+		t.Fatalf("expected same-repo historical tag to be a prune candidate, got %+v", candidate)
 	}
 }
 
