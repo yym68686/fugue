@@ -370,6 +370,11 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 			s.Logger.Printf("initial image replication reconcile error: %v", err)
 		}
 	}
+	if s.imageStoreDistributedMode() && s.Config.ImageCacheInventoryInterval > 0 {
+		if err := s.runImageCacheStorageMaintenance(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.Logger.Printf("initial image-cache storage maintenance error: %v", err)
+		}
+	}
 	staleTicker := time.NewTicker(s.Config.PollInterval)
 	defer staleTicker.Stop()
 	fallbackTicker := time.NewTicker(s.Config.FallbackPollInterval)
