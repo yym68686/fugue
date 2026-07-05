@@ -547,7 +547,74 @@ func (s *Service) cancelObsoletePendingImageReplicationTasks(ctx context.Context
 			return err
 		}
 	}
+	if err := s.cancelObsoletePendingNodeImageUpdateTasks(ctx, eligibility); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Service) cancelObsoletePendingNodeImageUpdateTasks(ctx context.Context, eligibility imageReplicationEligibility) error {
+	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		reason, err := s.obsoletePendingNodeImageUpdateTaskReason(task, eligibility)
+		if err != nil {
+			return err
+		}
+		if reason == "" {
+			continue
+		}
+		if _, err := s.Store.CancelNodeUpdateTask(task.ID, task.NodeUpdaterID, "obsolete image update task canceled: "+reason); err != nil && !errors.Is(err, store.ErrConflict) && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) obsoletePendingNodeImageUpdateTaskReason(task model.NodeUpdateTask, eligibility imageReplicationEligibility) (string, error) {
+	switch task.Type {
+	case model.NodeUpdateTaskTypeReplicateAppImage, model.NodeUpdateTaskTypePrepullAppImages:
+	default:
+		return "", nil
+	}
+	priority := strings.TrimSpace(task.Payload["priority"])
+	if priority == "" {
+		priority = model.ImageReplicationPriorityRepair
+	}
+	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage {
+		imageID := strings.TrimSpace(task.Payload["image_id"])
+		if imageID == "" {
+			return "missing_image_id", nil
+		}
+		image, err := s.Store.GetImage(imageID, "", true)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return "missing_image", nil
+			}
+			return "", err
+		}
+		if imageCacheReplicationTaskObsoleteForController(model.ImageReplicationTask{Priority: priority}, image) {
+			return "obsolete_image_generation", nil
+		}
+	}
+	if priority == model.ImageReplicationPriorityDeployBlocking {
+		return "", nil
+	}
+	updater := model.NodeUpdater{
+		MachineID:       task.MachineID,
+		RuntimeID:       task.RuntimeID,
+		ClusterNodeName: task.ClusterNodeName,
+		Status:          model.NodeUpdaterStatusActive,
+	}
+	if ok, reason := s.nodeEligibleForAppImageReplication(updater, priority, deployImageTarget{}, eligibility); !ok {
+		return reason, nil
+	}
+	return "", nil
 }
 
 func imageCacheReplicationTaskObsoleteForController(task model.ImageReplicationTask, image model.Image) bool {

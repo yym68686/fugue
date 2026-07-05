@@ -513,6 +513,39 @@ func (s *Store) FailNodeUpdateTask(taskID, updaterID, message, errorMessage stri
 	return redactNodeUpdateTask(task), nil
 }
 
+func (s *Store) CancelNodeUpdateTask(taskID, updaterID, message string) (model.NodeUpdateTask, error) {
+	if s.usingDatabase() {
+		return s.pgCancelNodeUpdateTask(taskID, updaterID, message)
+	}
+	var task model.NodeUpdateTask
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findNodeUpdateTask(state, taskID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
+			return ErrNotFound
+		}
+		switch state.NodeUpdateTasks[index].Status {
+		case model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning:
+		default:
+			return ErrConflict
+		}
+		now := time.Now().UTC()
+		state.NodeUpdateTasks[index].Status = model.NodeUpdateTaskStatusCanceled
+		state.NodeUpdateTasks[index].ResultMessage = strings.TrimSpace(message)
+		state.NodeUpdateTasks[index].ErrorMessage = ""
+		state.NodeUpdateTasks[index].CompletedAt = &now
+		state.NodeUpdateTasks[index].UpdatedAt = now
+		task = state.NodeUpdateTasks[index]
+		return nil
+	})
+	if err != nil {
+		return model.NodeUpdateTask{}, err
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
 func (s *Store) CompleteNodeUpdateTask(taskID, updaterID, status, message, errorMessage string) (model.NodeUpdateTask, error) {
 	if s.usingDatabase() {
 		return s.pgCompleteNodeUpdateTask(taskID, updaterID, status, message, errorMessage)

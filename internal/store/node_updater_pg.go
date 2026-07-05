@@ -499,6 +499,23 @@ RETURNING id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, c
 	return redactNodeUpdateTask(task), nil
 }
 
+func (s *Store) pgCancelNodeUpdateTask(taskID, updaterID, message string) (model.NodeUpdateTask, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC()
+	task, err := scanNodeUpdateTask(s.db.QueryRowContext(ctx, `
+UPDATE fugue_node_update_tasks
+SET status = $3, result_message = $4, error_message = '', completed_at = $5, updated_at = $5
+WHERE id = $1 AND node_updater_id = $2 AND status IN ($6, $7)
+RETURNING id, tenant_id, node_updater_id, machine_id, runtime_id, node_key_id, cluster_node_name, task_type, status, payload_json, result_message, error_message, logs_json, requested_by_type, requested_by_id, created_at, updated_at, claimed_at, completed_at
+`, strings.TrimSpace(taskID), strings.TrimSpace(updaterID), model.NodeUpdateTaskStatusCanceled, strings.TrimSpace(message), now, model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning))
+	if err != nil {
+		return model.NodeUpdateTask{}, mapDBErr(err)
+	}
+	return redactNodeUpdateTask(task), nil
+}
+
 func (s *Store) pgFindNodeUpdaterTarget(ctx context.Context, q sqlQueryer, updaterID, clusterNodeName, runtimeID string) (model.NodeUpdater, error) {
 	clauses := []string{}
 	args := []any{}
