@@ -161,6 +161,93 @@ func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testin
 	}
 }
 
+func TestScheduleOrphanImageCachePrunePrioritizesPressureAndDoesNotLetPendingStallGlobal(t *testing.T) {
+	t.Parallel()
+
+	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	coldUpdater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-cold", "https://worker-cold.example.com", nil, "machine-cold", "fingerprint-worker-cold", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
+	if err != nil {
+		t.Fatalf("enroll cold updater: %v", err)
+	}
+	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-pressure", "https://worker-pressure.example.com", nil, "machine-pressure", "fingerprint-worker-pressure", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
+		t.Fatalf("enroll pressure updater: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:                "machine-cold",
+		ClusterNodeName:       "worker-cold",
+		RuntimeID:             "runtime-cold",
+		ObservedAt:            now,
+		Status:                "reported",
+		UnreferencedBlobCount: 1,
+		UnreferencedBlobBytes: 1 << 30,
+		UnreferencedBlobs: []model.ImageCachePruneBlobCandidate{{
+			Digest:             "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			SizeBytes:          1 << 30,
+			PlannedDeleteBytes: 1 << 30,
+			Reason:             "unreferenced_blob",
+		}},
+	}, nil); err != nil {
+		t.Fatalf("upsert cold inventory: %v", err)
+	}
+	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
+		NodeID:                "machine-pressure",
+		ClusterNodeName:       "worker-pressure",
+		RuntimeID:             "runtime-pressure",
+		ObservedAt:            now,
+		Status:                "filesystem_pressure",
+		FilesystemUsedPercent: 91,
+		UnreferencedBlobCount: 1,
+		UnreferencedBlobBytes: 8 << 30,
+		UnreferencedBlobs: []model.ImageCachePruneBlobCandidate{{
+			Digest:             "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			SizeBytes:          8 << 30,
+			PlannedDeleteBytes: 8 << 30,
+			Reason:             "unreferenced_blob",
+		}},
+	}, nil); err != nil {
+		t.Fatalf("upsert pressure inventory: %v", err)
+	}
+	if _, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), coldUpdater.ID, coldUpdater.ClusterNodeName, coldUpdater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		"prune_reason": "image-cache-orphan",
+	}); err != nil {
+		t.Fatalf("create existing pending prune task: %v", err)
+	}
+	svc := &Service{
+		Store: stateStore,
+		Config: config.ControllerConfig{
+			ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
+			ImageStoreOrphanPruneGracePeriod:           time.Hour,
+			ImageStoreOrphanPruneMaxTargetsPerNode:     10,
+			ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
+			ImageStoreOrphanPruneMinReplicaCount:       1,
+			ImageCacheInventoryTTL:                     2 * time.Hour,
+		},
+	}
+	if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
+		t.Fatalf("schedule orphan prune: %v", err)
+	}
+	tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	var pressureTask *model.NodeUpdateTask
+	for idx := range tasks {
+		if tasks[idx].Type == model.NodeUpdateTaskTypePruneImageCache && tasks[idx].ClusterNodeName == "worker-pressure" {
+			pressureTask = &tasks[idx]
+			break
+		}
+	}
+	if pressureTask == nil {
+		t.Fatalf("expected a pressure-node prune task despite existing pending task, got %+v", tasks)
+	}
+	if pressureTask.Payload["candidate_blob_bytes"] != "8589934592" ||
+		pressureTask.Payload["include_unreferenced_blobs"] != "true" ||
+		pressureTask.Payload["max_delete_bytes"] != "26843545600" {
+		t.Fatalf("unexpected pressure prune payload: %+v", pressureTask.Payload)
+	}
+}
+
 func TestControllerImageCacheProtectsDigestWorkloadRef(t *testing.T) {
 	t.Parallel()
 

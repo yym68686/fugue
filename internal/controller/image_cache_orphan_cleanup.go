@@ -21,6 +21,11 @@ const (
 	defaultImageCachePressurePruneBudget    = int64(25 << 30)
 )
 
+type nodeImageCachePrunePlan struct {
+	node model.ImageCacheNodeInventory
+	plan model.ImageCachePrunePlan
+}
+
 func (s *Service) runImageCacheStorageMaintenance(ctx context.Context) error {
 	if err := s.scheduleImageCacheInventoryReports(ctx); err != nil {
 		return err
@@ -104,11 +109,7 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	type nodePlan struct {
-		node model.ImageCacheNodeInventory
-		plan model.ImageCachePrunePlan
-	}
-	plans := make([]nodePlan, 0, len(nodes))
+	plans := make([]nodeImageCachePrunePlan, 0, len(nodes))
 	for _, node := range nodes {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -121,7 +122,7 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		plans = append(plans, nodePlan{node: node, plan: plan})
+		plans = append(plans, nodeImageCachePrunePlan{node: node, plan: plan})
 	}
 	if mode == model.ImageCachePruneModeObserve {
 		return nil
@@ -136,17 +137,18 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			}
 		}
 	}
+	sortControllerImageCachePrunePlans(plans)
 	updaters, err := s.Store.ListNodeUpdaters("", true)
 	if err != nil {
 		return err
 	}
-	activeGlobal, err := s.controllerImageCacheActivePruneTaskCount()
+	activeGlobal, err := s.controllerImageCacheRunningPruneTaskCount()
 	if err != nil {
 		return err
 	}
 	if activeGlobal >= defaultImageCachePruneGlobalConcurrency {
 		if s.Logger != nil {
-			s.Logger.Printf("skip image-cache orphan prune scheduling: global prune concurrency limit reached active=%d limit=%d", activeGlobal, defaultImageCachePruneGlobalConcurrency)
+			s.Logger.Printf("skip image-cache orphan prune scheduling: global prune running limit reached active=%d limit=%d", activeGlobal, defaultImageCachePruneGlobalConcurrency)
 		}
 		return nil
 	}
@@ -274,23 +276,55 @@ func (s *Service) controllerImageCacheHasActivePruneTask(updaterID string) (bool
 	return false, nil
 }
 
-func (s *Service) controllerImageCacheActivePruneTaskCount() (int, error) {
+func (s *Service) controllerImageCacheRunningPruneTaskCount() (int, error) {
 	if s == nil || s.Store == nil {
 		return 0, nil
 	}
 	count := 0
-	for _, status := range []string{model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning} {
-		tasks, err := s.Store.ListNodeUpdateTasks("", true, "", status)
-		if err != nil {
-			return 0, err
-		}
-		for _, task := range tasks {
-			if controllerImageCacheControllerPruneTask(task) {
-				count++
-			}
+	tasks, err := s.Store.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusRunning)
+	if err != nil {
+		return 0, err
+	}
+	for _, task := range tasks {
+		if controllerImageCacheControllerPruneTask(task) {
+			count++
 		}
 	}
 	return count, nil
+}
+
+func sortControllerImageCachePrunePlans(plans []nodeImageCachePrunePlan) {
+	sort.SliceStable(plans, func(i, j int) bool {
+		left := plans[i].plan
+		right := plans[j].plan
+		if left.NodePressure != right.NodePressure {
+			return left.NodePressure
+		}
+		leftBytes := controllerImageCachePruneCandidateBytes(left)
+		rightBytes := controllerImageCachePruneCandidateBytes(right)
+		if leftBytes != rightBytes {
+			return leftBytes > rightBytes
+		}
+		if left.CandidateBlobBytes != right.CandidateBlobBytes {
+			return left.CandidateBlobBytes > right.CandidateBlobBytes
+		}
+		leftCandidates := left.CandidateManifestCount + left.CandidateBlobCount
+		rightCandidates := right.CandidateManifestCount + right.CandidateBlobCount
+		if leftCandidates != rightCandidates {
+			return leftCandidates > rightCandidates
+		}
+		leftName := firstNonEmptyImageCacheControllerString(left.ClusterNodeName, left.NodeID, left.RuntimeID)
+		rightName := firstNonEmptyImageCacheControllerString(right.ClusterNodeName, right.NodeID, right.RuntimeID)
+		return leftName < rightName
+	})
+}
+
+func controllerImageCachePruneCandidateBytes(plan model.ImageCachePrunePlan) int64 {
+	total := plan.CandidateBlobBytes
+	for _, candidate := range plan.Candidates {
+		total += candidate.PlannedDeleteBytes
+	}
+	return total
 }
 
 func (s *Service) controllerImageCacheNodePruneCoolingDown(updaterID string) (bool, time.Time, error) {

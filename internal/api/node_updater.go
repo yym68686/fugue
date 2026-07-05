@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion        = "v12"
+	nodeUpdaterScriptVersion        = "v13"
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 )
@@ -827,7 +827,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v12"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v13"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -2339,6 +2339,12 @@ manifests = inventory.get("manifests") or []
 if not isinstance(manifests, list):
     raise SystemExit("image-cache inventory manifests is not a list")
 
+def as_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
 normalized = []
 for manifest in manifests:
     if not isinstance(manifest, dict):
@@ -2354,11 +2360,38 @@ for manifest in manifests:
         item["created_at_observed"] = item.get("modified_at")
     normalized.append(item)
 
+raw_unreferenced_blobs = inventory.get("unreferenced_blobs") or []
+if not isinstance(raw_unreferenced_blobs, list):
+    raw_unreferenced_blobs = []
+unreferenced_blobs = []
+unreferenced_blob_bytes = 0
+for blob in raw_unreferenced_blobs:
+    if not isinstance(blob, dict):
+        continue
+    digest = str(blob.get("digest") or "").strip()
+    if not digest:
+        continue
+    size_bytes = as_int(blob.get("size_bytes") or blob.get("size") or blob.get("blob_size"))
+    item = {
+        "digest": digest,
+        "size_bytes": size_bytes,
+    }
+    modified_at = str(blob.get("modified_at") or blob.get("last_seen_at") or "").strip()
+    if modified_at:
+        item["modified_at"] = modified_at
+    unreferenced_blobs.append(item)
+    unreferenced_blob_bytes += size_bytes
+if unreferenced_blob_bytes == 0:
+    unreferenced_blob_bytes = as_int(inventory.get("unreferenced_blob_bytes"))
+unreferenced_blob_count = len(unreferenced_blobs)
+if unreferenced_blob_count == 0:
+    unreferenced_blob_count = as_int(inventory.get("unreferenced_blob_count"))
+
 disk = inventory.get("disk") if isinstance(inventory.get("disk"), dict) else {}
 pins = inventory.get("pins") if isinstance(inventory.get("pins"), list) else []
 observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-cache_bytes = int(disk.get("cache_bytes") or 0)
-free_bytes = int(disk.get("free_bytes") or 0)
+cache_bytes = as_int(disk.get("cache_bytes"))
+free_bytes = as_int(disk.get("free_bytes"))
 chunk_size = 500
 chunk_count = max(1, (len(normalized) + chunk_size - 1) // chunk_size)
 
@@ -2367,14 +2400,18 @@ base["endpoint"] = (inventory.get("endpoint") or endpoint).rstrip("/")
 base["cluster_node"] = inventory.get("cluster_node") or cluster_node
 base["observed_at"] = observed_at
 base["manifest_total_count"] = len(normalized)
+base["unreferenced_blobs"] = unreferenced_blobs
 base["node"] = {
     "cluster_node_name": base["cluster_node"],
     "cache_endpoint": base["endpoint"],
-    "filesystem_total_bytes": int(disk.get("total_bytes") or 0),
+    "filesystem_total_bytes": as_int(disk.get("total_bytes")),
     "filesystem_free_bytes": free_bytes,
     "filesystem_used_percent": float(disk.get("used_percent") or 0),
     "cache_bytes": cache_bytes,
     "manifest_count": len(normalized),
+    "blob_count": as_int(inventory.get("blob_count") or disk.get("blob_count")),
+    "unreferenced_blob_count": unreferenced_blob_count,
+    "unreferenced_blob_bytes": unreferenced_blob_bytes,
     "pin_count": len(pins),
     "observed_at": observed_at,
     "status": "reported",
@@ -2398,6 +2435,8 @@ with open(os.path.join(chunk_dir, "summary.env"), "w", encoding="utf-8") as fh:
     fh.write(f"manifest_count={len(normalized)}\n")
     fh.write(f"chunk_count={chunk_count}\n")
     fh.write(f"cache_bytes={cache_bytes}\n")
+    fh.write(f"unreferenced_blob_count={unreferenced_blob_count}\n")
+    fh.write(f"unreferenced_blob_bytes={unreferenced_blob_bytes}\n")
     fh.write(f"filesystem_free_bytes={free_bytes}\n")
 PY_IMAGE_CACHE_INVENTORY
   then
@@ -2462,7 +2501,7 @@ PY_IMAGE_CACHE_INVENTORY
     echo "image-cache inventory posted ${posted_chunks} chunks, expected ${expected_chunks}" >&2
     return 1
   fi
-  log_task "reported image-cache inventory manifests=${manifest_count:-0} chunks=${chunk_count:-0} cache_bytes=${cache_bytes:-0} filesystem_free_bytes=${filesystem_free_bytes:-0}"
+  log_task "reported image-cache inventory manifests=${manifest_count:-0} chunks=${chunk_count:-0} cache_bytes=${cache_bytes:-0} unreferenced_blob_count=${unreferenced_blob_count:-0} unreferenced_blob_bytes=${unreferenced_blob_bytes:-0} filesystem_free_bytes=${filesystem_free_bytes:-0}"
   rm -f "${inventory_file}"
   rm -rf "${chunk_dir}"
 }
