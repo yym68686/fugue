@@ -69,7 +69,7 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 [[ -n "${out}" ]]
-printf '%s' "${TEST_PLATFORM_AUTONOMY_JSON}" >"${out}"
+printf '%s' "${TEST_CURL_RESPONSE_JSON:-${TEST_PLATFORM_AUTONOMY_JSON}}" >"${out}"
 SH
 chmod +x "${TMP_CURL_DIR}/curl"
 PATH="${TMP_CURL_DIR}:${PATH}"
@@ -82,6 +82,26 @@ if autonomy_output="$(platform_autonomy_status_summary)"; then
   fail "failed platform autonomy status must return non-zero"
 fi
 assert_eq "${autonomy_output}" "pass=false block_rollout=true; failing=edge: warming" "platform autonomy failure summary"
+unset TEST_CURL_RESPONSE_JSON
+
+export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=6"}],"incidents":[{"id":"robust_existing","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=6"}]}}'
+if robustness_output="$(robustness_status_summary)"; then
+  fail "strict robustness status without a baseline must return non-zero when block_rollout=true"
+fi
+[[ "${robustness_output}" == *"block_rollout=true"* ]] || fail "strict robustness failure summary must include block_rollout=true"
+ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
+capture_pre_deploy_robustness_baseline
+[[ -n "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" && -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" ]] || fail "pre-deploy robustness baseline must be captured"
+assert_eq "$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" "pass=false block_rollout=true checks=1 incidents=1 baseline_incidents=1 new_incidents=0" "matching robustness baseline must tolerate existing incidents"
+export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=7"},{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","message":"missing route"}],"incidents":[{"id":"robust_existing_changed","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=7"},{"id":"robust_new","severity":"block_publish","subject":"route:example","check_name":"route_active","message":"missing route"}]}}'
+if robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")"; then
+  fail "robustness baseline must fail on new incidents"
+fi
+[[ "${robustness_output}" == *"new_incidents=1"* ]] || fail "robustness baseline failure must report new incident count"
+[[ "${robustness_output}" == *"new_blockers=route_active(route:example): missing route"* ]] || fail "robustness baseline failure must report new block_publish blocker"
+rm -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}"
+ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
+unset TEST_CURL_RESPONSE_JSON
 PATH="${ORIGINAL_PATH}"
 rm -rf "${TMP_CURL_DIR}"
 

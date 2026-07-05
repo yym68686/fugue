@@ -321,6 +321,7 @@ NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="false"
 PRESERVE_REGISTRY_ZERO_REPLICAS="false"
 RELEASE_CHANGED_FILES_EFFECTIVE=""
 STRICT_DRAIN_AGENT_IMAGE_PRESERVED=false
+ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 
 release_changed_files() {
   if [[ -n "${RELEASE_CHANGED_FILES_EFFECTIVE:-}" ]]; then
@@ -2755,6 +2756,9 @@ cleanup_upgrade_override_values() {
   fi
   if [[ -n "${DISCOVERY_BUNDLE_FILE_TEMP}" && -f "${DISCOVERY_BUNDLE_FILE_TEMP}" ]]; then
     rm -f "${DISCOVERY_BUNDLE_FILE_TEMP}"
+  fi
+  if [[ -n "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" && -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" ]]; then
+    rm -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}"
   fi
 }
 
@@ -5872,18 +5876,29 @@ PY
   return "${rc}"
 }
 
-robustness_status_summary() {
-  local api_base token status_file rc
+capture_pre_deploy_robustness_baseline() {
+  local api_base token status_file summary
+
+  case "${FUGUE_ROBUSTNESS_HEALTH_GATE_ENABLED:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
+      return 0
+      ;;
+  esac
+  command_exists python3 || fail "python3 is required for post-deploy robustness health gate"
 
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
   status_file="$(mktemp)"
   if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/robustness/status" -o "${status_file}"; then
     rm -f "${status_file}"
-    printf 'robustness status request failed'
-    return 1
+    ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
+    log "warning: failed to capture pre-deploy robustness baseline; post-deploy robustness gate will use strict mode"
+    return 0
   fi
-  python3 - "${status_file}" <<'PY'
+  if ! summary="$(python3 - "${status_file}" <<'PY'
 import json
 import sys
 
@@ -5892,13 +5907,117 @@ with open(path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status")
 if not isinstance(status, dict):
+    raise SystemExit("missing status object")
+checks = status.get("checks") or []
+incidents = status.get("incidents") or []
+print(
+    f"pass={str(bool(status.get('pass'))).lower()} "
+    f"block_rollout={str(bool(status.get('block_rollout'))).lower()} "
+    f"checks={len(checks)} incidents={len(incidents)}"
+)
+PY
+  )"; then
+    rm -f "${status_file}"
+    ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
+    log "warning: pre-deploy robustness baseline response was invalid; post-deploy robustness gate will use strict mode"
+    return 0
+  fi
+  ROBUSTNESS_HEALTH_GATE_BASELINE_FILE="${status_file}"
+  log "captured pre-deploy robustness baseline: ${summary}"
+}
+
+robustness_status_summary() {
+  local api_base token status_file baseline_file rc
+
+  baseline_file="${1:-}"
+  api_base="$(release_api_base_url)"
+  token="$(release_api_token)"
+  status_file="$(mktemp)"
+  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/robustness/status" -o "${status_file}"; then
+    rm -f "${status_file}"
+    printf 'robustness status request failed'
+    return 1
+  fi
+  python3 - "${status_file}" "${baseline_file}" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+baseline_path = sys.argv[2] if len(sys.argv) > 2 else ""
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+status = payload.get("status")
+if not isinstance(status, dict):
     print("robustness status response is missing status object")
     raise SystemExit(1)
+
+def stable_text(value):
+    return str(value or "").strip()
+
+def check_key(check):
+    return "\x00".join(
+        [
+            stable_text(check.get("name")),
+            stable_text(check.get("subject")),
+            stable_text(check.get("severity")),
+        ]
+    )
+
+def incident_key(incident):
+    return "\x00".join(
+        [
+            stable_text(incident.get("check_name") or incident.get("name")),
+            stable_text(incident.get("subject")),
+            stable_text(incident.get("severity")),
+        ]
+    )
+
+def incident_id(incident):
+    return stable_text(incident.get("id") or incident.get("incident_id"))
+
+def incident_label(incident):
+    name = stable_text(incident.get("check_name") or incident.get("name")) or "<unknown>"
+    subject = stable_text(incident.get("subject"))
+    severity = stable_text(incident.get("severity")) or "<unknown>"
+    message = stable_text(incident.get("message") or incident.get("observed"))
+    label = f"{severity}:{name}({subject})" if subject else f"{severity}:{name}"
+    return f"{label}: {message}" if message else label
+
+baseline_status = None
+baseline_incident_ids = set()
+baseline_incident_keys = set()
+baseline_blocker_keys = set()
+if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_path) > 0:
+    with open(baseline_path, "r", encoding="utf-8") as fh:
+        baseline_payload = json.load(fh)
+    candidate = baseline_payload.get("status")
+    if isinstance(candidate, dict):
+        baseline_status = candidate
+        for incident in candidate.get("incidents") or []:
+            if not isinstance(incident, dict):
+                continue
+            ident = incident_id(incident)
+            if ident:
+                baseline_incident_ids.add(ident)
+            key = incident_key(incident)
+            if key:
+                baseline_incident_keys.add(key)
+        for check in candidate.get("checks") or []:
+            if (
+                isinstance(check, dict)
+                and not check.get("pass")
+                and stable_text(check.get("severity")) == "block_publish"
+            ):
+                key = check_key(check)
+                if key:
+                    baseline_blocker_keys.add(key)
 
 checks = status.get("checks") or []
 incidents = status.get("incidents") or []
 block_rollout = bool(status.get("block_rollout"))
 blockers = []
+new_blockers = []
 for check in checks:
     if not isinstance(check, dict) or check.get("pass"):
         continue
@@ -5909,18 +6028,49 @@ for check in checks:
     subject = str(check.get("subject") or "").strip()
     message = str(check.get("message") or check.get("observed") or "").strip()
     label = f"{name}({subject})" if subject else name
-    blockers.append(f"{label}: {message}" if message else label)
+    description = f"{label}: {message}" if message else label
+    blockers.append(description)
+    key = check_key(check)
+    if not baseline_status or key not in baseline_blocker_keys:
+        new_blockers.append(description)
+
+new_incidents = []
+if baseline_status is not None:
+    for incident in incidents:
+        if not isinstance(incident, dict):
+            continue
+        ident = incident_id(incident)
+        key = incident_key(incident)
+        if (ident and ident in baseline_incident_ids) or (key and key in baseline_incident_keys):
+            continue
+        new_incidents.append(incident_label(incident))
 
 summary = (
     f"pass={str(bool(status.get('pass'))).lower()} "
     f"block_rollout={str(block_rollout).lower()} "
     f"checks={len(checks)} incidents={len(incidents)}"
 )
-if blockers:
+if baseline_status is not None:
+    summary += (
+        f" baseline_incidents={len(baseline_status.get('incidents') or [])}"
+        f" new_incidents={len(new_incidents)}"
+    )
+if new_blockers:
+    summary += "; new_blockers=" + "; ".join(new_blockers)
+elif blockers:
     summary += "; blockers=" + "; ".join(blockers)
+if new_incidents:
+    summary += "; new_incidents_detail=" + "; ".join(new_incidents[:5])
+    if len(new_incidents) > 5:
+        summary += f"; +{len(new_incidents) - 5} more"
 print(summary)
-if block_rollout or blockers:
-    raise SystemExit(1)
+
+if baseline_status is not None:
+    if new_blockers or new_incidents:
+        raise SystemExit(1)
+else:
+    if block_rollout or blockers:
+        raise SystemExit(1)
 PY
   rc=$?
   rm -f "${status_file}"
@@ -5963,7 +6113,7 @@ wait_for_post_deploy_robustness() {
 
   deadline=$((SECONDS + timeout))
   while true; do
-    if output="$(robustness_status_summary)"; then
+    if output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE:-}")"; then
       log "post-deploy robustness gate passed: ${output}"
       return 0
     fi
@@ -6486,6 +6636,7 @@ PY
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
   validate_control_plane_singleton_anchor
   prepare_release_domains
+  capture_pre_deploy_robustness_baseline
 
   PREVIOUS_REVISION="$(helm_current_revision)"
   [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
