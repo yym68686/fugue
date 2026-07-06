@@ -68,11 +68,11 @@ func TestControllerNodeUpdaterNeedsUpgrade(t *testing.T) {
 		target  string
 		want    bool
 	}{
-		{name: "older", current: "v12", target: "v13", want: true},
-		{name: "same", current: "v13", target: "v13", want: false},
-		{name: "future", current: "v14", target: "v13", want: false},
-		{name: "empty", current: "", target: "v13", want: true},
-		{name: "unknown", current: "legacy", target: "v13", want: true},
+		{name: "older", current: "v13", target: "v14", want: true},
+		{name: "same", current: "v14", target: "v14", want: false},
+		{name: "future", current: "v15", target: "v14", want: false},
+		{name: "empty", current: "", target: "v14", want: true},
+		{name: "unknown", current: "legacy", target: "v14", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

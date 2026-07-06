@@ -356,6 +356,8 @@ func decodeImageCacheInventoryReport(r *http.Request, updater model.NodeUpdater)
 	node.PinCount = firstNonZeroInt(node.PinCount, len(req.Pins))
 	if len(req.UnreferencedBlobs) > 0 {
 		node.UnreferencedBlobs = make([]model.ImageCachePruneBlobCandidate, 0, len(req.UnreferencedBlobs))
+		node.UnreferencedBlobCount = 0
+		node.UnreferencedBlobBytes = 0
 		for _, blob := range req.UnreferencedBlobs {
 			digest := strings.TrimSpace(blob.Digest)
 			if digest == "" {

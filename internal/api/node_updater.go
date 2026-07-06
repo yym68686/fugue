@@ -827,7 +827,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v13"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v14"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -2530,9 +2530,9 @@ prune_image_cache() {
   esac
   body="{\"dry_run\":${dry_run},\"allow_delete\":${allow_delete},\"image_ref\":\"$(json_escape_shell "${image_ref}")\",\"digest\":\"$(json_escape_shell "${digest}")\",\"max_delete_bytes\":\"$(json_escape_shell "${max_delete_bytes}")\",\"min_manifest_age\":\"$(json_escape_shell "${min_manifest_age}")\",\"include_unreferenced_blobs\":${include_unreferenced_blobs},\"targets\":${targets_json}}"
   response="$(image_cache_api_json /fugue/cache/v1/prune "${body}")"
-  planned_delete_bytes="$(printf '%s' "${response}" | sed -n 's/.*"planned_delete_bytes"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"
-  deleted_bytes="$(printf '%s' "${response}" | sed -n 's/.*"deleted_bytes"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"
-  candidate_count="$(printf '%s' "${response}" | sed -n 's/.*"candidate_count"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)"
+  planned_delete_bytes="$(printf '%s' "${response}" | sed -n 's/.*"planned_delete_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  deleted_bytes="$(printf '%s' "${response}" | sed -n 's/.*"deleted_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  candidate_count="$(printf '%s' "${response}" | sed -n 's/.*"candidate_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)"
   if printf '%s' "${response}" | grep -Eq '"deleted"[[:space:]]*:[[:space:]]*true'; then
     if [ -n "${image_id}" ]; then
       report_image_replica "${image_id}" "${digest}" missing "image-cache prune deleted local replica"

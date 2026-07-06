@@ -98,6 +98,72 @@ func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	}
 }
 
+func TestImageCacheInventoryUnreferencedBlobsUseBlobListTotals(t *testing.T) {
+	t.Parallel()
+
+	_, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Image Cache Unreferenced Blob Tenant")
+	modified := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	report := performJSONRequest(t, server, http.MethodPost, "/v1/node-updater/image-cache/inventory", updaterToken, map[string]any{
+		"endpoint":     "http://worker-1:5000",
+		"cluster_node": "worker-1",
+		"node": map[string]any{
+			"cluster_node_name":           "worker-1",
+			"unreferenced_blob_count":     99,
+			"unreferenced_blob_bytes":     99_999,
+			"filesystem_total_bytes":      1000,
+			"filesystem_free_bytes":       300,
+			"filesystem_used_percent":     70,
+			"cache_bytes":                 500,
+			"manifest_count":              0,
+			"blob_count":                  2,
+			"reported_by_node_updater_id": "ignored",
+		},
+		"unreferenced_blobs": []map[string]any{
+			{
+				"digest":      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"size_bytes":  123,
+				"modified_at": modified,
+			},
+			{
+				"digest":      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"size_bytes":  456,
+				"modified_at": modified,
+			},
+		},
+	})
+	if report.Code != http.StatusOK {
+		t.Fatalf("report inventory status=%d body=%s", report.Code, report.Body.String())
+	}
+
+	inventory := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/inventory?cluster_node_name=worker-1", adminSecret, nil)
+	if inventory.Code != http.StatusOK {
+		t.Fatalf("admin inventory status=%d body=%s", inventory.Code, inventory.Body.String())
+	}
+	var inventoryResponse struct {
+		Nodes []model.ImageCacheNodeInventory `json:"nodes"`
+	}
+	mustDecodeJSON(t, inventory, &inventoryResponse)
+	if len(inventoryResponse.Nodes) != 1 {
+		t.Fatalf("expected one node, got %+v", inventoryResponse.Nodes)
+	}
+	node := inventoryResponse.Nodes[0]
+	if node.UnreferencedBlobCount != 2 || node.UnreferencedBlobBytes != 579 || len(node.UnreferencedBlobs) != 2 {
+		t.Fatalf("unreferenced blob totals should come from blob list once, got %+v", node)
+	}
+
+	planRequest := performFormRequest(t, server, http.MethodGet, "/v1/admin/image-cache/prune-plan?cluster_node_name=worker-1", adminSecret, nil)
+	if planRequest.Code != http.StatusOK {
+		t.Fatalf("get prune plan status=%d body=%s", planRequest.Code, planRequest.Body.String())
+	}
+	var planResponse struct {
+		Plan model.ImageCachePrunePlan `json:"plan"`
+	}
+	mustDecodeJSON(t, planRequest, &planResponse)
+	if planResponse.Plan.CandidateBlobCount != 2 || planResponse.Plan.CandidateBlobBytes != 579 {
+		t.Fatalf("expected prune plan candidate blobs to match inventory blob list, got %+v", planResponse.Plan)
+	}
+}
+
 func TestImageCacheInventoryAndLocalPVAdminListsReturnEmptyArrays(t *testing.T) {
 	t.Parallel()
 

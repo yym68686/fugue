@@ -478,7 +478,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v13"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v14"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -513,6 +513,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`base["unreferenced_blobs"] = unreferenced_blobs`,
 		`"unreferenced_blob_count": unreferenced_blob_count`,
 		`"unreferenced_blob_bytes": unreferenced_blob_bytes`,
+		`"planned_delete_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)`,
 		`image-cache prune delete completed; reporting post-prune inventory`,
 	} {
 		if !strings.Contains(script, want) {
