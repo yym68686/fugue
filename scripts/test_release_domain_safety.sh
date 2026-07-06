@@ -25,6 +25,62 @@ export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-release
+  FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+
+  patched=""
+  switched=""
+
+  enable_bluegreen_chart_mode() { :; }
+  bluegreen_worker_bases() {
+    printf 'fugue-fugue-edge\n'
+    printf 'fugue-fugue-edge-dynamic\n'
+  }
+  wait_daemonset_ready() { :; }
+  daemonset_ready_counts() {
+    case "$1" in
+      *edge-dynamic-front|*edge-dynamic-worker-*)
+        printf '0\t0\t0'
+        ;;
+      *)
+        printf '1\t1\t0'
+        ;;
+    esac
+  }
+  current_active_slot() {
+    [[ "$1" != *dynamic* ]] || fail "dynamic base with desired=0 must not read active slot"
+    printf 'b'
+  }
+  patch_inactive_worker() {
+    [[ "$1" != *dynamic* ]] || fail "dynamic base with desired=0 must not patch workers"
+    patched="${patched}${1};"
+  }
+  delete_worker_pods() { :; }
+  worker_https_port() { printf '18443'; }
+  check_worker_tcp() { :; }
+  check_worker_https_smoke() { :; }
+  capture_daemonset_pods() { printf 'stable-pods\n'; }
+  write_front_active_slot() {
+    [[ "$1" != *dynamic* ]] || fail "dynamic base with desired=0 must not switch front slot"
+    switched="${switched}${1}:$2;"
+  }
+
+  run_bluegreen_release
+  assert_eq "${patched}" "fugue-fugue-edge-worker-a;" "blue-green release must patch only scheduled bases"
+  assert_eq "${switched}" "fugue-fugue-edge-front:a;" "blue-green release must switch only scheduled bases"
+  assert_eq "${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON}" '{"fugue-fugue-edge":"a"}' "blue-green release record must omit unscheduled dynamic base"
+)
+
 assert_eq "$(image_ref_repository 'ghcr.io/acme/fugue-edge:sha123')" "ghcr.io/acme/fugue-edge" "repository parses tagged ghcr image"
 assert_eq "$(image_ref_tag 'ghcr.io/acme/fugue-edge:sha123')" "sha123" "tag parses tagged ghcr image"
 assert_eq "$(image_ref_repository 'localhost:5000/acme/fugue-edge:sha123')" "localhost:5000/acme/fugue-edge" "repository keeps registry port"

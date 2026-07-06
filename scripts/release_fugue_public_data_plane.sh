@@ -324,6 +324,14 @@ daemonset_ready_counts() {
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true
 }
 
+daemonset_desired_count() {
+  local daemonset_name="$1"
+  local desired
+  IFS=$'\t' read -r desired _ <<<"$(daemonset_ready_counts "${daemonset_name}")"
+  desired="${desired:-0}"
+  printf '%s' "${desired}"
+}
+
 wait_daemonset_observed() {
   local daemonset_name="$1"
   local timeout_seconds="${FUGUE_PUBLIC_DATA_PLANE_OBSERVED_TIMEOUT_SECONDS:-120}"
@@ -993,6 +1001,10 @@ collect_current_active_slots_json() {
 
   for base in "${bases[@]}"; do
     front_ds="$(bluegreen_front_daemonset_name "${base}")"
+    if [[ "$(daemonset_desired_count "${front_ds}")" == "0" ]]; then
+      log "skipping active slot collection for ${base}; front desired=0"
+      continue
+    fi
     slot="$(current_active_slot "${base}" "${front_ds}")"
     active_slots="$(record_active_slot_json "${active_slots}" "${base}" "${slot}")"
   done
@@ -1296,6 +1308,10 @@ run_bluegreen_release() {
   for base in "${bases[@]}"; do
     front_ds="$(bluegreen_front_daemonset_name "${base}")"
     wait_daemonset_ready "${front_ds}"
+    if [[ "$(daemonset_desired_count "${front_ds}")" == "0" ]]; then
+      log "skipping ${base}; front desired=0"
+      continue
+    fi
     active="$(current_active_slot "${base}" "${front_ds}")"
     inactive="$(other_slot "${active}")"
     active_ds="$(bluegreen_worker_daemonset_name "${base}" "${active}")"
@@ -1325,6 +1341,7 @@ run_bluegreen_release() {
 
 run_front_ondelete_release() {
   local bases=()
+  local active_bases=()
   local base
   local front_ds
 
@@ -1346,10 +1363,15 @@ run_front_ondelete_release() {
     require_bluegreen_base_complete "${base}"
     wait_bluegreen_base_ready "${base}"
     front_ds="$(bluegreen_front_daemonset_name "${base}")"
+    if [[ "$(daemonset_desired_count "${front_ds}")" == "0" ]]; then
+      log "skipping front-ondelete for ${base}; front desired=0"
+      continue
+    fi
+    active_bases+=("${base}")
     patch_front_template "${front_ds}"
     replace_daemonset_pods_one_at_a_time "${front_ds}" "front" "true"
   done
-  FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="$(collect_current_active_slots_json "${bases[@]}")"
+  FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="$(collect_current_active_slots_json "${active_bases[@]}")"
 }
 
 run_dns_ondelete_release() {
@@ -1558,4 +1580,6 @@ main() {
   log "public data-plane DaemonSet templates patched; no public pods were deleted or restarted"
 }
 
-main "$@"
+if [[ "${FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY:-false}" != "true" ]]; then
+  main "$@"
+fi
