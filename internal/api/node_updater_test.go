@@ -154,6 +154,72 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	geoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","countryCode":"US"}`))
+	}))
+	defer geoServer.Close()
+	oldClient := geoIPHTTPClient
+	oldEndpoints := geoIPLookupEndpoints
+	defer func() {
+		geoIPHTTPClient = oldClient
+		geoIPLookupEndpoints = oldEndpoints
+	}()
+	geoIPHTTPClient = geoServer.Client()
+	geoIPLookupEndpoints = []geoIPLookupEndpoint{
+		{
+			Name:   "fixture",
+			URL:    func(string) string { return geoServer.URL },
+			Decode: decodeIPAPIComCountryCode,
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.fugue.pro/v1/node-updater/desired-state", nil)
+	credential, warnings, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{
+		ClusterNodeName: "dmit",
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	}, &model.ClusterNodePolicyStatus{
+		NodeName: "dmit",
+		Policy: &model.ClusterNodePolicy{
+			AllowEdge:     true,
+			AllowDNS:      false,
+			DedicatedMode: "edge",
+		},
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("issue edge credential: %v", err)
+	}
+	if credential == nil {
+		t.Fatalf("expected edge credential, warnings=%v", warnings)
+	}
+	if credential.EdgeGroupID != "edge-group-country-us" || credential.Country != "us" || credential.WorkloadMode != "dynamic" {
+		t.Fatalf("unexpected inferred credential: %+v warnings=%v", credential, warnings)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "inferred from public IP") {
+		t.Fatalf("expected inference warning, got %v", warnings)
+	}
+	node, _, err := s.GetEdgeNode("dmit")
+	if err != nil {
+		t.Fatalf("get created edge node: %v", err)
+	}
+	if node.EdgeGroupID != "edge-group-country-us" || node.Country != "us" || node.WorkloadMode != "dynamic" {
+		t.Fatalf("unexpected stored edge node: %+v", node)
+	}
+}
+
 func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
 	t.Parallel()
 
@@ -707,7 +773,7 @@ func TestNodeUpdaterK3sConfigReconcileRefreshesNodePolicyLabelsAndTaints(t *test
 		t.Fatalf("node updater script missing command dispatch")
 	}
 
-harness := prefix + `
+	harness := prefix + `
 tmpdir="$(mktemp -d)"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
@@ -777,12 +843,7 @@ cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
         "fugue.io/role.app-runtime": "true",
         "fugue.io/role.edge": "true",
         "fugue.io/runtime-id": "runtime_edge",
-        "fugue.io/tenant-id": "tenant_edge",
-        "fugue.io/location-country-code": "us",
-        "fugue.io/public-ip": "203.0.113.10",
-        "fugue.io/edge-group-id": "edge-group-country-us",
-        "fugue.io/edge-workload": "dynamic",
-        "fugue.io/edge-location-status": "ready"
+        "fugue.io/tenant-id": "tenant_edge"
       }
     },
     "edge_credential": {

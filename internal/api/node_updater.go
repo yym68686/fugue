@@ -173,9 +173,29 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 	if edgeID == "" {
 		return nil, []string{"edge credential not issued: cluster node name is empty"}, nil
 	}
+	warnings := []string{}
+	publicIP := strings.TrimSpace(labels["fugue.io/public-ip"])
+	country := strings.ToLower(strings.TrimSpace(labels["fugue.io/location-country-code"]))
+	region := strings.TrimSpace(firstNodeLabel(labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"))
 	edgeGroupID := derivedEdgeGroupIDForLabels(labels)
+	if (edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID) && country == "" && publicIP != "" {
+		geoCountry, source, err := lookupCountryCodeForPublicIP(r.Context(), publicIP)
+		if err != nil {
+			warnings = append(warnings, "edge credential location inference failed: "+err.Error())
+		} else if slug := edgeRouteSlug(geoCountry); slug != "" {
+			country = geoCountry
+			edgeGroupID = "edge-group-country-" + slug
+			warnings = append(warnings, "edge credential location inferred from public IP via "+source)
+		}
+	}
+	if (edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID) && country != "" {
+		if slug := edgeRouteSlug(country); slug != "" {
+			edgeGroupID = "edge-group-country-" + slug
+		}
+	}
 	if edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID {
-		return nil, []string{"edge credential not issued: missing location country/region or explicit edge group"}, nil
+		warnings = append(warnings, "edge credential not issued: missing location country/region or explicit edge group")
+		return nil, warnings, nil
 	}
 	workloadMode := strings.TrimSpace(strings.ToLower(labels["fugue.io/edge-workload"]))
 	switch workloadMode {
@@ -185,9 +205,6 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 	default:
 		workloadMode = "dynamic"
 	}
-	country := strings.ToLower(strings.TrimSpace(labels["fugue.io/location-country-code"]))
-	region := strings.TrimSpace(firstNodeLabel(labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"))
-	publicIP := strings.TrimSpace(labels["fugue.io/public-ip"])
 	credential := &model.NodeUpdaterEdgeCredential{
 		EdgeID:          edgeID,
 		EdgeGroupID:     edgeGroupID,
@@ -231,7 +248,7 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 		credential.Token = token
 		credential.TokenPrefix = node.TokenPrefix
 	}
-	return credential, nil, nil
+	return credential, warnings, nil
 }
 
 func nodeUpdaterPolicyAllowsEdge(labels map[string]string, nodePolicy *model.ClusterNodePolicyStatus) bool {
@@ -1409,8 +1426,12 @@ import sys
 state_path, key = sys.argv[1:3]
 with open(state_path, "r", encoding="utf-8") as fh:
     envelope = json.load(fh)
-labels = (((envelope.get("desired_state") or {}).get("node_policy") or {}).get("labels") or {})
+state = envelope.get("desired_state") or {}
+labels = ((state.get("node_policy") or {}).get("labels") or {})
+edge_credential = state.get("edge_credential") or {}
 value = str(labels.get(key) or "").strip()
+if not value and key == "fugue.io/public-ip":
+    value = str(edge_credential.get("public_ipv4") or edge_credential.get("public_ipv6") or "").strip()
 if not value:
     raise SystemExit(1)
 print(value)
@@ -1438,6 +1459,7 @@ node_policy = state.get("node_policy") or {}
 policy = node_policy.get("policy") or {}
 current_labels = node_policy.get("labels") or {}
 node_updater = state.get("node_updater") or {}
+edge_credential = state.get("edge_credential") or {}
 
 def truthy(value):
     return value is True or str(value).strip().lower() == "true"
@@ -1465,6 +1487,7 @@ machine_id = first(node_policy.get("machine_id"), node_updater.get("machine_id")
 node_key_id = first(node_updater.get("node_key_id"), current_labels.get("fugue.io/node-key-id"))
 node_mode = first(policy.get("node_mode"), current_labels.get("fugue.io/node-mode"))
 machine_scope = first(current_labels.get("fugue.io/machine-scope"), "tenant-runtime" if runtime_id else "")
+edge_public_ip = first(edge_credential.get("public_ipv4"), edge_credential.get("public_ipv6"))
 
 add_label("fugue.io/machine-id", machine_id)
 add_label("fugue.io/machine-scope", machine_scope)
@@ -1472,13 +1495,13 @@ add_label("fugue.io/node-key-id", node_key_id)
 add_label("fugue.io/node-mode", node_mode)
 add_label("fugue.io/runtime-id", runtime_id)
 add_label("fugue.io/tenant-id", tenant_id)
-add_label("topology.kubernetes.io/region", current_labels.get("topology.kubernetes.io/region"))
+add_label("topology.kubernetes.io/region", first(current_labels.get("topology.kubernetes.io/region"), edge_credential.get("region")))
 add_label("failure-domain.beta.kubernetes.io/region", current_labels.get("failure-domain.beta.kubernetes.io/region"))
 add_label("topology.kubernetes.io/zone", current_labels.get("topology.kubernetes.io/zone"))
 add_label("failure-domain.beta.kubernetes.io/zone", current_labels.get("failure-domain.beta.kubernetes.io/zone"))
-add_label("fugue.io/location-country-code", current_labels.get("fugue.io/location-country-code"))
-add_label("fugue.io/public-ip", first(os.environ.get("FUGUE_DETECTED_PUBLIC_IP"), current_labels.get("fugue.io/public-ip")))
-add_label("fugue.io/edge-group-id", current_labels.get("fugue.io/edge-group-id"))
+add_label("fugue.io/location-country-code", first(current_labels.get("fugue.io/location-country-code"), edge_credential.get("country")))
+add_label("fugue.io/public-ip", first(os.environ.get("FUGUE_DETECTED_PUBLIC_IP"), current_labels.get("fugue.io/public-ip"), edge_public_ip))
+add_label("fugue.io/edge-group-id", first(current_labels.get("fugue.io/edge-group-id"), edge_credential.get("edge_group_id")))
 
 if truthy(policy.get("allow_builds")):
     add_label("fugue.io/build", "true")
@@ -1487,9 +1510,9 @@ if truthy(policy.get("allow_app_runtime")):
     add_label("fugue.io/role.app-runtime", "true")
 if truthy(policy.get("allow_edge")):
     add_label("fugue.io/role.edge", "true")
-    edge_workload = first(current_labels.get("fugue.io/edge-workload"), "dynamic")
-    edge_group_id = first(current_labels.get("fugue.io/edge-group-id"))
-    country_code = first(current_labels.get("fugue.io/location-country-code"))
+    edge_workload = first(current_labels.get("fugue.io/edge-workload"), edge_credential.get("workload_mode"), "dynamic")
+    edge_group_id = first(current_labels.get("fugue.io/edge-group-id"), edge_credential.get("edge_group_id"))
+    country_code = first(current_labels.get("fugue.io/location-country-code"), edge_credential.get("country"))
     if country_code or edge_group_id or edge_workload == "static":
         add_label("fugue.io/edge-workload", edge_workload if edge_workload in {"static", "dynamic"} else "dynamic")
         add_label("fugue.io/edge-location-status", "ready")
