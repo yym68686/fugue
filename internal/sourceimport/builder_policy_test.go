@@ -50,6 +50,37 @@ func TestBuilderPodPolicyEscalatesHeavyMemoryAfterOOM(t *testing.T) {
 	}
 }
 
+func TestBuilderPodPolicyEscalatesHeavyEphemeralAfterEviction(t *testing.T) {
+	t.Parallel()
+
+	policy := defaultBuilderPodPolicy()
+	for _, tc := range []struct {
+		ephemeralRetries int
+		want             string
+	}{
+		{ephemeralRetries: 0, want: "8Gi"},
+		{ephemeralRetries: 1, want: "12Gi"},
+		{ephemeralRetries: 2, want: "16Gi"},
+		{ephemeralRetries: 3, want: "24Gi"},
+	} {
+		got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, 0, tc.ephemeralRetries)
+		if limit := got.Heavy.Resources.Limits["ephemeral-storage"]; limit != tc.want {
+			t.Fatalf("ephemeral retries=%d: expected ephemeral limit %s, got %s", tc.ephemeralRetries, tc.want, limit)
+		}
+		if tc.ephemeralRetries > 0 {
+			if request := got.Heavy.Resources.Requests["ephemeral-storage"]; request != tc.want {
+				t.Fatalf("ephemeral retries=%d: expected ephemeral request %s, got %s", tc.ephemeralRetries, tc.want, request)
+			}
+			if got.Heavy.WorkspaceSizeLimit != tc.want {
+				t.Fatalf("ephemeral retries=%d: expected workspace sizeLimit %s, got %s", tc.ephemeralRetries, tc.want, got.Heavy.WorkspaceSizeLimit)
+			}
+			if got.Heavy.DockerDataSizeLimit != tc.want {
+				t.Fatalf("ephemeral retries=%d: expected docker-data sizeLimit %s, got %s", tc.ephemeralRetries, tc.want, got.Heavy.DockerDataSizeLimit)
+			}
+		}
+	}
+}
+
 func TestBuilderPodPolicyCapsOOMGrowthAtTenantCeiling(t *testing.T) {
 	t.Parallel()
 
@@ -63,12 +94,34 @@ func TestBuilderPodPolicyCapsOOMGrowthAtTenantCeiling(t *testing.T) {
 	}
 }
 
+func TestBuilderPodPolicyCapsEphemeralGrowthAtTenantCeiling(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyWithEphemeralCeiling(defaultBuilderPodPolicy(), 14*1024*1024*1024)
+	got := builderPodPolicyForRetryCounts(policy, builderWorkloadProfileHeavy, 0, 2)
+	if limit := got.Heavy.Resources.Limits["ephemeral-storage"]; limit != "14Gi" {
+		t.Fatalf("expected ephemeral growth capped at 14Gi, got %s", limit)
+	}
+	if request := got.Heavy.Resources.Requests["ephemeral-storage"]; request != "14Gi" {
+		t.Fatalf("expected capped ephemeral to be reserved, got %s", request)
+	}
+}
+
 func TestBuilderPodPolicyStopsWhenTenantCeilingCannotGrow(t *testing.T) {
 	t.Parallel()
 
 	policy := builderPodPolicyWithMemoryCeiling(defaultBuilderPodPolicy(), DefaultBuilderHeavyMemoryLimitBytes())
 	if _, err := builderPodPolicyForJobAttempt(policy, builderWorkloadProfileHeavy, builderJobAttempt{Number: 2, OOMRetryCount: 1}); err == nil {
 		t.Fatal("expected builder OOM retry to stop when the tenant ceiling cannot grow")
+	}
+}
+
+func TestBuilderPodPolicyStopsWhenEphemeralCeilingCannotGrow(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyWithEphemeralCeiling(defaultBuilderPodPolicy(), DefaultBuilderHeavyEphemeralLimitBytes())
+	if _, err := builderPodPolicyForJobAttempt(policy, builderWorkloadProfileHeavy, builderJobAttempt{Number: 2, EphemeralRetryCount: 1}); err == nil {
+		t.Fatal("expected builder ephemeral retry to stop when the tenant ceiling cannot grow")
 	}
 }
 

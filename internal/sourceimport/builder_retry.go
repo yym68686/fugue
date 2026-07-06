@@ -14,8 +14,9 @@ const (
 )
 
 type builderJobAttempt struct {
-	Number        int
-	OOMRetryCount int
+	Number              int
+	OOMRetryCount       int
+	EphemeralRetryCount int
 }
 
 var retriableBuilderFailureSignals = []string{
@@ -54,11 +55,16 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 
 	var lastErr error
 	oomRetryCount := 0
+	ephemeralRetryCount := 0
 	for attempt := 1; attempt <= oomBuilderJobMaxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			break
 		}
-		err := run(ctx, builderJobAttempt{Number: attempt, OOMRetryCount: oomRetryCount})
+		err := run(ctx, builderJobAttempt{
+			Number:              attempt,
+			OOMRetryCount:       oomRetryCount,
+			EphemeralRetryCount: ephemeralRetryCount,
+		})
 		if err == nil {
 			return nil
 		}
@@ -66,8 +72,9 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 
 		retriable, signal := shouldRetryBuilderJobFailure(err)
 		oomFailure := isBuilderOOMFailure(err, signal)
+		ephemeralFailure := isBuilderEphemeralStorageFailure(err, signal)
 		maxAttempts := defaultBuilderJobMaxAttempts
-		if oomFailure || oomRetryCount > 0 {
+		if oomFailure || oomRetryCount > 0 || ephemeralFailure || ephemeralRetryCount > 0 {
 			maxAttempts = oomBuilderJobMaxAttempts
 		}
 		logger.Printf(
@@ -86,6 +93,9 @@ func runBuilderJobWithRetry(ctx context.Context, kind, jobName, imageRef string,
 		}
 		if oomFailure {
 			oomRetryCount++
+		}
+		if ephemeralFailure {
+			ephemeralRetryCount++
 		}
 
 		delay := builderRetryBackoff(attempt)
@@ -119,6 +129,16 @@ func isBuilderOOMFailure(err error, signal string) bool {
 		message += " " + strings.ToLower(err.Error())
 	}
 	return strings.Contains(message, "oomkilled") || strings.Contains(message, "out of memory")
+}
+
+func isBuilderEphemeralStorageFailure(err error, signal string) bool {
+	message := strings.ToLower(strings.TrimSpace(signal))
+	if err != nil {
+		message += " " + strings.ToLower(err.Error())
+	}
+	return strings.Contains(message, "ephemeral-storage") ||
+		strings.Contains(message, "ephemeral local storage") ||
+		strings.Contains(message, "no space left on device")
 }
 
 func shouldRetryBuilderJobFailure(err error) (bool, string) {

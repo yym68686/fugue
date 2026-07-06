@@ -143,6 +143,19 @@ func TestEscalatedBuilderDemandReservesOOMMemoryTier(t *testing.T) {
 	}
 }
 
+func TestEscalatedBuilderDemandReservesEphemeralTier(t *testing.T) {
+	t.Parallel()
+
+	policy := builderPodPolicyForRetryCounts(defaultBuilderPodPolicy(), builderWorkloadProfileHeavy, 0, 1)
+	demand, err := builderDemandForProfile(policy, builderWorkloadProfileHeavy)
+	if err != nil {
+		t.Fatalf("builder demand: %v", err)
+	}
+	if demand.EphemeralBytes != parseBuilderBytes("12Gi") {
+		t.Fatalf("expected escalated builder to reserve 12Gi ephemeral storage, got %d bytes", demand.EphemeralBytes)
+	}
+}
+
 func TestSelectBuilderCandidatesExcludesNodesBelowReservedDemand(t *testing.T) {
 	t.Parallel()
 

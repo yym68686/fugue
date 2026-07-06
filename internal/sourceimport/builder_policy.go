@@ -17,6 +17,7 @@ const (
 	defaultBuilderRetryIntervalSec        = 5
 	defaultBuilderReservationLeaseSec     = 120
 	defaultBuilderHeavyMemoryCeiling      = "16Gi"
+	defaultBuilderHeavyEphemeralCeiling   = "24Gi"
 )
 
 type builderWorkloadProfile string
@@ -52,6 +53,7 @@ type BuilderPodPolicy struct {
 	RetryIntervalSeconds         int                   `json:"retryIntervalSeconds,omitempty"`
 	ReservationLeaseDurationSecs int                   `json:"reservationLeaseDurationSeconds,omitempty"`
 	HeavyMemoryLimitCeiling      string                `json:"heavyMemoryLimitCeiling,omitempty"`
+	HeavyEphemeralLimitCeiling   string                `json:"heavyEphemeralLimitCeiling,omitempty"`
 	Tolerations                  []BuilderToleration   `json:"tolerations,omitempty"`
 	Light                        BuilderWorkloadPolicy `json:"light,omitempty"`
 	Heavy                        BuilderWorkloadPolicy `json:"heavy,omitempty"`
@@ -66,6 +68,7 @@ func defaultBuilderPodPolicy() BuilderPodPolicy {
 		RetryIntervalSeconds:         defaultBuilderRetryIntervalSec,
 		ReservationLeaseDurationSecs: defaultBuilderReservationLeaseSec,
 		HeavyMemoryLimitCeiling:      defaultBuilderHeavyMemoryCeiling,
+		HeavyEphemeralLimitCeiling:   defaultBuilderHeavyEphemeralCeiling,
 		Light: BuilderWorkloadPolicy{
 			Resources: BuilderResourceRequirements{
 				Requests: map[string]string{
@@ -124,6 +127,9 @@ func normalizeBuilderPodPolicy(policy BuilderPodPolicy) BuilderPodPolicy {
 	if strings.TrimSpace(policy.HeavyMemoryLimitCeiling) == "" {
 		policy.HeavyMemoryLimitCeiling = defaults.HeavyMemoryLimitCeiling
 	}
+	if strings.TrimSpace(policy.HeavyEphemeralLimitCeiling) == "" {
+		policy.HeavyEphemeralLimitCeiling = defaults.HeavyEphemeralLimitCeiling
+	}
 	policy.Tolerations = normalizeBuilderTolerations(policy.Tolerations)
 	policy.Light = normalizeBuilderWorkloadPolicy(policy.Light, defaults.Light)
 	policy.Heavy = normalizeBuilderWorkloadPolicy(policy.Heavy, defaults.Heavy)
@@ -136,6 +142,14 @@ func DefaultBuilderHeavyMemoryLimitBytes() int64 {
 
 func MaxBuilderHeavyMemoryLimitBytes() int64 {
 	return parseBuilderBytes(defaultBuilderHeavyMemoryCeiling)
+}
+
+func DefaultBuilderHeavyEphemeralLimitBytes() int64 {
+	return parseBuilderBytes(defaultBuilderPodPolicy().Heavy.Resources.Limits["ephemeral-storage"])
+}
+
+func MaxBuilderHeavyEphemeralLimitBytes() int64 {
+	return parseBuilderBytes(defaultBuilderHeavyEphemeralCeiling)
 }
 
 func builderPodPolicyWithMemoryCeiling(policy BuilderPodPolicy, ceilingBytes int64) BuilderPodPolicy {
@@ -154,11 +168,41 @@ func builderPodPolicyWithMemoryCeiling(policy BuilderPodPolicy, ceilingBytes int
 	return policy
 }
 
-func builderPodPolicyForAttempt(policy BuilderPodPolicy, profile builderWorkloadProfile, oomRetryCount int) BuilderPodPolicy {
+func builderPodPolicyWithEphemeralCeiling(policy BuilderPodPolicy, ceilingBytes int64) BuilderPodPolicy {
 	policy = normalizeBuilderPodPolicy(policy)
-	if profile != builderWorkloadProfileHeavy || oomRetryCount <= 0 {
+	if ceilingBytes <= 0 {
 		return policy
 	}
+	baseBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["ephemeral-storage"])
+	if ceilingBytes < baseBytes {
+		ceilingBytes = baseBytes
+	}
+	if maxBytes := MaxBuilderHeavyEphemeralLimitBytes(); maxBytes > 0 && ceilingBytes > maxBytes {
+		ceilingBytes = maxBytes
+	}
+	policy.HeavyEphemeralLimitCeiling = formatBuilderStorageBytes(ceilingBytes)
+	return policy
+}
+
+func builderPodPolicyForAttempt(policy BuilderPodPolicy, profile builderWorkloadProfile, oomRetryCount int) BuilderPodPolicy {
+	return builderPodPolicyForRetryCounts(policy, profile, oomRetryCount, 0)
+}
+
+func builderPodPolicyForRetryCounts(policy BuilderPodPolicy, profile builderWorkloadProfile, oomRetryCount, ephemeralRetryCount int) BuilderPodPolicy {
+	policy = normalizeBuilderPodPolicy(policy)
+	if profile != builderWorkloadProfileHeavy {
+		return policy
+	}
+	if oomRetryCount > 0 {
+		policy = builderPodPolicyWithHeavyMemoryRetry(policy, oomRetryCount)
+	}
+	if ephemeralRetryCount > 0 {
+		policy = builderPodPolicyWithHeavyEphemeralRetry(policy, ephemeralRetryCount)
+	}
+	return policy
+}
+
+func builderPodPolicyWithHeavyMemoryRetry(policy BuilderPodPolicy, oomRetryCount int) BuilderPodPolicy {
 	currentBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["memory"])
 	ceilingBytes := parseBuilderBytes(policy.HeavyMemoryLimitCeiling)
 	if ceilingBytes < currentBytes {
@@ -177,18 +221,31 @@ func builderPodPolicyForAttempt(policy BuilderPodPolicy, profile builderWorkload
 }
 
 func builderPodPolicyForJobAttempt(policy BuilderPodPolicy, profile builderWorkloadProfile, attempt builderJobAttempt) (BuilderPodPolicy, error) {
-	current := builderPodPolicyForAttempt(policy, profile, attempt.OOMRetryCount)
-	if attempt.OOMRetryCount <= 0 || profile != builderWorkloadProfileHeavy {
+	current := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount, attempt.EphemeralRetryCount)
+	if profile != builderWorkloadProfileHeavy {
 		return current, nil
 	}
-	previous := builderPodPolicyForAttempt(policy, profile, attempt.OOMRetryCount-1)
-	currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["memory"])
-	previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["memory"])
-	if currentBytes <= previousBytes {
-		return BuilderPodPolicy{}, fmt.Errorf(
-			"builder memory escalation is capped at %s; increase the tenant managed memory envelope or free capacity before retrying",
-			current.Heavy.Resources.Limits["memory"],
-		)
+	if attempt.OOMRetryCount > 0 {
+		previous := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount-1, attempt.EphemeralRetryCount)
+		currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["memory"])
+		previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["memory"])
+		if currentBytes <= previousBytes {
+			return BuilderPodPolicy{}, fmt.Errorf(
+				"builder memory escalation is capped at %s; increase the tenant managed memory envelope or free capacity before retrying",
+				current.Heavy.Resources.Limits["memory"],
+			)
+		}
+	}
+	if attempt.EphemeralRetryCount > 0 {
+		previous := builderPodPolicyForRetryCounts(policy, profile, attempt.OOMRetryCount, attempt.EphemeralRetryCount-1)
+		currentBytes := parseBuilderBytes(current.Heavy.Resources.Limits["ephemeral-storage"])
+		previousBytes := parseBuilderBytes(previous.Heavy.Resources.Limits["ephemeral-storage"])
+		if currentBytes <= previousBytes {
+			return BuilderPodPolicy{}, fmt.Errorf(
+				"builder ephemeral-storage escalation is capped at %s; free builder node disk capacity or increase the tenant builder storage envelope before retrying",
+				current.Heavy.Resources.Limits["ephemeral-storage"],
+			)
+		}
 	}
 	return current, nil
 }
@@ -206,12 +263,68 @@ func nextBuilderHeavyMemoryTier(currentBytes int64) int64 {
 	return currentBytes
 }
 
+func builderPodPolicyWithHeavyEphemeralRetry(policy BuilderPodPolicy, ephemeralRetryCount int) BuilderPodPolicy {
+	currentBytes := parseBuilderBytes(policy.Heavy.Resources.Limits["ephemeral-storage"])
+	ceilingBytes := parseBuilderBytes(policy.HeavyEphemeralLimitCeiling)
+	if ceilingBytes < currentBytes {
+		ceilingBytes = currentBytes
+	}
+	for retry := 0; retry < ephemeralRetryCount && currentBytes < ceilingBytes; retry++ {
+		currentBytes = nextBuilderHeavyEphemeralTier(currentBytes)
+		if currentBytes > ceilingBytes {
+			currentBytes = ceilingBytes
+		}
+	}
+	ephemeral := formatBuilderStorageBytes(currentBytes)
+	policy.Heavy.Resources.Requests["ephemeral-storage"] = ephemeral
+	policy.Heavy.Resources.Limits["ephemeral-storage"] = ephemeral
+	policy.Heavy.WorkspaceSizeLimit = maxBuilderStorageSize(policy.Heavy.WorkspaceSizeLimit, ephemeral)
+	policy.Heavy.DockerDataSizeLimit = maxBuilderStorageSize(policy.Heavy.DockerDataSizeLimit, ephemeral)
+	return policy
+}
+
+func nextBuilderHeavyEphemeralTier(currentBytes int64) int64 {
+	for _, tier := range []int64{
+		12 * 1024 * 1024 * 1024,
+		16 * 1024 * 1024 * 1024,
+		24 * 1024 * 1024 * 1024,
+	} {
+		if currentBytes < tier {
+			return tier
+		}
+	}
+	return currentBytes
+}
+
 func formatBuilderMemoryBytes(value int64) string {
 	const mebibyte = int64(1024 * 1024)
 	if value <= 0 {
 		return ""
 	}
 	return strconv.FormatInt((value+mebibyte-1)/mebibyte, 10) + "Mi"
+}
+
+func formatBuilderStorageBytes(value int64) string {
+	const (
+		mebibyte = int64(1024 * 1024)
+		gibibyte = int64(1024 * 1024 * 1024)
+	)
+	if value <= 0 {
+		return ""
+	}
+	if value%gibibyte == 0 {
+		return strconv.FormatInt(value/gibibyte, 10) + "Gi"
+	}
+	return strconv.FormatInt((value+mebibyte-1)/mebibyte, 10) + "Mi"
+}
+
+func maxBuilderStorageSize(left, right string) string {
+	leftBytes := parseBuilderBytes(left)
+	rightBytes := parseBuilderBytes(right)
+	if rightBytes > leftBytes {
+		return strings.TrimSpace(right)
+	}
+	return strings.TrimSpace(left)
 }
 
 func normalizeBuilderTolerations(tolerations []BuilderToleration) []BuilderToleration {

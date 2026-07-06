@@ -3,6 +3,7 @@ package sourceimport
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -22,6 +23,26 @@ func TestRunBuilderJobWithRetryRetriesTransientFailures(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("expected two attempts, got %d", attempts)
+	}
+}
+
+func TestRunBuilderJobWithRetryEscalatesEphemeralFailures(t *testing.T) {
+	t.Parallel()
+
+	attempts := []builderJobAttempt{}
+	err := runBuilderJobWithRetry(context.Background(), "dockerfile", "build-demo", "registry.example/demo:upload-abc123", nil, func(_ context.Context, attempt builderJobAttempt) error {
+		attempts = append(attempts, attempt)
+		if len(attempts) < 2 {
+			return errors.New("kaniko job build-demo: pod build-demo-abc on node node-a failed: Evicted: Pod ephemeral local storage usage exceeds the total limit of containers 8Gi")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected ephemeral builder error to recover, got %v", err)
+	}
+	got := []int{attempts[0].EphemeralRetryCount, attempts[1].EphemeralRetryCount}
+	if want := []int{0, 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ephemeral retry counts = %v, want %v; attempts=%+v", got, want, attempts)
 	}
 }
 
@@ -103,5 +124,14 @@ func TestIsBuilderOOMFailure(t *testing.T) {
 	err := errors.New("pod build-demo-abc container executor failed: OOMKilled: exit_code=137")
 	if !isBuilderOOMFailure(err, "oomkilled") {
 		t.Fatal("expected OOMKilled builder failure to trigger memory escalation")
+	}
+}
+
+func TestIsBuilderEphemeralStorageFailure(t *testing.T) {
+	t.Parallel()
+
+	err := errors.New("pod build-demo-abc failed: Evicted: Pod ephemeral local storage usage exceeds the total limit of containers 8Gi")
+	if !isBuilderEphemeralStorageFailure(err, "evicted") {
+		t.Fatal("expected ephemeral local storage eviction to trigger storage escalation")
 	}
 }
