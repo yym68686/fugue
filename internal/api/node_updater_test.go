@@ -707,12 +707,24 @@ func TestNodeUpdaterK3sConfigReconcileRefreshesNodePolicyLabelsAndTaints(t *test
 		t.Fatalf("node updater script missing command dispatch")
 	}
 
-	harness := prefix + `
+harness := prefix + `
 tmpdir="$(mktemp -d)"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
 FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${tmpdir}/edge-node.env"
 FUGUE_DISCOVERY_K3S_SERVER="https://cp.example:6443"
+mkdir() {
+  local args=()
+  local arg=""
+  for arg in "$@"; do
+    case "${arg}" in
+      /etc/rancher/k3s) arg="${tmpdir}/etc/rancher/k3s" ;;
+      /etc/fugue) arg="${tmpdir}/etc/fugue" ;;
+    esac
+    args+=("${arg}")
+  done
+  command mkdir "${args[@]}"
+}
 cat >"${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" <<'YAML'
 server: "https://cp.example:6443"
 node-external-ip: "100.64.0.13"
@@ -815,7 +827,7 @@ grep -q "FUGUE_EDGE_NODE_ID=edge-1" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
 grep -q "FUGUE_EDGE_GROUP_ID=edge-group-country-us" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
 grep -q "FUGUE_EDGE_NODE_TOKEN=fugue_edge_test_secret" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
 grep -q "FUGUE_EDGE_DESIRED_STATE_URL=https://api.fugue.pro/v1/edge/nodes/edge-1/desired-state" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
-if [ "$(stat -f '%Lp' "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}" 2>/dev/null || stat -c '%a' "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}")" != "600" ]; then
+if [ "$(stat -c '%a' "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}" 2>/dev/null || stat -f '%Lp' "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}")" != "600" ]; then
   echo "edge node env file is not 0600"
   ls -l "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
   exit 1
