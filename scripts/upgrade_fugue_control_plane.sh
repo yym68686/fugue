@@ -1809,6 +1809,126 @@ control_plane_postgres_rw_service_host() {
   printf '%s-rw.%s.svc.cluster.local' "$(control_plane_postgres_name)" "${FUGUE_NAMESPACE}"
 }
 
+control_plane_postgres_primary_selector() {
+  printf 'cnpg.io/cluster=%s,role=primary' "$(control_plane_postgres_name)"
+}
+
+control_plane_postgres_primary_pod_name() {
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    -l "$(control_plane_postgres_primary_selector)" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+control_plane_postgres_query() {
+  local pod_name="$1"
+  local sql="$2"
+
+  [[ -n "$(trim_field "${pod_name}")" ]] || return 1
+  printf '%s\n' "${sql}" |
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" exec -i "${pod_name}" -- \
+      psql -d "${FUGUE_CONTROL_PLANE_POSTGRES_DATABASE}" -Atq -v ON_ERROR_STOP=1
+}
+
+control_plane_active_pg_dump_pids() {
+  local pod_name="$1"
+
+  control_plane_postgres_query "${pod_name}" \
+    "SELECT COALESCE(string_agg(pid::text, ',' ORDER BY pid), '') FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'pg_dump';"
+}
+
+control_plane_backup_runs_table_exists() {
+  local pod_name="$1"
+  local result=""
+
+  result="$(control_plane_postgres_query "${pod_name}" "SELECT CASE WHEN to_regclass('public.fugue_backup_runs') IS NULL THEN 'false' ELSE 'true' END;" 2>/dev/null || true)"
+  [[ "$(trim_field "${result}")" == "true" ]]
+}
+
+control_plane_running_backup_count() {
+  local pod_name="$1"
+
+  if ! control_plane_backup_runs_table_exists "${pod_name}"; then
+    printf '0'
+    return 0
+  fi
+  control_plane_postgres_query "${pod_name}" \
+    "SELECT count(*) FROM fugue_backup_runs WHERE target_type = 'control-plane-db' AND status = 'running';" 2>/dev/null ||
+    printf '0'
+}
+
+control_plane_recent_backup_success_exists() {
+  local pod_name="$1"
+  local result=""
+
+  if ! control_plane_backup_runs_table_exists "${pod_name}"; then
+    return 1
+  fi
+  result="$(control_plane_postgres_query "${pod_name}" \
+    "SELECT CASE WHEN EXISTS (SELECT 1 FROM fugue_backup_runs WHERE target_type = 'control-plane-db' AND status = 'succeeded' AND finished_at > now() - make_interval(secs => ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS})) THEN 'true' ELSE 'false' END;" 2>/dev/null || true)"
+  [[ "$(trim_field "${result}")" == "true" ]]
+}
+
+control_plane_terminate_pg_dump_backends() {
+  local pod_name="$1"
+
+  control_plane_postgres_query "${pod_name}" \
+    "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) AS terminated FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'pg_dump') s WHERE terminated;"
+}
+
+drain_control_plane_backup_before_schema_rollout() {
+  local mode="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE}"
+  local pod_name=""
+  local deadline
+  local pids=""
+  local running_count=""
+  local terminated=""
+
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
+
+  if [[ "${mode}" == "skip" ]]; then
+    log "control-plane backup drain skipped by FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE=skip"
+    return 0
+  fi
+
+  pod_name="$(trim_field "$(control_plane_postgres_primary_pod_name)")"
+  if [[ -z "${pod_name}" ]]; then
+    log "control-plane backup drain skipped; no CNPG primary pod found for $(control_plane_postgres_name)"
+    return 0
+  fi
+
+  deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS))
+  while true; do
+    pids="$(trim_field "$(control_plane_active_pg_dump_pids "${pod_name}" 2>/dev/null || true)")"
+    running_count="$(trim_field "$(control_plane_running_backup_count "${pod_name}" 2>/dev/null || true)")"
+    running_count="${running_count:-0}"
+    if [[ -z "${pids}" ]]; then
+      if [[ "${running_count}" != "0" ]]; then
+        log "control-plane backup run is marked running but no active pg_dump backend is holding database locks; continuing"
+      fi
+      return 0
+    fi
+    if ((SECONDS >= deadline)); then
+      break
+    fi
+    log "control-plane backup pg_dump active before schema rollout: pids=${pids} running_backup_runs=${running_count}; waiting"
+    sleep "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS}"
+  done
+
+  if [[ "${mode}" == "wait" ]]; then
+    fail "control-plane backup pg_dump is still active after ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS}s; set FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE=terminate or retry after the backup finishes"
+  fi
+
+  if ! control_plane_recent_backup_success_exists "${pod_name}"; then
+    fail "refusing to terminate active control-plane backup pg_dump because no recent successful control-plane-db backup was found in the last ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS}s"
+  fi
+
+  terminated="$(trim_field "$(control_plane_terminate_pg_dump_backends "${pod_name}" 2>/dev/null || true)")"
+  terminated="${terminated:-0}"
+  log "terminated ${terminated} active control-plane backup pg_dump backend(s) before schema rollout; backup runner will retry"
+  sleep "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS}"
+}
+
 detect_existing_api_database_url() {
   local secret_name="${FUGUE_RELEASE_FULLNAME}-config"
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get secret "${secret_name}" -o jsonpath='{.data.FUGUE_DATABASE_URL}' 2>/dev/null | base64 --decode 2>/dev/null || true
@@ -2541,6 +2661,11 @@ rollout_daemonsets_by_component_prefix() {
   done <<<"${daemonsets}"
 }
 
+rollout_dynamic_edge_daemonsets_if_present() {
+  [[ "${FUGUE_EDGE_DYNAMIC_ENABLED:-false}" == "true" ]] || return 0
+  rollout_daemonsets_by_component_prefix "edge-dynamic" "dynamic edge"
+}
+
 cleanup_orphaned_regional_daemonsets() {
   local daemonset_name=""
   local component=""
@@ -2908,6 +3033,8 @@ edge:
       enabled: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}
       http: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}
       https: ${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}
+  dynamic:
+    enabled: ${FUGUE_EDGE_DYNAMIC_ENABLED}
 cloudnative-pg:
   replicaCount: 2
   priorityClassName: system-cluster-critical
@@ -4150,6 +4277,10 @@ EOF
 EOF
   node_selector_country_yaml "${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE}" "    " >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
   edge_extra_groups_yaml >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+  cat >>"${UPGRADE_OVERRIDE_VALUES_FILE}" <<EOF
+  dynamic:
+    enabled: ${FUGUE_EDGE_DYNAMIC_ENABLED}
+EOF
 }
 
 dns_answer_ips_lines() {
@@ -6296,6 +6427,12 @@ main() {
   FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS:-fugue-postgres-rwo}"
   FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME:-}"
   FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL="${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL:-}"
+  FUGUE_CONTROL_PLANE_POSTGRES_DATABASE="${FUGUE_CONTROL_PLANE_POSTGRES_DATABASE:-fugue}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE:-terminate}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS:-120}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS:-5}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS:-90000}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS:-5}"
   FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED="${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED:-false}"
   FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR="${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR:-}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
@@ -6321,6 +6458,7 @@ main() {
   FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH="${FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH:-/etc/caddy/static-tls}"
   FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY="${FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY:-tls.crt}"
   FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY="${FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY:-tls.key}"
+  FUGUE_EDGE_DYNAMIC_ENABLED="${FUGUE_EDGE_DYNAMIC_ENABLED:-true}"
   FUGUE_EDGE_REGION="${FUGUE_EDGE_REGION:-}"
   FUGUE_EDGE_COUNTRY="${FUGUE_EDGE_COUNTRY:-}"
   FUGUE_EDGE_PUBLIC_HOSTNAME="${FUGUE_EDGE_PUBLIC_HOSTNAME:-}"
@@ -6436,6 +6574,26 @@ main() {
   if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" && "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" != "true" ]]; then
     fail "FUGUE_CONTROL_PLANE_POSTGRES_ENABLED must be true when FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true"
   fi
+  case "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE}" in
+    skip|wait|terminate) ;;
+    *) fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE must be skip, wait, or terminate" ;;
+  esac
+  for numeric_var in \
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS \
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS \
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS \
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS; do
+    numeric_value="${!numeric_var}"
+    if ! [[ "${numeric_value}" =~ ^[0-9]+$ ]]; then
+      fail "${numeric_var} must be an integer"
+    fi
+    if [[ "${numeric_var}" == "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS" ]]; then
+      continue
+    fi
+    if (( numeric_value < 1 )); then
+      fail "${numeric_var} must be an integer >= 1"
+    fi
+  done
   if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] &&
     ! api_database_already_uses_control_plane_postgres &&
     [[ -z "$(trim_field "${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL}")" ]]; then
@@ -6444,6 +6602,10 @@ main() {
   case "${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED}" in
     true|false) ;;
     *) fail "FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED must be true or false" ;;
+  esac
+  case "${FUGUE_EDGE_DYNAMIC_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_EDGE_DYNAMIC_ENABLED must be true or false" ;;
   esac
   case "${FUGUE_OBSERVABILITY_ENABLED}" in
     true|false) ;;
@@ -6700,6 +6862,7 @@ PY
   upgrade_override_values_file="${UPGRADE_OVERRIDE_VALUES_FILE}"
   build_dns_helm_set_args
   prepare_helm_post_renderer
+  drain_control_plane_backup_before_schema_rollout
   log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
 
   # Do not use Helm's release-wide --wait here. It waits on every resource in
@@ -6927,6 +7090,11 @@ PY
   if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
     if ! public_data_plane_daemonset_rollout_wait_required; then
       log "skipping edge daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
+      if ! rollout_dynamic_edge_daemonsets_if_present; then
+        log "dynamic edge rollout check failed; attempting rollback"
+        rollback_release || true
+        fail "dynamic edge rollout failed"
+      fi
     elif ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
       log "edge rollout check failed; attempting rollback"
       rollback_release || true

@@ -594,4 +594,73 @@ for maintenance_template in registry-janitor-cronjob.yaml registry-gc-cronjob.ya
   fi
 done
 
+DYNAMIC_EDGE_WAITED=""
+daemonset_names_by_component_prefix() {
+  case "$1" in
+    edge-dynamic)
+      printf 'fugue-fugue-edge-dynamic-front\n'
+      printf 'fugue-fugue-edge-dynamic-worker-a\n'
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+rollout_daemonset_status() {
+  DYNAMIC_EDGE_WAITED="${DYNAMIC_EDGE_WAITED}${1};"
+}
+FUGUE_EDGE_DYNAMIC_ENABLED=true
+rollout_dynamic_edge_daemonsets_if_present
+assert_eq "${DYNAMIC_EDGE_WAITED}" "fugue-fugue-edge-dynamic-front;fugue-fugue-edge-dynamic-worker-a;" "preserved public data-plane releases must still wait for additive dynamic edge daemonsets"
+FUGUE_EDGE_DYNAMIC_ENABLED=false
+DYNAMIC_EDGE_WAITED=""
+rollout_dynamic_edge_daemonsets_if_present
+assert_eq "${DYNAMIC_EDGE_WAITED}" "" "disabled dynamic edge must skip dynamic daemonset waits"
+
+BACKUP_DRAIN_MARKER="$(mktemp)"
+fake_backup_kubectl() {
+  if [[ "$*" == *"get pods"* ]]; then
+    printf 'fugue-fugue-control-plane-postgres-1'
+    return 0
+  fi
+  local sql=""
+  sql="$(cat)"
+  case "${sql}" in
+    *pg_terminate_backend*)
+      printf '1'
+      printf 'terminated\n' >"${BACKUP_DRAIN_MARKER}"
+      ;;
+    *"string_agg(pid::text"*)
+      printf '12345'
+      ;;
+    *"to_regclass('public.fugue_backup_runs')"*)
+      printf 'true'
+      ;;
+    *"status = 'succeeded'"*)
+      printf 'true'
+      ;;
+    *"status = 'running'"*)
+      printf '1'
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+KUBECTL=fake_backup_kubectl
+FUGUE_NAMESPACE=fugue-system
+FUGUE_RELEASE_FULLNAME=fugue-fugue
+FUGUE_CONTROL_PLANE_POSTGRES_ENABLED=true
+FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true
+FUGUE_CONTROL_PLANE_POSTGRES_NAME=""
+FUGUE_CONTROL_PLANE_POSTGRES_DATABASE=fugue
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE=terminate
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=0
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS=1
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS=90000
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS=0
+drain_control_plane_backup_before_schema_rollout
+grep -q '^terminated$' "${BACKUP_DRAIN_MARKER}" || fail "backup drain must terminate active pg_dump after timeout when a recent successful backup exists"
+rm -f "${BACKUP_DRAIN_MARKER}"
+
 printf '[test_release_domain_safety] ok\n'
