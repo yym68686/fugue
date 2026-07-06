@@ -843,9 +843,28 @@ fugue admin image-cache prune-plan --include-protected --include-blobs --json
   - [x] `npm run openapi:generate`
   - [x] `npm run contract:check`
 - [x] 发布前跑 production observe-only plan。
-- [ ] 发布后确认 edge/offline/pressure 节点没有新 app replication tasks。
-- [ ] 发布后确认 `candidate_manifest_count`、`candidate_blob_bytes` 与节点 dry-run 对齐。
-- [ ] 发布后分轮释放 `ns101351`，每轮检查 filesystem usage 与 app rollout 状态。
+- [x] 发布后确认 edge/offline/pressure 节点没有新 app replication tasks。
+- [x] 发布后确认 `candidate_manifest_count`、`candidate_blob_bytes` 与节点 dry-run 对齐。
+- [x] 发布后分轮释放 `ns101351`，每轮检查 filesystem usage 与 app rollout 状态。
+
+## 10.1 Release verification log
+
+2026-07-06 发布验证结论：
+
+- 已通过正式发布链路推送并部署 `b08307a`、`190b21f`、`e1ce8b9`、`6a6016e`、`01c62b1`、`bc862c8`、`30a11a1`、`d5d6fa4`、`9323caf`、`ab3b5f9`、`de4221e`、`c5e3da8` 等修复；对应 `ci`、`build-cli`、`deploy-control-plane` 均完成成功。
+- `fugue-web` OpenAPI 派生产物已同步并通过 `npm run openapi:sync`、`npm run openapi:generate`、`npm run contract:check`。
+- 发布后 pending app image replication 未再调度到 edge-only/offline 节点；`bwg` 仍因流量耗尽保持离线/旧 updater，只有预期的旧 pending updater/inventory 任务，没有新的 app image replication 次生灾害。
+- 发布后 app image replication backlog 从 30 逐步降到 4；剩余任务均是修复前创建的旧 app 节点任务，目标集中在 `ns101351` 和 `v2202605354515455529`。
+- `candidate_blob_bytes` 与节点 inventory dry-run 已对齐：`ns101351` 为 `167043117003` bytes，`v2202605354515455529` 为 `6265313349` bytes；此前 inventory double-count 已由 `de4221e` 修复。
+- 在线 node-updater 已升级到 `v14`：`ns101351`、`fortedrape8`、`v2202605354515455529`、`vps-591f4447`、`vps-84c8f0a9` 均心跳正常；`bwg` 离线保持 `v12` 属预期。
+- `ns101351` 已完成两轮自动释放：
+  - 第一轮：约 10.74 GiB cache/free-space 改善，后续未发现 rollout gate 阻塞；
+  - 第二轮：`planned_delete_bytes=10737418077`、`deleted_bytes=10737418077`，filesystem used 从约 `78.89%` 降至约 `76.45%`，free bytes 提升到约 `81143353344`。
+- 其他自动释放：
+  - `fortedrape8`：`deleted_bytes=879124489`；
+  - `v2202605354515455529`：`deleted_bytes=6265482685`。
+- 发布后 `robustness.block_rollout=false`，`platform-autonomy.pass=true` 且 `block_rollout=false`；`fugue-system` pods 全部 Running/Ready。
+- 发布后发现的 build pod `ephemeral-storage` 8Gi 驱逐问题已由 `c5e3da8` 修复：heavy builder 对 ephemeral-storage eviction 进行分档扩容重试；修复部署后新 import 与 deploy operation 均 `completed`。
 
 ## 11. Expected production effect
 
