@@ -735,6 +735,93 @@ func TestBuildMachineNodeMergePatchAppliesNodePolicyRolesAndHealthGate(t *testin
 	}
 }
 
+func TestBuildMachineNodeLabelsPatchPreservesUnmanagedMetadataLabels(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{
+		runtimepkg.NodeKeyIDLabelKey:           "nodekey_edge",
+		runtimepkg.MachineIDLabelKey:           "machine_edge",
+		runtimepkg.MachineScopeLabelKey:        model.MachineScopeTenantRuntime,
+		runtimepkg.EdgeRoleLabelKey:            runtimepkg.NodeRoleLabelValue,
+		runtimepkg.NodeSchedulableLabelKey:     "true",
+		runtimepkg.NodeHealthLabelKey:          runtimepkg.NodeHealthReadyValue,
+		runtimepkg.RegionLabelKey:              "us-west",
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+		runtimepkg.PublicIPLabelKey:            "203.0.113.10",
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-us",
+		runtimepkg.EdgeWorkloadLabelKey:        runtimepkg.EdgeWorkloadDynamicValue,
+		runtimepkg.EdgeLocationStatusLabelKey:  runtimepkg.EdgeLocationStatusReady,
+	}
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "False"},
+	}
+	machine := model.Machine{
+		ID:        "machine_edge",
+		NodeKeyID: "nodekey_edge",
+		Scope:     model.MachineScopeTenantRuntime,
+		Policy: model.MachinePolicy{
+			AllowEdge: true,
+		},
+	}
+
+	patch, changed := buildMachineNodeLabelsPatch(node, machine, nil)
+	if changed {
+		t.Fatalf("expected unmanaged metadata labels to be preserved without drift, got patch %#v", patch)
+	}
+	for _, key := range machineMetadataNodeLabelKeys() {
+		if _, ok := patch[key]; ok {
+			t.Fatalf("expected unmanaged metadata label %s to be omitted from patch, got %#v", key, patch)
+		}
+	}
+}
+
+func TestBuildMachineNodeLabelsPatchAppliesDeclaredMetadataLabels(t *testing.T) {
+	t.Parallel()
+
+	node := kubeNode{}
+	node.Metadata.Labels = map[string]string{
+		runtimepkg.NodeKeyIDLabelKey:       "nodekey_edge",
+		runtimepkg.MachineIDLabelKey:       "machine_edge",
+		runtimepkg.MachineScopeLabelKey:    model.MachineScopeTenantRuntime,
+		runtimepkg.EdgeRoleLabelKey:        runtimepkg.NodeRoleLabelValue,
+		runtimepkg.NodeSchedulableLabelKey: "true",
+		runtimepkg.NodeHealthLabelKey:      runtimepkg.NodeHealthReadyValue,
+		runtimepkg.EdgeWorkloadLabelKey:    runtimepkg.EdgeWorkloadStaticValue,
+	}
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "False"},
+	}
+	machine := model.Machine{
+		ID:        "machine_edge",
+		NodeKeyID: "nodekey_edge",
+		Scope:     model.MachineScopeTenantRuntime,
+		Labels: map[string]string{
+			runtimepkg.EdgeWorkloadLabelKey: runtimepkg.EdgeWorkloadDynamicValue,
+			runtimepkg.EdgeGroupIDLabelKey:  "edge-group-country-us",
+		},
+		Policy: model.MachinePolicy{
+			AllowEdge: true,
+		},
+	}
+
+	patch, changed := buildMachineNodeLabelsPatch(node, machine, nil)
+	if !changed {
+		t.Fatal("expected declared metadata label drift to be reconciled")
+	}
+	if got := patch[runtimepkg.EdgeWorkloadLabelKey]; got != runtimepkg.EdgeWorkloadDynamicValue {
+		t.Fatalf("expected edge workload patch to dynamic, got %#v in %#v", got, patch)
+	}
+	if got := patch[runtimepkg.EdgeGroupIDLabelKey]; got != "edge-group-country-us" {
+		t.Fatalf("expected edge group patch, got %#v in %#v", got, patch)
+	}
+	if _, ok := patch[runtimepkg.PublicIPLabelKey]; ok {
+		t.Fatalf("expected undeclared public-ip metadata to be omitted from patch, got %#v", patch)
+	}
+}
+
 func TestBuildRuntimeNodeLabelsPatchHonorsSavedEdgeOnlyMachinePolicy(t *testing.T) {
 	t.Parallel()
 

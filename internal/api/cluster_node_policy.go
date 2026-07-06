@@ -318,17 +318,13 @@ func buildMachineNodeLabelsPatch(node kubeNode, machine model.Machine, runtimeOb
 		runtimepkg.InternalMaintenanceLabelKey,
 		legacyBuildTierLabelKey,
 		runtimepkg.ControlPlaneDesiredRoleKey,
-		runtimepkg.RegionLabelKey,
-		runtimepkg.LegacyRegionLabelKey,
-		runtimepkg.ZoneLabelKey,
-		runtimepkg.LegacyZoneLabelKey,
-		runtimepkg.LocationCountryCodeLabelKey,
-		runtimepkg.PublicIPLabelKey,
-		runtimepkg.EdgeGroupIDLabelKey,
-		runtimepkg.EdgeWorkloadLabelKey,
-		runtimepkg.EdgeLocationStatusLabelKey,
 		runtimepkg.NodeSchedulableLabelKey,
 		runtimepkg.NodeHealthLabelKey,
+	}
+	for _, key := range machineMetadataNodeLabelKeys() {
+		if _, ok := desired[key]; ok {
+			keys = append(keys, key)
+		}
 	}
 	if runtimeObj == nil {
 		keys = append(keys, runtimepkg.SharedPoolLabelKey)

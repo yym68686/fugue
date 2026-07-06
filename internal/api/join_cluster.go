@@ -544,19 +544,8 @@ func machineJoinMetadataLabels(source map[string]string) map[string]string {
 	if len(source) == 0 {
 		return nil
 	}
-	keys := []string{
-		runtime.RegionLabelKey,
-		runtime.LegacyRegionLabelKey,
-		runtime.ZoneLabelKey,
-		runtime.LegacyZoneLabelKey,
-		runtime.LocationCountryCodeLabelKey,
-		runtime.PublicIPLabelKey,
-		runtime.EdgeGroupIDLabelKey,
-		runtime.EdgeWorkloadLabelKey,
-		runtime.EdgeLocationStatusLabelKey,
-	}
 	out := map[string]string{}
-	for _, key := range keys {
+	for _, key := range machineMetadataNodeLabelKeys() {
 		value := strings.TrimSpace(source[key])
 		if value == "" {
 			continue
@@ -581,6 +570,20 @@ func machineJoinMetadataLabels(source map[string]string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func machineMetadataNodeLabelKeys() []string {
+	return []string{
+		runtime.RegionLabelKey,
+		runtime.LegacyRegionLabelKey,
+		runtime.ZoneLabelKey,
+		runtime.LegacyZoneLabelKey,
+		runtime.LocationCountryCodeLabelKey,
+		runtime.PublicIPLabelKey,
+		runtime.EdgeGroupIDLabelKey,
+		runtime.EdgeWorkloadLabelKey,
+		runtime.EdgeLocationStatusLabelKey,
+	}
 }
 
 func normalizeEdgeWorkloadLabelValue(value string) string {
