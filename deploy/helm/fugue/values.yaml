@@ -455,6 +455,41 @@ edge:
   tokenSecret:
     name: ""
     key: FUGUE_EDGE_TLS_ASK_TOKEN
+  dynamic:
+    enabled: false
+    nodeSelector:
+      fugue.io/role.edge: "true"
+      fugue.io/schedulable: "true"
+      fugue.io/edge-workload: "dynamic"
+    credentialHostPath: /etc/fugue/edge-node.env
+    blueGreen:
+      enabled: true
+    resources:
+      requests:
+        cpu: 25m
+        memory: 128Mi
+        ephemeral-storage: 32Mi
+      limits:
+        memory: 512Mi
+        ephemeral-storage: 256Mi
+    caddy:
+      resources:
+        requests:
+          cpu: 25m
+          memory: 96Mi
+          ephemeral-storage: 32Mi
+        limits:
+          memory: 384Mi
+          ephemeral-storage: 256Mi
+    front:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+          ephemeral-storage: 16Mi
+        limits:
+          memory: 128Mi
+          ephemeral-storage: 128Mi
   persistence:
     hostPath: /var/lib/fugue/edge
     mountPath: /var/lib/fugue/edge

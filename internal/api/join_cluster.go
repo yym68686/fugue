@@ -507,6 +507,9 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 		runtime.MachineIDLabelKey:    strings.TrimSpace(machine.ID),
 		runtime.MachineScopeLabelKey: model.NormalizeMachineScope(machine.Scope),
 	}
+	for key, value := range machineJoinMetadataLabels(machine.Labels) {
+		labels[key] = value
+	}
 	if machine.Policy.AllowBuilds {
 		labels[runtime.BuildNodeLabelKey] = runtime.BuildNodeLabelValue
 		labels[runtime.BuilderRoleLabelKey] = runtime.NodeRoleLabelValue
@@ -535,6 +538,71 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 		}
 	}
 	return labels
+}
+
+func machineJoinMetadataLabels(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	keys := []string{
+		runtime.RegionLabelKey,
+		runtime.LegacyRegionLabelKey,
+		runtime.ZoneLabelKey,
+		runtime.LegacyZoneLabelKey,
+		runtime.LocationCountryCodeLabelKey,
+		runtime.PublicIPLabelKey,
+		runtime.EdgeGroupIDLabelKey,
+		runtime.EdgeWorkloadLabelKey,
+		runtime.EdgeLocationStatusLabelKey,
+	}
+	out := map[string]string{}
+	for _, key := range keys {
+		value := strings.TrimSpace(source[key])
+		if value == "" {
+			continue
+		}
+		switch key {
+		case runtime.LocationCountryCodeLabelKey:
+			value = strings.ToLower(value)
+		case runtime.EdgeWorkloadLabelKey:
+			value = normalizeEdgeWorkloadLabelValue(value)
+			if value == "" {
+				continue
+			}
+		case runtime.EdgeLocationStatusLabelKey:
+			value = normalizeEdgeLocationStatusLabelValue(value)
+			if value == "" {
+				continue
+			}
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeEdgeWorkloadLabelValue(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case runtime.EdgeWorkloadStaticValue:
+		return runtime.EdgeWorkloadStaticValue
+	case runtime.EdgeWorkloadDynamicValue:
+		return runtime.EdgeWorkloadDynamicValue
+	default:
+		return ""
+	}
+}
+
+func normalizeEdgeLocationStatusLabelValue(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case runtime.EdgeLocationStatusReady:
+		return runtime.EdgeLocationStatusReady
+	case runtime.EdgeLocationStatusMissing:
+		return runtime.EdgeLocationStatusMissing
+	default:
+		return ""
+	}
 }
 
 func machineJoinTaints(machine model.Machine) []string {
@@ -661,6 +729,12 @@ FUGUE_LIMIT_MEMORY="${FUGUE_LIMIT_MEMORY:-}"
 FUGUE_LIMIT_DISK="${FUGUE_LIMIT_DISK:-}"
 FUGUE_LIMIT_DISK_PATH="${FUGUE_LIMIT_DISK_PATH:-/}"
 FUGUE_EDGE_ONLY="${FUGUE_EDGE_ONLY:-}"
+FUGUE_EDGE_WORKLOAD="${FUGUE_EDGE_WORKLOAD:-}"
+FUGUE_EDGE_GROUP_ID="${FUGUE_EDGE_GROUP_ID:-}"
+FUGUE_NODE_COUNTRY_CODE="${FUGUE_NODE_COUNTRY_CODE:-}"
+FUGUE_NODE_REGION="${FUGUE_NODE_REGION:-}"
+FUGUE_NODE_ZONE="${FUGUE_NODE_ZONE:-}"
+FUGUE_NODE_PUBLIC_IP="${FUGUE_NODE_PUBLIC_IP:-}"
 FUGUE_PROGRESS_HEARTBEAT_SECONDS="${FUGUE_PROGRESS_HEARTBEAT_SECONDS:-15}"
 FUGUE_NODE_UPDATER_ENABLED="${FUGUE_NODE_UPDATER_ENABLED:-true}"
 FUGUE_NODE_UPDATER_POLL_INTERVAL="${FUGUE_NODE_UPDATER_POLL_INTERVAL:-5min}"
@@ -1095,13 +1169,18 @@ print_install_timeline() {
 
 usage() {
   cat >&2 <<EOF_USAGE
-Usage: join-cluster.sh [--edge-only] [--cpu LIMIT] [--memory LIMIT] [--disk LIMIT]
+Usage: join-cluster.sh [--edge-only] [--country CODE] [--region REGION] [--public-ip IP] [--edge-group EDGE_GROUP_ID] [--edge-workload static|dynamic] [--cpu LIMIT] [--memory LIMIT] [--disk LIMIT]
 
 Optional resource caps can also be provided as environment variables:
   FUGUE_LIMIT_CPU=2
   FUGUE_LIMIT_MEMORY=4Gi
   FUGUE_LIMIT_DISK=50Gi
   FUGUE_EDGE_ONLY=true
+  FUGUE_NODE_COUNTRY_CODE=jp
+  FUGUE_NODE_REGION=asia
+  FUGUE_NODE_PUBLIC_IP=203.0.113.10
+  FUGUE_EDGE_GROUP_ID=edge-group-country-jp
+  FUGUE_EDGE_WORKLOAD=dynamic
 
 Accepted formats:
   CPU: integer cores (2), decimal cores (1.5), or millicores (1500m)
@@ -1120,6 +1199,9 @@ Examples:
 
   curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | \\
     sudo FUGUE_NODE_KEY='...' bash -s -- --edge-only --cpu 1500m --memory 768Mi --disk 14Gi
+
+  curl -fsSL ${FUGUE_API_BASE}/install/join-cluster.sh | \\
+    sudo FUGUE_NODE_KEY='...' bash -s -- --edge-only --country jp --edge-workload dynamic
 EOF_USAGE
 }
 
@@ -1156,6 +1238,60 @@ parse_args() {
       --edge-only)
         FUGUE_EDGE_ONLY=true
         shift
+        ;;
+      --country|--country-code)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_NODE_COUNTRY_CODE="$2"
+        shift 2
+        ;;
+      --region)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_NODE_REGION="$2"
+        shift 2
+        ;;
+      --public-ip)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_NODE_PUBLIC_IP="$2"
+        shift 2
+        ;;
+      --edge-group|--edge-group-id)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        FUGUE_EDGE_GROUP_ID="$2"
+        shift 2
+        ;;
+      --edge-workload)
+        [ "$#" -ge 2 ] || {
+          echo "$1 requires a value" >&2
+          usage
+          exit 1
+        }
+        case "$2" in
+          static|dynamic)
+            FUGUE_EDGE_WORKLOAD="$2"
+            ;;
+          *)
+            echo "--edge-workload must be static or dynamic" >&2
+            usage
+            exit 1
+            ;;
+        esac
+        shift 2
         ;;
       -h|--help)
         usage
@@ -1199,6 +1335,9 @@ append_runtime_label() {
 
 apply_join_role_shortcuts() {
   if truthy "${FUGUE_EDGE_ONLY:-}"; then
+    if [ -z "${FUGUE_EDGE_WORKLOAD:-}" ]; then
+      FUGUE_EDGE_WORKLOAD="dynamic"
+    fi
     append_runtime_label "fugue.io/role.edge" "true"
   fi
 }
@@ -1650,11 +1789,37 @@ detect_public_ip() {
   return 1
 }
 
-detect_public_country_json() {
+detect_control_plane_geo_json() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  local query_ip="${node_public_ip:-${FUGUE_NODE_PUBLIC_IP:-}}"
+  local url="${FUGUE_API_BASE}/v1/metadata/geoip"
+  if [ -n "${query_ip}" ]; then
+    url="${url}?ip=${query_ip}"
+  fi
+  curl -fsS --max-time 5 "${url}" 2>/dev/null || true
+}
+
+detect_ipapi_country_json() {
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
   curl -fsS --max-time 5 "${FUGUE_NODE_GEO_URL:-https://ipapi.co/json/}" 2>/dev/null || true
+}
+
+detect_ipinfo_country_code() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  curl -fsS --max-time 5 https://ipinfo.io/country 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'
+}
+
+detect_ifconfig_country_code() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  curl -fsS --max-time 5 https://ifconfig.co/country-iso 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'
 }
 
 extract_json_string() {
@@ -1686,12 +1851,35 @@ detect_node_country_code() {
   fi
   local json=""
   local country_code=""
-  json="$(detect_public_country_json)"
+  json="$(detect_control_plane_geo_json)"
   json="$(printf '%%s' "${json}" | tr -d '\r\n')"
-  [ -n "${json}" ] || return 1
-  country_code="$(extract_json_string "${json}" "country_code")"
-  [ -n "${country_code}" ] || return 1
-  printf '%%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
+  if [ -n "${json}" ]; then
+    country_code="$(extract_json_string "${json}" "country_code")"
+    if [ -n "${country_code}" ]; then
+      printf '%%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
+      return 0
+    fi
+  fi
+  json="$(detect_ipapi_country_json)"
+  json="$(printf '%%s' "${json}" | tr -d '\r\n')"
+  if [ -n "${json}" ]; then
+    country_code="$(extract_json_string "${json}" "country_code")"
+    if [ -n "${country_code}" ]; then
+      printf '%%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
+      return 0
+    fi
+  fi
+  country_code="$(detect_ipinfo_country_code || true)"
+  if [ -n "${country_code}" ]; then
+    printf '%%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
+    return 0
+  fi
+  country_code="$(detect_ifconfig_country_code || true)"
+  if [ -n "${country_code}" ]; then
+    printf '%%s' "${country_code}" | tr '[:upper:]' '[:lower:]'
+    return 0
+  fi
+  return 1
 }
 
 csv_has_label_key() {
@@ -1730,6 +1918,60 @@ csv_append_label() {
   printf '%%s=%%s' "${key}" "${value}"
 }
 
+sync_edge_metadata_runtime_labels() {
+  local country_code=""
+  local region=""
+  local zone=""
+  local public_ip=""
+  local workload=""
+
+  public_ip="${node_public_ip:-${FUGUE_NODE_PUBLIC_IP:-}}"
+  region="$(detect_node_region || true)"
+  zone="$(detect_node_zone || true)"
+  country_code="$(detect_node_country_code || true)"
+
+  if [ -n "${country_code}" ]; then
+    FUGUE_NODE_COUNTRY_CODE="${country_code}"
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "fugue.io/location-country-code" "${country_code}")"
+  fi
+  if [ -n "${region}" ]; then
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "topology.kubernetes.io/region" "${region}")"
+  fi
+  if [ -n "${zone}" ]; then
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "topology.kubernetes.io/zone" "${zone}")"
+  fi
+  if [ -n "${public_ip}" ]; then
+    FUGUE_NODE_PUBLIC_IP="${public_ip}"
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "fugue.io/public-ip" "${public_ip}")"
+  fi
+  if [ -n "${FUGUE_EDGE_GROUP_ID:-}" ]; then
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "fugue.io/edge-group-id" "${FUGUE_EDGE_GROUP_ID}")"
+  fi
+
+  if ! truthy "${FUGUE_EDGE_ONLY:-}"; then
+    return 0
+  fi
+
+  workload="${FUGUE_EDGE_WORKLOAD:-dynamic}"
+  case "${workload}" in
+    static|dynamic)
+      ;;
+    *)
+      workload="dynamic"
+      ;;
+  esac
+  FUGUE_EDGE_WORKLOAD="${workload}"
+
+  if [ -n "${country_code}" ] || [ -n "${FUGUE_EDGE_GROUP_ID:-}" ] || [ "${workload}" = "static" ]; then
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "fugue.io/edge-workload" "${workload}")"
+    FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "fugue.io/edge-location-status" "ready")"
+    return 0
+  fi
+
+  FUGUE_RUNTIME_LABELS="$(csv_append_label "${FUGUE_RUNTIME_LABELS:-}" "fugue.io/edge-location-status" "missing_location")"
+  log_step "Edge-only node is missing country metadata; it will join with edge policy but dynamic public edge workload will stay disabled until country or edge group is set."
+}
+
 append_location_node_labels() {
   local labels="${FUGUE_JOIN_NODE_LABELS:-}"
   local zone=""
@@ -1744,6 +1986,15 @@ append_location_node_labels() {
   labels="$(csv_append_label "${labels}" "topology.kubernetes.io/zone" "${zone}")"
   labels="$(csv_append_label "${labels}" "fugue.io/location-country-code" "${country_code}")"
   labels="$(csv_append_label "${labels}" "fugue.io/public-ip" "${public_ip}")"
+  labels="$(csv_append_label "${labels}" "fugue.io/edge-group-id" "${FUGUE_EDGE_GROUP_ID:-}")"
+  if truthy "${FUGUE_EDGE_ONLY:-}"; then
+    if [ -n "${country_code}" ] || [ -n "${FUGUE_EDGE_GROUP_ID:-}" ] || [ "${FUGUE_EDGE_WORKLOAD:-}" = "static" ]; then
+      labels="$(csv_append_label "${labels}" "fugue.io/edge-workload" "${FUGUE_EDGE_WORKLOAD:-dynamic}")"
+      labels="$(csv_append_label "${labels}" "fugue.io/edge-location-status" "ready")"
+    else
+      labels="$(csv_append_label "${labels}" "fugue.io/edge-location-status" "missing_location")"
+    fi
+  fi
   printf '%%s' "${labels}"
 }
 
@@ -2512,6 +2763,7 @@ if [ -n "${node_public_ip}" ] && [ "${node_endpoint}" = "${node_name}" ]; then
   node_endpoint="${node_public_ip}"
 fi
 apply_join_role_shortcuts
+sync_edge_metadata_runtime_labels
 script_started_at="$(date +%%s)"
 print_install_timeline
 if fetch_discovery_bundle; then

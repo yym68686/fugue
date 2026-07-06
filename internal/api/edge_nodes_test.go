@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -501,6 +502,150 @@ func TestEdgeHeartbeatDiscoversPublicEndpointFromClusterNode(t *testing.T) {
 		heartbeatResponse.Node.Country != "us" ||
 		heartbeatResponse.Node.MeshIP != "100.64.0.10" {
 		t.Fatalf("expected cluster node endpoint discovery, got %+v", heartbeatResponse.Node)
+	}
+}
+
+func TestEdgeNodeDesiredStateAndControlEndpoints(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, token, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:           "edge-jp-1",
+		EdgeGroupID:  "edge-group-country-jp",
+		WorkloadMode: model.EdgeWorkloadModeDynamic,
+		CanaryState:  model.EdgeCanaryStateJoined,
+		Region:       "asia",
+		Country:      "jp",
+		PublicIPv4:   "203.0.113.44",
+		Status:       model.EdgeHealthUnknown,
+	})
+	if err != nil {
+		t.Fatalf("create edge token: %v", err)
+	}
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:              "edge-jp-1",
+		EdgeGroupID:     "edge-group-country-jp",
+		WorkloadMode:    model.EdgeWorkloadModeDynamic,
+		Region:          "asia",
+		Country:         "jp",
+		PublicIPv4:      "203.0.113.44",
+		Status:          model.EdgeHealthHealthy,
+		Healthy:         true,
+		CaddyRouteCount: 2,
+		TLSStatus:       model.EdgeTLSStatusReady,
+	}); err != nil {
+		t.Fatalf("record dynamic edge heartbeat: %v", err)
+	}
+
+	desiredRecorder := httptest.NewRecorder()
+	desiredReq := httptest.NewRequest(http.MethodGet, "/v1/edge/nodes/edge-jp-1/desired-state?token="+token, nil)
+	server.Handler().ServeHTTP(desiredRecorder, desiredReq)
+	if desiredRecorder.Code != http.StatusOK {
+		t.Fatalf("expected desired-state status %d, got %d body=%s", http.StatusOK, desiredRecorder.Code, desiredRecorder.Body.String())
+	}
+	var desiredResponse struct {
+		DesiredState edgeNodeDesiredStateResponse `json:"desired_state"`
+	}
+	mustDecodeJSON(t, desiredRecorder, &desiredResponse)
+	if desiredResponse.DesiredState.WorkloadMode != model.EdgeWorkloadModeDynamic ||
+		desiredResponse.DesiredState.CanaryState != model.EdgeCanaryStateJoined ||
+		desiredResponse.DesiredState.DNSEligible ||
+		!desiredResponse.DesiredState.RouteReady ||
+		!desiredResponse.DesiredState.TLSReady {
+		t.Fatalf("unexpected initial desired state: %+v", desiredResponse.DesiredState)
+	}
+
+	canary := performJSONRequest(t, server, http.MethodPost, "/v1/admin/edge/nodes/edge-jp-1/canary", platformAdminKey, map[string]any{
+		"state":  model.EdgeCanaryStateCanary,
+		"weight": 3,
+	})
+	if canary.Code != http.StatusOK {
+		t.Fatalf("expected canary status %d, got %d body=%s", http.StatusOK, canary.Code, canary.Body.String())
+	}
+	var canaryResponse struct {
+		DesiredState edgeNodeDesiredStateResponse `json:"desired_state"`
+	}
+	mustDecodeJSON(t, canary, &canaryResponse)
+	if canaryResponse.DesiredState.CanaryState != model.EdgeCanaryStateCanary ||
+		canaryResponse.DesiredState.CanaryWeight != 3 ||
+		!canaryResponse.DesiredState.DNSEligible ||
+		canaryResponse.DesiredState.Draining {
+		t.Fatalf("unexpected canary desired state: %+v", canaryResponse.DesiredState)
+	}
+
+	drain := performJSONRequest(t, server, http.MethodPost, "/v1/admin/edge/nodes/edge-jp-1/drain", platformAdminKey, nil)
+	if drain.Code != http.StatusOK {
+		t.Fatalf("expected drain status %d, got %d body=%s", http.StatusOK, drain.Code, drain.Body.String())
+	}
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:              "edge-jp-1",
+		EdgeGroupID:     "edge-group-country-jp",
+		WorkloadMode:    model.EdgeWorkloadModeDynamic,
+		Status:          model.EdgeHealthHealthy,
+		Healthy:         true,
+		Draining:        false,
+		CaddyRouteCount: 2,
+		TLSStatus:       model.EdgeTLSStatusReady,
+	}); err != nil {
+		t.Fatalf("heartbeat after drain: %v", err)
+	}
+	adminDesired := performJSONRequest(t, server, http.MethodGet, "/v1/admin/edge/nodes/edge-jp-1/desired-state", platformAdminKey, nil)
+	if adminDesired.Code != http.StatusOK {
+		t.Fatalf("expected admin desired-state status %d, got %d body=%s", http.StatusOK, adminDesired.Code, adminDesired.Body.String())
+	}
+	var adminDesiredResponse struct {
+		DesiredState edgeNodeDesiredStateResponse `json:"desired_state"`
+	}
+	mustDecodeJSON(t, adminDesired, &adminDesiredResponse)
+	if !adminDesiredResponse.DesiredState.Draining ||
+		adminDesiredResponse.DesiredState.CanaryState != model.EdgeCanaryStateDrained ||
+		adminDesiredResponse.DesiredState.DNSEligible {
+		t.Fatalf("expected drained desired state to survive heartbeat, got %+v", adminDesiredResponse.DesiredState)
+	}
+
+	undrain := performJSONRequest(t, server, http.MethodPost, "/v1/admin/edge/nodes/edge-jp-1/undrain", platformAdminKey, nil)
+	if undrain.Code != http.StatusOK {
+		t.Fatalf("expected undrain status %d, got %d body=%s", http.StatusOK, undrain.Code, undrain.Body.String())
+	}
+	var undrainResponse struct {
+		DesiredState edgeNodeDesiredStateResponse `json:"desired_state"`
+	}
+	mustDecodeJSON(t, undrain, &undrainResponse)
+	if undrainResponse.DesiredState.Draining ||
+		undrainResponse.DesiredState.CanaryState != model.EdgeCanaryStateCanary ||
+		undrainResponse.DesiredState.CanaryWeight != 1 ||
+		!undrainResponse.DesiredState.DNSEligible {
+		t.Fatalf("unexpected undrain desired state: %+v", undrainResponse.DesiredState)
+	}
+}
+
+func TestAdminProbeEdgeNodeFailsClosedWithoutPublicEndpoint(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:           "edge-missing-public",
+		EdgeGroupID:  "edge-group-country-jp",
+		WorkloadMode: model.EdgeWorkloadModeDynamic,
+		Status:       model.EdgeHealthHealthy,
+		Healthy:      true,
+	}); err != nil {
+		t.Fatalf("record edge heartbeat: %v", err)
+	}
+
+	probe := performJSONRequest(t, server, http.MethodPost, "/v1/admin/edge/nodes/edge-missing-public/probe", platformAdminKey, nil)
+	if probe.Code != http.StatusOK {
+		t.Fatalf("expected probe status %d, got %d body=%s", http.StatusOK, probe.Code, probe.Body.String())
+	}
+	var response struct {
+		Node         model.EdgeNode               `json:"node"`
+		DesiredState edgeNodeDesiredStateResponse `json:"desired_state"`
+	}
+	mustDecodeJSON(t, probe, &response)
+	if response.Node.PublicProbeStatus != model.EdgePublicProbeStatusFailing ||
+		!strings.Contains(response.Node.PublicProbeLastError, "missing public") ||
+		response.DesiredState.DNSEligible {
+		t.Fatalf("expected missing-public probe to fail closed, got node=%+v desired=%+v", response.Node, response.DesiredState)
 	}
 }
 

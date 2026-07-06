@@ -39,6 +39,10 @@
 {{- $syncInterval := .syncInterval -}}
 {{- $httpTimeout := .httpTimeout -}}
 {{- $routeCacheHostPath := .routeCacheHostPath -}}
+{{- $credentialHostPath := trim (default "" .credentialHostPath) -}}
+{{- $frontResources := default $root.Values.edge.blueGreen.front.resources .frontResources -}}
+{{- $workerResources := default $root.Values.edge.resources .workerResources -}}
+{{- $caddyResources := default $root.Values.edge.caddy.resources .caddyResources -}}
 {{- $frontImageRepository := default $edgeImageRepository $root.Values.edge.blueGreen.front.image.repository -}}
 {{- $frontImageTag := default $edgeImageTag $root.Values.edge.blueGreen.front.image.tag -}}
 {{- $frontImageDigest := default $edgeImageDigest $root.Values.edge.blueGreen.front.image.digest -}}
@@ -79,6 +83,9 @@ spec:
         fugue.io/rollout-subsystem: public-data-plane
         fugue.io/rollout-mode: node-local-blue-green-front
         fugue.io/downtime-class: online-required
+        {{- if $credentialHostPath }}
+        fugue.io/edge-workload: dynamic
+        {{- end }}
         {{- with $root.Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -126,8 +133,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if $credentialHostPath }}
+            - name: FUGUE_EDGE_FRONT_NODE_ENV_FILE
+              value: {{ $credentialHostPath | quote }}
+            {{- else }}
             - name: FUGUE_EDGE_FRONT_EDGE_GROUP_ID
               value: {{ $edgeGroupID | quote }}
+            {{- end }}
             - name: FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR
               value: {{ default ":80" $root.Values.edge.blueGreen.front.httpListenAddr | quote }}
             - name: FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR
@@ -158,6 +170,11 @@ spec:
             - name: host-proc
               mountPath: {{ $frontProcMountPath | quote }}
               readOnly: true
+            {{- if $credentialHostPath }}
+            - name: edge-node-env
+              mountPath: {{ $credentialHostPath | quote }}
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -174,7 +191,7 @@ spec:
             failureThreshold: 6
             timeoutSeconds: 3
           resources:
-            {{- toYaml $root.Values.edge.blueGreen.front.resources | nindent 12 }}
+            {{- toYaml $frontResources | nindent 12 }}
       volumes:
         - name: edge-blue-green-state
           hostPath:
@@ -184,11 +201,27 @@ spec:
           hostPath:
             path: {{ $frontProcHostPath | quote }}
             type: Directory
+        {{- if $credentialHostPath }}
+        - name: edge-node-env
+          hostPath:
+            path: {{ $credentialHostPath | quote }}
+            type: FileOrCreate
+        {{- end }}
       nodeSelector:
         {{- toYaml $nodeSelector | nindent 8 }}
-      {{- with $root.Values.edge.affinity }}
+      {{- if $root.Values.edge.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $root.Values.edge.affinity | nindent 8 }}
+      {{- else if not $credentialHostPath }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: fugue.io/edge-workload
+                    operator: NotIn
+                    values:
+                      - dynamic
       {{- end }}
       {{- with $root.Values.edge.tolerations }}
       tolerations:
@@ -226,6 +259,9 @@ spec:
         fugue.io/rollout-mode: node-local-blue-green-worker
         fugue.io/downtime-class: online-required
         fugue.io/edge-slot: {{ $slot.name | quote }}
+        {{- if $credentialHostPath }}
+        fugue.io/edge-workload: dynamic
+        {{- end }}
         {{- with $root.Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -256,11 +292,18 @@ spec:
           env:
             - name: FUGUE_API_URL
               value: {{ $apiURL | quote }}
+            {{- if $credentialHostPath }}
+            - name: FUGUE_EDGE_NODE_ENV_FILE
+              value: {{ $credentialHostPath | quote }}
+            - name: FUGUE_EDGE_WORKLOAD_MODE
+              value: "dynamic"
+            {{- else }}
             - name: FUGUE_EDGE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ $tokenSecretName }}
                   key: {{ $tokenSecretKey }}
+            {{- end }}
             - name: FUGUE_BUNDLE_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
@@ -282,8 +325,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if not $credentialHostPath }}
             - name: FUGUE_EDGE_GROUP_ID
               value: {{ $edgeGroupID | quote }}
+            {{- end }}
             - name: FUGUE_EDGE_LISTEN_ADDR
               value: {{ $listenAddr | quote }}
             - name: FUGUE_EDGE_ROUTES_CACHE_PATH
@@ -347,6 +392,11 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           volumeMounts:
+            {{- if $credentialHostPath }}
+            - name: edge-node-env
+              mountPath: {{ $credentialHostPath | quote }}
+              readOnly: true
+            {{- end }}
             - name: route-cache
               mountPath: {{ $root.Values.edge.persistence.mountPath | quote }}
             {{- if $caddyEnabled }}
@@ -374,7 +424,7 @@ spec:
             failureThreshold: 12
             timeoutSeconds: 3
           resources:
-            {{- toYaml $root.Values.edge.resources | nindent 12 }}
+            {{- toYaml $workerResources | nindent 12 }}
         {{- if $caddyEnabled }}
         - name: caddy
           image: {{ include "fugue.imageRef" (dict "repository" $caddyImageRepository "tag" $caddyImageTag "digest" $caddyImageDigest) | quote }}
@@ -406,9 +456,15 @@ spec:
               readOnly: true
             {{- end }}
           resources:
-            {{- toYaml $root.Values.edge.caddy.resources | nindent 12 }}
+            {{- toYaml $caddyResources | nindent 12 }}
         {{- end }}
       volumes:
+        {{- if $credentialHostPath }}
+        - name: edge-node-env
+          hostPath:
+            path: {{ $credentialHostPath | quote }}
+            type: FileOrCreate
+        {{- end }}
         - name: route-cache
           hostPath:
             path: {{ printf "%s/slot-%s" (trimSuffix "/" $routeCacheHostPath) $slot.name | quote }}
@@ -433,9 +489,19 @@ spec:
         {{- end }}
       nodeSelector:
         {{- toYaml $nodeSelector | nindent 8 }}
-      {{- with $root.Values.edge.affinity }}
+      {{- if $root.Values.edge.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $root.Values.edge.affinity | nindent 8 }}
+      {{- else if not $credentialHostPath }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: fugue.io/edge-workload
+                    operator: NotIn
+                    values:
+                      - dynamic
       {{- end }}
       {{- with $root.Values.edge.tolerations }}
       tolerations:
@@ -568,6 +634,62 @@ spec:
   "httpTimeout" (default $.Values.edge.httpTimeout $group.httpTimeout)
   "routeCacheHostPath" $.Values.edge.persistence.hostPath
   "extraEnv" (default (list) $group.extraEnv)
+) }}
+{{- end }}
+{{- $dynamic := default dict .Values.edge.dynamic -}}
+{{- $dynamicBlueGreen := default dict $dynamic.blueGreen -}}
+{{- if and $dynamic.enabled (default true $dynamicBlueGreen.enabled) }}
+{{- if not $dynamic.nodeSelector }}
+{{- fail "edge.dynamic.nodeSelector is required when edge.dynamic.enabled=true" }}
+{{- end }}
+{{- $dynamicCredentialHostPath := required "edge.dynamic.credentialHostPath is required when edge.dynamic.enabled=true" $dynamic.credentialHostPath -}}
+{{- $dynamicCaddy := default dict $dynamic.caddy -}}
+{{- $dynamicFront := default dict $dynamic.front -}}
+{{- include "fugue.edgeBlueGreenGroup" (dict
+  "root" .
+  "daemonBase" (printf "%s-dynamic" (include "fugue.edgeDaemonSetName" .))
+  "componentBase" "edge-dynamic"
+  "edgeGroupID" "dynamic"
+  "nodeSelector" $dynamic.nodeSelector
+  "apiURL" (default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL)
+  "tokenSecretName" (default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name)
+  "tokenSecretKey" (default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key)
+  "edgeImageRepository" .Values.edge.image.repository
+  "edgeImageTag" .Values.edge.image.tag
+  "edgeImageDigest" .Values.edge.image.digest
+  "edgeImagePullPolicy" .Values.edge.image.pullPolicy
+  "caddyEnabled" .Values.edge.caddy.enabled
+  "caddyImageRepository" .Values.edge.caddy.image.repository
+  "caddyImageTag" .Values.edge.caddy.image.tag
+  "caddyImageDigest" .Values.edge.caddy.image.digest
+  "caddyImagePullPolicy" .Values.edge.caddy.image.pullPolicy
+  "caddyAdminAddr" .Values.edge.caddy.adminAddr
+  "caddyAdminURL" .Values.edge.caddy.adminURL
+  "caddyTLSMode" .Values.edge.caddy.tlsMode
+  "caddyTLSAskURL" .Values.edge.caddy.tlsAskURL
+  "caddyProxyListenAddr" .Values.edge.caddy.proxyListenAddr
+  "caddyDataDir" (default "/data/caddy" .Values.edge.caddy.dataDir)
+  "caddyDataHostPath" (default "/var/lib/fugue/edge/caddy-data" .Values.edge.caddy.persistence.hostPath)
+  "sharedTLSEnabled" (default true .Values.edge.caddy.sharedTLS.enabled)
+  "staticTLSEnabled" $staticTLSEnabled
+  "staticTLSSecretName" $staticTLSSecretName
+  "staticTLSMountPath" (default "/etc/caddy/static-tls" $rootStaticTLS.mountPath)
+  "staticTLSCertKey" (default "tls.crt" $rootStaticTLS.certificateKey)
+  "staticTLSPrivateKeyKey" (default "tls.key" $rootStaticTLS.privateKeyKey)
+  "peerFallbackEnabled" .Values.edge.peerFallbackEnabled
+  "listenAddr" .Values.edge.listenAddr
+  "healthPort" .Values.edge.healthPort
+  "routesCachePath" .Values.edge.routesCachePath
+  "cacheArchiveLimit" .Values.edge.cacheArchiveLimit
+  "maxStale" .Values.edge.maxStale
+  "syncInterval" .Values.edge.syncInterval
+  "httpTimeout" .Values.edge.httpTimeout
+  "routeCacheHostPath" .Values.edge.persistence.hostPath
+  "credentialHostPath" $dynamicCredentialHostPath
+  "frontResources" (default .Values.edge.blueGreen.front.resources $dynamicFront.resources)
+  "workerResources" (default .Values.edge.resources $dynamic.resources)
+  "caddyResources" (default .Values.edge.caddy.resources $dynamicCaddy.resources)
+  "extraEnv" (list)
 ) }}
 {{- end }}
 {{- end }}

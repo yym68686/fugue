@@ -2,10 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +18,9 @@ import (
 
 type createEdgeNodeTokenRequest struct {
 	EdgeGroupID    string `json:"edge_group_id"`
+	WorkloadMode   string `json:"workload_mode,omitempty"`
+	CanaryState    string `json:"canary_state,omitempty"`
+	CanaryWeight   int    `json:"canary_weight,omitempty"`
 	Region         string `json:"region,omitempty"`
 	Country        string `json:"country,omitempty"`
 	PublicHostname string `json:"public_hostname,omitempty"`
@@ -28,6 +33,7 @@ type createEdgeNodeTokenRequest struct {
 type edgeHeartbeatRequest struct {
 	EdgeID                 string                        `json:"edge_id"`
 	EdgeGroupID            string                        `json:"edge_group_id"`
+	WorkloadMode           string                        `json:"workload_mode,omitempty"`
 	Region                 string                        `json:"region,omitempty"`
 	Country                string                        `json:"country,omitempty"`
 	PublicHostname         string                        `json:"public_hostname,omitempty"`
@@ -53,6 +59,21 @@ type edgeHeartbeatRequest struct {
 	Draining               bool                          `json:"draining"`
 	LastError              string                        `json:"last_error,omitempty"`
 	PerformanceSamples     []model.EdgePerformanceSample `json:"performance_samples,omitempty"`
+}
+
+type edgeNodeDesiredStateResponse struct {
+	EdgeID            string     `json:"edge_id"`
+	EdgeGroupID       string     `json:"edge_group_id"`
+	WorkloadMode      string     `json:"workload_mode"`
+	CanaryState       string     `json:"canary_state"`
+	CanaryWeight      int        `json:"canary_weight"`
+	PublicProbeStatus string     `json:"public_probe_status"`
+	DNSEligible       bool       `json:"dns_eligible"`
+	Draining          bool       `json:"draining"`
+	RouteReady        bool       `json:"route_ready"`
+	TLSReady          bool       `json:"tls_ready"`
+	TokenPrefix       string     `json:"token_prefix,omitempty"`
+	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
 }
 
 func (s *Server) handleListEdgeNodes(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +115,57 @@ func (s *Server) handleGetEdgeNode(w http.ResponseWriter, r *http.Request) {
 		"node":  node,
 		"group": group,
 	})
+}
+
+func (s *Server) handleGetEdgeNodeDesiredState(w http.ResponseWriter, r *http.Request) {
+	authContext, ok := s.authorizeEdgeRequest(w, r)
+	if !ok {
+		return
+	}
+	edgeID := strings.TrimSpace(r.PathValue("edge_id"))
+	edgeGroupID := ""
+	if err := authContext.constrain(&edgeID, &edgeGroupID); err != nil {
+		httpx.WriteError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	node, _, err := s.store.GetEdgeNode(edgeID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": buildEdgeNodeDesiredState(node)})
+}
+
+func (s *Server) handleAdminGetEdgeNodeDesiredState(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "only platform admin can inspect edge node desired state")
+		return
+	}
+	node, _, err := s.store.GetEdgeNode(r.PathValue("edge_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"desired_state": buildEdgeNodeDesiredState(node)})
+}
+
+func buildEdgeNodeDesiredState(node model.EdgeNode) edgeNodeDesiredStateResponse {
+	canaryState := edgeNodeEffectiveCanaryState(node)
+	return edgeNodeDesiredStateResponse{
+		EdgeID:            strings.TrimSpace(node.ID),
+		EdgeGroupID:       strings.TrimSpace(node.EdgeGroupID),
+		WorkloadMode:      edgeNodeEffectiveWorkloadMode(node),
+		CanaryState:       canaryState,
+		CanaryWeight:      edgeNodeEffectiveCanaryWeight(node),
+		PublicProbeStatus: edgeNodeEffectivePublicProbeStatus(node),
+		DNSEligible:       edgeNodeDNSEligible(node),
+		Draining:          node.Draining || canaryState == model.EdgeCanaryStateDrained,
+		RouteReady:        edgeNodeHasRouteState(node),
+		TLSReady:          edgeNodeTLSReadyForDNS(node),
+		TokenPrefix:       strings.TrimSpace(node.TokenPrefix),
+		LastHeartbeatAt:   node.LastHeartbeatAt,
+	}
 }
 
 func (s *Server) handleGetEdgeNodeQuality(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +218,9 @@ func (s *Server) handleCreateEdgeNodeToken(w http.ResponseWriter, r *http.Reques
 	node, token, err := s.store.CreateEdgeNodeToken(model.EdgeNode{
 		ID:             edgeID,
 		EdgeGroupID:    req.EdgeGroupID,
+		WorkloadMode:   req.WorkloadMode,
+		CanaryState:    req.CanaryState,
+		CanaryWeight:   req.CanaryWeight,
 		Region:         req.Region,
 		Country:        req.Country,
 		PublicHostname: req.PublicHostname,
@@ -167,6 +242,193 @@ func (s *Server) handleCreateEdgeNodeToken(w http.ResponseWriter, r *http.Reques
 		"node":  node,
 		"token": token,
 	})
+}
+
+func (s *Server) handleAdminProbeEdgeNode(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "only platform admin can probe edge nodes")
+		return
+	}
+	node, _, err := s.store.GetEdgeNode(r.PathValue("edge_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	now := time.Now().UTC()
+	probeStatus, probeError := probeEdgeNodePublicEndpoints(r.Context(), node)
+	patch := model.EdgeNode{
+		Draining:             node.Draining,
+		PublicProbeStatus:    probeStatus,
+		PublicProbeLastError: probeError,
+		PublicProbeLastAt:    &now,
+	}
+	if probeStatus == model.EdgePublicProbeStatusPassing && edgeNodeEffectiveWorkloadMode(node) == model.EdgeWorkloadModeDynamic {
+		switch edgeNodeEffectiveCanaryState(node) {
+		case model.EdgeCanaryStateJoined, model.EdgeCanaryStateWarming, model.EdgeCanaryStateProbing:
+			patch.CanaryState = model.EdgeCanaryStateCanary
+			patch.CanaryWeight = 1
+		}
+	}
+	updated, group, err := s.store.UpdateEdgeNodeControlState(node.ID, patch)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"node":          updated,
+		"group":         group,
+		"desired_state": buildEdgeNodeDesiredState(updated),
+	})
+}
+
+func (s *Server) handleAdminSetEdgeNodeCanary(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "only platform admin can set edge node canary")
+		return
+	}
+	node, _, err := s.store.GetEdgeNode(r.PathValue("edge_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	var req struct {
+		State  string `json:"state"`
+		Weight int    `json:"weight"`
+	}
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	state := model.NormalizeEdgeCanaryState(req.State)
+	if state == "" {
+		state = model.EdgeCanaryStateCanary
+	}
+	if state != model.EdgeCanaryStateCanary && state != model.EdgeCanaryStateActive && state != model.EdgeCanaryStateDrained {
+		httpx.WriteError(w, http.StatusBadRequest, "state must be canary, active, or drained")
+		return
+	}
+	weight := req.Weight
+	if state == model.EdgeCanaryStateCanary {
+		if weight <= 0 {
+			weight = 1
+		}
+		if weight > 5 {
+			httpx.WriteError(w, http.StatusBadRequest, "canary weight cannot exceed 5")
+			return
+		}
+	}
+	if state == model.EdgeCanaryStateActive && weight <= 0 {
+		weight = 100
+	}
+	updated, group, err := s.store.UpdateEdgeNodeControlState(node.ID, model.EdgeNode{
+		Draining:     node.Draining || state == model.EdgeCanaryStateDrained,
+		CanaryState:  state,
+		CanaryWeight: weight,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": updated, "group": group, "desired_state": buildEdgeNodeDesiredState(updated)})
+}
+
+func (s *Server) handleAdminDrainEdgeNode(w http.ResponseWriter, r *http.Request) {
+	s.handleAdminSetEdgeNodeDrain(w, r, true)
+}
+
+func (s *Server) handleAdminUndrainEdgeNode(w http.ResponseWriter, r *http.Request) {
+	s.handleAdminSetEdgeNodeDrain(w, r, false)
+}
+
+func (s *Server) handleAdminSetEdgeNodeDrain(w http.ResponseWriter, r *http.Request, draining bool) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "only platform admin can drain edge nodes")
+		return
+	}
+	node, _, err := s.store.GetEdgeNode(r.PathValue("edge_id"))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	patch := model.EdgeNode{Draining: draining}
+	if draining {
+		patch.CanaryState = model.EdgeCanaryStateDrained
+	} else if edgeNodeEffectiveCanaryState(node) == model.EdgeCanaryStateDrained {
+		patch.CanaryState = model.EdgeCanaryStateCanary
+		patch.CanaryWeight = 1
+	}
+	updated, group, err := s.store.UpdateEdgeNodeControlState(node.ID, patch)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": updated, "group": group, "desired_state": buildEdgeNodeDesiredState(updated)})
+}
+
+func probeEdgeNodePublicEndpoints(ctx context.Context, node model.EdgeNode) (string, string) {
+	failures := []string{}
+	if !edgeNodeHasRouteState(node) {
+		failures = append(failures, "route_bundle=not_ready")
+	}
+	if !edgeNodeTLSReadyForDNS(node) {
+		failures = append(failures, "tls=not_ready")
+	}
+	host := strings.TrimSpace(node.PublicHostname)
+	if host == "" {
+		host = strings.TrimSpace(node.PublicIPv4)
+	}
+	if host == "" {
+		host = strings.TrimSpace(node.PublicIPv6)
+	}
+	if host == "" {
+		failures = append(failures, "missing public hostname or IP")
+	}
+	if len(failures) > 0 {
+		return model.EdgePublicProbeStatusFailing, strings.Join(failures, "; ")
+	}
+	if err := probeTCP(ctx, host, 80); err != nil {
+		failures = append(failures, "tcp80="+err.Error())
+	}
+	if err := probeTLS(ctx, host, 443); err != nil {
+		failures = append(failures, "tls443="+err.Error())
+	}
+	if len(failures) > 0 {
+		return model.EdgePublicProbeStatusFailing, strings.Join(failures, "; ")
+	}
+	return model.EdgePublicProbeStatusPassing, ""
+}
+
+func probeTCP(ctx context.Context, host string, port int) error {
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func probeTLS(ctx context.Context, host string, port int) error {
+	dialer := net.Dialer{Timeout: 4 * time.Second}
+	conn, err := tls.DialWithDialer(&dialer, "tcp", net.JoinHostPort(host, strconv.Itoa(port)), &tls.Config{
+		ServerName:         tlsServerName(host),
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func tlsServerName(host string) string {
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return ""
+	}
+	return host
 }
 
 func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +455,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 	node, _, err := s.store.UpdateEdgeHeartbeat(model.EdgeNode{
 		ID:                  req.EdgeID,
 		EdgeGroupID:         req.EdgeGroupID,
+		WorkloadMode:        req.WorkloadMode,
 		Region:              req.Region,
 		Country:             req.Country,
 		PublicHostname:      req.PublicHostname,

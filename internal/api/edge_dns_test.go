@@ -1083,6 +1083,130 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 	}
 }
 
+func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	server.platformRoutes = []model.PlatformRoute{
+		{
+			Hostname:      "api.fugue.pro",
+			Kind:          model.EdgeRouteKindControlPlaneAPI,
+			UpstreamKind:  model.EdgeRouteUpstreamKindMesh,
+			UpstreamScope: model.EdgeRouteUpstreamScopeMesh,
+			UpstreamURL:   "http://api.fugue.internal",
+			TLSPolicy:     model.EdgeRouteTLSPolicyPlatform,
+			RoutePolicy:   model.EdgeRoutePolicyEnabled,
+			EdgeGroupMode: model.PlatformRouteEdgeGroupModeAllHealthy,
+			Status:        model.EdgeRouteStatusActive,
+			TTL:           60,
+		},
+	}
+	for _, node := range []model.EdgeNode{
+		{
+			ID:              "edge-us-1",
+			EdgeGroupID:     "edge-group-country-us",
+			Country:         "us",
+			Region:          "us-east",
+			PublicIPv4:      "15.204.94.71",
+			Status:          model.EdgeHealthHealthy,
+			Healthy:         true,
+			CaddyRouteCount: 1,
+			TLSStatus:       model.EdgeTLSStatusReady,
+		},
+		{
+			ID:                "edge-jp-1",
+			EdgeGroupID:       "edge-group-country-jp",
+			WorkloadMode:      model.EdgeWorkloadModeDynamic,
+			CanaryState:       model.EdgeCanaryStateJoined,
+			PublicProbeStatus: model.EdgePublicProbeStatusUnknown,
+			Country:           "jp",
+			Region:            "asia",
+			PublicIPv4:        "203.0.113.44",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			CaddyRouteCount:   1,
+			TLSStatus:         model.EdgeTLSStatusReady,
+		},
+	} {
+		if _, _, err := storeState.UpdateEdgeHeartbeat(node); err != nil {
+			t.Fatalf("record edge heartbeat: %v", err)
+		}
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	apiA := edgeDNSRecordByNameAndType(bundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil {
+		t.Fatalf("expected api.fugue.pro A record, got %+v", bundle.Records)
+	}
+	if stringSliceContains(apiA.Values, "203.0.113.44") || edgeDNSCandidateByEdgeID(apiA.Candidates, "edge-jp-1") != nil {
+		t.Fatalf("expected joined dynamic edge to stay out of DNS answers, got record=%+v", apiA)
+	}
+
+	probedAt := time.Now().UTC()
+	if _, _, err := storeState.UpdateEdgeNodeControlState("edge-jp-1", model.EdgeNode{
+		CanaryState:       model.EdgeCanaryStateCanary,
+		CanaryWeight:      1,
+		PublicProbeStatus: model.EdgePublicProbeStatusPassing,
+		PublicProbeLastAt: &probedAt,
+	}); err != nil {
+		t.Fatalf("promote dynamic edge canary: %v", err)
+	}
+
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &bundle)
+	apiA = edgeDNSRecordByNameAndType(bundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil || !stringSliceContains(apiA.Values, "203.0.113.44") {
+		t.Fatalf("expected canary dynamic edge answer, got %+v", apiA)
+	}
+	jpCandidate := edgeDNSCandidateByEdgeID(apiA.Candidates, "edge-jp-1")
+	if jpCandidate == nil ||
+		jpCandidate.WorkloadMode != model.EdgeWorkloadModeDynamic ||
+		jpCandidate.CanaryState != model.EdgeCanaryStateCanary ||
+		jpCandidate.CanaryWeight != 1 ||
+		jpCandidate.PublicProbeStatus != model.EdgePublicProbeStatusPassing ||
+		!jpCandidate.DNSEligible ||
+		jpCandidate.Weight != 1 {
+		t.Fatalf("unexpected dynamic canary candidate: %+v candidates=%+v", jpCandidate, apiA.Candidates)
+	}
+
+	if _, err := storeState.PutEdgeRoutePolicy(model.EdgeRoutePolicy{
+		Hostname:        "api.fugue.pro",
+		AppID:           "platform-api",
+		TenantID:        "platform",
+		RoutePolicy:     model.EdgeRoutePolicyEnabled,
+		ExcludedEdgeIDs: []string{"edge-jp-1"},
+		ExclusionReason: "dynamic edge canary blocked for service",
+	}); err != nil {
+		t.Fatalf("put dynamic edge exclusion policy: %v", err)
+	}
+	recorder = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-us&answer_ip=15.204.94.71", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	mustDecodeJSON(t, recorder, &bundle)
+	apiA = edgeDNSRecordByNameAndType(bundle.Records, "api.fugue.pro", model.EdgeDNSRecordTypeA)
+	if apiA == nil {
+		t.Fatalf("expected api.fugue.pro A record after exclusion, got %+v", bundle.Records)
+	}
+	if stringSliceContains(apiA.Values, "203.0.113.44") || edgeDNSCandidateByEdgeID(apiA.Candidates, "edge-jp-1") != nil {
+		t.Fatalf("expected service exclusion to remove dynamic edge from DNS answers, got %+v", apiA)
+	}
+}
+
 func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 	t.Parallel()
 
@@ -1707,6 +1831,15 @@ func edgeDNSScopedCandidatesByScope(scoped []model.EdgeDNSScopedAnswerCandidates
 	for index := range scoped {
 		if scoped[index].ScopeKey == scopeKey {
 			return &scoped[index]
+		}
+	}
+	return nil
+}
+
+func edgeDNSCandidateByEdgeID(candidates []model.EdgeDNSAnswerCandidate, edgeID string) *model.EdgeDNSAnswerCandidate {
+	for index := range candidates {
+		if candidates[index].EdgeID == edgeID {
+			return &candidates[index]
 		}
 	}
 	return nil

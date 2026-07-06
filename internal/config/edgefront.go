@@ -15,12 +15,14 @@ type EdgeFrontConfig = edgefront.Config
 func EdgeFrontFromEnv() EdgeFrontConfig {
 	nodeHost := getenv("FUGUE_EDGE_FRONT_NODE_HOST", "127.0.0.1")
 	defaultSlot := getenv("FUGUE_EDGE_FRONT_DEFAULT_SLOT", "a")
+	edgeNodeEnvFile := getenv("FUGUE_EDGE_FRONT_NODE_ENV_FILE", getenv("FUGUE_EDGE_NODE_ENV_FILE", "/etc/fugue/edge-node.env"))
+	edgeNodeEnv := readSimpleEnvFile(edgeNodeEnvFile)
 	return EdgeFrontConfig{
 		HTTPListenAddr:     getenv("FUGUE_EDGE_FRONT_HTTP_LISTEN_ADDR", ":80"),
 		HTTPSListenAddr:    getenv("FUGUE_EDGE_FRONT_HTTPS_LISTEN_ADDR", ":443"),
 		HealthAddr:         getenv("FUGUE_EDGE_FRONT_HEALTH_LISTEN_ADDR", ":7831"),
 		EdgeID:             getenv("FUGUE_EDGE_FRONT_EDGE_ID", nodeHost),
-		EdgeGroupID:        strings.TrimSpace(os.Getenv("FUGUE_EDGE_FRONT_EDGE_GROUP_ID")),
+		EdgeGroupID:        getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_FRONT_EDGE_GROUP_ID", getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_GROUP_ID", "")),
 		NodeHost:           nodeHost,
 		HTTPMode:           getenv("FUGUE_EDGE_FRONT_HTTP_MODE", edgefront.HTTPModeRedirect),
 		ActiveSlotFile:     getenv("FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE", "/var/lib/fugue/edge-blue-green/active-slot"),

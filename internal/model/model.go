@@ -717,11 +717,25 @@ type NodeUpdater struct {
 }
 
 type NodeUpdaterDesiredState struct {
-	GeneratedAt     time.Time                `json:"generated_at"`
-	NodeUpdater     NodeUpdater              `json:"node_updater"`
-	DiscoveryBundle DiscoveryBundle          `json:"discovery_bundle"`
-	NodePolicy      *ClusterNodePolicyStatus `json:"node_policy,omitempty"`
-	Warnings        []string                 `json:"warnings,omitempty"`
+	GeneratedAt     time.Time                  `json:"generated_at"`
+	NodeUpdater     NodeUpdater                `json:"node_updater"`
+	DiscoveryBundle DiscoveryBundle            `json:"discovery_bundle"`
+	NodePolicy      *ClusterNodePolicyStatus   `json:"node_policy,omitempty"`
+	EdgeCredential  *NodeUpdaterEdgeCredential `json:"edge_credential,omitempty"`
+	Warnings        []string                   `json:"warnings,omitempty"`
+}
+
+type NodeUpdaterEdgeCredential struct {
+	EdgeID          string `json:"edge_id"`
+	EdgeGroupID     string `json:"edge_group_id"`
+	WorkloadMode    string `json:"workload_mode,omitempty"`
+	Country         string `json:"country,omitempty"`
+	Region          string `json:"region,omitempty"`
+	PublicIPv4      string `json:"public_ipv4,omitempty"`
+	PublicIPv6      string `json:"public_ipv6,omitempty"`
+	Token           string `json:"token,omitempty"`
+	TokenPrefix     string `json:"token_prefix,omitempty"`
+	DesiredStateURL string `json:"desired_state_url,omitempty"`
 }
 
 type NodeUpdateTask struct {

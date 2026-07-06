@@ -736,6 +736,68 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 }
 
+func TestSyncOnceRefreshesDynamicDesiredStateBeforeRoutes(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_dynamic")
+	var gotDesiredToken string
+	var gotRoutesToken string
+	var gotRoutesEdgeID string
+	var gotRoutesEdgeGroupID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/edge/nodes/dynamic-edge-1/desired-state":
+			gotDesiredToken = r.URL.Query().Get("token")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"desired_state": map[string]any{
+					"edge_id":             "dynamic-edge-1",
+					"edge_group_id":       "edge-group-country-jp",
+					"workload_mode":       "dynamic",
+					"canary_state":        "canary",
+					"canary_weight":       1,
+					"public_probe_status": "passing",
+					"dns_eligible":        true,
+					"route_ready":         true,
+					"tls_ready":           true,
+				},
+			})
+		case "/v1/edge/routes":
+			gotRoutesToken = r.URL.Query().Get("token")
+			gotRoutesEdgeID = r.URL.Query().Get("edge_id")
+			gotRoutesEdgeGroupID = r.URL.Query().Get("edge_group_id")
+			w.Header().Set("ETag", `"routegen_dynamic"`)
+			if err := json.NewEncoder(w).Encode(bundle); err != nil {
+				t.Fatalf("encode bundle: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := NewService(config.EdgeConfig{
+		APIURL:              server.URL,
+		EdgeDesiredStateURL: server.URL + "/v1/edge/nodes/dynamic-edge-1/desired-state",
+		EdgeToken:           "edge-secret",
+		EdgeID:              "dynamic-edge-1",
+		WorkloadMode:        "dynamic",
+		CachePath:           filepath.Join(t.TempDir(), "routes-cache.json"),
+	}, log.New(ioDiscard{}, "", 0))
+
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once: %v", err)
+	}
+	if gotDesiredToken != "edge-secret" {
+		t.Fatalf("expected desired-state token, got %q", gotDesiredToken)
+	}
+	if gotRoutesToken != "edge-secret" || gotRoutesEdgeID != "dynamic-edge-1" || gotRoutesEdgeGroupID != "edge-group-country-jp" {
+		t.Fatalf("unexpected route query token=%q edge_id=%q edge_group_id=%q", gotRoutesToken, gotRoutesEdgeID, gotRoutesEdgeGroupID)
+	}
+	if service.Config.EdgeGroupID != "edge-group-country-jp" || service.Config.WorkloadMode != model.EdgeWorkloadModeDynamic {
+		t.Fatalf("desired state was not applied to config: %+v", service.Config)
+	}
+}
+
 func TestLoadCacheFallsBackToPreviousVerifiedGeneration(t *testing.T) {
 	t.Parallel()
 

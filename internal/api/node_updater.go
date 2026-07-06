@@ -146,13 +146,102 @@ func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, p
 			warnings = append(warnings, "node policy not found for current cluster node")
 		}
 	}
+	edgeCredential, edgeWarnings, err := s.nodeUpdaterEdgeCredential(r, updater, nodePolicy)
+	if err != nil {
+		return model.NodeUpdaterDesiredState{}, err
+	}
+	warnings = append(warnings, edgeWarnings...)
 	return model.NodeUpdaterDesiredState{
 		GeneratedAt:     time.Now().UTC(),
 		NodeUpdater:     updater,
 		DiscoveryBundle: discovery,
 		NodePolicy:      nodePolicy,
+		EdgeCredential:  edgeCredential,
 		Warnings:        warnings,
 	}, nil
+}
+
+func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUpdater, nodePolicy *model.ClusterNodePolicyStatus) (*model.NodeUpdaterEdgeCredential, []string, error) {
+	labels := updater.Labels
+	if nodePolicy != nil && len(nodePolicy.Labels) > 0 {
+		labels = nodePolicy.Labels
+	}
+	if !nodeUpdaterPolicyAllowsEdge(labels, nodePolicy) {
+		return nil, nil, nil
+	}
+	edgeID := strings.TrimSpace(updater.ClusterNodeName)
+	if edgeID == "" {
+		return nil, []string{"edge credential not issued: cluster node name is empty"}, nil
+	}
+	edgeGroupID := derivedEdgeGroupIDForLabels(labels)
+	if edgeGroupID == "" || edgeGroupID == defaultEdgeGroupID {
+		return nil, []string{"edge credential not issued: missing location country/region or explicit edge group"}, nil
+	}
+	workloadMode := strings.TrimSpace(strings.ToLower(labels["fugue.io/edge-workload"]))
+	switch workloadMode {
+	case "", "dynamic":
+		workloadMode = "dynamic"
+	case "static":
+	default:
+		workloadMode = "dynamic"
+	}
+	country := strings.ToLower(strings.TrimSpace(labels["fugue.io/location-country-code"]))
+	region := strings.TrimSpace(firstNodeLabel(labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"))
+	publicIP := strings.TrimSpace(labels["fugue.io/public-ip"])
+	credential := &model.NodeUpdaterEdgeCredential{
+		EdgeID:          edgeID,
+		EdgeGroupID:     edgeGroupID,
+		WorkloadMode:    workloadMode,
+		Country:         country,
+		Region:          region,
+		DesiredStateURL: strings.TrimRight(s.publicInstallAPIBaseURL(r), "/") + "/v1/edge/nodes/" + edgeID + "/desired-state",
+	}
+	if strings.Contains(publicIP, ":") {
+		credential.PublicIPv6 = publicIP
+	} else {
+		credential.PublicIPv4 = publicIP
+	}
+	needsToken := strings.TrimSpace(updater.EdgeEnvGeneration) == ""
+	if existing, _, err := s.store.GetEdgeNode(edgeID); err == nil {
+		credential.TokenPrefix = existing.TokenPrefix
+		if strings.TrimSpace(existing.TokenPrefix) == "" || !strings.EqualFold(strings.TrimSpace(existing.EdgeGroupID), edgeGroupID) {
+			needsToken = true
+		}
+	} else if errors.Is(err, store.ErrNotFound) {
+		needsToken = true
+	} else {
+		return nil, nil, err
+	}
+	if needsToken {
+		node, token, err := s.store.CreateEdgeNodeToken(model.EdgeNode{
+			ID:           edgeID,
+			EdgeGroupID:  edgeGroupID,
+			WorkloadMode: workloadMode,
+			CanaryState:  model.EdgeCanaryStateJoined,
+			CanaryWeight: 1,
+			Region:       region,
+			Country:      country,
+			PublicIPv4:   credential.PublicIPv4,
+			PublicIPv6:   credential.PublicIPv6,
+			Status:       model.EdgeHealthUnknown,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		credential.Token = token
+		credential.TokenPrefix = node.TokenPrefix
+	}
+	return credential, nil, nil
+}
+
+func nodeUpdaterPolicyAllowsEdge(labels map[string]string, nodePolicy *model.ClusterNodePolicyStatus) bool {
+	if nodePolicy != nil && nodePolicy.Policy != nil {
+		if nodePolicy.Policy.EffectiveEdge || nodePolicy.Policy.AllowEdge {
+			return true
+		}
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(labels["fugue.io/role.edge"]), "true")
 }
 
 func (s *Server) nodeUpdaterByPrincipal(principal model.Principal) (model.NodeUpdater, error) {
@@ -840,6 +929,7 @@ FUGUE_NODE_UPDATER_STATE_ENV_FILE="${FUGUE_NODE_UPDATER_STATE_ENV_FILE:-${FUGUE_
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/rancher/k3s/config.yaml}"
 FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE="${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE:-/etc/rancher/k3s/registries.yaml}"
 FUGUE_NODE_UPDATER_EDGE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_ENV_FILE:-/etc/fugue/fugue-edge.env}"
+FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE:-/etc/fugue/edge-node.env}"
 FUGUE_NODE_UPDATER_DNS_ENV_FILE="${FUGUE_NODE_UPDATER_DNS_ENV_FILE:-/etc/fugue/fugue-dns.env}"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE:-/etc/dnsmasq.d/fugue-node-dns-escape-hatch.conf}"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE:-fugue-node-dns-escape-hatch.service}"
@@ -901,6 +991,19 @@ write_file_if_changed() {
   return 0
 }
 
+write_secret_file_if_changed() {
+  local source_path="$1"
+  local target_path="$2"
+  if [ -f "${target_path}" ] && cmp -s "${source_path}" "${target_path}"; then
+    rm -f "${source_path}"
+    chmod 0600 "${target_path}" 2>/dev/null || true
+    return 1
+  fi
+  install -m 0600 "${source_path}" "${target_path}"
+  rm -f "${source_path}"
+  return 0
+}
+
 preserve_rollback_file() {
   local path="$1"
   if [ -r "${path}" ]; then
@@ -942,6 +1045,22 @@ load_cached_env_file() {
   if [ -r "${path}" ]; then
     # shellcheck disable=SC1090
     . "${path}"
+    return 0
+  fi
+  return 1
+}
+
+detect_public_ip() {
+  if command -v curl >/dev/null 2>&1; then
+    local ip=""
+    ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [ -n "${ip}" ]; then
+      printf '%s' "${ip}"
+      return 0
+    fi
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
     return 0
   fi
   return 1
@@ -1305,8 +1424,9 @@ render_desired_k3s_policy_lists() {
   if [ ! -r "${state_file}" ] || ! command -v python3 >/dev/null 2>&1; then
     return 1
   fi
-  python3 - "${state_file}" "${labels_file}" "${taints_file}" <<'PY_NODE_POLICY'
+  FUGUE_DETECTED_PUBLIC_IP="$(detect_public_ip || true)" python3 - "${state_file}" "${labels_file}" "${taints_file}" <<'PY_NODE_POLICY'
 import json
+import os
 import sys
 
 state_path, labels_path, taints_path = sys.argv[1:4]
@@ -1352,8 +1472,13 @@ add_label("fugue.io/node-key-id", node_key_id)
 add_label("fugue.io/node-mode", node_mode)
 add_label("fugue.io/runtime-id", runtime_id)
 add_label("fugue.io/tenant-id", tenant_id)
+add_label("topology.kubernetes.io/region", current_labels.get("topology.kubernetes.io/region"))
+add_label("failure-domain.beta.kubernetes.io/region", current_labels.get("failure-domain.beta.kubernetes.io/region"))
+add_label("topology.kubernetes.io/zone", current_labels.get("topology.kubernetes.io/zone"))
+add_label("failure-domain.beta.kubernetes.io/zone", current_labels.get("failure-domain.beta.kubernetes.io/zone"))
 add_label("fugue.io/location-country-code", current_labels.get("fugue.io/location-country-code"))
-add_label("fugue.io/public-ip", current_labels.get("fugue.io/public-ip"))
+add_label("fugue.io/public-ip", first(os.environ.get("FUGUE_DETECTED_PUBLIC_IP"), current_labels.get("fugue.io/public-ip")))
+add_label("fugue.io/edge-group-id", current_labels.get("fugue.io/edge-group-id"))
 
 if truthy(policy.get("allow_builds")):
     add_label("fugue.io/build", "true")
@@ -1362,6 +1487,14 @@ if truthy(policy.get("allow_app_runtime")):
     add_label("fugue.io/role.app-runtime", "true")
 if truthy(policy.get("allow_edge")):
     add_label("fugue.io/role.edge", "true")
+    edge_workload = first(current_labels.get("fugue.io/edge-workload"), "dynamic")
+    edge_group_id = first(current_labels.get("fugue.io/edge-group-id"))
+    country_code = first(current_labels.get("fugue.io/location-country-code"))
+    if country_code or edge_group_id or edge_workload == "static":
+        add_label("fugue.io/edge-workload", edge_workload if edge_workload in {"static", "dynamic"} else "dynamic")
+        add_label("fugue.io/edge-location-status", "ready")
+    else:
+        add_label("fugue.io/edge-location-status", "missing_location")
 if truthy(policy.get("allow_dns")):
     add_label("fugue.io/role.dns", "true")
 if truthy(policy.get("allow_internal_maintenance")):
@@ -1773,6 +1906,83 @@ reconcile_lkg_service_envs() {
   [ "${changed}" -eq 1 ]
 }
 
+render_edge_node_env() {
+  local target="$1"
+  local state_file="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}"
+  if [ ! -r "${state_file}" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "${state_file}" "${target}" <<'PY_EDGE_NODE_ENV'
+import json
+import shlex
+import sys
+
+state_path, target_path = sys.argv[1:3]
+with open(state_path, "r", encoding="utf-8") as fh:
+    envelope = json.load(fh)
+
+credential = ((envelope.get("desired_state") or {}).get("edge_credential") or {})
+edge_id = str(credential.get("edge_id") or "").strip()
+edge_group_id = str(credential.get("edge_group_id") or "").strip()
+token = str(credential.get("token") or "").strip()
+if not edge_id or not edge_group_id or not token:
+    raise SystemExit(1)
+
+def emit(key, value):
+    value = "" if value is None else str(value)
+    print(f"{key}={shlex.quote(value)}")
+
+emit("FUGUE_EDGE_NODE_ID", edge_id)
+emit("FUGUE_EDGE_ID", edge_id)
+emit("FUGUE_EDGE_GROUP_ID", edge_group_id)
+emit("FUGUE_EDGE_NODE_TOKEN", token)
+emit("FUGUE_EDGE_TOKEN", token)
+emit("FUGUE_EDGE_WORKLOAD_MODE", credential.get("workload_mode") or "dynamic")
+emit("FUGUE_EDGE_DESIRED_STATE_URL", credential.get("desired_state_url") or "")
+emit("FUGUE_EDGE_PUBLIC_IPV4", credential.get("public_ipv4") or "")
+emit("FUGUE_EDGE_PUBLIC_IPV6", credential.get("public_ipv6") or "")
+emit("FUGUE_EDGE_REGION", credential.get("region") or "")
+emit("FUGUE_EDGE_COUNTRY", credential.get("country") or "")
+PY_EDGE_NODE_ENV
+}
+
+restart_dynamic_edge_pods_for_credential_reload() {
+  local node_name="${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-}"
+  if [ -z "${node_name}" ]; then
+    return 1
+  fi
+  if command -v k3s >/dev/null 2>&1; then
+    k3s kubectl -n fugue-system delete pod \
+      --field-selector "spec.nodeName=${node_name}" \
+      -l "fugue.io/edge-workload=dynamic" \
+      --ignore-not-found >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  if command -v kubectl >/dev/null 2>&1; then
+    kubectl -n fugue-system delete pod \
+      --field-selector "spec.nodeName=${node_name}" \
+      -l "fugue.io/edge-workload=dynamic" \
+      --ignore-not-found >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  return 1
+}
+
+reconcile_edge_node_env() {
+  local env_tmp=""
+  env_tmp="$(mktemp)"
+  if ! render_edge_node_env "${env_tmp}" >"${env_tmp}"; then
+    rm -f "${env_tmp}"
+    return 1
+  fi
+  mkdir -p "$(dirname "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}")"
+  if write_secret_file_if_changed "${env_tmp}" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"; then
+    restart_dynamic_edge_pods_for_credential_reload || true
+    return 0
+  fi
+  return 1
+}
+
 reconcile_node_state() {
   local k3s_runtime_config_changed=0
   mkdir -p "${FUGUE_NODE_UPDATER_STATE_DIR}"
@@ -1788,6 +1998,9 @@ reconcile_node_state() {
   fi
   if fetch_node_policy_desired_state; then
     log "refreshed desired node policy cache"
+  fi
+  if reconcile_edge_node_env; then
+    log "updated node-scoped edge credential"
   fi
   if [ -r "${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE}" ]; then
     # shellcheck disable=SC1090
@@ -1878,7 +2091,14 @@ current_taints_hash() {
 }
 
 current_edge_env_generation() {
-  current_file_hash "${FUGUE_NODE_UPDATER_EDGE_ENV_FILE}"
+  local tmp=""
+  tmp="$(mktemp)"
+  {
+    printf 'edge_env=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_EDGE_ENV_FILE}")"
+    printf 'edge_node_env=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}")"
+  } >"${tmp}"
+  sha256_file "${tmp}" || true
+  rm -f "${tmp}"
 }
 
 current_dns_env_generation() {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,7 +16,8 @@ func (s *Store) pgListEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.E
 	defer cancel()
 
 	query := `
-SELECT id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
+SELECT id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
+	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
 	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
@@ -56,7 +58,8 @@ func (s *Store) pgGetEdgeNode(edgeID string) (model.EdgeNode, model.EdgeGroup, e
 	defer cancel()
 
 	node, err := scanEdgeNode(s.db.QueryRowContext(ctx, `
-SELECT id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
+SELECT id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
+	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
 	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
@@ -120,7 +123,8 @@ func (s *Store) pgAuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
 	defer tx.Rollback()
 
 	node, err := scanEdgeNode(tx.QueryRowContext(ctx, `
-SELECT id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
+SELECT id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
+	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
 	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
@@ -155,6 +159,13 @@ func (s *Store) pgUpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, mode
 	if node.CreatedAt.IsZero() {
 		node.CreatedAt = now
 	}
+	if existing, _, err := s.pgGetEdgeNode(node.ID); err == nil {
+		if existing.Draining && !node.Draining {
+			node.Draining = true
+		}
+	} else if !errors.Is(err, ErrNotFound) {
+		return model.EdgeNode{}, model.EdgeGroup{}, err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -183,6 +194,39 @@ func (s *Store) pgUpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, mode
 	return redactEdgeNode(stored), group, nil
 }
 
+func (s *Store) pgUpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	current, group, err := s.pgGetEdgeNode(edgeID)
+	if err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, err
+	}
+	applyEdgeNodeControlPatch(&current, patch)
+	current.UpdatedAt = time.Now().UTC()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, fmt.Errorf("begin edge control-state transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := pgUpsertEdgeGroup(ctx, tx, current, current.UpdatedAt); err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, err
+	}
+	stored, err := pgUpsertEdgeNode(ctx, tx, current, false)
+	if err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, fmt.Errorf("commit edge control-state transaction: %w", err)
+	}
+	groups, err := s.pgListEdgeGroups(ctx, stored.EdgeGroupID)
+	if err == nil && len(groups) > 0 {
+		group = groups[0]
+	}
+	return redactEdgeNode(stored), group, nil
+}
+
 func pgUpsertEdgeGroup(ctx context.Context, tx *sql.Tx, node model.EdgeNode, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO fugue_edge_groups (id, region, country, status, created_at, updated_at)
@@ -200,18 +244,26 @@ ON CONFLICT (id) DO UPDATE SET
 func pgUpsertEdgeNode(ctx context.Context, tx *sql.Tx, node model.EdgeNode, replaceToken bool) (model.EdgeNode, error) {
 	row := tx.QueryRowContext(ctx, `
 INSERT INTO fugue_edge_nodes (
-	id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
+	id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
+	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
 	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14,
-	$15, $16, $17, $18, $19, $20, $21,
-	$22, $23, $24, $25, $26, $27, $28, $29
+	$15, $16, $17, $18, $19, $20,
+	$21, $22, $23, $24, $25, $26, $27,
+	$28, $29, $30, $31, $32, $33, $34, $35
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_group_id = EXCLUDED.edge_group_id,
+	workload_mode = EXCLUDED.workload_mode,
+	canary_state = CASE WHEN EXCLUDED.canary_state <> '' THEN EXCLUDED.canary_state ELSE fugue_edge_nodes.canary_state END,
+	canary_weight = CASE WHEN EXCLUDED.canary_weight > 0 THEN EXCLUDED.canary_weight ELSE fugue_edge_nodes.canary_weight END,
+	public_probe_status = CASE WHEN EXCLUDED.public_probe_status <> '' THEN EXCLUDED.public_probe_status ELSE fugue_edge_nodes.public_probe_status END,
+	public_probe_last_error = CASE WHEN EXCLUDED.public_probe_last_error <> '' THEN EXCLUDED.public_probe_last_error ELSE fugue_edge_nodes.public_probe_last_error END,
+	public_probe_last_at = CASE WHEN EXCLUDED.public_probe_last_at IS NOT NULL THEN EXCLUDED.public_probe_last_at ELSE fugue_edge_nodes.public_probe_last_at END,
 	region = EXCLUDED.region,
 	country = EXCLUDED.country,
 	public_hostname = EXCLUDED.public_hostname,
@@ -233,16 +285,18 @@ ON CONFLICT (id) DO UPDATE SET
 	tls_last_message = EXCLUDED.tls_last_message,
 	tls_ready_at = EXCLUDED.tls_ready_at,
 	last_error = EXCLUDED.last_error,
-	token_prefix = CASE WHEN $30 THEN EXCLUDED.token_prefix ELSE fugue_edge_nodes.token_prefix END,
-	token_hash = CASE WHEN $30 THEN EXCLUDED.token_hash ELSE fugue_edge_nodes.token_hash END,
+	token_prefix = CASE WHEN $36 THEN EXCLUDED.token_prefix ELSE fugue_edge_nodes.token_prefix END,
+	token_hash = CASE WHEN $36 THEN EXCLUDED.token_hash ELSE fugue_edge_nodes.token_hash END,
 	last_seen_at = EXCLUDED.last_seen_at,
 	last_heartbeat_at = EXCLUDED.last_heartbeat_at,
 	updated_at = EXCLUDED.updated_at
-RETURNING id, edge_group_id, region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
+RETURNING id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, public_probe_last_error, public_probe_last_at,
+	region, country, public_hostname, public_ipv4, public_ipv6, mesh_ip,
 	status, healthy, draining, route_bundle_version, dns_bundle_version, caddy_route_count,
 	serving_generation, lkg_generation, caddy_applied_version, caddy_last_error, cache_status,
 	tls_status, tls_last_message, tls_ready_at, last_error, token_prefix, token_hash, last_seen_at, last_heartbeat_at, created_at, updated_at
-`, node.ID, node.EdgeGroupID, node.Region, node.Country, node.PublicHostname, node.PublicIPv4, node.PublicIPv6, node.MeshIP,
+`, node.ID, node.EdgeGroupID, node.WorkloadMode, node.CanaryState, node.CanaryWeight, node.PublicProbeStatus, node.PublicProbeLastError, node.PublicProbeLastAt,
+		node.Region, node.Country, node.PublicHostname, node.PublicIPv4, node.PublicIPv6, node.MeshIP,
 		node.Status, node.Healthy, node.Draining, node.RouteBundleVersion, node.DNSBundleVersion, node.CaddyRouteCount,
 		node.ServingGeneration, node.LKGGeneration, node.CaddyAppliedVersion, node.CaddyLastError, node.CacheStatus,
 		node.TLSStatus, node.TLSLastMessage, node.TLSReadyAt, node.LastError, node.TokenPrefix, node.TokenHash, node.LastSeenAt, node.LastHeartbeatAt, node.CreatedAt, node.UpdatedAt, replaceToken)
@@ -307,9 +361,16 @@ func scanEdgeNode(scanner sqlScanner) (model.EdgeNode, error) {
 	var lastSeenAt sql.NullTime
 	var lastHeartbeatAt sql.NullTime
 	var tlsReadyAt sql.NullTime
+	var publicProbeLastAt sql.NullTime
 	if err := scanner.Scan(
 		&node.ID,
 		&node.EdgeGroupID,
+		&node.WorkloadMode,
+		&node.CanaryState,
+		&node.CanaryWeight,
+		&node.PublicProbeStatus,
+		&node.PublicProbeLastError,
+		&publicProbeLastAt,
 		&node.Region,
 		&node.Country,
 		&node.PublicHostname,
@@ -348,6 +409,9 @@ func scanEdgeNode(scanner sqlScanner) (model.EdgeNode, error) {
 	}
 	if tlsReadyAt.Valid {
 		node.TLSReadyAt = &tlsReadyAt.Time
+	}
+	if publicProbeLastAt.Valid {
+		node.PublicProbeLastAt = &publicProbeLastAt.Time
 	}
 	normalizeEdgeNodeForRead(&node)
 	return node, nil

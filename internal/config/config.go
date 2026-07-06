@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"log"
 	"os"
@@ -172,6 +173,9 @@ type AgentConfig struct {
 
 type EdgeConfig struct {
 	APIURL                          string
+	EdgeNodeEnvFile                 string
+	EdgeDesiredStateURL             string
+	WorkloadMode                    string
 	EdgeToken                       string
 	EdgeID                          string
 	EdgeGroupID                     string
@@ -484,16 +488,21 @@ func AgentFromEnv() AgentConfig {
 }
 
 func EdgeFromEnv() EdgeConfig {
+	edgeNodeEnvFile := getenv("FUGUE_EDGE_NODE_ENV_FILE", "/etc/fugue/edge-node.env")
+	edgeNodeEnv := readSimpleEnvFile(edgeNodeEnvFile)
 	return EdgeConfig{
 		APIURL:                    getenv("FUGUE_API_URL", ""),
-		EdgeToken:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_TOKEN")),
-		EdgeID:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_ID")),
-		EdgeGroupID:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
-		Region:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_REGION")),
-		Country:                   strings.TrimSpace(os.Getenv("FUGUE_EDGE_COUNTRY")),
+		EdgeNodeEnvFile:           edgeNodeEnvFile,
+		EdgeDesiredStateURL:       getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_DESIRED_STATE_URL", ""),
+		WorkloadMode:              getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_WORKLOAD_MODE", ""),
+		EdgeToken:                 getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_TOKEN", getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_NODE_TOKEN", "")),
+		EdgeID:                    getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_ID", getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_NODE_ID", "")),
+		EdgeGroupID:               getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_GROUP_ID", ""),
+		Region:                    getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_REGION", ""),
+		Country:                   getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_COUNTRY", ""),
 		PublicHostname:            strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_HOSTNAME")),
-		PublicIPv4:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV4")),
-		PublicIPv6:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_PUBLIC_IPV6")),
+		PublicIPv4:                getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_PUBLIC_IPV4", ""),
+		PublicIPv6:                getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_PUBLIC_IPV6", ""),
 		MeshIP:                    strings.TrimSpace(os.Getenv("FUGUE_EDGE_MESH_IP")),
 		Draining:                  getenvBool("FUGUE_EDGE_DRAINING", false),
 		CachePath:                 getenv("FUGUE_EDGE_ROUTES_CACHE_PATH", "/var/lib/fugue/edge/routes-cache.json"),
@@ -785,6 +794,66 @@ func getenvFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvFileFallback(fileEnv map[string]string, key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(fileEnv[key]); value != "" {
+		return value
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func readSimpleEnvFile(path string) map[string]string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	out := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = unquoteSimpleEnvValue(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func unquoteSimpleEnvValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		value = value[1 : len(value)-1]
+		value = strings.ReplaceAll(value, `'"'"'`, `'`)
+		value = strings.ReplaceAll(value, `'\''`, `'`)
+		return value
+	}
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+		value = strings.ReplaceAll(value, `\"`, `"`)
+		value = strings.ReplaceAll(value, `\\`, `\`)
+		return value
+	}
+	return value
 }
 
 func hostnameFallback() string {

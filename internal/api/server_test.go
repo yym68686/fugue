@@ -583,7 +583,14 @@ func TestJoinClusterEnvSupportsEdgeOnlyJoinLabels(t *testing.T) {
 	form.Set("node_name", "edge-1")
 	form.Set("machine_name", "edge-1")
 	form.Set("machine_fingerprint", "edge-1-fingerprint")
-	form.Set("labels", runtime.EdgeRoleLabelKey+"="+runtime.NodeRoleLabelValue)
+	form.Set("labels", strings.Join([]string{
+		runtime.EdgeRoleLabelKey + "=" + runtime.NodeRoleLabelValue,
+		runtime.LocationCountryCodeLabelKey + "=JP",
+		runtime.PublicIPLabelKey + "=203.0.113.44",
+		runtime.EdgeGroupIDLabelKey + "=edge-group-country-jp",
+		runtime.EdgeWorkloadLabelKey + "=" + runtime.EdgeWorkloadDynamicValue,
+		runtime.EdgeLocationStatusLabelKey + "=" + runtime.EdgeLocationStatusReady,
+	}, ","))
 	req := httptest.NewRequest(http.MethodPost, "/v1/nodes/join-cluster/env", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recorder := httptest.NewRecorder()
@@ -597,8 +604,22 @@ func TestJoinClusterEnvSupportsEdgeOnlyJoinLabels(t *testing.T) {
 	if !strings.Contains(body, runtime.EdgeRoleLabelKey+"="+runtime.NodeRoleLabelValue) {
 		t.Fatalf("expected edge role label in join env, got %s", body)
 	}
+	for _, want := range []string{
+		runtime.LocationCountryCodeLabelKey + "=jp",
+		runtime.PublicIPLabelKey + "=203.0.113.44",
+		runtime.EdgeGroupIDLabelKey + "=edge-group-country-jp",
+		runtime.EdgeWorkloadLabelKey + "=" + runtime.EdgeWorkloadDynamicValue,
+		runtime.EdgeLocationStatusLabelKey + "=" + runtime.EdgeLocationStatusReady,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected dynamic edge label %q in join env, got %s", want, body)
+		}
+	}
 	if strings.Contains(body, runtime.AppRuntimeRoleLabelKey+"="+runtime.NodeRoleLabelValue) {
 		t.Fatalf("expected edge-only join env to omit app-runtime label, got %s", body)
+	}
+	if strings.Contains(body, runtime.DNSRoleLabelKey+"="+runtime.NodeRoleLabelValue) {
+		t.Fatalf("expected edge-only join env to omit dns label, got %s", body)
 	}
 	if !strings.Contains(body, runtime.DedicatedTaintKey+"="+runtime.DedicatedEdgeValue+":NoSchedule") {
 		t.Fatalf("expected edge dedicated taint in join env, got %s", body)
@@ -610,6 +631,13 @@ func TestJoinClusterEnvSupportsEdgeOnlyJoinLabels(t *testing.T) {
 	}
 	if machine.Policy.AllowAppRuntime || !machine.Policy.AllowEdge {
 		t.Fatalf("expected stored edge-only machine policy, got %#v", machine.Policy)
+	}
+	if machine.Labels[runtime.LocationCountryCodeLabelKey] != "JP" ||
+		machine.Labels[runtime.PublicIPLabelKey] != "203.0.113.44" ||
+		machine.Labels[runtime.EdgeGroupIDLabelKey] != "edge-group-country-jp" ||
+		machine.Labels[runtime.EdgeWorkloadLabelKey] != runtime.EdgeWorkloadDynamicValue ||
+		machine.Labels[runtime.EdgeLocationStatusLabelKey] != runtime.EdgeLocationStatusReady {
+		t.Fatalf("expected dynamic edge metadata to be stored on machine, got %#v", machine.Labels)
 	}
 }
 
@@ -770,9 +798,24 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 		`--data-urlencode "bootstrap_token_id=${FUGUE_JOIN_BOOTSTRAP_TOKEN_ID:-}"`,
 		`cleanup_stale_cluster_nodes`,
 		`FUGUE_EDGE_ONLY="${FUGUE_EDGE_ONLY:-}"`,
+		`FUGUE_EDGE_WORKLOAD="${FUGUE_EDGE_WORKLOAD:-}"`,
+		`FUGUE_EDGE_GROUP_ID="${FUGUE_EDGE_GROUP_ID:-}"`,
 		`--edge-only`,
+		`--country|--country-code)`,
+		`--region)`,
+		`--public-ip)`,
+		`--edge-group|--edge-group-id)`,
+		`--edge-workload)`,
 		`append_runtime_label "fugue.io/role.edge" "true"`,
 		`apply_join_role_shortcuts`,
+		`sync_edge_metadata_runtime_labels`,
+		`fugue.io/edge-workload`,
+		`fugue.io/edge-group-id`,
+		`fugue.io/edge-location-status`,
+		`missing_location`,
+		`/v1/metadata/geoip`,
+		`https://ipinfo.io/country`,
+		`https://ifconfig.co/country-iso`,
 		`FUGUE_JOIN_USE_MESH_FOR_FLANNEL`,
 		`keeping k3s node/flannel address`,
 	} {

@@ -100,6 +100,11 @@ func (c *CLI) newAdminEdgeNodesCommand() *cobra.Command {
 		c.newAdminEdgeNodesGetCommand(),
 		c.newAdminEdgeNodesQualityCommand(),
 		c.newAdminEdgeNodesTokenCommand(),
+		c.newAdminEdgeNodesDesiredStateCommand(),
+		c.newAdminEdgeNodesProbeCommand(),
+		c.newAdminEdgeNodesCanaryCommand(),
+		c.newAdminEdgeNodesDrainCommand(),
+		c.newAdminEdgeNodesUndrainCommand(),
 	)
 	return cmd
 }
@@ -227,6 +232,9 @@ func (c *CLI) newAdminEdgeNodesTokenCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Edge group this node token is allowed to serve")
+	cmd.Flags().StringVar(&opts.WorkloadMode, "workload-mode", "", "Workload mode for the edge node: static or dynamic")
+	cmd.Flags().StringVar(&opts.CanaryState, "canary-state", "", "Initial canary state: joined, warming, probing, canary, active, or drained")
+	cmd.Flags().IntVar(&opts.CanaryWeight, "canary-weight", 0, "Initial canary weight")
 	cmd.Flags().StringVar(&opts.Region, "region", "", "Region metadata for the edge node")
 	cmd.Flags().StringVar(&opts.Country, "country", "", "Country metadata for the edge node")
 	cmd.Flags().StringVar(&opts.PublicHostname, "public-hostname", "", "Public hostname for the edge node")
@@ -235,6 +243,125 @@ func (c *CLI) newAdminEdgeNodesTokenCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.MeshIP, "mesh-ip", "", "Private mesh IP for the edge node")
 	cmd.Flags().BoolVar(&opts.Draining, "draining", false, "Create the node in draining mode")
 	return cmd
+}
+
+func (c *CLI) newAdminEdgeNodesDesiredStateCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "desired-state <edge-id>",
+		Short: "Show control-plane desired state for one edge node",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.GetAdminEdgeNodeDesiredState(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeNodeDesiredState(c.stdout, response.DesiredState)
+		},
+	}
+}
+
+func (c *CLI) newAdminEdgeNodesProbeCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "probe <edge-id>",
+		Short: "Probe public 80/443 reachability for one edge node",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.ProbeEdgeNode(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeNodeControlResult(c.stdout, response)
+		},
+	}
+}
+
+func (c *CLI) newAdminEdgeNodesCanaryCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "canary",
+		Short: "Manage edge node canary state",
+	}
+	opts := setEdgeNodeCanaryRequest{State: model.EdgeCanaryStateCanary, Weight: 1}
+	setCmd := &cobra.Command{
+		Use:   "set <edge-id>",
+		Short: "Set one edge node canary state and weight",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.SetEdgeNodeCanary(args[0], opts)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeNodeControlResult(c.stdout, response)
+		},
+	}
+	setCmd.Flags().StringVar(&opts.State, "state", opts.State, "Canary state: canary, active, or drained")
+	setCmd.Flags().IntVar(&opts.Weight, "weight", opts.Weight, "Canary answer weight; canary state is capped by the control plane")
+	cmd.AddCommand(setCmd)
+	return cmd
+}
+
+func (c *CLI) newAdminEdgeNodesDrainCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "drain <edge-id>",
+		Short: "Drain one edge node from DNS answers",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.DrainEdgeNode(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeNodeControlResult(c.stdout, response)
+		},
+	}
+}
+
+func (c *CLI) newAdminEdgeNodesUndrainCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "undrain <edge-id>",
+		Short: "Return one drained edge node to canary eligibility",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.UndrainEdgeNode(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeEdgeNodeControlResult(c.stdout, response)
+		},
+	}
 }
 
 func (c *CLI) newAdminEdgeRoutePolicyCommand() *cobra.Command {
@@ -703,6 +830,12 @@ func writeEdgeNode(w io.Writer, node model.EdgeNode) error {
 	return writeKeyValues(w,
 		kvPair{Key: "edge_id", Value: strings.TrimSpace(node.ID)},
 		kvPair{Key: "edge_group", Value: strings.TrimSpace(node.EdgeGroupID)},
+		kvPair{Key: "workload_mode", Value: cliEdgeNodeWorkloadMode(node)},
+		kvPair{Key: "canary_state", Value: cliEdgeNodeCanaryState(node)},
+		kvPair{Key: "canary_weight", Value: fmt.Sprintf("%d", cliEdgeNodeCanaryWeight(node))},
+		kvPair{Key: "public_probe", Value: cliEdgeNodePublicProbeStatus(node)},
+		kvPair{Key: "dns_eligible", Value: fmt.Sprintf("%t", cliEdgeNodeDNSEligible(node))},
+		kvPair{Key: "dns_gate_reason", Value: cliEdgeNodeDNSGateReason(node)},
 		kvPair{Key: "status", Value: strings.TrimSpace(node.Status)},
 		kvPair{Key: "healthy", Value: fmt.Sprintf("%t", node.Healthy)},
 		kvPair{Key: "draining", Value: fmt.Sprintf("%t", node.Draining)},
@@ -723,6 +856,33 @@ func writeEdgeNode(w io.Writer, node model.EdgeNode) error {
 		kvPair{Key: "last_heartbeat", Value: formatOptionalEdgeTime(node.LastHeartbeatAt)},
 		kvPair{Key: "updated", Value: formatTime(node.UpdatedAt)},
 	)
+}
+
+func writeEdgeNodeDesiredState(w io.Writer, state edgeNodeDesiredState) error {
+	return writeKeyValues(w,
+		kvPair{Key: "edge_id", Value: strings.TrimSpace(state.EdgeID)},
+		kvPair{Key: "edge_group", Value: strings.TrimSpace(state.EdgeGroupID)},
+		kvPair{Key: "workload_mode", Value: strings.TrimSpace(state.WorkloadMode)},
+		kvPair{Key: "canary_state", Value: strings.TrimSpace(state.CanaryState)},
+		kvPair{Key: "canary_weight", Value: fmt.Sprintf("%d", state.CanaryWeight)},
+		kvPair{Key: "public_probe", Value: strings.TrimSpace(state.PublicProbeStatus)},
+		kvPair{Key: "dns_eligible", Value: fmt.Sprintf("%t", state.DNSEligible)},
+		kvPair{Key: "draining", Value: fmt.Sprintf("%t", state.Draining)},
+		kvPair{Key: "route_ready", Value: fmt.Sprintf("%t", state.RouteReady)},
+		kvPair{Key: "tls_ready", Value: fmt.Sprintf("%t", state.TLSReady)},
+		kvPair{Key: "token_prefix", Value: strings.TrimSpace(state.TokenPrefix)},
+		kvPair{Key: "last_heartbeat", Value: formatOptionalEdgeTime(state.LastHeartbeatAt)},
+	)
+}
+
+func writeEdgeNodeControlResult(w io.Writer, response edgeNodeControlResponse) error {
+	if err := writeEdgeNode(w, response.Node); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeEdgeNodeDesiredState(w, response.DesiredState)
 }
 
 func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) error {
@@ -947,20 +1107,25 @@ func writeEdgeNodeTable(w io.Writer, nodes []model.EdgeNode) error {
 		return sorted[i].ID < sorted[j].ID
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "EDGE_ID\tGROUP\tSTATUS\tHEALTHY\tDRAINING\tROUTE_BUNDLE\tDNS_BUNDLE\tTLS\tCADDY_ROUTES\tLAST_SEEN"); err != nil {
+	if _, err := fmt.Fprintln(tw, "EDGE_ID\tGROUP\tMODE\tCANARY\tWEIGHT\tPROBE\tDNS_ELIGIBLE\tGATE\tSTATUS\tHEALTHY\tDRAINING\tROUTE_BUNDLE\tTLS\tCADDY_ROUTES\tLAST_SEEN"); err != nil {
 		return err
 	}
 	for _, node := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%t\t%t\t%s\t%s\t%s\t%d\t%s\n",
+			"%s\t%s\t%s\t%s\t%d\t%s\t%t\t%s\t%s\t%t\t%t\t%s\t%s\t%d\t%s\n",
 			strings.TrimSpace(node.ID),
 			strings.TrimSpace(node.EdgeGroupID),
+			cliEdgeNodeWorkloadMode(node),
+			cliEdgeNodeCanaryState(node),
+			cliEdgeNodeCanaryWeight(node),
+			cliEdgeNodePublicProbeStatus(node),
+			cliEdgeNodeDNSEligible(node),
+			cliEdgeNodeDNSGateReason(node),
 			strings.TrimSpace(node.Status),
 			node.Healthy,
 			node.Draining,
 			strings.TrimSpace(node.RouteBundleVersion),
-			strings.TrimSpace(node.DNSBundleVersion),
 			strings.TrimSpace(node.TLSStatus),
 			node.CaddyRouteCount,
 			formatOptionalEdgeTime(node.LastSeenAt),
@@ -969,6 +1134,91 @@ func writeEdgeNodeTable(w io.Writer, nodes []model.EdgeNode) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func cliEdgeNodeWorkloadMode(node model.EdgeNode) string {
+	mode := model.NormalizeEdgeWorkloadMode(node.WorkloadMode)
+	if mode == "" {
+		mode = model.EdgeWorkloadModeStatic
+	}
+	return mode
+}
+
+func cliEdgeNodeCanaryState(node model.EdgeNode) string {
+	state := model.NormalizeEdgeCanaryState(node.CanaryState)
+	if state != "" {
+		return state
+	}
+	if cliEdgeNodeWorkloadMode(node) == model.EdgeWorkloadModeDynamic {
+		return model.EdgeCanaryStateJoined
+	}
+	return model.EdgeCanaryStateActive
+}
+
+func cliEdgeNodeCanaryWeight(node model.EdgeNode) int {
+	if node.CanaryWeight > 0 {
+		return node.CanaryWeight
+	}
+	if cliEdgeNodeCanaryState(node) == model.EdgeCanaryStateActive {
+		return 100
+	}
+	if cliEdgeNodeCanaryState(node) == model.EdgeCanaryStateCanary {
+		return 1
+	}
+	return 0
+}
+
+func cliEdgeNodePublicProbeStatus(node model.EdgeNode) string {
+	status := model.NormalizeEdgePublicProbeStatus(node.PublicProbeStatus)
+	if status == "" {
+		status = model.EdgePublicProbeStatusUnknown
+	}
+	return status
+}
+
+func cliEdgeNodeRouteReady(node model.EdgeNode) bool {
+	return strings.TrimSpace(node.RouteBundleVersion) != "" ||
+		strings.TrimSpace(node.ServingGeneration) != "" ||
+		strings.TrimSpace(node.CaddyAppliedVersion) != ""
+}
+
+func cliEdgeNodeTLSReady(node model.EdgeNode) bool {
+	status := strings.ToLower(strings.TrimSpace(node.TLSStatus))
+	return status == "" || status == "ready" || status == "ok" || status == "healthy"
+}
+
+func cliEdgeNodeDNSEligible(node model.EdgeNode) bool {
+	return cliEdgeNodeDNSGateReason(node) == "eligible"
+}
+
+func cliEdgeNodeDNSGateReason(node model.EdgeNode) string {
+	if node.Draining {
+		return "draining"
+	}
+	if !node.Healthy {
+		return "not_healthy"
+	}
+	if !cliEdgeNodeRouteReady(node) {
+		return "route_not_ready"
+	}
+	if !cliEdgeNodeTLSReady(node) {
+		return "tls_not_ready"
+	}
+	if cliEdgeNodeWorkloadMode(node) != model.EdgeWorkloadModeDynamic {
+		return "eligible"
+	}
+	switch cliEdgeNodeCanaryState(node) {
+	case model.EdgeCanaryStateCanary, model.EdgeCanaryStateActive:
+	default:
+		return "not_canary"
+	}
+	if cliEdgeNodeCanaryWeight(node) <= 0 {
+		return "zero_weight"
+	}
+	if cliEdgeNodePublicProbeStatus(node) == model.EdgePublicProbeStatusFailing {
+		return "probe_failed"
+	}
+	return "eligible"
 }
 
 func writeEdgeGroupTable(w io.Writer, groups []model.EdgeGroup) error {

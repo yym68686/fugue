@@ -152,6 +152,18 @@ func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.
 			existing := state.EdgeNodes[index]
 			node.TokenPrefix = existing.TokenPrefix
 			node.TokenHash = existing.TokenHash
+			node.CanaryState = firstNonEmpty(node.CanaryState, existing.CanaryState)
+			if node.CanaryWeight <= 0 {
+				node.CanaryWeight = existing.CanaryWeight
+			}
+			node.PublicProbeStatus = firstNonEmpty(node.PublicProbeStatus, existing.PublicProbeStatus)
+			node.PublicProbeLastError = firstNonEmpty(node.PublicProbeLastError, existing.PublicProbeLastError)
+			if node.PublicProbeLastAt == nil {
+				node.PublicProbeLastAt = existing.PublicProbeLastAt
+			}
+			if existing.Draining && !node.Draining {
+				node.Draining = true
+			}
 			if node.CreatedAt.IsZero() {
 				node.CreatedAt = existing.CreatedAt
 			}
@@ -177,9 +189,71 @@ func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.
 	return out, group, nil
 }
 
+func (s *Store) UpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error) {
+	edgeID = normalizeEdgeID(edgeID)
+	if edgeID == "" {
+		return model.EdgeNode{}, model.EdgeGroup{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgUpdateEdgeNodeControlState(edgeID, patch)
+	}
+
+	var out model.EdgeNode
+	var group model.EdgeGroup
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findEdgeNode(state, edgeID)
+		if index < 0 {
+			return ErrNotFound
+		}
+		node := state.EdgeNodes[index]
+		applyEdgeNodeControlPatch(&node, patch)
+		node.UpdatedAt = time.Now().UTC()
+		state.EdgeNodes[index] = node
+		upsertEdgeGroupForNode(state, node, node.UpdatedAt)
+		out = redactEdgeNode(node)
+		group = edgeGroupSummary(node.EdgeGroupID, state.EdgeGroups, state.EdgeNodes)
+		return nil
+	})
+	if err != nil {
+		return model.EdgeNode{}, model.EdgeGroup{}, err
+	}
+	return out, group, nil
+}
+
+func applyEdgeNodeControlPatch(node *model.EdgeNode, patch model.EdgeNode) {
+	if node == nil {
+		return
+	}
+	if mode := model.NormalizeEdgeWorkloadMode(patch.WorkloadMode); mode != "" {
+		node.WorkloadMode = mode
+	}
+	if state := model.NormalizeEdgeCanaryState(patch.CanaryState); state != "" {
+		node.CanaryState = state
+	}
+	if patch.CanaryWeight > 0 {
+		node.CanaryWeight = patch.CanaryWeight
+	}
+	if status := model.NormalizeEdgePublicProbeStatus(patch.PublicProbeStatus); status != "" {
+		node.PublicProbeStatus = status
+	}
+	if strings.TrimSpace(patch.PublicProbeLastError) != "" {
+		node.PublicProbeLastError = strings.TrimSpace(patch.PublicProbeLastError)
+	}
+	if patch.PublicProbeLastAt != nil {
+		node.PublicProbeLastAt = patch.PublicProbeLastAt
+	}
+	node.Draining = patch.Draining
+}
+
 func normalizeEdgeNodeForStore(node model.EdgeNode) (model.EdgeNode, error) {
 	node.ID = normalizeEdgeID(node.ID)
 	node.EdgeGroupID = normalizeEdgeGroupID(node.EdgeGroupID)
+	node.WorkloadMode = model.NormalizeEdgeWorkloadMode(node.WorkloadMode)
+	if node.WorkloadMode == "" {
+		node.WorkloadMode = model.EdgeWorkloadModeStatic
+	}
+	node.CanaryState = model.NormalizeEdgeCanaryState(node.CanaryState)
+	node.PublicProbeStatus = model.NormalizeEdgePublicProbeStatus(node.PublicProbeStatus)
 	node.Region = normalizeEdgeMetadataValue(node.Region)
 	node.Country = normalizeEdgeMetadataValue(node.Country)
 	node.PublicHostname = normalizeEdgeHostname(node.PublicHostname)
@@ -194,11 +268,15 @@ func normalizeEdgeNodeForStore(node model.EdgeNode) (model.EdgeNode, error) {
 	node.CacheStatus = strings.TrimSpace(node.CacheStatus)
 	node.TLSStatus = model.NormalizeEdgeTLSStatus(strings.TrimSpace(node.TLSStatus))
 	node.TLSLastMessage = strings.TrimSpace(node.TLSLastMessage)
+	node.PublicProbeLastError = strings.TrimSpace(node.PublicProbeLastError)
 	node.LastError = strings.TrimSpace(node.LastError)
 	node.TokenPrefix = strings.TrimSpace(node.TokenPrefix)
 	node.TokenHash = strings.TrimSpace(node.TokenHash)
 	if node.CaddyRouteCount < 0 {
 		node.CaddyRouteCount = 0
+	}
+	if node.CanaryWeight < 0 {
+		node.CanaryWeight = 0
 	}
 	if node.ID == "" || node.EdgeGroupID == "" || node.Status == "" {
 		return model.EdgeNode{}, ErrInvalidInput
@@ -212,6 +290,29 @@ func normalizeEdgeNodeForRead(node *model.EdgeNode) {
 	}
 	node.ID = normalizeEdgeID(node.ID)
 	node.EdgeGroupID = normalizeEdgeGroupID(node.EdgeGroupID)
+	node.WorkloadMode = model.NormalizeEdgeWorkloadMode(node.WorkloadMode)
+	if node.WorkloadMode == "" {
+		node.WorkloadMode = model.EdgeWorkloadModeStatic
+	}
+	node.CanaryState = model.NormalizeEdgeCanaryState(node.CanaryState)
+	if node.CanaryState == "" {
+		if node.WorkloadMode == model.EdgeWorkloadModeDynamic {
+			node.CanaryState = model.EdgeCanaryStateJoined
+		} else {
+			node.CanaryState = model.EdgeCanaryStateActive
+		}
+	}
+	if node.CanaryWeight <= 0 {
+		if node.WorkloadMode == model.EdgeWorkloadModeDynamic && node.CanaryState == model.EdgeCanaryStateCanary {
+			node.CanaryWeight = 1
+		} else if node.CanaryState == model.EdgeCanaryStateActive {
+			node.CanaryWeight = 100
+		}
+	}
+	node.PublicProbeStatus = model.NormalizeEdgePublicProbeStatus(node.PublicProbeStatus)
+	if node.PublicProbeStatus == "" {
+		node.PublicProbeStatus = model.EdgePublicProbeStatusUnknown
+	}
 	node.Region = normalizeEdgeMetadataValue(node.Region)
 	node.Country = normalizeEdgeMetadataValue(node.Country)
 	node.PublicHostname = normalizeEdgeHostname(node.PublicHostname)

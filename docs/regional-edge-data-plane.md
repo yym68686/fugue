@@ -6,6 +6,8 @@
 
 下一阶段的 GeoDNS、CDN 边缘缓存、TLS 预热和 route/DNS 一致性方案见 `docs/edge-dns-cdn-latency-upgrade.md`。
 
+任意地区 edge 的动态接入方案见 `docs/dynamic-edge-onboarding-plan.md`。本文早期提到的静态 country-specific edge group 只作为迁移期兼容路径；长期默认路径应由 node labels、NodePolicy、node updater credential、dynamic edge workload 和 DNS canary gate 数据化驱动，不应为每个新国家或机房新增生产 Helm values 或地区特例代码。
+
 ```text
 中国用户
   -> 美国 Route A edge / fugue-api

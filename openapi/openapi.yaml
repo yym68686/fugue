@@ -102,6 +102,28 @@ paths:
                 $ref: "#/components/schemas/DataDownloadPlanResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/metadata/geoip:
+    get:
+      operationId: getGeoIPMetadata
+      summary: Get GeoIP Metadata
+      tags: [System]
+      x-fugue-handler: handleGeoIPMetadata
+      parameters:
+        - in: query
+          name: ip
+          required: false
+          description: Optional public IP to resolve. If omitted, the control plane uses forwarded request metadata.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeoIPMetadataResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/auth/context:
     get:
       operationId: getAuthContext
@@ -388,6 +410,150 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/EdgeQualityRankResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/nodes/{edge_id}/desired-state:
+    get:
+      operationId: getEdgeNodeDesiredState
+      summary: Get Edge Node Desired State
+      tags: [Edge]
+      x-fugue-handler: handleGetEdgeNodeDesiredState
+      security:
+        - EdgeToken: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeDesiredStateEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/edge/nodes/{edge_id}/desired-state:
+    get:
+      operationId: adminGetEdgeNodeDesiredState
+      summary: Admin Get Edge Node Desired State
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminGetEdgeNodeDesiredState
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeDesiredStateEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/edge/nodes/{edge_id}/probe:
+    post:
+      operationId: adminProbeEdgeNode
+      summary: Admin Probe Edge Node
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminProbeEdgeNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeControlResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/edge/nodes/{edge_id}/canary:
+    post:
+      operationId: adminSetEdgeNodeCanary
+      summary: Admin Set Edge Node Canary
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminSetEdgeNodeCanary
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetEdgeNodeCanaryRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeControlResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/edge/nodes/{edge_id}/drain:
+    post:
+      operationId: adminDrainEdgeNode
+      summary: Admin Drain Edge Node
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminDrainEdgeNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeControlResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/edge/nodes/{edge_id}/undrain:
+    post:
+      operationId: adminUndrainEdgeNode
+      summary: Admin Undrain Edge Node
+      tags: [Admin, Edge]
+      x-fugue-handler: handleAdminUndrainEdgeNode
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeNodeControlResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/nodes/{edge_id}/token:
@@ -11296,6 +11462,23 @@ components:
           type: string
         edge_group_id:
           type: string
+        workload_mode:
+          type: string
+          enum: [static, dynamic]
+        canary_state:
+          type: string
+          enum: [joined, warming, probing, canary, active, drained]
+        canary_weight:
+          type: integer
+          format: int32
+        public_probe_status:
+          type: string
+          enum: [unknown, passing, failing]
+        public_probe_last_error:
+          type: string
+        public_probe_last_at:
+          type: string
+          format: date-time
         region:
           type: string
         country:
@@ -11391,6 +11574,65 @@ components:
         updated_at:
           type: string
           format: date-time
+    EdgeNodeDesiredState:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id, workload_mode, canary_state, canary_weight, public_probe_status, dns_eligible, draining, route_ready, tls_ready]
+      properties:
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        workload_mode:
+          type: string
+        canary_state:
+          type: string
+        canary_weight:
+          type: integer
+          format: int32
+        public_probe_status:
+          type: string
+        dns_eligible:
+          type: boolean
+        draining:
+          type: boolean
+        route_ready:
+          type: boolean
+        tls_ready:
+          type: boolean
+        token_prefix:
+          type: string
+        last_heartbeat_at:
+          type: string
+          format: date-time
+    EdgeNodeDesiredStateEnvelope:
+      type: object
+      additionalProperties: false
+      required: [desired_state]
+      properties:
+        desired_state:
+          $ref: "#/components/schemas/EdgeNodeDesiredState"
+    SetEdgeNodeCanaryRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        state:
+          type: string
+          enum: [canary, active, drained]
+        weight:
+          type: integer
+          format: int32
+    EdgeNodeControlResponse:
+      type: object
+      additionalProperties: false
+      required: [node, group, desired_state]
+      properties:
+        node:
+          $ref: "#/components/schemas/EdgeNode"
+        group:
+          $ref: "#/components/schemas/EdgeGroup"
+        desired_state:
+          $ref: "#/components/schemas/EdgeNodeDesiredState"
     EdgeNodeListResponse:
       type: object
       additionalProperties: false
@@ -11792,6 +12034,15 @@ components:
           type: string
         edge_group_id:
           type: string
+        workload_mode:
+          type: string
+          enum: [static, dynamic]
+        canary_state:
+          type: string
+          enum: [joined, warming, probing, canary, active, drained]
+        canary_weight:
+          type: integer
+          format: int32
         region:
           type: string
         country:
@@ -11863,6 +12114,19 @@ components:
           format: date-time
         reason:
           type: string
+    GeoIPMetadataResponse:
+      type: object
+      additionalProperties: false
+      required: [public_ip]
+      properties:
+        public_ip:
+          type: string
+        country_code:
+          type: string
+        source:
+          type: string
+        error:
+          type: string
     CreateEdgeNodeTokenRequest:
       type: object
       additionalProperties: false
@@ -11870,6 +12134,15 @@ components:
       properties:
         edge_group_id:
           type: string
+        workload_mode:
+          type: string
+          enum: [static, dynamic]
+        canary_state:
+          type: string
+          enum: [joined, warming, probing, canary, active, drained]
+        canary_weight:
+          type: integer
+          format: int32
         region:
           type: string
         country:
@@ -11902,6 +12175,9 @@ components:
           type: string
         edge_group_id:
           type: string
+        workload_mode:
+          type: string
+          enum: [static, dynamic]
         region:
           type: string
         country:
@@ -12436,6 +12712,17 @@ components:
         route_ready:
           type: boolean
         tls_ready:
+          type: boolean
+        workload_mode:
+          type: string
+        canary_state:
+          type: string
+        canary_weight:
+          type: integer
+          format: int32
+        public_probe_status:
+          type: string
+        dns_eligible:
           type: boolean
     EdgeDNSScopedAnswerCandidates:
       type: object
@@ -17620,10 +17907,38 @@ components:
           $ref: "#/components/schemas/DiscoveryBundle"
         node_policy:
           $ref: "#/components/schemas/ClusterNodePolicyStatus"
+        edge_credential:
+          $ref: "#/components/schemas/NodeUpdaterEdgeCredential"
         warnings:
           type: array
           items:
             type: string
+    NodeUpdaterEdgeCredential:
+      type: object
+      additionalProperties: false
+      required: [edge_id, edge_group_id]
+      properties:
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        workload_mode:
+          type: string
+          enum: [static, dynamic]
+        country:
+          type: string
+        region:
+          type: string
+        public_ipv4:
+          type: string
+        public_ipv6:
+          type: string
+        token:
+          type: string
+        token_prefix:
+          type: string
+        desired_state_url:
+          type: string
     NodeUpdaterDesiredStateResponse:
       type: object
       additionalProperties: false

@@ -254,6 +254,9 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 		latencyProfile := latencyProfiles.globalProfile(hostname)
 		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups))
 		answerIPs := edgeDNSAnswerIPsForPlatformRoute(platformRoute, options, edgeAnswerIPsByGroup)
+		if policy, ok := policyByHostname[hostname]; ok {
+			answerIPs = edgeDNSFilterAnswerIPsForExclusions(answerIPs, edgeRoutePolicyActiveExclusions(policy, now), edgeCandidateByIP)
+		}
 		if len(answerIPs) == 0 {
 			continue
 		}
@@ -708,6 +711,9 @@ func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBun
 			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
 				continue
 			}
+			if !edgeNodeDNSEligible(node) {
+				continue
+			}
 			groupID := strings.TrimSpace(node.EdgeGroupID)
 			if groupID == "" {
 				continue
@@ -733,6 +739,9 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 		liveServingByNode := s.edgeLiveServingByNode(ctx, now)
 		for _, node := range nodes {
 			if !edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
+				continue
+			}
+			if !edgeNodeDNSEligible(node) {
 				continue
 			}
 			for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
@@ -774,18 +783,94 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 
 func edgeDNSAnswerCandidateForNode(ip string, node model.EdgeNode, localEdgeGroupID string) model.EdgeDNSAnswerCandidate {
 	groupID := strings.TrimSpace(node.EdgeGroupID)
+	reason := edgeDNSCandidateReason(groupID, strings.TrimSpace(localEdgeGroupID), "")
+	if model.NormalizeEdgeWorkloadMode(node.WorkloadMode) == model.EdgeWorkloadModeDynamic {
+		reason = strings.TrimSpace(reason + "; dynamic_" + edgeNodeEffectiveCanaryState(node))
+	}
 	return model.EdgeDNSAnswerCandidate{
-		IP:          strings.TrimSpace(ip),
-		EdgeID:      strings.TrimSpace(node.ID),
-		EdgeGroupID: groupID,
-		Region:      strings.TrimSpace(node.Region),
-		Country:     strings.ToLower(strings.TrimSpace(node.Country)),
-		Priority:    edgeDNSCandidatePriority(groupID, strings.TrimSpace(localEdgeGroupID), ""),
-		Weight:      100,
-		Reason:      edgeDNSCandidateReason(groupID, strings.TrimSpace(localEdgeGroupID), ""),
-		Healthy:     node.Healthy && !node.Draining,
-		RouteReady:  edgeNodeHasRouteState(node),
-		TLSReady:    edgeNodeTLSReadyForDNS(node),
+		IP:                strings.TrimSpace(ip),
+		EdgeID:            strings.TrimSpace(node.ID),
+		EdgeGroupID:       groupID,
+		Region:            strings.TrimSpace(node.Region),
+		Country:           strings.ToLower(strings.TrimSpace(node.Country)),
+		WorkloadMode:      edgeNodeEffectiveWorkloadMode(node),
+		CanaryState:       edgeNodeEffectiveCanaryState(node),
+		CanaryWeight:      edgeNodeEffectiveCanaryWeight(node),
+		PublicProbeStatus: edgeNodeEffectivePublicProbeStatus(node),
+		DNSEligible:       edgeNodeDNSEligible(node),
+		Priority:          edgeDNSCandidatePriority(groupID, strings.TrimSpace(localEdgeGroupID), ""),
+		Weight:            edgeNodeEffectiveCanaryWeight(node),
+		Reason:            reason,
+		Healthy:           node.Healthy && !node.Draining,
+		RouteReady:        edgeNodeHasRouteState(node),
+		TLSReady:          edgeNodeTLSReadyForDNS(node),
+	}
+}
+
+func edgeNodeEffectiveWorkloadMode(node model.EdgeNode) string {
+	mode := model.NormalizeEdgeWorkloadMode(node.WorkloadMode)
+	if mode == "" {
+		return model.EdgeWorkloadModeStatic
+	}
+	return mode
+}
+
+func edgeNodeEffectiveCanaryState(node model.EdgeNode) string {
+	state := model.NormalizeEdgeCanaryState(node.CanaryState)
+	if state != "" {
+		return state
+	}
+	if edgeNodeEffectiveWorkloadMode(node) == model.EdgeWorkloadModeDynamic {
+		return model.EdgeCanaryStateJoined
+	}
+	return model.EdgeCanaryStateActive
+}
+
+func edgeNodeEffectivePublicProbeStatus(node model.EdgeNode) string {
+	status := model.NormalizeEdgePublicProbeStatus(node.PublicProbeStatus)
+	if status == "" {
+		return model.EdgePublicProbeStatusUnknown
+	}
+	return status
+}
+
+func edgeNodeEffectiveCanaryWeight(node model.EdgeNode) int {
+	state := edgeNodeEffectiveCanaryState(node)
+	weight := node.CanaryWeight
+	switch state {
+	case model.EdgeCanaryStateActive:
+		if weight <= 0 {
+			return 100
+		}
+		if weight > 100 {
+			return 100
+		}
+		return weight
+	case model.EdgeCanaryStateCanary:
+		if weight <= 0 {
+			return 1
+		}
+		if weight > 5 {
+			return 5
+		}
+		return weight
+	default:
+		return 0
+	}
+}
+
+func edgeNodeDNSEligible(node model.EdgeNode) bool {
+	if edgeNodeEffectiveWorkloadMode(node) != model.EdgeWorkloadModeDynamic {
+		return true
+	}
+	if edgeNodeEffectivePublicProbeStatus(node) == model.EdgePublicProbeStatusFailing {
+		return false
+	}
+	switch edgeNodeEffectiveCanaryState(node) {
+	case model.EdgeCanaryStateCanary, model.EdgeCanaryStateActive:
+		return edgeNodeEffectiveCanaryWeight(node) > 0
+	default:
+		return false
 	}
 }
 
@@ -918,6 +1003,10 @@ func edgeDNSAnswerIPsForBindings(bindings []model.EdgeRouteBinding, options edge
 
 func edgeDNSFilterAnswerIPsForBinding(answerIPs []string, binding model.EdgeRouteBinding, candidateByIP map[string]model.EdgeDNSAnswerCandidate) []string {
 	exclusions := edgeRouteExclusionsFromBinding(binding)
+	return edgeDNSFilterAnswerIPsForExclusions(answerIPs, exclusions, candidateByIP)
+}
+
+func edgeDNSFilterAnswerIPsForExclusions(answerIPs []string, exclusions edgeRouteExclusions, candidateByIP map[string]model.EdgeDNSAnswerCandidate) []string {
 	if exclusions.Empty() || len(answerIPs) == 0 {
 		return answerIPs
 	}

@@ -69,6 +69,8 @@ imageCache:
 
 edge:
   enabled: true
+  dynamic:
+    enabled: true
   sshFront:
     enabled: false
   nodeSelector:

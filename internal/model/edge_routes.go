@@ -108,6 +108,69 @@ const (
 	EdgeTLSStatusError   = "error"
 )
 
+const (
+	EdgeWorkloadModeStatic  = "static"
+	EdgeWorkloadModeDynamic = "dynamic"
+)
+
+const (
+	EdgeCanaryStateJoined  = "joined"
+	EdgeCanaryStateWarming = "warming"
+	EdgeCanaryStateProbing = "probing"
+	EdgeCanaryStateCanary  = "canary"
+	EdgeCanaryStateActive  = "active"
+	EdgeCanaryStateDrained = "drained"
+)
+
+const (
+	EdgePublicProbeStatusUnknown = "unknown"
+	EdgePublicProbeStatusPassing = "passing"
+	EdgePublicProbeStatusFailing = "failing"
+)
+
+func NormalizeEdgeWorkloadMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case EdgeWorkloadModeStatic:
+		return EdgeWorkloadModeStatic
+	case EdgeWorkloadModeDynamic:
+		return EdgeWorkloadModeDynamic
+	default:
+		return ""
+	}
+}
+
+func NormalizeEdgeCanaryState(state string) string {
+	switch strings.TrimSpace(strings.ToLower(state)) {
+	case EdgeCanaryStateJoined:
+		return EdgeCanaryStateJoined
+	case EdgeCanaryStateWarming:
+		return EdgeCanaryStateWarming
+	case EdgeCanaryStateProbing:
+		return EdgeCanaryStateProbing
+	case EdgeCanaryStateCanary:
+		return EdgeCanaryStateCanary
+	case EdgeCanaryStateActive:
+		return EdgeCanaryStateActive
+	case EdgeCanaryStateDrained:
+		return EdgeCanaryStateDrained
+	default:
+		return ""
+	}
+}
+
+func NormalizeEdgePublicProbeStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case EdgePublicProbeStatusUnknown:
+		return EdgePublicProbeStatusUnknown
+	case EdgePublicProbeStatusPassing:
+		return EdgePublicProbeStatusPassing
+	case EdgePublicProbeStatusFailing:
+		return EdgePublicProbeStatusFailing
+	default:
+		return ""
+	}
+}
+
 func NormalizeEdgeTLSStatus(status string) string {
 	switch strings.TrimSpace(strings.ToLower(status)) {
 	case EdgeTLSStatusPending:
@@ -365,20 +428,25 @@ type DNSAnswerPolicy struct {
 }
 
 type EdgeDNSAnswerCandidate struct {
-	IP             string             `json:"ip"`
-	EdgeID         string             `json:"edge_id,omitempty"`
-	EdgeGroupID    string             `json:"edge_group_id,omitempty"`
-	Region         string             `json:"region,omitempty"`
-	Country        string             `json:"country,omitempty"`
-	Priority       int                `json:"priority,omitempty"`
-	Weight         int                `json:"weight,omitempty"`
-	Reason         string             `json:"reason,omitempty"`
-	TrafficClass   string             `json:"traffic_class,omitempty"`
-	Score          float64            `json:"score,omitempty"`
-	ScoreBreakdown map[string]float64 `json:"score_breakdown,omitempty"`
-	Healthy        bool               `json:"healthy,omitempty"`
-	RouteReady     bool               `json:"route_ready,omitempty"`
-	TLSReady       bool               `json:"tls_ready,omitempty"`
+	IP                string             `json:"ip"`
+	EdgeID            string             `json:"edge_id,omitempty"`
+	EdgeGroupID       string             `json:"edge_group_id,omitempty"`
+	Region            string             `json:"region,omitempty"`
+	Country           string             `json:"country,omitempty"`
+	WorkloadMode      string             `json:"workload_mode,omitempty"`
+	CanaryState       string             `json:"canary_state,omitempty"`
+	CanaryWeight      int                `json:"canary_weight,omitempty"`
+	PublicProbeStatus string             `json:"public_probe_status,omitempty"`
+	DNSEligible       bool               `json:"dns_eligible,omitempty"`
+	Priority          int                `json:"priority,omitempty"`
+	Weight            int                `json:"weight,omitempty"`
+	Reason            string             `json:"reason,omitempty"`
+	TrafficClass      string             `json:"traffic_class,omitempty"`
+	Score             float64            `json:"score,omitempty"`
+	ScoreBreakdown    map[string]float64 `json:"score_breakdown,omitempty"`
+	Healthy           bool               `json:"healthy,omitempty"`
+	RouteReady        bool               `json:"route_ready,omitempty"`
+	TLSReady          bool               `json:"tls_ready,omitempty"`
 }
 
 type EdgeDNSScopedAnswerCandidates struct {
@@ -729,35 +797,41 @@ type DNSACMEChallenge struct {
 }
 
 type EdgeNode struct {
-	ID                  string     `json:"id"`
-	EdgeGroupID         string     `json:"edge_group_id"`
-	Region              string     `json:"region,omitempty"`
-	Country             string     `json:"country,omitempty"`
-	PublicHostname      string     `json:"public_hostname,omitempty"`
-	PublicIPv4          string     `json:"public_ipv4,omitempty"`
-	PublicIPv6          string     `json:"public_ipv6,omitempty"`
-	MeshIP              string     `json:"mesh_ip,omitempty"`
-	Status              string     `json:"status"`
-	Healthy             bool       `json:"healthy"`
-	Draining            bool       `json:"draining"`
-	RouteBundleVersion  string     `json:"route_bundle_version,omitempty"`
-	DNSBundleVersion    string     `json:"dns_bundle_version,omitempty"`
-	ServingGeneration   string     `json:"serving_generation,omitempty"`
-	LKGGeneration       string     `json:"lkg_generation,omitempty"`
-	CaddyRouteCount     int        `json:"caddy_route_count"`
-	CaddyAppliedVersion string     `json:"caddy_applied_version,omitempty"`
-	CaddyLastError      string     `json:"caddy_last_error,omitempty"`
-	CacheStatus         string     `json:"cache_status,omitempty"`
-	TLSStatus           string     `json:"tls_status,omitempty"`
-	TLSLastMessage      string     `json:"tls_last_message,omitempty"`
-	TLSReadyAt          *time.Time `json:"tls_ready_at,omitempty"`
-	LastError           string     `json:"last_error,omitempty"`
-	TokenPrefix         string     `json:"token_prefix,omitempty"`
-	TokenHash           string     `json:"token_hash,omitempty"`
-	LastSeenAt          *time.Time `json:"last_seen_at,omitempty"`
-	LastHeartbeatAt     *time.Time `json:"last_heartbeat_at,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	ID                   string     `json:"id"`
+	EdgeGroupID          string     `json:"edge_group_id"`
+	WorkloadMode         string     `json:"workload_mode,omitempty"`
+	CanaryState          string     `json:"canary_state,omitempty"`
+	CanaryWeight         int        `json:"canary_weight,omitempty"`
+	PublicProbeStatus    string     `json:"public_probe_status,omitempty"`
+	PublicProbeLastError string     `json:"public_probe_last_error,omitempty"`
+	PublicProbeLastAt    *time.Time `json:"public_probe_last_at,omitempty"`
+	Region               string     `json:"region,omitempty"`
+	Country              string     `json:"country,omitempty"`
+	PublicHostname       string     `json:"public_hostname,omitempty"`
+	PublicIPv4           string     `json:"public_ipv4,omitempty"`
+	PublicIPv6           string     `json:"public_ipv6,omitempty"`
+	MeshIP               string     `json:"mesh_ip,omitempty"`
+	Status               string     `json:"status"`
+	Healthy              bool       `json:"healthy"`
+	Draining             bool       `json:"draining"`
+	RouteBundleVersion   string     `json:"route_bundle_version,omitempty"`
+	DNSBundleVersion     string     `json:"dns_bundle_version,omitempty"`
+	ServingGeneration    string     `json:"serving_generation,omitempty"`
+	LKGGeneration        string     `json:"lkg_generation,omitempty"`
+	CaddyRouteCount      int        `json:"caddy_route_count"`
+	CaddyAppliedVersion  string     `json:"caddy_applied_version,omitempty"`
+	CaddyLastError       string     `json:"caddy_last_error,omitempty"`
+	CacheStatus          string     `json:"cache_status,omitempty"`
+	TLSStatus            string     `json:"tls_status,omitempty"`
+	TLSLastMessage       string     `json:"tls_last_message,omitempty"`
+	TLSReadyAt           *time.Time `json:"tls_ready_at,omitempty"`
+	LastError            string     `json:"last_error,omitempty"`
+	TokenPrefix          string     `json:"token_prefix,omitempty"`
+	TokenHash            string     `json:"token_hash,omitempty"`
+	LastSeenAt           *time.Time `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt      *time.Time `json:"last_heartbeat_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 type DNSNode struct {

@@ -1167,6 +1167,11 @@ func derivedEdgeGroupIDForRuntime(runtimeObj model.Runtime, runtimeFound bool, n
 }
 
 func derivedEdgeGroupIDForLabels(labels map[string]string) string {
+	if edgeGroupID := firstRuntimeLabelValue(labels, runtimepkg.EdgeGroupIDLabelKey, "edge_group_id", "edgeGroupID"); edgeGroupID != "" {
+		if strings.HasPrefix(edgeGroupID, "edge-group-") {
+			return edgeGroupID
+		}
+	}
 	if country := firstRuntimeLabelValue(labels, runtimepkg.LocationCountryCodeLabelKey, "country_code", "countryCode"); country != "" {
 		if slug := edgeRouteSlug(country); slug != "" {
 			return "edge-group-country-" + slug

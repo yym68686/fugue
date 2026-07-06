@@ -95,6 +95,24 @@ type Status struct {
 	CaddyLastError         string     `json:"caddy_last_error,omitempty"`
 }
 
+type edgeDesiredStateEnvelope struct {
+	DesiredState edgeDesiredState `json:"desired_state"`
+}
+
+type edgeDesiredState struct {
+	EdgeID            string     `json:"edge_id"`
+	EdgeGroupID       string     `json:"edge_group_id"`
+	WorkloadMode      string     `json:"workload_mode"`
+	CanaryState       string     `json:"canary_state"`
+	CanaryWeight      int        `json:"canary_weight"`
+	PublicProbeStatus string     `json:"public_probe_status"`
+	DNSEligible       bool       `json:"dns_eligible"`
+	Draining          bool       `json:"draining"`
+	RouteReady        bool       `json:"route_ready"`
+	TLSReady          bool       `json:"tls_ready"`
+	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
+}
+
 type cacheFile struct {
 	Version  int                   `json:"version"`
 	ETag     string                `json:"etag,omitempty"`
@@ -343,9 +361,6 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	if err := s.validateConfig(); err != nil {
-		return err
-	}
 	if s.Logger == nil {
 		s.Logger = log.Default()
 	}
@@ -354,6 +369,12 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if s.proxyBase == nil {
 		s.proxyBase = newDefaultEdgeProxyTransport()
+	}
+	if err := s.RefreshDesiredState(ctx); err != nil && s.Logger != nil {
+		s.Logger.Printf("edge desired state refresh failed on startup: %s", s.redact(err.Error()))
+	}
+	if err := s.validateConfig(); err != nil {
+		return err
 	}
 
 	if err := s.LoadCache(); err != nil {
@@ -429,6 +450,16 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		}
 	}()
 
+	if desiredErr := s.RefreshDesiredState(ctx); desiredErr != nil {
+		if strings.TrimSpace(s.Config.EdgeGroupID) == "" {
+			err = desiredErr
+			s.recordSyncError(err)
+			return err
+		}
+		if s.Logger != nil {
+			s.Logger.Printf("edge desired state refresh failed; continuing with current state: %s", s.redact(desiredErr.Error()))
+		}
+	}
 	if err := s.validateConfig(); err != nil {
 		s.recordSyncError(err)
 		return err
@@ -2433,6 +2464,85 @@ func (s *Service) newRoutesRequest(ctx context.Context) (*http.Request, error) {
 	return req, nil
 }
 
+func (s *Service) RefreshDesiredState(ctx context.Context) error {
+	req, err := s.newDesiredStateRequest(ctx)
+	if err != nil {
+		if errors.Is(err, errEdgeDesiredStateDisabled) {
+			return nil
+		}
+		return err
+	}
+	resp, err := s.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch edge desired state: %s", s.redact(err.Error()))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return statusError{
+			StatusCode: resp.StatusCode,
+			Body:       s.redact(strings.TrimSpace(string(body))),
+		}
+	}
+	var envelope edgeDesiredStateEnvelope
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return fmt.Errorf("decode edge desired state: %w", err)
+	}
+	desired := envelope.DesiredState
+	if strings.TrimSpace(desired.EdgeGroupID) == "" {
+		return fmt.Errorf("edge desired state missing edge_group_id")
+	}
+	s.applyDesiredState(desired)
+	return nil
+}
+
+var errEdgeDesiredStateDisabled = errors.New("edge desired state disabled")
+
+func (s *Service) newDesiredStateRequest(ctx context.Context) (*http.Request, error) {
+	rawURL := strings.TrimSpace(s.Config.EdgeDesiredStateURL)
+	if rawURL == "" && strings.EqualFold(strings.TrimSpace(s.Config.WorkloadMode), model.EdgeWorkloadModeDynamic) {
+		base := strings.TrimRight(strings.TrimSpace(s.Config.APIURL), "/")
+		edgeID := strings.TrimSpace(s.Config.EdgeID)
+		if base != "" && edgeID != "" {
+			rawURL = base + "/v1/edge/nodes/" + url.PathEscape(edgeID) + "/desired-state"
+		}
+	}
+	if rawURL == "" {
+		return nil, errEdgeDesiredStateDisabled
+	}
+	if strings.TrimSpace(s.Config.EdgeToken) == "" {
+		return nil, fmt.Errorf("FUGUE_EDGE_TOKEN is required to fetch desired state")
+	}
+	desiredURL, err := url.Parse(rawURL)
+	if err != nil || desiredURL.Scheme == "" || desiredURL.Host == "" {
+		return nil, fmt.Errorf("invalid FUGUE_EDGE_DESIRED_STATE_URL")
+	}
+	query := desiredURL.Query()
+	query.Set("token", strings.TrimSpace(s.Config.EdgeToken))
+	desiredURL.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, desiredURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build edge desired state request: %w", err)
+	}
+	return req, nil
+}
+
+func (s *Service) applyDesiredState(desired edgeDesiredState) {
+	edgeGroupID := strings.TrimSpace(desired.EdgeGroupID)
+	if edgeGroupID == "" {
+		return
+	}
+	workloadMode := model.NormalizeEdgeWorkloadMode(desired.WorkloadMode)
+	s.mu.Lock()
+	s.Config.EdgeGroupID = edgeGroupID
+	if workloadMode != "" {
+		s.Config.WorkloadMode = workloadMode
+	}
+	s.Config.Draining = desired.Draining
+	s.snapshot.EdgeGroupID = edgeGroupID
+	s.mu.Unlock()
+}
+
 func (s *Service) startHeartbeatLoop(ctx context.Context) {
 	if !s.heartbeatEnabled() {
 		if s.Logger != nil {
@@ -2456,6 +2566,11 @@ func (s *Service) startHeartbeatLoop(ctx context.Context) {
 }
 
 func (s *Service) HeartbeatOnce(ctx context.Context) error {
+	if !s.heartbeatEnabled() {
+		if err := s.RefreshDesiredState(ctx); err != nil && s.Logger != nil {
+			s.Logger.Printf("edge desired state refresh before heartbeat failed: %s", s.redact(err.Error()))
+		}
+	}
 	if !s.heartbeatEnabled() {
 		return nil
 	}
@@ -2512,6 +2627,7 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 	body := map[string]any{
 		"edge_id":                  strings.TrimSpace(s.Config.EdgeID),
 		"edge_group_id":            strings.TrimSpace(s.Config.EdgeGroupID),
+		"workload_mode":            strings.TrimSpace(s.Config.WorkloadMode),
 		"region":                   strings.TrimSpace(s.Config.Region),
 		"country":                  strings.TrimSpace(s.Config.Country),
 		"public_hostname":          strings.TrimSpace(s.Config.PublicHostname),

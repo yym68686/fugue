@@ -711,6 +711,7 @@ func TestNodeUpdaterK3sConfigReconcileRefreshesNodePolicyLabelsAndTaints(t *test
 tmpdir="$(mktemp -d)"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
+FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${tmpdir}/edge-node.env"
 FUGUE_DISCOVERY_K3S_SERVER="https://cp.example:6443"
 cat >"${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" <<'YAML'
 server: "https://cp.example:6443"
@@ -766,14 +767,31 @@ cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
         "fugue.io/runtime-id": "runtime_edge",
         "fugue.io/tenant-id": "tenant_edge",
         "fugue.io/location-country-code": "us",
-        "fugue.io/public-ip": "203.0.113.10"
+        "fugue.io/public-ip": "203.0.113.10",
+        "fugue.io/edge-group-id": "edge-group-country-us",
+        "fugue.io/edge-workload": "dynamic",
+        "fugue.io/edge-location-status": "ready"
       }
-    }
+    },
+    "edge_credential": {
+      "edge_id": "edge-1",
+      "edge_group_id": "edge-group-country-us",
+      "workload_mode": "dynamic",
+      "country": "us",
+      "region": "north-america",
+      "public_ipv4": "203.0.113.10",
+      "token": "fugue_edge_test_secret",
+      "desired_state_url": "https://api.fugue.pro/v1/edge/nodes/edge-1/desired-state"
+      }
   }
 }
 JSON
 if ! reconcile_k3s_config; then
   echo "first reconcile should report a write"
+  exit 1
+fi
+if ! reconcile_edge_node_env; then
+  echo "edge credential reconcile should report a write"
   exit 1
 fi
 if grep -q 'fugue.io/role.app-runtime=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"; then
@@ -788,8 +806,20 @@ if grep -q '^flannel-iface:' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"; then
   exit 1
 fi
 grep -q 'fugue.io/role.edge=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/edge-workload=dynamic' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/edge-group-id=edge-group-country-us' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/edge-location-status=ready' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
 grep -q 'fugue.io/dedicated=edge:NoSchedule' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
 grep -q 'fugue.io/tenant=tenant_edge:NoSchedule' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q "FUGUE_EDGE_NODE_ID=edge-1" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
+grep -q "FUGUE_EDGE_GROUP_ID=edge-group-country-us" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
+grep -q "FUGUE_EDGE_NODE_TOKEN=fugue_edge_test_secret" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
+grep -q "FUGUE_EDGE_DESIRED_STATE_URL=https://api.fugue.pro/v1/edge/nodes/edge-1/desired-state" "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
+if [ "$(stat -f '%Lp' "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}" 2>/dev/null || stat -c '%a' "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}")" != "600" ]; then
+  echo "edge node env file is not 0600"
+  ls -l "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}"
+  exit 1
+fi
 if reconcile_k3s_config; then
   echo "second reconcile should not report a write"
   exit 1

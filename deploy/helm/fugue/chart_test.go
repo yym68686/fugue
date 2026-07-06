@@ -2081,6 +2081,124 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 	}
 }
 
+func TestEdgeBlueGreenRendersDynamicWorkload(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
+		"--set",
+		"edge.blueGreen.enabled=true",
+		"--set",
+		"edge.dynamic.enabled=true",
+		"--set",
+		"edge.caddy.tlsMode=public-on-demand",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	frontDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-dynamic-front")
+	if frontDoc == "" {
+		t.Fatalf("rendered manifest missing dynamic edge front daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`app.kubernetes.io/component: edge-dynamic-front`,
+		`fugue.io/edge-workload: dynamic`,
+		`name: FUGUE_EDGE_FRONT_NODE_ENV_FILE`,
+		`value: "/etc/fugue/edge-node.env"`,
+		`mountPath: "/etc/fugue/edge-node.env"`,
+		`type: FileOrCreate`,
+		`hostPort: 80`,
+		`hostPort: 443`,
+		`fugue.io/role.edge: "true"`,
+		`fugue.io/schedulable: "true"`,
+	} {
+		if !strings.Contains(frontDoc, want) {
+			t.Fatalf("dynamic edge front daemonset missing %q:\n%s", want, frontDoc)
+		}
+	}
+	if strings.Contains(frontDoc, `name: FUGUE_EDGE_FRONT_EDGE_GROUP_ID`) {
+		t.Fatalf("dynamic edge front should read edge group from node env, not static env:\n%s", frontDoc)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		slot     string
+		hostPort string
+	}{
+		{name: "fugue-fugue-edge-dynamic-worker-a", slot: `"a"`, hostPort: "18443"},
+		{name: "fugue-fugue-edge-dynamic-worker-b", slot: `"b"`, hostPort: "28443"},
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", tc.name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s:\n%s", tc.name, manifest)
+		}
+		for _, want := range []string{
+			`app.kubernetes.io/component: edge-dynamic-worker-` + strings.Trim(tc.slot, `"`),
+			`fugue.io/edge-workload: dynamic`,
+			`name: FUGUE_EDGE_NODE_ENV_FILE`,
+			`value: "/etc/fugue/edge-node.env"`,
+			`name: FUGUE_EDGE_WORKLOAD_MODE`,
+			`value: "dynamic"`,
+			`mountPath: "/etc/fugue/edge-node.env"`,
+			`type: FileOrCreate`,
+			`hostPort: ` + tc.hostPort,
+			`memory: 512Mi`,
+			`memory: 384Mi`,
+			`fugue.io/edge-workload: dynamic`,
+			`fugue.io/role.edge: "true"`,
+			`fugue.io/schedulable: "true"`,
+		} {
+			if !strings.Contains(doc, want) {
+				t.Fatalf("%s missing %q:\n%s", tc.name, want, doc)
+			}
+		}
+		for _, unwanted := range []string{
+			`name: FUGUE_EDGE_TOKEN`,
+			`name: FUGUE_EDGE_GROUP_ID`,
+			`hostPort: 80`,
+			`hostPort: 443`,
+		} {
+			if strings.Contains(doc, unwanted) {
+				t.Fatalf("%s should not contain %q:\n%s", tc.name, unwanted, doc)
+			}
+		}
+	}
+
+	staticFrontDoc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-front")
+	if staticFrontDoc == "" {
+		t.Fatalf("rendered manifest missing static edge front daemonset:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`key: fugue.io/edge-workload`,
+		`operator: NotIn`,
+		`- dynamic`,
+	} {
+		if !strings.Contains(staticFrontDoc, want) {
+			t.Fatalf("static edge front should avoid dynamic nodes with %q:\n%s", want, staticFrontDoc)
+		}
+	}
+	if strings.Contains(manifest, "fugue-fugue-edge-dynamic-dns") {
+		t.Fatalf("dynamic edge workload must not render a DNS daemonset:\n%s", manifest)
+	}
+}
+
 func TestEdgeBlueGreenSeparatesPrimaryAndRegionalDocuments(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
