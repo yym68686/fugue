@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	nodeUpdaterScriptVersion        = "v13"
+	nodeUpdaterScriptVersion        = model.NodeUpdaterCurrentVersion
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
 )

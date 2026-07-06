@@ -246,7 +246,8 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 
 func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType string, payload map[string]string) (model.NodeUpdateTask, bool) {
 	switch taskType {
-	case model.NodeUpdateTaskTypePrepullAppImages,
+	case model.NodeUpdateTaskTypeUpgradeUpdater,
+		model.NodeUpdateTaskTypePrepullAppImages,
 		model.NodeUpdateTaskTypeReplicateAppImage,
 		model.NodeUpdateTaskTypeVerifyImageCache,
 		model.NodeUpdateTaskTypePruneImageCache,

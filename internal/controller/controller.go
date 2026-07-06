@@ -497,6 +497,9 @@ func (s *Service) reconcileOnce(ctx context.Context) error {
 	if err := s.cleanupZombieBuildJobs(ctx); err != nil {
 		return err
 	}
+	if err := s.reconcileNodeUpdaterVersions(ctx); err != nil {
+		return err
+	}
 	if s.Config.KubectlApply {
 		return s.reconcileManagedApps(ctx)
 	}
