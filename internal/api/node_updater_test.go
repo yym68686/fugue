@@ -205,8 +205,61 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 	if credential == nil {
 		t.Fatalf("expected edge credential, warnings=%v", warnings)
 	}
+	if credential.Token == "" || credential.TokenPrefix == "" {
+		t.Fatalf("expected first credential response to include token, got %+v", credential)
+	}
 	if credential.EdgeGroupID != "edge-group-country-us" || credential.Country != "us" || credential.WorkloadMode != "dynamic" {
 		t.Fatalf("unexpected inferred credential: %+v warnings=%v", credential, warnings)
+	}
+	reportedCredential, _, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{
+		ClusterNodeName:   "dmit",
+		EdgeEnvGeneration: "v2:" + credential.TokenPrefix + ":already-installed",
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	}, &model.ClusterNodePolicyStatus{
+		NodeName: "dmit",
+		Policy: &model.ClusterNodePolicy{
+			AllowEdge:     true,
+			AllowDNS:      false,
+			DedicatedMode: "edge",
+		},
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("issue reported edge credential: %v", err)
+	}
+	if reportedCredential == nil || reportedCredential.Token != "" || reportedCredential.TokenPrefix != credential.TokenPrefix {
+		t.Fatalf("expected installed token prefix to avoid reissue, got %+v", reportedCredential)
+	}
+	reissuedCredential, _, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{
+		ClusterNodeName:   "dmit",
+		EdgeEnvGeneration: "v2:missing:empty-file",
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	}, &model.ClusterNodePolicyStatus{
+		NodeName: "dmit",
+		Policy: &model.ClusterNodePolicy{
+			AllowEdge:     true,
+			AllowDNS:      false,
+			DedicatedMode: "edge",
+		},
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("reissue edge credential: %v", err)
+	}
+	if reissuedCredential == nil || reissuedCredential.Token == "" || reissuedCredential.TokenPrefix == credential.TokenPrefix {
+		t.Fatalf("expected missing token prefix to reissue credential, got %+v", reissuedCredential)
 	}
 	policy := nodeUpdaterPolicyWithEdgeCredentialLabels(&model.ClusterNodePolicyStatus{
 		NodeName: "dmit",
@@ -569,7 +622,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v15"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v16"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,

@@ -219,10 +219,12 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 	} else {
 		credential.PublicIPv4 = publicIP
 	}
-	needsToken := strings.TrimSpace(updater.EdgeEnvGeneration) == ""
+	reportedTokenPrefix := nodeUpdaterEdgeEnvGenerationTokenPrefix(updater.EdgeEnvGeneration)
+	needsToken := reportedTokenPrefix == ""
 	if existing, _, err := s.store.GetEdgeNode(edgeID); err == nil {
 		credential.TokenPrefix = existing.TokenPrefix
-		if strings.TrimSpace(existing.TokenPrefix) == "" || !strings.EqualFold(strings.TrimSpace(existing.EdgeGroupID), edgeGroupID) {
+		existingPrefix := strings.TrimSpace(existing.TokenPrefix)
+		if existingPrefix == "" || !strings.EqualFold(strings.TrimSpace(existing.EdgeGroupID), edgeGroupID) || !strings.EqualFold(reportedTokenPrefix, existingPrefix) {
 			needsToken = true
 		}
 	} else if errors.Is(err, store.ErrNotFound) {
@@ -250,6 +252,18 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 		credential.TokenPrefix = node.TokenPrefix
 	}
 	return credential, warnings, nil
+}
+
+func nodeUpdaterEdgeEnvGenerationTokenPrefix(generation string) string {
+	generation = strings.TrimSpace(generation)
+	if generation == "" {
+		return ""
+	}
+	parts := strings.Split(generation, ":")
+	if len(parts) >= 3 && parts[0] == "v2" {
+		return strings.TrimSpace(parts[1])
+	}
+	return ""
 }
 
 func nodeUpdaterPolicyWithEdgeCredentialLabels(nodePolicy *model.ClusterNodePolicyStatus, credential *model.NodeUpdaterEdgeCredential) *model.ClusterNodePolicyStatus {
@@ -978,7 +992,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v15"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v16"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -2158,14 +2172,43 @@ current_taints_hash() {
   yaml_list_block_hash "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" node-taint || true
 }
 
+current_edge_node_token_prefix() {
+  if [ ! -r "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  python3 - "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}" <<'PY_EDGE_TOKEN_PREFIX'
+import shlex
+import sys
+
+path = sys.argv[1]
+for line in open(path, "r", encoding="utf-8"):
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, raw = line.split("=", 1)
+    if key not in {"FUGUE_EDGE_NODE_TOKEN", "FUGUE_EDGE_TOKEN"}:
+        continue
+    try:
+        values = shlex.split(raw)
+    except ValueError:
+        values = [raw.strip("'\"")]
+    token = (values[0] if values else "").strip()
+    if token:
+        print(token[:8])
+        break
+PY_EDGE_TOKEN_PREFIX
+}
+
 current_edge_env_generation() {
   local tmp=""
+  local token_prefix=""
   tmp="$(mktemp)"
+  token_prefix="$(current_edge_node_token_prefix)"
   {
     printf 'edge_env=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_EDGE_ENV_FILE}")"
     printf 'edge_node_env=%s\n' "$(current_file_hash "${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}")"
   } >"${tmp}"
-  sha256_file "${tmp}" || true
+  printf 'v2:%s:%s\n' "${token_prefix}" "$(sha256_file "${tmp}" || true)"
   rm -f "${tmp}"
 }
 
