@@ -208,6 +208,31 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 	if credential.EdgeGroupID != "edge-group-country-us" || credential.Country != "us" || credential.WorkloadMode != "dynamic" {
 		t.Fatalf("unexpected inferred credential: %+v warnings=%v", credential, warnings)
 	}
+	policy := nodeUpdaterPolicyWithEdgeCredentialLabels(&model.ClusterNodePolicyStatus{
+		NodeName: "dmit",
+		Policy: &model.ClusterNodePolicy{
+			AllowEdge:     true,
+			AllowDNS:      false,
+			DedicatedMode: "edge",
+		},
+		Labels: map[string]string{
+			"fugue.io/public-ip": "191.222.213.223",
+			"fugue.io/role.edge": "true",
+		},
+	}, credential)
+	if policy == nil {
+		t.Fatalf("expected policy labels to be augmented")
+	}
+	for key, want := range map[string]string{
+		"fugue.io/location-country-code": "us",
+		"fugue.io/edge-group-id":         "edge-group-country-us",
+		"fugue.io/edge-workload":         "dynamic",
+		"fugue.io/edge-location-status":  "ready",
+	} {
+		if got := policy.Labels[key]; got != want {
+			t.Fatalf("expected augmented label %s=%s, got %q labels=%v", key, want, got, policy.Labels)
+		}
+	}
 	if !strings.Contains(strings.Join(warnings, "\n"), "inferred from public IP") {
 		t.Fatalf("expected inference warning, got %v", warnings)
 	}
@@ -544,7 +569,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v14"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v15"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,

@@ -150,6 +150,7 @@ func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, p
 	if err != nil {
 		return model.NodeUpdaterDesiredState{}, err
 	}
+	nodePolicy = nodeUpdaterPolicyWithEdgeCredentialLabels(nodePolicy, edgeCredential)
 	warnings = append(warnings, edgeWarnings...)
 	return model.NodeUpdaterDesiredState{
 		GeneratedAt:     time.Now().UTC(),
@@ -249,6 +250,50 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 		credential.TokenPrefix = node.TokenPrefix
 	}
 	return credential, warnings, nil
+}
+
+func nodeUpdaterPolicyWithEdgeCredentialLabels(nodePolicy *model.ClusterNodePolicyStatus, credential *model.NodeUpdaterEdgeCredential) *model.ClusterNodePolicyStatus {
+	if nodePolicy == nil || credential == nil {
+		return nodePolicy
+	}
+	out := *nodePolicy
+	out.Labels = cloneStringMap(nodePolicy.Labels)
+	if out.Labels == nil {
+		out.Labels = map[string]string{}
+	}
+	setIfEmpty := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" || strings.TrimSpace(out.Labels[key]) != "" {
+			return
+		}
+		out.Labels[key] = value
+	}
+	edgePublicIP := strings.TrimSpace(firstNonEmptyString(credential.PublicIPv4, credential.PublicIPv6))
+	setIfEmpty("fugue.io/public-ip", edgePublicIP)
+	setIfEmpty("topology.kubernetes.io/region", credential.Region)
+	setIfEmpty("fugue.io/location-country-code", strings.ToLower(strings.TrimSpace(credential.Country)))
+	setIfEmpty("fugue.io/edge-group-id", credential.EdgeGroupID)
+	workloadMode := strings.TrimSpace(strings.ToLower(credential.WorkloadMode))
+	if workloadMode == "" {
+		workloadMode = "dynamic"
+	}
+	switch workloadMode {
+	case "static", "dynamic":
+	default:
+		workloadMode = "dynamic"
+	}
+	setIfEmpty("fugue.io/edge-workload", workloadMode)
+	if nodePolicy.Policy != nil && (nodePolicy.Policy.AllowEdge || nodePolicy.Policy.EffectiveEdge) {
+		setIfEmpty("fugue.io/role.edge", "true")
+	}
+	if strings.TrimSpace(out.Labels["fugue.io/edge-location-status"]) == "" {
+		if strings.TrimSpace(out.Labels["fugue.io/edge-group-id"]) != "" || strings.TrimSpace(out.Labels["fugue.io/location-country-code"]) != "" || workloadMode == "static" {
+			out.Labels["fugue.io/edge-location-status"] = "ready"
+		} else {
+			out.Labels["fugue.io/edge-location-status"] = "missing_location"
+		}
+	}
+	return &out
 }
 
 func nodeUpdaterPolicyAllowsEdge(labels map[string]string, nodePolicy *model.ClusterNodePolicyStatus) bool {
@@ -933,7 +978,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v14"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v15"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
