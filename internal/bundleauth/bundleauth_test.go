@@ -98,3 +98,111 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 		t.Fatalf("expected current verifier to reject tampered upstreams, got %v", err)
 	}
 }
+
+func TestEdgeDNSBundleSignsLegacyCandidateProjectionForOldDNSNodes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	keyring := NewKeyring("dns-signing-key", "control-plane", "", "", nil)
+	bundle := model.EdgeDNSBundle{
+		Version:       "dnsgen_test",
+		Generation:    "dnsgen_test",
+		GeneratedAt:   now,
+		DNSNodeID:     "dns-us-1",
+		EdgeGroupID:   "edge-group-country-us",
+		Zone:          "fugue.pro",
+		SchemaVersion: model.BundleSchemaVersionV1,
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:             "api.example.com.",
+				Type:             "A",
+				Values:           []string{"203.0.113.10"},
+				TTL:              30,
+				RecordKind:       "platform",
+				AppID:            "app_1",
+				TenantID:         "tenant_1",
+				EdgeGroupID:      "edge-group-country-us",
+				Status:           "active",
+				RecordGeneration: "record_test",
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{
+						IP:                "203.0.113.10",
+						EdgeID:            "edge-us-1",
+						EdgeGroupID:       "edge-group-country-us",
+						Region:            "us-west",
+						Country:           "US",
+						WorkloadMode:      "dynamic",
+						CanaryState:       "canary",
+						CanaryWeight:      1,
+						PublicProbeStatus: "pass",
+						DNSEligible:       true,
+						Priority:          10,
+						Weight:            100,
+						Reason:            "dynamic_canary",
+						TrafficClass:      "default",
+						Score:             0.95,
+						ScoreBreakdown: map[string]float64{
+							"ttfb": 0.8,
+						},
+						Healthy:    true,
+						RouteReady: true,
+						TLSReady:   true,
+					},
+				},
+				ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{
+					{
+						ScopeKey:            "country:CN",
+						Country:             "CN",
+						PolicyKind:          "quality",
+						Reason:              "best_quality",
+						SelectedEdgeGroupID: "edge-group-country-us",
+						Candidates: []model.EdgeDNSAnswerCandidate{
+							{
+								IP:                "203.0.113.10",
+								EdgeID:            "edge-us-1",
+								EdgeGroupID:       "edge-group-country-us",
+								WorkloadMode:      "dynamic",
+								CanaryState:       "canary",
+								CanaryWeight:      1,
+								PublicProbeStatus: "pass",
+								DNSEligible:       true,
+								Priority:          1,
+								Weight:            100,
+								Reason:            "scoped_dynamic_canary",
+								Healthy:           true,
+								RouteReady:        true,
+								TLSReady:          true,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	signed := SignEdgeDNSBundleWithKeyring(bundle, keyring, time.Hour)
+	if len(signed.Signatures) < 2 {
+		t.Fatalf("expected current and legacy DNS signatures, got %+v", signed.Signatures)
+	}
+	if err := VerifyEdgeDNSBundleWithKeyring(signed, keyring, now); err != nil {
+		t.Fatalf("verify signed bundle with current DNS model: %v", err)
+	}
+
+	legacyDecoded := signed
+	legacyDecoded.Records = append([]model.EdgeDNSRecord(nil), signed.Records...)
+	for recordIdx := range legacyDecoded.Records {
+		legacyDecoded.Records[recordIdx].Candidates = cloneLegacyEdgeDNSAnswerCandidates(signed.Records[recordIdx].Candidates)
+		legacyDecoded.Records[recordIdx].ScopedCandidates = cloneLegacyEdgeDNSScopedAnswerCandidates(signed.Records[recordIdx].ScopedCandidates)
+	}
+	if err := VerifyEdgeDNSBundleWithKeyring(legacyDecoded, keyring, now); err != nil {
+		t.Fatalf("verify signed bundle after old DNS drops unknown candidate fields: %v", err)
+	}
+
+	tampered := signed
+	tampered.Records = append([]model.EdgeDNSRecord(nil), signed.Records...)
+	tampered.Records[0].Candidates = append([]model.EdgeDNSAnswerCandidate(nil), signed.Records[0].Candidates...)
+	tampered.Records[0].Candidates[0].PublicProbeStatus = "fail"
+	if err := VerifyEdgeDNSBundleWithKeyring(tampered, keyring, now); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("expected current verifier to reject tampered dynamic DNS candidate fields, got %v", err)
+	}
+}
