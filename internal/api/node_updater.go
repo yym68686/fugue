@@ -218,10 +218,20 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 	if existing, _, err := s.store.GetEdgeNode(edgeID); err == nil {
 		credential.TokenPrefix = existing.TokenPrefix
 		existingPrefix := strings.TrimSpace(existing.TokenPrefix)
-		if existingPrefix == "" || !strings.EqualFold(strings.TrimSpace(existing.EdgeGroupID), edgeGroupID) || !strings.EqualFold(reportedTokenPrefix, existingPrefix) {
+		if workloadMode == runtimepkg.EdgeWorkloadStaticValue {
+			if existingPrefix == "" {
+				warnings = append(warnings, "edge credential token not issued: static edge token is managed outside node-updater")
+			}
+			return credential, warnings, nil
+		}
+		if existingPrefix == "" || !strings.EqualFold(reportedTokenPrefix, existingPrefix) {
 			needsToken = true
 		}
 	} else if errors.Is(err, store.ErrNotFound) {
+		if workloadMode == runtimepkg.EdgeWorkloadStaticValue {
+			warnings = append(warnings, "edge credential token not issued: static edge token is managed outside node-updater")
+			return credential, warnings, nil
+		}
 		needsToken = true
 	} else {
 		return nil, nil, err
@@ -1018,7 +1028,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v18"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v19"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -2331,7 +2341,11 @@ for line in open(path, "r", encoding="utf-8"):
         values = [raw.strip("'\"")]
     token = (values[0] if values else "").strip()
     if token:
-        print(token[:8])
+        parts = token.split("_")
+        if len(parts) >= 3:
+            print(parts[-2].strip())
+        else:
+            print(token[:8])
         break
 PY_EDGE_TOKEN_PREFIX
 }

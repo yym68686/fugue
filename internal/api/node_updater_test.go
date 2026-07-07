@@ -305,6 +305,20 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 	}
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 
+	existingNode, _, err := s.CreateEdgeNodeToken(model.EdgeNode{
+		ID:           "vps-591f4447",
+		EdgeGroupID:  "edge-group-country-us",
+		WorkloadMode: "static",
+		CanaryState:  model.EdgeCanaryStateJoined,
+		CanaryWeight: 1,
+		Country:      "us",
+		PublicIPv4:   "15.204.94.71",
+		Status:       model.EdgeHealthUnknown,
+	})
+	if err != nil {
+		t.Fatalf("seed legacy static edge node: %v", err)
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "https://api.fugue.pro/v1/node-updater/desired-state", nil)
 	legacyLabels := map[string]string{
 		"fugue.io/location-country-code": "us",
@@ -334,6 +348,12 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 	if credential.WorkloadMode != "static" {
 		t.Fatalf("expected legacy edge/DNS node to default static, got %+v", credential)
 	}
+	if credential.Token != "" {
+		t.Fatalf("expected node-updater not to rotate static edge token, got %+v", credential)
+	}
+	if credential.TokenPrefix != existingNode.TokenPrefix {
+		t.Fatalf("expected static edge token prefix to stay %q, got %+v", existingNode.TokenPrefix, credential)
+	}
 	if credential.EdgeGroupID != "edge-group-country-us" || credential.Country != "us" {
 		t.Fatalf("unexpected legacy credential location: %+v", credential)
 	}
@@ -357,6 +377,9 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 	}
 	if node.WorkloadMode != "static" {
 		t.Fatalf("expected stored legacy edge node to be static, got %+v", node)
+	}
+	if node.TokenPrefix != existingNode.TokenPrefix {
+		t.Fatalf("expected stored legacy edge token to be preserved, got %+v", node)
 	}
 }
 
@@ -684,7 +707,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v18"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v19"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -739,6 +762,44 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterEdgeEnvGenerationUsesSecretPrefix(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${tmpdir}/edge-node.env"
+cat >"${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE}" <<'EOF_EDGE_NODE_ENV'
+FUGUE_EDGE_NODE_TOKEN='fugue_edge_abcd1234_0123456789abcdef0123456789abcdef'
+EOF_EDGE_NODE_ENV
+
+got="$(current_edge_node_token_prefix)"
+if [ "${got}" != "abcd1234" ]; then
+  printf 'expected secret prefix abcd1234, got %s\n' "${got}" >&2
+  exit 1
+fi
+`
+
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-prefix.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run node-updater prefix harness: %v\n%s", err, output)
 	}
 }
 
