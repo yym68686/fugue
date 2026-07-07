@@ -694,6 +694,30 @@ func TestAdminProbeEdgeNodeFailsClosedWithoutPublicEndpoint(t *testing.T) {
 	}
 }
 
+func TestEdgeNodePublicProbeServerNameUsesRoutedSNIForIP(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{
+		apiPublicDomain: "api.fugue.pro",
+		appBaseDomain:   "fugue.pro",
+		platformRoutes: []model.PlatformRoute{
+			{Hostname: "control.fugue.pro"},
+		},
+	}
+	if got := server.edgeNodePublicProbeServerName(model.EdgeNode{PublicIPv4: "203.0.113.44"}); got != "api.fugue.pro" {
+		t.Fatalf("expected API public domain SNI for IP-only edge, got %q", got)
+	}
+	if got := server.edgeNodePublicProbeServerName(model.EdgeNode{PublicHostname: "edge-jp.fugue.pro", PublicIPv4: "203.0.113.44"}); got != "edge-jp.fugue.pro" {
+		t.Fatalf("expected explicit public hostname SNI, got %q", got)
+	}
+	if got := (&Server{platformRoutes: []model.PlatformRoute{{Hostname: "route.fugue.pro"}}}).edgeNodePublicProbeServerName(model.EdgeNode{PublicIPv4: "203.0.113.44"}); got != "route.fugue.pro" {
+		t.Fatalf("expected platform route SNI fallback, got %q", got)
+	}
+	if got := (&Server{appBaseDomain: "fugue.pro"}).edgeNodePublicProbeServerName(model.EdgeNode{PublicIPv4: "203.0.113.44"}); got != "api.fugue.pro" {
+		t.Fatalf("expected app base API SNI fallback, got %q", got)
+	}
+}
+
 func edgeQualityFloatClose(got, want float64) bool {
 	return math.Abs(got-want) < 0.000001
 }

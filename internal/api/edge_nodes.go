@@ -256,7 +256,7 @@ func (s *Server) handleAdminProbeEdgeNode(w http.ResponseWriter, r *http.Request
 		return
 	}
 	now := time.Now().UTC()
-	probeStatus, probeError := probeEdgeNodePublicEndpoints(r.Context(), node)
+	probeStatus, probeError := s.probeEdgeNodePublicEndpoints(r.Context(), node)
 	patch := model.EdgeNode{
 		Draining:             node.Draining,
 		PublicProbeStatus:    probeStatus,
@@ -368,7 +368,7 @@ func (s *Server) handleAdminSetEdgeNodeDrain(w http.ResponseWriter, r *http.Requ
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": updated, "group": group, "desired_state": buildEdgeNodeDesiredState(updated)})
 }
 
-func probeEdgeNodePublicEndpoints(ctx context.Context, node model.EdgeNode) (string, string) {
+func (s *Server) probeEdgeNodePublicEndpoints(ctx context.Context, node model.EdgeNode) (string, string) {
 	failures := []string{}
 	if !edgeNodeHasRouteState(node) {
 		failures = append(failures, "route_bundle=not_ready")
@@ -392,13 +392,31 @@ func probeEdgeNodePublicEndpoints(ctx context.Context, node model.EdgeNode) (str
 	if err := probeTCP(ctx, host, 80); err != nil {
 		failures = append(failures, "tcp80="+err.Error())
 	}
-	if err := probeTLS(ctx, host, 443); err != nil {
+	if err := probeTLS(ctx, host, 443, s.edgeNodePublicProbeServerName(node)); err != nil {
 		failures = append(failures, "tls443="+err.Error())
 	}
 	if len(failures) > 0 {
 		return model.EdgePublicProbeStatusFailing, strings.Join(failures, "; ")
 	}
 	return model.EdgePublicProbeStatusPassing, ""
+}
+
+func (s *Server) edgeNodePublicProbeServerName(node model.EdgeNode) string {
+	if serverName := tlsServerName(strings.TrimSpace(node.PublicHostname)); serverName != "" {
+		return serverName
+	}
+	if serverName := normalizeExternalAppDomain(s.apiPublicDomain); serverName != "" {
+		return serverName
+	}
+	for _, route := range s.platformRoutes {
+		if serverName := normalizeExternalAppDomain(route.Hostname); serverName != "" {
+			return serverName
+		}
+	}
+	if base := normalizeExternalAppDomain(s.appBaseDomain); base != "" {
+		return "api." + base
+	}
+	return ""
 }
 
 func probeTCP(ctx context.Context, host string, port int) error {
@@ -411,10 +429,13 @@ func probeTCP(ctx context.Context, host string, port int) error {
 	return nil
 }
 
-func probeTLS(ctx context.Context, host string, port int) error {
+func probeTLS(ctx context.Context, host string, port int, serverName string) error {
 	dialer := net.Dialer{Timeout: 4 * time.Second}
+	if serverName == "" {
+		serverName = tlsServerName(host)
+	}
 	conn, err := tls.DialWithDialer(&dialer, "tcp", net.JoinHostPort(host, strconv.Itoa(port)), &tls.Config{
-		ServerName:         tlsServerName(host),
+		ServerName:         serverName,
 		InsecureSkipVerify: true,
 	})
 	if err != nil {

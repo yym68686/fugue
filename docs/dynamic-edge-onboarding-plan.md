@@ -833,7 +833,7 @@ fugue admin dns answer-check <hostname> --explain
 - [x] `make test` 通过。
 - [x] Helm chart tests 通过。
 - [x] OpenAPI generated drift check 通过。
-- [ ] 在 staging 或 shadow 模式验证 dynamic DaemonSet 不影响 US/DE。
+- [x] 在 staging 或 shadow 模式验证 dynamic DaemonSet 不影响 US/DE。
 - [ ] 推送到 `main` 触发 GitHub Actions 控制平面发布。
 - [ ] 监控 deploy-control-plane workflow 成功。
 - [ ] 验证线上 API / controller Ready。
