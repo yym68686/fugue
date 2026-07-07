@@ -408,6 +408,8 @@ Gate 分成三类：
 
 后续把 slow body read、body_read_error_rate 等 edge 质量指标接入 AppReleaseGatePolicy。
 
+仅修改 continuity / gate / canary 配置且渲染后的 pod-template release key 不变时，不创建 candidate release，不运行 candidate canary gate，也不要求 candidate request facts。该类操作只更新配置并保持 stable-only 流量；只有真实 pod-template 变化才进入 stable/candidate 两阶段发布。
+
 ## 旧 Pod 关闭条件
 
 旧 stable Pod / release 的最终关闭条件必须从单条件：
@@ -747,6 +749,7 @@ Debug bundle 必须包含：
 工作：
 
 - deploy 创建 candidate release record。
+- deploy 前比较 previous / candidate 渲染后的 pod-template release key；没有新 pod 变化时跳过 candidate release 和 candidate gate。
 - candidate rollout ready 后写 UpstreamURL。
 - controller 自动运行 active probe gate。
 - gate fail 自动 abort。

@@ -254,7 +254,7 @@ func (s AppReleaseService) AbortRelease(ctx context.Context, principal model.Pri
 		return model.AppTrafficPolicy{}, err
 	}
 	policy.Mode = model.AppTrafficModeSingle
-	policy.CandidateReleaseID = release.ID
+	policy.CandidateReleaseID = ""
 	policy.StableWeight = 100
 	policy.CandidateWeight = 0
 	policy.UpdatedByType = principal.ActorType

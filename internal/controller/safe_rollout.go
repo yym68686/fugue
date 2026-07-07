@@ -29,7 +29,7 @@ type safeRolloutPlan struct {
 	CanarySteps []int
 }
 
-func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, previous, candidate model.App) (*safeRolloutState, error) {
+func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, previous, candidate model.App, schedulingValues ...runtime.SchedulingConstraints) (*safeRolloutState, error) {
 	if op.Type != model.OperationTypeDeploy ||
 		!model.AppSafeZeroDowntimeRolloutEnabled(previous.Spec) ||
 		!model.AppSafeZeroDowntimeRolloutEnabled(candidate.Spec) {
@@ -57,6 +57,18 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 	if _, err := service.EnsureStableTrafficPolicy(ctx, principal, previous); err != nil {
 		return nil, fmt.Errorf("ensure stable traffic policy before safe rollout: %w", err)
 	}
+	scheduling := runtime.SchedulingConstraints{}
+	if len(schedulingValues) > 0 {
+		scheduling = schedulingValues[0]
+	}
+	if !s.safeRolloutCandidateChangesPodTemplate(previous, candidate, scheduling) {
+		s.recordSafeRolloutReleaseStep(op, candidate, "candidate_create", model.ReleaseStepStatusSkipped, "safe rollout skipped: candidate pod template unchanged", stable.ID, map[string]any{
+			"stable_release_id":     stable.ID,
+			"previous_release_key":  strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(previous), scheduling)),
+			"candidate_release_key": strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(candidate), scheduling)),
+		})
+		return nil, nil
+	}
 	specSnapshot := candidate.Spec
 	candidateRelease, err := service.CreateRelease(ctx, candidate, releaseflow.CreateReleaseRequest{
 		Role:             model.AppReleaseRoleCandidate,
@@ -74,6 +86,15 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 		"candidate_release_id": candidateRelease.ID,
 	})
 	return &safeRolloutState{Enabled: true, PreviousApp: previous, CandidateApp: candidate, StableRelease: stable, Candidate: candidateRelease}, nil
+}
+
+func (s *Service) safeRolloutCandidateChangesPodTemplate(previous, candidate model.App, scheduling runtime.SchedulingConstraints) bool {
+	previousKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(previous), scheduling))
+	candidateKey := strings.TrimSpace(s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(candidate), scheduling))
+	if previousKey == "" || candidateKey == "" {
+		return true
+	}
+	return previousKey != candidateKey
 }
 
 func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, state *safeRolloutState) error {

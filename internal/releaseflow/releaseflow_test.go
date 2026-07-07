@@ -116,7 +116,7 @@ func TestAppReleaseServiceAbortRestoresStableTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("abort candidate: %v", err)
 	}
-	if policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+	if policy.Mode != model.AppTrafficModeSingle || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
 		t.Fatalf("expected stable-only traffic after abort, got %+v", policy)
 	}
 	updatedCandidate, err := stateStore.GetAppRelease(app.TenantID, true, candidate.ID)

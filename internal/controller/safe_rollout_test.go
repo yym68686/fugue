@@ -357,6 +357,43 @@ func TestSafeZeroDowntimeRolloutCanarySampleDeficitContinuesToNextWeight(t *test
 	}
 }
 
+func TestSafeZeroDowntimeRolloutSkipsCandidateWhenPodTemplateUnchanged(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Image = previous.Spec.Image
+
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if state != nil {
+		t.Fatalf("expected no safe rollout state for unchanged pod template, got %+v", state)
+	}
+	releases, err := stateStore.ListAppReleases(model.AppReleaseFilter{TenantID: candidate.TenantID, AppID: candidate.ID, PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list releases: %v", err)
+	}
+	if len(releases) != 1 || releases[0].Role != model.AppReleaseRoleStable {
+		t.Fatalf("expected only stable release for unchanged pod template, got %+v", releases)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != releases[0].ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 {
+		t.Fatalf("expected stable-only traffic policy for unchanged pod template, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "candidate_create", model.ReleaseStepStatusSkipped) {
+		t.Fatalf("expected skipped candidate_create step for unchanged pod template, got %+v", steps)
+	}
+}
+
 func TestSafeZeroDowntimeRolloutCandidateRolloutFailureAutoAborts(t *testing.T) {
 	t.Parallel()
 

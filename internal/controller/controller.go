@@ -912,7 +912,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	timer.Mark("right_sizing_downtime_guard")
 
-	safeRollout, err := s.prepareSafeZeroDowntimeRollout(ctx, op, currentApp, app)
+	safeRollout, err := s.prepareSafeZeroDowntimeRollout(ctx, op, currentApp, app, scheduling)
 	if err != nil {
 		return err
 	}
