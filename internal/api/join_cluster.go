@@ -2263,6 +2263,51 @@ delete_rule() {
   done
 }
 
+delete_saved_nat_rule() {
+  local rule="$1"
+  [ -n "${rule}" ] || return 1
+  set -- ${rule}
+  [ "${1:-}" = "-A" ] || return 1
+  shift
+  local chain="${1:-}"
+  [ -n "${chain}" ] || return 1
+  shift
+  iptables -t nat -D "${chain}" "$@"
+}
+
+cleanup_dns_redirect_rules() {
+  local kube_dns_service_ip="$1"
+  local current_cni_bridge_ip="${2:-}"
+  local mode="${3:-stale}"
+  local current_target=""
+  local rules=""
+  local rule=""
+  [ -n "${kube_dns_service_ip}" ] || return 1
+  if [ -n "${current_cni_bridge_ip}" ]; then
+    current_target="${current_cni_bridge_ip}:53"
+  fi
+  rules="$(iptables-save -t nat 2>/dev/null | awk -v service_ip="${kube_dns_service_ip}/32" -v current_target="${current_target}" -v mode="${mode}" '
+    $1 == "-A" && ($2 == "PREROUTING" || $2 == "OUTPUT") &&
+    index($0, "-d " service_ip) &&
+    $0 ~ /--dport 53/ &&
+    $0 ~ /-j DNAT/ &&
+    $0 ~ /--to-destination [0-9.]+:53/ &&
+    $0 !~ /--comment "/ {
+      if (mode != "all" && current_target != "" && index($0, "--to-destination " current_target) > 0) {
+        next
+      }
+      print
+    }
+  ')"
+  [ -n "${rules}" ] || return 1
+  while IFS= read -r rule; do
+    [ -n "${rule}" ] || continue
+    delete_saved_nat_rule "${rule}" || true
+  done <<EOF_STALE_DNS_REDIRECT_RULES
+${rules}
+EOF_STALE_DNS_REDIRECT_RULES
+}
+
 detect_cni_bridge_ip() {
   ip -4 addr show dev cni0 2>/dev/null | awk '/inet / {split($2, parts, "/"); print parts[1]; exit}'
 }
@@ -2341,6 +2386,7 @@ ensure_dns_redirect_rules() {
   local cni_bridge_ip="$1"
   local kube_dns_service_ip="$2"
 
+  cleanup_dns_redirect_rules "${kube_dns_service_ip}" "${cni_bridge_ip}" stale || true
   ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
   ensure_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
   ensure_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
@@ -2351,6 +2397,7 @@ delete_dns_redirect_rules() {
   local cni_bridge_ip="$1"
   local kube_dns_service_ip="$2"
 
+  cleanup_dns_redirect_rules "${kube_dns_service_ip}" "${cni_bridge_ip}" all || true
   delete_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
   delete_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"
   delete_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53"

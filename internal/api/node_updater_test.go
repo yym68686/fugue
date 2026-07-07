@@ -820,10 +820,22 @@ func TestNodeUpdaterDisablesDNSEscapeHatchByDefault(t *testing.T) {
 	harness := prefix + `
 tmpdir="$(mktemp -d)"
 actions="${tmpdir}/actions.log"
+iptables_rules="${tmpdir}/iptables.rules"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${tmpdir}/fugue-node-dns-escape-hatch.conf"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="fugue-node-dns-escape-hatch.service"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER="fugue-node-dns-escape-hatch.timer"
 : >"${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+cat >"${iptables_rules}" <<'EOF_IPTABLES_RULES'
+-A KUBE-SERVICES -d 10.43.0.10/32 -p udp -m comment --comment "kube-system/kube-dns:dns cluster IP" -m udp --dport 53 -j KUBE-SVC-TCOU7JCQXEZGVUNU
+-A PREROUTING -d 10.43.0.10/32 -i cni0 -p udp --dport 53 -j DNAT --to-destination 10.42.8.1:53
+-A PREROUTING -d 10.43.0.10/32 -i cni0 -p tcp --dport 53 -j DNAT --to-destination 10.42.8.1:53
+-A OUTPUT -d 10.43.0.10/32 -p udp --dport 53 -j DNAT --to-destination 10.42.8.1:53
+-A OUTPUT -d 10.43.0.10/32 -p tcp --dport 53 -j DNAT --to-destination 10.42.8.1:53
+-A PREROUTING -i cni0 -d 10.43.0.10/32 -p udp --dport 53 -j DNAT --to-destination 10.42.7.1:53
+-A PREROUTING -i cni0 -d 10.43.0.10/32 -p tcp --dport 53 -j DNAT --to-destination 10.42.7.1:53
+-A OUTPUT -d 10.43.0.10/32 -p udp --dport 53 -j DNAT --to-destination 10.42.7.1:53
+-A OUTPUT -d 10.43.0.10/32 -p tcp --dport 53 -j DNAT --to-destination 10.42.7.1:53
+EOF_IPTABLES_RULES
 
 systemctl() {
   printf 'systemctl %s\n' "$*" >>"${actions}"
@@ -849,24 +861,39 @@ ip() {
 iptables_save_called=0
 iptables-save() {
   iptables_save_called=$((iptables_save_called + 1))
-  cat <<'EOF_IPTABLES'
--A KUBE-SERVICES -d 10.43.0.10/32 -p udp -m comment --comment "kube-system/kube-dns:dns cluster IP" -m udp --dport 53 -j KUBE-SVC-TCOU7JCQXEZGVUNU
--A PREROUTING -d 10.43.0.10/32 -i cni0 -p udp -m udp --dport 53 -j DNAT --to-destination 10.42.7.1:53
-EOF_IPTABLES
+  cat "${iptables_rules}"
 }
 
-iptables_check_seen=0
 iptables() {
   printf 'iptables %s\n' "$*" >>"${actions}"
-  case "$*" in
-    *" -C "*)
-      if [ "${iptables_check_seen}" -eq 0 ]; then
-        iptables_check_seen=1
-        return 0
-      fi
-      return 1
+  if [ "${1:-}" = "-t" ]; then
+    shift 2
+  fi
+  local op="${1:-}"
+  local chain="${2:-}"
+  shift 2 || true
+  local rule="-A ${chain}"
+  local arg=""
+  for arg in "$@"; do
+    rule="${rule} ${arg}"
+  done
+  case "${op}" in
+    -C)
+      grep -Fxq -- "${rule}" "${iptables_rules}"
+      return $?
       ;;
-    *" -D "*)
+    -D)
+      if ! grep -Fxq -- "${rule}" "${iptables_rules}"; then
+        return 1
+      fi
+      awk -v target="${rule}" '
+        $0 == target && !removed {
+          removed = 1
+          next
+        }
+        { print }
+      ' "${iptables_rules}" >"${iptables_rules}.tmp"
+      mv "${iptables_rules}.tmp" "${iptables_rules}"
       return 0
       ;;
   esac
@@ -885,7 +912,15 @@ if ! reconcile_node_dns_escape_hatch; then
 fi
 grep -q 'systemctl disable --now fugue-node-dns-escape-hatch.timer' "${actions}"
 grep -q 'systemctl disable --now fugue-node-dns-escape-hatch.service' "${actions}"
-grep -q 'iptables -t nat -D PREROUTING' "${actions}"
+grep -q 'iptables -t nat -D PREROUTING -d 10.43.0.10/32 -i cni0 -p udp --dport 53 -j DNAT --to-destination 10.42.8.1:53' "${actions}"
+grep -q 'iptables -t nat -D OUTPUT -d 10.43.0.10/32 -p tcp --dport 53 -j DNAT --to-destination 10.42.8.1:53' "${actions}"
+grep -q 'iptables -t nat -D PREROUTING -i cni0 -d 10.43.0.10/32 -p udp --dport 53 -j DNAT --to-destination 10.42.7.1:53' "${actions}"
+if grep -q '10.42.8.1:53' "${iptables_rules}"; then
+  echo "stale DNS escape hatch redirect rules were not removed" >&2
+  cat "${iptables_rules}" >&2
+  cat "${actions}" >&2
+  exit 1
+fi
 if grep -q 'dnsmasq.service' "${actions}"; then
   echo "dnsmasq should not be restarted while disabling the escape hatch" >&2
   cat "${actions}" >&2
