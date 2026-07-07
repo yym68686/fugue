@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
@@ -18,6 +20,12 @@ type safeRolloutState struct {
 	CandidateApp  model.App
 	StableRelease model.AppRelease
 	Candidate     model.AppRelease
+}
+
+type safeRolloutPlan struct {
+	Gate        model.AppReleaseGatePolicy
+	Canary      model.AppRolloutCanarySpec
+	CanarySteps []int
 }
 
 func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, previous, candidate model.App) (*safeRolloutState, error) {
@@ -74,10 +82,13 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	service := s.appReleaseService()
 	now := time.Now().UTC()
 	candidate := state.Candidate
-	candidate.UpstreamURL = controllerServiceURLForApp(state.CandidateApp)
-	candidate.DeploymentName = runtime.RuntimeAppResourceName(state.CandidateApp)
-	candidate.ServiceName = runtime.RuntimeAppServiceName(state.CandidateApp)
+	revision := safeRolloutCandidateRevision(candidate.ID)
+	candidate.UpstreamURL = s.controllerRevisionServiceURLForApp(ctx, state.CandidateApp, revision)
+	candidate.DeploymentName = runtime.RuntimeAppResourceNameWithOptions(s.Renderer.PrepareApp(state.CandidateApp), runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision})
+	candidate.ServiceName = runtime.RuntimeAppServiceNameWithOptions(s.Renderer.PrepareApp(state.CandidateApp), runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision})
 	candidate.Status = model.AppReleaseStatusReady
+	candidate.StatusReason = ""
+	candidate.ReleaseMessage = "candidate rollout ready"
 	candidate.ReadyAt = releaseflow.FirstNonNilTime(candidate.ReadyAt, &now)
 	updated, err := s.Store.UpdateAppRelease(candidate)
 	if err != nil {
@@ -88,26 +99,118 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 		"upstream_url": updated.UpstreamURL,
 	})
 
-	policy := releaseflow.ReleaseGateEvaluator{}.NormalizePolicy(nil)
-	if continuity := model.NormalizeAppContinuityPolicy(state.CandidateApp.Spec.Continuity); continuity != nil && continuity.ZeroDowntime != nil && continuity.ZeroDowntime.Gate != nil {
-		policy = releaseflow.ReleaseGateEvaluator{}.NormalizePolicy(continuity.ZeroDowntime.Gate)
-	}
-	gate := s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, policy)
+	plan := s.safeRolloutPlanForApp(state.CandidateApp)
+	initialPolicy := plan.Gate
+	initialPolicy.MinCandidateRequests = 0
+	gate := s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, initialPolicy)
 	if gate.Status == model.AppReleaseGateStatusFail {
+		evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, "candidate active gate failed")
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "gate_check", model.ReleaseStepStatusFailed, "candidate gate failed", state.Candidate.ID, map[string]any{
+			"gate":        gate,
+			"evidence_id": evidenceID,
+		})
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.fail", state.Candidate.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "gate_check",
+			"evidence_id":  evidenceID,
+		})
 		_ = s.abortSafeZeroDowntimeRollout(ctx, op, state, "candidate gate failed: "+strings.Join(gate.Failures, "; "))
 		return fmt.Errorf("safe zero downtime rollout gate failed: %s", strings.Join(gate.Failures, "; "))
 	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "gate_check", model.ReleaseStepStatusCompleted, "candidate gate passed", state.Candidate.ID, map[string]any{
 		"gate": gate,
 	})
+	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.pass", state.Candidate.ID, map[string]string{
+		"operation_id": op.ID,
+		"phase":        "gate_check",
+	})
 
 	principal := model.Principal{TenantID: state.CandidateApp.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller"}
+	observedCanaryTraffic := false
+	if plan.Canary.Enabled && len(plan.CanarySteps) > 0 {
+		for _, weight := range plan.CanarySteps {
+			if weight <= 0 || weight >= 100 {
+				continue
+			}
+			traffic, err := service.PromoteRelease(ctx, principal, state.CandidateApp, state.Candidate, weight)
+			if err != nil {
+				return fmt.Errorf("shift safe rollout canary to %d%%: %w", weight, err)
+			}
+			s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_shift", model.ReleaseStepStatusCompleted, fmt.Sprintf("candidate canary shifted to %d%%", weight), state.Candidate.ID, map[string]any{
+				"candidate_weight":  weight,
+				"stable_weight":     traffic.StableWeight,
+				"traffic_policy_id": traffic.ID,
+			})
+			s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.canary.shifted", state.Candidate.ID, map[string]string{
+				"operation_id":     op.ID,
+				"candidate_weight": fmt.Sprintf("%d", weight),
+			})
+			observedCanaryTraffic = true
+			if err := s.sleepSafeRolloutObservation(ctx, time.Duration(plan.Canary.MinObservationSeconds)*time.Second); err != nil {
+				return err
+			}
+			gate = s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, plan.Gate)
+			if gate.Status == model.AppReleaseGateStatusFail {
+				evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, fmt.Sprintf("candidate canary gate failed at %d%%", weight))
+				s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusFailed, fmt.Sprintf("candidate canary gate failed at %d%%", weight), state.Candidate.ID, map[string]any{
+					"candidate_weight": weight,
+					"gate":             gate,
+					"evidence_id":      evidenceID,
+				})
+				s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.fail", state.Candidate.ID, map[string]string{
+					"operation_id":      op.ID,
+					"phase":             "canary_gate",
+					"candidate_weight":  fmt.Sprintf("%d", weight),
+					"evidence_id":       evidenceID,
+					"candidate_release": state.Candidate.ID,
+				})
+				_ = s.abortSafeZeroDowntimeRollout(ctx, op, state, fmt.Sprintf("candidate canary gate failed at %d%%: %s", weight, strings.Join(gate.Failures, "; ")))
+				return fmt.Errorf("safe zero downtime rollout canary gate failed at %d%%: %s", weight, strings.Join(gate.Failures, "; "))
+			}
+			s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusCompleted, fmt.Sprintf("candidate canary gate passed at %d%%", weight), state.Candidate.ID, map[string]any{
+				"candidate_weight": weight,
+				"gate":             gate,
+			})
+			s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.pass", state.Candidate.ID, map[string]string{
+				"operation_id":      op.ID,
+				"phase":             "canary_gate",
+				"candidate_weight":  fmt.Sprintf("%d", weight),
+				"candidate_release": state.Candidate.ID,
+			})
+		}
+	}
+	finalPolicy := plan.Gate
+	if !observedCanaryTraffic {
+		finalPolicy.MinCandidateRequests = 0
+	}
+	gate = s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, finalPolicy)
+	if gate.Status == model.AppReleaseGateStatusFail {
+		evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, "candidate final gate failed")
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "final_gate", model.ReleaseStepStatusFailed, "candidate final gate failed", state.Candidate.ID, map[string]any{
+			"gate":        gate,
+			"evidence_id": evidenceID,
+		})
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.fail", state.Candidate.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "final_gate",
+			"evidence_id":  evidenceID,
+		})
+		_ = s.abortSafeZeroDowntimeRollout(ctx, op, state, "candidate final gate failed: "+strings.Join(gate.Failures, "; "))
+		return fmt.Errorf("safe zero downtime rollout final gate failed: %s", strings.Join(gate.Failures, "; "))
+	}
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "final_gate", model.ReleaseStepStatusCompleted, "candidate final gate passed", state.Candidate.ID, map[string]any{
+		"gate": gate,
+	})
 	traffic, err := service.PromoteRelease(ctx, principal, state.CandidateApp, state.Candidate, 100)
 	if err != nil {
 		return fmt.Errorf("promote candidate release after safe rollout gate: %w", err)
 	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "promote", model.ReleaseStepStatusCompleted, "candidate promoted to stable", state.Candidate.ID, map[string]any{
 		"traffic_policy_id": traffic.ID,
+	})
+	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.promote", state.Candidate.ID, map[string]string{
+		"operation_id": op.ID,
+		"mode":         "safe_zero_downtime",
 	})
 	return nil
 }
@@ -122,6 +225,10 @@ func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Ope
 		return err
 	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "abort", model.ReleaseStepStatusCompleted, reason, state.Candidate.ID, nil)
+	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.abort.auto", state.Candidate.ID, map[string]string{
+		"operation_id": op.ID,
+		"reason":       reason,
+	})
 	return s.restoreSafeZeroDowntimePreviousSpec(ctx, op, state, reason)
 }
 
@@ -155,12 +262,71 @@ func (s *Service) restoreSafeZeroDowntimePreviousSpec(ctx context.Context, op mo
 func (s *Service) appReleaseService() releaseflow.AppReleaseService {
 	return releaseflow.AppReleaseService{
 		Store:            s.Store,
-		ServiceURLForApp: func(ctx context.Context, app model.App) string { return controllerServiceURLForApp(app) },
+		ServiceURLForApp: s.controllerServiceURLForApp,
 	}
 }
 
+func safeRolloutCandidateRevision(releaseID string) runtime.AppRevisionRenderOptions {
+	return runtime.AppRevisionRenderOptions{Role: runtime.AppRevisionRoleCandidate, ReleaseID: strings.TrimSpace(releaseID)}
+}
+
+func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op model.Operation, state *safeRolloutState, scheduling runtime.SchedulingConstraints, postgresPlacements map[string][]runtime.SchedulingConstraints) error {
+	if state == nil || !state.Enabled {
+		return nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes candidate revision client: %w", err)
+	}
+	app := state.CandidateApp
+	if normalizedApp, changed := s.normalizeManagedAppRuntimeImageRefs(app); changed {
+		app = normalizedApp
+		state.CandidateApp = normalizedApp
+	}
+	if err := validateManagedAppDeployableImage(app); err != nil {
+		return err
+	}
+	app = s.appWithResolvedLaunchOverride(ctx, app)
+	app = s.Renderer.PrepareApp(app)
+	state.CandidateApp = app
+	revision := safeRolloutCandidateRevision(state.Candidate.ID)
+	objects := s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, postgresPlacements, nil, revision)
+	if err := client.applyObjects(ctx, objects); err != nil {
+		return fmt.Errorf("apply candidate revision objects: %w", err)
+	}
+	if err := client.replaceObjectSpecsByKind(ctx, objects, "apps/v1", "Deployment"); err != nil {
+		return fmt.Errorf("replace candidate revision deployment spec: %w", err)
+	}
+	s.recordSafeRolloutReleaseStep(op, app, "candidate_apply", model.ReleaseStepStatusCompleted, "candidate revision desired state applied", state.Candidate.ID, map[string]any{
+		"deployment_name": runtime.RuntimeAppResourceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision}),
+		"service_name":    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision}),
+	})
+	return nil
+}
+
 func (s *Service) releaseGateEvaluator() releaseflow.ReleaseGateEvaluator {
-	return releaseflow.ReleaseGateEvaluator{}
+	return releaseflow.ReleaseGateEvaluator{
+		MetricsQuerier: s.releaseGateMetricsQuerier,
+		HTTPClient:     s.releaseGateHTTPClient,
+	}
+}
+
+func (s *Service) controllerServiceURLForApp(ctx context.Context, app model.App) string {
+	if s != nil && s.serviceURLForApp != nil {
+		if url := strings.TrimSpace(s.serviceURLForApp(ctx, app)); url != "" {
+			return url
+		}
+	}
+	return controllerServiceURLForApp(app)
+}
+
+func (s *Service) controllerRevisionServiceURLForApp(ctx context.Context, app model.App, revision runtime.AppRevisionRenderOptions) string {
+	if s != nil && s.serviceURLForApp != nil {
+		if url := strings.TrimSpace(s.serviceURLForApp(ctx, app)); url != "" {
+			return url
+		}
+	}
+	return s.Renderer.AppRevisionServiceURL(app, revision)
 }
 
 func controllerServiceURLForApp(app model.App) string {
@@ -171,6 +337,129 @@ func controllerServiceURLForApp(app model.App) string {
 		port = app.Spec.Ports[0]
 	}
 	return "http://" + runtime.RuntimeAppServiceName(app) + "." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local:" + strconv.Itoa(port)
+}
+
+func controllerReleaseGateMetricsQuerier(cfg config.ControllerConfig) releaseflow.ReleaseGateMetricsQuerier {
+	cfg.Observability = cfg.Observability.Normalize()
+	if strings.TrimSpace(cfg.Observability.ClickHouseDSN) == "" {
+		return nil
+	}
+	return releaseflow.ClickHouseReleaseGateMetricsQuerier{
+		DSN:             cfg.Observability.ClickHouseDSN,
+		MaxPayloadBytes: cfg.Observability.ClickHouseQueryMaxPayloadBytes,
+	}
+}
+
+func (s *Service) safeRolloutPlanForApp(app model.App) safeRolloutPlan {
+	policy := releaseflow.ReleaseGateEvaluator{}.NormalizePolicy(nil)
+	canary := model.AppRolloutCanarySpec{Enabled: false, InitialWeight: 0, MaxWeight: 100}
+	if continuity := model.NormalizeAppContinuityPolicy(app.Spec.Continuity); continuity != nil && continuity.ZeroDowntime != nil {
+		if continuity.ZeroDowntime.Gate != nil {
+			policy = releaseflow.ReleaseGateEvaluator{}.NormalizePolicy(continuity.ZeroDowntime.Gate)
+		}
+		if continuity.ZeroDowntime.Canary != nil {
+			canary = *continuity.ZeroDowntime.Canary
+		}
+	}
+	return safeRolloutPlan{Gate: policy, Canary: canary, CanarySteps: safeRolloutCanarySteps(canary)}
+}
+
+func safeRolloutCanarySteps(canary model.AppRolloutCanarySpec) []int {
+	if !canary.Enabled {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	steps := []int{}
+	add := func(weight int) {
+		if weight < 0 {
+			weight = 0
+		}
+		if canary.MaxWeight > 0 && weight > canary.MaxWeight {
+			weight = canary.MaxWeight
+		}
+		if weight > 100 {
+			weight = 100
+		}
+		if _, ok := seen[weight]; ok {
+			return
+		}
+		seen[weight] = struct{}{}
+		steps = append(steps, weight)
+	}
+	add(canary.InitialWeight)
+	for _, weight := range canary.StepWeights {
+		add(weight)
+	}
+	sort.Ints(steps)
+	return steps
+}
+
+func (s *Service) sleepSafeRolloutObservation(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	if s != nil && s.safeRolloutSleep != nil {
+		return s.safeRolloutSleep(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (s *Service) recordSafeRolloutGateFailureEvidence(op model.Operation, app model.App, release model.AppRelease, gate model.AppReleaseGateResult, summary string) string {
+	message := strings.Join(gate.Failures, "; ")
+	if message == "" {
+		message = "release gate failed"
+	}
+	return s.recordOperationEvidenceBestEffort(model.OperationEvidence{
+		TenantID:        app.TenantID,
+		ProjectID:       app.ProjectID,
+		AppID:           app.ID,
+		OperationID:     op.ID,
+		Type:            model.OperationEvidenceTypeAppReleaseGateFailure,
+		Source:          model.OperationEvidenceSourceController,
+		Severity:        model.OperationEvidenceSeverityError,
+		Confidence:      model.OperationEvidenceConfidenceEvidenceBacked,
+		SubjectKind:     "app_release",
+		SubjectName:     release.ID,
+		Summary:         strings.TrimSpace(summary),
+		Message:         message,
+		RedactionStatus: model.OperationEvidenceRedactionRedacted,
+		Payload: map[string]any{
+			"release_id":   release.ID,
+			"release_role": release.Role,
+			"gate":         gate,
+		},
+	})
+}
+
+func (s *Service) appendSafeRolloutAuditEvent(app model.App, action, releaseID string, metadata map[string]string) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	metadata["app_id"] = app.ID
+	if releaseID != "" {
+		metadata["app_release_id"] = releaseID
+	}
+	if err := s.Store.AppendAuditEvent(model.AuditEvent{
+		TenantID:   app.TenantID,
+		ActorType:  model.ActorTypeSystem,
+		ActorID:    "safe-rollout-controller",
+		Action:     strings.TrimSpace(action),
+		TargetType: "app_release",
+		TargetID:   releaseID,
+		Metadata:   metadata,
+	}); err != nil && s.Logger != nil {
+		s.Logger.Printf("append safe rollout audit event failed app=%s release=%s action=%s: %v", app.ID, releaseID, action, err)
+	}
 }
 
 func (s *Service) recordSafeRolloutReleaseStep(op model.Operation, app model.App, phase, status, summary, releaseID string, payload map[string]any) {

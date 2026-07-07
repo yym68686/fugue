@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -18,6 +19,9 @@ type appReleaseCreateCLIRequest struct {
 	ServiceName      string         `json:"service_name,omitempty"`
 	Status           string         `json:"status,omitempty"`
 	StatusReason     string         `json:"status_reason,omitempty"`
+	RollbackTargetID string         `json:"rollback_target_release_id,omitempty"`
+	ReleaseMessage   string         `json:"release_message,omitempty"`
+	RetentionUntil   *time.Time     `json:"retention_until,omitempty"`
 	SpecSnapshot     *model.AppSpec `json:"spec_snapshot,omitempty"`
 }
 

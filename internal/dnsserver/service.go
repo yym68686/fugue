@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"log"
 	"net"
@@ -26,6 +25,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 )
 
 const cacheFileVersion = 1
@@ -1832,19 +1832,19 @@ func edgeDNSMaybePromoteExploration(record model.EdgeDNSRecord, policy model.DNS
 	if len(candidates) <= 1 {
 		return candidates
 	}
-	hash, ok := edgeDNSExplorationHash(record, policy, hint, now)
+	seed, ok := edgeDNSExplorationSeed(record, policy, hint, now)
 	if !ok {
 		return candidates
 	}
 	percent := edgeDNSExplorationPercent(policy)
-	if int(hash%100) >= percent {
+	if releaseflow.WeightedBucket(seed, 100) >= percent {
 		return candidates
 	}
 	rest := len(candidates) - 1
 	if rest <= 0 {
 		return candidates
 	}
-	index := 1 + int((hash/100)%uint64(rest))
+	index := 1 + releaseflow.WeightedBucket(seed+"|cross-group", rest)
 	if index <= 0 || index >= len(candidates) {
 		return candidates
 	}
@@ -1872,15 +1872,15 @@ func edgeDNSMaybePromoteNodeExploration(record model.EdgeDNSRecord, policy model
 	if len(siblingIndexes) == 0 {
 		return candidates, false
 	}
-	hash, ok := edgeDNSExplorationHash(record, policy, hint, now)
+	seed, ok := edgeDNSExplorationSeed(record, policy, hint, now)
 	if !ok {
 		return candidates, false
 	}
 	percent := edgeDNSExplorationPercent(policy)
-	if int(hash%100) >= percent {
+	if releaseflow.WeightedBucket(seed, 100) >= percent {
 		return candidates, false
 	}
-	index := siblingIndexes[int((hash/100)%uint64(len(siblingIndexes)))]
+	index := siblingIndexes[releaseflow.WeightedBucket(seed+"|same-group", len(siblingIndexes))]
 	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
 	explorer := out[index]
 	copy(out[1:index+1], out[0:index])
@@ -1888,13 +1888,13 @@ func edgeDNSMaybePromoteNodeExploration(record model.EdgeDNSRecord, policy model
 	return out, true
 }
 
-func edgeDNSExplorationHash(record model.EdgeDNSRecord, policy model.DNSAnswerPolicy, hint dnsGeoHint, now time.Time) (uint64, bool) {
+func edgeDNSExplorationSeed(record model.EdgeDNSRecord, policy model.DNSAnswerPolicy, hint dnsGeoHint, now time.Time) (string, bool) {
 	switch strings.TrimSpace(policy.PolicyKind) {
 	case model.DNSAnswerPolicyKindDisabled, model.DNSAnswerPolicyKindPinned:
-		return 0, false
+		return "", false
 	}
 	if edgeDNSExplorationPercent(policy) <= 0 {
-		return 0, false
+		return "", false
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -1907,9 +1907,7 @@ func edgeDNSExplorationHash(record model.EdgeDNSRecord, policy model.DNSAnswerPo
 		scope,
 		strconv.FormatInt(bucket, 10),
 	}, "|")
-	hash := fnv.New64a()
-	_, _ = hash.Write([]byte(seed))
-	return hash.Sum64(), true
+	return seed, true
 }
 
 func edgeDNSExplorationPercent(policy model.DNSAnswerPolicy) int {

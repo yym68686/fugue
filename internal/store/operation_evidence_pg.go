@@ -767,6 +767,7 @@ func operationEvidenceCaptureMetricTypes() []string {
 		model.OperationEvidenceTypeReadinessProbeFailure,
 		model.OperationEvidenceTypeLivenessProbeFailure,
 		model.OperationEvidenceTypeStartupProbeFailure,
+		model.OperationEvidenceTypeAppReleaseGateFailure,
 	}
 }
 

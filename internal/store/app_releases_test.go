@@ -63,6 +63,43 @@ func TestAppReleaseTrafficPolicyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestListAppReleasesActiveOnlyFiltersRoutingReleases(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newAppImageTrackingTestStore(t)
+	active := []model.AppRelease{
+		{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing},
+		{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusReady},
+		{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining},
+	}
+	for _, release := range active {
+		if _, err := s.CreateAppRelease(release); err != nil {
+			t.Fatalf("create active release: %v", err)
+		}
+	}
+	inactive := []model.AppRelease{
+		{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleCandidate, Status: model.AppReleaseStatusFailed},
+		{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired},
+	}
+	for _, release := range inactive {
+		if _, err := s.CreateAppRelease(release); err != nil {
+			t.Fatalf("create inactive release: %v", err)
+		}
+	}
+	listed, err := s.ListAppReleases(model.AppReleaseFilter{TenantID: tenant.ID, AppID: app.ID, ActiveOnly: true})
+	if err != nil {
+		t.Fatalf("list active releases: %v", err)
+	}
+	if len(listed) != len(active) {
+		t.Fatalf("expected %d active releases, got %+v", len(active), listed)
+	}
+	for _, release := range listed {
+		if !appReleaseActiveForTest(release) {
+			t.Fatalf("listed inactive release with active filter: %+v", release)
+		}
+	}
+}
+
 func TestAppTrafficPolicyRejectsInvalidWeights(t *testing.T) {
 	t.Parallel()
 
@@ -313,5 +350,19 @@ func TestCompletedDeployDoesNotAutoSyncStableReleaseForSafeZeroDowntimeApp(t *te
 	}
 	if len(releases) != 1 {
 		t.Fatalf("expected no implicit stable sync release for safe mode, got %+v", releases)
+	}
+}
+
+func appReleaseActiveForTest(release model.AppRelease) bool {
+	switch release.Role {
+	case model.AppReleaseRoleStable, model.AppReleaseRoleCandidate, model.AppReleaseRolePrevious:
+	default:
+		return false
+	}
+	switch release.Status {
+	case model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
+		return true
+	default:
+		return false
 	}
 }

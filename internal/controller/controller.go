@@ -12,6 +12,7 @@ import (
 	"fugue/internal/appimages"
 	"fugue/internal/config"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
@@ -33,6 +34,10 @@ type Service struct {
 	readRegistryMaintenance         func(context.Context) registryMaintenanceStatus
 	resolveManagedImageDigestRef    func(context.Context, string) (string, error)
 	resolveRemoteImageDigest        func(context.Context, string) (string, error)
+	releaseGateMetricsQuerier       releaseflow.ReleaseGateMetricsQuerier
+	releaseGateHTTPClient           releaseflow.HTTPDoer
+	safeRolloutSleep                func(context.Context, time.Duration) error
+	serviceURLForApp                func(context.Context, model.App) string
 	syncBillingImageStorage         bool
 	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	newKubeClient                   func(namespace string) (*kubeClient, error)
@@ -115,6 +120,7 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		builderRegistryPushBase:      strings.TrimSpace(cfg.BuilderRegistryPushBase),
 		resolveManagedImageDigestRef: sourceimport.ResolveRemoteImageDigestRef,
 		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
+		releaseGateMetricsQuerier:    controllerReleaseGateMetricsQuerier(cfg),
 		latestGitHubCommit:           sourceimport.LatestGitHubCommit,
 		newKubeClient:                newKubeClient,
 		now:                          time.Now,
@@ -933,14 +939,26 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				timer.Mark("capacity_preflight")
 			}
 			applyCtx := withManagedAppApplySource(ctx, managedAppApplySourceOperation, op.ID)
-			if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
+			if safeRollout != nil {
+				if err := s.applySafeZeroDowntimeCandidateRevision(applyCtx, op, safeRollout, scheduling, postgresPlacements); err != nil {
+					if rollbackErr := s.abortSafeZeroDowntimeRollout(ctx, op, safeRollout, err.Error()); rollbackErr != nil {
+						return fmt.Errorf("apply safe rollout candidate revision %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
+					}
+					return fmt.Errorf("apply safe rollout candidate revision %s: %w", app.ID, err)
+				}
+			} else if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
 				return fmt.Errorf("apply managed app desired state %s: %w", app.ID, err)
 			}
 			timer.Mark("apply_desired_state")
 			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 				s.markReleaseAttemptRolloutWaiting(op, app)
 			}
-			rolloutResult := s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
+			var rolloutResult releaseflow.RolloutReadinessResult
+			if safeRollout != nil {
+				rolloutResult = s.waitForManagedAppRevisionRolloutResultWithScheduling(ctx, app, op.ID, scheduling, safeRolloutCandidateRevision(safeRollout.Candidate.ID))
+			} else {
+				rolloutResult = s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
+			}
 			s.recordRolloutReadinessResultStep(op, app, rolloutResult)
 			if err := rolloutResult.Error(); err != nil {
 				if safeRollout != nil {
@@ -952,6 +970,16 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			}
 			if err := s.completeSafeZeroDowntimeRollout(ctx, op, safeRollout); err != nil {
 				return err
+			}
+			if safeRollout != nil {
+				if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
+					return fmt.Errorf("align managed app desired state after safe rollout %s: %w", app.ID, err)
+				}
+				alignmentResult := s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
+				s.recordRolloutReadinessResultStep(op, app, alignmentResult)
+				if err := alignmentResult.Error(); err != nil {
+					return fmt.Errorf("wait for managed app alignment after safe rollout %s: %w", app.ID, err)
+				}
 			}
 			timer.Mark("rollout_wait")
 		}

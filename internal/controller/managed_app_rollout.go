@@ -59,6 +59,131 @@ func (s *Service) waitForManagedAppRolloutResultWithScheduling(
 	return result
 }
 
+func (s *Service) waitForManagedAppRevisionRolloutResultWithScheduling(
+	ctx context.Context,
+	app model.App,
+	operationID string,
+	scheduling runtime.SchedulingConstraints,
+	revision runtime.AppRevisionRenderOptions,
+) releaseflow.RolloutReadinessResult {
+	app = s.Renderer.PrepareApp(app)
+	expectedDeployment, found := s.expectedManagedAppRevisionDeployment(app, scheduling, revision)
+	expectedName := strings.TrimSpace(expectedDeployment.Metadata.Name)
+	result := releaseflow.RolloutReadinessResult{
+		AppID:              app.ID,
+		OperationID:        operationID,
+		ExpectedReleaseKey: deploymentReleaseKey(expectedDeployment),
+		Phase:              "candidate_rollout_wait",
+	}
+	if !found {
+		result.Err = fmt.Errorf("candidate revision deployment was not rendered")
+		result.Message = result.Err.Error()
+		return result
+	}
+	err := s.waitForManagedAppRevisionRolloutErrorWithScheduling(ctx, app, operationID, scheduling, revision, expectedDeployment)
+	if err != nil {
+		result.Err = err
+		result.Message = err.Error()
+		result.Phase = rolloutReadinessFailurePhase(err)
+		if result.Phase == "rollout_wait" {
+			result.Phase = "candidate_rollout_wait"
+		}
+		result.SchedulingReason = rolloutReadinessSchedulingReason(err)
+		result.PodFailureReason = rolloutReadinessPodFailureReason(err)
+		return result
+	}
+	result.Ready = true
+	result.Phase = "candidate_ready"
+	result.Message = "candidate revision rollout ready"
+	if result.ExpectedReleaseKey == "" {
+		result.ExpectedReleaseKey = expectedName
+	}
+	return result
+}
+
+func (s *Service) waitForManagedAppRevisionRolloutErrorWithScheduling(
+	ctx context.Context,
+	app model.App,
+	operationID string,
+	scheduling runtime.SchedulingConstraints,
+	revision runtime.AppRevisionRenderOptions,
+	expectedDeployment kubeDeployment,
+) error {
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes candidate revision rollout client: %w", err)
+	}
+	app = s.Renderer.PrepareApp(app)
+	expectedName := strings.TrimSpace(expectedDeployment.Metadata.Name)
+	expectedReleaseKey := deploymentReleaseKey(expectedDeployment)
+	expectedImage := strings.TrimSpace(app.Spec.Image)
+	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
+	defer cancel()
+
+	interval := 2 * time.Second
+	if s.Config.PollInterval > interval {
+		interval = s.Config.PollInterval
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	lastMessage := ""
+	waitForNextSignal := func(targets []kubeWatchTarget) error {
+		if err := client.waitForAnyObjectEvent(waitCtx, targets, interval); err != nil {
+			if lastMessage != "" {
+				return fmt.Errorf("wait for candidate revision deployment rollout %s/%s: %w (%s)", namespace, expectedName, err, lastMessage)
+			}
+			return fmt.Errorf("wait for candidate revision deployment rollout %s/%s: %w", namespace, expectedName, err)
+		}
+		return nil
+	}
+	for {
+		if strings.TrimSpace(operationID) != "" {
+			if err := s.ensureOperationStillActive(operationID); err != nil {
+				return err
+			}
+		}
+		deployment, found, err := client.getDeployment(waitCtx, namespace, expectedName)
+		if err != nil {
+			return fmt.Errorf("read candidate revision deployment rollout for %s/%s: %w", namespace, expectedName, err)
+		}
+		ready, message, err := deploymentRolloutReady(deployment, found, app.Spec.Replicas, expectedName, expectedReleaseKey, expectedImage)
+		if err != nil {
+			return err
+		}
+		watchTargets := rolloutWatchTargets(namespace, expectedName, deployment, found)
+		if found && app.Spec.Replicas > 0 && deploymentTargetsExpectedRollout(deployment, expectedReleaseKey, expectedImage) {
+			pods, err := client.listPodsBySelector(waitCtx, namespace, managedAppRevisionPodLabelSelector(app, revision))
+			if err != nil {
+				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
+					return fmt.Errorf("list candidate revision pods for %s/%s: %w", namespace, expectedName, err)
+				}
+				pods = nil
+			}
+			if len(pods) > 0 {
+				watchTargets = append(watchTargets, managedAppRevisionPodRolloutWatchTargets(namespace, app, revision)...)
+				if failureMessage := deploymentTemplatePodFailureMessage(pods, deployment); failureMessage != "" {
+					primaryEvidenceID := s.captureDeploymentRolloutFailureEvidence(waitCtx, client, app, operationID, namespace, deployment, pods, failureMessage)
+					if strings.TrimSpace(primaryEvidenceID) != "" {
+						failureMessage = fmt.Sprintf("%s (primary_evidence_id=%s)", failureMessage, primaryEvidenceID)
+					}
+					return fmt.Errorf("candidate revision %s/%s rollout failed: %s", namespace, expectedName, failureMessage)
+				}
+				if blockingMessage := deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
+					message = blockingMessage
+				}
+			}
+		}
+		if ready {
+			return nil
+		}
+		if strings.TrimSpace(message) != "" {
+			lastMessage = strings.TrimSpace(message)
+		}
+		if err := waitForNextSignal(watchTargets); err != nil {
+			return err
+		}
+	}
+}
+
 func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 	ctx context.Context,
 	app model.App,
@@ -285,6 +410,18 @@ func managedAppRolloutWatchTargets(namespace, name string, managed runtime.Manag
 
 func managedAppPodRolloutWatchTargets(namespace string, app model.App) []kubeWatchTarget {
 	selector := strings.TrimSpace(managedAppPodLabelSelector(app))
+	if selector == "" {
+		return nil
+	}
+	query := url.Values{}
+	query.Set("labelSelector", selector)
+	return []kubeWatchTarget{{
+		apiPath: "/api/v1/namespaces/" + url.PathEscape(strings.TrimSpace(namespace)) + "/pods?" + query.Encode(),
+	}}
+}
+
+func managedAppRevisionPodRolloutWatchTargets(namespace string, app model.App, revision runtime.AppRevisionRenderOptions) []kubeWatchTarget {
+	selector := strings.TrimSpace(managedAppRevisionPodLabelSelector(app, revision))
 	if selector == "" {
 		return nil
 	}
@@ -683,6 +820,24 @@ func expectedManagedAppDeployment(app model.App, scheduling runtime.SchedulingCo
 
 func (s *Service) expectedManagedAppDeployment(app model.App, scheduling runtime.SchedulingConstraints) (kubeDeployment, bool) {
 	for _, object := range s.Renderer.BuildManagedAppChildObjects(app, scheduling, nil) {
+		if !strings.EqualFold(strings.TrimSpace(objectStringField(object, "kind")), "Deployment") {
+			continue
+		}
+		data, err := json.Marshal(object)
+		if err != nil {
+			return kubeDeployment{}, false
+		}
+		var deployment kubeDeployment
+		if err := json.Unmarshal(data, &deployment); err != nil {
+			return kubeDeployment{}, false
+		}
+		return deployment, true
+	}
+	return kubeDeployment{}, false
+}
+
+func (s *Service) expectedManagedAppRevisionDeployment(app model.App, scheduling runtime.SchedulingConstraints, revision runtime.AppRevisionRenderOptions) (kubeDeployment, bool) {
+	for _, object := range s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, nil, nil, revision) {
 		if !strings.EqualFold(strings.TrimSpace(objectStringField(object, "kind")), "Deployment") {
 			continue
 		}

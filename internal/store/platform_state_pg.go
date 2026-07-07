@@ -215,24 +215,24 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
-	release := buildPlatformArtifactRelease(artifact, channel, "", req.CanaryRuleRef, req.Reason, principal, now)
+	entry := buildPlatformArtifactReleaseLedgerEntry(artifact, channel, "", req.CanaryRuleRef, req.Reason, model.PlatformReleaseMessageTypeRelease, principal, now)
+	release := entry.Release
 	if err := pgSupersedePlatformReleases(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if _, err := pgInsertPlatformArtifactRelease(ctx, tx, release); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	message := buildPlatformReleaseMessage(artifact, release, model.PlatformReleaseMessageTypeRelease, now)
+	message := entry.Message
 	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	var lkg *model.PlatformLKGSnapshot
-	if channel == model.PlatformArtifactReleaseChannelFull {
-		snapshot := buildPlatformLKGSnapshot(artifact, now)
-		if _, err := pgUpsertPlatformLKGSnapshot(ctx, tx, snapshot); err != nil {
+	if entry.LKG != nil {
+		if _, err := pgUpsertPlatformLKGSnapshot(ctx, tx, *entry.LKG); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
-		lkg = &snapshot
+		lkg = entry.LKG
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -261,24 +261,24 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
-	release := buildPlatformArtifactRelease(target, channel, current.Generation, req.CanaryRuleRef, req.Reason, principal, now)
+	entry := buildPlatformArtifactReleaseLedgerEntry(target, channel, current.Generation, req.CanaryRuleRef, req.Reason, model.PlatformReleaseMessageTypeRollback, principal, now)
+	release := entry.Release
 	if err := pgSupersedePlatformReleases(ctx, tx, target.ArtifactKind, target.ScopeKey, channel, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if _, err := pgInsertPlatformArtifactRelease(ctx, tx, release); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	message := buildPlatformReleaseMessage(target, release, model.PlatformReleaseMessageTypeRollback, now)
+	message := entry.Message
 	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	var lkg *model.PlatformLKGSnapshot
-	if channel == model.PlatformArtifactReleaseChannelFull {
-		snapshot := buildPlatformLKGSnapshot(target, now)
-		if _, err := pgUpsertPlatformLKGSnapshot(ctx, tx, snapshot); err != nil {
+	if entry.LKG != nil {
+		if _, err := pgUpsertPlatformLKGSnapshot(ctx, tx, *entry.LKG); err != nil {
 			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 		}
-		lkg = &snapshot
+		lkg = entry.LKG
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err

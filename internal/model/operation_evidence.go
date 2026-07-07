@@ -60,6 +60,7 @@ const (
 	OperationEvidenceTypeMigrationCompleted          = "migration_completed"
 	OperationEvidenceTypeMigrationFailed             = "migration_failed"
 	OperationEvidenceTypeMigrationSchemaVersionFound = "migration_schema_version_observed"
+	OperationEvidenceTypeAppReleaseGateFailure       = "app_release_gate_failure"
 
 	ReleaseAttemptTriggerManualDeploy            = "manual_deploy"
 	ReleaseAttemptTriggerManualRestart           = "manual_restart"

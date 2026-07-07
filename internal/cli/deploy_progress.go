@@ -118,6 +118,7 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 			} else if len(currentApps) > 0 {
 				bundle.PrimaryApp = currentApps[0]
 			}
+			c.progressSafeRolloutPhasesForDeploy(client, currentApps, currentOps)
 			diagnosis, err := c.buildImportBundleDiagnosis(client, bundle.PrimaryApp)
 			if err != nil {
 				if isTransientDeployWaitError(err) {
@@ -131,6 +132,80 @@ func (c *CLI) waitForImportBundle(client *Client, bundle importBundle) (importBu
 		}
 
 		sleepDeployWaitPoll()
+	}
+}
+
+func (c *CLI) progressSafeRolloutPhasesForDeploy(client *Client, apps []model.App, operations []model.Operation) {
+	if client == nil {
+		return
+	}
+	appsByID := map[string]model.App{}
+	for _, app := range apps {
+		if strings.TrimSpace(app.ID) != "" {
+			appsByID[app.ID] = app
+		}
+	}
+	for _, op := range operations {
+		if !strings.EqualFold(strings.TrimSpace(op.Type), model.OperationTypeDeploy) || strings.TrimSpace(op.AppID) == "" {
+			continue
+		}
+		app, ok := appsByID[op.AppID]
+		if !ok || !model.AppSafeZeroDowntimeRolloutEnabled(app.Spec) {
+			continue
+		}
+		c.progressReleaseAttemptPhases(client, op.AppID, op.ID)
+	}
+}
+
+func (c *CLI) progressReleaseAttemptPhases(client *Client, appID, operationID string) {
+	if client == nil || strings.TrimSpace(appID) == "" || strings.TrimSpace(operationID) == "" {
+		return
+	}
+	attempts, err := client.ListAppReleaseAttempts(appID)
+	if err != nil {
+		return
+	}
+	for _, attempt := range attempts {
+		if strings.TrimSpace(attempt.SourceOperationID) != operationID &&
+			strings.TrimSpace(attempt.RootOperationID) != operationID &&
+			strings.TrimSpace(attempt.FailureOperationID) != operationID {
+			continue
+		}
+		c.progressf("release_attempt_id=%s release_attempt_status=%s", attempt.ID, attempt.Status)
+		timeline, err := client.GetAppReleaseAttemptTimeline(appID, attempt.ID)
+		if err != nil {
+			return
+		}
+		for _, entry := range timeline {
+			if entry.Type != model.ReleaseStepTypeHealthCheck {
+				continue
+			}
+			phase, _ := entry.Payload["phase"].(string)
+			if !cliSafeRolloutPhase(phase) {
+				continue
+			}
+			evidenceID := strings.TrimSpace(entry.EvidenceID)
+			if evidenceID == "" {
+				if value, ok := entry.Payload["evidence_id"].(string); ok {
+					evidenceID = strings.TrimSpace(value)
+				}
+			}
+			if evidenceID != "" {
+				c.progressf("safe_rollout_phase=%s status=%s evidence_id=%s summary=%s", strings.TrimSpace(phase), strings.TrimSpace(entry.Status), evidenceID, strings.TrimSpace(entry.Summary))
+			} else {
+				c.progressf("safe_rollout_phase=%s status=%s summary=%s", strings.TrimSpace(phase), strings.TrimSpace(entry.Status), strings.TrimSpace(entry.Summary))
+			}
+		}
+		return
+	}
+}
+
+func cliSafeRolloutPhase(phase string) bool {
+	switch strings.TrimSpace(phase) {
+	case "candidate_create", "candidate_ready", "gate_check", "canary_shift", "canary_gate", "final_gate", "promote", "abort", "restore_previous":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -22,8 +22,16 @@ func TestAppReleaseServicePromoteReplacesStable(t *testing.T) {
 		t.Fatalf("init store: %v", err)
 	}
 	app := releaseflowTestApp()
+	app.Spec.Continuity = &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+		Enabled:               true,
+		Mode:                  model.AppZeroDowntimeModeSafe,
+		Strategy:              model.AppZeroDowntimeStrategyStableCandidate,
+		RollbackWindowSeconds: 300,
+	}}
+	now := time.Unix(1000, 0).UTC()
 	service := AppReleaseService{
 		Store: stateStore,
+		Now:   func() time.Time { return now },
 		ServiceURLForApp: func(context.Context, model.App) string {
 			return "http://stable.internal:8080"
 		},
@@ -63,8 +71,14 @@ func TestAppReleaseServicePromoteReplacesStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get old stable: %v", err)
 	}
-	if updatedStable.Role != model.AppReleaseRolePrevious {
+	if updatedStable.Role != model.AppReleaseRolePrevious || updatedStable.Status != model.AppReleaseStatusDraining {
 		t.Fatalf("expected old stable previous, got %+v", updatedStable)
+	}
+	if updatedStable.RetentionUntil == nil || !updatedStable.RetentionUntil.Equal(now.Add(300*time.Second)) {
+		t.Fatalf("expected old stable retention window, got %+v", updatedStable.RetentionUntil)
+	}
+	if updatedCandidate.RollbackTargetID != stable.ID || updatedCandidate.ReleaseMessage == "" {
+		t.Fatalf("expected promoted candidate to remember rollback target, got %+v", updatedCandidate)
 	}
 }
 
@@ -180,6 +194,92 @@ func TestReleaseGateEvaluatorFailsOnMetricsAndProbe(t *testing.T) {
 	for _, want := range []string{"below minimum", "5xx rate", "edge upstream error rate", "p95 ttfb", "p99 duration", "probe health failed"} {
 		if !releaseflowStringsContain(gate.Failures, want) {
 			t.Fatalf("expected gate failures to contain %q, got %+v", want, gate.Failures)
+		}
+	}
+}
+
+func TestClickHouseReleaseGateMetricsQuerierUsesRollupReleaseID(t *testing.T) {
+	t.Parallel()
+
+	var query string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"request_count":4,"error_5xx_count":1,"edge_upstream_error_count":0,"p95_ttfb_ms":120,"p99_duration_ms":350}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+
+	querier := ClickHouseReleaseGateMetricsQuerier{
+		DSN: clickHouse.URL + "?database=fugue_observability",
+		Now: func() time.Time {
+			return time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+		},
+	}
+	metrics, err := querier.QueryReleaseGateMetrics(context.Background(), "app_demo", "rel_candidate", model.AppReleaseRoleCandidate, time.Minute)
+	if err != nil {
+		t.Fatalf("query release gate metrics: %v", err)
+	}
+	if FloatMetric(metrics, "request_count") != 4 || FloatMetric(metrics, "error_5xx_rate") != 0.25 {
+		t.Fatalf("unexpected metrics: %+v", metrics)
+	}
+	if metrics["metrics_source"] != "release_gate_rollups_1m" {
+		t.Fatalf("expected rollup metrics source, got %+v", metrics)
+	}
+	for _, want := range []string{
+		"FROM release_gate_rollups_1m",
+		"app_id = 'app_demo'",
+		"release_id = 'rel_candidate'",
+		"toDateTime64('2026-07-07 11:59:00.000', 3, 'UTC')",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("expected query to contain %q, got %q", want, query)
+		}
+	}
+	if strings.Contains(query, "release_role") {
+		t.Fatalf("expected release id to take precedence over role, got %q", query)
+	}
+}
+
+func TestClickHouseReleaseGateMetricsQuerierFallsBackToRawFacts(t *testing.T) {
+	t.Parallel()
+
+	var queries []string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		queries = append(queries, query)
+		if strings.Contains(query, "FROM release_gate_rollups_1m") {
+			_, _ = w.Write([]byte(`{"request_count":0,"error_5xx_count":0,"edge_upstream_error_count":0,"p95_ttfb_ms":0,"p99_duration_ms":0}` + "\n"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"request_count":4,"error_5xx_count":1,"edge_upstream_error_count":0,"p95_ttfb_ms":120,"p99_duration_ms":350}` + "\n"))
+	}))
+	t.Cleanup(clickHouse.Close)
+
+	querier := ClickHouseReleaseGateMetricsQuerier{
+		DSN: clickHouse.URL + "?database=fugue_observability",
+		Now: func() time.Time {
+			return time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+		},
+	}
+	metrics, err := querier.QueryReleaseGateMetrics(context.Background(), "app_demo", "rel_candidate", model.AppReleaseRoleCandidate, time.Minute)
+	if err != nil {
+		t.Fatalf("query release gate metrics: %v", err)
+	}
+	if FloatMetric(metrics, "request_count") != 4 || FloatMetric(metrics, "error_5xx_rate") != 0.25 {
+		t.Fatalf("unexpected metrics: %+v", metrics)
+	}
+	if metrics["metrics_source"] != "request_facts" {
+		t.Fatalf("expected raw metrics source, got %+v", metrics)
+	}
+	if len(queries) != 2 || !strings.Contains(queries[0], "FROM release_gate_rollups_1m") || !strings.Contains(queries[1], "FROM request_facts") {
+		t.Fatalf("expected rollup query followed by raw fallback, got %+v", queries)
+	}
+	for _, want := range []string{
+		"app_id = 'app_demo'",
+		"JSONExtractString(summary_json, 'release_id') = 'rel_candidate'",
+		"toDateTime64('2026-07-07 11:59:00.000', 3, 'UTC')",
+	} {
+		if !strings.Contains(queries[1], want) {
+			t.Fatalf("expected raw query to contain %q, got %q", want, queries[1])
 		}
 	}
 }

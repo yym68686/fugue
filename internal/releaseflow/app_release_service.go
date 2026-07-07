@@ -37,6 +37,9 @@ type CreateReleaseRequest struct {
 	ServiceName      string
 	Status           string
 	StatusReason     string
+	RollbackTargetID string
+	ReleaseMessage   string
+	RetentionUntil   *time.Time
 	SpecSnapshot     *model.AppSpec
 }
 
@@ -154,6 +157,9 @@ func (s AppReleaseService) CreateRelease(ctx context.Context, app model.App, req
 		ServiceName:      strings.TrimSpace(req.ServiceName),
 		Status:           status,
 		StatusReason:     strings.TrimSpace(req.StatusReason),
+		RollbackTargetID: strings.TrimSpace(req.RollbackTargetID),
+		ReleaseMessage:   strings.TrimSpace(req.ReleaseMessage),
+		RetentionUntil:   req.RetentionUntil,
 		SpecSnapshot:     specSnapshot,
 		ReadyAt:          readyAt,
 	})
@@ -215,11 +221,18 @@ func (s AppReleaseService) PromoteRelease(ctx context.Context, principal model.P
 	if oldStableID != "" && oldStableID != release.ID {
 		if oldStable, err := s.Store.GetAppRelease(app.TenantID, true, oldStableID); err == nil {
 			oldStable.Role = model.AppReleaseRolePrevious
+			oldStable.Status = model.AppReleaseStatusDraining
+			oldStable.StatusReason = "superseded by release " + release.ID
+			oldStable.ReleaseMessage = "previous stable kept draining as rollback target"
+			oldStable.RetentionUntil = releaseRetentionUntil(app, now)
 			_, _ = s.Store.UpdateAppRelease(oldStable)
 		}
 	}
 	release.Role = model.AppReleaseRoleStable
 	release.Status = model.AppReleaseStatusServing
+	release.StatusReason = ""
+	release.RollbackTargetID = oldStableID
+	release.ReleaseMessage = "promoted to stable"
 	release.PromotedAt = &now
 	release.ReadyAt = FirstNonNilTime(release.ReadyAt, &now)
 	if _, err := s.Store.UpdateAppRelease(release); err != nil {
@@ -253,11 +266,25 @@ func (s AppReleaseService) AbortRelease(ctx context.Context, principal model.Pri
 	if markFailed {
 		release.Status = model.AppReleaseStatusFailed
 		release.StatusReason = strings.TrimSpace(reason)
+		release.ReleaseMessage = "aborted: " + strings.TrimSpace(reason)
 		if _, err := s.Store.UpdateAppRelease(release); err != nil {
 			return model.AppTrafficPolicy{}, err
 		}
 	}
 	return policy, nil
+}
+
+func (s AppReleaseService) RetireRelease(ctx context.Context, app model.App, release model.AppRelease, reason string) (model.AppRelease, error) {
+	if s.Store == nil {
+		return model.AppRelease{}, fmt.Errorf("app release store is nil")
+	}
+	now := s.now()
+	release.Role = model.AppReleaseRoleRetired
+	release.Status = model.AppReleaseStatusRetired
+	release.StatusReason = strings.TrimSpace(reason)
+	release.ReleaseMessage = "retired: " + strings.TrimSpace(reason)
+	release.RetiredAt = &now
+	return s.Store.UpdateAppRelease(release)
 }
 
 func (s AppReleaseService) RestoreStableTraffic(ctx context.Context, principal model.Principal, app model.App) (model.AppTrafficPolicy, error) {
@@ -324,4 +351,13 @@ func (s AppReleaseService) serviceURLForApp(ctx context.Context, app model.App) 
 		return s.ServiceURLForApp(ctx, app)
 	}
 	return ""
+}
+
+func releaseRetentionUntil(app model.App, now time.Time) *time.Time {
+	policy := model.NormalizeAppContinuityPolicy(app.Spec.Continuity)
+	if policy == nil || policy.ZeroDowntime == nil || policy.ZeroDowntime.RollbackWindowSeconds <= 0 {
+		return nil
+	}
+	until := now.Add(time.Duration(policy.ZeroDowntime.RollbackWindowSeconds) * time.Second)
+	return &until
 }

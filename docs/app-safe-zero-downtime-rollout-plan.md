@@ -871,18 +871,18 @@ Debug bundle 必须包含：
 - [x] controller 自动运行 active probe gate。
 - [x] gate fail 自动 abort candidate。
 - [x] gate pass 记录 audit event 和 release step。
-- [ ] gate failure 记录 evidence id。
+- [x] gate failure 记录 evidence id。
 - [x] 增加 default probe 可配置。
 - [x] 增加 probe timeout / TTFB / duration 测试。
 
 ### Traffic Canary
 
-- [ ] controller 可自动设置 candidate initial weight。
+- [x] controller 可自动设置 candidate initial weight。
 - [ ] controller 等待 edge route bundle 应用完成。
 - [x] request facts 必须记录 release id / release role。
-- [ ] controller 查询 candidate passive metrics。
-- [ ] canary pass 后按 step_weights 升权。
-- [ ] canary fail 后把 candidate weight 置 0。
+- [x] controller 查询 candidate passive metrics。
+- [x] canary pass 后按 step_weights 升权。
+- [x] canary fail 后把 candidate weight 置 0。
 - [x] candidate unavailable 时 edge route 必须 fail closed 到 stable。
 - [x] 增加 edge route bundle 回归测试。
 
@@ -893,9 +893,9 @@ Debug bundle 必须包含：
 - [x] runtime 渲染 candidate Deployment / Service。
 - [x] candidate revision labels 与 selector 独立。
 - [x] AppRelease.UpstreamURL 指向 revision service。
-- [ ] promote 后 role swap 不破坏现有 traffic policy。
-- [ ] previous stable 进入 draining 状态。
-- [ ] 清理 retired revision 时保留 rollback window。
+- [x] promote 后 role swap 不破坏现有 traffic policy。
+- [x] previous stable 进入 draining 状态。
+- [x] 清理 retired revision 时保留 rollback window。
 - [x] 对不支持双 revision 的存储类型 hard gate。
 
 ### Stable Drain / Retire
@@ -914,17 +914,17 @@ Debug bundle 必须包含：
 - [x] 实现 `fugue app continuity enable <app> --zero-downtime safe`。
 - [x] 实现 `fugue app continuity disable <app> --zero-downtime`。
 - [x] 实现 `fugue app continuity show <app>` safe rollout 字段。
-- [ ] 增强 `fugue app continuity audit <app>`。
-- [ ] `fugue app deploy --wait` 展示 safe rollout phases。
+- [x] 增强 `fugue app continuity audit <app>`。
+- [x] `fugue app deploy --wait` 展示 safe rollout phases。
 - [x] JSON 输出保持稳定字段并增加可选字段。
-- [ ] CLI failure 输出包含 gate reason、release id、evidence id。
+- [x] CLI failure 输出包含 gate reason、release id、evidence id。
 
 ### Observability / Debug Bundle
 
-- [ ] 增加 safe rollout metrics。
-- [ ] 增加 app release gate failure metrics。
-- [ ] 增加 app release abort / rollback metrics。
-- [ ] 增加 audit events。
+- [x] 增加 safe rollout metrics。
+- [x] 增加 app release gate failure metrics。
+- [x] 增加 app release abort / rollback metrics。
+- [x] 增加 audit events。
 - [x] debug bundle 包含 traffic policy snapshots。
 - [x] debug bundle 包含 stable/candidate release records。
 - [x] debug bundle 包含 probe results。
@@ -934,8 +934,8 @@ Debug bundle 必须包含：
 
 - [x] Unit test：policy validation。
 - [x] Unit test：safe mode 默认不改变未开启 app。
-- [ ] Unit test：candidate probe fail 自动 abort。
-- [ ] Unit test：canary metrics fail 自动 abort。
+- [x] Unit test：candidate probe fail 自动 abort。
+- [x] Unit test：canary metrics fail 自动 abort。
 - [x] Unit test：candidate unavailable 时 edge route fallback stable。
 - [ ] Unit test：rollout wait failure 自动 restore previous spec。
 - [ ] Integration test：stateless app safe rollout success。
@@ -946,11 +946,11 @@ Debug bundle 必须包含：
 
 ### Docs / Runbook
 
-- [ ] 更新 `docs/deploy.md` continuity 章节。
-- [ ] 新增 safe zero downtime rollout runbook。
-- [ ] 更新 zero downtime incident 文档，说明新语义覆盖哪些历史缺口。
-- [ ] 更新 release-phase hooks RFC，与 safe rollout phase 对齐。
-- [ ] 更新 CLI help 示例。
+- [x] 更新 `docs/deploy.md` continuity 章节。
+- [x] 新增 safe zero downtime rollout runbook。
+- [x] 更新 zero downtime incident 文档，说明新语义覆盖哪些历史缺口。
+- [x] 更新 release-phase hooks RFC，与 safe rollout phase 对齐。
+- [x] 更新 CLI help 示例。
 
 ### 发布
 

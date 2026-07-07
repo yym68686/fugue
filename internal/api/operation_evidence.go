@@ -114,7 +114,7 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		appPtr = &appCopy
 	}
 	trackingPtr, trackingChecks := s.appImageTrackingDebugBundleState(principal, appPtr)
-	metricsSummary := s.debugBundleMetricsSummary()
+	metricsSummary := s.debugBundleMetricsSummaryForApp(principal, op.AppID, queryBool(r, "include_global_summary"))
 	view := releaseflow.ReleaseEvidenceView{
 		Metadata: map[string]any{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
@@ -248,7 +248,7 @@ func (s *Server) handleGetAppReleaseAttemptDebugBundle(w http.ResponseWriter, r 
 		appPtr = &appCopy
 	}
 	trackingPtr, trackingChecks := s.appImageTrackingDebugBundleState(principal, appPtr)
-	metricsSummary := s.debugBundleMetricsSummary()
+	metricsSummary := s.debugBundleMetricsSummaryForApp(principal, attempt.AppID, queryBool(r, "include_global_summary"))
 	appReleases, trafficPolicies := s.releaseDebugSections(principal, attempt.AppID)
 	view := releaseflow.ReleaseEvidenceView{
 		Metadata: map[string]any{
@@ -278,10 +278,10 @@ func (s *Server) handleGetAppReleaseAttemptDebugBundle(w http.ResponseWriter, r 
 
 func (s *Server) releaseDebugSections(principal model.Principal, appID string) ([]model.AppRelease, []model.AppTrafficPolicy) {
 	appReleases, err := s.store.ListAppReleases(model.AppReleaseFilter{
-		TenantID:       principal.TenantID,
-		PlatformAdmin:  principal.IsPlatformAdmin(),
-		AppID:          appID,
-		IncludeRetired: true,
+		TenantID:      principal.TenantID,
+		PlatformAdmin: principal.IsPlatformAdmin(),
+		AppID:         appID,
+		ActiveOnly:    true,
 	})
 	if err != nil {
 		appReleases = nil
@@ -291,6 +291,96 @@ func (s *Server) releaseDebugSections(principal model.Principal, appID string) (
 		policies = append(policies, policy)
 	}
 	return appReleases, policies
+}
+
+func (s *Server) debugBundleMetricsSummaryForApp(principal model.Principal, appID string, includeGlobal bool) map[string]any {
+	appID = strings.TrimSpace(appID)
+	summary := map[string]any{
+		"scope":                  "app",
+		"app_id":                 appID,
+		"include_global_summary": includeGlobal,
+	}
+	if appID == "" {
+		summary["scope"] = "operation"
+	}
+	if appID != "" {
+		attempts, err := s.store.ListReleaseAttempts(model.ReleaseAttemptFilter{
+			TenantID:      principal.TenantID,
+			PlatformAdmin: principal.IsPlatformAdmin(),
+			AppID:         appID,
+			Limit:         500,
+		})
+		if err != nil {
+			summary["release_attempt_error"] = err.Error()
+		} else {
+			summary["release_attempt_count"] = len(attempts)
+			summary["release_attempts_by_status"] = releaseAttemptStatusSummary(attempts)
+		}
+		releases, err := s.store.ListAppReleases(model.AppReleaseFilter{
+			TenantID:      principal.TenantID,
+			PlatformAdmin: principal.IsPlatformAdmin(),
+			AppID:         appID,
+			ActiveOnly:    true,
+		})
+		if err != nil {
+			summary["app_release_error"] = err.Error()
+		} else {
+			summary["active_release_count"] = len(releases)
+			summary["active_releases_by_role"] = appReleaseRoleSummary(releases)
+		}
+	}
+	evidence, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{
+		TenantID:      principal.TenantID,
+		PlatformAdmin: principal.IsPlatformAdmin(),
+		AppID:         appID,
+		Limit:         1000,
+	})
+	if err != nil {
+		summary["operation_evidence_error"] = err.Error()
+	} else {
+		summary["operation_evidence_count"] = len(evidence)
+		summary["operation_evidence_by_type"] = operationEvidenceTypeSummary(evidence)
+	}
+	if includeGlobal {
+		summary["global"] = s.debugBundleMetricsSummary()
+	}
+	return summary
+}
+
+func releaseAttemptStatusSummary(attempts []model.ReleaseAttempt) map[string]int {
+	out := map[string]int{}
+	for _, attempt := range attempts {
+		key := strings.TrimSpace(attempt.Status)
+		if key == "" {
+			key = "unknown"
+		}
+		out[key]++
+	}
+	return out
+}
+
+func appReleaseRoleSummary(releases []model.AppRelease) map[string]int {
+	out := map[string]int{}
+	for _, release := range releases {
+		key := strings.TrimSpace(release.Role)
+		if key == "" {
+			key = "unknown"
+		}
+		out[key]++
+	}
+	return out
+}
+
+func operationEvidenceTypeSummary(evidence []model.OperationEvidence) map[string]int {
+	out := map[string]int{}
+	for _, item := range evidence {
+		key := strings.TrimSpace(item.Type)
+		if key == "" {
+			key = "unknown"
+		}
+		out[key]++
+	}
+	return out
 }
 
 func (s *Server) debugBundleMetricsSummary() map[string]any {

@@ -78,6 +78,7 @@ type ControllerConfig struct {
 	MetricsBindAddr                            string
 	StorePath                                  string
 	DatabaseURL                                string
+	Observability                              observability.Config
 	APIPublicDomain                            string
 	AppObservabilityEndpoint                   string
 	StrictDrainMode                            string
@@ -386,6 +387,7 @@ func ControllerFromEnv() ControllerConfig {
 		MetricsBindAddr:                            strings.TrimSpace(os.Getenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR")),
 		StorePath:                                  getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                                getenv("FUGUE_DATABASE_URL", ""),
+		Observability:                              ObservabilityFromEnv(),
 		APIPublicDomain:                            getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
 		AppObservabilityEndpoint:                   getenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", ""),
 		StrictDrainMode:                            getenv("FUGUE_STRICT_DRAIN_MODE", "connection-aware"),

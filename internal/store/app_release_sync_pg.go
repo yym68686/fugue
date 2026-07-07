@@ -122,17 +122,17 @@ func (s *Store) pgCreateAppReleaseTx(ctx context.Context, tx *sql.Tx, release mo
 	out, err := scanAppRelease(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_app_releases (
 	id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url, runtime_id,
-	deployment_name, service_name, status, status_reason, spec_snapshot_json,
-	ready_at, promoted_at, retired_at, created_at, updated_at
+	deployment_name, service_name, status, status_reason, rollback_target_release_id, release_message, spec_snapshot_json,
+	ready_at, promoted_at, retired_at, retention_until, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
-	$9, $10, $11, $12, $13,
-	$14, $15, $16, $17, $18
+	$9, $10, $11, $12, $13, $14, $15,
+	$16, $17, $18, $19, $20, $21
 )
 RETURNING `+appReleaseSelectColumns,
 		release.ID, release.TenantID, release.AppID, release.Role, release.SourceRef, release.ResolvedImageRef, release.UpstreamURL, release.RuntimeID,
-		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, specJSON,
-		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.CreatedAt, release.UpdatedAt))
+		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, release.RollbackTargetID, release.ReleaseMessage, specJSON,
+		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil, release.CreatedAt, release.UpdatedAt))
 	return out, mapDBErr(err)
 }
 
@@ -154,16 +154,19 @@ SET tenant_id = $2,
 	service_name = $10,
 	status = $11,
 	status_reason = $12,
-	spec_snapshot_json = $13,
-	ready_at = $14,
-	promoted_at = $15,
-	retired_at = $16,
-	updated_at = $17
+	rollback_target_release_id = $13,
+	release_message = $14,
+	spec_snapshot_json = $15,
+	ready_at = $16,
+	promoted_at = $17,
+	retired_at = $18,
+	retention_until = $19,
+	updated_at = $20
 WHERE id = $1
 RETURNING `+appReleaseSelectColumns,
 		release.ID, release.TenantID, release.AppID, release.Role, release.SourceRef, release.ResolvedImageRef, release.UpstreamURL, release.RuntimeID,
-		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, specJSON,
-		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.UpdatedAt))
+		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, release.RollbackTargetID, release.ReleaseMessage, specJSON,
+		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil, release.UpdatedAt))
 	return out, mapDBErr(err)
 }
 

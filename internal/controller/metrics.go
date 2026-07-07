@@ -71,6 +71,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.writeImageTrackingMetrics(w)
 	s.writeOperationEvidenceMetrics(w)
 	s.writeReleaseAttemptMetrics(w)
+	s.writeSafeRolloutMetrics(w)
 	observability.WriteMetricHeader(w, "fugue_controller_workers_configured", "Configured controller worker slots by lane; zero means unbounded.", "gauge")
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_import"}, float64(s.Config.ForegroundImportWorkers))
 	observability.WriteMetricSample(w, "fugue_controller_workers_configured", map[string]string{"lane": "foreground_activate"}, float64(s.Config.ForegroundActivateWorkers))
@@ -101,6 +102,83 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	observability.WriteGaugeMetric(w, "fugue_registry_unreferenced_blob_count", "Registry blobs not reachable from any retained manifest or workload digest at the last maintenance scan.", nil, float64(registry.UnreferencedBlobCount))
 	observability.WriteGaugeMetric(w, "fugue_registry_protected_workload_digests", "Current workload image digests included in the registry GC keep set at the last maintenance scan.", nil, float64(registry.ProtectedDigestCount))
 	s.writeImageCacheLocalPVMetrics(w)
+}
+
+func (s *Service) writeSafeRolloutMetrics(w http.ResponseWriter) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	attempts, err := s.Store.ListReleaseAttempts(model.ReleaseAttemptFilter{PlatformAdmin: true, Limit: 500})
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Printf("safe rollout metrics unavailable: %v", err)
+		}
+		return
+	}
+	stepCounts := map[string]int{}
+	abortCounts := map[string]int{}
+	for _, attempt := range attempts {
+		steps, err := s.Store.ListReleaseSteps(attempt.TenantID, true, attempt.ID)
+		if err != nil {
+			continue
+		}
+		for _, step := range steps {
+			phase, _ := step.Payload["phase"].(string)
+			phase = strings.TrimSpace(phase)
+			if !safeRolloutMetricPhase(phase) {
+				continue
+			}
+			status := safeMetricLabelValue(step.Status, "unknown")
+			stepCounts[phase+"\x00"+status]++
+			if phase == "abort" || phase == "restore_previous" {
+				abortCounts[phase+"\x00"+status]++
+			}
+		}
+	}
+	observability.WriteMetricHeader(w, "fugue_safe_rollout_steps_total", "Retained safe zero downtime rollout release steps, grouped by low-cardinality phase and status.", "gauge")
+	for _, key := range sortedMetricKeys(stepCounts) {
+		phase, status, _ := strings.Cut(key, "\x00")
+		observability.WriteMetricSample(w, "fugue_safe_rollout_steps_total", map[string]string{
+			"phase":  safeMetricLabelValue(phase, "unknown"),
+			"status": safeMetricLabelValue(status, "unknown"),
+		}, float64(stepCounts[key]))
+	}
+	observability.WriteMetricHeader(w, "fugue_safe_rollout_abort_restore_total", "Retained safe rollout abort and previous restore release steps.", "gauge")
+	for _, key := range sortedMetricKeys(abortCounts) {
+		phase, status, _ := strings.Cut(key, "\x00")
+		observability.WriteMetricSample(w, "fugue_safe_rollout_abort_restore_total", map[string]string{
+			"phase":  safeMetricLabelValue(phase, "unknown"),
+			"status": safeMetricLabelValue(status, "unknown"),
+		}, float64(abortCounts[key]))
+	}
+	evidence, err := s.Store.ListOperationEvidence(model.OperationEvidenceFilter{
+		PlatformAdmin: true,
+		Types:         []string{model.OperationEvidenceTypeAppReleaseGateFailure},
+		Limit:         1000,
+	})
+	if err != nil {
+		return
+	}
+	failures := map[string]int{}
+	for _, item := range evidence {
+		confidence := safeMetricLabelValue(item.Confidence, "unknown")
+		failures[confidence]++
+	}
+	observability.WriteMetricHeader(w, "fugue_app_release_gate_failures_total", "Retained app release gate failure evidence records by confidence.", "gauge")
+	for _, confidence := range sortedMetricKeys(failures) {
+		observability.WriteMetricSample(w, "fugue_app_release_gate_failures_total", map[string]string{
+			"confidence": confidence,
+		}, float64(failures[confidence]))
+	}
+}
+
+func safeRolloutMetricPhase(phase string) bool {
+	switch strings.TrimSpace(phase) {
+	case "candidate_create", "candidate_ready", "gate_check", "canary_shift", "canary_gate", "final_gate", "promote", "abort", "restore_previous":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) writeOperationEvidenceMetrics(w http.ResponseWriter) {
@@ -251,6 +329,15 @@ func safeMetricLabelValue(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func sortedMetricKeys(values map[string]int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (s *Service) controllerHealthSnapshot() (bool, time.Time, bool, string) {

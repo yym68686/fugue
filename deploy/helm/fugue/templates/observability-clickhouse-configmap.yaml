@@ -118,4 +118,41 @@ data:
     PARTITION BY toDate(minute)
     ORDER BY (tenant_id, project_id, app_id, minute)
     TTL minute + INTERVAL 1 DAY DELETE;
+
+    CREATE TABLE IF NOT EXISTS fugue_observability.release_gate_rollups_1m
+    (
+      minute DateTime('UTC'),
+      tenant_id String,
+      project_id String,
+      app_id String,
+      release_id String,
+      release_role LowCardinality(String),
+      request_count UInt64,
+      error_5xx_count UInt64,
+      edge_upstream_error_count UInt64,
+      p95_ttfb_ms Float64,
+      p99_duration_ms Float64
+    )
+    ENGINE = MergeTree
+    PARTITION BY toDate(minute)
+    ORDER BY (tenant_id, project_id, app_id, release_id, release_role, minute)
+    TTL minute + INTERVAL 1 DAY DELETE;
+
+    CREATE MATERIALIZED VIEW IF NOT EXISTS fugue_observability.release_gate_rollups_1m_mv
+    TO fugue_observability.release_gate_rollups_1m
+    AS SELECT
+      toStartOfMinute(ts) AS minute,
+      tenant_id,
+      project_id,
+      app_id,
+      JSONExtractString(summary_json, 'release_id') AS release_id,
+      JSONExtractString(summary_json, 'release_role') AS release_role,
+      count() AS request_count,
+      countIf(status_code >= 500) AS error_5xx_count,
+      countIf(error_type = 'upstream_error') AS edge_upstream_error_count,
+      quantileTDigest(0.95)(toFloat64(ttfb_ms)) AS p95_ttfb_ms,
+      quantileTDigestIf(0.99)(toFloat64(duration_ms), NOT (streaming OR JSONExtractBool(summary_json, 'sse') OR JSONExtractBool(summary_json, 'stream') OR JSONExtractBool(summary_json, 'streaming'))) AS p99_duration_ms
+    FROM fugue_observability.request_facts
+    WHERE app_id != '' AND (JSONExtractString(summary_json, 'release_id') != '' OR JSONExtractString(summary_json, 'release_role') != '')
+    GROUP BY minute, tenant_id, project_id, app_id, release_id, release_role;
 {{- end }}

@@ -2107,12 +2107,15 @@ type AppRelease struct {
 	ServiceName      string     `json:"service_name,omitempty"`
 	Status           string     `json:"status"`
 	StatusReason     string     `json:"status_reason,omitempty"`
+	RollbackTargetID string     `json:"rollback_target_release_id,omitempty"`
+	ReleaseMessage   string     `json:"release_message,omitempty"`
 	SpecSnapshot     *AppSpec   `json:"spec_snapshot,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 	ReadyAt          *time.Time `json:"ready_at,omitempty"`
 	PromotedAt       *time.Time `json:"promoted_at,omitempty"`
 	RetiredAt        *time.Time `json:"retired_at,omitempty"`
+	RetentionUntil   *time.Time `json:"retention_until,omitempty"`
 }
 
 type AppReleaseFilter struct {
@@ -2120,6 +2123,7 @@ type AppReleaseFilter struct {
 	AppID          string
 	Role           string
 	IncludeRetired bool
+	ActiveOnly     bool
 	PlatformAdmin  bool
 }
 

@@ -490,6 +490,35 @@ Interpretation:
 - `caution`: no hard blocker exists, but redundancy is incomplete or runtime posture is weak
 - `blocked`: Fugue-managed state is still attached, so one-click failover remains intentionally disabled
 
+Safe zero downtime rollout is separate from app failover. `drain_only` keeps old
+connections alive during a normal rolling replacement; `safe` uses explicit
+stable/candidate AppRelease records, runs release gates, canary shifts a small
+percentage of traffic, and aborts back to stable-only traffic when the candidate
+fails.
+
+Enable safe rollout for an eligible stateless/RWX app:
+
+```bash
+fugue app continuity enable <app-name> --zero-downtime safe
+fugue app continuity show <app-name>
+fugue app continuity audit <app-name>
+```
+
+When safe rollout is enabled, `fugue app deploy --wait` prints retained release
+attempt phases such as `candidate_create`, `candidate_ready`, `gate_check`,
+`canary_shift`, `canary_gate`, `final_gate`, `promote`, `abort`, and
+`restore_previous`. Gate failures include the release id and evidence id when
+available, so the matching debug bundle can be fetched directly:
+
+```bash
+fugue app release attempts <app-name>
+fugue app release debug-bundle <app-name> --attempt <release-attempt-id>
+```
+
+By default, release and operation debug bundles include app-scoped metrics
+summary only. Add `include_global_summary=true` to the debug-bundle API when a
+platform-wide evidence summary is explicitly needed.
+
 Flow:
 
 1. The API writes an async `operation`.

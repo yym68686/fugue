@@ -34,6 +34,9 @@ type appReleaseCreateRequest struct {
 	ServiceName      string         `json:"service_name,omitempty"`
 	Status           string         `json:"status,omitempty"`
 	StatusReason     string         `json:"status_reason,omitempty"`
+	RollbackTargetID string         `json:"rollback_target_release_id,omitempty"`
+	ReleaseMessage   string         `json:"release_message,omitempty"`
+	RetentionUntil   *time.Time     `json:"retention_until,omitempty"`
 	SpecSnapshot     *model.AppSpec `json:"spec_snapshot,omitempty"`
 }
 
@@ -170,6 +173,9 @@ func (s *Server) handleCreateAppRelease(w http.ResponseWriter, r *http.Request) 
 		ServiceName:      req.ServiceName,
 		Status:           req.Status,
 		StatusReason:     req.StatusReason,
+		RollbackTargetID: req.RollbackTargetID,
+		ReleaseMessage:   req.ReleaseMessage,
+		RetentionUntil:   req.RetentionUntil,
 		SpecSnapshot:     req.SpecSnapshot,
 	})
 	if err != nil {

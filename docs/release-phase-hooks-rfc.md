@@ -95,6 +95,29 @@ Constraints:
 - Fugue must not infer phase meaning from env key names.
 - Each phase must create release steps and operation evidence.
 
+## Alignment With Safe Zero Downtime Rollout
+
+The first concrete stable/candidate state machine uses release steps instead of
+generic user hooks. Future hook support must reuse this timeline shape rather
+than introducing a parallel phase recorder.
+
+Current safe rollout phases:
+
+- `candidate_create`
+- `candidate_ready`
+- `gate_check`
+- `canary_shift`
+- `canary_gate`
+- `final_gate`
+- `promote`
+- `abort`
+- `restore_previous`
+
+Gate failures use `app_release_gate_failure` operation evidence and should carry
+the evidence id in the release step payload. Future generic phases should follow
+the same rule: user-visible phase failure must produce a durable evidence id,
+and the CLI/debug bundle should link to that evidence.
+
 ## Promote Command Shape
 
 A future command may combine explicit env patch and image promote into one
@@ -135,4 +158,3 @@ Before implementing behavior changes, produce an evidence report with:
 - Number of migration/schema/SQLSTATE/deadlock log evidence rows by confidence.
 - At least one redacted debug bundle for a representative success and failure.
 - A rollback plan that leaves current commands unchanged.
-

@@ -854,17 +854,17 @@ Store 负责：
 - [x] 支持 sticky key。
 - [x] 支持 deterministic bucket。
 - [x] Edge release upstream selection 改用 utility。
-- [ ] DNS exploration 逐步改用 utility。
+- [x] DNS exploration 逐步改用 utility。
 - [x] 保持现有分布测试通过。
 - [x] 添加 bucket explain tests。
 
 ### PlatformArtifact ledger pattern
 
-- [ ] 梳理 PlatformArtifact release/LKG/rollback 可复用 helper。
-- [ ] 设计 AppRelease rollback target 字段。
-- [ ] 设计 AppRelease release message / audit event。
-- [ ] 保持 AppRelease 和 PlatformArtifact store 独立。
-- [ ] 添加 rollback target tests。
+- [x] 梳理 PlatformArtifact release/LKG/rollback 可复用 helper。
+- [x] 设计 AppRelease rollback target 字段。
+- [x] 设计 AppRelease release message / audit event。
+- [x] 保持 AppRelease 和 PlatformArtifact store 独立。
+- [x] 添加 rollback target tests。
 
 ### App failover 边界
 
@@ -885,14 +885,14 @@ Store 负责：
 
 ### 性能优化
 
-- [ ] 为 active app releases 增加 store 查询或 index。
-- [ ] Edge route bundle 只加载 active stable/candidate/previous draining releases。
-- [ ] Gate evaluator 优先读取 rollups。
-- [ ] Gate evaluator raw facts fallback 有窗口限制。
-- [ ] Debug bundle global summary 变成可选。
-- [ ] Release scoped metrics summary 替代默认 global count。
-- [ ] 增加 bundle generation benchmark。
-- [ ] 增加 gate evaluation benchmark。
+- [x] 为 active app releases 增加 store 查询或 index。
+- [x] Edge route bundle 只加载 active stable/candidate/previous draining releases。
+- [x] Gate evaluator 优先读取 rollups。
+- [x] Gate evaluator raw facts fallback 有窗口限制。
+- [x] Debug bundle global summary 变成可选。
+- [x] Release scoped metrics summary 替代默认 global count。
+- [x] 增加 bundle generation benchmark。
+- [x] 增加 gate evaluation benchmark。
 
 ### 测试
 

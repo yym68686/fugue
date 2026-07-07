@@ -101,7 +101,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}
-	releases, err := s.store.ListAppReleases(model.AppReleaseFilter{PlatformAdmin: true, IncludeRetired: false})
+	releases, err := s.store.ListAppReleases(model.AppReleaseFilter{PlatformAdmin: true, ActiveOnly: true})
 	if err != nil {
 		return model.EdgeRouteBundle{}, err
 	}

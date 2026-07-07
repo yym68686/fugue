@@ -188,6 +188,8 @@ func normalizeAppReleaseForStore(release model.AppRelease) (model.AppRelease, er
 	release.DeploymentName = strings.TrimSpace(release.DeploymentName)
 	release.ServiceName = strings.TrimSpace(release.ServiceName)
 	release.StatusReason = strings.TrimSpace(release.StatusReason)
+	release.RollbackTargetID = strings.TrimSpace(release.RollbackTargetID)
+	release.ReleaseMessage = strings.TrimSpace(release.ReleaseMessage)
 	if release.TenantID == "" || release.AppID == "" || release.Role == "" || release.Status == "" {
 		return model.AppRelease{}, ErrInvalidInput
 	}
@@ -304,7 +306,24 @@ func appReleaseMatchesFilter(release model.AppRelease, filter model.AppReleaseFi
 	if !filter.IncludeRetired && strings.TrimSpace(release.Role) == model.AppReleaseRoleRetired {
 		return false
 	}
+	if filter.ActiveOnly && !appReleaseIsActiveForRouting(release) {
+		return false
+	}
 	return true
+}
+
+func appReleaseIsActiveForRouting(release model.AppRelease) bool {
+	switch strings.TrimSpace(release.Role) {
+	case model.AppReleaseRoleStable, model.AppReleaseRoleCandidate, model.AppReleaseRolePrevious:
+	default:
+		return false
+	}
+	switch strings.TrimSpace(release.Status) {
+	case model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
+		return true
+	default:
+		return false
+	}
 }
 
 func sortAppReleases(releases []model.AppRelease) {

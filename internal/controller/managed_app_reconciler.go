@@ -980,6 +980,25 @@ func managedAppPodLabelSelector(app model.App) string {
 	return strings.Join(selectors, ",")
 }
 
+func managedAppRevisionPodLabelSelector(app model.App, revision runtime.AppRevisionRenderOptions) string {
+	selector := managedAppPodLabelSelector(app)
+	revision = runtime.NormalizeAppRevisionRenderOptions(revision)
+	extra := []string{}
+	if revision.Role != "" && revision.Role != runtime.AppRevisionRoleDefault {
+		extra = append(extra, runtime.FugueLabelAppReleaseRole+"="+revision.Role)
+	}
+	if revision.ReleaseID != "" {
+		extra = append(extra, runtime.FugueLabelAppReleaseID+"="+revision.ReleaseID)
+	}
+	if len(extra) == 0 {
+		return selector
+	}
+	if selector == "" {
+		return strings.Join(extra, ",")
+	}
+	return selector + "," + strings.Join(extra, ",")
+}
+
 func managedAppPodFailureCutoff(previous runtime.ManagedAppStatus, releaseKey string) (*time.Time, bool) {
 	releaseKey = strings.TrimSpace(releaseKey)
 	if releaseKey == "" {

@@ -219,6 +219,8 @@ func rolloutFailureMetricReason(evidenceType string) string {
 		return "pod_failure"
 	case model.OperationEvidenceTypeRolloutTimeout:
 		return "timeout"
+	case model.OperationEvidenceTypeAppReleaseGateFailure:
+		return "app_release_gate"
 	default:
 		return ""
 	}

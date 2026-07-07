@@ -11,7 +11,7 @@ import (
 	"fugue/internal/model"
 )
 
-const appReleaseSelectColumns = `id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url, runtime_id, deployment_name, service_name, status, status_reason, spec_snapshot_json, ready_at, promoted_at, retired_at, created_at, updated_at`
+const appReleaseSelectColumns = `id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url, runtime_id, deployment_name, service_name, status, status_reason, rollback_target_release_id, release_message, spec_snapshot_json, ready_at, promoted_at, retired_at, retention_until, created_at, updated_at`
 const appTrafficPolicySelectColumns = `id, tenant_id, app_id, mode, stable_release_id, candidate_release_id, stable_weight, candidate_weight, sticky_header, sticky_cookie, updated_by_type, updated_by_id, created_at, updated_at`
 
 func (s *Store) pgCreateAppRelease(release model.AppRelease) (model.AppRelease, error) {
@@ -26,16 +26,19 @@ func (s *Store) pgCreateAppRelease(release model.AppRelease) (model.AppRelease, 
 INSERT INTO fugue_app_releases (
 	id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url, runtime_id,
 	deployment_name, service_name, status, status_reason, spec_snapshot_json,
-	ready_at, promoted_at, retired_at, created_at, updated_at
+	rollback_target_release_id, release_message, ready_at, promoted_at, retired_at, retention_until,
+	created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13,
-	$14, $15, $16, $17, $18
+	$14, $15, $16, $17, $18, $19,
+	$20, $21
 )
 RETURNING `+appReleaseSelectColumns,
 		release.ID, release.TenantID, release.AppID, release.Role, release.SourceRef, release.ResolvedImageRef, release.UpstreamURL, release.RuntimeID,
 		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, specJSON,
-		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.CreatedAt, release.UpdatedAt))
+		release.RollbackTargetID, release.ReleaseMessage, release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil,
+		release.CreatedAt, release.UpdatedAt))
 	return out, mapDBErr(err)
 }
 
@@ -60,16 +63,19 @@ SET tenant_id = $2,
 	service_name = $10,
 	status = $11,
 	status_reason = $12,
-	spec_snapshot_json = $13,
-	ready_at = $14,
-	promoted_at = $15,
-	retired_at = $16,
-	updated_at = $17
+	rollback_target_release_id = $13,
+	release_message = $14,
+	spec_snapshot_json = $15,
+	ready_at = $16,
+	promoted_at = $17,
+	retired_at = $18,
+	retention_until = $19,
+	updated_at = $20
 WHERE id = $1
 RETURNING `+appReleaseSelectColumns,
 		release.ID, release.TenantID, release.AppID, release.Role, release.SourceRef, release.ResolvedImageRef, release.UpstreamURL, release.RuntimeID,
-		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, specJSON,
-		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.UpdatedAt))
+		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, release.RollbackTargetID, release.ReleaseMessage, specJSON,
+		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil, release.UpdatedAt))
 	return out, mapDBErr(err)
 }
 
@@ -111,6 +117,22 @@ func (s *Store) pgListAppReleases(filter model.AppReleaseFilter) ([]model.AppRel
 	if !filter.IncludeRetired {
 		args = append(args, model.AppReleaseRoleRetired)
 		clauses = append(clauses, fmt.Sprintf("role <> $%d", len(args)))
+	}
+	if filter.ActiveOnly {
+		activeRoles := []string{model.AppReleaseRoleStable, model.AppReleaseRoleCandidate, model.AppReleaseRolePrevious}
+		rolePlaceholders := make([]string, 0, len(activeRoles))
+		for _, role := range activeRoles {
+			args = append(args, role)
+			rolePlaceholders = append(rolePlaceholders, fmt.Sprintf("$%d", len(args)))
+		}
+		clauses = append(clauses, "role IN ("+strings.Join(rolePlaceholders, ", ")+")")
+		activeStatuses := []string{model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining}
+		statusPlaceholders := make([]string, 0, len(activeStatuses))
+		for _, status := range activeStatuses {
+			args = append(args, status)
+			statusPlaceholders = append(statusPlaceholders, fmt.Sprintf("$%d", len(args)))
+		}
+		clauses = append(clauses, "status IN ("+strings.Join(statusPlaceholders, ", ")+")")
 	}
 
 	query := `SELECT ` + appReleaseSelectColumns + ` FROM fugue_app_releases`
@@ -218,6 +240,7 @@ func scanAppRelease(scanner sqlScanner) (model.AppRelease, error) {
 	var readyAt sql.NullTime
 	var promotedAt sql.NullTime
 	var retiredAt sql.NullTime
+	var retentionUntil sql.NullTime
 	if err := scanner.Scan(
 		&release.ID,
 		&release.TenantID,
@@ -231,10 +254,13 @@ func scanAppRelease(scanner sqlScanner) (model.AppRelease, error) {
 		&release.ServiceName,
 		&release.Status,
 		&release.StatusReason,
+		&release.RollbackTargetID,
+		&release.ReleaseMessage,
 		&specJSON,
 		&readyAt,
 		&promotedAt,
 		&retiredAt,
+		&retentionUntil,
 		&release.CreatedAt,
 		&release.UpdatedAt,
 	); err != nil {
@@ -255,6 +281,9 @@ func scanAppRelease(scanner sqlScanner) (model.AppRelease, error) {
 	}
 	if retiredAt.Valid {
 		release.RetiredAt = &retiredAt.Time
+	}
+	if retentionUntil.Valid {
+		release.RetentionUntil = &retentionUntil.Time
 	}
 	return release, nil
 }

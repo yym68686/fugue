@@ -4278,6 +4278,11 @@ paths:
           schema:
             type: string
             enum: [json, zip]
+        - in: query
+          name: include_global_summary
+          required: false
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -6737,6 +6742,11 @@ paths:
           schema:
             type: string
             enum: [json, zip]
+        - in: query
+          name: include_global_summary
+          required: false
+          schema:
+            type: boolean
       responses:
         '200':
           description: Successful response
@@ -16785,6 +16795,10 @@ components:
           enum: [creating, ready, serving, draining, failed, retired]
         status_reason:
           type: string
+        rollback_target_release_id:
+          type: string
+        release_message:
+          type: string
         spec_snapshot:
           $ref: "#/components/schemas/AppSpec"
         ready_at:
@@ -16794,6 +16808,9 @@ components:
           type: string
           format: date-time
         retired_at:
+          type: string
+          format: date-time
+        retention_until:
           type: string
           format: date-time
         created_at:
@@ -16863,6 +16880,13 @@ components:
           type: string
         status_reason:
           type: string
+        rollback_target_release_id:
+          type: string
+        release_message:
+          type: string
+        retention_until:
+          type: string
+          format: date-time
         spec_snapshot:
           $ref: "#/components/schemas/AppSpec"
     AppReleaseResponse:

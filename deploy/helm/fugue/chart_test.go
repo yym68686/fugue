@@ -981,6 +981,8 @@ func TestObservabilityClickHouseIsDisabledByDefaultAndCanRender(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS fugue_observability.request_spans",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.app_events",
 		"CREATE TABLE IF NOT EXISTS fugue_observability.diagnosis_windows_1m",
+		"CREATE TABLE IF NOT EXISTS fugue_observability.release_gate_rollups_1m",
+		"CREATE MATERIALIZED VIEW IF NOT EXISTS fugue_observability.release_gate_rollups_1m_mv",
 		"TTL ts + INTERVAL 1 DAY DELETE",
 	} {
 		if !strings.Contains(configDoc, want) {

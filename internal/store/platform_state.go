@@ -237,15 +237,15 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 			return ErrConflict
 		}
 		now := time.Now().UTC()
-		release = buildPlatformArtifactRelease(artifact, channel, "", req.CanaryRuleRef, req.Reason, principal, now)
+		entry := buildPlatformArtifactReleaseLedgerEntry(artifact, channel, "", req.CanaryRuleRef, req.Reason, model.PlatformReleaseMessageTypeRelease, principal, now)
+		release = entry.Release
 		state.PlatformArtifactReleases = supersedePlatformReleases(state.PlatformArtifactReleases, artifact.ArtifactKind, artifact.ScopeKey, channel, release.ID, now)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-		message = buildPlatformReleaseMessage(artifact, release, model.PlatformReleaseMessageTypeRelease, now)
+		message = entry.Message
 		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
-		if channel == model.PlatformArtifactReleaseChannelFull {
-			snapshot := buildPlatformLKGSnapshot(artifact, now)
-			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, snapshot)
-			lkg = &snapshot
+		if entry.LKG != nil {
+			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, *entry.LKG)
+			lkg = entry.LKG
 		}
 		return nil
 	})
@@ -282,15 +282,15 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			return ErrConflict
 		}
 		now := time.Now().UTC()
-		release = buildPlatformArtifactRelease(target, channel, current.Generation, req.CanaryRuleRef, req.Reason, principal, now)
+		entry := buildPlatformArtifactReleaseLedgerEntry(target, channel, current.Generation, req.CanaryRuleRef, req.Reason, model.PlatformReleaseMessageTypeRollback, principal, now)
+		release = entry.Release
 		state.PlatformArtifactReleases = supersedePlatformReleases(state.PlatformArtifactReleases, target.ArtifactKind, target.ScopeKey, channel, release.ID, now)
 		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-		message = buildPlatformReleaseMessage(target, release, model.PlatformReleaseMessageTypeRollback, now)
+		message = entry.Message
 		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
-		if channel == model.PlatformArtifactReleaseChannelFull {
-			snapshot := buildPlatformLKGSnapshot(target, now)
-			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, snapshot)
-			lkg = &snapshot
+		if entry.LKG != nil {
+			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, *entry.LKG)
+			lkg = entry.LKG
 		}
 		return nil
 	})
@@ -601,8 +601,15 @@ func platformArtifactGenerationIndex(artifacts []model.PlatformArtifact, kind, s
 	return -1
 }
 
-func buildPlatformArtifactRelease(artifact model.PlatformArtifact, channel, rollbackTargetGeneration, canaryRuleRef, reason string, principal model.Principal, now time.Time) model.PlatformArtifactRelease {
-	return model.PlatformArtifactRelease{
+type platformArtifactReleaseLedgerEntry struct {
+	Artifact model.PlatformArtifact
+	Release  model.PlatformArtifactRelease
+	Message  model.PlatformReleaseMessage
+	LKG      *model.PlatformLKGSnapshot
+}
+
+func buildPlatformArtifactReleaseLedgerEntry(artifact model.PlatformArtifact, channel, rollbackTargetGeneration, canaryRuleRef, reason, messageType string, principal model.Principal, now time.Time) platformArtifactReleaseLedgerEntry {
+	release := model.PlatformArtifactRelease{
 		ID:                       model.NewID("artifactrel"),
 		ArtifactID:               artifact.ID,
 		ArtifactKind:             artifact.ArtifactKind,
@@ -620,6 +627,16 @@ func buildPlatformArtifactRelease(artifact model.PlatformArtifact, channel, roll
 		CreatedAt:                now,
 		UpdatedAt:                now,
 	}
+	entry := platformArtifactReleaseLedgerEntry{
+		Artifact: artifact,
+		Release:  release,
+		Message:  buildPlatformReleaseMessage(artifact, release, messageType, now),
+	}
+	if channel == model.PlatformArtifactReleaseChannelFull {
+		snapshot := buildPlatformLKGSnapshot(artifact, now)
+		entry.LKG = &snapshot
+	}
+	return entry
 }
 
 func supersedePlatformReleases(releases []model.PlatformArtifactRelease, kind, scopeKey, channel, keepID string, now time.Time) []model.PlatformArtifactRelease {

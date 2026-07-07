@@ -14,16 +14,27 @@ import (
 )
 
 type appFailoverResult struct {
-	App             model.App                 `json:"app"`
-	Assessment      failoverpkg.AppAssessment `json:"assessment"`
-	BackupReadiness string                    `json:"backup_readiness,omitempty"`
-	BackupPosture   []model.BackupPosture     `json:"backup_posture,omitempty"`
+	App                       model.App                    `json:"app"`
+	Assessment                failoverpkg.AppAssessment    `json:"assessment"`
+	BackupReadiness           string                       `json:"backup_readiness,omitempty"`
+	BackupPosture             []model.BackupPosture        `json:"backup_posture,omitempty"`
+	ZeroDowntime              *model.AppZeroDowntimePolicy `json:"zero_downtime,omitempty"`
+	ReleaseTraffic            *model.AppTrafficPolicy      `json:"release_traffic,omitempty"`
+	ActiveReleases            []model.AppRelease           `json:"active_releases,omitempty"`
+	RecentReleaseAttempts     []model.ReleaseAttempt       `json:"recent_release_attempts,omitempty"`
+	GateFailureCount          int                          `json:"gate_failure_count,omitempty"`
+	LastGateFailureEvidenceID string                       `json:"last_gate_failure_evidence_id,omitempty"`
 }
 
 func (c *CLI) newAppContinuityCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "continuity",
 		Short: "Audit and configure app continuity settings",
+		Example: strings.TrimSpace(`
+  fugue app continuity audit api
+  fugue app continuity enable api --zero-downtime safe
+  fugue app continuity show api
+`),
 	}
 	cmd.AddCommand(
 		c.newAppContinuityAuditCommand(),
@@ -55,7 +66,11 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 		Use:     "audit [app]",
 		Aliases: []string{"ha", "dr"},
 		Short:   "Audit failover readiness for apps",
-		Args:    cobra.RangeArgs(0, 1),
+		Example: strings.TrimSpace(`
+  fugue app continuity audit
+  fugue app continuity audit api
+`),
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
 			if err != nil {
@@ -79,6 +94,7 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 				}
 				result := buildAppFailoverResult(app, runtimeByID)
 				c.attachAppBackupReadiness(client, &result)
+				c.attachAppSafeRolloutAudit(client, &result)
 				if c.wantsJSON() {
 					return writeJSON(c.stdout, result)
 				}
@@ -96,6 +112,7 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 			results := buildAppFailoverResults(filterApps(apps, tenantID, projectID), runtimeByID)
 			for index := range results {
 				c.attachAppBackupReadiness(client, &results[index])
+				c.attachAppSafeRolloutAudit(client, &results[index])
 			}
 			if c.wantsJSON() {
 				return writeJSON(c.stdout, map[string]any{"assessments": results})
@@ -511,6 +528,66 @@ func (c *CLI) attachAppBackupReadiness(client *Client, result *appFailoverResult
 	result.BackupReadiness = summarizeAppBackupReadiness(status.Posture)
 }
 
+func (c *CLI) attachAppSafeRolloutAudit(client *Client, result *appFailoverResult) {
+	if client == nil || result == nil || strings.TrimSpace(result.App.ID) == "" {
+		return
+	}
+	if continuity := model.NormalizeAppContinuityPolicy(result.App.Spec.Continuity); continuity != nil && continuity.ZeroDowntime != nil {
+		result.ZeroDowntime = continuity.ZeroDowntime
+	}
+	if result.ZeroDowntime == nil || !result.ZeroDowntime.Enabled || result.ZeroDowntime.Mode != model.AppZeroDowntimeModeSafe {
+		return
+	}
+	if releases, err := client.ListAppReleases(result.App.ID); err == nil {
+		if releases.Traffic != nil {
+			traffic := *releases.Traffic
+			result.ReleaseTraffic = &traffic
+		}
+		for _, release := range releases.Releases {
+			if appReleaseActiveForContinuityAudit(release) {
+				result.ActiveReleases = append(result.ActiveReleases, release)
+			}
+		}
+	}
+	attempts, err := client.ListAppReleaseAttempts(result.App.ID)
+	if err != nil {
+		return
+	}
+	if len(attempts) > 5 {
+		attempts = attempts[:5]
+	}
+	result.RecentReleaseAttempts = append([]model.ReleaseAttempt(nil), attempts...)
+	for _, attempt := range attempts {
+		evidence, err := client.GetAppReleaseAttemptEvidence(result.App.ID, attempt.ID, false)
+		if err != nil {
+			continue
+		}
+		for _, item := range evidence {
+			if item.Type != model.OperationEvidenceTypeAppReleaseGateFailure {
+				continue
+			}
+			result.GateFailureCount++
+			if result.LastGateFailureEvidenceID == "" {
+				result.LastGateFailureEvidenceID = item.ID
+			}
+		}
+	}
+}
+
+func appReleaseActiveForContinuityAudit(release model.AppRelease) bool {
+	switch strings.TrimSpace(release.Role) {
+	case model.AppReleaseRoleStable, model.AppReleaseRoleCandidate, model.AppReleaseRolePrevious:
+	default:
+		return false
+	}
+	switch strings.TrimSpace(release.Status) {
+	case model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
+		return true
+	default:
+		return false
+	}
+}
+
 func summarizeAppBackupReadiness(posture []model.BackupPosture) string {
 	if len(posture) == 0 {
 		return "unknown"
@@ -610,7 +687,46 @@ func writeAppFailoverStatus(w io.Writer, result appFailoverResult) error {
 		{Key: "blockers", Value: strings.Join(result.Assessment.Blockers, "; ")},
 		{Key: "warnings", Value: strings.Join(result.Assessment.Warnings, "; ")},
 	}
+	if result.ZeroDowntime != nil {
+		pairs = append(pairs,
+			kvPair{Key: "zero_downtime_enabled", Value: fmt.Sprintf("%t", result.ZeroDowntime.Enabled)},
+			kvPair{Key: "zero_downtime_mode", Value: result.ZeroDowntime.Mode},
+			kvPair{Key: "zero_downtime_strategy", Value: result.ZeroDowntime.Strategy},
+		)
+		if result.ZeroDowntime.Canary != nil {
+			pairs = append(pairs,
+				kvPair{Key: "zero_downtime_canary_enabled", Value: fmt.Sprintf("%t", result.ZeroDowntime.Canary.Enabled)},
+				kvPair{Key: "zero_downtime_initial_weight", Value: fmt.Sprintf("%d", result.ZeroDowntime.Canary.InitialWeight)},
+				kvPair{Key: "zero_downtime_step_weights", Value: strings.Join(intsToStrings(result.ZeroDowntime.Canary.StepWeights), ",")},
+			)
+		}
+	} else {
+		pairs = append(pairs, kvPair{Key: "zero_downtime_enabled", Value: "false"})
+	}
+	if result.ReleaseTraffic != nil {
+		pairs = append(pairs,
+			kvPair{Key: "release_traffic_mode", Value: result.ReleaseTraffic.Mode},
+			kvPair{Key: "stable_release_id", Value: result.ReleaseTraffic.StableReleaseID},
+			kvPair{Key: "candidate_release_id", Value: result.ReleaseTraffic.CandidateReleaseID},
+			kvPair{Key: "stable_weight", Value: fmt.Sprintf("%d", result.ReleaseTraffic.StableWeight)},
+			kvPair{Key: "candidate_weight", Value: fmt.Sprintf("%d", result.ReleaseTraffic.CandidateWeight)},
+		)
+	}
+	pairs = append(pairs,
+		kvPair{Key: "active_release_count", Value: fmt.Sprintf("%d", len(result.ActiveReleases))},
+		kvPair{Key: "recent_release_attempt_count", Value: fmt.Sprintf("%d", len(result.RecentReleaseAttempts))},
+		kvPair{Key: "gate_failure_count", Value: fmt.Sprintf("%d", result.GateFailureCount)},
+		kvPair{Key: "last_gate_failure_evidence_id", Value: result.LastGateFailureEvidenceID},
+	)
 	return writeKeyValues(w, pairs...)
+}
+
+func intsToStrings(values []int) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, fmt.Sprintf("%d", value))
+	}
+	return out
 }
 
 func formatFailoverRuntime(assessment failoverpkg.AppAssessment) string {
