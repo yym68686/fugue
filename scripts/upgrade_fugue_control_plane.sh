@@ -3376,6 +3376,12 @@ from urllib.parse import urlparse
 def trim(value):
     return str(value or "").strip()
 
+def as_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
 def parse_endpoint(value):
     value = trim(value)
     if not value:
@@ -3519,13 +3525,30 @@ def dns_node_route_bootstrap_capable(node, route_bootstrap_groups):
         return False
     return True
 
+def dns_node_serving_capable(node):
+    if not node.get("healthy"):
+        return False
+    status = trim(node.get("status")).lower()
+    if status not in {"healthy", "degraded"}:
+        return False
+    if not trim(node.get("dns_bundle_version")):
+        return False
+    if as_int(node.get("record_count")) <= 0:
+        return False
+    cache_status = trim(node.get("cache_status")).lower()
+    if cache_status in {"", "missing"} or "error" in cache_status:
+        return False
+    if as_int(node.get("cache_write_errors")) != 0:
+        return False
+    return True
+
 def dns_inventory_bootstrap_healthy(nodes, route_bootstrap_groups):
     if not nodes:
         return False, []
     healthy_count = 0
     bootstrap_pending = []
     for node in nodes:
-        if node.get("healthy") and trim(node.get("status")).lower() == "healthy" and trim(node.get("last_error")) == "" and trim(node.get("cache_status")).lower() not in {"", "error", "missing"}:
+        if dns_node_serving_capable(node):
             healthy_count += 1
             continue
         if dns_node_route_bootstrap_capable(node, route_bootstrap_groups):
@@ -3616,7 +3639,7 @@ if set(failing_checks).issubset(allowed_checks) and bootstrap_override and (not 
         retired_edge = ", ".join(sorted(set(filter(None, retired_edge_nodes)))) or "<none>"
         retired_dns = ", ".join(sorted(set(filter(None, retired_dns_nodes)))) or "<none>"
         retired_note = f"; node-policy-retired edge nodes ignored: {retired_edge}; node-policy-retired DNS nodes ignored: {retired_dns}"
-    print(f"release preflight bootstrap: edge inventory is blocked only by bootstrap-pending nodes {pending} and route-bootstrap nodes {route_pending}; dns bootstrap nodes {dns_pending}{retired_note}; continuing with explicit rollout to bring them online")
+    print(f"release preflight serviceability override: edge inventory is serving or bootstrap-safe; dns inventory is serving or bootstrap-safe; edge bootstrap nodes {pending}; route-bootstrap nodes {route_pending}; dns bootstrap nodes {dns_pending}{retired_note}; continuing with explicit rollout")
 elif node_local_build_plane_override_allowed and set(failing_checks).issubset({"registry", "node_policy"}):
     registry_message = trim((checks.get("registry") or {}).get("message"))
     node_policy_message = trim((checks.get("node_policy") or {}).get("message"))

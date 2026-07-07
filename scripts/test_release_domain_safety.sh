@@ -92,6 +92,83 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   assert_eq "$(current_active_slot "fugue-fugue-edge-dynamic" "fugue-fugue-edge-dynamic-front")" "a" "missing dynamic release record must fall back to default slot"
 )
 
+(
+  ORIGINAL_PATH="${PATH}"
+  TMP_CURL_DIR="$(mktemp -d)"
+  cat >"${TMP_CURL_DIR}/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+headers=""
+out=""
+writeout=""
+url=""
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -D)
+      headers="$2"
+      shift 2
+      ;;
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w)
+      writeout="$2"
+      shift 2
+      ;;
+    -H|--header)
+      shift 2
+      ;;
+    http://*|https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+case "${url}" in
+  */v1/discovery/bundle)
+    [[ -z "${headers}" ]] || printf 'ETag: "discovery_test"\r\n' >"${headers}"
+    body='{"generation":"generation_test","schema_version":"1.0","signature":"sig"}'
+    ;;
+  */v1/admin/platform/autonomy/status)
+    body='{"status":{"pass":false,"block_rollout":true,"control_plane_store":{"permission_verification_status":"passed","block_rollout":false},"checks":[{"name":"dns","pass":false,"message":"active=2 total=2"}]}}'
+    ;;
+  */v1/edge/nodes)
+    body='{"nodes":[{"id":"edge-us-1","edge_group_id":"edge-group-country-us","healthy":true,"status":"healthy","last_seen_at":"2999-01-01T00:00:00Z","caddy_route_count":1,"cache_status":"ready"}]}'
+    ;;
+  */v1/dns/nodes)
+    body='{"nodes":[{"id":"dns-us-1","edge_group_id":"edge-group-country-us","healthy":true,"status":"degraded","dns_bundle_version":"dnsgen_us","record_count":40,"cache_status":"stale","cache_write_errors":0,"last_error":""}]}'
+    ;;
+  */v1/cluster/node-policies/status)
+    body='{"node_policies":[]}'
+    ;;
+  *)
+    printf 'unexpected curl URL: %s\n' "${url}" >&2
+    exit 22
+    ;;
+esac
+if [[ -n "${out}" ]]; then
+  printf '%s' "${body}" >"${out}"
+else
+  printf '%s' "${body}"
+fi
+[[ -z "${writeout}" ]] || printf '200'
+SH
+  chmod +x "${TMP_CURL_DIR}/curl"
+  PATH="${TMP_CURL_DIR}:${PATH}"
+  FUGUE_API_URL="https://api.example.test"
+  FUGUE_API_KEY="test-token"
+  FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT=
+  FUGUE_REGISTRY_PULL_BASE=
+  KUBECTL=
+  run_release_preflight || fail "release preflight must allow serving degraded DNS nodes"
+  PATH="${ORIGINAL_PATH}"
+  rm -rf "${TMP_CURL_DIR}"
+)
+
 assert_eq "$(image_ref_repository 'ghcr.io/acme/fugue-edge:sha123')" "ghcr.io/acme/fugue-edge" "repository parses tagged ghcr image"
 assert_eq "$(image_ref_tag 'ghcr.io/acme/fugue-edge:sha123')" "sha123" "tag parses tagged ghcr image"
 assert_eq "$(image_ref_repository 'localhost:5000/acme/fugue-edge:sha123')" "localhost:5000/acme/fugue-edge" "repository keeps registry port"

@@ -490,13 +490,15 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 	nodeDiskPressure := known && policy.DiskPressure
 	cacheOK := dnsNodeCacheHealthy(node.CacheStatus, node.DNSBundleVersion, node.CacheWriteErrors, node.CacheLoadErrors)
 	bundleOK := strings.TrimSpace(node.DNSBundleVersion) != ""
-	healthOK := node.Healthy && node.Status == model.EdgeHealthHealthy
+	healthOK := dnsNodeServingHealthOK(node)
 	kubeOK := policyErr == nil && known && nodeReady && !nodeDiskPressure
 	pass := healthOK && bundleOK && cacheOK && kubeOK && probePass
 
 	messageParts := []string{}
 	if !healthOK {
 		messageParts = append(messageParts, "DNS heartbeat is not healthy")
+	} else if model.NormalizeEdgeHealthStatus(node.Status) == model.EdgeHealthDegraded {
+		messageParts = append(messageParts, "DNS heartbeat is degraded but serving DNS probes pass")
 	}
 	if !bundleOK {
 		messageParts = append(messageParts, "DNS bundle version is empty")
@@ -546,6 +548,18 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 		LastSeenAt:          node.LastSeenAt,
 		Pass:                pass,
 		Message:             strings.Join(messageParts, "; "),
+	}
+}
+
+func dnsNodeServingHealthOK(node model.DNSNode) bool {
+	if !node.Healthy {
+		return false
+	}
+	switch model.NormalizeEdgeHealthStatus(node.Status) {
+	case model.EdgeHealthHealthy, model.EdgeHealthDegraded:
+		return true
+	default:
+		return false
 	}
 }
 

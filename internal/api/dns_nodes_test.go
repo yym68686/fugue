@@ -218,6 +218,88 @@ func TestDNSDelegationPreflightPassesWithTwoHealthyNodes(t *testing.T) {
 	}
 }
 
+func TestDNSDelegationPreflightAllowsServingDegradedStaleCache(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	for _, node := range []model.DNSNode{
+		{
+			ID:               "dns-us-1",
+			EdgeGroupID:      "edge-group-country-us",
+			PublicIPv4:       "203.0.113.10",
+			Zone:             "fugue.pro",
+			Status:           model.EdgeHealthDegraded,
+			Healthy:          true,
+			DNSBundleVersion: "dnsgen_us",
+			RecordCount:      40,
+			CacheStatus:      "stale",
+			BundleSyncErrors: 12,
+			UDPAddr:          ":53",
+			TCPAddr:          ":53",
+			UDPListen:        true,
+			TCPListen:        true,
+			LastSeenAt:       &now,
+		},
+		{
+			ID:               "dns-eu-1",
+			EdgeGroupID:      "edge-group-country-de",
+			PublicIPv4:       "203.0.113.20",
+			Zone:             "fugue.pro",
+			Status:           model.EdgeHealthDegraded,
+			Healthy:          true,
+			DNSBundleVersion: "dnsgen_de",
+			RecordCount:      40,
+			CacheStatus:      "stale",
+			BundleSyncErrors: 24,
+			UDPAddr:          ":53",
+			TCPAddr:          ":53",
+			UDPListen:        true,
+			TCPListen:        true,
+			LastSeenAt:       &now,
+		},
+	} {
+		if _, err := storeState.UpdateDNSHeartbeat(node); err != nil {
+			t.Fatalf("update dns heartbeat fixture: %v", err)
+		}
+	}
+
+	kubeServer := newDNSPreflightKubeServer(t, []string{"dns-us-1", "dns-eu-1"})
+	defer kubeServer.Close()
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+	server.dnsDelegationProbe = func(_ context.Context, node model.DNSNode, _, _ string) dnsDelegationProbeResult {
+		return dnsDelegationProbeResult{
+			UDP53Reachable: true,
+			TCP53Reachable: true,
+			ProbeAnswers:   []string{node.PublicIPv4},
+		}
+	}
+	server.dnsParentNSLookup = func(_ context.Context, _ string) ([]string, error) {
+		return []string{"current-parent.example"}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/dns/delegation/preflight", platformAdminKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response model.DNSDelegationPreflightResponse
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Pass || response.HealthyNodeCount != 2 {
+		t.Fatalf("expected serving degraded DNS nodes to pass preflight, got %+v", response)
+	}
+	for _, node := range response.Nodes {
+		if !node.Pass || !strings.Contains(node.Message, "degraded") {
+			t.Fatalf("expected degraded serving node to pass with diagnostic message, got %+v", node)
+		}
+	}
+}
+
 func TestDNSDelegationPlanUsesStaticNameserverRecords(t *testing.T) {
 	t.Parallel()
 
