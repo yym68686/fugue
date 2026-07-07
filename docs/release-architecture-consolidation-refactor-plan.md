@@ -914,8 +914,8 @@ Store 负责：
 - [x] 第一阶段只发布内部重构，不开启 safe rollout。
 - [x] 跑 `make generate-openapi`，如没有契约变化应无 diff。
 - [x] 跑 `make test`。
-- [ ] 推送 main 后观察 control plane deploy。
-- [ ] 对现有 AppRelease API 做 smoke test。
-- [ ] 对 edge route bundle 做 smoke test。
-- [ ] 对 release debug bundle 做 smoke test。
-- [ ] 确认线上 traffic policy 不发生非预期变化。
+- [x] 推送 main 后观察 control plane deploy。
+- [x] 对现有 AppRelease API 做 smoke test。
+- [x] 对 edge route bundle 做 smoke test。
+- [x] 对 release debug bundle 做 smoke test。
+- [x] 确认线上 traffic policy 不发生非预期变化。
