@@ -834,16 +834,16 @@ fugue admin dns answer-check <hostname> --explain
 - [x] Helm chart tests 通过。
 - [x] OpenAPI generated drift check 通过。
 - [x] 在 staging 或 shadow 模式验证 dynamic DaemonSet 不影响 US/DE。
-- [ ] 推送到 `main` 触发 GitHub Actions 控制平面发布。
-- [ ] 监控 deploy-control-plane workflow 成功。
-- [ ] 验证线上 API / controller Ready。
-- [ ] 验证现有 US/DE edge 仍 healthy。
-- [ ] 验证现有 DNS answer 未异常变化。
-- [ ] 给 `dmit` 补齐 dynamic labels / credentials。
-- [ ] 验证 `dmit` dynamic edge pods Ready。
-- [ ] 验证 `dmit` 不运行 DNS pod。
-- [ ] 验证 `dmit` 进入 canary。
-- [ ] 观察 `dmit` 真实请求质量指标。
+- [x] 推送到 `main` 触发 GitHub Actions 控制平面发布。
+- [x] 监控 deploy-control-plane workflow 成功。
+- [x] 验证线上 API / controller Ready。
+- [x] 验证现有 US/DE edge 仍 healthy。
+- [x] 验证现有 DNS answer 未异常变化。
+- [x] 给 `dmit` 补齐 dynamic labels / credentials。
+- [x] 验证 `dmit` dynamic edge pods Ready。
+- [x] 验证 `dmit` 不运行 DNS pod。
+- [x] 验证 `dmit` 进入 canary。
+- [x] 观察 `dmit` 真实请求质量指标。
 
 ## 最终完成定义
 
