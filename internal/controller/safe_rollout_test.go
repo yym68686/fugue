@@ -391,6 +391,246 @@ func TestSafeZeroDowntimeRolloutPausesPreviousRetireWhenDrainMetricsStillActive(
 	}
 }
 
+func TestSafeZeroDowntimeRolloutIntegrationStatelessAppSuccess(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := newSafeRolloutIntegrationService(stateStore, upstream.URL, safeRolloutDrainMetrics{
+		Ready:                true,
+		ActiveConnections:    0,
+		MaxActiveConnections: 1,
+		FinalCount:           1,
+		Summary:              map[string]any{"active_connections": 0, "max_active_connections": 1},
+	})
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	if !state.StableAlignmentAllowed {
+		t.Fatal("expected stable alignment to be allowed after successful safe rollout gates")
+	}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != state.Candidate.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected promoted candidate to receive all traffic, got %+v", policy)
+	}
+	promoted, err := stateStore.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		t.Fatalf("get promoted candidate: %v", err)
+	}
+	if promoted.Role != model.AppReleaseRoleStable || promoted.Status != model.AppReleaseStatusServing || promoted.PromotedAt == nil {
+		t.Fatalf("expected candidate promoted to serving stable, got %+v", promoted)
+	}
+	previousRelease, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get previous release: %v", err)
+	}
+	if previousRelease.Role != model.AppReleaseRoleRetired || previousRelease.Status != model.AppReleaseStatusRetired {
+		t.Fatalf("expected drained previous release retired, got %+v", previousRelease)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	for _, phase := range []string{"candidate_create", "candidate_ready", "gate_check", "final_gate", "promote", "edge_bundle_wait", "pre_alignment_retire_gate", "pre_previous_retire_gate", "previous_retire"} {
+		if !releaseStepsContainPhase(steps, phase, model.ReleaseStepStatusCompleted) {
+			t.Fatalf("expected completed phase %q, got %+v", phase, steps)
+		}
+	}
+}
+
+func TestSafeZeroDowntimeRolloutIntegrationLongRequestKeepsPreviousDraining(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := newSafeRolloutIntegrationService(stateStore, upstream.URL, safeRolloutDrainMetrics{
+		Ready:                false,
+		ActiveConnections:    1,
+		MaxActiveConnections: 1,
+		SampleCount:          3,
+		Summary:              map[string]any{"active_connections": 1, "max_active_connections": 1},
+	})
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+
+	previousRelease, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get previous release: %v", err)
+	}
+	if previousRelease.Role != model.AppReleaseRolePrevious || previousRelease.Status != model.AppReleaseStatusDraining {
+		t.Fatalf("expected previous release to keep draining while long request is active, got %+v", previousRelease)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != state.Candidate.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 {
+		t.Fatalf("expected new requests to stay on promoted candidate while previous drains, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "previous_retire", model.ReleaseStepStatusSkipped) {
+		t.Fatalf("expected previous retire to pause for active long request, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutIntegrationCandidateCrashLoopKeepsStable(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.abortSafeZeroDowntimeRollout(context.Background(), op, state, "candidate rollout failed: CrashLoopBackOff"); err != nil {
+		t.Fatalf("abort safe rollout: %v", err)
+	}
+
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != state.StableRelease.ID || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected stable release to keep all traffic after crashloop, got %+v", policy)
+	}
+	stable, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get stable release: %v", err)
+	}
+	if stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusReady {
+		t.Fatalf("expected existing stable release to remain ready stable, got %+v", stable)
+	}
+	failedCandidate, err := stateStore.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		t.Fatalf("get failed candidate: %v", err)
+	}
+	if failedCandidate.Status != model.AppReleaseStatusFailed || !strings.Contains(failedCandidate.StatusReason, "CrashLoopBackOff") {
+		t.Fatalf("expected failed crashloop candidate, got %+v", failedCandidate)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutIntegrationBusinessProbeFailureKeepsStable(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "business readiness failed", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		serviceURLForApp: func(context.Context, model.App) string { return upstream.URL },
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+
+	err = svc.completeSafeZeroDowntimeRollout(context.Background(), op, state)
+	if err == nil || !strings.Contains(err.Error(), "gate failed") {
+		t.Fatalf("expected business probe gate failure, got %v", err)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != state.StableRelease.ID || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected stable release to keep all traffic after probe failure, got %+v", policy)
+	}
+	stable, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get stable release: %v", err)
+	}
+	if stable.Role != model.AppReleaseRoleStable {
+		t.Fatalf("expected existing stable release to remain stable, got %+v", stable)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutIntegrationPreviousStableRollbackWindowRecoverable(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	previous.Spec.Continuity.ZeroDowntime.RollbackWindowSeconds = 300
+	candidate.Spec.Continuity.ZeroDowntime.RollbackWindowSeconds = 300
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := newSafeRolloutIntegrationService(stateStore, upstream.URL, safeRolloutDrainMetrics{
+		Ready:                false,
+		ActiveConnections:    1,
+		MaxActiveConnections: 2,
+		SampleCount:          1,
+		Summary:              map[string]any{"active_connections": 1, "max_active_connections": 2},
+	})
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+
+	previousRelease, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get previous release: %v", err)
+	}
+	if previousRelease.Role != model.AppReleaseRolePrevious || previousRelease.Status != model.AppReleaseStatusDraining || previousRelease.RetentionUntil == nil {
+		t.Fatalf("expected previous release retained as rollback target, got %+v", previousRelease)
+	}
+	promotedCandidate, err := stateStore.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		t.Fatalf("get promoted candidate: %v", err)
+	}
+	if promotedCandidate.RollbackTargetID != previousRelease.ID {
+		t.Fatalf("expected promoted candidate to point at rollback target %s, got %+v", previousRelease.ID, promotedCandidate)
+	}
+	principal := model.Principal{TenantID: candidate.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-integration-test"}
+	rollbackPolicy, err := svc.appReleaseService().PromoteRelease(context.Background(), principal, candidate, previousRelease, 100)
+	if err != nil {
+		t.Fatalf("restore previous stable release: %v", err)
+	}
+	if rollbackPolicy.StableReleaseID != previousRelease.ID || rollbackPolicy.CandidateReleaseID != "" || rollbackPolicy.StableWeight != 100 {
+		t.Fatalf("expected rollback to restore previous stable traffic, got %+v", rollbackPolicy)
+	}
+	restored, err := stateStore.GetAppRelease(candidate.TenantID, true, previousRelease.ID)
+	if err != nil {
+		t.Fatalf("get restored previous release: %v", err)
+	}
+	if restored.Role != model.AppReleaseRoleStable || restored.Status != model.AppReleaseStatusServing {
+		t.Fatalf("expected previous release restored to serving stable, got %+v", restored)
+	}
+}
+
 func TestSafeRolloutEdgeObserverRejectsServingLKGAndStaleHeartbeat(t *testing.T) {
 	t.Parallel()
 
@@ -501,6 +741,16 @@ func (q *sequencedReleaseGateMetricsQuerier) QueryReleaseGateMetrics(context.Con
 	out := q.metrics[0]
 	q.metrics = q.metrics[1:]
 	return out, nil
+}
+
+func newSafeRolloutIntegrationService(stateStore *store.Store, upstreamURL string, drainMetrics safeRolloutDrainMetrics) *Service {
+	return &Service{
+		Store:                          stateStore,
+		Logger:                         log.New(io.Discard, "", 0),
+		serviceURLForApp:               func(context.Context, model.App) string { return upstreamURL },
+		safeRolloutEdgeBundleObserver:  staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 2, ReadyNodes: 2, Summary: map[string]any{"ready_nodes": 2}}},
+		safeRolloutDrainMetricsQuerier: staticSafeRolloutDrainQuerier{metrics: drainMetrics},
+	}
 }
 
 func newSafeRolloutTestState(t *testing.T) (*store.Store, model.App, model.App, model.Operation) {

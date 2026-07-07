@@ -938,11 +938,11 @@ Debug bundle 必须包含：
 - [x] Unit test：canary metrics fail 自动 abort。
 - [x] Unit test：candidate unavailable 时 edge route fallback stable。
 - [x] Unit test：rollout wait failure 自动 restore previous spec。
-- [ ] Integration test：stateless app safe rollout success。
-- [ ] Integration test：long request during safe rollout 不被切断。
-- [ ] Integration test：candidate crashloop stable 保留。
-- [ ] Integration test：candidate Ready 后业务 probe fail stable 保留。
-- [ ] Integration test：previous stable rollback window 内可恢复。
+- [x] Integration test：stateless app safe rollout success。
+- [x] Integration test：long request during safe rollout 不被切断。
+- [x] Integration test：candidate crashloop stable 保留。
+- [x] Integration test：candidate Ready 后业务 probe fail stable 保留。
+- [x] Integration test：previous stable rollback window 内可恢复。
 
 ### Docs / Runbook
 
