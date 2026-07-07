@@ -959,8 +959,15 @@ Debug bundle 必须包含：
 ### 发布
 
 - [x] 第一阶段以 feature flag / shadow mode 发布。
-- [ ] 在测试 app 上开启 safe mode。
-- [ ] 验证 candidate gate pass / fail 都符合预期。
+- [x] 在测试 app 上开启 safe mode。
+- [x] 验证 candidate gate pass / fail 都符合预期。
 - [ ] 在低风险生产 app 上小范围开启。
 - [ ] 观察 safe rollout metrics 至少 24 小时。
 - [ ] 再开放给普通用户手动开启。
+
+#### 测试 App 发布验证记录
+
+- 测试对象：`drain-canary-0705`（`app_1783188884_8facd2b054e6`），用于 connection-aware zero-downtime validation。
+- Pass 验证：`rel_1783448371_7e9b9d885770` 完成 candidate initial gate、50% canary gate、final gate、promote，并在 edge route bundle 应用确认后进入 previous retire 阶段。50% canary passive metrics 记录 candidate 请求数 3、stable 请求数 6，candidate/stable 5xx rate 均为 0，2xx rate 均为 1，p95 TTFB 分别为 184ms / 175ms。
+- Fail 验证：`rel_1783449735_6e146abce7c8` 在 50% canary gate 因 `release request count 0 is below minimum 1` 失败，自动 abort candidate、恢复 previous stable desired state，并生成 evidence `evid_1783449901_b027d91b0bd0`。
+- 结论：测试 app 已覆盖 candidate gate pass 与 fail 两条路径；fail 路径没有关闭未确认安全的 stable revision，符合 safe zero downtime rollout 设计目标。
