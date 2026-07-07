@@ -961,7 +961,7 @@ Debug bundle 必须包含：
 - [x] 第一阶段以 feature flag / shadow mode 发布。
 - [x] 在测试 app 上开启 safe mode。
 - [x] 验证 candidate gate pass / fail 都符合预期。
-- [ ] 在低风险生产 app 上小范围开启。
+- [x] 在低风险生产 app 上小范围开启。
 - [ ] 观察 safe rollout metrics 至少 24 小时。
 - [ ] 再开放给普通用户手动开启。
 
@@ -971,3 +971,12 @@ Debug bundle 必须包含：
 - Pass 验证：`rel_1783448371_7e9b9d885770` 完成 candidate initial gate、50% canary gate、final gate、promote，并在 edge route bundle 应用确认后进入 previous retire 阶段。50% canary passive metrics 记录 candidate 请求数 3、stable 请求数 6，candidate/stable 5xx rate 均为 0，2xx rate 均为 1，p95 TTFB 分别为 184ms / 175ms。
 - Fail 验证：`rel_1783449735_6e146abce7c8` 在 50% canary gate 因 `release request count 0 is below minimum 1` 失败，自动 abort candidate、恢复 previous stable desired state，并生成 evidence `evid_1783449901_b027d91b0bd0`。
 - 结论：测试 app 已覆盖 candidate gate pass 与 fail 两条路径；fail 路径没有关闭未确认安全的 stable revision，符合 safe zero downtime rollout 设计目标。
+
+#### 低风险生产 App 灰度记录
+
+- 灰度对象：`albumartwork`（`app_1774720664_ef855e625cae`，`https://music.fugue.pro`），静态站，1 副本，无 app binding，无 backing service。
+- 开启记录：`op_1783456259_bfc1a3d1c9be` 完成 deploy 后，`continuity.zero_downtime.mode=safe` 生效。首次开启前遇到内部 registry tag 缺失，控制平面自动 queued image rebuild，`op_1783456242_fe89c0764d9f` 完成后 app 回到 deployed，公网探测保持 200。
+- 真实 canary 验证：`rel_1783456347_6308a1f6e3d8` 由 noop env patch 触发，candidate rollout ready，edge route bundle 在 1%、5%、25%、50% 阶段均确认应用到 3/3 ready edge nodes。
+- 保护行为：1%、5%、25% 因 candidate 样本不足被记录为 inconclusive 并继续升权；50% 阶段拿到 candidate 样本后，candidate p95 TTFB 828ms 劣于 stable 91ms，触发 canary gate failure，自动 abort candidate，并生成 evidence `evid_1783456670_f79d627dd4f9`。
+- 恢复验证：失败后 `albumartwork` 仍为 deployed，公网探测返回 200，noop env `FUGUE_SAFE_ROLLOUT_PROD_CANARY` 未进入 stable spec，说明 safe rollout 没有把未通过 gate 的 candidate 提升为 stable。
+- 观察窗口：生产 safe mode 已开启，但 24 小时观察窗口尚未完成；观察起点按 `2026-07-07T20:31:13Z` 记录，最早应在 `2026-07-08T20:31:13Z` 之后再勾选 24 小时观察项。
