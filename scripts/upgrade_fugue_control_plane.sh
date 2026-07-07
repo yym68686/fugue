@@ -3361,8 +3361,15 @@ PY
     : >"${node_policies_file}"
   fi
   image_cache_status_file="$(mktemp)"
-  if [[ -n "${KUBECTL:-}" ]] && ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
-    : >"${image_cache_status_file}"
+  if [[ -n "${KUBECTL:-}" ]]; then
+    if command_exists timeout; then
+      if ! timeout "${FUGUE_RELEASE_PREFLIGHT_KUBECTL_TIMEOUT_SECONDS:-15}s" \
+        ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
+        : >"${image_cache_status_file}"
+      fi
+    elif ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
+      : >"${image_cache_status_file}"
+    fi
   fi
   local autonomy_override_message=""
   local node_local_build_plane_override_allowed="false"
