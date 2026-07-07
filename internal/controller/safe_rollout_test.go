@@ -137,6 +137,356 @@ func TestSafeZeroDowntimeRolloutCanaryMetricsFailureAutoAborts(t *testing.T) {
 	}
 }
 
+func TestSafeZeroDowntimeRolloutCandidateRolloutFailureAutoAborts(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+
+	reason := "candidate revision rollout failed: ImagePullBackOff"
+	if err := svc.abortSafeZeroDowntimeRollout(context.Background(), op, state, reason); err != nil {
+		t.Fatalf("abort safe rollout: %v", err)
+	}
+	updatedCandidate, err := stateStore.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		t.Fatalf("get candidate release: %v", err)
+	}
+	if updatedCandidate.Status != model.AppReleaseStatusFailed || !strings.Contains(updatedCandidate.StatusReason, "ImagePullBackOff") {
+		t.Fatalf("expected failed candidate release with image pull reason, got %+v", updatedCandidate)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected stable-only traffic after candidate rollout failure, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "abort", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected completed abort step, got %+v", steps)
+	}
+	events, err := stateStore.ListAuditEvents(candidate.TenantID, true, 100)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if !auditEventsContainAction(events, "app.release.abort.auto") {
+		t.Fatalf("expected auto abort audit event, got %+v", events)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutFailureRestoresPreviousSpec(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	restoreCalled := false
+	restoreReason := ""
+	svc := &Service{
+		Store:  stateStore,
+		Logger: log.New(io.Discard, "", 0),
+		restoreSafeRolloutPreviousSpec: func(_ context.Context, gotOp model.Operation, gotState *safeRolloutState, reason string) error {
+			restoreCalled = true
+			restoreReason = reason
+			if gotOp.ID != op.ID {
+				t.Fatalf("expected operation %s, got %s", op.ID, gotOp.ID)
+			}
+			if gotState == nil || gotState.PreviousApp.Spec.Image != previous.Spec.Image {
+				t.Fatalf("expected previous spec image %s, got %+v", previous.Spec.Image, gotState)
+			}
+			return nil
+		},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+
+	reason := "candidate rollout wait failed: pod api-abc container api failed: CrashLoopBackOff"
+	if err := svc.abortSafeZeroDowntimeRollout(context.Background(), op, state, reason); err != nil {
+		t.Fatalf("abort safe rollout: %v", err)
+	}
+	if !restoreCalled || !strings.Contains(restoreReason, "CrashLoopBackOff") {
+		t.Fatalf("expected previous restore hook with rollout failure reason, called=%t reason=%q", restoreCalled, restoreReason)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "abort", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected abort step before restore, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutWaitsForEdgeBundleBeforeStableAlignment(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: false, RequiredNodes: 2, ReadyNodes: 1, Summary: map[string]any{"waiting_nodes": []string{"edge-de-1:serving_lkg"}}}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	if state.StableAlignmentAllowed {
+		t.Fatal("expected stable alignment to stay paused until edge route bundle is confirmed")
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "edge_bundle_wait", model.ReleaseStepStatusSkipped) ||
+		releaseStepsContainPhase(steps, "stable_alignment", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected skipped edge bundle wait and no completed alignment step, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutPausesAlignmentWhenCandidateFailsRetireGate(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	var requests int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests >= 3 {
+			http.Error(w, "candidate regressed", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout should pause retire instead of aborting promoted release: %v", err)
+	}
+	if state.StableAlignmentAllowed {
+		t.Fatal("expected stable alignment to stay paused after candidate retire gate failure")
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "pre_alignment_retire_gate", model.ReleaseStepStatusSkipped) {
+		t.Fatalf("expected skipped pre-alignment retire gate step, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutRetiresPreviousAfterDrainMetricsReachZero(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:                          stateStore,
+		Logger:                         log.New(io.Discard, "", 0),
+		serviceURLForApp:               func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutEdgeBundleObserver:  staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+		safeRolloutDrainMetricsQuerier: staticSafeRolloutDrainQuerier{metrics: safeRolloutDrainMetrics{Ready: true, ActiveConnections: 0, MaxActiveConnections: 4, FinalCount: 1, Summary: map[string]any{"active_connections": 0, "max_active_connections": 4}}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	if !state.StableAlignmentAllowed {
+		t.Fatal("expected stable alignment to be allowed after edge and candidate retire gates pass")
+	}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+
+	retiredPrevious, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get previous release: %v", err)
+	}
+	if retiredPrevious.Role != model.AppReleaseRoleRetired || retiredPrevious.Status != model.AppReleaseStatusRetired {
+		t.Fatalf("expected previous release retired after zero active drain metrics, got %+v", retiredPrevious)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "previous_retire", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected completed previous_retire step, got %+v", steps)
+	}
+	events, err := stateStore.ListAuditEvents(candidate.TenantID, true, 100)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if !auditEventsContainAction(events, "app.release.previous_retired") {
+		t.Fatalf("expected previous retired audit event, got %+v", events)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutPausesPreviousRetireWhenDrainMetricsStillActive(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:                          stateStore,
+		Logger:                         log.New(io.Discard, "", 0),
+		serviceURLForApp:               func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutEdgeBundleObserver:  staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+		safeRolloutDrainMetricsQuerier: staticSafeRolloutDrainQuerier{metrics: safeRolloutDrainMetrics{Ready: false, ActiveConnections: 2, MaxActiveConnections: 4, SampleCount: 1, Summary: map[string]any{"active_connections": 2, "max_active_connections": 4}}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+
+	drainingPrevious, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get previous release: %v", err)
+	}
+	if drainingPrevious.Role != model.AppReleaseRolePrevious || drainingPrevious.Status != model.AppReleaseStatusDraining {
+		t.Fatalf("expected previous release to remain draining while active connections exist, got %+v", drainingPrevious)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "previous_retire", model.ReleaseStepStatusSkipped) {
+		t.Fatalf("expected skipped previous_retire step, got %+v", steps)
+	}
+}
+
+func TestSafeRolloutEdgeObserverRejectsServingLKGAndStaleHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1700000000, 0).UTC()
+	readyHeartbeat := now.Add(time.Second)
+	observer := storeSafeRolloutEdgeBundleObserver{
+		Store: staticEdgeNodeLister{nodes: []model.EdgeNode{
+			{
+				ID:                 "edge-live",
+				EdgeGroupID:        "edge-group-country-us",
+				Status:             model.EdgeHealthHealthy,
+				Healthy:            true,
+				CaddyRouteCount:    10,
+				RouteBundleVersion: "routegen_live",
+				ServingGeneration:  "routegen_live",
+				LastHeartbeatAt:    &readyHeartbeat,
+			},
+			{
+				ID:                 "edge-lkg",
+				EdgeGroupID:        "edge-group-country-de",
+				Status:             model.EdgeHealthHealthy,
+				Healthy:            true,
+				CaddyRouteCount:    10,
+				RouteBundleVersion: "routegen_new",
+				ServingGeneration:  "routegen_old",
+				LKGGeneration:      "routegen_old",
+				LastHeartbeatAt:    &readyHeartbeat,
+			},
+		}},
+		Now: func() time.Time { return now },
+	}
+	observation, err := observer.observe(model.App{ID: "app"}, model.AppRelease{ID: "rel"}, now)
+	if err != nil {
+		t.Fatalf("wait edge bundle: %v", err)
+	}
+	if observation.Ready || observation.RequiredNodes != 2 || observation.ReadyNodes != 1 {
+		t.Fatalf("expected one waiting LKG node, got %+v", observation)
+	}
+	if len(observation.WaitingNodes) != 1 || !strings.Contains(observation.WaitingNodes[0], "serving_lkg") {
+		t.Fatalf("expected serving_lkg waiting reason, got %+v", observation.WaitingNodes)
+	}
+}
+
+func TestSafeRolloutDrainMetricsParserRequiresFinalZeroActive(t *testing.T) {
+	t.Parallel()
+
+	metrics := safeRolloutDrainMetrics{Summary: map[string]any{}}
+	safeRolloutApplyDrainLogLine(&metrics, "fugue_drain_sample active_connections=3 states=ESTABLISHED:3 waited_ms=1000")
+	safeRolloutApplyDrainLogLine(&metrics, "fugue_drain_complete reason=idle waited_ms=3200 active_connections=0 max_active_connections=3 observer_errors=0")
+	metrics.Ready = metrics.FinalCount > 0 && metrics.ActiveConnections == 0
+	if !metrics.Ready || metrics.SampleCount != 1 || metrics.FinalCount != 1 || metrics.MaxActiveConnections != 3 {
+		t.Fatalf("expected zero-active final drain metrics to be ready, got %+v", metrics)
+	}
+
+	active := safeRolloutDrainMetrics{Summary: map[string]any{}}
+	safeRolloutApplyDrainLogLine(&active, "fugue_drain_complete reason=timeout waited_ms=600000 active_connections=2 max_active_connections=5 observer_errors=0")
+	active.Ready = active.FinalCount > 0 && active.ActiveConnections == 0
+	if active.Ready {
+		t.Fatalf("expected non-zero active drain metrics to block retire, got %+v", active)
+	}
+
+	timedOut := safeRolloutDrainMetrics{Summary: map[string]any{}}
+	safeRolloutApplyDrainLogLine(&timedOut, "fugue_drain_complete reason=timeout waited_ms=600000 active_connections=0 max_active_connections=5 observer_errors=0")
+	unsafeFinalReason, _ := timedOut.Summary["unsafe_final_reason"].(bool)
+	timedOut.Ready = timedOut.FinalCount > 0 && timedOut.ActiveConnections == 0 && !unsafeFinalReason
+	if timedOut.Ready {
+		t.Fatalf("expected timeout final reason to block retire even with zero active connections, got %+v", timedOut)
+	}
+}
+
+type staticEdgeNodeLister struct {
+	nodes []model.EdgeNode
+}
+
+func (l staticEdgeNodeLister) ListEdgeNodes(string) ([]model.EdgeNode, []model.EdgeGroup, error) {
+	return l.nodes, nil, nil
+}
+
+type staticSafeRolloutEdgeObserver struct {
+	observation safeRolloutEdgeBundleObservation
+	err         error
+}
+
+func (o staticSafeRolloutEdgeObserver) WaitForSafeRolloutEdgeRouteBundle(context.Context, model.App, model.AppRelease, time.Time) (safeRolloutEdgeBundleObservation, error) {
+	return o.observation, o.err
+}
+
+type staticSafeRolloutDrainQuerier struct {
+	metrics safeRolloutDrainMetrics
+	err     error
+}
+
+func (q staticSafeRolloutDrainQuerier) QuerySafeRolloutDrainMetrics(context.Context, model.App, model.AppRelease, time.Time) (safeRolloutDrainMetrics, error) {
+	return q.metrics, q.err
+}
+
 type sequencedReleaseGateMetricsQuerier struct {
 	mu      sync.Mutex
 	metrics []map[string]any

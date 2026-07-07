@@ -174,7 +174,7 @@ func (s *Service) writeSafeRolloutMetrics(w http.ResponseWriter) {
 
 func safeRolloutMetricPhase(phase string) bool {
 	switch strings.TrimSpace(phase) {
-	case "candidate_create", "candidate_ready", "gate_check", "canary_shift", "canary_gate", "final_gate", "promote", "abort", "restore_previous":
+	case "candidate_create", "candidate_ready", "gate_check", "canary_shift", "canary_gate", "final_gate", "promote", "edge_bundle_wait", "pre_alignment_retire_gate", "stable_alignment", "pre_previous_retire_gate", "previous_retire", "abort", "restore_previous":
 		return true
 	default:
 		return false

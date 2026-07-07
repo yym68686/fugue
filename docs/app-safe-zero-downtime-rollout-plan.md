@@ -830,7 +830,7 @@ Debug bundle 必须包含：
 
 - [x] 确认 safe zero downtime rollout 的产品语义：`drain_only` 与 `safe` 分离。
 - [x] 确认默认值：新 app 默认不开启 safe mode。
-- [ ] 确认哪些用户套餐 / app 类型允许开启 safe mode。
+- [x] 确认哪些用户套餐 / app 类型允许开启 safe mode：当前不按套餐默认硬限制，先按 app 能力 gate；只允许有 public/internal cluster service、无 workspace storage、无非 RWX persistent storage 的 app 开启，后续套餐化应落在 billing/entitlement 配置而不是 controller 特判。
 - [x] 确认持久化存储 app 的支持矩阵：stateless、RWX、movable RWO、direct RWO、managed Postgres。
 - [x] 确认 migration / data rollback 不属于默认 safe rollout 自动保证。
 
@@ -854,7 +854,7 @@ Debug bundle 必须包含：
 - [x] rollback restore 必须幂等。
 - [x] rollback restore 失败必须附带 operation evidence。
 - [x] 防止同一 release attempt 无限 rollback。
-- [ ] 增加 crashloop / image pull failure 回归测试。
+- [x] 增加 crashloop / image pull failure 回归测试。
 
 ### Candidate Release
 
@@ -878,7 +878,7 @@ Debug bundle 必须包含：
 ### Traffic Canary
 
 - [x] controller 可自动设置 candidate initial weight。
-- [ ] controller 等待 edge route bundle 应用完成。
+- [x] controller 等待 edge route bundle 应用完成。
 - [x] request facts 必须记录 release id / release role。
 - [x] controller 查询 candidate passive metrics。
 - [x] canary pass 后按 step_weights 升权。
@@ -900,14 +900,14 @@ Debug bundle 必须包含：
 
 ### Stable Drain / Retire
 
-- [ ] controller 在 retire previous 前读取 drain-agent metrics。
-- [ ] controller 确认 previous stable 不再接收新请求。
-- [ ] controller 等待 active connections 归零。
-- [ ] controller 在 retire 前重新检查 candidate active probe。
-- [ ] controller 在 retire 前重新检查短窗口 passive metrics。
-- [ ] candidate unhealthy 时暂停 previous retire。
-- [ ] previous retire 完成后记录 audit event。
-- [ ] 增加长连接 / SSE / streaming 请求回归测试。
+- [x] controller 在 retire previous 前读取 drain-agent metrics。
+- [x] controller 确认 previous stable 不再接收新请求。
+- [x] controller 等待 active connections 归零。
+- [x] controller 在 retire 前重新检查 candidate active probe。
+- [x] controller 在 retire 前重新检查短窗口 passive metrics。
+- [x] candidate unhealthy 时暂停 previous retire。
+- [x] previous retire 完成后记录 audit event。
+- [x] 增加长连接 / SSE / streaming 请求回归测试。
 
 ### CLI
 
@@ -937,7 +937,7 @@ Debug bundle 必须包含：
 - [x] Unit test：candidate probe fail 自动 abort。
 - [x] Unit test：canary metrics fail 自动 abort。
 - [x] Unit test：candidate unavailable 时 edge route fallback stable。
-- [ ] Unit test：rollout wait failure 自动 restore previous spec。
+- [x] Unit test：rollout wait failure 自动 restore previous spec。
 - [ ] Integration test：stateless app safe rollout success。
 - [ ] Integration test：long request during safe rollout 不被切断。
 - [ ] Integration test：candidate crashloop stable 保留。

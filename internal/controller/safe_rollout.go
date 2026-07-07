@@ -15,11 +15,12 @@ import (
 )
 
 type safeRolloutState struct {
-	Enabled       bool
-	PreviousApp   model.App
-	CandidateApp  model.App
-	StableRelease model.AppRelease
-	Candidate     model.AppRelease
+	Enabled                bool
+	PreviousApp            model.App
+	CandidateApp           model.App
+	StableRelease          model.AppRelease
+	Candidate              model.AppRelease
+	StableAlignmentAllowed bool
 }
 
 type safeRolloutPlan struct {
@@ -205,6 +206,9 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	if err != nil {
 		return fmt.Errorf("promote candidate release after safe rollout gate: %w", err)
 	}
+	if promoted, err := s.Store.GetAppRelease(state.CandidateApp.TenantID, true, state.Candidate.ID); err == nil {
+		state.Candidate = promoted
+	}
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "promote", model.ReleaseStepStatusCompleted, "candidate promoted to stable", state.Candidate.ID, map[string]any{
 		"traffic_policy_id": traffic.ID,
 	})
@@ -212,7 +216,223 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 		"operation_id": op.ID,
 		"mode":         "safe_zero_downtime",
 	})
+	if !s.waitSafeRolloutEdgeRouteBundleApplied(ctx, op, state) {
+		return nil
+	}
+	if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "pre_alignment_retire_gate") {
+		return nil
+	}
+	state.StableAlignmentAllowed = true
 	return nil
+}
+
+func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op model.Operation, state *safeRolloutState) bool {
+	if state == nil || !state.Enabled {
+		return true
+	}
+	observer := s.edgeBundleObserverForSafeRollout()
+	since := time.Now().UTC()
+	if state.Candidate.PromotedAt != nil {
+		since = state.Candidate.PromotedAt.UTC()
+	}
+	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, since)
+	payload := map[string]any{
+		"observation": observation.Summary,
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "edge_bundle_wait", model.ReleaseStepStatusSkipped, "stable alignment paused: edge route bundle confirmation failed", state.Candidate.ID, payload)
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "edge_bundle_wait",
+			"reason":       err.Error(),
+		})
+		return false
+	}
+	status := model.ReleaseStepStatusCompleted
+	summary := "edge route bundle applied before previous retire"
+	if !observation.Ready {
+		status = model.ReleaseStepStatusSkipped
+		summary = "stable alignment paused: waiting for edge route bundle application"
+	}
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "edge_bundle_wait", status, summary, state.Candidate.ID, payload)
+	if !observation.Ready {
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
+			"operation_id":   op.ID,
+			"phase":          "edge_bundle_wait",
+			"required_nodes": fmt.Sprintf("%d", observation.RequiredNodes),
+			"ready_nodes":    fmt.Sprintf("%d", observation.ReadyNodes),
+		})
+	}
+	return observation.Ready
+}
+
+func (s *Service) edgeBundleObserverForSafeRollout() safeRolloutEdgeBundleObserver {
+	if s != nil && s.safeRolloutEdgeBundleObserver != nil {
+		return s.safeRolloutEdgeBundleObserver
+	}
+	var sleep func(context.Context, time.Duration) error
+	if s != nil {
+		sleep = s.safeRolloutSleep
+	}
+	return storeSafeRolloutEdgeBundleObserver{Store: s.Store, Sleep: sleep}
+}
+
+func (s *Service) recheckSafeRolloutCandidateBeforeRetire(ctx context.Context, op model.Operation, state *safeRolloutState, phase string) bool {
+	if state == nil || !state.Enabled {
+		return true
+	}
+	gate := s.evaluateSafeRolloutCandidateRetireGate(ctx, state.CandidateApp, state.Candidate, s.safeRolloutPlanForApp(state.CandidateApp).Gate)
+	status := model.ReleaseStepStatusCompleted
+	summary := "candidate retire gate passed"
+	if gate.Status == model.AppReleaseGateStatusFail {
+		status = model.ReleaseStepStatusSkipped
+		summary = "previous retire paused: candidate retire gate failed"
+	}
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, phase, status, summary, state.Candidate.ID, map[string]any{
+		"gate": gate,
+	})
+	if gate.Status == model.AppReleaseGateStatusFail {
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        phase,
+			"reason":       strings.Join(gate.Failures, "; "),
+		})
+		return false
+	}
+	return true
+}
+
+func (s *Service) evaluateSafeRolloutCandidateRetireGate(ctx context.Context, app model.App, release model.AppRelease, policy model.AppReleaseGatePolicy) model.AppReleaseGateResult {
+	evaluator := s.releaseGateEvaluator()
+	window := time.Duration(policy.WindowSeconds) * time.Second
+	if window <= 0 || window > time.Minute {
+		window = time.Minute
+	}
+	gate := model.AppReleaseGateResult{
+		Status:       model.AppReleaseGateStatusPass,
+		ReleaseID:    release.ID,
+		Role:         release.Role,
+		Window:       window.String(),
+		Evidence:     []string{},
+		Warnings:     []string{},
+		Failures:     []string{},
+		Metrics:      map[string]any{},
+		EvaluatedAt:  time.Now().UTC(),
+		ProbeResults: evaluator.RunProbes(ctx, release, policy.Probes),
+	}
+	for _, result := range gate.ProbeResults {
+		if result.Status == model.AppReleaseGateStatusFail {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("probe %s failed: %s", firstNonEmptyString(result.Name, result.Path), result.Error))
+		}
+	}
+	if s.releaseGateMetricsQuerier != nil {
+		if metrics, err := s.releaseGateMetricsQuerier.QueryReleaseGateMetrics(ctx, app.ID, release.ID, release.Role, window); err == nil {
+			passivePolicy := policy
+			passivePolicy.MinCandidateRequests = 0
+			gate.Metrics = metrics
+			gate.Evidence = append(gate.Evidence, releaseflow.ReleaseGateMetricEvidence(metrics)...)
+			gate.Failures = append(gate.Failures, releaseflow.ReleaseGateMetricFailures(metrics, passivePolicy)...)
+		} else {
+			gate.Warnings = append(gate.Warnings, "short-window passive release metrics unavailable: "+err.Error())
+		}
+	} else {
+		gate.Warnings = append(gate.Warnings, "short-window passive release metrics unavailable: metrics querier is not configured")
+	}
+	if len(gate.Failures) > 0 {
+		gate.Status = model.AppReleaseGateStatusFail
+	}
+	return gate
+}
+
+func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op model.Operation, state *safeRolloutState) {
+	if state == nil || !state.Enabled || !state.StableAlignmentAllowed {
+		return
+	}
+	if !s.recheckSafeRolloutCandidateBeforeRetire(ctx, op, state, "pre_previous_retire_gate") {
+		return
+	}
+	policy, err := s.Store.GetAppTrafficPolicy(state.CandidateApp.TenantID, true, state.CandidateApp.ID)
+	if err != nil {
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: traffic policy unavailable", state.Candidate.ID, map[string]any{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(policy.StableReleaseID) != strings.TrimSpace(state.Candidate.ID) ||
+		strings.TrimSpace(policy.CandidateReleaseID) != "" ||
+		policy.StableWeight != 100 ||
+		policy.CandidateWeight != 0 {
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: previous release may still receive traffic", state.Candidate.ID, map[string]any{
+			"traffic_policy": policy,
+		})
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "previous_retire",
+			"reason":       "traffic policy still references non-stable traffic",
+		})
+		return
+	}
+	previous, err := s.Store.GetAppRelease(state.CandidateApp.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: previous release unavailable", state.Candidate.ID, map[string]any{"error": err.Error()})
+		return
+	}
+	metrics, ok := s.querySafeRolloutDrainMetrics(ctx, op, state.CandidateApp, previous, state.Candidate.PromotedAt)
+	if !ok {
+		return
+	}
+	retired, err := s.appReleaseService().RetireRelease(ctx, state.CandidateApp, previous, "safe rollout previous stable drained")
+	if err != nil {
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: release record update failed", state.Candidate.ID, map[string]any{"error": err.Error(), "drain_metrics": metrics.Summary})
+		return
+	}
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusCompleted, "previous stable retired after drain metrics reached zero", retired.ID, map[string]any{
+		"drain_metrics": metrics.Summary,
+	})
+	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retired", retired.ID, map[string]string{
+		"operation_id":        op.ID,
+		"candidate_release":   state.Candidate.ID,
+		"active_connections":  fmt.Sprintf("%d", metrics.ActiveConnections),
+		"max_active_requests": fmt.Sprintf("%d", metrics.MaxActiveConnections),
+	})
+}
+
+func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Operation, app model.App, previous model.AppRelease, promotedAt *time.Time) (safeRolloutDrainMetrics, bool) {
+	if s == nil || s.safeRolloutDrainMetricsQuerier == nil {
+		s.recordSafeRolloutReleaseStep(op, app, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: drain metrics querier is not configured", previous.ID, nil)
+		s.appendSafeRolloutAuditEvent(app, "app.release.previous_retire.paused", previous.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "previous_retire",
+			"reason":       "drain metrics querier is not configured",
+		})
+		return safeRolloutDrainMetrics{}, false
+	}
+	since := time.Now().UTC().Add(-safeRolloutDrainMetricsLookback)
+	if promotedAt != nil {
+		since = promotedAt.UTC()
+	}
+	metrics, err := s.safeRolloutDrainMetricsQuerier.QuerySafeRolloutDrainMetrics(ctx, app, previous, since)
+	if err != nil {
+		s.recordSafeRolloutReleaseStep(op, app, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: drain metrics unavailable", previous.ID, map[string]any{"error": err.Error()})
+		s.appendSafeRolloutAuditEvent(app, "app.release.previous_retire.paused", previous.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "previous_retire",
+			"reason":       "drain metrics unavailable",
+		})
+		return safeRolloutDrainMetrics{}, false
+	}
+	if !metrics.Ready || metrics.ActiveConnections > 0 {
+		s.recordSafeRolloutReleaseStep(op, app, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: active connections have not drained to zero", previous.ID, map[string]any{
+			"drain_metrics": metrics.Summary,
+		})
+		s.appendSafeRolloutAuditEvent(app, "app.release.previous_retire.paused", previous.ID, map[string]string{
+			"operation_id":       op.ID,
+			"phase":              "previous_retire",
+			"reason":             "active connections have not drained to zero",
+			"active_connections": fmt.Sprintf("%d", metrics.ActiveConnections),
+		})
+		return metrics, false
+	}
+	return metrics, true
 }
 
 func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, state *safeRolloutState, reason string) error {
@@ -229,6 +449,9 @@ func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Ope
 		"operation_id": op.ID,
 		"reason":       reason,
 	})
+	if s.restoreSafeRolloutPreviousSpec != nil {
+		return s.restoreSafeRolloutPreviousSpec(ctx, op, state, reason)
+	}
 	return s.restoreSafeZeroDowntimePreviousSpec(ctx, op, state, reason)
 }
 

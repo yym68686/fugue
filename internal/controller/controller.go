@@ -36,7 +36,10 @@ type Service struct {
 	resolveRemoteImageDigest        func(context.Context, string) (string, error)
 	releaseGateMetricsQuerier       releaseflow.ReleaseGateMetricsQuerier
 	releaseGateHTTPClient           releaseflow.HTTPDoer
+	safeRolloutEdgeBundleObserver   safeRolloutEdgeBundleObserver
+	safeRolloutDrainMetricsQuerier  safeRolloutDrainMetricsQuerier
 	safeRolloutSleep                func(context.Context, time.Duration) error
+	restoreSafeRolloutPreviousSpec  func(context.Context, model.Operation, *safeRolloutState, string) error
 	serviceURLForApp                func(context.Context, model.App) string
 	syncBillingImageStorage         bool
 	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
@@ -113,19 +116,20 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 				NativeSidecarEnabled:          cfg.StrictDrainNativeSidecarEnabled,
 			}.Normalize(),
 		},
-		Logger:                       logger,
-		importer:                     sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
-		registryPushBase:             strings.TrimSpace(cfg.RegistryPushBase),
-		registryPullBase:             strings.TrimSpace(cfg.RegistryPullBase),
-		builderRegistryPushBase:      strings.TrimSpace(cfg.BuilderRegistryPushBase),
-		resolveManagedImageDigestRef: sourceimport.ResolveRemoteImageDigestRef,
-		resolveRemoteImageDigest:     sourceimport.ResolveRemoteImageDigest,
-		releaseGateMetricsQuerier:    controllerReleaseGateMetricsQuerier(cfg),
-		latestGitHubCommit:           sourceimport.LatestGitHubCommit,
-		newKubeClient:                newKubeClient,
-		now:                          time.Now,
-		metricsStartedAt:             time.Now().UTC(),
-		imageTrackingDecisionCounts:  map[string]int64{},
+		Logger:                         logger,
+		importer:                       sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		registryPushBase:               strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:               strings.TrimSpace(cfg.RegistryPullBase),
+		builderRegistryPushBase:        strings.TrimSpace(cfg.BuilderRegistryPushBase),
+		resolveManagedImageDigestRef:   sourceimport.ResolveRemoteImageDigestRef,
+		resolveRemoteImageDigest:       sourceimport.ResolveRemoteImageDigest,
+		releaseGateMetricsQuerier:      controllerReleaseGateMetricsQuerier(cfg),
+		safeRolloutDrainMetricsQuerier: controllerSafeRolloutDrainMetricsQuerier(cfg),
+		latestGitHubCommit:             sourceimport.LatestGitHubCommit,
+		newKubeClient:                  newKubeClient,
+		now:                            time.Now,
+		metricsStartedAt:               time.Now().UTC(),
+		imageTrackingDecisionCounts:    map[string]int64{},
 	}
 }
 
@@ -971,7 +975,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err := s.completeSafeZeroDowntimeRollout(ctx, op, safeRollout); err != nil {
 				return err
 			}
-			if safeRollout != nil {
+			if safeRollout != nil && safeRollout.StableAlignmentAllowed {
 				if err := s.applyManagedAppDesiredState(applyCtx, app, scheduling); err != nil {
 					return fmt.Errorf("align managed app desired state after safe rollout %s: %w", app.ID, err)
 				}
@@ -980,6 +984,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				if err := alignmentResult.Error(); err != nil {
 					return fmt.Errorf("wait for managed app alignment after safe rollout %s: %w", app.ID, err)
 				}
+				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusCompleted, "stable desired state aligned after edge route confirmation", safeRollout.Candidate.ID, nil)
+				s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, safeRollout)
+			} else if safeRollout != nil {
+				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "stable desired state alignment paused until edge route and retire gates pass", safeRollout.Candidate.ID, nil)
 			}
 			timer.Mark("rollout_wait")
 		}
