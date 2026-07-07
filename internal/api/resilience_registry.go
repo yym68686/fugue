@@ -18,9 +18,9 @@ func resilienceInvariantRegistry() []model.ResilienceInvariant {
 		{ID: "node.managed_iptables_provenance", Category: "node", Description: "Fugue managed iptables rules are identifiable and stale rules are detected before repair", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/stale-iptables-managed-rule.md"},
 		{ID: "node.podcidr_matches_kubernetes", Category: "node", Description: "actual route table still contains the Kubernetes Node PodCIDR", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
 		{ID: "node.conntrack_safe", Category: "node", Description: "conntrack saturation stays below the hard fail threshold", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "runtime.no_quarantined_node_placement", Category: "runtime", Description: "new runtime placement excludes quarantined nodes", HardGate: true, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
-		{ID: "runtime.stateless_replacement_ready_before_route", Category: "runtime", Description: "stateless replacement plan must become ready before route cutover", HardGate: true, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
-		{ID: "runtime.stateful_fence_before_failover", Category: "runtime", Description: "stateful failover requires lease, fence, backup, and restore evidence", HardGate: true, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateful-app-preflight.md"},
+		{ID: "runtime.no_quarantined_node_placement", Category: "tenant_workload", Description: "new runtime placement excludes quarantined nodes when tenant workload failover is enabled", HardGate: false, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
+		{ID: "runtime.stateless_replacement_ready_before_route", Category: "tenant_workload", Description: "stateless replacement plan must become ready before tenant workload route cutover", HardGate: false, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
+		{ID: "runtime.stateful_fence_before_failover", Category: "tenant_workload", Description: "stateful tenant workload failover requires lease, fence, backup, and restore evidence", HardGate: false, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateful-app-preflight.md"},
 		{ID: "edge.eligible_set_hard_gates", Category: "edge", Description: "DNS answers only contain online, healthy, route-ready, TLS-ready, non-excluded, non-draining, non-quarantined edges", HardGate: true, EvidenceSource: "traffic_safety", RunbookRef: "docs/runbooks/edge-quarantine.md"},
 		{ID: "edge.service_min_healthy_edge_count", Category: "edge", Description: "service-level exclusion or rollout must not leave a hostname with zero healthy eligible edges", HardGate: true, EvidenceSource: "traffic_safety", RunbookRef: "docs/runbooks/traffic-safety-zero-eligible-edge.md"},
 		{ID: "dns.answer_policy_generation_visible", Category: "dns", Description: "DNS answers include ranking version, scope, route generation, and selected edge group evidence", HardGate: false, EvidenceSource: "dns_answer_policy", RunbookRef: "docs/runbooks/request-attribution.md"},
@@ -401,11 +401,16 @@ func robustnessChecksFromRuntimeContinuity(statuses []model.RuntimeContinuitySta
 	for _, status := range statuses {
 		pass := len(status.Blockers) == 0
 		severity := model.RobustnessSeverityInfo
-		if !pass && status.Strategy == "stateful_preflight_only" {
-			severity = model.RobustnessSeverityBlockPublish
-		} else if !pass {
+		if !pass {
 			severity = model.RobustnessSeverityDegraded
 		}
+		evidence := cloneStringMap(status.Evidence)
+		if evidence == nil {
+			evidence = map[string]string{}
+		}
+		evidence["guardian"] = "runtime-continuity"
+		evidence["release_gate_scope"] = "tenant_workload"
+		evidence["report_only"] = "true"
 		checks = append(checks, model.RobustnessCheck{
 			Name:       "app_continuity_invariant",
 			Pass:       pass,
@@ -414,8 +419,8 @@ func robustnessChecksFromRuntimeContinuity(statuses []model.RuntimeContinuitySta
 			Expected:   "ready replicas satisfy desired replicas and runtime node is not quarantined",
 			Observed:   fmt.Sprintf("state=%s strategy=%s ready=%d desired=%d runtime=%s node=%s", status.State, status.Strategy, status.ReadyReplicas, status.DesiredReplicas, status.RuntimeID, status.RuntimeNode),
 			Message:    strings.Join(status.Blockers, "; "),
-			Evidence:   status.Evidence,
-			RepairHint: firstNonEmpty(status.ReplacementPlan, "no action needed"),
+			Evidence:   evidence,
+			RepairHint: firstNonEmpty(status.ReplacementPlan, "tenant workload continuity is report-only unless the tenant has enabled managed failover"),
 		})
 	}
 	return checks

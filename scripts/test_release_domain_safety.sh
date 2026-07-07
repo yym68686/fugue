@@ -244,9 +244,15 @@ fi
 [[ "${robustness_output}" == *"new_incidents=1"* ]] || fail "robustness baseline failure must report new incident count"
 [[ "${robustness_output}" == *"new_blockers=route_active(route:example): missing route"* ]] || fail "robustness baseline failure must report new block_publish blocker"
 export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=7"},{"name":"app_continuity_invariant","subject":"app:example","pass":false,"severity":"block_publish","message":"ready replicas 0 below desired 1"}],"incidents":[{"id":"robust_existing_changed","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=7"},{"id":"robust_introduced","severity":"block_publish","subject":"app:example","check_name":"app_continuity_invariant","message":"ready replicas 0 below desired 1"}]}}'
-robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" || fail "newly introduced robustness checks must not fail a mixed-version baseline rollout"
-[[ "${robustness_output}" == *"introduced_blockers=app_continuity_invariant(app:example): ready replicas 0 below desired 1"* ]] || fail "introduced blocker summary must be reported"
-[[ "${robustness_output}" == *"introduced_incidents=block_publish:app_continuity_invariant(app:example): ready replicas 0 below desired 1"* ]] || fail "introduced incident summary must be reported"
+robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" || fail "tenant workload continuity must not fail a mixed-version baseline rollout"
+[[ "${robustness_output}" == *"block_rollout=false"* ]] || fail "tenant workload continuity must not keep effective block_rollout=true"
+[[ "${robustness_output}" == *"raw_block_rollout=true ignored_by_release_scope=true"* ]] || fail "tenant workload continuity summary must report raw block_rollout was ignored"
+[[ "${robustness_output}" == *"ignored_tenant_workload_blockers=1"* ]] || fail "tenant workload blocker count must be reported"
+[[ "${robustness_output}" == *"ignored_tenant_workload_incidents=1"* ]] || fail "tenant workload incident count must be reported"
+export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"app_continuity_invariant","subject":"app:example","pass":false,"severity":"block_publish","message":"ready replicas 0 below desired 1"}],"incidents":[{"id":"robust_app","severity":"block_publish","subject":"app:example","check_name":"app_continuity_invariant","message":"ready replicas 0 below desired 1"}]}}'
+robustness_output="$(robustness_status_summary)" || fail "tenant workload continuity must not fail strict rollout mode"
+[[ "${robustness_output}" == *"block_rollout=false"* ]] || fail "strict tenant workload continuity summary must not block rollout"
+[[ "${robustness_output}" == *"ignored_tenant_workload_blockers=1"* ]] || fail "strict tenant workload continuity blocker count must be reported"
 rm -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}"
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 unset TEST_CURL_RESPONSE_JSON

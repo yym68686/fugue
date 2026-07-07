@@ -6262,6 +6262,19 @@ def incident_label(incident):
     label = f"{severity}:{name}({subject})" if subject else f"{severity}:{name}"
     return f"{label}: {message}" if message else label
 
+def evidence_map(item):
+    evidence = item.get("evidence") if isinstance(item, dict) else {}
+    return evidence if isinstance(evidence, dict) else {}
+
+def release_gate_ignored_tenant_workload(item):
+    name = stable_text(item.get("check_name") or item.get("name"))
+    if name == "app_continuity_invariant":
+        return True
+    evidence = evidence_map(item)
+    if stable_text(evidence.get("release_gate_scope")) == "tenant_workload":
+        return True
+    return stable_text(evidence.get("report_only")).lower() == "true"
+
 baseline_status = None
 baseline_check_names = set()
 baseline_incident_ids = set()
@@ -6291,6 +6304,7 @@ if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_
             if (
                 not check.get("pass")
                 and stable_text(check.get("severity")) == "block_publish"
+                and not release_gate_ignored_tenant_workload(check)
             ):
                 key = check_key(check)
                 if key:
@@ -6298,10 +6312,11 @@ if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_
 
 checks = status.get("checks") or []
 incidents = status.get("incidents") or []
-block_rollout = bool(status.get("block_rollout"))
+raw_block_rollout = bool(status.get("block_rollout"))
 blockers = []
 new_blockers = []
 introduced_blockers = []
+ignored_tenant_workload_blockers = []
 for check in checks:
     if not isinstance(check, dict) or check.get("pass"):
         continue
@@ -6314,6 +6329,9 @@ for check in checks:
     message = str(check.get("message") or check.get("observed") or "").strip()
     label = f"{name}({subject})" if subject else name
     description = f"{label}: {message}" if message else label
+    if release_gate_ignored_tenant_workload(check):
+        ignored_tenant_workload_blockers.append(description)
+        continue
     blockers.append(description)
     key = check_key(check)
     if not baseline_status:
@@ -6326,6 +6344,7 @@ for check in checks:
 
 new_incidents = []
 introduced_incidents = []
+ignored_tenant_workload_incidents = []
 if baseline_status is not None:
     for incident in incidents:
         if not isinstance(incident, dict):
@@ -6336,11 +6355,15 @@ if baseline_status is not None:
             continue
         name = stable_text(incident.get("check_name") or incident.get("name"))
         label = incident_label(incident)
+        if release_gate_ignored_tenant_workload(incident):
+            ignored_tenant_workload_incidents.append(label)
+            continue
         if name and name not in baseline_check_names:
             introduced_incidents.append(label)
         else:
             new_incidents.append(label)
 
+block_rollout = raw_block_rollout and (bool(blockers) or not ignored_tenant_workload_blockers)
 summary = (
     f"pass={str(bool(status.get('pass'))).lower()} "
     f"block_rollout={str(block_rollout).lower()} "
@@ -6351,6 +6374,12 @@ if baseline_status is not None:
         f" baseline_incidents={len(baseline_status.get('incidents') or [])}"
         f" new_incidents={len(new_incidents)}"
     )
+if raw_block_rollout and not block_rollout:
+    summary += "; raw_block_rollout=true ignored_by_release_scope=true"
+if ignored_tenant_workload_blockers:
+    summary += f"; ignored_tenant_workload_blockers={len(ignored_tenant_workload_blockers)}"
+if ignored_tenant_workload_incidents:
+    summary += f"; ignored_tenant_workload_incidents={len(ignored_tenant_workload_incidents)}"
 if new_blockers:
     summary += "; new_blockers=" + "; ".join(new_blockers)
 elif introduced_blockers:

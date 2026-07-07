@@ -198,7 +198,7 @@ func TestRequestExplainSplitsUpstreamUnavailableAndFailureContracts(t *testing.T
 	}
 }
 
-func TestRuntimeContinuityHardGatesQuarantinedAndStatefulApps(t *testing.T) {
+func TestRuntimeContinuityReportsTenantWorkloadRisksWithoutPlatformHardGate(t *testing.T) {
 	t.Parallel()
 
 	statelessChecks := robustnessChecksFromRuntimeContinuity([]model.RuntimeContinuityStatus{{
@@ -213,7 +213,10 @@ func TestRuntimeContinuityHardGatesQuarantinedAndStatefulApps(t *testing.T) {
 		ReplacementPlan: "create replacement pod on non-quarantined runtime node",
 	}})
 	if len(statelessChecks) != 2 || statelessChecks[1].Pass || statelessChecks[1].Severity != model.RobustnessSeverityDegraded {
-		t.Fatalf("expected stateless quarantined runtime to be degraded but not auto-cutover, got %+v", statelessChecks)
+		t.Fatalf("expected stateless quarantined runtime to be degraded but not a platform hard gate, got %+v", statelessChecks)
+	}
+	if statelessChecks[1].Evidence["release_gate_scope"] != "tenant_workload" || statelessChecks[1].Evidence["report_only"] != "true" {
+		t.Fatalf("expected stateless continuity to be tenant workload report-only evidence, got %+v", statelessChecks[1].Evidence)
 	}
 
 	statefulChecks := robustnessChecksFromRuntimeContinuity([]model.RuntimeContinuityStatus{{
@@ -227,7 +230,10 @@ func TestRuntimeContinuityHardGatesQuarantinedAndStatefulApps(t *testing.T) {
 		StatefulPreflight: []string{"lease present", "fence evidence present", "fresh backup available", "restore plan available"},
 		ReplacementPlan:   "stateful app requires lease/fence/backup/restore preflight before failover",
 	}})
-	if len(statefulChecks) != 2 || statefulChecks[1].Pass || statefulChecks[1].Severity != model.RobustnessSeverityBlockPublish {
-		t.Fatalf("expected stateful failover without readiness to block, got %+v", statefulChecks)
+	if len(statefulChecks) != 2 || statefulChecks[1].Pass || statefulChecks[1].Severity != model.RobustnessSeverityDegraded {
+		t.Fatalf("expected stateful failover without readiness to be tenant workload risk, got %+v", statefulChecks)
+	}
+	if statefulChecks[1].Evidence["release_gate_scope"] != "tenant_workload" || statefulChecks[1].Evidence["report_only"] != "true" {
+		t.Fatalf("expected stateful continuity to be tenant workload report-only evidence, got %+v", statefulChecks[1].Evidence)
 	}
 }
