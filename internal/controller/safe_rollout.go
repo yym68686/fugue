@@ -150,7 +150,7 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			if err := s.sleepSafeRolloutObservation(ctx, time.Duration(plan.Canary.MinObservationSeconds)*time.Second); err != nil {
 				return err
 			}
-			gate = s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, plan.Gate)
+			gate = s.evaluateSafeRolloutCandidateCanaryGate(ctx, state, plan.Gate)
 			if gate.Status == model.AppReleaseGateStatusFail {
 				evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, fmt.Sprintf("candidate canary gate failed at %d%%", weight))
 				s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusFailed, fmt.Sprintf("candidate canary gate failed at %d%%", weight), state.Candidate.ID, map[string]any{
@@ -184,7 +184,11 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	if !observedCanaryTraffic {
 		finalPolicy.MinCandidateRequests = 0
 	}
-	gate = s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, finalPolicy)
+	if observedCanaryTraffic {
+		gate = s.evaluateSafeRolloutCandidateCanaryGate(ctx, state, finalPolicy)
+	} else {
+		gate = s.releaseGateEvaluator().Evaluate(ctx, state.CandidateApp, state.Candidate, finalPolicy)
+	}
 	if gate.Status == model.AppReleaseGateStatusFail {
 		evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, "candidate final gate failed")
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "final_gate", model.ReleaseStepStatusFailed, "candidate final gate failed", state.Candidate.ID, map[string]any{
@@ -310,20 +314,22 @@ func (s *Service) evaluateSafeRolloutCandidateRetireGate(ctx context.Context, ap
 		window = time.Minute
 	}
 	gate := model.AppReleaseGateResult{
-		Status:       model.AppReleaseGateStatusPass,
-		ReleaseID:    release.ID,
-		Role:         release.Role,
-		Window:       window.String(),
-		Evidence:     []string{},
-		Warnings:     []string{},
-		Failures:     []string{},
-		Metrics:      map[string]any{},
-		EvaluatedAt:  time.Now().UTC(),
-		ProbeResults: evaluator.RunProbes(ctx, release, policy.Probes),
+		Status:      model.AppReleaseGateStatusPass,
+		ReleaseID:   release.ID,
+		Role:        release.Role,
+		Window:      window.String(),
+		Evidence:    []string{},
+		Warnings:    []string{},
+		Failures:    []string{},
+		Metrics:     map[string]any{},
+		EvaluatedAt: time.Now().UTC(),
 	}
-	for _, result := range gate.ProbeResults {
-		if result.Status == model.AppReleaseGateStatusFail {
-			gate.Failures = append(gate.Failures, fmt.Sprintf("probe %s failed: %s", firstNonEmptyString(result.Name, result.Path), result.Error))
+	if len(policy.Probes) > 0 {
+		gate.ProbeResults = evaluator.RunProbes(ctx, release, policy.Probes)
+		for _, result := range gate.ProbeResults {
+			if result.Status == model.AppReleaseGateStatusFail {
+				gate.Failures = append(gate.Failures, fmt.Sprintf("probe %s failed: %s", firstNonEmptyString(result.Name, result.Path), result.Error))
+			}
 		}
 	}
 	if s.releaseGateMetricsQuerier != nil {
@@ -343,6 +349,92 @@ func (s *Service) evaluateSafeRolloutCandidateRetireGate(ctx context.Context, ap
 		gate.Status = model.AppReleaseGateStatusFail
 	}
 	return gate
+}
+
+func (s *Service) evaluateSafeRolloutCandidateCanaryGate(ctx context.Context, state *safeRolloutState, policy model.AppReleaseGatePolicy) model.AppReleaseGateResult {
+	window := time.Duration(policy.WindowSeconds) * time.Second
+	if window <= 0 {
+		window = releaseflow.DefaultAppReleaseGateWindow
+	}
+
+	evaluator := s.releaseGateEvaluator()
+	gate := model.AppReleaseGateResult{
+		Status:      model.AppReleaseGateStatusPass,
+		ReleaseID:   state.Candidate.ID,
+		Role:        state.Candidate.Role,
+		Window:      window.String(),
+		Evidence:    []string{},
+		Warnings:    []string{},
+		Failures:    []string{},
+		Metrics:     map[string]any{},
+		EvaluatedAt: time.Now().UTC(),
+	}
+	if len(policy.Probes) > 0 {
+		gate.ProbeResults = evaluator.RunProbes(ctx, state.Candidate, policy.Probes)
+		for _, result := range gate.ProbeResults {
+			if result.Status == model.AppReleaseGateStatusFail {
+				gate.Failures = append(gate.Failures, fmt.Sprintf("probe %s failed: %s", firstNonEmptyString(result.Name, result.Path), result.Error))
+			}
+		}
+	}
+	if s.releaseGateMetricsQuerier == nil {
+		gate.Warnings = append(gate.Warnings, "comparative release metrics unavailable: metrics querier is not configured")
+		gate.Failures = append(gate.Failures, "comparative release metrics unavailable: metrics querier is not configured")
+		gate.Status = model.AppReleaseGateStatusFail
+		return gate
+	}
+
+	candidateMetrics, err := s.querySafeRolloutReleaseComparisonMetrics(ctx, state.CandidateApp.ID, state.Candidate.ID, state.Candidate.Role, window)
+	if err != nil {
+		gate.Warnings = append(gate.Warnings, "comparative candidate release metrics unavailable: "+err.Error())
+		gate.Failures = append(gate.Failures, "comparative candidate release metrics unavailable: "+err.Error())
+		gate.Status = model.AppReleaseGateStatusFail
+		return gate
+	}
+	gate.Metrics = candidateMetrics
+	gate.Evidence = append(gate.Evidence, releaseflow.ReleaseGateMetricEvidence(candidateMetrics)...)
+	gate.Failures = append(gate.Failures, releaseflow.ReleaseGateMetricFailures(candidateMetrics, policy)...)
+
+	stableMetrics, err := s.querySafeRolloutStableComparisonMetrics(ctx, state, window)
+	if err != nil {
+		gate.Warnings = append(gate.Warnings, "comparative stable release metrics unavailable: "+err.Error())
+		gate.Failures = append(gate.Failures, "comparative stable release metrics unavailable: "+err.Error())
+		gate.Status = model.AppReleaseGateStatusFail
+		return gate
+	}
+	comparison := releaseflow.BuildReleaseGateComparisonMetrics(candidateMetrics, stableMetrics)
+	if gate.Metrics == nil {
+		gate.Metrics = map[string]any{}
+	}
+	gate.Metrics["stable_request_count"] = releaseflow.FloatMetric(stableMetrics, "request_count")
+	gate.Metrics["stable_error_5xx_rate"] = releaseflow.FloatMetric(stableMetrics, "error_5xx_rate")
+	gate.Metrics["stable_edge_upstream_error_rate"] = releaseflow.FloatMetric(stableMetrics, "edge_upstream_error_rate")
+	gate.Metrics["stable_status_2xx_rate"] = releaseflow.FloatMetric(stableMetrics, "status_2xx_rate")
+	gate.Metrics["stable_status_4xx_rate"] = releaseflow.FloatMetric(stableMetrics, "status_4xx_rate")
+	gate.Metrics["stable_p95_ttfb_ms"] = releaseflow.FloatMetric(stableMetrics, "p95_ttfb_ms")
+	gate.Metrics["stable_p99_duration_ms"] = releaseflow.FloatMetric(stableMetrics, "p99_duration_ms")
+	gate.Metrics["comparison"] = comparison
+	gate.Evidence = append(gate.Evidence, releaseflow.ReleaseGateComparisonEvidence(comparison)...)
+	gate.Failures = append(gate.Failures, releaseflow.ReleaseGateComparisonFailures(comparison, policy)...)
+	if len(gate.Failures) > 0 {
+		gate.Status = model.AppReleaseGateStatusFail
+	}
+	return gate
+}
+
+func (s *Service) querySafeRolloutStableComparisonMetrics(ctx context.Context, state *safeRolloutState, window time.Duration) (map[string]any, error) {
+	return s.querySafeRolloutReleaseComparisonMetrics(ctx, state.CandidateApp.ID, state.StableRelease.ID, model.AppReleaseRoleStable, window)
+}
+
+func (s *Service) querySafeRolloutReleaseComparisonMetrics(ctx context.Context, appID, releaseID, releaseRole string, window time.Duration) (map[string]any, error) {
+	if rawQuerier, ok := s.releaseGateMetricsQuerier.(releaseflow.ReleaseGateRawMetricsQuerier); ok {
+		if metrics, err := rawQuerier.QueryReleaseGateRawMetrics(ctx, appID, releaseID, releaseRole, window); err == nil {
+			return metrics, nil
+		} else {
+			return nil, err
+		}
+	}
+	return s.releaseGateMetricsQuerier.QueryReleaseGateMetrics(ctx, appID, releaseID, releaseRole, window)
 }
 
 func (s *Service) finalizeSafeZeroDowntimePreviousRetire(ctx context.Context, op model.Operation, state *safeRolloutState) {

@@ -198,6 +198,68 @@ func TestReleaseGateEvaluatorFailsOnMetricsAndProbe(t *testing.T) {
 	}
 }
 
+func TestReleaseGateComparisonFailsWhenCandidateStatusRatioRegresses(t *testing.T) {
+	t.Parallel()
+
+	comparison := BuildReleaseGateComparisonMetrics(
+		map[string]any{
+			"request_count":            20,
+			"error_5xx_rate":           0.02,
+			"edge_upstream_error_rate": 0.0,
+			"status_2xx_rate":          0.94,
+			"has_status_class_counts":  true,
+			"p95_ttfb_ms":              120.0,
+			"p99_duration_ms":          200.0,
+		},
+		map[string]any{
+			"request_count":            200,
+			"error_5xx_rate":           0.0,
+			"edge_upstream_error_rate": 0.0,
+			"status_2xx_rate":          1.0,
+			"has_status_class_counts":  true,
+			"p95_ttfb_ms":              100.0,
+			"p99_duration_ms":          150.0,
+		},
+	)
+	failures := ReleaseGateComparisonFailures(comparison, model.AppReleaseGatePolicy{Max5xxRate: 0.10})
+	for _, want := range []string{"candidate 5xx rate", "candidate 2xx rate"} {
+		if !releaseflowStringsContain(failures, want) {
+			t.Fatalf("expected comparison failure containing %q, got %+v", want, failures)
+		}
+	}
+	if evidence := ReleaseGateComparisonEvidence(comparison); len(evidence) != 1 || !strings.Contains(evidence[0], "stable_requests=200") {
+		t.Fatalf("expected comparison evidence, got %+v", evidence)
+	}
+}
+
+func TestReleaseGateComparisonPassesWhenCandidateMatchesStable(t *testing.T) {
+	t.Parallel()
+
+	comparison := BuildReleaseGateComparisonMetrics(
+		map[string]any{
+			"request_count":            20,
+			"error_5xx_rate":           0.001,
+			"edge_upstream_error_rate": 0.0,
+			"status_2xx_rate":          0.999,
+			"has_status_class_counts":  true,
+			"p95_ttfb_ms":              120.0,
+			"p99_duration_ms":          200.0,
+		},
+		map[string]any{
+			"request_count":            200,
+			"error_5xx_rate":           0.0,
+			"edge_upstream_error_rate": 0.0,
+			"status_2xx_rate":          1.0,
+			"has_status_class_counts":  true,
+			"p95_ttfb_ms":              100.0,
+			"p99_duration_ms":          150.0,
+		},
+	)
+	if failures := ReleaseGateComparisonFailures(comparison, model.AppReleaseGatePolicy{Max5xxRate: 0.10}); len(failures) != 0 {
+		t.Fatalf("expected comparison gate pass, got %+v", failures)
+	}
+}
+
 func TestClickHouseReleaseGateMetricsQuerierUsesRollupReleaseID(t *testing.T) {
 	t.Parallel()
 

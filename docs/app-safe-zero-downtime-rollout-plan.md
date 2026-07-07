@@ -361,13 +361,7 @@ Gate 分成三类：
 
 ### 2. Active probe gate
 
-默认 probe：
-
-```text
-GET /v1/health -> 200
-timeout 3s
-max duration 3s
-```
+默认不启用硬编码 HTTP path probe。原因是 Fugue 不能假设所有用户服务都有 `/v1/health`、`/healthz` 或 `/` 这类端点；默认 probe 误伤会把“服务没有这个 path”错判成“新 pod 不健康”。
 
 用户可配置：
 
@@ -384,12 +378,15 @@ max duration 3s
 - probe 不能默认带 secret。
 - 需要带认证的 probe 必须由用户显式配置 header secret 引用。
 - probe 失败必须记录 response status、TTFB、duration、错误类别，但不记录敏感 body。
+- active probe 只作为用户显式声明的业务探针，不作为 safe rollout 默认核心判据。
 
 ### 3. Passive metrics gate
 
-基于 edge request facts：
+默认核心判据必须基于 edge request facts 中同一时间窗内的 stable / candidate 真实请求对比：
 
 - candidate request count。
+- stable request count。
+- candidate 与 stable 的 2xx / 3xx / 4xx / 5xx status class 比例。
 - edge upstream error rate。
 - 5xx rate。
 - P95 TTFB。
@@ -401,12 +398,13 @@ max duration 3s
 
 默认第一版可复用现有 gate 指标：
 
-- request count。
-- 5xx rate。
-- edge upstream error rate。
-- P95 TTFB。
-- P99 duration。
-- active probes。
+- candidate request count。
+- candidate vs stable 5xx rate。
+- candidate vs stable 2xx rate。
+- candidate vs stable edge upstream error rate。
+- candidate vs stable P95 TTFB。
+- candidate vs stable P99 duration。
+- 用户显式配置的 active probes。
 
 后续把 slow body read、body_read_error_rate 等 edge 质量指标接入 AppReleaseGatePolicy。
 
@@ -676,9 +674,9 @@ Debug bundle 必须包含：
 
 应对：
 
-- 默认 probe 只做基础健康。
+- 默认不硬编码 probe path。
 - 用户可配置关键路径 probe。
-- passive metrics gate 观察真实 candidate traffic。
+- passive metrics gate 对比同一窗口内 stable / candidate 的真实请求状态比例和错误率。
 
 ### 风险：candidate 小流量伤害真实用户
 
@@ -760,18 +758,19 @@ Debug bundle 必须包含：
 
 ### Phase 4：Traffic canary 自动编排
 
-目标：candidate 通过 active probe 后接入小流量真实请求。
+目标：candidate 接入小流量真实请求后，用同一窗口内 stable / candidate 的真实请求质量对比决定是否继续。
 
 工作：
 
 - controller 设置 candidate initial weight。
 - 等待 edge bundle 生效。
-- 按 policy 观察 request facts。
+- 按 policy 观察 request facts，并按 release_id / release_role 对比 stable 与 candidate。
 - 通过后升权，失败后 abort。
 
 验收：
 
 - request facts 可按 release_id / release_role 区分。
+- candidate status/error/latency 比例显著差于 stable 时自动 abort。
 - canary 失败恢复 stable 100。
 
 ### Phase 5：Stable/candidate 独立 runtime revision

@@ -20,6 +20,9 @@ func TestSafeZeroDowntimeRolloutProbeFailureAutoAborts(t *testing.T) {
 	t.Parallel()
 
 	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+		Probes: []model.AppReleaseProbe{{Name: "health", Method: http.MethodGet, Path: "/health", ExpectedStatus: http.StatusOK}},
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 	}))
@@ -134,6 +137,157 @@ func TestSafeZeroDowntimeRolloutCanaryMetricsFailureAutoAborts(t *testing.T) {
 	}
 	if updatedCandidate.Status != model.AppReleaseStatusFailed || !strings.Contains(updatedCandidate.StatusReason, "canary gate failed") {
 		t.Fatalf("expected failed candidate release with canary reason, got %+v", updatedCandidate)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutCanaryComparisonFailureAutoAborts(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Canary = &model.AppRolloutCanarySpec{
+		Enabled:               true,
+		InitialWeight:         5,
+		MaxWeight:             100,
+		StepWeights:           []int{5, 100},
+		MinObservationSeconds: 0,
+	}
+	candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+		WindowSeconds:        60,
+		MinCandidateRequests: 10,
+		Max5xxRate:           0.10,
+	}
+	svc := &Service{
+		Store:            stateStore,
+		Logger:           log.New(io.Discard, "", 0),
+		serviceURLForApp: func(context.Context, model.App) string { return "http://candidate.test" },
+		safeRolloutSleep: func(context.Context, time.Duration) error { return nil },
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	svc.releaseGateMetricsQuerier = releaseMetricsByIDQuerier{metrics: map[string]map[string]any{
+		state.Candidate.ID: {
+			"request_count":            20,
+			"error_5xx_rate":           0.02,
+			"edge_upstream_error_rate": 0.0,
+			"status_2xx_rate":          0.94,
+			"has_status_class_counts":  true,
+			"p95_ttfb_ms":              100,
+			"p99_duration_ms":          200,
+		},
+		state.StableRelease.ID: {
+			"request_count":            200,
+			"error_5xx_rate":           0.0,
+			"edge_upstream_error_rate": 0.0,
+			"status_2xx_rate":          1.0,
+			"has_status_class_counts":  true,
+			"p95_ttfb_ms":              100,
+			"p99_duration_ms":          200,
+		},
+	}}
+
+	err = svc.completeSafeZeroDowntimeRollout(context.Background(), op, state)
+	if err == nil || !strings.Contains(err.Error(), "canary gate failed") || !strings.Contains(err.Error(), "candidate 5xx rate") {
+		t.Fatalf("expected comparative canary gate failure, got %v", err)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected stable-only traffic after comparative canary abort, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "canary_gate", model.ReleaseStepStatusFailed) || !releaseStepsContainPhase(steps, "abort", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected failed comparative canary gate and abort, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutCanaryGateUsesRawRequestFactsBeforeRollups(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Canary = &model.AppRolloutCanarySpec{
+		Enabled:               true,
+		InitialWeight:         5,
+		MaxWeight:             100,
+		StepWeights:           []int{5, 100},
+		MinObservationSeconds: 0,
+	}
+	candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+		WindowSeconds:        60,
+		MinCandidateRequests: 10,
+		Max5xxRate:           0.10,
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutSleep:              func(context.Context, time.Duration) error { return nil },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+		safeRolloutDrainMetricsQuerier: staticSafeRolloutDrainQuerier{metrics: safeRolloutDrainMetrics{
+			Ready:                true,
+			ActiveConnections:    0,
+			MaxActiveConnections: 1,
+			FinalCount:           1,
+			Summary:              map[string]any{"active_connections": 0},
+		}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	querier := &rawPreferredReleaseMetricsQuerier{
+		rollup: map[string]any{
+			"request_count":            0,
+			"error_5xx_rate":           0.0,
+			"edge_upstream_error_rate": 0.0,
+			"p95_ttfb_ms":              0,
+			"p99_duration_ms":          0,
+		},
+		raw: map[string]map[string]any{
+			state.Candidate.ID: {
+				"request_count":            20,
+				"error_5xx_rate":           0.0,
+				"edge_upstream_error_rate": 0.0,
+				"status_2xx_rate":          1.0,
+				"has_status_class_counts":  true,
+				"p95_ttfb_ms":              100,
+				"p99_duration_ms":          200,
+			},
+			state.StableRelease.ID: {
+				"request_count":            200,
+				"error_5xx_rate":           0.0,
+				"edge_upstream_error_rate": 0.0,
+				"status_2xx_rate":          1.0,
+				"has_status_class_counts":  true,
+				"p95_ttfb_ms":              90,
+				"p99_duration_ms":          180,
+			},
+		},
+	}
+	svc.releaseGateMetricsQuerier = querier
+
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("expected canary rollout to use raw request facts and pass, got %v", err)
+	}
+	if querier.rawCalls == 0 {
+		t.Fatal("expected canary gate to query raw request facts")
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != state.Candidate.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected candidate promoted after raw request comparison, got %+v", policy)
 	}
 }
 
@@ -265,6 +419,9 @@ func TestSafeZeroDowntimeRolloutPausesAlignmentWhenCandidateFailsRetireGate(t *t
 	t.Parallel()
 
 	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+		Probes: []model.AppReleaseProbe{{Name: "health", Method: http.MethodGet, Path: "/health", ExpectedStatus: http.StatusOK}},
+	}
 	var requests int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -540,6 +697,9 @@ func TestSafeZeroDowntimeRolloutIntegrationBusinessProbeFailureKeepsStable(t *te
 	t.Parallel()
 
 	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+		Probes: []model.AppReleaseProbe{{Name: "health", Method: http.MethodGet, Path: "/health", ExpectedStatus: http.StatusOK}},
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "business readiness failed", http.StatusServiceUnavailable)
 	}))
@@ -741,6 +901,44 @@ func (q *sequencedReleaseGateMetricsQuerier) QueryReleaseGateMetrics(context.Con
 	out := q.metrics[0]
 	q.metrics = q.metrics[1:]
 	return out, nil
+}
+
+type releaseMetricsByIDQuerier struct {
+	metrics map[string]map[string]any
+}
+
+func (q releaseMetricsByIDQuerier) QueryReleaseGateMetrics(_ context.Context, _ string, releaseID, releaseRole string, _ time.Duration) (map[string]any, error) {
+	if metrics, ok := q.metrics[releaseID]; ok {
+		return metrics, nil
+	}
+	if metrics, ok := q.metrics[releaseRole]; ok {
+		return metrics, nil
+	}
+	return map[string]any{}, nil
+}
+
+type rawPreferredReleaseMetricsQuerier struct {
+	rollup   map[string]any
+	raw      map[string]map[string]any
+	rawCalls int
+}
+
+func (q *rawPreferredReleaseMetricsQuerier) QueryReleaseGateMetrics(context.Context, string, string, string, time.Duration) (map[string]any, error) {
+	if q.rollup != nil {
+		return q.rollup, nil
+	}
+	return map[string]any{}, nil
+}
+
+func (q *rawPreferredReleaseMetricsQuerier) QueryReleaseGateRawMetrics(_ context.Context, _ string, releaseID, releaseRole string, _ time.Duration) (map[string]any, error) {
+	q.rawCalls++
+	if metrics, ok := q.raw[releaseID]; ok {
+		return metrics, nil
+	}
+	if metrics, ok := q.raw[releaseRole]; ok {
+		return metrics, nil
+	}
+	return map[string]any{}, nil
 }
 
 func newSafeRolloutIntegrationService(stateStore *store.Store, upstreamURL string, drainMetrics safeRolloutDrainMetrics) *Service {

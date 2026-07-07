@@ -45,6 +45,22 @@ func (q ClickHouseReleaseGateMetricsQuerier) QueryReleaseGateMetrics(ctx context
 	return raw, nil
 }
 
+func (q ClickHouseReleaseGateMetricsQuerier) QueryReleaseGateRawMetrics(ctx context.Context, appID, releaseID, releaseRole string, window time.Duration) (map[string]any, error) {
+	if strings.TrimSpace(q.DSN) == "" {
+		return nil, fmt.Errorf("ClickHouse DSN is not configured")
+	}
+	if window <= 0 {
+		window = DefaultAppReleaseGateWindow
+	}
+	until := q.now()
+	raw, err := q.queryReleaseGateRawFactMetrics(ctx, appID, releaseID, releaseRole, until.Add(-window), until)
+	if err != nil {
+		return nil, err
+	}
+	raw["metrics_source"] = "request_facts"
+	return raw, nil
+}
+
 func (q ClickHouseReleaseGateMetricsQuerier) queryReleaseGateRollupMetrics(ctx context.Context, appID, releaseID, releaseRole string, since, until time.Time) (map[string]any, error) {
 	queryText := "SELECT " +
 		"sum(request_count) AS request_count, " +
@@ -63,6 +79,9 @@ func (q ClickHouseReleaseGateMetricsQuerier) queryReleaseGateRollupMetrics(ctx c
 func (q ClickHouseReleaseGateMetricsQuerier) queryReleaseGateRawFactMetrics(ctx context.Context, appID, releaseID, releaseRole string, since, until time.Time) (map[string]any, error) {
 	queryText := "SELECT " +
 		"count() AS request_count, " +
+		"countIf(status_code >= 200 AND status_code < 300) AS status_2xx_count, " +
+		"countIf(status_code >= 300 AND status_code < 400) AS status_3xx_count, " +
+		"countIf(status_code >= 400 AND status_code < 500) AS status_4xx_count, " +
 		"countIf(status_code >= 500) AS error_5xx_count, " +
 		"countIf(error_type = 'upstream_error') AS edge_upstream_error_count, " +
 		"quantileTDigest(0.95)(toFloat64(ttfb_ms)) AS p95_ttfb_ms, " +
@@ -93,18 +112,35 @@ func (q ClickHouseReleaseGateMetricsQuerier) queryReleaseGateMetricRow(ctx conte
 	}
 	row := rows[0]
 	requestCount := FloatMetric(row, "request_count")
+	_, hasStatusClassCounts := row["status_2xx_count"]
+	status2xxCount := FloatMetric(row, "status_2xx_count")
+	status3xxCount := FloatMetric(row, "status_3xx_count")
+	status4xxCount := FloatMetric(row, "status_4xx_count")
 	error5xxCount := FloatMetric(row, "error_5xx_count")
 	upstreamErrorCount := FloatMetric(row, "edge_upstream_error_count")
+	status2xxRate := 0.0
+	status3xxRate := 0.0
+	status4xxRate := 0.0
 	error5xxRate := 0.0
 	upstreamErrorRate := 0.0
 	if requestCount > 0 {
+		status2xxRate = status2xxCount / requestCount
+		status3xxRate = status3xxCount / requestCount
+		status4xxRate = status4xxCount / requestCount
 		error5xxRate = error5xxCount / requestCount
 		upstreamErrorRate = upstreamErrorCount / requestCount
 	}
 	return map[string]any{
 		"request_count":             requestCount,
+		"status_2xx_count":          status2xxCount,
+		"status_3xx_count":          status3xxCount,
+		"status_4xx_count":          status4xxCount,
 		"error_5xx_count":           error5xxCount,
 		"edge_upstream_error_count": upstreamErrorCount,
+		"status_2xx_rate":           status2xxRate,
+		"status_3xx_rate":           status3xxRate,
+		"status_4xx_rate":           status4xxRate,
+		"has_status_class_counts":   hasStatusClassCounts,
 		"error_5xx_rate":            error5xxRate,
 		"edge_upstream_error_rate":  upstreamErrorRate,
 		"p95_ttfb_ms":               FloatMetric(row, "p95_ttfb_ms"),
