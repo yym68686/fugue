@@ -127,6 +127,12 @@ spec:
                   name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
                   key: {{ .Values.observability.exporterSecret.metricsQueryURLKey | quote }}
                   optional: true
+            - name: FUGUE_OBSERVABILITY_LOKI_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.lokiURLKey | quote }}
+                  optional: true
             - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
               valueFrom:
                 secretKeyRef:
@@ -137,6 +143,10 @@ spec:
             {{- if .Values.observability.metrics.enabled }}
             - name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL
               value: {{ printf "http://%s-observability-prometheus:%v/api/v1/query" (include "fugue.fullname" .) .Values.observability.metrics.port | quote }}
+            {{- end }}
+            {{- if .Values.observability.logs.enabled }}
+            - name: FUGUE_OBSERVABILITY_LOKI_URL
+              value: {{ printf "http://%s-observability-loki:%v/loki/api/v1/push" (include "fugue.fullname" .) .Values.observability.logs.port | quote }}
             {{- end }}
             {{- if .Values.observability.analytics.enabled }}
             - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN

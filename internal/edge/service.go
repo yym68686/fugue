@@ -803,9 +803,6 @@ func weightedReleaseStickinessKey(r *http.Request, host string, route model.Edge
 			strings.TrimSpace(r.Header.Get("X-Fugue-Release-Stickiness")),
 			strings.TrimSpace(r.Header.Get("X-API-Key")),
 			strings.TrimSpace(r.Header.Get("Authorization")),
-			strings.TrimSpace(r.Header.Get("CF-Connecting-IP")),
-			strings.TrimSpace(r.Header.Get("X-Forwarded-For")),
-			strings.TrimSpace(r.RemoteAddr),
 		)
 	}
 	if identity == "" {

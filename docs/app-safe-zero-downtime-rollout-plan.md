@@ -883,6 +883,7 @@ Debug bundle 必须包含：
 - [x] controller 可自动设置 candidate initial weight。
 - [x] controller 在每次 canary shift 后等待 edge route bundle 应用完成。
 - [x] request facts 必须记录 release id / release role。
+- [x] 匿名请求不能按客户端 IP / XFF / RemoteAddr 固定到单一 release；只有显式 stickiness、API key、Authorization 才保持跨请求粘性，否则 canary 观测可能因为低样本同 IP 流量完全拿不到 candidate 样本。
 - [x] controller 查询 candidate passive metrics。
 - [x] canary pass 后按 step_weights 升权。
 - [x] canary fail 后把 candidate weight 置 0。

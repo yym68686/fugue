@@ -42,6 +42,25 @@ func TestSelectWeightedEdgeRouteUpstreamDistribution(t *testing.T) {
 	}
 }
 
+func TestSelectWeightedEdgeRouteUpstreamDoesNotPinAnonymousTrafficToClientIP(t *testing.T) {
+	t.Parallel()
+
+	route := weightedReleaseTestRoute()
+	route.Upstreams[0].Weight = 50
+	route.Upstreams[1].Weight = 50
+	counts := map[string]int{}
+	for i := 0; i < 500; i++ {
+		req := httptest.NewRequest(http.MethodGet, "https://demo.fugue.pro/", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		req.RemoteAddr = "203.0.113.7:44321"
+		_, upstream := selectWeightedEdgeRouteUpstream(req, route, "demo.fugue.pro", "", "edge_req_"+strconv.Itoa(i))
+		counts[upstream.Role]++
+	}
+	if counts[model.AppReleaseRoleCandidate] < 150 || counts[model.AppReleaseRoleCandidate] > 350 {
+		t.Fatalf("expected anonymous same-IP traffic to be sampled per request, got %+v", counts)
+	}
+}
+
 func weightedReleaseTestRoute() model.EdgeRouteBinding {
 	return model.EdgeRouteBinding{
 		Hostname:    "demo.fugue.pro",

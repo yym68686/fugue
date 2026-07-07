@@ -519,6 +519,8 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 		"value: \"http://fugue-fugue-telemetry-agent.default.svc.cluster.local:7834\"",
 		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
 		"key: \"FUGUE_OBSERVABILITY_METRICS_QUERY_URL\"",
+		"name: FUGUE_OBSERVABILITY_LOKI_URL",
+		"key: \"FUGUE_OBSERVABILITY_LOKI_URL\"",
 		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
 		"key: \"FUGUE_OBSERVABILITY_CLICKHOUSE_DSN\"",
 	} {
@@ -541,6 +543,7 @@ func TestControllerReceivesInternalObservabilityQueryEnv(t *testing.T) {
 		"helm", "template", "fugue", chartDir,
 		"--set", "observability.enabled=true",
 		"--set", "observability.metrics.enabled=true",
+		"--set", "observability.logs.enabled=true",
 		"--set", "observability.analytics.enabled=true",
 	)
 	cmd.Dir = chartDir
@@ -556,6 +559,8 @@ func TestControllerReceivesInternalObservabilityQueryEnv(t *testing.T) {
 	for _, want := range []string{
 		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
 		"value: \"http://fugue-fugue-observability-prometheus:9090/api/v1/query\"",
+		"name: FUGUE_OBSERVABILITY_LOKI_URL",
+		"value: \"http://fugue-fugue-observability-loki:3100/loki/api/v1/push\"",
 		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
 		"value: \"http://fugue-fugue-observability-clickhouse:8123?database=fugue_observability\"",
 	} {
