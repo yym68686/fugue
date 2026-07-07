@@ -1088,21 +1088,24 @@ node_local_build_plane_preflight_override_allowed() {
       internal/api/import_github_topology.go|\
       internal/api/import_network_mode.go|\
       internal/api/node_updater.go|\
-      internal/api/node_updater_test.go|\
-      internal/api/runtime_pool.go|\
-      internal/api/server_test.go|\
-      scripts/prepare_fugue_lvm_localpv_node.sh|\
-      deploy/helm/fugue/templates/_helpers.tpl|\
-      deploy/helm/fugue/templates/controller-deployment.yaml|\
-      scripts/upgrade_fugue_control_plane.sh|\
-      scripts/test_release_domain_safety.sh)
-        saw_allowed="true"
-        ;;
-      .github/workflows/deploy-control-plane.yml|\
-      docs/*|\
-      fugue-cli-acceptance.md|\
-      openapi/openapi.yaml|\
-      internal/api/routes_gen.go|\
+	      internal/api/node_updater_test.go|\
+	      internal/api/runtime_pool.go|\
+	      internal/api/server_test.go|\
+	      scripts/prepare_fugue_lvm_localpv_node.sh|\
+	      deploy/helm/fugue/templates/_helpers.tpl|\
+	      deploy/helm/fugue/templates/controller-deployment.yaml|\
+	      .github/workflows/deploy-control-plane.yml|\
+	      scripts/build_control_plane_images.sh|\
+	      scripts/compute_control_plane_image_build_plan.sh|\
+	      scripts/resolve_control_plane_live_images.sh|\
+	      scripts/upgrade_fugue_control_plane.sh|\
+	      scripts/test_release_domain_safety.sh)
+	        saw_allowed="true"
+	        ;;
+	      docs/*|\
+	      fugue-cli-acceptance.md|\
+	      openapi/openapi.yaml|\
+	      internal/api/routes_gen.go|\
       internal/apispec/spec_gen.go|\
       internal/cli/*)
         ;;

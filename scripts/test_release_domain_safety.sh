@@ -757,6 +757,9 @@ if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-headscale; th
   fail "node-local build-plane override must not skip headscale singleton rollout waits"
 fi
 
+FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\nscripts/build_control_plane_images.sh\nscripts/compute_control_plane_image_build_plan.sh\nscripts/resolve_control_plane_live_images.sh\nscripts/test_release_domain_safety.sh\nscripts/upgrade_fugue_control_plane.sh'
+node_local_build_plane_preflight_override_allowed || fail "deploy tooling changes must allow existing node-local build-plane preflight degradation"
+
 live_deployment_replicas() {
   case "$1" in
     fugue-fugue-registry) printf '0' ;;
