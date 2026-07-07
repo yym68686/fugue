@@ -157,7 +157,11 @@ func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.
 				node.CanaryWeight = existing.CanaryWeight
 			}
 			node.PublicProbeStatus = firstNonEmpty(node.PublicProbeStatus, existing.PublicProbeStatus)
-			node.PublicProbeLastError = firstNonEmpty(node.PublicProbeLastError, existing.PublicProbeLastError)
+			if node.PublicProbeStatus == model.EdgePublicProbeStatusPassing && strings.TrimSpace(node.PublicProbeLastError) == "" {
+				node.PublicProbeLastError = ""
+			} else {
+				node.PublicProbeLastError = firstNonEmpty(node.PublicProbeLastError, existing.PublicProbeLastError)
+			}
 			if node.PublicProbeLastAt == nil {
 				node.PublicProbeLastAt = existing.PublicProbeLastAt
 			}
@@ -235,6 +239,9 @@ func applyEdgeNodeControlPatch(node *model.EdgeNode, patch model.EdgeNode) {
 	}
 	if status := model.NormalizeEdgePublicProbeStatus(patch.PublicProbeStatus); status != "" {
 		node.PublicProbeStatus = status
+	}
+	if node.PublicProbeStatus == model.EdgePublicProbeStatusPassing && strings.TrimSpace(patch.PublicProbeLastError) == "" {
+		node.PublicProbeLastError = ""
 	}
 	if strings.TrimSpace(patch.PublicProbeLastError) != "" {
 		node.PublicProbeLastError = strings.TrimSpace(patch.PublicProbeLastError)

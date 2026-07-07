@@ -66,3 +66,36 @@ func TestEdgeNodeControlStateSurvivesHeartbeat(t *testing.T) {
 		t.Fatalf("expected explicit undrain to restore canary, got %+v", undrained)
 	}
 }
+
+func TestEdgeNodePassingProbeClearsPreviousError(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	if _, _, err := s.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                   "edge-jp-1",
+		EdgeGroupID:          "edge-group-country-jp",
+		WorkloadMode:         model.EdgeWorkloadModeDynamic,
+		Status:               model.EdgeHealthHealthy,
+		Healthy:              true,
+		CaddyRouteCount:      1,
+		TLSStatus:            model.EdgeTLSStatusReady,
+		PublicProbeStatus:    model.EdgePublicProbeStatusFailing,
+		PublicProbeLastError: "tls443=remote error",
+	}); err != nil {
+		t.Fatalf("create dynamic edge heartbeat: %v", err)
+	}
+
+	updated, _, err := s.UpdateEdgeNodeControlState("edge-jp-1", model.EdgeNode{
+		PublicProbeStatus: model.EdgePublicProbeStatusPassing,
+	})
+	if err != nil {
+		t.Fatalf("mark probe passing: %v", err)
+	}
+	if updated.PublicProbeStatus != model.EdgePublicProbeStatusPassing || updated.PublicProbeLastError != "" {
+		t.Fatalf("expected passing probe to clear stale error, got %+v", updated)
+	}
+}

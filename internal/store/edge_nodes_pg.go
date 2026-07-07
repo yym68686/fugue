@@ -262,7 +262,11 @@ ON CONFLICT (id) DO UPDATE SET
 	canary_state = CASE WHEN EXCLUDED.canary_state <> '' THEN EXCLUDED.canary_state ELSE fugue_edge_nodes.canary_state END,
 	canary_weight = CASE WHEN EXCLUDED.canary_weight > 0 THEN EXCLUDED.canary_weight ELSE fugue_edge_nodes.canary_weight END,
 	public_probe_status = CASE WHEN EXCLUDED.public_probe_status <> '' THEN EXCLUDED.public_probe_status ELSE fugue_edge_nodes.public_probe_status END,
-	public_probe_last_error = CASE WHEN EXCLUDED.public_probe_last_error <> '' THEN EXCLUDED.public_probe_last_error ELSE fugue_edge_nodes.public_probe_last_error END,
+	public_probe_last_error = CASE
+		WHEN EXCLUDED.public_probe_status = 'passing' AND EXCLUDED.public_probe_last_error = '' THEN ''
+		WHEN EXCLUDED.public_probe_last_error <> '' THEN EXCLUDED.public_probe_last_error
+		ELSE fugue_edge_nodes.public_probe_last_error
+	END,
 	public_probe_last_at = CASE WHEN EXCLUDED.public_probe_last_at IS NOT NULL THEN EXCLUDED.public_probe_last_at ELSE fugue_edge_nodes.public_probe_last_at END,
 	region = EXCLUDED.region,
 	country = EXCLUDED.country,
