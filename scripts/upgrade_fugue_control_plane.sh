@@ -6240,6 +6240,7 @@ def incident_label(incident):
     return f"{label}: {message}" if message else label
 
 baseline_status = None
+baseline_check_names = set()
 baseline_incident_ids = set()
 baseline_incident_keys = set()
 baseline_blocker_keys = set()
@@ -6259,9 +6260,13 @@ if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_
             if key:
                 baseline_incident_keys.add(key)
         for check in candidate.get("checks") or []:
+            if not isinstance(check, dict):
+                continue
+            name = stable_text(check.get("name"))
+            if name:
+                baseline_check_names.add(name)
             if (
-                isinstance(check, dict)
-                and not check.get("pass")
+                not check.get("pass")
                 and stable_text(check.get("severity")) == "block_publish"
             ):
                 key = check_key(check)
@@ -6273,23 +6278,31 @@ incidents = status.get("incidents") or []
 block_rollout = bool(status.get("block_rollout"))
 blockers = []
 new_blockers = []
+introduced_blockers = []
 for check in checks:
     if not isinstance(check, dict) or check.get("pass"):
         continue
     severity = str(check.get("severity") or "").strip()
     if severity != "block_publish":
         continue
-    name = str(check.get("name") or "").strip() or "<unknown>"
+    raw_name = str(check.get("name") or "").strip()
+    name = raw_name or "<unknown>"
     subject = str(check.get("subject") or "").strip()
     message = str(check.get("message") or check.get("observed") or "").strip()
     label = f"{name}({subject})" if subject else name
     description = f"{label}: {message}" if message else label
     blockers.append(description)
     key = check_key(check)
-    if not baseline_status or key not in baseline_blocker_keys:
+    if not baseline_status:
         new_blockers.append(description)
+    elif key not in baseline_blocker_keys:
+        if raw_name and raw_name not in baseline_check_names:
+            introduced_blockers.append(description)
+        else:
+            new_blockers.append(description)
 
 new_incidents = []
+introduced_incidents = []
 if baseline_status is not None:
     for incident in incidents:
         if not isinstance(incident, dict):
@@ -6298,7 +6311,12 @@ if baseline_status is not None:
         key = incident_key(incident)
         if (ident and ident in baseline_incident_ids) or (key and key in baseline_incident_keys):
             continue
-        new_incidents.append(incident_label(incident))
+        name = stable_text(incident.get("check_name") or incident.get("name"))
+        label = incident_label(incident)
+        if name and name not in baseline_check_names:
+            introduced_incidents.append(label)
+        else:
+            new_incidents.append(label)
 
 summary = (
     f"pass={str(bool(status.get('pass'))).lower()} "
@@ -6312,12 +6330,18 @@ if baseline_status is not None:
     )
 if new_blockers:
     summary += "; new_blockers=" + "; ".join(new_blockers)
+elif introduced_blockers:
+    summary += "; introduced_blockers=" + "; ".join(introduced_blockers)
 elif blockers:
     summary += "; blockers=" + "; ".join(blockers)
 if new_incidents:
     summary += "; new_incidents_detail=" + "; ".join(new_incidents[:5])
     if len(new_incidents) > 5:
         summary += f"; +{len(new_incidents) - 5} more"
+elif introduced_incidents:
+    summary += "; introduced_incidents=" + "; ".join(introduced_incidents[:5])
+    if len(introduced_incidents) > 5:
+        summary += f"; +{len(introduced_incidents) - 5} more"
 print(summary)
 
 if baseline_status is not None:

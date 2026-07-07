@@ -140,7 +140,7 @@ fi
 assert_eq "${autonomy_output}" "pass=false block_rollout=true; failing=edge: warming" "platform autonomy failure summary"
 unset TEST_CURL_RESPONSE_JSON
 
-export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=6"}],"incidents":[{"id":"robust_existing","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=6"}]}}'
+export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=6"},{"name":"route_active","subject":"route:example","pass":true,"severity":"block_publish","observed":"route present"}],"incidents":[{"id":"robust_existing","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=6"}]}}'
 if robustness_output="$(robustness_status_summary)"; then
   fail "strict robustness status without a baseline must return non-zero when block_rollout=true"
 fi
@@ -148,13 +148,17 @@ fi
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 capture_pre_deploy_robustness_baseline
 [[ -n "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" && -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" ]] || fail "pre-deploy robustness baseline must be captured"
-assert_eq "$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" "pass=false block_rollout=true checks=1 incidents=1 baseline_incidents=1 new_incidents=0" "matching robustness baseline must tolerate existing incidents"
+assert_eq "$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" "pass=false block_rollout=true checks=2 incidents=1 baseline_incidents=1 new_incidents=0" "matching robustness baseline must tolerate existing incidents"
 export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=7"},{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","message":"missing route"}],"incidents":[{"id":"robust_existing_changed","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=7"},{"id":"robust_new","severity":"block_publish","subject":"route:example","check_name":"route_active","message":"missing route"}]}}'
 if robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")"; then
   fail "robustness baseline must fail on new incidents"
 fi
 [[ "${robustness_output}" == *"new_incidents=1"* ]] || fail "robustness baseline failure must report new incident count"
 [[ "${robustness_output}" == *"new_blockers=route_active(route:example): missing route"* ]] || fail "robustness baseline failure must report new block_publish blocker"
+export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=7"},{"name":"app_continuity_invariant","subject":"app:example","pass":false,"severity":"block_publish","message":"ready replicas 0 below desired 1"}],"incidents":[{"id":"robust_existing_changed","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=7"},{"id":"robust_introduced","severity":"block_publish","subject":"app:example","check_name":"app_continuity_invariant","message":"ready replicas 0 below desired 1"}]}}'
+robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" || fail "newly introduced robustness checks must not fail a mixed-version baseline rollout"
+[[ "${robustness_output}" == *"introduced_blockers=app_continuity_invariant(app:example): ready replicas 0 below desired 1"* ]] || fail "introduced blocker summary must be reported"
+[[ "${robustness_output}" == *"introduced_incidents=block_publish:app_continuity_invariant(app:example): ready replicas 0 below desired 1"* ]] || fail "introduced incident summary must be reported"
 rm -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}"
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 unset TEST_CURL_RESPONSE_JSON
