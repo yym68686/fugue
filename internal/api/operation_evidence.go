@@ -110,11 +110,12 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 	app, appFound, _ := s.getDiagnosisApp(op.AppID)
 	var appPtr *model.App
 	if appFound {
-		appCopy := app
+		appCopy := redactAppForDebugBundle(app)
 		appPtr = &appCopy
 	}
 	trackingPtr, trackingChecks := s.appImageTrackingDebugBundleState(principal, appPtr)
 	metricsSummary := s.debugBundleMetricsSummaryForApp(principal, op.AppID, queryBool(r, "include_global_summary"))
+	redactedOperation := redactOperationForDebugBundle(op)
 	view := releaseflow.ReleaseEvidenceView{
 		Metadata: map[string]any{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
@@ -122,7 +123,7 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 			"operation_id": op.ID,
 			"redacted":     true,
 		},
-		Operation:           &op,
+		Operation:           &redactedOperation,
 		App:                 appPtr,
 		ImageTracking:       trackingPtr,
 		ImageTrackingChecks: trackingChecks,
@@ -244,7 +245,7 @@ func (s *Server) handleGetAppReleaseAttemptDebugBundle(w http.ResponseWriter, r 
 	}
 	var appPtr *model.App
 	if app, err := s.store.GetApp(attempt.AppID); err == nil {
-		appCopy := app
+		appCopy := redactAppForDebugBundle(app)
 		appPtr = &appCopy
 	}
 	trackingPtr, trackingChecks := s.appImageTrackingDebugBundleState(principal, appPtr)

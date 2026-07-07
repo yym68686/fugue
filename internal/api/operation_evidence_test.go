@@ -22,6 +22,13 @@ func setupOperationEvidenceAPITest(t *testing.T) (*store.Store, *Server, string,
 		t.Fatalf("create tenant: %v", err)
 	}
 	raiseManagedTestCap(t, stateStore, tenant.ID)
+	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    4000,
+		MemoryMebibytes:  8192,
+		StorageGibibytes: 80,
+	}); err != nil {
+		t.Fatalf("raise evidence test billing cap: %v", err)
+	}
 	project, err := stateStore.CreateProject(tenant.ID, "ops", "")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
@@ -30,11 +37,58 @@ func setupOperationEvidenceAPITest(t *testing.T) (*store.Store, *Server, string,
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
-	app, err := stateStore.CreateApp(tenant.ID, project.ID, "api", "", model.AppSpec{Image: "ghcr.io/example/api", Replicas: 1})
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "api", "", model.AppSpec{
+		Image:     "ghcr.io/example/api",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Env: map[string]string{
+			"API_TOKEN": "debug-bundle-env-secret",
+			"LOG_LEVEL": "info",
+		},
+		Files: []model.AppFile{{
+			Path:    "/run/secret.txt",
+			Content: "debug-bundle-file-secret",
+			Secret:  true,
+		}},
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mounts: []model.AppPersistentStorageMount{{
+				Path:        "/data/seed.txt",
+				SeedContent: "debug-bundle-seed-secret",
+				Secret:      true,
+			}},
+		},
+		Postgres: &model.AppPostgresSpec{
+			Database:    "api",
+			User:        "api",
+			Password:    "debug-bundle-app-postgres-secret",
+			ServiceName: "api-db",
+			RuntimeID:   "runtime_managed_shared",
+		},
+		RestartToken: "debug-bundle-restart-secret",
+	})
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	service, err := stateStore.CreateBackingService(tenant.ID, project.ID, "shared-db", "", model.BackingServiceSpec{
+		Postgres: &model.AppPostgresSpec{
+			Database:    "shared",
+			User:        "shared",
+			Password:    "debug-bundle-service-postgres-secret",
+			ServiceName: "shared-db",
+			RuntimeID:   "runtime_managed_shared",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backing service: %v", err)
+	}
+	if _, err := stateStore.BindBackingService(tenant.ID, app.ID, service.ID, "shared", map[string]string{
+		"DATABASE_URL": "postgres://debug-bundle-binding-secret",
+	}); err != nil {
+		t.Fatalf("bind backing service: %v", err)
+	}
 	spec := app.Spec
+	spec.Env["OP_TOKEN"] = "debug-bundle-operation-env-secret"
+	spec.RestartToken = "debug-bundle-operation-restart-secret"
 	op, err := stateStore.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeDeploy, AppID: app.ID, DesiredSpec: &spec})
 	if err != nil {
 		t.Fatalf("create operation: %v", err)
@@ -104,6 +158,32 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 	if !strings.Contains(recorder.Body.String(), "operation_debug_bundle") || !strings.Contains(recorder.Body.String(), recorded.ID) {
 		t.Fatalf("expected debug bundle metadata/evidence, got %s", recorder.Body.String())
 	}
+	assertDebugBundleSecretsRedacted(t, recorder.Body.String())
+
+	attempt, err := stateStore.CreateReleaseAttempt(model.ReleaseAttempt{
+		TenantID:          app.TenantID,
+		ProjectID:         app.ProjectID,
+		AppID:             app.ID,
+		TriggerType:       model.ReleaseAttemptTriggerManualDeploy,
+		TriggerActorType:  model.ReleaseAttemptActorUser,
+		SourceOperationID: op.ID,
+		RootOperationID:   op.ID,
+		Status:            model.ReleaseAttemptStatusCompleted,
+		Confidence:        model.OperationEvidenceConfidenceConfirmed,
+		Summary:           "completed",
+		DesiredSource:     map[string]any{"values": "redacted"},
+	})
+	if err != nil {
+		t.Fatalf("create release attempt: %v", err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/release-attempts/"+attempt.ID+"/debug-bundle", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected release debug bundle status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "release_debug_bundle") || !strings.Contains(recorder.Body.String(), attempt.ID) {
+		t.Fatalf("expected release debug bundle metadata/attempt, got %s", recorder.Body.String())
+	}
+	assertDebugBundleSecretsRedacted(t, recorder.Body.String())
 
 	otherTenant, err := stateStore.CreateTenant("Other Tenant")
 	if err != nil {
@@ -116,6 +196,29 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/evidence", otherKey, nil)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected tenant isolation status 403, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func assertDebugBundleSecretsRedacted(t *testing.T, body string) {
+	t.Helper()
+
+	for _, leaked := range []string{
+		"debug-bundle-env-secret",
+		"debug-bundle-file-secret",
+		"debug-bundle-seed-secret",
+		"debug-bundle-app-postgres-secret",
+		"debug-bundle-restart-secret",
+		"debug-bundle-service-postgres-secret",
+		"debug-bundle-binding-secret",
+		"debug-bundle-operation-env-secret",
+		"debug-bundle-operation-restart-secret",
+	} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("debug bundle leaked secret sentinel %q in body=%s", leaked, body)
+		}
+	}
+	if !strings.Contains(body, apiRedactedSecretValue) {
+		t.Fatalf("expected debug bundle to contain redacted markers, got %s", body)
 	}
 }
 

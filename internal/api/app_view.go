@@ -7,6 +7,8 @@ import (
 	"fugue/internal/runtime"
 )
 
+const apiRedactedSecretValue = "[redacted]"
+
 func sanitizeAppForAPI(app model.App) model.App {
 	out := cloneApp(app)
 	out.Source = sanitizeAppSourceForAPI(out.Source)
@@ -17,6 +19,117 @@ func sanitizeAppForAPI(app model.App) model.App {
 	out.Spec, _ = model.StripFugueInjectedAppEnvFromSpec(out.Spec)
 	out.InternalService = buildAppInternalService(out)
 	out.TechStack = buildAppTechStack(out)
+	return out
+}
+
+func redactAppForDebugBundle(app model.App) model.App {
+	out := cloneApp(app)
+	out.Source = redactAppSourceForDebugBundle(out.Source)
+	out.OriginSource = redactAppSourceForDebugBundle(out.OriginSource)
+	out.BuildSource = redactAppSourceForDebugBundle(out.BuildSource)
+	model.NormalizeAppSourceState(&out)
+	out.Spec = redactAppSpecForDebugBundle(out.Spec)
+	out.Bindings = redactServiceBindingsForDebugBundle(out.Bindings)
+	out.BackingServices = redactBackingServicesForDebugBundle(out.BackingServices)
+	out.InternalService = buildAppInternalService(out)
+	out.TechStack = buildAppTechStack(out)
+	return out
+}
+
+func redactOperationForDebugBundle(op model.Operation) model.Operation {
+	out := op
+	if op.DesiredSpec != nil {
+		spec := redactAppSpecForDebugBundle(*op.DesiredSpec)
+		out.DesiredSpec = &spec
+	}
+	out.DesiredSource = redactAppSourceForDebugBundle(op.DesiredSource)
+	out.DesiredOriginSource = redactAppSourceForDebugBundle(op.DesiredOriginSource)
+	return out
+}
+
+func redactAppSourceForDebugBundle(source *model.AppSource) *model.AppSource {
+	if source == nil {
+		return nil
+	}
+	out := sanitizeAppSourceForAPI(source)
+	if out != nil && strings.TrimSpace(out.RepoAuthToken) != "" {
+		out.RepoAuthToken = apiRedactedSecretValue
+	}
+	return out
+}
+
+func redactAppSpecForDebugBundle(spec model.AppSpec) model.AppSpec {
+	out := cloneAppSpec(spec)
+	out.Env = redactStringMapValues(out.Env)
+	out.Files = redactAppFilesForDebugBundle(out.Files)
+	if out.PersistentStorage != nil {
+		storage := *out.PersistentStorage
+		storage.Mounts = redactStorageMountsForDebugBundle(storage.Mounts)
+		out.PersistentStorage = &storage
+	}
+	if out.Postgres != nil && strings.TrimSpace(out.Postgres.Password) != "" {
+		postgres := *out.Postgres
+		postgres.Password = apiRedactedSecretValue
+		out.Postgres = &postgres
+	}
+	if strings.TrimSpace(out.RestartToken) != "" {
+		out.RestartToken = apiRedactedSecretValue
+	}
+	return out
+}
+
+func redactServiceBindingsForDebugBundle(bindings []model.ServiceBinding) []model.ServiceBinding {
+	out := cloneServiceBindings(bindings)
+	for index := range out {
+		out[index].Env = redactStringMapValues(out[index].Env)
+	}
+	return out
+}
+
+func redactBackingServicesForDebugBundle(services []model.BackingService) []model.BackingService {
+	out := cloneBackingServices(services)
+	for index := range out {
+		if out[index].Spec.Postgres != nil && strings.TrimSpace(out[index].Spec.Postgres.Password) != "" {
+			postgres := *out[index].Spec.Postgres
+			postgres.Password = apiRedactedSecretValue
+			out[index].Spec.Postgres = &postgres
+		}
+	}
+	return out
+}
+
+func redactStringMapValues(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			out[key] = value
+			continue
+		}
+		out[key] = apiRedactedSecretValue
+	}
+	return out
+}
+
+func redactAppFilesForDebugBundle(files []model.AppFile) []model.AppFile {
+	out := cloneAppFiles(files)
+	for index := range out {
+		if out[index].Secret && strings.TrimSpace(out[index].Content) != "" {
+			out[index].Content = apiRedactedSecretValue
+		}
+	}
+	return out
+}
+
+func redactStorageMountsForDebugBundle(mounts []model.AppPersistentStorageMount) []model.AppPersistentStorageMount {
+	out := cloneAppPersistentStorageMounts(mounts)
+	for index := range out {
+		if strings.TrimSpace(out[index].SeedContent) != "" {
+			out[index].SeedContent = apiRedactedSecretValue
+		}
+	}
 	return out
 }
 
