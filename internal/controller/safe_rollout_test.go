@@ -291,6 +291,72 @@ func TestSafeZeroDowntimeRolloutCanaryGateUsesRawRequestFactsBeforeRollups(t *te
 	}
 }
 
+func TestSafeZeroDowntimeRolloutCanarySampleDeficitContinuesToNextWeight(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Canary = &model.AppRolloutCanarySpec{
+		Enabled:               true,
+		InitialWeight:         1,
+		MaxWeight:             100,
+		StepWeights:           []int{1, 5, 100},
+		MinObservationSeconds: 0,
+	}
+	candidate.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+		WindowSeconds:        60,
+		MinCandidateRequests: 1,
+		Max5xxRate:           0.10,
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutSleep:              func(context.Context, time.Duration) error { return nil },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+		safeRolloutDrainMetricsQuerier: staticSafeRolloutDrainQuerier{metrics: safeRolloutDrainMetrics{
+			Ready:                true,
+			ActiveConnections:    0,
+			MaxActiveConnections: 1,
+			FinalCount:           1,
+			Summary:              map[string]any{"active_connections": 0},
+		}},
+		releaseGateMetricsQuerier: &sequencedReleaseGateMetricsQuerier{metrics: []map[string]any{
+			{"request_count": 0, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "p95_ttfb_ms": 0, "p99_duration_ms": 0},
+			{"request_count": 0, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "p95_ttfb_ms": 0, "p99_duration_ms": 0, "has_status_class_counts": true},
+			{"request_count": 50, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "status_2xx_rate": 1.0, "p95_ttfb_ms": 100, "p99_duration_ms": 200, "has_status_class_counts": true},
+			{"request_count": 10, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "status_2xx_rate": 1.0, "p95_ttfb_ms": 100, "p99_duration_ms": 200, "has_status_class_counts": true},
+			{"request_count": 50, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "status_2xx_rate": 1.0, "p95_ttfb_ms": 100, "p99_duration_ms": 200, "has_status_class_counts": true},
+			{"request_count": 10, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "status_2xx_rate": 1.0, "p95_ttfb_ms": 100, "p99_duration_ms": 200, "has_status_class_counts": true},
+		}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("expected rollout to continue after low-weight sample deficit, got %v", err)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "canary_gate", model.ReleaseStepStatusSkipped) || !releaseStepsContainPhase(steps, "canary_gate", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected inconclusive low-weight canary gate followed by completed canary gate, got %+v", steps)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != state.Candidate.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected candidate promoted after later canary sample, got %+v", policy)
+	}
+}
+
 func TestSafeZeroDowntimeRolloutCandidateRolloutFailureAutoAborts(t *testing.T) {
 	t.Parallel()
 

@@ -225,7 +225,7 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 						Enabled:               opts.Canary,
 						InitialWeight:         opts.InitialCanaryWeight,
 						MaxWeight:             100,
-						StepWeights:           []int{opts.InitialCanaryWeight, 5, 25, 50, 100},
+						StepWeights:           defaultAppContinuityCanaryStepWeights(opts.InitialCanaryWeight),
 						MinObservationSeconds: opts.MinObservationSeconds,
 					}
 				}
@@ -260,6 +260,23 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("app-runtime-id")
 	_ = cmd.Flags().MarkHidden("db-runtime-id")
 	return cmd
+}
+
+func defaultAppContinuityCanaryStepWeights(initialWeight int) []int {
+	defaults := []int{initialWeight, 5, 25, 50, 100}
+	steps := make([]int, 0, len(defaults))
+	seen := map[int]struct{}{}
+	for _, weight := range defaults {
+		if weight < initialWeight {
+			continue
+		}
+		if _, ok := seen[weight]; ok {
+			continue
+		}
+		seen[weight] = struct{}{}
+		steps = append(steps, weight)
+	}
+	return steps
 }
 
 func (c *CLI) newAppContinuityOffCommand() *cobra.Command {

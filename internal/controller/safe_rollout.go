@@ -129,7 +129,7 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	principal := model.Principal{TenantID: state.CandidateApp.TenantID, ActorType: model.ActorTypeSystem, ActorID: "safe-rollout-controller"}
 	observedCanaryTraffic := false
 	if plan.Canary.Enabled && len(plan.CanarySteps) > 0 {
-		for _, weight := range plan.CanarySteps {
+		for index, weight := range plan.CanarySteps {
 			if weight <= 0 || weight >= 100 {
 				continue
 			}
@@ -152,6 +152,21 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 			}
 			gate = s.evaluateSafeRolloutCandidateCanaryGate(ctx, state, plan.Gate)
 			if gate.Status == model.AppReleaseGateStatusFail {
+				if safeRolloutCanaryGateOnlySampleDeficit(gate, plan.Gate) && safeRolloutHasLaterCanaryStep(plan.CanarySteps, index) {
+					s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusSkipped, fmt.Sprintf("candidate canary gate inconclusive at %d%%; continuing to next canary weight", weight), state.Candidate.ID, map[string]any{
+						"candidate_weight": weight,
+						"gate":             gate,
+						"reason":           "candidate sample count below minimum",
+					})
+					s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.gate.inconclusive", state.Candidate.ID, map[string]string{
+						"operation_id":      op.ID,
+						"phase":             "canary_gate",
+						"candidate_weight":  fmt.Sprintf("%d", weight),
+						"candidate_release": state.Candidate.ID,
+						"reason":            "candidate sample count below minimum",
+					})
+					continue
+				}
 				evidenceID := s.recordSafeRolloutGateFailureEvidence(op, state.CandidateApp, state.Candidate, gate, fmt.Sprintf("candidate canary gate failed at %d%%", weight))
 				s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_gate", model.ReleaseStepStatusFailed, fmt.Sprintf("candidate canary gate failed at %d%%", weight), state.Candidate.ID, map[string]any{
 					"candidate_weight": weight,
@@ -707,6 +722,37 @@ func safeRolloutCanarySteps(canary model.AppRolloutCanarySpec) []int {
 	}
 	sort.Ints(steps)
 	return steps
+}
+
+func safeRolloutHasLaterCanaryStep(steps []int, index int) bool {
+	for nextIndex, weight := range steps {
+		if nextIndex <= index {
+			continue
+		}
+		if weight > 0 && weight < 100 {
+			return true
+		}
+	}
+	return false
+}
+
+func safeRolloutCanaryGateOnlySampleDeficit(gate model.AppReleaseGateResult, policy model.AppReleaseGatePolicy) bool {
+	if policy.MinCandidateRequests <= 0 {
+		return false
+	}
+	if releaseflow.FloatMetric(gate.Metrics, "request_count") >= float64(policy.MinCandidateRequests) {
+		return false
+	}
+	if len(gate.Failures) == 0 {
+		return false
+	}
+	for _, failure := range gate.Failures {
+		if strings.Contains(failure, "request count") && strings.Contains(failure, "below minimum") {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *Service) sleepSafeRolloutObservation(ctx context.Context, delay time.Duration) error {
