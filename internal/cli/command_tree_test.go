@@ -633,6 +633,60 @@ func TestRunAppRouteSetUsesPathPrefix(t *testing.T) {
 	}
 }
 
+func TestAdminRobustnessTypedCheckCommandsUseSubjectEndpoint(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantPath string
+	}{
+		{
+			name:     "node",
+			args:     []string{"admin", "robustness", "check", "node", "node-a"},
+			wantPath: "/v1/admin/robustness/check/node-a",
+		},
+		{
+			name:     "service",
+			args:     []string{"admin", "robustness", "check", "service", "api.example.com"},
+			wantPath: "/v1/admin/robustness/check/api.example.com",
+		},
+		{
+			name:     "edge",
+			args:     []string{"admin", "robustness", "check", "edge", "edge-us-1"},
+			wantPath: "/v1/admin/robustness/check/edge-us-1",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != tc.wantPath {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+				if got := r.Header.Get("Authorization"); got != "Bearer token" {
+					t.Fatalf("unexpected auth header %q", got)
+				}
+				_, _ = w.Write([]byte(`{"status":{"generated_at":"2026-04-02T00:00:00Z","pass":true,"block_rollout":false,"checks":[{"name":"typed-check","pass":true,"severity":"info","subject":"demo"}],"incidents":[]}}`))
+			}))
+			defer server.Close()
+
+			args := append([]string{"--base-url", server.URL, "--token", "token"}, tc.args...)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if err := runWithStreams(args, &stdout, &stderr); err != nil {
+				t.Fatalf("run command: %v; stderr=%s", err, stderr.String())
+			}
+			if out := stdout.String(); !strings.Contains(out, "typed-check") {
+				t.Fatalf("expected robustness output, got %q", out)
+			}
+		})
+	}
+}
+
 func TestRunAppCommandSetArgsUsesDeploySpec(t *testing.T) {
 	t.Parallel()
 

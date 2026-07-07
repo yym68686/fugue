@@ -376,6 +376,12 @@ paths:
           schema:
             type: string
         - in: query
+          name: request_size_class
+          required: false
+          description: Request body size class used for body-read quality ranking. Accepted values include no_body, body_le_64k, body_64k_1m, body_1m_16m, and body_gt_16m.
+          schema:
+            type: string
+        - in: query
           name: method
           required: false
           schema:
@@ -987,6 +993,88 @@ paths:
                 $ref: "#/components/schemas/PlatformFailureDrillResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/release-guard/status:
+    get:
+      operationId: getReleaseGuardStatus
+      summary: Get Release Guard Status
+      tags: [Admin]
+      x-fugue-handler: handleGetReleaseGuardStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: subject
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReleaseGuardStatusResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/traffic-safety/explain/{hostname}:
+    get:
+      operationId: explainTrafficSafety
+      summary: Explain Traffic Safety
+      tags: [Admin]
+      x-fugue-handler: handleExplainTrafficSafety
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: hostname
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: min_healthy_edges
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficSafetyExplainResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/requests/{request_id}/explain:
+    get:
+      operationId: explainRequest
+      summary: Explain Request
+      tags: [Admin]
+      x-fugue-handler: handleExplainRequest
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: request_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: since
+          required: false
+          description: Lower bound as a positive duration such as 24h or an RFC3339 timestamp. Defaults to 24h.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestExplainResponseEnvelope"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/robustness/status:
     get:
       operationId: getRobustnessStatus
@@ -1161,6 +1249,334 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RobustnessRepairPlanResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts:
+    get:
+      operationId: listPlatformArtifacts
+      summary: List Platform Artifacts
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformArtifacts
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: scope
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createPlatformArtifact
+      summary: Create Platform Artifact Draft
+      tags: [Admin]
+      x-fugue-handler: handleCreatePlatformArtifact
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformArtifactCreateRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}:
+    get:
+      operationId: getPlatformArtifact
+      summary: Get Platform Artifact
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/validate:
+    post:
+      operationId: validatePlatformArtifact
+      summary: Validate Platform Artifact
+      tags: [Admin]
+      x-fugue-handler: handleValidatePlatformArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformArtifactValidateRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactValidationResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/release:
+    post:
+      operationId: releasePlatformArtifact
+      summary: Release Platform Artifact
+      tags: [Admin]
+      x-fugue-handler: handleReleasePlatformArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformArtifactReleaseRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactReleaseResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/rollback:
+    post:
+      operationId: rollbackPlatformArtifact
+      summary: Roll Back Platform Artifact
+      tags: [Admin]
+      x-fugue-handler: handleRollbackPlatformArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformArtifactRollbackRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactReleaseResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/consumers:
+    get:
+      operationId: listPlatformArtifactConsumers
+      summary: List Platform Artifact Consumers
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformArtifactConsumers
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactConsumersResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifacts/{artifact_id}/lkg:
+    get:
+      operationId: getPlatformArtifactLKG
+      summary: Get Platform Artifact LKG
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformArtifactLKG
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactLKGResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/artifacts/{artifact_kind}:
+    get:
+      operationId: getPlatformStateArtifact
+      summary: Pull Platform State Artifact
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformStateArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_kind
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: scope_key
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: channel
+          required: false
+          schema:
+            type: string
+            enum: [shadow, gray, full]
+        - in: query
+          name: current_generation
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: wait_seconds
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 30
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformStateArtifactResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/heartbeat:
+    post:
+      operationId: platformConsumerHeartbeat
+      summary: Report Platform State Consumer Heartbeat
+      tags: [Admin]
+      x-fugue-handler: handlePlatformConsumerHeartbeat
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformConsumerHeartbeatRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConsumerHeartbeatResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/failure-contracts:
+    get:
+      operationId: listSubsystemFailureContracts
+      summary: List Subsystem Failure Contracts
+      tags: [Admin]
+      x-fugue-handler: handleListSubsystemFailureContracts
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubsystemFailureContractListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/failure-contracts/{subsystem}:
+    get:
+      operationId: getSubsystemFailureContract
+      summary: Get Subsystem Failure Contract
+      tags: [Admin]
+      x-fugue-handler: handleGetSubsystemFailureContract
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: subsystem
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubsystemFailureContractResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/security/key-rotation:
@@ -6406,6 +6822,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NodeUpdaterListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/node-health:
+    get:
+      operationId: listNodeDeepHealth
+      summary: List Node Deep Health Results
+      tags: [Admin, Node Updater]
+      x-fugue-handler: handleListNodeDeepHealth
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDeepHealthListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/node-health/{node_updater_id}:
+    get:
+      operationId: getNodeDeepHealth
+      summary: Get Node Deep Health Result
+      tags: [Admin, Node Updater]
+      x-fugue-handler: handleGetNodeDeepHealth
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: node_updater_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeDeepHealthResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/node-update-tasks:
@@ -11994,6 +12450,8 @@ components:
           type: string
         traffic_class:
           type: string
+        request_size_class:
+          type: string
         method:
           type: string
         path_prefix_bucket:
@@ -12023,6 +12481,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgeQualityRankCandidate"
+        shadow_comparison:
+          $ref: "#/components/schemas/EdgeQualityShadowComparison"
     EdgeQualityRankCandidate:
       type: object
       additionalProperties: false
@@ -12112,6 +12572,19 @@ components:
         last_sampled_at:
           type: string
           format: date-time
+        reason:
+          type: string
+    EdgeQualityShadowComparison:
+      type: object
+      additionalProperties: false
+      required: [changed]
+      properties:
+        legacy_selected_edge_group_id:
+          type: string
+        quality_selected_edge_group_id:
+          type: string
+        changed:
+          type: boolean
         reason:
           type: string
     GeoIPMetadataResponse:
@@ -12656,6 +13129,12 @@ components:
         switch_cooldown_seconds:
           type: integer
           format: int32
+        ranking_version:
+          type: string
+          description: Edge quality ranking algorithm version considered for this answer.
+        ranking_scope:
+          type: string
+          description: Scope key used by the quality ranking decision, such as global, country:cn, region:cn:sh, or asn:as4134.
         region:
           type: string
         country:
@@ -17893,6 +18372,96 @@ components:
       properties:
         node_updater:
           $ref: "#/components/schemas/NodeUpdater"
+        deep_health:
+          $ref: "#/components/schemas/NodeDeepHealthResult"
+    NodeDeepHealthCheck:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        category:
+          type: string
+        status:
+          type: string
+          enum: [pass, warning, fail]
+        expected:
+          type: string
+        observed:
+          type: string
+        message:
+          type: string
+        hard_fail:
+          type: boolean
+        repair_action:
+          type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+        checked_at:
+          type: string
+          format: date-time
+    NodeDeepHealthResult:
+      type: object
+      additionalProperties: false
+      required: [observed_only, overall_status, quarantine_state, checks, reported_at, updated_at]
+      properties:
+        node_updater_id:
+          type: string
+        cluster_node_name:
+          type: string
+        runtime_id:
+          type: string
+        machine_id:
+          type: string
+        observed_only:
+          type: boolean
+        overall_status:
+          type: string
+          enum: [pass, warning, fail]
+        quarantine_state:
+          type: string
+          enum: [clear, degraded, quarantined]
+        quarantine_reason:
+          type: string
+        quarantine_expires_at:
+          type: string
+          format: date-time
+        recovery_conditions:
+          type: array
+          items:
+            type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeDeepHealthCheck"
+        reported_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    NodeDeepHealthListResponse:
+      type: object
+      additionalProperties: false
+      required: [results, generated_at]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeDeepHealthResult"
+        generated_at:
+          type: string
+          format: date-time
+    NodeDeepHealthResponse:
+      type: object
+      additionalProperties: false
+      required: [result]
+      properties:
+        result:
+          $ref: "#/components/schemas/NodeDeepHealthResult"
     NodeUpdaterDesiredState:
       type: object
       additionalProperties: false
@@ -18025,6 +18594,8 @@ components:
           type: string
         last_error:
           type: string
+        deep_health:
+          $ref: "#/components/schemas/NodeDeepHealthResult"
     CreateNodeUpdateTaskRequest:
       type: object
       additionalProperties: false
@@ -21297,6 +21868,224 @@ components:
       properties:
         report:
           $ref: "#/components/schemas/PlatformFailureDrillReport"
+    ReleaseGuardStatus:
+      type: object
+      additionalProperties: false
+      required: [generated_at, pass, block_rollout, mode, robustness_baseline, failure_contract_count, platform_artifact_validation_failures, platform_consumer_drift]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        pass:
+          type: boolean
+        block_rollout:
+          type: boolean
+        mode:
+          type: string
+        robustness_baseline:
+          $ref: "#/components/schemas/RobustnessStatus"
+        failure_contract_count:
+          type: integer
+          format: int32
+        platform_artifact_kinds:
+          type: array
+          items:
+            type: string
+        platform_artifact_validation_failures:
+          type: integer
+          format: int32
+        platform_consumer_drift:
+          type: integer
+          format: int32
+        blocked_reasons:
+          type: array
+          items:
+            type: string
+        recommended_operator_steps:
+          type: array
+          items:
+            type: string
+    ReleaseGuardStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/ReleaseGuardStatus"
+    ServiceTrafficSafetyState:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          hostname,
+          pass,
+          min_healthy_edge_count,
+          healthy_edge_count,
+          strict_protection,
+          exploration_paused,
+          route_explain,
+          generated_at,
+        ]
+      properties:
+        hostname:
+          type: string
+        pass:
+          type: boolean
+        min_healthy_edge_count:
+          type: integer
+          format: int32
+        healthy_edge_count:
+          type: integer
+          format: int32
+        eligible_edge_groups:
+          type: array
+          items:
+            type: string
+        hard_gated_edge_groups:
+          type: array
+          items:
+            type: string
+        hard_gate_reasons:
+          type: object
+          additionalProperties:
+            type: string
+        blockers:
+          type: array
+          items:
+            type: string
+        failure_contracts:
+          type: array
+          items:
+            type: string
+        gray_release_scope:
+          type: string
+        strict_protection:
+          type: boolean
+        exploration_paused:
+          type: boolean
+        route_explain:
+          $ref: "#/components/schemas/RouteExplainResponse"
+        generated_at:
+          type: string
+          format: date-time
+    TrafficSafetyExplainResponse:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          $ref: "#/components/schemas/ServiceTrafficSafetyState"
+    RequestExplainResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, found, secret_safe, generated_at]
+      properties:
+        request_id:
+          type: string
+        found:
+          type: boolean
+        error_class:
+          type: string
+        edge_id:
+          type: string
+        edge_group_id:
+          type: string
+        runtime_node:
+          type: string
+        hostname:
+          type: string
+        path_prefix:
+          type: string
+        method:
+          type: string
+        traffic_class:
+          type: string
+        route_generation:
+          type: string
+        status_code:
+          type: integer
+          format: int32
+        body_read_block_ms:
+          type: integer
+          format: int64
+        upload_effective_bps:
+          type: integer
+          format: int64
+        min_window_bps:
+          type: integer
+          format: int64
+        max_read_gap_ms:
+          type: integer
+          format: int64
+        request_body_bytes:
+          type: integer
+          format: int64
+        request_body_read_bytes:
+          type: integer
+          format: int64
+        body_incomplete_count:
+          type: integer
+          format: int32
+        body_read_error_count:
+          type: integer
+          format: int32
+        origin_dns_ms:
+          type: integer
+          format: int64
+        origin_connect_ms:
+          type: integer
+          format: int64
+        origin_request_write_ms:
+          type: integer
+          format: int64
+        origin_response_wait_ms:
+          type: integer
+          format: int64
+        origin_ttfb_ms:
+          type: integer
+          format: int64
+        origin_total_ms:
+          type: integer
+          format: int64
+        client_tcp_rtt_ms:
+          type: number
+          format: double
+        client_tcp_retrans_rate:
+          type: number
+          format: double
+        client_tcp_rto_rate:
+          type: number
+          format: double
+        client_tcp_delivery_rate_bps:
+          type: integer
+          format: int64
+        attribution:
+          type: array
+          items:
+            type: string
+        failure_contracts:
+          type: array
+          items:
+            type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+        secret_safe:
+          type: boolean
+        sampled_at:
+          type: string
+          format: date-time
+        generated_at:
+          type: string
+          format: date-time
+    RequestExplainResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required: [explain]
+      properties:
+        explain:
+          $ref: "#/components/schemas/RequestExplainResponse"
     RobustnessCheck:
       type: object
       additionalProperties: false
@@ -21359,6 +22148,180 @@ components:
         updated_at:
           type: string
           format: date-time
+    ResilienceInvariant:
+      type: object
+      additionalProperties: false
+      required: [id, category, description, hard_gate]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        subject:
+          type: string
+        description:
+          type: string
+        hard_gate:
+          type: boolean
+        evidence_source:
+          type: string
+        runbook_ref:
+          type: string
+    ResilienceInventoryItem:
+      type: object
+      additionalProperties: false
+      required: [category, subject, status]
+      properties:
+        category:
+          type: string
+        subject:
+          type: string
+        status:
+          type: string
+        summary:
+          type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+        updated_at:
+          type: string
+          format: date-time
+    ResilienceGap:
+      type: object
+      additionalProperties: false
+      required: [id, category, severity, description]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        severity:
+          type: string
+        description:
+          type: string
+        implementation_path:
+          type: string
+    ResilienceDashboard:
+      type: object
+      additionalProperties: false
+      required: [name, scope]
+      properties:
+        name:
+          type: string
+        scope:
+          type: string
+        metrics:
+          type: array
+          items:
+            type: string
+        command:
+          type: string
+        description:
+          type: string
+    ResilienceAlertRule:
+      type: object
+      additionalProperties: false
+      required: [name, severity, expression, incident_class, explain_command]
+      properties:
+        name:
+          type: string
+        severity:
+          type: string
+        expression:
+          type: string
+        incident_class:
+          type: string
+        explain_command:
+          type: string
+        runbook_ref:
+          type: string
+    RuntimeContinuityStatus:
+      type: object
+      additionalProperties: false
+      required: [state, strategy, desired_replicas, ready_replicas]
+      properties:
+        app_id:
+          type: string
+        app_name:
+          type: string
+        hostname:
+          type: string
+        state:
+          type: string
+        strategy:
+          type: string
+        desired_replicas:
+          type: integer
+          format: int32
+        ready_replicas:
+          type: integer
+          format: int32
+        runtime_id:
+          type: string
+        runtime_node:
+          type: string
+        node_quarantine:
+          type: string
+        blockers:
+          type: array
+          items:
+            type: string
+        replacement_plan:
+          type: string
+        stateful_preflight:
+          type: array
+          items:
+            type: string
+        attribution:
+          type: array
+          items:
+            type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+    ResilienceChaosDrill:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          failure_mode,
+          detection,
+          quarantine,
+          repair_or_rollback,
+          explain_command,
+          release_readiness,
+        ]
+      properties:
+        id:
+          type: string
+        failure_mode:
+          type: string
+        detection:
+          type: string
+        quarantine:
+          type: string
+        repair_or_rollback:
+          type: string
+        explain_command:
+          type: string
+        release_readiness:
+          type: boolean
+        runbook_ref:
+          type: string
+    RunbookReference:
+      type: object
+      additionalProperties: false
+      required: [name, path]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        incident_class:
+          type: string
     RobustnessStatus:
       type: object
       additionalProperties: false
@@ -21385,12 +22348,48 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RobustnessIncident"
+        invariants:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResilienceInvariant"
+        inventory:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResilienceInventoryItem"
+        gaps:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResilienceGap"
+        dashboards:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResilienceDashboard"
+        alert_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResilienceAlertRule"
+        runtime_continuity:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeContinuityStatus"
+        chaos_drills:
+          type: array
+          items:
+            $ref: "#/components/schemas/ResilienceChaosDrill"
+        runbooks:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunbookReference"
         autonomy:
           $ref: "#/components/schemas/PlatformAutonomyStatus"
         dns:
           $ref: "#/components/schemas/DNSDelegationPreflightResponse"
         route_explain:
           $ref: "#/components/schemas/RouteExplainResponse"
+        failure_contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubsystemFailureContract"
         generated_sources:
           type: array
           items:
@@ -21475,6 +22474,576 @@ components:
       properties:
         plan:
           $ref: "#/components/schemas/RobustnessRepairPlan"
+    PlatformArtifactScope:
+      type: object
+      additionalProperties: false
+      properties:
+        scope_type:
+          type: string
+        key:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        app_id:
+          type: string
+        hostname:
+          type: string
+        edge_group_id:
+          type: string
+        edge_id:
+          type: string
+        node_id:
+          type: string
+        region:
+          type: string
+        country:
+          type: string
+        traffic_class:
+          type: string
+    PlatformArtifactValidationResult:
+      type: object
+      additionalProperties: false
+      required: [name, pass, severity]
+      properties:
+        name:
+          type: string
+        pass:
+          type: boolean
+        severity:
+          type: string
+          enum: [block_publish, degraded, warning, info]
+        message:
+          type: string
+        evidence:
+          type: object
+          additionalProperties:
+            type: string
+    PlatformArtifact:
+      type: object
+      additionalProperties: false
+      required: [id, artifact_kind, scope, scope_key, generation, status, content_hash, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        artifact_kind:
+          type: string
+          enum: [edge_route_bundle, dns_answer_bundle, caddy_route_config, discovery_bundle, node_desired_state, runtime_placement_plan, runtime_continuity_plan, node_guardian_policy, release_guard_policy, edge_ranking_policy, traffic_safety_policy, subsystem_failure_contracts]
+        scope:
+          $ref: "#/components/schemas/PlatformArtifactScope"
+        scope_key:
+          type: string
+        generation:
+          type: string
+        status:
+          type: string
+          enum: [draft, validated, rejected]
+        content_hash:
+          type: string
+        content:
+          type: object
+          additionalProperties: true
+        validation_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformArtifactValidationResult"
+        compatibility_floor:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        created_by_type:
+          type: string
+        created_by_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PlatformArtifactRelease:
+      type: object
+      additionalProperties: false
+      required: [id, artifact_id, artifact_kind, scope, scope_key, generation, release_channel, status, released_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        artifact_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PlatformArtifactScope"
+        scope_key:
+          type: string
+        generation:
+          type: string
+        release_channel:
+          type: string
+          enum: [shadow, gray, full]
+        status:
+          type: string
+          enum: [active, superseded, rolled_back]
+        rollback_target_generation:
+          type: string
+        canary_rule_ref:
+          type: string
+        reason:
+          type: string
+        released_by_type:
+          type: string
+        released_by_id:
+          type: string
+        released_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PlatformReleaseMessage:
+      type: object
+      additionalProperties: false
+      required: [id, release_id, artifact_id, artifact_kind, scope, scope_key, generation, release_channel, message_type, created_at, ack_count]
+      properties:
+        id:
+          type: string
+        release_id:
+          type: string
+        artifact_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PlatformArtifactScope"
+        scope_key:
+          type: string
+        generation:
+          type: string
+        release_channel:
+          type: string
+          enum: [shadow, gray, full]
+        message_type:
+          type: string
+          enum: [release, rollback]
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        ack_count:
+          type: integer
+    PlatformConsumerInstance:
+      type: object
+      additionalProperties: false
+      required: [id, consumer_id, artifact_kind, scope_key, last_heartbeat_at, updated_at]
+      properties:
+        id:
+          type: string
+        consumer_id:
+          type: string
+        component:
+          type: string
+        node_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope_key:
+          type: string
+        supported_artifact_kinds:
+          type: array
+          items:
+            type: string
+        desired_generation:
+          type: string
+        actual_generation:
+          type: string
+        lkg_generation:
+          type: string
+        apply_status:
+          type: string
+        probe_status:
+          type: string
+        serving_lkg:
+          type: boolean
+        lkg_expired:
+          type: boolean
+        last_error:
+          type: string
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PlatformLKGSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, artifact_id, artifact_kind, scope, scope_key, generation, content_hash, expires_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        artifact_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PlatformArtifactScope"
+        scope_key:
+          type: string
+        generation:
+          type: string
+        content_hash:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PlatformArtifactCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [artifact_kind, content]
+      properties:
+        artifact_kind:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PlatformArtifactScope"
+        generation:
+          type: string
+        content:
+          type: object
+          additionalProperties: true
+        compatibility_floor:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    PlatformArtifactValidateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run:
+          type: boolean
+    PlatformArtifactReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [release_channel]
+      properties:
+        release_channel:
+          type: string
+          enum: [shadow, gray, full]
+        canary_rule_ref:
+          type: string
+        force_publish:
+          type: boolean
+        reason:
+          type: string
+    PlatformArtifactRollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [to_generation, reason]
+      properties:
+        release_channel:
+          type: string
+          enum: [shadow, gray, full]
+        to_generation:
+          type: string
+        reason:
+          type: string
+        force_publish:
+          type: boolean
+        canary_rule_ref:
+          type: string
+    PlatformConsumerHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [consumer_id, artifact_kind]
+      properties:
+        consumer_id:
+          type: string
+        component:
+          type: string
+        node_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope_key:
+          type: string
+        supported_artifact_kinds:
+          type: array
+          items:
+            type: string
+        desired_generation:
+          type: string
+        actual_generation:
+          type: string
+        lkg_generation:
+          type: string
+        apply_status:
+          type: string
+        probe_status:
+          type: string
+        serving_lkg:
+          type: boolean
+        lkg_expired:
+          type: boolean
+        last_error:
+          type: string
+    PlatformArtifactListResponse:
+      type: object
+      additionalProperties: false
+      required: [artifacts, generated_at]
+      properties:
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformArtifact"
+        generated_at:
+          type: string
+          format: date-time
+    PlatformArtifactResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+    PlatformArtifactValidationResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact, results, pass, dry_run]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformArtifactValidationResult"
+        pass:
+          type: boolean
+        dry_run:
+          type: boolean
+    PlatformArtifactReleaseResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact, release, message]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        release:
+          $ref: "#/components/schemas/PlatformArtifactRelease"
+        message:
+          $ref: "#/components/schemas/PlatformReleaseMessage"
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
+    PlatformArtifactConsumersResponse:
+      type: object
+      additionalProperties: false
+      required: [consumers, generated_at]
+      properties:
+        consumers:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformConsumerInstance"
+        generated_at:
+          type: string
+          format: date-time
+    PlatformArtifactLKGResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
+    PlatformStateArtifactResponse:
+      type: object
+      additionalProperties: false
+      required: [messages, waited]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        release:
+          $ref: "#/components/schemas/PlatformArtifactRelease"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformReleaseMessage"
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
+        generation:
+          type: string
+        waited:
+          type: boolean
+    PlatformConsumerHeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required: [consumer, drift]
+      properties:
+        consumer:
+          $ref: "#/components/schemas/PlatformConsumerInstance"
+        drift:
+          type: boolean
+    FailureMode:
+      type: object
+      additionalProperties: false
+      required: [id, description]
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        severity:
+          type: string
+    DetectionSignal:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        required:
+          type: boolean
+    IsolationAction:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        automatic:
+          type: boolean
+    FallbackBehavior:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+    RepairAction:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        safety_class:
+          type: string
+        automatic:
+          type: boolean
+    RollbackPath:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+    HumanApprovalBoundary:
+      type: object
+      additionalProperties: false
+      required: [action, description, required]
+      properties:
+        action:
+          type: string
+        description:
+          type: string
+        required:
+          type: boolean
+    SubsystemFailureContract:
+      type: object
+      additionalProperties: false
+      required: [subsystem, failure_modes, detection_signals, isolation_actions, fallback_behaviors, repair_actions, rollback_paths, attribution_classes, human_approval_boundaries, observe_only_allowed, automatic_quarantine_allowed, automatic_repair_allowed, human_approval_required, updated_at]
+      properties:
+        subsystem:
+          type: string
+        owner:
+          type: string
+        summary:
+          type: string
+        failure_modes:
+          type: array
+          items:
+            $ref: "#/components/schemas/FailureMode"
+        detection_signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/DetectionSignal"
+        isolation_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/IsolationAction"
+        fallback_behaviors:
+          type: array
+          items:
+            $ref: "#/components/schemas/FallbackBehavior"
+        repair_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepairAction"
+        rollback_paths:
+          type: array
+          items:
+            $ref: "#/components/schemas/RollbackPath"
+        attribution_classes:
+          type: array
+          items:
+            type: string
+        human_approval_boundaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/HumanApprovalBoundary"
+        observe_only_allowed:
+          type: boolean
+        automatic_quarantine_allowed:
+          type: boolean
+        automatic_repair_allowed:
+          type: boolean
+        human_approval_required:
+          type: boolean
+        runbook_ref:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+    SubsystemFailureContractListResponse:
+      type: object
+      additionalProperties: false
+      required: [contracts, generated_at]
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/SubsystemFailureContract"
+        generated_at:
+          type: string
+          format: date-time
+    SubsystemFailureContractResponse:
+      type: object
+      additionalProperties: false
+      required: [contract]
+      properties:
+        contract:
+          $ref: "#/components/schemas/SubsystemFailureContract"
     KeyRotationPreflightRequest:
       type: object
       additionalProperties: false

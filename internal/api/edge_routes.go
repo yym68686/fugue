@@ -1011,6 +1011,7 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 	expectedMinTrafficRoutes := make(map[string]int)
 	now := time.Now().UTC()
 	liveServingByNode := s.edgeLiveServingByNode(context.Background(), now)
+	quarantineByNode := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
 		groupID := strings.TrimSpace(node.EdgeGroupID)
 		if groupID == "" {
@@ -1021,6 +1022,12 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 		}
 		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHasRouteState(node) {
 			expectedMinTrafficRoutes[groupID] = node.CaddyRouteCount
+		}
+		if edgeNodeQuarantined(node, quarantineByNode) {
+			if _, ok := healthy[groupID]; !ok {
+				healthy[groupID] = false
+			}
+			continue
 		}
 		if edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
 			healthy[groupID] = true
@@ -1035,6 +1042,22 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 		sort.Strings(healthyNodeIDsByGroup[groupID])
 	}
 	return healthy, healthyNodeIDsByGroup, expectedNonEmpty, expectedMinTrafficRoutes, nil
+}
+
+func edgeNodeQuarantined(node model.EdgeNode, quarantineByNode map[string]model.NodeDeepHealthResult) bool {
+	if len(quarantineByNode) == 0 {
+		return false
+	}
+	for _, key := range []string{node.ID, node.PublicHostname, node.MeshIP} {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if quarantine, ok := quarantineByNode[key]; ok && strings.TrimSpace(quarantine.QuarantineState) != model.NodeQuarantineStateClear {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) edgeLiveServingByNode(ctx context.Context, now time.Time) map[string]edgeLiveServingState {

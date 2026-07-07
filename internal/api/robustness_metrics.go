@@ -2,15 +2,17 @@ package api
 
 import (
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/observability"
 	"fugue/internal/store"
 )
 
 func (s *Server) writeRobustnessMetrics(w io.Writer) {
-	for _, guardian := range []string{"route-dns", "edge-tls", "node-health", "bundle-rollout"} {
+	for _, guardian := range []string{"route-dns", "edge-tls", "node-health", "bundle-rollout", "traffic-safety", "release-guard", "request-attribution", "runtime-continuity", "platform-state-release"} {
 		observability.WriteGaugeMetric(w, "fugue_robustness_guardian_enabled", "Robustness guardian classes available in the control plane.", map[string]string{"guardian": guardian}, 1)
 	}
 
@@ -35,6 +37,33 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 			observability.WriteMetricSample(w, "fugue_robustness_node_generation_drift_seconds", labels, robustnessGenerationDriftSeconds(now, expected, firstNonEmpty(node.DNSBundleVersion, node.ServingGeneration), node.LastHeartbeatAt, node.UpdatedAt))
 			observability.WriteMetricSample(w, "fugue_robustness_lkg_serving", labels, boolMetric(robustnessNodeServingLKG(node.CacheStatus, node.DNSBundleVersion, node.ServingGeneration, node.LKGGeneration)))
 			observability.WriteMetricSample(w, "fugue_robustness_dns_query_errors", map[string]string{"node_id": node.ID, "edge_group_id": node.EdgeGroupID}, float64(node.QueryErrorCount))
+		}
+	}
+	if nodeHealth, err := s.store.ListNodeDeepHealthResults(); err == nil {
+		observability.WriteMetricHeader(w, "fugue_node_deep_health_pass", "Whether the latest node deep health report passed.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_node_quarantine_active", "Whether a node is currently quarantined by deep health.", "gauge")
+		observability.WriteMetricHeader(w, "fugue_node_managed_iptables_stale_rule_count", "Suspicious stale Fugue managed iptables rules reported by node deep health.", "gauge")
+		for _, result := range nodeHealth {
+			labels := map[string]string{
+				"node_updater_id": result.NodeUpdaterID,
+				"cluster_node":    result.ClusterNodeName,
+				"runtime_id":      result.RuntimeID,
+				"reason":          result.QuarantineReason,
+			}
+			observability.WriteMetricSample(w, "fugue_node_deep_health_pass", labels, boolMetric(result.OverallStatus == model.NodeDeepHealthStatusPass))
+			observability.WriteMetricSample(w, "fugue_node_quarantine_active", labels, boolMetric(nodeQuarantineActive(result, now)))
+			staleRules := 0.0
+			for _, check := range result.Checks {
+				if check.Name != model.NodeDeepHealthCheckManagedIptablesStale {
+					continue
+				}
+				if value := strings.TrimSpace(check.Evidence["suspect_rules"]); value != "" {
+					if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+						staleRules = parsed
+					}
+				}
+			}
+			observability.WriteMetricSample(w, "fugue_node_managed_iptables_stale_rule_count", labels, staleRules)
 		}
 	}
 
@@ -71,6 +100,33 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 			observability.WriteMetricSample(w, "fugue_robustness_repair_events_total", map[string]string{"outcome": outcome}, repairCounts[outcome])
 		}
 		observability.WriteGaugeMetric(w, "fugue_robustness_bundle_publish_rejections_recent", "Recent structured bundle publish rejection audit events.", nil, bundleRejections)
+	}
+	if artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500}); err == nil {
+		seen := map[string]bool{}
+		drift := 0.0
+		lkgExpired := 0.0
+		for _, artifact := range artifacts {
+			key := artifact.ArtifactKind + "\x00" + artifact.ScopeKey
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			consumers, err := s.store.ListPlatformConsumers(artifact.ArtifactKind, artifact.ScopeKey)
+			if err != nil {
+				continue
+			}
+			for _, consumer := range consumers {
+				if consumer.DesiredGeneration != "" && consumer.ActualGeneration != "" && consumer.DesiredGeneration != consumer.ActualGeneration {
+					drift++
+				}
+				if consumer.LKGExpired {
+					lkgExpired++
+				}
+			}
+		}
+		observability.WriteGaugeMetric(w, "fugue_platform_consumer_generation_drift_total", "Platform state consumers whose actual generation differs from desired generation.", nil, drift)
+		observability.WriteGaugeMetric(w, "fugue_platform_lkg_expired_total", "Platform state consumers reporting expired LKG.", nil, lkgExpired)
+		observability.WriteGaugeMetric(w, "fugue_release_guard_block_total", "Current release guard block signal derived from consumer drift and LKG expiry.", nil, boolMetric(drift > 0 || lkgExpired > 0))
 	}
 }
 

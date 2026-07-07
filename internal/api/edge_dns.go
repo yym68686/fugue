@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	defaultEdgeDNSTTL          = 60
-	defaultEdgeDNSProbeLabel   = "d-test"
-	edgeDNSBundleVersionPrefix = "dnsgen_"
+	defaultEdgeDNSTTL            = 60
+	defaultEdgeDNSProbeLabel     = "d-test"
+	edgeDNSBundleVersionPrefix   = "dnsgen_"
+	edgeDNSQualityRankingVersion = "edge-quality-scoped-v1"
 )
 
 type edgeDNSBundleOptions struct {
@@ -2453,7 +2454,11 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 	selectedEdgeGroupID := edgeDNSLegacySelectedEdgeGroup(preferred, allowed)
 	shadowSelectedEdgeGroupID := ""
 	shadowReason := ""
+	rankingVersion := ""
+	rankingScope := ""
 	if latencyProfile != nil && latencyProfile.Enabled {
+		rankingVersion = edgeDNSQualityRankingVersion
+		rankingScope = latencyProfile.Scope.key()
 		shadowSelectedEdgeGroupID = strings.TrimSpace(latencyProfile.BestEdgeGroupID)
 		shadowReason = "shadow_" + strings.TrimSpace(latencyProfile.Reason)
 	}
@@ -2486,6 +2491,8 @@ func edgeDNSAnswerPolicy(options edgeDNSBundleOptions, preferredEdgeGroupID, fal
 		RouteReadyRequired:        true,
 		ExplorationPercent:        edgeDNSExplorationPercent,
 		SwitchCooldownSec:         int(edgeDNSDecisionCooldown.Seconds()),
+		RankingVersion:            rankingVersion,
+		RankingScope:              rankingScope,
 		Weight:                    weight,
 		Reason:                    reason,
 		SelectedEdgeGroupID:       selectedEdgeGroupID,

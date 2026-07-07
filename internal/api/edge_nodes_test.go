@@ -240,6 +240,8 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 			SampleCount:          60,
 			UploadEffectiveBPS:   2 * 1024 * 1024,
 			MinWindowBPS:         1536 * 1024,
+			RequestBodyBytes:     2 * 1024 * 1024,
+			RequestBodyReadBytes: 2 * 1024 * 1024,
 			BodyReadBlockMS:      40,
 			MaxReadGapMS:         100,
 			ClientTCPRTTMS:       120,
@@ -265,6 +267,8 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 			SampleCount:               60,
 			UploadEffectiveBPS:        64 * 1024,
 			MinWindowBPS:              32 * 1024,
+			RequestBodyBytes:          2 * 1024 * 1024,
+			RequestBodyReadBytes:      2 * 1024 * 1024,
 			BodyReadBlockMS:           1200,
 			MaxReadGapMS:              8000,
 			BodyIncompleteCount:       3,
@@ -276,17 +280,40 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 			ClientTCPDeliveryBPS:      64 * 1024,
 			SampledAt:                 now.Add(-5 * time.Minute),
 		},
+		{
+			ID:                   "api-us-huge-body-slow",
+			EdgeID:               "edge-us-1",
+			EdgeGroupID:          "edge-group-country-us",
+			Hostname:             "api.fugue.pro",
+			PathPrefix:           "/api",
+			Method:               "POST",
+			TrafficClass:         "large_body_api",
+			ClientCountry:        "cn",
+			ClientASN:            "as4134",
+			DNSPolicy:            "client_scope_header",
+			TTFBMS:               300,
+			UpstreamMS:           220,
+			TotalMS:              420,
+			SampleCount:          60,
+			UploadEffectiveBPS:   16 * 1024,
+			MinWindowBPS:         8 * 1024,
+			RequestBodyBytes:     32 * 1024 * 1024,
+			RequestBodyReadBytes: 32 * 1024 * 1024,
+			BodyReadBlockMS:      5000,
+			MaxReadGapMS:         12000,
+			SampledAt:            now.Add(-5 * time.Minute),
+		},
 	}, time.Time{}); err != nil {
 		t.Fatalf("record performance samples: %v", err)
 	}
 
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-rank/api.fugue.pro?traffic_class=large_body_api&method=POST&path_prefix=/api/responses&scope=asn:as4134&window=6h", platformAdminKey, nil)
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-rank/api.fugue.pro?traffic_class=large_body_api&request_size_class=body_1m_16m&method=POST&path_prefix=/api/responses&scope=asn:as4134&window=6h", platformAdminKey, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected quality rank status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
 	var response model.EdgeQualityRankResponse
 	mustDecodeJSON(t, recorder, &response)
-	if response.SelectedScope != "asn:as4134" || response.TrafficClass != "large_body_api" || response.Method != "POST" {
+	if response.SelectedScope != "asn:as4134" || response.TrafficClass != "large_body_api" || response.RequestSizeClass != "body_1m_16m" || response.Method != "POST" {
 		t.Fatalf("unexpected quality rank scope/filter: %+v", response)
 	}
 	if len(response.Candidates) != 1 || response.Candidates[0].EdgeID != "edge-us-1" || response.Candidates[0].Score <= 0 {
@@ -295,8 +322,26 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 	if response.Candidates[0].ScoreBreakdown["upload"] <= 0 || response.Candidates[0].Confidence <= 0 {
 		t.Fatalf("expected upload/confidence breakdown, got %+v", response.Candidates[0])
 	}
+	if response.Candidates[0].AvgUploadBPS < 1024*1024 {
+		t.Fatalf("expected huge-body slow sample to be filtered out by request_size_class, got %+v", response.Candidates[0])
+	}
 	if len(response.HardGated) != 1 || response.HardGated[0].EdgeID != "edge-de-1" || !response.HardGated[0].Excluded {
 		t.Fatalf("expected service-excluded DE edge in hard gates, got %+v", response.HardGated)
+	}
+}
+
+func TestEdgeQualityShadowComparisonReportsChangedWinner(t *testing.T) {
+	t.Parallel()
+
+	comparison := edgeQualityShadowComparison(model.EdgeRoutePolicy{EdgeGroupID: "edge-group-country-de"}, []model.EdgeQualityRankCandidate{
+		{Rank: 1, EdgeID: "edge-us-1", EdgeGroupID: "edge-group-country-us", Score: 100},
+		{Rank: 2, EdgeID: "edge-de-1", EdgeGroupID: "edge-group-country-de", Score: 300},
+	})
+	if comparison == nil ||
+		!comparison.Changed ||
+		comparison.LegacySelectedEdgeGroupID != "edge-group-country-de" ||
+		comparison.QualitySelectedEdgeGroupID != "edge-group-country-us" {
+		t.Fatalf("expected changed shadow comparison, got %+v", comparison)
 	}
 }
 

@@ -417,6 +417,8 @@ type DNSAnswerPolicy struct {
 	RouteReadyRequired        bool     `json:"route_ready_required,omitempty"`
 	ExplorationPercent        int      `json:"exploration_percent,omitempty"`
 	SwitchCooldownSec         int      `json:"switch_cooldown_seconds,omitempty"`
+	RankingVersion            string   `json:"ranking_version,omitempty"`
+	RankingScope              string   `json:"ranking_scope,omitempty"`
 	Region                    string   `json:"region,omitempty"`
 	Country                   string   `json:"country,omitempty"`
 	Priority                  int      `json:"priority,omitempty"`
@@ -625,19 +627,21 @@ type EdgeNodeQualityRoute struct {
 }
 
 type EdgeQualityRankResponse struct {
-	Hostname         string                     `json:"hostname"`
-	TrafficClass     string                     `json:"traffic_class,omitempty"`
-	Method           string                     `json:"method,omitempty"`
-	PathPrefixBucket string                     `json:"path_prefix_bucket,omitempty"`
-	RequestedScope   string                     `json:"requested_scope"`
-	SelectedScope    string                     `json:"selected_scope"`
-	FallbackLevel    int                        `json:"fallback_level"`
-	FallbackReason   string                     `json:"fallback_reason,omitempty"`
-	Window           string                     `json:"window"`
-	Since            time.Time                  `json:"since"`
-	GeneratedAt      time.Time                  `json:"generated_at"`
-	Candidates       []EdgeQualityRankCandidate `json:"candidates,omitempty"`
-	HardGated        []EdgeQualityRankCandidate `json:"hard_gated,omitempty"`
+	Hostname         string                       `json:"hostname"`
+	TrafficClass     string                       `json:"traffic_class,omitempty"`
+	RequestSizeClass string                       `json:"request_size_class,omitempty"`
+	Method           string                       `json:"method,omitempty"`
+	PathPrefixBucket string                       `json:"path_prefix_bucket,omitempty"`
+	RequestedScope   string                       `json:"requested_scope"`
+	SelectedScope    string                       `json:"selected_scope"`
+	FallbackLevel    int                          `json:"fallback_level"`
+	FallbackReason   string                       `json:"fallback_reason,omitempty"`
+	Window           string                       `json:"window"`
+	Since            time.Time                    `json:"since"`
+	GeneratedAt      time.Time                    `json:"generated_at"`
+	Candidates       []EdgeQualityRankCandidate   `json:"candidates,omitempty"`
+	HardGated        []EdgeQualityRankCandidate   `json:"hard_gated,omitempty"`
+	ShadowComparison *EdgeQualityShadowComparison `json:"shadow_comparison,omitempty"`
 }
 
 type EdgeQualityRankCandidate struct {
@@ -670,6 +674,13 @@ type EdgeQualityRankCandidate struct {
 	ClientTCPRTORate          float64            `json:"client_tcp_rto_rate,omitempty"`
 	LastSampledAt             *time.Time         `json:"last_sampled_at,omitempty"`
 	Reason                    string             `json:"reason,omitempty"`
+}
+
+type EdgeQualityShadowComparison struct {
+	LegacySelectedEdgeGroupID  string `json:"legacy_selected_edge_group_id,omitempty"`
+	QualitySelectedEdgeGroupID string `json:"quality_selected_edge_group_id,omitempty"`
+	Changed                    bool   `json:"changed"`
+	Reason                     string `json:"reason,omitempty"`
 }
 
 type EdgeQualityRollup struct {

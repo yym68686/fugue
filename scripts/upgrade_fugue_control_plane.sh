@@ -2079,6 +2079,86 @@ rollout_status() {
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "deploy/${deployment_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
 }
 
+deployment_canary_ready() {
+  local deployment_name="$1"
+  local status updated ready available generation observed
+
+  status="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" \
+    -o jsonpath='{.status.updatedReplicas} {.status.readyReplicas} {.status.availableReplicas} {.metadata.generation} {.status.observedGeneration}' 2>/dev/null || true)"
+  read -r updated ready available generation observed <<<"${status}"
+  updated="${updated:-0}"
+  ready="${ready:-0}"
+  available="${available:-0}"
+  generation="${generation:-0}"
+  observed="${observed:-0}"
+  [[ "${updated}" =~ ^[0-9]+$ ]] || updated=0
+  [[ "${ready}" =~ ^[0-9]+$ ]] || ready=0
+  [[ "${available}" =~ ^[0-9]+$ ]] || available=0
+  [[ "${generation}" =~ ^[0-9]+$ ]] || generation=0
+  [[ "${observed}" =~ ^[0-9]+$ ]] || observed=0
+  (( observed >= generation && updated >= 1 && ready >= 1 && available >= 1 ))
+}
+
+wait_for_deployment_canary_ready() {
+  local deployment_name="$1"
+  local timeout="${FUGUE_CONTROL_PLANE_CANARY_TIMEOUT_SECONDS:-120}"
+  local delay="${FUGUE_CONTROL_PLANE_CANARY_DELAY_SECONDS:-5}"
+  local deadline
+
+  deployment_exists "${deployment_name}" || return 0
+  deadline=$((SECONDS + timeout))
+  while true; do
+    if deployment_canary_ready "${deployment_name}"; then
+      log "control-plane canary ready: deployment=${deployment_name} updated_ready_replicas>=1"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      log "control-plane canary not ready before timeout: deployment=${deployment_name}"
+      return 1
+    fi
+    log "waiting for control-plane canary: deployment=${deployment_name}"
+    sleep "${delay}"
+  done
+}
+
+control_plane_readyz_probe() {
+  local api_base
+
+  api_base="$(release_api_base_url)"
+  curl -fsS "${api_base}/readyz" >/dev/null
+}
+
+control_plane_canary_readiness_gate() {
+  local summary
+
+  case "${FUGUE_CONTROL_PLANE_CANARY_GATE_ENABLED:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      log "control-plane canary gate disabled"
+      return 0
+      ;;
+  esac
+  wait_for_deployment_canary_ready "${FUGUE_API_DEPLOYMENT_NAME}" || return 1
+  wait_for_deployment_canary_ready "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}" || return 1
+  retry "${FUGUE_CONTROL_PLANE_CANARY_READY_RETRIES:-12}" "${FUGUE_CONTROL_PLANE_CANARY_READY_DELAY_SECONDS:-5}" control_plane_readyz_probe || {
+    log "control-plane canary API readiness failed"
+    return 1
+  }
+  if summary="$(release_guard_status_summary 2>/dev/null)"; then
+    log "control-plane canary release guard passed: ${summary}"
+  else
+    log "control-plane canary release guard failed: ${summary:-unknown}"
+    return 1
+  fi
+  if summary="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE:-}")"; then
+    log "control-plane canary robustness/route readiness passed: ${summary}"
+  else
+    log "control-plane canary robustness/route readiness failed: ${summary:-unknown}"
+    return 1
+  fi
+}
+
 daemonset_exists() {
   local daemonset_name="$1"
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" >/dev/null 2>&1
@@ -6007,6 +6087,44 @@ PY
   return "${rc}"
 }
 
+release_guard_status_summary() {
+  local api_base token status_file rc
+
+  api_base="$(release_api_base_url)"
+  token="$(release_api_token)"
+  status_file="$(mktemp)"
+  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/release-guard/status" -o "${status_file}"; then
+    rm -f "${status_file}"
+    printf 'release guard status request failed'
+    return 1
+  fi
+  python3 - "${status_file}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+status = payload.get("status") or {}
+blocked = status.get("blocked_reasons") or []
+print(
+    "pass={pass_} block_rollout={block} artifact_failures={artifact_failures} "
+    "consumer_drift={consumer_drift} failure_contracts={contracts} blockers={blockers}".format(
+        pass_=str(bool(status.get("pass"))).lower(),
+        block=str(bool(status.get("block_rollout"))).lower(),
+        artifact_failures=int(status.get("platform_artifact_validation_failures") or 0),
+        consumer_drift=int(status.get("platform_consumer_drift") or 0),
+        contracts=int(status.get("failure_contract_count") or 0),
+        blockers="; ".join(str(item) for item in blocked) if blocked else "none",
+    )
+)
+raise SystemExit(0 if bool(status.get("pass")) and not bool(status.get("block_rollout")) else 1)
+PY
+  rc=$?
+  rm -f "${status_file}"
+  return "${rc}"
+}
+
 capture_pre_deploy_robustness_baseline() {
   local api_base token status_file summary
 
@@ -6055,6 +6173,11 @@ PY
   fi
   ROBUSTNESS_HEALTH_GATE_BASELINE_FILE="${status_file}"
   log "captured pre-deploy robustness baseline: ${summary}"
+  if summary="$(release_guard_status_summary 2>/dev/null)"; then
+    log "pre-deploy release guard summary: ${summary}"
+  else
+    log "warning: pre-deploy release guard summary unavailable or blocked: ${summary:-unknown}"
+  fi
 }
 
 robustness_status_summary() {
@@ -6246,6 +6369,11 @@ wait_for_post_deploy_robustness() {
   while true; do
     if output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE:-}")"; then
       log "post-deploy robustness gate passed: ${output}"
+      if release_output="$(release_guard_status_summary 2>/dev/null)"; then
+        log "post-deploy release guard summary: ${release_output}"
+      else
+        log "warning: post-deploy release guard summary unavailable or blocked: ${release_output:-unknown}"
+      fi
       return 0
     fi
     if (( SECONDS >= deadline )); then
@@ -7055,6 +7183,12 @@ PY
 
   force_delete_release_pods_on_unhealthy_nodes
   cleanup_orphaned_regional_daemonsets
+
+  if ! control_plane_canary_readiness_gate; then
+    log "control-plane canary gate failed; attempting rollback"
+    rollback_release || true
+    fail "control-plane canary gate failed"
+  fi
 
   if ! rollout_status "${FUGUE_API_DEPLOYMENT_NAME}"; then
     log "api rollout check failed; attempting rollback"

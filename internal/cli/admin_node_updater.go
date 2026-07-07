@@ -20,6 +20,7 @@ func (c *CLI) newAdminNodeUpdaterCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAdminNodeUpdaterListCommand(),
+		c.newAdminNodeUpdaterHealthCommand(),
 		c.newAdminNodeUpdaterTaskCommand(),
 	)
 	return cmd
@@ -58,6 +59,54 @@ func (c *CLI) newAdminNodeUpdaterTaskCommand() *cobra.Command {
 		c.newAdminNodeUpdaterTaskListCommand(),
 		c.newAdminNodeUpdaterTaskCreateCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAdminNodeUpdaterHealthCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "health",
+		Short: "Inspect node deep health and quarantine state",
+	}
+	list := &cobra.Command{
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List latest node deep health reports",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			results, err := client.ListNodeDeepHealthResults()
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"results": results})
+			}
+			return writeNodeDeepHealthTable(c.stdout, results)
+		},
+	}
+	show := &cobra.Command{
+		Use:   "show <node-updater-id>",
+		Short: "Show one node deep health report",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			result, err := client.GetNodeDeepHealthResult(args[0])
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"result": result})
+			}
+			return writeNodeDeepHealth(c.stdout, result)
+		},
+	}
+	cmd.AddCommand(list, show)
 	return cmd
 }
 
@@ -203,6 +252,11 @@ func nodeUpdateTaskTypes() []string {
 		model.NodeUpdateTaskTypeReportLocalPV,
 		model.NodeUpdateTaskTypeDecommissionLocalPV,
 		model.NodeUpdateTaskTypeVerifySystemdEscape,
+		model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeRefreshDesiredState,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeRunDeepHealth,
 	}
 }
 
@@ -241,6 +295,97 @@ func writeNodeUpdaterTable(w io.Writer, updaters []model.NodeUpdater) error {
 			firstNonEmpty(strings.TrimSpace(updater.DiscoveryGeneration), "-"),
 			formatOptionalTimePtr(updater.LastHeartbeatAt),
 			firstNonEmpty(strings.TrimSpace(updater.LastError), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeNodeDeepHealthTable(w io.Writer, results []model.NodeDeepHealthResult) error {
+	sorted := append([]model.NodeDeepHealthResult(nil), results...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if !sorted[i].UpdatedAt.Equal(sorted[j].UpdatedAt) {
+			return sorted[i].UpdatedAt.After(sorted[j].UpdatedAt)
+		}
+		return sorted[i].NodeUpdaterID < sorted[j].NodeUpdaterID
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "UPDATER\tNODE\tSTATUS\tQUARANTINE\tREASON\tEXPIRES\tUPDATED"); err != nil {
+		return err
+	}
+	for _, result := range sorted {
+		expires := "-"
+		if result.QuarantineExpiresAt != nil {
+			expires = formatTime(*result.QuarantineExpiresAt)
+		}
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			firstNonEmpty(strings.TrimSpace(result.NodeUpdaterID), "-"),
+			firstNonEmpty(strings.TrimSpace(result.ClusterNodeName), "-"),
+			firstNonEmpty(strings.TrimSpace(result.OverallStatus), "-"),
+			firstNonEmpty(strings.TrimSpace(result.QuarantineState), "-"),
+			firstNonEmpty(strings.TrimSpace(result.QuarantineReason), "-"),
+			expires,
+			formatTime(result.UpdatedAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func writeNodeDeepHealth(w io.Writer, result model.NodeDeepHealthResult) error {
+	expires := "-"
+	if result.QuarantineExpiresAt != nil {
+		expires = formatTime(*result.QuarantineExpiresAt)
+	}
+	if err := writeKeyValues(w,
+		kvPair{Key: "node_updater", Value: firstNonEmpty(strings.TrimSpace(result.NodeUpdaterID), "-")},
+		kvPair{Key: "cluster_node", Value: firstNonEmpty(strings.TrimSpace(result.ClusterNodeName), "-")},
+		kvPair{Key: "runtime", Value: firstNonEmpty(strings.TrimSpace(result.RuntimeID), "-")},
+		kvPair{Key: "machine", Value: firstNonEmpty(strings.TrimSpace(result.MachineID), "-")},
+		kvPair{Key: "observed_only", Value: fmt.Sprintf("%t", result.ObservedOnly)},
+		kvPair{Key: "overall_status", Value: firstNonEmpty(strings.TrimSpace(result.OverallStatus), "-")},
+		kvPair{Key: "quarantine_state", Value: firstNonEmpty(strings.TrimSpace(result.QuarantineState), "-")},
+		kvPair{Key: "quarantine_reason", Value: firstNonEmpty(strings.TrimSpace(result.QuarantineReason), "-")},
+		kvPair{Key: "quarantine_expires", Value: expires},
+		kvPair{Key: "reported_at", Value: formatTime(result.ReportedAt)},
+		kvPair{Key: "updated_at", Value: formatTime(result.UpdatedAt)},
+	); err != nil {
+		return err
+	}
+	if len(result.RecoveryConditions) > 0 {
+		if _, err := fmt.Fprintln(w, "\nRecovery conditions:"); err != nil {
+			return err
+		}
+		for _, condition := range result.RecoveryConditions {
+			if _, err := fmt.Fprintf(w, "- %s\n", strings.TrimSpace(condition)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(result.Checks) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "\nChecks:"); err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "STATUS\tHARD\tCATEGORY\tCHECK\tOBSERVED\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, check := range result.Checks {
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%t\t%s\t%s\t%s\t%s\n",
+			firstNonEmpty(strings.TrimSpace(check.Status), "-"),
+			check.HardFail,
+			firstNonEmpty(strings.TrimSpace(check.Category), "-"),
+			firstNonEmpty(strings.TrimSpace(check.Name), "-"),
+			firstNonEmpty(strings.TrimSpace(check.Observed), "-"),
+			firstNonEmpty(strings.TrimSpace(check.Message), "-"),
 		); err != nil {
 			return err
 		}

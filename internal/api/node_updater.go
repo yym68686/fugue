@@ -22,6 +22,7 @@ const (
 	nodeUpdaterScriptVersion        = model.NodeUpdaterCurrentVersion
 	staleNodeUpdateTaskTimeout      = 2 * time.Hour
 	imageCachePruneDeleteTaskMaxAge = 45 * time.Minute
+	nodeRepairTaskMaxAge            = 45 * time.Minute
 )
 
 func (s *Server) handleNodeUpdaterInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -98,13 +99,45 @@ func (s *Server) handleNodeUpdaterHeartbeat(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
+	var deepHealth *model.NodeDeepHealthResult
+	if req.DeepHealth != nil {
+		report := *req.DeepHealth
+		report.NodeUpdaterID = updater.ID
+		report.ClusterNodeName = updater.ClusterNodeName
+		report.RuntimeID = updater.RuntimeID
+		report.MachineID = updater.MachineID
+		saved, err := s.store.RecordNodeDeepHealthResult(report)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		deepHealth = &saved
+		if saved.QuarantineState != "" && saved.QuarantineState != model.NodeQuarantineStateClear {
+			s.appendAudit(principal, "node.deep_health.quarantine_observed", "node_updater", updater.ID, updater.TenantID, map[string]string{
+				"cluster_node":      saved.ClusterNodeName,
+				"quarantine_state":  saved.QuarantineState,
+				"quarantine_reason": saved.QuarantineReason,
+				"overall_status":    saved.OverallStatus,
+				"observed_only":     "true",
+			})
+		}
+	}
 	if wantsEnv {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintf(w, "FUGUE_NODE_UPDATER_ID=%s\n", shellQuote(updater.ID))
 		fmt.Fprintf(w, "FUGUE_NODE_UPDATER_STATUS=%s\n", shellQuote(updater.Status))
+		if deepHealth != nil {
+			fmt.Fprintf(w, "FUGUE_NODE_DEEP_HEALTH_STATUS=%s\n", shellQuote(deepHealth.OverallStatus))
+			fmt.Fprintf(w, "FUGUE_NODE_QUARANTINE_STATE=%s\n", shellQuote(deepHealth.QuarantineState))
+			fmt.Fprintf(w, "FUGUE_NODE_QUARANTINE_REASON=%s\n", shellQuote(deepHealth.QuarantineReason))
+		}
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"node_updater": updater})
+	response := map[string]any{"node_updater": updater}
+	if deepHealth != nil {
+		response["deep_health"] = deepHealth
+	}
+	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleGetNodeUpdaterDesiredState(w http.ResponseWriter, r *http.Request) {
@@ -471,6 +504,9 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage {
 		return s.refuseUnsafeReplicateAppImageTaskClaim(task)
 	}
+	if nodeUpdateTaskIsRepair(task.Type) {
+		return refuseUnsafeNodeRepairTaskClaim(task), nil
+	}
 	if task.Type != model.NodeUpdateTaskTypePruneImageCache {
 		return "", nil
 	}
@@ -527,6 +563,38 @@ func (s *Server) refuseUnsafeNodeUpdateTaskClaim(r *http.Request, task model.Nod
 		}
 	}
 	return "", nil
+}
+
+func nodeUpdateTaskIsRepair(taskType string) bool {
+	switch taskType {
+	case model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeRefreshDesiredState,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeRunDeepHealth:
+		return true
+	default:
+		return false
+	}
+}
+
+func refuseUnsafeNodeRepairTaskClaim(task model.NodeUpdateTask) string {
+	if !task.CreatedAt.IsZero() && time.Since(task.CreatedAt) > nodeRepairTaskMaxAge {
+		return fmt.Sprintf("refuse node repair task before execution: task age %s exceeds %s; recompute a fresh repair plan", time.Since(task.CreatedAt).Round(time.Second), nodeRepairTaskMaxAge)
+	}
+	if task.Type == model.NodeUpdateTaskTypeRepairManagedIPTables && !nodeUpdatePayloadBool(task.Payload["dry_run"]) && !nodeUpdatePayloadBool(task.Payload["allow_delete"]) {
+		return "refuse managed iptables repair before execution: non-dry-run requires allow_delete=true"
+	}
+	if task.Type == model.NodeUpdateTaskTypeRestartStatelessNodeService {
+		service := strings.TrimSpace(task.Payload["service"])
+		switch service {
+		case "fugue-edge.service", "fugue-dns.service", "fugue-node-dns-escape-hatch.service", "fugue-node-updater.timer":
+			return ""
+		default:
+			return "refuse stateless node service restart before execution: service is not in the Fugue managed allowlist"
+		}
+	}
+	return ""
 }
 
 func (s *Server) refuseUnsafeReplicateAppImageTaskClaim(task model.NodeUpdateTask) (string, error) {
@@ -704,6 +772,19 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		} else if task.Status == model.NodeUpdateTaskStatusFailed {
 			action = "localpv_decommission_refused"
 		}
+	case model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeRefreshDesiredState,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeRunDeepHealth:
+		if task.Status == model.NodeUpdateTaskStatusCompleted {
+			action = "node_repair_completed"
+			if taskPayloadTruthy(task.Payload, "dry_run") {
+				action = "node_repair_dry_run_completed"
+			}
+		} else if task.Status == model.NodeUpdateTaskStatusFailed {
+			action = "node_repair_failed"
+		}
 	default:
 		return
 	}
@@ -732,6 +813,13 @@ func (s *Server) appendNodeUpdateTaskMaintenanceAudit(principal model.Principal,
 		"expected_lv_count",
 		"expected_bound_pv_count",
 		"allow_localpv_decommission",
+		"repair_id",
+		"repair_action",
+		"safety_class",
+		"dry_run",
+		"allow_delete",
+		"service",
+		"after_probe",
 	} {
 		if value := strings.TrimSpace(task.Payload[key]); value != "" {
 			metadata[key] = value
@@ -777,23 +865,24 @@ type nodeUpdaterEnrollRequest struct {
 }
 
 type nodeUpdaterHeartbeatRequest struct {
-	Labels              map[string]string `json:"labels"`
-	Capabilities        []string          `json:"capabilities"`
-	UpdaterVersion      string            `json:"updater_version"`
-	JoinScriptVersion   string            `json:"join_script_version"`
-	K3SVersion          string            `json:"k3s_version"`
-	K3SServer           string            `json:"k3s_server"`
-	K3SFallbackServers  string            `json:"k3s_fallback_servers"`
-	RegistryMirror      string            `json:"registry_mirror"`
-	LabelsHash          string            `json:"labels_hash"`
-	TaintsHash          string            `json:"taints_hash"`
-	EdgeEnvGeneration   string            `json:"edge_env_generation"`
-	DNSEnvGeneration    string            `json:"dns_env_generation"`
-	ConfigHash          string            `json:"config_hash"`
-	DiscoveryGeneration string            `json:"discovery_generation"`
-	OS                  string            `json:"os"`
-	Arch                string            `json:"arch"`
-	LastError           string            `json:"last_error"`
+	Labels              map[string]string           `json:"labels"`
+	Capabilities        []string                    `json:"capabilities"`
+	UpdaterVersion      string                      `json:"updater_version"`
+	JoinScriptVersion   string                      `json:"join_script_version"`
+	K3SVersion          string                      `json:"k3s_version"`
+	K3SServer           string                      `json:"k3s_server"`
+	K3SFallbackServers  string                      `json:"k3s_fallback_servers"`
+	RegistryMirror      string                      `json:"registry_mirror"`
+	LabelsHash          string                      `json:"labels_hash"`
+	TaintsHash          string                      `json:"taints_hash"`
+	EdgeEnvGeneration   string                      `json:"edge_env_generation"`
+	DNSEnvGeneration    string                      `json:"dns_env_generation"`
+	ConfigHash          string                      `json:"config_hash"`
+	DiscoveryGeneration string                      `json:"discovery_generation"`
+	OS                  string                      `json:"os"`
+	Arch                string                      `json:"arch"`
+	LastError           string                      `json:"last_error"`
+	DeepHealth          *model.NodeDeepHealthResult `json:"deep_health,omitempty"`
 }
 
 func decodeNodeUpdaterEnrollRequest(r *http.Request) (nodeUpdaterEnrollRequest, bool, error) {
@@ -1030,7 +1119,7 @@ set -euo pipefail
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
 FUGUE_NODE_UPDATER_SCRIPT_VERSION="v19"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
-FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
+FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
 FUGUE_NODE_UPDATER_LAST_ERROR_FILE="${FUGUE_NODE_UPDATER_LAST_ERROR_FILE:-${FUGUE_NODE_UPDATER_WORK_DIR}/last-error}"
 FUGUE_NODE_UPDATER_STATE_DIR="${FUGUE_NODE_UPDATER_STATE_DIR:-${FUGUE_NODE_UPDATER_WORK_DIR}}"
@@ -1096,11 +1185,18 @@ truthy() {
 write_file_if_changed() {
   local source_path="$1"
   local target_path="$2"
+  local target_dir=""
+  local staged_path=""
   if [ -f "${target_path}" ] && cmp -s "${source_path}" "${target_path}"; then
     rm -f "${source_path}"
     return 1
   fi
-  install -m 0644 "${source_path}" "${target_path}"
+  target_dir="$(dirname "${target_path}")"
+  mkdir -p "${target_dir}"
+  staged_path="$(mktemp "${target_dir}/.fugue-write.XXXXXX")"
+  install -m 0644 "${source_path}" "${staged_path}"
+  mv -f "${staged_path}" "${target_path}"
+  write_file_hash_sidecar "${target_path}" || true
   rm -f "${source_path}"
   return 0
 }
@@ -1108,12 +1204,18 @@ write_file_if_changed() {
 write_secret_file_if_changed() {
   local source_path="$1"
   local target_path="$2"
+  local target_dir=""
+  local staged_path=""
   if [ -f "${target_path}" ] && cmp -s "${source_path}" "${target_path}"; then
     rm -f "${source_path}"
     chmod 0600 "${target_path}" 2>/dev/null || true
     return 1
   fi
-  install -m 0600 "${source_path}" "${target_path}"
+  target_dir="$(dirname "${target_path}")"
+  mkdir -p "${target_dir}"
+  staged_path="$(mktemp "${target_dir}/.fugue-write.XXXXXX")"
+  install -m 0600 "${source_path}" "${staged_path}"
+  mv -f "${staged_path}" "${target_path}"
   rm -f "${source_path}"
   return 0
 }
@@ -1154,9 +1256,33 @@ sha256_text() {
   return 1
 }
 
+write_file_hash_sidecar() {
+  local path="$1"
+  local digest=""
+  digest="$(sha256_file "${path}" || true)"
+  [ -n "${digest}" ] || return 1
+  printf 'sha256:%s\n' "${digest}" >"${path}.sha256.tmp"
+  mv -f "${path}.sha256.tmp" "${path}.sha256"
+}
+
+verify_file_hash_sidecar() {
+  local path="$1"
+  local sidecar="${path}.sha256"
+  local expected=""
+  local actual=""
+  [ -r "${sidecar}" ] || return 0
+  expected="$(sed -n 's/^sha256://p' "${sidecar}" | head -n 1)"
+  actual="$(sha256_file "${path}" || true)"
+  [ -n "${expected}" ] && [ -n "${actual}" ] && [ "${expected}" = "${actual}" ]
+}
+
 load_cached_env_file() {
   local path="$1"
   if [ -r "${path}" ]; then
+    if ! verify_file_hash_sidecar "${path}"; then
+      log "cached env hash verification failed for ${path}; ignoring local LKG"
+      return 1
+    fi
     # shellcheck disable=SC1090
     . "${path}"
     return 0
@@ -2465,9 +2591,207 @@ api_json() {
     --data "${body}"
 }
 
+node_deep_health_heartbeat_json() {
+  local current_k3s="$1"
+  FUGUE_HEARTBEAT_K3S_VERSION="${current_k3s}" \
+  FUGUE_HEARTBEAT_K3S_SERVER="$(current_k3s_server)" \
+  FUGUE_HEARTBEAT_K3S_FALLBACK_SERVERS="$(current_k3s_fallback_servers)" \
+  FUGUE_HEARTBEAT_REGISTRY_MIRROR="$(current_registry_mirror)" \
+  FUGUE_HEARTBEAT_LABELS_HASH="$(current_labels_hash)" \
+  FUGUE_HEARTBEAT_TAINTS_HASH="$(current_taints_hash)" \
+  FUGUE_HEARTBEAT_EDGE_ENV_GENERATION="$(current_edge_env_generation)" \
+  FUGUE_HEARTBEAT_DNS_ENV_GENERATION="$(current_dns_env_generation)" \
+  FUGUE_HEARTBEAT_CONFIG_HASH="$(current_config_hash)" \
+  FUGUE_HEARTBEAT_OS="$(uname -s 2>/dev/null || true)" \
+  FUGUE_HEARTBEAT_ARCH="$(uname -m 2>/dev/null || true)" \
+  FUGUE_HEARTBEAT_LAST_ERROR="$(last_error)" \
+  python3 - <<'PY_NODE_DEEP_HEALTH'
+import datetime
+import json
+import os
+import shutil
+import socket
+import subprocess
+
+now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+def run(argv, timeout=3):
+    if not argv or not shutil.which(argv[0]):
+        return None, "missing command: " + (argv[0] if argv else "")
+    try:
+        cp = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        output = (cp.stdout + cp.stderr).strip()
+        return cp.returncode == 0, output[-240:]
+    except Exception as exc:
+        return False, str(exc)[-240:]
+
+def check(name, category, status, observed="", expected="", hard=False, message="", evidence=None):
+    return {
+        "name": name,
+        "category": category,
+        "status": status,
+        "observed": observed,
+        "expected": expected,
+        "hard_fail": bool(hard),
+        "message": message,
+        "evidence": evidence or {},
+        "checked_at": now,
+    }
+
+checks = []
+
+def dns_query(server=None):
+    if shutil.which("nslookup"):
+        argv = ["nslookup", "kubernetes.default.svc"]
+        if server:
+            argv.append(server)
+        return run(argv, 4)
+    if shutil.which("dig"):
+        target = "@%s" % server if server else ""
+        argv = ["dig"]
+        if target:
+            argv.append(target)
+        argv.extend(["kubernetes.default.svc", "+time=3", "+tries=1"])
+        return run(argv, 5)
+    return None, "missing nslookup/dig"
+
+ok, out = dns_query("10.43.0.10")
+if ok is None:
+    checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", out, "DNS query to kube-dns service IP"))
+elif ok:
+    checks.append(check("pod_dns_to_kube_dns_service", "dns", "pass", out, "DNS query to kube-dns service IP"))
+else:
+    checks.append(check("pod_dns_to_kube_dns_service", "dns", "fail", out, "DNS query to kube-dns service IP", True))
+
+coredns_ip = ""
+if shutil.which("kubectl"):
+    ok_pod, pod_out = run(["kubectl", "-n", "kube-system", "get", "pod", "-l", "k8s-app=kube-dns", "-o", "jsonpath={.items[0].status.podIP}"], 5)
+    if ok_pod:
+        coredns_ip = pod_out.strip()
+if coredns_ip:
+    ok, out = dns_query(coredns_ip)
+    checks.append(check("pod_dns_to_coredns_pod", "dns", "pass" if ok else "fail", out, "DNS query to CoreDNS pod IP", not ok))
+else:
+    checks.append(check("pod_dns_to_coredns_pod", "dns", "warning", "CoreDNS pod IP unavailable", "CoreDNS pod IP"))
+
+try:
+    socket.getaddrinfo("kubernetes.default.svc", 443)
+    checks.append(check("kubernetes_default_svc_dns", "dns", "pass", "resolved", "kubernetes.default.svc resolves"))
+except Exception as exc:
+    checks.append(check("kubernetes_default_svc_dns", "dns", "fail", str(exc), "kubernetes.default.svc resolves", True))
+
+try:
+    socket.getaddrinfo("kubernetes.default.svc", 443)
+    checks.append(check("same_namespace_service_dns", "dns", "pass", "resolved", "same-namespace service DNS resolves"))
+except Exception as exc:
+    checks.append(check("same_namespace_service_dns", "dns", "fail", str(exc), "same-namespace service DNS resolves", True))
+
+try:
+    with socket.create_connection(("kubernetes.default.svc", 443), timeout=3):
+        checks.append(check("same_namespace_service_tcp", "network", "pass", "connected", "TCP connect to service"))
+except Exception as exc:
+    checks.append(check("same_namespace_service_tcp", "network", "fail", str(exc), "TCP connect to service", True))
+
+try:
+    socket.getaddrinfo("cloudflare.com", 443)
+    checks.append(check("external_dns", "dns", "pass", "resolved", "external DNS resolves"))
+except Exception as exc:
+    checks.append(check("external_dns", "dns", "warning", str(exc), "external DNS resolves"))
+
+ok, out = run(["iptables-save"], 4)
+if ok is None:
+    checks.append(check("managed_iptables_stale_rule", "iptables", "warning", out, "Fugue managed iptables audit"))
+elif ok:
+    managed_lines = []
+    for line in out.splitlines():
+        if "-j DNAT" not in line or "--dport 53" not in line or "--to-destination" not in line:
+            continue
+        if "FUGUE-MANAGED-DNAT" in line:
+            managed_lines.append(line)
+            continue
+        if (line.startswith("-A PREROUTING ") or line.startswith("-A OUTPUT ")) and "--comment" not in line:
+            managed_lines.append(line)
+    stale = any("FUGUE-MANAGED-DNAT-STALE" in line or "--comment" not in line for line in managed_lines)
+    checks.append(check("managed_iptables_stale_rule", "iptables", "fail" if stale else "pass", ("%d suspect stale rule(s)" % len(managed_lines)) if stale else "no stale managed marker", "no stale Fugue managed DNAT", stale, evidence={"suspect_rules": str(len(managed_lines))}))
+else:
+    checks.append(check("managed_iptables_stale_rule", "iptables", "warning", out, "iptables-save succeeds"))
+
+pod_cidr = ""
+if shutil.which("kubectl"):
+    ok_podcidr, podcidr_out = run(["kubectl", "get", "node", os.uname().nodename, "-o", "jsonpath={.spec.podCIDR}"], 5)
+    if ok_podcidr:
+        pod_cidr = podcidr_out.strip()
+if pod_cidr:
+    ok_route, route_out = run(["ip", "route"], 3)
+    drift = ok_route is True and pod_cidr not in route_out
+    checks.append(check("pod_cidr_drift", "cni", "fail" if drift else "pass", route_out if drift else pod_cidr, "PodCIDR route present", drift))
+else:
+    checks.append(check("pod_cidr_drift", "cni", "warning", "PodCIDR unavailable", "Kubernetes node spec podCIDR"))
+
+try:
+    with open("/proc/sys/net/netfilter/nf_conntrack_count", "r", encoding="utf-8") as fh:
+        count = int(fh.read().strip())
+    with open("/proc/sys/net/netfilter/nf_conntrack_max", "r", encoding="utf-8") as fh:
+        maximum = int(fh.read().strip())
+    ratio = float(count) / float(maximum) if maximum > 0 else 0
+    status = "fail" if ratio >= 0.95 else ("warning" if ratio >= 0.85 else "pass")
+    checks.append(check("conntrack_saturation", "network", status, "%.2f%%" % (ratio * 100), "<85%", status == "fail", evidence={"count": str(count), "max": str(maximum)}))
+except Exception as exc:
+    checks.append(check("conntrack_saturation", "network", "warning", str(exc), "conntrack count/max readable"))
+
+checks.append(check(
+    "node_updater_generation_drift",
+    "generation",
+    "pass",
+    os.environ.get("FUGUE_HEARTBEAT_CONFIG_HASH", ""),
+    "reported config generation",
+    False,
+    evidence={
+        "edge_env_generation": os.environ.get("FUGUE_HEARTBEAT_EDGE_ENV_GENERATION", ""),
+        "dns_env_generation": os.environ.get("FUGUE_HEARTBEAT_DNS_ENV_GENERATION", ""),
+        "discovery_generation": os.environ.get("FUGUE_DISCOVERY_GENERATION", ""),
+    },
+))
+
+payload = {
+    "updater_version": os.environ.get("FUGUE_NODE_UPDATER_VERSION", ""),
+    "join_script_version": os.environ.get("FUGUE_JOIN_SCRIPT_VERSION", ""),
+    "capabilities": [part.strip() for part in os.environ.get("FUGUE_NODE_UPDATER_CAPABILITIES", "").split(",") if part.strip()],
+    "k3s_version": os.environ.get("FUGUE_HEARTBEAT_K3S_VERSION", ""),
+    "k3s_server": os.environ.get("FUGUE_HEARTBEAT_K3S_SERVER", ""),
+    "k3s_fallback_servers": os.environ.get("FUGUE_HEARTBEAT_K3S_FALLBACK_SERVERS", ""),
+    "registry_mirror": os.environ.get("FUGUE_HEARTBEAT_REGISTRY_MIRROR", ""),
+    "labels_hash": os.environ.get("FUGUE_HEARTBEAT_LABELS_HASH", ""),
+    "taints_hash": os.environ.get("FUGUE_HEARTBEAT_TAINTS_HASH", ""),
+    "edge_env_generation": os.environ.get("FUGUE_HEARTBEAT_EDGE_ENV_GENERATION", ""),
+    "dns_env_generation": os.environ.get("FUGUE_HEARTBEAT_DNS_ENV_GENERATION", ""),
+    "config_hash": os.environ.get("FUGUE_HEARTBEAT_CONFIG_HASH", ""),
+    "discovery_generation": os.environ.get("FUGUE_DISCOVERY_GENERATION", ""),
+    "os": os.environ.get("FUGUE_HEARTBEAT_OS", ""),
+    "arch": os.environ.get("FUGUE_HEARTBEAT_ARCH", ""),
+    "last_error": os.environ.get("FUGUE_HEARTBEAT_LAST_ERROR", ""),
+    "deep_health": {
+        "observed_only": True,
+        "overall_status": "warning",
+        "quarantine_state": "clear",
+        "reported_at": now,
+        "updated_at": now,
+        "checks": checks,
+    },
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY_NODE_DEEP_HEALTH
+}
+
 heartbeat() {
   local current_k3s=""
+  local body=""
   current_k3s="$(k3s_version)"
+  if command -v python3 >/dev/null 2>&1; then
+    body="$(node_deep_health_heartbeat_json "${current_k3s}")"
+    api_json POST /v1/node-updater/heartbeat "${body}" >/dev/null
+    return 0
+  fi
   api_form POST /v1/node-updater/heartbeat \
     --data-urlencode "updater_version=${FUGUE_NODE_UPDATER_VERSION}" \
     --data-urlencode "join_script_version=${FUGUE_JOIN_SCRIPT_VERSION:-}" \
@@ -3465,6 +3789,91 @@ verify_systemd_escape_hatch() {
   fi
 }
 
+repair_managed_iptables() {
+  local dry_run="${FUGUE_NODE_UPDATE_TASK_DRY_RUN:-true}"
+  local allow_delete="${FUGUE_NODE_UPDATE_TASK_ALLOW_DELETE:-false}"
+  local kube_dns_service_ip=""
+  local cni_bridge_ip=""
+  local rules=""
+  command -v iptables-save >/dev/null 2>&1 || {
+    log_task "iptables-save unavailable; cannot audit managed iptables rules"
+    return 1
+  }
+  kube_dns_service_ip="$(detect_dns_escape_hatch_kube_dns_service_ip || true)"
+  cni_bridge_ip="$(detect_dns_escape_hatch_cni_bridge_ip || true)"
+  rules="$(iptables-save -t nat 2>/dev/null | awk -v service_ip="${kube_dns_service_ip}/32" -v current_target="${cni_bridge_ip}:53" '
+    $1 == "-A" && ($2 == "PREROUTING" || $2 == "OUTPUT") &&
+    $0 ~ /--dport 53/ &&
+    $0 ~ /-j DNAT/ &&
+    $0 ~ /--to-destination [0-9.]+:53/ {
+      if (service_ip != "/32" && index($0, "-d " service_ip) == 0) {
+        next
+      }
+      if (current_target != ":53" && index($0, "--to-destination " current_target) > 0) {
+        next
+      }
+      print
+    }
+  ' | head -n 20)"
+  if [ -z "${rules}" ]; then
+    log_task "no stale Fugue managed DNS DNAT rules detected"
+    return 0
+  fi
+  if truthy "${dry_run}" || ! truthy "${allow_delete}"; then
+    log_task "dry-run managed iptables repair; would delete stale DNS DNAT rules:"
+    while IFS= read -r line; do
+      [ -n "${line}" ] && log_task "${line}"
+    done <<EOF_REPAIR_MANAGED_IPTABLES_DRY_RUN
+${rules}
+EOF_REPAIR_MANAGED_IPTABLES_DRY_RUN
+    return 0
+  fi
+  if cleanup_node_dns_escape_hatch_redirect_rules; then
+    log_task "deleted stale Fugue managed DNS DNAT rules"
+  else
+    log_task "no stale Fugue managed DNS DNAT rules deleted by execution path"
+  fi
+  heartbeat || true
+}
+
+refresh_desired_state_task() {
+  log_task "refreshing node desired state"
+  reconcile_node_state
+}
+
+reload_lkg_bundle_task() {
+  local changed=1
+  reconcile_lkg_service_envs && changed=0
+  for unit in fugue-edge.service fugue-dns.service; do
+    if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
+      if systemctl reload-or-restart "${unit}" >/dev/null 2>&1 || systemctl restart "${unit}" >/dev/null 2>&1; then
+        changed=0
+        log_task "reloaded ${unit} with current LKG/discovery env"
+      fi
+    fi
+  done
+  return "${changed}"
+}
+
+restart_stateless_node_service_task() {
+  local service="${FUGUE_NODE_UPDATE_TASK_SERVICE:-}"
+  case "${service}" in
+    fugue-edge.service|fugue-dns.service|fugue-node-dns-escape-hatch.service|fugue-node-updater.timer)
+      ;;
+    *)
+      echo "refusing to restart non-allowlisted service: ${service}" >&2
+      return 2
+      ;;
+  esac
+  systemctl restart "${service}"
+  log_task "restarted ${service}"
+}
+
+run_deep_health_task() {
+  heartbeat
+  log_task "deep health heartbeat submitted"
+}
+
 run_task() {
   case "${FUGUE_NODE_UPDATE_TASK_TYPE}" in
     refresh-join-config)
@@ -3516,6 +3925,21 @@ run_task() {
       ;;
     verify-systemd-escape-hatch)
       verify_systemd_escape_hatch
+      ;;
+    repair-managed-iptables)
+      repair_managed_iptables
+      ;;
+    refresh-desired-state)
+      refresh_desired_state_task
+      ;;
+    reload-lkg-bundle)
+      reload_lkg_bundle_task
+      ;;
+    restart-stateless-node-service)
+      restart_stateless_node_service_task
+      ;;
+    run-deep-health)
+      run_deep_health_task
       ;;
     *)
       echo "unsupported node update task type: ${FUGUE_NODE_UPDATE_TASK_TYPE}" >&2

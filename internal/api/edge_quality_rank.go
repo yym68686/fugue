@@ -37,6 +37,7 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 	query := edgeQualityRankQuery{
 		Hostname:         hostname,
 		TrafficClass:     normalizeEdgeTrafficClass(r.URL.Query().Get("traffic_class")),
+		RequestSizeClass: normalizeEdgeRequestSizeClass(r.URL.Query().Get("request_size_class")),
 		Method:           strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("method"))),
 		PathPrefixBucket: edgeQualityPathPrefixBucket(r.URL.Query().Get("path_prefix")),
 		RequestedScope:   scope,
@@ -57,14 +58,14 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var response model.EdgeQualityRankResponse
-	if rollupWindow := normalizedEdgeQualityRankWindow(window); rollupWindow != "" {
+	if rollupWindow := normalizedEdgeQualityRankWindow(window); rollupWindow != "" && query.RequestSizeClass == "" {
 		rollups, err := s.store.ListEdgeQualityRollups("", rollupWindow, since)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
 		if len(rollups) > 0 {
-			rollupResponse := buildEdgeQualityRankResponseFromRollups(query, nodes, policy, rollups)
+			rollupResponse := s.buildEdgeQualityRankResponseFromRollups(query, nodes, policy, rollups)
 			if edgeQualityRankRollupResponseFreshEnough(rollupResponse, now) {
 				response = rollupResponse
 			}
@@ -76,7 +77,7 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 			s.writeStoreError(w, err)
 			return
 		}
-		response = buildEdgeQualityRankResponse(query, nodes, policy, samples)
+		response = s.buildEdgeQualityRankResponse(query, nodes, policy, samples)
 	}
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
@@ -84,6 +85,7 @@ func (s *Server) handleGetEdgeQualityRank(w http.ResponseWriter, r *http.Request
 type edgeQualityRankQuery struct {
 	Hostname         string
 	TrafficClass     string
+	RequestSizeClass string
 	Method           string
 	PathPrefixBucket string
 	RequestedScope   edgeQualityRankScope
@@ -102,11 +104,12 @@ type edgeQualityRankScope struct {
 
 type edgeQualityRankFilter struct {
 	TrafficClass     string
+	RequestSizeClass string
 	Method           string
 	PathPrefixBucket string
 }
 
-func buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, samples []model.EdgePerformanceSample) model.EdgeQualityRankResponse {
+func (s *Server) buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, samples []model.EdgePerformanceSample) model.EdgeQualityRankResponse {
 	filters := edgeQualityRankFallbackFilters(query)
 	scopes := edgeQualityRankFallbackScopes(query.RequestedScope)
 	selectedScope := edgeQualityRankScope{Kind: "global", Value: "global"}
@@ -156,8 +159,9 @@ func buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.Edge
 
 	candidates := make([]model.EdgeQualityRankCandidate, 0, len(nodes))
 	hardGated := make([]model.EdgeQualityRankCandidate, 0)
+	quarantineByNode := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
-		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt)
+		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt, quarantineByNode)
 		if candidate.Excluded || !candidate.Healthy || candidate.Draining || !candidate.RouteReady || !candidate.TLSReady {
 			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, edgeQualityRankGateReason(candidate))
 			hardGated = append(hardGated, candidate)
@@ -196,6 +200,7 @@ func buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.Edge
 	return model.EdgeQualityRankResponse{
 		Hostname:         query.Hostname,
 		TrafficClass:     selectedFilter.TrafficClass,
+		RequestSizeClass: selectedFilter.RequestSizeClass,
 		Method:           selectedFilter.Method,
 		PathPrefixBucket: selectedFilter.PathPrefixBucket,
 		RequestedScope:   query.RequestedScope.key(),
@@ -207,10 +212,11 @@ func buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.Edge
 		GeneratedAt:      query.GeneratedAt,
 		Candidates:       candidates,
 		HardGated:        hardGated,
+		ShadowComparison: edgeQualityShadowComparison(policy, candidates),
 	}
 }
 
-func buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, rollups []model.EdgeQualityRollup) model.EdgeQualityRankResponse {
+func (s *Server) buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, rollups []model.EdgeQualityRollup) model.EdgeQualityRankResponse {
 	filters := edgeQualityRankFallbackFilters(query)
 	scopes := edgeQualityRankFallbackScopes(query.RequestedScope)
 	hostnames := edgeQualityRankFallbackHostnames(query.Hostname)
@@ -261,8 +267,9 @@ func buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes [
 
 	candidates := make([]model.EdgeQualityRankCandidate, 0, len(nodes))
 	hardGated := make([]model.EdgeQualityRankCandidate, 0)
+	quarantineByNode := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
-		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt)
+		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt, quarantineByNode)
 		if candidate.Excluded || !candidate.Healthy || candidate.Draining || !candidate.RouteReady || !candidate.TLSReady {
 			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, edgeQualityRankGateReason(candidate))
 			hardGated = append(hardGated, candidate)
@@ -298,6 +305,7 @@ func buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes [
 	return model.EdgeQualityRankResponse{
 		Hostname:         query.Hostname,
 		TrafficClass:     selectedFilter.TrafficClass,
+		RequestSizeClass: selectedFilter.RequestSizeClass,
 		Method:           selectedFilter.Method,
 		PathPrefixBucket: selectedFilter.PathPrefixBucket,
 		RequestedScope:   query.RequestedScope.key(),
@@ -309,7 +317,63 @@ func buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes [
 		GeneratedAt:      query.GeneratedAt,
 		Candidates:       candidates,
 		HardGated:        hardGated,
+		ShadowComparison: edgeQualityShadowComparison(policy, candidates),
 	}
+}
+
+func edgeQualityShadowComparison(policy model.EdgeRoutePolicy, candidates []model.EdgeQualityRankCandidate) *model.EdgeQualityShadowComparison {
+	if len(candidates) == 0 {
+		return &model.EdgeQualityShadowComparison{
+			Reason: "no eligible candidates for quality comparison",
+		}
+	}
+	qualityGroupID := strings.TrimSpace(candidates[0].EdgeGroupID)
+	legacyGroupID := strings.TrimSpace(policy.EdgeGroupID)
+	if legacyGroupID == "" || !edgeQualityCandidatesContainGroup(candidates, legacyGroupID) {
+		legacyGroupID = edgeQualityLegacyCandidateGroup(candidates)
+	}
+	comparison := &model.EdgeQualityShadowComparison{
+		LegacySelectedEdgeGroupID:  legacyGroupID,
+		QualitySelectedEdgeGroupID: qualityGroupID,
+		Changed:                    legacyGroupID != "" && qualityGroupID != "" && legacyGroupID != qualityGroupID,
+	}
+	if comparison.Changed {
+		comparison.Reason = "quality ranking would select a different edge group"
+	} else {
+		comparison.Reason = "quality ranking keeps the legacy edge group"
+	}
+	return comparison
+}
+
+func edgeQualityCandidatesContainGroup(candidates []model.EdgeQualityRankCandidate, edgeGroupID string) bool {
+	edgeGroupID = strings.TrimSpace(edgeGroupID)
+	if edgeGroupID == "" {
+		return false
+	}
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate.EdgeGroupID), edgeGroupID) {
+			return true
+		}
+	}
+	return false
+}
+
+func edgeQualityLegacyCandidateGroup(candidates []model.EdgeQualityRankCandidate) string {
+	groups := make([]string, 0, len(candidates))
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		groupID := strings.TrimSpace(candidate.EdgeGroupID)
+		if groupID == "" || seen[groupID] {
+			continue
+		}
+		seen[groupID] = true
+		groups = append(groups, groupID)
+	}
+	sort.Strings(groups)
+	if len(groups) == 0 {
+		return ""
+	}
+	return groups[0]
 }
 
 func edgeQualityRankRollupResponseFreshEnough(response model.EdgeQualityRankResponse, now time.Time) bool {
@@ -328,7 +392,7 @@ func edgeQualityRankRollupResponseFreshEnough(response model.EdgeQualityRankResp
 	return !latest.Before(now.UTC().Add(-2 * edgeQualityRollupBuilderInterval))
 }
 
-func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoutePolicy, now time.Time) model.EdgeQualityRankCandidate {
+func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoutePolicy, now time.Time, quarantineByNode map[string]model.NodeDeepHealthResult) model.EdgeQualityRankCandidate {
 	tlsReady := strings.EqualFold(strings.TrimSpace(node.TLSStatus), model.EdgeTLSStatusReady) || node.TLSReadyAt != nil
 	routeReady := strings.TrimSpace(node.RouteBundleVersion) != "" && node.CaddyRouteCount > 0
 	candidate := model.EdgeQualityRankCandidate{
@@ -344,6 +408,14 @@ func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoute
 	excluded, reason := edgeQualityNodeExcludedByPolicy(node, policy, now)
 	candidate.Excluded = excluded
 	candidate.ExclusionReason = reason
+	if edgeNodeQuarantined(node, quarantineByNode) {
+		candidate.Excluded = true
+		if quarantine, ok := quarantineByNode[strings.TrimSpace(node.ID)]; ok {
+			candidate.ExclusionReason = firstNonEmpty(quarantine.QuarantineReason, "node quarantined by deep health")
+		} else {
+			candidate.ExclusionReason = "node quarantined by deep health"
+		}
+	}
 	return candidate
 }
 
@@ -437,10 +509,16 @@ func edgeQualityNodeExcludedByPolicy(node model.EdgeNode, policy model.EdgeRoute
 func edgeQualityRankFallbackFilters(query edgeQualityRankQuery) []edgeQualityRankFilter {
 	full := edgeQualityRankFilter{
 		TrafficClass:     strings.TrimSpace(query.TrafficClass),
+		RequestSizeClass: strings.TrimSpace(query.RequestSizeClass),
 		Method:           strings.TrimSpace(query.Method),
 		PathPrefixBucket: strings.TrimSpace(query.PathPrefixBucket),
 	}
 	out := []edgeQualityRankFilter{full}
+	if full.RequestSizeClass != "" {
+		next := full
+		next.RequestSizeClass = ""
+		out = append(out, next)
+	}
 	if full.PathPrefixBucket != "" {
 		next := full
 		next.PathPrefixBucket = ""
@@ -470,7 +548,7 @@ func edgeQualityDeduplicateFilters(filters []edgeQualityRankFilter) []edgeQualit
 	out := make([]edgeQualityRankFilter, 0, len(filters))
 	seen := map[string]bool{}
 	for _, filter := range filters {
-		key := strings.Join([]string{filter.TrafficClass, filter.Method, filter.PathPrefixBucket}, "\x00")
+		key := strings.Join([]string{filter.TrafficClass, filter.RequestSizeClass, filter.Method, filter.PathPrefixBucket}, "\x00")
 		if seen[key] {
 			continue
 		}
@@ -486,7 +564,7 @@ func edgeQualityRankFallbackScopes(scope edgeQualityRankScope) []edgeQualityRank
 	case "asn":
 		return []edgeQualityRankScope{scope, global}
 	case "region":
-		return []edgeQualityRankScope{scope, {Kind: "country", Value: scope.Country, Country: scope.Country}, global}
+		return []edgeQualityRankScope{scope, edgeQualityRankScope{Kind: "country", Value: scope.Country, Country: scope.Country}, global}
 	case "country":
 		return []edgeQualityRankScope{scope, global}
 	default:
@@ -498,6 +576,9 @@ func edgeQualityFilterSamples(samples []model.EdgePerformanceSample, filter edge
 	out := make([]model.EdgePerformanceSample, 0, len(samples))
 	for _, sample := range samples {
 		if filter.TrafficClass != "" && !strings.EqualFold(strings.TrimSpace(sample.TrafficClass), filter.TrafficClass) {
+			continue
+		}
+		if filter.RequestSizeClass != "" && edgeQualityRequestSizeClass(sample) != filter.RequestSizeClass {
 			continue
 		}
 		if filter.Method != "" && !strings.EqualFold(strings.TrimSpace(sample.Method), filter.Method) {
@@ -658,6 +739,47 @@ func edgeQualitySampleMatchesScope(sample model.EdgePerformanceSample, scope edg
 		return strings.EqualFold(strings.TrimSpace(sample.ClientCountry), scope.Country)
 	default:
 		return true
+	}
+}
+
+func normalizeEdgeRequestSizeClass(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "all":
+		return ""
+	case "no_body", "body_le_64k", "body_64k_1m", "body_1m_16m", "body_gt_16m":
+		return value
+	case "none":
+		return "no_body"
+	case "small", "small_body":
+		return "body_le_64k"
+	case "medium", "medium_body":
+		return "body_64k_1m"
+	case "large", "large_body":
+		return "body_1m_16m"
+	case "huge", "huge_body":
+		return "body_gt_16m"
+	default:
+		return ""
+	}
+}
+
+func edgeQualityRequestSizeClass(sample model.EdgePerformanceSample) string {
+	size := sample.RequestBodyBytes
+	if sample.RequestBodyReadBytes > size {
+		size = sample.RequestBodyReadBytes
+	}
+	switch {
+	case size <= 0:
+		return "no_body"
+	case size <= 64*1024:
+		return "body_le_64k"
+	case size <= 1024*1024:
+		return "body_64k_1m"
+	case size <= 16*1024*1024:
+		return "body_1m_16m"
+	default:
+		return "body_gt_16m"
 	}
 }
 

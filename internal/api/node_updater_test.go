@@ -36,6 +36,10 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
+	_, platformAdminKey, err := s.CreateAPIKey(tenant.ID, "platform-admin", []string{"platform.admin"})
+	if err != nil {
+		t.Fatalf("create platform admin api key: %v", err)
+	}
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 
 	enrollForm := url.Values{}
@@ -69,6 +73,45 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	heartbeatRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/heartbeat", updaterToken, heartbeatForm)
 	if heartbeatRecorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, heartbeatRecorder.Code, heartbeatRecorder.Body.String())
+	}
+	deepHealthRecorder := performJSONRequest(t, server, http.MethodPost, "/v1/node-updater/heartbeat", updaterToken, map[string]any{
+		"updater_version": "v2",
+		"capabilities":    []string{"heartbeat", "tasks", "diagnose-node", "upgrade-k3s-agent"},
+		"deep_health": map[string]any{
+			"reported_at": time.Now().UTC(),
+			"checks": []map[string]any{
+				{
+					"name":      model.NodeDeepHealthCheckPodDNSToKubeDNSService,
+					"category":  "dns",
+					"status":    model.NodeDeepHealthStatusFail,
+					"hard_fail": true,
+					"observed":  "timeout to 10.43.0.10:53",
+					"expected":  "DNS response",
+				},
+			},
+		},
+	})
+	if deepHealthRecorder.Code != http.StatusOK {
+		t.Fatalf("expected deep health heartbeat status %d, got %d body=%s", http.StatusOK, deepHealthRecorder.Code, deepHealthRecorder.Body.String())
+	}
+	var heartbeatResponse struct {
+		DeepHealth model.NodeDeepHealthResult `json:"deep_health"`
+	}
+	mustDecodeJSON(t, deepHealthRecorder, &heartbeatResponse)
+	if heartbeatResponse.DeepHealth.QuarantineState != model.NodeQuarantineStateQuarantined ||
+		heartbeatResponse.DeepHealth.QuarantineReason != model.NodeQuarantineReasonDNSHardFail ||
+		!heartbeatResponse.DeepHealth.ObservedOnly {
+		t.Fatalf("expected observe-only DNS quarantine, got %+v", heartbeatResponse.DeepHealth)
+	}
+	healthRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/node-health/"+updaterID, platformAdminKey, nil)
+	if healthRecorder.Code != http.StatusOK {
+		t.Fatalf("expected admin health status %d, got %d body=%s", http.StatusOK, healthRecorder.Code, healthRecorder.Body.String())
+	}
+	var healthResponse model.NodeDeepHealthResponse
+	mustDecodeJSON(t, healthRecorder, &healthResponse)
+	if healthResponse.Result.QuarantineState != model.NodeQuarantineStateQuarantined ||
+		healthResponse.Result.QuarantineReason != model.NodeQuarantineReasonDNSHardFail {
+		t.Fatalf("unexpected stored deep health response: %+v", healthResponse.Result)
 	}
 
 	desiredRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/desired-state", updaterToken, nil)
@@ -517,6 +560,115 @@ func TestNodeUpdaterLocalPVDecommissionCompletionWritesAudit(t *testing.T) {
 	t.Fatalf("expected localpv decommission audit event, got %+v", events)
 }
 
+func TestNodeRepairTaskGuardsUnsafeExecutionAndWritesAudit(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Node Repair Guard Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	updater, updaterToken, err := s.EnrollNodeUpdater(
+		nodeSecret,
+		"repair-node-1",
+		"https://repair-node-1.example.com",
+		nil,
+		"machine-repair-1",
+		"fingerprint-repair-1",
+		"v19",
+		"join-v19",
+		[]string{
+			"heartbeat",
+			"tasks",
+			model.NodeUpdateTaskTypeRepairManagedIPTables,
+			model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		},
+	)
+	if err != nil {
+		t.Fatalf("enroll updater: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	requester := model.Principal{
+		ActorType: model.ActorTypeSystem,
+		ActorID:   "repair-guardian",
+		TenantID:  tenant.ID,
+		Scopes:    map[string]struct{}{"platform.admin": {}},
+	}
+
+	unsafeRepair, err := s.CreateNodeUpdateTask(requester, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeRepairManagedIPTables, map[string]string{
+		"dry_run":      "false",
+		"allow_delete": "false",
+	})
+	if err != nil {
+		t.Fatalf("create unsafe repair task: %v", err)
+	}
+	claimUnsafe := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+unsafeRepair.ID+"/claim", updaterToken, nil)
+	if claimUnsafe.Code != http.StatusConflict || !strings.Contains(claimUnsafe.Body.String(), "allow_delete=true") {
+		t.Fatalf("expected unsafe repair refusal, code=%d body=%s", claimUnsafe.Code, claimUnsafe.Body.String())
+	}
+
+	unsafeRestart, err := s.CreateNodeUpdateTask(requester, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeRestartStatelessNodeService, map[string]string{
+		"service": "postgresql.service",
+	})
+	if err != nil {
+		t.Fatalf("create unsafe restart task: %v", err)
+	}
+	claimRestart := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+unsafeRestart.ID+"/claim", updaterToken, nil)
+	if claimRestart.Code != http.StatusConflict || !strings.Contains(claimRestart.Body.String(), "allowlist") {
+		t.Fatalf("expected unsafe restart refusal, code=%d body=%s", claimRestart.Code, claimRestart.Body.String())
+	}
+
+	safePayload := map[string]string{
+		"dry_run":       "true",
+		"repair_id":     "repair-dns-dnat",
+		"repair_action": "stale-managed-dnat-dry-run",
+		"safety_class":  model.NodeRepairSafetyDryRun,
+	}
+	safeRepair, err := s.CreateNodeUpdateTask(requester, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeRepairManagedIPTables, safePayload)
+	if err != nil {
+		t.Fatalf("create safe repair task: %v", err)
+	}
+	duplicate, err := s.CreateNodeUpdateTask(requester, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypeRepairManagedIPTables, safePayload)
+	if err != nil {
+		t.Fatalf("create duplicate repair task: %v", err)
+	}
+	if duplicate.ID != safeRepair.ID {
+		t.Fatalf("expected duplicate pending repair task to reuse lock/lease task id, first=%s duplicate=%s", safeRepair.ID, duplicate.ID)
+	}
+	claimSafe := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+safeRepair.ID+"/claim", updaterToken, nil)
+	if claimSafe.Code != http.StatusOK {
+		t.Fatalf("expected safe repair claim status %d, got %d body=%s", http.StatusOK, claimSafe.Code, claimSafe.Body.String())
+	}
+	completeForm := url.Values{}
+	completeForm.Set("status", model.NodeUpdateTaskStatusCompleted)
+	completeForm.Set("message", "dry-run managed iptables repair completed")
+	completeRecorder := performFormRequest(t, server, http.MethodPost, "/v1/node-updater/tasks/"+safeRepair.ID+"/complete", updaterToken, completeForm)
+	if completeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected safe repair completion status %d, got %d body=%s", http.StatusOK, completeRecorder.Code, completeRecorder.Body.String())
+	}
+	events, err := s.ListAuditEvents("", true, 20)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	for _, event := range events {
+		if event.Action != "node_repair_dry_run_completed" {
+			continue
+		}
+		if event.TargetID != safeRepair.ID || event.Metadata["repair_id"] != "repair-dns-dnat" || event.Metadata["dry_run"] != "true" {
+			t.Fatalf("unexpected repair audit event: %+v", event)
+		}
+		return
+	}
+	t.Fatalf("expected node repair dry-run audit event, got %+v", events)
+}
+
 func TestNodeUpdaterTaskPollExpiresStaleRunningTasks(t *testing.T) {
 	t.Parallel()
 
@@ -746,6 +898,14 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`"unreferenced_blob_bytes": unreferenced_blob_bytes`,
 		`"planned_delete_bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)`,
 		`image-cache prune delete completed; reporting post-prune inventory`,
+		`repair-managed-iptables`,
+		`refresh-desired-state`,
+		`reload-lkg-bundle`,
+		`restart-stateless-node-service`,
+		`run-deep-health`,
+		`write_file_hash_sidecar`,
+		`verify_file_hash_sidecar`,
+		`cached env hash verification failed`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)
@@ -762,6 +922,56 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterCachedLKGEnvRejectsHashCorruption(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+source_file="${tmpdir}/source.env"
+target_file="${tmpdir}/cached.env"
+printf 'FUGUE_TEST_LKG_VALUE=good\n' >"${source_file}"
+write_file_if_changed "${source_file}" "${target_file}" >/dev/null
+if ! load_cached_env_file "${target_file}"; then
+  echo "expected hash-verified cache load to pass" >&2
+  exit 1
+fi
+if [ "${FUGUE_TEST_LKG_VALUE:-}" != "good" ]; then
+  echo "expected good cached value" >&2
+  exit 1
+fi
+printf 'FUGUE_TEST_LKG_VALUE=corrupt\n' >"${target_file}"
+unset FUGUE_TEST_LKG_VALUE
+if load_cached_env_file "${target_file}"; then
+  echo "corrupt cached env should not load" >&2
+  exit 1
+fi
+if [ -n "${FUGUE_TEST_LKG_VALUE:-}" ]; then
+  echo "corrupt cached env leaked variables" >&2
+  exit 1
+fi
+`
+
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-lkg-cache-corruption.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run node-updater LKG corruption harness: %v\n%s", err, output)
 	}
 }
 

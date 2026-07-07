@@ -111,21 +111,26 @@ const (
 
 	NodeUpdaterCurrentVersion = "v19"
 
-	NodeUpdateTaskTypeRefreshJoinConfig   = "refresh-join-config"
-	NodeUpdateTaskTypeUpgradeK3SAgent     = "upgrade-k3s-agent"
-	NodeUpdateTaskTypeUpgradeUpdater      = "upgrade-node-updater"
-	NodeUpdateTaskTypeRestartK3SAgent     = "restart-k3s-agent"
-	NodeUpdateTaskTypeDiagnoseNode        = "diagnose-node"
-	NodeUpdateTaskTypeInstallNFSClient    = "install-nfs-client-tools"
-	NodeUpdateTaskTypePrepullSystemImages = "prepull-system-images"
-	NodeUpdateTaskTypePrepullAppImages    = "prepull-app-images"
-	NodeUpdateTaskTypeReplicateAppImage   = "replicate-app-image"
-	NodeUpdateTaskTypeVerifyImageCache    = "verify-image-cache"
-	NodeUpdateTaskTypePruneImageCache     = "prune-image-cache"
-	NodeUpdateTaskTypeReportImageCache    = "report-image-cache-inventory"
-	NodeUpdateTaskTypeReportLocalPV       = "report-lvm-localpv-inventory"
-	NodeUpdateTaskTypeDecommissionLocalPV = "decommission-lvm-localpv"
-	NodeUpdateTaskTypeVerifySystemdEscape = "verify-systemd-escape-hatch"
+	NodeUpdateTaskTypeRefreshJoinConfig           = "refresh-join-config"
+	NodeUpdateTaskTypeUpgradeK3SAgent             = "upgrade-k3s-agent"
+	NodeUpdateTaskTypeUpgradeUpdater              = "upgrade-node-updater"
+	NodeUpdateTaskTypeRestartK3SAgent             = "restart-k3s-agent"
+	NodeUpdateTaskTypeDiagnoseNode                = "diagnose-node"
+	NodeUpdateTaskTypeInstallNFSClient            = "install-nfs-client-tools"
+	NodeUpdateTaskTypePrepullSystemImages         = "prepull-system-images"
+	NodeUpdateTaskTypePrepullAppImages            = "prepull-app-images"
+	NodeUpdateTaskTypeReplicateAppImage           = "replicate-app-image"
+	NodeUpdateTaskTypeVerifyImageCache            = "verify-image-cache"
+	NodeUpdateTaskTypePruneImageCache             = "prune-image-cache"
+	NodeUpdateTaskTypeReportImageCache            = "report-image-cache-inventory"
+	NodeUpdateTaskTypeReportLocalPV               = "report-lvm-localpv-inventory"
+	NodeUpdateTaskTypeDecommissionLocalPV         = "decommission-lvm-localpv"
+	NodeUpdateTaskTypeVerifySystemdEscape         = "verify-systemd-escape-hatch"
+	NodeUpdateTaskTypeRepairManagedIPTables       = "repair-managed-iptables"
+	NodeUpdateTaskTypeRefreshDesiredState         = "refresh-desired-state"
+	NodeUpdateTaskTypeReloadLKGBundle             = "reload-lkg-bundle"
+	NodeUpdateTaskTypeRestartStatelessNodeService = "restart-stateless-node-service"
+	NodeUpdateTaskTypeRunDeepHealth               = "run-deep-health"
 
 	NodeUpdateTaskStatusPending   = "pending"
 	NodeUpdateTaskStatusRunning   = "running"
@@ -2887,6 +2892,7 @@ type State struct {
 	Machines                   []Machine                   `json:"machines"`
 	NodeUpdaters               []NodeUpdater               `json:"node_updaters,omitempty"`
 	NodeUpdateTasks            []NodeUpdateTask            `json:"node_update_tasks,omitempty"`
+	NodeDeepHealthResults      []NodeDeepHealthResult      `json:"node_deep_health_results,omitempty"`
 	ImageLocations             []ImageLocation             `json:"image_locations,omitempty"`
 	Images                     []Image                     `json:"images,omitempty"`
 	ImageAliases               []ImageAlias                `json:"image_aliases,omitempty"`
@@ -2920,6 +2926,12 @@ type State struct {
 	EdgeQualityRollups         []EdgeQualityRollup         `json:"edge_quality_rollups,omitempty"`
 	EdgeDNSRoutingDecisions    []EdgeDNSRoutingDecision    `json:"edge_dns_routing_decisions,omitempty"`
 	StorePromotions            []StorePromotion            `json:"store_promotions,omitempty"`
+	PlatformArtifacts          []PlatformArtifact          `json:"platform_artifacts,omitempty"`
+	PlatformArtifactContents   []PlatformArtifactContent   `json:"platform_artifact_contents,omitempty"`
+	PlatformArtifactReleases   []PlatformArtifactRelease   `json:"platform_artifact_releases,omitempty"`
+	PlatformReleaseMessages    []PlatformReleaseMessage    `json:"platform_release_messages,omitempty"`
+	PlatformConsumerInstances  []PlatformConsumerInstance  `json:"platform_consumer_instances,omitempty"`
+	PlatformLKGSnapshots       []PlatformLKGSnapshot       `json:"platform_lkg_snapshots,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`
 	Operations                 []Operation                 `json:"operations"`

@@ -29,12 +29,13 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 
 func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
 	opts := struct {
-		TrafficClass string
-		Method       string
-		PathPrefix   string
-		Scope        string
-		Window       string
-		Since        string
+		TrafficClass     string
+		RequestSizeClass string
+		Method           string
+		PathPrefix       string
+		Scope            string
+		Window           string
+		Since            string
 	}{
 		Scope:  "global",
 		Window: "30m",
@@ -48,7 +49,7 @@ func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.GetEdgeQualityRank(args[0], opts.TrafficClass, opts.Method, opts.PathPrefix, opts.Scope, opts.Window, opts.Since)
+			response, err := client.GetEdgeQualityRank(args[0], opts.TrafficClass, opts.RequestSizeClass, opts.Method, opts.PathPrefix, opts.Scope, opts.Window, opts.Since)
 			if err != nil {
 				return err
 			}
@@ -59,6 +60,7 @@ func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.TrafficClass, "traffic-class", "", "Traffic class such as dynamic_api, large_body_api, static_cacheable, streaming, sse, or websocket")
+	cmd.Flags().StringVar(&opts.RequestSizeClass, "request-size-class", "", "Request body size class: no_body, body_le_64k, body_64k_1m, body_1m_16m, or body_gt_16m")
 	cmd.Flags().StringVar(&opts.Method, "method", "", "HTTP method such as GET or POST")
 	cmd.Flags().StringVar(&opts.PathPrefix, "path-prefix", "", "Path prefix to bucket before ranking")
 	cmd.Flags().StringVar(&opts.Scope, "scope", opts.Scope, "Client scope: global, country:<country>, region:<country>:<region>, or asn:<asn>")
@@ -946,6 +948,7 @@ func writeEdgeQualityRank(w io.Writer, response model.EdgeQualityRankResponse) e
 	if err := writeKeyValues(w,
 		kvPair{Key: "hostname", Value: strings.TrimSpace(response.Hostname)},
 		kvPair{Key: "traffic_class", Value: strings.TrimSpace(response.TrafficClass)},
+		kvPair{Key: "request_size_class", Value: strings.TrimSpace(response.RequestSizeClass)},
 		kvPair{Key: "method", Value: strings.TrimSpace(response.Method)},
 		kvPair{Key: "path_bucket", Value: strings.TrimSpace(response.PathPrefixBucket)},
 		kvPair{Key: "requested_scope", Value: strings.TrimSpace(response.RequestedScope)},
@@ -957,6 +960,16 @@ func writeEdgeQualityRank(w io.Writer, response model.EdgeQualityRankResponse) e
 		kvPair{Key: "generated_at", Value: formatTime(response.GeneratedAt)},
 	); err != nil {
 		return err
+	}
+	if response.ShadowComparison != nil {
+		if err := writeKeyValues(w,
+			kvPair{Key: "legacy_edge_group", Value: strings.TrimSpace(response.ShadowComparison.LegacySelectedEdgeGroupID)},
+			kvPair{Key: "quality_edge_group", Value: strings.TrimSpace(response.ShadowComparison.QualitySelectedEdgeGroupID)},
+			kvPair{Key: "shadow_changed", Value: fmt.Sprintf("%t", response.ShadowComparison.Changed)},
+			kvPair{Key: "shadow_reason", Value: strings.TrimSpace(response.ShadowComparison.Reason)},
+		); err != nil {
+			return err
+		}
 	}
 	if len(response.Candidates) > 0 {
 		if _, err := fmt.Fprintln(w); err != nil {

@@ -197,6 +197,11 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, nodeChecks...)
+	nodeDeepHealthChecks, err := s.robustnessNodeDeepHealthChecks()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, nodeDeepHealthChecks...)
 	backupChecks, err := s.robustnessBackupChecks()
 	if err != nil {
 		return model.RobustnessStatus{}, err
@@ -212,6 +217,16 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, operationChecks...)
+	consumerChecks, err := s.robustnessPlatformConsumerChecks()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, consumerChecks...)
+	runtimeContinuity, err := s.buildRuntimeContinuityStatuses()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, robustnessChecksFromRuntimeContinuity(runtimeContinuity)...)
 	var routeExplain *model.RouteExplainResponse
 	if subject != "" {
 		explain, err := s.explainRouteForRobustness(r, subject)
@@ -221,6 +236,16 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		routeExplain = &explain
 		checks = append(checks, robustnessChecksFromRouteExplain(explain)...)
 	}
+	failureContracts := subsystemFailureContracts()
+	checks = append(checks, model.RobustnessCheck{
+		Name:     "subsystem_failure_contracts",
+		Pass:     len(failureContracts) >= 16,
+		Severity: model.RobustnessSeverityInfo,
+		Subject:  "platform",
+		Observed: fmt.Sprintf("%d", len(failureContracts)),
+		Message:  "production critical subsystems must have explicit failure contracts",
+		Evidence: map[string]string{"contracts": fmt.Sprintf("%d", len(failureContracts))},
+	})
 	checks = dedupeRobustnessChecks(checks)
 	incidents := robustnessIncidentsFromChecks(checks, generatedAt)
 	pass := len(incidents) == 0
@@ -243,25 +268,45 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		summary["subject"] = subject
 	}
 	return model.RobustnessStatus{
-		GeneratedAt:  generatedAt,
-		Pass:         pass,
-		BlockRollout: blockRollout,
-		Subject:      subject,
-		Summary:      summary,
-		Checks:       checks,
-		Incidents:    incidents,
-		Autonomy:     &autonomy,
-		DNS:          &dns,
-		RouteExplain: routeExplain,
+		GeneratedAt:       generatedAt,
+		Pass:              pass,
+		BlockRollout:      blockRollout,
+		Subject:           subject,
+		Summary:           summary,
+		Checks:            checks,
+		Incidents:         incidents,
+		Invariants:        resilienceInvariantRegistry(),
+		Inventory:         s.buildResilienceInventory(subject),
+		Gaps:              resilienceGapReport(),
+		Dashboards:        resilienceDashboards(),
+		AlertRules:        resilienceAlertRules(),
+		RuntimeContinuity: runtimeContinuity,
+		ChaosDrills:       resilienceChaosDrills(),
+		Runbooks:          resilienceRunbooks(),
+		Autonomy:          &autonomy,
+		DNS:               &dns,
+		RouteExplain:      routeExplain,
+		FailureContracts:  failureContracts,
 		GeneratedSources: []string{
 			"platform_autonomy",
 			"dns_delegation_preflight",
 			"generated_artifact_inventory",
 			"node_generation_inventory",
+			"subsystem_failure_contracts",
 			"backup_restore_inventory",
 			"backing_service_runtime",
 			"operation_inventory",
 			"route_explain",
+			"node_deep_health",
+			"platform_consumer_generation",
+			"runtime_continuity",
+			"resilience_invariant_registry",
+			"resilience_inventory",
+			"resilience_gap_report",
+			"resilience_dashboards",
+			"resilience_alert_rules",
+			"chaos_drills",
+			"runbooks",
 		},
 	}, nil
 }

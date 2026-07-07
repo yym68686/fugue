@@ -48,6 +48,18 @@ type platformFailureDrillEnvelope struct {
 	Report model.PlatformFailureDrillReport `json:"report"`
 }
 
+type releaseGuardStatusEnvelope struct {
+	Status model.ReleaseGuardStatus `json:"status"`
+}
+
+type trafficSafetyExplainEnvelope struct {
+	State model.ServiceTrafficSafetyState `json:"state"`
+}
+
+type requestExplainEnvelope struct {
+	Explain model.RequestExplainResponse `json:"explain"`
+}
+
 type keyRotationPreflightEnvelope struct {
 	Preflight model.KeyRotationPreflight `json:"preflight"`
 }
@@ -68,6 +80,44 @@ type robustnessIncidentEnvelope struct {
 
 type robustnessRepairPlanEnvelope struct {
 	Plan model.RobustnessRepairPlan `json:"plan"`
+}
+
+type platformArtifactListEnvelope struct {
+	Artifacts []model.PlatformArtifact `json:"artifacts"`
+}
+
+type platformArtifactEnvelope struct {
+	Artifact model.PlatformArtifact `json:"artifact"`
+}
+
+type platformArtifactValidationEnvelope struct {
+	Artifact model.PlatformArtifact                   `json:"artifact"`
+	Results  []model.PlatformArtifactValidationResult `json:"results"`
+	Pass     bool                                     `json:"pass"`
+	DryRun   bool                                     `json:"dry_run"`
+}
+
+type platformArtifactReleaseEnvelope struct {
+	Artifact model.PlatformArtifact        `json:"artifact"`
+	Release  model.PlatformArtifactRelease `json:"release"`
+	Message  model.PlatformReleaseMessage  `json:"message"`
+	LKG      *model.PlatformLKGSnapshot    `json:"lkg,omitempty"`
+}
+
+type platformArtifactConsumersEnvelope struct {
+	Consumers []model.PlatformConsumerInstance `json:"consumers"`
+}
+
+type platformArtifactLKGEnvelope struct {
+	LKG *model.PlatformLKGSnapshot `json:"lkg,omitempty"`
+}
+
+type subsystemFailureContractListEnvelope struct {
+	Contracts []model.SubsystemFailureContract `json:"contracts"`
+}
+
+type subsystemFailureContractEnvelope struct {
+	Contract model.SubsystemFailureContract `json:"contract"`
 }
 
 func (c *Client) GetControlPlaneStoreStatus() (model.ControlPlaneStoreStatus, error) {
@@ -116,6 +166,54 @@ func (c *Client) RunPlatformFailureDrill(request model.PlatformFailureDrillReque
 		return model.PlatformFailureDrillReport{}, err
 	}
 	return response.Report, nil
+}
+
+func (c *Client) GetReleaseGuardStatus(subject string) (model.ReleaseGuardStatus, error) {
+	path := "/v1/admin/release-guard/status"
+	values := url.Values{}
+	if strings.TrimSpace(subject) != "" {
+		values.Set("subject", strings.TrimSpace(subject))
+	}
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response releaseGuardStatusEnvelope
+	if err := c.doJSON(http.MethodGet, path, nil, &response); err != nil {
+		return model.ReleaseGuardStatus{}, err
+	}
+	return response.Status, nil
+}
+
+func (c *Client) ExplainTrafficSafety(hostname string, minHealthyEdges int) (model.ServiceTrafficSafetyState, error) {
+	values := url.Values{}
+	if minHealthyEdges > 0 {
+		values.Set("min_healthy_edges", formatInt(minHealthyEdges))
+	}
+	path := "/v1/admin/traffic-safety/explain/" + url.PathEscape(strings.TrimSpace(hostname))
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response trafficSafetyExplainEnvelope
+	if err := c.doJSON(http.MethodGet, path, nil, &response); err != nil {
+		return model.ServiceTrafficSafetyState{}, err
+	}
+	return response.State, nil
+}
+
+func (c *Client) ExplainRequest(requestID, since string) (model.RequestExplainResponse, error) {
+	values := url.Values{}
+	if strings.TrimSpace(since) != "" {
+		values.Set("since", strings.TrimSpace(since))
+	}
+	path := "/v1/admin/requests/" + url.PathEscape(strings.TrimSpace(requestID)) + "/explain"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response requestExplainEnvelope
+	if err := c.doJSON(http.MethodGet, path, nil, &response); err != nil {
+		return model.RequestExplainResponse{}, err
+	}
+	return response.Explain, nil
 }
 
 func (c *Client) PreflightKeyRotation(request model.KeyRotationPreflightRequest) (model.KeyRotationPreflight, error) {
@@ -234,4 +332,95 @@ func (c *Client) RunRobustnessRepair(id, subject string, request model.Robustnes
 		return model.RobustnessRepairPlan{}, err
 	}
 	return response.Plan, nil
+}
+
+func (c *Client) ListPlatformArtifacts(kind, scope, status string, limit int) ([]model.PlatformArtifact, error) {
+	values := url.Values{}
+	if strings.TrimSpace(kind) != "" {
+		values.Set("kind", strings.TrimSpace(kind))
+	}
+	if strings.TrimSpace(scope) != "" {
+		values.Set("scope", strings.TrimSpace(scope))
+	}
+	if strings.TrimSpace(status) != "" {
+		values.Set("status", strings.TrimSpace(status))
+	}
+	if limit > 0 {
+		values.Set("limit", formatInt(limit))
+	}
+	path := "/v1/admin/artifacts"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response platformArtifactListEnvelope
+	if err := c.doJSON(http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Artifacts, nil
+}
+
+func (c *Client) CreatePlatformArtifact(req model.PlatformArtifactCreateRequest) (model.PlatformArtifact, error) {
+	var response platformArtifactEnvelope
+	if err := c.doJSON(http.MethodPost, "/v1/admin/artifacts", req, &response); err != nil {
+		return model.PlatformArtifact{}, err
+	}
+	return response.Artifact, nil
+}
+
+func (c *Client) GetPlatformArtifact(id string) (model.PlatformArtifact, error) {
+	var response platformArtifactEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id)), nil, &response); err != nil {
+		return model.PlatformArtifact{}, err
+	}
+	return response.Artifact, nil
+}
+
+func (c *Client) ValidatePlatformArtifact(id string, dryRun bool) (platformArtifactValidationEnvelope, error) {
+	var response platformArtifactValidationEnvelope
+	err := c.doJSON(http.MethodPost, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id))+"/validate", model.PlatformArtifactValidateRequest{DryRun: dryRun}, &response)
+	return response, err
+}
+
+func (c *Client) ReleasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest) (platformArtifactReleaseEnvelope, error) {
+	var response platformArtifactReleaseEnvelope
+	err := c.doJSON(http.MethodPost, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id))+"/release", req, &response)
+	return response, err
+}
+
+func (c *Client) RollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest) (platformArtifactReleaseEnvelope, error) {
+	var response platformArtifactReleaseEnvelope
+	err := c.doJSON(http.MethodPost, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id))+"/rollback", req, &response)
+	return response, err
+}
+
+func (c *Client) ListPlatformArtifactConsumers(id string) ([]model.PlatformConsumerInstance, error) {
+	var response platformArtifactConsumersEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id))+"/consumers", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Consumers, nil
+}
+
+func (c *Client) GetPlatformArtifactLKG(id string) (*model.PlatformLKGSnapshot, error) {
+	var response platformArtifactLKGEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/artifacts/"+url.PathEscape(strings.TrimSpace(id))+"/lkg", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.LKG, nil
+}
+
+func (c *Client) ListSubsystemFailureContracts() ([]model.SubsystemFailureContract, error) {
+	var response subsystemFailureContractListEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/failure-contracts", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Contracts, nil
+}
+
+func (c *Client) GetSubsystemFailureContract(subsystem string) (model.SubsystemFailureContract, error) {
+	var response subsystemFailureContractEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/failure-contracts/"+url.PathEscape(strings.TrimSpace(subsystem)), nil, &response); err != nil {
+		return model.SubsystemFailureContract{}, err
+	}
+	return response.Contract, nil
 }

@@ -257,7 +257,7 @@ func TestEdgeQualityRankResponseUsesPlatformFallbackRollup(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
-	response := buildEdgeQualityRankResponseFromRollups(edgeQualityRankQuery{
+	response := (&Server{}).buildEdgeQualityRankResponseFromRollups(edgeQualityRankQuery{
 		Hostname:       "api.fugue.pro",
 		TrafficClass:   "dynamic_api",
 		RequestedScope: edgeQualityRankScope{Kind: "asn", Value: "as4134", ASN: "as4134"},

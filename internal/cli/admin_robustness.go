@@ -51,25 +51,46 @@ func (c *CLI) newAdminRobustnessStatusCommand() *cobra.Command {
 }
 
 func (c *CLI) newAdminRobustnessCheckCommand() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "check <subject>",
 		Short: "Run robustness checks scoped to a hostname or subject",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			status, err := client.CheckRobustnessSubject(args[0])
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"status": status})
-			}
-			return writeRobustnessStatus(c.stdout, status)
+			return c.runAdminRobustnessCheck(args[0])
 		},
 	}
+	cmd.AddCommand(
+		c.newAdminRobustnessTypedCheckCommand("node", "Run robustness checks scoped to one node", "<node-name>"),
+		c.newAdminRobustnessTypedCheckCommand("service", "Run robustness checks scoped to one hostname or app", "<hostname-or-app>"),
+		c.newAdminRobustnessTypedCheckCommand("edge", "Run robustness checks scoped to one edge node", "<edge-id>"),
+	)
+	return cmd
+}
+
+func (c *CLI) newAdminRobustnessTypedCheckCommand(kind, short, argName string) *cobra.Command {
+	return &cobra.Command{
+		Use:   kind + " " + argName,
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.runAdminRobustnessCheck(args[0])
+		},
+	}
+}
+
+func (c *CLI) runAdminRobustnessCheck(subject string) error {
+	client, err := c.newClient()
+	if err != nil {
+		return err
+	}
+	status, err := client.CheckRobustnessSubject(subject)
+	if err != nil {
+		return err
+	}
+	if c.wantsJSON() {
+		return writeJSON(c.stdout, map[string]any{"status": status})
+	}
+	return writeRobustnessStatus(c.stdout, status)
 }
 
 func (c *CLI) newAdminRobustnessIncidentsCommand() *cobra.Command {

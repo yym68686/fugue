@@ -253,7 +253,12 @@ func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType stri
 		model.NodeUpdateTaskTypePruneImageCache,
 		model.NodeUpdateTaskTypeReportImageCache,
 		model.NodeUpdateTaskTypeReportLocalPV,
-		model.NodeUpdateTaskTypeDecommissionLocalPV:
+		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeRefreshDesiredState,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeRunDeepHealth:
 	default:
 		return model.NodeUpdateTask{}, false
 	}
@@ -377,7 +382,11 @@ func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask) int {
 	switch task.Type {
 	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
 		return 1
-	case model.NodeUpdateTaskTypePruneImageCache, model.NodeUpdateTaskTypeDecommissionLocalPV:
+	case model.NodeUpdateTaskTypePruneImageCache,
+		model.NodeUpdateTaskTypeDecommissionLocalPV,
+		model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService:
 		return 2
 	default:
 		return 3
@@ -633,6 +642,16 @@ func normalizeNodeUpdateTaskType(raw string) string {
 		return model.NodeUpdateTaskTypeDecommissionLocalPV
 	case model.NodeUpdateTaskTypeVerifySystemdEscape:
 		return model.NodeUpdateTaskTypeVerifySystemdEscape
+	case model.NodeUpdateTaskTypeRepairManagedIPTables:
+		return model.NodeUpdateTaskTypeRepairManagedIPTables
+	case model.NodeUpdateTaskTypeRefreshDesiredState:
+		return model.NodeUpdateTaskTypeRefreshDesiredState
+	case model.NodeUpdateTaskTypeReloadLKGBundle:
+		return model.NodeUpdateTaskTypeReloadLKGBundle
+	case model.NodeUpdateTaskTypeRestartStatelessNodeService:
+		return model.NodeUpdateTaskTypeRestartStatelessNodeService
+	case model.NodeUpdateTaskTypeRunDeepHealth:
+		return model.NodeUpdateTaskTypeRunDeepHealth
 	default:
 		return ""
 	}

@@ -221,6 +221,24 @@ path must be disabled during an incident. Non-dry-run automatic repair remains
 blocked unless the incident class has an explicitly safe implementation and an
 audit event.
 
+Detailed incident runbooks:
+
+- [Node DNS failure](runbooks/node-dns-failure.md)
+- [Stale managed iptables rule](runbooks/stale-iptables-managed-rule.md)
+- [Edge quarantine](runbooks/edge-quarantine.md)
+- [Traffic safety zero eligible edge](runbooks/traffic-safety-zero-eligible-edge.md)
+- [Release guard blocked](runbooks/release-guard-blocked.md)
+- [Request attribution](runbooks/request-attribution.md)
+- [Stateless runtime migration](runbooks/stateless-runtime-migration.md)
+- [Stateful app preflight](runbooks/stateful-app-preflight.md)
+- [Platform artifact release](runbooks/platform-artifact-release.md)
+- [Platform artifact rollback](runbooks/platform-artifact-rollback.md)
+- [Consumer generation drift](runbooks/consumer-generation-drift.md)
+- [LKG expired](runbooks/lkg-expired.md)
+- [Subsystem failure contract](runbooks/subsystem-failure-contract.md)
+- [Automatic repair safety](runbooks/automatic-repair-safety.md)
+- [Emergency disable switch](runbooks/emergency-disable-switch.md)
+
 ### Route, DNS, and TLS mismatch
 
 1. Run `fugue admin robustness check <hostname>`.

@@ -1524,6 +1524,22 @@ func (c *Client) ListNodeUpdaters() ([]model.NodeUpdater, error) {
 	return response.NodeUpdaters, nil
 }
 
+func (c *Client) ListNodeDeepHealthResults() ([]model.NodeDeepHealthResult, error) {
+	var response model.NodeDeepHealthListResponse
+	if err := c.doJSON(http.MethodGet, "/v1/admin/node-health", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Results, nil
+}
+
+func (c *Client) GetNodeDeepHealthResult(nodeUpdaterID string) (model.NodeDeepHealthResult, error) {
+	var response model.NodeDeepHealthResponse
+	if err := c.doJSON(http.MethodGet, "/v1/admin/node-health/"+url.PathEscape(strings.TrimSpace(nodeUpdaterID)), nil, &response); err != nil {
+		return model.NodeDeepHealthResult{}, err
+	}
+	return response.Result, nil
+}
+
 func (c *Client) ListNodeUpdateTasks(nodeUpdaterID, status string) ([]model.NodeUpdateTask, error) {
 	query := url.Values{}
 	if strings.TrimSpace(nodeUpdaterID) != "" {

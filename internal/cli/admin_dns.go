@@ -145,7 +145,7 @@ func (c *CLI) newAdminDNSAnswerCheckCommand() *cobra.Command {
 				return err
 			}
 			if opts.Explain {
-				quality, err := client.GetEdgeQualityRank(opts.Hostname, "", "", "", "global", "30m", "")
+				quality, err := client.GetEdgeQualityRank(opts.Hostname, "", "", "", "", "global", "30m", "")
 				if err != nil {
 					return err
 				}

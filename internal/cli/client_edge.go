@@ -239,11 +239,14 @@ func (c *Client) GetEdgeNodeQuality(edgeID, since string) (model.EdgeNodeQuality
 	return response, nil
 }
 
-func (c *Client) GetEdgeQualityRank(hostname, trafficClass, method, pathPrefix, scope, window, since string) (model.EdgeQualityRankResponse, error) {
+func (c *Client) GetEdgeQualityRank(hostname, trafficClass, requestSizeClass, method, pathPrefix, scope, window, since string) (model.EdgeQualityRankResponse, error) {
 	apiPath := "/v1/edge/quality-rank/" + url.PathEscape(strings.TrimSpace(hostname))
 	values := url.Values{}
 	if strings.TrimSpace(trafficClass) != "" {
 		values.Set("traffic_class", strings.TrimSpace(trafficClass))
+	}
+	if strings.TrimSpace(requestSizeClass) != "" {
+		values.Set("request_size_class", strings.TrimSpace(requestSizeClass))
 	}
 	if strings.TrimSpace(method) != "" {
 		values.Set("method", strings.TrimSpace(method))

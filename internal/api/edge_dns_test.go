@@ -1310,7 +1310,9 @@ func TestEdgeDNSBundleAppliesLatencyAwareWeights(t *testing.T) {
 		!apiA.AnswerPolicy.HealthRequired ||
 		!apiA.AnswerPolicy.RouteReadyRequired ||
 		apiA.AnswerPolicy.ExplorationPercent != edgeDNSExplorationPercent ||
-		apiA.AnswerPolicy.SwitchCooldownSec != int(edgeDNSDecisionCooldown.Seconds()) {
+		apiA.AnswerPolicy.SwitchCooldownSec != int(edgeDNSDecisionCooldown.Seconds()) ||
+		apiA.AnswerPolicy.RankingVersion != edgeDNSQualityRankingVersion ||
+		apiA.AnswerPolicy.RankingScope != "global" {
 		t.Fatalf("expected latency-aware policy with safety gates, got %+v", apiA.AnswerPolicy)
 	}
 	decisions, err := storeState.ListEdgeDNSRoutingDecisions("api.fugue.pro")
@@ -1384,6 +1386,8 @@ func TestEdgeDNSShadowModeDoesNotChangeAnswerButRecordsShadowWinner(t *testing.T
 	if apiA.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindGeo ||
 		apiA.AnswerPolicy.SelectedEdgeGroupID != "edge-group-country-de" ||
 		apiA.AnswerPolicy.ShadowSelectedEdgeGroupID != "edge-group-country-us" ||
+		apiA.AnswerPolicy.RankingVersion != edgeDNSQualityRankingVersion ||
+		apiA.AnswerPolicy.RankingScope != "global" ||
 		!strings.Contains(apiA.AnswerPolicy.ShadowReason, "shadow_latency_aware") {
 		t.Fatalf("expected shadow mode to keep geo answer and expose shadow winner, got %+v", apiA.AnswerPolicy)
 	}

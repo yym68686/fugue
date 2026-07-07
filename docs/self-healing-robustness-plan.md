@@ -5,6 +5,13 @@ ability. The goal is not to assume bugs can be eliminated. The goal is to make
 incorrect state hard to publish, easy to detect, and automatically recoverable
 when the recovery action is safe and reversible.
 
+The next-stage upgrade plan based on the edge rollout and node DNS drift
+incidents is tracked in
+`docs/self-organization-recovery-resilience-upgrade-plan.md`. Treat that file
+as the active roadmap for strengthening node deep health, traffic safety,
+release guards, request attribution, and chaos drills beyond the first
+robustness foundation described here.
+
 All implementation that affects the control plane, edge proxy, DNS, Caddy,
 Ingress, cluster bootstrap, runtime routing, or platform-level traffic rules
 must go through the normal repository release path: commit to `main`, then let
