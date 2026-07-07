@@ -141,6 +141,59 @@ func TestSafeZeroDowntimeRolloutCanaryMetricsFailureAutoAborts(t *testing.T) {
 	}
 }
 
+func TestSafeZeroDowntimeCandidateRevisionFiltersSharedStatefulObjects(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "api",
+		Spec: model.AppSpec{
+			Image:    "ghcr.io/example/api:v2",
+			Ports:    []int{8080},
+			Replicas: 1,
+			Continuity: &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+				Enabled:  true,
+				Mode:     model.AppZeroDowntimeModeSafe,
+				Strategy: model.AppZeroDowntimeStrategyStableCandidate,
+			}},
+			Postgres: &model.AppPostgresSpec{
+				Database:    "api",
+				User:        "api",
+				Password:    "secret",
+				StorageSize: "1Gi",
+			},
+		},
+	}
+	revision := safeRolloutCandidateRevision("rel_candidate")
+	objects := runtime.Renderer{}.BuildManagedAppRevisionChildObjects(app, runtime.SchedulingConstraints{}, nil, nil, revision)
+	if !safeRolloutObjectsContainKind(objects, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind) {
+		t.Fatalf("test fixture should include a shared postgres cluster before candidate filtering")
+	}
+
+	filtered := filterSafeRolloutCandidateRevisionObjects(objects, revision)
+	if safeRolloutObjectsContainKind(filtered, runtime.CloudNativePGAPIVersion, runtime.CloudNativePGClusterKind) {
+		t.Fatalf("candidate revision apply must not include shared postgres cluster objects")
+	}
+	if !safeRolloutObjectsContainKind(filtered, "apps/v1", "Deployment") {
+		t.Fatalf("candidate revision apply should include the candidate deployment")
+	}
+	if !safeRolloutObjectsContainKind(filtered, "v1", "Service") {
+		t.Fatalf("candidate revision apply should include the candidate service")
+	}
+	for _, object := range filtered {
+		metadata := objectMapField(object, "metadata")
+		labels := normalizeKubeStringMap(metadata["labels"])
+		if labels[runtime.FugueLabelAppReleaseRole] != runtime.AppRevisionRoleCandidate {
+			t.Fatalf("filtered object is not candidate-scoped: kind=%s labels=%v", objectStringField(object, "kind"), labels)
+		}
+		if labels[runtime.FugueLabelAppReleaseID] != "rel_candidate" {
+			t.Fatalf("filtered object has wrong release id: kind=%s labels=%v", objectStringField(object, "kind"), labels)
+		}
+	}
+}
+
 func TestSafeZeroDowntimeRolloutCanaryComparisonFailureAutoAborts(t *testing.T) {
 	t.Parallel()
 
@@ -1367,6 +1420,15 @@ func releaseStepsContainPhase(steps []model.ReleaseStep, phase, status string) b
 			continue
 		}
 		if value, ok := step.Payload["phase"].(string); ok && value == phase {
+			return true
+		}
+	}
+	return false
+}
+
+func safeRolloutObjectsContainKind(objects []map[string]any, apiVersion, kind string) bool {
+	for _, object := range objects {
+		if objectStringField(object, "apiVersion") == apiVersion && objectStringField(object, "kind") == kind {
 			return true
 		}
 	}

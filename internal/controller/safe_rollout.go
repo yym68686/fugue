@@ -1027,6 +1027,7 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 	state.CandidateApp = app
 	revision := safeRolloutCandidateRevision(state.Candidate.ID)
 	objects := s.Renderer.BuildManagedAppRevisionChildObjects(app, scheduling, postgresPlacements, nil, revision)
+	objects = filterSafeRolloutCandidateRevisionObjects(objects, revision)
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return fmt.Errorf("apply candidate revision objects: %w", err)
 	}
@@ -1038,6 +1039,23 @@ func (s *Service) applySafeZeroDowntimeCandidateRevision(ctx context.Context, op
 		"service_name":    runtime.RuntimeAppServiceNameWithOptions(app, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain, Revision: revision}),
 	})
 	return nil
+}
+
+func filterSafeRolloutCandidateRevisionObjects(objects []map[string]any, revision runtime.AppRevisionRenderOptions) []map[string]any {
+	revision = runtime.NormalizeAppRevisionRenderOptions(revision)
+	filtered := make([]map[string]any, 0, len(objects))
+	for _, object := range objects {
+		metadata := objectMapField(object, "metadata")
+		labels := normalizeKubeStringMap(metadata["labels"])
+		if labels[runtime.FugueLabelAppReleaseRole] != runtime.AppRevisionRoleCandidate {
+			continue
+		}
+		if revision.ReleaseID != "" && labels[runtime.FugueLabelAppReleaseID] != revision.ReleaseID {
+			continue
+		}
+		filtered = append(filtered, object)
+	}
+	return filtered
 }
 
 func (s *Service) releaseGateEvaluator() releaseflow.ReleaseGateEvaluator {
