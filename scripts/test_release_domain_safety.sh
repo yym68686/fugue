@@ -363,6 +363,48 @@ if public_data_plane_front_image_changed; then
   fail "dnsserver-only changes must not mark front image changed"
 fi
 
+(
+  FUGUE_EDGE_ENABLED=true
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE=auto
+  FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE=false
+  FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
+  FUGUE_SMOKE_URLS=
+  release_called=false
+  public_data_plane_worker_image_changed() { return 0; }
+  public_data_plane_front_image_changed() { return 1; }
+  public_data_plane_dns_image_changed() { return 1; }
+  public_data_plane_live_worker_image_changed() { return 1; }
+  public_data_plane_live_front_image_changed() { return 1; }
+  public_data_plane_live_dns_image_changed() { return 1; }
+  public_data_plane_manifest_changed() { return 1; }
+  public_data_plane_front_daemonsets_ready() { return 0; }
+  bash() { release_called=true; }
+  release_public_data_plane_if_needed
+  [[ "${release_called}" == "false" ]] || fail "public data-plane auto release must skip when CI marks it ineligible"
+  [[ "${PUBLIC_DATA_PLANE_RELEASED}" == "false" ]] || fail "public data-plane released flag must remain false when auto release is ineligible"
+)
+
+(
+  FUGUE_EDGE_ENABLED=true
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE=auto
+  FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE=true
+  FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
+  FUGUE_SMOKE_URLS=
+  release_called=false
+  public_data_plane_worker_image_changed() { return 0; }
+  public_data_plane_front_image_changed() { return 1; }
+  public_data_plane_dns_image_changed() { return 1; }
+  public_data_plane_live_worker_image_changed() { return 1; }
+  public_data_plane_live_front_image_changed() { return 1; }
+  public_data_plane_live_dns_image_changed() { return 1; }
+  public_data_plane_manifest_changed() { return 1; }
+  public_data_plane_front_daemonsets_ready() { return 0; }
+  bash() { release_called=true; }
+  release_public_data_plane_if_needed
+  [[ "${release_called}" == "true" ]] || fail "eligible public data-plane worker change must still start auto release"
+  [[ "${PUBLIC_DATA_PLANE_RELEASED}" == "true" ]] || fail "public data-plane released flag must be true after eligible auto release"
+)
+
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/dns-daemonset.yaml'
 public_data_plane_changed || fail "dns daemonset changes must mark public data-plane changed"
 

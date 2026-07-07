@@ -6004,6 +6004,7 @@ public_data_plane_auto_front_release_enabled() {
 
 release_public_data_plane_if_needed() {
   local public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
+  local auto_release_eligible="${FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE:-true}"
   local worker_changed="false"
   local front_changed="false"
   local dns_changed="false"
@@ -6020,6 +6021,17 @@ release_public_data_plane_if_needed() {
     log "skip public data-plane auto release because release was explicitly allowed during Helm upgrade"
     return 0
   fi
+  case "${auto_release_eligible}" in
+    true)
+      ;;
+    false)
+      log "skip public data-plane auto release because FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE=false"
+      return 0
+      ;;
+    *)
+      fail "FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE must be true or false"
+      ;;
+  esac
   if public_data_plane_worker_image_changed; then
     worker_changed="true"
   fi
