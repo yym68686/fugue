@@ -594,6 +594,23 @@ func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Ope
 		})
 		return safeRolloutDrainMetrics{}, false
 	}
+	if safeRolloutDrainMetricsCanUseKubernetesRevisionAbsence(metrics) {
+		inactive, summary, err := s.safeRolloutPreviousRevisionInactive(ctx, app, previous)
+		if metrics.Summary == nil {
+			metrics.Summary = map[string]any{}
+		}
+		for key, value := range summary {
+			metrics.Summary[key] = value
+		}
+		if err != nil {
+			metrics.Summary["kubernetes_revision_check_error"] = err.Error()
+		} else if inactive {
+			metrics.Ready = true
+			metrics.Summary["ready"] = true
+			metrics.Summary["drain_source"] = "kubernetes_previous_revision_inactive"
+			return metrics, true
+		}
+	}
 	if !metrics.Ready || metrics.ActiveConnections > 0 {
 		s.recordSafeRolloutReleaseStep(op, app, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: active connections have not drained to zero", previous.ID, map[string]any{
 			"drain_metrics": metrics.Summary,
@@ -607,6 +624,92 @@ func (s *Service) querySafeRolloutDrainMetrics(ctx context.Context, op model.Ope
 		return metrics, false
 	}
 	return metrics, true
+}
+
+func safeRolloutDrainMetricsCanUseKubernetesRevisionAbsence(metrics safeRolloutDrainMetrics) bool {
+	return !metrics.Ready &&
+		metrics.ActiveConnections == 0 &&
+		metrics.SampleCount == 0 &&
+		metrics.FinalCount == 0
+}
+
+func (s *Service) safeRolloutPreviousRevisionInactive(ctx context.Context, app model.App, previous model.AppRelease) (bool, map[string]any, error) {
+	deploymentName := strings.TrimSpace(previous.DeploymentName)
+	summary := map[string]any{
+		"previous_deployment": deploymentName,
+	}
+	if deploymentName == "" {
+		summary["kubernetes_revision_check"] = "missing_previous_deployment_name"
+		return false, summary, nil
+	}
+	currentStableName := runtime.RuntimeAppResourceNameWithOptions(s.Renderer.PrepareApp(app), runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	if strings.TrimSpace(currentStableName) != "" && strings.EqualFold(deploymentName, currentStableName) {
+		summary["kubernetes_revision_check"] = "previous_deployment_is_current_stable"
+		return false, summary, nil
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return false, summary, err
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deployment, found, err := client.getDeployment(ctx, namespace, deploymentName)
+	if err != nil {
+		return false, summary, err
+	}
+	summary["previous_deployment_found"] = found
+	if !found {
+		summary["kubernetes_revision_check"] = "previous_deployment_not_found"
+		return true, summary, nil
+	}
+	desiredReplicas := 0
+	if deployment.Spec.Replicas != nil {
+		desiredReplicas = *deployment.Spec.Replicas
+	}
+	summary["previous_deployment_desired_replicas"] = desiredReplicas
+	summary["previous_deployment_status_replicas"] = deployment.Status.Replicas
+	selector := safeRolloutLabelSelectorFromMap(deployment.Spec.Template.Metadata.Labels)
+	pods, err := client.listPodsBySelector(ctx, namespace, selector)
+	if err != nil {
+		return false, summary, err
+	}
+	activePods := 0
+	for _, pod := range pods {
+		if strings.TrimSpace(pod.Metadata.DeletionTimestamp) != "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(pod.Status.Phase)) {
+		case "succeeded", "failed":
+			continue
+		default:
+			activePods++
+		}
+	}
+	summary["previous_deployment_pods"] = len(pods)
+	summary["previous_deployment_active_pods"] = activePods
+	if desiredReplicas == 0 && deployment.Status.Replicas == 0 && activePods == 0 {
+		summary["kubernetes_revision_check"] = "previous_deployment_scaled_to_zero"
+		return true, summary, nil
+	}
+	summary["kubernetes_revision_check"] = "previous_deployment_still_present"
+	return false, summary, nil
+}
+
+func safeRolloutLabelSelectorFromMap(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, strings.TrimSpace(key)+"="+strings.TrimSpace(labels[key]))
+	}
+	return strings.Join(parts, ",")
 }
 
 func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Operation, state *safeRolloutState, reason string) error {

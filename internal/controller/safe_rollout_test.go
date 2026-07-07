@@ -662,6 +662,56 @@ func TestSafeZeroDowntimeRolloutRetiresPreviousAfterDrainMetricsReachZero(t *tes
 	}
 }
 
+func TestSafeZeroDowntimeRolloutRetiresPreviousWhenRevisionDeploymentGone(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(kubeServer.Close)
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return upstream.URL },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+		safeRolloutDrainMetricsQuerier: staticSafeRolloutDrainQuerier{metrics: safeRolloutDrainMetrics{
+			Ready:             false,
+			ActiveConnections: 0,
+			SampleCount:       0,
+			FinalCount:        0,
+			Summary:           map[string]any{"active_connections": 0, "sample_count": 0, "final_count": 0},
+		}},
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{client: kubeServer.Client(), baseURL: kubeServer.URL, bearerToken: "test", namespace: namespace}, nil
+		},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	state.StableRelease.DeploymentName = "app-demo-previous-candidate"
+	if _, err := stateStore.UpdateAppRelease(state.StableRelease); err != nil {
+		t.Fatalf("update stable release deployment name: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	svc.finalizeSafeZeroDowntimePreviousRetire(context.Background(), op, state)
+
+	retiredPrevious, err := stateStore.GetAppRelease(candidate.TenantID, true, state.StableRelease.ID)
+	if err != nil {
+		t.Fatalf("get previous release: %v", err)
+	}
+	if retiredPrevious.Role != model.AppReleaseRoleRetired || retiredPrevious.Status != model.AppReleaseStatusRetired {
+		t.Fatalf("expected missing previous revision deployment to retire previous release, got %+v", retiredPrevious)
+	}
+}
+
 func TestSafeZeroDowntimeRolloutPausesPreviousRetireWhenDrainMetricsStillActive(t *testing.T) {
 	t.Parallel()
 
