@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"path"
 	"strings"
 	"time"
@@ -258,6 +259,7 @@ const (
 	AppReleaseStatusCreating = "creating"
 	AppReleaseStatusReady    = "ready"
 	AppReleaseStatusServing  = "serving"
+	AppReleaseStatusDraining = "draining"
 	AppReleaseStatusFailed   = "failed"
 	AppReleaseStatusRetired  = "retired"
 
@@ -272,6 +274,10 @@ const (
 
 	AppReleaseProbeKindHTTP       = "http"
 	AppReleaseProbeKindHTTPStream = "http_stream"
+
+	AppZeroDowntimeModeDrainOnly           = "drain_only"
+	AppZeroDowntimeModeSafe                = "safe"
+	AppZeroDowntimeStrategyStableCandidate = "stable_candidate"
 )
 
 func NormalizeGitHubAppSourceType(raw string) string {
@@ -317,6 +323,7 @@ func ApplyAppSpecDefaults(spec *AppSpec) {
 	}
 	spec.SSH = NormalizeAppSSHSpec(spec.SSH)
 	spec.GeneratedEnv = NormalizeAppGeneratedEnvSpecs(spec.GeneratedEnv)
+	spec.Continuity = NormalizeAppContinuityPolicy(spec.Continuity)
 	spec.WorkloadClass = NormalizeWorkloadClass(spec.WorkloadClass)
 	rightSizing := AppRightSizingSpec{Mode: AppRightSizingModeAuto}
 	if spec.RightSizing != nil {
@@ -1623,6 +1630,7 @@ type AppSpec struct {
 	VolumeReplication             *AppVolumeReplicationSpec      `json:"volume_replication,omitempty"`
 	Postgres                      *AppPostgresSpec               `json:"postgres,omitempty"`
 	Failover                      *AppFailoverSpec               `json:"failover,omitempty"`
+	Continuity                    *AppContinuityPolicy           `json:"continuity,omitempty"`
 	ImageMirrorLimit              int                            `json:"image_mirror_limit,omitempty"`
 	TerminationGracePeriodSeconds int64                          `json:"termination_grace_period_seconds,omitempty"`
 	RestartToken                  string                         `json:"restart_token,omitempty"`
@@ -1775,6 +1783,182 @@ type AppVolumeReplicationSpec struct {
 type AppFailoverSpec struct {
 	TargetRuntimeID string `json:"target_runtime_id,omitempty"`
 	Auto            bool   `json:"auto,omitempty"`
+}
+
+type AppContinuityPolicy struct {
+	ZeroDowntime *AppZeroDowntimePolicy `json:"zero_downtime,omitempty"`
+}
+
+type AppZeroDowntimePolicy struct {
+	Enabled               bool                  `json:"enabled"`
+	Mode                  string                `json:"mode,omitempty"`
+	Strategy              string                `json:"strategy,omitempty"`
+	Canary                *AppRolloutCanarySpec `json:"canary,omitempty"`
+	Gate                  *AppReleaseGatePolicy `json:"gate,omitempty"`
+	RollbackWindowSeconds int                   `json:"rollback_window_seconds,omitempty"`
+	RetireGraceSeconds    int                   `json:"retire_grace_seconds,omitempty"`
+}
+
+type AppRolloutCanarySpec struct {
+	Enabled               bool  `json:"enabled,omitempty"`
+	InitialWeight         int   `json:"initial_weight,omitempty"`
+	MaxWeight             int   `json:"max_weight,omitempty"`
+	StepWeights           []int `json:"step_weights,omitempty"`
+	MinObservationSeconds int   `json:"min_observation_seconds,omitempty"`
+}
+
+func NormalizeAppContinuityPolicy(policy *AppContinuityPolicy) *AppContinuityPolicy {
+	if policy == nil {
+		return nil
+	}
+	out := *policy
+	out.ZeroDowntime = NormalizeAppZeroDowntimePolicy(policy.ZeroDowntime)
+	if out.ZeroDowntime == nil {
+		return nil
+	}
+	return &out
+}
+
+func CloneAppContinuityPolicy(policy *AppContinuityPolicy) *AppContinuityPolicy {
+	if policy == nil {
+		return nil
+	}
+	out := *policy
+	if policy.ZeroDowntime != nil {
+		zero := *policy.ZeroDowntime
+		if policy.ZeroDowntime.Canary != nil {
+			canary := *policy.ZeroDowntime.Canary
+			canary.StepWeights = append([]int(nil), policy.ZeroDowntime.Canary.StepWeights...)
+			zero.Canary = &canary
+		}
+		if policy.ZeroDowntime.Gate != nil {
+			gate := *policy.ZeroDowntime.Gate
+			gate.Probes = append([]AppReleaseProbe(nil), policy.ZeroDowntime.Gate.Probes...)
+			zero.Gate = &gate
+		}
+		out.ZeroDowntime = &zero
+	}
+	return &out
+}
+
+func NormalizeAppZeroDowntimePolicy(policy *AppZeroDowntimePolicy) *AppZeroDowntimePolicy {
+	if policy == nil {
+		return nil
+	}
+	out := *policy
+	out.Mode = strings.TrimSpace(strings.ToLower(out.Mode))
+	out.Strategy = strings.TrimSpace(strings.ToLower(out.Strategy))
+	if !out.Enabled {
+		return nil
+	}
+	if out.Mode == "" {
+		out.Mode = AppZeroDowntimeModeDrainOnly
+	}
+	if out.Strategy == "" && out.Mode == AppZeroDowntimeModeSafe {
+		out.Strategy = AppZeroDowntimeStrategyStableCandidate
+	}
+	if out.Mode == AppZeroDowntimeModeSafe && out.Canary == nil {
+		out.Canary = &AppRolloutCanarySpec{
+			Enabled:               true,
+			InitialWeight:         1,
+			MaxWeight:             100,
+			StepWeights:           []int{1, 5, 25, 50, 100},
+			MinObservationSeconds: 60,
+		}
+	}
+	if out.Canary != nil {
+		canary := *out.Canary
+		if canary.InitialWeight < 0 {
+			canary.InitialWeight = 0
+		}
+		if canary.MaxWeight <= 0 || canary.MaxWeight > 100 {
+			canary.MaxWeight = 100
+		}
+		if canary.InitialWeight > canary.MaxWeight {
+			canary.InitialWeight = canary.MaxWeight
+		}
+		if len(canary.StepWeights) == 0 && canary.Enabled {
+			canary.StepWeights = []int{canary.InitialWeight, 5, 25, 50, 100}
+		}
+		filtered := make([]int, 0, len(canary.StepWeights))
+		for _, weight := range canary.StepWeights {
+			if weight < 0 {
+				weight = 0
+			}
+			if weight > canary.MaxWeight {
+				weight = canary.MaxWeight
+			}
+			if len(filtered) == 0 || filtered[len(filtered)-1] != weight {
+				filtered = append(filtered, weight)
+			}
+		}
+		canary.StepWeights = filtered
+		if canary.MinObservationSeconds < 0 {
+			canary.MinObservationSeconds = 0
+		}
+		out.Canary = &canary
+	}
+	if out.RollbackWindowSeconds < 0 {
+		out.RollbackWindowSeconds = 0
+	}
+	if out.RetireGraceSeconds < 0 {
+		out.RetireGraceSeconds = 0
+	}
+	return &out
+}
+
+func ValidateAppZeroDowntimePolicy(policy *AppZeroDowntimePolicy) error {
+	if policy != nil && policy.Enabled && policy.Canary != nil {
+		if policy.Canary.InitialWeight < 0 || policy.Canary.InitialWeight > 100 {
+			return fmt.Errorf("continuity.zero_downtime.canary.initial_weight must be between 0 and 100")
+		}
+		if policy.Canary.MaxWeight < 0 || policy.Canary.MaxWeight > 100 {
+			return fmt.Errorf("continuity.zero_downtime.canary.max_weight must be between 0 and 100")
+		}
+		previous := -1
+		for _, weight := range policy.Canary.StepWeights {
+			if weight < 0 || weight > 100 {
+				return fmt.Errorf("continuity.zero_downtime.canary.step_weights must be between 0 and 100")
+			}
+			if previous > weight {
+				return fmt.Errorf("continuity.zero_downtime.canary.step_weights must be non-decreasing")
+			}
+			previous = weight
+		}
+	}
+	normalized := NormalizeAppZeroDowntimePolicy(policy)
+	if normalized == nil {
+		return nil
+	}
+	switch normalized.Mode {
+	case AppZeroDowntimeModeDrainOnly, AppZeroDowntimeModeSafe:
+	default:
+		return fmt.Errorf("continuity.zero_downtime.mode must be drain_only or safe")
+	}
+	if normalized.Mode == AppZeroDowntimeModeSafe && normalized.Strategy != AppZeroDowntimeStrategyStableCandidate {
+		return fmt.Errorf("continuity.zero_downtime.strategy must be stable_candidate for safe mode")
+	}
+	if normalized.Canary != nil {
+		previous := -1
+		for _, weight := range normalized.Canary.StepWeights {
+			if weight < 0 || weight > 100 {
+				return fmt.Errorf("continuity.zero_downtime.canary.step_weights must be between 0 and 100")
+			}
+			if previous > weight {
+				return fmt.Errorf("continuity.zero_downtime.canary.step_weights must be non-decreasing")
+			}
+			previous = weight
+		}
+	}
+	return nil
+}
+
+func AppSafeZeroDowntimeRolloutEnabled(spec AppSpec) bool {
+	policy := NormalizeAppContinuityPolicy(spec.Continuity)
+	return policy != nil &&
+		policy.ZeroDowntime != nil &&
+		policy.ZeroDowntime.Enabled &&
+		policy.ZeroDowntime.Mode == AppZeroDowntimeModeSafe
 }
 
 type AppPostgresSpec struct {

@@ -1793,6 +1793,130 @@ func TestRunAppContinuityEnableUsesSemanticCommand(t *testing.T) {
 	}
 }
 
+func TestRunAppContinuityEnableZeroDowntimeSafe(t *testing.T) {
+	t.Parallel()
+
+	var gotBody patchAppContinuityRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/continuity":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode continuity body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"zero_downtime":{"enabled":true,"mode":"safe","strategy":"stable_candidate","canary":{"enabled":true,"initial_weight":2,"max_weight":100,"step_weights":[2,5,25,50,100],"min_observation_seconds":90}},"operation":{"id":"op_123","app_id":"app_123"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "continuity", "enable", "demo",
+		"--zero-downtime", "safe",
+		"--initial-canary-weight", "2",
+		"--min-observation-seconds", "90",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app continuity enable zero downtime: %v", err)
+	}
+
+	if gotBody.ZeroDowntime == nil || !gotBody.ZeroDowntime.Enabled || gotBody.ZeroDowntime.Mode != model.AppZeroDowntimeModeSafe || gotBody.ZeroDowntime.Strategy != model.AppZeroDowntimeStrategyStableCandidate {
+		t.Fatalf("unexpected zero downtime request %+v", gotBody.ZeroDowntime)
+	}
+	if gotBody.ZeroDowntime.Canary == nil || gotBody.ZeroDowntime.Canary.InitialWeight != 2 || gotBody.ZeroDowntime.Canary.MinObservationSeconds != 90 {
+		t.Fatalf("unexpected canary request %+v", gotBody.ZeroDowntime.Canary)
+	}
+	out := stdout.String()
+	for _, want := range []string{"app_id=app_123", "operation_id=op_123", "zero_downtime_enabled=true", "zero_downtime_mode=safe", "zero_downtime_strategy=stable_candidate", "zero_downtime_initial_weight=2"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, out)
+		}
+	}
+}
+
+func TestRunAppContinuityDisableZeroDowntimeOnly(t *testing.T) {
+	t.Parallel()
+
+	var gotBody patchAppContinuityRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/continuity":
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode continuity body: %v", err)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"zero_downtime":{"enabled":false}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "continuity", "disable", "demo",
+		"--zero-downtime",
+		"--wait=false",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app continuity disable zero downtime: %v", err)
+	}
+	if gotBody.ZeroDowntime == nil || gotBody.ZeroDowntime.Enabled {
+		t.Fatalf("expected zero downtime disable request, got %+v", gotBody.ZeroDowntime)
+	}
+	if gotBody.AppFailover != nil || gotBody.DatabaseFailover != nil {
+		t.Fatalf("expected zero downtime-only disable, got app=%+v db=%+v", gotBody.AppFailover, gotBody.DatabaseFailover)
+	}
+	if !strings.Contains(stdout.String(), "zero_downtime_enabled=false") {
+		t.Fatalf("expected zero downtime disabled output, got %q", stdout.String())
+	}
+}
+
+func TestRunAppContinuityShowZeroDowntime(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","description":"demo","spec":{"runtime_id":"runtime_a","replicas":1,"continuity":{"zero_downtime":{"enabled":true,"mode":"safe","strategy":"stable_candidate","canary":{"enabled":true,"initial_weight":1,"max_weight":100,"step_weights":[1,5,25,50,100],"min_observation_seconds":60}}}},"status":{"phase":"ready","current_runtime_id":"runtime_a","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "continuity", "show", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app continuity show: %v", err)
+	}
+	for _, want := range []string{"app_id=app_123", "zero_downtime_enabled=true", "zero_downtime_mode=safe", "zero_downtime_strategy=stable_candidate"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
 func TestRunAppFailoverPolicyClearJSONRedactsOperationDesiredSpec(t *testing.T) {
 	t.Parallel()
 

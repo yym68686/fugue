@@ -73,9 +73,9 @@ func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, p
 func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference, options RenderOptions) []map[string]any {
 	options = normalizeRenderOptions(options)
 	namespace := NamespaceForTenant(app.TenantID)
-	appRuntimeName := RuntimeAppResourceName(app)
+	appRuntimeName := RuntimeAppResourceNameWithOptions(app, options)
 	postgresResources := managedPostgresResources(namespace, app, postgresPlacements)
-	labels := appLabels(app)
+	labels := mergeStringMaps(appLabels(app), appRevisionLabels(options))
 	objects := []map[string]any{
 		buildNamespaceObject(namespace),
 	}
@@ -117,7 +117,7 @@ func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingCons
 	if appRuntimeDeploymentRequired(app) {
 		objects = append(objects, buildAppDeploymentObjectWithOptions(namespace, app, labels, scheduling, postgresResources, options))
 	}
-	if serviceObject := buildAppServiceObject(namespace, app, labels); serviceObject != nil {
+	if serviceObject := buildAppServiceObjectWithOptions(namespace, app, labels, options); serviceObject != nil {
 		objects = append(objects, serviceObject)
 	}
 	if aliasObject := buildComposeServiceAliasObject(namespace, app); aliasObject != nil {
@@ -498,7 +498,7 @@ func buildAppDeploymentObject(namespace string, app model.App, labels map[string
 
 func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels map[string]string, scheduling SchedulingConstraints, postgresResources []postgresRuntimeResource, options RenderOptions) map[string]any {
 	options = normalizeRenderOptions(options)
-	resourceName := RuntimeAppResourceName(app)
+	resourceName := RuntimeAppResourceNameWithOptions(app, options)
 	container := map[string]any{
 		"name":  sanitizeName(app.Name),
 		"image": app.Spec.Image,
@@ -1107,7 +1107,8 @@ func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) strin
 
 func ManagedAppReleaseKeyWithOptions(app model.App, scheduling SchedulingConstraints, options RenderOptions) string {
 	namespace := NamespaceForTenant(app.TenantID)
-	object := buildAppDeploymentObjectWithOptions(namespace, app, appLabels(app), scheduling, managedPostgresResources(namespace, app, nil), options)
+	labels := mergeStringMaps(appLabels(app), appRevisionLabels(options))
+	object := buildAppDeploymentObjectWithOptions(namespace, app, labels, scheduling, managedPostgresResources(namespace, app, nil), options)
 	return managedDeploymentRuntimeKey(object)
 }
 
@@ -1487,6 +1488,11 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 }
 
 func buildAppServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
+	return buildAppServiceObjectWithOptions(namespace, app, labels, defaultRenderOptions())
+}
+
+func buildAppServiceObjectWithOptions(namespace string, app model.App, labels map[string]string, options RenderOptions) map[string]any {
+	options = normalizeRenderOptions(options)
 	if !model.AppHasClusterService(app.Spec) && !model.AppSSHEnabled(app.Spec) {
 		return nil
 	}
@@ -1499,7 +1505,7 @@ func buildAppServiceObject(namespace string, app model.App, labels map[string]st
 		"apiVersion": "v1",
 		"kind":       "Service",
 		"metadata": map[string]any{
-			"name":      RuntimeAppServiceName(app),
+			"name":      RuntimeAppServiceNameWithOptions(app, options),
 			"namespace": namespace,
 			"labels":    labels,
 		},

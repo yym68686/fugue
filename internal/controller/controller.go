@@ -902,6 +902,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	}
 	timer.Mark("right_sizing_downtime_guard")
 
+	safeRollout, err := s.prepareSafeZeroDowntimeRollout(ctx, op, currentApp, app)
+	if err != nil {
+		return err
+	}
+	timer.Mark("safe_rollout_prepare")
+
 	bundle, err := s.Renderer.RenderAppBundleWithPlacements(app, scheduling, postgresPlacements)
 	if err != nil {
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)
@@ -934,8 +940,18 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
 				s.markReleaseAttemptRolloutWaiting(op, app)
 			}
-			if err := s.waitForManagedAppRolloutWithScheduling(ctx, app, op.ID, scheduling); err != nil {
+			rolloutResult := s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
+			s.recordRolloutReadinessResultStep(op, app, rolloutResult)
+			if err := rolloutResult.Error(); err != nil {
+				if safeRollout != nil {
+					if rollbackErr := s.abortSafeZeroDowntimeRollout(ctx, op, safeRollout, err.Error()); rollbackErr != nil {
+						return fmt.Errorf("wait for managed app rollout %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
+					}
+				}
 				return fmt.Errorf("wait for managed app rollout %s: %w", app.ID, err)
+			}
+			if err := s.completeSafeZeroDowntimeRollout(ctx, op, safeRollout); err != nil {
+				return err
 			}
 			timer.Mark("rollout_wait")
 		}

@@ -14,6 +14,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	"fugue/internal/store"
 )
 
@@ -93,6 +94,32 @@ type appReleaseGateResponse struct {
 	Policy model.AppReleaseGatePolicy `json:"policy"`
 }
 
+func (s *Server) appReleaseService() releaseflow.AppReleaseService {
+	return releaseflow.AppReleaseService{
+		Store:            s.store,
+		ServiceURLForApp: s.serviceURLForApp,
+	}
+}
+
+func (s *Server) appReleaseGateEvaluator() releaseflow.ReleaseGateEvaluator {
+	return releaseflow.ReleaseGateEvaluator{
+		MetricsQuerier: apiReleaseGateMetricsQuerier{server: s},
+	}
+}
+
+type apiReleaseGateMetricsQuerier struct {
+	server *Server
+}
+
+func (q apiReleaseGateMetricsQuerier) QueryReleaseGateMetrics(ctx context.Context, appID, releaseID, releaseRole string, window time.Duration) (map[string]any, error) {
+	if q.server == nil {
+		return nil, fmt.Errorf("api server is nil")
+	}
+	until := time.Now().UTC()
+	obsWindow := appObservabilityWindow{Since: until.Add(-window).Format(time.RFC3339), Until: until.Format(time.RFC3339)}
+	return q.server.queryAppReleaseGateMetrics(ctx, appID, releaseID, releaseRole, obsWindow)
+}
+
 func (s *Server) handleListAppReleases(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
@@ -133,42 +160,17 @@ func (s *Server) handleCreateAppRelease(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	role := store.NormalizeAppReleaseRole(req.Role)
-	if role == "" {
-		role = model.AppReleaseRoleCandidate
-	}
-	status := store.NormalizeAppReleaseStatus(req.Status)
-	upstreamURL := strings.TrimSpace(req.UpstreamURL)
-	if role == model.AppReleaseRoleStable && upstreamURL == "" {
-		upstreamURL = s.serviceURLForApp(r.Context(), app)
-	}
-	if status == model.AppReleaseStatusReady && upstreamURL == "" && role == model.AppReleaseRoleCandidate {
-		status = model.AppReleaseStatusCreating
-	}
-	var readyAt *time.Time
-	if status == model.AppReleaseStatusReady || status == model.AppReleaseStatusServing {
-		now := time.Now().UTC()
-		readyAt = &now
-	}
-	specSnapshot := req.SpecSnapshot
-	if specSnapshot == nil && role == model.AppReleaseRoleStable {
-		spec := app.Spec
-		specSnapshot = &spec
-	}
-	release, err := s.store.CreateAppRelease(model.AppRelease{
-		TenantID:         app.TenantID,
-		AppID:            app.ID,
-		Role:             role,
-		SourceRef:        firstNonEmpty(req.SourceRef, appReleaseSourceRef(app)),
-		ResolvedImageRef: strings.TrimSpace(req.ResolvedImageRef),
-		UpstreamURL:      upstreamURL,
-		RuntimeID:        firstNonEmpty(req.RuntimeID, app.Spec.RuntimeID),
-		DeploymentName:   strings.TrimSpace(req.DeploymentName),
-		ServiceName:      strings.TrimSpace(req.ServiceName),
-		Status:           status,
-		StatusReason:     strings.TrimSpace(req.StatusReason),
-		SpecSnapshot:     specSnapshot,
-		ReadyAt:          readyAt,
+	release, err := s.appReleaseService().CreateRelease(r.Context(), app, releaseflow.CreateReleaseRequest{
+		Role:             req.Role,
+		SourceRef:        req.SourceRef,
+		ResolvedImageRef: req.ResolvedImageRef,
+		UpstreamURL:      req.UpstreamURL,
+		RuntimeID:        req.RuntimeID,
+		DeploymentName:   req.DeploymentName,
+		ServiceName:      req.ServiceName,
+		Status:           req.Status,
+		StatusReason:     req.StatusReason,
+		SpecSnapshot:     req.SpecSnapshot,
 	})
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -216,40 +218,20 @@ func (s *Server) handlePatchAppTrafficPolicy(w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	current, err := s.ensureAppStableTrafficPolicy(r.Context(), principal, app)
+	policy, err := s.appReleaseService().PatchTrafficPolicy(r.Context(), principal, app, releaseflow.TrafficPatch{
+		Mode:               req.Mode,
+		StableReleaseID:    req.StableReleaseID,
+		CandidateReleaseID: req.CandidateReleaseID,
+		StableWeight:       req.StableWeight,
+		CandidateWeight:    req.CandidateWeight,
+		StickyHeader:       req.StickyHeader,
+		StickyCookie:       req.StickyCookie,
+	})
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if req.Mode != "" {
-		current.Mode = req.Mode
-	}
-	if req.StableReleaseID != "" {
-		current.StableReleaseID = strings.TrimSpace(req.StableReleaseID)
-	}
-	if req.CandidateReleaseID != "" {
-		current.CandidateReleaseID = strings.TrimSpace(req.CandidateReleaseID)
-	}
-	if req.StableWeight != nil {
-		current.StableWeight = *req.StableWeight
-	}
-	if req.CandidateWeight != nil {
-		current.CandidateWeight = *req.CandidateWeight
-	}
-	if req.StickyHeader != "" {
-		current.StickyHeader = strings.TrimSpace(req.StickyHeader)
-	}
-	if req.StickyCookie != "" {
-		current.StickyCookie = strings.TrimSpace(req.StickyCookie)
-	}
-	current.UpdatedByType = principal.ActorType
-	current.UpdatedByID = principal.ActorID
-	if err := s.validateAppTrafficPolicyReferences(principal, app, current); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	policy, err := s.store.UpsertAppTrafficPolicy(current)
-	if err != nil {
+		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "belongs to another app") || strings.Contains(err.Error(), "upstream_url") {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -282,7 +264,7 @@ func (s *Server) handleProbeAppRelease(w http.ResponseWriter, r *http.Request) {
 	if len(probes) == 0 {
 		probes = defaultAppReleaseProbes()
 	}
-	results := s.runAppReleaseProbes(r.Context(), release, probes)
+	results := s.appReleaseGateEvaluator().RunProbes(r.Context(), release, probes)
 	status := model.AppReleaseGateStatusPass
 	for _, result := range results {
 		if result.Status == model.AppReleaseGateStatusFail {
@@ -315,7 +297,7 @@ func (s *Server) handleEvaluateAppReleaseGate(w http.ResponseWriter, r *http.Req
 		}
 	}
 	policy := normalizeAppReleaseGatePolicy(req.Policy)
-	gate := s.evaluateAppReleaseGate(r.Context(), app, release, policy)
+	gate := s.appReleaseGateEvaluator().Evaluate(r.Context(), app, release, policy)
 	s.appendAudit(principal, "app.release.gate.evaluate", "app_release", release.ID, app.TenantID, map[string]string{
 		"app_id": app.ID,
 		"status": gate.Status,
@@ -344,55 +326,12 @@ func (s *Server) handlePromoteAppRelease(w http.ResponseWriter, r *http.Request)
 	if req.CandidateWeight != nil {
 		weight = *req.CandidateWeight
 	}
-	if weight < 0 || weight > 100 {
-		httpx.WriteError(w, http.StatusBadRequest, "candidate_weight must be between 0 and 100")
-		return
-	}
-	policy, err := s.ensureAppStableTrafficPolicy(r.Context(), principal, app)
+	policy, err := s.appReleaseService().PromoteRelease(r.Context(), principal, app, release, weight)
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if weight < 100 {
-		policy.Mode = model.AppTrafficModeCanary
-		policy.CandidateReleaseID = release.ID
-		policy.StableWeight = 100 - weight
-		policy.CandidateWeight = weight
-		policy.UpdatedByType = principal.ActorType
-		policy.UpdatedByID = principal.ActorID
-		policy, err = s.store.UpsertAppTrafficPolicy(policy)
-		if err != nil {
-			s.writeStoreError(w, err)
+		if strings.Contains(err.Error(), "candidate_weight") {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, appTrafficResponse{AppID: app.ID, Traffic: policy})
-		return
-	}
-	now := time.Now().UTC()
-	oldStableID := policy.StableReleaseID
-	if oldStableID != "" && oldStableID != release.ID {
-		if oldStable, err := s.store.GetAppRelease(app.TenantID, true, oldStableID); err == nil {
-			oldStable.Role = model.AppReleaseRolePrevious
-			_, _ = s.store.UpdateAppRelease(oldStable)
-		}
-	}
-	release.Role = model.AppReleaseRoleStable
-	release.Status = model.AppReleaseStatusServing
-	release.PromotedAt = &now
-	release.ReadyAt = appReleaseFirstNonNilTime(release.ReadyAt, &now)
-	if _, err := s.store.UpdateAppRelease(release); err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	policy.Mode = model.AppTrafficModeSingle
-	policy.StableReleaseID = release.ID
-	policy.CandidateReleaseID = ""
-	policy.StableWeight = 100
-	policy.CandidateWeight = 0
-	policy.UpdatedByType = principal.ActorType
-	policy.UpdatedByID = principal.ActorID
-	policy, err = s.store.UpsertAppTrafficPolicy(policy)
-	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -417,29 +356,10 @@ func (s *Server) handleAbortAppRelease(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	policy, err := s.ensureAppStableTrafficPolicy(r.Context(), principal, app)
+	policy, err := s.appReleaseService().AbortRelease(r.Context(), principal, app, release, req.MarkFailed, req.Reason)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
-	}
-	policy.Mode = model.AppTrafficModeSingle
-	policy.CandidateReleaseID = release.ID
-	policy.StableWeight = 100
-	policy.CandidateWeight = 0
-	policy.UpdatedByType = principal.ActorType
-	policy.UpdatedByID = principal.ActorID
-	policy, err = s.store.UpsertAppTrafficPolicy(policy)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if req.MarkFailed {
-		release.Status = model.AppReleaseStatusFailed
-		release.StatusReason = strings.TrimSpace(req.Reason)
-		if _, err := s.store.UpdateAppRelease(release); err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
 	}
 	s.appendAudit(principal, "app.release.abort", "app_release", release.ID, app.TenantID, map[string]string{"app_id": app.ID})
 	httpx.WriteJSON(w, http.StatusOK, appTrafficResponse{AppID: app.ID, Traffic: policy})
@@ -468,116 +388,19 @@ func (s *Server) loadAuthorizedAppRelease(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) ensureAppStableTrafficPolicy(ctx context.Context, principal model.Principal, app model.App) (model.AppTrafficPolicy, error) {
-	if policy, err := s.store.GetAppTrafficPolicy(principal.TenantID, principal.IsPlatformAdmin(), app.ID); err == nil {
-		return policy, nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return model.AppTrafficPolicy{}, err
-	}
-	stable, err := s.ensureAppStableRelease(ctx, app)
-	if err != nil {
-		return model.AppTrafficPolicy{}, err
-	}
-	return s.store.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
-		TenantID:        app.TenantID,
-		AppID:           app.ID,
-		Mode:            model.AppTrafficModeSingle,
-		StableReleaseID: stable.ID,
-		StableWeight:    100,
-		CandidateWeight: 0,
-		StickyCookie:    "Fugue-Release-Stickiness",
-		UpdatedByType:   principal.ActorType,
-		UpdatedByID:     principal.ActorID,
-	})
+	return s.appReleaseService().EnsureStableTrafficPolicy(ctx, principal, app)
 }
 
 func (s *Server) ensureAppStableRelease(ctx context.Context, app model.App) (model.AppRelease, error) {
-	releases, err := s.store.ListAppReleases(model.AppReleaseFilter{
-		TenantID:      app.TenantID,
-		AppID:         app.ID,
-		Role:          model.AppReleaseRoleStable,
-		PlatformAdmin: true,
-	})
-	if err != nil {
-		return model.AppRelease{}, err
-	}
-	if len(releases) > 0 {
-		return releases[0], nil
-	}
-	status := model.AppReleaseStatusReady
-	if app.Status.CurrentReplicas <= 0 {
-		status = model.AppReleaseStatusCreating
-	}
-	now := time.Now().UTC()
-	spec := app.Spec
-	return s.store.CreateAppRelease(model.AppRelease{
-		TenantID:         app.TenantID,
-		AppID:            app.ID,
-		Role:             model.AppReleaseRoleStable,
-		SourceRef:        appReleaseSourceRef(app),
-		ResolvedImageRef: app.Spec.Image,
-		UpstreamURL:      s.serviceURLForApp(ctx, app),
-		RuntimeID:        app.Spec.RuntimeID,
-		Status:           status,
-		SpecSnapshot:     &spec,
-		ReadyAt:          &now,
-	})
+	return s.appReleaseService().EnsureStableRelease(ctx, app)
 }
 
 func (s *Server) validateAppTrafficPolicyReferences(principal model.Principal, app model.App, policy model.AppTrafficPolicy) error {
-	if _, err := s.store.GetAppRelease(principal.TenantID, principal.IsPlatformAdmin(), policy.StableReleaseID); err != nil {
-		return fmt.Errorf("stable_release_id is invalid")
-	}
-	if policy.CandidateReleaseID != "" {
-		release, err := s.store.GetAppRelease(principal.TenantID, principal.IsPlatformAdmin(), policy.CandidateReleaseID)
-		if err != nil {
-			return fmt.Errorf("candidate_release_id is invalid")
-		}
-		if release.AppID != app.ID {
-			return fmt.Errorf("candidate_release_id belongs to another app")
-		}
-		if policy.CandidateWeight > 0 && strings.TrimSpace(release.UpstreamURL) == "" {
-			return fmt.Errorf("candidate release has no upstream_url")
-		}
-	}
-	return nil
+	return s.appReleaseService().ValidateTrafficPolicyReferences(principal, app, policy)
 }
 
 func (s *Server) evaluateAppReleaseGate(ctx context.Context, app model.App, release model.AppRelease, policy model.AppReleaseGatePolicy) model.AppReleaseGateResult {
-	gate := model.AppReleaseGateResult{
-		Status:      model.AppReleaseGateStatusPass,
-		ReleaseID:   release.ID,
-		Role:        release.Role,
-		Evidence:    []string{},
-		Warnings:    []string{},
-		Failures:    []string{},
-		Metrics:     map[string]any{},
-		EvaluatedAt: time.Now().UTC(),
-	}
-	window := time.Duration(policy.WindowSeconds) * time.Second
-	if window <= 0 {
-		window = defaultAppReleaseGateWindow
-	}
-	until := time.Now().UTC()
-	obsWindow := appObservabilityWindow{Since: until.Add(-window).Format(time.RFC3339), Until: until.Format(time.RFC3339)}
-	gate.Window = window.String()
-	if metrics, err := s.queryAppReleaseGateMetrics(ctx, app.ID, release.ID, release.Role, obsWindow); err == nil {
-		gate.Metrics = metrics
-		gate.Evidence = append(gate.Evidence, appReleaseGateMetricEvidence(metrics)...)
-		gate.Failures = append(gate.Failures, appReleaseGateMetricFailures(metrics, policy)...)
-	} else {
-		gate.Warnings = append(gate.Warnings, "passive release metrics unavailable: "+err.Error())
-	}
-	probeResults := s.runAppReleaseProbes(ctx, release, policy.Probes)
-	gate.ProbeResults = probeResults
-	for _, result := range probeResults {
-		if result.Status == model.AppReleaseGateStatusFail {
-			gate.Failures = append(gate.Failures, fmt.Sprintf("probe %s failed: %s", firstNonEmpty(result.Name, result.Path), result.Error))
-		}
-	}
-	if len(gate.Failures) > 0 {
-		gate.Status = model.AppReleaseGateStatusFail
-	}
-	return gate
+	return s.appReleaseGateEvaluator().Evaluate(ctx, app, release, policy)
 }
 
 func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseID, releaseRole string, window appObservabilityWindow) (map[string]any, error) {
@@ -667,14 +490,7 @@ func appReleaseGateMetricFailures(metrics map[string]any, policy model.AppReleas
 }
 
 func (s *Server) runAppReleaseProbes(ctx context.Context, release model.AppRelease, probes []model.AppReleaseProbe) []model.AppReleaseProbeResult {
-	if len(probes) == 0 {
-		probes = defaultAppReleaseProbes()
-	}
-	results := make([]model.AppReleaseProbeResult, 0, len(probes))
-	for _, probe := range probes {
-		results = append(results, runAppReleaseProbe(ctx, release, probe))
-	}
-	return results
+	return s.appReleaseGateEvaluator().RunProbes(ctx, release, probes)
 }
 
 func runAppReleaseProbe(ctx context.Context, release model.AppRelease, probe model.AppReleaseProbe) model.AppReleaseProbeResult {
@@ -774,62 +590,19 @@ func runAppReleaseProbe(ctx context.Context, release model.AppRelease, probe mod
 }
 
 func normalizeAppReleaseGatePolicy(raw *model.AppReleaseGatePolicy) model.AppReleaseGatePolicy {
-	policy := model.AppReleaseGatePolicy{
-		WindowSeconds:              int(defaultAppReleaseGateWindow.Seconds()),
-		MinCandidateRequests:       defaultAppReleaseGateMinRequests,
-		Max5xxRate:                 0.01,
-		MaxEdgeUpstreamErrorRate:   0.005,
-		MaxP95TTFBMilliseconds:     2000,
-		MaxP99DurationMilliseconds: 30000,
-		Probes:                     defaultAppReleaseProbes(),
-	}
-	if raw == nil {
-		return policy
-	}
-	if raw.WindowSeconds > 0 {
-		policy.WindowSeconds = raw.WindowSeconds
-	}
-	if raw.MinCandidateRequests > 0 {
-		policy.MinCandidateRequests = raw.MinCandidateRequests
-	}
-	if raw.Max5xxRate > 0 {
-		policy.Max5xxRate = raw.Max5xxRate
-	}
-	if raw.MaxEdgeUpstreamErrorRate > 0 {
-		policy.MaxEdgeUpstreamErrorRate = raw.MaxEdgeUpstreamErrorRate
-	}
-	if raw.MaxP95TTFBMilliseconds > 0 {
-		policy.MaxP95TTFBMilliseconds = raw.MaxP95TTFBMilliseconds
-	}
-	if raw.MaxP99DurationMilliseconds > 0 {
-		policy.MaxP99DurationMilliseconds = raw.MaxP99DurationMilliseconds
-	}
-	if len(raw.Probes) > 0 {
-		policy.Probes = raw.Probes
-	}
-	return policy
+	return releaseflow.ReleaseGateEvaluator{}.NormalizePolicy(raw)
 }
 
 func defaultAppReleaseProbes() []model.AppReleaseProbe {
-	return []model.AppReleaseProbe{
-		{Name: "health", Kind: model.AppReleaseProbeKindHTTP, Method: http.MethodGet, Path: "/v1/health", ExpectedStatus: http.StatusOK, TimeoutMilliseconds: 3000, MaxDurationMilliseconds: 3000},
-	}
+	return releaseflow.DefaultReleaseProbes()
 }
 
 func appReleaseSourceRef(app model.App) string {
-	if app.Source != nil {
-		return firstNonEmpty(app.Source.ImageRef, app.Source.RepoURL, app.Spec.Image)
-	}
-	return app.Spec.Image
+	return releaseflow.AppReleaseSourceRef(app)
 }
 
 func appReleaseFirstNonNilTime(values ...*time.Time) *time.Time {
-	for _, value := range values {
-		if value != nil {
-			return value
-		}
-	}
-	return nil
+	return releaseflow.FirstNonNilTime(values...)
 }
 
 func floatMetric(metrics map[string]any, key string) float64 {

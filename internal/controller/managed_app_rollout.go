@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
 )
 
@@ -21,6 +22,44 @@ func (s *Service) waitForManagedAppRollout(ctx context.Context, app model.App, o
 }
 
 func (s *Service) waitForManagedAppRolloutWithScheduling(
+	ctx context.Context,
+	app model.App,
+	operationID string,
+	scheduling runtime.SchedulingConstraints,
+) error {
+	result := s.waitForManagedAppRolloutResultWithScheduling(ctx, app, operationID, scheduling)
+	return result.Error()
+}
+
+func (s *Service) waitForManagedAppRolloutResultWithScheduling(
+	ctx context.Context,
+	app model.App,
+	operationID string,
+	scheduling runtime.SchedulingConstraints,
+) releaseflow.RolloutReadinessResult {
+	app = s.Renderer.PrepareApp(app)
+	result := releaseflow.RolloutReadinessResult{
+		AppID:              app.ID,
+		OperationID:        operationID,
+		ExpectedReleaseKey: s.expectedManagedAppReleaseKey(app, scheduling),
+		Phase:              "rollout_wait",
+	}
+	err := s.waitForManagedAppRolloutErrorWithScheduling(ctx, app, operationID, scheduling)
+	if err != nil {
+		result.Err = err
+		result.Message = err.Error()
+		result.Phase = rolloutReadinessFailurePhase(err)
+		result.SchedulingReason = rolloutReadinessSchedulingReason(err)
+		result.PodFailureReason = rolloutReadinessPodFailureReason(err)
+		return result
+	}
+	result.Ready = true
+	result.Phase = "ready"
+	result.Message = "managed app rollout ready"
+	return result
+}
+
+func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 	ctx context.Context,
 	app model.App,
 	operationID string,
@@ -173,6 +212,35 @@ func (s *Service) waitForManagedAppRolloutWithScheduling(
 			return err
 		}
 	}
+}
+
+func rolloutReadinessFailurePhase(err error) string {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "pod") || strings.Contains(message, "container") || strings.Contains(message, "image"):
+		return "pod_failure"
+	case strings.Contains(message, "scheduling") || strings.Contains(message, "node"):
+		return "scheduling_blocked"
+	case strings.Contains(message, "backing service"):
+		return "backing_service_wait"
+	default:
+		return "rollout_wait"
+	}
+}
+
+func rolloutReadinessSchedulingReason(err error) string {
+	if strings.Contains(strings.ToLower(err.Error()), "scheduling") {
+		return err.Error()
+	}
+	return ""
+}
+
+func rolloutReadinessPodFailureReason(err error) string {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "pod") || strings.Contains(message, "container") || strings.Contains(message, "image") {
+		return err.Error()
+	}
+	return ""
 }
 
 func (s *Service) managedBackingServiceRolloutTargets(ctx context.Context, app model.App) ([]runtime.ManagedBackingServiceDeployment, error) {

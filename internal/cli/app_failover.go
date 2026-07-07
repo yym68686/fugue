@@ -27,6 +27,7 @@ func (c *CLI) newAppContinuityCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		c.newAppContinuityAuditCommand(),
+		c.newAppContinuityShowCommand(),
 		c.newAppContinuityEnableCommand(),
 		c.newAppContinuityDisableCommand(),
 	)
@@ -104,15 +105,53 @@ func (c *CLI) newAppContinuityAuditCommand() *cobra.Command {
 	}
 }
 
+func (c *CLI) newAppContinuityShowCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <app>",
+		Short: "Show app continuity settings",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			app, err := c.resolveNamedApp(client, args[0])
+			if err != nil {
+				return err
+			}
+			app, err = client.GetApp(app.ID)
+			if err != nil {
+				return err
+			}
+			continuity := model.NormalizeAppContinuityPolicy(app.Spec.Continuity)
+			response := appContinuityResponse{
+				AppFailover:  app.Spec.Failover,
+				ZeroDowntime: nil,
+				Database:     app.Spec.Postgres,
+			}
+			if continuity != nil {
+				response.ZeroDowntime = continuity.ZeroDowntime
+			}
+			return c.renderAppContinuityResult(app.ID, response)
+		},
+	}
+}
+
 func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 	opts := struct {
-		AppRuntimeName string
-		AppRuntimeID   string
-		DBRuntimeName  string
-		DBRuntimeID    string
-		RebalanceNow   bool
-		Wait           bool
-	}{Wait: true}
+		AppRuntimeName        string
+		AppRuntimeID          string
+		DBRuntimeName         string
+		DBRuntimeID           string
+		ZeroDowntimeMode      string
+		Canary                bool
+		InitialCanaryWeight   int
+		MinObservationSeconds int
+		RollbackWindowSeconds int
+		RetireGraceSeconds    int
+		RebalanceNow          bool
+		Wait                  bool
+	}{Wait: true, InitialCanaryWeight: 1, MinObservationSeconds: 60}
 	cmd := &cobra.Command{
 		Use:   "set <app>",
 		Short: "Enable app and/or database continuity targets",
@@ -149,8 +188,34 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 					RebalanceNow:    opts.RebalanceNow,
 				}
 			}
-			if request.AppFailover == nil && request.DatabaseFailover == nil {
-				return fmt.Errorf("at least one of --app-to or --db-to is required")
+			if strings.TrimSpace(opts.ZeroDowntimeMode) != "" {
+				mode := strings.TrimSpace(strings.ToLower(opts.ZeroDowntimeMode))
+				if mode == "drain" || mode == "drain-only" {
+					mode = model.AppZeroDowntimeModeDrainOnly
+				}
+				if mode != model.AppZeroDowntimeModeDrainOnly && mode != model.AppZeroDowntimeModeSafe {
+					return fmt.Errorf("--zero-downtime must be drain_only or safe")
+				}
+				req := &appContinuityZeroDowntimeRequest{
+					Enabled:               true,
+					Mode:                  mode,
+					RollbackWindowSeconds: opts.RollbackWindowSeconds,
+					RetireGraceSeconds:    opts.RetireGraceSeconds,
+				}
+				if mode == model.AppZeroDowntimeModeSafe {
+					req.Strategy = model.AppZeroDowntimeStrategyStableCandidate
+					req.Canary = &model.AppRolloutCanarySpec{
+						Enabled:               opts.Canary,
+						InitialWeight:         opts.InitialCanaryWeight,
+						MaxWeight:             100,
+						StepWeights:           []int{opts.InitialCanaryWeight, 5, 25, 50, 100},
+						MinObservationSeconds: opts.MinObservationSeconds,
+					}
+				}
+				request.ZeroDowntime = req
+			}
+			if request.AppFailover == nil && request.DatabaseFailover == nil && request.ZeroDowntime == nil {
+				return fmt.Errorf("at least one of --app-to, --db-to, or --zero-downtime is required")
 			}
 
 			response, err := client.PatchAppContinuity(app.ID, request)
@@ -167,6 +232,12 @@ func (c *CLI) newAppContinuitySetCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.AppRuntimeID, "app-runtime-id", "", "Target runtime ID for app failover")
 	cmd.Flags().StringVar(&opts.DBRuntimeName, "db-to", "", "Target runtime for database failover")
 	cmd.Flags().StringVar(&opts.DBRuntimeID, "db-runtime-id", "", "Target runtime ID for database failover")
+	cmd.Flags().StringVar(&opts.ZeroDowntimeMode, "zero-downtime", "", "Enable zero downtime policy: drain_only or safe")
+	cmd.Flags().BoolVar(&opts.Canary, "canary", true, "Enable safe rollout candidate canary")
+	cmd.Flags().IntVar(&opts.InitialCanaryWeight, "initial-canary-weight", opts.InitialCanaryWeight, "Initial safe rollout candidate canary weight")
+	cmd.Flags().IntVar(&opts.MinObservationSeconds, "min-observation-seconds", opts.MinObservationSeconds, "Minimum observation seconds per safe rollout canary step")
+	cmd.Flags().IntVar(&opts.RollbackWindowSeconds, "rollback-window-seconds", 0, "Seconds to keep previous stable as rollback target")
+	cmd.Flags().IntVar(&opts.RetireGraceSeconds, "retire-grace-seconds", 0, "Minimum seconds before retiring previous stable")
 	cmd.Flags().BoolVar(&opts.RebalanceNow, "rebalance-now", false, "Clear any pending managed Postgres placement hold when configuring database failover")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	_ = cmd.Flags().MarkHidden("app-runtime-id")
@@ -178,6 +249,7 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 	opts := struct {
 		App          bool
 		DB           bool
+		ZeroDowntime bool
 		RebalanceNow bool
 		Wait         bool
 	}{Wait: true}
@@ -194,8 +266,8 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			disableApp := opts.App || (!opts.App && !opts.DB)
-			disableDB := opts.DB || (!opts.App && !opts.DB)
+			disableApp := opts.App || (!opts.App && !opts.DB && !opts.ZeroDowntime)
+			disableDB := opts.DB || (!opts.App && !opts.DB && !opts.ZeroDowntime)
 			request := patchAppContinuityRequest{}
 			if disableApp {
 				request.AppFailover = &appContinuityAppFailoverRequest{Enabled: false}
@@ -205,6 +277,9 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 					Enabled:      false,
 					RebalanceNow: opts.RebalanceNow,
 				}
+			}
+			if opts.ZeroDowntime {
+				request.ZeroDowntime = &appContinuityZeroDowntimeRequest{Enabled: false}
 			}
 			response, err := client.PatchAppContinuity(app.ID, request)
 			if err != nil {
@@ -218,6 +293,7 @@ func (c *CLI) newAppContinuityOffCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&opts.App, "app", false, "Disable only app failover")
 	cmd.Flags().BoolVar(&opts.DB, "db", false, "Disable only database failover")
+	cmd.Flags().BoolVar(&opts.ZeroDowntime, "zero-downtime", false, "Disable only zero downtime rollout policy")
 	cmd.Flags().BoolVar(&opts.RebalanceNow, "rebalance-now", false, "Clear any pending managed Postgres placement hold while disabling database failover")
 	cmd.Flags().BoolVar(&opts.Wait, "wait", opts.Wait, "Wait for the deploy operation to complete")
 	return cmd
@@ -349,6 +425,7 @@ func (c *CLI) renderAppContinuityResult(appID string, result appContinuityRespon
 		return writeJSON(c.stdout, map[string]any{
 			"app_id":          appID,
 			"app_failover":    result.AppFailover,
+			"zero_downtime":   result.ZeroDowntime,
 			"database":        result.Database,
 			"already_current": result.AlreadyCurrent,
 			"operation":       redactOperationPtrForOutput(result.Operation),
@@ -376,6 +453,21 @@ func (c *CLI) renderAppContinuityResult(appID string, result appContinuityRespon
 		)
 	} else {
 		pairs = append(pairs, kvPair{Key: "database_failover_enabled", Value: "false"})
+	}
+	if result.ZeroDowntime != nil && result.ZeroDowntime.Enabled {
+		pairs = append(pairs,
+			kvPair{Key: "zero_downtime_enabled", Value: "true"},
+			kvPair{Key: "zero_downtime_mode", Value: result.ZeroDowntime.Mode},
+			kvPair{Key: "zero_downtime_strategy", Value: result.ZeroDowntime.Strategy},
+		)
+		if result.ZeroDowntime.Canary != nil {
+			pairs = append(pairs,
+				kvPair{Key: "zero_downtime_canary_enabled", Value: fmt.Sprintf("%t", result.ZeroDowntime.Canary.Enabled)},
+				kvPair{Key: "zero_downtime_initial_weight", Value: fmt.Sprintf("%d", result.ZeroDowntime.Canary.InitialWeight)},
+			)
+		}
+	} else {
+		pairs = append(pairs, kvPair{Key: "zero_downtime_enabled", Value: "false"})
 	}
 	return writeKeyValues(c.stdout, pairs...)
 }

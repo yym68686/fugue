@@ -31,20 +31,31 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 			TargetRuntimeID string `json:"target_runtime_id"`
 			RebalanceNow    bool   `json:"rebalance_now"`
 		} `json:"database_failover"`
+		ZeroDowntime *struct {
+			Enabled               bool                        `json:"enabled"`
+			Mode                  string                      `json:"mode,omitempty"`
+			Strategy              string                      `json:"strategy,omitempty"`
+			Canary                *model.AppRolloutCanarySpec `json:"canary,omitempty"`
+			Gate                  *model.AppReleaseGatePolicy `json:"gate,omitempty"`
+			RollbackWindowSeconds int                         `json:"rollback_window_seconds,omitempty"`
+			RetireGraceSeconds    int                         `json:"retire_grace_seconds,omitempty"`
+		} `json:"zero_downtime"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.AppFailover == nil && req.DatabaseFailover == nil {
-		httpx.WriteError(w, http.StatusBadRequest, "app_failover or database_failover is required")
+	if req.AppFailover == nil && req.DatabaseFailover == nil && req.ZeroDowntime == nil {
+		httpx.WriteError(w, http.StatusBadRequest, "app_failover, database_failover, or zero_downtime is required")
 		return
 	}
 
 	spec := cloneAppSpec(app.Spec)
 	currentAppFailover := cloneAppFailoverSpec(app.Spec.Failover)
+	currentContinuity := model.CloneAppContinuityPolicy(app.Spec.Continuity)
 	currentDatabase := normalizedOwnedManagedPostgresSpec(app)
 	nextAppFailover := cloneAppFailoverSpec(currentAppFailover)
+	nextContinuity := model.CloneAppContinuityPolicy(currentContinuity)
 	nextDatabase := cloneAppPostgresSpec(currentDatabase)
 	changed := false
 
@@ -114,15 +125,57 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 						currentDatabase.SynchronousReplicas > 0
 			}
 		}
+
 		if !reflect.DeepEqual(currentDatabase, nextDatabase) {
 			spec.Postgres = cloneAppPostgresSpec(nextDatabase)
 			changed = true
 		}
 	}
 
+	if req.ZeroDowntime != nil {
+		if req.ZeroDowntime.Enabled {
+			if nextContinuity == nil {
+				nextContinuity = &model.AppContinuityPolicy{}
+			}
+			nextContinuity.ZeroDowntime = &model.AppZeroDowntimePolicy{
+				Enabled:               true,
+				Mode:                  strings.TrimSpace(req.ZeroDowntime.Mode),
+				Strategy:              strings.TrimSpace(req.ZeroDowntime.Strategy),
+				Canary:                req.ZeroDowntime.Canary,
+				Gate:                  req.ZeroDowntime.Gate,
+				RollbackWindowSeconds: req.ZeroDowntime.RollbackWindowSeconds,
+				RetireGraceSeconds:    req.ZeroDowntime.RetireGraceSeconds,
+			}
+			nextContinuity = model.NormalizeAppContinuityPolicy(nextContinuity)
+			if err := model.ValidateAppZeroDowntimePolicy(nextContinuity.ZeroDowntime); err != nil {
+				httpx.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		} else {
+			if nextContinuity != nil {
+				nextContinuity.ZeroDowntime = nil
+				nextContinuity = model.NormalizeAppContinuityPolicy(nextContinuity)
+			}
+		}
+		if !reflect.DeepEqual(currentContinuity, nextContinuity) {
+			spec.Continuity = model.CloneAppContinuityPolicy(nextContinuity)
+			changed = true
+		}
+	}
+
 	response := map[string]any{
 		"app_failover": cloneAppFailoverSpec(nextAppFailover),
-		"database":     sanitizePostgresSpecForContinuityResponse(nextDatabase),
+		"zero_downtime": func() *model.AppZeroDowntimePolicy {
+			if nextContinuity == nil {
+				return nil
+			}
+			continuity := model.CloneAppContinuityPolicy(nextContinuity)
+			if continuity == nil {
+				return nil
+			}
+			return continuity.ZeroDowntime
+		}(),
+		"database": sanitizePostgresSpecForContinuityResponse(nextDatabase),
 	}
 	if !changed {
 		response["already_current"] = true

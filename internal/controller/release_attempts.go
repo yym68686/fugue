@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 )
 
 func (s *Service) createImageTrackingReleaseAttemptBestEffort(app model.App, tracking model.AppImageTracking, op model.Operation, digest, triggerType, summary string) *model.ReleaseAttempt {
@@ -213,6 +214,47 @@ func (s *Service) failReleaseAttemptForOperation(op model.Operation, summary str
 		Summary:          strings.TrimSpace(summary),
 		EvidenceID:       attempt.FailureEvidenceID,
 		FinishedAt:       &now,
+	})
+}
+
+func (s *Service) recordRolloutReadinessResultStep(op model.Operation, app model.App, result releaseflow.RolloutReadinessResult) {
+	if s == nil || s.Store == nil {
+		return
+	}
+	attempt, found, err := s.Store.FindReleaseAttemptForOperation(op.ID)
+	if err != nil || !found {
+		return
+	}
+	now := time.Now().UTC()
+	status := model.ReleaseStepStatusCompleted
+	summary := "managed app rollout ready"
+	if !result.Ready {
+		status = model.ReleaseStepStatusFailed
+		summary = strings.TrimSpace(result.Message)
+		if summary == "" && result.Err != nil {
+			summary = result.Err.Error()
+		}
+		if summary == "" {
+			summary = "managed app rollout failed"
+		}
+	}
+	s.recordReleaseStepBestEffort(model.ReleaseStep{
+		TenantID:         app.TenantID,
+		ReleaseAttemptID: attempt.ID,
+		OperationID:      op.ID,
+		Type:             model.ReleaseStepTypeRolloutWait,
+		Status:           status,
+		Summary:          summary,
+		EvidenceID:       result.EvidenceID,
+		FinishedAt:       &now,
+		Payload: map[string]any{
+			"phase":                result.Phase,
+			"ready":                result.Ready,
+			"expected_release_key": result.ExpectedReleaseKey,
+			"current_release_key":  result.CurrentReleaseKey,
+			"scheduling_reason":    result.SchedulingReason,
+			"pod_failure_reason":   result.PodFailureReason,
+		},
 	})
 }
 

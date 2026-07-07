@@ -787,6 +787,74 @@ func TestBuildAppDeploymentAnnotatesReleaseKey(t *testing.T) {
 	}
 }
 
+func TestBuildAppRevisionObjectsKeepDefaultRenderCompatible(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+
+	defaultObjects := buildAppObjectsWithPlacementsAndOptions(app, SchedulingConstraints{}, nil, defaultRenderOptions())
+	options := defaultRenderOptions()
+	options.Revision = AppRevisionRenderOptions{Role: AppRevisionRoleDefault}
+	revisionObjects := buildAppObjectsWithPlacementsAndOptions(app, SchedulingConstraints{}, nil, options)
+
+	if !reflect.DeepEqual(defaultObjects, revisionObjects) {
+		t.Fatalf("expected default revision render to match existing render")
+	}
+}
+
+func TestBuildAppRevisionObjectsUseIndependentDeploymentAndService(t *testing.T) {
+	app := model.App{
+		ID:        "app_demo",
+		TenantID:  "tenant_demo",
+		ProjectID: "project_demo",
+		Name:      "demo",
+		Spec: model.AppSpec{
+			Image:     "ghcr.io/example/demo:v1",
+			Ports:     []int{8080},
+			Replicas:  1,
+			RuntimeID: "runtime_demo",
+		},
+	}
+	options := defaultRenderOptions()
+	options.Revision = AppRevisionRenderOptions{Role: AppRevisionRoleCandidate, ReleaseID: "apprel_candidate"}
+
+	objects := buildAppObjectsWithPlacementsAndOptions(app, SchedulingConstraints{}, nil, options)
+	deployment := firstObjectByKind(t, objects, "Deployment")
+	service := firstObjectByKind(t, objects, "Service")
+	deploymentMetadata := deployment["metadata"].(map[string]any)
+	serviceMetadata := service["metadata"].(map[string]any)
+	if got := deploymentMetadata["name"]; got != "app-demo-candidate" {
+		t.Fatalf("expected candidate deployment name, got %#v", got)
+	}
+	if got := serviceMetadata["name"]; got != "app-demo-candidate" {
+		t.Fatalf("expected candidate service name, got %#v", got)
+	}
+	deploymentLabels := deploymentMetadata["labels"].(map[string]string)
+	if got := deploymentLabels[FugueLabelAppReleaseRole]; got != AppRevisionRoleCandidate {
+		t.Fatalf("expected candidate release role label, got %#v", got)
+	}
+	if got := deploymentLabels[FugueLabelAppReleaseID]; got != "apprel_candidate" {
+		t.Fatalf("expected release id label, got %#v", got)
+	}
+	selector := deployment["spec"].(map[string]any)["selector"].(map[string]any)["matchLabels"].(map[string]string)
+	if got := selector[FugueLabelAppReleaseRole]; got != AppRevisionRoleCandidate {
+		t.Fatalf("expected candidate selector label, got %#v", got)
+	}
+	serviceSelector := service["spec"].(map[string]any)["selector"].(map[string]string)
+	if got := serviceSelector[FugueLabelAppReleaseID]; got != "apprel_candidate" {
+		t.Fatalf("expected service selector release id, got %#v", got)
+	}
+}
+
 func TestManagedPostgresFailoverPlacementDoesNotChangeAppPodTemplate(t *testing.T) {
 	app := model.App{
 		ID:        "app_demo",

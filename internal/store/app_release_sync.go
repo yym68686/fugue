@@ -21,7 +21,7 @@ func syncStableReleaseForCompletedDeployInState(state *model.State, app model.Ap
 		return nil
 	}
 	policy := state.AppTrafficPolicies[policyIndex]
-	if !trafficPolicyAllowsStableReleaseAutoSync(policy) {
+	if !trafficPolicyAllowsStableReleaseAutoSync(app, policy) {
 		return nil
 	}
 
@@ -69,7 +69,10 @@ func shouldSyncStableReleaseForCompletedDeploy(app model.App, op model.Operation
 	return model.AppExposesPublicService(app.Spec)
 }
 
-func trafficPolicyAllowsStableReleaseAutoSync(policy model.AppTrafficPolicy) bool {
+func trafficPolicyAllowsStableReleaseAutoSync(app model.App, policy model.AppTrafficPolicy) bool {
+	if model.AppSafeZeroDowntimeRolloutEnabled(app.Spec) {
+		return false
+	}
 	return policy.CandidateWeight == 0
 }
 

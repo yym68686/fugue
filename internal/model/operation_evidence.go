@@ -230,6 +230,10 @@ type OperationDebugBundle struct {
 	Evidence            []OperationEvidence      `json:"evidence"`
 	ReleaseAttempt      *ReleaseAttempt          `json:"release_attempt,omitempty"`
 	ReleaseTimeline     []ReleaseTimelineEntry   `json:"release_timeline,omitempty"`
+	AppReleases         []AppRelease             `json:"app_releases,omitempty"`
+	TrafficPolicies     []AppTrafficPolicy       `json:"traffic_policies,omitempty"`
+	GateResults         []AppReleaseGateResult   `json:"gate_results,omitempty"`
+	DrainMetricsSummary map[string]any           `json:"drain_metrics_summary,omitempty"`
 	RedactionReport     []map[string]any         `json:"redaction_report,omitempty"`
 }
 
@@ -242,5 +246,9 @@ type ReleaseDebugBundle struct {
 	MetricsSummary      map[string]any          `json:"metrics_summary,omitempty"`
 	ReleaseTimeline     []ReleaseTimelineEntry  `json:"release_timeline"`
 	Evidence            []OperationEvidence     `json:"evidence"`
+	AppReleases         []AppRelease            `json:"app_releases,omitempty"`
+	TrafficPolicies     []AppTrafficPolicy      `json:"traffic_policies,omitempty"`
+	GateResults         []AppReleaseGateResult  `json:"gate_results,omitempty"`
+	DrainMetricsSummary map[string]any          `json:"drain_metrics_summary,omitempty"`
 	RedactionReport     []map[string]any        `json:"redaction_report,omitempty"`
 }

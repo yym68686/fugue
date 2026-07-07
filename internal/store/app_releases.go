@@ -228,6 +228,8 @@ func NormalizeAppReleaseStatus(status string) string {
 		return model.AppReleaseStatusReady
 	case model.AppReleaseStatusServing:
 		return model.AppReleaseStatusServing
+	case model.AppReleaseStatusDraining:
+		return model.AppReleaseStatusDraining
 	case model.AppReleaseStatusFailed:
 		return model.AppReleaseStatusFailed
 	case model.AppReleaseStatusRetired:

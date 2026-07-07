@@ -30,6 +30,7 @@ type StrictDrainConfig struct {
 
 type RenderOptions struct {
 	StrictDrain StrictDrainConfig
+	Revision    AppRevisionRenderOptions
 }
 
 func DefaultStrictDrainConfig() StrictDrainConfig {
@@ -133,6 +134,7 @@ func defaultRenderOptions() RenderOptions {
 
 func normalizeRenderOptions(options RenderOptions) RenderOptions {
 	options.StrictDrain = options.StrictDrain.Normalize()
+	options.Revision = NormalizeAppRevisionRenderOptions(options.Revision)
 	return options
 }
 

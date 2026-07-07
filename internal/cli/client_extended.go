@@ -135,16 +135,28 @@ type appContinuityDatabaseFailoverRequest struct {
 	RebalanceNow    bool   `json:"rebalance_now,omitempty"`
 }
 
+type appContinuityZeroDowntimeRequest struct {
+	Enabled               bool                        `json:"enabled"`
+	Mode                  string                      `json:"mode,omitempty"`
+	Strategy              string                      `json:"strategy,omitempty"`
+	Canary                *model.AppRolloutCanarySpec `json:"canary,omitempty"`
+	Gate                  *model.AppReleaseGatePolicy `json:"gate,omitempty"`
+	RollbackWindowSeconds int                         `json:"rollback_window_seconds,omitempty"`
+	RetireGraceSeconds    int                         `json:"retire_grace_seconds,omitempty"`
+}
+
 type patchAppContinuityRequest struct {
 	AppFailover      *appContinuityAppFailoverRequest      `json:"app_failover,omitempty"`
 	DatabaseFailover *appContinuityDatabaseFailoverRequest `json:"database_failover,omitempty"`
+	ZeroDowntime     *appContinuityZeroDowntimeRequest     `json:"zero_downtime,omitempty"`
 }
 
 type appContinuityResponse struct {
-	AppFailover    *model.AppFailoverSpec `json:"app_failover,omitempty"`
-	Database       *model.AppPostgresSpec `json:"database,omitempty"`
-	AlreadyCurrent bool                   `json:"already_current,omitempty"`
-	Operation      *model.Operation       `json:"operation,omitempty"`
+	AppFailover    *model.AppFailoverSpec       `json:"app_failover,omitempty"`
+	ZeroDowntime   *model.AppZeroDowntimePolicy `json:"zero_downtime,omitempty"`
+	Database       *model.AppPostgresSpec       `json:"database,omitempty"`
+	AlreadyCurrent bool                         `json:"already_current,omitempty"`
+	Operation      *model.Operation             `json:"operation,omitempty"`
 }
 
 type projectImageUsageAppSummary struct {

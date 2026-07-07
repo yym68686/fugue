@@ -343,6 +343,7 @@ func cloneManagedAppSpec(spec model.AppSpec) model.AppSpec {
 		failover := *spec.Failover
 		out.Failover = &failover
 	}
+	out.Continuity = model.CloneAppContinuityPolicy(spec.Continuity)
 	if spec.Postgres != nil {
 		postgres := *spec.Postgres
 		out.Postgres = &postgres

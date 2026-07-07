@@ -221,6 +221,11 @@ func normalizeAppSpecResources(spec *model.AppSpec) error {
 	if spec.RightSizing != nil && strings.TrimSpace(spec.RightSizing.Mode) != "" && model.NormalizeAppRightSizingMode(spec.RightSizing.Mode) == "" {
 		return ErrInvalidInput
 	}
+	if spec.Continuity != nil {
+		if err := model.ValidateAppZeroDowntimePolicy(spec.Continuity.ZeroDowntime); err != nil {
+			return err
+		}
+	}
 	model.ApplyAppSpecDefaults(spec)
 	if model.NormalizeWorkloadClass(spec.WorkloadClass) == "" {
 		return ErrInvalidInput

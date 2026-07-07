@@ -26,7 +26,7 @@ FOR UPDATE
 	if err != nil {
 		return mapDBErr(err)
 	}
-	if !trafficPolicyAllowsStableReleaseAutoSync(policy) {
+	if !trafficPolicyAllowsStableReleaseAutoSync(app, policy) {
 		return nil
 	}
 

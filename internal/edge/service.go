@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +32,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	"fugue/internal/tcpdiag"
 )
 
@@ -758,31 +758,27 @@ func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBindi
 		return route, model.EdgeRouteUpstream{}
 	}
 	candidates := make([]model.EdgeRouteUpstream, 0, len(route.Upstreams))
-	total := 0
+	weighted := make([]releaseflow.WeightedCandidate, 0, len(route.Upstreams))
 	for _, upstream := range route.Upstreams {
-		if strings.TrimSpace(upstream.UpstreamURL) == "" || upstream.Weight <= 0 {
-			continue
-		}
-		if status := strings.TrimSpace(upstream.Status); status != "" && !strings.EqualFold(status, model.EdgeRouteStatusActive) {
-			continue
-		}
 		candidates = append(candidates, upstream)
-		total += upstream.Weight
+		active := strings.TrimSpace(upstream.UpstreamURL) != "" &&
+			upstream.Weight > 0 &&
+			(strings.TrimSpace(upstream.Status) == "" || strings.EqualFold(strings.TrimSpace(upstream.Status), model.EdgeRouteStatusActive))
+		weighted = append(weighted, releaseflow.WeightedCandidate{
+			ID:     firstNonEmpty(upstream.ReleaseID, upstream.Role, upstream.UpstreamURL),
+			Weight: upstream.Weight,
+			Active: active,
+		})
 	}
-	if len(candidates) == 0 || total <= 0 {
+	if len(candidates) == 0 {
 		return route, model.EdgeRouteUpstream{}
 	}
 	stickinessKey := weightedReleaseStickinessKey(r, host, route, traceID, edgeRequestID)
-	bucket := weightedReleaseBucket(stickinessKey, total)
-	running := 0
-	selected := candidates[len(candidates)-1]
-	for _, upstream := range candidates {
-		running += upstream.Weight
-		if bucket < running {
-			selected = upstream
-			break
-		}
+	selection, ok := releaseflow.SelectWeighted(weighted, stickinessKey)
+	if !ok || selection.Index < 0 || selection.Index >= len(candidates) {
+		return route, model.EdgeRouteUpstream{}
 	}
+	selected := candidates[selection.Index]
 	route.UpstreamURL = selected.UpstreamURL
 	route.UpstreamKind = firstNonEmpty(selected.UpstreamKind, route.UpstreamKind)
 	route.UpstreamScope = firstNonEmpty(selected.UpstreamScope, route.UpstreamScope)
@@ -820,11 +816,7 @@ func weightedReleaseStickinessKey(r *http.Request, host string, route model.Edge
 }
 
 func weightedReleaseBucket(key string, total int) int {
-	if total <= 0 {
-		return 0
-	}
-	sum := sha256.Sum256([]byte(key))
-	return int(binary.BigEndian.Uint64(sum[:8]) % uint64(total))
+	return releaseflow.WeightedBucket(key, total)
 }
 
 func (s *Service) hasBundle() bool {

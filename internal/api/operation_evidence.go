@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	fuguestore "fugue/internal/store"
 )
 
@@ -114,14 +115,14 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 	}
 	trackingPtr, trackingChecks := s.appImageTrackingDebugBundleState(principal, appPtr)
 	metricsSummary := s.debugBundleMetricsSummary()
-	bundle := model.OperationDebugBundle{
+	view := releaseflow.ReleaseEvidenceView{
 		Metadata: map[string]any{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
 			"kind":         "operation_debug_bundle",
 			"operation_id": op.ID,
 			"redacted":     true,
 		},
-		Operation:           op,
+		Operation:           &op,
 		App:                 appPtr,
 		ImageTracking:       trackingPtr,
 		ImageTrackingChecks: trackingChecks,
@@ -129,23 +130,22 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		Diagnosis:           diagnosisPtr,
 		Timeline:            timeline,
 		Evidence:            evidence,
-		RedactionReport: []map[string]any{{
-			"status": "redacted",
-			"note":   "operation evidence payloads are stored after server-side redaction",
-		}},
 	}
 	for _, item := range evidence {
 		if strings.TrimSpace(item.ReleaseAttemptID) == "" {
 			continue
 		}
 		if attempt, err := s.store.GetReleaseAttempt(item.ReleaseAttemptID); err == nil {
-			bundle.ReleaseAttempt = &attempt
+			view.ReleaseAttempt = &attempt
 			if releaseTimeline, err := s.store.ListReleaseTimeline(principal.TenantID, principal.IsPlatformAdmin(), attempt.ID); err == nil {
-				bundle.ReleaseTimeline = releaseTimeline
+				view.ReleaseTimeline = releaseTimeline
+				view.GateResults = releaseflow.GateResultsFromReleaseTimeline(releaseTimeline)
 			}
+			view.AppReleases, view.TrafficPolicies = s.releaseDebugSections(principal, attempt.AppID)
 		}
 		break
 	}
+	bundle := releaseflow.ReleaseEvidenceViewBuilder{}.OperationBundle(view)
 	return bundle, nil
 }
 
@@ -249,30 +249,48 @@ func (s *Server) handleGetAppReleaseAttemptDebugBundle(w http.ResponseWriter, r 
 	}
 	trackingPtr, trackingChecks := s.appImageTrackingDebugBundleState(principal, appPtr)
 	metricsSummary := s.debugBundleMetricsSummary()
-	bundle := model.ReleaseDebugBundle{
+	appReleases, trafficPolicies := s.releaseDebugSections(principal, attempt.AppID)
+	view := releaseflow.ReleaseEvidenceView{
 		Metadata: map[string]any{
 			"generated_at":       time.Now().UTC().Format(time.RFC3339),
 			"kind":               "release_debug_bundle",
 			"release_attempt_id": attempt.ID,
 			"redacted":           true,
 		},
-		ReleaseAttempt:      attempt,
+		ReleaseAttempt:      &attempt,
 		App:                 appPtr,
 		ImageTracking:       trackingPtr,
 		ImageTrackingChecks: trackingChecks,
 		MetricsSummary:      metricsSummary,
 		ReleaseTimeline:     timeline,
 		Evidence:            evidence,
-		RedactionReport: []map[string]any{{
-			"status": "redacted",
-			"note":   "release evidence payloads are stored after server-side redaction",
-		}},
+		AppReleases:         appReleases,
+		TrafficPolicies:     trafficPolicies,
+		GateResults:         releaseflow.GateResultsFromReleaseTimeline(timeline),
 	}
+	bundle := releaseflow.ReleaseEvidenceViewBuilder{}.ReleaseBundle(view)
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "zip") {
 		writeDebugBundleZip(w, "release-debug-bundle.json", bundle)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"bundle": bundle})
+}
+
+func (s *Server) releaseDebugSections(principal model.Principal, appID string) ([]model.AppRelease, []model.AppTrafficPolicy) {
+	appReleases, err := s.store.ListAppReleases(model.AppReleaseFilter{
+		TenantID:       principal.TenantID,
+		PlatformAdmin:  principal.IsPlatformAdmin(),
+		AppID:          appID,
+		IncludeRetired: true,
+	})
+	if err != nil {
+		appReleases = nil
+	}
+	policies := []model.AppTrafficPolicy{}
+	if policy, err := s.store.GetAppTrafficPolicy(principal.TenantID, principal.IsPlatformAdmin(), appID); err == nil {
+		policies = append(policies, policy)
+	}
+	return appReleases, policies
 }
 
 func (s *Server) debugBundleMetricsSummary() map[string]any {

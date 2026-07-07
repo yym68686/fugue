@@ -184,6 +184,7 @@ func cloneAppSpec(spec model.AppSpec) model.AppSpec {
 		failover := *spec.Failover
 		out.Failover = &failover
 	}
+	out.Continuity = model.CloneAppContinuityPolicy(spec.Continuity)
 	if spec.Resources != nil {
 		resources := *spec.Resources
 		out.Resources = &resources

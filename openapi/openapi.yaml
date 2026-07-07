@@ -13870,6 +13870,64 @@ components:
           type: string
         auto:
           type: boolean
+    AppContinuityPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        zero_downtime:
+          $ref: "#/components/schemas/AppZeroDowntimePolicy"
+    AppZeroDowntimePolicy:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        mode:
+          type: string
+          enum: [drain_only, safe]
+        strategy:
+          type: string
+          enum: [stable_candidate]
+        canary:
+          $ref: "#/components/schemas/AppRolloutCanarySpec"
+        gate:
+          $ref: "#/components/schemas/AppReleaseGatePolicy"
+        rollback_window_seconds:
+          type: integer
+          format: int32
+          minimum: 0
+        retire_grace_seconds:
+          type: integer
+          format: int32
+          minimum: 0
+    AppRolloutCanarySpec:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        initial_weight:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+        max_weight:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+        step_weights:
+          type: array
+          items:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+        min_observation_seconds:
+          type: integer
+          format: int32
+          minimum: 0
     AppPostgresSpec:
       type: object
       additionalProperties: false
@@ -14089,6 +14147,8 @@ components:
           $ref: "#/components/schemas/AppPostgresSpec"
         failover:
           $ref: "#/components/schemas/AppFailoverSpec"
+        continuity:
+          $ref: "#/components/schemas/AppContinuityPolicy"
         image_mirror_limit:
           type: integer
           format: int32
@@ -15629,6 +15689,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ReleaseTimelineEntry"
+        app_releases:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRelease"
+        traffic_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppTrafficPolicy"
+        gate_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseGateResult"
+        drain_metrics_summary:
+          type: object
+          additionalProperties: true
         redaction_report:
           type: array
           items:
@@ -15663,6 +15738,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/OperationEvidence"
+        app_releases:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRelease"
+        traffic_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppTrafficPolicy"
+        gate_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseGateResult"
+        drain_metrics_summary:
+          type: object
+          additionalProperties: true
         redaction_report:
           type: array
           items:
@@ -15767,6 +15857,8 @@ components:
           $ref: "#/components/schemas/AppContinuityAppFailoverRequest"
         database_failover:
           $ref: "#/components/schemas/AppContinuityDatabaseFailoverRequest"
+        zero_downtime:
+          $ref: "#/components/schemas/AppZeroDowntimePolicy"
     AuditEvent:
       type: object
       additionalProperties: false
@@ -16690,7 +16782,7 @@ components:
           type: string
         status:
           type: string
-          enum: [creating, ready, serving, failed, retired]
+          enum: [creating, ready, serving, draining, failed, retired]
         status_reason:
           type: string
         spec_snapshot:
@@ -21362,6 +21454,8 @@ components:
       properties:
         app_failover:
           $ref: "#/components/schemas/AppFailoverSpec"
+        zero_downtime:
+          $ref: "#/components/schemas/AppZeroDowntimePolicy"
         database:
           $ref: "#/components/schemas/AppPostgresSpec"
         already_current:

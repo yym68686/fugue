@@ -252,3 +252,66 @@ func TestCompletedDeployDoesNotOverrideActiveCanaryTraffic(t *testing.T) {
 		t.Fatalf("expected active canary policy to remain unchanged, got %+v", policy)
 	}
 }
+
+func TestCompletedDeployDoesNotAutoSyncStableReleaseForSafeZeroDowntimeApp(t *testing.T) {
+	t.Parallel()
+
+	s, tenant, _, app := newAppImageTrackingTestStore(t)
+	oldStable, err := s.CreateAppRelease(model.AppRelease{
+		TenantID:    tenant.ID,
+		AppID:       app.ID,
+		Role:        model.AppReleaseRoleStable,
+		UpstreamURL: "http://stable.internal:8080",
+		RuntimeID:   app.Spec.RuntimeID,
+		Status:      model.AppReleaseStatusServing,
+	})
+	if err != nil {
+		t.Fatalf("create stable release: %v", err)
+	}
+	if _, err := s.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
+		TenantID:        tenant.ID,
+		AppID:           app.ID,
+		Mode:            model.AppTrafficModeSingle,
+		StableReleaseID: oldStable.ID,
+		StableWeight:    100,
+		CandidateWeight: 0,
+	}); err != nil {
+		t.Fatalf("upsert traffic policy: %v", err)
+	}
+
+	nextSpec := app.Spec
+	nextSpec.Image = "registry.example/app:new"
+	nextSpec.Continuity = &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
+		Enabled:  true,
+		Mode:     model.AppZeroDowntimeModeSafe,
+		Strategy: model.AppZeroDowntimeStrategyStableCandidate,
+	}}
+	deployOp, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         app.ID,
+		DesiredSpec:   &nextSpec,
+		ExecutionMode: model.ExecutionModeManaged,
+	})
+	if err != nil {
+		t.Fatalf("create deploy operation: %v", err)
+	}
+	if _, err := s.CompleteManagedOperationWithResult(deployOp.ID, "/tmp/app.yaml", "deployed", &nextSpec, nil); err != nil {
+		t.Fatalf("complete deploy operation: %v", err)
+	}
+
+	policy, err := s.GetAppTrafficPolicy(tenant.ID, false, app.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != oldStable.ID || policy.Mode != model.AppTrafficModeSingle || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected safe mode to preserve existing stable traffic policy, got %+v", policy)
+	}
+	releases, err := s.ListAppReleases(model.AppReleaseFilter{TenantID: tenant.ID, AppID: app.ID, IncludeRetired: true})
+	if err != nil {
+		t.Fatalf("list releases: %v", err)
+	}
+	if len(releases) != 1 {
+		t.Fatalf("expected no implicit stable sync release for safe mode, got %+v", releases)
+	}
+}

@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/releaseflow"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
@@ -506,108 +507,19 @@ func edgeRoutePolicyByHostname(policies []model.EdgeRoutePolicy) map[string]mode
 }
 
 func appReleaseByID(releases []model.AppRelease) map[string]model.AppRelease {
-	out := make(map[string]model.AppRelease, len(releases))
-	for _, release := range releases {
-		if id := strings.TrimSpace(release.ID); id != "" {
-			out[id] = release
-		}
-	}
-	return out
+	return releaseflow.AppReleaseByID(releases)
 }
 
 func appTrafficPolicyByApp(policies []model.AppTrafficPolicy) map[string]model.AppTrafficPolicy {
-	out := make(map[string]model.AppTrafficPolicy, len(policies))
-	for _, policy := range policies {
-		if appID := strings.TrimSpace(policy.AppID); appID != "" {
-			out[appID] = policy
-		}
-	}
-	return out
+	return releaseflow.AppTrafficPolicyByApp(policies)
 }
 
 func applyAppReleaseTraffic(binding model.EdgeRouteBinding, policies map[string]model.AppTrafficPolicy, releases map[string]model.AppRelease) model.EdgeRouteBinding {
-	policy, ok := policies[strings.TrimSpace(binding.AppID)]
-	if !ok || strings.TrimSpace(policy.StableReleaseID) == "" {
-		return binding
-	}
-	if !strings.EqualFold(strings.TrimSpace(binding.Status), model.EdgeRouteStatusActive) || strings.TrimSpace(binding.UpstreamURL) == "" {
-		return binding
-	}
-	stableRelease, ok := releases[strings.TrimSpace(policy.StableReleaseID)]
-	if !ok || strings.TrimSpace(stableRelease.AppID) != strings.TrimSpace(binding.AppID) {
-		return binding
-	}
-	stableWeight := policy.StableWeight
-	candidateWeight := policy.CandidateWeight
-	if policy.Mode == model.AppTrafficModeSingle || policy.Mode == model.AppTrafficModePaused {
-		stableWeight = 100
-		candidateWeight = 0
-	}
-
-	upstreams := []model.EdgeRouteUpstream{}
-	stableURL := firstNonEmpty(stableRelease.UpstreamURL, binding.UpstreamURL)
-	if stableWeight > 0 || candidateWeight == 0 {
-		upstreams = append(upstreams, model.EdgeRouteUpstream{
-			Role:                 model.AppReleaseRoleStable,
-			ReleaseID:            stableRelease.ID,
-			Weight:               stableWeight,
-			UpstreamKind:         firstNonEmpty(binding.UpstreamKind, model.EdgeRouteUpstreamKindKubernetesService),
-			UpstreamScope:        binding.UpstreamScope,
-			UpstreamURL:          stableURL,
-			ServicePort:          binding.ServicePort,
-			RuntimeID:            firstNonEmpty(stableRelease.RuntimeID, binding.RuntimeID),
-			DeploymentGeneration: firstNonEmpty(stableRelease.ResolvedImageRef, stableRelease.SourceRef, binding.DeploymentGeneration),
-			Status:               model.EdgeRouteStatusActive,
-		})
-	}
-
-	if candidateID := strings.TrimSpace(policy.CandidateReleaseID); candidateID != "" {
-		if candidate, ok := releases[candidateID]; ok && strings.TrimSpace(candidate.AppID) == strings.TrimSpace(binding.AppID) {
-			candidateStatus := model.EdgeRouteStatusActive
-			statusReason := strings.TrimSpace(candidate.StatusReason)
-			if !appReleaseCanReceiveEdgeTraffic(candidate) || strings.TrimSpace(candidate.UpstreamURL) == "" {
-				candidateStatus = model.EdgeRouteStatusUnavailable
-				if statusReason == "" {
-					statusReason = "candidate release is not ready for edge traffic"
-				}
-				candidateWeight = 0
-				if stableWeight < 100 {
-					stableWeight = 100
-				}
-			}
-			upstreams = append(upstreams, model.EdgeRouteUpstream{
-				Role:                 model.AppReleaseRoleCandidate,
-				ReleaseID:            candidate.ID,
-				Weight:               candidateWeight,
-				UpstreamKind:         firstNonEmpty(binding.UpstreamKind, model.EdgeRouteUpstreamKindKubernetesService),
-				UpstreamScope:        binding.UpstreamScope,
-				UpstreamURL:          candidate.UpstreamURL,
-				ServicePort:          binding.ServicePort,
-				RuntimeID:            firstNonEmpty(candidate.RuntimeID, binding.RuntimeID),
-				DeploymentGeneration: firstNonEmpty(candidate.ResolvedImageRef, candidate.SourceRef),
-				Status:               candidateStatus,
-				StatusReason:         statusReason,
-			})
-		}
-	}
-	if len(upstreams) == 0 {
-		return binding
-	}
-	if upstreams[0].Role == model.AppReleaseRoleStable {
-		upstreams[0].Weight = stableWeight
-	}
-	binding.Upstreams = upstreams
-	binding.RouteGeneration = edgeRouteGeneration(binding)
-	return binding
+	return releaseflow.ApplyAppReleaseTraffic(binding, policies, releases)
 }
 
 func appReleaseCanReceiveEdgeTraffic(release model.AppRelease) bool {
-	switch strings.TrimSpace(release.Status) {
-	case model.AppReleaseStatusReady, model.AppReleaseStatusServing:
-		return true
-	default:
-		return false
-	}
+	return releaseflow.AppReleaseCanReceiveEdgeTraffic(release)
 }
 
 func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string, now time.Time) model.EdgeRouteBinding {
@@ -1238,9 +1150,7 @@ func edgeRouteSlug(value string) string {
 }
 
 func edgeRouteGeneration(binding model.EdgeRouteBinding) string {
-	payload, _ := json.Marshal(edgeRouteVersionMaterialFromBinding(binding))
-	sum := sha256.Sum256(payload)
-	return "routegen_" + hex.EncodeToString(sum[:])[:16]
+	return releaseflow.EdgeRouteGeneration(binding)
 }
 
 type edgeRouteVersionMaterial struct {
