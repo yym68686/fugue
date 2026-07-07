@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 type safeRolloutState struct {
@@ -50,12 +52,9 @@ func (s *Service) prepareSafeZeroDowntimeRollout(ctx context.Context, op model.O
 		ActorID:   "safe-rollout-controller",
 	}
 	service := s.appReleaseService()
-	stable, err := service.EnsureStableRelease(ctx, previous)
+	stable, err := s.ensureSafeRolloutCanonicalStableBaseline(ctx, op, previous, principal)
 	if err != nil {
-		return nil, fmt.Errorf("ensure stable release before safe rollout: %w", err)
-	}
-	if _, err := service.EnsureStableTrafficPolicy(ctx, principal, previous); err != nil {
-		return nil, fmt.Errorf("ensure stable traffic policy before safe rollout: %w", err)
+		return nil, fmt.Errorf("ensure canonical stable release before safe rollout: %w", err)
 	}
 	scheduling := runtime.SchedulingConstraints{}
 	if len(schedulingValues) > 0 {
@@ -272,6 +271,201 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	return nil
 }
 
+func (s *Service) alignSafeRolloutPromotedStableRelease(ctx context.Context, op model.Operation, state *safeRolloutState) (bool, error) {
+	if state == nil || !state.Enabled || !state.StableAlignmentAllowed {
+		return true, nil
+	}
+	latest, err := s.Store.GetAppRelease(state.CandidateApp.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		return false, fmt.Errorf("read promoted safe rollout release: %w", err)
+	}
+	since := time.Now().UTC()
+	aligned := s.safeRolloutApplyCanonicalStableFields(ctx, state.CandidateApp, latest, "safe rollout promoted stable aligned to canonical service")
+	aligned.Role = model.AppReleaseRoleStable
+	aligned.Status = model.AppReleaseStatusServing
+	aligned.StatusReason = ""
+	updated, err := s.Store.UpdateAppRelease(aligned)
+	if err != nil {
+		return false, fmt.Errorf("align promoted safe rollout release to canonical stable service: %w", err)
+	}
+	state.Candidate = updated
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_alignment", model.ReleaseStepStatusCompleted, "promoted stable release points to canonical service", updated.ID, map[string]any{
+		"upstream_url":      updated.UpstreamURL,
+		"deployment_name":   updated.DeploymentName,
+		"service_name":      updated.ServiceName,
+		"stable_release_id": updated.ID,
+	})
+	if !s.waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx, op, state, since) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (s *Service) ensureSafeRolloutCanonicalStableBaseline(ctx context.Context, op model.Operation, app model.App, principal model.Principal) (model.AppRelease, error) {
+	if s == nil || s.Store == nil {
+		return model.AppRelease{}, fmt.Errorf("app release store is nil")
+	}
+	releases, err := s.Store.ListAppReleases(model.AppReleaseFilter{
+		TenantID:      app.TenantID,
+		AppID:         app.ID,
+		ActiveOnly:    true,
+		PlatformAdmin: true,
+	})
+	if err != nil {
+		return model.AppRelease{}, err
+	}
+	policy, policyFound, err := s.safeRolloutTrafficPolicyForApp(app, principal)
+	if err != nil {
+		return model.AppRelease{}, err
+	}
+
+	stable, found := safeRolloutSelectStableBaselineRelease(releases, policy, policyFound)
+	if !found {
+		stable = s.safeRolloutNewCanonicalStableRelease(ctx, app)
+		created, err := s.Store.CreateAppRelease(stable)
+		if err != nil {
+			return model.AppRelease{}, err
+		}
+		stable = created
+	} else {
+		aligned := s.safeRolloutApplyCanonicalStableFields(ctx, app, stable, "safe rollout canonical stable baseline")
+		updated, err := s.Store.UpdateAppRelease(aligned)
+		if err != nil {
+			return model.AppRelease{}, err
+		}
+		stable = updated
+	}
+
+	for _, release := range releases {
+		if release.ID == stable.ID || release.Role != model.AppReleaseRoleStable {
+			continue
+		}
+		release.Role = model.AppReleaseRolePrevious
+		release.Status = model.AppReleaseStatusDraining
+		release.StatusReason = "superseded by canonical safe rollout stable baseline " + stable.ID
+		release.ReleaseMessage = "previous stable kept draining as rollback target"
+		_, _ = s.Store.UpdateAppRelease(release)
+	}
+
+	policy = safeRolloutCanonicalStableTrafficPolicy(policy, policyFound, app, principal, stable.ID)
+	if _, err := s.Store.UpsertAppTrafficPolicy(policy); err != nil {
+		return model.AppRelease{}, err
+	}
+	s.recordSafeRolloutReleaseStep(op, app, "stable_baseline", model.ReleaseStepStatusCompleted, "canonical stable release ready before safe rollout", stable.ID, map[string]any{
+		"stable_release_id": stable.ID,
+		"upstream_url":      stable.UpstreamURL,
+		"deployment_name":   stable.DeploymentName,
+		"service_name":      stable.ServiceName,
+	})
+	return stable, nil
+}
+
+func (s *Service) safeRolloutTrafficPolicyForApp(app model.App, principal model.Principal) (model.AppTrafficPolicy, bool, error) {
+	policy, err := s.Store.GetAppTrafficPolicy(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	if err == nil {
+		return policy, true, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return model.AppTrafficPolicy{}, false, nil
+	}
+	return model.AppTrafficPolicy{}, false, err
+}
+
+func safeRolloutSelectStableBaselineRelease(releases []model.AppRelease, policy model.AppTrafficPolicy, policyFound bool) (model.AppRelease, bool) {
+	if policyFound && strings.TrimSpace(policy.StableReleaseID) != "" {
+		for _, release := range releases {
+			if release.ID == strings.TrimSpace(policy.StableReleaseID) && release.AppID == policy.AppID {
+				return release, true
+			}
+		}
+	}
+	for _, release := range releases {
+		if release.Role == model.AppReleaseRoleStable {
+			return release, true
+		}
+	}
+	for _, release := range releases {
+		if release.Role == model.AppReleaseRolePrevious {
+			return release, true
+		}
+	}
+	return model.AppRelease{}, false
+}
+
+func safeRolloutCanonicalStableTrafficPolicy(policy model.AppTrafficPolicy, policyFound bool, app model.App, principal model.Principal, stableReleaseID string) model.AppTrafficPolicy {
+	if !policyFound {
+		policy = model.AppTrafficPolicy{
+			TenantID:      app.TenantID,
+			AppID:         app.ID,
+			StickyCookie:  "Fugue-Release-Stickiness",
+			UpdatedByType: principal.ActorType,
+			UpdatedByID:   principal.ActorID,
+		}
+	}
+	policy.Mode = model.AppTrafficModeSingle
+	policy.StableReleaseID = strings.TrimSpace(stableReleaseID)
+	policy.CandidateReleaseID = ""
+	policy.StableWeight = 100
+	policy.CandidateWeight = 0
+	policy.UpdatedByType = principal.ActorType
+	policy.UpdatedByID = principal.ActorID
+	if strings.TrimSpace(policy.StickyCookie) == "" {
+		policy.StickyCookie = "Fugue-Release-Stickiness"
+	}
+	return policy
+}
+
+func (s *Service) safeRolloutNewCanonicalStableRelease(ctx context.Context, app model.App) model.AppRelease {
+	now := time.Now().UTC()
+	status := model.AppReleaseStatusReady
+	if app.Status.CurrentReplicas <= 0 {
+		status = model.AppReleaseStatusCreating
+	}
+	spec := cloneControllerAppSpec(&app.Spec)
+	release := model.AppRelease{
+		TenantID:         app.TenantID,
+		AppID:            app.ID,
+		Role:             model.AppReleaseRoleStable,
+		SourceRef:        releaseflow.AppReleaseSourceRef(app),
+		ResolvedImageRef: strings.TrimSpace(app.Spec.Image),
+		RuntimeID:        strings.TrimSpace(app.Spec.RuntimeID),
+		Status:           status,
+		ReleaseMessage:   "safe rollout canonical stable baseline",
+		SpecSnapshot:     spec,
+		ReadyAt:          &now,
+	}
+	return s.safeRolloutApplyCanonicalStableFields(ctx, app, release, release.ReleaseMessage)
+}
+
+func (s *Service) safeRolloutApplyCanonicalStableFields(ctx context.Context, app model.App, release model.AppRelease, message string) model.AppRelease {
+	now := time.Now().UTC()
+	prepared := s.Renderer.PrepareApp(app)
+	originalRole := release.Role
+	release.TenantID = app.TenantID
+	release.AppID = app.ID
+	release.Role = model.AppReleaseRoleStable
+	if release.Status == "" ||
+		release.Status == model.AppReleaseStatusFailed ||
+		release.Status == model.AppReleaseStatusRetired ||
+		release.Status == model.AppReleaseStatusDraining ||
+		originalRole != model.AppReleaseRoleStable {
+		release.Status = model.AppReleaseStatusReady
+	}
+	release.SourceRef = releaseflow.AppReleaseSourceRef(app)
+	release.ResolvedImageRef = strings.TrimSpace(app.Spec.Image)
+	release.RuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	release.UpstreamURL = s.controllerServiceURLForApp(ctx, app)
+	release.DeploymentName = runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	release.ServiceName = runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: s.Renderer.StrictDrain})
+	release.SpecSnapshot = cloneControllerAppSpec(&app.Spec)
+	release.StatusReason = ""
+	if strings.TrimSpace(message) != "" {
+		release.ReleaseMessage = strings.TrimSpace(message)
+	}
+	release.ReadyAt = releaseflow.FirstNonNilTime(release.ReadyAt, &now)
+	return release
+}
+
 func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Context, op model.Operation, state *safeRolloutState, weight int, since time.Time) bool {
 	if state == nil || !state.Enabled {
 		return true
@@ -346,6 +540,43 @@ func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op 
 		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
 			"operation_id":   op.ID,
 			"phase":          "edge_bundle_wait",
+			"required_nodes": fmt.Sprintf("%d", observation.RequiredNodes),
+			"ready_nodes":    fmt.Sprintf("%d", observation.ReadyNodes),
+		})
+	}
+	return observation.Ready
+}
+
+func (s *Service) waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx context.Context, op model.Operation, state *safeRolloutState, since time.Time) bool {
+	if state == nil || !state.Enabled {
+		return true
+	}
+	observer := s.edgeBundleObserverForSafeRollout()
+	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, since)
+	payload := map[string]any{
+		"observation": observation.Summary,
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_edge_bundle_wait", model.ReleaseStepStatusSkipped, "stable release alignment paused: edge route bundle confirmation failed", state.Candidate.ID, payload)
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
+			"operation_id": op.ID,
+			"phase":        "stable_release_edge_bundle_wait",
+			"reason":       err.Error(),
+		})
+		return false
+	}
+	status := model.ReleaseStepStatusCompleted
+	summary := "edge route bundle applied for canonical stable release"
+	if !observation.Ready {
+		status = model.ReleaseStepStatusSkipped
+		summary = "stable release alignment paused: waiting for edge route bundle application"
+	}
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_edge_bundle_wait", status, summary, state.Candidate.ID, payload)
+	if !observation.Ready {
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.previous_retire.paused", state.Candidate.ID, map[string]string{
+			"operation_id":   op.ID,
+			"phase":          "stable_release_edge_bundle_wait",
 			"required_nodes": fmt.Sprintf("%d", observation.RequiredNodes),
 			"ready_nodes":    fmt.Sprintf("%d", observation.ReadyNodes),
 		})
@@ -721,6 +952,11 @@ func (s *Service) abortSafeZeroDowntimeRollout(ctx context.Context, op model.Ope
 	if _, err := service.AbortRelease(ctx, principal, state.CandidateApp, state.Candidate, true, reason); err != nil {
 		return err
 	}
+	stable, err := s.ensureSafeRolloutCanonicalStableBaseline(ctx, op, state.PreviousApp, principal)
+	if err != nil {
+		return fmt.Errorf("restore canonical stable traffic after safe rollout abort: %w", err)
+	}
+	state.StableRelease = stable
 	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "abort", model.ReleaseStepStatusCompleted, reason, state.Candidate.ID, nil)
 	s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.abort.auto", state.Candidate.ID, map[string]string{
 		"operation_id": op.ID,

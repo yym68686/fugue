@@ -317,6 +317,7 @@ func (c *CLI) newAppReleaseTrafficCommand() *cobra.Command {
 	opts := struct {
 		StableWeight       int
 		CandidateWeight    int
+		StableReleaseID    string
 		CandidateReleaseID string
 		Mode               string
 	}{StableWeight: -1, CandidateWeight: -1, Mode: model.AppTrafficModeCanary}
@@ -351,9 +352,11 @@ func (c *CLI) newAppReleaseTrafficCommand() *cobra.Command {
 			if stable < 0 || candidate < 0 || stable+candidate != 100 {
 				return fmt.Errorf("stable and candidate weights must be non-negative and sum to 100")
 			}
+			stableReleaseID := firstNonEmpty(opts.StableReleaseID, current.Traffic.StableReleaseID)
 			candidateReleaseID := firstNonEmpty(opts.CandidateReleaseID, current.Traffic.CandidateReleaseID)
 			response, err := client.PatchAppTrafficPolicy(app.ID, appTrafficPatchCLIRequest{
 				Mode:               opts.Mode,
+				StableReleaseID:    stableReleaseID,
 				CandidateReleaseID: candidateReleaseID,
 				StableWeight:       intPtr(stable),
 				CandidateWeight:    intPtr(candidate),
@@ -369,6 +372,7 @@ func (c *CLI) newAppReleaseTrafficCommand() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&opts.StableWeight, "stable", opts.StableWeight, "Stable traffic percentage")
 	cmd.Flags().IntVar(&opts.CandidateWeight, "candidate", opts.CandidateWeight, "Candidate traffic percentage")
+	cmd.Flags().StringVar(&opts.StableReleaseID, "stable-release", "", "Stable release id")
 	cmd.Flags().StringVar(&opts.CandidateReleaseID, "candidate-release", "", "Candidate release id")
 	cmd.Flags().StringVar(&opts.Mode, "mode", opts.Mode, "Traffic mode")
 	return cmd

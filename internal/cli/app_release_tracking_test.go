@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,5 +148,49 @@ func TestRunAppReleaseTrackingSyncRetriesAfterDeferredActiveOperation(t *testing
 	}
 	if !strings.Contains(stdout.String(), "already_current=true") {
 		t.Fatalf("expected final retry result, got %q", stdout.String())
+	}
+}
+
+func TestRunAppReleaseTrafficSupportsStableReleaseFlag(t *testing.T) {
+	t.Parallel()
+
+	var gotPatch appTrafficPatchCLIRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123/traffic":
+			_, _ = w.Write([]byte(`{"app_id":"app_123","traffic":{"id":"tp_123","tenant_id":"tenant_123","app_id":"app_123","mode":"canary","stable_release_id":"apprel_old","candidate_release_id":"apprel_candidate","stable_weight":50,"candidate_weight":50}}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/apps/app_123/traffic":
+			if err := json.NewDecoder(r.Body).Decode(&gotPatch); err != nil {
+				t.Fatalf("decode patch body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"app_id":"app_123","traffic":{"id":"tp_123","tenant_id":"tenant_123","app_id":"app_123","mode":"single","stable_release_id":"apprel_stable","stable_weight":100,"candidate_weight":0}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"deployed","current_replicas":1}}]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"app", "release", "traffic", "demo",
+		"--stable-release", "apprel_stable",
+		"--stable", "100",
+		"--candidate", "0",
+		"--mode", "single",
+		"--json",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app release traffic: %v stderr=%s", err, stderr.String())
+	}
+	if gotPatch.StableReleaseID != "apprel_stable" || gotPatch.CandidateReleaseID != "apprel_candidate" || gotPatch.StableWeight == nil || *gotPatch.StableWeight != 100 || gotPatch.CandidateWeight == nil || *gotPatch.CandidateWeight != 0 {
+		t.Fatalf("unexpected traffic patch body: %+v", gotPatch)
+	}
+	if !strings.Contains(stdout.String(), `"stable_release_id": "apprel_stable"`) {
+		t.Fatalf("expected JSON output to include stable release, got %s", stdout.String())
 	}
 }

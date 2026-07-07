@@ -984,6 +984,15 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				if err := alignmentResult.Error(); err != nil {
 					return fmt.Errorf("wait for managed app alignment after safe rollout %s: %w", app.ID, err)
 				}
+				stableReleaseAligned, err := s.alignSafeRolloutPromotedStableRelease(ctx, op, safeRollout)
+				if err != nil {
+					return err
+				}
+				if !stableReleaseAligned {
+					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "stable desired state aligned but edge route bundle has not confirmed canonical stable release yet", safeRollout.Candidate.ID, nil)
+					timer.Mark("rollout_wait")
+					break
+				}
 				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusCompleted, "stable desired state aligned after edge route confirmation", safeRollout.Candidate.ID, nil)
 				s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, safeRollout)
 			} else if safeRollout != nil {

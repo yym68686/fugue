@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -442,6 +443,147 @@ func TestSafeZeroDowntimeRolloutSkipsCandidateWhenPodTemplateUnchanged(t *testin
 	}
 	if !releaseStepsContainPhase(steps, "candidate_create", model.ReleaseStepStatusSkipped) {
 		t.Fatalf("expected skipped candidate_create step for unchanged pod template, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutPrepareRepairsStaleStableCandidateUpstream(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	svc := &Service{Store: stateStore, Logger: log.New(io.Discard, "", 0)}
+	prepared := svc.Renderer.PrepareApp(previous)
+	staleRevision := runtime.AppRevisionRenderOptions{Role: runtime.AppRevisionRoleCandidate, ReleaseID: "apprel_stale"}
+	stale, err := stateStore.CreateAppRelease(model.AppRelease{
+		TenantID:         previous.TenantID,
+		AppID:            previous.ID,
+		Role:             model.AppReleaseRoleStable,
+		SourceRef:        previous.Spec.Image,
+		ResolvedImageRef: previous.Spec.Image,
+		RuntimeID:        previous.Spec.RuntimeID,
+		UpstreamURL:      svc.Renderer.AppRevisionServiceURL(previous, staleRevision),
+		DeploymentName:   runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{Revision: staleRevision}),
+		ServiceName:      runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{Revision: staleRevision}),
+		Status:           model.AppReleaseStatusServing,
+		ReleaseMessage:   "promoted stale candidate metadata",
+		SpecSnapshot:     cloneControllerAppSpec(&previous.Spec),
+	})
+	if err != nil {
+		t.Fatalf("create stale stable release: %v", err)
+	}
+	if _, err := stateStore.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
+		TenantID:        previous.TenantID,
+		AppID:           previous.ID,
+		Mode:            model.AppTrafficModeSingle,
+		StableReleaseID: stale.ID,
+		StableWeight:    100,
+		CandidateWeight: 0,
+		StickyCookie:    "Fugue-Release-Stickiness",
+	}); err != nil {
+		t.Fatalf("upsert stale traffic policy: %v", err)
+	}
+
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if state == nil {
+		t.Fatal("expected safe rollout state")
+	}
+	canonicalDeployment := runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: svc.Renderer.StrictDrain})
+	canonicalService := runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: svc.Renderer.StrictDrain})
+	canonicalUpstream := svc.controllerServiceURLForApp(context.Background(), previous)
+	if state.StableRelease.ID != stale.ID {
+		t.Fatalf("expected stale policy stable release to be repaired in place, got %s want %s", state.StableRelease.ID, stale.ID)
+	}
+	if state.StableRelease.DeploymentName != canonicalDeployment ||
+		state.StableRelease.ServiceName != canonicalService ||
+		state.StableRelease.UpstreamURL != canonicalUpstream {
+		t.Fatalf("expected canonical stable routing fields, got %+v", state.StableRelease)
+	}
+	if strings.Contains(state.StableRelease.DeploymentName, "candidate") || strings.Contains(state.StableRelease.ServiceName, "candidate") {
+		t.Fatalf("expected stable baseline not to point at candidate resources, got %+v", state.StableRelease)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != stale.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected stable-only traffic to repaired stable release, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "stable_baseline", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected completed stable_baseline step, got %+v", steps)
+	}
+}
+
+func TestSafeZeroDowntimeRolloutAlignsPromotedStableReleaseToCanonicalService(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: true, RequiredNodes: 1, ReadyNodes: 1, Summary: map[string]any{"ready_nodes": 1}}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	if err := svc.completeSafeZeroDowntimeRollout(context.Background(), op, state); err != nil {
+		t.Fatalf("complete safe rollout: %v", err)
+	}
+	if !state.StableAlignmentAllowed {
+		t.Fatal("expected stable alignment to be allowed after successful promote")
+	}
+	promotedBeforeAlignment, err := stateStore.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		t.Fatalf("get promoted release before alignment: %v", err)
+	}
+	if !strings.Contains(promotedBeforeAlignment.DeploymentName, "candidate") || !strings.Contains(promotedBeforeAlignment.ServiceName, "candidate") {
+		t.Fatalf("expected promoted release to initially point at candidate revision, got %+v", promotedBeforeAlignment)
+	}
+
+	aligned, err := svc.alignSafeRolloutPromotedStableRelease(context.Background(), op, state)
+	if err != nil {
+		t.Fatalf("align promoted stable release: %v", err)
+	}
+	if !aligned {
+		t.Fatal("expected canonical stable release edge bundle confirmation to pass")
+	}
+	updated, err := stateStore.GetAppRelease(candidate.TenantID, true, state.Candidate.ID)
+	if err != nil {
+		t.Fatalf("get aligned release: %v", err)
+	}
+	prepared := svc.Renderer.PrepareApp(candidate)
+	canonicalDeployment := runtime.RuntimeAppResourceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: svc.Renderer.StrictDrain})
+	canonicalService := runtime.RuntimeAppServiceNameWithOptions(prepared, runtime.RenderOptions{StrictDrain: svc.Renderer.StrictDrain})
+	canonicalUpstream := svc.controllerServiceURLForApp(context.Background(), candidate)
+	if updated.Role != model.AppReleaseRoleStable || updated.Status != model.AppReleaseStatusServing {
+		t.Fatalf("expected aligned release to stay serving stable, got %+v", updated)
+	}
+	if updated.DeploymentName != canonicalDeployment || updated.ServiceName != canonicalService || updated.UpstreamURL != canonicalUpstream {
+		t.Fatalf("expected promoted release to point at canonical stable service, got %+v", updated)
+	}
+	if strings.Contains(updated.DeploymentName, "candidate") || strings.Contains(updated.ServiceName, "candidate") {
+		t.Fatalf("expected aligned stable release not to point at candidate resources, got %+v", updated)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.StableReleaseID != updated.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected traffic to stay on promoted stable release, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "stable_release_alignment", model.ReleaseStepStatusCompleted) ||
+		!releaseStepsContainPhase(steps, "stable_release_edge_bundle_wait", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected canonical stable release alignment steps, got %+v", steps)
 	}
 }
 
