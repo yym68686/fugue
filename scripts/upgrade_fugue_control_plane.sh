@@ -805,6 +805,52 @@ stateful_dependency_changed() {
   release_changed_files_match stateful || registry_persistence_values_changed
 }
 
+control_plane_backup_drain_required() {
+  local required="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED:-auto}"
+  local file=""
+  local saw_file="false"
+
+  case "${required}" in
+    true)
+      return 0
+      ;;
+    false)
+      return 1
+      ;;
+    auto)
+      ;;
+    *)
+      fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED must be auto, true, or false"
+      ;;
+  esac
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    saw_file="true"
+    case "${file}" in
+      go.mod|go.sum|\
+      Dockerfile.api|Dockerfile.controller|\
+      cmd/fugue-api/*|cmd/fugue-controller/*|cmd/fugue-registry-maintenance/*|\
+      internal/api/*|internal/apispec/*|internal/auth/*|internal/config/*|\
+      internal/controller/*|internal/model/*|internal/store/*|internal/workloadidentity/*|\
+      openapi/openapi.yaml|\
+      deploy/helm/fugue/templates/deployment.yaml|\
+      deploy/helm/fugue/templates/controller-deployment.yaml|\
+      deploy/helm/fugue/templates/secret.yaml|\
+      deploy/helm/fugue/templates/control-plane-postgres-*|\
+      deploy/helm/fugue/templates/postgres-*|\
+      deploy/helm/fugue/values.yaml|\
+      deploy/helm/fugue/values-production-ha.yaml)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  [[ "${saw_file}" == "true" ]] || return 0
+  return 1
+}
+
 node_local_build_plane_resource_values_changed() {
   local file=""
   local saw_resource_values="false"
@@ -1891,6 +1937,10 @@ drain_control_plane_backup_before_schema_rollout() {
 
   if [[ "${mode}" == "skip" ]]; then
     log "control-plane backup drain skipped by FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE=skip"
+    return 0
+  fi
+  if ! control_plane_backup_drain_required; then
+    log "control-plane backup drain skipped; release changed files do not require a schema/runtime rollout"
     return 0
   fi
 
@@ -6689,6 +6739,7 @@ main() {
   FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL="${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL:-}"
   FUGUE_CONTROL_PLANE_POSTGRES_DATABASE="${FUGUE_CONTROL_PLANE_POSTGRES_DATABASE:-fugue}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE:-terminate}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED:-auto}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS:-120}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS:-5}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS:-90000}"
@@ -6837,6 +6888,10 @@ main() {
   case "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE}" in
     skip|wait|terminate) ;;
     *) fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE must be skip, wait, or terminate" ;;
+  esac
+  case "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED}" in
+    auto|true|false) ;;
+    *) fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED must be auto, true, or false" ;;
   esac
   for numeric_var in \
     FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS \

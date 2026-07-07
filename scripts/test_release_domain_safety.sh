@@ -332,6 +332,20 @@ fi
 if node_local_build_plane_preflight_override_allowed; then
   fail "generic control-plane changes must not bypass registry/node-policy preflight"
 fi
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=auto
+control_plane_backup_drain_required || fail "API changes must require control-plane backup drain in auto mode"
+
+FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/test_release_domain_safety.sh\n.github/workflows/deploy-control-plane.yml'
+if control_plane_backup_drain_required; then
+  fail "deploy tooling changes must not require control-plane backup drain in auto mode"
+fi
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=true
+control_plane_backup_drain_required || fail "explicit backup drain required=true must force drain"
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=false
+if control_plane_backup_drain_required; then
+  fail "explicit backup drain required=false must skip drain"
+fi
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=auto
 
 FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
@@ -926,6 +940,7 @@ FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true
 FUGUE_CONTROL_PLANE_POSTGRES_NAME=""
 FUGUE_CONTROL_PLANE_POSTGRES_DATABASE=fugue
 FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE=terminate
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=true
 FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=0
 FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS=1
 FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS=90000
