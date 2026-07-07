@@ -253,6 +253,12 @@ export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"ch
 robustness_output="$(robustness_status_summary)" || fail "tenant workload continuity must not fail strict rollout mode"
 [[ "${robustness_output}" == *"block_rollout=false"* ]] || fail "strict tenant workload continuity summary must not block rollout"
 [[ "${robustness_output}" == *"ignored_tenant_workload_blockers=1"* ]] || fail "strict tenant workload continuity blocker count must be reported"
+export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"app_continuity_invariant","subject":"app:example","pass":false,"severity":"block_publish","message":"ready replicas 0 below desired 1","evidence":{"release_signal_id":"sig_example","release_gate_scope":"control_plane","report_only":"false"}}],"incidents":[{"id":"robust_app_signal","severity":"block_publish","subject":"app:example","check_name":"app_continuity_invariant","message":"ready replicas 0 below desired 1","evidence":{"release_signal_id":"sig_example","release_gate_scope":"control_plane","report_only":"false"}}]}}'
+if robustness_output="$(robustness_status_summary)"; then
+  fail "explicit control-plane release signal must fail strict rollout mode"
+fi
+[[ "${robustness_output}" == *"block_rollout=true"* ]] || fail "explicit release signal summary must keep block_rollout=true"
+[[ "${robustness_output}" == *"blockers=app_continuity_invariant(app:example): ready replicas 0 below desired 1"* ]] || fail "explicit release signal must be reported as a blocker"
 rm -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}"
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 unset TEST_CURL_RESPONSE_JSON

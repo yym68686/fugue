@@ -246,6 +246,24 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		Message:  "production critical subsystems must have explicit failure contracts",
 		Evidence: map[string]string{"contracts": fmt.Sprintf("%d", len(failureContracts))},
 	})
+	releaseSignals := []model.ReleaseSignal{}
+	releaseSignalPolicy, err := s.activeReleaseSignalPolicy()
+	if err != nil {
+		checks = append(checks, model.RobustnessCheck{
+			Name:       "release_signal_policy",
+			Pass:       false,
+			Severity:   model.RobustnessSeverityBlockPublish,
+			Subject:    "release_guard_policy",
+			Expected:   "active release guard policy can be read and parsed",
+			Observed:   err.Error(),
+			Message:    "release guard policy is invalid",
+			RepairHint: "publish a valid release_guard_policy artifact or roll back to the last known good policy",
+			Evidence:   map[string]string{"guardian": "release-guard", "artifact_kind": model.PlatformArtifactKindReleaseGuardPolicy},
+		})
+	} else {
+		releaseSignals = releaseSignalPolicy.Signals
+		checks = applyReleaseSignalsToRobustnessChecks(checks, releaseSignals)
+	}
 	checks = dedupeRobustnessChecks(checks)
 	incidents := robustnessIncidentsFromChecks(checks, generatedAt)
 	pass := len(incidents) == 0
@@ -257,9 +275,10 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		}
 	}
 	summary := map[string]string{
-		"checks":    fmt.Sprintf("%d", len(checks)),
-		"incidents": fmt.Sprintf("%d", len(incidents)),
-		"dns_zone":  dns.Zone,
+		"checks":          fmt.Sprintf("%d", len(checks)),
+		"incidents":       fmt.Sprintf("%d", len(incidents)),
+		"dns_zone":        dns.Zone,
+		"release_signals": fmt.Sprintf("%d", len(releaseSignals)),
 	}
 	if autonomy.BlockRollout {
 		blockRollout = true
@@ -287,6 +306,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		DNS:               &dns,
 		RouteExplain:      routeExplain,
 		FailureContracts:  failureContracts,
+		ReleaseSignals:    releaseSignals,
 		GeneratedSources: []string{
 			"platform_autonomy",
 			"dns_delegation_preflight",
@@ -300,6 +320,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 			"node_deep_health",
 			"platform_consumer_generation",
 			"runtime_continuity",
+			"release_guard_policy",
 			"resilience_invariant_registry",
 			"resilience_inventory",
 			"resilience_gap_report",

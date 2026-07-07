@@ -6266,7 +6266,15 @@ def evidence_map(item):
     evidence = item.get("evidence") if isinstance(item, dict) else {}
     return evidence if isinstance(evidence, dict) else {}
 
+def explicit_control_plane_release_signal(item):
+    evidence = evidence_map(item)
+    if stable_text(evidence.get("release_gate_scope")) != "control_plane":
+        return False
+    return stable_text(evidence.get("release_signal_id")) != ""
+
 def release_gate_ignored_tenant_workload(item):
+    if explicit_control_plane_release_signal(item):
+        return False
     name = stable_text(item.get("check_name") or item.get("name"))
     if name == "app_continuity_invariant":
         return True

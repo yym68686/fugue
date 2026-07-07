@@ -63,6 +63,7 @@ type RobustnessStatus struct {
 	DNS               *DNSDelegationPreflightResponse `json:"dns,omitempty"`
 	RouteExplain      *RouteExplainResponse           `json:"route_explain,omitempty"`
 	FailureContracts  []SubsystemFailureContract      `json:"failure_contracts,omitempty"`
+	ReleaseSignals    []ReleaseSignal                 `json:"release_signals,omitempty"`
 	GeneratedSources  []string                        `json:"generated_sources,omitempty"`
 }
 

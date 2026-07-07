@@ -112,6 +112,15 @@ type platformArtifactLKGEnvelope struct {
 	LKG *model.PlatformLKGSnapshot `json:"lkg,omitempty"`
 }
 
+type platformStateArtifactEnvelope struct {
+	Artifact   *model.PlatformArtifact        `json:"artifact,omitempty"`
+	Release    *model.PlatformArtifactRelease `json:"release,omitempty"`
+	Messages   []model.PlatformReleaseMessage `json:"messages,omitempty"`
+	LKG        *model.PlatformLKGSnapshot     `json:"lkg,omitempty"`
+	Generation string                         `json:"generation,omitempty"`
+	Waited     bool                           `json:"waited"`
+}
+
 type subsystemFailureContractListEnvelope struct {
 	Contracts []model.SubsystemFailureContract `json:"contracts"`
 }
@@ -407,6 +416,23 @@ func (c *Client) GetPlatformArtifactLKG(id string) (*model.PlatformLKGSnapshot, 
 		return nil, err
 	}
 	return response.LKG, nil
+}
+
+func (c *Client) GetPlatformStateArtifact(kind, scopeKey, channel string) (platformStateArtifactEnvelope, error) {
+	values := url.Values{}
+	if strings.TrimSpace(scopeKey) != "" {
+		values.Set("scope_key", strings.TrimSpace(scopeKey))
+	}
+	if strings.TrimSpace(channel) != "" {
+		values.Set("channel", strings.TrimSpace(channel))
+	}
+	path := "/v1/platform-state/artifacts/" + url.PathEscape(strings.TrimSpace(kind))
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response platformStateArtifactEnvelope
+	err := c.doJSON(http.MethodGet, path, nil, &response)
+	return response, err
 }
 
 func (c *Client) ListSubsystemFailureContracts() ([]model.SubsystemFailureContract, error) {

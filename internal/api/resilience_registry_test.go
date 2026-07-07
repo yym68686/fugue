@@ -237,3 +237,54 @@ func TestRuntimeContinuityReportsTenantWorkloadRisksWithoutPlatformHardGate(t *t
 		t.Fatalf("expected stateful continuity to be tenant workload report-only evidence, got %+v", statefulChecks[1].Evidence)
 	}
 }
+
+func TestExplicitReleaseSignalPromotesTenantWorkloadContinuityToControlPlaneGate(t *testing.T) {
+	t.Parallel()
+
+	checks := robustnessChecksFromRuntimeContinuity([]model.RuntimeContinuityStatus{{
+		AppID:           "app_signal",
+		AppName:         "signal-app",
+		Hostname:        "signal.example.com",
+		State:           "degraded",
+		Strategy:        "stateless_replacement",
+		DesiredReplicas: 1,
+		ReadyReplicas:   0,
+		Blockers:        []string{"ready replicas 0 below desired 1"},
+	}})
+	checks = applyReleaseSignalsToRobustnessChecks(checks, []model.ReleaseSignal{{
+		ID:         "sig_signal_app",
+		Enabled:    true,
+		OwnerScope: model.ReleaseSignalOwnerScopeTenantWorkload,
+		GateScope:  model.ReleaseSignalGateScopeControlPlane,
+		Mode:       model.ReleaseSignalModeHardGate,
+		Subject:    "app:app_signal",
+		CheckName:  "app_continuity_invariant",
+		Reason:     "admin opted this workload into control-plane release success",
+	}})
+
+	if len(checks) != 2 || checks[1].Pass || checks[1].Severity != model.RobustnessSeverityBlockPublish {
+		t.Fatalf("expected explicit release signal to promote failing workload to block_publish, got %+v", checks)
+	}
+	evidence := checks[1].Evidence
+	if evidence["release_signal_id"] != "sig_signal_app" || evidence["release_gate_scope"] != model.ReleaseSignalGateScopeControlPlane || evidence["report_only"] != "false" {
+		t.Fatalf("expected explicit control-plane release signal evidence, got %+v", evidence)
+	}
+}
+
+func TestExplicitReleaseSignalFailsWhenConfiguredWorkloadSignalIsMissing(t *testing.T) {
+	t.Parallel()
+
+	checks := applyReleaseSignalsToRobustnessChecks(nil, []model.ReleaseSignal{{
+		ID:         "sig_missing",
+		Enabled:    true,
+		OwnerScope: model.ReleaseSignalOwnerScopeTenantWorkload,
+		GateScope:  model.ReleaseSignalGateScopeControlPlane,
+		Mode:       model.ReleaseSignalModeHardGate,
+		Subject:    "app:missing",
+		CheckName:  "app_continuity_invariant",
+		Reason:     "admin opted this workload into control-plane release success",
+	}})
+	if len(checks) != 1 || checks[0].Name != "release_signal_observed" || checks[0].Severity != model.RobustnessSeverityBlockPublish {
+		t.Fatalf("expected missing explicit release signal to block rollout, got %+v", checks)
+	}
+}

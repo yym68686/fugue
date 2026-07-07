@@ -411,6 +411,9 @@ func robustnessChecksFromRuntimeContinuity(statuses []model.RuntimeContinuitySta
 		evidence["guardian"] = "runtime-continuity"
 		evidence["release_gate_scope"] = "tenant_workload"
 		evidence["report_only"] = "true"
+		evidence["app_id"] = strings.TrimSpace(status.AppID)
+		evidence["app_name"] = strings.TrimSpace(status.AppName)
+		evidence["hostname"] = normalizeExternalAppDomain(status.Hostname)
 		checks = append(checks, model.RobustnessCheck{
 			Name:       "app_continuity_invariant",
 			Pass:       pass,

@@ -687,6 +687,63 @@ func TestAdminRobustnessTypedCheckCommandsUseSubjectEndpoint(t *testing.T) {
 	}
 }
 
+func TestAdminReleaseGuardSignalAddPublishesPolicyArtifact(t *testing.T) {
+	t.Parallel()
+
+	var createdBody model.PlatformArtifactCreateRequest
+	var releaseBody model.PlatformArtifactReleaseRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/platform-state/artifacts/release_guard_policy":
+			if r.URL.Query().Get("scope_key") != "global" || r.URL.Query().Get("channel") != "full" {
+				t.Fatalf("unexpected platform-state query %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"waited":false}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/artifacts":
+			if err := json.NewDecoder(r.Body).Decode(&createdBody); err != nil {
+				t.Fatalf("decode create artifact body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"draft","content_hash":"sha256:test","content":{"version":"v1","signals":[{"id":"sig_api","enabled":true,"owner_scope":"tenant_workload","gate_scope":"control_plane","mode":"hard_gate","subject":"app:api","check_name":"app_continuity_invariant","reason":"test"}]},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/artifacts/artifact_signal/validate":
+			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"results":[{"name":"schema","pass":true,"severity":"info"}],"pass":true,"dry_run":false}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/artifacts/artifact_signal/release":
+			if err := json.NewDecoder(r.Body).Decode(&releaseBody); err != nil {
+				t.Fatalf("decode release artifact body: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"release":{"id":"release_signal","artifact_id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","release_channel":"full","status":"active","released_at":"2026-04-02T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"message":{"id":"msg_signal","release_id":"release_signal","artifact_id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","release_channel":"full","message_type":"release","created_at":"2026-04-02T00:00:00Z","ack_count":0}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "release", "guard", "signals", "add", "sig_api",
+		"--subject", "app:api",
+		"--reason", "test",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run signal add: %v; stderr=%s", err, stderr.String())
+	}
+	if createdBody.ArtifactKind != model.PlatformArtifactKindReleaseGuardPolicy {
+		t.Fatalf("expected release guard policy artifact, got %+v", createdBody)
+	}
+	signals, ok := createdBody.Content["signals"].([]any)
+	if !ok || len(signals) != 1 {
+		t.Fatalf("expected one signal in artifact content, got %+v", createdBody.Content)
+	}
+	if releaseBody.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || releaseBody.Reason != "test" {
+		t.Fatalf("expected full release with reason, got %+v", releaseBody)
+	}
+	if out := stdout.String(); !strings.Contains(out, "release_signals_test") || !strings.Contains(out, "artifact_signal") {
+		t.Fatalf("expected release signal publish output, got %q", out)
+	}
+}
+
 func TestRunAppCommandSetArgsUsesDeploySpec(t *testing.T) {
 	t.Parallel()
 

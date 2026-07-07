@@ -21897,6 +21897,10 @@ components:
         platform_consumer_drift:
           type: integer
           format: int32
+        release_signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseSignal"
         blocked_reasons:
           type: array
           items:
@@ -21912,6 +21916,47 @@ components:
       properties:
         status:
           $ref: "#/components/schemas/ReleaseGuardStatus"
+    ReleaseSignal:
+      type: object
+      additionalProperties: false
+      required: [id, enabled, owner_scope, gate_scope, mode, subject]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        owner_scope:
+          type: string
+          enum: [platform, first_party_service, tenant_workload]
+        gate_scope:
+          type: string
+          enum: [control_plane, edge_rollout, runtime_rollout, tenant_traffic, report_only]
+        mode:
+          type: string
+          enum: [report_only, soft_gate, canary_gate, rollback_gate, hard_gate]
+        subject:
+          type: string
+        check_name:
+          type: string
+        reason:
+          type: string
+        created_at:
+          type: string
+        updated_at:
+          type: string
+    ReleaseSignalPolicy:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: string
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseSignal"
     ServiceTrafficSafetyState:
       type: object
       additionalProperties: false
@@ -22390,6 +22435,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SubsystemFailureContract"
+        release_signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseSignal"
         generated_sources:
           type: array
           items:

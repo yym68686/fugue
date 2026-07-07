@@ -105,6 +105,70 @@ func TestReleaseGuardStatusBlocksInvalidActivePlatformArtifact(t *testing.T) {
 	}
 }
 
+func TestReleaseGuardStatusIncludesExplicitReleaseSignals(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+
+	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindReleaseGuardPolicy,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   "release_guard_policy_signal_test",
+		Content: map[string]any{
+			"version": "v1",
+			"signals": []any{map[string]any{
+				"id":          "sig_missing_app",
+				"enabled":     true,
+				"owner_scope": "tenant_workload",
+				"gate_scope":  "control_plane",
+				"mode":        "hard_gate",
+				"subject":     "app:missing-app",
+				"check_name":  "app_continuity_invariant",
+				"reason":      "test signal blocks if not observable",
+			}},
+		},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected create status %d, got %d body=%s", http.StatusCreated, create.Code, create.Body.String())
+	}
+	var created model.PlatformArtifactResponse
+	mustDecodeJSON(t, create, &created)
+
+	validate := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/validate", platformAdminKey, model.PlatformArtifactValidateRequest{DryRun: false})
+	if validate.Code != http.StatusOK {
+		t.Fatalf("expected validate status %d, got %d body=%s", http.StatusOK, validate.Code, validate.Body.String())
+	}
+	var validation model.PlatformArtifactValidationResponse
+	mustDecodeJSON(t, validate, &validation)
+	if !validation.Pass {
+		t.Fatalf("expected release guard policy validation to pass, got %+v", validation.Results)
+	}
+
+	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		Reason:         "activate test release signal",
+	})
+	if release.Code != http.StatusOK {
+		t.Fatalf("expected release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/release-guard/status", platformAdminKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected release guard status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response model.ReleaseGuardStatusResponse
+	mustDecodeJSON(t, recorder, &response)
+	if len(response.Status.ReleaseSignals) != 1 || response.Status.ReleaseSignals[0].ID != "sig_missing_app" {
+		t.Fatalf("expected release guard status to include active signal, got %+v", response.Status.ReleaseSignals)
+	}
+	if !response.Status.BlockRollout {
+		t.Fatalf("expected missing hard-gated release signal to block rollout, got %+v", response.Status)
+	}
+	if !stringSliceContains(response.Status.BlockedReasons, "release_signal_observed: release signal sig_missing_app did not match any current robustness check") {
+		t.Fatalf("expected release signal blocked reason, got %+v", response.Status.BlockedReasons)
+	}
+}
+
 func TestTrafficSafetyExplainReportsUnroutedHostname(t *testing.T) {
 	t.Parallel()
 

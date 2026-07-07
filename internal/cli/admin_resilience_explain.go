@@ -18,7 +18,7 @@ func (c *CLI) newAdminReleaseCommand() *cobra.Command {
 		Use:   "guard",
 		Short: "Inspect release guard decisions",
 	}
-	guard.AddCommand(c.newAdminReleaseGuardStatusCommand())
+	guard.AddCommand(c.newAdminReleaseGuardStatusCommand(), c.newAdminReleaseGuardSignalsCommand())
 	cmd.AddCommand(guard)
 	return cmd
 }
@@ -116,6 +116,7 @@ func writeReleaseGuardStatus(w io.Writer, status model.ReleaseGuardStatus) error
 		kvPair{Key: "artifact_kinds", Value: stringsJoin(status.PlatformArtifactKinds)},
 		kvPair{Key: "artifact_validation_failures", Value: fmt.Sprintf("%d", status.PlatformArtifactFailures)},
 		kvPair{Key: "consumer_drift", Value: fmt.Sprintf("%d", status.PlatformConsumerDrift)},
+		kvPair{Key: "release_signals", Value: fmt.Sprintf("%d", len(status.ReleaseSignals))},
 		kvPair{Key: "blocked_reasons", Value: stringsJoin(status.BlockedReasons)},
 		kvPair{Key: "next_steps", Value: stringsJoin(status.RecommendedOperatorSteps)},
 		kvPair{Key: "generated_at", Value: formatTime(status.GeneratedAt)},

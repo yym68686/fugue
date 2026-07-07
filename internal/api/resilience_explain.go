@@ -71,6 +71,7 @@ func (s *Server) handleGetReleaseGuardStatus(w http.ResponseWriter, r *http.Requ
 		PlatformArtifactKinds:    artifactKinds,
 		PlatformArtifactFailures: artifactFailures,
 		PlatformConsumerDrift:    drift,
+		ReleaseSignals:           baseline.ReleaseSignals,
 		BlockedReasons:           blockedReasons,
 		RecommendedOperatorSteps: releaseGuardRecommendedSteps(blockedReasons),
 	}
