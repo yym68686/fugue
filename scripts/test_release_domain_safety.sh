@@ -81,6 +81,17 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   assert_eq "${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON}" '{"fugue-fugue-edge":"a"}' "blue-green release record must omit unscheduled dynamic base"
 )
 
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT=a
+  active_slot_from_front() { :; }
+  active_slot_from_record() { :; }
+  assert_eq "$(current_active_slot "fugue-fugue-edge-dynamic" "fugue-fugue-edge-dynamic-front")" "a" "missing dynamic release record must fall back to default slot"
+)
+
 assert_eq "$(image_ref_repository 'ghcr.io/acme/fugue-edge:sha123')" "ghcr.io/acme/fugue-edge" "repository parses tagged ghcr image"
 assert_eq "$(image_ref_tag 'ghcr.io/acme/fugue-edge:sha123')" "sha123" "tag parses tagged ghcr image"
 assert_eq "$(image_ref_repository 'localhost:5000/acme/fugue-edge:sha123')" "localhost:5000/acme/fugue-edge" "repository keeps registry port"

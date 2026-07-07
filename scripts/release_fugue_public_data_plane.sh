@@ -938,6 +938,7 @@ if isinstance(value, dict):
 current_active_slot() {
   local base="$1"
   local front_daemonset="$2"
+  local default_slot
   local slot
   slot="$(trim_field "$(active_slot_from_front "${front_daemonset}")")"
   case "${slot}" in
@@ -946,6 +947,10 @@ current_active_slot() {
   slot="$(trim_field "$(active_slot_from_record "${base}")")"
   case "${slot}" in
     a|b) printf '%s' "${slot}"; return 0 ;;
+  esac
+  default_slot="$(trim_field "${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT:-a}")"
+  case "${default_slot}" in
+    a|b) printf '%s' "${default_slot}"; return 0 ;;
   esac
   fail "could not determine active slot for ${base}; front slot file is unreadable and no per-base release record exists"
 }
