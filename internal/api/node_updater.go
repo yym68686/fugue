@@ -14,6 +14,7 @@ import (
 	"fugue/internal/appimages"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
@@ -198,14 +199,7 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 		warnings = append(warnings, "edge credential not issued: missing location country/region or explicit edge group")
 		return nil, warnings, nil
 	}
-	workloadMode := strings.TrimSpace(strings.ToLower(labels["fugue.io/edge-workload"]))
-	switch workloadMode {
-	case "", "dynamic":
-		workloadMode = "dynamic"
-	case "static":
-	default:
-		workloadMode = "dynamic"
-	}
+	workloadMode := nodeUpdaterEdgeWorkloadMode(labels, nodePolicy)
 	credential := &model.NodeUpdaterEdgeCredential{
 		EdgeID:          edgeID,
 		EdgeGroupID:     edgeGroupID,
@@ -252,6 +246,38 @@ func (s *Server) nodeUpdaterEdgeCredential(r *http.Request, updater model.NodeUp
 		credential.TokenPrefix = node.TokenPrefix
 	}
 	return credential, warnings, nil
+}
+
+func nodeUpdaterEdgeWorkloadMode(labels map[string]string, nodePolicy *model.ClusterNodePolicyStatus) string {
+	if mode := normalizeNodeUpdaterEdgeWorkloadMode(labels[runtimepkg.EdgeWorkloadLabelKey]); mode != "" {
+		return mode
+	}
+	if nodePolicy != nil && nodePolicy.Policy != nil {
+		policy := nodePolicy.Policy
+		if policy.AllowDNS || policy.EffectiveDNS {
+			return runtimepkg.EdgeWorkloadStaticValue
+		}
+		if model.NormalizeMachineDedicatedMode(firstNonEmptyString(policy.DedicatedMode, policy.EffectiveDedicatedMode)) == model.MachineDedicatedModeEdge {
+			return runtimepkg.EdgeWorkloadDynamicValue
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(labels[runtimepkg.DNSRoleLabelKey]), runtimepkg.NodeRoleLabelValue) {
+		return runtimepkg.EdgeWorkloadStaticValue
+	}
+	// Ambiguous legacy edge nodes predate dynamic DaemonSets. Keep them on the
+	// static public edge unless a node key, policy, or explicit label opts in.
+	return runtimepkg.EdgeWorkloadStaticValue
+}
+
+func normalizeNodeUpdaterEdgeWorkloadMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case runtimepkg.EdgeWorkloadStaticValue:
+		return runtimepkg.EdgeWorkloadStaticValue
+	case runtimepkg.EdgeWorkloadDynamicValue:
+		return runtimepkg.EdgeWorkloadDynamicValue
+	default:
+		return ""
+	}
 }
 
 func nodeUpdaterEdgeEnvGenerationTokenPrefix(generation string) string {
@@ -992,7 +1018,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v16"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v17"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -1530,6 +1556,20 @@ def first(*values):
             return value
     return ""
 
+def edge_workload_mode():
+    current = str(current_labels.get("fugue.io/edge-workload") or "").strip().lower()
+    if current in {"static", "dynamic"}:
+        return current
+    if truthy(policy.get("allow_dns")) or truthy(policy.get("effective_dns")) or truthy(current_labels.get("fugue.io/role.dns")):
+        return "static"
+    credential = str(edge_credential.get("workload_mode") or "").strip().lower()
+    if credential in {"static", "dynamic"}:
+        return credential
+    dedicated = first(policy.get("dedicated_mode"), policy.get("effective_dedicated_mode")).lower()
+    if dedicated == "edge":
+        return "dynamic"
+    return "static"
+
 labels = []
 seen = set()
 
@@ -1569,11 +1609,11 @@ if truthy(policy.get("allow_app_runtime")):
     add_label("fugue.io/role.app-runtime", "true")
 if truthy(policy.get("allow_edge")):
     add_label("fugue.io/role.edge", "true")
-    edge_workload = first(current_labels.get("fugue.io/edge-workload"), edge_credential.get("workload_mode"), "dynamic")
+    edge_workload = edge_workload_mode()
     edge_group_id = first(current_labels.get("fugue.io/edge-group-id"), edge_credential.get("edge_group_id"))
     country_code = first(current_labels.get("fugue.io/location-country-code"), edge_credential.get("country"))
     if country_code or edge_group_id or edge_workload == "static":
-        add_label("fugue.io/edge-workload", edge_workload if edge_workload in {"static", "dynamic"} else "dynamic")
+        add_label("fugue.io/edge-workload", edge_workload)
         add_label("fugue.io/edge-location-status", "ready")
     else:
         add_label("fugue.io/edge-location-status", "missing_location")

@@ -109,7 +109,7 @@ const (
 	NodeUpdaterStatusActive  = "active"
 	NodeUpdaterStatusRevoked = "revoked"
 
-	NodeUpdaterCurrentVersion = "v16"
+	NodeUpdaterCurrentVersion = "v17"
 
 	NodeUpdateTaskTypeRefreshJoinConfig   = "refresh-join-config"
 	NodeUpdateTaskTypeUpgradeK3SAgent     = "upgrade-k3s-agent"

@@ -667,7 +667,16 @@ rollout_daemonset_status() {
 }
 FUGUE_EDGE_DYNAMIC_ENABLED=true
 rollout_dynamic_edge_daemonsets_if_present
-assert_eq "${DYNAMIC_EDGE_WAITED}" "fugue-fugue-edge-dynamic-front;fugue-fugue-edge-dynamic-worker-a;" "preserved public data-plane releases must still wait for additive dynamic edge daemonsets"
+assert_eq "${DYNAMIC_EDGE_WAITED}" "fugue-fugue-edge-dynamic-front;fugue-fugue-edge-dynamic-worker-a;" "explicit dynamic edge rollout checks must wait for additive dynamic edge daemonsets"
+PUBLIC_DATA_PLANE_PRESERVED=true
+DYNAMIC_EDGE_WAITED=""
+if ! public_data_plane_daemonset_rollout_wait_required; then
+  :
+else
+  fail "preserved public data-plane releases must skip edge and dynamic edge daemonset waits"
+fi
+assert_eq "${DYNAMIC_EDGE_WAITED}" "" "preserved public data-plane releases must not block on additive dynamic edge daemonsets"
+PUBLIC_DATA_PLANE_PRESERVED=false
 FUGUE_EDGE_DYNAMIC_ENABLED=false
 DYNAMIC_EDGE_WAITED=""
 rollout_dynamic_edge_daemonsets_if_present

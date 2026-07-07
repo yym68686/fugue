@@ -7090,11 +7090,6 @@ PY
   if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
     if ! public_data_plane_daemonset_rollout_wait_required; then
       log "skipping edge daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
-      if ! rollout_dynamic_edge_daemonsets_if_present; then
-        log "dynamic edge rollout check failed; attempting rollback"
-        rollback_release || true
-        fail "dynamic edge rollout failed"
-      fi
     elif ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
       log "edge rollout check failed; attempting rollback"
       rollback_release || true

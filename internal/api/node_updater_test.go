@@ -298,6 +298,68 @@ func TestNodeUpdaterEdgeCredentialInfersCountryFromPublicIP(t *testing.T) {
 	}
 }
 
+func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+
+	req := httptest.NewRequest(http.MethodGet, "https://api.fugue.pro/v1/node-updater/desired-state", nil)
+	legacyLabels := map[string]string{
+		"fugue.io/location-country-code": "us",
+		"fugue.io/public-ip":             "15.204.94.71",
+		"fugue.io/role.dns":              "true",
+		"fugue.io/role.edge":             "true",
+	}
+	credential, warnings, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{
+		ClusterNodeName: "vps-591f4447",
+		Labels:          legacyLabels,
+	}, &model.ClusterNodePolicyStatus{
+		NodeName: "vps-591f4447",
+		Policy: &model.ClusterNodePolicy{
+			AllowAppRuntime: true,
+			AllowEdge:       true,
+			AllowDNS:        true,
+			DedicatedMode:   "none",
+		},
+		Labels: legacyLabels,
+	})
+	if err != nil {
+		t.Fatalf("issue legacy edge credential: %v", err)
+	}
+	if credential == nil {
+		t.Fatalf("expected edge credential, warnings=%v", warnings)
+	}
+	if credential.WorkloadMode != "static" {
+		t.Fatalf("expected legacy edge/DNS node to default static, got %+v", credential)
+	}
+	if credential.EdgeGroupID != "edge-group-country-us" || credential.Country != "us" {
+		t.Fatalf("unexpected legacy credential location: %+v", credential)
+	}
+
+	policy := nodeUpdaterPolicyWithEdgeCredentialLabels(&model.ClusterNodePolicyStatus{
+		NodeName: "vps-591f4447",
+		Policy: &model.ClusterNodePolicy{
+			AllowAppRuntime: true,
+			AllowEdge:       true,
+			AllowDNS:        true,
+			DedicatedMode:   "none",
+		},
+		Labels: legacyLabels,
+	}, credential)
+	if policy == nil || policy.Labels["fugue.io/edge-workload"] != "static" {
+		t.Fatalf("expected legacy node policy to be augmented as static, got %+v", policy)
+	}
+	node, _, err := s.GetEdgeNode("vps-591f4447")
+	if err != nil {
+		t.Fatalf("get stored legacy edge node: %v", err)
+	}
+	if node.WorkloadMode != "static" {
+		t.Fatalf("expected stored legacy edge node to be static, got %+v", node)
+	}
+}
+
 func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
 	t.Parallel()
 
@@ -622,7 +684,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v16"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v17"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -983,6 +1045,123 @@ fi
 	cmd := exec.Command("bash", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("node updater policy reconcile harness failed: %v\n%s", err, output)
+	}
+}
+
+func TestNodeUpdaterK3sConfigKeepsLegacyDNSEdgeStatic(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${tmpdir}/config.yaml"
+FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
+FUGUE_DISCOVERY_K3S_SERVER="https://cp.example:6443"
+mkdir() {
+  local args=()
+  local arg=""
+  for arg in "$@"; do
+    case "${arg}" in
+      /etc/rancher/k3s) arg="${tmpdir}/etc/rancher/k3s" ;;
+      /etc/fugue) arg="${tmpdir}/etc/fugue" ;;
+    esac
+    args+=("${arg}")
+  done
+  command mkdir "${args[@]}"
+}
+cat >"${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}" <<'YAML'
+server: "https://cp.example:6443"
+node-external-ip: "15.204.94.71"
+node-label:
+  - "fugue.io/role.edge=true"
+  - "fugue.io/role.dns=true"
+  - "fugue.io/location-country-code=us"
+  - "fugue.io/public-ip=15.204.94.71"
+node-taint:
+  - "fugue.io/tenant=tenant_edge:NoSchedule"
+YAML
+cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
+{
+  "desired_state": {
+    "node_updater": {
+      "node_key_id": "nodekey_edge",
+      "machine_id": "machine_edge",
+      "runtime_id": "runtime_edge",
+      "tenant_id": "tenant_edge"
+    },
+    "node_policy": {
+      "node_name": "vps-591f4447",
+      "runtime_id": "runtime_edge",
+      "tenant_id": "tenant_edge",
+      "machine_id": "machine_edge",
+      "policy": {
+        "allow_app_runtime": true,
+        "allow_builds": false,
+        "allow_shared_pool": false,
+        "allow_edge": true,
+        "allow_dns": true,
+        "allow_internal_maintenance": false,
+        "dedicated_mode": "none",
+        "node_mode": "managed-owned",
+        "node_health": "ready",
+        "desired_control_plane_role": "none"
+      },
+      "labels": {
+        "fugue.io/machine-id": "machine_edge",
+        "fugue.io/machine-scope": "tenant-runtime",
+        "fugue.io/node-key-id": "nodekey_edge",
+        "fugue.io/node-mode": "managed-owned",
+        "fugue.io/role.app-runtime": "true",
+        "fugue.io/role.edge": "true",
+        "fugue.io/role.dns": "true",
+        "fugue.io/runtime-id": "runtime_edge",
+        "fugue.io/tenant-id": "tenant_edge",
+        "fugue.io/location-country-code": "us",
+        "fugue.io/public-ip": "15.204.94.71"
+      }
+    },
+    "edge_credential": {
+      "edge_id": "vps-591f4447",
+      "edge_group_id": "edge-group-country-us",
+      "workload_mode": "dynamic",
+      "country": "us",
+      "public_ipv4": "15.204.94.71",
+      "token": "fugue_edge_test_secret",
+      "desired_state_url": "https://api.fugue.pro/v1/edge/nodes/vps-591f4447/desired-state"
+    }
+  }
+}
+JSON
+if ! reconcile_k3s_config; then
+  echo "legacy DNS edge reconcile should report a write"
+  exit 1
+fi
+grep -q 'fugue.io/role.edge=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/role.dns=true' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+grep -q 'fugue.io/edge-workload=static' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+if grep -q 'fugue.io/edge-workload=dynamic' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"; then
+  echo "legacy DNS edge was incorrectly rendered as dynamic"
+  cat "${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE}"
+  exit 1
+fi
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-legacy-dns-edge-static-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater legacy DNS edge harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater legacy DNS edge harness failed: %v\n%s", err, output)
 	}
 }
 
