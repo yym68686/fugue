@@ -20,6 +20,63 @@ assert_eq() {
 
 bash -n "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 bash -n "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
+bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
+bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
+
+plan_value() {
+  local output_file="$1"
+  local key="$2"
+  awk -F= -v key="${key}" '$1 == key {print substr($0, length(key) + 2); exit}' "${output_file}"
+}
+
+assert_build_plan() {
+  local changed_files="$1"
+  local label="$2"
+  local output_file log_file
+  shift 2
+
+  output_file="$(mktemp)"
+  log_file="$(mktemp)"
+  GITHUB_OUTPUT="${output_file}" \
+    FUGUE_RELEASE_CHANGED_FILES="${changed_files}" \
+    "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${log_file}"
+  while [[ "$#" -gt 0 ]]; do
+    assert_eq "$(plan_value "${output_file}" "$1")" "$2" "${label} $1"
+    shift 2
+  done
+  rm -f "${output_file}" "${log_file}"
+}
+
+assert_build_plan \
+  $'internal/controller/safe_rollout.go' \
+  "controller-only build plan" \
+  build_api false \
+  build_controller true \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge false \
+  build_app_ssh false
+
+assert_build_plan \
+  $'Dockerfile.edge' \
+  "edge Dockerfile build plan" \
+  build_api false \
+  build_controller false \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge true \
+  build_app_ssh false
+
+assert_build_plan \
+  $'scripts/upgrade_fugue_control_plane.sh' \
+  "script-only build plan" \
+  target_count 0 \
+  build_api false \
+  build_controller false \
+  build_edge false
 
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
@@ -236,7 +293,7 @@ fi
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 capture_pre_deploy_robustness_baseline
 [[ -n "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" && -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" ]] || fail "pre-deploy robustness baseline must be captured"
-assert_eq "$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" "pass=false block_rollout=true checks=2 incidents=1 baseline_incidents=1 new_incidents=0" "matching robustness baseline must tolerate existing incidents"
+assert_eq "$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" "pass=false block_rollout=false checks=2 incidents=1 baseline_incidents=1 new_incidents=0; raw_block_rollout=true tolerated_by_baseline=true" "matching robustness baseline must tolerate existing incidents"
 export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=7"},{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","message":"missing route"}],"incidents":[{"id":"robust_existing_changed","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=7"},{"id":"robust_new","severity":"block_publish","subject":"route:example","check_name":"route_active","message":"missing route"}]}}'
 if robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")"; then
   fail "robustness baseline must fail on new incidents"

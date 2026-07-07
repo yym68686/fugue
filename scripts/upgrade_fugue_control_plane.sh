@@ -6283,6 +6283,11 @@ def release_gate_ignored_tenant_workload(item):
         return True
     return stable_text(evidence.get("report_only")).lower() == "true"
 
+def incident_blocks_release(incident):
+    if release_gate_ignored_tenant_workload(incident):
+        return False
+    return stable_text(incident.get("severity")) == "block_publish"
+
 baseline_status = None
 baseline_check_names = set()
 baseline_incident_ids = set()
@@ -6351,7 +6356,9 @@ for check in checks:
             new_blockers.append(description)
 
 new_incidents = []
+new_blocking_incidents = []
 introduced_incidents = []
+introduced_blocking_incidents = []
 ignored_tenant_workload_incidents = []
 if baseline_status is not None:
     for incident in incidents:
@@ -6366,12 +6373,20 @@ if baseline_status is not None:
         if release_gate_ignored_tenant_workload(incident):
             ignored_tenant_workload_incidents.append(label)
             continue
+        blocks_release = incident_blocks_release(incident)
         if name and name not in baseline_check_names:
             introduced_incidents.append(label)
+            if blocks_release:
+                introduced_blocking_incidents.append(label)
         else:
             new_incidents.append(label)
+            if blocks_release:
+                new_blocking_incidents.append(label)
 
-block_rollout = raw_block_rollout and (bool(blockers) or not ignored_tenant_workload_blockers)
+if baseline_status is not None:
+    block_rollout = bool(new_blockers or new_blocking_incidents)
+else:
+    block_rollout = raw_block_rollout and (bool(blockers) or not ignored_tenant_workload_blockers)
 summary = (
     f"pass={str(bool(status.get('pass'))).lower()} "
     f"block_rollout={str(block_rollout).lower()} "
@@ -6382,7 +6397,9 @@ if baseline_status is not None:
         f" baseline_incidents={len(baseline_status.get('incidents') or [])}"
         f" new_incidents={len(new_incidents)}"
     )
-if raw_block_rollout and not block_rollout:
+if baseline_status is not None and raw_block_rollout and not block_rollout and not ignored_tenant_workload_blockers:
+    summary += "; raw_block_rollout=true tolerated_by_baseline=true"
+if raw_block_rollout and not block_rollout and (ignored_tenant_workload_blockers or ignored_tenant_workload_incidents):
     summary += "; raw_block_rollout=true ignored_by_release_scope=true"
 if ignored_tenant_workload_blockers:
     summary += f"; ignored_tenant_workload_blockers={len(ignored_tenant_workload_blockers)}"
@@ -6390,8 +6407,16 @@ if ignored_tenant_workload_incidents:
     summary += f"; ignored_tenant_workload_incidents={len(ignored_tenant_workload_incidents)}"
 if new_blockers:
     summary += "; new_blockers=" + "; ".join(new_blockers)
+elif new_blocking_incidents:
+    summary += "; new_blocking_incidents=" + "; ".join(new_blocking_incidents[:5])
+    if len(new_blocking_incidents) > 5:
+        summary += f"; +{len(new_blocking_incidents) - 5} more"
 elif introduced_blockers:
     summary += "; introduced_blockers=" + "; ".join(introduced_blockers)
+elif introduced_blocking_incidents:
+    summary += "; introduced_blocking_incidents=" + "; ".join(introduced_blocking_incidents[:5])
+    if len(introduced_blocking_incidents) > 5:
+        summary += f"; +{len(introduced_blocking_incidents) - 5} more"
 elif blockers:
     summary += "; blockers=" + "; ".join(blockers)
 if new_incidents:
@@ -6405,7 +6430,7 @@ elif introduced_incidents:
 print(summary)
 
 if baseline_status is not None:
-    if new_blockers or new_incidents:
+    if new_blockers or new_blocking_incidents:
         raise SystemExit(1)
 else:
     if block_rollout or blockers:
