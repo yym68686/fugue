@@ -116,6 +116,33 @@ spec:
             - name: FUGUE_APP_OBSERVABILITY_ENDPOINT
               value: {{ printf "http://%s-telemetry-agent.%s.svc.cluster.local:%v" (include "fugue.fullname" .) .Release.Namespace .Values.observability.agent.port | quote }}
             {{- end }}
+            - name: FUGUE_OBSERVABILITY_ENABLED
+              value: {{ .Values.observability.enabled | quote }}
+            - name: FUGUE_OBSERVABILITY_RETENTION
+              value: {{ .Values.observability.retention | quote }}
+            {{- if .Values.observability.exporterSecret.existingSecretName }}
+            - name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.metricsQueryURLKey | quote }}
+                  optional: true
+            - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.exporterSecret.existingSecretName | quote }}
+                  key: {{ .Values.observability.exporterSecret.clickHouseDSNKey | quote }}
+                  optional: true
+            {{- else }}
+            {{- if .Values.observability.metrics.enabled }}
+            - name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL
+              value: {{ printf "http://%s-observability-prometheus:%v/api/v1/query" (include "fugue.fullname" .) .Values.observability.metrics.port | quote }}
+            {{- end }}
+            {{- if .Values.observability.analytics.enabled }}
+            - name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN
+              value: {{ printf "http://%s-observability-clickhouse:%v?database=fugue_observability" (include "fugue.fullname" .) .Values.observability.analytics.httpPort | quote }}
+            {{- end }}
+            {{- end }}
             - name: FUGUE_IMPORT_WORK_DIR
               value: {{ .Values.api.importWorkDir | quote }}
             - name: FUGUE_RENDER_DIR

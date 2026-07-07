@@ -381,6 +381,16 @@ func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t 
 	if strings.Contains(controllerDoc, "FUGUE_APP_OBSERVABILITY_ENDPOINT") {
 		t.Fatalf("controller deployment should not inject app observability endpoint by default:\n%s", controllerDoc)
 	}
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_ENABLED",
+		"value: \"false\"",
+		"name: FUGUE_OBSERVABILITY_RETENTION",
+		"value: \"24h\"",
+	} {
+		if !strings.Contains(controllerDoc, want) {
+			t.Fatalf("controller deployment missing observability default %q:\n%s", want, controllerDoc)
+		}
+	}
 
 	cmd = exec.Command("helm", "template", "fugue", chartDir, "--set", "observability.enabled=true")
 	cmd.Dir = chartDir
@@ -395,6 +405,14 @@ func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t 
 	}
 	if strings.Contains(controllerDoc, "FUGUE_APP_OBSERVABILITY_ENDPOINT") {
 		t.Fatalf("controller deployment should not inject app observability endpoint without telemetry-agent:\n%s", controllerDoc)
+	}
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_ENABLED",
+		"value: \"true\"",
+	} {
+		if !strings.Contains(controllerDoc, want) {
+			t.Fatalf("controller deployment missing observability enabled setting %q:\n%s", want, controllerDoc)
+		}
 	}
 }
 
@@ -499,9 +517,50 @@ func TestTelemetryAgentCanBeRenderedExplicitly(t *testing.T) {
 	for _, want := range []string{
 		"name: FUGUE_APP_OBSERVABILITY_ENDPOINT",
 		"value: \"http://fugue-fugue-telemetry-agent.default.svc.cluster.local:7834\"",
+		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
+		"key: \"FUGUE_OBSERVABILITY_METRICS_QUERY_URL\"",
+		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
+		"key: \"FUGUE_OBSERVABILITY_CLICKHOUSE_DSN\"",
 	} {
 		if !strings.Contains(controllerDoc, want) {
 			t.Fatalf("controller deployment missing app observability endpoint %q:\n%s", want, controllerDoc)
+		}
+	}
+}
+
+func TestControllerReceivesInternalObservabilityQueryEnv(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "observability.enabled=true",
+		"--set", "observability.metrics.enabled=true",
+		"--set", "observability.analytics.enabled=true",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	controllerDoc := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+	if controllerDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-controller deployment:\n%s", output)
+	}
+	for _, want := range []string{
+		"name: FUGUE_OBSERVABILITY_METRICS_QUERY_URL",
+		"value: \"http://fugue-fugue-observability-prometheus:9090/api/v1/query\"",
+		"name: FUGUE_OBSERVABILITY_CLICKHOUSE_DSN",
+		"value: \"http://fugue-fugue-observability-clickhouse:8123?database=fugue_observability\"",
+	} {
+		if !strings.Contains(controllerDoc, want) {
+			t.Fatalf("controller deployment missing internal observability query env %q:\n%s", want, controllerDoc)
 		}
 	}
 }
