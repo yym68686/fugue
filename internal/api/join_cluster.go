@@ -2404,7 +2404,7 @@ configure_dns_escape_hatch() {
   local unit_tmp=""
   local timer_tmp=""
   local config_changed=0
-  case "${FUGUE_JOIN_NODE_DNS_ESCAPE_HATCH_ENABLED:-true}" in
+  case "${FUGUE_JOIN_NODE_DNS_ESCAPE_HATCH_ENABLED:-false}" in
     1|true|TRUE|yes|YES)
       ;;
     *)
@@ -2905,7 +2905,7 @@ if ! reconcile_cni_bridge_mtu; then
   log_step "CNI bridge MTU is already aligned or not ready yet."
 fi
 
-if ! run_with_heartbeat "Installing local DNS escape hatch" "5-30s" configure_dns_escape_hatch; then
+if ! run_with_heartbeat "Reconciling optional local DNS escape hatch" "5-30s" configure_dns_escape_hatch; then
   log_step "Local DNS escape hatch installation failed; orphan workloads may still depend on control-plane DNS."
 fi
 

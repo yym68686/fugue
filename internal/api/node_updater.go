@@ -1018,7 +1018,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v17"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v18"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -1035,6 +1035,8 @@ FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_NODE_ENV_FILE:-
 FUGUE_NODE_UPDATER_DNS_ENV_FILE="${FUGUE_NODE_UPDATER_DNS_ENV_FILE:-/etc/fugue/fugue-dns.env}"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE:-/etc/dnsmasq.d/fugue-node-dns-escape-hatch.conf}"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE:-fugue-node-dns-escape-hatch.service}"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER:-fugue-node-dns-escape-hatch.timer}"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED:-false}"
 FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN="${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN:-/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC:-32}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC:-64}"
@@ -1946,12 +1948,107 @@ node_dns_escape_hatch_installed() {
   systemctl list-unit-files "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1
 }
 
+dns_escape_hatch_enabled() {
+  case "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED:-false}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+detect_dns_escape_hatch_cni_bridge_ip() {
+  ip -4 addr show dev cni0 2>/dev/null | awk '/inet / {split($2, parts, "/"); print parts[1]; exit}'
+}
+
+detect_dns_escape_hatch_kube_dns_service_ip() {
+  iptables-save 2>/dev/null | awk '
+    /-A KUBE-SERVICES/ && /kube-system\/kube-dns:dns/ && /--dport 53/ {
+      line = $0
+      if (match(line, /-d [0-9.]+\/32/)) {
+        ip = substr(line, RSTART + 3, RLENGTH - 3)
+        sub(/\/32$/, "", ip)
+        print ip
+        exit
+      }
+    }
+    /-A KUBE-SERVICES/ && /kube-system\/coredns:dns/ && /--dport 53/ {
+      line = $0
+      if (match(line, /-d [0-9.]+\/32/)) {
+        ip = substr(line, RSTART + 3, RLENGTH - 3)
+        sub(/\/32$/, "", ip)
+        print ip
+        exit
+      }
+    }
+  '
+}
+
+delete_dns_escape_hatch_rule() {
+  local table="$1"
+  local chain="$2"
+  shift 2
+  local deleted=1
+  while iptables -t "${table}" -C "${chain}" "$@" 2>/dev/null; do
+    iptables -t "${table}" -D "${chain}" "$@" || break
+    deleted=0
+  done
+  return "${deleted}"
+}
+
+cleanup_node_dns_escape_hatch_redirect_rules() {
+  command -v iptables >/dev/null 2>&1 || return 1
+  command -v iptables-save >/dev/null 2>&1 || return 1
+
+  local cni_bridge_ip=""
+  local kube_dns_service_ip=""
+  local changed=1
+  cni_bridge_ip="$(detect_dns_escape_hatch_cni_bridge_ip || true)"
+  kube_dns_service_ip="$(detect_dns_escape_hatch_kube_dns_service_ip || true)"
+  if [ -z "${cni_bridge_ip}" ] || [ -z "${kube_dns_service_ip}" ]; then
+    return 1
+  fi
+
+  delete_dns_escape_hatch_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53" && changed=0
+  delete_dns_escape_hatch_rule nat PREROUTING -i cni0 -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53" && changed=0
+  delete_dns_escape_hatch_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p udp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53" && changed=0
+  delete_dns_escape_hatch_rule nat OUTPUT -d "${kube_dns_service_ip}/32" -p tcp --dport 53 -j DNAT --to-destination "${cni_bridge_ip}:53" && changed=0
+  return "${changed}"
+}
+
+disable_node_dns_escape_hatch() {
+  local changed=1
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" || \
+       systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" 2>/dev/null; then
+      systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" >/dev/null 2>&1 || true
+      changed=0
+    fi
+    if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" || \
+       systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" 2>/dev/null; then
+      systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1 || true
+      changed=0
+    fi
+  fi
+  if cleanup_node_dns_escape_hatch_redirect_rules; then
+    changed=0
+  fi
+  return "${changed}"
+}
+
 reconcile_node_dns_escape_hatch() {
   local tmp=""
   local changed=1
   local dnsmasq_was_active=0
 
   node_dns_escape_hatch_installed || return 1
+  if ! dns_escape_hatch_enabled; then
+    disable_node_dns_escape_hatch || return 1
+    log "disabled local DNS escape hatch so pod DNS uses Kubernetes CoreDNS"
+    return 0
+  fi
   if ! command -v dnsmasq >/dev/null 2>&1 || ! command -v systemctl >/dev/null 2>&1; then
     log "local DNS escape hatch is installed but dnsmasq/systemctl is unavailable"
     return 1

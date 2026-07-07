@@ -684,7 +684,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v17"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v18"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`verify_image_cache_manifest`,
 		`pre-pull succeeded but node image cache does not serve registry manifest`,
@@ -707,7 +707,9 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`fugue-edge.env`,
 		`fugue-dns.env`,
 		`reconcile_node_dns_escape_hatch`,
-		`bind-interfaces`,
+		`FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED:-false}"`,
+		`disable_node_dns_escape_hatch`,
+		`disabled local DNS escape hatch so pod DNS uses Kubernetes CoreDNS`,
 		`discovery_generation=`,
 		`import os`,
 		`image-cache inventory produced no chunks`,
@@ -737,6 +739,105 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterDisablesDNSEscapeHatchByDefault(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+actions="${tmpdir}/actions.log"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${tmpdir}/fugue-node-dns-escape-hatch.conf"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="fugue-node-dns-escape-hatch.service"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER="fugue-node-dns-escape-hatch.timer"
+: >"${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+
+systemctl() {
+  printf 'systemctl %s\n' "$*" >>"${actions}"
+  case "$1" in
+    is-active|is-enabled|list-unit-files)
+      return 0
+      ;;
+    disable)
+      return 0
+      ;;
+  esac
+  return 0
+}
+
+ip() {
+  if [ "$1" = "-4" ]; then
+    printf '3: cni0: <BROADCAST> mtu 1450\n    inet 10.42.7.1/24 scope global cni0\n'
+    return 0
+  fi
+  return 1
+}
+
+iptables_save_called=0
+iptables-save() {
+  iptables_save_called=$((iptables_save_called + 1))
+  cat <<'EOF_IPTABLES'
+-A KUBE-SERVICES -d 10.43.0.10/32 -p udp -m comment --comment "kube-system/kube-dns:dns cluster IP" -m udp --dport 53 -j KUBE-SVC-TCOU7JCQXEZGVUNU
+-A PREROUTING -d 10.43.0.10/32 -i cni0 -p udp -m udp --dport 53 -j DNAT --to-destination 10.42.7.1:53
+EOF_IPTABLES
+}
+
+iptables_check_seen=0
+iptables() {
+  printf 'iptables %s\n' "$*" >>"${actions}"
+  case "$*" in
+    *" -C "*)
+      if [ "${iptables_check_seen}" -eq 0 ]; then
+        iptables_check_seen=1
+        return 0
+      fi
+      return 1
+      ;;
+    *" -D "*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+dnsmasq() {
+  echo "dnsmasq must not run when escape hatch is disabled" >&2
+  return 1
+}
+
+if ! reconcile_node_dns_escape_hatch; then
+  echo "expected DNS escape hatch reconciliation to report a change" >&2
+  cat "${actions}" >&2
+  exit 1
+fi
+grep -q 'systemctl disable --now fugue-node-dns-escape-hatch.timer' "${actions}"
+grep -q 'systemctl disable --now fugue-node-dns-escape-hatch.service' "${actions}"
+grep -q 'iptables -t nat -D PREROUTING' "${actions}"
+if grep -q 'dnsmasq.service' "${actions}"; then
+  echo "dnsmasq should not be restarted while disabling the escape hatch" >&2
+  cat "${actions}" >&2
+  exit 1
+fi
+`
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-disable-dns-escape-hatch.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node-updater DNS escape hatch harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater DNS escape hatch harness failed: %v\n%s", err, output)
 	}
 }
 
