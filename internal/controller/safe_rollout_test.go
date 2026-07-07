@@ -357,6 +357,57 @@ func TestSafeZeroDowntimeRolloutCanarySampleDeficitContinuesToNextWeight(t *test
 	}
 }
 
+func TestSafeZeroDowntimeRolloutCanaryWaitsForEdgeBundleBeforeObservation(t *testing.T) {
+	t.Parallel()
+
+	stateStore, previous, candidate, op := newSafeRolloutTestState(t)
+	candidate.Spec.Continuity.ZeroDowntime.Canary = &model.AppRolloutCanarySpec{
+		Enabled:               true,
+		InitialWeight:         50,
+		MaxWeight:             100,
+		StepWeights:           []int{50, 100},
+		MinObservationSeconds: 0,
+	}
+	svc := &Service{
+		Store:                         stateStore,
+		Logger:                        log.New(io.Discard, "", 0),
+		serviceURLForApp:              func(context.Context, model.App) string { return "http://candidate.test" },
+		safeRolloutSleep:              func(context.Context, time.Duration) error { return nil },
+		safeRolloutEdgeBundleObserver: staticSafeRolloutEdgeObserver{observation: safeRolloutEdgeBundleObservation{Ready: false, RequiredNodes: 2, ReadyNodes: 1, WaitingNodes: []string{"edge-1:heartbeat_before_promotion"}, Summary: map[string]any{"ready_nodes": 1}}},
+		releaseGateMetricsQuerier: releaseMetricsByIDQuerier{metrics: map[string]map[string]any{
+			model.AppReleaseRoleCandidate: {"request_count": 10, "error_5xx_rate": 0, "edge_upstream_error_rate": 0, "p95_ttfb_ms": 100, "p99_duration_ms": 200},
+		}},
+	}
+	state, err := svc.prepareSafeZeroDowntimeRollout(context.Background(), op, previous, candidate)
+	if err != nil {
+		t.Fatalf("prepare safe rollout: %v", err)
+	}
+	err = svc.completeSafeZeroDowntimeRollout(context.Background(), op, state)
+	if err == nil || !strings.Contains(err.Error(), "canary edge route bundle wait failed") {
+		t.Fatalf("expected canary edge bundle wait failure, got %v", err)
+	}
+	policy, err := stateStore.GetAppTrafficPolicy(candidate.TenantID, true, candidate.ID)
+	if err != nil {
+		t.Fatalf("get traffic policy: %v", err)
+	}
+	if policy.Mode != model.AppTrafficModeSingle || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 {
+		t.Fatalf("expected stable-only traffic after canary edge bundle wait failure, got %+v", policy)
+	}
+	steps, err := stateStore.ListReleaseSteps(candidate.TenantID, true, "attempt_safe")
+	if err != nil {
+		t.Fatalf("list release steps: %v", err)
+	}
+	if !releaseStepsContainPhase(steps, "canary_edge_bundle_wait", model.ReleaseStepStatusFailed) ||
+		!releaseStepsContainPhase(steps, "abort", model.ReleaseStepStatusCompleted) {
+		t.Fatalf("expected failed canary edge bundle wait and abort steps, got %+v", steps)
+	}
+	for _, step := range steps {
+		if value, ok := step.Payload["phase"].(string); ok && value == "canary_gate" {
+			t.Fatalf("expected canary gate not to run before edge bundle confirmation, got %+v", steps)
+		}
+	}
+}
+
 func TestSafeZeroDowntimeRolloutSkipsCandidateWhenPodTemplateUnchanged(t *testing.T) {
 	t.Parallel()
 

@@ -766,13 +766,14 @@ Debug bundle 必须包含：
 工作：
 
 - controller 设置 candidate initial weight。
-- 等待 edge bundle 生效。
+- 每次 canary shift 后等待 edge route bundle 在活跃 edge 节点上确认生效，再开始 observation window。
 - 按 policy 观察 request facts，并按 release_id / release_role 对比 stable 与 candidate。
 - 通过后升权，失败后 abort。
 
 验收：
 
 - request facts 可按 release_id / release_role 区分。
+- canary observation window 开始前，edge bundle 必须已晚于本次 traffic policy 更新；否则 abort candidate，避免用 0 个 candidate 样本做假失败。
 - candidate status/error/latency 比例显著差于 stable 时自动 abort。
 - canary 失败恢复 stable 100。
 
@@ -880,7 +881,7 @@ Debug bundle 必须包含：
 ### Traffic Canary
 
 - [x] controller 可自动设置 candidate initial weight。
-- [x] controller 等待 edge route bundle 应用完成。
+- [x] controller 在每次 canary shift 后等待 edge route bundle 应用完成。
 - [x] request facts 必须记录 release id / release role。
 - [x] controller 查询 candidate passive metrics。
 - [x] canary pass 后按 step_weights 升权。

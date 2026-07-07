@@ -167,6 +167,12 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 				"operation_id":     op.ID,
 				"candidate_weight": fmt.Sprintf("%d", weight),
 			})
+			routePolicyUpdatedAt := time.Now().UTC()
+			if !s.waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx, op, state, weight, routePolicyUpdatedAt) {
+				reason := fmt.Sprintf("candidate canary edge route bundle not applied at %d%%", weight)
+				_ = s.abortSafeZeroDowntimeRollout(ctx, op, state, reason)
+				return fmt.Errorf("safe zero downtime rollout canary edge route bundle wait failed at %d%%", weight)
+			}
 			observedCanaryTraffic = true
 			if err := s.sleepSafeRolloutObservation(ctx, time.Duration(plan.Canary.MinObservationSeconds)*time.Second); err != nil {
 				return err
@@ -264,6 +270,46 @@ func (s *Service) completeSafeZeroDowntimeRollout(ctx context.Context, op model.
 	}
 	state.StableAlignmentAllowed = true
 	return nil
+}
+
+func (s *Service) waitSafeRolloutCanaryEdgeRouteBundleApplied(ctx context.Context, op model.Operation, state *safeRolloutState, weight int, since time.Time) bool {
+	if state == nil || !state.Enabled {
+		return true
+	}
+	observer := s.edgeBundleObserverForSafeRollout()
+	observation, err := observer.WaitForSafeRolloutEdgeRouteBundle(ctx, state.CandidateApp, state.Candidate, since)
+	payload := map[string]any{
+		"candidate_weight": weight,
+		"observation":      observation.Summary,
+	}
+	if err != nil {
+		payload["error"] = err.Error()
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_edge_bundle_wait", model.ReleaseStepStatusFailed, fmt.Sprintf("candidate canary edge route bundle confirmation failed at %d%%", weight), state.Candidate.ID, payload)
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.canary.blocked", state.Candidate.ID, map[string]string{
+			"operation_id":     op.ID,
+			"phase":            "canary_edge_bundle_wait",
+			"candidate_weight": fmt.Sprintf("%d", weight),
+			"reason":           err.Error(),
+		})
+		return false
+	}
+	status := model.ReleaseStepStatusCompleted
+	summary := fmt.Sprintf("edge route bundle applied for candidate canary at %d%%", weight)
+	if !observation.Ready {
+		status = model.ReleaseStepStatusFailed
+		summary = fmt.Sprintf("candidate canary edge route bundle not applied at %d%%", weight)
+	}
+	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "canary_edge_bundle_wait", status, summary, state.Candidate.ID, payload)
+	if !observation.Ready {
+		s.appendSafeRolloutAuditEvent(state.CandidateApp, "app.release.canary.blocked", state.Candidate.ID, map[string]string{
+			"operation_id":     op.ID,
+			"phase":            "canary_edge_bundle_wait",
+			"candidate_weight": fmt.Sprintf("%d", weight),
+			"required_nodes":   fmt.Sprintf("%d", observation.RequiredNodes),
+			"ready_nodes":      fmt.Sprintf("%d", observation.ReadyNodes),
+		})
+	}
+	return observation.Ready
 }
 
 func (s *Service) waitSafeRolloutEdgeRouteBundleApplied(ctx context.Context, op model.Operation, state *safeRolloutState) bool {
