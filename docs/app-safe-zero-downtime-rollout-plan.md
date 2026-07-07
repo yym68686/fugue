@@ -980,3 +980,4 @@ Debug bundle 必须包含：
 - 保护行为：1%、5%、25% 因 candidate 样本不足被记录为 inconclusive 并继续升权；50% 阶段拿到 candidate 样本后，candidate p95 TTFB 828ms 劣于 stable 91ms，触发 canary gate failure，自动 abort candidate，并生成 evidence `evid_1783456670_f79d627dd4f9`。
 - 恢复验证：失败后 `albumartwork` 仍为 deployed，公网探测返回 200，noop env `FUGUE_SAFE_ROLLOUT_PROD_CANARY` 未进入 stable spec，说明 safe rollout 没有把未通过 gate 的 candidate 提升为 stable。
 - 观察窗口：生产 safe mode 已开启，但 24 小时观察窗口尚未完成；观察起点按 `2026-07-07T20:31:13Z` 记录，最早应在 `2026-07-08T20:31:13Z` 之后再勾选 24 小时观察项。
+- 灰度开关：24 小时观察通过前，`FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED` 默认保持 `false`，只有平台管理员可开启 `zero_downtime.mode=safe`。普通用户开放动作是把该开关显式设为 `true` 并完成一次控制平面发布后，再勾选“再开放给普通用户手动开启”。

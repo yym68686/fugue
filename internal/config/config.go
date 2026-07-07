@@ -16,57 +16,58 @@ import (
 const DefaultManagedAppRolloutTimeout = time.Hour
 
 type APIConfig struct {
-	BindAddr                      string
-	MetricsBindAddr               string
-	StorePath                     string
-	DatabaseURL                   string
-	BootstrapAdminKey             string
-	WorkloadIdentitySigningKey    string
-	ControlPlaneNamespace         string
-	ControlPlaneReleaseInstance   string
-	ControlPlaneCNPGBackupEnabled bool
-	ControlPlaneCNPGBackupName    string
-	RegistryGCLeaseName           string
-	ControlPlaneGitHubRepository  string
-	ControlPlaneGitHubWorkflow    string
-	ControlPlaneGitHubAPIURL      string
-	ControlPlaneGitHubToken       string
-	AppBaseDomain                 string
-	APIPublicDomain               string
-	SSHPublicHost                 string
-	SSHPublicPortStart            int
-	SSHPublicPortEnd              int
-	DNSStaticRecordsJSON          string
-	DNSRouteAAnswerIPs            []string
-	DNSBundleTTL                  int
-	PlatformRoutesJSON            string
-	EdgeQualityRankingMode        string
-	EdgeTLSAskToken               string
-	AllowLegacyEdgeToken          bool
-	ImageStoreMode                string
-	RegistryPushBase              string
-	RegistryPullBase              string
-	ClusterJoinRegistryEndpoint   string
-	MovableRWOStorageClass        string
-	ManagedPostgresStorageClass   string
-	ClusterJoinServer             string
-	ClusterJoinServerFallbacks    string
-	ClusterJoinCAHash             string
-	ClusterJoinBootstrapTokenTTL  time.Duration
-	ClusterJoinK3SVersion         string
-	ClusterJoinMeshProvider       string
-	ClusterJoinMeshLoginServer    string
-	ClusterJoinMeshAuthKey        string
-	BundleSigningKey              string
-	BundleSigningKeyID            string
-	BundleSigningPreviousKey      string
-	BundleSigningPreviousKeyID    string
-	BundleRevokedKeyIDs           []string
-	BundleValidFor                time.Duration
-	ImportWorkDir                 string
-	ShutdownDrainDelay            time.Duration
-	ShutdownTimeout               time.Duration
-	Observability                 observability.Config
+	BindAddr                         string
+	MetricsBindAddr                  string
+	StorePath                        string
+	DatabaseURL                      string
+	BootstrapAdminKey                string
+	WorkloadIdentitySigningKey       string
+	ControlPlaneNamespace            string
+	ControlPlaneReleaseInstance      string
+	ControlPlaneCNPGBackupEnabled    bool
+	ControlPlaneCNPGBackupName       string
+	RegistryGCLeaseName              string
+	ControlPlaneGitHubRepository     string
+	ControlPlaneGitHubWorkflow       string
+	ControlPlaneGitHubAPIURL         string
+	ControlPlaneGitHubToken          string
+	AppBaseDomain                    string
+	APIPublicDomain                  string
+	SSHPublicHost                    string
+	SSHPublicPortStart               int
+	SSHPublicPortEnd                 int
+	DNSStaticRecordsJSON             string
+	DNSRouteAAnswerIPs               []string
+	DNSBundleTTL                     int
+	PlatformRoutesJSON               string
+	EdgeQualityRankingMode           string
+	AppSafeZeroDowntimePublicEnabled bool
+	EdgeTLSAskToken                  string
+	AllowLegacyEdgeToken             bool
+	ImageStoreMode                   string
+	RegistryPushBase                 string
+	RegistryPullBase                 string
+	ClusterJoinRegistryEndpoint      string
+	MovableRWOStorageClass           string
+	ManagedPostgresStorageClass      string
+	ClusterJoinServer                string
+	ClusterJoinServerFallbacks       string
+	ClusterJoinCAHash                string
+	ClusterJoinBootstrapTokenTTL     time.Duration
+	ClusterJoinK3SVersion            string
+	ClusterJoinMeshProvider          string
+	ClusterJoinMeshLoginServer       string
+	ClusterJoinMeshAuthKey           string
+	BundleSigningKey                 string
+	BundleSigningKeyID               string
+	BundleSigningPreviousKey         string
+	BundleSigningPreviousKeyID       string
+	BundleRevokedKeyIDs              []string
+	BundleValidFor                   time.Duration
+	ImportWorkDir                    string
+	ShutdownDrainDelay               time.Duration
+	ShutdownTimeout                  time.Duration
+	Observability                    observability.Config
 }
 
 type TelemetryAgentConfig struct {
@@ -272,57 +273,58 @@ type DNSGeoIPOverride struct {
 
 func APIFromEnv() APIConfig {
 	cfg := APIConfig{
-		BindAddr:                      getenv("FUGUE_BIND_ADDR", ":8080"),
-		MetricsBindAddr:               strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
-		StorePath:                     getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:                   getenv("FUGUE_DATABASE_URL", ""),
-		BootstrapAdminKey:             getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
-		WorkloadIdentitySigningKey:    strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
-		ControlPlaneNamespace:         getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
-		ControlPlaneReleaseInstance:   getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
-		ControlPlaneCNPGBackupEnabled: getenvBool("FUGUE_CONTROL_PLANE_CNPG_BACKUP_ENABLED", false),
-		ControlPlaneCNPGBackupName:    strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_CNPG_BACKUP_NAME")),
-		RegistryGCLeaseName:           getenv("FUGUE_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
-		ControlPlaneGitHubRepository:  strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY")),
-		ControlPlaneGitHubWorkflow:    getenv("FUGUE_CONTROL_PLANE_GITHUB_WORKFLOW", "deploy-control-plane.yml"),
-		ControlPlaneGitHubAPIURL:      getenv("FUGUE_CONTROL_PLANE_GITHUB_API_URL", "https://api.github.com"),
-		ControlPlaneGitHubToken:       strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_TOKEN")),
-		AppBaseDomain:                 getenv("FUGUE_APP_BASE_DOMAIN", ""),
-		APIPublicDomain:               getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
-		SSHPublicHost:                 strings.TrimSpace(os.Getenv("FUGUE_SSH_PUBLIC_HOST")),
-		SSHPublicPortStart:            getenvInt("FUGUE_SSH_PUBLIC_PORT_START", 22000),
-		SSHPublicPortEnd:              getenvInt("FUGUE_SSH_PUBLIC_PORT_END", 32000),
-		DNSStaticRecordsJSON:          strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
-		DNSRouteAAnswerIPs:            getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
-		DNSBundleTTL:                  getenvInt("FUGUE_DNS_TTL", 60),
-		PlatformRoutesJSON:            strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
-		EdgeQualityRankingMode:        getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
-		EdgeTLSAskToken:               strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
-		AllowLegacyEdgeToken:          getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
-		ImageStoreMode:                getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
-		RegistryPushBase:              getenv("FUGUE_REGISTRY_PUSH_BASE", ""),
-		RegistryPullBase:              strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
-		ClusterJoinRegistryEndpoint:   strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),
-		MovableRWOStorageClass:        strings.TrimSpace(os.Getenv("FUGUE_DEFAULT_MOVABLE_RWO_STORAGE_CLASS_NAME")),
-		ManagedPostgresStorageClass:   strings.TrimSpace(os.Getenv("FUGUE_DEFAULT_MANAGED_POSTGRES_STORAGE_CLASS_NAME")),
-		ClusterJoinServer:             getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
-		ClusterJoinServerFallbacks:    strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS")),
-		ClusterJoinCAHash:             strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_CA_HASH")),
-		ClusterJoinBootstrapTokenTTL:  getenvDuration("FUGUE_CLUSTER_JOIN_BOOTSTRAP_TOKEN_TTL", 15*time.Minute),
-		ClusterJoinK3SVersion:         strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_K3S_VERSION")),
-		ClusterJoinMeshProvider:       getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
-		ClusterJoinMeshLoginServer:    getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
-		ClusterJoinMeshAuthKey:        getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
-		BundleSigningKey:              strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
-		BundleSigningKeyID:            getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
-		BundleSigningPreviousKey:      strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
-		BundleSigningPreviousKeyID:    strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
-		BundleRevokedKeyIDs:           getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
-		BundleValidFor:                getenvDuration("FUGUE_BUNDLE_VALID_FOR", 15*time.Minute),
-		ImportWorkDir:                 getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
-		ShutdownDrainDelay:            getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
-		ShutdownTimeout:               getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
-		Observability:                 ObservabilityFromEnv(),
+		BindAddr:                         getenv("FUGUE_BIND_ADDR", ":8080"),
+		MetricsBindAddr:                  strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
+		StorePath:                        getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                      getenv("FUGUE_DATABASE_URL", ""),
+		BootstrapAdminKey:                getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		WorkloadIdentitySigningKey:       strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
+		ControlPlaneNamespace:            getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
+		ControlPlaneReleaseInstance:      getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
+		ControlPlaneCNPGBackupEnabled:    getenvBool("FUGUE_CONTROL_PLANE_CNPG_BACKUP_ENABLED", false),
+		ControlPlaneCNPGBackupName:       strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_CNPG_BACKUP_NAME")),
+		RegistryGCLeaseName:              getenv("FUGUE_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
+		ControlPlaneGitHubRepository:     strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_REPOSITORY")),
+		ControlPlaneGitHubWorkflow:       getenv("FUGUE_CONTROL_PLANE_GITHUB_WORKFLOW", "deploy-control-plane.yml"),
+		ControlPlaneGitHubAPIURL:         getenv("FUGUE_CONTROL_PLANE_GITHUB_API_URL", "https://api.github.com"),
+		ControlPlaneGitHubToken:          strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_GITHUB_TOKEN")),
+		AppBaseDomain:                    getenv("FUGUE_APP_BASE_DOMAIN", ""),
+		APIPublicDomain:                  getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
+		SSHPublicHost:                    strings.TrimSpace(os.Getenv("FUGUE_SSH_PUBLIC_HOST")),
+		SSHPublicPortStart:               getenvInt("FUGUE_SSH_PUBLIC_PORT_START", 22000),
+		SSHPublicPortEnd:                 getenvInt("FUGUE_SSH_PUBLIC_PORT_END", 32000),
+		DNSStaticRecordsJSON:             strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
+		DNSRouteAAnswerIPs:               getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
+		DNSBundleTTL:                     getenvInt("FUGUE_DNS_TTL", 60),
+		PlatformRoutesJSON:               strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
+		EdgeQualityRankingMode:           getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
+		AppSafeZeroDowntimePublicEnabled: getenvBool("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", false),
+		EdgeTLSAskToken:                  strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
+		AllowLegacyEdgeToken:             getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
+		ImageStoreMode:                   getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
+		RegistryPushBase:                 getenv("FUGUE_REGISTRY_PUSH_BASE", ""),
+		RegistryPullBase:                 strings.TrimSpace(os.Getenv("FUGUE_REGISTRY_PULL_BASE")),
+		ClusterJoinRegistryEndpoint:      strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT")),
+		MovableRWOStorageClass:           strings.TrimSpace(os.Getenv("FUGUE_DEFAULT_MOVABLE_RWO_STORAGE_CLASS_NAME")),
+		ManagedPostgresStorageClass:      strings.TrimSpace(os.Getenv("FUGUE_DEFAULT_MANAGED_POSTGRES_STORAGE_CLASS_NAME")),
+		ClusterJoinServer:                getenv("FUGUE_CLUSTER_JOIN_SERVER", ""),
+		ClusterJoinServerFallbacks:       strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS")),
+		ClusterJoinCAHash:                strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_CA_HASH")),
+		ClusterJoinBootstrapTokenTTL:     getenvDuration("FUGUE_CLUSTER_JOIN_BOOTSTRAP_TOKEN_TTL", 15*time.Minute),
+		ClusterJoinK3SVersion:            strings.TrimSpace(os.Getenv("FUGUE_CLUSTER_JOIN_K3S_VERSION")),
+		ClusterJoinMeshProvider:          getenv("FUGUE_CLUSTER_JOIN_MESH_PROVIDER", ""),
+		ClusterJoinMeshLoginServer:       getenv("FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER", ""),
+		ClusterJoinMeshAuthKey:           getenv("FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY", ""),
+		BundleSigningKey:                 strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_KEY")),
+		BundleSigningKeyID:               getenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "control-plane"),
+		BundleSigningPreviousKey:         strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY")),
+		BundleSigningPreviousKeyID:       strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
+		BundleRevokedKeyIDs:              getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
+		BundleValidFor:                   getenvDuration("FUGUE_BUNDLE_VALID_FOR", 15*time.Minute),
+		ImportWorkDir:                    getenv("FUGUE_IMPORT_WORK_DIR", "./data/import"),
+		ShutdownDrainDelay:               getenvDuration("FUGUE_API_SHUTDOWN_DRAIN_DELAY", 5*time.Second),
+		ShutdownTimeout:                  getenvDuration("FUGUE_API_SHUTDOWN_TIMEOUT", 25*time.Second),
+		Observability:                    ObservabilityFromEnv(),
 	}
 	if cfg.RegistryPullBase == "" {
 		cfg.RegistryPullBase = cfg.RegistryPushBase

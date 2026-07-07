@@ -27,107 +27,108 @@ import (
 )
 
 type Server struct {
-	store                         *store.Store
-	auth                          *auth.Authenticator
-	log                           *log.Logger
-	metricsStartedAt              time.Time
-	controlPlaneDatabaseURL       string
-	controlPlaneNamespace         string
-	controlPlaneReleaseInstance   string
-	controlPlaneCNPGBackupEnabled bool
-	controlPlaneCNPGBackupName    string
-	registryGCLeaseName           string
-	controlPlaneGitHubRepository  string
-	controlPlaneGitHubWorkflow    string
-	controlPlaneGitHubAPIURL      string
-	controlPlaneGitHubToken       string
-	controlPlaneHTTPClient        *http.Client
-	appBaseDomain                 string
-	customDomainBaseDomain        string
-	apiPublicDomain               string
-	sshPublicHost                 string
-	sshPublicPortStart            int
-	sshPublicPortEnd              int
-	dnsStaticRecords              []model.EdgeDNSRecord
-	dnsRouteAAnswerIPs            []string
-	dnsBundleTTL                  int
-	platformRoutes                []model.PlatformRoute
-	edgeQualityRankingMode        string
-	edgeTLSAskToken               string
-	allowLegacyEdgeToken          bool
-	imageStoreMode                string
-	registryPushBase              string
-	registryPullBase              string
-	clusterJoinRegistryEndpoint   string
-	movableRWOStorageClass        string
-	managedPostgresStorageClass   string
-	reservedAppHosts              map[string]struct{}
-	clusterJoinServer             string
-	clusterJoinServerFallbacks    []string
-	clusterJoinCAHash             string
-	clusterJoinBootstrapTokenTTL  time.Duration
-	clusterJoinK3SVersion         string
-	clusterJoinMeshProvider       string
-	clusterJoinMeshLoginServer    string
-	clusterJoinMeshAuthKey        string
-	bundleSigningKey              string
-	bundleSigningKeyID            string
-	bundleSigningPreviousKey      string
-	bundleSigningPreviousKeyID    string
-	bundleRevokedKeyIDs           []string
-	bundleValidFor                time.Duration
-	observabilityConfig           observability.Config
-	importer                      *sourceimport.Importer
-	resolveRemoteImageDigest      func(context.Context, string) (string, error)
-	inspectBuilderPlacement       builderPlacementInspector
-	appImageRegistry              appImageRegistry
-	requestRegistryGC             func(context.Context, string) error
-	projectImageUsageCache        expiringResponseCache[projectImageUsageResponse]
-	readinessKubernetesAPICache   expiringResponseCache[readinessCheckResult]
-	clusterNodeInventoryCache     expiringResponseCache[[]clusterNodeSnapshot]
-	edgeLiveServingCache          expiringResponseCache[map[string]edgeLiveServingState]
-	appProxyAppCache              expiringResponseCache[model.App]
-	appProxyServiceHostCache      expiringResponseCache[string]
-	managedSharedLocationSync     managedSharedLocationSyncState
-	newClusterNodeClient          func() (*clusterNodeClient, error)
-	newManagedAppStatusClient     func() (*managedAppStatusClient, error)
-	managedAppStatusCache         managedAppStatusCache
-	consoleGalleryCache           expiringResponseCache[consoleGalleryResponse]
-	billingImageStorageRefresh    billingImageStorageRefreshScheduler
-	newLogsClient                 func(namespace string) (appLogsClient, error)
-	newFilesystemPodLister        func(namespace string) (filesystemPodLister, error)
-	filesystemExecRunner          filesystemPodExecRunner
-	appProxyTransport             http.RoundTripper
-	appRequestHTTPClient          *http.Client
-	openAppDatabase               func(driverName, dsn string) (*sql.DB, error)
-	appDatabaseImportRunner       func(context.Context, model.AppDatabaseImportJob) (string, error)
-	backupRunner                  func(context.Context, model.BackupRun) ([]model.BackupArtifact, error)
-	dialAppDatabaseTunnel         func(context.Context, string, string) (net.Conn, error)
-	dnsResolver                   appDomainDNSResolver
-	dnsDelegationProbe            dnsDelegationProbeFunc
-	dnsParentNSLookup             dnsParentNSLookupFunc
-	logStreamTuning               logStreamTuning
-	oomRightSizingMu              sync.Mutex
-	oomRightSizingEvents          map[string]time.Time
-	edgeQualityRollupMu           sync.Mutex
-	edgeQualityRollupLastRun      time.Time
-	edgeQualityRollupLastSuccess  time.Time
-	edgeQualityRollupLastDuration time.Duration
-	edgeQualityRollupLastCount    int
-	edgeQualityRollupRunCount     int64
-	edgeQualityRollupErrorCount   int64
-	edgeQualityRollupLastError    string
-	edgeDNSArtifactMu             sync.Mutex
-	edgeDNSArtifactLastRun        time.Time
-	edgeDNSArtifactLastSuccess    time.Time
-	edgeDNSArtifactLastDuration   time.Duration
-	edgeDNSArtifactLastCount      int
-	edgeDNSArtifactLastDecisions  int
-	edgeDNSArtifactRunCount       int64
-	edgeDNSArtifactSkippedCount   int64
-	edgeDNSArtifactErrorCount     int64
-	edgeDNSArtifactLastError      string
-	ready                         atomic.Bool
+	store                            *store.Store
+	auth                             *auth.Authenticator
+	log                              *log.Logger
+	metricsStartedAt                 time.Time
+	controlPlaneDatabaseURL          string
+	controlPlaneNamespace            string
+	controlPlaneReleaseInstance      string
+	controlPlaneCNPGBackupEnabled    bool
+	controlPlaneCNPGBackupName       string
+	registryGCLeaseName              string
+	controlPlaneGitHubRepository     string
+	controlPlaneGitHubWorkflow       string
+	controlPlaneGitHubAPIURL         string
+	controlPlaneGitHubToken          string
+	controlPlaneHTTPClient           *http.Client
+	appBaseDomain                    string
+	customDomainBaseDomain           string
+	apiPublicDomain                  string
+	sshPublicHost                    string
+	sshPublicPortStart               int
+	sshPublicPortEnd                 int
+	dnsStaticRecords                 []model.EdgeDNSRecord
+	dnsRouteAAnswerIPs               []string
+	dnsBundleTTL                     int
+	platformRoutes                   []model.PlatformRoute
+	edgeQualityRankingMode           string
+	appSafeZeroDowntimePublicEnabled bool
+	edgeTLSAskToken                  string
+	allowLegacyEdgeToken             bool
+	imageStoreMode                   string
+	registryPushBase                 string
+	registryPullBase                 string
+	clusterJoinRegistryEndpoint      string
+	movableRWOStorageClass           string
+	managedPostgresStorageClass      string
+	reservedAppHosts                 map[string]struct{}
+	clusterJoinServer                string
+	clusterJoinServerFallbacks       []string
+	clusterJoinCAHash                string
+	clusterJoinBootstrapTokenTTL     time.Duration
+	clusterJoinK3SVersion            string
+	clusterJoinMeshProvider          string
+	clusterJoinMeshLoginServer       string
+	clusterJoinMeshAuthKey           string
+	bundleSigningKey                 string
+	bundleSigningKeyID               string
+	bundleSigningPreviousKey         string
+	bundleSigningPreviousKeyID       string
+	bundleRevokedKeyIDs              []string
+	bundleValidFor                   time.Duration
+	observabilityConfig              observability.Config
+	importer                         *sourceimport.Importer
+	resolveRemoteImageDigest         func(context.Context, string) (string, error)
+	inspectBuilderPlacement          builderPlacementInspector
+	appImageRegistry                 appImageRegistry
+	requestRegistryGC                func(context.Context, string) error
+	projectImageUsageCache           expiringResponseCache[projectImageUsageResponse]
+	readinessKubernetesAPICache      expiringResponseCache[readinessCheckResult]
+	clusterNodeInventoryCache        expiringResponseCache[[]clusterNodeSnapshot]
+	edgeLiveServingCache             expiringResponseCache[map[string]edgeLiveServingState]
+	appProxyAppCache                 expiringResponseCache[model.App]
+	appProxyServiceHostCache         expiringResponseCache[string]
+	managedSharedLocationSync        managedSharedLocationSyncState
+	newClusterNodeClient             func() (*clusterNodeClient, error)
+	newManagedAppStatusClient        func() (*managedAppStatusClient, error)
+	managedAppStatusCache            managedAppStatusCache
+	consoleGalleryCache              expiringResponseCache[consoleGalleryResponse]
+	billingImageStorageRefresh       billingImageStorageRefreshScheduler
+	newLogsClient                    func(namespace string) (appLogsClient, error)
+	newFilesystemPodLister           func(namespace string) (filesystemPodLister, error)
+	filesystemExecRunner             filesystemPodExecRunner
+	appProxyTransport                http.RoundTripper
+	appRequestHTTPClient             *http.Client
+	openAppDatabase                  func(driverName, dsn string) (*sql.DB, error)
+	appDatabaseImportRunner          func(context.Context, model.AppDatabaseImportJob) (string, error)
+	backupRunner                     func(context.Context, model.BackupRun) ([]model.BackupArtifact, error)
+	dialAppDatabaseTunnel            func(context.Context, string, string) (net.Conn, error)
+	dnsResolver                      appDomainDNSResolver
+	dnsDelegationProbe               dnsDelegationProbeFunc
+	dnsParentNSLookup                dnsParentNSLookupFunc
+	logStreamTuning                  logStreamTuning
+	oomRightSizingMu                 sync.Mutex
+	oomRightSizingEvents             map[string]time.Time
+	edgeQualityRollupMu              sync.Mutex
+	edgeQualityRollupLastRun         time.Time
+	edgeQualityRollupLastSuccess     time.Time
+	edgeQualityRollupLastDuration    time.Duration
+	edgeQualityRollupLastCount       int
+	edgeQualityRollupRunCount        int64
+	edgeQualityRollupErrorCount      int64
+	edgeQualityRollupLastError       string
+	edgeDNSArtifactMu                sync.Mutex
+	edgeDNSArtifactLastRun           time.Time
+	edgeDNSArtifactLastSuccess       time.Time
+	edgeDNSArtifactLastDuration      time.Duration
+	edgeDNSArtifactLastCount         int
+	edgeDNSArtifactLastDecisions     int
+	edgeDNSArtifactRunCount          int64
+	edgeDNSArtifactSkippedCount      int64
+	edgeDNSArtifactErrorCount        int64
+	edgeDNSArtifactLastError         string
+	ready                            atomic.Bool
 }
 
 func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger, cfg ServerConfig) *Server {
@@ -144,70 +145,71 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		dnsBundleTTL = defaultEdgeDNSTTL
 	}
 	server := &Server{
-		store:                         store,
-		auth:                          authn,
-		log:                           logger,
-		metricsStartedAt:              time.Now().UTC(),
-		controlPlaneDatabaseURL:       strings.TrimSpace(cfg.DatabaseURL),
-		controlPlaneNamespace:         strings.TrimSpace(cfg.ControlPlaneNamespace),
-		controlPlaneReleaseInstance:   strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
-		controlPlaneCNPGBackupEnabled: cfg.ControlPlaneCNPGBackupEnabled,
-		controlPlaneCNPGBackupName:    strings.TrimSpace(cfg.ControlPlaneCNPGBackupName),
-		registryGCLeaseName:           strings.TrimSpace(cfg.RegistryGCLeaseName),
-		controlPlaneGitHubRepository:  strings.TrimSpace(cfg.ControlPlaneGitHubRepository),
-		controlPlaneGitHubWorkflow:    strings.TrimSpace(cfg.ControlPlaneGitHubWorkflow),
-		controlPlaneGitHubAPIURL:      strings.TrimRight(strings.TrimSpace(cfg.ControlPlaneGitHubAPIURL), "/"),
-		controlPlaneGitHubToken:       strings.TrimSpace(cfg.ControlPlaneGitHubToken),
-		controlPlaneHTTPClient:        &http.Client{Timeout: 10 * time.Second},
-		appBaseDomain:                 strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
-		customDomainBaseDomain:        defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
-		apiPublicDomain:               strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
-		sshPublicHost:                 defaultSSHPublicHost(cfg.SSHPublicHost, cfg.AppBaseDomain),
-		sshPublicPortStart:            cfg.SSHPublicPortStart,
-		sshPublicPortEnd:              cfg.SSHPublicPortEnd,
-		dnsStaticRecords:              parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
-		dnsRouteAAnswerIPs:            dnsRouteAAnswerIPs,
-		dnsBundleTTL:                  dnsBundleTTL,
-		platformRoutes:                parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
-		edgeQualityRankingMode:        normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
-		edgeTLSAskToken:               strings.TrimSpace(cfg.EdgeTLSAskToken),
-		allowLegacyEdgeToken:          cfg.AllowLegacyEdgeToken,
-		imageStoreMode:                strings.TrimSpace(cfg.ImageStoreMode),
-		registryPushBase:              strings.TrimSpace(cfg.RegistryPushBase),
-		registryPullBase:              strings.TrimSpace(cfg.RegistryPullBase),
-		clusterJoinRegistryEndpoint:   strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
-		movableRWOStorageClass:        normalizeDefaultMovableRWOStorageClassName(cfg.MovableRWOStorageClass),
-		managedPostgresStorageClass:   normalizeDefaultManagedPostgresStorageClassName(cfg.ManagedPostgresStorageClass),
-		clusterJoinServer:             strings.TrimSpace(cfg.ClusterJoinServer),
-		clusterJoinServerFallbacks:    parseCSVValues(cfg.ClusterJoinServerFallbacks),
-		clusterJoinCAHash:             normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),
-		clusterJoinBootstrapTokenTTL:  cfg.ClusterJoinBootstrapTokenTTL,
-		clusterJoinK3SVersion:         strings.TrimSpace(cfg.ClusterJoinK3SVersion),
-		clusterJoinMeshProvider:       strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
-		clusterJoinMeshLoginServer:    strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
-		clusterJoinMeshAuthKey:        strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
-		bundleSigningKey:              strings.TrimSpace(cfg.BundleSigningKey),
-		bundleSigningKeyID:            strings.TrimSpace(cfg.BundleSigningKeyID),
-		bundleSigningPreviousKey:      strings.TrimSpace(cfg.BundleSigningPreviousKey),
-		bundleSigningPreviousKeyID:    strings.TrimSpace(cfg.BundleSigningPreviousKeyID),
-		bundleRevokedKeyIDs:           append([]string(nil), cfg.BundleRevokedKeyIDs...),
-		bundleValidFor:                cfg.BundleValidFor,
-		observabilityConfig:           cfg.Observability.Normalize(),
-		importer:                      sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
-		resolveRemoteImageDigest:      sourceimport.ResolveRemoteImageDigest,
-		inspectBuilderPlacement:       sourceimport.InspectBuilderPlacementForProfile,
-		appImageRegistry:              newRemoteAppImageRegistry(),
-		projectImageUsageCache:        newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
-		readinessKubernetesAPICache:   newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
-		clusterNodeInventoryCache:     newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
-		edgeLiveServingCache:          newExpiringResponseCache[map[string]edgeLiveServingState](5 * time.Second),
-		appProxyAppCache:              newExpiringResponseCache[model.App](defaultAppProxyLookupCacheTTL),
-		appProxyServiceHostCache:      newExpiringResponseCache[string](defaultAppProxyLookupCacheTTL),
-		newClusterNodeClient:          newClusterNodeClient,
-		newManagedAppStatusClient:     newManagedAppStatusClient,
-		managedAppStatusCache:         newManagedAppStatusCache(0, 0),
-		consoleGalleryCache:           newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
-		billingImageStorageRefresh:    newBillingImageStorageRefreshScheduler(0, 0),
+		store:                            store,
+		auth:                             authn,
+		log:                              logger,
+		metricsStartedAt:                 time.Now().UTC(),
+		controlPlaneDatabaseURL:          strings.TrimSpace(cfg.DatabaseURL),
+		controlPlaneNamespace:            strings.TrimSpace(cfg.ControlPlaneNamespace),
+		controlPlaneReleaseInstance:      strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		controlPlaneCNPGBackupEnabled:    cfg.ControlPlaneCNPGBackupEnabled,
+		controlPlaneCNPGBackupName:       strings.TrimSpace(cfg.ControlPlaneCNPGBackupName),
+		registryGCLeaseName:              strings.TrimSpace(cfg.RegistryGCLeaseName),
+		controlPlaneGitHubRepository:     strings.TrimSpace(cfg.ControlPlaneGitHubRepository),
+		controlPlaneGitHubWorkflow:       strings.TrimSpace(cfg.ControlPlaneGitHubWorkflow),
+		controlPlaneGitHubAPIURL:         strings.TrimRight(strings.TrimSpace(cfg.ControlPlaneGitHubAPIURL), "/"),
+		controlPlaneGitHubToken:          strings.TrimSpace(cfg.ControlPlaneGitHubToken),
+		controlPlaneHTTPClient:           &http.Client{Timeout: 10 * time.Second},
+		appBaseDomain:                    strings.TrimSpace(strings.ToLower(cfg.AppBaseDomain)),
+		customDomainBaseDomain:           defaultCustomDomainBaseDomain(cfg.AppBaseDomain),
+		apiPublicDomain:                  strings.TrimSpace(strings.ToLower(cfg.APIPublicDomain)),
+		sshPublicHost:                    defaultSSHPublicHost(cfg.SSHPublicHost, cfg.AppBaseDomain),
+		sshPublicPortStart:               cfg.SSHPublicPortStart,
+		sshPublicPortEnd:                 cfg.SSHPublicPortEnd,
+		dnsStaticRecords:                 parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
+		dnsRouteAAnswerIPs:               dnsRouteAAnswerIPs,
+		dnsBundleTTL:                     dnsBundleTTL,
+		platformRoutes:                   parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),
+		edgeQualityRankingMode:           normalizeEdgeQualityRankingMode(cfg.EdgeQualityRankingMode),
+		appSafeZeroDowntimePublicEnabled: cfg.AppSafeZeroDowntimePublicEnabled,
+		edgeTLSAskToken:                  strings.TrimSpace(cfg.EdgeTLSAskToken),
+		allowLegacyEdgeToken:             cfg.AllowLegacyEdgeToken,
+		imageStoreMode:                   strings.TrimSpace(cfg.ImageStoreMode),
+		registryPushBase:                 strings.TrimSpace(cfg.RegistryPushBase),
+		registryPullBase:                 strings.TrimSpace(cfg.RegistryPullBase),
+		clusterJoinRegistryEndpoint:      strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),
+		movableRWOStorageClass:           normalizeDefaultMovableRWOStorageClassName(cfg.MovableRWOStorageClass),
+		managedPostgresStorageClass:      normalizeDefaultManagedPostgresStorageClassName(cfg.ManagedPostgresStorageClass),
+		clusterJoinServer:                strings.TrimSpace(cfg.ClusterJoinServer),
+		clusterJoinServerFallbacks:       parseCSVValues(cfg.ClusterJoinServerFallbacks),
+		clusterJoinCAHash:                normalizeClusterJoinCAHash(cfg.ClusterJoinCAHash),
+		clusterJoinBootstrapTokenTTL:     cfg.ClusterJoinBootstrapTokenTTL,
+		clusterJoinK3SVersion:            strings.TrimSpace(cfg.ClusterJoinK3SVersion),
+		clusterJoinMeshProvider:          strings.TrimSpace(strings.ToLower(cfg.ClusterJoinMeshProvider)),
+		clusterJoinMeshLoginServer:       strings.TrimSpace(cfg.ClusterJoinMeshLoginServer),
+		clusterJoinMeshAuthKey:           strings.TrimSpace(cfg.ClusterJoinMeshAuthKey),
+		bundleSigningKey:                 strings.TrimSpace(cfg.BundleSigningKey),
+		bundleSigningKeyID:               strings.TrimSpace(cfg.BundleSigningKeyID),
+		bundleSigningPreviousKey:         strings.TrimSpace(cfg.BundleSigningPreviousKey),
+		bundleSigningPreviousKeyID:       strings.TrimSpace(cfg.BundleSigningPreviousKeyID),
+		bundleRevokedKeyIDs:              append([]string(nil), cfg.BundleRevokedKeyIDs...),
+		bundleValidFor:                   cfg.BundleValidFor,
+		observabilityConfig:              cfg.Observability.Normalize(),
+		importer:                         sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
+		resolveRemoteImageDigest:         sourceimport.ResolveRemoteImageDigest,
+		inspectBuilderPlacement:          sourceimport.InspectBuilderPlacementForProfile,
+		appImageRegistry:                 newRemoteAppImageRegistry(),
+		projectImageUsageCache:           newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
+		readinessKubernetesAPICache:      newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
+		clusterNodeInventoryCache:        newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
+		edgeLiveServingCache:             newExpiringResponseCache[map[string]edgeLiveServingState](5 * time.Second),
+		appProxyAppCache:                 newExpiringResponseCache[model.App](defaultAppProxyLookupCacheTTL),
+		appProxyServiceHostCache:         newExpiringResponseCache[string](defaultAppProxyLookupCacheTTL),
+		newClusterNodeClient:             newClusterNodeClient,
+		newManagedAppStatusClient:        newManagedAppStatusClient,
+		managedAppStatusCache:            newManagedAppStatusCache(0, 0),
+		consoleGalleryCache:              newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
+		billingImageStorageRefresh:       newBillingImageStorageRefreshScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},

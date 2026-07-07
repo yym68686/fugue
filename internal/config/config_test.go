@@ -151,6 +151,18 @@ func TestAPIFromEnvReadsDefaultManagedPostgresStorageClass(t *testing.T) {
 	}
 }
 
+func TestAPIFromEnvReadsSafeZeroDowntimePublicFlag(t *testing.T) {
+	t.Setenv("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", "")
+	if APIFromEnv().AppSafeZeroDowntimePublicEnabled {
+		t.Fatal("expected safe zero downtime public enablement to default false")
+	}
+
+	t.Setenv("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", "true")
+	if !APIFromEnv().AppSafeZeroDowntimePublicEnabled {
+		t.Fatal("expected safe zero downtime public enablement from env")
+	}
+}
+
 func TestControllerFromEnvReadsAppObservabilityEndpoint(t *testing.T) {
 	t.Setenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", "http://telemetry-agent.fugue-system.svc.cluster.local:7834")
 

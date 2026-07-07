@@ -129,7 +129,7 @@ func TestPatchAppContinuityZeroDowntimeQueuesDeployWithoutDatabaseFailover(t *te
 		t.Fatalf("create app: %v", err)
 	}
 
-	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{AppSafeZeroDowntimePublicEnabled: true})
 	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", apiKey, map[string]any{
 		"zero_downtime": map[string]any{
 			"enabled":  true,
@@ -169,6 +169,85 @@ func TestPatchAppContinuityZeroDowntimeQueuesDeployWithoutDatabaseFailover(t *te
 	}
 	if op.DesiredSpec.Continuity.ZeroDowntime.Mode != model.AppZeroDowntimeModeSafe || op.DesiredSpec.Continuity.ZeroDowntime.Strategy != model.AppZeroDowntimeStrategyStableCandidate {
 		t.Fatalf("unexpected zero downtime desired spec: %+v", op.DesiredSpec.Continuity.ZeroDowntime)
+	}
+}
+
+func TestPatchAppContinuitySafeZeroDowntimeRequiresPublicFlagForTenant(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Continuity Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	runtime, _, err := s.CreateRuntime(tenant.ID, "runtime-a", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "tenant-admin", []string{"app.write", "app.deploy"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: runtime.ID,
+		Replicas:  1,
+		Ports:     []int{8080},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", apiKey, safeZeroDowntimeContinuityPatch())
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusForbidden, recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "not open") {
+		t.Fatalf("expected public rollout gate message, got %s", recorder.Body.String())
+	}
+}
+
+func TestPatchAppContinuitySafeZeroDowntimeAllowsPlatformAdminDuringPrivateRollout(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Continuity Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := s.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	runtime, _, err := s.CreateRuntime(tenant.ID, "runtime-a", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image:     "ghcr.io/example/demo:latest",
+		RuntimeID: runtime.ID,
+		Replicas:  1,
+		Ports:     []int{8080},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, "bootstrap-secret"), nil, ServerConfig{})
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/continuity", "bootstrap-secret", safeZeroDowntimeContinuityPatch())
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -454,5 +533,22 @@ func TestPatchAppContinuityEnableDatabaseFailoverRebalanceNowClearsPendingPlacem
 	}
 	if op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance {
 		t.Fatalf("expected rebalance_now to clear pending placement hold on enable, got %+v", op.DesiredSpec.Postgres)
+	}
+}
+
+func safeZeroDowntimeContinuityPatch() map[string]any {
+	return map[string]any{
+		"zero_downtime": map[string]any{
+			"enabled":  true,
+			"mode":     model.AppZeroDowntimeModeSafe,
+			"strategy": model.AppZeroDowntimeStrategyStableCandidate,
+			"canary": map[string]any{
+				"enabled":                 true,
+				"initial_weight":          1,
+				"max_weight":              100,
+				"step_weights":            []int{1, 5, 25, 50, 100},
+				"min_observation_seconds": 60,
+			},
+		},
 	}
 }

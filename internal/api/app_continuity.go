@@ -134,6 +134,12 @@ func (s *Server) handlePatchAppContinuity(w http.ResponseWriter, r *http.Request
 
 	if req.ZeroDowntime != nil {
 		if req.ZeroDowntime.Enabled {
+			if strings.EqualFold(strings.TrimSpace(req.ZeroDowntime.Mode), model.AppZeroDowntimeModeSafe) &&
+				!principal.IsPlatformAdmin() &&
+				!s.appSafeZeroDowntimePublicEnabled {
+				httpx.WriteError(w, http.StatusForbidden, "safe zero downtime rollout is not open for tenant workloads yet")
+				return
+			}
 			if nextContinuity == nil {
 				nextContinuity = &model.AppContinuityPolicy{}
 			}
