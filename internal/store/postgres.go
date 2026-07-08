@@ -1004,6 +1004,7 @@ var postgresSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_fugue_edge_dns_bundle_artifacts_valid_until ON fugue_edge_dns_bundle_artifacts (valid_until DESC)`,
 	`CREATE TABLE IF NOT EXISTS fugue_dns_nodes (
 		id TEXT PRIMARY KEY,
+		physical_node_id TEXT NOT NULL DEFAULT '',
 		edge_group_id TEXT NOT NULL DEFAULT '',
 		public_hostname TEXT NOT NULL DEFAULT '',
 		public_ipv4 TEXT NOT NULL DEFAULT '',
@@ -1035,6 +1036,7 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_dns_nodes ADD COLUMN IF NOT EXISTS physical_node_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_dns_nodes ADD COLUMN IF NOT EXISTS serving_generation TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_dns_nodes ADD COLUMN IF NOT EXISTS lkg_generation TEXT NOT NULL DEFAULT ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_dns_nodes_edge_group ON fugue_dns_nodes (edge_group_id, updated_at DESC)`,

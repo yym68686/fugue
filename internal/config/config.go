@@ -233,12 +233,14 @@ type DNSConfig struct {
 	APIURL                     string
 	EdgeToken                  string
 	DNSNodeID                  string
+	PhysicalNodeID             string
 	EdgeGroupID                string
 	PublicHostname             string
 	PublicIPv4                 string
 	PublicIPv6                 string
 	MeshIP                     string
 	Zone                       string
+	ExtraZones                 []string
 	AnswerIPs                  []string
 	RouteAAnswerIPs            []string
 	CachePath                  string
@@ -580,12 +582,14 @@ func DNSFromEnv() DNSConfig {
 		APIURL:                     getenv("FUGUE_API_URL", ""),
 		EdgeToken:                  strings.TrimSpace(os.Getenv("FUGUE_DNS_TOKEN")),
 		DNSNodeID:                  strings.TrimSpace(os.Getenv("FUGUE_DNS_NODE_ID")),
+		PhysicalNodeID:             strings.TrimSpace(os.Getenv("FUGUE_DNS_PHYSICAL_NODE_ID")),
 		EdgeGroupID:                strings.TrimSpace(os.Getenv("FUGUE_EDGE_GROUP_ID")),
 		PublicHostname:             strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_HOSTNAME")),
 		PublicIPv4:                 strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_IPV4")),
 		PublicIPv6:                 strings.TrimSpace(os.Getenv("FUGUE_DNS_PUBLIC_IPV6")),
 		MeshIP:                     strings.TrimSpace(os.Getenv("FUGUE_DNS_MESH_IP")),
 		Zone:                       zone,
+		ExtraZones:                 normalizedDNSZonesFromEnv(zone),
 		AnswerIPs:                  getenvList("FUGUE_DNS_ANSWER_IPS"),
 		RouteAAnswerIPs:            getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
 		CachePath:                  getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
@@ -663,6 +667,32 @@ func getenvList(key string) []string {
 		out = append(out, part)
 	}
 	return out
+}
+
+func normalizedDNSZonesFromEnv(primary string) []string {
+	primary = normalizeDNSZone(primary)
+	values := append(getenvList("FUGUE_DNS_ZONES"), getenvList("FUGUE_DNS_EXTRA_ZONES")...)
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	if primary != "" {
+		seen[primary] = struct{}{}
+	}
+	for _, value := range values {
+		zone := normalizeDNSZone(value)
+		if zone == "" {
+			continue
+		}
+		if _, ok := seen[zone]; ok {
+			continue
+		}
+		seen[zone] = struct{}{}
+		out = append(out, zone)
+	}
+	return out
+}
+
+func normalizeDNSZone(value string) string {
+	return strings.Trim(strings.TrimSpace(strings.ToLower(value)), ".")
 }
 
 func getenvListDefault(key string, fallback []string) []string {

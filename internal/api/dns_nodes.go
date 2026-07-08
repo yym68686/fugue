@@ -26,6 +26,7 @@ const (
 
 type dnsHeartbeatRequest struct {
 	DNSNodeID              string            `json:"dns_node_id"`
+	PhysicalNodeID         string            `json:"physical_node_id,omitempty"`
 	EdgeGroupID            string            `json:"edge_group_id"`
 	PublicHostname         string            `json:"public_hostname,omitempty"`
 	PublicIPv4             string            `json:"public_ipv4,omitempty"`
@@ -133,6 +134,7 @@ func (s *Server) handleDNSHeartbeat(w http.ResponseWriter, r *http.Request) {
 	req = s.enrichDNSHeartbeatFromClusterNode(r.Context(), req)
 	node, err := s.store.UpdateDNSHeartbeat(model.DNSNode{
 		ID:                req.DNSNodeID,
+		PhysicalNodeID:    req.PhysicalNodeID,
 		EdgeGroupID:       req.EdgeGroupID,
 		PublicHostname:    req.PublicHostname,
 		PublicIPv4:        req.PublicIPv4,
@@ -197,7 +199,7 @@ func (s *Server) enforceScopedDNSNode(authContext edgeAuthContext, dnsNodeID, ed
 }
 
 func (s *Server) enrichDNSHeartbeatFromClusterNode(ctx context.Context, req dnsHeartbeatRequest) dnsHeartbeatRequest {
-	endpoint := s.discoverClusterNodeEndpoint(ctx, req.DNSNodeID)
+	endpoint := s.discoverClusterNodeEndpoint(ctx, firstNonEmpty(req.PhysicalNodeID, req.DNSNodeID))
 	if strings.TrimSpace(req.PublicIPv4) == "" {
 		req.PublicIPv4 = endpoint.PublicIPv4
 	}
@@ -485,7 +487,7 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 	probe := s.probeDNSDelegationNode(ctx, node, opts.Zone, opts.ProbeName)
 	expectedAnswer := publicIP
 	probePass := probe.UDP53Reachable && probe.TCP53Reachable && expectedAnswer != "" && stringSliceContains(probe.ProbeAnswers, expectedAnswer)
-	policy, known := policyByNode[strings.TrimSpace(strings.ToLower(node.ID))]
+	policy, known := policyByNode[dnsNodePolicyLookupID(node)]
 	nodeReady := known && policy.Ready
 	nodeDiskPressure := known && policy.DiskPressure
 	cacheOK := dnsNodeCacheHealthy(node.CacheStatus, node.DNSBundleVersion, node.CacheWriteErrors, node.CacheLoadErrors)
@@ -525,6 +527,7 @@ func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNS
 
 	return model.DNSDelegationNodeCheck{
 		DNSNodeID:           node.ID,
+		PhysicalNodeID:      firstNonEmpty(node.PhysicalNodeID, node.ID),
 		EdgeGroupID:         node.EdgeGroupID,
 		PublicIP:            publicIP,
 		Zone:                node.Zone,
@@ -663,6 +666,10 @@ func dnsNodesForZone(nodes []model.DNSNode, zone string) []model.DNSNode {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+func dnsNodePolicyLookupID(node model.DNSNode) string {
+	return strings.TrimSpace(strings.ToLower(firstNonEmpty(node.PhysicalNodeID, node.ID)))
 }
 
 func countPassingDNSNodeChecks(checks []model.DNSDelegationNodeCheck) int {

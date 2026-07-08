@@ -95,6 +95,7 @@ func (s *Store) UpdateDNSHeartbeat(node model.DNSNode) (model.DNSNode, error) {
 
 func normalizeDNSNodeForStore(node model.DNSNode) (model.DNSNode, error) {
 	node.ID = normalizeDNSNodeID(node.ID)
+	node.PhysicalNodeID = normalizeDNSNodeID(node.PhysicalNodeID)
 	node.EdgeGroupID = normalizeEdgeGroupID(node.EdgeGroupID)
 	node.PublicHostname = normalizeEdgeHostname(node.PublicHostname)
 	node.PublicIPv4 = strings.TrimSpace(node.PublicIPv4)
@@ -128,6 +129,7 @@ func normalizeDNSNodeForRead(node *model.DNSNode) {
 		return
 	}
 	node.ID = normalizeDNSNodeID(node.ID)
+	node.PhysicalNodeID = normalizeDNSNodeID(node.PhysicalNodeID)
 	node.EdgeGroupID = normalizeEdgeGroupID(node.EdgeGroupID)
 	node.PublicHostname = normalizeEdgeHostname(node.PublicHostname)
 	node.Zone = normalizeDNSZone(node.Zone)

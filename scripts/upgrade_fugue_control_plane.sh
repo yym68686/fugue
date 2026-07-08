@@ -4477,6 +4477,7 @@ csv_lines() {
 
 append_upgrade_dns_values() {
   local answer_ip
+  local extra_zone
   local nameserver
   local rendered_answer_ips=0
 
@@ -4513,6 +4514,12 @@ EOF
     while IFS= read -r answer_ip; do
       printf '    - %s\n' "$(yaml_quote "${answer_ip}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
     done < <(dns_answer_ips_lines "${FUGUE_DNS_ROUTE_A_ANSWER_IPS}")
+  fi
+  if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_ZONES:-}")" ]]; then
+    printf '  extraZones:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    while IFS= read -r extra_zone; do
+      printf '    - %s\n' "$(yaml_quote "${extra_zone}")" >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
+    done < <(csv_lines "${FUGUE_DNS_EXTRA_ZONES}")
   fi
   if [[ -n "$(trim_field "${FUGUE_DNS_GEOIP_OVERRIDES_JSON:-}")" ]]; then
     printf '  extraEnv:\n' >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
@@ -4590,6 +4597,7 @@ EOF
 
 build_dns_helm_set_args() {
   local answer_ip
+  local extra_zone
   local nameserver
   local index=0
 
@@ -4635,6 +4643,11 @@ build_dns_helm_set_args() {
     DNS_HELM_SET_ARGS+=(--set-string "dns.routeAAnswerIPs[${index}]=${answer_ip}")
     index=$((index + 1))
   done < <(dns_answer_ips_lines "${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}")
+  index=0
+  while IFS= read -r extra_zone; do
+    DNS_HELM_SET_ARGS+=(--set-string "dns.extraZones[${index}]=${extra_zone}")
+    index=$((index + 1))
+  done < <(csv_lines "${FUGUE_DNS_EXTRA_ZONES:-}")
   index=0
   while IFS= read -r nameserver; do
     DNS_HELM_SET_ARGS+=(--set-string "dns.nameservers[${index}]=${nameserver}")
@@ -6794,6 +6807,7 @@ main() {
   FUGUE_EDGE_QUALITY_RANKING_MODE="${FUGUE_EDGE_QUALITY_RANKING_MODE:-shadow}"
   FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE="${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-}"
   FUGUE_DNS_EXTRA_GROUPS="${FUGUE_DNS_EXTRA_GROUPS:-}"
+  FUGUE_DNS_EXTRA_ZONES="${FUGUE_DNS_EXTRA_ZONES:-}"
   FUGUE_DNS_GEOIP_OVERRIDES_JSON="${FUGUE_DNS_GEOIP_OVERRIDES_JSON:-}"
   FUGUE_DNS_TOKEN_SECRET_NAME="${FUGUE_DNS_TOKEN_SECRET_NAME:-${FUGUE_EDGE_TOKEN_SECRET_NAME}}"
   if [[ -n "$(trim_field "${FUGUE_DNS_TOKEN_SECRET_NAME}")" ]]; then
@@ -6994,6 +7008,9 @@ main() {
   if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS}")" && "${FUGUE_DNS_ENABLED}" != "true" ]]; then
     fail "FUGUE_DNS_ENABLED must be true when FUGUE_DNS_EXTRA_GROUPS is set"
   fi
+  if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_ZONES}")" && "${FUGUE_DNS_ENABLED}" != "true" ]]; then
+    fail "FUGUE_DNS_ENABLED must be true when FUGUE_DNS_EXTRA_ZONES is set"
+  fi
   if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS}")" && -z "$(trim_field "${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE}")" ]]; then
     fail "FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE must be set when FUGUE_DNS_EXTRA_GROUPS is set"
   fi
@@ -7146,7 +7163,7 @@ PY
   log "cluster join mesh auth key: $([[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] && printf configured || printf '<none>')"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
-  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) edge_quality_ranking=${FUGUE_EDGE_QUALITY_RANKING_MODE} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
+  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} extra_zones=${FUGUE_DNS_EXTRA_ZONES:-<none>} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) edge_quality_ranking=${FUGUE_EDGE_QUALITY_RANKING_MODE} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
   log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
   log "mesh recovery: enabled=${FUGUE_MESH_RECOVERY_ENABLED} generation=${FUGUE_MESH_RECOVERY_GENERATION} mode=${FUGUE_MESH_RECOVERY_MODE} login_server=${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"

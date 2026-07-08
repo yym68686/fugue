@@ -2635,6 +2635,8 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		"dns.routeAAnswerIPs[0]=136.112.185.40",
 		"--set",
 		"dns.nameservers[0]=ns1.dns.fugue.pro",
+		"--set",
+		"dns.extraZones[0]=oaix.cc",
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -2667,6 +2669,8 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 		`value: "127.0.0.1:5353"`,
 		`name: FUGUE_DNS_NAMESERVERS`,
 		`value: "ns1.dns.fugue.pro"`,
+		`name: FUGUE_DNS_EXTRA_ZONES`,
+		`value: "oaix.cc"`,
 		`path: /healthz`,
 		`containerPort: 7834`,
 		`value: "http://fugue-fugue:80"`,
@@ -2783,6 +2787,8 @@ edge:
         fugue.io/location-country-code: de
 dns:
   enabled: true
+  extraZones:
+    - oaix.cc
   answerIPs:
     - 15.204.94.71
   routeAAnswerIPs:
@@ -2873,6 +2879,8 @@ dns:
 		`value: "edge-group-country-de"`,
 		`name: FUGUE_DNS_ANSWER_IPS`,
 		`value: "51.38.126.103"`,
+		`name: FUGUE_DNS_EXTRA_ZONES`,
+		`value: "oaix.cc"`,
 		`name: FUGUE_DNS_ROUTE_A_ANSWER_IPS`,
 		`value: "136.112.185.40"`,
 		`name: dns-udp`,

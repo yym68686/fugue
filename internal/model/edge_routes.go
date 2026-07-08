@@ -847,6 +847,7 @@ type EdgeNode struct {
 
 type DNSNode struct {
 	ID                string            `json:"id"`
+	PhysicalNodeID    string            `json:"physical_node_id,omitempty"`
 	EdgeGroupID       string            `json:"edge_group_id"`
 	PublicHostname    string            `json:"public_hostname,omitempty"`
 	PublicIPv4        string            `json:"public_ipv4,omitempty"`
@@ -903,6 +904,7 @@ type DNSDelegationPreflightCheck struct {
 
 type DNSDelegationNodeCheck struct {
 	DNSNodeID           string     `json:"dns_node_id"`
+	PhysicalNodeID      string     `json:"physical_node_id,omitempty"`
 	EdgeGroupID         string     `json:"edge_group_id,omitempty"`
 	PublicIP            string     `json:"public_ip,omitempty"`
 	Zone                string     `json:"zone,omitempty"`

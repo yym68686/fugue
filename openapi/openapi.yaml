@@ -13348,6 +13348,8 @@ components:
       properties:
         id:
           type: string
+        physical_node_id:
+          type: string
         edge_group_id:
           type: string
         public_hostname:
@@ -13447,6 +13449,8 @@ components:
       required: [dns_node_id, edge_group_id, zone, status, healthy]
       properties:
         dns_node_id:
+          type: string
+        physical_node_id:
           type: string
         edge_group_id:
           type: string
@@ -13597,6 +13601,8 @@ components:
         - pass
       properties:
         dns_node_id:
+          type: string
+        physical_node_id:
           type: string
         edge_group_id:
           type: string

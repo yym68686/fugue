@@ -948,7 +948,7 @@ func activeDNSNodesForPolicy(nodes []model.DNSNode, statuses []model.ClusterNode
 	}
 	out := make([]model.DNSNode, 0, len(nodes))
 	for _, node := range nodes {
-		status, ok := statusByName[strings.TrimSpace(node.ID)]
+		status, ok := statusByName[dnsNodePolicyLookupID(node)]
 		if !ok {
 			continue
 		}
@@ -992,6 +992,7 @@ func clusterNodePolicyStatusByName(statuses []model.ClusterNodePolicyStatus) map
 			continue
 		}
 		out[name] = status
+		out[strings.ToLower(name)] = status
 	}
 	return out
 }

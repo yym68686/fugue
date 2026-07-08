@@ -67,6 +67,79 @@ func TestServiceAnswersAuthoritativelyAndRefusesOutsideZone(t *testing.T) {
 	}
 }
 
+func TestServiceRoutesConfiguredExtraZones(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.DNSConfig{
+		DNSNodeID:    "vps-591f4447",
+		Zone:         "fugue.pro",
+		ExtraZones:   []string{"oaix.cc"},
+		TTL:          60,
+		Nameservers:  []string{"ns1.dns.fugue.pro"},
+		CachePath:    "/var/lib/fugue/dns/dns-cache.json",
+		ListenAddr:   "127.0.0.1:7834",
+		UDPAddr:      ":53",
+		TCPAddr:      ":53",
+		SyncInterval: time.Hour,
+	}, log.New(ioDiscard{}, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version:   "dnsgen_fugue",
+		DNSNodeID: "vps-591f4447",
+		Zone:      "fugue.pro",
+		Records: []model.EdgeDNSRecord{{
+			Name:       "d-main.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindProbe,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}, `"dnsgen_fugue"`, false, "")
+
+	child := service.zoneServices["oaix.cc"]
+	if child == nil {
+		t.Fatalf("expected oaix.cc child zone service")
+	}
+	if child.Config.DNSNodeID != "vps-591f4447--zone-oaix-cc" || child.Config.PhysicalNodeID != "vps-591f4447" {
+		t.Fatalf("unexpected child identity: dns_node_id=%q physical_node_id=%q", child.Config.DNSNodeID, child.Config.PhysicalNodeID)
+	}
+	if child.Config.CachePath != "/var/lib/fugue/dns/dns-cache.oaix-cc.json" {
+		t.Fatalf("unexpected child cache path %q", child.Config.CachePath)
+	}
+	child.setBundle(model.EdgeDNSBundle{
+		Version:   "dnsgen_oaix",
+		DNSNodeID: "vps-591f4447--zone-oaix-cc",
+		Zone:      "oaix.cc",
+		Records: []model.EdgeDNSRecord{{
+			Name:       "d-test.oaix.cc",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.20"},
+			TTL:        60,
+			RecordKind: model.EdgeDNSRecordKindProbe,
+			Status:     model.EdgeRouteStatusActive,
+		}},
+	}, `"dnsgen_oaix"`, false, "")
+
+	mainAnswer := dnsQuery(t, service, "d-main.fugue.pro.", miekgdns.TypeA)
+	if mainAnswer.Rcode != miekgdns.RcodeSuccess || len(mainAnswer.Answer) != 1 {
+		t.Fatalf("expected primary zone answer, got rcode=%s answer=%+v", miekgdns.RcodeToString[mainAnswer.Rcode], mainAnswer.Answer)
+	}
+
+	extraAnswer := dnsQuery(t, service, "d-test.oaix.cc.", miekgdns.TypeA)
+	if extraAnswer.Rcode != miekgdns.RcodeSuccess || len(extraAnswer.Answer) != 1 {
+		t.Fatalf("expected extra zone answer, got rcode=%s answer=%+v", miekgdns.RcodeToString[extraAnswer.Rcode], extraAnswer.Answer)
+	}
+	a, ok := extraAnswer.Answer[0].(*miekgdns.A)
+	if !ok || a.A.String() != "203.0.113.20" {
+		t.Fatalf("unexpected extra zone A answer: %+v", extraAnswer.Answer[0])
+	}
+
+	refused := dnsQuery(t, service, "example.com.", miekgdns.TypeA)
+	if refused.Rcode != miekgdns.RcodeRefused {
+		t.Fatalf("expected outside-zone query refused, got %s", miekgdns.RcodeToString[refused.Rcode])
+	}
+}
+
 func TestServiceSuppressesUnhealthyEdgeAnswerWhenProbeEnabled(t *testing.T) {
 	t.Parallel()
 

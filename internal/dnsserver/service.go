@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,6 +49,8 @@ type Service struct {
 	edgeHealthMu sync.Mutex
 	edgeHealth   map[string]edgeHealthObservation
 	edgeProbe    edgeHealthProbeFunc
+
+	zoneServices map[string]*Service
 }
 
 type Status struct {
@@ -73,6 +76,7 @@ type Status struct {
 	ListenAddr             string     `json:"listen_addr,omitempty"`
 	UDPAddr                string     `json:"udp_addr,omitempty"`
 	TCPAddr                string     `json:"tcp_addr,omitempty"`
+	Zones                  []Status   `json:"zones,omitempty"`
 }
 
 type cacheFile struct {
@@ -129,6 +133,8 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 	if logger == nil {
 		logger = log.Default()
 	}
+	cfg.Zone = normalizeName(cfg.Zone)
+	cfg.ExtraZones = normalizeDNSExtraZones(cfg.Zone, cfg.ExtraZones)
 	timeout := cfg.HTTPTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -151,7 +157,132 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 			TCPAddr:     strings.TrimSpace(cfg.TCPAddr),
 		},
 	}
+	service.zoneServices = service.newZoneServices(cfg)
 	return service
+}
+
+func (s *Service) newZoneServices(cfg config.DNSConfig) map[string]*Service {
+	if len(cfg.ExtraZones) == 0 {
+		return nil
+	}
+	children := make(map[string]*Service, len(cfg.ExtraZones))
+	physicalNodeID := firstNonEmpty(cfg.PhysicalNodeID, cfg.DNSNodeID)
+	for _, zone := range cfg.ExtraZones {
+		zone = normalizeName(zone)
+		if zone == "" || zone == normalizeName(cfg.Zone) {
+			continue
+		}
+		childCfg := cfg
+		childCfg.Zone = zone
+		childCfg.ExtraZones = nil
+		childCfg.PhysicalNodeID = physicalNodeID
+		childCfg.DNSNodeID = dnsZoneScopedNodeID(cfg.DNSNodeID, zone)
+		childCfg.CachePath = dnsZoneCachePath(cfg.CachePath, zone)
+		children[zone] = NewService(childCfg, s.Logger)
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	return children
+}
+
+func (s *Service) childZoneServices() []*Service {
+	if len(s.zoneServices) == 0 {
+		return nil
+	}
+	zones := make([]string, 0, len(s.zoneServices))
+	for zone := range s.zoneServices {
+		zones = append(zones, zone)
+	}
+	sort.Strings(zones)
+	children := make([]*Service, 0, len(zones))
+	for _, zone := range zones {
+		children = append(children, s.zoneServices[zone])
+	}
+	return children
+}
+
+func (s *Service) configuredZones() []string {
+	zones := []string{}
+	if zone := normalizeName(s.Config.Zone); zone != "" {
+		zones = append(zones, zone)
+	}
+	for _, child := range s.childZoneServices() {
+		if zone := normalizeName(child.Config.Zone); zone != "" {
+			zones = append(zones, zone)
+		}
+	}
+	return zones
+}
+
+func normalizeDNSExtraZones(primary string, zones []string) []string {
+	primary = normalizeName(primary)
+	out := make([]string, 0, len(zones))
+	seen := map[string]struct{}{}
+	if primary != "" {
+		seen[primary] = struct{}{}
+	}
+	for _, zone := range zones {
+		zone = normalizeName(zone)
+		if zone == "" {
+			continue
+		}
+		if _, ok := seen[zone]; ok {
+			continue
+		}
+		seen[zone] = struct{}{}
+		out = append(out, zone)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func dnsZoneScopedNodeID(base, zone string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return ""
+	}
+	slug := dnsZoneSlug(zone)
+	if slug == "" {
+		return base
+	}
+	return base + "--zone-" + slug
+}
+
+func dnsZoneSlug(zone string) string {
+	zone = normalizeName(zone)
+	if zone == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range zone {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+			lastDash = false
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func dnsZoneCachePath(path, zone string) string {
+	path = strings.TrimSpace(path)
+	slug := dnsZoneSlug(zone)
+	if path == "" || slug == "" {
+		return path
+	}
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(path, ext)
+	return stem + "." + slug + ext
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -167,6 +298,11 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if err := s.LoadCache(); err != nil {
 		s.Logger.Printf("dns bundle cache unavailable: %v", err)
+	}
+	for _, child := range s.childZoneServices() {
+		if err := child.LoadCache(); err != nil {
+			child.Logger.Printf("dns bundle cache unavailable; zone=%s error=%v", normalizeName(child.Config.Zone), err)
+		}
 	}
 
 	httpShutdown, err := s.startHTTPServer()
@@ -191,10 +327,19 @@ func (s *Service) Run(ctx context.Context) error {
 		defer dnsShutdown()
 	}
 
-	s.Logger.Printf("fugue-dns shadow started; api=%s dns_node_id=%s edge_group_id=%s zone=%s answer_ips=%s cache=%s listen=%s udp=%s tcp=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.DNSNodeID, s.Config.EdgeGroupID, normalizeName(s.Config.Zone), strings.Join(s.Config.AnswerIPs, ","), s.Config.CachePath, s.Config.ListenAddr, s.Config.UDPAddr, s.Config.TCPAddr, s.syncInterval())
+	s.Logger.Printf("fugue-dns shadow started; api=%s dns_node_id=%s edge_group_id=%s zones=%s answer_ips=%s cache=%s listen=%s udp=%s tcp=%s interval=%s", safeBaseURL(s.Config.APIURL), s.Config.DNSNodeID, s.Config.EdgeGroupID, strings.Join(s.configuredZones(), ","), strings.Join(s.Config.AnswerIPs, ","), s.Config.CachePath, s.Config.ListenAddr, s.Config.UDPAddr, s.Config.TCPAddr, s.syncInterval())
 	_ = s.SyncOnce(ctx)
+	for _, child := range s.childZoneServices() {
+		_ = child.SyncOnce(ctx)
+	}
 	s.startEdgeHealthProbeLoop(ctx)
+	for _, child := range s.childZoneServices() {
+		child.startEdgeHealthProbeLoop(ctx)
+	}
 	s.startHeartbeatLoop(ctx)
+	for _, child := range s.childZoneServices() {
+		child.startHeartbeatLoop(ctx)
+	}
 
 	ticker := time.NewTicker(s.syncInterval())
 	defer ticker.Stop()
@@ -204,6 +349,9 @@ func (s *Service) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			_ = s.SyncOnce(ctx)
+			for _, child := range s.childZoneServices() {
+				_ = child.SyncOnce(ctx)
+			}
 		}
 	}
 }
@@ -385,7 +533,11 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 
 	qtype := "unknown"
 	rcode := "NOERROR"
+	delegated := false
 	defer func() {
+		if delegated {
+			return
+		}
 		s.recordQuery(qtype, rcode)
 	}()
 
@@ -402,6 +554,11 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		qtype = fmt.Sprintf("TYPE%d", question.Qtype)
 	}
 	name := normalizeName(question.Name)
+	if selected := s.serviceForQuestionName(name); selected != nil && selected != s {
+		delegated = true
+		selected.ServeDNS(w, r)
+		return
+	}
 	snapshot := s.currentBundle()
 	zone := normalizeName(s.Config.Zone)
 	if snapshot != nil && normalizeName(snapshot.Zone) != "" {
@@ -457,6 +614,27 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	_ = w.WriteMsg(resp)
 }
 
+func (s *Service) serviceForQuestionName(name string) *Service {
+	name = normalizeName(name)
+	bestZone := ""
+	var best *Service
+	if zone := normalizeName(s.Config.Zone); nameWithinZone(name, zone) {
+		bestZone = zone
+		best = s
+	}
+	for zone, child := range s.zoneServices {
+		zone = normalizeName(zone)
+		if !nameWithinZone(name, zone) {
+			continue
+		}
+		if len(zone) > len(bestZone) {
+			bestZone = zone
+			best = child
+		}
+	}
+	return best
+}
+
 func (s *Service) LoadCache() error {
 	path := strings.TrimSpace(s.Config.CachePath)
 	if path == "" {
@@ -506,7 +684,20 @@ func (s *Service) LoadCache() error {
 func (s *Service) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.snapshot
+	status := s.snapshot
+	for _, child := range s.childZoneServices() {
+		childStatus := child.Status()
+		childStatus.Zones = nil
+		status.Zones = append(status.Zones, childStatus)
+		if !childStatus.Healthy {
+			status.Healthy = false
+			status.Status = "unhealthy"
+			if strings.TrimSpace(status.DegradedReason) == "" {
+				status.DegradedReason = "one or more DNS zones are unhealthy"
+			}
+		}
+	}
+	return status
 }
 
 func (s *Service) metricSnapshot() metricSnapshot {
@@ -916,6 +1107,7 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, error
 	queryCount, queryErrorCount, rcodeCounts, qtypeCounts := dnsQueryMetricCounters(snapshot.Metrics.QueryTotal)
 	body := map[string]any{
 		"dns_node_id":              strings.TrimSpace(s.Config.DNSNodeID),
+		"physical_node_id":         firstNonEmpty(s.Config.PhysicalNodeID, s.Config.DNSNodeID),
 		"edge_group_id":            strings.TrimSpace(s.Config.EdgeGroupID),
 		"public_hostname":          strings.TrimSpace(s.Config.PublicHostname),
 		"public_ipv4":              firstNonEmpty(strings.TrimSpace(s.Config.PublicIPv4), firstAnswerIPByFamily(s.Config.AnswerIPs, true)),

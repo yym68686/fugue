@@ -9,6 +9,7 @@ Usage:
     --dns-node-id <node> \
     --edge-group-id <edge-group> \
     --answer-ips <ip[,ip...]> \
+    [--extra-zones <zone[,zone...]>] \
     [--route-a-answer-ips <ip[,ip...]>] \
     --token-env-file /etc/fugue/fugue-dns-token.env
 
@@ -23,6 +24,7 @@ api_url="${FUGUE_API_URL:-}"
 dns_node_id="${FUGUE_DNS_NODE_ID:-$(hostname -s 2>/dev/null || hostname)}"
 edge_group_id="${FUGUE_EDGE_GROUP_ID:-}"
 zone="${FUGUE_DNS_ZONE:-}"
+extra_zones="${FUGUE_DNS_EXTRA_ZONES:-}"
 answer_ips="${FUGUE_DNS_ANSWER_IPS:-}"
 route_a_answer_ips="${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-}"
 token_env_file="/etc/fugue/fugue-dns-token.env"
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --dns-node-id) dns_node_id="${2:-}"; shift 2 ;;
     --edge-group-id) edge_group_id="${2:-}"; shift 2 ;;
     --zone) zone="${2:-}"; shift 2 ;;
+    --extra-zones) extra_zones="${2:-}"; shift 2 ;;
     --answer-ips) answer_ips="${2:-}"; shift 2 ;;
     --route-a-answer-ips) route_a_answer_ips="${2:-}"; shift 2 ;;
     --token-env-file) token_env_file="${2:-}"; shift 2 ;;
@@ -74,6 +77,7 @@ FUGUE_API_URL=${api_url}
 FUGUE_DNS_NODE_ID=${dns_node_id}
 FUGUE_EDGE_GROUP_ID=${edge_group_id}
 FUGUE_DNS_ZONE=${zone}
+FUGUE_DNS_EXTRA_ZONES=${extra_zones}
 FUGUE_DNS_ANSWER_IPS=${answer_ips}
 FUGUE_DNS_ROUTE_A_ANSWER_IPS=${route_a_answer_ips}
 FUGUE_DNS_CACHE_PATH=${cache_path}
