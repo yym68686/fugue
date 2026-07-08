@@ -111,6 +111,102 @@ func TestPutAppDomainManagedDNSCreatesHostedRecord(t *testing.T) {
 	}
 }
 
+func TestGetAppDomainDiagnosisPassesManagedDNS(t *testing.T) {
+	t.Parallel()
+
+	_, server, apiKey, _, app, _ := setupAppDomainTestServer(t)
+	putHostedDNSZoneForEdgeDNSTest(t, server.store, app.TenantID, "example.com")
+
+	putRecorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"dns_mode": "managed",
+		"hostname": "example.com",
+	})
+	if putRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, putRecorder.Code, putRecorder.Body.String())
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/apps/"+app.ID+"/domains/diagnosis?hostname=example.com", apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Diagnosis appDomainDiagnosis `json:"diagnosis"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Diagnosis.Domain.DNSMode != model.AppDomainDNSModeManaged ||
+		!response.Diagnosis.DNSObservation.Verified ||
+		response.Diagnosis.DNSObservation.RecordKind != model.AppDomainDNSRecordKindFlattened {
+		t.Fatalf("expected managed DNS diagnosis to pass, got %+v", response.Diagnosis)
+	}
+	for _, check := range response.Diagnosis.Checks {
+		if check.Name == "dns_record" && check.Status != "pass" {
+			t.Fatalf("expected dns_record check to pass for managed DNS, got %+v", response.Diagnosis.Checks)
+		}
+	}
+	for _, action := range response.Diagnosis.RecommendedActions {
+		if strings.Contains(action, "CNAME") {
+			t.Fatalf("managed DNS diagnosis must not recommend external CNAME, got %+v", response.Diagnosis.RecommendedActions)
+		}
+	}
+}
+
+func TestVerifyAppDomainRestoresManagedDNSFromOwnedRecord(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, _ := setupAppDomainTestServer(t)
+	zone := putHostedDNSZoneForEdgeDNSTest(t, s, app.TenantID, "example.com")
+	record, err := s.PutDNSRecord(zone, model.DNSRecord{
+		Name:          "@",
+		Type:          model.DNSRecordTypeFUGUEAPP,
+		Values:        []string{app.ID},
+		FlattenMode:   model.DNSRecordFlattenModeApp,
+		Source:        model.DNSRecordSourceAppDomain,
+		SourceRefType: model.DNSRecordSourceRefTypeAppDomain,
+		SourceRefID:   "example.com",
+		Status:        model.DNSRecordStatusActive,
+	}, false)
+	if err != nil {
+		t.Fatalf("put managed DNS record: %v", err)
+	}
+	now := time.Now().UTC().Add(-time.Hour)
+	if _, err := s.PutAppDomain(model.AppDomain{
+		Hostname:         "example.com",
+		AppID:            app.ID,
+		TenantID:         app.TenantID,
+		Status:           model.AppDomainStatusVerified,
+		DNSMode:          model.AppDomainDNSModeExternal,
+		DNSStatus:        model.AppDomainDNSStatusReady,
+		DNSRecordKind:    model.AppDomainDNSRecordKindFlattened,
+		TLSStatus:        model.AppDomainTLSStatusPending,
+		RouteTarget:      server.primaryCustomDomainTarget(app),
+		LastCheckedAt:    &now,
+		DNSLastCheckedAt: &now,
+		VerifiedAt:       &now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}); err != nil {
+		t.Fatalf("put stale external domain: %v", err)
+	}
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains/verify", apiKey, map[string]any{
+		"hostname": "example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Domain   model.AppDomain `json:"domain"`
+		Verified bool            `json:"verified"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if !response.Verified ||
+		response.Domain.DNSMode != model.AppDomainDNSModeManaged ||
+		response.Domain.DNSZoneID != zone.ID ||
+		response.Domain.DNSRecordID != record.ID ||
+		response.Domain.DNSRecordSource != model.DNSRecordSourceAppDomain {
+		t.Fatalf("expected verify to restore managed DNS relationship, got %+v", response.Domain)
+	}
+}
+
 func TestPutAppDomainManagedDNSDoesNotOverwriteUserRecord(t *testing.T) {
 	t.Parallel()
 

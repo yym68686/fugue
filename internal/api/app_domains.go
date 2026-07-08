@@ -277,8 +277,12 @@ func (s *Server) handleVerifyAppDomain(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, store.ErrNotFound)
 		return
 	}
-	if dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode); dnsMode != "" {
-		domain.DNSMode = dnsMode
+	if strings.TrimSpace(req.DNSMode) != "" {
+		if dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode); dnsMode != "" {
+			domain.DNSMode = dnsMode
+		}
+	} else {
+		domain = s.inferManagedAppDomainDNSRelationship(app, domain)
 	}
 	domain, err = s.ensureAppDomainDNSRelationship(r.Context(), principal, app, domain, req.Overwrite)
 	if err != nil {
@@ -320,6 +324,7 @@ func (s *Server) handleGetAppDomainDiagnosis(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, store.ErrNotFound)
 		return
 	}
+	domain = s.inferManagedAppDomainDNSRelationship(app, domain)
 	domain = s.refreshAppDomainForRead(r.Context(), app, domain)
 	diagnosis := s.buildAppDomainDiagnosis(r.Context(), app, domain)
 	s.appendAudit(principal, "app.domain.diagnose", "app", app.ID, app.TenantID, map[string]string{"hostname": domain.Hostname})
@@ -355,8 +360,12 @@ func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, store.ErrNotFound)
 		return
 	}
-	if dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode); dnsMode != "" {
-		domain.DNSMode = dnsMode
+	if strings.TrimSpace(req.DNSMode) != "" {
+		if dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode); dnsMode != "" {
+			domain.DNSMode = dnsMode
+		}
+	} else {
+		domain = s.inferManagedAppDomainDNSRelationship(app, domain)
 	}
 	domain, err = s.ensureAppDomainDNSRelationship(r.Context(), principal, app, domain, req.Overwrite)
 	if err != nil {
@@ -999,6 +1008,50 @@ func (s *Server) managedAppDomainDNSRecord(zone model.HostedZone, domain model.A
 	return model.DNSRecord{}, store.ErrNotFound
 }
 
+func (s *Server) inferManagedAppDomainDNSRelationship(app model.App, domain model.AppDomain) model.AppDomain {
+	mode := model.NormalizeAppDomainDNSMode(domain.DNSMode)
+	if mode == model.AppDomainDNSModeManaged || mode == model.AppDomainDNSModeManual {
+		return domain
+	}
+	zone, record, ok := s.findOwnedAppDomainDNSRecord(app, domain.Hostname)
+	if !ok {
+		return domain
+	}
+	domain.DNSMode = model.AppDomainDNSModeManaged
+	domain.DNSZoneID = zone.ID
+	domain.DNSRecordID = record.ID
+	domain.DNSRecordSource = model.DNSRecordSourceAppDomain
+	return domain
+}
+
+func (s *Server) findOwnedAppDomainDNSRecord(app model.App, hostname string) (model.HostedZone, model.DNSRecord, bool) {
+	hostname = normalizeExternalAppDomain(hostname)
+	if hostname == "" {
+		return model.HostedZone{}, model.DNSRecord{}, false
+	}
+	zone, err := s.store.FindHostedZoneForHostname(app.TenantID, hostname, false)
+	if err != nil {
+		return model.HostedZone{}, model.DNSRecord{}, false
+	}
+	records, err := s.store.ListDNSRecords(zone.ID)
+	if err != nil {
+		return model.HostedZone{}, model.DNSRecord{}, false
+	}
+	for _, record := range records {
+		if record.Source != model.DNSRecordSourceAppDomain ||
+			record.SourceRefType != model.DNSRecordSourceRefTypeAppDomain ||
+			record.SourceRefID != hostname ||
+			record.Type != model.DNSRecordTypeFUGUEAPP ||
+			model.NormalizeDNSRecordStatus(record.Status) != model.DNSRecordStatusActive {
+			continue
+		}
+		if appForRecord, ok := hostedDNSRecordApp(record, map[string]model.App{app.ID: app}); ok && appForRecord.ID == app.ID {
+			return zone, record, true
+		}
+	}
+	return model.HostedZone{}, model.DNSRecord{}, false
+}
+
 func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain, wasVerified bool, now time.Time) (model.AppDomain, bool, error) {
 	zone, err := s.appDomainHostedZone(app, domain)
 	if err != nil || zone.Status != model.HostedZoneStatusActive {
@@ -1247,9 +1300,28 @@ func (s *Server) validateEdgeTLSCertificateBundle(hostname string, domain model.
 
 func (s *Server) buildAppDomainDiagnosis(ctx context.Context, app model.App, domain model.AppDomain) appDomainDiagnosis {
 	targets := s.customDomainTargets(app, domain.RouteTarget)
-	observation, err := s.inspectCustomDomainDNS(ctx, domain.Hostname, targets)
-	if err != nil {
-		observation = appDomainDNSObservation{Message: err.Error()}
+	domain = s.inferManagedAppDomainDNSRelationship(app, domain)
+	observation := appDomainDNSObservation{}
+	switch model.NormalizeAppDomainDNSMode(domain.DNSMode) {
+	case model.AppDomainDNSModeManaged, model.AppDomainDNSModeManual:
+		evaluated, verified, err := s.evaluateAppDomainVerification(ctx, app, domain)
+		if err != nil {
+			observation = appDomainDNSObservation{Message: err.Error()}
+		} else {
+			domain = evaluated
+			observation = appDomainDNSObservation{
+				Verified:      verified,
+				RecordKind:    domain.DNSRecordKind,
+				MatchedTarget: domain.DNSRecordID,
+				Message:       domain.DNSLastMessage,
+			}
+		}
+	default:
+		var err error
+		observation, err = s.inspectCustomDomainDNS(ctx, domain.Hostname, targets)
+		if err != nil {
+			observation = appDomainDNSObservation{Message: err.Error()}
+		}
 	}
 	certSummary := appDomainTLSCertificateSummary{}
 	if cert, certErr := s.store.GetEdgeTLSCertificate(domain.Hostname); certErr == nil {
