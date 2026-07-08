@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -39,6 +40,7 @@ const (
 	defaultImageCacheLowWatermarkPercent  = 45
 	defaultImageCacheMinFreeBytes         = int64(50 * 1024 * 1024 * 1024)
 	defaultImageCacheMaxDeleteBytesPerRun = int64(10 * 1024 * 1024 * 1024)
+	imageCacheUploadDirName               = "_uploads"
 )
 
 type imageCache struct {
@@ -105,6 +107,14 @@ type imageLocation struct {
 	ClusterNodeName   string `json:"cluster_node_name"`
 	CacheEndpoint     string `json:"cache_endpoint"`
 	Status            string `json:"status"`
+}
+
+type imageCacheBlobUploadState struct {
+	Repo      string    `json:"repo"`
+	UUID      string    `json:"uuid"`
+	SizeBytes int64     `json:"size_bytes"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func main() {
@@ -497,16 +507,16 @@ func (c *imageCache) handleManagementUnpin(w http.ResponseWriter, r *http.Reques
 
 func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DryRun         *bool                   `json:"dry_run"`
-		AllowDelete    bool                    `json:"allow_delete"`
-		ImageRef       string                  `json:"image_ref"`
-		Repo           string                  `json:"repo"`
-		Target         string                  `json:"target"`
-		Digest         string                  `json:"digest"`
-		Targets        []imageCachePruneTarget `json:"targets"`
-		MaxDeleteBytes string                  `json:"max_delete_bytes"`
-		MinManifestAge string                  `json:"min_manifest_age"`
-		IncludeUnreferencedBlobs bool         `json:"include_unreferenced_blobs"`
+		DryRun                   *bool                   `json:"dry_run"`
+		AllowDelete              bool                    `json:"allow_delete"`
+		ImageRef                 string                  `json:"image_ref"`
+		Repo                     string                  `json:"repo"`
+		Target                   string                  `json:"target"`
+		Digest                   string                  `json:"digest"`
+		Targets                  []imageCachePruneTarget `json:"targets"`
+		MaxDeleteBytes           string                  `json:"max_delete_bytes"`
+		MinManifestAge           string                  `json:"min_manifest_age"`
+		IncludeUnreferencedBlobs bool                    `json:"include_unreferenced_blobs"`
 	}
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -554,13 +564,13 @@ func (c *imageCache) handleManagementPrune(w http.ResponseWriter, r *http.Reques
 		})
 	}
 	plan, err := c.planImageCachePrune(imageCachePruneRequest{
-		repo:            repo,
-		target:          target,
-		digest:          normalizeImageCacheDigest(req.Digest),
-		targets:         targets,
-		allowDelete:     req.AllowDelete,
-		requestMaxBytes: requestMaxDeleteBytes,
-		minManifestAge:  minManifestAge,
+		repo:                     repo,
+		target:                   target,
+		digest:                   normalizeImageCacheDigest(req.Digest),
+		targets:                  targets,
+		allowDelete:              req.AllowDelete,
+		requestMaxBytes:          requestMaxDeleteBytes,
+		minManifestAge:           minManifestAge,
 		includeUnreferencedBlobs: req.IncludeUnreferencedBlobs,
 	}, records, pinned)
 	if err != nil {
@@ -606,13 +616,13 @@ type imageCachePruneTarget struct {
 }
 
 type imageCachePruneRequest struct {
-	repo            string
-	target          string
-	digest          string
-	targets         []imageCachePruneTarget
-	allowDelete     bool
-	requestMaxBytes int64
-	minManifestAge  time.Duration
+	repo                     string
+	target                   string
+	digest                   string
+	targets                  []imageCachePruneTarget
+	allowDelete              bool
+	requestMaxBytes          int64
+	minManifestAge           time.Duration
 	includeUnreferencedBlobs bool
 }
 
@@ -1538,6 +1548,10 @@ func firstNonEmptyCacheString(values ...string) string {
 }
 
 func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) {
+	if c.serveBlobUpload(w, r) {
+		return
+	}
+
 	var manifestBody []byte
 	var manifestRepo, manifestTarget, manifestContentType string
 	if r != nil && r.URL != nil && (r.Method == http.MethodPut || r.Method == http.MethodDelete) {
@@ -1585,6 +1599,391 @@ func (c *imageCache) serveRegistryWrite(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	c.reportRegistryWrite(r, status, manifestBody)
+}
+
+func (c *imageCache) serveBlobUpload(w http.ResponseWriter, r *http.Request) bool {
+	if c == nil || r == nil || r.URL == nil {
+		return false
+	}
+	repo, uploadID, ok := parseImageCacheBlobUploadPath(r.URL.Path)
+	if !ok {
+		return false
+	}
+	switch r.Method {
+	case http.MethodPost:
+		if uploadID != "" {
+			return false
+		}
+		state, err := c.createBlobUpload(repo, r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("create blob upload: %v", err), http.StatusInternalServerError)
+			return true
+		}
+		writeImageCacheUploadAccepted(w, repo, state.UUID, state.SizeBytes)
+		return true
+	case http.MethodPatch:
+		uploadID = cleanImageCacheUploadID(uploadID)
+		if uploadID == "" {
+			http.Error(w, "invalid blob upload id", http.StatusBadRequest)
+			return true
+		}
+		state, err := c.appendBlobUpload(repo, uploadID, r.Body)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "blob upload not found", http.StatusNotFound)
+				return true
+			}
+			http.Error(w, fmt.Sprintf("append blob upload: %v", err), http.StatusInternalServerError)
+			return true
+		}
+		writeImageCacheUploadAccepted(w, repo, state.UUID, state.SizeBytes)
+		return true
+	case http.MethodPut:
+		uploadID = cleanImageCacheUploadID(uploadID)
+		if uploadID == "" {
+			http.Error(w, "invalid blob upload id", http.StatusBadRequest)
+			return true
+		}
+		digest, err := validateImageCacheBlobDigest(r.URL.Query().Get("digest"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return true
+		}
+		if err := c.completeBlobUpload(repo, uploadID, digest, r.Body); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "blob upload not found", http.StatusNotFound)
+				return true
+			}
+			var digestErr *imageCacheBlobDigestMismatchError
+			if errors.As(err, &digestErr) {
+				http.Error(w, digestErr.Error(), http.StatusBadRequest)
+				return true
+			}
+			http.Error(w, fmt.Sprintf("complete blob upload: %v", err), http.StatusInternalServerError)
+			return true
+		}
+		w.Header().Set("Docker-Content-Digest", digest)
+		w.Header().Set("Location", imageCacheBlobLocation(repo, digest))
+		w.WriteHeader(http.StatusCreated)
+		return true
+	case http.MethodDelete:
+		uploadID = cleanImageCacheUploadID(uploadID)
+		if uploadID == "" {
+			http.Error(w, "invalid blob upload id", http.StatusBadRequest)
+			return true
+		}
+		if err := c.deleteBlobUpload(uploadID); err != nil {
+			http.Error(w, fmt.Sprintf("delete blob upload: %v", err), http.StatusInternalServerError)
+			return true
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return true
+	default:
+		return false
+	}
+}
+
+func parseImageCacheBlobUploadPath(pathValue string) (string, string, bool) {
+	parts := strings.Split(strings.Trim(pathValue, "/"), "/")
+	if len(parts) < 4 || parts[0] != "v2" {
+		return "", "", false
+	}
+	for i := 2; i+1 < len(parts); i++ {
+		if parts[i] != "blobs" || parts[i+1] != "uploads" {
+			continue
+		}
+		repo := strings.Trim(strings.Join(parts[1:i], "/"), "/")
+		if repo == "" {
+			return "", "", false
+		}
+		uploadID := ""
+		if i+2 < len(parts) {
+			uploadID = parts[i+2]
+		}
+		if i+3 < len(parts) {
+			return "", "", false
+		}
+		return repo, uploadID, true
+	}
+	return "", "", false
+}
+
+func (c *imageCache) createBlobUpload(repo string, body io.Reader) (imageCacheBlobUploadState, error) {
+	id := newImageCacheUploadID()
+	state := imageCacheBlobUploadState{
+		Repo:      strings.Trim(repo, "/"),
+		UUID:      id,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := os.MkdirAll(c.blobUploadDir(), 0o755); err != nil {
+		return state, err
+	}
+	file, err := os.OpenFile(c.blobUploadDataPath(id), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return state, err
+	}
+	if body != nil {
+		written, copyErr := io.Copy(file, body)
+		state.SizeBytes += written
+		if copyErr != nil {
+			_ = file.Close()
+			_ = os.Remove(c.blobUploadDataPath(id))
+			return state, copyErr
+		}
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(c.blobUploadDataPath(id))
+		return state, err
+	}
+	if err := c.writeBlobUploadState(state); err != nil {
+		_ = os.Remove(c.blobUploadDataPath(id))
+		return state, err
+	}
+	return state, nil
+}
+
+func (c *imageCache) appendBlobUpload(repo, uploadID string, body io.Reader) (imageCacheBlobUploadState, error) {
+	state, err := c.readBlobUploadState(uploadID)
+	if err != nil {
+		return state, err
+	}
+	if !imageCacheUploadRepoMatches(state.Repo, repo) {
+		return state, fmt.Errorf("blob upload repo mismatch: got %q want %q", repo, state.Repo)
+	}
+	file, err := os.OpenFile(c.blobUploadDataPath(uploadID), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return state, err
+	}
+	if body != nil {
+		written, copyErr := io.Copy(file, body)
+		state.SizeBytes += written
+		if copyErr != nil {
+			_ = file.Close()
+			return state, copyErr
+		}
+	}
+	if err := file.Close(); err != nil {
+		return state, err
+	}
+	state.UpdatedAt = time.Now().UTC()
+	if err := c.writeBlobUploadState(state); err != nil {
+		return state, err
+	}
+	return state, nil
+}
+
+func (c *imageCache) completeBlobUpload(repo, uploadID, digest string, body io.Reader) error {
+	state, err := c.appendBlobUpload(repo, uploadID, body)
+	if err != nil {
+		return err
+	}
+	if !imageCacheUploadRepoMatches(state.Repo, repo) {
+		return fmt.Errorf("blob upload repo mismatch: got %q want %q", repo, state.Repo)
+	}
+	blobPath, err := imageCacheBlobStorePath(c.storeDir, digest)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(blobPath); err == nil {
+		return c.deleteBlobUpload(uploadID)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	src, err := os.Open(c.blobUploadDataPath(uploadID))
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(blobPath), "blob-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(tmp, hasher), src)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpName)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpName)
+		return closeErr
+	}
+	actualDigest := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+	if actualDigest != digest {
+		_ = os.Remove(tmpName)
+		_ = c.deleteBlobUpload(uploadID)
+		return &imageCacheBlobDigestMismatchError{
+			Expected: digest,
+			Actual:   actualDigest,
+			Size:     written,
+		}
+	}
+	if err := os.Rename(tmpName, blobPath); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return c.deleteBlobUpload(uploadID)
+}
+
+func (c *imageCache) deleteBlobUpload(uploadID string) error {
+	uploadID = cleanImageCacheUploadID(uploadID)
+	if uploadID == "" {
+		return nil
+	}
+	var errs []error
+	for _, pathValue := range []string{c.blobUploadDataPath(uploadID), c.blobUploadStatePath(uploadID)} {
+		if err := os.Remove(pathValue); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (c *imageCache) readBlobUploadState(uploadID string) (imageCacheBlobUploadState, error) {
+	uploadID = cleanImageCacheUploadID(uploadID)
+	if uploadID == "" {
+		return imageCacheBlobUploadState{}, os.ErrNotExist
+	}
+	raw, err := os.ReadFile(c.blobUploadStatePath(uploadID))
+	if err != nil {
+		return imageCacheBlobUploadState{}, err
+	}
+	var state imageCacheBlobUploadState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return imageCacheBlobUploadState{}, err
+	}
+	if state.UUID == "" {
+		state.UUID = uploadID
+	}
+	return state, nil
+}
+
+func (c *imageCache) writeBlobUploadState(state imageCacheBlobUploadState) error {
+	state.UUID = cleanImageCacheUploadID(state.UUID)
+	if state.UUID == "" {
+		return fmt.Errorf("missing blob upload id")
+	}
+	state.Repo = strings.Trim(state.Repo, "/")
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(c.blobUploadDir(), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(c.blobUploadDir(), "upload-*.json.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, c.blobUploadStatePath(state.UUID))
+}
+
+func (c *imageCache) blobUploadDir() string {
+	return filepath.Join(c.storeDir, imageCacheUploadDirName)
+}
+
+func (c *imageCache) blobUploadDataPath(uploadID string) string {
+	return filepath.Join(c.blobUploadDir(), cleanImageCacheUploadID(uploadID)+".data")
+}
+
+func (c *imageCache) blobUploadStatePath(uploadID string) string {
+	return filepath.Join(c.blobUploadDir(), cleanImageCacheUploadID(uploadID)+".json")
+}
+
+func newImageCacheUploadID() string {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err == nil {
+		return hex.EncodeToString(random[:])
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
+	return hex.EncodeToString(sum[:16])
+}
+
+func cleanImageCacheUploadID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return ""
+		}
+	}
+	return value
+}
+
+func imageCacheUploadRepoMatches(expected, actual string) bool {
+	return strings.Trim(expected, "/") == strings.Trim(actual, "/")
+}
+
+func validateImageCacheBlobDigest(value string) (string, error) {
+	digest := normalizeImageCacheDigest(value)
+	parts := strings.SplitN(digest, ":", 2)
+	if len(parts) != 2 || parts[0] != "sha256" || len(parts[1]) != sha256.Size*2 {
+		return "", fmt.Errorf("invalid blob digest")
+	}
+	return digest, nil
+}
+
+func imageCacheBlobStorePath(storeDir, digest string) (string, error) {
+	digest, err := validateImageCacheBlobDigest(digest)
+	if err != nil {
+		return "", err
+	}
+	parts := strings.SplitN(digest, ":", 2)
+	return filepath.Join(storeDir, parts[0], parts[1]), nil
+}
+
+func imageCacheBlobLocation(repo, digest string) string {
+	return "/" + strings.Join([]string{"v2", strings.Trim(repo, "/"), "blobs", digest}, "/")
+}
+
+func writeImageCacheUploadAccepted(w http.ResponseWriter, repo, uploadID string, size int64) {
+	w.Header().Set("Docker-Upload-UUID", uploadID)
+	w.Header().Set("Location", "/"+strings.Join([]string{"v2", strings.Trim(repo, "/"), "blobs/uploads", uploadID}, "/"))
+	w.Header().Set("Range", imageCacheUploadRange(size))
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func imageCacheUploadRange(size int64) string {
+	if size <= 0 {
+		return "0-0"
+	}
+	return fmt.Sprintf("0-%d", size-1)
+}
+
+type imageCacheBlobDigestMismatchError struct {
+	Expected string
+	Actual   string
+	Size     int64
+}
+
+func (e *imageCacheBlobDigestMismatchError) Error() string {
+	if e == nil {
+		return "blob digest mismatch"
+	}
+	return fmt.Sprintf("blob digest mismatch: expected %s actual %s size=%d", e.Expected, e.Actual, e.Size)
 }
 
 type persistedManifest struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -874,6 +875,127 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 	}
 }
 
+func TestImageCacheStreamsBlobUploadToDisk(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir: storeDir,
+		registry: registry.New(registry.WithBlobHandler(
+			registry.NewDiskBlobHandler(storeDir),
+		)),
+	}
+	firstChunk := bytes.Repeat([]byte("a"), 256*1024)
+	secondChunk := bytes.Repeat([]byte("b"), 256*1024)
+	blob := append(append([]byte(nil), firstChunk...), secondChunk...)
+	digest := testImageCacheBlobDigest(blob)
+
+	uploadLocation, uploadID := startImageCacheBlobUpload(t, cache, "fugue-apps/demo")
+	patch := httptest.NewRequest(http.MethodPatch, "http://image-cache.test"+uploadLocation, bytes.NewReader(firstChunk))
+	patchRec := httptest.NewRecorder()
+	cache.ServeHTTP(patchRec, patch)
+	if patchRec.Code != http.StatusAccepted {
+		t.Fatalf("patch status = %d, want %d; body=%q", patchRec.Code, http.StatusAccepted, patchRec.Body.String())
+	}
+	if got, want := patchRec.Header().Get("Range"), fmt.Sprintf("0-%d", len(firstChunk)-1); got != want {
+		t.Fatalf("patch range = %q, want %q", got, want)
+	}
+
+	putURL := "http://image-cache.test" + uploadLocation + "?digest=" + url.QueryEscape(digest)
+	put := httptest.NewRequest(http.MethodPut, putURL, bytes.NewReader(secondChunk))
+	putRec := httptest.NewRecorder()
+	cache.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("put status = %d, want %d; body=%q", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+	if got := putRec.Header().Get("Docker-Content-Digest"); got != digest {
+		t.Fatalf("Docker-Content-Digest = %q, want %q", got, digest)
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, digest)); err != nil {
+		t.Fatalf("expected blob to be stored on disk: %v", err)
+	}
+	if _, err := os.Stat(cache.blobUploadDataPath(uploadID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected upload data to be removed, stat err=%v", err)
+	}
+
+	head := httptest.NewRequest(http.MethodHead, "http://image-cache.test/v2/fugue-apps/demo/blobs/"+digest, nil)
+	headRec := httptest.NewRecorder()
+	cache.ServeHTTP(headRec, head)
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("head status = %d, want %d; body=%q", headRec.Code, http.StatusOK, headRec.Body.String())
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/blobs/"+digest, nil)
+	getRec := httptest.NewRecorder()
+	cache.ServeHTTP(getRec, get)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body=%q", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	if !bytes.Equal(getRec.Body.Bytes(), blob) {
+		t.Fatalf("get body length = %d, want %d", getRec.Body.Len(), len(blob))
+	}
+}
+
+func TestImageCacheCompletesBlobUploadWithPutBody(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir: storeDir,
+		registry: registry.New(registry.WithBlobHandler(
+			registry.NewDiskBlobHandler(storeDir),
+		)),
+	}
+	blob := []byte("single put body")
+	digest := testImageCacheBlobDigest(blob)
+	uploadLocation, _ := startImageCacheBlobUpload(t, cache, "fugue-apps/demo")
+
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test"+uploadLocation+"?digest="+url.QueryEscape(digest), bytes.NewReader(blob))
+	putRec := httptest.NewRecorder()
+	cache.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("put status = %d, want %d; body=%q", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "http://image-cache.test/v2/fugue-apps/demo/blobs/"+digest, nil)
+	getRec := httptest.NewRecorder()
+	cache.ServeHTTP(getRec, get)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want %d; body=%q", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	if !bytes.Equal(getRec.Body.Bytes(), blob) {
+		t.Fatalf("get body = %q, want %q", getRec.Body.String(), string(blob))
+	}
+}
+
+func TestImageCacheRejectsBlobUploadDigestMismatch(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	cache := &imageCache{
+		storeDir: storeDir,
+		registry: registry.New(registry.WithBlobHandler(
+			registry.NewDiskBlobHandler(storeDir),
+		)),
+	}
+	blob := []byte("actual blob")
+	wrongDigest := testImageCacheBlobDigest([]byte("different blob"))
+	uploadLocation, uploadID := startImageCacheBlobUpload(t, cache, "fugue-apps/demo")
+
+	put := httptest.NewRequest(http.MethodPut, "http://image-cache.test"+uploadLocation+"?digest="+url.QueryEscape(wrongDigest), bytes.NewReader(blob))
+	putRec := httptest.NewRecorder()
+	cache.ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusBadRequest {
+		t.Fatalf("put status = %d, want %d; body=%q", putRec.Code, http.StatusBadRequest, putRec.Body.String())
+	}
+	if _, err := os.Stat(imageCacheBlobPath(storeDir, wrongDigest)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched blob should not be stored, stat err=%v", err)
+	}
+	if _, err := os.Stat(cache.blobUploadDataPath(uploadID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched upload data should be removed, stat err=%v", err)
+	}
+}
+
 func TestImageCachePruneSkipsDeleteBelowWatermark(t *testing.T) {
 	t.Parallel()
 
@@ -1453,10 +1575,30 @@ func postImageCachePrune(t *testing.T, cache *imageCache, body string) imageCach
 	return result
 }
 
+func startImageCacheBlobUpload(t *testing.T, cache *imageCache, repo string) (string, string) {
+	t.Helper()
+	post := httptest.NewRequest(http.MethodPost, "http://image-cache.test/v2/"+strings.Trim(repo, "/")+"/blobs/uploads/", nil)
+	postRec := httptest.NewRecorder()
+	cache.ServeHTTP(postRec, post)
+	if postRec.Code != http.StatusAccepted {
+		t.Fatalf("post status = %d, want %d; body=%q", postRec.Code, http.StatusAccepted, postRec.Body.String())
+	}
+	location := postRec.Header().Get("Location")
+	uploadID := postRec.Header().Get("Docker-Upload-UUID")
+	if location == "" || uploadID == "" {
+		t.Fatalf("missing upload headers: Location=%q Docker-Upload-UUID=%q", location, uploadID)
+	}
+	return location, uploadID
+}
+
+func testImageCacheBlobDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
 func writeTestImageCacheBlob(t *testing.T, storeDir string, body []byte) string {
 	t.Helper()
-	sum := sha256.Sum256(body)
-	digest := fmt.Sprintf("sha256:%x", sum[:])
+	digest := testImageCacheBlobDigest(body)
 	path := imageCacheBlobPath(storeDir, digest)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir blob dir: %v", err)
