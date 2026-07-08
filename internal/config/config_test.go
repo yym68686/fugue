@@ -153,8 +153,13 @@ func TestAPIFromEnvReadsDefaultManagedPostgresStorageClass(t *testing.T) {
 
 func TestAPIFromEnvReadsSafeZeroDowntimePublicFlag(t *testing.T) {
 	t.Setenv("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", "")
+	if !APIFromEnv().AppSafeZeroDowntimePublicEnabled {
+		t.Fatal("expected safe zero downtime public enablement to default true")
+	}
+
+	t.Setenv("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", "false")
 	if APIFromEnv().AppSafeZeroDowntimePublicEnabled {
-		t.Fatal("expected safe zero downtime public enablement to default false")
+		t.Fatal("expected safe zero downtime public enablement to support env disable")
 	}
 
 	t.Setenv("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", "true")

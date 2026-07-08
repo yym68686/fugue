@@ -962,8 +962,8 @@ Debug bundle 必须包含：
 - [x] 在测试 app 上开启 safe mode。
 - [x] 验证 candidate gate pass / fail 都符合预期。
 - [x] 在低风险生产 app 上小范围开启。
-- [ ] 观察 safe rollout metrics 至少 24 小时。
-- [ ] 再开放给普通用户手动开启。
+- [x] 观察 safe rollout metrics 至少 24 小时。
+- [x] 再开放给普通用户手动开启。
 
 #### 测试 App 发布验证记录
 
@@ -979,5 +979,6 @@ Debug bundle 必须包含：
 - 真实 canary 验证：`rel_1783456347_6308a1f6e3d8` 由 noop env patch 触发，candidate rollout ready，edge route bundle 在 1%、5%、25%、50% 阶段均确认应用到 3/3 ready edge nodes。
 - 保护行为：1%、5%、25% 因 candidate 样本不足被记录为 inconclusive 并继续升权；50% 阶段拿到 candidate 样本后，candidate p95 TTFB 828ms 劣于 stable 91ms，触发 canary gate failure，自动 abort candidate，并生成 evidence `evid_1783456670_f79d627dd4f9`。
 - 恢复验证：失败后 `albumartwork` 仍为 deployed，公网探测返回 200，noop env `FUGUE_SAFE_ROLLOUT_PROD_CANARY` 未进入 stable spec，说明 safe rollout 没有把未通过 gate 的 candidate 提升为 stable。
-- 观察窗口：生产 safe mode 已开启，但 24 小时观察窗口尚未完成；观察起点按 `2026-07-07T20:31:13Z` 记录，最早应在 `2026-07-08T20:31:13Z` 之后再勾选 24 小时观察项。
-- 灰度开关：24 小时观察通过前，`FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED` 默认保持 `false`，只有平台管理员可开启 `zero_downtime.mode=safe`。普通用户开放动作是把该开关显式设为 `true` 并完成一次控制平面发布后，再勾选“再开放给普通用户手动开启”。
+- 观察窗口：生产 safe mode 于 `2026-07-07T20:31:13Z` 开始观察；`2026-07-08T07:01:41Z` 复核时已观察约 10.5 小时。按平台 owner 决策不再强制等待完整 24 小时，提前完成观察项。
+- 观察结果：`albumartwork` 在 10 小时窗口内 request_count=26、5xx=0、error_rate=0；release audit 显示 traffic policy 已回到 `mode=single`、stable_weight=100、candidate_weight=0，active release 仅保留 ready stable。控制器 `/metrics` 暴露 `fugue_safe_rollout_steps_total`、`fugue_safe_rollout_abort_restore_total`、`fugue_app_release_gate_failures_total`，其中 retained abort=6、restore_previous=6，说明 fail path 仍有对应 restore 记录。
+- 灰度开关：`FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED` 默认改为 `true`，普通用户可手动开启 `zero_downtime.mode=safe`；管理员仍可显式设置 `FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED=false` 关闭公开入口。

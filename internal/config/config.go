@@ -298,7 +298,7 @@ func APIFromEnv() APIConfig {
 		DNSBundleTTL:                     getenvInt("FUGUE_DNS_TTL", 60),
 		PlatformRoutesJSON:               strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
 		EdgeQualityRankingMode:           getenv("FUGUE_EDGE_QUALITY_RANKING_MODE", "shadow"),
-		AppSafeZeroDowntimePublicEnabled: getenvBool("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", false),
+		AppSafeZeroDowntimePublicEnabled: getenvBool("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", true),
 		EdgeTLSAskToken:                  strings.TrimSpace(os.Getenv("FUGUE_EDGE_TLS_ASK_TOKEN")),
 		AllowLegacyEdgeToken:             getenvBool("FUGUE_ALLOW_LEGACY_EDGE_TOKEN", false),
 		ImageStoreMode:                   getenv("FUGUE_IMAGE_STORE_MODE", "bundled-registry"),
