@@ -72,6 +72,79 @@ func TestPutAppDomainVerifiesWithCNAMEOnly(t *testing.T) {
 	}
 }
 
+func TestPutAppDomainManagedDNSCreatesHostedRecord(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, _ := setupAppDomainTestServer(t)
+	zone := putHostedDNSZoneForEdgeDNSTest(t, s, app.TenantID, "example.com")
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"dns_mode": "managed",
+		"hostname": "example.com",
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var putResponse struct {
+		Domain model.AppDomain `json:"domain"`
+	}
+	mustDecodeJSON(t, recorder, &putResponse)
+	if putResponse.Domain.DNSMode != model.AppDomainDNSModeManaged ||
+		putResponse.Domain.DNSStatus != model.AppDomainDNSStatusReady ||
+		putResponse.Domain.Status != model.AppDomainStatusVerified ||
+		putResponse.Domain.DNSZoneID != zone.ID ||
+		putResponse.Domain.DNSRecordID == "" {
+		t.Fatalf("expected managed DNS verified domain, got %+v", putResponse.Domain)
+	}
+
+	record, err := s.GetDNSRecord(zone.ID, putResponse.Domain.DNSRecordID)
+	if err != nil {
+		t.Fatalf("get managed DNS record: %v", err)
+	}
+	if record.Type != model.DNSRecordTypeFUGUEAPP ||
+		record.Name != "@" ||
+		record.Source != model.DNSRecordSourceAppDomain ||
+		record.SourceRefType != model.DNSRecordSourceRefTypeAppDomain ||
+		record.SourceRefID != "example.com" ||
+		strings.Join(record.Values, ",") != app.ID {
+		t.Fatalf("unexpected managed DNS record: %+v", record)
+	}
+}
+
+func TestPutAppDomainManagedDNSDoesNotOverwriteUserRecord(t *testing.T) {
+	t.Parallel()
+
+	s, server, apiKey, _, app, _ := setupAppDomainTestServer(t)
+	zone := putHostedDNSZoneForEdgeDNSTest(t, s, app.TenantID, "example.com")
+	if _, err := s.PutDNSRecord(zone, model.DNSRecord{
+		Name:        "@",
+		Type:        model.DNSRecordTypeFUGUEAPP,
+		Values:      []string{"other-app"},
+		FlattenMode: model.DNSRecordFlattenModeApp,
+		Source:      model.DNSRecordSourceUser,
+		Status:      model.DNSRecordStatusActive,
+	}, false); err != nil {
+		t.Fatalf("put user owned FUGUE_APP record: %v", err)
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains", apiKey, map[string]any{
+		"dns_mode": "managed",
+		"hostname": "example.com",
+	})
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, recorder.Code, recorder.Body.String())
+	}
+	records, err := s.ListDNSRecords(zone.ID)
+	if err != nil {
+		t.Fatalf("list hosted DNS records: %v", err)
+	}
+	for _, record := range records {
+		if record.Source == model.DNSRecordSourceAppDomain {
+			t.Fatalf("managed app domain must not create app_domain record on conflict: %+v", records)
+		}
+	}
+}
+
 func TestListAppDomainsRefreshesStalePendingDomain(t *testing.T) {
 	t.Parallel()
 

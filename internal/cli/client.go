@@ -352,7 +352,19 @@ type appDomainRepairResponse struct {
 }
 
 type appDomainRepairRequest struct {
-	Hostname string `json:"hostname"`
+	Hostname    string `json:"hostname"`
+	DNSMode     string `json:"dns_mode,omitempty"`
+	DNSZoneID   string `json:"dns_zone_id,omitempty"`
+	DNSRecordID string `json:"dns_record_id,omitempty"`
+	Overwrite   bool   `json:"overwrite,omitempty"`
+}
+
+type appDomainMutationRequest struct {
+	Hostname    string `json:"hostname"`
+	DNSMode     string `json:"dns_mode,omitempty"`
+	DNSZoneID   string `json:"dns_zone_id,omitempty"`
+	DNSRecordID string `json:"dns_record_id,omitempty"`
+	Overwrite   bool   `json:"overwrite,omitempty"`
 }
 
 type edgeTLSCertificateBundleInput struct {
@@ -1036,18 +1048,18 @@ func (c *Client) GetAppDomainAvailability(id, hostname string) (appDomainAvailab
 	return response.Availability, nil
 }
 
-func (c *Client) PutAppDomain(id, hostname string) (appDomainPutResponse, error) {
+func (c *Client) PutAppDomain(id, hostname string, req appDomainMutationRequest) (appDomainPutResponse, error) {
 	var response appDomainPutResponse
-	req := map[string]string{"hostname": strings.TrimSpace(hostname)}
+	req.Hostname = strings.TrimSpace(hostname)
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "domains"), req, &response); err != nil {
 		return appDomainPutResponse{}, err
 	}
 	return response, nil
 }
 
-func (c *Client) VerifyAppDomain(id, hostname string) (appDomainVerifyResponse, error) {
+func (c *Client) VerifyAppDomain(id, hostname string, req appDomainMutationRequest) (appDomainVerifyResponse, error) {
 	var response appDomainVerifyResponse
-	req := map[string]string{"hostname": strings.TrimSpace(hostname)}
+	req.Hostname = strings.TrimSpace(hostname)
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "domains", "verify"), req, &response); err != nil {
 		return appDomainVerifyResponse{}, err
 	}
@@ -1065,9 +1077,9 @@ func (c *Client) GetAppDomainDiagnosis(id, hostname string) (appDomainDiagnosisR
 	return response, nil
 }
 
-func (c *Client) RepairAppDomain(id, hostname string) (appDomainRepairResponse, error) {
+func (c *Client) RepairAppDomain(id, hostname string, req appDomainRepairRequest) (appDomainRepairResponse, error) {
 	var response appDomainRepairResponse
-	req := appDomainRepairRequest{Hostname: strings.TrimSpace(hostname)}
+	req.Hostname = strings.TrimSpace(hostname)
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/apps", id, "domains", "repair"), req, &response); err != nil {
 		return appDomainRepairResponse{}, err
 	}

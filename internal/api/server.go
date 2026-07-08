@@ -310,6 +310,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	s.writeRobustnessMetrics(w)
 	s.writeEdgeQualityRollupMetrics(w)
 	s.writeEdgeDNSArtifactMetrics(w)
+	s.writeHostedDNSMetrics(w)
 }
 
 func (s *Server) handleGetAuthContext(w http.ResponseWriter, r *http.Request) {

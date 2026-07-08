@@ -1592,6 +1592,8 @@ func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype u
 		recordTypes = []string{model.EdgeDNSRecordTypeMX}
 	case miekgdns.TypeNS:
 		recordTypes = []string{model.EdgeDNSRecordTypeNS}
+	case miekgdns.TypeSRV:
+		recordTypes = []string{model.EdgeDNSRecordTypeSRV}
 	case miekgdns.TypeTXT:
 		recordTypes = []string{model.EdgeDNSRecordTypeTXT}
 	default:
@@ -1711,6 +1713,11 @@ func rrForEdgeDNSRecord(record model.EdgeDNSRecord, ownerName string) []miekgdns
 					Hdr: miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeNS, Class: miekgdns.ClassINET, Ttl: ttl},
 					Ns:  fqdn(target),
 				})
+			}
+		case model.EdgeDNSRecordTypeSRV:
+			if srv, ok := parseEdgeDNSSRV(value); ok {
+				srv.Hdr = miekgdns.RR_Header{Name: fqdn(ownerName), Rrtype: miekgdns.TypeSRV, Class: miekgdns.ClassINET, Ttl: ttl}
+				rrs = append(rrs, srv)
 			}
 		case model.EdgeDNSRecordTypeTXT:
 			if strings.TrimSpace(value) != "" {
@@ -2179,6 +2186,35 @@ func parseEdgeDNSMX(value string) (*miekgdns.MX, bool) {
 		return nil, false
 	}
 	return &miekgdns.MX{Preference: preference, Mx: fqdn(exchange)}, true
+}
+
+func parseEdgeDNSSRV(value string) (*miekgdns.SRV, bool) {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) != 4 {
+		return nil, false
+	}
+	priority, err := strconv.ParseUint(fields[0], 10, 16)
+	if err != nil {
+		return nil, false
+	}
+	weight, err := strconv.ParseUint(fields[1], 10, 16)
+	if err != nil {
+		return nil, false
+	}
+	port, err := strconv.ParseUint(fields[2], 10, 16)
+	if err != nil {
+		return nil, false
+	}
+	target := normalizeName(fields[3])
+	if target == "" {
+		return nil, false
+	}
+	return &miekgdns.SRV{
+		Priority: uint16(priority),
+		Weight:   uint16(weight),
+		Port:     uint16(port),
+		Target:   fqdn(target),
+	}, true
 }
 
 func parseEdgeDNSCAA(value string) (*miekgdns.CAA, bool) {

@@ -77,6 +77,7 @@ const (
 	EdgeDNSRecordKindProbe              = "probe"
 	EdgeDNSRecordKindProtected          = "protected"
 	EdgeDNSRecordKindACMEChallenge      = "acme-challenge"
+	EdgeDNSRecordKindHosted             = "hosted"
 )
 
 const (
@@ -92,6 +93,7 @@ const (
 	EdgeDNSRecordTypeCNAME = "CNAME"
 	EdgeDNSRecordTypeMX    = "MX"
 	EdgeDNSRecordTypeNS    = "NS"
+	EdgeDNSRecordTypeSRV   = "SRV"
 	EdgeDNSRecordTypeTXT   = "TXT"
 )
 

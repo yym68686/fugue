@@ -1874,6 +1874,233 @@ paths:
                 $ref: "#/components/schemas/DeleteDNSACMEChallengeResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/zones:
+    get:
+      operationId: listHostedDNSZones
+      summary: List Hosted DNS Zones
+      tags: [DNS]
+      x-fugue-handler: handleListHostedDNSZones
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSZoneListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createHostedDNSZone
+      summary: Create Hosted DNS Zone
+      tags: [DNS]
+      x-fugue-handler: handleCreateHostedDNSZone
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateHostedDNSZoneRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSZoneResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/zones/{zone}:
+    get:
+      operationId: getHostedDNSZone
+      summary: Get Hosted DNS Zone
+      tags: [DNS]
+      x-fugue-handler: handleGetHostedDNSZone
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSZoneResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteHostedDNSZone
+      summary: Delete Hosted DNS Zone
+      tags: [DNS]
+      x-fugue-handler: handleDeleteHostedDNSZone
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteHostedDNSZoneResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/zones/{zone}/preflight:
+    get:
+      operationId: hostedDNSZonePreflight
+      summary: Hosted DNS Zone Preflight
+      tags: [DNS]
+      x-fugue-handler: handleHostedDNSZonePreflight
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: min_healthy_nodes
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 10
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSZonePreflightResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/zones/{zone}/records:
+    get:
+      operationId: listHostedDNSRecords
+      summary: List Hosted DNS Records
+      tags: [DNS]
+      x-fugue-handler: handleListHostedDNSRecords
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSRecordListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createHostedDNSRecord
+      summary: Create Hosted DNS Record
+      tags: [DNS]
+      x-fugue-handler: handleCreateHostedDNSRecord
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateHostedDNSRecordRequest"
+      responses:
+        '201':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSRecordResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/dns/zones/{zone}/records/{record_id}:
+    patch:
+      operationId: patchHostedDNSRecord
+      summary: Patch Hosted DNS Record
+      tags: [DNS]
+      x-fugue-handler: handlePatchHostedDNSRecord
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: record_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchHostedDNSRecordRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostedDNSRecordResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteHostedDNSRecord
+      summary: Delete Hosted DNS Record
+      tags: [DNS]
+      x-fugue-handler: handleDeleteHostedDNSRecord
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: zone
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: record_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteHostedDNSRecordResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/dns/nodes/{dns_node_id}:
     get:
       operationId: getDNSNode
@@ -13068,7 +13295,7 @@ components:
           type: string
         type:
           type: string
-          enum: [A, AAAA, CAA, CNAME, MX, NS, TXT]
+          enum: [A, AAAA, CAA, CNAME, MX, NS, SRV, TXT]
         values:
           type: array
           items:
@@ -13078,7 +13305,7 @@ components:
           format: int32
         record_kind:
           type: string
-          enum: [acme-challenge, custom-domain-target, platform, platform-domain, platform-route, probe, protected]
+          enum: [acme-challenge, custom-domain-target, hosted, platform, platform-domain, platform-route, probe, protected]
         app_id:
           type: string
         tenant_id:
@@ -13240,6 +13467,281 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgeDNSAnswerCandidate"
+    HostedDNSZone:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, zone_name, status, delegation_status, expected_nameservers, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        zone_name:
+          type: string
+        status:
+          type: string
+          enum: [pending_delegation, active, degraded, suspended, deleted]
+        delegation_status:
+          type: string
+          enum: [pending, ready, error]
+        parent_nameservers:
+          type: array
+          items:
+            type: string
+        expected_nameservers:
+          type: array
+          items:
+            type: string
+        created_by:
+          type: string
+        last_checked_at:
+          type: string
+          format: date-time
+        last_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    HostedDNSRecord:
+      type: object
+      additionalProperties: false
+      required: [id, zone_id, tenant_id, name, fqdn, type, values, ttl, source, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        zone_id:
+          type: string
+        tenant_id:
+          type: string
+        name:
+          type: string
+        fqdn:
+          type: string
+        type:
+          type: string
+          enum: [A, AAAA, CAA, CNAME, MX, NS, SRV, TXT, ALIAS, ANAME, FUGUE_APP]
+        values:
+          type: array
+          items:
+            type: string
+        ttl:
+          type: integer
+          format: int32
+        flatten_mode:
+          type: string
+          enum: [none, apex, always, app]
+        flatten_target:
+          type: string
+        flatten_ipv4_policy:
+          type: string
+          enum: [auto, ipv4_only, ipv6_only, dual_stack_required]
+        flatten_ipv6_policy:
+          type: string
+          enum: [auto, ipv4_only, ipv6_only, dual_stack_required]
+        flatten_ttl_policy:
+          type: string
+          enum: [target, record, min, bounded]
+        flatten_fallback_policy:
+          type: string
+          enum: [stale_if_error, fail_closed, empty_noerror]
+        flatten_status:
+          type: string
+          enum: [pending, resolved, stale, degraded, error]
+        flattened_a:
+          type: array
+          items:
+            type: string
+        flattened_aaaa:
+          type: array
+          items:
+            type: string
+        last_resolved_at:
+          type: string
+          format: date-time
+        resolve_error:
+          type: string
+        source:
+          type: string
+          enum: [user, app_domain, system, acme]
+        source_ref_type:
+          type: string
+        source_ref_id:
+          type: string
+        status:
+          type: string
+          enum: [active, degraded, disabled, conflict]
+        created_by:
+          type: string
+        last_published_at:
+          type: string
+          format: date-time
+        last_message:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateHostedDNSZoneRequest:
+      type: object
+      additionalProperties: false
+      required: [zone_name]
+      properties:
+        zone_name:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+    HostedDNSZoneResponse:
+      type: object
+      additionalProperties: false
+      required: [zone]
+      properties:
+        zone:
+          $ref: "#/components/schemas/HostedDNSZone"
+    HostedDNSZoneListResponse:
+      type: object
+      additionalProperties: false
+      required: [zones]
+      properties:
+        zones:
+          type: array
+          items:
+            $ref: "#/components/schemas/HostedDNSZone"
+    DeleteHostedDNSZoneResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, zone]
+      properties:
+        deleted:
+          type: boolean
+        zone:
+          $ref: "#/components/schemas/HostedDNSZone"
+    HostedDNSZonePreflightResponse:
+      type: object
+      additionalProperties: false
+      required: [zone, preflight]
+      properties:
+        zone:
+          $ref: "#/components/schemas/HostedDNSZone"
+        preflight:
+          $ref: "#/components/schemas/DNSDelegationPreflightResponse"
+    CreateHostedDNSRecordRequest:
+      type: object
+      additionalProperties: false
+      required: [name, type, values]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [A, AAAA, CAA, CNAME, MX, NS, SRV, TXT, ALIAS, ANAME, FUGUE_APP]
+        values:
+          type: array
+          items:
+            type: string
+        ttl:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 86400
+        flatten:
+          type: boolean
+        flatten_mode:
+          type: string
+          enum: [none, apex, always, app]
+        flatten_target:
+          type: string
+        flatten_ipv4_policy:
+          type: string
+          enum: [auto, ipv4_only, ipv6_only, dual_stack_required]
+        flatten_ipv6_policy:
+          type: string
+          enum: [auto, ipv4_only, ipv6_only, dual_stack_required]
+        flatten_ttl_policy:
+          type: string
+          enum: [target, record, min, bounded]
+        flatten_fallback_policy:
+          type: string
+          enum: [stale_if_error, fail_closed, empty_noerror]
+        source:
+          type: string
+          enum: [user, app_domain, system, acme]
+        source_ref_type:
+          type: string
+        source_ref_id:
+          type: string
+        overwrite:
+          type: boolean
+    PatchHostedDNSRecordRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        values:
+          type: array
+          items:
+            type: string
+        ttl:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 86400
+        flatten:
+          type: boolean
+        flatten_mode:
+          type: string
+          enum: [none, apex, always, app]
+        flatten_target:
+          type: string
+        flatten_ipv4_policy:
+          type: string
+          enum: [auto, ipv4_only, ipv6_only, dual_stack_required]
+        flatten_ipv6_policy:
+          type: string
+          enum: [auto, ipv4_only, ipv6_only, dual_stack_required]
+        flatten_ttl_policy:
+          type: string
+          enum: [target, record, min, bounded]
+        flatten_fallback_policy:
+          type: string
+          enum: [stale_if_error, fail_closed, empty_noerror]
+        status:
+          type: string
+          enum: [active, degraded, disabled, conflict]
+        overwrite:
+          type: boolean
+    HostedDNSRecordResponse:
+      type: object
+      additionalProperties: false
+      required: [record]
+      properties:
+        record:
+          $ref: "#/components/schemas/HostedDNSRecord"
+    HostedDNSRecordListResponse:
+      type: object
+      additionalProperties: false
+      required: [records]
+      properties:
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/HostedDNSRecord"
+    DeleteHostedDNSRecordResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, record]
+      properties:
+        deleted:
+          type: boolean
+        record:
+          $ref: "#/components/schemas/HostedDNSRecord"
     DNSACMEChallenge:
       type: object
       additionalProperties: false
@@ -13725,6 +14227,15 @@ components:
         tenant_id:
           type: string
         status:
+          type: string
+        dns_mode:
+          type: string
+          enum: [external, managed, manual]
+        dns_zone_id:
+          type: string
+        dns_record_id:
+          type: string
+        dns_record_source:
           type: string
         dns_status:
           type: string
@@ -16099,6 +16610,15 @@ components:
       properties:
         hostname:
           type: string
+        dns_mode:
+          type: string
+          enum: [external, managed, manual]
+        dns_zone_id:
+          type: string
+        dns_record_id:
+          type: string
+        overwrite:
+          type: boolean
         path_prefix:
           type: string
         public_url:
@@ -20303,6 +20823,11 @@ components:
       properties:
         hostname:
           type: string
+        dns_mode:
+          type: string
+          enum: [external, managed, manual]
+        overwrite:
+          type: boolean
     AppDomainPutResponse:
       type: object
       additionalProperties: false
@@ -20321,6 +20846,11 @@ components:
       properties:
         hostname:
           type: string
+        dns_mode:
+          type: string
+          enum: [external, managed, manual]
+        overwrite:
+          type: boolean
     AppDomainVerifyResponse:
       type: object
       additionalProperties: false

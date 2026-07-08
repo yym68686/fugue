@@ -275,6 +275,7 @@ Environment variables:
 		c.newServiceCommand(),
 		c.newDataCommand(),
 		c.newBackupCommand(),
+		c.newDNSCommand(),
 		c.newVersionCommand(),
 		c.newUpgradeCommand(),
 		c.newAPICommand(),

@@ -96,6 +96,14 @@ type appDomainDiagnosis struct {
 	RecommendedActions   []string                       `json:"recommended_actions,omitempty"`
 }
 
+type appDomainDNSRequest struct {
+	Hostname    string `json:"hostname"`
+	DNSMode     string `json:"dns_mode,omitempty"`
+	DNSZoneID   string `json:"dns_zone_id,omitempty"`
+	DNSRecordID string `json:"dns_record_id,omitempty"`
+	Overwrite   bool   `json:"overwrite,omitempty"`
+}
+
 func (s *Server) handleListAppDomains(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	app, allowed := s.loadAuthorizedAppMetadata(w, r, principal)
@@ -137,12 +145,14 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Hostname string `json:"hostname"`
-	}
+	var req appDomainDNSRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode)
+	if dnsMode == "" {
+		dnsMode = model.AppDomainDNSModeExternal
 	}
 
 	availability, existing, err := s.inspectAppDomainAvailability(app, req.Hostname, principal.IsPlatformAdmin())
@@ -164,7 +174,7 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		if existing.Status == model.AppDomainStatusVerified {
+		if existing.Status == model.AppDomainStatusVerified && (strings.TrimSpace(req.DNSMode) == "" || existing.DNSMode == dnsMode) {
 			availability.Current = true
 			httpx.WriteJSON(w, http.StatusOK, map[string]any{
 				"domain":          *existing,
@@ -173,7 +183,20 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		domain, verified, err := s.verifyAndPersistAppDomain(r.Context(), app, *existing)
+		domain := *existing
+		domain.DNSMode = dnsMode
+		if strings.TrimSpace(req.DNSZoneID) != "" {
+			domain.DNSZoneID = strings.TrimSpace(req.DNSZoneID)
+		}
+		if strings.TrimSpace(req.DNSRecordID) != "" {
+			domain.DNSRecordID = strings.TrimSpace(req.DNSRecordID)
+		}
+		domain, err = s.ensureAppDomainDNSRelationship(r.Context(), principal, app, domain, req.Overwrite)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		domain, verified, err := s.verifyAndPersistAppDomain(r.Context(), app, domain)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadGateway, err.Error())
 			return
@@ -193,9 +216,17 @@ func (s *Server) handlePutAppDomain(w http.ResponseWriter, r *http.Request) {
 		AppID:       app.ID,
 		TenantID:    app.TenantID,
 		Status:      model.AppDomainStatusPending,
+		DNSMode:     dnsMode,
+		DNSZoneID:   strings.TrimSpace(req.DNSZoneID),
+		DNSRecordID: strings.TrimSpace(req.DNSRecordID),
 		RouteTarget: target,
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}
+	domain, err = s.ensureAppDomainDNSRelationship(r.Context(), principal, app, domain, req.Overwrite)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
 	}
 	domain, verified, err := s.evaluateAppDomainVerification(r.Context(), app, domain)
 	if err != nil {
@@ -227,9 +258,7 @@ func (s *Server) handleVerifyAppDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Hostname string `json:"hostname"`
-	}
+	var req appDomainDNSRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -246,6 +275,14 @@ func (s *Server) handleVerifyAppDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	if domain.AppID != app.ID {
 		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	if dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode); dnsMode != "" {
+		domain.DNSMode = dnsMode
+	}
+	domain, err = s.ensureAppDomainDNSRelationship(r.Context(), principal, app, domain, req.Overwrite)
+	if err != nil {
+		s.writeStoreError(w, err)
 		return
 	}
 	updated, verified, err := s.verifyAndPersistAppDomain(r.Context(), app, domain)
@@ -299,9 +336,7 @@ func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	var req struct {
-		Hostname string `json:"hostname"`
-	}
+	var req appDomainDNSRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -318,6 +353,14 @@ func (s *Server) handleRepairAppDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	if domain.AppID != app.ID {
 		s.writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	if dnsMode := model.NormalizeAppDomainDNSMode(req.DNSMode); dnsMode != "" {
+		domain.DNSMode = dnsMode
+	}
+	domain, err = s.ensureAppDomainDNSRelationship(r.Context(), principal, app, domain, req.Overwrite)
+	if err != nil {
+		s.writeStoreError(w, err)
 		return
 	}
 
@@ -383,6 +426,11 @@ func (s *Server) handleDeleteAppDomain(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
+	}
+	if domain.DNSMode == model.AppDomainDNSModeManaged && strings.TrimSpace(domain.DNSZoneID) != "" {
+		if _, deleteErr := s.store.DeleteDNSRecordsBySourceRef(domain.DNSZoneID, model.DNSRecordSourceAppDomain, "app_domain", domain.Hostname); deleteErr != nil && s.log != nil {
+			s.log.Printf("delete managed DNS records for app domain failed; hostname=%s zone_id=%s err=%v", domain.Hostname, domain.DNSZoneID, deleteErr)
+		}
 	}
 	s.appendAudit(principal, "app.domain.delete", "app", app.ID, app.TenantID, map[string]string{"hostname": domain.Hostname})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"domain": domain})
@@ -715,6 +763,90 @@ func (s *Server) normalizeRequestedCustomDomain(raw string, allowPlatformRoot bo
 	return hostname, ""
 }
 
+func (s *Server) ensureAppDomainDNSRelationship(ctx context.Context, principal model.Principal, app model.App, domain model.AppDomain, overwrite bool) (model.AppDomain, error) {
+	domain.DNSMode = model.NormalizeAppDomainDNSMode(domain.DNSMode)
+	if domain.DNSMode == "" {
+		domain.DNSMode = model.AppDomainDNSModeExternal
+	}
+	switch domain.DNSMode {
+	case model.AppDomainDNSModeManaged:
+		zone, err := s.appDomainHostedZone(app, domain)
+		if err != nil {
+			return domain, err
+		}
+		if zone.Status != model.HostedZoneStatusActive {
+			return domain, store.ErrInvalidInput
+		}
+		recordName := appDomainDNSRecordName(domain.Hostname, zone.ZoneName)
+		record := model.DNSRecord{
+			ZoneID:                zone.ID,
+			TenantID:              zone.TenantID,
+			Name:                  recordName,
+			Type:                  model.DNSRecordTypeFUGUEAPP,
+			Values:                []string{app.ID},
+			TTL:                   defaultEdgeDNSTTL,
+			FlattenMode:           model.DNSRecordFlattenModeApp,
+			FlattenIPv4Policy:     model.DNSRecordFlattenIPPolicyAuto,
+			FlattenIPv6Policy:     model.DNSRecordFlattenIPPolicyAuto,
+			FlattenTTLPolicy:      model.DNSRecordFlattenTTLPolicyBounded,
+			FlattenFallbackPolicy: model.DNSRecordFlattenFallbackStaleIfError,
+			Source:                model.DNSRecordSourceAppDomain,
+			SourceRefType:         "app_domain",
+			SourceRefID:           domain.Hostname,
+			Status:                model.DNSRecordStatusActive,
+			CreatedBy:             strings.TrimSpace(principal.ActorID),
+		}
+		stored, err := s.store.PutDNSRecord(zone, record, overwrite)
+		if err != nil {
+			return domain, err
+		}
+		domain.DNSZoneID = zone.ID
+		domain.DNSRecordID = stored.ID
+		domain.DNSRecordSource = model.DNSRecordSourceAppDomain
+	case model.AppDomainDNSModeManual:
+		zone, err := s.appDomainHostedZone(app, domain)
+		if err != nil {
+			return domain, err
+		}
+		domain.DNSZoneID = zone.ID
+		domain.DNSRecordSource = model.DNSRecordSourceUser
+	default:
+		domain.DNSZoneID = ""
+		domain.DNSRecordID = ""
+		domain.DNSRecordSource = ""
+	}
+	_ = ctx
+	return domain, nil
+}
+
+func (s *Server) appDomainHostedZone(app model.App, domain model.AppDomain) (model.HostedZone, error) {
+	if strings.TrimSpace(domain.DNSZoneID) != "" {
+		zones, err := s.store.ListHostedZones(app.TenantID, false)
+		if err != nil {
+			return model.HostedZone{}, err
+		}
+		for _, zone := range zones {
+			if strings.TrimSpace(zone.ID) == strings.TrimSpace(domain.DNSZoneID) {
+				if !edgeDNSTargetWithinZone(domain.Hostname, zone.ZoneName) {
+					return model.HostedZone{}, store.ErrInvalidInput
+				}
+				return zone, nil
+			}
+		}
+		return model.HostedZone{}, store.ErrNotFound
+	}
+	return s.store.FindHostedZoneForHostname(app.TenantID, domain.Hostname, false)
+}
+
+func appDomainDNSRecordName(hostname, zoneName string) string {
+	hostname = normalizeExternalAppDomain(hostname)
+	zoneName = normalizeExternalAppDomain(zoneName)
+	if hostname == "" || zoneName == "" || hostname == zoneName {
+		return "@"
+	}
+	return strings.TrimSuffix(hostname, "."+zoneName)
+}
+
 func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain) (model.AppDomain, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -726,6 +858,10 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 
 	now := time.Now().UTC()
 	updated := domain
+	updated.DNSMode = model.NormalizeAppDomainDNSMode(updated.DNSMode)
+	if updated.DNSMode == "" {
+		updated.DNSMode = model.AppDomainDNSModeExternal
+	}
 	wasVerified := updated.Status == model.AppDomainStatusVerified
 	if domain.LastCheckedAt != nil {
 		lastCheckedAt := *domain.LastCheckedAt
@@ -741,6 +877,13 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 	updated.VerificationTXTValue = ""
 	updated.LastCheckedAt = &now
 	updated.DNSLastCheckedAt = &now
+
+	switch updated.DNSMode {
+	case model.AppDomainDNSModeManaged:
+		return s.evaluateManagedAppDomainVerification(ctx, app, updated, wasVerified, now)
+	case model.AppDomainDNSModeManual:
+		return s.evaluateManualAppDomainVerification(ctx, app, updated, wasVerified, now)
+	}
 
 	observation, err := s.inspectCustomDomainDNS(ctx, updated.Hostname, s.customDomainTargets(app, legacyTarget))
 	if err != nil {
@@ -772,6 +915,162 @@ func (s *Server) evaluateAppDomainVerification(ctx context.Context, app model.Ap
 		updated.LastMessage = observation.Message
 	}
 	return updated, verified, nil
+}
+
+func (s *Server) evaluateManagedAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain, wasVerified bool, now time.Time) (model.AppDomain, bool, error) {
+	zone, err := s.appDomainHostedZone(app, domain)
+	if err != nil {
+		domain.Status = model.AppDomainStatusPending
+		domain.DNSStatus = model.AppDomainDNSStatusPending
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		domain.LastMessage = "hosted DNS zone is not available for this hostname"
+		domain.DNSLastMessage = domain.LastMessage
+		return domain, false, nil
+	}
+	domain.DNSZoneID = zone.ID
+	if zone.Status != model.HostedZoneStatusActive {
+		domain.Status = model.AppDomainStatusPending
+		domain.DNSStatus = model.AppDomainDNSStatusPending
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		domain.LastMessage = "hosted DNS zone is not active"
+		domain.DNSLastMessage = domain.LastMessage
+		return domain, false, nil
+	}
+	record, err := s.managedAppDomainDNSRecord(zone, domain)
+	if err != nil {
+		domain.Status = model.AppDomainStatusPending
+		domain.DNSStatus = model.AppDomainDNSStatusPending
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		domain.LastMessage = "managed FUGUE_APP DNS record is missing"
+		domain.DNSLastMessage = domain.LastMessage
+		return domain, false, nil
+	}
+	if record.Source != model.DNSRecordSourceAppDomain || record.SourceRefType != "app_domain" || record.SourceRefID != domain.Hostname || record.Type != model.DNSRecordTypeFUGUEAPP {
+		domain.Status = model.AppDomainStatusPending
+		domain.DNSStatus = model.AppDomainDNSStatusPending
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		domain.LastMessage = "managed DNS record ownership does not match this app domain"
+		domain.DNSLastMessage = domain.LastMessage
+		return domain, false, nil
+	}
+	if appForRecord, ok := hostedDNSRecordApp(record, map[string]model.App{app.ID: app}); !ok || appForRecord.ID != app.ID {
+		domain.Status = model.AppDomainStatusPending
+		domain.DNSStatus = model.AppDomainDNSStatusPending
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		domain.LastMessage = "managed DNS record does not point to this app"
+		domain.DNSLastMessage = domain.LastMessage
+		return domain, false, nil
+	}
+	domain.DNSRecordID = record.ID
+	domain.DNSRecordSource = model.DNSRecordSourceAppDomain
+	domain.Status = model.AppDomainStatusVerified
+	domain.DNSStatus = model.AppDomainDNSStatusReady
+	domain.DNSRecordKind = model.AppDomainDNSRecordKindFlattened
+	domain.LastMessage = ""
+	domain.DNSLastMessage = ""
+	if domain.VerifiedAt == nil {
+		domain.VerifiedAt = &now
+	}
+	if !wasVerified {
+		domain.TLSStatus = model.AppDomainTLSStatusPending
+		domain.TLSLastMessage = ""
+		domain.TLSLastCheckedAt = nil
+		domain.TLSReadyAt = nil
+	}
+	return domain, true, nil
+}
+
+func (s *Server) managedAppDomainDNSRecord(zone model.HostedZone, domain model.AppDomain) (model.DNSRecord, error) {
+	if strings.TrimSpace(domain.DNSRecordID) != "" {
+		return s.store.GetDNSRecord(zone.ID, domain.DNSRecordID)
+	}
+	records, err := s.store.ListDNSRecords(zone.ID)
+	if err != nil {
+		return model.DNSRecord{}, err
+	}
+	for _, record := range records {
+		if record.Source == model.DNSRecordSourceAppDomain &&
+			record.SourceRefType == "app_domain" &&
+			record.SourceRefID == domain.Hostname &&
+			record.Type == model.DNSRecordTypeFUGUEAPP {
+			return record, nil
+		}
+	}
+	return model.DNSRecord{}, store.ErrNotFound
+}
+
+func (s *Server) evaluateManualAppDomainVerification(ctx context.Context, app model.App, domain model.AppDomain, wasVerified bool, now time.Time) (model.AppDomain, bool, error) {
+	zone, err := s.appDomainHostedZone(app, domain)
+	if err != nil || zone.Status != model.HostedZoneStatusActive {
+		domain.Status = model.AppDomainStatusPending
+		domain.DNSStatus = model.AppDomainDNSStatusPending
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+		domain.LastMessage = "hosted DNS zone is not active"
+		domain.DNSLastMessage = domain.LastMessage
+		return domain, false, nil
+	}
+	domain.DNSZoneID = zone.ID
+	if record, ok := s.manualFUGUEAppDNSRecord(zone, domain, app); ok {
+		domain.DNSRecordID = record.ID
+		domain.Status = model.AppDomainStatusVerified
+		domain.DNSStatus = model.AppDomainDNSStatusReady
+		domain.DNSRecordKind = model.AppDomainDNSRecordKindFlattened
+		domain.LastMessage = ""
+		domain.DNSLastMessage = ""
+		if domain.VerifiedAt == nil {
+			domain.VerifiedAt = &now
+		}
+		if !wasVerified {
+			domain.TLSStatus = model.AppDomainTLSStatusPending
+			domain.TLSLastMessage = ""
+			domain.TLSLastCheckedAt = nil
+			domain.TLSReadyAt = nil
+		}
+		return domain, true, nil
+	}
+	observation, err := s.inspectCustomDomainDNS(ctx, domain.Hostname, s.customDomainTargets(app, domain.RouteTarget))
+	if err != nil {
+		return domain, false, err
+	}
+	if observation.Verified {
+		domain.Status = model.AppDomainStatusVerified
+		domain.DNSStatus = model.AppDomainDNSStatusReady
+		domain.DNSRecordKind = observation.RecordKind
+		domain.LastMessage = ""
+		domain.DNSLastMessage = ""
+		if domain.VerifiedAt == nil {
+			domain.VerifiedAt = &now
+		}
+		if !wasVerified {
+			domain.TLSStatus = model.AppDomainTLSStatusPending
+			domain.TLSLastMessage = ""
+			domain.TLSLastCheckedAt = nil
+			domain.TLSReadyAt = nil
+		}
+		return domain, true, nil
+	}
+	domain.Status = model.AppDomainStatusPending
+	domain.DNSStatus = model.AppDomainDNSStatusPending
+	domain.DNSRecordKind = model.AppDomainDNSRecordKindNone
+	domain.LastMessage = observation.Message
+	domain.DNSLastMessage = observation.Message
+	return domain, false, nil
+}
+
+func (s *Server) manualFUGUEAppDNSRecord(zone model.HostedZone, domain model.AppDomain, app model.App) (model.DNSRecord, bool) {
+	records, err := s.store.ListDNSRecords(zone.ID)
+	if err != nil {
+		return model.DNSRecord{}, false
+	}
+	for _, record := range records {
+		if record.FQDN != domain.Hostname || record.Type != model.DNSRecordTypeFUGUEAPP || record.Source != model.DNSRecordSourceUser {
+			continue
+		}
+		if appForRecord, ok := hostedDNSRecordApp(record, map[string]model.App{app.ID: app}); ok && appForRecord.ID == app.ID {
+			return record, true
+		}
+	}
+	return model.DNSRecord{}, false
 }
 
 func (s *Server) verifyAndPersistAppDomain(ctx context.Context, app model.App, domain model.AppDomain) (model.AppDomain, bool, error) {

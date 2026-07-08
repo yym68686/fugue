@@ -259,6 +259,147 @@ func TestEdgeDNSBundlePublishesCustomDomainTargetsBeforeVerification(t *testing.
 	}
 }
 
+func TestEdgeDNSBundlePublishesHostedZoneRecords(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	zone := putHostedDNSZoneForEdgeDNSTest(t, storeState, app.TenantID, "example.net")
+	putHostedDNSRecordForEdgeDNSTest(t, storeState, zone, model.DNSRecord{
+		Name:   "www",
+		Type:   model.DNSRecordTypeA,
+		Values: []string{"203.0.113.44"},
+		TTL:    120,
+		Source: model.DNSRecordSourceUser,
+		Status: model.DNSRecordStatusActive,
+	})
+	putHostedDNSRecordForEdgeDNSTest(t, storeState, zone, model.DNSRecord{
+		Name:   "mail",
+		Type:   model.DNSRecordTypeMX,
+		Values: []string{"10 mailhost.example.net"},
+		TTL:    300,
+		Source: model.DNSRecordSourceUser,
+		Status: model.DNSRecordStatusActive,
+	})
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=example.net&answer_ip=203.0.113.10&ttl=120", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	a := edgeDNSRecordByNameAndType(bundle.Records, "www.example.net", model.EdgeDNSRecordTypeA)
+	if a == nil || a.RecordKind != model.EdgeDNSRecordKindHosted || strings.Join(a.Values, ",") != "203.0.113.44" {
+		t.Fatalf("expected hosted www A record, got %+v in %+v", a, bundle.Records)
+	}
+	mx := edgeDNSRecordByNameAndType(bundle.Records, "mail.example.net", model.EdgeDNSRecordTypeMX)
+	if mx == nil || mx.RecordKind != model.EdgeDNSRecordKindHosted || strings.Join(mx.Values, ",") != "10 mailhost.example.net" {
+		t.Fatalf("expected hosted mail MX record, got %+v in %+v", mx, bundle.Records)
+	}
+	if edgeDNSRecordByNameAndType(bundle.Records, "www.fugue.pro", model.EdgeDNSRecordTypeA) != nil {
+		t.Fatalf("hosted records from example.net must not leak into other zones: %+v", bundle.Records)
+	}
+}
+
+func TestEdgeDNSBundlePublishesHostedFlattenedRecords(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	now := time.Now().UTC()
+	zone := putHostedDNSZoneForEdgeDNSTest(t, storeState, app.TenantID, "example.net")
+	putHostedDNSRecordForEdgeDNSTest(t, storeState, zone, model.DNSRecord{
+		Name:                  "@",
+		Type:                  model.DNSRecordTypeALIAS,
+		Values:                []string{"target.example.org"},
+		TTL:                   180,
+		FlattenMode:           model.DNSRecordFlattenModeAlways,
+		FlattenTarget:         "target.example.org",
+		FlattenFallbackPolicy: model.DNSRecordFlattenFallbackStaleIfError,
+		FlattenStatus:         model.DNSRecordFlattenStatusResolved,
+		FlattenedA:            []string{"198.51.100.20"},
+		FlattenedAAAA:         []string{"2001:db8::20"},
+		LastResolvedAt:        &now,
+		Source:                model.DNSRecordSourceUser,
+		Status:                model.DNSRecordStatusActive,
+	})
+	putHostedDNSRecordForEdgeDNSTest(t, storeState, zone, model.DNSRecord{
+		Name:                  "closed",
+		Type:                  model.DNSRecordTypeANAME,
+		Values:                []string{"missing.example.org"},
+		TTL:                   180,
+		FlattenMode:           model.DNSRecordFlattenModeAlways,
+		FlattenTarget:         "missing.example.org",
+		FlattenFallbackPolicy: model.DNSRecordFlattenFallbackFailClosed,
+		FlattenStatus:         model.DNSRecordFlattenStatusError,
+		ResolveError:          "target lookup failed",
+		Source:                model.DNSRecordSourceUser,
+		Status:                model.DNSRecordStatusDegraded,
+	})
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=example.net&answer_ip=203.0.113.10&ttl=120", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	a := edgeDNSRecordByNameAndType(bundle.Records, "example.net", model.EdgeDNSRecordTypeA)
+	if a == nil || a.RecordKind != model.EdgeDNSRecordKindHosted || strings.Join(a.Values, ",") != "198.51.100.20" {
+		t.Fatalf("expected flattened apex A record, got %+v in %+v", a, bundle.Records)
+	}
+	aaaa := edgeDNSRecordByNameAndType(bundle.Records, "example.net", model.EdgeDNSRecordTypeAAAA)
+	if aaaa == nil || strings.Join(aaaa.Values, ",") != "2001:db8::20" {
+		t.Fatalf("expected flattened apex AAAA record, got %+v in %+v", aaaa, bundle.Records)
+	}
+	if edgeDNSRecordByNameAndType(bundle.Records, "example.net", model.EdgeDNSRecordTypeCNAME) != nil {
+		t.Fatalf("flattened hosted record must not publish CNAME: %+v", bundle.Records)
+	}
+	if edgeDNSRecordByNameAndType(bundle.Records, "closed.example.net", model.EdgeDNSRecordTypeA) != nil {
+		t.Fatalf("fail-closed flattened record without cache must not publish: %+v", bundle.Records)
+	}
+}
+
+func TestEdgeDNSBundleExpandsHostedFugueAppRecord(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordHealthyEdgeForRouteTest(t, storeState, "edge-default-1", defaultEdgeGroupID, "203.0.113.20")
+	zone := putHostedDNSZoneForEdgeDNSTest(t, storeState, app.TenantID, "example.net")
+	putHostedDNSRecordForEdgeDNSTest(t, storeState, zone, model.DNSRecord{
+		Name:          "@",
+		Type:          model.DNSRecordTypeFUGUEAPP,
+		Values:        []string{app.ID},
+		TTL:           90,
+		FlattenMode:   model.DNSRecordFlattenModeApp,
+		Source:        model.DNSRecordSourceAppDomain,
+		SourceRefType: model.DNSRecordSourceRefTypeAppDomain,
+		SourceRefID:   "example.net",
+		Status:        model.DNSRecordStatusActive,
+	})
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=example.net&answer_ip=203.0.113.10&ttl=120", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	record := edgeDNSRecordByNameAndType(bundle.Records, "example.net", model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected hosted FUGUE_APP apex A record in bundle: %+v", bundle.Records)
+	}
+	if record.RecordKind != model.EdgeDNSRecordKindCustomDomainTarget || record.AppID != app.ID || strings.Join(record.Values, ",") != "203.0.113.20" {
+		t.Fatalf("unexpected hosted FUGUE_APP record: %+v", record)
+	}
+}
+
 func TestEdgeDNSBundleSkipsPreVerificationTargetsForExternalAppRoutes(t *testing.T) {
 	t.Parallel()
 
@@ -1931,6 +2072,33 @@ func TestDNSACMEChallengeAPIDrivesEdgeDNSBundleTXTRecords(t *testing.T) {
 	if txt == nil || strings.Join(txt.Values, ",") != secondResponse.Challenge.Value {
 		t.Fatalf("expected only second ACME TXT value after cleanup, got %+v", txt)
 	}
+}
+
+func putHostedDNSZoneForEdgeDNSTest(t *testing.T, storeState *store.Store, tenantID, zoneName string) model.HostedZone {
+	t.Helper()
+	now := time.Now().UTC()
+	zone, err := storeState.PutHostedZone(model.HostedZone{
+		TenantID:            tenantID,
+		ZoneName:            zoneName,
+		Status:              model.HostedZoneStatusActive,
+		DelegationStatus:    model.HostedZoneDelegationStatusReady,
+		ExpectedNameservers: []string{"ns1.dns.fugue.pro", "ns2.dns.fugue.pro"},
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	})
+	if err != nil {
+		t.Fatalf("put hosted DNS zone %s: %v", zoneName, err)
+	}
+	return zone
+}
+
+func putHostedDNSRecordForEdgeDNSTest(t *testing.T, storeState *store.Store, zone model.HostedZone, record model.DNSRecord) model.DNSRecord {
+	t.Helper()
+	out, err := storeState.PutDNSRecord(zone, record, false)
+	if err != nil {
+		t.Fatalf("put hosted DNS record %s %s: %v", record.Name, record.Type, err)
+	}
+	return out
 }
 
 func edgeDNSRecordByNameAndType(records []model.EdgeDNSRecord, name, recordType string) *model.EdgeDNSRecord {

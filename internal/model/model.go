@@ -1525,6 +1525,12 @@ const (
 )
 
 const (
+	AppDomainDNSModeExternal = "external"
+	AppDomainDNSModeManaged  = "managed"
+	AppDomainDNSModeManual   = "manual"
+)
+
+const (
 	AppDomainTLSStatusPending = "pending"
 	AppDomainTLSStatusReady   = "ready"
 	AppDomainTLSStatusError   = "error"
@@ -1569,11 +1575,28 @@ func NormalizeAppDomainDNSRecordKind(kind string) string {
 	}
 }
 
+func NormalizeAppDomainDNSMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", AppDomainDNSModeExternal:
+		return AppDomainDNSModeExternal
+	case AppDomainDNSModeManaged:
+		return AppDomainDNSModeManaged
+	case AppDomainDNSModeManual:
+		return AppDomainDNSModeManual
+	default:
+		return ""
+	}
+}
+
 type AppDomain struct {
 	Hostname             string     `json:"hostname"`
 	AppID                string     `json:"app_id,omitempty"`
 	TenantID             string     `json:"tenant_id,omitempty"`
 	Status               string     `json:"status"`
+	DNSMode              string     `json:"dns_mode,omitempty"`
+	DNSZoneID            string     `json:"dns_zone_id,omitempty"`
+	DNSRecordID          string     `json:"dns_record_id,omitempty"`
+	DNSRecordSource      string     `json:"dns_record_source,omitempty"`
 	DNSStatus            string     `json:"dns_status,omitempty"`
 	DNSRecordKind        string     `json:"dns_record_kind,omitempty"`
 	TLSStatus            string     `json:"tls_status,omitempty"`
@@ -3108,6 +3131,8 @@ type State struct {
 	EdgeGroups                 []EdgeGroup                 `json:"edge_groups,omitempty"`
 	EdgeNodes                  []EdgeNode                  `json:"edge_nodes,omitempty"`
 	DNSNodes                   []DNSNode                   `json:"dns_nodes,omitempty"`
+	HostedZones                []HostedZone                `json:"hosted_zones,omitempty"`
+	DNSRecords                 []DNSRecord                 `json:"dns_records,omitempty"`
 	DNSACMEChallenges          []DNSACMEChallenge          `json:"dns_acme_challenges,omitempty"`
 	EdgeRoutePolicies          []EdgeRoutePolicy           `json:"edge_route_policies,omitempty"`
 	EdgePerformanceSamples     []EdgePerformanceSample     `json:"edge_performance_samples,omitempty"`

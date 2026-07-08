@@ -105,15 +105,16 @@ func writeDomainTable(w io.Writer, domains []model.AppDomain) error {
 	})
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "HOSTNAME\tSTATUS\tDNS\tTLS\tTARGET\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tSTATUS\tMODE\tDNS\tTLS\tTARGET\tUPDATED"); err != nil {
 		return err
 	}
 	for _, domain := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			domain.Hostname,
 			strings.TrimSpace(domain.Status),
+			strings.TrimSpace(domain.DNSMode),
 			strings.TrimSpace(domain.DNSStatus),
 			strings.TrimSpace(domain.TLSStatus),
 			strings.TrimSpace(domain.RouteTarget),

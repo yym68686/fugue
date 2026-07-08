@@ -278,7 +278,10 @@ func (c *CLI) newDomainCheckCommand() *cobra.Command {
 }
 
 func (c *CLI) newDomainAddCommand() *cobra.Command {
-	return &cobra.Command{
+	var dnsMode string
+	var dnsZoneID string
+	var overwrite bool
+	cmd := &cobra.Command{
 		Use:     "add <app> <hostname>",
 		Aliases: []string{"attach", "connect"},
 		Short:   "Attach a custom domain to an app",
@@ -292,7 +295,11 @@ func (c *CLI) newDomainAddCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.PutAppDomain(app.ID, args[1])
+			response, err := client.PutAppDomain(app.ID, args[1], appDomainMutationRequest{
+				DNSMode:   dnsMode,
+				DNSZoneID: dnsZoneID,
+				Overwrite: overwrite,
+			})
 			if err != nil {
 				return err
 			}
@@ -304,10 +311,16 @@ func (c *CLI) newDomainAddCommand() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&dnsMode, "dns", "", "DNS mode: external, managed, or manual")
+	cmd.Flags().StringVar(&dnsZoneID, "dns-zone-id", "", "Hosted DNS zone ID for managed/manual mode")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Allow managed DNS record replacement when safe")
+	return cmd
 }
 
 func (c *CLI) newDomainVerifyCommand() *cobra.Command {
-	return &cobra.Command{
+	var dnsMode string
+	var overwrite bool
+	cmd := &cobra.Command{
 		Use:   "verify <app> <hostname>",
 		Short: "Re-check DNS verification for a custom domain",
 		Args:  cobra.ExactArgs(2),
@@ -320,7 +333,10 @@ func (c *CLI) newDomainVerifyCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.VerifyAppDomain(app.ID, args[1])
+			response, err := client.VerifyAppDomain(app.ID, args[1], appDomainMutationRequest{
+				DNSMode:   dnsMode,
+				Overwrite: overwrite,
+			})
 			if err != nil {
 				return err
 			}
@@ -331,6 +347,9 @@ func (c *CLI) newDomainVerifyCommand() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&dnsMode, "dns", "", "DNS mode: external, managed, or manual")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Allow managed DNS record replacement when safe")
+	return cmd
 }
 
 func (c *CLI) newDomainDiagnoseCommand() *cobra.Command {
@@ -361,7 +380,9 @@ func (c *CLI) newDomainDiagnoseCommand() *cobra.Command {
 }
 
 func (c *CLI) newDomainRepairCommand() *cobra.Command {
-	return &cobra.Command{
+	var dnsMode string
+	var overwrite bool
+	cmd := &cobra.Command{
 		Use:   "repair <app> <hostname>",
 		Short: "Re-verify and repair a custom domain's DNS and shared TLS state",
 		Args:  cobra.ExactArgs(2),
@@ -374,7 +395,10 @@ func (c *CLI) newDomainRepairCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := client.RepairAppDomain(app.ID, args[1])
+			response, err := client.RepairAppDomain(app.ID, args[1], appDomainRepairRequest{
+				DNSMode:   dnsMode,
+				Overwrite: overwrite,
+			})
 			if err != nil {
 				return err
 			}
@@ -385,6 +409,9 @@ func (c *CLI) newDomainRepairCommand() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().StringVar(&dnsMode, "dns", "", "DNS mode: external, managed, or manual")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "Allow managed DNS record replacement when safe")
+	return cmd
 }
 
 func (c *CLI) newDomainRemoveCommand() *cobra.Command {
@@ -428,6 +455,15 @@ func (c *CLI) renderDomainMutation(result domainMutationResult) error {
 		pairs = append(pairs, kvPair{Key: "hostname", Value: result.Domain.Hostname})
 		if value := strings.TrimSpace(result.Domain.Status); value != "" {
 			pairs = append(pairs, kvPair{Key: "status", Value: value})
+		}
+		if value := strings.TrimSpace(result.Domain.DNSMode); value != "" {
+			pairs = append(pairs, kvPair{Key: "dns_mode", Value: value})
+		}
+		if value := strings.TrimSpace(result.Domain.DNSZoneID); value != "" {
+			pairs = append(pairs, kvPair{Key: "dns_zone_id", Value: value})
+		}
+		if value := strings.TrimSpace(result.Domain.DNSRecordID); value != "" {
+			pairs = append(pairs, kvPair{Key: "dns_record_id", Value: value})
 		}
 		if value := strings.TrimSpace(result.Domain.DNSStatus); value != "" {
 			pairs = append(pairs, kvPair{Key: "dns_status", Value: value})
@@ -474,6 +510,9 @@ func (c *CLI) renderDomainDiagnosis(result domainDiagnosisResult) error {
 		{Key: "app_id", Value: result.AppID},
 		{Key: "hostname", Value: result.Diagnosis.Domain.Hostname},
 		{Key: "status", Value: strings.TrimSpace(result.Diagnosis.Domain.Status)},
+		{Key: "dns_mode", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSMode)},
+		{Key: "dns_zone_id", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSZoneID)},
+		{Key: "dns_record_id", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSRecordID)},
 		{Key: "dns_status", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSStatus)},
 		{Key: "dns_record_kind", Value: strings.TrimSpace(result.Diagnosis.Domain.DNSRecordKind)},
 		{Key: "tls_status", Value: strings.TrimSpace(result.Diagnosis.Domain.TLSStatus)},

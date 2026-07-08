@@ -78,6 +78,10 @@ func (s *Store) PutAppDomain(domain model.AppDomain) (model.AppDomain, error) {
 	domain.AppID = strings.TrimSpace(domain.AppID)
 	domain.TenantID = strings.TrimSpace(domain.TenantID)
 	domain.Status = normalizeAppDomainStatus(domain.Status)
+	domain.DNSMode = model.NormalizeAppDomainDNSMode(domain.DNSMode)
+	domain.DNSZoneID = strings.TrimSpace(domain.DNSZoneID)
+	domain.DNSRecordID = strings.TrimSpace(domain.DNSRecordID)
+	domain.DNSRecordSource = strings.TrimSpace(domain.DNSRecordSource)
 	domain.DNSStatus = model.NormalizeAppDomainDNSStatus(domain.DNSStatus)
 	domain.DNSRecordKind = model.NormalizeAppDomainDNSRecordKind(domain.DNSRecordKind)
 	domain.TLSStatus = model.NormalizeAppDomainTLSStatus(domain.TLSStatus)
@@ -87,7 +91,7 @@ func (s *Store) PutAppDomain(domain model.AppDomain) (model.AppDomain, error) {
 	domain.LastMessage = strings.TrimSpace(domain.LastMessage)
 	domain.DNSLastMessage = strings.TrimSpace(domain.DNSLastMessage)
 	domain.TLSLastMessage = strings.TrimSpace(domain.TLSLastMessage)
-	if domain.Hostname == "" || domain.AppID == "" {
+	if domain.Hostname == "" || domain.AppID == "" || domain.DNSMode == "" {
 		return model.AppDomain{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -324,6 +328,13 @@ func sortAppDomains(domains []model.AppDomain) {
 
 func cloneAppDomain(in model.AppDomain) model.AppDomain {
 	out := in
+	out.DNSMode = model.NormalizeAppDomainDNSMode(out.DNSMode)
+	if out.DNSMode == "" {
+		out.DNSMode = model.AppDomainDNSModeExternal
+	}
+	out.DNSZoneID = strings.TrimSpace(out.DNSZoneID)
+	out.DNSRecordID = strings.TrimSpace(out.DNSRecordID)
+	out.DNSRecordSource = strings.TrimSpace(out.DNSRecordSource)
 	out.DNSStatus = model.NormalizeAppDomainDNSStatus(out.DNSStatus)
 	if out.DNSStatus == "" {
 		if out.Status == model.AppDomainStatusVerified {

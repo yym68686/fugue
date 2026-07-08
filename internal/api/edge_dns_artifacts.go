@@ -96,6 +96,13 @@ func (s *Server) rebuildEdgeDNSArtifacts(ctx context.Context, now time.Time) (in
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	if updated, err := s.reconcileHostedDNSFlattenRecords(ctx, now); err != nil {
+		if s.log != nil {
+			s.log.Printf("hosted dns flatten resolver failed; continuing with previous cached answers: updated=%d err=%v", updated, err)
+		}
+	} else if updated > 0 && s.log != nil {
+		s.log.Printf("hosted dns flatten resolver updated %d records", updated)
+	}
 	decisionCount, err := s.reconcileEdgeDNSRoutingDecisions(now)
 	if err != nil {
 		return 0, decisionCount, fmt.Errorf("reconcile edge dns routing decisions: %w", err)
