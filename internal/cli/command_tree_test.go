@@ -859,6 +859,44 @@ func TestRunAppNetworkSetResolvesPeerAppNames(t *testing.T) {
 	}
 }
 
+func TestRunAppNetworkShowReportsAlreadyCurrent(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/apps/app_123":
+			_, _ = w.Write([]byte(`{"app":{"id":"app_123","tenant_id":"tenant_123","project_id":"project_123","name":"demo","spec":{"runtime_id":"runtime_managed_shared","replicas":1},"status":{"phase":"ready","current_replicas":1},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"--json",
+		"app", "network", "show", "demo",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run app network show: %v", err)
+	}
+
+	var got struct {
+		AlreadyCurrent bool `json:"already_current"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode stdout: %v\n%s", err, stdout.String())
+	}
+	if !got.AlreadyCurrent {
+		t.Fatalf("read-only network show should report already_current=true, got output %s", stdout.String())
+	}
+}
+
 func TestRunEnvGeneratedSetUsesDeploySpec(t *testing.T) {
 	t.Parallel()
 

@@ -47,7 +47,7 @@ func (c *CLI) newAppNetworkShowCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return c.renderAppNetworkState(app, nil, false)
+			return c.renderAppNetworkState(app, nil, true)
 		},
 	}
 }
