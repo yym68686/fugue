@@ -46,10 +46,14 @@ func (c *CLI) newDNSZoneAddCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			tenantID, projectID, err := c.resolveFilterSelections(client)
+			if err != nil {
+				return err
+			}
 			zone, err := client.CreateHostedDNSZone(createHostedDNSZoneClientRequest{
 				ZoneName:  args[0],
-				TenantID:  c.root.TenantID,
-				ProjectID: c.root.ProjectID,
+				TenantID:  tenantID,
+				ProjectID: projectID,
 			})
 			if err != nil {
 				return err
