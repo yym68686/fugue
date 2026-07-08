@@ -170,6 +170,10 @@ spec:
             - name: FUGUE_DNS_ROUTE_A_ANSWER_IPS
               value: {{ join "," .Values.dns.routeAAnswerIPs | quote }}
             {{- end }}
+            {{- if .Values.dns.nameservers }}
+            - name: FUGUE_DNS_NAMESERVERS
+              value: {{ join "," .Values.dns.nameservers | quote }}
+            {{- end }}
             - name: FUGUE_DNS_TTL
               value: {{ printf "%v" .Values.dns.ttl | quote }}
             {{- if .Values.api.platformRoutesJSON }}

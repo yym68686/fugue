@@ -49,6 +49,7 @@ type Server struct {
 	sshPublicPortStart               int
 	sshPublicPortEnd                 int
 	dnsStaticRecords                 []model.EdgeDNSRecord
+	dnsNameservers                   []string
 	dnsRouteAAnswerIPs               []string
 	dnsBundleTTL                     int
 	platformRoutes                   []model.PlatformRoute
@@ -167,6 +168,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		sshPublicPortStart:               cfg.SSHPublicPortStart,
 		sshPublicPortEnd:                 cfg.SSHPublicPortEnd,
 		dnsStaticRecords:                 parseEdgeDNSStaticRecords(cfg.DNSStaticRecordsJSON, logger),
+		dnsNameservers:                   normalizeDNSNameservers(cfg.DNSNameservers),
 		dnsRouteAAnswerIPs:               dnsRouteAAnswerIPs,
 		dnsBundleTTL:                     dnsBundleTTL,
 		platformRoutes:                   parsePlatformRoutes(cfg.PlatformRoutesJSON, logger),

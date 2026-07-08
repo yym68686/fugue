@@ -23,6 +23,7 @@ type ServerConfig struct {
 	SSHPublicPortStart               int
 	SSHPublicPortEnd                 int
 	DNSStaticRecordsJSON             string
+	DNSNameservers                   []string
 	DNSRouteAAnswerIPs               []string
 	DNSBundleTTL                     int
 	PlatformRoutesJSON               string

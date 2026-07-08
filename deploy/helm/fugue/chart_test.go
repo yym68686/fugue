@@ -2582,6 +2582,10 @@ func TestAPIStaticDNSRecordsEnvRenders(t *testing.T) {
 api:
   dnsStaticRecordsJSON: '[{"name":"fugue.pro","type":"MX","values":["10 mail.fugue.pro"],"ttl":300,"record_kind":"protected","status":"active","record_generation":"dnsgen_test"}]'
   platformRoutesJSON: '{"routes":[{"hostname":"api.fugue.pro","kind":"control-plane-api","upstream_url":"http://fugue-fugue.fugue-system.svc.cluster.local:80","edge_group_mode":"region_aware"}]}'
+dns:
+  nameservers:
+    - ns1.dns.fugue.pro
+    - ns2.dns.fugue.pro
 `
 	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
 		t.Fatalf("write values: %v", err)
@@ -2601,6 +2605,8 @@ api:
 	for _, want := range []string{
 		`name: FUGUE_DNS_STATIC_RECORDS_JSON`,
 		`name: FUGUE_PLATFORM_ROUTES_JSON`,
+		`name: FUGUE_DNS_NAMESERVERS`,
+		`ns1.dns.fugue.pro,ns2.dns.fugue.pro`,
 		`api.fugue.pro`,
 		`control-plane-api`,
 		`fugue.pro`,

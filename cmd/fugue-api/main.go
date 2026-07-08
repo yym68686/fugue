@@ -43,6 +43,7 @@ func main() {
 		SSHPublicPortStart:               cfg.SSHPublicPortStart,
 		SSHPublicPortEnd:                 cfg.SSHPublicPortEnd,
 		DNSStaticRecordsJSON:             cfg.DNSStaticRecordsJSON,
+		DNSNameservers:                   cfg.DNSNameservers,
 		DNSRouteAAnswerIPs:               cfg.DNSRouteAAnswerIPs,
 		DNSBundleTTL:                     cfg.DNSBundleTTL,
 		PlatformRoutesJSON:               cfg.PlatformRoutesJSON,

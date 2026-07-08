@@ -353,7 +353,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 		GeneratedAt:      time.Now().UTC(),
 		Checks:           checks,
 		Nodes:            nodeChecks,
-		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS, dnsDelegationPlanHints(opts.Zone, s.dnsStaticRecords)),
+		DelegationPlan:   buildDNSDelegationPlan(opts.Zone, nodeChecks, currentParentNS, dnsDelegationPlanHints(opts.Zone, s.dnsStaticRecords, s.dnsNameservers)),
 	}
 }
 
@@ -787,10 +787,34 @@ type dnsDelegationPlanHint struct {
 	ARecords    map[string][]string
 }
 
-func dnsDelegationPlanHints(zone string, staticRecords []model.EdgeDNSRecord) dnsDelegationPlanHint {
+func normalizeDNSNameservers(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		nsHost := normalizeExternalAppDomain(value)
+		if nsHost == "" {
+			continue
+		}
+		if _, ok := seen[nsHost]; ok {
+			continue
+		}
+		seen[nsHost] = struct{}{}
+		out = append(out, nsHost)
+	}
+	return out
+}
+
+func dnsDelegationPlanHints(zone string, staticRecords []model.EdgeDNSRecord, publicNameservers []string) dnsDelegationPlanHint {
 	zone = normalizeExternalAppDomain(zone)
 	hint := dnsDelegationPlanHint{ARecords: map[string][]string{}}
-	seenNS := map[string]struct{}{}
+	publicNameservers = normalizeDNSNameservers(publicNameservers)
+	publicNS := map[string]struct{}{}
+	for _, nsHost := range publicNameservers {
+		publicNS[nsHost] = struct{}{}
+		hint.Nameservers = append(hint.Nameservers, nsHost)
+	}
+	staticNS := []string{}
+	seenStaticNS := map[string]struct{}{}
 	for _, record := range edgeDNSStaticRecordsForZone(staticRecords, zone) {
 		recordName := normalizeExternalAppDomain(record.Name)
 		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
@@ -804,11 +828,11 @@ func dnsDelegationPlanHints(zone string, staticRecords []model.EdgeDNSRecord) dn
 				if nsHost == "" {
 					continue
 				}
-				if _, ok := seenNS[nsHost]; ok {
+				if _, ok := seenStaticNS[nsHost]; ok {
 					continue
 				}
-				seenNS[nsHost] = struct{}{}
-				hint.Nameservers = append(hint.Nameservers, nsHost)
+				seenStaticNS[nsHost] = struct{}{}
+				staticNS = append(staticNS, nsHost)
 			}
 		case model.EdgeDNSRecordTypeA:
 			if recordName == "" {
@@ -821,7 +845,24 @@ func dnsDelegationPlanHints(zone string, staticRecords []model.EdgeDNSRecord) dn
 			}
 		}
 	}
-	sort.Strings(hint.Nameservers)
+	for _, record := range staticRecords {
+		recordName := normalizeExternalAppDomain(record.Name)
+		if _, ok := publicNS[recordName]; !ok {
+			continue
+		}
+		if strings.ToUpper(strings.TrimSpace(record.Type)) != model.EdgeDNSRecordTypeA {
+			continue
+		}
+		for _, value := range record.Values {
+			if ip := net.ParseIP(strings.TrimSpace(value)); ip != nil && ip.To4() != nil {
+				hint.ARecords[recordName] = append(hint.ARecords[recordName], ip.String())
+			}
+		}
+	}
+	if len(staticNS) > 0 {
+		sort.Strings(staticNS)
+		hint.Nameservers = staticNS
+	}
 	return hint
 }
 
@@ -854,13 +895,16 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 			nsHost = hint.Nameservers[index]
 		}
 		ip := strings.TrimSpace(node.PublicIP)
-		plannedA = append(plannedA, model.DNSDelegationRecord{
-			Name:    nsHost,
-			Type:    "A",
-			Values:  []string{ip},
-			TTL:     defaultDNSDelegationPlanTTL,
-			Comment: "authoritative DNS node " + node.DNSNodeID,
-		})
+		needsGlue := dnsDelegationNSNeedsGlue(zone, nsHost)
+		if needsGlue {
+			plannedA = append(plannedA, model.DNSDelegationRecord{
+				Name:    nsHost,
+				Type:    "A",
+				Values:  []string{ip},
+				TTL:     defaultDNSDelegationPlanTTL,
+				Comment: "authoritative DNS node " + node.DNSNodeID,
+			})
+		}
 		plannedNS = append(plannedNS, model.DNSDelegationRecord{
 			Name:    zone,
 			Type:    "NS",
@@ -868,10 +912,10 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 			TTL:     defaultDNSDelegationPlanTTL,
 			Comment: "delegate child zone to fugue-dns",
 		})
-		rollback = append(rollback,
-			model.DNSDelegationRecord{Name: nsHost, Type: "A", Values: []string{ip}, Comment: "delete if delegation is rolled back"},
-			model.DNSDelegationRecord{Name: zone, Type: "NS", Values: []string{nsHost}, Comment: "delete if delegation is rolled back"},
-		)
+		if needsGlue {
+			rollback = append(rollback, model.DNSDelegationRecord{Name: nsHost, Type: "A", Values: []string{ip}, Comment: "delete if delegation is rolled back"})
+		}
+		rollback = append(rollback, model.DNSDelegationRecord{Name: zone, Type: "NS", Values: []string{nsHost}, Comment: "delete if delegation is rolled back"})
 	}
 	if len(eligible) < defaultDNSDelegationMinHealthyNodes {
 		notes = append(notes, fmt.Sprintf("Only %d DNS nodes have public IPv4; add another node before production delegation.", len(eligible)))
@@ -883,6 +927,12 @@ func buildDNSDelegationPlan(zone string, nodes []model.DNSDelegationNodeCheck, c
 		RollbackDeleteRecords: rollback,
 		Notes:                 notes,
 	}
+}
+
+func dnsDelegationNSNeedsGlue(zone, nsHost string) bool {
+	zone = normalizeExternalAppDomain(zone)
+	nsHost = normalizeExternalAppDomain(nsHost)
+	return zone != "" && (nsHost == zone || strings.HasSuffix(nsHost, "."+zone))
 }
 
 func orderDNSDelegationNodesByNameserverHint(nodes []model.DNSDelegationNodeCheck, hint dnsDelegationPlanHint, limit int) []model.DNSDelegationNodeCheck {

@@ -151,6 +151,15 @@ func TestAPIFromEnvReadsDefaultManagedPostgresStorageClass(t *testing.T) {
 	}
 }
 
+func TestAPIFromEnvReadsDNSNameservers(t *testing.T) {
+	t.Setenv("FUGUE_DNS_NAMESERVERS", "ns1.dns.fugue.pro, ns2.dns.fugue.pro")
+
+	cfg := APIFromEnv()
+	if len(cfg.DNSNameservers) != 2 || cfg.DNSNameservers[0] != "ns1.dns.fugue.pro" || cfg.DNSNameservers[1] != "ns2.dns.fugue.pro" {
+		t.Fatalf("expected API DNS nameservers from env, got %+v", cfg.DNSNameservers)
+	}
+}
+
 func TestAPIFromEnvReadsSafeZeroDowntimePublicFlag(t *testing.T) {
 	t.Setenv("FUGUE_APP_SAFE_ZERO_DOWNTIME_PUBLIC_ENABLED", "")
 	if !APIFromEnv().AppSafeZeroDowntimePublicEnabled {

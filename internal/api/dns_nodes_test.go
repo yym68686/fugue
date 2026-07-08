@@ -404,7 +404,7 @@ func TestDNSDelegationPlanUsesStaticNameserverRecords(t *testing.T) {
 			Values:     []string{"203.0.113.20"},
 			RecordKind: model.EdgeDNSRecordKindProtected,
 		},
-	})
+	}, nil)
 	plan := buildDNSDelegationPlan("fugue.pro", []model.DNSDelegationNodeCheck{
 		{
 			DNSNodeID: "dns-eu-1",
@@ -429,6 +429,55 @@ func TestDNSDelegationPlanUsesStaticNameserverRecords(t *testing.T) {
 	}
 	if plan.PlannedNSRecords[0].Values[0] != "ns1.dns.fugue.pro" || plan.PlannedNSRecords[1].Values[0] != "ns2.dns.fugue.pro" {
 		t.Fatalf("expected static NS hostnames in plan, got %+v", plan.PlannedNSRecords)
+	}
+}
+
+func TestDNSDelegationPlanUsesPublicNameserversWithoutVanityGlue(t *testing.T) {
+	t.Parallel()
+
+	hint := dnsDelegationPlanHints("oaix.cc", []model.EdgeDNSRecord{
+		{
+			Name:       "ns1.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.10"},
+			RecordKind: model.EdgeDNSRecordKindProtected,
+		},
+		{
+			Name:       "ns2.dns.fugue.pro",
+			Type:       model.EdgeDNSRecordTypeA,
+			Values:     []string{"203.0.113.20"},
+			RecordKind: model.EdgeDNSRecordKindProtected,
+		},
+	}, []string{"ns1.dns.fugue.pro.", "ns2.dns.fugue.pro."})
+	plan := buildDNSDelegationPlan("oaix.cc", []model.DNSDelegationNodeCheck{
+		{
+			DNSNodeID: "dns-eu-1",
+			Pass:      true,
+			PublicIP:  "203.0.113.20",
+		},
+		{
+			DNSNodeID: "dns-us-1",
+			Pass:      true,
+			PublicIP:  "203.0.113.10",
+		},
+	}, []string{"current-parent.example"}, hint)
+
+	if len(plan.PlannedARecords) != 0 {
+		t.Fatalf("expected no child-zone glue for public nameservers outside oaix.cc, got %+v", plan.PlannedARecords)
+	}
+	if len(plan.PlannedNSRecords) != 2 {
+		t.Fatalf("expected two planned NS records, got %+v", plan)
+	}
+	if got := plan.PlannedNSRecords[0].Values[0]; got != "ns1.dns.fugue.pro" {
+		t.Fatalf("expected first planned NS to use public ns1, got %q", got)
+	}
+	if got := plan.PlannedNSRecords[1].Values[0]; got != "ns2.dns.fugue.pro" {
+		t.Fatalf("expected second planned NS to use public ns2, got %q", got)
+	}
+	for _, record := range plan.RollbackDeleteRecords {
+		if record.Type == "A" && strings.HasSuffix(record.Name, ".oaix.cc") {
+			t.Fatalf("expected rollback not to include vanity child-zone glue, got %+v", plan.RollbackDeleteRecords)
+		}
 	}
 }
 

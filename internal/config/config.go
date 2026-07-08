@@ -37,6 +37,7 @@ type APIConfig struct {
 	SSHPublicPortStart               int
 	SSHPublicPortEnd                 int
 	DNSStaticRecordsJSON             string
+	DNSNameservers                   []string
 	DNSRouteAAnswerIPs               []string
 	DNSBundleTTL                     int
 	PlatformRoutesJSON               string
@@ -296,6 +297,7 @@ func APIFromEnv() APIConfig {
 		SSHPublicPortStart:               getenvInt("FUGUE_SSH_PUBLIC_PORT_START", 22000),
 		SSHPublicPortEnd:                 getenvInt("FUGUE_SSH_PUBLIC_PORT_END", 32000),
 		DNSStaticRecordsJSON:             strings.TrimSpace(os.Getenv("FUGUE_DNS_STATIC_RECORDS_JSON")),
+		DNSNameservers:                   getenvList("FUGUE_DNS_NAMESERVERS"),
 		DNSRouteAAnswerIPs:               getenvList("FUGUE_DNS_ROUTE_A_ANSWER_IPS"),
 		DNSBundleTTL:                     getenvInt("FUGUE_DNS_TTL", 60),
 		PlatformRoutesJSON:               strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ROUTES_JSON")),
