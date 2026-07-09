@@ -860,6 +860,8 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`refresh-join-config`,
 		`prepull-app-images`,
 		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="` + model.NodeUpdaterCurrentVersion + `"`,
+		`export FUGUE_NODE_UPDATER_SCRIPT_VERSION FUGUE_NODE_UPDATER_VERSION FUGUE_NODE_UPDATER_CAPABILITIES`,
+		`restore_node_updater_static_env`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH=`,
 		`verify_image_cache_manifest`,
