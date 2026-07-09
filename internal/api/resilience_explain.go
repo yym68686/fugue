@@ -272,7 +272,7 @@ func trafficSafetyEdgeGroups(explain model.RouteExplainResponse) ([]string, []st
 		if groupID == "" {
 			continue
 		}
-		if route.Status != "" && !strings.EqualFold(route.Status, "ready") {
+		if route.Status != "" && !trafficSafetyRouteStatusReady(route.Status) {
 			delete(eligibleSet, groupID)
 			gatedSet[groupID] = struct{}{}
 		}
@@ -309,7 +309,7 @@ func trafficSafetyHardGateReasons(explain model.RouteExplainResponse) map[string
 		if groupID == "" {
 			continue
 		}
-		if route.Status != "" && !strings.EqualFold(route.Status, "ready") {
+		if route.Status != "" && !trafficSafetyRouteStatusReady(route.Status) {
 			reasons[groupID] = "route generation is not ready: " + route.Status
 		}
 		if route.TLSPolicy != "" && strings.Contains(strings.ToLower(route.TLSPolicy), "blocked") {
@@ -333,7 +333,7 @@ func trafficSafetyRouteBlockers(explain model.RouteExplainResponse) []string {
 		if route.PathPrefix != "" {
 			routeID += route.PathPrefix
 		}
-		if route.Status != "" && !strings.EqualFold(route.Status, "ready") {
+		if route.Status != "" && !trafficSafetyRouteStatusReady(route.Status) {
 			blockers = append(blockers, fmt.Sprintf("route %s status is %s", routeID, route.Status))
 		}
 		if route.RouteGeneration == "" {
@@ -341,6 +341,15 @@ func trafficSafetyRouteBlockers(explain model.RouteExplainResponse) []string {
 		}
 	}
 	return blockers
+}
+
+func trafficSafetyRouteStatusReady(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "ready", model.EdgeRouteStatusActive:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) trafficSafetyGrayReleaseScope(hostname string) string {

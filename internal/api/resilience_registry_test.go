@@ -87,6 +87,7 @@ func TestTrafficSafetyHardGateReasonsCoverRouteExclusionAndNodeHealth(t *testing
 			"edge-group-exclusion":  true,
 			"edge-group-tls":        true,
 			"edge-group-generation": true,
+			"edge-group-active":     true,
 		},
 		Routes: []model.EdgeRouteBinding{
 			{
@@ -116,6 +117,12 @@ func TestTrafficSafetyHardGateReasonsCoverRouteExclusionAndNodeHealth(t *testing
 				SelectedEdgeGroup: "edge-group-generation",
 				Status:            "ready",
 			},
+			{
+				Hostname:          "api.fugue.pro",
+				SelectedEdgeGroup: "edge-group-active",
+				Status:            model.EdgeRouteStatusActive,
+				RouteGeneration:   "route_gen_active",
+			},
 		},
 		GeneratedAt: time.Now().UTC(),
 	}
@@ -123,6 +130,9 @@ func TestTrafficSafetyHardGateReasonsCoverRouteExclusionAndNodeHealth(t *testing
 	eligible, gated := trafficSafetyEdgeGroups(explain)
 	if !stringSliceContains(gated, "edge-group-drained") || !stringSliceContains(gated, "edge-group-route") || !stringSliceContains(gated, "edge-group-tls") {
 		t.Fatalf("expected unhealthy/route/tls groups to be gated, eligible=%v gated=%v", eligible, gated)
+	}
+	if !stringSliceContains(eligible, "edge-group-active") || stringSliceContains(gated, "edge-group-active") {
+		t.Fatalf("active routes must remain eligible, eligible=%v gated=%v", eligible, gated)
 	}
 	reasons := trafficSafetyHardGateReasons(explain)
 	for group, want := range map[string]string{
@@ -138,6 +148,9 @@ func TestTrafficSafetyHardGateReasonsCoverRouteExclusionAndNodeHealth(t *testing
 	blockers := trafficSafetyRouteBlockers(explain)
 	if !stringSliceContains(blockers, "route api.fugue.pro status is building") || !stringSliceContains(blockers, "route api.fugue.pro has no route generation") {
 		t.Fatalf("expected route generation blockers, got %+v", blockers)
+	}
+	if stringSliceContains(blockers, "route api.fugue.pro status is active") {
+		t.Fatalf("active routes must not be treated as blockers, got %+v", blockers)
 	}
 }
 
