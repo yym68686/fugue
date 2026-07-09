@@ -417,6 +417,11 @@ shared_gates="$(release_safety_required_gates)"
 [[ "${shared_gates}" == *"platform_autonomy"* && "${shared_gates}" == *"rollback_path_smoke"* ]] ||
   fail "shared control-plane changes must require autonomy and rollback gates, got ${shared_gates}"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/platformsafety/kernel.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "platform safety kernel changes must propagate shared control-plane risk"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "platform safety kernel files must have explicit release-risk ownership"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/unattributed/runtime.go'
 assert_eq "$(release_safety_changed_file_subsystems)" "unknown_high_risk" "unattributed runtime changes must be classified high risk"
 assert_eq "$(release_safety_unknown_high_risk_files)" "internal/unattributed/runtime.go" "unknown high-risk file list"

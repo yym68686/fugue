@@ -602,6 +602,7 @@ release_safety_changed_file_subsystems() {
       internal/apispec/*|\
       internal/observability/*|\
       internal/bundleauth/*|\
+      internal/platformsafety/*|\
       openapi/*|\
       go.mod|\
       go.sum)
