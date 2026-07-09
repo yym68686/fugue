@@ -503,60 +503,231 @@ public_data_plane_daemonset_rollout_wait_required() {
   [[ "${PUBLIC_DATA_PLANE_PRESERVED:-false}" != "true" ]]
 }
 
+release_safety_file_is_non_runtime() {
+  local file="$1"
+
+  case "${file}" in
+    docs/*|\
+    *.md|\
+    *_test.go|\
+    */testdata/*|\
+    scripts/test_*.sh)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+release_safety_emit_subsystem() {
+  local subsystem="$1"
+
+  if [[ "${seen}" != *" ${subsystem} "* ]]; then
+    printf '%s\n' "${subsystem}"
+    seen="${seen}${subsystem} "
+  fi
+}
+
 release_safety_changed_file_subsystems() {
   local file=""
   local seen=" "
+  local matched="false"
 
   while IFS= read -r file; do
     file="$(trim_field "${file}")"
     [[ -n "${file}" ]] || continue
+    release_safety_file_is_non_runtime "${file}" && continue
+    matched="false"
+
     case "${file}" in
       internal/api/node_updater.go|\
       internal/store/node_deep_health.go|\
       internal/store/node_deep_health_pg.go|\
       internal/model/node_deep_health.go|\
       scripts/render_fugue_node_updater_systemd_unit.sh)
-        if [[ "${seen}" != *" node_updater "* ]]; then
-          printf 'node_updater\n'
-          seen="${seen}node_updater "
-        fi
+        release_safety_emit_subsystem node_updater
+        matched="true"
         ;;
+    esac
+    case "${file}" in
       internal/api/edge_routes.go|\
       internal/model/edge_routes.go)
-        if [[ "${seen}" != *" edge_route "* ]]; then
-          printf 'edge_route\n'
-          seen="${seen}edge_route "
-        fi
+        release_safety_emit_subsystem edge_route
+        matched="true"
         ;;
+    esac
+    case "${file}" in
       internal/dnsserver/*|\
       cmd/fugue-dns/*|\
-      deploy/helm/fugue/templates/dns-*)
-        if [[ "${seen}" != *" dns_server "* ]]; then
-          printf 'dns_server\n'
-          seen="${seen}dns_server "
-        fi
+      deploy/helm/fugue/templates/dns-*|\
+      scripts/render_fugue_dns_systemd_unit.sh)
+        release_safety_emit_subsystem dns_server
+        matched="true"
         ;;
+    esac
+    case "${file}" in
       internal/edge/*|\
       internal/edgefront/*|\
+      internal/proxyproto/*|\
       cmd/fugue-edge/*|\
       cmd/fugue-edge-front/*|\
       Dockerfile.edge|\
-      deploy/helm/fugue/templates/edge-*)
-        if [[ "${seen}" != *" edge_worker "* ]]; then
-          printf 'edge_worker\n'
-          seen="${seen}edge_worker "
-        fi
-        ;;
-      scripts/upgrade_fugue_control_plane.sh|\
-      scripts/release_fugue_public_data_plane.sh|\
-      .github/workflows/deploy-control-plane.yml)
-        if [[ "${seen}" != *" deploy_script "* ]]; then
-          printf 'deploy_script\n'
-          seen="${seen}deploy_script "
-        fi
+      deploy/helm/fugue/templates/edge-*|\
+      scripts/render_fugue_edge_systemd_unit.sh|\
+      scripts/sync_fugue_edge_proxy.sh)
+        release_safety_emit_subsystem edge_worker
+        matched="true"
         ;;
     esac
+    case "${file}" in
+      cmd/fugue-api/*|\
+      internal/api/*|\
+      Dockerfile.api)
+        release_safety_emit_subsystem control_plane_api
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      cmd/fugue-controller/*|\
+      internal/controller/*|\
+      Dockerfile.controller)
+        release_safety_emit_subsystem control_plane_controller
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      internal/model/*|\
+      internal/store/*|\
+      internal/config/*|\
+      internal/auth/*|\
+      internal/apispec/*|\
+      internal/observability/*|\
+      internal/bundleauth/*|\
+      openapi/*|\
+      go.mod|\
+      go.sum)
+        release_safety_emit_subsystem shared_control_plane
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      cmd/fugue-image-cache/*|\
+      Dockerfile.image-cache|\
+      deploy/helm/fugue/templates/image-cache-*|\
+      scripts/prepare_fugue_lvm_localpv_node.sh)
+        release_safety_emit_subsystem node_local_build_plane
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      cmd/fugue-drain-agent/*|\
+      cmd/fugue-telemetry-agent/*|\
+      cmd/fugue-registry-maintenance/*|\
+      Dockerfile.drain-agent|\
+      Dockerfile.telemetry-agent|\
+      deploy/helm/fugue/templates/*janitor*|\
+      deploy/helm/fugue/templates/*maintenance*)
+        release_safety_emit_subsystem maintenance_agent
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      cmd/fugue-mesh-agent/*|\
+      cmd/fugue-mesh-recovery/*|\
+      internal/mesh*|\
+      scripts/install_fugue_ha.sh|\
+      scripts/render_fugue_mesh_agent_systemd_unit.sh|\
+      scripts/render_fugue_mesh_recovery_systemd_unit.sh)
+        release_safety_emit_subsystem cluster_bootstrap
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      deploy/helm/fugue/templates/registry-*|\
+      deploy/helm/fugue/templates/headscale-*|\
+      deploy/helm/fugue/templates/*postgres*|\
+      deploy/helm/fugue/templates/shared-workspace-*|\
+      deploy/helm/fugue/templates/snapshot-controller.yaml)
+        release_safety_emit_subsystem stateful_dependency
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      deploy/helm/fugue/charts/*|\
+      deploy/helm/fugue/crds/*|\
+      deploy/helm/fugue/Chart.yaml|\
+      deploy/helm/fugue/values.yaml|\
+      deploy/helm/fugue/values-production-ha.yaml|\
+      deploy/helm/fugue/templates/_helpers.tpl|\
+      deploy/helm/fugue/templates/*)
+        release_safety_emit_subsystem helm_shared
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      internal/cli/*|\
+      cmd/fugue-ssh-front/*|\
+      images/app-ssh/*|\
+      Dockerfile.app-ssh)
+        release_safety_emit_subsystem client_or_app_runtime
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      scripts/upgrade_fugue_control_plane.sh|\
+      scripts/release_fugue_public_data_plane.sh|\
+      scripts/build_control_plane_images.sh|\
+      scripts/compute_control_plane_image_build_plan.sh|\
+      scripts/resolve_control_plane_live_images.sh|\
+      .github/workflows/deploy-control-plane.yml)
+        release_safety_emit_subsystem deploy_script
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
+      scripts/export_cloudflare_zone_static_records.sh|\
+      scripts/issue_fugue_app_wildcard_tls.sh)
+        release_safety_emit_subsystem dns_server
+        matched="true"
+        ;;
+    esac
+
+    if [[ "${matched}" != "true" ]]; then
+      release_safety_emit_subsystem unknown_high_risk
+    fi
   done < <(release_changed_files)
+}
+
+release_safety_unknown_high_risk_files() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    release_safety_file_is_non_runtime "${file}" && continue
+    if FUGUE_RELEASE_CHANGED_FILES="${file}" RELEASE_CHANGED_FILES_EFFECTIVE="" \
+      release_safety_changed_file_subsystems | grep -Fqx unknown_high_risk; then
+      printf '%s\n' "${file}"
+    fi
+  done < <(release_changed_files)
+}
+
+require_release_safety_attribution() {
+  local unknown_files=""
+
+  unknown_files="$(release_safety_unknown_high_risk_files)"
+  [[ -n "$(trim_field "${unknown_files}")" ]] || return 0
+  case "${FUGUE_UNKNOWN_RELEASE_RISK_APPROVED:-false}" in
+    1|true|TRUE|yes|YES)
+      log "unknown high-risk release files explicitly approved: $(paste -sd, - <<<"${unknown_files}")"
+      return 0
+      ;;
+  esac
+  log_stderr "unattributed runtime release files require FUGUE_UNKNOWN_RELEASE_RISK_APPROVED=true:"
+  while IFS= read -r file; do
+    [[ -n "${file}" ]] || continue
+    log_stderr "  ${file}"
+  done <<<"${unknown_files}"
+  return 1
 }
 
 release_safety_watch_window_seconds() {
@@ -582,6 +753,21 @@ release_safety_watch_window_seconds() {
         ;;
       deploy_script)
         seconds="${FUGUE_DEPLOY_SCRIPT_WATCH_WINDOW_SECONDS:-60}"
+        ;;
+      control_plane_api|control_plane_controller)
+        seconds="${FUGUE_CONTROL_PLANE_COMPONENT_WATCH_WINDOW_SECONDS:-120}"
+        ;;
+      shared_control_plane|helm_shared)
+        seconds="${FUGUE_SHARED_CONTROL_PLANE_WATCH_WINDOW_SECONDS:-180}"
+        ;;
+      node_local_build_plane|maintenance_agent|cluster_bootstrap|client_or_app_runtime)
+        seconds="${FUGUE_COMPONENT_WATCH_WINDOW_SECONDS:-120}"
+        ;;
+      stateful_dependency)
+        seconds="${FUGUE_STATEFUL_DEPENDENCY_WATCH_WINDOW_SECONDS:-300}"
+        ;;
+      unknown_high_risk)
+        seconds="${FUGUE_UNKNOWN_HIGH_RISK_WATCH_WINDOW_SECONDS:-300}"
         ;;
       *)
         seconds=0
@@ -617,6 +803,24 @@ release_safety_required_gates() {
         ;;
       deploy_script)
         gates+=("release_guard" "rollback_path_smoke")
+        ;;
+      control_plane_api|control_plane_controller)
+        gates+=("platform_autonomy" "release_guard" "public_synthetic" "rollback_path_smoke")
+        ;;
+      shared_control_plane|helm_shared)
+        gates+=("platform_autonomy" "release_guard" "public_synthetic" "rollback_path_smoke")
+        ;;
+      node_local_build_plane)
+        gates+=("node_heartbeat" "release_guard" "registry_readiness")
+        ;;
+      maintenance_agent|cluster_bootstrap|client_or_app_runtime)
+        gates+=("platform_autonomy" "release_guard")
+        ;;
+      stateful_dependency)
+        gates+=("restore_readiness" "platform_autonomy" "release_guard" "rollback_path_smoke")
+        ;;
+      unknown_high_risk)
+        gates+=("manual_risk_attribution" "platform_autonomy" "release_guard" "public_synthetic" "rollback_path_smoke")
         ;;
     esac
   done < <(release_safety_changed_file_subsystems)
@@ -656,6 +860,7 @@ payload = {
     "release_id": os.environ.get("FUGUE_RELEASE_ID") or os.environ.get("GITHUB_SHA") or "",
     "changed_files": [line for line in os.environ.get("FUGUE_RELEASE_CHANGED_FILES", "").splitlines() if line.strip()],
     "subsystems": run("release_safety_changed_file_subsystems"),
+    "unknown_high_risk_files": run("release_safety_unknown_high_risk_files"),
     "required_gates": [item for line in run("release_safety_required_gates") for item in line.split(",") if item],
     "watch_seconds": int(run("release_safety_watch_window_seconds")[0] or "0"),
 }
@@ -6115,6 +6320,9 @@ prepare_release_domains() {
   refresh_release_changed_files_from_live_api
   log "release safety watch selection: $(release_safety_watch_window_summary)"
   write_release_safety_attribution || true
+  if ! require_release_safety_attribution; then
+    fail "release contains unattributed runtime changes; classify them or explicitly approve the high-risk hold"
+  fi
 
   public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   build_mode="${FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE:-auto}"
@@ -6549,9 +6757,12 @@ robustness_status_summary() {
     return 1
   fi
   python3 - "${status_file}" "${baseline_file}" <<'PY'
+import hashlib
 import json
 import os
+import re
 import sys
+from datetime import datetime, timezone
 
 path = sys.argv[1]
 baseline_path = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -6571,6 +6782,14 @@ def check_key(check):
             stable_text(check.get("name")),
             stable_text(check.get("subject")),
             stable_text(check.get("severity")),
+        ]
+    )
+
+def check_identity(check):
+    return "\x00".join(
+        [
+            stable_text(check.get("name")),
+            stable_text(check.get("subject")),
         ]
     )
 
@@ -6620,11 +6839,171 @@ def incident_blocks_release(incident):
         return False
     return stable_text(incident.get("severity")) == "block_publish"
 
+def severity_rank(value):
+    return {
+        "": 0,
+        "info": 1,
+        "warning": 2,
+        "degraded": 3,
+        "block_publish": 4,
+    }.get(stable_text(value).lower(), 5)
+
+def parse_generated_at(value):
+    text = stable_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+def stable_evidence_fingerprint(item):
+    volatile_tokens = (
+        "time",
+        "timestamp",
+        "generated_at",
+        "observed_at",
+        "updated_at",
+        "created_at",
+        "first_observed",
+        "last_observed",
+        "nonce",
+        "request_id",
+        "trace_id",
+    )
+    evidence = {
+        stable_text(key): stable_text(value)
+        for key, value in evidence_map(item).items()
+        if not any(token in stable_text(key).lower() for token in volatile_tokens)
+    }
+    payload = {
+        "expected": stable_text(item.get("expected")),
+        "evidence": evidence,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+number_pattern = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)=(-?[0-9]+(?:\.[0-9]+)?)")
+
+def numeric_measurements(item):
+    values = {}
+    for key, value in evidence_map(item).items():
+        text = stable_text(value)
+        try:
+            values[stable_text(key).lower()] = float(text)
+        except ValueError:
+            pass
+    for field in ("observed", "message"):
+        for key, value in number_pattern.findall(stable_text(item.get(field))):
+            values[key.lower()] = float(value)
+    return values
+
+def metric_worse_direction(key):
+    normalized = key.lower().replace("-", "_").replace(".", "_")
+    bad_tokens = (
+        "affected",
+        "blocked",
+        "corrupt",
+        "debt",
+        "drift",
+        "error",
+        "expired",
+        "fail",
+        "invalid",
+        "lag",
+        "missing",
+        "mismatch",
+        "orphan",
+        "pending",
+        "pressure",
+        "quarantin",
+        "reject",
+        "retry",
+        "stale",
+        "suspect",
+        "timeout",
+        "unavailable",
+        "unhealthy",
+        "violation",
+    )
+    good_tokens = (
+        "available",
+        "connected",
+        "current",
+        "healthy",
+        "ready",
+        "success",
+        "valid",
+    )
+    if any(token in normalized for token in bad_tokens):
+        return "higher"
+    if any(token in normalized for token in good_tokens):
+        return "lower"
+    return ""
+
+def scope_values(item):
+    values = {}
+    for key, value in evidence_map(item).items():
+        normalized = stable_text(key).lower().replace("-", "_").replace(".", "_")
+        if not (
+            normalized.startswith("affected_")
+            or normalized.endswith("_nodes")
+            or normalized.endswith("_edges")
+            or normalized.endswith("_consumers")
+            or normalized.endswith("_failure_domains")
+            or normalized in {"affected_scope", "failure_domains"}
+        ):
+            continue
+        members = {
+            member.strip()
+            for member in re.split(r"[,;\s]+", stable_text(value))
+            if member.strip()
+        }
+        if members:
+            values[normalized] = members
+    return values
+
+def blocker_regressions(previous, current):
+    regressions = []
+    previous_severity = severity_rank(previous.get("severity"))
+    current_severity = severity_rank(current.get("severity"))
+    if current_severity > previous_severity:
+        regressions.append(
+            f"severity {stable_text(previous.get('severity')) or '<empty>'}"
+            f"->{stable_text(current.get('severity')) or '<empty>'}"
+        )
+
+    previous_metrics = numeric_measurements(previous)
+    current_metrics = numeric_measurements(current)
+    for key in sorted(set(previous_metrics).intersection(current_metrics)):
+        before = previous_metrics[key]
+        after = current_metrics[key]
+        direction = metric_worse_direction(key)
+        if (direction == "higher" and after > before) or (direction == "lower" and after < before):
+            regressions.append(f"{key} {before:g}->{after:g}")
+
+    previous_scopes = scope_values(previous)
+    current_scopes = scope_values(current)
+    for key in sorted(set(previous_scopes).intersection(current_scopes)):
+        added = current_scopes[key] - previous_scopes[key]
+        if added:
+            regressions.append(f"{key} expanded by {len(added)}")
+
+    comparison_mode = stable_text(evidence_map(current).get("baseline_comparison")).lower()
+    if comparison_mode == "exact" and stable_evidence_fingerprint(previous) != stable_evidence_fingerprint(current):
+        regressions.append("evidence fingerprint changed")
+    return regressions
+
 baseline_status = None
 baseline_check_names = set()
 baseline_incident_ids = set()
 baseline_incident_keys = set()
 baseline_blocker_keys = set()
+baseline_checks_by_identity = {}
+baseline_expired = False
 if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_path) > 0:
     with open(baseline_path, "r", encoding="utf-8") as fh:
         baseline_payload = json.load(fh)
@@ -6646,6 +7025,9 @@ if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_
             name = stable_text(check.get("name"))
             if name:
                 baseline_check_names.add(name)
+            identity = check_identity(check)
+            if identity:
+                baseline_checks_by_identity[identity] = check
             if (
                 not check.get("pass")
                 and stable_text(check.get("severity")) == "block_publish"
@@ -6654,6 +7036,14 @@ if baseline_path and os.path.exists(baseline_path) and os.path.getsize(baseline_
                 key = check_key(check)
                 if key:
                     baseline_blocker_keys.add(key)
+        baseline_generated_at = parse_generated_at(candidate.get("generated_at"))
+        current_generated_at = parse_generated_at(status.get("generated_at"))
+        try:
+            baseline_max_age_seconds = max(1, int(os.environ.get("FUGUE_ROBUSTNESS_BASELINE_MAX_AGE_SECONDS", "3600")))
+        except ValueError:
+            baseline_max_age_seconds = 3600
+        if baseline_generated_at and current_generated_at:
+            baseline_expired = (current_generated_at - baseline_generated_at).total_seconds() > baseline_max_age_seconds
 
 checks = status.get("checks") or []
 incidents = status.get("incidents") or []
@@ -6661,6 +7051,7 @@ raw_block_rollout = bool(status.get("block_rollout"))
 blockers = []
 new_blockers = []
 introduced_blockers = []
+regressed_blockers = []
 ignored_tenant_workload_blockers = []
 for check in checks:
     if not isinstance(check, dict) or check.get("pass"):
@@ -6681,11 +7072,18 @@ for check in checks:
     key = check_key(check)
     if not baseline_status:
         new_blockers.append(description)
-    elif key not in baseline_blocker_keys:
-        if raw_name and raw_name not in baseline_check_names:
-            introduced_blockers.append(description)
-        else:
-            new_blockers.append(description)
+    elif baseline_expired:
+        new_blockers.append(f"{description} [baseline expired]")
+    else:
+        previous = baseline_checks_by_identity.get(check_identity(check))
+        regressions = blocker_regressions(previous, check) if isinstance(previous, dict) else []
+        if regressions:
+            regressed_blockers.append(f"{description} [{', '.join(regressions)}]")
+        elif key not in baseline_blocker_keys:
+            if raw_name and raw_name not in baseline_check_names:
+                introduced_blockers.append(description)
+            else:
+                new_blockers.append(description)
 
 new_incidents = []
 new_blocking_incidents = []
@@ -6716,7 +7114,7 @@ if baseline_status is not None:
                 new_blocking_incidents.append(label)
 
 if baseline_status is not None:
-    block_rollout = bool(new_blockers or new_blocking_incidents)
+    block_rollout = bool(new_blockers or regressed_blockers or new_blocking_incidents)
 else:
     block_rollout = raw_block_rollout and (bool(blockers) or not ignored_tenant_workload_blockers)
 summary = (
@@ -6729,6 +7127,8 @@ if baseline_status is not None:
         f" baseline_incidents={len(baseline_status.get('incidents') or [])}"
         f" new_incidents={len(new_incidents)}"
     )
+    if baseline_expired:
+        summary += " baseline_expired=true"
 if baseline_status is not None and raw_block_rollout and not block_rollout and not ignored_tenant_workload_blockers:
     summary += "; raw_block_rollout=true tolerated_by_baseline=true"
 if raw_block_rollout and not block_rollout and (ignored_tenant_workload_blockers or ignored_tenant_workload_incidents):
@@ -6739,6 +7139,8 @@ if ignored_tenant_workload_incidents:
     summary += f"; ignored_tenant_workload_incidents={len(ignored_tenant_workload_incidents)}"
 if new_blockers:
     summary += "; new_blockers=" + "; ".join(new_blockers)
+elif regressed_blockers:
+    summary += "; regressed_blockers=" + "; ".join(regressed_blockers)
 elif new_blocking_incidents:
     summary += "; new_blocking_incidents=" + "; ".join(new_blocking_incidents[:5])
     if len(new_blocking_incidents) > 5:
@@ -6762,7 +7164,7 @@ elif introduced_incidents:
 print(summary)
 
 if baseline_status is not None:
-    if new_blockers or new_blocking_incidents:
+    if new_blockers or regressed_blockers or new_blocking_incidents:
         raise SystemExit(1)
 else:
     if block_rollout or blockers:

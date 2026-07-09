@@ -304,6 +304,39 @@ ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 capture_pre_deploy_robustness_baseline
 [[ -n "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" && -f "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}" ]] || fail "pre-deploy robustness baseline must be captured"
 assert_eq "$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")" "pass=false block_rollout=false checks=2 incidents=1 baseline_incidents=1 new_incidents=0; raw_block_rollout=true tolerated_by_baseline=true" "matching robustness baseline must tolerate existing incidents"
+
+MONOTONIC_BASELINE_FILE="$(mktemp)"
+printf '%s' '{"status":{"generated_at":"2026-07-09T22:00:00Z","pass":false,"block_rollout":true,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","observed":"error_rate=0.01 affected_count=1","evidence":{"affected_edges":"edge-a"}}],"incidents":[]}}' >"${MONOTONIC_BASELINE_FILE}"
+export TEST_CURL_RESPONSE_JSON='{"status":{"generated_at":"2026-07-09T22:01:00Z","pass":false,"block_rollout":true,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","observed":"error_rate=0.02 affected_count=1","evidence":{"affected_edges":"edge-a"}}],"incidents":[]}}'
+if robustness_output="$(robustness_status_summary "${MONOTONIC_BASELINE_FILE}")"; then
+  fail "matching blocker identity must not tolerate a quantitative regression"
+fi
+[[ "${robustness_output}" == *"regressed_blockers="* && "${robustness_output}" == *"error_rate 0.01->0.02"* ]] ||
+  fail "quantitative blocker regression must be reported, got ${robustness_output}"
+export TEST_CURL_RESPONSE_JSON='{"status":{"generated_at":"2026-07-09T22:01:00Z","pass":false,"block_rollout":true,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","observed":"error_rate=0.01 affected_count=2","evidence":{"affected_edges":"edge-a,edge-b"}}],"incidents":[]}}'
+if robustness_output="$(robustness_status_summary "${MONOTONIC_BASELINE_FILE}")"; then
+  fail "matching blocker identity must not tolerate affected scope expansion"
+fi
+[[ "${robustness_output}" == *"affected_count 1->2"* && "${robustness_output}" == *"affected_edges expanded by 1"* ]] ||
+  fail "affected scope blocker regression must be reported, got ${robustness_output}"
+
+printf '%s' '{"status":{"generated_at":"2026-07-09T22:00:00Z","pass":false,"block_rollout":false,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"degraded","observed":"error_rate=0.01"}],"incidents":[]}}' >"${MONOTONIC_BASELINE_FILE}"
+export TEST_CURL_RESPONSE_JSON='{"status":{"generated_at":"2026-07-09T22:01:00Z","pass":false,"block_rollout":true,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","observed":"error_rate=0.01"}],"incidents":[]}}'
+if robustness_output="$(robustness_status_summary "${MONOTONIC_BASELINE_FILE}")"; then
+  fail "matching blocker identity must not tolerate severity escalation"
+fi
+[[ "${robustness_output}" == *"severity degraded->block_publish"* ]] ||
+  fail "severity blocker regression must be reported, got ${robustness_output}"
+
+printf '%s' '{"status":{"generated_at":"2026-07-09T20:00:00Z","pass":false,"block_rollout":true,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","observed":"error_rate=0.01"}],"incidents":[]}}' >"${MONOTONIC_BASELINE_FILE}"
+export TEST_CURL_RESPONSE_JSON='{"status":{"generated_at":"2026-07-09T22:01:00Z","pass":false,"block_rollout":true,"checks":[{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","observed":"error_rate=0.01"}],"incidents":[]}}'
+if robustness_output="$(FUGUE_ROBUSTNESS_BASELINE_MAX_AGE_SECONDS=60 robustness_status_summary "${MONOTONIC_BASELINE_FILE}")"; then
+  fail "expired robustness baseline must not tolerate existing blockers"
+fi
+[[ "${robustness_output}" == *"baseline_expired=true"* ]] ||
+  fail "expired robustness baseline must be reported, got ${robustness_output}"
+rm -f "${MONOTONIC_BASELINE_FILE}"
+
 export TEST_CURL_RESPONSE_JSON='{"status":{"pass":false,"block_rollout":true,"checks":[{"name":"node_policy","subject":"platform-autonomy","pass":false,"severity":"degraded","observed":"pass=false count=7"},{"name":"route_active","subject":"route:example","pass":false,"severity":"block_publish","message":"missing route"}],"incidents":[{"id":"robust_existing_changed","severity":"degraded","subject":"platform-autonomy","check_name":"node_policy","observed":"pass=false count=7"},{"id":"robust_new","severity":"block_publish","subject":"route:example","check_name":"route_active","message":"missing route"}]}}'
 if robustness_output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE}")"; then
   fail "robustness baseline must fail on new incidents"
@@ -362,17 +395,37 @@ public_data_plane_changed || fail "edge code changes must mark public data-plane
 public_data_plane_worker_image_changed || fail "edge code changes must mark worker image changed"
 
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/node_updater.go'
-assert_eq "$(release_safety_changed_file_subsystems)" "node_updater" "node-updater changed files must select node-updater subsystem"
+node_updater_subsystems="$(release_safety_changed_file_subsystems)"
+[[ "${node_updater_subsystems}" == *"node_updater"* && "${node_updater_subsystems}" == *"control_plane_api"* ]] ||
+  fail "node-updater changed files must select node-updater and control-plane API subsystems, got ${node_updater_subsystems}"
 assert_eq "$(FUGUE_NODE_UPDATER_TIMER_CYCLE_SECONDS=123 release_safety_watch_window_seconds)" "123" "node-updater changed files must require a full timer-cycle watch window"
 node_updater_gates="$(release_safety_required_gates)"
 [[ "${node_updater_gates}" == *"node_deep_health"* && "${node_updater_gates}" == *"public_synthetic"* ]] ||
   fail "node-updater changed files must require node deep health and public synthetic gates, got ${node_updater_gates}"
 
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/edge_routes.go'
-assert_eq "$(release_safety_changed_file_subsystems)" "edge_route" "edge route changed files must select edge_route subsystem"
+edge_route_subsystems="$(release_safety_changed_file_subsystems)"
+[[ "${edge_route_subsystems}" == *"edge_route"* && "${edge_route_subsystems}" == *"control_plane_api"* ]] ||
+  fail "edge route changed files must select edge-route and control-plane API subsystems, got ${edge_route_subsystems}"
 edge_route_gates="$(release_safety_required_gates)"
 [[ "${edge_route_gates}" == *"route_check"* && "${edge_route_gates}" == *"dns_answer_audit"* ]] ||
   fail "edge route changed files must require route-check and DNS answer audit gates, got ${edge_route_gates}"
+
+FUGUE_RELEASE_CHANGED_FILES=$'internal/model/model.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "shared model changes must propagate shared control-plane risk"
+shared_gates="$(release_safety_required_gates)"
+[[ "${shared_gates}" == *"platform_autonomy"* && "${shared_gates}" == *"rollback_path_smoke"* ]] ||
+  fail "shared control-plane changes must require autonomy and rollback gates, got ${shared_gates}"
+
+FUGUE_RELEASE_CHANGED_FILES=$'internal/unattributed/runtime.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "unknown_high_risk" "unattributed runtime changes must be classified high risk"
+assert_eq "$(release_safety_unknown_high_risk_files)" "internal/unattributed/runtime.go" "unknown high-risk file list"
+if require_release_safety_attribution; then
+  fail "unknown high-risk runtime changes must hold without explicit approval"
+fi
+FUGUE_UNKNOWN_RELEASE_RISK_APPROVED=true
+require_release_safety_attribution || fail "explicit unknown high-risk approval must release the hold"
+unset FUGUE_UNKNOWN_RELEASE_RISK_APPROVED
 
 assert_eq "$(public_synthetic_error_class 503 'no healthy edge groups')" "public_synthetic_503_no_healthy_edge_groups" "synthetic no healthy edge groups class"
 public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'edge group has no healthy non-excluded edge nodes')" ||
