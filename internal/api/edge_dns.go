@@ -266,7 +266,7 @@ func (s *Server) deriveEdgeDNSBundle(r *http.Request, options edgeDNSBundleOptio
 			continue
 		}
 		latencyProfile := latencyProfiles.globalProfile(hostname)
-		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups))
+		registerEdgeDNSRouteReadyBindings(routeReadyByHostnameEdgeGroup, edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups, healthyEdgeNodeIDsByGroup))
 		answerIPs := edgeDNSAnswerIPsForPlatformRoute(platformRoute, options, edgeAnswerIPsByGroup)
 		if policy, ok := policyByHostname[hostname]; ok {
 			answerIPs = edgeDNSFilterAnswerIPsForExclusions(answerIPs, edgeRoutePolicyActiveExclusions(policy, now), edgeCandidateByIP)
@@ -894,6 +894,7 @@ func hostedDNSRecordApp(record model.DNSRecord, appByID map[string]model.App) (m
 
 func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBundleOptions) (map[string][]string, error) {
 	out := map[string][]string{}
+	blockedGroups := map[string]bool{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListEdgeNodes("")
 		if err != nil {
@@ -906,6 +907,12 @@ func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBun
 				continue
 			}
 			if !edgeNodeDNSEligible(node) {
+				continue
+			}
+			if !edgeNodeDNSCacheValid(node) {
+				if groupID := strings.TrimSpace(node.EdgeGroupID); groupID != "" {
+					blockedGroups[groupID] = true
+				}
 				continue
 			}
 			groupID := strings.TrimSpace(node.EdgeGroupID)
@@ -916,7 +923,7 @@ func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBun
 			out[groupID] = appendEdgeDNSUniqueIP(out[groupID], node.PublicIPv6)
 		}
 	}
-	if options.EdgeGroupID != "" && len(out[options.EdgeGroupID]) == 0 {
+	if options.EdgeGroupID != "" && len(out[options.EdgeGroupID]) == 0 && !blockedGroups[options.EdgeGroupID] {
 		out[options.EdgeGroupID] = append([]string(nil), options.AnswerIPs...)
 	}
 	return out, nil
@@ -924,6 +931,7 @@ func (s *Server) edgeDNSAnswerIPsByGroup(ctx context.Context, options edgeDNSBun
 
 func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNSBundleOptions) (map[string]model.EdgeDNSAnswerCandidate, error) {
 	out := map[string]model.EdgeDNSAnswerCandidate{}
+	blockedIPs := map[string]bool{}
 	if s.store != nil {
 		nodes, _, err := s.store.ListEdgeNodes("")
 		if err != nil {
@@ -936,6 +944,18 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 				continue
 			}
 			if !edgeNodeDNSEligible(node) {
+				continue
+			}
+			if !edgeNodeDNSCacheValid(node) {
+				for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
+					normalized := normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeA, ip)
+					if normalized == "" {
+						normalized = normalizeEdgeDNSStaticRecordValue(model.EdgeDNSRecordTypeAAAA, ip)
+					}
+					if normalized != "" {
+						blockedIPs[normalized] = true
+					}
+				}
 				continue
 			}
 			for _, ip := range []string{node.PublicIPv4, node.PublicIPv6} {
@@ -958,6 +978,9 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 		if normalized == "" {
 			continue
 		}
+		if blockedIPs[normalized] {
+			continue
+		}
 		if _, ok := out[normalized]; ok {
 			continue
 		}
@@ -973,6 +996,19 @@ func (s *Server) edgeDNSAnswerCandidateByIP(ctx context.Context, options edgeDNS
 		}
 	}
 	return out, nil
+}
+
+func edgeNodeDNSCacheValid(node model.EdgeNode) bool {
+	status := strings.ToLower(strings.TrimSpace(node.CacheStatus))
+	if status == "" {
+		return true
+	}
+	for _, marker := range []string{"error", "invalid", "corrupt", "expired", "max_stale"} {
+		if strings.Contains(status, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func edgeDNSAnswerCandidateForNode(ip string, node model.EdgeNode, localEdgeGroupID string) model.EdgeDNSAnswerCandidate {
@@ -991,6 +1027,9 @@ func edgeDNSAnswerCandidateForNode(ip string, node model.EdgeNode, localEdgeGrou
 		CanaryState:       edgeNodeEffectiveCanaryState(node),
 		CanaryWeight:      edgeNodeEffectiveCanaryWeight(node),
 		PublicProbeStatus: edgeNodeEffectivePublicProbeStatus(node),
+		ServingGeneration: strings.TrimSpace(node.ServingGeneration),
+		LKGGeneration:     strings.TrimSpace(node.LKGGeneration),
+		CacheStatus:       strings.TrimSpace(node.CacheStatus),
 		DNSEligible:       edgeNodeDNSEligible(node),
 		Priority:          edgeDNSCandidatePriority(groupID, strings.TrimSpace(localEdgeGroupID), ""),
 		Weight:            edgeNodeEffectiveCanaryWeight(node),

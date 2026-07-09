@@ -116,10 +116,28 @@ func (s *Server) publicAPIURL(r *http.Request) string {
 func (s *Server) discoveryAPIEndpoints(apiURL string) []model.DiscoveryEndpoint {
 	out := []model.DiscoveryEndpoint{}
 	if strings.TrimSpace(apiURL) != "" {
-		out = append(out, model.DiscoveryEndpoint{Name: "public", URL: apiURL})
+		out = append(out, model.DiscoveryEndpoint{Name: "public", URL: apiURL, EndpointMode: controlPlaneEndpointModeSingle})
 	}
 	if strings.TrimSpace(s.clusterJoinServer) != "" {
-		out = append(out, model.DiscoveryEndpoint{Name: "cluster-join", URL: s.clusterJoinServer})
+		out = append(out, model.DiscoveryEndpoint{Name: "cluster-join", URL: s.clusterJoinServer, EndpointMode: discoveryEndpointModeForFallbacks(s.clusterJoinServerFallbacks)})
+	}
+	return out
+}
+
+func discoveryEndpointModeForFallbacks(fallbacks []string) string {
+	if len(nonEmptyDiscoveryStrings(fallbacks)) > 0 {
+		return controlPlaneEndpointModeMultiAddress
+	}
+	return controlPlaneEndpointModeSingle
+}
+
+func nonEmptyDiscoveryStrings(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
 	}
 	return out
 }
@@ -150,6 +168,7 @@ func (s *Server) discoveryKubernetesEndpoints() []model.DiscoveryKubernetesEndpo
 		Name:            "cluster-join",
 		Server:          s.clusterJoinServer,
 		FallbackServers: append([]string(nil), s.clusterJoinServerFallbacks...),
+		EndpointMode:    discoveryEndpointModeForFallbacks(s.clusterJoinServerFallbacks),
 		CAHash:          s.clusterJoinCAHash,
 	}
 	if strings.TrimSpace(s.clusterJoinRegistryEndpoint) != "" {

@@ -115,6 +115,9 @@ func normalizeEdgeRoutePolicyForStore(policy model.EdgeRoutePolicy) (model.EdgeR
 	policy.ExcludedEdgeIDs = normalizeEdgeRoutePolicyIDList(policy.ExcludedEdgeIDs, false)
 	policy.ExcludedEdgeGroupIDs = normalizeEdgeRoutePolicyIDList(policy.ExcludedEdgeGroupIDs, true)
 	policy.ExclusionReason = strings.TrimSpace(policy.ExclusionReason)
+	if policy.MinHealthyEdgeNodes < 0 {
+		policy.MinHealthyEdgeNodes = 0
+	}
 	if policy.ExclusionExpiresAt != nil {
 		expiresAt := policy.ExclusionExpiresAt.UTC()
 		policy.ExclusionExpiresAt = &expiresAt
@@ -136,6 +139,7 @@ func normalizeEdgeRoutePolicyForStore(policy model.EdgeRoutePolicy) (model.EdgeR
 		policy.ExcludedEdgeGroupIDs = nil
 		policy.ExclusionReason = ""
 		policy.ExclusionExpiresAt = nil
+		policy.MinHealthyEdgeNodes = 0
 	}
 	return policy, nil
 }

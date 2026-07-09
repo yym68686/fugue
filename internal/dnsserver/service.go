@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,9 +32,16 @@ import (
 
 const cacheFileVersion = 1
 
+const dnsCacheEnvelopeKind = "dns_answer_bundle"
+
+const dnsCacheEnvelopeFallbackTTL = 24 * time.Hour
+
 const edgeHealthProbeTTL = 15 * time.Second
 
+const dnsTemporaryFilterWALInterval = time.Minute
+
 type edgeDNSLiveHealthFunc func(string) bool
+type edgeDNSPeerHealthFunc func(model.EdgeDNSAnswerCandidate) string
 
 type Service struct {
 	Config     config.DNSConfig
@@ -49,6 +57,11 @@ type Service struct {
 	edgeHealthMu sync.Mutex
 	edgeHealth   map[string]edgeHealthObservation
 	edgeProbe    edgeHealthProbeFunc
+	peerHealthMu sync.Mutex
+	peerHealth   map[string]model.PeerHealthDecision
+
+	walMu         sync.Mutex
+	walFilterLast map[string]time.Time
 
 	zoneServices map[string]*Service
 }
@@ -86,6 +99,11 @@ type cacheFile struct {
 	Bundle   model.EdgeDNSBundle `json:"bundle"`
 }
 
+type decodedDNSCacheFile struct {
+	Cache    cacheFile
+	Envelope bool
+}
+
 type telemetry struct {
 	BundleSyncSuccess     uint64
 	BundleSyncNotModified uint64
@@ -104,6 +122,22 @@ type edgeHealthProbeFunc func(context.Context, string) bool
 type edgeHealthObservation struct {
 	Healthy   bool
 	CheckedAt time.Time
+}
+
+type edgeDNSFilteredCandidate struct {
+	Candidate model.EdgeDNSAnswerCandidate
+	Reason    string
+}
+
+type edgeDNSAnswerAudit struct {
+	OwnerName        string
+	RecordName       string
+	RecordType       string
+	RecordKind       string
+	RecordGeneration string
+	PolicyKind       string
+	Answered         []model.EdgeDNSAnswerCandidate
+	Filtered         []edgeDNSFilteredCandidate
 }
 
 type dnsQueryMetricKey struct {
@@ -144,8 +178,10 @@ func NewService(cfg config.DNSConfig, logger *log.Logger) *Service {
 		HTTPClient: &http.Client{
 			Timeout: timeout,
 		},
-		Logger:     logger,
-		edgeHealth: map[string]edgeHealthObservation{},
+		Logger:        logger,
+		edgeHealth:    map[string]edgeHealthObservation{},
+		peerHealth:    map[string]model.PeerHealthDecision{},
+		walFilterLast: map[string]time.Time{},
 		snapshot: Status{
 			Status:      "unhealthy",
 			DNSNodeID:   strings.TrimSpace(cfg.DNSNodeID),
@@ -650,8 +686,8 @@ func (s *Service) LoadCache() error {
 		s.recordCacheLoad("error")
 		return err
 	}
-	var cached cacheFile
-	if err := json.Unmarshal(data, &cached); err != nil {
+	decoded, err := s.decodeDNSCacheFile(data, time.Now().UTC())
+	if err != nil {
 		s.recordCacheLoad("error")
 		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
 			s.recordCacheCorruptGeneration("unknown")
@@ -659,6 +695,7 @@ func (s *Service) LoadCache() error {
 		}
 		return err
 	}
+	cached := decoded.Cache
 	if cached.Version != cacheFileVersion {
 		s.recordCacheLoad("error")
 		if fallbackErr := s.LoadPreviousCache(); fallbackErr == nil {
@@ -1331,7 +1368,26 @@ func (s *Service) writeCache(cached cacheFile) error {
 	if path == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(cached, "", "  ")
+	createdAt := cached.CachedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+		cached.CachedAt = createdAt
+	}
+	payload, err := json.MarshalIndent(cached, "", "  ")
+	if err != nil {
+		return err
+	}
+	envelope, err := lkgcache.NewEnvelope(
+		dnsCacheEnvelopeKind,
+		edgeDNSCacheGeneration(cached.Bundle),
+		payload,
+		s.dnsCacheEnvelopeExpiresAt(cached, createdAt),
+		createdAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create dns cache envelope: %w", err)
+	}
+	data, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1351,12 +1407,13 @@ func (s *Service) LoadPreviousCache() error {
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		var cached cacheFile
-		if err := json.Unmarshal(candidate.Data, &cached); err != nil {
+		decoded, err := s.decodeDNSCacheFile(candidate.Data, time.Now().UTC())
+		if err != nil {
 			lastErr = fmt.Errorf("decode previous dns cache %s: %w", candidate.Path, err)
 			s.recordCacheLoad("error")
 			continue
 		}
+		cached := decoded.Cache
 		if cached.Version != cacheFileVersion {
 			lastErr = fmt.Errorf("unsupported dns cache file version %d in %s", cached.Version, candidate.Path)
 			s.recordCacheLoad("error")
@@ -1382,15 +1439,71 @@ func (s *Service) LoadPreviousCache() error {
 
 func (s *Service) preservePreviousCache(path string) {
 	err := lkgcache.PreservePrevious(path, func(data []byte) bool {
-		var cached cacheFile
-		if err := json.Unmarshal(data, &cached); err != nil || cached.Version != cacheFileVersion {
+		decoded, err := s.decodeDNSCacheFile(data, time.Now().UTC())
+		if err != nil || decoded.Cache.Version != cacheFileVersion {
 			return false
 		}
-		return s.verifyCachedBundle(cached.Bundle, time.Now().UTC()) == nil
+		return s.verifyCachedBundle(decoded.Cache.Bundle, time.Now().UTC()) == nil
 	})
 	if err != nil && !os.IsNotExist(err) && s.Logger != nil {
 		s.Logger.Printf("preserve previous dns cache failed: %v", err)
 	}
+}
+
+func (s *Service) decodeDNSCacheFile(data []byte, now time.Time) (decodedDNSCacheFile, error) {
+	if dnsCacheLooksLikeEnvelope(data) {
+		envelope, err := lkgcache.DecodeEnvelope(data, lkgcache.ReadEnvelopeOptions{
+			Now:          now,
+			ExpectedKind: dnsCacheEnvelopeKind,
+		})
+		if err != nil {
+			return decodedDNSCacheFile{}, err
+		}
+		var cached cacheFile
+		if err := json.Unmarshal(envelope.Payload, &cached); err != nil {
+			return decodedDNSCacheFile{}, err
+		}
+		return decodedDNSCacheFile{Cache: cached, Envelope: true}, nil
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil {
+		return decodedDNSCacheFile{}, err
+	}
+	return decodedDNSCacheFile{Cache: cached}, nil
+}
+
+func dnsCacheLooksLikeEnvelope(data []byte) bool {
+	var marker struct {
+		SchemaVersion string          `json:"schema_version"`
+		Kind          string          `json:"kind"`
+		ContentHash   string          `json:"content_hash"`
+		Payload       json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return false
+	}
+	return strings.TrimSpace(marker.SchemaVersion) != "" ||
+		strings.TrimSpace(marker.Kind) != "" ||
+		strings.TrimSpace(marker.ContentHash) != "" ||
+		len(marker.Payload) > 0
+}
+
+func (s *Service) dnsCacheEnvelopeExpiresAt(cached cacheFile, createdAt time.Time) time.Time {
+	validUntil := cached.Bundle.ValidUntil
+	if !validUntil.IsZero() {
+		if s.Config.MaxStale > 0 {
+			return validUntil.Add(s.Config.MaxStale).UTC()
+		}
+		return validUntil.UTC()
+	}
+	ttl := s.Config.MaxStale
+	if ttl <= 0 {
+		ttl = dnsCacheEnvelopeFallbackTTL
+	}
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return createdAt.Add(ttl).UTC()
 }
 
 func previousCachePath(path string) string {
@@ -1512,7 +1625,12 @@ func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.E
 	if s.Config.EdgeHealthProbeEnabled {
 		liveHealth = s.edgeIPHealthy
 	}
-	answers, nameExists := edgeDNSRecordsForQuestion(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth)
+	var peerHealth edgeDNSPeerHealthFunc
+	if s.hasPeerHealthDecisions() {
+		peerHealth = s.peerHealthFilterReason
+	}
+	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth)
+	s.logDNSAnswerAudits(bundle, name, qtype, audits)
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
 		return answers, nameExists
 	}
@@ -1546,6 +1664,151 @@ func (s *Service) filterHealthyEdgeAnswers(_ context.Context, answers []miekgdns
 	return filtered
 }
 
+func (s *Service) logDNSAnswerAudits(bundle *model.EdgeDNSBundle, queryName string, qtype uint16, audits []edgeDNSAnswerAudit) {
+	if s == nil || len(audits) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	generation := ""
+	dnsNodeID := strings.TrimSpace(s.Config.DNSNodeID)
+	edgeGroupID := strings.TrimSpace(s.Config.EdgeGroupID)
+	zone := normalizeName(s.Config.Zone)
+	if bundle != nil {
+		generation = edgeDNSCacheGeneration(*bundle)
+		dnsNodeID = firstNonEmpty(bundle.DNSNodeID, dnsNodeID)
+		edgeGroupID = firstNonEmpty(bundle.EdgeGroupID, edgeGroupID)
+		zone = normalizeName(firstNonEmpty(bundle.Zone, zone))
+	}
+	for _, audit := range audits {
+		answeredIDs, answeredIPs := edgeDNSAuditCandidateIDsAndIPs(audit.Answered)
+		filteredIDs, filteredIPs, reasons := edgeDNSAuditFilteredCandidates(audit.Filtered)
+		for _, filtered := range audit.Filtered {
+			s.recordDNSTemporaryFilterWAL(bundle, queryName, qtype, audit, filtered, now)
+		}
+		if s.Logger == nil {
+			continue
+		}
+		if !dnsAnswerAuditShouldLog(queryName, qtype, generation, answeredIPs, filteredIPs) {
+			continue
+		}
+		writeDNSStructuredLog(s.Logger.Writer(), map[string]any{
+			"event_type":         "dns_answer_audit",
+			"message":            "dns answer decision",
+			"dns_node_id":        dnsNodeID,
+			"edge_group_id":      edgeGroupID,
+			"zone":               zone,
+			"query_name":         normalizeName(queryName),
+			"qtype":              dnsTypeString(qtype),
+			"owner_name":         audit.OwnerName,
+			"record_name":        audit.RecordName,
+			"record_type":        audit.RecordType,
+			"record_kind":        audit.RecordKind,
+			"record_generation":  audit.RecordGeneration,
+			"policy_kind":        audit.PolicyKind,
+			"serving_generation": generation,
+			"lkg_generation":     generation,
+			"answered_edge_ids":  answeredIDs,
+			"answered_ips":       answeredIPs,
+			"filtered_edge_ids":  filteredIDs,
+			"filtered_ips":       filteredIPs,
+			"filter_reasons":     reasons,
+		})
+	}
+}
+
+func writeDNSStructuredLog(w io.Writer, fields map[string]any) {
+	if w == nil || len(fields) == 0 {
+		return
+	}
+	body, err := json.Marshal(fields)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintln(w, string(body))
+}
+
+func edgeDNSAuditCandidateIDsAndIPs(candidates []model.EdgeDNSAnswerCandidate) ([]string, []string) {
+	ids := make([]string, 0, len(candidates))
+	ips := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if id := edgeDNSAuditCandidateID(candidate); id != "" {
+			ids = appendUniqueString(ids, id)
+		}
+		if ip := strings.TrimSpace(candidate.IP); ip != "" {
+			ips = appendUniqueString(ips, ip)
+		}
+	}
+	return ids, ips
+}
+
+func edgeDNSAuditFilteredCandidates(candidates []edgeDNSFilteredCandidate) ([]string, []string, map[string]string) {
+	ids := make([]string, 0, len(candidates))
+	ips := make([]string, 0, len(candidates))
+	reasons := map[string]string{}
+	for _, filtered := range candidates {
+		id := edgeDNSAuditCandidateID(filtered.Candidate)
+		if id != "" {
+			ids = appendUniqueString(ids, id)
+			reasons[id] = strings.TrimSpace(filtered.Reason)
+		}
+		ip := strings.TrimSpace(filtered.Candidate.IP)
+		if ip != "" {
+			ips = appendUniqueString(ips, ip)
+			if id == "" {
+				reasons[ip] = strings.TrimSpace(filtered.Reason)
+			}
+		}
+	}
+	if len(reasons) == 0 {
+		reasons = nil
+	}
+	return ids, ips, reasons
+}
+
+func edgeDNSAuditCandidateID(candidate model.EdgeDNSAnswerCandidate) string {
+	if value := strings.TrimSpace(candidate.EdgeID); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(candidate.EdgeGroupID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(candidate.IP)
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func dnsAnswerAuditShouldLog(queryName string, qtype uint16, generation string, answeredIPs, filteredIPs []string) bool {
+	if len(filteredIPs) > 0 {
+		return true
+	}
+	material := strings.Join([]string{
+		normalizeName(queryName),
+		dnsTypeString(qtype),
+		strings.TrimSpace(generation),
+		strings.Join(answeredIPs, ","),
+	}, "|")
+	sum := sha256.Sum256([]byte(material))
+	return sum[0] == 0
+}
+
+func dnsTypeString(qtype uint16) string {
+	if value := strings.TrimSpace(miekgdns.TypeToString[qtype]); value != "" {
+		return value
+	}
+	return fmt.Sprintf("TYPE%d", qtype)
+}
+
 func (s *Service) edgeIPHealthy(ip string) bool {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
@@ -1558,6 +1821,59 @@ func (s *Service) edgeIPHealthy(ip string) bool {
 		return observation.Healthy
 	}
 	return true
+}
+
+func (s *Service) SetPeerHealthDecisions(decisions []model.PeerHealthDecision) {
+	s.peerHealthMu.Lock()
+	defer s.peerHealthMu.Unlock()
+	s.peerHealth = map[string]model.PeerHealthDecision{}
+	for _, decision := range decisions {
+		key := strings.TrimSpace(decision.SubjectEdgeID)
+		if key == "" {
+			continue
+		}
+		s.peerHealth[key] = decision
+	}
+}
+
+func (s *Service) hasPeerHealthDecisions() bool {
+	s.peerHealthMu.Lock()
+	defer s.peerHealthMu.Unlock()
+	now := time.Now().UTC()
+	for key, decision := range s.peerHealth {
+		if !decision.ExpiresAt.IsZero() && !now.Before(decision.ExpiresAt) {
+			delete(s.peerHealth, key)
+			continue
+		}
+		if decision.Decision == model.PeerHealthDecisionTemporaryFilter || decision.Decision == model.PeerHealthDecisionSuspect {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) peerHealthFilterReason(candidate model.EdgeDNSAnswerCandidate) string {
+	edgeID := strings.TrimSpace(candidate.EdgeID)
+	if edgeID == "" {
+		return ""
+	}
+	now := time.Now().UTC()
+	s.peerHealthMu.Lock()
+	decision, ok := s.peerHealth[edgeID]
+	if ok && !decision.ExpiresAt.IsZero() && !now.Before(decision.ExpiresAt) {
+		delete(s.peerHealth, edgeID)
+		ok = false
+	}
+	s.peerHealthMu.Unlock()
+	if !ok {
+		return ""
+	}
+	switch decision.Decision {
+	case model.PeerHealthDecisionTemporaryFilter:
+		return "peer_health_temporary_filter"
+	default:
+		return ""
+	}
 }
 
 func (s *Service) dialEdgeIP(ctx context.Context, ip string) bool {
@@ -1575,8 +1891,13 @@ func (s *Service) dialEdgeIP(ctx context.Context, ip string) bool {
 }
 
 func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) ([]miekgdns.RR, bool) {
+	answers, nameExists, _ := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, hint, liveHealth, nil)
+	return answers, nameExists
+}
+
+func edgeDNSRecordsForQuestionWithAudit(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]miekgdns.RR, bool, []edgeDNSAnswerAudit) {
 	if bundle == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	recordTypes := []string{}
 	switch qtype {
@@ -1597,15 +1918,20 @@ func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype u
 	case miekgdns.TypeTXT:
 		recordTypes = []string{model.EdgeDNSRecordTypeTXT}
 	default:
-		return nil, edgeDNSNameExists(bundle, name)
+		return nil, edgeDNSNameExists(bundle, name), nil
 	}
 	matchingRecords, ownerName := edgeDNSMatchingRecords(bundle, name)
 	nameExists := len(matchingRecords) > 0
 	answers := make([]miekgdns.RR, 0)
+	audits := make([]edgeDNSAnswerAudit, 0)
 	for _, recordType := range recordTypes {
 		for _, record := range matchingRecords {
 			if strings.EqualFold(record.Type, recordType) {
-				answers = append(answers, rrForEdgeDNSRecordWithGeo(record, ownerName, qtype, hint, liveHealth)...)
+				rrs, audit, ok := rrForEdgeDNSRecordWithGeoAudit(record, ownerName, qtype, hint, liveHealth, peerHealth)
+				answers = append(answers, rrs...)
+				if ok {
+					audits = append(audits, audit)
+				}
 			}
 		}
 	}
@@ -1616,7 +1942,7 @@ func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype u
 			}
 		}
 	}
-	return answers, nameExists
+	return answers, nameExists, audits
 }
 
 func edgeDNSMatchingRecords(bundle *model.EdgeDNSBundle, name string) ([]model.EdgeDNSRecord, string) {
@@ -1861,30 +2187,33 @@ func edgeGroupCountry(edgeGroupID string) string {
 }
 
 func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) []miekgdns.RR {
+	rrs, _, _ := rrForEdgeDNSRecordWithGeoAudit(record, ownerName, qtype, hint, liveHealth, nil)
+	return rrs
+}
+
+func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]miekgdns.RR, edgeDNSAnswerAudit, bool) {
 	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
-		return rrForEdgeDNSRecord(record, ownerName)
+		return rrForEdgeDNSRecord(record, ownerName), edgeDNSAnswerAudit{}, false
 	}
-	ordered := edgeDNSOrderedCandidates(record, hint, time.Now().UTC())
-	if liveHealth != nil && len(ordered) > 0 {
-		filtered := ordered[:0]
-		for _, candidate := range ordered {
-			if candidate.IP == "" || liveHealth(candidate.IP) {
-				filtered = append(filtered, candidate)
-			}
-		}
-		ordered = filtered
+	ordered, filteredCandidates := edgeDNSAnswerCandidateDecision(record, hint, time.Now().UTC(), liveHealth, peerHealth)
+	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
+	audit := edgeDNSAnswerAudit{
+		OwnerName:        ownerName,
+		RecordName:       normalizeName(record.Name),
+		RecordType:       strings.ToUpper(strings.TrimSpace(record.Type)),
+		RecordKind:       strings.TrimSpace(record.RecordKind),
+		RecordGeneration: strings.TrimSpace(record.RecordGeneration),
+		PolicyKind:       strings.TrimSpace(record.AnswerPolicy.PolicyKind),
+		Answered:         append([]model.EdgeDNSAnswerCandidate(nil), ordered...),
+		Filtered:         append([]edgeDNSFilteredCandidate(nil), filteredCandidates...),
 	}
 	if len(ordered) == 0 {
-		return nil
-	}
-	if limit := edgeDNSAnswerCandidateLimit(record.AnswerPolicy, ordered); limit > 0 && len(ordered) > limit {
-		ordered = ordered[:limit]
+		return nil, audit, len(filteredCandidates) > 0
 	}
 	ttl := uint32(record.TTL)
 	if ttl == 0 {
 		ttl = 60
 	}
-	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
 	rrs := make([]miekgdns.RR, 0, len(ordered))
 	for _, candidate := range ordered {
 		ip := net.ParseIP(strings.TrimSpace(candidate.IP))
@@ -1903,9 +2232,50 @@ func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qty
 		}
 	}
 	if len(rrs) == 0 {
-		return nil
+		return nil, audit, len(audit.Filtered) > 0 || len(audit.Answered) > 0
 	}
-	return rrs
+	return rrs, audit, true
+}
+
+func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]model.EdgeDNSAnswerCandidate, []edgeDNSFilteredCandidate) {
+	ordered := edgeDNSOrderedCandidates(record, hint, now)
+	filteredCandidates := []edgeDNSFilteredCandidate{}
+	if liveHealth != nil && len(ordered) > 0 {
+		filtered := ordered[:0]
+		for _, candidate := range ordered {
+			if candidate.IP == "" || liveHealth(candidate.IP) {
+				filtered = append(filtered, candidate)
+				continue
+			}
+			filteredCandidates = append(filteredCandidates, edgeDNSFilteredCandidate{
+				Candidate: candidate,
+				Reason:    "local_edge_probe_unhealthy",
+			})
+		}
+		ordered = filtered
+	}
+	if peerHealth != nil && len(ordered) > 0 {
+		filtered := ordered[:0]
+		for _, candidate := range ordered {
+			reason := strings.TrimSpace(peerHealth(candidate))
+			if reason == "" {
+				filtered = append(filtered, candidate)
+				continue
+			}
+			filteredCandidates = append(filteredCandidates, edgeDNSFilteredCandidate{
+				Candidate: candidate,
+				Reason:    reason,
+			})
+		}
+		ordered = filtered
+	}
+	if len(ordered) == 0 {
+		return nil, filteredCandidates
+	}
+	if limit := edgeDNSAnswerCandidateLimit(record.AnswerPolicy, ordered); limit > 0 && len(ordered) > limit {
+		ordered = ordered[:limit]
+	}
+	return ordered, filteredCandidates
 }
 
 func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.EdgeDNSAnswerCandidate) int {
@@ -1980,6 +2350,9 @@ func edgeDNSAnyCandidateScore(candidates []model.EdgeDNSAnswerCandidate) bool {
 }
 
 func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy model.DNSAnswerPolicy) bool {
+	if edgeDNSCandidateLKGInvalid(candidate) {
+		return false
+	}
 	if policy.HealthRequired && !candidate.Healthy {
 		return false
 	}
@@ -1992,6 +2365,22 @@ func edgeDNSCandidateEligible(candidate model.EdgeDNSAnswerCandidate, policy mod
 		}
 	}
 	return true
+}
+
+func edgeDNSCandidateLKGInvalid(candidate model.EdgeDNSAnswerCandidate) bool {
+	if candidate.MaxStaleExceeded {
+		return true
+	}
+	cacheStatus := strings.ToLower(strings.TrimSpace(candidate.CacheStatus))
+	if cacheStatus == "" {
+		return false
+	}
+	for _, marker := range []string{"error", "invalid", "corrupt", "expired", "max_stale"} {
+		if strings.Contains(cacheStatus, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func edgeDNSScopedCandidatesForHint(scoped []model.EdgeDNSScopedAnswerCandidates, hint dnsGeoHint) (model.EdgeDNSScopedAnswerCandidates, bool) {

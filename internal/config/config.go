@@ -172,6 +172,7 @@ type AgentConfig struct {
 	HeartbeatEvery     time.Duration
 	StateFile          string
 	ApplyWithKubectl   bool
+	AutonomyWALPath    string
 }
 
 type EdgeConfig struct {
@@ -207,6 +208,7 @@ type EdgeConfig struct {
 	CacheWarmupMaxDepth             int
 	MaxStale                        time.Duration
 	PeerFallbackEnabled             bool
+	AutonomyWALPath                 string
 	ListenAddr                      string
 	SyncInterval                    time.Duration
 	HeartbeatInterval               time.Duration
@@ -247,6 +249,7 @@ type DNSConfig struct {
 	CachePath                  string
 	CacheArchiveLimit          int
 	MaxStale                   time.Duration
+	AutonomyWALPath            string
 	EdgeHealthProbeEnabled     bool
 	EdgeHealthProbePort        int
 	EdgeHealthProbeTimeout     time.Duration
@@ -492,6 +495,7 @@ func AgentFromEnv() AgentConfig {
 		HeartbeatEvery:     getenvDuration("FUGUE_AGENT_HEARTBEAT_EVERY", 15*time.Second),
 		StateFile:          getenv("FUGUE_AGENT_STATE_FILE", "./data/agent/state.json"),
 		ApplyWithKubectl:   getenvBool("FUGUE_AGENT_APPLY_WITH_KUBECTL", false),
+		AutonomyWALPath:    getenv("FUGUE_AGENT_AUTONOMY_WAL_PATH", filepath.Join(workDir, "autonomy.wal")),
 	}
 }
 
@@ -546,6 +550,7 @@ func EdgeFromEnv() EdgeConfig {
 		CacheWarmupMaxDepth:       getenvInt("FUGUE_EDGE_CACHE_WARMUP_MAX_DEPTH", 2),
 		MaxStale:                  getenvDuration("FUGUE_EDGE_MAX_STALE", 24*time.Hour),
 		PeerFallbackEnabled:       getenvBool("FUGUE_EDGE_PEER_FALLBACK_ENABLED", true),
+		AutonomyWALPath:           getenv("FUGUE_EDGE_AUTONOMY_WAL_PATH", "/var/lib/fugue/edge/autonomy.wal"),
 		ListenAddr:                getenv("FUGUE_EDGE_LISTEN_ADDR", "127.0.0.1:7832"),
 		SyncInterval:              getenvDuration("FUGUE_EDGE_SYNC_INTERVAL", 15*time.Second),
 		HeartbeatInterval:         getenvDuration("FUGUE_EDGE_HEARTBEAT_INTERVAL", 30*time.Second),
@@ -597,6 +602,7 @@ func DNSFromEnv() DNSConfig {
 		CachePath:                  getenv("FUGUE_DNS_CACHE_PATH", "/var/lib/fugue/dns/dns-cache.json"),
 		CacheArchiveLimit:          getenvInt("FUGUE_DNS_CACHE_ARCHIVE_LIMIT", 5),
 		MaxStale:                   getenvDuration("FUGUE_DNS_MAX_STALE", 24*time.Hour),
+		AutonomyWALPath:            getenv("FUGUE_DNS_AUTONOMY_WAL_PATH", "/var/lib/fugue/dns/autonomy.wal"),
 		EdgeHealthProbeEnabled:     getenvBool("FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED", true),
 		EdgeHealthProbePort:        getenvInt("FUGUE_DNS_EDGE_HEALTH_PROBE_PORT", 443),
 		EdgeHealthProbeTimeout:     getenvDuration("FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT", 250*time.Millisecond),

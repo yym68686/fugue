@@ -15,7 +15,7 @@ func (s *Store) pgListEdgeRoutePolicies() ([]model.EdgeRoutePolicy, error) {
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, route_policy, enabled, created_at, updated_at
+SELECT id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, min_healthy_edge_nodes, route_policy, enabled, created_at, updated_at
 FROM fugue_edge_route_policies
 ORDER BY hostname ASC, created_at ASC
 `)
@@ -43,7 +43,7 @@ func (s *Store) pgGetEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, er
 	defer cancel()
 
 	policy, err := scanEdgeRoutePolicy(s.db.QueryRowContext(ctx, `
-SELECT id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, route_policy, enabled, created_at, updated_at
+SELECT id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, min_healthy_edge_nodes, route_policy, enabled, created_at, updated_at
 FROM fugue_edge_route_policies
 WHERE lower(hostname) = lower($1)
 `, hostname))
@@ -77,9 +77,9 @@ func (s *Store) pgPutEdgeRoutePolicy(policy model.EdgeRoutePolicy) (model.EdgeRo
 	row := s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_edge_route_policies (
 	id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids,
-	exclusion_reason, exclusion_expires_at, route_policy, enabled, created_at, updated_at
+	exclusion_reason, exclusion_expires_at, min_healthy_edge_nodes, route_policy, enabled, created_at, updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13, $14)
 ON CONFLICT (hostname) DO UPDATE SET
 	tenant_id = EXCLUDED.tenant_id,
 	app_id = EXCLUDED.app_id,
@@ -88,11 +88,12 @@ ON CONFLICT (hostname) DO UPDATE SET
 	excluded_edge_group_ids = EXCLUDED.excluded_edge_group_ids,
 	exclusion_reason = EXCLUDED.exclusion_reason,
 	exclusion_expires_at = EXCLUDED.exclusion_expires_at,
+	min_healthy_edge_nodes = EXCLUDED.min_healthy_edge_nodes,
 	route_policy = EXCLUDED.route_policy,
 	enabled = EXCLUDED.enabled,
 	updated_at = EXCLUDED.updated_at
-RETURNING id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, route_policy, enabled, created_at, updated_at
-`, policy.ID, policy.Hostname, policy.TenantID, policy.AppID, policy.EdgeGroupID, excludedEdgeIDsJSON, excludedEdgeGroupIDsJSON, policy.ExclusionReason, policy.ExclusionExpiresAt, policy.RoutePolicy, policy.Enabled, policy.CreatedAt, policy.UpdatedAt)
+RETURNING id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, min_healthy_edge_nodes, route_policy, enabled, created_at, updated_at
+`, policy.ID, policy.Hostname, policy.TenantID, policy.AppID, policy.EdgeGroupID, excludedEdgeIDsJSON, excludedEdgeGroupIDsJSON, policy.ExclusionReason, policy.ExclusionExpiresAt, policy.MinHealthyEdgeNodes, policy.RoutePolicy, policy.Enabled, policy.CreatedAt, policy.UpdatedAt)
 	stored, err := scanEdgeRoutePolicy(row)
 	if err != nil {
 		return model.EdgeRoutePolicy{}, mapDBErr(err)
@@ -107,7 +108,7 @@ func (s *Store) pgDeleteEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy,
 	policy, err := scanEdgeRoutePolicy(s.db.QueryRowContext(ctx, `
 DELETE FROM fugue_edge_route_policies
 WHERE lower(hostname) = lower($1)
-RETURNING id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, route_policy, enabled, created_at, updated_at
+RETURNING id, hostname, tenant_id, app_id, edge_group_id, excluded_edge_ids, excluded_edge_group_ids, exclusion_reason, exclusion_expires_at, min_healthy_edge_nodes, route_policy, enabled, created_at, updated_at
 `, hostname))
 	if err != nil {
 		return model.EdgeRoutePolicy{}, mapDBErr(err)
@@ -131,6 +132,7 @@ func scanEdgeRoutePolicy(scanner sqlScanner) (model.EdgeRoutePolicy, error) {
 		&excludedEdgeGroupIDsRaw,
 		&policy.ExclusionReason,
 		&exclusionExpiresAt,
+		&policy.MinHealthyEdgeNodes,
 		&policy.RoutePolicy,
 		&policy.Enabled,
 		&policy.CreatedAt,

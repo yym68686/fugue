@@ -65,6 +65,8 @@ type Service struct {
 	bodyBufferActiveMu    sync.Mutex
 	activeBodyBufferReads map[string]edgeActiveRequestBodyBuffer
 	activeProxyRequests   int64
+	walMu                 sync.Mutex
+	walActionLast         map[string]time.Time
 }
 
 type Status struct {
@@ -347,6 +349,7 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		cacheWarmupClientFactory: newEdgeCacheWarmupClient,
 		proxyBase:                newDefaultEdgeProxyTransport(),
 		bodyBuffer:               newEdgeRequestBodyBufferManager(cfg),
+		walActionLast:            map[string]time.Time{},
 		snapshot: Status{
 			Status:      "unhealthy",
 			EdgeID:      strings.TrimSpace(cfg.EdgeID),
@@ -445,6 +448,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		default:
 			if err != nil {
 				s.logSyncFailure(err)
+				s.recordEdgeServeLKGWAL("control_plane_sync_failed", err)
 				s.retryCurrentCaddyConfig(ctx, "route sync failed")
 			}
 		}
@@ -499,6 +503,12 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		if etag == "" {
 			etag = quoteETag(bundle.Version)
 		}
+		if err := s.applyCaddyConfig(ctx, bundle); err != nil {
+			s.recordEdgeCaddyReloadWAL("bundle_sync", err)
+			err = fmt.Errorf("apply caddy config: %w", err)
+			s.recordSyncError(err)
+			return err
+		}
 		if err := s.writeCache(cacheFile{
 			Version:  cacheFileVersion,
 			ETag:     etag,
@@ -509,9 +519,6 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		s.recordSyncSuccess(bundle, etag, now, false)
-		if err := s.applyCaddyConfig(ctx, bundle); err != nil && s.Logger != nil {
-			s.Logger.Printf("edge caddy config apply failed; version=%s error=%s", bundle.Version, s.redact(err.Error()))
-		}
 		result = "success"
 		return nil
 	case http.StatusNotModified:
@@ -521,9 +528,12 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		s.recordNotModified(now)
-		if err := s.applyCurrentCaddyConfig(ctx); err != nil && s.Logger != nil {
-			status := s.Status()
-			s.Logger.Printf("edge caddy config apply failed; version=%s error=%s", status.BundleVersion, s.redact(err.Error()))
+		if err := s.applyCurrentCaddyConfig(ctx); err != nil {
+			s.recordEdgeCaddyReloadWAL("not_modified", err)
+			if s.Logger != nil {
+				status := s.Status()
+				s.Logger.Printf("edge caddy config apply failed; version=%s error=%s", status.BundleVersion, s.redact(err.Error()))
+			}
 		}
 		result = "not_modified"
 		return nil
@@ -543,11 +553,14 @@ func (s *Service) retryCurrentCaddyConfig(ctx context.Context, reason string) {
 		return
 	}
 	if err := s.applyCurrentCaddyConfig(ctx); err != nil {
+		s.recordEdgeCaddyReloadWAL(reason, err)
 		if s.Logger != nil {
 			status := s.Status()
 			s.Logger.Printf("edge caddy cached config reapply failed; reason=%s version=%s error=%s", strings.TrimSpace(reason), status.BundleVersion, s.redact(err.Error()))
 		}
+		return
 	}
+	s.recordEdgeCaddyReloadWAL(reason, nil)
 }
 
 func (s *Service) LoadCache() error {
@@ -604,6 +617,7 @@ func (s *Service) LoadCache() error {
 	s.recordCacheLoaded(cached)
 	s.recordCacheLoad("success")
 	s.logCacheLoaded(cached)
+	s.recordEdgeServeLKGWAL("load_cache", nil)
 	return nil
 }
 
@@ -2840,6 +2854,7 @@ func buildEdgePerformanceSamples(current, baseline telemetry, routesByKey map[ro
 			OriginResponseWaitMS:  edgePerformanceAverageMilliseconds(originWaitSum, originWaitCount),
 			OriginTTFBMS:          edgePerformanceAverageMilliseconds(originTTFBSum, originTTFBCount),
 			OriginTotalMS:         edgePerformanceAverageMilliseconds(originTotalSum, originTotalCount),
+			OriginFailureClass:    edgePerformanceOriginFailureClass(dominantStatusCode, errorCount, originDNSCount, originConnectCount, originWriteCount, originWaitCount, originTTFBCount),
 			StreamingRequestCount: streamingRequestCount,
 			WebSocketRequestCount: webSocketRequestCount,
 			SSERequestCount:       sseRequestCount,
@@ -2979,6 +2994,26 @@ func edgePerformanceBytesPerSecond(bytes uint64, seconds float64) int64 {
 		return 0
 	}
 	return int64(float64(bytes) / seconds)
+}
+
+func edgePerformanceOriginFailureClass(statusCode, errorCount, originDNSCount, originConnectCount, originWriteCount, originWaitCount, originTTFBCount int) string {
+	if errorCount <= 0 && statusCode < 500 {
+		return ""
+	}
+	switch {
+	case originDNSCount > 0 && originConnectCount == 0 && originTTFBCount == 0:
+		return "origin_dns_failed"
+	case originConnectCount > 0 && originTTFBCount == 0:
+		return "origin_connect_failed"
+	case originWriteCount > 0 && originWaitCount == 0 && originTTFBCount == 0:
+		return "origin_request_write_failed"
+	case originWaitCount > 0 && originTTFBCount == 0:
+		return "origin_ttfb_timeout"
+	case originTTFBCount > 0:
+		return "origin_5xx_or_slow"
+	default:
+		return "origin_unavailable"
+	}
 }
 
 func deltaUint64(current, baseline uint64) uint64 {
@@ -3221,6 +3256,7 @@ func (s *Service) writeCache(cached cacheFile) error {
 		return fmt.Errorf("replace edge route cache: %w", err)
 	}
 	s.recordCacheWrite("success")
+	s.recordEdgeLKGWriteWAL(cached)
 	return nil
 }
 
@@ -3254,6 +3290,7 @@ func (s *Service) LoadPreviousCache() error {
 		}
 		s.recordCacheLoaded(cached)
 		s.recordCacheLoad("success")
+		s.recordEdgeServeLKGWAL("load_previous_cache", nil)
 		if s.Logger != nil {
 			s.Logger.Printf("edge route previous cache loaded; version=%s etag=%s path=%s", cached.Bundle.Version, cached.ETag, candidate.Path)
 		}

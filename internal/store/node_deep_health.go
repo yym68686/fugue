@@ -173,6 +173,20 @@ func nodeQuarantineReasonForCheck(check model.NodeDeepHealthCheck) string {
 		return model.NodeQuarantineReasonIptablesHardFail
 	case model.NodeDeepHealthCheckPodCIDRDrift:
 		return model.NodeQuarantineReasonPodCIDRDrift
+	case model.NodeDeepHealthCheckK3SAgentProcess,
+		model.NodeDeepHealthCheckKubeletProcess,
+		model.NodeDeepHealthCheckLocalAPIServer,
+		model.NodeDeepHealthCheckRemoteDialer,
+		model.NodeDeepHealthCheckNodeLeaseFreshness,
+		model.NodeDeepHealthCheckPodSandboxCreation:
+		return model.NodeQuarantineReasonK3SAgentHardFail
+	case model.NodeDeepHealthCheckCNIBridge,
+		model.NodeDeepHealthCheckKubeProxyRules:
+		return model.NodeQuarantineReasonCNIHardFail
+	case model.NodeDeepHealthCheckDiskInodePressure,
+		model.NodeDeepHealthCheckMemoryPressure,
+		model.NodeDeepHealthCheckCPULoadPressure:
+		return model.NodeQuarantineReasonResourcePressure
 	case model.NodeDeepHealthCheckConntrackSaturation:
 		return model.NodeQuarantineReasonConntrackSaturated
 	default:

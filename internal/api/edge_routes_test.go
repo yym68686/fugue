@@ -779,12 +779,20 @@ func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
 	recordHealthyEdgeForRouteTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103")
 
 	put := performJSONRequest(t, server, http.MethodPut, "/v1/edge/route-policies/"+app.Route.Hostname, platformAdminKey, map[string]any{
-		"route_policy":      model.EdgeRoutePolicyEnabled,
-		"excluded_edge_ids": []string{"edge-de-1"},
-		"exclusion_reason":  "slow-upload",
+		"route_policy":           model.EdgeRoutePolicyEnabled,
+		"excluded_edge_ids":      []string{"edge-de-1"},
+		"exclusion_reason":       "slow-upload",
+		"min_healthy_edge_nodes": 2,
 	})
 	if put.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, put.Code, put.Body.String())
+	}
+	var putResponse struct {
+		Policy model.EdgeRoutePolicy `json:"policy"`
+	}
+	mustDecodeJSON(t, put, &putResponse)
+	if putResponse.Policy.MinHealthyEdgeNodes != 2 {
+		t.Fatalf("expected saved min healthy edge nodes, got %+v", putResponse.Policy)
 	}
 
 	excluded := httptest.NewRecorder()
@@ -816,6 +824,50 @@ func TestEdgeRoutePolicyCanExcludeOneEdgeNodeFromRouteBundle(t *testing.T) {
 	}
 	if route.EdgeGroupID != "edge-group-country-us" {
 		t.Fatalf("expected excluded single-node DE group to be removed from selection, got %+v", route)
+	}
+	if route.MinHealthyEdgeNodes != 2 || route.HealthyEdgeNodeCount != 1 || route.EdgeRedundancyStatus != "at_risk" {
+		t.Fatalf("expected route to expose single-edge redundancy risk, got %+v", route)
+	}
+	if !strings.Contains(route.EdgeRedundancyReason, "below minimum 2") {
+		t.Fatalf("expected route redundancy reason to explain minimum, got %+v", route)
+	}
+
+	explain := performJSONRequest(t, server, http.MethodGet, "/v1/admin/traffic-safety/explain/"+app.Route.Hostname+"?min_healthy_edges=2", platformAdminKey, nil)
+	if explain.Code != http.StatusOK {
+		t.Fatalf("expected traffic safety status %d, got %d body=%s", http.StatusOK, explain.Code, explain.Body.String())
+	}
+	var explainResponse model.TrafficSafetyExplainResponse
+	mustDecodeJSON(t, explain, &explainResponse)
+	if explainResponse.State.Pass {
+		t.Fatalf("traffic safety should fail below min healthy edge nodes, got %+v", explainResponse.State)
+	}
+	if explainResponse.State.HealthyEdgeCount != 1 || explainResponse.State.MinHealthyEdgeCount != 2 {
+		t.Fatalf("expected traffic safety to count healthy edge nodes as 1/2, got %+v", explainResponse.State)
+	}
+	if !stringSliceContains(explainResponse.State.Blockers, "healthy eligible edge nodes 1 below minimum 2") {
+		t.Fatalf("expected node-count blocker, got %+v", explainResponse.State.Blockers)
+	}
+
+	robustness := performJSONRequest(t, server, http.MethodGet, "/v1/admin/robustness/incidents?subject="+app.Route.Hostname, platformAdminKey, nil)
+	if robustness.Code != http.StatusOK {
+		t.Fatalf("expected robustness incident status %d, got %d body=%s", http.StatusOK, robustness.Code, robustness.Body.String())
+	}
+	var incidentResponse model.RobustnessIncidentListResponse
+	mustDecodeJSON(t, robustness, &incidentResponse)
+	var trafficSafetyIncident *model.RobustnessIncident
+	for index := range incidentResponse.Incidents {
+		if incidentResponse.Incidents[index].CheckName == "traffic_safety_min_healthy_edges" {
+			trafficSafetyIncident = &incidentResponse.Incidents[index]
+			break
+		}
+	}
+	if trafficSafetyIncident == nil {
+		t.Fatalf("expected min healthy edge incident, got %+v", incidentResponse.Incidents)
+	}
+	if trafficSafetyIncident.Severity != model.RobustnessSeverityDegraded ||
+		trafficSafetyIncident.Evidence["hostname"] != app.Route.Hostname ||
+		trafficSafetyIncident.Evidence["edge_redundancy_status"] != "at_risk" {
+		t.Fatalf("expected degraded traffic safety evidence, got %+v", trafficSafetyIncident)
 	}
 }
 
@@ -998,6 +1050,9 @@ func TestConfiguredPlatformRouteFansOutToHealthyEdgeGroups(t *testing.T) {
 			route.TLSPolicy != model.EdgeRouteTLSPolicyPlatform ||
 			route.Status != model.EdgeRouteStatusActive {
 			t.Fatalf("unexpected configured platform route: %+v", route)
+		}
+		if route.MinHealthyEdgeNodes != 2 || route.HealthyEdgeNodeCount != 2 || route.EdgeRedundancyStatus != "ok" {
+			t.Fatalf("expected control-plane platform route to default to 2 healthy edge nodes, got %+v", route)
 		}
 	}
 

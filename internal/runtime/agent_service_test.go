@@ -17,8 +17,42 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/localwal"
 	"fugue/internal/model"
 )
+
+func TestAgentPollFailureWritesRuntimeAutonomyWAL(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "control plane unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tempDir := t.TempDir()
+	walPath := filepath.Join(tempDir, "runtime.wal")
+	service := NewAgentService(config.AgentConfig{
+		ServerURL:        server.URL,
+		RuntimeKey:       "runtime_key",
+		RuntimeID:        "runtime_external",
+		RuntimeName:      "worker-1",
+		WorkDir:          filepath.Join(tempDir, "work"),
+		CellStorePath:    filepath.Join(tempDir, "cell-store.json"),
+		AutonomyWALPath:  walPath,
+		ApplyWithKubectl: false,
+	}, log.New(io.Discard, "", 0))
+
+	if err := service.pollAndProcess(context.Background()); err == nil {
+		t.Fatal("expected poll failure")
+	}
+	records, err := localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	if len(records) != 1 || records[0].Component != "runtime-agent" || records[0].Action != "control_plane_poll_failed" {
+		t.Fatalf("unexpected wal records: %+v", records)
+	}
+}
 
 func TestAgentCompletionOutboxReplaysAfterControlPlaneRecovery(t *testing.T) {
 	t.Parallel()

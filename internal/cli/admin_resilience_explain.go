@@ -72,7 +72,7 @@ func (c *CLI) newAdminTrafficSafetyCommand() *cobra.Command {
 			return writeTrafficSafetyState(c.stdout, state)
 		},
 	}
-	explain.Flags().IntVar(&opts.MinHealthyEdges, "min-healthy-edges", opts.MinHealthyEdges, "Minimum healthy eligible edge groups required")
+	explain.Flags().IntVar(&opts.MinHealthyEdges, "min-healthy-edges", opts.MinHealthyEdges, "Minimum healthy eligible edge nodes required")
 	cmd.AddCommand(explain)
 	return cmd
 }
@@ -159,6 +159,7 @@ func writeRequestExplain(w io.Writer, explain model.RequestExplainResponse) erro
 		{Key: "request_id", Value: explain.RequestID},
 		{Key: "found", Value: fmt.Sprintf("%t", explain.Found)},
 		{Key: "error_class", Value: firstNonEmpty(explain.ErrorClass, "-")},
+		{Key: "failure_plane", Value: firstNonEmpty(explain.FailurePlane, "-")},
 		{Key: "secret_safe", Value: fmt.Sprintf("%t", explain.SecretSafe)},
 		{Key: "generated_at", Value: formatTime(explain.GeneratedAt)},
 	}
@@ -179,6 +180,7 @@ func writeRequestExplain(w io.Writer, explain model.RequestExplainResponse) erro
 			kvPair{Key: "body_read_bytes", Value: fmt.Sprintf("%d/%d", explain.RequestBodyReadBytes, explain.RequestBodyBytes)},
 			kvPair{Key: "origin_dns_ms", Value: fmt.Sprintf("%d", explain.OriginDNSMS)},
 			kvPair{Key: "origin_connect_ms", Value: fmt.Sprintf("%d", explain.OriginConnectMS)},
+			kvPair{Key: "origin_endpoint_connect_ms", Value: fmt.Sprintf("%d", explain.OriginEndpointConnectMS)},
 			kvPair{Key: "origin_write_ms", Value: fmt.Sprintf("%d", explain.OriginRequestWriteMS)},
 			kvPair{Key: "origin_wait_ms", Value: fmt.Sprintf("%d", explain.OriginResponseWaitMS)},
 			kvPair{Key: "origin_ttfb_ms", Value: fmt.Sprintf("%d", explain.OriginTTFBMS)},

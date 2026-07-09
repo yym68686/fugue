@@ -61,7 +61,9 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 			RequestBodyReadBytes:      1024,
 			BodyIncompleteCount:       1,
 			ResponseEgressBPS:         512 * 1024,
+			OriginEndpointConnectMS:   33,
 			OriginTTFBMS:              90,
+			OriginFailureClass:        " Origin_DNS_Failed! ",
 			ActiveRequests:            3,
 			ActiveBodyBuffers:         1,
 			ClientTCPRTTMS:            88.5,
@@ -109,13 +111,15 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 		samples[0].MaxReadGapMS != 900 ||
 		samples[0].RequestBodyReadBytes != 1024 ||
 		samples[0].BodyIncompleteCount != 1 ||
+		samples[0].OriginEndpointConnectMS != 33 ||
 		samples[0].OriginTTFBMS != 90 ||
 		samples[0].ActiveBodyBuffers != 1 ||
 		samples[0].ClientTCPRTTMS != 88.5 ||
 		samples[0].ClientTCPTotalRetrans != 3 ||
 		samples[0].ClientTCPBytesRetrans != 4096 ||
 		samples[0].ClientTCPRTORate != 0.01 ||
-		samples[0].ClientTCPDeliveryBPS != 2*1024*1024 {
+		samples[0].ClientTCPDeliveryBPS != 2*1024*1024 ||
+		samples[0].OriginFailureClass != "origin_dns_failed" {
 		t.Fatalf("unexpected normalized sample: %+v", samples[0])
 	}
 }

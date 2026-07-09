@@ -2,6 +2,7 @@ package localwal
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +29,8 @@ type Record struct {
 	Subject       string            `json:"subject,omitempty"`
 	Evidence      map[string]string `json:"evidence,omitempty"`
 	EvidenceHash  string            `json:"evidence_hash,omitempty"`
+	Signer        string            `json:"signer,omitempty"`
+	Signature     string            `json:"signature,omitempty"`
 	ExpiresAt     *time.Time        `json:"expires_at,omitempty"`
 	RecordedAt    time.Time         `json:"recorded_at"`
 }
@@ -128,6 +131,92 @@ func ReadAll(path string) ([]Record, error) {
 		return records[i].RecordedAt.Before(records[j].RecordedAt)
 	})
 	return records, nil
+}
+
+func SignRecord(record Record, signer string, secret []byte) (Record, error) {
+	if len(secret) == 0 {
+		return Record{}, fmt.Errorf("wal signing secret is required")
+	}
+	record.Signer = strings.TrimSpace(signer)
+	if record.Signer == "" {
+		return Record{}, fmt.Errorf("wal signer is required")
+	}
+	record.Signature = ""
+	record.Evidence = cloneEvidence(record.Evidence)
+	record.EvidenceHash = EvidenceHash(record.Evidence)
+	payload, err := canonicalRecord(record)
+	if err != nil {
+		return Record{}, err
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(payload)
+	record.Signature = "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+	return record, nil
+}
+
+func VerifyRecord(record Record, secret []byte) error {
+	if len(secret) == 0 {
+		return fmt.Errorf("wal verification secret is required")
+	}
+	if strings.TrimSpace(record.Signer) == "" {
+		return fmt.Errorf("wal signer is required")
+	}
+	signature := strings.TrimSpace(record.Signature)
+	if signature == "" {
+		return fmt.Errorf("wal signature is required")
+	}
+	unsigned := record
+	unsigned.Signature = ""
+	if unsigned.EvidenceHash == "" {
+		unsigned.EvidenceHash = EvidenceHash(unsigned.Evidence)
+	}
+	payload, err := canonicalRecord(unsigned)
+	if err != nil {
+		return err
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(payload)
+	want := "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(signature), []byte(want)) {
+		return fmt.Errorf("wal signature mismatch")
+	}
+	return nil
+}
+
+func canonicalRecord(record Record) ([]byte, error) {
+	record.Evidence = cloneEvidence(record.Evidence)
+	if record.EvidenceHash == "" {
+		record.EvidenceHash = EvidenceHash(record.Evidence)
+	}
+	return json.Marshal(struct {
+		SchemaVersion string            `json:"schema_version"`
+		ID            string            `json:"id"`
+		Component     string            `json:"component"`
+		NodeID        string            `json:"node_id,omitempty"`
+		Action        string            `json:"action"`
+		SafetyClass   string            `json:"safety_class,omitempty"`
+		Generation    string            `json:"generation,omitempty"`
+		Subject       string            `json:"subject,omitempty"`
+		Evidence      map[string]string `json:"evidence,omitempty"`
+		EvidenceHash  string            `json:"evidence_hash,omitempty"`
+		Signer        string            `json:"signer,omitempty"`
+		ExpiresAt     *time.Time        `json:"expires_at,omitempty"`
+		RecordedAt    time.Time         `json:"recorded_at"`
+	}{
+		SchemaVersion: record.SchemaVersion,
+		ID:            record.ID,
+		Component:     record.Component,
+		NodeID:        record.NodeID,
+		Action:        record.Action,
+		SafetyClass:   record.SafetyClass,
+		Generation:    record.Generation,
+		Subject:       record.Subject,
+		Evidence:      record.Evidence,
+		EvidenceHash:  record.EvidenceHash,
+		Signer:        record.Signer,
+		ExpiresAt:     normalizeTimePtr(record.ExpiresAt),
+		RecordedAt:    record.RecordedAt.UTC(),
+	})
 }
 
 func EvidenceHash(evidence map[string]string) string {

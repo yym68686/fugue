@@ -96,10 +96,14 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 	}
 	minHealthy := queryIntDefault(r, "min_healthy_edges", 1)
 	eligible, gated := trafficSafetyEdgeGroups(explain)
+	healthyEdgeCount := trafficSafetyHealthyEdgeNodeCount(explain)
+	if healthyEdgeCount == 0 {
+		healthyEdgeCount = len(eligible)
+	}
 	gateReasons := trafficSafetyHardGateReasons(explain)
 	blockers := []string{}
-	if len(eligible) < minHealthy {
-		blockers = append(blockers, fmt.Sprintf("healthy eligible edge groups %d below minimum %d", len(eligible), minHealthy))
+	if healthyEdgeCount < minHealthy {
+		blockers = append(blockers, fmt.Sprintf("healthy eligible edge nodes %d below minimum %d", healthyEdgeCount, minHealthy))
 	}
 	if explain.Route == nil {
 		blockers = append(blockers, "hostname has no generated edge route")
@@ -108,7 +112,7 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 		blockers = append(blockers, routeBlockers...)
 	}
 	grayScope := s.trafficSafetyGrayReleaseScope(hostname)
-	strictProtection := len(eligible) <= minHealthy
+	strictProtection := healthyEdgeCount <= minHealthy
 	explorationPaused := len(blockers) > 0 || strictProtection
 	if strictProtection {
 		blockers = append(blockers, "service is at or below minimum healthy edge count; exploration and exclusion expansion require strict protection")
@@ -117,7 +121,7 @@ func (s *Server) handleExplainTrafficSafety(w http.ResponseWriter, r *http.Reque
 		Hostname:            hostname,
 		Pass:                len(blockers) == 0,
 		MinHealthyEdgeCount: minHealthy,
-		HealthyEdgeCount:    len(eligible),
+		HealthyEdgeCount:    healthyEdgeCount,
 		EligibleEdgeGroups:  eligible,
 		HardGatedEdgeGroups: gated,
 		HardGateReasons:     gateReasons,
@@ -162,11 +166,12 @@ func (s *Server) handleExplainRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, model.RequestExplainResponseEnvelope{Explain: model.RequestExplainResponse{
-		RequestID:   requestID,
-		Found:       false,
-		ErrorClass:  "not_observed",
-		SecretSafe:  true,
-		GeneratedAt: now,
+		RequestID:    requestID,
+		Found:        false,
+		ErrorClass:   "not_observed",
+		FailurePlane: "control_plane_observability",
+		SecretSafe:   true,
+		GeneratedAt:  now,
 		Evidence: map[string]string{
 			"since": since.Format(time.RFC3339),
 		},
@@ -264,6 +269,19 @@ func trafficSafetyEdgeGroups(explain model.RouteExplainResponse) ([]string, []st
 	return sortedKeys(eligibleSet), sortedKeys(gatedSet)
 }
 
+func trafficSafetyHealthyEdgeNodeCount(explain model.RouteExplainResponse) int {
+	healthy := 0
+	for _, route := range explain.Routes {
+		if route.HealthyEdgeNodeCount > healthy {
+			healthy = route.HealthyEdgeNodeCount
+		}
+	}
+	if explain.Route != nil && explain.Route.HealthyEdgeNodeCount > healthy {
+		healthy = explain.Route.HealthyEdgeNodeCount
+	}
+	return healthy
+}
+
 func trafficSafetyHardGateReasons(explain model.RouteExplainResponse) map[string]string {
 	reasons := map[string]string{}
 	for groupID, healthy := range explain.HealthyEdgeGroups {
@@ -357,42 +375,46 @@ func sortedKeys(in map[string]struct{}) []string {
 
 func (s *Server) requestExplainFromSample(r *http.Request, requestID string, sample model.EdgePerformanceSample, generatedAt time.Time) model.RequestExplainResponse {
 	attribution := requestAttributionFromSample(sample)
+	errorClass := requestErrorClassFromSample(sample)
 	explain := model.RequestExplainResponse{
-		RequestID:            requestID,
-		Found:                true,
-		ErrorClass:           requestErrorClassFromSample(sample),
-		EdgeID:               sample.EdgeID,
-		EdgeGroupID:          sample.EdgeGroupID,
-		Hostname:             sample.Hostname,
-		PathPrefix:           sample.PathPrefix,
-		Method:               sample.Method,
-		TrafficClass:         sample.TrafficClass,
-		RouteGeneration:      sample.RouteGeneration,
-		StatusCode:           sample.StatusCode,
-		BodyReadBlockMS:      sample.BodyReadBlockMS,
-		UploadEffectiveBPS:   sample.UploadEffectiveBPS,
-		MinWindowBPS:         sample.MinWindowBPS,
-		MaxReadGapMS:         sample.MaxReadGapMS,
-		RequestBodyBytes:     sample.RequestBodyBytes,
-		RequestBodyReadBytes: sample.RequestBodyReadBytes,
-		BodyIncompleteCount:  sample.BodyIncompleteCount,
-		BodyReadErrorCount:   sample.BodyReadErrorCount,
-		OriginDNSMS:          sample.OriginDNSMS,
-		OriginConnectMS:      sample.OriginConnectMS,
-		OriginRequestWriteMS: sample.OriginRequestWriteMS,
-		OriginResponseWaitMS: sample.OriginResponseWaitMS,
-		OriginTTFBMS:         sample.OriginTTFBMS,
-		OriginTotalMS:        sample.OriginTotalMS,
-		ClientTCPRTTMS:       sample.ClientTCPRTTMS,
-		ClientTCPRetransRate: sample.ClientTCPRetransRate,
-		ClientTCPRTORate:     sample.ClientTCPRTORate,
-		ClientTCPDeliveryBPS: sample.ClientTCPDeliveryBPS,
-		Attribution:          attribution,
-		FailureContracts:     requestFailureContractsFromAttribution(attribution),
-		Evidence:             requestExplainEvidence(sample),
-		SecretSafe:           true,
-		SampledAt:            sample.SampledAt,
-		GeneratedAt:          generatedAt,
+		RequestID:               requestID,
+		Found:                   true,
+		ErrorClass:              errorClass,
+		FailurePlane:            requestFailurePlane(errorClass, sample),
+		EdgeID:                  sample.EdgeID,
+		EdgeGroupID:             sample.EdgeGroupID,
+		Hostname:                sample.Hostname,
+		PathPrefix:              sample.PathPrefix,
+		Method:                  sample.Method,
+		TrafficClass:            sample.TrafficClass,
+		RouteGeneration:         sample.RouteGeneration,
+		StatusCode:              sample.StatusCode,
+		BodyReadBlockMS:         sample.BodyReadBlockMS,
+		UploadEffectiveBPS:      sample.UploadEffectiveBPS,
+		MinWindowBPS:            sample.MinWindowBPS,
+		MaxReadGapMS:            sample.MaxReadGapMS,
+		RequestBodyBytes:        sample.RequestBodyBytes,
+		RequestBodyReadBytes:    sample.RequestBodyReadBytes,
+		BodyIncompleteCount:     sample.BodyIncompleteCount,
+		BodyReadErrorCount:      sample.BodyReadErrorCount,
+		OriginDNSMS:             sample.OriginDNSMS,
+		OriginConnectMS:         sample.OriginConnectMS,
+		OriginEndpointConnectMS: sample.OriginEndpointConnectMS,
+		OriginRequestWriteMS:    sample.OriginRequestWriteMS,
+		OriginResponseWaitMS:    sample.OriginResponseWaitMS,
+		OriginTTFBMS:            sample.OriginTTFBMS,
+		OriginTotalMS:           sample.OriginTotalMS,
+		OriginFailureClass:      firstNonEmpty(sample.OriginFailureClass, requestOriginFailureClassFromSample(sample)),
+		ClientTCPRTTMS:          sample.ClientTCPRTTMS,
+		ClientTCPRetransRate:    sample.ClientTCPRetransRate,
+		ClientTCPRTORate:        sample.ClientTCPRTORate,
+		ClientTCPDeliveryBPS:    sample.ClientTCPDeliveryBPS,
+		Attribution:             attribution,
+		FailureContracts:        requestFailureContractsFromAttribution(attribution),
+		Evidence:                requestExplainEvidence(sample),
+		SecretSafe:              true,
+		SampledAt:               sample.SampledAt,
+		GeneratedAt:             generatedAt,
 	}
 	if routeExplain, err := s.explainRouteForRobustness(r, sample.Hostname); err == nil {
 		if route := requestRouteForSample(routeExplain.Routes, sample); route != nil {
@@ -431,18 +453,68 @@ func requestErrorClassFromSample(sample model.EdgePerformanceSample) string {
 	}
 }
 
-func requestUpstreamUnavailableClass(sample model.EdgePerformanceSample) string {
+func requestFailurePlane(errorClass string, sample model.EdgePerformanceSample) string {
+	errorClass = strings.TrimSpace(strings.ToLower(errorClass))
 	switch {
-	case sample.OriginDNSMS > 0 && sample.OriginConnectMS == 0 && sample.OriginTTFBMS == 0:
+	case errorClass == "", errorClass == "none":
+		return "none"
+	case strings.HasPrefix(errorClass, "edge."), strings.HasPrefix(errorClass, "origin."):
+		return "data_plane"
+	case sample.OriginDNSMS > 0 || sample.OriginConnectMS > 0 || sample.OriginEndpointConnectMS > 0 || sample.OriginRequestWriteMS > 0 || sample.OriginResponseWaitMS > 0 || sample.OriginTTFBMS > 0 || strings.TrimSpace(sample.OriginFailureClass) != "":
+		return "data_plane"
+	case sample.BodyReadErrorCount > 0 || sample.BodyIncompleteCount > 0 || sample.MaxReadGapMS > 0 || sample.ClientTCPRetransRate > 0 || sample.ClientTCPRTORate > 0:
+		return "data_plane"
+	case errorClass == "auth":
+		return "auth_control"
+	case errorClass == "quota":
+		return "quota_control"
+	case strings.HasPrefix(errorClass, "business."):
+		return "application"
+	default:
+		return "unknown"
+	}
+}
+
+func requestUpstreamUnavailableClass(sample model.EdgePerformanceSample) string {
+	switch requestOriginFailureClassFromSample(sample) {
+	case "origin_dns_failed":
 		return "edge.upstream_unavailable.origin_dns"
-	case sample.OriginConnectMS > 0 && sample.OriginTTFBMS == 0:
+	case "origin_connect_failed":
 		return "edge.upstream_unavailable.origin_connect"
-	case sample.OriginRequestWriteMS > 0 && sample.OriginResponseWaitMS == 0 && sample.OriginTTFBMS == 0:
+	case "origin_endpoint_connect_failed":
+		return "edge.upstream_unavailable.origin_endpoint_connect"
+	case "origin_request_write_failed":
 		return "edge.upstream_unavailable.origin_request_write"
-	case sample.OriginResponseWaitMS > 0 && sample.OriginTTFBMS == 0:
+	case "origin_ttfb_timeout":
 		return "edge.upstream_unavailable.timeout"
+	case "origin_5xx_or_slow":
+		return "edge.upstream_unavailable.origin_slow"
+	case "origin_unavailable":
+		return "edge.upstream_unavailable.origin_unavailable"
 	default:
 		return "edge.upstream_unavailable.origin_unavailable"
+	}
+}
+
+func requestOriginFailureClassFromSample(sample model.EdgePerformanceSample) string {
+	if class := strings.TrimSpace(sample.OriginFailureClass); class != "" {
+		return class
+	}
+	switch {
+	case sample.OriginDNSMS > 0 && sample.OriginConnectMS == 0 && sample.OriginEndpointConnectMS == 0 && sample.OriginTTFBMS == 0:
+		return "origin_dns_failed"
+	case sample.OriginEndpointConnectMS > 0 && sample.OriginTTFBMS == 0:
+		return "origin_endpoint_connect_failed"
+	case sample.OriginConnectMS > 0 && sample.OriginTTFBMS == 0:
+		return "origin_connect_failed"
+	case sample.OriginRequestWriteMS > 0 && sample.OriginResponseWaitMS == 0 && sample.OriginTTFBMS == 0:
+		return "origin_request_write_failed"
+	case sample.OriginResponseWaitMS > 0 && sample.OriginTTFBMS == 0:
+		return "origin_ttfb_timeout"
+	case sample.OriginTTFBMS > 0:
+		return "origin_5xx_or_slow"
+	default:
+		return ""
 	}
 }
 
@@ -460,6 +532,9 @@ func requestAttributionFromSample(sample model.EdgePerformanceSample) []string {
 	if sample.OriginConnectMS > 0 {
 		out = append(out, "edge_to_origin_connect")
 	}
+	if sample.OriginEndpointConnectMS > 0 {
+		out = append(out, "edge_to_origin_endpoint_connect")
+	}
 	if sample.OriginTTFBMS > 0 || sample.OriginResponseWaitMS > 0 {
 		out = append(out, "origin_response_wait")
 	}
@@ -476,9 +551,10 @@ func requestFailureContractsFromAttribution(attribution []string) []string {
 		case "client_to_edge_body_read", "client_to_edge_tcp":
 			set["edge_front"] = struct{}{}
 			set["edge_worker"] = struct{}{}
-		case "edge_to_origin_dns", "edge_to_origin_connect":
+		case "edge_to_origin_dns", "edge_to_origin_connect", "edge_to_origin_endpoint_connect":
 			set["edge_worker"] = struct{}{}
 			set["kubernetes_cni_dns"] = struct{}{}
+			set["runtime_scheduler"] = struct{}{}
 		case "origin_response_wait":
 			set["app_runtime"] = struct{}{}
 			set["runtime_scheduler"] = struct{}{}

@@ -223,6 +223,10 @@ type EdgeRouteBinding struct {
 	ExcludedEdgeGroupIDs []string            `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string              `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time          `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes  int                 `json:"min_healthy_edge_nodes,omitempty"`
+	HealthyEdgeNodeCount int                 `json:"healthy_edge_node_count,omitempty"`
+	EdgeRedundancyStatus string              `json:"edge_redundancy_status,omitempty"`
+	EdgeRedundancyReason string              `json:"edge_redundancy_reason,omitempty"`
 	RoutePolicy          string              `json:"route_policy"`
 	SelectionReason      string              `json:"selection_reason,omitempty"`
 	FallbackReason       string              `json:"fallback_reason,omitempty"`
@@ -267,6 +271,7 @@ type EdgeRoutePolicy struct {
 	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
 	RoutePolicy          string     `json:"route_policy"`
 	Enabled              bool       `json:"enabled"`
 	CreatedAt            time.Time  `json:"created_at"`
@@ -299,8 +304,9 @@ type BundleSignature struct {
 }
 
 type DiscoveryEndpoint struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	EndpointMode string `json:"endpoint_mode,omitempty"`
 }
 
 type DiscoveryRegistryEndpoint struct {
@@ -314,6 +320,7 @@ type DiscoveryKubernetesEndpoint struct {
 	Name             string   `json:"name"`
 	Server           string   `json:"server,omitempty"`
 	FallbackServers  []string `json:"fallback_servers,omitempty"`
+	EndpointMode     string   `json:"endpoint_mode,omitempty"`
 	CAHash           string   `json:"ca_hash,omitempty"`
 	RegistryEndpoint string   `json:"registry_endpoint,omitempty"`
 }
@@ -441,6 +448,10 @@ type EdgeDNSAnswerCandidate struct {
 	CanaryState       string             `json:"canary_state,omitempty"`
 	CanaryWeight      int                `json:"canary_weight,omitempty"`
 	PublicProbeStatus string             `json:"public_probe_status,omitempty"`
+	ServingGeneration string             `json:"serving_generation,omitempty"`
+	LKGGeneration     string             `json:"lkg_generation,omitempty"`
+	CacheStatus       string             `json:"cache_status,omitempty"`
+	MaxStaleExceeded  bool               `json:"max_stale_exceeded,omitempty"`
 	DNSEligible       bool               `json:"dns_eligible,omitempty"`
 	Priority          int                `json:"priority,omitempty"`
 	Weight            int                `json:"weight,omitempty"`
@@ -505,10 +516,12 @@ type EdgePerformanceSample struct {
 	ResponseEgressBPS         int64     `json:"response_egress_bps,omitempty"`
 	OriginDNSMS               int64     `json:"origin_dns_ms,omitempty"`
 	OriginConnectMS           int64     `json:"origin_connect_ms,omitempty"`
+	OriginEndpointConnectMS   int64     `json:"origin_endpoint_connect_ms,omitempty"`
 	OriginRequestWriteMS      int64     `json:"origin_request_write_ms,omitempty"`
 	OriginResponseWaitMS      int64     `json:"origin_response_wait_ms,omitempty"`
 	OriginTTFBMS              int64     `json:"origin_ttfb_ms,omitempty"`
 	OriginTotalMS             int64     `json:"origin_total_ms,omitempty"`
+	OriginFailureClass        string    `json:"origin_failure_class,omitempty"`
 	StreamingRequestCount     int       `json:"streaming_request_count,omitempty"`
 	WebSocketRequestCount     int       `json:"websocket_request_count,omitempty"`
 	SSERequestCount           int       `json:"sse_request_count,omitempty"`

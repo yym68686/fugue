@@ -202,6 +202,11 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, topologyChecks...)
+	trafficSafetyChecks, err := s.robustnessTrafficSafetyChecks(r)
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, trafficSafetyChecks...)
 	nodeDeepHealthChecks, err := s.robustnessNodeDeepHealthChecks()
 	if err != nil {
 		return model.RobustnessStatus{}, err
@@ -227,6 +232,10 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, consumerChecks...)
+	platformConsumers, err := s.robustnessPlatformConsumers()
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
 	runtimeContinuity, err := s.buildRuntimeContinuityStatuses()
 	if err != nil {
 		return model.RobustnessStatus{}, err
@@ -312,6 +321,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		RouteExplain:      routeExplain,
 		FailureContracts:  failureContracts,
 		ReleaseSignals:    releaseSignals,
+		PlatformConsumers: platformConsumers,
 		GeneratedSources: []string{
 			"platform_autonomy",
 			"dns_delegation_preflight",
@@ -324,6 +334,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 			"operation_inventory",
 			"route_explain",
 			"node_deep_health",
+			"traffic_safety",
 			"platform_consumer_generation",
 			"runtime_continuity",
 			"release_guard_policy",
@@ -984,6 +995,100 @@ func (s *Server) explainRouteForRobustness(r *http.Request, hostname string) (mo
 		}
 	}
 	return response, nil
+}
+
+func (s *Server) robustnessTrafficSafetyChecks(r *http.Request) ([]model.RobustnessCheck, error) {
+	bundle, err := s.deriveEdgeRouteBundle(r, edgeRouteBundleOptions{})
+	if err != nil {
+		return nil, err
+	}
+	latestBySubject := map[string]model.EdgeRouteBinding{}
+	for _, route := range bundle.Routes {
+		hostname := normalizeExternalAppDomain(route.Hostname)
+		if hostname == "" {
+			continue
+		}
+		minHealthy := route.MinHealthyEdgeNodes
+		if minHealthy <= 0 {
+			minHealthy = defaultMinHealthyEdgeNodesForBinding(route)
+		}
+		route.MinHealthyEdgeNodes = minHealthy
+		key := strings.Join([]string{
+			hostname,
+			strings.TrimSpace(route.PathPrefix),
+			strings.TrimSpace(route.RouteKind),
+			strings.TrimSpace(route.EdgeGroupID),
+		}, "\x00")
+		if existing, ok := latestBySubject[key]; ok && existing.RouteGeneration >= route.RouteGeneration {
+			continue
+		}
+		latestBySubject[key] = route
+	}
+	if len(latestBySubject) == 0 {
+		return []model.RobustnessCheck{{
+			Name:       "traffic_safety_inventory",
+			Pass:       true,
+			Severity:   model.RobustnessSeverityInfo,
+			Subject:    "edge-routes",
+			Expected:   "generated route bundle exposes service traffic-safety metadata",
+			Observed:   "routes=0",
+			Evidence:   map[string]string{"guardian": "traffic-safety"},
+			RepairHint: "publish an edge route bundle before traffic-safety incidents can be generated",
+		}}, nil
+	}
+	keys := make([]string, 0, len(latestBySubject))
+	for key := range latestBySubject {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	checks := make([]model.RobustnessCheck, 0, len(keys)+1)
+	atRisk := 0
+	for _, key := range keys {
+		route := latestBySubject[key]
+		minHealthy := route.MinHealthyEdgeNodes
+		healthy := route.HealthyEdgeNodeCount
+		pass := healthy >= minHealthy
+		if !pass {
+			atRisk++
+		}
+		severity := model.RobustnessSeverityInfo
+		if !pass {
+			severity = model.RobustnessSeverityDegraded
+			if healthy == 0 {
+				severity = model.RobustnessSeverityBlockPublish
+			}
+		}
+		subject := "hostname:" + normalizeExternalAppDomain(route.Hostname)
+		if path := strings.TrimSpace(route.PathPrefix); path != "" {
+			subject += path
+		}
+		check := model.RobustnessCheck{
+			Name:       "traffic_safety_min_healthy_edges",
+			Pass:       pass,
+			Severity:   severity,
+			Subject:    subject,
+			Expected:   fmt.Sprintf("healthy_edge_node_count >= min_healthy_edge_nodes (%d)", minHealthy),
+			Observed:   fmt.Sprintf("healthy_edge_node_count=%d min_healthy_edge_nodes=%d route_kind=%s edge_group=%s status=%s", healthy, minHealthy, route.RouteKind, route.EdgeGroupID, route.Status),
+			Message:    route.EdgeRedundancyReason,
+			Evidence:   map[string]string{"guardian": "traffic-safety", "hostname": normalizeExternalAppDomain(route.Hostname), "path_prefix": strings.TrimSpace(route.PathPrefix), "route_kind": strings.TrimSpace(route.RouteKind), "edge_group_id": strings.TrimSpace(route.EdgeGroupID), "route_generation": strings.TrimSpace(route.RouteGeneration), "edge_redundancy_status": strings.TrimSpace(route.EdgeRedundancyStatus)},
+			RepairHint: "restore or add a healthy edge, or explicitly lower the service minimum if the single-edge risk is accepted",
+		}
+		if check.Message == "" && !pass {
+			check.Message = fmt.Sprintf("healthy eligible edge nodes %d below minimum %d", healthy, minHealthy)
+		}
+		checks = append(checks, check)
+	}
+	checks = append(checks, model.RobustnessCheck{
+		Name:       "traffic_safety_inventory",
+		Pass:       true,
+		Severity:   model.RobustnessSeverityInfo,
+		Subject:    "edge-routes",
+		Expected:   "generated route bundle exposes minimum healthy edge metadata",
+		Observed:   fmt.Sprintf("routes=%d at_risk=%d", len(latestBySubject), atRisk),
+		Evidence:   map[string]string{"guardian": "traffic-safety"},
+		RepairHint: "use fugue admin traffic-safety explain <hostname> for per-service edge eligibility details",
+	})
+	return checks, nil
 }
 
 func robustnessChecksFromStore(subject string, checks []model.StoreInvariantCheck) []model.RobustnessCheck {

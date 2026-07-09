@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/localwal"
 	"fugue/internal/model"
 	"fugue/internal/tcpdiag"
 
@@ -692,12 +693,14 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	defer server.Close()
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	walPath := filepath.Join(t.TempDir(), "edge-autonomy.wal")
 	var logs bytes.Buffer
 	service := NewService(config.EdgeConfig{
-		APIURL:      server.URL,
-		EdgeToken:   "edge-secret",
-		EdgeGroupID: "edge-group-country-hk",
-		CachePath:   cachePath,
+		APIURL:          server.URL,
+		EdgeToken:       "edge-secret",
+		EdgeGroupID:     "edge-group-country-hk",
+		CachePath:       cachePath,
+		AutonomyWALPath: walPath,
 	}, log.New(&logs, "", 0))
 
 	if err := service.SyncOnce(context.Background()); err != nil {
@@ -742,6 +745,105 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "edge route bundle sync success; version=routegen_first routes=1 tls_allowlist=1") {
 		t.Fatalf("expected sync success log, got %s", logs.String())
+	}
+	records, err := localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read edge autonomy wal: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one edge LKG write WAL record, got %+v", records)
+	}
+	record := records[0]
+	if record.Component != "edge-worker" || record.Action != "lkg_write" || record.SafetyClass != "L0_observe_only" {
+		t.Fatalf("unexpected edge WAL record: %+v", record)
+	}
+	if record.Generation != "routegen_first" || record.Subject != "routegen_first" {
+		t.Fatalf("unexpected edge WAL generation/subject: %+v", record)
+	}
+	if record.ExpiresAt == nil {
+		t.Fatalf("expected WAL expiry for edge LKG write, got %+v", record)
+	}
+	for key, want := range map[string]string{
+		"edge_group_id":       "edge-group-country-hk",
+		"route_count":         "1",
+		"tls_allowlist_count": "1",
+		"cache_path":          cachePath,
+	} {
+		if got := record.Evidence[key]; got != want {
+			t.Fatalf("expected WAL evidence %s=%q, got %q in %+v", key, want, got, record.Evidence)
+		}
+	}
+}
+
+func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	walPath := filepath.Join(t.TempDir(), "edge-autonomy.wal")
+	writeTestCache(t, cachePath, testBundle("routegen_old"), `"routegen_old"`)
+	newBundle := testBundle("routegen_new")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/edge/routes":
+			w.Header().Set("ETag", `"routegen_new"`)
+			if err := json.NewEncoder(w).Encode(newBundle); err != nil {
+				t.Fatalf("encode bundle: %v", err)
+			}
+		case "/load":
+			http.Error(w, "bad caddy config", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	service := NewService(config.EdgeConfig{
+		APIURL:                server.URL,
+		EdgeToken:             "edge-secret",
+		EdgeGroupID:           "edge-group-country-hk",
+		CachePath:             cachePath,
+		AutonomyWALPath:       walPath,
+		CaddyEnabled:          true,
+		CaddyAdminURL:         server.URL,
+		CaddyListenAddr:       "127.0.0.1:18080",
+		CaddyProxyListenAddr:  "127.0.0.1:7833",
+		CaddySharedTLSEnabled: false,
+		CacheWarmupEnabled:    false,
+	}, log.New(&logs, "", 0))
+	service.HTTPClient = server.Client()
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("load old cache: %v", err)
+	}
+	if err := service.SyncOnce(context.Background()); err == nil {
+		t.Fatal("expected caddy apply failure")
+	}
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(data, &cached); err != nil {
+		t.Fatalf("decode cache: %v", err)
+	}
+	if cached.Bundle.Version != "routegen_old" {
+		t.Fatalf("failed Caddy apply must not promote new LKG, got %+v", cached.Bundle.Version)
+	}
+	status := service.Status()
+	if status.BundleVersion != "routegen_old" || !status.StaleCache || status.Healthy || status.Status != "caddy-error" {
+		t.Fatalf("expected old LKG to remain stale with Caddy error, got %+v", status)
+	}
+	records, err := localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read edge autonomy wal: %v", err)
+	}
+	for _, record := range records {
+		if record.Action == "lkg_write" && record.Generation == "routegen_new" {
+			t.Fatalf("new bundle should not be written as LKG after failed Caddy apply: %+v", records)
+		}
+	}
+	if !strings.Contains(logs.String(), "edge route bundle sync failed; error=apply caddy config") {
+		t.Fatalf("expected Caddy apply sync failure log, got %s", logs.String())
 	}
 }
 
@@ -1107,12 +1209,14 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "routes-cache.json")
+	walPath := filepath.Join(t.TempDir(), "edge-autonomy.wal")
 	writeTestCache(t, cachePath, testBundle("routegen_stale"), `"routegen_stale"`)
 	var logs bytes.Buffer
 	service := NewService(config.EdgeConfig{
-		APIURL:    "https://api.example.invalid",
-		EdgeToken: "edge-secret",
-		CachePath: cachePath,
+		APIURL:          "https://api.example.invalid",
+		EdgeToken:       "edge-secret",
+		CachePath:       cachePath,
+		AutonomyWALPath: walPath,
 	}, log.New(&logs, "", 0))
 	service.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("control plane unavailable")
@@ -1152,6 +1256,33 @@ func TestSyncOnceUsesStaleCacheWhenAPIUnavailable(t *testing.T) {
 	if !strings.Contains(logOutput, "edge route cache loaded; version=routegen_stale") ||
 		!strings.Contains(logOutput, "edge route bundle sync failed; using stale cache; version=routegen_stale") {
 		t.Fatalf("expected cache loaded and stale fallback logs, got %s", logOutput)
+	}
+	records, err := localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read edge autonomy wal: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected load_cache and control_plane_sync_failed serve_lkg WAL records, got %+v", records)
+	}
+	byReason := map[string]localwal.Record{}
+	for _, record := range records {
+		if record.Component != "edge-worker" || record.Action != "serve_lkg" || record.SafetyClass != "L0_observe_only" {
+			t.Fatalf("unexpected stale LKG WAL record: %+v", record)
+		}
+		if record.Generation != "routegen_stale" || record.Subject != "routegen_stale" {
+			t.Fatalf("unexpected stale WAL generation/subject: %+v", record)
+		}
+		byReason[record.Evidence["reason"]] = record
+	}
+	for _, reason := range []string{"load_cache", "control_plane_sync_failed"} {
+		if _, ok := byReason[reason]; !ok {
+			t.Fatalf("missing stale WAL reason %q in %+v", reason, records)
+		}
+	}
+	for _, record := range byReason {
+		if record.Evidence["stale_cache"] != "true" || record.Evidence["route_count"] != "1" {
+			t.Fatalf("unexpected stale WAL evidence: %+v", record.Evidence)
+		}
 	}
 }
 

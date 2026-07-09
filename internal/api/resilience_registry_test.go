@@ -159,11 +159,25 @@ func TestRequestExplainSplitsUpstreamUnavailableAndFailureContracts(t *testing.T
 			wantSystem: "kubernetes_cni_dns",
 		},
 		{
+			name:       "stored-dns-class",
+			sample:     model.EdgePerformanceSample{StatusCode: http.StatusServiceUnavailable, OriginFailureClass: "origin_dns_failed"},
+			wantClass:  "edge.upstream_unavailable.origin_dns",
+			wantCause:  "edge_observed_request",
+			wantSystem: "observability_metrics",
+		},
+		{
 			name:       "connect",
 			sample:     model.EdgePerformanceSample{StatusCode: http.StatusServiceUnavailable, OriginConnectMS: 50},
 			wantClass:  "edge.upstream_unavailable.origin_connect",
 			wantCause:  "edge_to_origin_connect",
 			wantSystem: "kubernetes_cni_dns",
+		},
+		{
+			name:       "endpoint-connect",
+			sample:     model.EdgePerformanceSample{StatusCode: http.StatusServiceUnavailable, OriginEndpointConnectMS: 35},
+			wantClass:  "edge.upstream_unavailable.origin_endpoint_connect",
+			wantCause:  "edge_to_origin_endpoint_connect",
+			wantSystem: "runtime_scheduler",
 		},
 		{
 			name:       "timeout",
@@ -188,8 +202,12 @@ func TestRequestExplainSplitsUpstreamUnavailableAndFailureContracts(t *testing.T
 			gotClass := requestErrorClassFromSample(tt.sample)
 			attribution := requestAttributionFromSample(tt.sample)
 			contracts := requestFailureContractsFromAttribution(attribution)
+			plane := requestFailurePlane(gotClass, tt.sample)
 			if gotClass != tt.wantClass {
 				t.Fatalf("expected class %s, got %s", tt.wantClass, gotClass)
+			}
+			if plane != "data_plane" {
+				t.Fatalf("expected data plane failure for %s, got %s", gotClass, plane)
 			}
 			if !stringSliceContains(attribution, tt.wantCause) || !stringSliceContains(contracts, tt.wantSystem) {
 				t.Fatalf("expected attribution %q and contract %q, got attribution=%v contracts=%v", tt.wantCause, tt.wantSystem, attribution, contracts)

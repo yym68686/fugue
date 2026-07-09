@@ -1033,6 +1033,7 @@ paths:
         - in: query
           name: min_healthy_edges
           required: false
+          description: Minimum healthy eligible edge nodes required.
           schema:
             type: integer
             format: int32
@@ -11931,7 +11932,7 @@ components:
           type: string
         route_kind:
           type: string
-          enum: [platform, custom-domain, platform-domain, platform-route]
+          enum: [platform, custom-domain, platform-domain, platform-route, control-plane-api]
         app_id:
           type: string
         tenant_id:
@@ -11953,6 +11954,31 @@ components:
         fallback_edge_group_id:
           type: string
         policy_edge_group_id:
+          type: string
+        excluded_edge_ids:
+          type: array
+          items:
+            type: string
+        excluded_edge_group_ids:
+          type: array
+          items:
+            type: string
+        exclusion_reason:
+          type: string
+        exclusion_expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        min_healthy_edge_nodes:
+          type: integer
+          format: int32
+        healthy_edge_node_count:
+          type: integer
+          format: int32
+        edge_redundancy_status:
+          type: string
+          enum: [ok, at_risk]
+        edge_redundancy_reason:
           type: string
         route_policy:
           type: string
@@ -12061,6 +12087,9 @@ components:
           type: string
           format: date-time
           nullable: true
+        min_healthy_edge_nodes:
+          type: integer
+          format: int32
         route_policy:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]
@@ -12285,6 +12314,14 @@ components:
           format: int32
         public_probe_status:
           type: string
+        serving_generation:
+          type: string
+        lkg_generation:
+          type: string
+        cache_status:
+          type: string
+        max_stale_exceeded:
+          type: boolean
         dns_eligible:
           type: boolean
         draining:
@@ -13066,6 +13103,8 @@ components:
         origin_total_ms:
           type: integer
           format: int64
+        origin_failure_class:
+          type: string
         streaming_request_count:
           type: integer
           format: int32
@@ -13153,6 +13192,9 @@ components:
           type: string
           format: date-time
           nullable: true
+        min_healthy_edge_nodes:
+          type: integer
+          format: int32
         route_policy:
           type: string
           enum: [route_a_only, edge_canary, edge_enabled]
@@ -22902,6 +22944,8 @@ components:
         origin_total_ms:
           type: integer
           format: int64
+        origin_failure_class:
+          type: string
         client_tcp_rtt_ms:
           type: number
           format: double

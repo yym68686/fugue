@@ -1117,7 +1117,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v19"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v20"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -1127,6 +1127,7 @@ FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_FILE="${FUGUE_NODE_UPDATER_DISCOVERY_BUNDLE_
 FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE="${FUGUE_NODE_UPDATER_DISCOVERY_ENV_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/discovery.env}"
 FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/desired-state.json}"
 FUGUE_NODE_UPDATER_STATE_ENV_FILE="${FUGUE_NODE_UPDATER_STATE_ENV_FILE:-${FUGUE_NODE_UPDATER_STATE_DIR}/state.env}"
+FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH="${FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH:-/var/lib/fugue/node-guardian/autonomy.wal}"
 FUGUE_NODE_UPDATER_K3S_CONFIG_FILE="${FUGUE_NODE_UPDATER_K3S_CONFIG_FILE:-/etc/rancher/k3s/config.yaml}"
 FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE="${FUGUE_NODE_UPDATER_K3S_REGISTRIES_FILE:-/etc/rancher/k3s/registries.yaml}"
 FUGUE_NODE_UPDATER_EDGE_ENV_FILE="${FUGUE_NODE_UPDATER_EDGE_ENV_FILE:-/etc/fugue/fugue-edge.env}"
@@ -2285,7 +2286,7 @@ render_lkg_service_env() {
   mkdir -p "$(dirname "${target}")"
   tmp="$(mktemp)"
   if [ -r "${target}" ]; then
-    grep -Ev '^(FUGUE_API_URL|FUGUE_EDGE_DISCOVERY_GENERATION|FUGUE_DNS_DISCOVERY_GENERATION|FUGUE_EDGE_TOKEN|FUGUE_DNS_TOKEN|FUGUE_BUNDLE_SIGNING_KEY|FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY)=' "${target}" >"${tmp}" || true
+    grep -Ev '^(FUGUE_API_URL|FUGUE_EDGE_DISCOVERY_GENERATION|FUGUE_DNS_DISCOVERY_GENERATION|FUGUE_EDGE_TOKEN|FUGUE_DNS_TOKEN|FUGUE_EDGE_AUTONOMY_WAL_PATH|FUGUE_DNS_AUTONOMY_WAL_PATH|FUGUE_BUNDLE_SIGNING_KEY|FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY)=' "${target}" >"${tmp}" || true
   fi
   {
     printf 'FUGUE_API_URL=%s\n' "$(json_quote_env "${api_url}")"
@@ -2299,6 +2300,14 @@ render_lkg_service_env() {
     if [ -n "${FUGUE_BUNDLE_REVOKED_KEY_IDS:-}" ]; then
       printf 'FUGUE_BUNDLE_REVOKED_KEY_IDS=%s\n' "$(json_quote_env "${FUGUE_BUNDLE_REVOKED_KEY_IDS}")"
     fi
+    case "${generation_key}" in
+      FUGUE_EDGE_DISCOVERY_GENERATION)
+        printf 'FUGUE_EDGE_AUTONOMY_WAL_PATH=%s\n' "$(json_quote_env "${FUGUE_EDGE_AUTONOMY_WAL_PATH:-/var/lib/fugue/edge/autonomy.wal}")"
+        ;;
+      FUGUE_DNS_DISCOVERY_GENERATION)
+        printf 'FUGUE_DNS_AUTONOMY_WAL_PATH=%s\n' "$(json_quote_env "${FUGUE_DNS_AUTONOMY_WAL_PATH:-/var/lib/fugue/dns/autonomy.wal}")"
+        ;;
+    esac
   } >>"${tmp}"
   write_file_if_changed "${tmp}" "${target}" || true
 }
@@ -2612,6 +2621,7 @@ import os
 import shutil
 import socket
 import subprocess
+import urllib.parse
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -2625,7 +2635,7 @@ def run(argv, timeout=3):
     except Exception as exc:
         return False, str(exc)[-240:]
 
-def check(name, category, status, observed="", expected="", hard=False, message="", evidence=None):
+def check(name, category, status, observed="", expected="", hard=False, message="", evidence=None, repair_action=""):
     return {
         "name": name,
         "category": category,
@@ -2634,11 +2644,77 @@ def check(name, category, status, observed="", expected="", hard=False, message=
         "expected": expected,
         "hard_fail": bool(hard),
         "message": message,
+        "repair_action": repair_action,
         "evidence": evidence or {},
         "checked_at": now,
     }
 
 checks = []
+
+def tcp_connect_check(name, category, host, port, expected, hard=False, timeout=3):
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            checks.append(check(name, category, "pass", f"{host}:{port} connected", expected, False))
+    except Exception as exc:
+        checks.append(check(name, category, "fail" if hard else "warning", str(exc), expected, hard))
+
+def systemd_or_process_check(name, unit, process_names):
+    ok, out = run(["systemctl", "is-active", unit], 3)
+    if ok:
+        checks.append(check(name, "process", "pass", out, f"{unit} active"))
+        return
+    for proc in process_names:
+        proc_ok, proc_out = run(["pgrep", "-f", proc], 3)
+        if proc_ok:
+            checks.append(check(name, "process", "pass", proc_out, f"{unit} or process {proc} active"))
+            return
+    checks.append(check(name, "process", "fail", out or "process not found", f"{unit} active", True, repair_action="restart_stateless_node_service"))
+
+def parse_host_port(raw, default_port):
+    raw = (raw or "").strip()
+    if not raw:
+        return "", default_port
+    if "://" not in raw:
+        raw = "https://" + raw
+    parsed = urllib.parse.urlparse(raw)
+    host = parsed.hostname or ""
+    port = parsed.port or default_port
+    return host, port
+
+systemd_or_process_check("k3s_agent_process", "k3s-agent", ["k3s agent", "k3s-agent"])
+systemd_or_process_check("kubelet_process", "k3s-agent", ["kubelet"])
+tcp_connect_check("local_apiserver_127_0_0_1_6444", "kubernetes", "127.0.0.1", 6444, "local k3s agent apiserver listens on 127.0.0.1:6444", True)
+
+k3s_server = os.environ.get("FUGUE_HEARTBEAT_K3S_SERVER", "")
+server_host, server_port = parse_host_port(k3s_server, 6443)
+if server_host:
+    tcp_connect_check("remotedialer_control_plane_endpoint", "kubernetes", server_host, server_port, "k3s remotedialer/control-plane endpoint reachable", True, timeout=5)
+else:
+    checks.append(check("remotedialer_control_plane_endpoint", "kubernetes", "warning", "control-plane endpoint unavailable", "k3s server endpoint"))
+
+node_name = os.uname().nodename
+if shutil.which("kubectl"):
+    ok_lease, lease_out = run(["kubectl", "-n", "kube-node-lease", "get", "lease", node_name, "-o", "jsonpath={.spec.renewTime}"], 5)
+    if ok_lease and lease_out.strip():
+        try:
+            renewed = datetime.datetime.fromisoformat(lease_out.strip().replace("Z", "+00:00"))
+            age = (datetime.datetime.now(datetime.timezone.utc) - renewed).total_seconds()
+            status = "fail" if age > 120 else ("warning" if age > 60 else "pass")
+            checks.append(check("node_lease_freshness", "kubernetes", status, "%.0fs" % age, "<60s preferred, <120s hard", status == "fail", evidence={"renew_time": lease_out.strip()}))
+        except Exception as exc:
+            checks.append(check("node_lease_freshness", "kubernetes", "warning", str(exc), "parse node lease renewTime"))
+    else:
+        checks.append(check("node_lease_freshness", "kubernetes", "warning", lease_out, "node lease readable"))
+else:
+    checks.append(check("node_lease_freshness", "kubernetes", "warning", "kubectl unavailable", "node lease readable"))
+
+ok_cri, cri_out = run(["crictl", "info"], 5)
+if ok_cri is None:
+    checks.append(check("pod_sandbox_creation", "cri", "warning", cri_out, "CRI runtime reachable for pod sandbox creation preflight"))
+elif ok_cri:
+    checks.append(check("pod_sandbox_creation", "cri", "pass", "crictl info ok", "CRI runtime reachable for pod sandbox creation preflight"))
+else:
+    checks.append(check("pod_sandbox_creation", "cri", "fail", cri_out, "CRI runtime reachable for pod sandbox creation preflight", True, repair_action="restart-k3s-agent"))
 
 def dns_query(server=None):
     if shutil.which("nslookup"):
@@ -2727,6 +2803,90 @@ if pod_cidr:
     checks.append(check("pod_cidr_drift", "cni", "fail" if drift else "pass", route_out if drift else pod_cidr, "PodCIDR route present", drift))
 else:
     checks.append(check("pod_cidr_drift", "cni", "warning", "PodCIDR unavailable", "Kubernetes node spec podCIDR"))
+
+ok_link, link_out = run(["ip", "link", "show"], 3)
+if ok_link is None:
+    checks.append(check("cni_bridge", "cni", "warning", link_out, "CNI bridge interface visible"))
+elif ok_link:
+    has_bridge = any(name in link_out for name in ("cni0", "flannel.1", "tailscale0"))
+    checks.append(check("cni_bridge", "cni", "pass" if has_bridge else "fail", link_out[-240:], "cni0/flannel.1/tailscale0 present", not has_bridge, repair_action="human_cni_boundary"))
+else:
+    checks.append(check("cni_bridge", "cni", "warning", link_out, "ip link show succeeds"))
+
+ok_proxy, proxy_out = run(["iptables-save"], 4)
+if ok_proxy:
+    has_proxy = "KUBE-SERVICES" in proxy_out or "KUBE-SVC" in proxy_out
+    checks.append(check("kube_proxy_rules", "kube-proxy", "pass" if has_proxy else "fail", "kube proxy rules present" if has_proxy else proxy_out[-240:], "kube-proxy iptables/ipvs rules present", not has_proxy, repair_action="human_kube_proxy_boundary"))
+else:
+    ok_ipvs, ipvs_out = run(["ipvsadm", "-Ln"], 4)
+    if ok_ipvs:
+        checks.append(check("kube_proxy_rules", "kube-proxy", "pass", "ipvs rules readable", "kube-proxy iptables/ipvs rules present"))
+    else:
+        checks.append(check("kube_proxy_rules", "kube-proxy", "warning", proxy_out or ipvs_out, "kube-proxy iptables/ipvs rules present"))
+
+try:
+    stat = os.statvfs("/")
+    disk_free_ratio = float(stat.f_bavail) / float(stat.f_blocks) if stat.f_blocks else 0.0
+    inode_free_ratio = float(stat.f_favail) / float(stat.f_files) if stat.f_files else 0.0
+    status = "fail" if disk_free_ratio < 0.05 or inode_free_ratio < 0.05 else ("warning" if disk_free_ratio < 0.10 or inode_free_ratio < 0.10 else "pass")
+    checks.append(check("disk_inode_pressure", "resource", status, "disk_free=%.1f%% inode_free=%.1f%%" % (disk_free_ratio * 100, inode_free_ratio * 100), "disk and inode free >=10% preferred, >=5% hard", status == "fail"))
+except Exception as exc:
+    checks.append(check("disk_inode_pressure", "resource", "warning", str(exc), "statvfs / readable"))
+
+try:
+    mem = {}
+    with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.split()
+            if len(parts) >= 2:
+                mem[parts[0].rstrip(":")] = int(parts[1])
+    total = float(mem.get("MemTotal", 0))
+    available = float(mem.get("MemAvailable", 0))
+    ratio = available / total if total else 0.0
+    status = "fail" if ratio < 0.03 else ("warning" if ratio < 0.08 else "pass")
+    checks.append(check("memory_pressure", "resource", status, "%.1f%% available" % (ratio * 100), "memory available >=8% preferred, >=3% hard", status == "fail"))
+except Exception as exc:
+    checks.append(check("memory_pressure", "resource", "warning", str(exc), "/proc/meminfo readable"))
+
+try:
+    with open("/proc/loadavg", "r", encoding="utf-8") as fh:
+        load1 = float(fh.read().split()[0])
+    cpus = os.cpu_count() or 1
+    ratio = load1 / float(cpus)
+    status = "fail" if ratio > 8 else ("warning" if ratio > 4 else "pass")
+    checks.append(check("cpu_load_pressure", "resource", status, "load1/cpu=%.2f" % ratio, "load1/cpu <=4 preferred, <=8 hard", status == "fail"))
+except Exception as exc:
+    checks.append(check("cpu_load_pressure", "resource", "warning", str(exc), "/proc/loadavg readable"))
+
+try:
+    with open("/proc/stat", "r", encoding="utf-8") as fh:
+        first = fh.readline().split()
+    steal = int(first[8]) if len(first) > 8 else 0
+    total_ticks = sum(int(v) for v in first[1:] if v.isdigit())
+    ratio = float(steal) / float(total_ticks) if total_ticks else 0.0
+    status = "warning" if ratio > 0.05 else "pass"
+    checks.append(check("cpu_steal", "resource", status, "%.2f%%" % (ratio * 100), "CPU steal <=5%"))
+except Exception as exc:
+    checks.append(check("cpu_steal", "resource", "warning", str(exc), "/proc/stat readable"))
+
+ok_time, time_out = run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"], 3)
+if ok_time is True:
+    synced = time_out.strip().lower() == "yes"
+    checks.append(check("time_sync_ntp", "time", "pass" if synced else "warning", time_out, "NTP synchronized"))
+else:
+    ok_chrony, chrony_out = run(["chronyc", "tracking"], 3)
+    checks.append(check("time_sync_ntp", "time", "pass" if ok_chrony else "warning", chrony_out if ok_chrony else time_out, "NTP synchronized"))
+
+edge_listener_pass = False
+edge_listener_errors = []
+for host, port in [("127.0.0.1", 18443), ("127.0.0.1", 443), ("127.0.0.1", 80)]:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            edge_listener_pass = True
+            break
+    except Exception as exc:
+        edge_listener_errors.append(f"{host}:{port} {exc}")
+checks.append(check("edge_caddy_listener", "edge", "pass" if edge_listener_pass else "warning", "listener reachable" if edge_listener_pass else "; ".join(edge_listener_errors)[-240:], "edge/Caddy listener reachable when this node has edge role"))
 
 try:
     with open("/proc/sys/net/netfilter/nf_conntrack_count", "r", encoding="utf-8") as fh:
@@ -2854,6 +3014,17 @@ restart_k3s_agent() {
   systemctl restart k3s-agent
   wait_for_unit_active k3s-agent 900
   log_task "k3s-agent is active"
+}
+
+guarded_restart_k3s_agent_task() {
+  repair_guard "k3s_agent_guarded_restart" 900 1 || return 1
+  record_node_guardian_wal "before_probe" "L4_guarded_node_repair" "k3s-agent" "before guarded k3s-agent restart"
+  if ! restart_k3s_agent; then
+    repair_record_failure "k3s_agent_guarded_restart" "L4_guarded_node_repair" "k3s-agent" "systemctl restart failed or unit did not become active"
+    return 1
+  fi
+  record_node_guardian_wal "after_probe" "L4_guarded_node_repair" "k3s-agent" "after guarded k3s-agent restart active"
+  repair_record_success "k3s_agent_guarded_restart" "L4_guarded_node_repair" "k3s-agent"
 }
 
 restart_k3s_agent_for_config_reload() {
@@ -3102,6 +3273,92 @@ image_cache_api_json() {
 
 json_escape_shell() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+record_node_guardian_wal() {
+  local action="$1"
+  local safety_class="$2"
+  local subject="$3"
+  local evidence="$4"
+  local path="${FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH:-}"
+  local now=""
+  local id=""
+  if [ -z "${path}" ]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "${path}")" 2>/dev/null || return 0
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  id="wal_node_guardian_$(date -u +%s 2>/dev/null || echo 0)_$$"
+  {
+    printf '{"schema_version":"1.0","id":"%s","component":"node-guardian","node_id":"%s","action":"%s","safety_class":"%s","generation":"%s","subject":"%s","evidence":{"summary":"%s"},"recorded_at":"%s"}\n' \
+      "$(json_escape_shell "${id}")" \
+      "$(json_escape_shell "${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-${FUGUE_JOIN_NODE_NAME:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)}}")" \
+      "$(json_escape_shell "${action}")" \
+      "$(json_escape_shell "${safety_class}")" \
+      "$(json_escape_shell "${FUGUE_DISCOVERY_GENERATION:-}")" \
+      "$(json_escape_shell "${subject}")" \
+      "$(json_escape_shell "${evidence}")" \
+      "$(json_escape_shell "${now}")"
+  } >>"${path}" 2>/dev/null || return 0
+  sync -f "${path}" >/dev/null 2>&1 || sync >/dev/null 2>&1 || true
+}
+
+repair_state_file() {
+  local action="$1"
+  local suffix="$2"
+  mkdir -p "${FUGUE_NODE_UPDATER_WORK_DIR}/repair" 2>/dev/null || true
+  printf '%s/repair/%s.%s\n' "${FUGUE_NODE_UPDATER_WORK_DIR}" "$(printf '%s' "${action}" | tr -c 'A-Za-z0-9_.-' '_')" "${suffix}"
+}
+
+repair_guard() {
+  local action="$1"
+  local cooldown_seconds="${2:-120}"
+  local max_attempts="${3:-3}"
+  local now=""
+  local last_file=""
+  local attempts_file=""
+  local last=0
+  local attempts=0
+  now="$(date +%s)"
+  last_file="$(repair_state_file "${action}" last)"
+  attempts_file="$(repair_state_file "${action}" attempts)"
+  [ -r "${last_file}" ] && last="$(cat "${last_file}" 2>/dev/null || echo 0)"
+  [ -r "${attempts_file}" ] && attempts="$(cat "${attempts_file}" 2>/dev/null || echo 0)"
+  if [ "${last:-0}" -gt 0 ] && [ $((now - last)) -lt "${cooldown_seconds}" ]; then
+    log_task "repair ${action} blocked by cooldown remaining=$((cooldown_seconds - (now - last)))s"
+    return 1
+  fi
+  if [ "${max_attempts}" -gt 0 ] && [ "${attempts:-0}" -ge "${max_attempts}" ]; then
+    log_task "repair ${action} blocked by max attempts=${attempts}"
+    record_node_guardian_wal "local_quarantine" "L1_temporary_filter" "node:${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-unknown}" "repair ${action} exceeded max attempts"
+    return 1
+  fi
+  printf '%s\n' "${now}" >"${last_file}" 2>/dev/null || true
+  return 0
+}
+
+repair_record_success() {
+  local action="$1"
+  local safety_class="$2"
+  local subject="$3"
+  local attempts_file=""
+  attempts_file="$(repair_state_file "${action}" attempts)"
+  printf '0\n' >"${attempts_file}" 2>/dev/null || true
+  record_node_guardian_wal "repair_action" "${safety_class}" "${subject}" "repair ${action} success"
+}
+
+repair_record_failure() {
+  local action="$1"
+  local safety_class="$2"
+  local subject="$3"
+  local message="$4"
+  local attempts_file=""
+  local attempts=0
+  attempts_file="$(repair_state_file "${action}" attempts)"
+  [ -r "${attempts_file}" ] && attempts="$(cat "${attempts_file}" 2>/dev/null || echo 0)"
+  attempts=$((attempts + 1))
+  printf '%s\n' "${attempts}" >"${attempts_file}" 2>/dev/null || true
+  record_node_guardian_wal "repair_action" "${safety_class}" "${subject}" "repair ${action} failed attempts=${attempts} message=${message}"
 }
 
 report_image_replica() {
@@ -3837,12 +4094,20 @@ EOF_REPAIR_MANAGED_IPTABLES_DRY_RUN
 }
 
 refresh_desired_state_task() {
+  repair_guard "local_generation_cache_refresh" 30 5 || return 1
   log_task "refreshing node desired state"
-  reconcile_node_state
+  if reconcile_node_state; then
+    repair_record_success "local_generation_cache_refresh" "L2_local_reload" "node:${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-unknown}"
+    return 0
+  fi
+  repair_record_failure "local_generation_cache_refresh" "L2_local_reload" "node:${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-unknown}" "reconcile_node_state failed"
+  return 1
 }
 
 reload_lkg_bundle_task() {
   local changed=1
+  repair_guard "edge_route_bundle_reload" 30 5 || return 1
+  record_node_guardian_wal "before_probe" "L2_local_reload" "lkg-bundle" "before LKG bundle reload"
   reconcile_lkg_service_envs && changed=0
   for unit in fugue-edge.service fugue-dns.service; do
     if systemctl list-unit-files "${unit}" >/dev/null 2>&1; then
@@ -3852,6 +4117,12 @@ reload_lkg_bundle_task() {
       fi
     fi
   done
+  if [ "${changed}" -eq 0 ]; then
+    record_node_guardian_wal "after_probe" "L2_local_reload" "lkg-bundle" "after LKG bundle reload"
+    repair_record_success "edge_route_bundle_reload" "L2_local_reload" "lkg-bundle"
+  else
+    repair_record_failure "edge_route_bundle_reload" "L2_local_reload" "lkg-bundle" "no LKG service changed or reloaded"
+  fi
   return "${changed}"
 }
 
@@ -3865,12 +4136,22 @@ restart_stateless_node_service_task() {
       return 2
       ;;
   esac
-  systemctl restart "${service}"
+  repair_guard "restart_${service}" 120 3 || return 1
+  record_node_guardian_wal "before_probe" "L3_stateless_restart" "${service}" "before stateless service restart"
+  if ! systemctl restart "${service}"; then
+    repair_record_failure "restart_${service}" "L3_stateless_restart" "${service}" "systemctl restart failed"
+    return 1
+  fi
+  record_node_guardian_wal "after_probe" "L3_stateless_restart" "${service}" "after stateless service restart"
+  repair_record_success "restart_${service}" "L3_stateless_restart" "${service}"
   log_task "restarted ${service}"
 }
 
 run_deep_health_task() {
+  record_node_guardian_wal "deep_health_before_probe" "L0_observe_only" "node:${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-${FUGUE_JOIN_NODE_NAME:-unknown}}" "before deep health heartbeat"
   heartbeat
+  record_node_guardian_wal "deep_health_after_probe" "L0_observe_only" "node:${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-${FUGUE_JOIN_NODE_NAME:-unknown}}" "after deep health heartbeat submitted"
+  record_node_guardian_wal "deep_health_heartbeat" "L0_observe_only" "node:${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-${FUGUE_JOIN_NODE_NAME:-unknown}}" "deep health heartbeat submitted"
   log_task "deep health heartbeat submitted"
 }
 
@@ -3885,7 +4166,7 @@ run_task() {
       return 1
       ;;
     restart-k3s-agent)
-      restart_k3s_agent
+      guarded_restart_k3s_agent_task
       ;;
     upgrade-k3s-agent)
       upgrade_k3s_agent

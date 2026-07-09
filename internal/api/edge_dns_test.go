@@ -850,6 +850,136 @@ func TestEdgeDNSBundleExcludesPolicyBlockedEdgeNodeAnswers(t *testing.T) {
 	}
 }
 
+func TestEdgeDNSBundleExcludesDrainingEdgeNodeAnswers(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordRouteReadyEdgeForDNSAnswerTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71", false)
+	recordRouteReadyEdgeForDNSAnswerTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103", true)
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	record := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected app route DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
+	}
+	if stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
+		t.Fatalf("expected DNS values to exclude draining DE edge and keep US edge, got %+v", record.Values)
+	}
+	for _, candidate := range record.Candidates {
+		if candidate.EdgeID == "edge-de-1" || candidate.IP == "51.38.126.103" {
+			t.Fatalf("expected candidates to exclude draining edge node, got %+v", record.Candidates)
+		}
+	}
+}
+
+func TestEdgeDNSBundleExcludesQuarantinedEdgeNodeAnswers(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordRouteReadyEdgeForDNSAnswerTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71", false)
+	recordRouteReadyEdgeForDNSAnswerTest(t, storeState, "edge-de-1", "edge-group-country-de", "51.38.126.103", false)
+	if _, err := storeState.RecordNodeDeepHealthResult(model.NodeDeepHealthResult{
+		NodeUpdaterID: "edge-de-1",
+		Checks: []model.NodeDeepHealthCheck{{
+			Name:     model.NodeDeepHealthCheckPodDNSToKubeDNSService,
+			Status:   model.NodeDeepHealthStatusFail,
+			HardFail: true,
+		}},
+		ReportedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("record quarantined edge node health: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	record := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected app route DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
+	}
+	if stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
+		t.Fatalf("expected DNS values to exclude quarantined DE edge and keep US edge, got %+v", record.Values)
+	}
+	for _, candidate := range record.Candidates {
+		if candidate.EdgeID == "edge-de-1" || candidate.IP == "51.38.126.103" {
+			t.Fatalf("expected candidates to exclude quarantined edge node, got %+v", record.Candidates)
+		}
+	}
+}
+
+func TestEdgeDNSBundleExcludesInvalidLKGEdgeNodeAnswers(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	app = deployAppForEdgeRouteTest(t, storeState, app)
+	recordRouteReadyEdgeForDNSAnswerTest(t, storeState, "edge-us-1", "edge-group-country-us", "15.204.94.71", false)
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:                "edge-de-1",
+		EdgeGroupID:       "edge-group-country-de",
+		PublicIPv4:        "51.38.126.103",
+		Status:            model.EdgeHealthHealthy,
+		Healthy:           true,
+		CaddyRouteCount:   1,
+		TLSStatus:         model.EdgeTLSStatusReady,
+		ServingGeneration: "routegen_bad",
+		LKGGeneration:     "routegen_bad",
+		CacheStatus:       "cache-error",
+	}); err != nil {
+		t.Fatalf("record cache-invalid edge node: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/edge/dns?token=edge-secret&zone=fugue.pro&edge_group_id=edge-group-country-de&answer_ip=51.38.126.103", nil)
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+	var bundle model.EdgeDNSBundle
+	mustDecodeJSON(t, recorder, &bundle)
+	record := edgeDNSRecordByNameAndType(bundle.Records, app.Route.Hostname, model.EdgeDNSRecordTypeA)
+	if record == nil {
+		t.Fatalf("expected app route DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
+	}
+	if stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
+		t.Fatalf("expected DNS values to exclude cache-invalid DE edge and keep US edge, got %+v", record.Values)
+	}
+	for _, candidate := range record.Candidates {
+		if candidate.EdgeID == "edge-de-1" || candidate.IP == "51.38.126.103" {
+			t.Fatalf("expected candidates to exclude cache-invalid edge node, got %+v", record.Candidates)
+		}
+	}
+}
+
+func recordRouteReadyEdgeForDNSAnswerTest(t *testing.T, storeState edgeRouteHeartbeatStore, id, groupID, publicIPv4 string, draining bool) {
+	t.Helper()
+	if _, _, err := storeState.UpdateEdgeHeartbeat(model.EdgeNode{
+		ID:              id,
+		EdgeGroupID:     groupID,
+		PublicIPv4:      publicIPv4,
+		Status:          model.EdgeHealthHealthy,
+		Healthy:         true,
+		Draining:        draining,
+		CaddyRouteCount: 1,
+		TLSStatus:       model.EdgeTLSStatusReady,
+	}); err != nil {
+		t.Fatalf("record route-ready edge node: %v", err)
+	}
+}
+
 func TestEdgeDNSBundleSharedCustomDomainTargetKeepsStrictestEdgeExclusions(t *testing.T) {
 	t.Parallel()
 

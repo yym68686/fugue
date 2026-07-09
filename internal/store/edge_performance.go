@@ -155,12 +155,12 @@ INSERT INTO fugue_edge_performance_samples (
 	error_count, upload_request_count, body_buffer_count, body_read_block_ms, file_write_ms,
 	upload_effective_bps, min_window_bps, max_read_gap_ms, request_body_bytes, request_body_read_bytes,
 	body_incomplete_count, body_read_error_count, response_write_ms, response_bytes, response_egress_bps,
-	origin_dns_ms, origin_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
+	origin_dns_ms, origin_connect_ms, origin_endpoint_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
 	origin_total_ms, streaming_request_count, websocket_request_count, sse_request_count, client_cancel_count,
 	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes,
 	client_tcp_rtt_ms, client_tcp_min_rtt_ms, client_tcp_rttvar_ms, client_tcp_total_retrans,
 	client_tcp_retrans_rate, client_tcp_bytes_retrans, client_tcp_bytes_retrans_rate,
-	client_tcp_total_rto, client_tcp_rto_rate, client_tcp_delivery_rate_bps, sampled_at
+	client_tcp_total_rto, client_tcp_rto_rate, client_tcp_delivery_rate_bps, origin_failure_class, sampled_at
 ) VALUES (
 	$1, $2, $3, $4, $5, $6, $7, $8,
 	$9, $10, $11, $12, $13, $14,
@@ -173,7 +173,7 @@ INSERT INTO fugue_edge_performance_samples (
 	$45, $46, $47, $48, $49,
 	$50, $51, $52, $53, $54,
 	$55, $56, $57, $58, $59,
-	$60, $61, $62
+	$60, $61, $62, $63, $64
 )
 ON CONFLICT (id) DO UPDATE SET
 	edge_id = EXCLUDED.edge_id,
@@ -214,6 +214,7 @@ ON CONFLICT (id) DO UPDATE SET
 	response_egress_bps = EXCLUDED.response_egress_bps,
 	origin_dns_ms = EXCLUDED.origin_dns_ms,
 	origin_connect_ms = EXCLUDED.origin_connect_ms,
+	origin_endpoint_connect_ms = EXCLUDED.origin_endpoint_connect_ms,
 	origin_request_write_ms = EXCLUDED.origin_request_write_ms,
 	origin_response_wait_ms = EXCLUDED.origin_response_wait_ms,
 	origin_ttfb_ms = EXCLUDED.origin_ttfb_ms,
@@ -236,6 +237,7 @@ ON CONFLICT (id) DO UPDATE SET
 	client_tcp_total_rto = EXCLUDED.client_tcp_total_rto,
 	client_tcp_rto_rate = EXCLUDED.client_tcp_rto_rate,
 	client_tcp_delivery_rate_bps = EXCLUDED.client_tcp_delivery_rate_bps,
+	origin_failure_class = EXCLUDED.origin_failure_class,
 	sampled_at = EXCLUDED.sampled_at
 `
 
@@ -303,6 +305,7 @@ func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSa
 			normalized.ResponseEgressBPS,
 			normalized.OriginDNSMS,
 			normalized.OriginConnectMS,
+			normalized.OriginEndpointConnectMS,
 			normalized.OriginRequestWriteMS,
 			normalized.OriginResponseWaitMS,
 			normalized.OriginTTFBMS,
@@ -325,6 +328,7 @@ func (s *Store) pgRecordEdgePerformanceSamples(samples []model.EdgePerformanceSa
 			normalized.ClientTCPTotalRTO,
 			normalized.ClientTCPRTORate,
 			normalized.ClientTCPDeliveryBPS,
+			normalized.OriginFailureClass,
 			normalized.SampledAt,
 		); err != nil {
 			return fmt.Errorf("insert edge performance sample: %w", err)
@@ -348,12 +352,12 @@ SELECT id, edge_id, edge_group_id, hostname, client_country, client_region, clie
 	error_count, upload_request_count, body_buffer_count, body_read_block_ms, file_write_ms,
 	upload_effective_bps, min_window_bps, max_read_gap_ms, request_body_bytes, request_body_read_bytes,
 	body_incomplete_count, body_read_error_count, response_write_ms, response_bytes, response_egress_bps,
-	origin_dns_ms, origin_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
+	origin_dns_ms, origin_connect_ms, origin_endpoint_connect_ms, origin_request_write_ms, origin_response_wait_ms, origin_ttfb_ms,
 	origin_total_ms, streaming_request_count, websocket_request_count, sse_request_count, client_cancel_count,
 	active_requests, active_body_buffers, goroutine_count, memory_alloc_bytes,
 	client_tcp_rtt_ms, client_tcp_min_rtt_ms, client_tcp_rttvar_ms, client_tcp_total_retrans,
 	client_tcp_retrans_rate, client_tcp_bytes_retrans, client_tcp_bytes_retrans_rate,
-	client_tcp_total_rto, client_tcp_rto_rate, client_tcp_delivery_rate_bps, sampled_at
+	client_tcp_total_rto, client_tcp_rto_rate, client_tcp_delivery_rate_bps, origin_failure_class, sampled_at
 FROM fugue_edge_performance_samples
 WHERE 1=1
 `
@@ -380,7 +384,7 @@ WHERE 1=1
 		var tlsHandshake, ttfb, upstream, total sql.NullInt64
 		var bodyReadBlock, fileWrite, uploadEffective, minWindow, maxReadGap sql.NullInt64
 		var requestBodyBytes, requestBodyReadBytes, responseWrite, responseBytes, responseEgress sql.NullInt64
-		var originDNS, originConnect, originWrite, originWait, originTTFB, originTotal sql.NullInt64
+		var originDNS, originConnect, originEndpointConnect, originWrite, originWait, originTTFB, originTotal sql.NullInt64
 		var memoryAlloc sql.NullInt64
 		var clientTCPRTT, clientTCPMinRTT, clientTCPRTTVar, clientTCPRetransRate, clientTCPBytesRetransRate, clientTCPRTORate sql.NullFloat64
 		var clientTCPTotalRetrans, clientTCPBytesRetrans, clientTCPTotalRTO, clientTCPDeliveryBPS sql.NullInt64
@@ -428,6 +432,7 @@ WHERE 1=1
 			&responseEgress,
 			&originDNS,
 			&originConnect,
+			&originEndpointConnect,
 			&originWrite,
 			&originWait,
 			&originTTFB,
@@ -450,6 +455,7 @@ WHERE 1=1
 			&clientTCPTotalRTO,
 			&clientTCPRTORate,
 			&clientTCPDeliveryBPS,
+			&sample.OriginFailureClass,
 			&sample.SampledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan edge performance sample: %w", err)
@@ -482,6 +488,7 @@ WHERE 1=1
 		sample.ResponseEgressBPS = edgePerformanceInt64FromNull(responseEgress)
 		sample.OriginDNSMS = edgePerformanceInt64FromNull(originDNS)
 		sample.OriginConnectMS = edgePerformanceInt64FromNull(originConnect)
+		sample.OriginEndpointConnectMS = edgePerformanceInt64FromNull(originEndpointConnect)
 		sample.OriginRequestWriteMS = edgePerformanceInt64FromNull(originWrite)
 		sample.OriginResponseWaitMS = edgePerformanceInt64FromNull(originWait)
 		sample.OriginTTFBMS = edgePerformanceInt64FromNull(originTTFB)
@@ -850,6 +857,7 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	sample.RouteGeneration = strings.TrimSpace(sample.RouteGeneration)
 	sample.CacheStatus = strings.TrimSpace(strings.ToLower(sample.CacheStatus))
 	sample.DNSPolicy = strings.TrimSpace(strings.ToLower(sample.DNSPolicy))
+	sample.OriginFailureClass = normalizeEdgeFailureClass(sample.OriginFailureClass)
 	if sample.SampledAt.IsZero() {
 		sample.SampledAt = now
 	}
@@ -952,6 +960,9 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 	if sample.OriginConnectMS < 0 {
 		sample.OriginConnectMS = 0
 	}
+	if sample.OriginEndpointConnectMS < 0 {
+		sample.OriginEndpointConnectMS = 0
+	}
 	if sample.OriginRequestWriteMS < 0 {
 		sample.OriginRequestWriteMS = 0
 	}
@@ -998,6 +1009,25 @@ func normalizeEdgePerformanceSampleForStore(sample model.EdgePerformanceSample, 
 		sample.ClientTCPDeliveryBPS = 0
 	}
 	return sample, nil
+}
+
+func normalizeEdgeFailureClass(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' || r == '_' || r == '-':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func sortEdgePerformanceSamples(samples []model.EdgePerformanceSample) {

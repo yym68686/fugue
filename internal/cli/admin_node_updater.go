@@ -22,6 +22,7 @@ func (c *CLI) newAdminNodeUpdaterCommand() *cobra.Command {
 		c.newAdminNodeUpdaterListCommand(),
 		c.newAdminNodeUpdaterHealthCommand(),
 		c.newAdminNodeUpdaterTaskCommand(),
+		c.newAdminNodeUpdaterRepairHistoryCommand(),
 	)
 	return cmd
 }
@@ -59,6 +60,41 @@ func (c *CLI) newAdminNodeUpdaterTaskCommand() *cobra.Command {
 		c.newAdminNodeUpdaterTaskListCommand(),
 		c.newAdminNodeUpdaterTaskCreateCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAdminNodeUpdaterRepairHistoryCommand() *cobra.Command {
+	opts := struct {
+		NodeUpdaterID string
+		Status        string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "repair-history",
+		Short: "Show node-local autonomy and repair task history",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			tasks, err := client.ListNodeUpdateTasks(opts.NodeUpdaterID, opts.Status)
+			if err != nil {
+				return err
+			}
+			filtered := make([]model.NodeUpdateTask, 0, len(tasks))
+			for _, task := range tasks {
+				if nodeUpdateTaskIsRepairHistory(task) {
+					filtered = append(filtered, task)
+				}
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"tasks": filtered})
+			}
+			return writeNodeUpdateTaskTable(c.stdout, filtered)
+		},
+	}
+	cmd.Flags().StringVar(&opts.NodeUpdaterID, "node-updater", "", "Filter by node updater ID")
+	cmd.Flags().StringVar(&opts.Status, "status", "", "Filter by task status")
 	return cmd
 }
 
@@ -443,4 +479,18 @@ func writeNodeUpdateTask(w io.Writer, task model.NodeUpdateTask) error {
 		return err
 	}
 	return writeStringMap(w, task.Payload)
+}
+
+func nodeUpdateTaskIsRepairHistory(task model.NodeUpdateTask) bool {
+	switch strings.TrimSpace(task.Type) {
+	case model.NodeUpdateTaskTypeRestartK3SAgent,
+		model.NodeUpdateTaskTypeRepairManagedIPTables,
+		model.NodeUpdateTaskTypeRefreshDesiredState,
+		model.NodeUpdateTaskTypeReloadLKGBundle,
+		model.NodeUpdateTaskTypeRestartStatelessNodeService,
+		model.NodeUpdateTaskTypeRunDeepHealth:
+		return true
+	default:
+		return false
+	}
 }

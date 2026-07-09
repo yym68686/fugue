@@ -100,6 +100,7 @@ type putEdgeRoutePolicyRequest struct {
 	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
 	RoutePolicy          string     `json:"route_policy"`
 }
 
@@ -109,6 +110,7 @@ type edgeRoutePolicyUpdate struct {
 	ExcludedEdgeGroupIDs []string
 	ExclusionReason      string
 	ExclusionExpiresAt   *time.Time
+	MinHealthyEdgeNodes  int
 	RoutePolicy          string
 }
 
@@ -148,6 +150,7 @@ func (c *Client) PutEdgeRoutePolicyUpdate(hostname string, update edgeRoutePolic
 		ExcludedEdgeGroupIDs: append([]string(nil), update.ExcludedEdgeGroupIDs...),
 		ExclusionReason:      strings.TrimSpace(update.ExclusionReason),
 		ExclusionExpiresAt:   update.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:  update.MinHealthyEdgeNodes,
 		RoutePolicy:          strings.TrimSpace(update.RoutePolicy),
 	}
 	var response edgeRoutePolicyResponse

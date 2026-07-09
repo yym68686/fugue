@@ -161,6 +161,10 @@ type edgeRouteVersionMaterial struct {
 	ExcludedEdgeGroupIDs []string                  `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string                    `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time                `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes  int                       `json:"min_healthy_edge_nodes,omitempty"`
+	HealthyEdgeNodeCount int                       `json:"healthy_edge_node_count,omitempty"`
+	EdgeRedundancyStatus string                    `json:"edge_redundancy_status,omitempty"`
+	EdgeRedundancyReason string                    `json:"edge_redundancy_reason,omitempty"`
 	RoutePolicy          string                    `json:"route_policy"`
 	SelectionReason      string                    `json:"selection_reason,omitempty"`
 	FallbackReason       string                    `json:"fallback_reason,omitempty"`
@@ -198,6 +202,10 @@ func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRou
 		ExcludedEdgeGroupIDs: append([]string(nil), binding.ExcludedEdgeGroupIDs...),
 		ExclusionReason:      binding.ExclusionReason,
 		ExclusionExpiresAt:   binding.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:  binding.MinHealthyEdgeNodes,
+		HealthyEdgeNodeCount: binding.HealthyEdgeNodeCount,
+		EdgeRedundancyStatus: binding.EdgeRedundancyStatus,
+		EdgeRedundancyReason: binding.EdgeRedundancyReason,
 		RoutePolicy:          binding.RoutePolicy,
 		SelectionReason:      binding.SelectionReason,
 		FallbackReason:       binding.FallbackReason,

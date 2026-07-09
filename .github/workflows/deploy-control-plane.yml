@@ -165,6 +165,7 @@ jobs:
   deploy:
     needs: build
     if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '')) }}
+    timeout-minutes: 30
     runs-on:
       - self-hosted
       - linux
@@ -232,6 +233,54 @@ jobs:
           else
             k3s kubectl version --client
           fi
+
+      - name: Explain runner and fail closed target
+        env:
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          FUGUE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag || github.sha }}
+          FUGUE_IMAGE_TARGETS: ${{ needs.build.outputs.image_targets || '' }}
+          FUGUE_RELEASE_CHANGED_FILES: ${{ steps.release_changes.outputs.changed_files }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/fugue-release"
+          if command -v kubectl >/dev/null 2>&1; then
+            KUBECTL=kubectl
+          else
+            KUBECTL="k3s kubectl"
+          fi
+          {
+            echo "workflow=deploy-control-plane.yml"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "runner_name=${RUNNER_NAME}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "commit=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "release_name=${FUGUE_RELEASE_NAME}"
+            echo "namespace=${FUGUE_NAMESPACE}"
+            echo "image_tag=${FUGUE_IMAGE_TAG}"
+            echo "image_targets=${FUGUE_IMAGE_TARGETS}"
+            echo "kubectl=$(${KUBECTL} version --client 2>&1 | tr '\n' ';')"
+            echo "helm=$(helm version --short 2>&1)"
+          } > "${RUNNER_TEMP}/fugue-release/attribution.env"
+          if ! ${KUBECTL} config current-context >> "${RUNNER_TEMP}/fugue-release/target-cluster.txt" 2>&1; then
+            echo "Kubernetes context unavailable; fail closed before control-plane deploy" >&2
+            exit 1
+          fi
+          if ! ${KUBECTL} get --raw=/readyz?verbose > "${RUNNER_TEMP}/fugue-release/kubernetes-readyz.txt" 2>&1; then
+            echo "Kubernetes API /readyz failed; fail closed before control-plane deploy" >&2
+            cat "${RUNNER_TEMP}/fugue-release/kubernetes-readyz.txt" >&2 || true
+            exit 1
+          fi
+          if helm plugin list 2>/dev/null | grep -q '^diff[[:space:]]'; then
+            echo "helm_diff=available" >> "${RUNNER_TEMP}/fugue-release/attribution.env"
+          else
+            echo "helm_diff=not_installed; upgrade script records kubectl/resource diffs where supported" >> "${RUNNER_TEMP}/fugue-release/attribution.env"
+          fi
+          printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES}" > "${RUNNER_TEMP}/fugue-release/changed-files.txt"
 
       - name: Resolve live image metadata
         id: live_images
@@ -442,3 +491,11 @@ jobs:
           FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE: ${{ vars.FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE || 'auto' }}
           FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE: ${{ vars.FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE || 'guard' }}
         run: ./scripts/upgrade_fugue_control_plane.sh
+
+      - name: Upload release attribution
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fugue-control-plane-release-attribution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-release
+          if-no-files-found: ignore

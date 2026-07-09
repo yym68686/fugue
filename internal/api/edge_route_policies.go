@@ -19,6 +19,7 @@ type putEdgeRoutePolicyRequest struct {
 	ExcludedEdgeGroupIDs []string   `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string     `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes  int        `json:"min_healthy_edge_nodes,omitempty"`
 	RoutePolicy          string     `json:"route_policy"`
 	Enabled              *bool      `json:"enabled,omitempty"`
 }
@@ -108,6 +109,14 @@ func (s *Server) handlePutEdgeRoutePolicy(w http.ResponseWriter, r *http.Request
 		s.writeStoreError(w, err)
 		return
 	}
+	minHealthyEdgeNodes := req.MinHealthyEdgeNodes
+	if minHealthyEdgeNodes < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "min_healthy_edge_nodes must be >= 0")
+		return
+	}
+	if model.EdgeRoutePolicyAllowsTraffic(policyValue) && minHealthyEdgeNodes == 0 {
+		minHealthyEdgeNodes = defaultMinHealthyEdgeNodesForPolicyHostname(s, hostname)
+	}
 	policy, err := s.store.PutEdgeRoutePolicy(model.EdgeRoutePolicy{
 		Hostname:             hostname,
 		AppID:                app.ID,
@@ -117,6 +126,7 @@ func (s *Server) handlePutEdgeRoutePolicy(w http.ResponseWriter, r *http.Request
 		ExcludedEdgeGroupIDs: excludedEdgeGroupIDs,
 		ExclusionReason:      strings.TrimSpace(req.ExclusionReason),
 		ExclusionExpiresAt:   req.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:  minHealthyEdgeNodes,
 		RoutePolicy:          policyValue,
 	})
 	if err != nil {
@@ -129,6 +139,7 @@ func (s *Server) handlePutEdgeRoutePolicy(w http.ResponseWriter, r *http.Request
 		"edge_group_id":           policy.EdgeGroupID,
 		"excluded_edge_ids":       strings.Join(policy.ExcludedEdgeIDs, ","),
 		"excluded_edge_group_ids": strings.Join(policy.ExcludedEdgeGroupIDs, ","),
+		"min_healthy_edge_nodes":  fmt.Sprintf("%d", policy.MinHealthyEdgeNodes),
 		"route_policy":            policy.RoutePolicy,
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"policy": policy})

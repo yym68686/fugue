@@ -437,8 +437,9 @@ func (c *CLI) newAdminEdgeRoutePolicyShowCommand() *cobra.Command {
 
 func (c *CLI) newAdminEdgeRoutePolicySetCommand() *cobra.Command {
 	opts := struct {
-		EdgeGroupID string
-		RoutePolicy string
+		EdgeGroupID     string
+		RoutePolicy     string
+		MinHealthyEdges int
 	}{}
 	cmd := &cobra.Command{
 		Use:   "set <hostname>",
@@ -460,7 +461,11 @@ func (c *CLI) newAdminEdgeRoutePolicySetCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			updated, err := client.PutEdgeRoutePolicy(args[0], opts.EdgeGroupID, policy)
+			updated, err := client.PutEdgeRoutePolicyUpdate(args[0], edgeRoutePolicyUpdate{
+				EdgeGroupID:         opts.EdgeGroupID,
+				RoutePolicy:         policy,
+				MinHealthyEdgeNodes: opts.MinHealthyEdges,
+			})
 			if err != nil {
 				return err
 			}
@@ -472,14 +477,16 @@ func (c *CLI) newAdminEdgeRoutePolicySetCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Edge group allowed to serve this hostname")
 	cmd.Flags().StringVar(&opts.RoutePolicy, "policy", model.EdgeRoutePolicyCanary, "Policy to apply: edge_canary or edge_enabled")
+	cmd.Flags().IntVar(&opts.MinHealthyEdges, "min-healthy-edges", 0, "Minimum healthy edge nodes expected for this hostname; defaults to platform policy")
 	return cmd
 }
 
 func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeCommand() *cobra.Command {
 	opts := struct {
-		EdgeID string
-		Reason string
-		TTL    string
+		EdgeID          string
+		Reason          string
+		TTL             string
+		MinHealthyEdges int
 	}{}
 	cmd := &cobra.Command{
 		Use:   "exclude-edge <hostname>",
@@ -505,6 +512,9 @@ func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeCommand() *cobra.Command {
 				if expiresAt != nil {
 					policy.ExclusionExpiresAt = expiresAt
 				}
+				if opts.MinHealthyEdges > 0 {
+					policy.MinHealthyEdgeNodes = opts.MinHealthyEdges
+				}
 			})
 			if err != nil {
 				return err
@@ -518,6 +528,7 @@ func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.EdgeID, "edge", "", "Edge node ID to exclude")
 	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Reason recorded on the exclusion policy")
 	cmd.Flags().StringVar(&opts.TTL, "ttl", "", "Optional exclusion TTL such as 30m, 6h, or 168h")
+	cmd.Flags().IntVar(&opts.MinHealthyEdges, "min-healthy-edges", 0, "Minimum healthy edge nodes expected after this exclusion")
 	return cmd
 }
 
@@ -552,9 +563,10 @@ func (c *CLI) newAdminEdgeRoutePolicyAllowEdgeCommand() *cobra.Command {
 
 func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeGroupCommand() *cobra.Command {
 	opts := struct {
-		EdgeGroupID string
-		Reason      string
-		TTL         string
+		EdgeGroupID     string
+		Reason          string
+		TTL             string
+		MinHealthyEdges int
 	}{}
 	cmd := &cobra.Command{
 		Use:   "exclude-edge-group <hostname>",
@@ -577,6 +589,9 @@ func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeGroupCommand() *cobra.Command {
 				if expiresAt != nil {
 					policy.ExclusionExpiresAt = expiresAt
 				}
+				if opts.MinHealthyEdges > 0 {
+					policy.MinHealthyEdgeNodes = opts.MinHealthyEdges
+				}
 			})
 			if err != nil {
 				return err
@@ -590,6 +605,7 @@ func (c *CLI) newAdminEdgeRoutePolicyExcludeEdgeGroupCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.EdgeGroupID, "edge-group", "", "Edge group ID to exclude")
 	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Reason recorded on the exclusion policy")
 	cmd.Flags().StringVar(&opts.TTL, "ttl", "", "Optional exclusion TTL such as 30m, 6h, or 168h")
+	cmd.Flags().IntVar(&opts.MinHealthyEdges, "min-healthy-edges", 0, "Minimum healthy edge nodes expected after this exclusion")
 	return cmd
 }
 
@@ -650,8 +666,9 @@ func (c *CLI) newAdminEdgeRoutePolicyDeleteCommand() *cobra.Command {
 }
 
 type edgeRoutePolicyMutationResult struct {
-	Policy  model.EdgeRoutePolicy `json:"policy"`
-	Deleted bool                  `json:"deleted,omitempty"`
+	Policy        model.EdgeRoutePolicy            `json:"policy"`
+	Deleted       bool                             `json:"deleted,omitempty"`
+	TrafficSafety *model.ServiceTrafficSafetyState `json:"traffic_safety,omitempty"`
 }
 
 func (c *CLI) mutateEdgeRoutePolicyExclusions(hostname string, createIfMissing bool, mutate func(*model.EdgeRoutePolicy)) (edgeRoutePolicyMutationResult, error) {
@@ -696,12 +713,19 @@ func (c *CLI) mutateEdgeRoutePolicyExclusions(hostname string, createIfMissing b
 		ExcludedEdgeGroupIDs: policy.ExcludedEdgeGroupIDs,
 		ExclusionReason:      policy.ExclusionReason,
 		ExclusionExpiresAt:   policy.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:  policy.MinHealthyEdgeNodes,
 		RoutePolicy:          policy.RoutePolicy,
 	})
 	if err != nil {
 		return edgeRoutePolicyMutationResult{}, err
 	}
-	return edgeRoutePolicyMutationResult{Policy: updated}, nil
+	result := edgeRoutePolicyMutationResult{Policy: updated}
+	if updated.MinHealthyEdgeNodes > 0 {
+		if state, err := client.ExplainTrafficSafety(hostname, updated.MinHealthyEdgeNodes); err == nil {
+			result.TrafficSafety = &state
+		}
+	}
+	return result, nil
 }
 
 func parseEdgeRoutePolicyTTL(raw string) (*time.Time, error) {
@@ -777,11 +801,27 @@ func writeEdgeRoutePolicyMutation(w io.Writer, result edgeRoutePolicyMutationRes
 	if err := writeEdgeRoutePolicy(w, result.Policy); err != nil {
 		return err
 	}
+	if result.TrafficSafety != nil {
+		if err := writeKeyValues(w,
+			kvPair{Key: "traffic_safety", Value: edgeRoutePolicyTrafficSafetyStatus(*result.TrafficSafety)},
+			kvPair{Key: "healthy_edges", Value: fmt.Sprintf("%d/%d", result.TrafficSafety.HealthyEdgeCount, result.TrafficSafety.MinHealthyEdgeCount)},
+			kvPair{Key: "traffic_safety_blockers", Value: stringsJoin(result.TrafficSafety.Blockers)},
+		); err != nil {
+			return err
+		}
+	}
 	if result.Deleted {
 		_, err := fmt.Fprintln(w, "deleted=true")
 		return err
 	}
 	return nil
+}
+
+func edgeRoutePolicyTrafficSafetyStatus(state model.ServiceTrafficSafetyState) string {
+	if state.Pass {
+		return "ok"
+	}
+	return "at_risk"
 }
 
 func writeEdgeRoutePolicy(w io.Writer, policy model.EdgeRoutePolicy) error {
@@ -794,6 +834,7 @@ func writeEdgeRoutePolicy(w io.Writer, policy model.EdgeRoutePolicy) error {
 		kvPair{Key: "excluded_edge_groups", Value: strings.Join(policy.ExcludedEdgeGroupIDs, ",")},
 		kvPair{Key: "exclusion_reason", Value: strings.TrimSpace(policy.ExclusionReason)},
 		kvPair{Key: "exclusion_expires", Value: formatOptionalEdgeTime(policy.ExclusionExpiresAt)},
+		kvPair{Key: "min_healthy_edges", Value: fmt.Sprintf("%d", policy.MinHealthyEdgeNodes)},
 		kvPair{Key: "route_policy", Value: strings.TrimSpace(policy.RoutePolicy)},
 		kvPair{Key: "enabled", Value: fmt.Sprintf("%t", policy.Enabled)},
 		kvPair{Key: "updated", Value: formatTime(policy.UpdatedAt)},
@@ -806,15 +847,16 @@ func writeEdgeRoutePolicyTable(w io.Writer, policies []model.EdgeRoutePolicy) er
 		return sorted[i].Hostname < sorted[j].Hostname
 	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPOLICY\tEDGE_GROUP\tEXCLUDED_EDGES\tEXCLUDED_GROUPS\tAPP\tENABLED\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "HOSTNAME\tPOLICY\tMIN_HEALTHY\tEDGE_GROUP\tEXCLUDED_EDGES\tEXCLUDED_GROUPS\tAPP\tENABLED\tUPDATED"); err != nil {
 		return err
 	}
 	for _, policy := range sorted {
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%t\t%s\n",
+			"%s\t%s\t%d\t%s\t%s\t%s\t%s\t%t\t%s\n",
 			strings.TrimSpace(policy.Hostname),
 			strings.TrimSpace(policy.RoutePolicy),
+			policy.MinHealthyEdgeNodes,
 			strings.TrimSpace(policy.EdgeGroupID),
 			strings.Join(policy.ExcludedEdgeIDs, ","),
 			strings.Join(policy.ExcludedEdgeGroupIDs, ","),

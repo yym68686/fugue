@@ -62,7 +62,20 @@ func resilienceChaosDrills() []model.ResilienceChaosDrill {
 		{ID: "edge-slow-body-read", FailureMode: "client-to-edge request body read is slow", Detection: "body read bps, min-window bps, max read gap, TCP retrans/RTO", Quarantine: "scoped quality score demotes edge inside eligible set", RepairOrRollback: "pause exploration and fall back to better scoped edge", ExplainCommand: "fugue admin edge quality-rank <hostname> --request-size-class body_1m_16m", ReleaseReadiness: true, RunbookRef: "docs/runbooks/request-attribution.md"},
 		{ID: "bad-route-bundle", FailureMode: "generated route bundle is empty or invalid", Detection: "route bundle invariant validation", Quarantine: "fail closed and keep LKG route bundle", RepairOrRollback: "rollback platform artifact release", ExplainCommand: "fugue admin artifact validate <artifact-id> --dry-run", ReleaseReadiness: true, RunbookRef: "docs/runbooks/platform-artifact-rollback.md"},
 		{ID: "service-edge-exclusion-zero", FailureMode: "service edge exclusion leaves zero eligible edge", Detection: "traffic safety min healthy edge count", Quarantine: "reject release or exclusion expansion", RepairOrRollback: "remove exclusion or bring another edge healthy", ExplainCommand: "fugue admin traffic-safety explain <hostname>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/traffic-safety-zero-eligible-edge.md"},
+		{ID: "control-plane-api-pod-kill", FailureMode: "control-plane API pod is killed or crashloops", Detection: "external watchdog API probe and Kubernetes readiness fail", Quarantine: "hold control-plane rollout and keep data-plane consumers on validated LKG", RepairOrRollback: "Kubernetes restarts healthy replica or deploy workflow rolls back bad image", ExplainCommand: "fugue admin release guard status", ReleaseReadiness: true, RunbookRef: "docs/runbooks/control-plane-outage-watchdog.md"},
+		{ID: "single-control-plane-vm-powerdown", FailureMode: "single control-plane VM is powered down by provider or hypervisor", Detection: "external watchdog API/Kubernetes/runner probes fail while edge/DNS probes may still pass", Quarantine: "data plane serves validated LKG; watchdog opens evidence-only incident", RepairOrRollback: "provider power action only with explicit configured target and recorded action id", ExplainCommand: "fugue admin robustness status --json", ReleaseReadiness: true, RunbookRef: "docs/runbooks/control-plane-outage-watchdog.md"},
+		{ID: "all-control-plane-unavailable-edge-alive", FailureMode: "all control-plane endpoints are unavailable while public edge/DNS remains reachable", Detection: "watchdog control-plane probes fail and edge/DNS probes pass", Quarantine: "edge/DNS keep validated LKG and only TTL-bound temporary filters are allowed", RepairOrRollback: "restore control plane, then replay local WAL and reconcile consumer generations", ExplainCommand: "fugue admin artifact consumers <artifact-id>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/data-plane-lkg-autonomy.md"},
+		{ID: "edge-caddy-bad-config", FailureMode: "new Caddy route config fails to load", Detection: "edge apply/probe failure before LKG promotion", Quarantine: "reject new route bundle and keep previous LKG", RepairOrRollback: "reload LKG Caddy config and fix generated artifact before release expansion", ExplainCommand: "fugue admin request explain <request-id>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/edge-quarantine.md"},
+		{ID: "edge-worker-crash", FailureMode: "edge worker exits or stops reporting heartbeat", Detection: "edge heartbeat, public probe, and DNS answer audit detect unavailable edge", Quarantine: "DNS answer-time filtering removes non-serving edge without changing authoritative policy", RepairOrRollback: "restart stateless edge component with cooldown or keep edge self-quarantined", ExplainCommand: "fugue admin edge nodes", ReleaseReadiness: true, RunbookRef: "docs/runbooks/automatic-repair-safety.md"},
 		{ID: "control-plane-bad-image-rollout", FailureMode: "new control-plane image fails readiness", Detection: "canary/API readiness/DB readiness/smoke/post-deploy robustness", Quarantine: "stop rollout and rollback Helm revision", RepairOrRollback: "helm rollback through deploy workflow", ExplainCommand: "fugue admin release guard status", ReleaseReadiness: true, RunbookRef: "docs/runbooks/release-guard-blocked.md"},
+		{ID: "cluster-ip-connect-failure", FailureMode: "edge resolves service DNS but cannot connect to ClusterIP", Detection: "edge request sample origin_cluster_ip_connect timing and upstream unavailable class", Quarantine: "traffic safety hard-gates affected hostname-edge path", RepairOrRollback: "repair node DNS/CNI or use endpoint fallback when stateless policy permits", ExplainCommand: "fugue admin request explain <request-id>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/request-attribution.md"},
+		{ID: "endpoint-fallback", FailureMode: "service DNS or ClusterIP path fails but verified endpoint LKG can serve stateless HTTP route", Detection: "origin DNS/ClusterIP failure plus valid endpoint LKG identity and TTL", Quarantine: "short TTL endpoint fallback only for safe routes and WAL record for every hit", RepairOrRollback: "expire fallback after TTL and reconcile endpoints when control plane returns", ExplainCommand: "fugue admin request explain <request-id>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/data-plane-lkg-autonomy.md"},
+		{ID: "k3s-agent-local-api-timeout", FailureMode: "node local k3s agent API or remotedialer becomes unavailable", Detection: "node guardian local apiserver/remotedialer hard check", Quarantine: "node enters suspect/quarantine and stops receiving new workload placement", RepairOrRollback: "guarded k3s-agent restart only after preflight and cooldown", ExplainCommand: "fugue admin node-updater health show <node-updater-id>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/node-dns-failure.md"},
+		{ID: "dns-stale-answer", FailureMode: "DNS would answer a stale or locally unhealthy edge", Detection: "DNS answer audit filtered_edge_ids/filter_reasons and stale edge public probe", Quarantine: "answer-time filtering removes stale edge for a bounded TTL", RepairOrRollback: "resync DNS bundle or keep serving previous validated DNS LKG", ExplainCommand: "fugue admin robustness status --json", ReleaseReadiness: true, RunbookRef: "docs/runbooks/data-plane-lkg-autonomy.md"},
+		{ID: "peer-false-positive", FailureMode: "peer health overlay marks a healthy edge suspect", Detection: "peer evidence hash/signature and local probe disagree", Quarantine: "single-peer suspect only lowers weight and expires automatically", RepairOrRollback: "discard expired peer signal and require multi-failure-domain evidence for temporary filter", ExplainCommand: "fugue admin robustness status --json", ReleaseReadiness: true, RunbookRef: "docs/runbooks/edge-quarantine.md"},
+		{ID: "lkg-expired", FailureMode: "edge or DNS LKG expires before a newer validated generation is available", Detection: "consumer heartbeat lkg_expired and robustness incident", Quarantine: "fail closed or degraded serving according to component failure contract", RepairOrRollback: "re-pull validated artifact or rollback to a fresh LKG", ExplainCommand: "fugue admin artifact consumers <artifact-id>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/lkg-expired.md"},
+		{ID: "lkg-corruption", FailureMode: "local LKG file hash or schema validation fails", Detection: "LKG content hash/schema verification rejects current file", Quarantine: "try previous validated LKG or fail closed", RepairOrRollback: "replace corrupted local cache from control plane artifact after validation", ExplainCommand: "fugue admin robustness status --json", ReleaseReadiness: true, RunbookRef: "docs/runbooks/lkg-expired.md"},
+		{ID: "provider-power-event-attribution", FailureMode: "VM power event cause is ambiguous", Detection: "guest logs and provider activity log disagree or provider evidence is missing", Quarantine: "classify as unknown_power_loss until provider evidence is imported", RepairOrRollback: "attach provider action id and timestamps before closing incident", ExplainCommand: "fugue admin robustness incidents ls", ReleaseReadiness: true, RunbookRef: "docs/runbooks/provider-power-event-attribution.md"},
 		{ID: "node-loss", FailureMode: "node heartbeat disappears or node becomes unhealthy", Detection: "node updater heartbeat and node deep health staleness", Quarantine: "scheduler/edge hard gate and runtime continuity replacement plan", RepairOrRollback: "stateless replacement plan; stateful preflight only", ExplainCommand: "fugue admin robustness check node <node-name>", ReleaseReadiness: true, RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
 	}
 }
@@ -81,6 +94,9 @@ func resilienceRunbooks() []model.RunbookReference {
 		{Name: "platform artifact rollback", Path: "docs/runbooks/platform-artifact-rollback.md", IncidentClass: "platform_artifact_rollback"},
 		{Name: "consumer generation drift", Path: "docs/runbooks/consumer-generation-drift.md", IncidentClass: "platform_consumer_generation_drift"},
 		{Name: "LKG expired", Path: "docs/runbooks/lkg-expired.md", IncidentClass: "platform_lkg_expired"},
+		{Name: "control-plane outage watchdog", Path: "docs/runbooks/control-plane-outage-watchdog.md", IncidentClass: "control_plane_outage"},
+		{Name: "data-plane LKG autonomy", Path: "docs/runbooks/data-plane-lkg-autonomy.md", IncidentClass: "data_plane_lkg_autonomy"},
+		{Name: "provider power event attribution", Path: "docs/runbooks/provider-power-event-attribution.md", IncidentClass: "provider_power_event"},
 		{Name: "subsystem failure contract", Path: "docs/runbooks/subsystem-failure-contract.md", IncidentClass: "subsystem_failure_contract"},
 		{Name: "automatic repair safety", Path: "docs/runbooks/automatic-repair-safety.md", IncidentClass: "automatic_repair"},
 		{Name: "emergency disable switch", Path: "docs/runbooks/emergency-disable-switch.md", IncidentClass: "emergency_disable"},
@@ -504,4 +520,44 @@ func (s *Server) robustnessPlatformConsumerChecks() ([]model.RobustnessCheck, er
 		RepairHint: "inspect fugue admin artifact consumers and force consumers to periodic-pull before rollout expansion",
 	})
 	return checks, nil
+}
+
+func (s *Server) robustnessPlatformConsumers() ([]model.PlatformConsumerInstance, error) {
+	artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 500})
+	if err != nil {
+		return nil, err
+	}
+	seenScope := map[string]bool{}
+	seenConsumer := map[string]bool{}
+	consumers := []model.PlatformConsumerInstance{}
+	for _, artifact := range artifacts {
+		scopeKey := artifact.ArtifactKind + "\x00" + artifact.ScopeKey
+		if seenScope[scopeKey] {
+			continue
+		}
+		seenScope[scopeKey] = true
+		scopeConsumers, err := s.store.ListPlatformConsumers(artifact.ArtifactKind, artifact.ScopeKey)
+		if err != nil {
+			return nil, err
+		}
+		for _, consumer := range scopeConsumers {
+			key := strings.Join([]string{
+				consumer.ConsumerID,
+				consumer.ArtifactKind,
+				consumer.ScopeKey,
+				consumer.NodeID,
+			}, "\x00")
+			if seenConsumer[key] {
+				continue
+			}
+			seenConsumer[key] = true
+			consumers = append(consumers, consumer)
+		}
+	}
+	sort.SliceStable(consumers, func(i, j int) bool {
+		left := strings.Join([]string{consumers[i].Component, consumers[i].NodeID, consumers[i].ArtifactKind, consumers[i].ScopeKey, consumers[i].ConsumerID}, "\x00")
+		right := strings.Join([]string{consumers[j].Component, consumers[j].NodeID, consumers[j].ArtifactKind, consumers[j].ScopeKey, consumers[j].ConsumerID}, "\x00")
+		return left < right
+	})
+	return consumers, nil
 }

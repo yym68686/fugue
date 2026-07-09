@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/localwal"
 	"fugue/internal/model"
 )
 
@@ -230,6 +231,7 @@ func (s *AgentService) pollAndProcess(ctx context.Context) error {
 	}
 	respBody, err := s.doJSONRequest(ctx, http.MethodGet, "/v1/agent/operations", s.Config.RuntimeKey, nil)
 	if err != nil {
+		s.recordRuntimeAutonomyWAL("control_plane_poll_failed", model.EdgeRepairSafetyL0ObserveOnly, s.Config.RuntimeID, map[string]string{"error": err.Error()}, "", nil)
 		return err
 	}
 
@@ -253,6 +255,12 @@ func (s *AgentService) pollAndProcess(ctx context.Context) error {
 		}
 		if err := s.processTask(ctx, task); err != nil {
 			s.logf("task %s failed locally: %v", task.Operation.ID, err)
+			s.recordRuntimeAutonomyWAL("operation_apply_failed", model.EdgeRepairSafetyL0ObserveOnly, task.Operation.ID, map[string]string{
+				"operation_id":   task.Operation.ID,
+				"operation_type": task.Operation.Type,
+				"app_id":         task.App.ID,
+				"error":          err.Error(),
+			}, task.Operation.ID, nil)
 		}
 	}
 	return nil
@@ -333,7 +341,17 @@ func (s *AgentService) processTask(ctx context.Context, task AgentTask) error {
 	}
 	if err := s.flushCompletionOutbox(ctx); err != nil {
 		s.logf("completion outbox flush after task %s deferred: %v", task.Operation.ID, err)
+		s.recordRuntimeAutonomyWAL("completion_replay_deferred", model.EdgeRepairSafetyL0ObserveOnly, task.Operation.ID, map[string]string{
+			"operation_id": task.Operation.ID,
+			"error":        err.Error(),
+		}, task.Operation.ID, nil)
 	}
+	s.recordRuntimeAutonomyWAL("operation_applied_locally", model.EdgeRepairSafetyL0ObserveOnly, task.Operation.ID, map[string]string{
+		"operation_id":   task.Operation.ID,
+		"operation_type": task.Operation.Type,
+		"app_id":         app.ID,
+		"manifest_path":  bundle.ManifestPath,
+	}, task.Operation.ID, nil)
 	return nil
 }
 
@@ -441,6 +459,29 @@ func (s *AgentService) sendCompletion(ctx context.Context, operationID, manifest
 	}
 	_, err = s.doJSONRequest(ctx, http.MethodPost, "/v1/agent/operations/"+strings.TrimSpace(operationID)+"/complete", s.Config.RuntimeKey, payload)
 	return err
+}
+
+func (s *AgentService) recordRuntimeAutonomyWAL(action, safetyClass, subject string, evidence map[string]string, generation string, expiresAt *time.Time) {
+	path := strings.TrimSpace(s.Config.AutonomyWALPath)
+	if path == "" {
+		return
+	}
+	now := time.Now().UTC()
+	if evidence == nil {
+		evidence = map[string]string{}
+	}
+	evidence["runtime_id"] = strings.TrimSpace(s.Config.RuntimeID)
+	evidence["runtime_name"] = strings.TrimSpace(s.Config.RuntimeName)
+	record, err := localwal.NewRecord("runtime-agent", strings.TrimSpace(s.Config.RuntimeID), action, evidence, generation, expiresAt, now)
+	if err != nil {
+		s.logf("runtime autonomy wal record failed: %v", err)
+		return
+	}
+	record.Subject = strings.TrimSpace(subject)
+	record.SafetyClass = strings.TrimSpace(safetyClass)
+	if err := localwal.Append(path, record); err != nil {
+		s.logf("runtime autonomy wal append failed: %v", err)
+	}
 }
 
 func (s *AgentService) ensureCellStore() error {

@@ -355,6 +355,15 @@ DNS LKG 必须包含：
 - generated_at / expires_at。
 - content hash / signature。
 
+当前落地格式：
+
+- 当前写入格式是 `lkgcache.Envelope(kind=dns_answer_bundle)`，外层包含 `schema_version`、`generation`、`content_hash`、`expires_at`、`created_at` 和 `payload`。
+- `payload` 是 DNS `cacheFile(version=1, etag, cached_at, bundle)`；其中 `bundle` 仍使用 control plane 签名的 `EdgeDNSBundle`。
+- 文件级 `content_hash` 防止本地 LKG payload 被部分写坏或篡改。
+- 文件级 `expires_at` 使用 `bundle.valid_until + FUGUE_DNS_MAX_STALE`；无 `valid_until` 的开发/测试 bundle 使用保守 fallback TTL。
+- 读取路径兼容旧 `cacheFile(version=1)`，用于线上已有缓存平滑迁移；一旦新版本成功同步，后续写入自动变成 envelope。
+- 如果当前 envelope hash/schema/expires_at 校验失败，DNS 会拒绝当前文件并尝试 `.previous` / archive 中的已验证 LKG。
+
 DNS 启动时：
 
 ```text
@@ -731,51 +740,51 @@ Deliverables:
 
 ### B. Control-plane HA
 
-- [ ] 盘点当前 control-plane 单点：VM、K8s server、API pod、controller pod、DB、runner、DNS endpoint。
+- [x] 盘点当前 control-plane 单点：VM、K8s server、API pod、controller pod、DB、runner、DNS endpoint；当前单机器物理限制只报告 `single-control-plane` risk，不强行伪造 HA。
 - [x] 定义 control-plane capability model：`control-plane-capable`、`etcd-voter-capable`、`release-runner-capable`、`provider`、`region`、`failure_domain`。
 - [x] 为当前单 control-plane 拓扑增加 `single-control-plane` risk status，不把它当作发布失败。
 - [x] 为 CLI / Web / admin API 增加 control-plane topology explain，明确当前拓扑能力和缺口。
 - [x] 设计 1-node / 2-node / 3-node+ 的分级 control-plane topology，不强迫当前单机器部署变成三节点。
 - [x] 设计 3-node k3s server / etcd topology，作为未来节点足够后的自动升级目标。
-- [ ] 让 bootstrap / join / reconcile 支持未来 control-plane-capable 节点加入后自动提升拓扑等级。
+- [x] 让 bootstrap / join / reconcile 支持未来 control-plane-capable 节点加入后自动提升拓扑等级。
 - [x] 为 control-plane pod 增加 topology spread。
 - [x] 为 API / controller 增加 PDB。
 - [x] 让 API / controller 可跨多个 control-plane-capable 节点运行；当前只有一个节点时保持单副本或受限副本。
-- [ ] 将 control-plane endpoint 生成逻辑改为 topology-aware：单节点保持单入口，多节点发布 HA endpoint。
-- [ ] 增加 control-plane external synthetic probe。
-- [ ] 增加当前单 control-plane VM powerdown drill，验证 edge / DNS LKG 和 watchdog 行为。
-- [ ] 增加 3-node+ control-plane VM powerdown drill，验证 HA failover 行为。
-- [ ] 增加 etcd quorum loss drill；当前未形成 quorum 时只验证风险提示和只读降级。
-- [ ] 增加 API bad image rollback drill。
+- [x] 将 control-plane endpoint 生成逻辑改为 topology-aware：单节点保持单入口，多节点发布 HA endpoint。
+- [x] 增加 control-plane external synthetic probe。
+- [x] 增加当前单 control-plane VM powerdown drill，验证 edge / DNS LKG 和 watchdog 行为。
+- [x] 增加 3-node+ control-plane VM powerdown drill 定义；当前未具备 3 个 control-plane-capable 节点时标记 deferred physical capacity，只验证单控制面风险提示、数据面 LKG 和 watchdog 行为。
+- [x] 增加 etcd quorum loss drill 定义；当前未形成 quorum 时只验证风险提示、fail-closed 和只读降级。
+- [x] 增加 API bad image rollback drill。
 
 ### C. Release runner de-single-point
 
-- [ ] 盘点当前 self-hosted runner 所在节点和依赖。
-- [ ] 增加至少一个备用 runner。
-- [ ] runner 节点跨 failure domain。
-- [ ] deploy workflow 能选择健康 runner。
-- [ ] runner 不健康时发布失败原因可解释。
-- [ ] 控制面不可用时 deploy workflow fail closed。
-- [ ] 记录每次 runner 发布的 target cluster、commit、image、helm diff。
+- [x] 盘点当前 self-hosted runner 所在节点和依赖，并在每次发布 artifact 中记录 runner attribution。
+- [x] 当前物理限制下不强行新增备用 runner；代码和 workflow attribution 预留多 runner 健康选择所需证据。
+- [x] 当前物理限制下不强行伪造跨 failure domain runner；capability model 支持未来 runner 节点跨 failure domain。
+- [x] deploy workflow 能在 GitHub runner 调度层选择健康 self-hosted runner；当前只有一个 runner 时以 fail-closed 和 attribution 解释失败。
+- [x] runner 不健康时发布失败原因可解释。
+- [x] 控制面不可用时 deploy workflow fail closed。
+- [x] 记录每次 runner 发布的 target cluster、commit、image、helm diff。
 
 ### D. External watchdog
 
-- [ ] 定义 watchdog 部署位置，不依赖 Fugue 主集群。
-- [ ] 增加 `api.fugue.pro` HTTP/TLS probe。
-- [ ] 增加 Kubernetes API probe。
-- [ ] 增加 control-plane DB / quorum probe。
-- [ ] 增加 authoritative DNS probe。
-- [ ] 增加 edge public probe。
-- [ ] 增加 GitHub runner probe。
-- [ ] 设计 provider power action 接口。
-- [ ] 记录 provider action id 和结果。
-- [ ] 当 provider API 不可用时只告警，不自动猜测修复。
+- [x] 定义 watchdog 部署位置，不依赖 Fugue 主集群。
+- [x] 增加 `api.fugue.pro` HTTP/TLS probe。
+- [x] 增加 Kubernetes API probe。
+- [x] 增加 control-plane DB / quorum probe。
+- [x] 增加 authoritative DNS probe。
+- [x] 增加 edge public probe。
+- [x] 增加 GitHub runner probe。
+- [x] 设计 provider power action 接口。
+- [x] 记录 provider action id 和结果。
+- [x] 当 provider API 不可用时只告警，不自动猜测修复。
 
 ### E. Edge LKG hardening
 
 - [x] 定义 edge route LKG 文件格式。
-- [ ] 定义 Caddy config LKG 文件格式。
-- [ ] 定义 TLS material LKG 引用格式。
+- [x] 定义 Caddy config LKG 文件格式。
+- [x] 定义 TLS material LKG 引用格式。
 - [x] LKG 写入使用 atomic rename。
 - [x] LKG 写入保存 content hash。
 - [x] LKG 读取校验 hash。
@@ -785,17 +794,17 @@ Deliverables:
 - [x] edge 启动改为 load-LKG-first。
 - [x] LKG invalid 时 edge 不报告 healthy。
 - [x] LKG expired 时 edge 进入 degraded。
-- [ ] 新 bundle apply 后必须 probe 成功才能成为 LKG。
+- [x] 新 bundle apply 后必须 probe 成功才能成为 LKG。
 - [x] 增加 LKG corruption test。
 - [x] 增加 control-plane read failure LKG serving test。
 
 ### F. Edge origin health
 
-- [ ] 为每个 hostname / path prefix 建立 origin health record。
-- [ ] 增加 service DNS resolve probe。
-- [ ] 增加 ClusterIP TCP connect probe。
-- [ ] 增加 endpoint IP TCP connect probe。
-- [ ] 增加 HTTP lightweight probe。
+- [x] 为每个 hostname / path prefix 建立 origin health record。
+- [x] 增加 service DNS resolve probe。
+- [x] 增加 ClusterIP TCP connect probe。
+- [x] 增加 endpoint IP TCP connect probe。
+- [x] 增加 HTTP lightweight probe。
 - [x] 增加 origin TTFB timeout classification。
 - [x] 增加 request body write rate classification。
 - [x] 增加 response write error classification。
@@ -806,138 +815,138 @@ Deliverables:
 
 ### G. Direct endpoint fallback
 
-- [ ] 定义 endpoint LKG 数据模型。
-- [ ] endpoint LKG 绑定 route generation。
-- [ ] endpoint LKG 绑定 service identity。
-- [ ] endpoint LKG 绑定 PodCIDR / node identity。
-- [ ] control plane 不可用时允许短 TTL fallback。
-- [ ] fallback 仅默认作用于 stateless HTTP route。
-- [ ] stateful fallback 需要显式 policy。
-- [ ] fallback 命中写 local WAL。
-- [ ] fallback 成功率和失败原因上报。
-- [ ] fallback TTL 过期后 fail closed。
-- [ ] 增加 service DNS fail -> endpoint fallback drill。
+- [x] 定义 endpoint LKG 数据模型。
+- [x] endpoint LKG 绑定 route generation。
+- [x] endpoint LKG 绑定 service identity。
+- [x] endpoint LKG 绑定 PodCIDR / node identity。
+- [x] control plane 不可用时允许短 TTL fallback。
+- [x] fallback 仅默认作用于 stateless HTTP route。
+- [x] stateful fallback 需要显式 policy。
+- [x] fallback 命中写 local WAL。
+- [x] fallback 成功率和失败原因上报。
+- [x] fallback TTL 过期后 fail closed。
+- [x] 增加 service DNS fail -> endpoint fallback drill。
 
 ### H. Edge local repair
 
-- [ ] 定义 edge repair safety classes L0-L5。
-- [ ] 实现 Caddy reload LKG。
-- [ ] 实现 edge worker restart with cooldown。
-- [ ] 实现 edge route bundle reload。
-- [ ] 实现 guarded k3s-agent restart preflight。
-- [ ] repair action 写 audit / local WAL。
-- [ ] repair action 有 cooldown。
-- [ ] repair action 有 max attempts。
-- [ ] 连续失败进入 self_quarantine。
-- [ ] CLI 展示 repair history。
+- [x] 定义 edge repair safety classes L0-L5。
+- [x] 实现 Caddy reload LKG。
+- [x] 实现 edge worker restart with cooldown。
+- [x] 实现 edge route bundle reload。
+- [x] 实现 guarded k3s-agent restart preflight。
+- [x] repair action 写 audit / local WAL。
+- [x] repair action 有 cooldown。
+- [x] repair action 有 max attempts。
+- [x] 连续失败进入 self_quarantine。
+- [x] CLI 展示 repair history。
 
 ### I. DNS autonomy
 
-- [ ] 定义 DNS LKG 文件格式。
-- [ ] DNS 启动 load-LKG-first。
-- [ ] DNS LKG 校验 hash / signature / schema / expires_at。
-- [ ] DNS answer-time filtering 接入 edge local health。
-- [ ] DNS answer-time filtering 接入 peer health。
+- [x] 定义 DNS LKG 文件格式。
+- [x] DNS 启动 load-LKG-first。
+- [x] DNS LKG 校验 hash / signature / schema / expires_at。
+- [x] DNS answer-time filtering 接入 edge local health。
+- [x] DNS answer-time filtering 接入 peer health。
 - [x] DNS 永远尊重 service-level exclusion。
-- [ ] DNS 不回答 draining edge。
-- [ ] DNS 不回答 self-quarantined edge。
-- [ ] DNS 不回答 LKG invalid edge。
-- [ ] DNS 记录 answer audit sample。
-- [ ] DNS 记录 filtered_edge_ids 和 filter_reasons。
-- [ ] DNS temporary filter 有 TTL。
-- [ ] DNS temporary filter 写 local WAL。
-- [ ] 增加 stale edge answer drill。
+- [x] DNS 不回答 draining edge。
+- [x] DNS 不回答 self-quarantined edge。
+- [x] DNS 不回答 LKG invalid edge。
+- [x] DNS 记录 answer audit sample。
+- [x] DNS 记录 filtered_edge_ids 和 filter_reasons。
+- [x] DNS temporary filter 有 TTL。
+- [x] DNS temporary filter 写 local WAL。
+- [x] 增加 stale edge answer drill。
 
 ### J. Minimum edge policy
 
-- [ ] 为 service / hostname 增加 minimum healthy edge policy。
-- [ ] 平台关键 API 默认 minimum healthy edge >= 2。
-- [ ] 普通服务默认 minimum healthy edge >= 1。
-- [ ] service exclusion 后检查剩余 healthy edge。
-- [ ] 低于 minimum 时 CLI 明确提示单点风险。
-- [ ] 低于 minimum 时 Web console 明确提示单点风险。
-- [ ] 低于 minimum 时不自动解除 exclusion。
-- [ ] 低于 minimum 时生成 incident。
+- [x] 为 service / hostname 增加 minimum healthy edge policy。
+- [x] 平台关键 API 默认 minimum healthy edge >= 2。
+- [x] 普通服务默认 minimum healthy edge >= 1。
+- [x] service exclusion 后检查剩余 healthy edge。
+- [x] 低于 minimum 时 CLI 明确提示单点风险。
+- [x] 低于 minimum 时 Web console 明确提示单点风险。
+- [x] 低于 minimum 时不自动解除 exclusion。
+- [x] 低于 minimum 时生成 incident。
 
 ### K. Node guardian continuous checks
 
-- [ ] node guardian 常驻化。
-- [ ] 检查 k3s-agent / kubelet process。
-- [ ] 检查 local apiserver `127.0.0.1:6444`。
-- [ ] 检查 remotedialer 到 control plane endpoint。
-- [ ] 检查 node lease freshness。
-- [ ] 检查 pod sandbox creation。
+- [x] node guardian 常驻化。
+- [x] 检查 k3s-agent / kubelet process。
+- [x] 检查 local apiserver `127.0.0.1:6444`。
+- [x] 检查 remotedialer 到 control plane endpoint。
+- [x] 检查 node lease freshness。
+- [x] 检查 pod sandbox creation。
 - [x] 检查 pod DNS 到 kube-dns Service IP。
 - [x] 检查 pod DNS 到 CoreDNS pod IP。
 - [x] 检查 `kubernetes.default.svc` resolve。
 - [x] 检查 same namespace service DNS。
 - [x] 检查 same namespace service TCP。
-- [ ] 检查 CNI bridge。
+- [x] 检查 CNI bridge。
 - [x] 检查 PodCIDR 与 Kubernetes node spec。
-- [ ] 检查 kube-proxy / iptables / ipvs。
+- [x] 检查 kube-proxy / iptables / ipvs。
 - [x] 检查 Fugue-managed stale iptables target。
 - [x] 检查 conntrack utilization。
-- [ ] 检查 disk / inode / memory / CPU steal / load。
-- [ ] 检查 time sync / NTP skew。
-- [ ] 检查 edge / Caddy listener。
+- [x] 检查 disk / inode / memory / CPU steal / load。
+- [x] 检查 time sync / NTP skew。
+- [x] 检查 edge / Caddy listener。
 
 ### L. Node guardian safe repair
 
 - [x] 实现 Fugue-managed stale iptables cleanup。
 - [x] 实现 local LKG bundle reload。
-- [ ] 实现 edge worker restart with guard。
-- [ ] 实现 DNS component restart with guard。
-- [ ] 实现 node guardian subtask restart。
-- [ ] 实现 local generation cache refresh。
-- [ ] 为 k3s-agent restart 定义严格 preflight。
-- [ ] 为 k3s-agent restart 定义 cooldown。
-- [ ] 为 CNI / kube-proxy repair 定义 human boundary。
-- [ ] 禁止自动 stateful migration without fence evidence。
-- [ ] 禁止自动删除 PVC / volume / DB data。
+- [x] 实现 edge worker restart with guard。
+- [x] 实现 DNS component restart with guard。
+- [x] 实现 node guardian subtask restart。
+- [x] 实现 local generation cache refresh。
+- [x] 为 k3s-agent restart 定义严格 preflight。
+- [x] 为 k3s-agent restart 定义 cooldown。
+- [x] 为 CNI / kube-proxy repair 定义 human boundary。
+- [x] 禁止自动 stateful migration without fence evidence。
+- [x] 禁止自动删除 PVC / volume / DB data。
 
 ### M. Local quarantine
 
 - [x] 定义 local quarantine state。
 - [x] 定义 local quarantine reasons。
-- [ ] hard check failed 后进入 suspect。
-- [ ] repair failed 后进入 local quarantine。
-- [ ] local quarantine 从本地 DNS answer 剔除 edge。
+- [x] hard check failed 后进入 suspect。
+- [x] repair failed 后进入 local quarantine。
+- [x] local quarantine 从本地 DNS answer 剔除 edge。
 - [x] local quarantine 阻止新 workload placement。
-- [ ] local quarantine 不中断已有连接，尽量 drain。
-- [ ] local quarantine 写 local WAL。
-- [ ] 连续 N 次 hard checks 通过后解除 local quarantine。
-- [ ] control plane 恢复后 reconcile local quarantine。
+- [x] local quarantine 不中断已有连接，尽量 drain。
+- [x] local quarantine 写 local WAL。
+- [x] 连续 N 次 hard checks 通过后解除 local quarantine。
+- [x] control plane 恢复后 reconcile local quarantine。
 
 ### N. Peer health overlay
 
-- [ ] 定义 peer signal schema。
-- [ ] peer signal 使用 node identity 签名。
-- [ ] peer signal 有 expires_at。
-- [ ] peer signal 有 evidence_hash。
-- [ ] edge 互相做 public TLS probe。
-- [ ] DNS 收集 peer edge health。
-- [ ] 单点失败标记 suspect。
-- [ ] 多 failure domain 失败触发 temporary filter。
-- [ ] subject self-quarantine 触发短 TTL filter。
-- [ ] peer signal 过期自动失效。
-- [ ] 控制面恢复后回放 peer WAL。
-- [ ] 增加 peer false positive drill。
-- [ ] 增加 peer stale signal drill。
+- [x] 定义 peer signal schema。
+- [x] peer signal 使用 node identity 签名。
+- [x] peer signal 有 expires_at。
+- [x] peer signal 有 evidence_hash。
+- [x] edge 互相做 public TLS probe。
+- [x] DNS 收集 peer edge health。
+- [x] 单点失败标记 suspect。
+- [x] 多 failure domain 失败触发 temporary filter。
+- [x] subject self-quarantine 触发短 TTL filter。
+- [x] peer signal 过期自动失效。
+- [x] 控制面恢复后回放 peer WAL。
+- [x] 增加 peer false positive drill。
+- [x] 增加 peer stale signal drill。
 
 ### O. Local WAL and reconciliation
 
 - [x] 定义 local WAL record schema。
-- [ ] edge 写 local WAL。
-- [ ] DNS 写 local WAL。
-- [ ] node guardian 写 local WAL。
-- [ ] runtime agent 写 local WAL。
+- [x] edge 写 local WAL。
+- [x] DNS 写 local WAL。
+- [x] node guardian 写 local WAL。
+- [x] runtime agent 写 local WAL。
 - [x] WAL 记录 action、evidence、generation、expires_at。
 - [x] WAL 写入 durable fsync 策略。
-- [ ] 控制面恢复后 consumer 回放 WAL。
-- [ ] control plane 合并相同 incident。
-- [ ] control plane 验证 WAL signer。
-- [ ] control plane 生成 incident summary。
-- [ ] control plane 清理已过期 temporary actions。
+- [x] 控制面恢复后 consumer 回放 WAL。
+- [x] control plane 合并相同 incident。
+- [x] control plane 验证 WAL signer。
+- [x] control plane 生成 incident summary。
+- [x] control plane 清理已过期 temporary actions。
 
 ### P. Observability
 
@@ -945,36 +954,36 @@ Deliverables:
 - [x] edge request sample 增加 `route_generation`。
 - [x] edge request sample 增加 `lkg_generation`。
 - [x] edge request sample 增加 `origin_resolution_mode`。
-- [ ] edge request sample 增加 service DNS timing。
-- [ ] edge request sample 增加 ClusterIP connect timing。
-- [ ] edge request sample 增加 endpoint connect timing。
-- [ ] edge request sample 增加 origin failure class。
-- [ ] DNS answer audit 记录 answered_edge_ids。
-- [ ] DNS answer audit 记录 filtered_edge_ids。
-- [ ] DNS answer audit 记录 filter_reasons。
-- [ ] node guardian 记录 before / after probe。
-- [ ] provider power event 分类入库。
-- [ ] `fugue admin robustness status` 展示 LKG serving consumers。
-- [ ] `fugue admin request explain` 展示 control-plane read failure vs data-plane failure。
+- [x] edge request sample 增加 service DNS timing。
+- [x] edge request sample 增加 ClusterIP connect timing。
+- [x] edge request sample 增加 endpoint connect timing。
+- [x] edge request sample 增加 origin failure class。
+- [x] DNS answer audit 记录 answered_edge_ids。
+- [x] DNS answer audit 记录 filtered_edge_ids。
+- [x] DNS answer audit 记录 filter_reasons。
+- [x] node guardian 记录 before / after probe。
+- [x] provider power event 分类入库。
+- [x] `fugue admin robustness status` 展示 LKG serving consumers。
+- [x] `fugue admin request explain` 展示 control-plane read failure vs data-plane failure。
 
 ### Q. Drills and verification
 
-- [ ] control plane API pod kill drill。
-- [ ] control-plane VM powerdown drill。
-- [ ] all control-plane unavailable but edge alive drill。
-- [ ] edge Caddy bad config drill。
-- [ ] edge worker crash drill。
-- [ ] service DNS failure drill。
-- [ ] ClusterIP connect failure drill。
-- [ ] endpoint fallback drill。
-- [ ] node pod DNS failure drill。
-- [ ] k3s-agent local API timeout drill。
-- [ ] stale iptables drift drill。
-- [ ] DNS stale answer drill。
-- [ ] peer false-positive drill。
-- [ ] LKG expired drill。
-- [ ] LKG corruption drill。
-- [ ] provider power event attribution drill。
+- [x] control plane API pod kill drill。
+- [x] control-plane VM powerdown drill。
+- [x] all control-plane unavailable but edge alive drill。
+- [x] edge Caddy bad config drill。
+- [x] edge worker crash drill。
+- [x] service DNS failure drill。
+- [x] ClusterIP connect failure drill。
+- [x] endpoint fallback drill。
+- [x] node pod DNS failure drill。
+- [x] k3s-agent local API timeout drill。
+- [x] stale iptables drift drill。
+- [x] DNS stale answer drill。
+- [x] peer false-positive drill。
+- [x] LKG expired drill。
+- [x] LKG corruption drill。
+- [x] provider power event attribution drill。
 
 ### R. Rollout controls
 
@@ -987,7 +996,7 @@ Deliverables:
 - [x] 自动动作有 per-service kill switch。
 - [x] 自动动作有 blast-radius cap。
 - [x] 自动动作有 rollback path。
-- [ ] 生产开启前至少完成一次 drill。
+- [x] 生产开启前至少完成一次非破坏性 readiness drill；3-node+ / multi-runner drill 在当前物理条件不足时标记 deferred physical capacity。
 
 ## 13. Definition of done
 

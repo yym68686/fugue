@@ -64,6 +64,7 @@ type RobustnessStatus struct {
 	RouteExplain      *RouteExplainResponse           `json:"route_explain,omitempty"`
 	FailureContracts  []SubsystemFailureContract      `json:"failure_contracts,omitempty"`
 	ReleaseSignals    []ReleaseSignal                 `json:"release_signals,omitempty"`
+	PlatformConsumers []PlatformConsumerInstance      `json:"platform_consumers,omitempty"`
 	GeneratedSources  []string                        `json:"generated_sources,omitempty"`
 }
 

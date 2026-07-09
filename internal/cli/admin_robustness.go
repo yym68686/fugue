@@ -217,6 +217,14 @@ func writeRobustnessStatus(w io.Writer, status model.RobustnessStatus) error {
 			return err
 		}
 	}
+	if consumers := robustnessInterestingPlatformConsumers(status.PlatformConsumers); len(consumers) > 0 {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if err := writeRobustnessPlatformConsumers(w, consumers); err != nil {
+			return err
+		}
+	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
@@ -276,6 +284,42 @@ func writeRobustnessIncident(w io.Writer, incident model.RobustnessIncident) err
 		kvPair{Key: "message", Value: firstNonEmpty(incident.Message, "-")},
 		kvPair{Key: "repair_hint", Value: firstNonEmpty(incident.RepairHint, "-")},
 	)
+}
+
+func robustnessInterestingPlatformConsumers(consumers []model.PlatformConsumerInstance) []model.PlatformConsumerInstance {
+	out := []model.PlatformConsumerInstance{}
+	for _, consumer := range consumers {
+		if consumer.ServingLKG || consumer.LKGExpired ||
+			(strings.TrimSpace(consumer.DesiredGeneration) != "" && strings.TrimSpace(consumer.ActualGeneration) != "" && consumer.DesiredGeneration != consumer.ActualGeneration) {
+			out = append(out, consumer)
+		}
+	}
+	return out
+}
+
+func writeRobustnessPlatformConsumers(w io.Writer, consumers []model.PlatformConsumerInstance) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "CONSUMER\tCOMPONENT\tNODE\tKIND\tSCOPE\tDESIRED\tACTUAL\tLKG\tSERVING_LKG\tLKG_EXPIRED\tUPDATED"); err != nil {
+		return err
+	}
+	for _, consumer := range consumers {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
+			consumer.ConsumerID,
+			firstNonEmpty(consumer.Component, "-"),
+			firstNonEmpty(consumer.NodeID, "-"),
+			firstNonEmpty(consumer.ArtifactKind, "-"),
+			firstNonEmpty(consumer.ScopeKey, "-"),
+			firstNonEmpty(consumer.DesiredGeneration, "-"),
+			firstNonEmpty(consumer.ActualGeneration, "-"),
+			firstNonEmpty(consumer.LKGGeneration, "-"),
+			consumer.ServingLKG,
+			consumer.LKGExpired,
+			formatTime(consumer.UpdatedAt),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 func writeRobustnessRepairPlan(w io.Writer, plan model.RobustnessRepairPlan) error {

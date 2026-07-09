@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -9,12 +10,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	miekgdns "github.com/miekg/dns"
 
 	"fugue/internal/config"
+	"fugue/internal/lkgcache"
+	"fugue/internal/localwal"
 	"fugue/internal/model"
 )
 
@@ -587,11 +591,197 @@ func TestEdgeDNSCandidateEligibilityRequiresTLSReadyForWeightedPolicy(t *testing
 			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", Priority: 0, Weight: 200, Healthy: true, RouteReady: true, TLSReady: false},
 			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", Priority: 50, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
 			{IP: "5.102.124.125", EdgeGroupID: "edge-group-country-hk", Priority: 50, Weight: 240, Healthy: false, RouteReady: true, TLSReady: true},
+			{IP: "203.0.113.44", EdgeGroupID: "edge-group-country-jp", Priority: 10, Weight: 240, Healthy: true, RouteReady: true, TLSReady: true, CacheStatus: "cache-error"},
+			{IP: "203.0.113.45", EdgeGroupID: "edge-group-country-sg", Priority: 10, Weight: 240, Healthy: true, RouteReady: true, TLSReady: true, MaxStaleExceeded: true},
 		},
 	}
 	ordered := edgeDNSOrderedCandidates(record, dnsGeoHint{}, time.Date(2026, 6, 17, 0, 0, 0, 0, time.UTC))
 	if len(ordered) != 1 || ordered[0].IP != "51.38.126.103" {
 		t.Fatalf("expected only healthy route-ready TLS-ready candidate, got %+v", ordered)
+	}
+}
+
+func TestServiceFiltersUnhealthyLiveCandidateAndLogsDNSAnswerAudit(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	walPath := filepath.Join(t.TempDir(), "dns-autonomy.wal")
+	service := NewService(config.DNSConfig{
+		DNSNodeID:              "dns-us-1",
+		EdgeGroupID:            "edge-group-country-us",
+		Zone:                   "dns.fugue.pro",
+		TTL:                    60,
+		Nameservers:            []string{"ns1.dns.fugue.pro"},
+		EdgeHealthProbeEnabled: true,
+		AutonomyWALPath:        walPath,
+	}, log.New(&logs, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version:     "dnsgen_live",
+		Generation:  "dnsgen_live",
+		DNSNodeID:   "dns-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				TTL:        60,
+				Status:     model.EdgeRouteStatusActive,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindWeighted,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeID: "edge-us", EdgeGroupID: "edge-group-country-us", Priority: 0, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "51.38.126.103", EdgeID: "edge-de", EdgeGroupID: "edge-group-country-de", Priority: 50, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_live"`, false, "")
+	service.edgeHealthMu.Lock()
+	service.edgeHealth["15.204.94.71"] = edgeHealthObservation{Healthy: false, CheckedAt: time.Now().UTC()}
+	service.edgeHealth["51.38.126.103"] = edgeHealthObservation{Healthy: true, CheckedAt: time.Now().UTC()}
+	service.edgeHealthMu.Unlock()
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess {
+		t.Fatalf("expected success, got %s", miekgdns.RcodeToString[answer.Rcode])
+	}
+	if len(answer.Answer) != 1 {
+		t.Fatalf("expected one filtered fallback answer, got %+v", answer.Answer)
+	}
+	first, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || first.A.String() != "51.38.126.103" {
+		t.Fatalf("expected unhealthy primary filtered and fallback edge answered, got %+v", answer.Answer)
+	}
+
+	logText := logs.String()
+	for _, want := range []string{
+		`"event_type":"dns_answer_audit"`,
+		`"answered_edge_ids":["edge-de"]`,
+		`"filtered_edge_ids":["edge-us"]`,
+		`"filter_reasons":{"edge-us":"local_edge_probe_unhealthy"}`,
+		`"lkg_generation":"dnsgen_live"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected audit log to contain %s, got %s", want, logText)
+		}
+	}
+
+	records, err := localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read dns autonomy wal: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected one temporary filter WAL record, got %+v", records)
+	}
+	record := records[0]
+	if record.Component != "dns-server" || record.Action != "temporary_filter" || record.SafetyClass != "L1_temporary_filter" {
+		t.Fatalf("unexpected WAL record identity: %+v", record)
+	}
+	if record.Generation != "dnsgen_live" || record.Subject != "edge-us" {
+		t.Fatalf("unexpected WAL generation/subject: %+v", record)
+	}
+	if record.ExpiresAt == nil || record.ExpiresAt.Before(time.Now().UTC()) {
+		t.Fatalf("expected future WAL expiry, got %+v", record.ExpiresAt)
+	}
+	for key, want := range map[string]string{
+		"query_name":    "app.dns.fugue.pro",
+		"candidate_ip":  "15.204.94.71",
+		"edge_id":       "edge-us",
+		"reason":        "local_edge_probe_unhealthy",
+		"source":        "dns_answer_time_filter",
+		"ttl_seconds":   "15",
+		"record_type":   model.EdgeDNSRecordTypeA,
+		"record_kind":   model.EdgeDNSRecordKindPlatform,
+		"record_name":   "app.dns.fugue.pro",
+		"policy_kind":   model.DNSAnswerPolicyKindWeighted,
+		"edge_group_id": "edge-group-country-us",
+	} {
+		if got := record.Evidence[key]; got != want {
+			t.Fatalf("expected WAL evidence %s=%q, got %q in %+v", key, want, got, record.Evidence)
+		}
+	}
+
+	_ = dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	records, err = localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read dns autonomy wal after duplicate query: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected duplicate temporary filter to be WAL-deduped, got %+v", records)
+	}
+}
+
+func TestServiceFiltersPeerHealthTemporaryFilteredCandidatesAtAnswerTime(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	walPath := filepath.Join(t.TempDir(), "dns-autonomy.wal")
+	service := NewService(config.DNSConfig{
+		Zone:            "dns.fugue.pro",
+		TTL:             60,
+		Nameservers:     []string{"ns1.dns.fugue.pro"},
+		AutonomyWALPath: walPath,
+	}, log.New(&logs, "", 0))
+	service.setBundle(model.EdgeDNSBundle{
+		Version:     "dnsbundle-peer",
+		Generation:  "dnsgen_peer",
+		DNSNodeID:   "dns-us-1",
+		EdgeGroupID: "edge-group-country-us",
+		Zone:        "dns.fugue.pro",
+		Records: []model.EdgeDNSRecord{
+			{
+				Name:       "app.dns.fugue.pro",
+				Type:       model.EdgeDNSRecordTypeA,
+				TTL:        60,
+				Status:     model.EdgeRouteStatusActive,
+				RecordKind: model.EdgeDNSRecordKindPlatform,
+				AnswerPolicy: model.DNSAnswerPolicy{
+					PolicyKind:         model.DNSAnswerPolicyKindWeighted,
+					HealthRequired:     true,
+					RouteReadyRequired: true,
+				},
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeID: "edge-us", EdgeGroupID: "edge-group-country-us", Priority: 0, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "51.38.126.103", EdgeID: "edge-de", EdgeGroupID: "edge-group-country-de", Priority: 50, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}, `"dnsgen_peer"`, false, "")
+	service.SetPeerHealthDecisions([]model.PeerHealthDecision{{
+		SubjectEdgeID: "edge-us",
+		Decision:      model.PeerHealthDecisionTemporaryFilter,
+		Reason:        "multi_failure_domain_peer_failure",
+		ExpiresAt:     time.Now().UTC().Add(time.Minute),
+		SignalCount:   2,
+	}})
+
+	answer := dnsQuery(t, service, "app.dns.fugue.pro.", miekgdns.TypeA)
+	if answer.Rcode != miekgdns.RcodeSuccess || len(answer.Answer) != 1 {
+		t.Fatalf("expected one peer-filtered answer, got rcode=%s answer=%+v", miekgdns.RcodeToString[answer.Rcode], answer.Answer)
+	}
+	first, ok := answer.Answer[0].(*miekgdns.A)
+	if !ok || first.A.String() != "51.38.126.103" {
+		t.Fatalf("expected peer-filtered fallback edge, got %+v", answer.Answer)
+	}
+	logText := logs.String()
+	for _, want := range []string{
+		`"filtered_edge_ids":["edge-us"]`,
+		`"filter_reasons":{"edge-us":"peer_health_temporary_filter"}`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("expected audit log to contain %s, got %s", want, logText)
+		}
+	}
+	records, err := localwal.ReadAll(walPath)
+	if err != nil {
+		t.Fatalf("read wal: %v", err)
+	}
+	if len(records) != 1 || records[0].Evidence["reason"] != "peer_health_temporary_filter" {
+		t.Fatalf("expected peer health temporary filter WAL, got %+v", records)
 	}
 }
 
@@ -927,6 +1117,27 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("expected cache file to be written: %v", err)
 	}
+	cacheBody, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read cache file: %v", err)
+	}
+	envelope, err := lkgcache.DecodeEnvelope(cacheBody, lkgcache.ReadEnvelopeOptions{
+		Now:          time.Now().UTC(),
+		ExpectedKind: dnsCacheEnvelopeKind,
+	})
+	if err != nil {
+		t.Fatalf("expected dns cache envelope: %v", err)
+	}
+	if envelope.Kind != dnsCacheEnvelopeKind || envelope.Generation != "dnsgen_test" || envelope.ContentHash == "" || envelope.ExpiresAt.IsZero() {
+		t.Fatalf("unexpected dns cache envelope: %+v", envelope)
+	}
+	var cached cacheFile
+	if err := json.Unmarshal(envelope.Payload, &cached); err != nil {
+		t.Fatalf("decode envelope payload: %v", err)
+	}
+	if cached.Version != cacheFileVersion || cached.Bundle.Version != "dnsgen_test" {
+		t.Fatalf("unexpected envelope payload: %+v", cached)
+	}
 
 	reloaded := NewService(cfg, log.New(ioDiscard{}, "", 0))
 	if err := reloaded.LoadCache(); err != nil {
@@ -942,6 +1153,44 @@ func TestServiceSyncWritesCacheLoadsCacheAndUsesNotModified(t *testing.T) {
 	snapshot := service.metricSnapshot()
 	if snapshot.Metrics.BundleSyncSuccess != 1 || snapshot.Metrics.BundleSyncNotModified != 1 || snapshot.Metrics.CacheWriteSuccess != 1 {
 		t.Fatalf("unexpected sync/cache metrics: %+v", snapshot.Metrics)
+	}
+}
+
+func TestLoadCacheReadsLegacyDNSCacheFile(t *testing.T) {
+	t.Parallel()
+
+	cachePath := filepath.Join(t.TempDir(), "dns-cache.json")
+	service := NewService(config.DNSConfig{
+		Zone:      "dns.fugue.pro",
+		CachePath: cachePath,
+		MaxStale:  time.Hour,
+	}, log.New(ioDiscard{}, "", 0))
+	legacy := cacheFile{
+		Version:  cacheFileVersion,
+		ETag:     `"dnsgen_legacy"`,
+		CachedAt: time.Now().UTC(),
+		Bundle: model.EdgeDNSBundle{
+			Version: "dnsgen_legacy",
+			Zone:    "dns.fugue.pro",
+			Records: []model.EdgeDNSRecord{
+				{Name: "legacy.dns.fugue.pro", Type: model.EdgeDNSRecordTypeA, Values: []string{"203.0.113.20"}, Status: model.EdgeRouteStatusActive},
+			},
+		},
+	}
+	body, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy cache: %v", err)
+	}
+	if err := os.WriteFile(cachePath, body, 0o600); err != nil {
+		t.Fatalf("write legacy cache: %v", err)
+	}
+
+	if err := service.LoadCache(); err != nil {
+		t.Fatalf("load legacy dns cache: %v", err)
+	}
+	status := service.Status()
+	if !status.Healthy || !status.StaleCache || status.ServingGeneration != "dnsgen_legacy" {
+		t.Fatalf("unexpected legacy cache status: %+v", status)
 	}
 }
 

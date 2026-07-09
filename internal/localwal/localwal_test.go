@@ -58,6 +58,28 @@ func TestReadAllRejectsEvidenceHashMismatch(t *testing.T) {
 	}
 }
 
+func TestSignAndVerifyRecord(t *testing.T) {
+	now := time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC)
+	record, err := NewRecord("edge-worker", "edge-1", "serve_lkg", map[string]string{"generation": "routegen_1"}, "routegen_1", nil, now)
+	if err != nil {
+		t.Fatalf("new record: %v", err)
+	}
+	signed, err := SignRecord(record, "node-identity:edge-1", []byte("secret"))
+	if err != nil {
+		t.Fatalf("sign record: %v", err)
+	}
+	if signed.Signer == "" || signed.Signature == "" {
+		t.Fatalf("expected signer and signature, got %+v", signed)
+	}
+	if err := VerifyRecord(signed, []byte("secret")); err != nil {
+		t.Fatalf("verify record: %v", err)
+	}
+	signed.Evidence["generation"] = "routegen_2"
+	if err := VerifyRecord(signed, []byte("secret")); err == nil {
+		t.Fatal("expected signature verification failure after evidence tamper")
+	}
+}
+
 func mustReadFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)

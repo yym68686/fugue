@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -180,7 +181,7 @@ func (s *Server) deriveEdgeRouteBundle(r *http.Request, options edgeRouteBundleO
 	}
 
 	for _, platformRoute := range s.platformRoutes {
-		for _, binding := range edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups) {
+		for _, binding := range edgeRouteBindingsForPlatformRoute(platformRoute, healthyEdgeGroups, healthyEdgeNodeIDsByGroup) {
 			routes = append(routes, binding)
 		}
 	}
@@ -537,8 +538,25 @@ func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]mo
 		binding.ExclusionExpiresAt = policy.ExclusionExpiresAt
 	}
 	effectiveHealthyEdgeGroups := edgeRouteHealthyGroupsAfterExclusions(healthyEdgeGroups, healthyEdgeNodeIDsByGroup, exclusions)
+	healthyEdgeNodeCount := edgeRouteHealthyNodeCountAfterExclusions(healthyEdgeNodeIDsByGroup, exclusions)
+	if policyMatches && strings.TrimSpace(policy.EdgeGroupID) != "" {
+		healthyEdgeNodeCount = edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup, []string{policy.EdgeGroupID}, exclusions)
+	}
 	selection := selectEdgeGroupForRoute(runtimeEdgeGroupID, effectiveHealthyEdgeGroups)
 	servingEdgeGroupID := selection.EdgeGroupID
+	minHealthyEdgeNodes := defaultMinHealthyEdgeNodesForBinding(binding)
+	if policyMatches && policy.MinHealthyEdgeNodes > 0 {
+		minHealthyEdgeNodes = policy.MinHealthyEdgeNodes
+	}
+	binding.MinHealthyEdgeNodes = minHealthyEdgeNodes
+	binding.HealthyEdgeNodeCount = healthyEdgeNodeCount
+	if model.EdgeRoutePolicyAllowsTraffic(binding.RoutePolicy) || policyMatches || isDefaultEdgeRouteKind(binding.RouteKind) {
+		binding.EdgeRedundancyStatus = "ok"
+		if minHealthyEdgeNodes > 0 && healthyEdgeNodeCount < minHealthyEdgeNodes {
+			binding.EdgeRedundancyStatus = "at_risk"
+			binding.EdgeRedundancyReason = fmt.Sprintf("healthy edge nodes %d below minimum %d", healthyEdgeNodeCount, minHealthyEdgeNodes)
+		}
+	}
 	binding.RuntimeEdgeGroupID = runtimeEdgeGroupID
 	binding.RuntimeEdgeGroup = runtimeEdgeGroupID
 	binding.SelectedEdgeGroup = servingEdgeGroupID
@@ -768,6 +786,42 @@ func edgeRouteHealthyGroupsAfterExclusions(healthyEdgeGroups map[string]bool, he
 	return out
 }
 
+func edgeRouteHealthyNodeCountAfterExclusions(healthyEdgeNodeIDsByGroup map[string][]string, exclusions edgeRouteExclusions) int {
+	return edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup, nil, exclusions)
+}
+
+func edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup map[string][]string, allowedGroups []string, exclusions edgeRouteExclusions) int {
+	if len(healthyEdgeNodeIDsByGroup) == 0 {
+		return 0
+	}
+	allowed := map[string]struct{}{}
+	for _, groupID := range allowedGroups {
+		groupID = strings.TrimSpace(groupID)
+		if groupID != "" {
+			allowed[groupID] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	for edgeGroupID, nodes := range healthyEdgeNodeIDsByGroup {
+		if len(allowed) > 0 {
+			if _, ok := allowed[strings.TrimSpace(edgeGroupID)]; !ok {
+				continue
+			}
+		}
+		if exclusions.ExcludesEdgeGroup(edgeGroupID) {
+			continue
+		}
+		for _, edgeID := range nodes {
+			edgeID = strings.TrimSpace(edgeID)
+			if edgeID == "" || exclusions.ExcludesEdge(edgeID) {
+				continue
+			}
+			seen[edgeID] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
 func edgeRouteBindingAllowedForRequest(binding model.EdgeRouteBinding, options edgeRouteBundleOptions) bool {
 	exclusions := edgeRouteExclusionsFromBinding(binding)
 	if exclusions.Empty() {
@@ -796,6 +850,43 @@ func isDefaultEdgeRouteKind(routeKind string) bool {
 		routeKind == model.EdgeRouteKindCustomDomain
 }
 
+func defaultMinHealthyEdgeNodesForPolicyHostname(s *Server, hostname string) int {
+	hostname = normalizeExternalAppDomain(hostname)
+	if hostname == "" {
+		return 1
+	}
+	if s != nil {
+		for _, route := range s.platformRoutes {
+			if normalizeExternalAppDomain(route.Hostname) != hostname {
+				continue
+			}
+			if platformRouteRequiresRedundantEdges(route.Kind) {
+				return 2
+			}
+		}
+		if normalizeExternalAppDomain(s.apiPublicDomain) == hostname {
+			return 2
+		}
+	}
+	return 1
+}
+
+func defaultMinHealthyEdgeNodesForBinding(binding model.EdgeRouteBinding) int {
+	if platformRouteRequiresRedundantEdges(binding.RouteKind) {
+		return 2
+	}
+	return 1
+}
+
+func platformRouteRequiresRedundantEdges(routeKind string) bool {
+	switch strings.TrimSpace(routeKind) {
+	case model.EdgeRouteKindControlPlaneAPI, model.EdgeRouteKindPlatformRoute:
+		return true
+	default:
+		return false
+	}
+}
+
 func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.AppDomain) model.EdgeRouteBinding {
 	if binding.RouteKind != model.EdgeRouteKindCustomDomain {
 		return binding
@@ -811,7 +902,7 @@ func applyCustomDomainReadiness(binding model.EdgeRouteBinding, domain model.App
 	return binding
 }
 
-func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
+func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string) []model.EdgeRouteBinding {
 	base := model.EdgeRouteBinding{
 		Hostname:      route.Hostname,
 		PathPrefix:    "/",
@@ -825,6 +916,8 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGro
 		Status:        route.Status,
 		StatusReason:  route.StatusReason,
 	}
+	minHealthyEdgeNodes := defaultMinHealthyEdgeNodesForBinding(base)
+	healthyEdgeNodeCount := edgeRouteHealthyNodeCountAfterExclusions(healthyEdgeNodeIDsByGroup, edgeRouteExclusions{})
 	if base.Status != model.EdgeRouteStatusActive || !model.EdgeRoutePolicyAllowsTraffic(base.RoutePolicy) {
 		base.UpstreamURL = ""
 	}
@@ -832,6 +925,8 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGro
 	switch route.EdgeGroupMode {
 	case model.PlatformRouteEdgeGroupModePinned:
 		base.EdgeGroupID = strings.TrimSpace(route.EdgeGroupID)
+		healthyEdgeNodeCount = edgeRouteHealthyNodeCountForGroupsAfterExclusions(healthyEdgeNodeIDsByGroup, []string{base.EdgeGroupID}, edgeRouteExclusions{})
+		base = applyEdgeRouteRedundancyStatus(base, healthyEdgeNodeCount, minHealthyEdgeNodes)
 		if base.EdgeGroupID == "" || !healthyEdgeGroups[base.EdgeGroupID] {
 			base.Status = model.EdgeRouteStatusUnavailable
 			base.StatusReason = "edge group has no healthy edge nodes"
@@ -852,11 +947,29 @@ func edgeRouteBindingsForPlatformRoute(route model.PlatformRoute, healthyEdgeGro
 		for _, edgeGroupID := range groups {
 			candidate := base
 			candidate.EdgeGroupID = edgeGroupID
+			candidate = applyEdgeRouteRedundancyStatus(candidate, healthyEdgeNodeCount, minHealthyEdgeNodes)
 			candidate.RouteGeneration = edgeRouteGeneration(candidate)
 			out = append(out, candidate)
 		}
 		return out
 	}
+}
+
+func applyEdgeRouteRedundancyStatus(binding model.EdgeRouteBinding, healthyEdgeNodeCount, minHealthyEdgeNodes int) model.EdgeRouteBinding {
+	binding.MinHealthyEdgeNodes = minHealthyEdgeNodes
+	binding.HealthyEdgeNodeCount = healthyEdgeNodeCount
+	if minHealthyEdgeNodes <= 0 {
+		binding.EdgeRedundancyStatus = ""
+		binding.EdgeRedundancyReason = ""
+		return binding
+	}
+	binding.EdgeRedundancyStatus = "ok"
+	binding.EdgeRedundancyReason = ""
+	if healthyEdgeNodeCount < minHealthyEdgeNodes {
+		binding.EdgeRedundancyStatus = "at_risk"
+		binding.EdgeRedundancyReason = fmt.Sprintf("healthy edge nodes %d below minimum %d", healthyEdgeNodeCount, minHealthyEdgeNodes)
+	}
+	return binding
 }
 
 type edgeGroupSelection struct {
@@ -1172,6 +1285,10 @@ type edgeRouteVersionMaterial struct {
 	ExcludedEdgeGroupIDs []string                  `json:"excluded_edge_group_ids,omitempty"`
 	ExclusionReason      string                    `json:"exclusion_reason,omitempty"`
 	ExclusionExpiresAt   *time.Time                `json:"exclusion_expires_at,omitempty"`
+	MinHealthyEdgeNodes  int                       `json:"min_healthy_edge_nodes,omitempty"`
+	HealthyEdgeNodeCount int                       `json:"healthy_edge_node_count,omitempty"`
+	EdgeRedundancyStatus string                    `json:"edge_redundancy_status,omitempty"`
+	EdgeRedundancyReason string                    `json:"edge_redundancy_reason,omitempty"`
 	RoutePolicy          string                    `json:"route_policy"`
 	SelectionReason      string                    `json:"selection_reason,omitempty"`
 	FallbackReason       string                    `json:"fallback_reason,omitempty"`
@@ -1230,6 +1347,10 @@ func edgeRouteVersionMaterialFromBinding(binding model.EdgeRouteBinding) edgeRou
 		ExcludedEdgeGroupIDs: append([]string(nil), binding.ExcludedEdgeGroupIDs...),
 		ExclusionReason:      binding.ExclusionReason,
 		ExclusionExpiresAt:   binding.ExclusionExpiresAt,
+		MinHealthyEdgeNodes:  binding.MinHealthyEdgeNodes,
+		HealthyEdgeNodeCount: binding.HealthyEdgeNodeCount,
+		EdgeRedundancyStatus: binding.EdgeRedundancyStatus,
+		EdgeRedundancyReason: binding.EdgeRedundancyReason,
 		RoutePolicy:          binding.RoutePolicy,
 		SelectionReason:      binding.SelectionReason,
 		FallbackReason:       binding.FallbackReason,
