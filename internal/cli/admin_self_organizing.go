@@ -322,6 +322,17 @@ func writePlatformAutonomyStatus(w io.Writer, status model.PlatformAutonomyStatu
 		kvPair{Key: "registry", Value: status.Registry},
 		kvPair{Key: "headscale", Value: status.Headscale},
 		kvPair{Key: "route_fallback", Value: status.RouteFallback},
+		kvPair{Key: "autonomy_mode", Value: status.Controls.Mode},
+		kvPair{Key: "global_kill_switch", Value: fmt.Sprintf("%t", status.Controls.GlobalKillSwitch)},
+		kvPair{Key: "disabled_nodes", Value: stringsJoin(status.Controls.DisabledNodes)},
+		kvPair{Key: "disabled_services", Value: stringsJoin(status.Controls.DisabledServices)},
+		kvPair{Key: "blast_radius_cap", Value: firstNonEmpty(status.Controls.BlastRadiusCap, "-")},
+		kvPair{Key: "rollback_path", Value: firstNonEmpty(status.Controls.RollbackPath, "-")},
+		kvPair{Key: "automatic_repair", Value: fmt.Sprintf("%t", status.Controls.AutomaticRepairEnabled)},
+		kvPair{Key: "quarantine", Value: fmt.Sprintf("%t", status.Controls.QuarantineEnabled)},
+		kvPair{Key: "dns_filtering", Value: fmt.Sprintf("%t", status.Controls.DNSFilteringEnabled)},
+		kvPair{Key: "peer_overlay", Value: fmt.Sprintf("%t", status.Controls.PeerOverlayEnabled)},
+		kvPair{Key: "endpoint_fallback", Value: fmt.Sprintf("%t", status.Controls.EndpointFallbackEnabled)},
 	); err != nil {
 		return err
 	}

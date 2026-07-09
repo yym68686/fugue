@@ -381,6 +381,20 @@ func (s *Server) robustnessNodeDeepHealthChecks() ([]model.RobustnessCheck, erro
 	return checks, nil
 }
 
+func (s *Server) robustnessControlPlaneTopologyChecks(principal model.Principal) ([]model.RobustnessCheck, error) {
+	updaters, err := s.store.ListNodeUpdaters(principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		return nil, err
+	}
+	topology := buildControlPlaneTopologyFromNodeUpdaters(updaters, time.Now().UTC())
+	check := controlPlaneTopologyCheck(topology)
+	if check.Evidence == nil {
+		check.Evidence = map[string]string{}
+	}
+	check.Evidence["source"] = "node_updater_heartbeat"
+	return []model.RobustnessCheck{check}, nil
+}
+
 func robustnessSeverityForNodeDeepHealthCheck(check model.NodeDeepHealthCheck) string {
 	if check.HardFail {
 		return model.RobustnessSeverityBlockPublish

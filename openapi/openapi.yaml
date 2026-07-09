@@ -19439,8 +19439,114 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ControlPlaneWarning"
+        topology:
+          $ref: "#/components/schemas/ControlPlaneTopology"
         deploy_workflow:
           $ref: "#/components/schemas/ControlPlaneWorkflowRun"
+    ControlPlaneTopology:
+      type: object
+      additionalProperties: false
+      required:
+        - mode
+        - status
+        - control_plane_capable_nodes
+        - ready_control_plane_capable_nodes
+        - etcd_voter_capable_nodes
+        - release_runner_capable_nodes
+        - endpoint_mode
+        - quorum_ready
+        - ha_ready
+        - generated_at
+      properties:
+        mode:
+          type: string
+        status:
+          type: string
+        control_plane_capable_nodes:
+          type: integer
+          format: int32
+        ready_control_plane_capable_nodes:
+          type: integer
+          format: int32
+        etcd_voter_capable_nodes:
+          type: integer
+          format: int32
+        release_runner_capable_nodes:
+          type: integer
+          format: int32
+        failure_domains:
+          type: array
+          items:
+            type: string
+        providers:
+          type: array
+          items:
+            type: string
+        regions:
+          type: array
+          items:
+            type: string
+        endpoint_mode:
+          type: string
+        quorum_ready:
+          type: boolean
+        ha_ready:
+          type: boolean
+        risk_warnings:
+          type: array
+          items:
+            type: string
+        missing_redundancy:
+          type: array
+          items:
+            type: string
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlPlaneTopologyNode"
+        generated_at:
+          type: string
+          format: date-time
+    ControlPlaneTopologyNode:
+      type: object
+      additionalProperties: false
+      required:
+        - node_name
+        - ready
+        - control_plane_capable
+        - etcd_voter_capable
+        - release_runner_capable
+      properties:
+        node_name:
+          type: string
+        ready:
+          type: boolean
+        control_plane_capable:
+          type: boolean
+        etcd_voter_capable:
+          type: boolean
+        release_runner_capable:
+          type: boolean
+        desired_control_plane_role:
+          type: string
+        effective_control_plane_role:
+          type: string
+        provider:
+          type: string
+        region:
+          type: string
+        zone:
+          type: string
+        failure_domain:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
     ControlPlaneStatusResponse:
       type: object
       additionalProperties: false
@@ -22466,10 +22572,60 @@ components:
           type: boolean
         control_plane_store:
           $ref: "#/components/schemas/ControlPlaneStoreStatus"
+        controls:
+          $ref: "#/components/schemas/AutonomyControls"
         checks:
           type: array
           items:
             $ref: "#/components/schemas/StoreInvariantCheck"
+    AutonomyControls:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+        global_kill_switch:
+          type: boolean
+        disabled_nodes:
+          type: array
+          items:
+            type: string
+        disabled_services:
+          type: array
+          items:
+            type: string
+        blast_radius_cap:
+          type: string
+        rollback_path:
+          type: string
+        automatic_repair_enabled:
+          type: boolean
+        quarantine_enabled:
+          type: boolean
+        dns_filtering_enabled:
+          type: boolean
+        peer_overlay_enabled:
+          type: boolean
+        endpoint_fallback_enabled:
+          type: boolean
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutonomyActionControl"
+    AutonomyActionControl:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        mode:
+          type: string
+        safety_class:
+          type: string
+        env:
+          type: string
     PlatformAutonomyStatusResponse:
       type: object
       additionalProperties: false

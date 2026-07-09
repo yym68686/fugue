@@ -102,15 +102,19 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 			RuntimeEdgeGroupID:   "edge-group-us",
 			RouteGeneration:      "routegen_123",
 			DeploymentGeneration: "deploygen_123",
+			UpstreamScope:        "cluster_service",
 		},
 	}
 
-	fields := edgeProxyObservationRequestFactFields(observed, config.EdgeConfig{EdgeID: "edge_123"})
+	fields := edgeProxyObservationRequestFactFields(observed, config.EdgeConfig{EdgeID: "edge_123"}, "lkg_123")
 	if fields["event_type"] != "request_fact" || fields["app_id"] != "app_123" || fields["status_class"] != "5xx" {
 		t.Fatalf("unexpected request fact fields: %+v", fields)
 	}
 	if fields["path_template"] != "/v1" || fields["trace_id"] == "" || fields["request_id"] != "req_123" {
 		t.Fatalf("missing route or trace fields: %+v", fields)
+	}
+	if fields["lkg_generation"] != "lkg_123" {
+		t.Fatalf("missing LKG generation: %+v", fields)
 	}
 	summary := fmt.Sprint(fields["summary_json"])
 	if strings.Contains(summary, "token=") || strings.Contains(summary, "Authorization") || strings.Contains(summary, "upstream_url") {
@@ -121,6 +125,11 @@ func TestEdgeProxyObservationRequestFactFieldsAreRedactedAndRouted(t *testing.T)
 	}
 	if !strings.Contains(summary, `"origin_wrote_request":true`) || !strings.Contains(summary, `"origin_response_wait_ms":180`) || !strings.Contains(summary, `"origin_remote_addr":"10.42.5.112:8000"`) {
 		t.Fatalf("summary missing origin phase details: %s", summary)
+	}
+	if !strings.Contains(summary, `"route_generation":"routegen_123"`) ||
+		!strings.Contains(summary, `"lkg_generation":"lkg_123"`) ||
+		!strings.Contains(summary, `"origin_resolution_mode":"cluster_service"`) {
+		t.Fatalf("summary missing route/LKG observability details: %s", summary)
 	}
 	if !strings.Contains(summary, `"edge_request_id":"edge_req_123"`) ||
 		!strings.Contains(summary, `"request_body_read_bytes":100`) ||

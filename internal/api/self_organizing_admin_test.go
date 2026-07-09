@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,47 @@ func TestRegistryReachabilityCheckFailsWhenRegistryUnavailable(t *testing.T) {
 	if !strings.Contains(message, "registry unavailable") {
 		t.Fatalf("expected unavailable registry message, got %q", message)
 	}
+}
+
+func TestPlatformAutonomyControlsDefaultObserveOnlyAndKillSwitch(t *testing.T) {
+	t.Setenv("FUGUE_AUTONOMY_MODE", "")
+	t.Setenv("FUGUE_AUTONOMY_REPAIR_ENABLED", "")
+	t.Setenv("FUGUE_AUTONOMY_QUARANTINE_ENABLED", "")
+	t.Setenv("FUGUE_AUTONOMY_DNS_FILTERING_ENABLED", "")
+	t.Setenv("FUGUE_AUTONOMY_PEER_OVERLAY_ENABLED", "")
+	t.Setenv("FUGUE_AUTONOMY_ENDPOINT_FALLBACK_ENABLED", "")
+	t.Setenv("FUGUE_AUTONOMY_KILL_SWITCH", "")
+	t.Setenv("FUGUE_AUTONOMY_DISABLED_NODES", "")
+	t.Setenv("FUGUE_AUTONOMY_DISABLED_SERVICES", "")
+	t.Setenv("FUGUE_AUTONOMY_BLAST_RADIUS_CAP", "")
+	t.Setenv("FUGUE_AUTONOMY_ROLLBACK_PATH", "")
+	controls := platformAutonomyControlsFromEnv()
+	if controls.Mode != "observe-only" || controls.BlastRadiusCap == "" || controls.RollbackPath == "" || controls.AutomaticRepairEnabled || controls.QuarantineEnabled || controls.DNSFilteringEnabled || controls.PeerOverlayEnabled || controls.EndpointFallbackEnabled {
+		t.Fatalf("expected default observe-only controls, got %+v", controls)
+	}
+
+	t.Setenv("FUGUE_AUTONOMY_MODE", "enforced")
+	t.Setenv("FUGUE_AUTONOMY_REPAIR_ENABLED", "true")
+	t.Setenv("FUGUE_AUTONOMY_QUARANTINE_ENABLED", "true")
+	t.Setenv("FUGUE_AUTONOMY_DNS_FILTERING_ENABLED", "true")
+	t.Setenv("FUGUE_AUTONOMY_PEER_OVERLAY_ENABLED", "true")
+	t.Setenv("FUGUE_AUTONOMY_ENDPOINT_FALLBACK_ENABLED", "true")
+	t.Setenv("FUGUE_AUTONOMY_KILL_SWITCH", "true")
+	t.Setenv("FUGUE_AUTONOMY_DISABLED_NODES", "node-a,node-b node-a")
+	t.Setenv("FUGUE_AUTONOMY_DISABLED_SERVICES", "svc-a;svc-b")
+	t.Setenv("FUGUE_AUTONOMY_BLAST_RADIUS_CAP", "one-edge")
+	t.Setenv("FUGUE_AUTONOMY_ROLLBACK_PATH", "set FUGUE_AUTONOMY_KILL_SWITCH=true")
+	controls = platformAutonomyControlsFromEnv()
+	if !controls.GlobalKillSwitch || controls.AutomaticRepairEnabled || controls.QuarantineEnabled || controls.DNSFilteringEnabled || controls.PeerOverlayEnabled || controls.EndpointFallbackEnabled {
+		t.Fatalf("expected kill switch to disable all autonomy actions, got %+v", controls)
+	}
+	if len(controls.DisabledNodes) != 2 || controls.DisabledNodes[0] != "node-a" || controls.DisabledNodes[1] != "node-b" {
+		t.Fatalf("expected per-node disabled list, got %+v", controls.DisabledNodes)
+	}
+	if len(controls.DisabledServices) != 2 || controls.BlastRadiusCap != "one-edge" || controls.RollbackPath == "" {
+		t.Fatalf("expected scoped safety controls, got %+v", controls)
+	}
+	_ = os.Getenv("FUGUE_AUTONOMY_MODE")
 }
 
 func TestRegistryReachabilityCheckFallsBackToReadyNodeLocalImageCache(t *testing.T) {

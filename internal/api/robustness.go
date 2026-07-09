@@ -197,6 +197,11 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, nodeChecks...)
+	topologyChecks, err := s.robustnessControlPlaneTopologyChecks(principal)
+	if err != nil {
+		return model.RobustnessStatus{}, err
+	}
+	checks = append(checks, topologyChecks...)
 	nodeDeepHealthChecks, err := s.robustnessNodeDeepHealthChecks()
 	if err != nil {
 		return model.RobustnessStatus{}, err
@@ -312,6 +317,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 			"dns_delegation_preflight",
 			"generated_artifact_inventory",
 			"node_generation_inventory",
+			"control_plane_topology",
 			"subsystem_failure_contracts",
 			"backup_restore_inventory",
 			"backing_service_runtime",

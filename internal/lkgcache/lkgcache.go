@@ -1,17 +1,150 @@
 package lkgcache
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
+
+const EnvelopeSchemaVersionV1 = "1.0"
 
 type Candidate struct {
 	Path string
 	Data []byte
+}
+
+type Envelope struct {
+	SchemaVersion string          `json:"schema_version"`
+	Kind          string          `json:"kind"`
+	Generation    string          `json:"generation"`
+	ContentHash   string          `json:"content_hash"`
+	Signature     string          `json:"signature,omitempty"`
+	ExpiresAt     time.Time       `json:"expires_at"`
+	CreatedAt     time.Time       `json:"created_at"`
+	Payload       json.RawMessage `json:"payload"`
+}
+
+type ReadEnvelopeOptions struct {
+	Now              time.Time
+	ExpectedKind     string
+	RequireSignature bool
+	VerifySignature  func(Envelope) error
+}
+
+func NewEnvelope(kind, generation string, payload []byte, expiresAt time.Time, now time.Time) (Envelope, error) {
+	kind = strings.TrimSpace(kind)
+	generation = strings.TrimSpace(generation)
+	if kind == "" {
+		return Envelope{}, fmt.Errorf("lkg envelope kind is required")
+	}
+	if generation == "" {
+		return Envelope{}, fmt.Errorf("lkg envelope generation is required")
+	}
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return Envelope{}, fmt.Errorf("lkg envelope payload is required")
+	}
+	if !json.Valid(payload) {
+		return Envelope{}, fmt.Errorf("lkg envelope payload must be valid JSON")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if expiresAt.IsZero() {
+		return Envelope{}, fmt.Errorf("lkg envelope expires_at is required")
+	}
+	return Envelope{
+		SchemaVersion: EnvelopeSchemaVersionV1,
+		Kind:          kind,
+		Generation:    generation,
+		ContentHash:   payloadHash(payload),
+		ExpiresAt:     expiresAt.UTC(),
+		CreatedAt:     now.UTC(),
+		Payload:       append(json.RawMessage(nil), payload...),
+	}, nil
+}
+
+func WriteEnvelope(path string, envelope Envelope, archiveLimit int) error {
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return err
+	}
+	return WriteCurrent(path, envelope.Generation, data, archiveLimit)
+}
+
+func ReadEnvelope(path string, opts ReadEnvelopeOptions) (Envelope, []byte, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return Envelope{}, nil, fmt.Errorf("lkg envelope path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Envelope{}, nil, err
+	}
+	envelope, err := DecodeEnvelope(data, opts)
+	if err != nil {
+		return Envelope{}, nil, err
+	}
+	return envelope, append([]byte(nil), envelope.Payload...), nil
+}
+
+func DecodeEnvelope(data []byte, opts ReadEnvelopeOptions) (Envelope, error) {
+	var envelope Envelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return Envelope{}, fmt.Errorf("decode lkg envelope: %w", err)
+	}
+	if envelope.SchemaVersion != EnvelopeSchemaVersionV1 {
+		return Envelope{}, fmt.Errorf("unsupported lkg envelope schema_version %q", envelope.SchemaVersion)
+	}
+	if expected := strings.TrimSpace(opts.ExpectedKind); expected != "" && !strings.EqualFold(strings.TrimSpace(envelope.Kind), expected) {
+		return Envelope{}, fmt.Errorf("unexpected lkg envelope kind %q, expected %q", envelope.Kind, expected)
+	}
+	if strings.TrimSpace(envelope.Generation) == "" {
+		return Envelope{}, fmt.Errorf("lkg envelope generation is required")
+	}
+	if len(bytes.TrimSpace(envelope.Payload)) == 0 || !json.Valid(envelope.Payload) {
+		return Envelope{}, fmt.Errorf("lkg envelope payload must be valid JSON")
+	}
+	if got, want := payloadHash(envelope.Payload), strings.TrimSpace(envelope.ContentHash); !strings.EqualFold(got, want) {
+		return Envelope{}, fmt.Errorf("lkg envelope content hash mismatch: got %s want %s", got, want)
+	}
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if envelope.ExpiresAt.IsZero() {
+		return Envelope{}, fmt.Errorf("lkg envelope expires_at is required")
+	}
+	if !now.Before(envelope.ExpiresAt.UTC()) {
+		return Envelope{}, fmt.Errorf("lkg envelope expired at %s", envelope.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if opts.RequireSignature && strings.TrimSpace(envelope.Signature) == "" && opts.VerifySignature == nil {
+		return Envelope{}, fmt.Errorf("lkg envelope signature is required")
+	}
+	if opts.VerifySignature != nil {
+		if err := opts.VerifySignature(envelope); err != nil {
+			return Envelope{}, fmt.Errorf("verify lkg envelope signature: %w", err)
+		}
+	}
+	return envelope, nil
+}
+
+func payloadHash(payload []byte) string {
+	var canonical bytes.Buffer
+	if err := json.Compact(&canonical, bytes.TrimSpace(payload)); err == nil {
+		payload = canonical.Bytes()
+	} else {
+		payload = bytes.TrimSpace(payload)
+	}
+	sum := sha256.Sum256(payload)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func PreviousPath(path string) string {

@@ -886,6 +886,34 @@ func writeControlPlaneComponentTable(w io.Writer, components []model.ControlPlan
 	return tw.Flush()
 }
 
+func writeControlPlaneTopologyNodeTable(w io.Writer, nodes []model.ControlPlaneTopologyNode) error {
+	sorted := append([]model.ControlPlaneTopologyNode(nil), nodes...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return strings.TrimSpace(sorted[i].NodeName) < strings.TrimSpace(sorted[j].NodeName)
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NODE\tREADY\tCP_CAPABLE\tETCD_VOTER\tRUNNER\tCP_ROLE\tFAILURE_DOMAIN"); err != nil {
+		return err
+	}
+	for _, node := range sorted {
+		role := firstNonEmpty(strings.TrimSpace(node.EffectiveControlPlaneRole), strings.TrimSpace(node.DesiredControlPlaneRole), "-")
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%t\t%t\t%t\t%t\t%s\t%s\n",
+			firstNonEmpty(strings.TrimSpace(node.NodeName), "-"),
+			node.Ready,
+			node.ControlPlaneCapable,
+			node.EtcdVoterCapable,
+			node.ReleaseRunnerCapable,
+			role,
+			firstNonEmpty(strings.TrimSpace(node.FailureDomain), "-"),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 func writeControlPlaneWarningTable(w io.Writer, warnings []model.ControlPlaneWarning) error {
 	sorted := append([]model.ControlPlaneWarning(nil), warnings...)
 	sort.Slice(sorted, func(i, j int) bool {

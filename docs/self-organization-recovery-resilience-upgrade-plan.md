@@ -12,6 +12,7 @@
 - `docs/dynamic-edge-onboarding-plan.md`
 - `docs/connection-aware-zero-downtime-drain-plan.md`
 - `docs/zero-downtime-rollout-incidents.md`
+- `docs/control-plane-outage-data-plane-autonomy-plan.md`
 
 本文也吸收 Apollo 配置中心的架构经验。参考资料以 Apollo 官方仓库和官方文档为准：
 

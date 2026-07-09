@@ -1098,6 +1098,24 @@ func (c *CLI) newAdminClusterStatusCommand() *cobra.Command {
 			); err != nil {
 				return err
 			}
+			if status.Topology != nil {
+				if err := writeKeyValues(c.stdout,
+					kvPair{Key: "topology_mode", Value: status.Topology.Mode},
+					kvPair{Key: "topology_status", Value: status.Topology.Status},
+					kvPair{Key: "control_plane_capable_nodes", Value: fmt.Sprintf("%d", status.Topology.ControlPlaneCapableNodes)},
+					kvPair{Key: "ready_control_plane_capable_nodes", Value: fmt.Sprintf("%d", status.Topology.ReadyControlPlaneCapableNodes)},
+					kvPair{Key: "etcd_voter_capable_nodes", Value: fmt.Sprintf("%d", status.Topology.EtcdVoterCapableNodes)},
+					kvPair{Key: "release_runner_capable_nodes", Value: fmt.Sprintf("%d", status.Topology.ReleaseRunnerCapableNodes)},
+					kvPair{Key: "endpoint_mode", Value: status.Topology.EndpointMode},
+					kvPair{Key: "quorum_ready", Value: fmt.Sprintf("%t", status.Topology.QuorumReady)},
+					kvPair{Key: "ha_ready", Value: fmt.Sprintf("%t", status.Topology.HAReady)},
+					kvPair{Key: "failure_domains", Value: stringsJoin(status.Topology.FailureDomains)},
+					kvPair{Key: "risk_warnings", Value: stringsJoin(status.Topology.RiskWarnings)},
+					kvPair{Key: "missing_redundancy", Value: stringsJoin(status.Topology.MissingRedundancy)},
+				); err != nil {
+					return err
+				}
+			}
 			if status.DeployWorkflow != nil {
 				if err := writeKeyValues(c.stdout,
 					kvPair{Key: "deploy_workflow_repository", Value: status.DeployWorkflow.Repository},
@@ -1125,12 +1143,27 @@ func (c *CLI) newAdminClusterStatusCommand() *cobra.Command {
 				}
 			}
 			if len(status.Components) == 0 {
+				if status.Topology == nil || len(status.Topology.Nodes) == 0 {
+					return nil
+				}
+				if _, err := fmt.Fprintln(c.stdout); err != nil {
+					return err
+				}
+				return writeControlPlaneTopologyNodeTable(c.stdout, status.Topology.Nodes)
+			}
+			if _, err := fmt.Fprintln(c.stdout); err != nil {
+				return err
+			}
+			if err := writeControlPlaneComponentTable(c.stdout, status.Components); err != nil {
+				return err
+			}
+			if status.Topology == nil || len(status.Topology.Nodes) == 0 {
 				return nil
 			}
 			if _, err := fmt.Fprintln(c.stdout); err != nil {
 				return err
 			}
-			return writeControlPlaneComponentTable(c.stdout, status.Components)
+			return writeControlPlaneTopologyNodeTable(c.stdout, status.Topology.Nodes)
 		},
 	}
 }

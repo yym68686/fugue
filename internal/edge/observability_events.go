@@ -26,7 +26,11 @@ func (s *Service) logProxyObservationFact(observed edgeProxyObservation) {
 	if s == nil || s.Logger == nil {
 		return
 	}
-	writeEdgeStructuredLog(s.Logger.Writer(), edgeProxyObservationRequestFactFields(observed, s.Config))
+	lkgGeneration := ""
+	s.mu.Lock()
+	lkgGeneration = strings.TrimSpace(s.snapshot.LKGGeneration)
+	s.mu.Unlock()
+	writeEdgeStructuredLog(s.Logger.Writer(), edgeProxyObservationRequestFactFields(observed, s.Config, lkgGeneration))
 }
 
 func writeEdgeStructuredLog(w io.Writer, fields map[string]any) {
@@ -42,7 +46,7 @@ func writeEdgeStructuredLog(w io.Writer, fields map[string]any) {
 	_, _ = fmt.Fprintln(w, string(body))
 }
 
-func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg config.EdgeConfig) map[string]any {
+func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg config.EdgeConfig, lkgGeneration string) map[string]any {
 	if observed.StatusCode == 0 {
 		observed.StatusCode = http.StatusOK
 	}
@@ -54,34 +58,36 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	}
 	route := observed.Route
 	summary := map[string]any{
-		"route_kind":            strings.TrimSpace(route.RouteKind),
-		"route_generation":      strings.TrimSpace(route.RouteGeneration),
-		"deployment_generation": strings.TrimSpace(route.DeploymentGeneration),
-		"release_id":            strings.TrimSpace(observed.ReleaseID),
-		"release_role":          strings.TrimSpace(observed.ReleaseRole),
-		"traffic_weight":        observed.TrafficWeight,
-		"edge_request_id":       strings.TrimSpace(observed.EdgeRequestID),
-		"protocol":              strings.TrimSpace(observed.Protocol),
-		"client_ip":             strings.TrimSpace(observed.ClientIP),
-		"client_remote_addr":    strings.TrimSpace(observed.ClientRemoteAddr),
-		"edge_group_id":         firstNonEmpty(route.EdgeGroupID, cfg.EdgeGroupID),
-		"runtime_edge_group_id": firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup),
-		"runtime_region":        edgeGroupRegion(firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup)),
-		"fallback_hit":          observed.FallbackHit,
-		"peer_fallback":         observed.PeerFallback,
-		"websocket":             observed.WebSocket,
-		"sse":                   observed.SSE,
-		"upload":                observed.Upload,
-		"cache_status":          firstNonEmpty(strings.TrimSpace(observed.CacheStatus), edgeCacheStatusBypass),
-		"cache_policy_id":       strings.TrimSpace(observed.CachePolicyID),
-		"asset_class":           strings.TrimSpace(observed.AssetClass),
-		"path":                  strings.TrimSpace(observed.Path),
-		"origin_got_conn":       observed.OriginGotConn,
-		"origin_conn_reused":    observed.OriginConnectionReused,
-		"origin_wrote_headers":  observed.OriginWroteHeaders,
-		"origin_wrote_request":  observed.OriginWroteRequest,
-		"origin_first_byte":     observed.OriginTTFB > 0,
-		"request_body_eof":      observed.RequestBodyEOF,
+		"route_kind":             strings.TrimSpace(route.RouteKind),
+		"route_generation":       strings.TrimSpace(route.RouteGeneration),
+		"lkg_generation":         strings.TrimSpace(lkgGeneration),
+		"origin_resolution_mode": edgeOriginResolutionMode(route),
+		"deployment_generation":  strings.TrimSpace(route.DeploymentGeneration),
+		"release_id":             strings.TrimSpace(observed.ReleaseID),
+		"release_role":           strings.TrimSpace(observed.ReleaseRole),
+		"traffic_weight":         observed.TrafficWeight,
+		"edge_request_id":        strings.TrimSpace(observed.EdgeRequestID),
+		"protocol":               strings.TrimSpace(observed.Protocol),
+		"client_ip":              strings.TrimSpace(observed.ClientIP),
+		"client_remote_addr":     strings.TrimSpace(observed.ClientRemoteAddr),
+		"edge_group_id":          firstNonEmpty(route.EdgeGroupID, cfg.EdgeGroupID),
+		"runtime_edge_group_id":  firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup),
+		"runtime_region":         edgeGroupRegion(firstNonEmpty(route.RuntimeEdgeGroupID, route.RuntimeEdgeGroup)),
+		"fallback_hit":           observed.FallbackHit,
+		"peer_fallback":          observed.PeerFallback,
+		"websocket":              observed.WebSocket,
+		"sse":                    observed.SSE,
+		"upload":                 observed.Upload,
+		"cache_status":           firstNonEmpty(strings.TrimSpace(observed.CacheStatus), edgeCacheStatusBypass),
+		"cache_policy_id":        strings.TrimSpace(observed.CachePolicyID),
+		"asset_class":            strings.TrimSpace(observed.AssetClass),
+		"path":                   strings.TrimSpace(observed.Path),
+		"origin_got_conn":        observed.OriginGotConn,
+		"origin_conn_reused":     observed.OriginConnectionReused,
+		"origin_wrote_headers":   observed.OriginWroteHeaders,
+		"origin_wrote_request":   observed.OriginWroteRequest,
+		"origin_first_byte":      observed.OriginTTFB > 0,
+		"request_body_eof":       observed.RequestBodyEOF,
 	}
 	if observed.RequestBytes > 0 {
 		summary["request_content_length"] = observed.RequestBytes
@@ -158,31 +164,53 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	}
 	summaryJSON, _ := json.Marshal(summary)
 	return map[string]any{
-		"event_type":    "request_fact",
-		"message":       "edge request",
-		"tenant_id":     strings.TrimSpace(route.TenantID),
-		"app_id":        strings.TrimSpace(route.AppID),
-		"release_id":    strings.TrimSpace(observed.ReleaseID),
-		"release_role":  strings.TrimSpace(observed.ReleaseRole),
-		"runtime_id":    strings.TrimSpace(route.RuntimeID),
-		"edge_id":       strings.TrimSpace(cfg.EdgeID),
-		"trace_id":      strings.TrimSpace(observed.TraceID),
-		"request_id":    strings.TrimSpace(observed.RequestID),
-		"route_id":      strings.TrimSpace(route.RouteGeneration),
-		"hostname":      firstNonEmpty(route.Hostname, observed.Host),
-		"path_template": model.NormalizeAppRoutePathPrefix(route.PathPrefix),
-		"method":        strings.TrimSpace(observed.Method),
-		"status_code":   observed.StatusCode,
-		"status_class":  edgeStatusClass(observed.StatusCode),
-		"duration_ms":   durationMilliseconds(observed.Duration),
-		"ttfb_ms":       durationMilliseconds(observed.TTFB),
-		"upstream_ms":   durationMilliseconds(observed.Upstream),
-		"bytes_in":      nonNegativeInt64(observed.RequestBytes),
-		"bytes_out":     nonNegativeInt64(observed.ResponseBytes),
-		"streaming":     observed.Streaming,
-		"error_type":    edgeObservationErrorType(observed),
-		"summary_json":  string(summaryJSON),
+		"event_type":     "request_fact",
+		"message":        "edge request",
+		"tenant_id":      strings.TrimSpace(route.TenantID),
+		"app_id":         strings.TrimSpace(route.AppID),
+		"release_id":     strings.TrimSpace(observed.ReleaseID),
+		"release_role":   strings.TrimSpace(observed.ReleaseRole),
+		"runtime_id":     strings.TrimSpace(route.RuntimeID),
+		"edge_id":        strings.TrimSpace(cfg.EdgeID),
+		"trace_id":       strings.TrimSpace(observed.TraceID),
+		"request_id":     strings.TrimSpace(observed.RequestID),
+		"route_id":       strings.TrimSpace(route.RouteGeneration),
+		"lkg_generation": strings.TrimSpace(lkgGeneration),
+		"hostname":       firstNonEmpty(route.Hostname, observed.Host),
+		"path_template":  model.NormalizeAppRoutePathPrefix(route.PathPrefix),
+		"method":         strings.TrimSpace(observed.Method),
+		"status_code":    observed.StatusCode,
+		"status_class":   edgeStatusClass(observed.StatusCode),
+		"duration_ms":    durationMilliseconds(observed.Duration),
+		"ttfb_ms":        durationMilliseconds(observed.TTFB),
+		"upstream_ms":    durationMilliseconds(observed.Upstream),
+		"bytes_in":       nonNegativeInt64(observed.RequestBytes),
+		"bytes_out":      nonNegativeInt64(observed.ResponseBytes),
+		"streaming":      observed.Streaming,
+		"error_type":     edgeObservationErrorType(observed),
+		"summary_json":   string(summaryJSON),
 	}
+}
+
+func edgeOriginResolutionMode(route model.EdgeRouteBinding) string {
+	if scope := strings.TrimSpace(route.UpstreamScope); scope != "" {
+		return scope
+	}
+	if kind := strings.TrimSpace(route.UpstreamKind); kind != "" {
+		return kind
+	}
+	if len(route.Upstreams) == 0 {
+		return "unknown"
+	}
+	for _, upstream := range route.Upstreams {
+		if scope := strings.TrimSpace(upstream.UpstreamScope); scope != "" {
+			return scope
+		}
+		if kind := strings.TrimSpace(upstream.UpstreamKind); kind != "" {
+			return kind
+		}
+	}
+	return "unknown"
 }
 
 func edgeStatusClass(statusCode int) string {

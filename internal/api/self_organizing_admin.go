@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -492,6 +493,7 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 		Pass:              pass,
 		BlockRollout:      !pass,
 		ControlPlaneStore: storeStatus,
+		Controls:          platformAutonomyControlsFromEnv(),
 		DiscoveryBundle:   checkStatus(checks, "discovery_bundle"),
 		NodePolicy:        checkStatus(checks, "node_policy"),
 		Edge:              checkStatus(checks, "edge"),
@@ -502,6 +504,96 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 		RestoreReadiness:  storeStatus.RestoreReadiness,
 		Checks:            append(storeStatus.Invariants, checks...),
 	}, nil
+}
+
+func platformAutonomyControlsFromEnv() model.AutonomyControls {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("FUGUE_AUTONOMY_MODE")))
+	if mode == "" {
+		mode = "observe-only"
+	}
+	globalKill := envBool("FUGUE_AUTONOMY_KILL_SWITCH", false)
+	repair := envBool("FUGUE_AUTONOMY_REPAIR_ENABLED", false) && !globalKill
+	quarantine := envBool("FUGUE_AUTONOMY_QUARANTINE_ENABLED", false) && !globalKill
+	dnsFiltering := envBool("FUGUE_AUTONOMY_DNS_FILTERING_ENABLED", false) && !globalKill
+	peerOverlay := envBool("FUGUE_AUTONOMY_PEER_OVERLAY_ENABLED", false) && !globalKill
+	endpointFallback := envBool("FUGUE_AUTONOMY_ENDPOINT_FALLBACK_ENABLED", false) && !globalKill
+	disabledNodes := envCSV("FUGUE_AUTONOMY_DISABLED_NODES")
+	disabledServices := envCSV("FUGUE_AUTONOMY_DISABLED_SERVICES")
+	blastRadiusCap := strings.TrimSpace(os.Getenv("FUGUE_AUTONOMY_BLAST_RADIUS_CAP"))
+	if blastRadiusCap == "" {
+		blastRadiusCap = "one-node-or-one-service"
+	}
+	rollbackPath := strings.TrimSpace(os.Getenv("FUGUE_AUTONOMY_ROLLBACK_PATH"))
+	if rollbackPath == "" {
+		rollbackPath = "disable action flag or set FUGUE_AUTONOMY_KILL_SWITCH=true"
+	}
+	actions := []model.AutonomyActionControl{
+		{Name: "repair", Enabled: repair, Mode: actionMode(mode, repair), SafetyClass: model.NodeRepairSafetyAutomaticSafe, Env: "FUGUE_AUTONOMY_REPAIR_ENABLED"},
+		{Name: "quarantine", Enabled: quarantine, Mode: actionMode(mode, quarantine), SafetyClass: model.NodeRepairSafetyAutomaticSafe, Env: "FUGUE_AUTONOMY_QUARANTINE_ENABLED"},
+		{Name: "dns_filtering", Enabled: dnsFiltering, Mode: actionMode(mode, dnsFiltering), SafetyClass: model.NodeRepairSafetyAutomaticSafe, Env: "FUGUE_AUTONOMY_DNS_FILTERING_ENABLED"},
+		{Name: "peer_overlay", Enabled: peerOverlay, Mode: actionMode(mode, peerOverlay), SafetyClass: model.NodeRepairSafetyObserveOnly, Env: "FUGUE_AUTONOMY_PEER_OVERLAY_ENABLED"},
+		{Name: "endpoint_fallback", Enabled: endpointFallback, Mode: actionMode(mode, endpointFallback), SafetyClass: model.NodeRepairSafetyAutomaticSafe, Env: "FUGUE_AUTONOMY_ENDPOINT_FALLBACK_ENABLED"},
+	}
+	return model.AutonomyControls{
+		Mode:                    mode,
+		GlobalKillSwitch:        globalKill,
+		DisabledNodes:           disabledNodes,
+		DisabledServices:        disabledServices,
+		BlastRadiusCap:          blastRadiusCap,
+		RollbackPath:            rollbackPath,
+		AutomaticRepairEnabled:  repair,
+		QuarantineEnabled:       quarantine,
+		DNSFilteringEnabled:     dnsFiltering,
+		PeerOverlayEnabled:      peerOverlay,
+		EndpointFallbackEnabled: endpointFallback,
+		Actions:                 actions,
+	}
+}
+
+func envCSV(name string) []string {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t' || r == ' '
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func actionMode(globalMode string, enabled bool) string {
+	if !enabled {
+		return "observe-only"
+	}
+	if globalMode == "" {
+		return "enforced"
+	}
+	return globalMode
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	switch value {
+	case "":
+		return fallback
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) registryReachabilityCheck(ctx context.Context) (bool, string) {

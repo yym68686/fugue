@@ -1029,6 +1029,54 @@ type ControlPlaneWarning struct {
 	Message   string `json:"message,omitempty"`
 }
 
+const (
+	ControlPlaneTopologyModeUnavailable = "unavailable"
+	ControlPlaneTopologyModeSingle      = "single_control_plane"
+	ControlPlaneTopologyModeDualPartial = "dual_partial"
+	ControlPlaneTopologyModeHAQuorum    = "ha_quorum"
+
+	ControlPlaneTopologyStatusUnavailable       = "unavailable"
+	ControlPlaneTopologyStatusNoCapableNode     = "no_control_plane_capable_node"
+	ControlPlaneTopologyStatusSingleNodeRisk    = "single_control_plane_risk"
+	ControlPlaneTopologyStatusPartialRedundancy = "partial_redundancy"
+	ControlPlaneTopologyStatusHAReady           = "ha_ready"
+)
+
+type ControlPlaneTopologyNode struct {
+	NodeName                  string   `json:"node_name"`
+	Ready                     bool     `json:"ready"`
+	ControlPlaneCapable       bool     `json:"control_plane_capable"`
+	EtcdVoterCapable          bool     `json:"etcd_voter_capable"`
+	ReleaseRunnerCapable      bool     `json:"release_runner_capable"`
+	DesiredControlPlaneRole   string   `json:"desired_control_plane_role,omitempty"`
+	EffectiveControlPlaneRole string   `json:"effective_control_plane_role,omitempty"`
+	Provider                  string   `json:"provider,omitempty"`
+	Region                    string   `json:"region,omitempty"`
+	Zone                      string   `json:"zone,omitempty"`
+	FailureDomain             string   `json:"failure_domain,omitempty"`
+	Roles                     []string `json:"roles,omitempty"`
+	Capabilities              []string `json:"capabilities,omitempty"`
+}
+
+type ControlPlaneTopology struct {
+	Mode                          string                     `json:"mode"`
+	Status                        string                     `json:"status"`
+	ControlPlaneCapableNodes      int                        `json:"control_plane_capable_nodes"`
+	ReadyControlPlaneCapableNodes int                        `json:"ready_control_plane_capable_nodes"`
+	EtcdVoterCapableNodes         int                        `json:"etcd_voter_capable_nodes"`
+	ReleaseRunnerCapableNodes     int                        `json:"release_runner_capable_nodes"`
+	FailureDomains                []string                   `json:"failure_domains,omitempty"`
+	Providers                     []string                   `json:"providers,omitempty"`
+	Regions                       []string                   `json:"regions,omitempty"`
+	EndpointMode                  string                     `json:"endpoint_mode"`
+	QuorumReady                   bool                       `json:"quorum_ready"`
+	HAReady                       bool                       `json:"ha_ready"`
+	RiskWarnings                  []string                   `json:"risk_warnings,omitempty"`
+	MissingRedundancy             []string                   `json:"missing_redundancy,omitempty"`
+	Nodes                         []ControlPlaneTopologyNode `json:"nodes,omitempty"`
+	GeneratedAt                   time.Time                  `json:"generated_at"`
+}
+
 type ControlPlaneStatus struct {
 	Namespace       string                   `json:"namespace"`
 	ReleaseInstance string                   `json:"release_instance"`
@@ -1038,6 +1086,7 @@ type ControlPlaneStatus struct {
 	ObservedAt      time.Time                `json:"observed_at"`
 	Components      []ControlPlaneComponent  `json:"components"`
 	Warnings        []ControlPlaneWarning    `json:"warnings,omitempty"`
+	Topology        *ControlPlaneTopology    `json:"topology,omitempty"`
 	DeployWorkflow  *ControlPlaneWorkflowRun `json:"deploy_workflow,omitempty"`
 }
 
@@ -2953,6 +3002,7 @@ type PlatformAutonomyStatus struct {
 	Pass              bool                    `json:"pass"`
 	BlockRollout      bool                    `json:"block_rollout"`
 	ControlPlaneStore ControlPlaneStoreStatus `json:"control_plane_store"`
+	Controls          AutonomyControls        `json:"controls"`
 	DiscoveryBundle   string                  `json:"discovery_bundle"`
 	NodePolicy        string                  `json:"node_policy"`
 	Edge              string                  `json:"edge"`
@@ -2962,6 +3012,29 @@ type PlatformAutonomyStatus struct {
 	RouteFallback     string                  `json:"route_fallback"`
 	RestoreReadiness  string                  `json:"restore_readiness"`
 	Checks            []StoreInvariantCheck   `json:"checks"`
+}
+
+type AutonomyControls struct {
+	Mode                    string                  `json:"mode"`
+	GlobalKillSwitch        bool                    `json:"global_kill_switch"`
+	DisabledNodes           []string                `json:"disabled_nodes,omitempty"`
+	DisabledServices        []string                `json:"disabled_services,omitempty"`
+	BlastRadiusCap          string                  `json:"blast_radius_cap,omitempty"`
+	RollbackPath            string                  `json:"rollback_path,omitempty"`
+	AutomaticRepairEnabled  bool                    `json:"automatic_repair_enabled"`
+	QuarantineEnabled       bool                    `json:"quarantine_enabled"`
+	DNSFilteringEnabled     bool                    `json:"dns_filtering_enabled"`
+	PeerOverlayEnabled      bool                    `json:"peer_overlay_enabled"`
+	EndpointFallbackEnabled bool                    `json:"endpoint_fallback_enabled"`
+	Actions                 []AutonomyActionControl `json:"actions,omitempty"`
+}
+
+type AutonomyActionControl struct {
+	Name        string `json:"name"`
+	Enabled     bool   `json:"enabled"`
+	Mode        string `json:"mode"`
+	SafetyClass string `json:"safety_class"`
+	Env         string `json:"env,omitempty"`
 }
 
 type DNSFullZonePreflightResponse struct {

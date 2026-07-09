@@ -495,21 +495,31 @@ func subsystemFailureContracts() []model.SubsystemFailureContract {
 		summary   string
 	}{
 		{"control_plane_api", "API readiness, store access, auth, and OpenAPI route serving"},
+		{"control_plane_topology", "control-plane capability discovery, quorum explain, endpoint mode, and redundancy risk status"},
 		{"controller", "background reconciliation workers and platform automation loops"},
 		{"platform_state_release_system", "versioned artifact validation, release messages, consumers, LKG, and rollback"},
+		{"local_wal_reconciliation", "node-local autonomy WAL records, signer verification, expiry, replay, and incident merge"},
 		{"node_guardian", "node deep health, quarantine decisions, and repair planning"},
 		{"node_updater", "node desired-state pull, task execution, and local repair hooks"},
 		{"kubernetes_cni_dns", "Kubernetes API, CNI, kube-dns, CoreDNS, and service networking"},
 		{"edge_front", "client-facing edge proxy, TLS, body read, cache, and request attribution"},
 		{"edge_worker", "edge route bundle consumer, local LKG, probes, and origin connectivity"},
+		{"edge_origin_health", "per-hostname origin DNS, ClusterIP, endpoint, HTTP, TTFB, body-write, and response-write health"},
+		{"endpoint_lkg_fallback", "short-TTL endpoint last-known-good fallback for stateless HTTP routes when control-plane or service DNS is unavailable"},
 		{"dns_server", "authoritative DNS serving, answer bundle consumer, health gates, and LKG"},
 		{"dns_answer_policy", "scoped answer ranking, exploration, cooldown, and fallback"},
+		{"peer_emergency_overlay", "TTL-bound peer health signals, signed evidence, temporary filtering, and false-positive controls"},
 		{"caddy_route_bundle", "Caddy route config generation, validation, reload, and rollback"},
 		{"runtime_scheduler", "runtime placement, node eligibility, and quarantine hard gates"},
+		{"runtime_agent", "runtime node task execution, workload health reporting, node-local cache, and app lifecycle hooks"},
 		{"app_runtime", "managed app pods, service routing, logs, and runtime probes"},
+		{"image_cache_agent", "node image cache hydration, verification, retention, and repair replication"},
 		{"database_stateful_services", "managed databases, stateful continuity, backups, restore, and fencing"},
 		{"observability_metrics", "metrics ingestion, dashboards, alert evidence, and degraded-signal behavior"},
 		{"automatic_repair_system", "repair planner, execution guardrails, leases, rate limits, and audit"},
+		{"github_actions_runner", "control-plane deploy runner health, failure-domain spread, workflow attribution, and fail-closed behavior"},
+		{"external_watchdog", "out-of-cluster synthetic probes, provider power actions, and audited recovery attempts"},
+		{"provider_power_watchdog", "provider or hypervisor power event import, classification, and recovery evidence"},
 	}
 	contracts := make([]model.SubsystemFailureContract, 0, len(names))
 	for _, item := range names {

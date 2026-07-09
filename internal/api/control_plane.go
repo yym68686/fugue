@@ -148,6 +148,20 @@ func (s *Server) handleGetControlPlaneStatus(w http.ResponseWriter, r *http.Requ
 	if workflow := s.readControlPlaneWorkflowRun(r.Context()); workflow != nil {
 		controlPlane.DeployWorkflow = workflow
 	}
+	if nodes, err := client.listKubeNodes(r.Context()); err == nil {
+		topology := buildControlPlaneTopologyFromKubeNodes(nodes, time.Now().UTC())
+		controlPlane.Topology = &topology
+	} else {
+		topology := model.ControlPlaneTopology{
+			Mode:              model.ControlPlaneTopologyModeUnavailable,
+			Status:            model.ControlPlaneTopologyStatusUnavailable,
+			EndpointMode:      controlPlaneEndpointModeUnavailable,
+			MissingRedundancy: []string{"control-plane topology explain requires Kubernetes node inventory"},
+			RiskWarnings:      []string{err.Error()},
+			GeneratedAt:       time.Now().UTC(),
+		}
+		controlPlane.Topology = &topology
+	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"control_plane": controlPlane})
 }
@@ -218,6 +232,14 @@ func (c *clusterNodeClient) listDeployments(ctx context.Context, namespace strin
 		return nil, err
 	}
 	return deploymentList.Items, nil
+}
+
+func (c *clusterNodeClient) listKubeNodes(ctx context.Context) ([]kubeNode, error) {
+	var nodeList kubeNodeList
+	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/nodes", &nodeList); err != nil {
+		return nil, err
+	}
+	return nodeList.Items, nil
 }
 
 func (c *clusterNodeClient) listDaemonSets(ctx context.Context, namespace string) ([]kubeDaemonSet, error) {
