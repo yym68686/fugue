@@ -1117,7 +1117,7 @@ func (s *Server) nodeUpdaterInstallScript(apiBase string) string {
 set -euo pipefail
 
 FUGUE_API_BASE="${FUGUE_API_BASE:-__FUGUE_API_BASE__}"
-FUGUE_NODE_UPDATER_SCRIPT_VERSION="v20"
+FUGUE_NODE_UPDATER_SCRIPT_VERSION="v21"
 FUGUE_NODE_UPDATER_VERSION="${FUGUE_NODE_UPDATER_SCRIPT_VERSION}"
 FUGUE_NODE_UPDATER_CAPABILITIES="heartbeat,tasks,refresh-join-config,restart-k3s-agent,upgrade-k3s-agent,upgrade-node-updater,diagnose-node,install-nfs-client-tools,prepull-system-images,prepull-app-images,replicate-app-image,verify-image-cache,prune-image-cache,report-image-cache-inventory,report-lvm-localpv-inventory,decommission-lvm-localpv,verify-systemd-escape-hatch,repair-managed-iptables,refresh-desired-state,reload-lkg-bundle,restart-stateless-node-service,run-deep-health,time-sync"
 FUGUE_NODE_UPDATER_WORK_DIR="${FUGUE_NODE_UPDATER_WORK_DIR:-/var/lib/fugue-node-updater}"
@@ -2681,6 +2681,20 @@ def parse_host_port(raw, default_port):
     port = parsed.port or default_port
     return host, port
 
+def kubectl_base_command():
+    if not shutil.which("kubectl"):
+        return None
+    if os.environ.get("KUBECONFIG"):
+        return ["kubectl"]
+    for kubeconfig_path in (
+        "/etc/rancher/k3s/k3s.yaml",
+        "/var/lib/rancher/k3s/agent/kubelet.kubeconfig",
+        "/var/lib/rancher/k3s/agent/k3scontroller.kubeconfig",
+    ):
+        if os.path.exists(kubeconfig_path):
+            return ["kubectl", "--kubeconfig", kubeconfig_path]
+    return ["kubectl"]
+
 systemd_or_process_check("k3s_agent_process", "k3s-agent", ["k3s agent", "k3s-agent"])
 systemd_or_process_check("kubelet_process", "k3s-agent", ["kubelet"])
 tcp_connect_check("local_apiserver_127_0_0_1_6444", "kubernetes", "127.0.0.1", 6444, "local k3s agent apiserver listens on 127.0.0.1:6444", True)
@@ -2693,8 +2707,9 @@ else:
     checks.append(check("remotedialer_control_plane_endpoint", "kubernetes", "warning", "control-plane endpoint unavailable", "k3s server endpoint"))
 
 node_name = os.uname().nodename
-if shutil.which("kubectl"):
-    ok_lease, lease_out = run(["kubectl", "-n", "kube-node-lease", "get", "lease", node_name, "-o", "jsonpath={.spec.renewTime}"], 5)
+kubectl_base = kubectl_base_command()
+if kubectl_base:
+    ok_lease, lease_out = run(kubectl_base + ["-n", "kube-node-lease", "get", "lease", node_name, "-o", "jsonpath={.spec.renewTime}"], 5)
     if ok_lease and lease_out.strip():
         try:
             renewed = datetime.datetime.fromisoformat(lease_out.strip().replace("Z", "+00:00"))
@@ -2716,43 +2731,286 @@ elif ok_cri:
 else:
     checks.append(check("pod_sandbox_creation", "cri", "fail", cri_out, "CRI runtime reachable for pod sandbox creation preflight", True, repair_action="restart-k3s-agent"))
 
-def dns_query(server=None, name="kubernetes.default.svc.cluster.local"):
+def run_capture(argv, timeout=5):
+    if not argv or not shutil.which(argv[0]):
+        return None, "missing command: " + (argv[0] if argv else "")
+    try:
+        cp = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        output = (cp.stdout + cp.stderr).strip()
+        return cp.returncode == 0, output
+    except Exception as exc:
+        return False, str(exc)
+
+def cni_netns_path(info):
+    cni = info.get("cniResult") or {}
+    interfaces = cni.get("Interfaces") or cni.get("interfaces") or {}
+    candidates = []
+    if isinstance(interfaces, dict):
+        candidates = list(interfaces.values())
+    elif isinstance(interfaces, list):
+        candidates = interfaces
+    for item in candidates:
+        if isinstance(item, dict):
+            sandbox = item.get("Sandbox") or item.get("sandbox")
+            if sandbox:
+                return str(sandbox)
+    return ""
+
+def pod_netns_contexts(limit=30):
+    if not shutil.which("crictl"):
+        return [], "crictl unavailable"
+    if not shutil.which("nsenter"):
+        return [], "nsenter unavailable"
+    ok, out = run_capture(["crictl", "pods", "--state", "Ready", "--quiet"], 5)
+    if ok is False:
+        ok, out = run_capture(["crictl", "pods", "--quiet"], 5)
+    if ok is None:
+        return [], out
+    if not ok:
+        return [], out[-240:]
+    sandbox_ids = [line.strip() for line in out.splitlines() if line.strip()]
+    contexts = []
+    last_error = ""
+    for sandbox_id in sandbox_ids[:limit]:
+        ok_inspect, inspect_out = run_capture(["crictl", "inspectp", sandbox_id], 5)
+        if not ok_inspect:
+            last_error = inspect_out[-240:]
+            continue
+        try:
+            payload = json.loads(inspect_out)
+        except Exception as exc:
+            last_error = str(exc)[-240:]
+            continue
+        info = payload.get("info") or {}
+        status = payload.get("status") or {}
+        config = info.get("config") or {}
+        metadata = config.get("metadata") or status.get("metadata") or {}
+        dns_config = config.get("dns_config") or config.get("dnsConfig") or {}
+        servers = [str(item) for item in (dns_config.get("servers") or []) if str(item)]
+        searches = [str(item) for item in (dns_config.get("searches") or []) if str(item)]
+        try:
+            pid = int(info.get("pid") or status.get("pid") or 0)
+        except Exception:
+            pid = 0
+        netns = cni_netns_path(info)
+        if pid <= 0 or not os.path.exists("/proc/%d/ns/net" % pid):
+            last_error = "pod sandbox %s has no live network namespace pid" % sandbox_id[:12]
+            continue
+        if not netns:
+            last_error = "pod sandbox %s has no CNI network namespace path" % sandbox_id[:12]
+            continue
+        contexts.append({
+            "sandbox_id": sandbox_id,
+            "pid": pid,
+            "namespace": str(metadata.get("namespace") or ""),
+            "pod": str(metadata.get("name") or ""),
+            "uid": str(metadata.get("uid") or ""),
+            "dns_servers": servers,
+            "dns_searches": searches,
+            "netns": netns,
+        })
+    if not contexts:
+        suffix = ": " + last_error if last_error else ""
+        return [], "no Ready pod sandbox with CNI network namespace found" + suffix
+    return contexts, ""
+
+def pod_netns_run(ctx, argv, timeout=5):
+    return run(["nsenter", "--target", str(ctx["pid"]), "--net", "--"] + argv, timeout)
+
+def pod_dns_query(ctx, server, name):
     if shutil.which("nslookup"):
         argv = ["nslookup", name]
         if server:
             argv.append(server)
-        return run(argv, 4)
+        return pod_netns_run(ctx, argv, 5)
     if shutil.which("dig"):
-        target = "@%s" % server if server else ""
         argv = ["dig"]
-        if target:
-            argv.append(target)
+        if server:
+            argv.append("@%s" % server)
         argv.extend([name, "+time=3", "+tries=1"])
-        return run(argv, 5)
+        return pod_netns_run(ctx, argv, 6)
     return None, "missing nslookup/dig"
 
-ok, out = dns_query("10.43.0.10")
-if ok is None:
-    checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", out, "DNS query to kube-dns service IP"))
-elif ok:
-    checks.append(check("pod_dns_to_kube_dns_service", "dns", "pass", out, "DNS query to kube-dns service IP"))
-else:
-    checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", out, "host-context DNS probe to kube-dns service IP; pod-netns probe required before hard gating"))
+def pod_tcp_connect(ctx, host, port):
+    code = "import socket,sys; s=socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=3); s.close()"
+    return pod_netns_run(ctx, ["python3", "-c", code, host, str(port)], 5)
+
+def kubectl_json(args, timeout=5):
+    base = kubectl_base_command()
+    if not base:
+        return None, "kubectl unavailable"
+    return run_capture(base + args + ["-o", "json"], timeout)
+
+def kubectl_jsonpath(args, expr, timeout=5):
+    base = kubectl_base_command()
+    if not base:
+        return None, "kubectl unavailable"
+    return run(base + args + ["-o", "jsonpath=" + expr], timeout)
+
+service_cache = {}
+def first_same_namespace_service(ctx):
+    namespace = ctx.get("namespace") or "default"
+    if namespace in service_cache:
+        return service_cache[namespace]
+    ok, out = kubectl_json(["-n", namespace, "get", "svc"], 6)
+    if ok is None:
+        service_cache[namespace] = (None, out)
+        return service_cache[namespace]
+    if not ok:
+        service_cache[namespace] = (None, out[-240:])
+        return service_cache[namespace]
+    try:
+        payload = json.loads(out)
+    except Exception as exc:
+        service_cache[namespace] = (None, str(exc)[-240:])
+        return service_cache[namespace]
+    for item in payload.get("items") or []:
+        spec = item.get("spec") or {}
+        cluster_ip = spec.get("clusterIP") or ""
+        if not cluster_ip or cluster_ip == "None":
+            continue
+        selected_port = None
+        for port in spec.get("ports") or []:
+            protocol = str(port.get("protocol") or "TCP").upper()
+            if protocol != "TCP":
+                continue
+            raw_port = port.get("port")
+            if isinstance(raw_port, int) and raw_port > 0:
+                selected_port = raw_port
+                break
+        if not selected_port:
+            continue
+        metadata = item.get("metadata") or {}
+        name = str(metadata.get("name") or "")
+        if not name:
+            continue
+        service_cache[namespace] = ({
+            "name": name,
+            "namespace": namespace,
+            "cluster_ip": str(cluster_ip),
+            "port": int(selected_port),
+            "fqdn": "%s.%s.svc.cluster.local" % (name, namespace),
+        }, "")
+        return service_cache[namespace]
+    service_cache[namespace] = (None, "no TCP ClusterIP service in namespace %s" % namespace)
+    return service_cache[namespace]
+
+def pod_context_evidence(ctx, extra=None):
+    evidence = {
+        "sandbox_id": (ctx.get("sandbox_id") or "")[:12],
+        "pod": ctx.get("pod") or "",
+        "namespace": ctx.get("namespace") or "",
+        "pid": str(ctx.get("pid") or ""),
+        "netns": ctx.get("netns") or "",
+    }
+    if extra:
+        evidence.update(extra)
+    return evidence
+
+def optional_probe_skipped(name, category, observed, expected, evidence=None):
+    checks.append(check(name, category, "pass", "optional probe skipped: " + (observed or "target unavailable"), expected, False, evidence=evidence or {}))
+
+pod_context_list, pod_context_reason = pod_netns_contexts()
+pod_ctx = pod_context_list[0] if pod_context_list else None
+same_service = None
+same_service_reason = ""
+for candidate_ctx in pod_context_list:
+    candidate_service, candidate_reason = first_same_namespace_service(candidate_ctx)
+    if candidate_service:
+        pod_ctx = candidate_ctx
+        same_service = candidate_service
+        same_service_reason = ""
+        break
+    same_service_reason = candidate_reason
+if pod_ctx and not same_service:
+    same_service, same_service_reason = first_same_namespace_service(pod_ctx)
+
+kube_service_dns_name = "kubernetes.default.svc.cluster.local"
+kube_dns_service_ip = ""
+if pod_ctx and pod_ctx.get("dns_servers"):
+    kube_dns_service_ip = pod_ctx["dns_servers"][0]
+if not kube_dns_service_ip:
+    ok_dns_svc, dns_svc_out = kubectl_jsonpath(["-n", "kube-system", "get", "svc", "kube-dns"], "{.spec.clusterIP}", 5)
+    if ok_dns_svc:
+        kube_dns_service_ip = dns_svc_out.strip()
+if not kube_dns_service_ip:
+    kube_dns_service_ip = "10.43.0.10"
+
+kubernetes_service_ip = ""
+ok_kube_svc, kube_svc_out = kubectl_jsonpath(["-n", "default", "get", "svc", "kubernetes"], "{.spec.clusterIP}", 5)
+if ok_kube_svc:
+    kubernetes_service_ip = kube_svc_out.strip()
+if not kubernetes_service_ip:
+    kubernetes_service_ip = "10.43.0.1"
 
 coredns_ip = ""
-if shutil.which("kubectl"):
-    ok_pod, pod_out = run(["kubectl", "-n", "kube-system", "get", "pod", "-l", "k8s-app=kube-dns", "-o", "jsonpath={.items[0].status.podIP}"], 5)
-    if ok_pod:
-        coredns_ip = pod_out.strip()
-if coredns_ip:
-    ok, out = dns_query(coredns_ip)
-    checks.append(check("pod_dns_to_coredns_pod", "dns", "pass" if ok else "warning", out, "host-context DNS probe to CoreDNS pod IP; pod-netns probe required before hard gating"))
-else:
-    checks.append(check("pod_dns_to_coredns_pod", "dns", "warning", "CoreDNS pod IP unavailable", "CoreDNS pod IP"))
+ok_pod, pod_out = kubectl_jsonpath(["-n", "kube-system", "get", "pod", "-l", "k8s-app=kube-dns"], "{.items[0].status.podIP}", 5)
+if ok_pod:
+    coredns_ip = pod_out.strip()
 
-checks.append(check("kubernetes_default_svc_dns", "dns", "warning", "skipped from host resolver namespace", "pod-network resolver must verify kubernetes.default.svc before hard gating"))
-checks.append(check("same_namespace_service_dns", "dns", "warning", "skipped from host resolver namespace", "pod-network resolver must verify same-namespace service DNS before hard gating"))
-checks.append(check("same_namespace_service_tcp", "network", "warning", "skipped from host network namespace", "pod-network probe must verify service TCP before hard gating"))
+if not pod_ctx:
+    unavailable = pod_context_reason or "pod network namespace unavailable"
+    checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", unavailable, "pod-netns DNS query to kube-dns service IP"))
+    checks.append(check("pod_dns_to_coredns_pod", "dns", "warning", unavailable, "pod-netns DNS query to CoreDNS pod IP"))
+    checks.append(check("kubernetes_default_svc_dns", "dns", "warning", unavailable, "pod-netns resolver resolves kubernetes.default.svc.cluster.local"))
+    checks.append(check("same_namespace_service_dns", "dns", "warning", unavailable, "pod-netns resolver resolves a same-namespace ClusterIP service"))
+    checks.append(check("same_namespace_service_tcp", "network", "warning", unavailable, "pod-netns TCP connect to a same-namespace ClusterIP service"))
+else:
+    ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, kube_service_dns_name)
+    kube_dns_evidence = pod_context_evidence(pod_ctx, {"dns_server": kube_dns_service_ip, "query": kube_service_dns_name})
+    if ok is None:
+        checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", out, "pod-netns DNS query to kube-dns service IP", evidence=kube_dns_evidence))
+        checks.append(check("kubernetes_default_svc_dns", "dns", "warning", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", evidence=kube_dns_evidence))
+    elif ok:
+        checks.append(check("pod_dns_to_kube_dns_service", "dns", "pass", out, "pod-netns DNS query to kube-dns service IP", evidence=kube_dns_evidence))
+        checks.append(check("kubernetes_default_svc_dns", "dns", "pass", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", evidence=kube_dns_evidence))
+    else:
+        checks.append(check("pod_dns_to_kube_dns_service", "dns", "fail", out, "pod-netns DNS query to kube-dns service IP", True, evidence=kube_dns_evidence))
+        checks.append(check("kubernetes_default_svc_dns", "dns", "fail", out, "pod-netns resolver resolves kubernetes.default.svc.cluster.local", True, evidence=kube_dns_evidence))
+
+    if coredns_ip:
+        ok, out = pod_dns_query(pod_ctx, coredns_ip, kube_service_dns_name)
+        coredns_evidence = pod_context_evidence(pod_ctx, {"dns_server": coredns_ip, "query": kube_service_dns_name})
+        if ok is None:
+            checks.append(check("pod_dns_to_coredns_pod", "dns", "warning", out, "pod-netns DNS query to CoreDNS pod IP", evidence=coredns_evidence))
+        elif ok:
+            checks.append(check("pod_dns_to_coredns_pod", "dns", "pass", out, "pod-netns DNS query to CoreDNS pod IP", evidence=coredns_evidence))
+        else:
+            checks.append(check("pod_dns_to_coredns_pod", "dns", "fail", out, "pod-netns DNS query to CoreDNS pod IP", True, evidence=coredns_evidence))
+    else:
+        optional_probe_skipped("pod_dns_to_coredns_pod", "dns", "CoreDNS pod IP unavailable", "CoreDNS pod IP", pod_context_evidence(pod_ctx))
+
+    if same_service:
+        service_evidence = pod_context_evidence(pod_ctx, {
+            "service": "%s/%s" % (same_service["namespace"], same_service["name"]),
+            "service_fqdn": same_service["fqdn"],
+            "service_ip": same_service["cluster_ip"],
+            "service_port": str(same_service["port"]),
+            "dns_server": kube_dns_service_ip,
+        })
+        ok, out = pod_dns_query(pod_ctx, kube_dns_service_ip, same_service["fqdn"])
+        if ok is None:
+            checks.append(check("same_namespace_service_dns", "dns", "warning", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", evidence=service_evidence))
+        elif ok:
+            checks.append(check("same_namespace_service_dns", "dns", "pass", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", evidence=service_evidence))
+        else:
+            checks.append(check("same_namespace_service_dns", "dns", "fail", out, "pod-netns resolver resolves same-namespace ClusterIP service FQDN", True, evidence=service_evidence))
+
+        kube_service_evidence = pod_context_evidence(pod_ctx, {
+            "service": "default/kubernetes",
+            "service_ip": kubernetes_service_ip,
+            "service_port": "443",
+        })
+        ok, out = pod_tcp_connect(pod_ctx, kubernetes_service_ip, 443)
+        if ok is None:
+            checks.append(check("same_namespace_service_tcp", "network", "warning", out, "pod-netns TCP connect to Kubernetes default ClusterIP service", evidence=kube_service_evidence))
+        elif ok:
+            checks.append(check("same_namespace_service_tcp", "network", "pass", "%s:443 connected" % kubernetes_service_ip, "pod-netns TCP connect to Kubernetes default ClusterIP service", evidence=kube_service_evidence))
+        else:
+            checks.append(check("same_namespace_service_tcp", "network", "fail", out, "pod-netns TCP connect to Kubernetes default ClusterIP service", True, evidence=kube_service_evidence))
+    else:
+        optional_probe_skipped("same_namespace_service_dns", "dns", same_service_reason or "same-namespace service unavailable", "pod-netns resolver resolves a same-namespace ClusterIP service", pod_context_evidence(pod_ctx))
+        optional_probe_skipped("same_namespace_service_tcp", "network", same_service_reason or "same-namespace service unavailable", "pod-netns TCP connect to a same-namespace ClusterIP service", pod_context_evidence(pod_ctx))
 
 try:
     socket.getaddrinfo("cloudflare.com", 443)
@@ -2760,7 +3018,7 @@ try:
 except Exception as exc:
     checks.append(check("external_dns", "dns", "warning", str(exc), "external DNS resolves"))
 
-ok, out = run(["iptables-save"], 4)
+ok, out = run_capture(["iptables-save"], 4)
 if ok is None:
     checks.append(check("managed_iptables_stale_rule", "iptables", "warning", out, "Fugue managed iptables audit"))
 elif ok:
@@ -2779,12 +3037,13 @@ else:
     checks.append(check("managed_iptables_stale_rule", "iptables", "warning", out, "iptables-save succeeds"))
 
 pod_cidr = ""
-if shutil.which("kubectl"):
-    ok_podcidr, podcidr_out = run(["kubectl", "get", "node", os.uname().nodename, "-o", "jsonpath={.spec.podCIDR}"], 5)
+kubectl_base = kubectl_base_command()
+if kubectl_base:
+    ok_podcidr, podcidr_out = run(kubectl_base + ["get", "node", os.uname().nodename, "-o", "jsonpath={.spec.podCIDR}"], 5)
     if ok_podcidr:
         pod_cidr = podcidr_out.strip()
 if pod_cidr:
-    ok_route, route_out = run(["ip", "route"], 3)
+    ok_route, route_out = run_capture(["ip", "route"], 3)
     drift = ok_route is True and pod_cidr not in route_out
     checks.append(check("pod_cidr_drift", "cni", "fail" if drift else "pass", route_out if drift else pod_cidr, "PodCIDR route present", drift))
 else:
@@ -2799,7 +3058,7 @@ elif ok_link:
 else:
     checks.append(check("cni_bridge", "cni", "warning", link_out, "ip link show succeeds"))
 
-ok_proxy, proxy_out = run(["iptables-save"], 4)
+ok_proxy, proxy_out = run_capture(["iptables-save"], 4)
 if ok_proxy:
     has_proxy = "KUBE-SERVICES" in proxy_out or "KUBE-SVC" in proxy_out
     checks.append(check("kube_proxy_rules", "kube-proxy", "pass" if has_proxy else "warning", "kube proxy rules present" if has_proxy else proxy_out[-240:], "kube-proxy iptables/ipvs rules present; missing marker requires corroborating node evidence before hard gating", False, repair_action="human_kube_proxy_boundary"))

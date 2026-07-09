@@ -859,7 +859,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v20"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v21"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH=`,
 		`verify_image_cache_manifest`,
@@ -924,6 +924,8 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`"TCP connect to service", True`,
 		`"DNS query to kube-dns service IP", True`,
 		`"DNS query to CoreDNS pod IP", not ok`,
+		`host-context DNS probe`,
+		`skipped from host resolver namespace`,
 		`"kube-proxy iptables/ipvs rules present", not has_proxy`,
 	} {
 		if strings.Contains(script, forbidden) {
@@ -931,8 +933,11 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`skipped from host resolver namespace`,
-		`pod-netns probe required before hard gating`,
+		`crictl", "inspectp", sandbox_id`,
+		`nsenter", "--target", str(ctx["pid"]), "--net", "--"`,
+		`kubernetes.default.svc.cluster.local`,
+		`pod-netns DNS query to kube-dns service IP`,
+		`pod-netns resolver resolves same-namespace ClusterIP service FQDN`,
 		`missing marker requires corroborating node evidence before hard gating`,
 	} {
 		if !strings.Contains(script, want) {
