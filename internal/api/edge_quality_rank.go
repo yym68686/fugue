@@ -162,8 +162,8 @@ func (s *Server) buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes 
 	quarantineByNode := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
 		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt, quarantineByNode)
-		if candidate.Excluded || !candidate.Healthy || candidate.Draining || !candidate.RouteReady || !candidate.TLSReady {
-			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, edgeQualityRankGateReason(candidate))
+		if edgeQualityRankCandidateHardGated(candidate) {
+			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, candidate.Reason, edgeQualityRankGateReason(candidate))
 			hardGated = append(hardGated, candidate)
 			continue
 		}
@@ -270,8 +270,8 @@ func (s *Server) buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQu
 	quarantineByNode := s.activeNodeQuarantineByName()
 	for _, node := range nodes {
 		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt, quarantineByNode)
-		if candidate.Excluded || !candidate.Healthy || candidate.Draining || !candidate.RouteReady || !candidate.TLSReady {
-			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, edgeQualityRankGateReason(candidate))
+		if edgeQualityRankCandidateHardGated(candidate) {
+			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, candidate.Reason, edgeQualityRankGateReason(candidate))
 			hardGated = append(hardGated, candidate)
 			continue
 		}
@@ -395,15 +395,19 @@ func edgeQualityRankRollupResponseFreshEnough(response model.EdgeQualityRankResp
 func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoutePolicy, now time.Time, quarantineByNode map[string]model.NodeDeepHealthResult) model.EdgeQualityRankCandidate {
 	tlsReady := strings.EqualFold(strings.TrimSpace(node.TLSStatus), model.EdgeTLSStatusReady) || node.TLSReadyAt != nil
 	routeReady := strings.TrimSpace(node.RouteBundleVersion) != "" && node.CaddyRouteCount > 0
+	heartbeatFresh := edgeNodeHeartbeatFresh(node, now)
 	candidate := model.EdgeQualityRankCandidate{
 		EdgeID:      strings.TrimSpace(node.ID),
 		EdgeGroupID: strings.TrimSpace(node.EdgeGroupID),
 		Region:      strings.TrimSpace(node.Region),
 		Country:     strings.TrimSpace(node.Country),
-		Healthy:     node.Healthy,
+		Healthy:     node.Healthy && heartbeatFresh,
 		Draining:    node.Draining,
 		RouteReady:  routeReady,
 		TLSReady:    tlsReady,
+	}
+	if !heartbeatFresh {
+		candidate.Reason = "edge node heartbeat stale"
 	}
 	excluded, reason := edgeQualityNodeExcludedByPolicy(node, policy, now)
 	candidate.Excluded = excluded
@@ -417,6 +421,10 @@ func edgeQualityRankCandidateForNode(node model.EdgeNode, policy model.EdgeRoute
 		}
 	}
 	return candidate
+}
+
+func edgeQualityRankCandidateHardGated(candidate model.EdgeQualityRankCandidate) bool {
+	return candidate.Excluded || !candidate.Healthy || candidate.Draining || !candidate.RouteReady || !candidate.TLSReady
 }
 
 func edgeQualityApplyProfile(candidate *model.EdgeQualityRankCandidate, profile edgeDNSLatencyCandidateProfile) {

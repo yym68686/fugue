@@ -272,6 +272,8 @@ func TestEdgeQualityRankResponseUsesPlatformFallbackRollup(t *testing.T) {
 			RouteBundleVersion: "routegen",
 			CaddyRouteCount:    1,
 			TLSStatus:          model.EdgeTLSStatusReady,
+			LastSeenAt:         &now,
+			LastHeartbeatAt:    &now,
 		},
 		{
 			ID:                 "edge-de-1",
@@ -280,6 +282,8 @@ func TestEdgeQualityRankResponseUsesPlatformFallbackRollup(t *testing.T) {
 			RouteBundleVersion: "routegen",
 			CaddyRouteCount:    1,
 			TLSStatus:          model.EdgeTLSStatusReady,
+			LastSeenAt:         &now,
+			LastHeartbeatAt:    &now,
 		},
 	}, model.EdgeRoutePolicy{}, []model.EdgeQualityRollup{
 		{

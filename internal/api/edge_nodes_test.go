@@ -181,6 +181,7 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 
 	storeState, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	now := time.Now().UTC()
+	stale := now.Add(-10 * time.Minute)
 	for _, node := range []map[string]any{
 		{
 			"edge_id":              "edge-us-1",
@@ -211,6 +212,22 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 		if heartbeat.Code != http.StatusOK {
 			t.Fatalf("expected heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
 		}
+	}
+	if _, _, err := storeState.CreateEdgeNodeToken(model.EdgeNode{
+		ID:                 "edge-jp-stale",
+		EdgeGroupID:        "edge-group-country-jp",
+		Region:             "jp",
+		Country:            "JP",
+		PublicIPv4:         "203.0.113.30",
+		RouteBundleVersion: "routegen",
+		CaddyRouteCount:    4,
+		TLSStatus:          model.EdgeTLSStatusReady,
+		Status:             model.EdgeHealthHealthy,
+		Healthy:            true,
+		LastSeenAt:         &stale,
+		LastHeartbeatAt:    &stale,
+	}); err != nil {
+		t.Fatalf("create stale edge node: %v", err)
 	}
 	if _, err := storeState.PutEdgeRoutePolicy(model.EdgeRoutePolicy{
 		Hostname:        "api.fugue.pro",
@@ -303,6 +320,29 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 			MaxReadGapMS:         12000,
 			SampledAt:            now.Add(-5 * time.Minute),
 		},
+		{
+			ID:                   "api-jp-stale-fast",
+			EdgeID:               "edge-jp-stale",
+			EdgeGroupID:          "edge-group-country-jp",
+			Hostname:             "api.fugue.pro",
+			PathPrefix:           "/api",
+			Method:               "POST",
+			TrafficClass:         "large_body_api",
+			ClientCountry:        "cn",
+			ClientASN:            "as4134",
+			DNSPolicy:            "client_scope_header",
+			TTFBMS:               50,
+			UpstreamMS:           40,
+			TotalMS:              70,
+			SampleCount:          60,
+			UploadEffectiveBPS:   4 * 1024 * 1024,
+			MinWindowBPS:         3 * 1024 * 1024,
+			RequestBodyBytes:     2 * 1024 * 1024,
+			RequestBodyReadBytes: 2 * 1024 * 1024,
+			BodyReadBlockMS:      10,
+			MaxReadGapMS:         20,
+			SampledAt:            now.Add(-5 * time.Minute),
+		},
 	}, time.Time{}); err != nil {
 		t.Fatalf("record performance samples: %v", err)
 	}
@@ -325,8 +365,15 @@ func TestEdgeQualityRankUsesScopedTrafficClassAndServiceExclusion(t *testing.T) 
 	if response.Candidates[0].AvgUploadBPS < 1024*1024 {
 		t.Fatalf("expected huge-body slow sample to be filtered out by request_size_class, got %+v", response.Candidates[0])
 	}
-	if len(response.HardGated) != 1 || response.HardGated[0].EdgeID != "edge-de-1" || !response.HardGated[0].Excluded {
+	gates := map[string]model.EdgeQualityRankCandidate{}
+	for _, candidate := range response.HardGated {
+		gates[candidate.EdgeID] = candidate
+	}
+	if gate := gates["edge-de-1"]; !gate.Excluded {
 		t.Fatalf("expected service-excluded DE edge in hard gates, got %+v", response.HardGated)
+	}
+	if gate := gates["edge-jp-stale"]; gate.Reason != "edge node heartbeat stale" || gate.Healthy {
+		t.Fatalf("expected stale JP edge to be hard-gated by heartbeat freshness, got %+v in %+v", gate, response.HardGated)
 	}
 }
 
