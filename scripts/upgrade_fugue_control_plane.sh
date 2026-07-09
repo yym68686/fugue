@@ -6566,10 +6566,9 @@ wait_for_post_deploy_robustness() {
       log "post-deploy robustness gate passed: ${output}"
       if release_output="$(release_guard_status_summary 2>/dev/null)"; then
         log "post-deploy release guard summary: ${release_output}"
-      else
-        log "warning: post-deploy release guard summary unavailable or blocked: ${release_output:-unknown}"
+        return 0
       fi
-      return 0
+      output="release guard blocked after robustness passed: ${release_output:-unknown}"
     fi
     if (( SECONDS >= deadline )); then
       log "post-deploy robustness gate did not pass: ${output}"
@@ -7488,6 +7487,11 @@ PY
   release_public_data_plane_if_needed
   if [[ "${PUBLIC_DATA_PLANE_RELEASED:-false}" == "true" ]]; then
     wait_for_platform_autonomy_after_public_data_plane_release
+    if ! wait_for_post_deploy_robustness; then
+      log "post-public-data-plane robustness gate failed; attempting rollback"
+      rollback_release || true
+      fail "post-public-data-plane robustness gate failed"
+    fi
   fi
 
   local current_revision

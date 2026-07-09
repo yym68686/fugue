@@ -1089,13 +1089,11 @@ with socket.create_connection((host, port), timeout=timeout):
 }
 
 worker_smoke_target() {
-  local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
-  [[ -n "$(trim_field "${urls}")" ]] || return 0
-  python3 -c '
+  public_data_plane_smoke_urls | python3 -c '
 import sys
 from urllib.parse import urlsplit
 
-for raw in sys.argv[1].split(","):
+for raw in sys.stdin:
     raw = raw.strip()
     if not raw:
         continue
@@ -1107,7 +1105,13 @@ for raw in sys.argv[1].split(","):
         path += "?" + parsed.query
     print(parsed.hostname + "\t" + path)
     break
-' "${urls}"
+'
+}
+
+public_data_plane_smoke_urls() {
+  local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
+  [[ -n "$(trim_field "${urls}")" ]] || return 0
+  printf '%s\n' "${urls}" | tr ',;' '\n'
 }
 
 check_worker_https_smoke() {
@@ -1286,7 +1290,7 @@ check_public_smoke_on_front_nodes() {
         --resolve "${host}:443:${host_ip}" \
         "https://${host}${path}" >/dev/null
     done < <(node_ips_for_daemonset "${front_daemonset}")
-  done < <(printf '%s\n' "${urls}" | tr ',' '\n')
+  done < <(public_data_plane_smoke_urls)
 }
 
 run_bluegreen_release() {
@@ -1447,7 +1451,7 @@ run_smoke_urls() {
     [[ -n "${url}" ]] || continue
     log "smoke ${url}"
     curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" "${url}" >/dev/null
-  done < <(printf '%s\n' "${urls}" | tr ',' '\n')
+  done < <(public_data_plane_smoke_urls)
 }
 
 main() {

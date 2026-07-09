@@ -24,6 +24,12 @@ bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
 
+if grep -q 'warning: post-deploy release guard' "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
+  fail "post-deploy release guard must be a hard gate, not warning-only"
+fi
+grep -q 'release guard blocked after robustness passed' "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "post-deploy robustness gate must surface release guard blocks"
+
 plan_value() {
   local output_file="$1"
   local key="$2"
@@ -147,6 +153,10 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   active_slot_from_front() { :; }
   active_slot_from_record() { :; }
   assert_eq "$(current_active_slot "fugue-fugue-edge-dynamic" "fugue-fugue-edge-dynamic-front")" "a" "missing dynamic release record must fall back to default slot"
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.fugue.pro/healthz; https://oaix.fugue.pro/healthz,https://argus.fugue.pro/healthz'
+  assert_eq "$(public_data_plane_smoke_urls | wc -l | tr -d ' ')" "3" "public data-plane smoke URL parser must split comma and semicolon"
+  assert_eq "$(worker_smoke_target)" $'api.fugue.pro\t/healthz' "worker smoke target must parse the first HTTPS smoke URL after splitting"
 )
 
 (
