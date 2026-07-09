@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -400,7 +401,22 @@ func (s *Server) robustnessNodeDeepHealthChecks() ([]model.RobustnessCheck, erro
 	return checks, nil
 }
 
-func (s *Server) robustnessControlPlaneTopologyChecks(principal model.Principal) ([]model.RobustnessCheck, error) {
+func (s *Server) robustnessControlPlaneTopologyChecks(r *http.Request, principal model.Principal) ([]model.RobustnessCheck, error) {
+	if r != nil {
+		if snapshots, err := s.loadClusterNodeInventory(r.Context()); err == nil {
+			nodes := make([]model.ClusterNode, 0, len(snapshots))
+			for _, snapshot := range snapshots {
+				nodes = append(nodes, snapshot.node)
+			}
+			topology := buildControlPlaneTopologyFromClusterNodes(nodes, time.Now().UTC())
+			check := controlPlaneTopologyCheck(topology)
+			if check.Evidence == nil {
+				check.Evidence = map[string]string{}
+			}
+			check.Evidence["source"] = "kubernetes_node_inventory"
+			return []model.RobustnessCheck{check}, nil
+		}
+	}
 	updaters, err := s.store.ListNodeUpdaters(principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		return nil, err

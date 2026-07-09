@@ -197,7 +197,7 @@ func (s *Server) buildRobustnessStatus(r *http.Request, principal model.Principa
 		return model.RobustnessStatus{}, err
 	}
 	checks = append(checks, nodeChecks...)
-	topologyChecks, err := s.robustnessControlPlaneTopologyChecks(principal)
+	topologyChecks, err := s.robustnessControlPlaneTopologyChecks(r, principal)
 	if err != nil {
 		return model.RobustnessStatus{}, err
 	}

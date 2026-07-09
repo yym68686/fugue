@@ -29,6 +29,31 @@ func TestControlPlaneTopologySingleNodeIsRiskNotFailure(t *testing.T) {
 	}
 }
 
+func TestControlPlaneTopologyFromClusterNodesUsesKubernetesControlPlaneRole(t *testing.T) {
+	now := time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC)
+	topology := buildControlPlaneTopologyFromClusterNodes([]model.ClusterNode{{
+		Name:   "cp-1",
+		Status: "ready",
+		Roles:  []string{"control-plane", "etcd"},
+		Region: "us-west",
+		Policy: &model.ClusterNodePolicy{
+			DesiredControlPlaneRole:   model.MachineControlPlaneRoleMember,
+			EffectiveControlPlaneRole: model.MachineControlPlaneRoleMember,
+		},
+	}}, now)
+
+	if topology.Mode != model.ControlPlaneTopologyModeSingle || topology.Status != model.ControlPlaneTopologyStatusSingleNodeRisk {
+		t.Fatalf("expected Kubernetes control-plane node to report single-control-plane risk, got %+v", topology)
+	}
+	if topology.ControlPlaneCapableNodes != 1 || topology.EtcdVoterCapableNodes != 1 {
+		t.Fatalf("expected one control-plane/etcd capable node, got %+v", topology)
+	}
+	check := controlPlaneTopologyCheck(topology)
+	if !check.Pass || check.Severity != model.RobustnessSeverityWarning {
+		t.Fatalf("single Kubernetes control-plane node should be warning, not failure: %+v", check)
+	}
+}
+
 func TestControlPlaneTopologyThreeNodesHAReady(t *testing.T) {
 	now := time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC)
 	topology := buildControlPlaneTopology([]model.ControlPlaneTopologyNode{

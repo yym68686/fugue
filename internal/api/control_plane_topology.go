@@ -25,6 +25,14 @@ func buildControlPlaneTopologyFromKubeNodes(nodes []kubeNode, generatedAt time.T
 	return buildControlPlaneTopology(topologyNodes, generatedAt)
 }
 
+func buildControlPlaneTopologyFromClusterNodes(nodes []model.ClusterNode, generatedAt time.Time) model.ControlPlaneTopology {
+	topologyNodes := make([]model.ControlPlaneTopologyNode, 0, len(nodes))
+	for _, node := range nodes {
+		topologyNodes = append(topologyNodes, controlPlaneTopologyNodeFromClusterNode(node))
+	}
+	return buildControlPlaneTopology(topologyNodes, generatedAt)
+}
+
 func buildControlPlaneTopologyFromNodeUpdaters(updaters []model.NodeUpdater, generatedAt time.Time) model.ControlPlaneTopology {
 	nodes := make([]model.ControlPlaneTopologyNode, 0, len(updaters))
 	for _, updater := range updaters {
@@ -158,6 +166,46 @@ func controlPlaneTopologyNodeFromKube(node kubeNode) model.ControlPlaneTopologyN
 	}
 }
 
+func controlPlaneTopologyNodeFromClusterNode(node model.ClusterNode) model.ControlPlaneTopologyNode {
+	policy := node.Policy
+	desiredRole := ""
+	effectiveRole := model.MachineControlPlaneRoleNone
+	if policy != nil {
+		desiredRole = model.NormalizeMachineControlPlaneRole(policy.DesiredControlPlaneRole)
+		effectiveRole = model.NormalizeMachineControlPlaneRole(policy.EffectiveControlPlaneRole)
+	}
+	if effectiveRole == "" {
+		effectiveRole = model.MachineControlPlaneRoleNone
+	}
+	for _, role := range node.Roles {
+		if strings.EqualFold(strings.TrimSpace(role), "control-plane") {
+			effectiveRole = model.MachineControlPlaneRoleMember
+			break
+		}
+	}
+	if effectiveRole == model.MachineControlPlaneRoleNone {
+		switch desiredRole {
+		case model.MachineControlPlaneRoleCandidate, model.MachineControlPlaneRoleMember:
+			effectiveRole = model.MachineControlPlaneRoleCandidate
+		}
+	}
+	capabilities := controlPlaneCapabilitiesForClusterNode(node, desiredRole, effectiveRole)
+	return model.ControlPlaneTopologyNode{
+		NodeName:                  strings.TrimSpace(node.Name),
+		Ready:                     strings.EqualFold(strings.TrimSpace(node.Status), "ready"),
+		ControlPlaneCapable:       effectiveRole == model.MachineControlPlaneRoleMember || effectiveRole == model.MachineControlPlaneRoleCandidate,
+		EtcdVoterCapable:          effectiveRole == model.MachineControlPlaneRoleMember,
+		ReleaseRunnerCapable:      hasCapability(capabilities, "release-runner-capable"),
+		DesiredControlPlaneRole:   desiredRole,
+		EffectiveControlPlaneRole: effectiveRole,
+		Region:                    strings.TrimSpace(node.Region),
+		Zone:                      strings.TrimSpace(node.Zone),
+		FailureDomain:             failureDomain("", node.Region, node.Zone, node.Name),
+		Roles:                     append([]string(nil), node.Roles...),
+		Capabilities:              capabilities,
+	}
+}
+
 func controlPlaneTopologyNodeFromUpdater(updater model.NodeUpdater) model.ControlPlaneTopologyNode {
 	labels := updater.Labels
 	desiredRole := model.NormalizeMachineControlPlaneRole(firstNodeLabel(labels, runtimepkg.ControlPlaneDesiredRoleKey))
@@ -212,6 +260,33 @@ func controlPlaneCapabilitiesForLabels(labels map[string]string, roles []string)
 	}
 	if strings.EqualFold(firstNodeLabel(labels, "fugue.io/role.release-runner"), runtimepkg.NodeRoleLabelValue) {
 		capabilities = append(capabilities, "release-runner-capable")
+	}
+	return dedupeStrings(capabilities)
+}
+
+func controlPlaneCapabilitiesForClusterNode(node model.ClusterNode, desiredRole, effectiveRole string) []string {
+	capabilities := []string{}
+	for _, role := range node.Roles {
+		switch strings.ToLower(strings.TrimSpace(role)) {
+		case "control-plane":
+			capabilities = append(capabilities, "control-plane-capable")
+		case "etcd":
+			capabilities = append(capabilities, "etcd-voter-capable")
+		}
+	}
+	switch effectiveRole {
+	case model.MachineControlPlaneRoleMember:
+		capabilities = append(capabilities, "control-plane-capable", "etcd-voter-capable")
+	case model.MachineControlPlaneRoleCandidate:
+		capabilities = append(capabilities, "control-plane-capable")
+	}
+	if effectiveRole == model.MachineControlPlaneRoleNone {
+		switch desiredRole {
+		case model.MachineControlPlaneRoleMember:
+			capabilities = append(capabilities, "control-plane-capable", "etcd-voter-capable")
+		case model.MachineControlPlaneRoleCandidate:
+			capabilities = append(capabilities, "control-plane-capable")
+		}
 	}
 	return dedupeStrings(capabilities)
 }
