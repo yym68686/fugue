@@ -2625,11 +2625,18 @@ import urllib.parse
 
 now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
+def command_env():
+    env = dict(os.environ)
+    env.setdefault("HOME", "/root")
+    env.setdefault("USER", "root")
+    env.setdefault("LOGNAME", "root")
+    return env
+
 def run(argv, timeout=3):
     if not argv or not shutil.which(argv[0]):
         return None, "missing command: " + (argv[0] if argv else "")
     try:
-        cp = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        cp = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, env=command_env())
         output = (cp.stdout + cp.stderr).strip()
         return cp.returncode == 0, output[-240:]
     except Exception as exc:
@@ -2735,7 +2742,7 @@ def run_capture(argv, timeout=5):
     if not argv or not shutil.which(argv[0]):
         return None, "missing command: " + (argv[0] if argv else "")
     try:
-        cp = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        cp = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, env=command_env())
         output = (cp.stdout + cp.stderr).strip()
         return cp.returncode == 0, output
     except Exception as exc:
