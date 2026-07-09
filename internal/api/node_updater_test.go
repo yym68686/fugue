@@ -98,10 +98,10 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 		DeepHealth model.NodeDeepHealthResult `json:"deep_health"`
 	}
 	mustDecodeJSON(t, deepHealthRecorder, &heartbeatResponse)
-	if heartbeatResponse.DeepHealth.QuarantineState != model.NodeQuarantineStateQuarantined ||
-		heartbeatResponse.DeepHealth.QuarantineReason != model.NodeQuarantineReasonDNSHardFail ||
+	if heartbeatResponse.DeepHealth.QuarantineState != model.NodeQuarantineStateDegraded ||
+		heartbeatResponse.DeepHealth.QuarantineReason != "warning_or_soft_fail" ||
 		!heartbeatResponse.DeepHealth.ObservedOnly {
-		t.Fatalf("expected observe-only DNS quarantine, got %+v", heartbeatResponse.DeepHealth)
+		t.Fatalf("expected observe-only DNS failure to degrade without quarantine, got %+v", heartbeatResponse.DeepHealth)
 	}
 	healthRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/node-health/"+updaterID, platformAdminKey, nil)
 	if healthRecorder.Code != http.StatusOK {
@@ -109,8 +109,8 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	}
 	var healthResponse model.NodeDeepHealthResponse
 	mustDecodeJSON(t, healthRecorder, &healthResponse)
-	if healthResponse.Result.QuarantineState != model.NodeQuarantineStateQuarantined ||
-		healthResponse.Result.QuarantineReason != model.NodeQuarantineReasonDNSHardFail {
+	if healthResponse.Result.QuarantineState != model.NodeQuarantineStateDegraded ||
+		healthResponse.Result.QuarantineReason != "warning_or_soft_fail" {
 		t.Fatalf("unexpected stored deep health response: %+v", healthResponse.Result)
 	}
 
@@ -915,6 +915,29 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	}
 	if strings.Contains(script, `api_json POST /v1/node-updater/image-cache/inventory "$(cat "${chunk_file}")"`) {
 		t.Fatalf("node-updater script must not pass image-cache inventory chunks through argv")
+	}
+	for _, forbidden := range []string{
+		`socket.getaddrinfo("kubernetes.default.svc", 443)`,
+		`with socket.create_connection(("kubernetes.default.svc", 443), timeout=3):`,
+		`"kubernetes.default.svc resolves", True`,
+		`"same-namespace service DNS resolves", True`,
+		`"TCP connect to service", True`,
+		`"DNS query to kube-dns service IP", True`,
+		`"DNS query to CoreDNS pod IP", not ok`,
+		`"kube-proxy iptables/ipvs rules present", not has_proxy`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("node-updater host-context deep health probe must not hard gate on %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`skipped from host resolver namespace`,
+		`pod-netns probe required before hard gating`,
+		`missing marker requires corroborating node evidence before hard gating`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected node-updater script to contain %q", want)
+		}
 	}
 	scriptPath := filepath.Join(t.TempDir(), "node-updater.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {

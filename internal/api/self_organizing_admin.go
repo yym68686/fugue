@@ -488,10 +488,11 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 			break
 		}
 	}
+	blockRollout := platformAutonomyBlockRollout(storeStatus, checks)
 	return model.PlatformAutonomyStatus{
 		GeneratedAt:       time.Now().UTC(),
 		Pass:              pass,
-		BlockRollout:      !pass,
+		BlockRollout:      blockRollout,
 		ControlPlaneStore: storeStatus,
 		Controls:          platformAutonomyControlsFromEnv(),
 		DiscoveryBundle:   checkStatus(checks, "discovery_bundle"),
@@ -504,6 +505,22 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 		RestoreReadiness:  storeStatus.RestoreReadiness,
 		Checks:            append(storeStatus.Invariants, checks...),
 	}, nil
+}
+
+func platformAutonomyBlockRollout(storeStatus model.ControlPlaneStoreStatus, checks []model.StoreInvariantCheck) bool {
+	if storeStatus.BlockRollout {
+		return true
+	}
+	for _, check := range checks {
+		if check.Pass {
+			continue
+		}
+		switch strings.TrimSpace(check.Name) {
+		case "discovery_bundle", "registry", "headscale", "restore_readiness":
+			return true
+		}
+	}
+	return false
 }
 
 func platformAutonomyControlsFromEnv() model.AutonomyControls {

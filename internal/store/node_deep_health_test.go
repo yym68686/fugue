@@ -7,7 +7,7 @@ import (
 	"fugue/internal/model"
 )
 
-func TestRecordNodeDeepHealthQuarantinesDNSHardFailAndRecovers(t *testing.T) {
+func TestRecordNodeDeepHealthObserveOnlyHardFailDegradesWithoutQuarantine(t *testing.T) {
 	t.Parallel()
 
 	s := New(filepath.Join(t.TempDir(), "store.json"))
@@ -24,14 +24,14 @@ func TestRecordNodeDeepHealthQuarantinesDNSHardFailAndRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record failed health: %v", err)
 	}
-	if failed.QuarantineState != model.NodeQuarantineStateQuarantined || failed.QuarantineReason != model.NodeQuarantineReasonDNSHardFail || failed.QuarantineExpiresAt == nil {
-		t.Fatalf("expected DNS hard fail quarantine, got %+v", failed)
-	}
 	if !failed.ObservedOnly {
 		t.Fatalf("node deep health must be observe-only before repair automation is enabled")
 	}
+	if failed.QuarantineState != model.NodeQuarantineStateDegraded || failed.QuarantineReason != "warning_or_soft_fail" || failed.QuarantineExpiresAt != nil {
+		t.Fatalf("expected observed-only DNS hard fail to degrade without quarantine, got %+v", failed)
+	}
 	if len(failed.RecoveryConditions) == 0 {
-		t.Fatalf("expected recovery conditions")
+		t.Fatalf("expected recovery conditions for degraded result")
 	}
 
 	recovered, err := s.RecordNodeDeepHealthResult(model.NodeDeepHealthResult{
@@ -47,6 +47,25 @@ func TestRecordNodeDeepHealthQuarantinesDNSHardFailAndRecovers(t *testing.T) {
 	}
 	if recovered.QuarantineState != model.NodeQuarantineStateClear || recovered.QuarantineReason != "" || recovered.QuarantineExpiresAt != nil {
 		t.Fatalf("expected clear quarantine after passing hard check, got %+v", recovered)
+	}
+}
+
+func TestNodeDeepHealthDecisionQuarantinesOnlyWhenEnforced(t *testing.T) {
+	t.Parallel()
+
+	checks := []model.NodeDeepHealthCheck{{
+		Name:     model.NodeDeepHealthCheckPodDNSToKubeDNSService,
+		Status:   model.NodeDeepHealthStatusFail,
+		HardFail: true,
+		Observed: "lookup timeout",
+	}}
+	_, observedState, observedReason := nodeDeepHealthDecision(checks, true)
+	if observedState != model.NodeQuarantineStateDegraded || observedReason != "warning_or_soft_fail" {
+		t.Fatalf("expected observed-only hard fail to degrade, got state=%s reason=%s", observedState, observedReason)
+	}
+	_, enforcedState, enforcedReason := nodeDeepHealthDecision(checks, false)
+	if enforcedState != model.NodeQuarantineStateQuarantined || enforcedReason != model.NodeQuarantineReasonDNSHardFail {
+		t.Fatalf("expected enforced hard fail to quarantine, got state=%s reason=%s", enforcedState, enforcedReason)
 	}
 }
 
@@ -70,7 +89,7 @@ func TestRecordNodeDeepHealthDetectsStaleManagedIptablesIncidentShape(t *testing
 	if err != nil {
 		t.Fatalf("record stale iptables health: %v", err)
 	}
-	if result.QuarantineState != model.NodeQuarantineStateQuarantined || result.QuarantineReason != model.NodeQuarantineReasonIptablesHardFail {
-		t.Fatalf("expected iptables hard fail quarantine, got %+v", result)
+	if result.QuarantineState != model.NodeQuarantineStateDegraded || result.QuarantineReason != "warning_or_soft_fail" || result.QuarantineExpiresAt != nil {
+		t.Fatalf("expected observed-only iptables hard fail to degrade without quarantine, got %+v", result)
 	}
 }

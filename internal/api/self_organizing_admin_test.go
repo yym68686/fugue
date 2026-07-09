@@ -466,6 +466,24 @@ func TestActiveInventoryFiltersNodesRetiredByNodePolicy(t *testing.T) {
 	}
 }
 
+func TestPlatformAutonomyBlockRolloutOnlyHardFailures(t *testing.T) {
+	if platformAutonomyBlockRollout(model.ControlPlaneStoreStatus{}, []model.StoreInvariantCheck{
+		{Name: "edge", Pass: false, Message: "active=3 total=5"},
+		{Name: "dns", Pass: false, Message: "generation drift"},
+		{Name: "node_policy", Pass: false, Message: "policy inventory stale"},
+	}) {
+		t.Fatalf("expected data-plane degraded checks to stay visible without blocking rollout")
+	}
+	if !platformAutonomyBlockRollout(model.ControlPlaneStoreStatus{}, []model.StoreInvariantCheck{
+		{Name: "registry", Pass: false},
+	}) {
+		t.Fatalf("expected registry hard failure to block rollout")
+	}
+	if !platformAutonomyBlockRollout(model.ControlPlaneStoreStatus{BlockRollout: true}, nil) {
+		t.Fatalf("expected control-plane store block to block rollout")
+	}
+}
+
 func TestActiveInventoryFiltersNodesAbsentFromNodePolicyInventory(t *testing.T) {
 	now := time.Now().UTC()
 	policies := []model.ClusterNodePolicyStatus{

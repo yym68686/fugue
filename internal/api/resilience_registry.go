@@ -309,6 +309,9 @@ func appContinuityStateless(app model.App) bool {
 }
 
 func nodeQuarantineActive(result model.NodeDeepHealthResult, now time.Time) bool {
+	if result.ObservedOnly {
+		return false
+	}
 	if strings.TrimSpace(result.QuarantineState) == "" || result.QuarantineState == model.NodeQuarantineStateClear {
 		return false
 	}
@@ -384,7 +387,7 @@ func (s *Server) robustnessNodeDeepHealthChecks() ([]model.RobustnessCheck, erro
 			checks = append(checks, model.RobustnessCheck{
 				Name:       "node_deep_health_" + deep.Name,
 				Pass:       false,
-				Severity:   robustnessSeverityForNodeDeepHealthCheck(deep),
+				Severity:   robustnessSeverityForNodeDeepHealthCheck(deep, result.ObservedOnly),
 				Subject:    subject,
 				Expected:   deep.Expected,
 				Observed:   deep.Observed,
@@ -411,7 +414,10 @@ func (s *Server) robustnessControlPlaneTopologyChecks(principal model.Principal)
 	return []model.RobustnessCheck{check}, nil
 }
 
-func robustnessSeverityForNodeDeepHealthCheck(check model.NodeDeepHealthCheck) string {
+func robustnessSeverityForNodeDeepHealthCheck(check model.NodeDeepHealthCheck, observedOnly bool) string {
+	if observedOnly {
+		return model.RobustnessSeverityWarning
+	}
 	if check.HardFail {
 		return model.RobustnessSeverityBlockPublish
 	}

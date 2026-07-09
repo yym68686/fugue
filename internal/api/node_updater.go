@@ -2716,9 +2716,9 @@ elif ok_cri:
 else:
     checks.append(check("pod_sandbox_creation", "cri", "fail", cri_out, "CRI runtime reachable for pod sandbox creation preflight", True, repair_action="restart-k3s-agent"))
 
-def dns_query(server=None):
+def dns_query(server=None, name="kubernetes.default.svc.cluster.local"):
     if shutil.which("nslookup"):
-        argv = ["nslookup", "kubernetes.default.svc"]
+        argv = ["nslookup", name]
         if server:
             argv.append(server)
         return run(argv, 4)
@@ -2727,7 +2727,7 @@ def dns_query(server=None):
         argv = ["dig"]
         if target:
             argv.append(target)
-        argv.extend(["kubernetes.default.svc", "+time=3", "+tries=1"])
+        argv.extend([name, "+time=3", "+tries=1"])
         return run(argv, 5)
     return None, "missing nslookup/dig"
 
@@ -2737,7 +2737,7 @@ if ok is None:
 elif ok:
     checks.append(check("pod_dns_to_kube_dns_service", "dns", "pass", out, "DNS query to kube-dns service IP"))
 else:
-    checks.append(check("pod_dns_to_kube_dns_service", "dns", "fail", out, "DNS query to kube-dns service IP", True))
+    checks.append(check("pod_dns_to_kube_dns_service", "dns", "warning", out, "host-context DNS probe to kube-dns service IP; pod-netns probe required before hard gating"))
 
 coredns_ip = ""
 if shutil.which("kubectl"):
@@ -2746,27 +2746,13 @@ if shutil.which("kubectl"):
         coredns_ip = pod_out.strip()
 if coredns_ip:
     ok, out = dns_query(coredns_ip)
-    checks.append(check("pod_dns_to_coredns_pod", "dns", "pass" if ok else "fail", out, "DNS query to CoreDNS pod IP", not ok))
+    checks.append(check("pod_dns_to_coredns_pod", "dns", "pass" if ok else "warning", out, "host-context DNS probe to CoreDNS pod IP; pod-netns probe required before hard gating"))
 else:
     checks.append(check("pod_dns_to_coredns_pod", "dns", "warning", "CoreDNS pod IP unavailable", "CoreDNS pod IP"))
 
-try:
-    socket.getaddrinfo("kubernetes.default.svc", 443)
-    checks.append(check("kubernetes_default_svc_dns", "dns", "pass", "resolved", "kubernetes.default.svc resolves"))
-except Exception as exc:
-    checks.append(check("kubernetes_default_svc_dns", "dns", "fail", str(exc), "kubernetes.default.svc resolves", True))
-
-try:
-    socket.getaddrinfo("kubernetes.default.svc", 443)
-    checks.append(check("same_namespace_service_dns", "dns", "pass", "resolved", "same-namespace service DNS resolves"))
-except Exception as exc:
-    checks.append(check("same_namespace_service_dns", "dns", "fail", str(exc), "same-namespace service DNS resolves", True))
-
-try:
-    with socket.create_connection(("kubernetes.default.svc", 443), timeout=3):
-        checks.append(check("same_namespace_service_tcp", "network", "pass", "connected", "TCP connect to service"))
-except Exception as exc:
-    checks.append(check("same_namespace_service_tcp", "network", "fail", str(exc), "TCP connect to service", True))
+checks.append(check("kubernetes_default_svc_dns", "dns", "warning", "skipped from host resolver namespace", "pod-network resolver must verify kubernetes.default.svc before hard gating"))
+checks.append(check("same_namespace_service_dns", "dns", "warning", "skipped from host resolver namespace", "pod-network resolver must verify same-namespace service DNS before hard gating"))
+checks.append(check("same_namespace_service_tcp", "network", "warning", "skipped from host network namespace", "pod-network probe must verify service TCP before hard gating"))
 
 try:
     socket.getaddrinfo("cloudflare.com", 443)
@@ -2816,7 +2802,7 @@ else:
 ok_proxy, proxy_out = run(["iptables-save"], 4)
 if ok_proxy:
     has_proxy = "KUBE-SERVICES" in proxy_out or "KUBE-SVC" in proxy_out
-    checks.append(check("kube_proxy_rules", "kube-proxy", "pass" if has_proxy else "fail", "kube proxy rules present" if has_proxy else proxy_out[-240:], "kube-proxy iptables/ipvs rules present", not has_proxy, repair_action="human_kube_proxy_boundary"))
+    checks.append(check("kube_proxy_rules", "kube-proxy", "pass" if has_proxy else "warning", "kube proxy rules present" if has_proxy else proxy_out[-240:], "kube-proxy iptables/ipvs rules present; missing marker requires corroborating node evidence before hard gating", False, repair_action="human_kube_proxy_boundary"))
 else:
     ok_ipvs, ipvs_out = run(["ipvsadm", "-Ln"], 4)
     if ok_ipvs:

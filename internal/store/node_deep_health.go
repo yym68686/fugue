@@ -90,7 +90,7 @@ func normalizeNodeDeepHealthResult(result model.NodeDeepHealthResult, now time.T
 	}
 	result.UpdatedAt = now
 	result.Checks = normalizeNodeDeepHealthChecks(result.Checks, result.ReportedAt)
-	result.OverallStatus, result.QuarantineState, result.QuarantineReason = nodeDeepHealthDecision(result.Checks)
+	result.OverallStatus, result.QuarantineState, result.QuarantineReason = nodeDeepHealthDecision(result.Checks, result.ObservedOnly)
 	if result.QuarantineState == model.NodeQuarantineStateQuarantined && result.QuarantineExpiresAt == nil {
 		expires := now.Add(15 * time.Minute)
 		result.QuarantineExpiresAt = &expires
@@ -141,7 +141,7 @@ func normalizeNodeDeepHealthStatus(status string) string {
 	}
 }
 
-func nodeDeepHealthDecision(checks []model.NodeDeepHealthCheck) (string, string, string) {
+func nodeDeepHealthDecision(checks []model.NodeDeepHealthCheck, observedOnly bool) (string, string, string) {
 	overall := model.NodeDeepHealthStatusPass
 	for _, check := range checks {
 		if check.Status == model.NodeDeepHealthStatusWarning && overall == model.NodeDeepHealthStatusPass {
@@ -152,6 +152,9 @@ func nodeDeepHealthDecision(checks []model.NodeDeepHealthCheck) (string, string,
 		}
 		overall = model.NodeDeepHealthStatusFail
 		if check.HardFail {
+			if observedOnly {
+				continue
+			}
 			return overall, model.NodeQuarantineStateQuarantined, nodeQuarantineReasonForCheck(check)
 		}
 	}

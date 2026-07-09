@@ -880,7 +880,7 @@ func TestEdgeDNSBundleExcludesDrainingEdgeNodeAnswers(t *testing.T) {
 	}
 }
 
-func TestEdgeDNSBundleExcludesQuarantinedEdgeNodeAnswers(t *testing.T) {
+func TestEdgeDNSBundleKeepsObserveOnlyDeepHealthFailuresInAnswers(t *testing.T) {
 	t.Parallel()
 
 	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -911,13 +911,17 @@ func TestEdgeDNSBundleExcludesQuarantinedEdgeNodeAnswers(t *testing.T) {
 	if record == nil {
 		t.Fatalf("expected app route DNS record for %s: %+v", app.Route.Hostname, bundle.Records)
 	}
-	if stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
-		t.Fatalf("expected DNS values to exclude quarantined DE edge and keep US edge, got %+v", record.Values)
+	if !stringSliceContains(record.Values, "51.38.126.103") || !stringSliceContains(record.Values, "15.204.94.71") {
+		t.Fatalf("expected observed-only deep health failure to keep both edge answers, got %+v", record.Values)
 	}
+	seenDE := false
 	for _, candidate := range record.Candidates {
 		if candidate.EdgeID == "edge-de-1" || candidate.IP == "51.38.126.103" {
-			t.Fatalf("expected candidates to exclude quarantined edge node, got %+v", record.Candidates)
+			seenDE = true
 		}
+	}
+	if !seenDE {
+		t.Fatalf("expected observed-only deep health failure to keep DE candidate, got %+v", record.Candidates)
 	}
 }
 
