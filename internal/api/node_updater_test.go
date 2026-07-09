@@ -859,7 +859,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`/v1/node-updater/desired-state`,
 		`refresh-join-config`,
 		`prepull-app-images`,
-		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="v21"`,
+		`FUGUE_NODE_UPDATER_SCRIPT_VERSION="` + model.NodeUpdaterCurrentVersion + `"`,
 		`FUGUE_NODE_UPDATER_CAPABILITIES=`,
 		`FUGUE_NODE_GUARDIAN_AUTONOMY_WAL_PATH=`,
 		`verify_image_cache_manifest`,
@@ -926,6 +926,7 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`"DNS query to CoreDNS pod IP", not ok`,
 		`host-context DNS probe`,
 		`skipped from host resolver namespace`,
+		`__FUGUE_NODE_UPDATER_SCRIPT_VERSION__`,
 		`"kube-proxy iptables/ipvs rules present", not has_proxy`,
 	} {
 		if strings.Contains(script, forbidden) {
