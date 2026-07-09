@@ -12,6 +12,10 @@ type ReleaseGuardStatus struct {
 	PlatformArtifactKinds    []string         `json:"platform_artifact_kinds,omitempty"`
 	PlatformArtifactFailures int              `json:"platform_artifact_validation_failures"`
 	PlatformConsumerDrift    int              `json:"platform_consumer_drift"`
+	GatePolicyCount          int              `json:"gate_policy_count"`
+	EnforcedGateCount        int              `json:"enforced_gate_count"`
+	GatePolicyViolations     []string         `json:"gate_policy_violations,omitempty"`
+	GatePolicies             []GatePolicy     `json:"gate_policies,omitempty"`
 	ReleaseSignals           []ReleaseSignal  `json:"release_signals,omitempty"`
 	BlockedReasons           []string         `json:"blocked_reasons,omitempty"`
 	RecommendedOperatorSteps []string         `json:"recommended_operator_steps,omitempty"`

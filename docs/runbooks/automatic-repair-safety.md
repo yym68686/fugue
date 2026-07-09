@@ -22,6 +22,27 @@ Use this before enabling or executing any non-dry-run repair task.
 - Fresh deep-health reprobe after repair.
 - Failed repair keeps quarantine active.
 
+## Safety Contract
+
+Automatic repair and automatic isolation actions must have a registered safety
+contract before execution. The contract must declare:
+
+- action id
+- scope
+- trigger invariant
+- evidence source
+- max blast radius
+- TTL
+- recovery condition
+- rollback action
+- dry-run output
+- audit log location
+- kill switch
+- human approval boundary
+
+Non-dry-run automatic repair is refused unless the action has a contract and the
+kill switch allows it.
+
 ## Disable Switch
 
 Set the control plane environment variable below when automatic repair must be
@@ -30,6 +51,12 @@ disabled globally:
 ```bash
 FUGUE_ROBUSTNESS_REPAIR_DISABLED=true
 ```
+
+## Operator Flow
+
+- Use `fugue admin robustness repair-plan <incident-id>` first.
+- Prefer scoped dry-runs and canary repair over global action.
+- Verify release guard, robustness, and public synthetic probes after repair.
 
 ## Verification
 

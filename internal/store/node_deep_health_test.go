@@ -30,6 +30,15 @@ func TestRecordNodeDeepHealthObserveOnlyHardFailDegradesWithoutQuarantine(t *tes
 	if failed.QuarantineState != model.NodeQuarantineStateDegraded || failed.QuarantineReason != "warning_or_soft_fail" || failed.QuarantineExpiresAt != nil {
 		t.Fatalf("expected observed-only DNS hard fail to degrade without quarantine, got %+v", failed)
 	}
+	if got := failed.Checks[0].GateID; got != "node.kubernetes_service_dns" {
+		t.Fatalf("expected DNS check to be tagged with gate id, got %q", got)
+	}
+	if got := failed.Checks[0].GateMode; got != model.GatePolicyModeShadow {
+		t.Fatalf("expected new deep health checks to default to shadow, got %q", got)
+	}
+	if failed.Checks[0].HardFail {
+		t.Fatalf("shadow gate must not keep hard_fail=true")
+	}
 	if len(failed.RecoveryConditions) == 0 {
 		t.Fatalf("expected recovery conditions for degraded result")
 	}
@@ -47,6 +56,37 @@ func TestRecordNodeDeepHealthObserveOnlyHardFailDegradesWithoutQuarantine(t *tes
 	}
 	if recovered.QuarantineState != model.NodeQuarantineStateClear || recovered.QuarantineReason != "" || recovered.QuarantineExpiresAt != nil {
 		t.Fatalf("expected clear quarantine after passing hard check, got %+v", recovered)
+	}
+}
+
+func TestRecordNodeDeepHealthUnknownGateCannotEnforce(t *testing.T) {
+	t.Parallel()
+
+	s := New(filepath.Join(t.TempDir(), "store.json"))
+	result, err := s.RecordNodeDeepHealthResult(model.NodeDeepHealthResult{
+		NodeUpdaterID:   "nodeupdater_unknown_gate",
+		ClusterNodeName: "node-a",
+		Checks: []model.NodeDeepHealthCheck{{
+			Name:     "new_experimental_check",
+			GateID:   "node.new_experimental_check",
+			GateMode: model.GatePolicyModeEnforced,
+			Status:   model.NodeDeepHealthStatusFail,
+			HardFail: true,
+			Observed: "failed",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("record unknown gate health: %v", err)
+	}
+	if result.QuarantineState != model.NodeQuarantineStateDegraded || result.QuarantineExpiresAt != nil {
+		t.Fatalf("unknown enforced gate must degrade without quarantine, got %+v", result)
+	}
+	check := result.Checks[0]
+	if check.GateMode != model.GatePolicyModeShadow || check.HardFail {
+		t.Fatalf("unknown enforced gate must be downgraded to shadow and clear hard_fail, got %+v", check)
+	}
+	if check.Evidence["gate_policy"] != "unknown_gate_downgraded_to_shadow" {
+		t.Fatalf("expected downgrade evidence, got %+v", check.Evidence)
 	}
 }
 

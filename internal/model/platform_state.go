@@ -15,6 +15,8 @@ const (
 	PlatformArtifactKindEdgeRankingPolicy         = "edge_ranking_policy"
 	PlatformArtifactKindTrafficSafetyPolicy       = "traffic_safety_policy"
 	PlatformArtifactKindSubsystemFailureContracts = "subsystem_failure_contracts"
+	PlatformArtifactKindGatePolicyRegistry        = "gate_policy_registry"
+	PlatformArtifactKindAutomaticActionContracts  = "automatic_action_contracts"
 
 	PlatformArtifactStatusDraft     = "draft"
 	PlatformArtifactStatusValidated = "validated"

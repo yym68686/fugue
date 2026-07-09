@@ -135,7 +135,7 @@ func (s *Server) handleRunRobustnessRepair(w http.ResponseWriter, r *http.Reques
 	}
 	if !req.DryRun {
 		s.appendRobustnessRepairAudit(principal, incident, plan, "blocked")
-		httpx.WriteError(w, http.StatusConflict, "automatic robustness repair is not enabled for this incident class; inspect the repair plan and run the recommended command")
+		httpx.WriteError(w, http.StatusConflict, "automatic robustness repair requires a registered safety contract for this incident class; inspect the dry-run repair plan and run the recommended command")
 		return
 	}
 	s.appendRobustnessRepairAudit(principal, incident, plan, "dry_run")

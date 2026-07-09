@@ -55,6 +55,8 @@ type NodeDeepHealthCheck struct {
 	Name         string            `json:"name"`
 	Category     string            `json:"category,omitempty"`
 	Status       string            `json:"status"`
+	GateID       string            `json:"gate_id,omitempty"`
+	GateMode     string            `json:"gate_mode,omitempty"`
 	Expected     string            `json:"expected,omitempty"`
 	Observed     string            `json:"observed,omitempty"`
 	Message      string            `json:"message,omitempty"`

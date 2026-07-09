@@ -1030,8 +1030,10 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	healthy := make(map[string]bool)
-	healthyNodeIDsByGroup := make(map[string][]string)
+	healthyBeforeQuarantine := make(map[string]bool)
+	healthyAfterQuarantine := make(map[string]bool)
+	healthyNodeIDsBeforeQuarantine := make(map[string][]string)
+	healthyNodeIDsAfterQuarantine := make(map[string][]string)
 	expectedNonEmpty := make(map[string]bool)
 	expectedMinTrafficRoutes := make(map[string]int)
 	now := time.Now().UTC()
@@ -1048,25 +1050,75 @@ func (s *Server) edgeRouteGroupInventory() (map[string]bool, map[string][]string
 		if node.CaddyRouteCount > expectedMinTrafficRoutes[groupID] && edgeNodeHasRouteState(node) {
 			expectedMinTrafficRoutes[groupID] = node.CaddyRouteCount
 		}
-		if edgeNodeQuarantined(node, quarantineByNode) {
-			if _, ok := healthy[groupID]; !ok {
-				healthy[groupID] = false
-			}
-			continue
-		}
 		if edgeNodeRouteServingCapableWithLive(node, now, liveServingByNode) {
-			healthy[groupID] = true
-			healthyNodeIDsByGroup[groupID] = appendUniqueString(healthyNodeIDsByGroup[groupID], node.ID)
+			healthyBeforeQuarantine[groupID] = true
+			healthyNodeIDsBeforeQuarantine[groupID] = appendUniqueString(healthyNodeIDsBeforeQuarantine[groupID], node.ID)
+			if !edgeNodeQuarantined(node, quarantineByNode) {
+				healthyAfterQuarantine[groupID] = true
+				healthyNodeIDsAfterQuarantine[groupID] = appendUniqueString(healthyNodeIDsAfterQuarantine[groupID], node.ID)
+			} else if _, ok := healthyAfterQuarantine[groupID]; !ok {
+				healthyAfterQuarantine[groupID] = false
+			}
 		} else if edgeNodeHeartbeatFresh(node, now) {
-			if _, ok := healthy[groupID]; !ok {
-				healthy[groupID] = false
+			if _, ok := healthyBeforeQuarantine[groupID]; !ok {
+				healthyBeforeQuarantine[groupID] = false
+			}
+			if !edgeNodeQuarantined(node, quarantineByNode) {
+				if _, ok := healthyAfterQuarantine[groupID]; !ok {
+					healthyAfterQuarantine[groupID] = false
+				}
+			} else if _, ok := healthyAfterQuarantine[groupID]; !ok {
+				healthyAfterQuarantine[groupID] = false
 			}
 		}
 	}
+	healthy, healthyNodeIDsByGroup := applyEdgeRouteInventoryBlastRadiusCap(healthyBeforeQuarantine, healthyNodeIDsBeforeQuarantine, healthyAfterQuarantine, healthyNodeIDsAfterQuarantine)
 	for groupID := range healthyNodeIDsByGroup {
 		sort.Strings(healthyNodeIDsByGroup[groupID])
 	}
 	return healthy, healthyNodeIDsByGroup, expectedNonEmpty, expectedMinTrafficRoutes, nil
+}
+
+func applyEdgeRouteInventoryBlastRadiusCap(beforeHealthy map[string]bool, beforeIDs map[string][]string, afterHealthy map[string]bool, afterIDs map[string][]string) (map[string]bool, map[string][]string) {
+	beforeCounts := edgeRouteHealthyCounts(beforeIDs)
+	afterCounts := edgeRouteHealthyCounts(afterIDs)
+	eval := model.EvaluateBlastRadius(beforeCounts, afterCounts, "edge-group", model.BlastRadiusPolicy{PreserveMinHealthyEdgeGroups: 1})
+	if eval.Pass {
+		return copyBoolMap(afterHealthy), copyStringSliceMap(afterIDs)
+	}
+	healthy := copyBoolMap(afterHealthy)
+	ids := copyStringSliceMap(afterIDs)
+	for groupID := range eval.Violations {
+		if beforeHealthy[groupID] {
+			healthy[groupID] = true
+			ids[groupID] = append([]string(nil), beforeIDs[groupID]...)
+		}
+	}
+	return healthy, ids
+}
+
+func edgeRouteHealthyCounts(ids map[string][]string) map[string]int {
+	out := make(map[string]int, len(ids))
+	for groupID, values := range ids {
+		out[groupID] = len(values)
+	}
+	return out
+}
+
+func copyBoolMap(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func copyStringSliceMap(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
 }
 
 func edgeNodeQuarantined(node model.EdgeNode, quarantineByNode map[string]model.NodeDeepHealthResult) bool {

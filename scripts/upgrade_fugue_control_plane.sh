@@ -503,6 +503,247 @@ public_data_plane_daemonset_rollout_wait_required() {
   [[ "${PUBLIC_DATA_PLANE_PRESERVED:-false}" != "true" ]]
 }
 
+release_safety_changed_file_subsystems() {
+  local file=""
+  local seen=" "
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      internal/api/node_updater.go|\
+      internal/store/node_deep_health.go|\
+      internal/store/node_deep_health_pg.go|\
+      internal/model/node_deep_health.go|\
+      scripts/render_fugue_node_updater_systemd_unit.sh)
+        if [[ "${seen}" != *" node_updater "* ]]; then
+          printf 'node_updater\n'
+          seen="${seen}node_updater "
+        fi
+        ;;
+      internal/api/edge_routes.go|\
+      internal/model/edge_routes.go)
+        if [[ "${seen}" != *" edge_route "* ]]; then
+          printf 'edge_route\n'
+          seen="${seen}edge_route "
+        fi
+        ;;
+      internal/dnsserver/*|\
+      cmd/fugue-dns/*|\
+      deploy/helm/fugue/templates/dns-*)
+        if [[ "${seen}" != *" dns_server "* ]]; then
+          printf 'dns_server\n'
+          seen="${seen}dns_server "
+        fi
+        ;;
+      internal/edge/*|\
+      internal/edgefront/*|\
+      cmd/fugue-edge/*|\
+      cmd/fugue-edge-front/*|\
+      Dockerfile.edge|\
+      deploy/helm/fugue/templates/edge-*)
+        if [[ "${seen}" != *" edge_worker "* ]]; then
+          printf 'edge_worker\n'
+          seen="${seen}edge_worker "
+        fi
+        ;;
+      scripts/upgrade_fugue_control_plane.sh|\
+      scripts/release_fugue_public_data_plane.sh|\
+      .github/workflows/deploy-control-plane.yml)
+        if [[ "${seen}" != *" deploy_script "* ]]; then
+          printf 'deploy_script\n'
+          seen="${seen}deploy_script "
+        fi
+        ;;
+    esac
+  done < <(release_changed_files)
+}
+
+release_safety_watch_window_seconds() {
+  local subsystem=""
+  local max_seconds=0
+  local seconds=0
+
+  while IFS= read -r subsystem; do
+    subsystem="$(trim_field "${subsystem}")"
+    [[ -n "${subsystem}" ]] || continue
+    case "${subsystem}" in
+      node_updater)
+        seconds="${FUGUE_NODE_UPDATER_TIMER_CYCLE_SECONDS:-900}"
+        ;;
+      edge_route)
+        seconds="${FUGUE_EDGE_ROUTE_WATCH_WINDOW_SECONDS:-180}"
+        ;;
+      dns_server)
+        seconds="${FUGUE_DNS_WATCH_WINDOW_SECONDS:-180}"
+        ;;
+      edge_worker)
+        seconds="${FUGUE_PUBLIC_DATA_PLANE_WATCH_WINDOW_SECONDS:-180}"
+        ;;
+      deploy_script)
+        seconds="${FUGUE_DEPLOY_SCRIPT_WATCH_WINDOW_SECONDS:-60}"
+        ;;
+      *)
+        seconds=0
+        ;;
+    esac
+    if (( seconds > max_seconds )); then
+      max_seconds="${seconds}"
+    fi
+  done < <(release_safety_changed_file_subsystems)
+
+  printf '%s\n' "${max_seconds}"
+}
+
+release_safety_required_gates() {
+  local subsystem=""
+  local gates=()
+
+  while IFS= read -r subsystem; do
+    subsystem="$(trim_field "${subsystem}")"
+    [[ -n "${subsystem}" ]] || continue
+    case "${subsystem}" in
+      node_updater)
+        gates+=("node_deep_health" "node_heartbeat" "release_guard" "public_synthetic")
+        ;;
+      edge_route)
+        gates+=("route_check" "dns_answer_audit" "release_guard" "public_synthetic")
+        ;;
+      dns_server)
+        gates+=("authoritative_dns" "dns_answer_audit" "release_guard")
+        ;;
+      edge_worker)
+        gates+=("inactive_worker_smoke" "active_slot_smoke" "edge_request_error_class")
+        ;;
+      deploy_script)
+        gates+=("release_guard" "rollback_path_smoke")
+        ;;
+    esac
+  done < <(release_safety_changed_file_subsystems)
+
+  printf '%s\n' "${gates[@]}" | sed '/^[[:space:]]*$/d' | sort -u | paste -sd, -
+}
+
+release_safety_watch_window_summary() {
+  local subsystems gates seconds
+
+  subsystems="$(release_safety_changed_file_subsystems | paste -sd, -)"
+  gates="$(release_safety_required_gates)"
+  seconds="$(release_safety_watch_window_seconds)"
+  printf 'subsystems=%s watch_seconds=%s gates=%s' "${subsystems:-none}" "${seconds:-0}" "${gates:-none}"
+}
+
+write_release_safety_attribution() {
+  local dir="${FUGUE_RELEASE_ATTRIBUTION_DIR:-}"
+  local file
+
+  [[ -n "$(trim_field "${dir}")" ]] || return 0
+  mkdir -p "${dir}"
+  file="${dir}/release-safety-watch-windows.json"
+  python3 - "${file}" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+path = sys.argv[1]
+
+def run(fn):
+    out = subprocess.check_output(["bash", "-lc", f"source scripts/upgrade_fugue_control_plane.sh >/dev/null 2>&1; {fn}"], env={**os.environ, "FUGUE_UPGRADE_LIB_ONLY": "true"}, text=True)
+    return [line for line in out.splitlines() if line.strip()]
+
+payload = {
+    "release_id": os.environ.get("FUGUE_RELEASE_ID") or os.environ.get("GITHUB_SHA") or "",
+    "changed_files": [line for line in os.environ.get("FUGUE_RELEASE_CHANGED_FILES", "").splitlines() if line.strip()],
+    "subsystems": run("release_safety_changed_file_subsystems"),
+    "required_gates": [item for line in run("release_safety_required_gates") for item in line.split(",") if item],
+    "watch_seconds": int(run("release_safety_watch_window_seconds")[0] or "0"),
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, sort_keys=True)
+PY
+}
+
+public_synthetic_error_class() {
+  local status="$1"
+  local body="$2"
+  local normalized
+
+  normalized="$(printf '%s' "${body}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${status}" == "503" && "${normalized}" == *"no healthy edge groups"* ]]; then
+    printf 'public_synthetic_503_no_healthy_edge_groups\n'
+    return 0
+  fi
+  if [[ "${status}" == "503" && "${normalized}" == *"edge group has no healthy non-excluded edge nodes"* ]]; then
+    printf 'public_synthetic_503_no_healthy_non_excluded_edge_nodes\n'
+    return 0
+  fi
+  if [[ "${normalized}" == *"no active route"* ]]; then
+    printf 'public_synthetic_no_active_route\n'
+    return 0
+  fi
+  if [[ "${normalized}" == *"dns answer contains non route-ready edge"* ]]; then
+    printf 'public_synthetic_dns_non_route_ready_edge\n'
+    return 0
+  fi
+  if [[ "${status}" == "503" && "${normalized}" == *"upstream unavailable"* ]]; then
+    printf 'public_synthetic_503_upstream_unavailable\n'
+    return 0
+  fi
+  printf 'none\n'
+}
+
+public_synthetic_status_is_hard_rollback() {
+  local class="$1"
+  case "${class}" in
+    public_synthetic_503_no_healthy_edge_groups|\
+    public_synthetic_503_no_healthy_non_excluded_edge_nodes|\
+    public_synthetic_no_active_route|\
+    public_synthetic_dns_non_route_ready_edge)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+wait_for_release_safety_watch_windows() {
+  local seconds delay deadline output release_output summary
+
+  case "${FUGUE_RELEASE_SAFETY_WATCH_WINDOWS_ENABLED:-true}" in
+    1|true|TRUE|yes|YES)
+      ;;
+    *)
+      log "release safety watch windows disabled"
+      return 0
+      ;;
+  esac
+
+  seconds="$(release_safety_watch_window_seconds)"
+  [[ "${seconds}" =~ ^[0-9]+$ ]] || seconds=0
+  if (( seconds <= 0 )); then
+    return 0
+  fi
+  delay="${FUGUE_RELEASE_SAFETY_WATCH_DELAY_SECONDS:-30}"
+  summary="$(release_safety_watch_window_summary)"
+  log "release safety watch window selected: ${summary}"
+  write_release_safety_attribution || true
+  deadline=$((SECONDS + seconds))
+  while true; do
+    if output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE:-}")" &&
+      release_output="$(release_guard_status_summary 2>/dev/null)"; then
+      log "release safety watch sample passed: ${output}; ${release_output}"
+    else
+      log "release safety watch failed: ${output:-unknown} ${release_output:-unknown}"
+      return 1
+    fi
+    if (( SECONDS >= deadline )); then
+      log "release safety watch window completed: ${summary}"
+      return 0
+    fi
+    sleep "${delay}"
+  done
+}
+
 node_local_build_plane_changed() {
   release_changed_files_match build
 }
@@ -5872,6 +6113,8 @@ prepare_release_domains() {
   local public_mode build_mode stateful_mode maintenance_mode
 
   refresh_release_changed_files_from_live_api
+  log "release safety watch selection: $(release_safety_watch_window_summary)"
+  write_release_safety_attribution || true
 
   public_mode="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}"
   build_mode="${FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE:-auto}"
@@ -6218,12 +6461,16 @@ status = payload.get("status") or {}
 blocked = status.get("blocked_reasons") or []
 print(
     "pass={pass_} block_rollout={block} artifact_failures={artifact_failures} "
-    "consumer_drift={consumer_drift} failure_contracts={contracts} blockers={blockers}".format(
+    "consumer_drift={consumer_drift} failure_contracts={contracts} gate_policies={gates} "
+    "enforced_gates={enforced_gates} gate_violations={gate_violations} blockers={blockers}".format(
         pass_=str(bool(status.get("pass"))).lower(),
         block=str(bool(status.get("block_rollout"))).lower(),
         artifact_failures=int(status.get("platform_artifact_validation_failures") or 0),
         consumer_drift=int(status.get("platform_consumer_drift") or 0),
         contracts=int(status.get("failure_contract_count") or 0),
+        gates=int(status.get("gate_policy_count") or 0),
+        enforced_gates=int(status.get("enforced_gate_count") or 0),
+        gate_violations="; ".join(str(item) for item in (status.get("gate_policy_violations") or [])) or "none",
         blockers="; ".join(str(item) for item in blocked) if blocked else "none",
     )
 )
@@ -7482,6 +7729,12 @@ PY
     log "post-deploy robustness gate failed; attempting rollback"
     rollback_release || true
     fail "post-deploy robustness gate failed"
+  fi
+
+  if ! wait_for_release_safety_watch_windows; then
+    log "release safety watch window failed; attempting rollback"
+    rollback_release || true
+    fail "release safety watch window failed"
   fi
 
   release_public_data_plane_if_needed

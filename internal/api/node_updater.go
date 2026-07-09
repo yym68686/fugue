@@ -187,12 +187,13 @@ func (s *Server) nodeUpdaterDesiredState(ctx context.Context, r *http.Request, p
 	nodePolicy = nodeUpdaterPolicyWithEdgeCredentialLabels(nodePolicy, edgeCredential)
 	warnings = append(warnings, edgeWarnings...)
 	return model.NodeUpdaterDesiredState{
-		GeneratedAt:     time.Now().UTC(),
-		NodeUpdater:     updater,
-		DiscoveryBundle: discovery,
-		NodePolicy:      nodePolicy,
-		EdgeCredential:  edgeCredential,
-		Warnings:        warnings,
+		GeneratedAt:           time.Now().UTC(),
+		NodeUpdaterGeneration: nodeUpdaterScriptVersion,
+		NodeUpdater:           updater,
+		DiscoveryBundle:       discovery,
+		NodePolicy:            nodePolicy,
+		EdgeCredential:        edgeCredential,
+		Warnings:              warnings,
 	}, nil
 }
 

@@ -61,16 +61,31 @@ func (s *Server) handleGetReleaseGuardStatus(w http.ResponseWriter, r *http.Requ
 	if artifactFailures > 0 {
 		blockedReasons = append(blockedReasons, fmt.Sprintf("platform artifact validation failed: %d", artifactFailures))
 	}
+	gatePolicies := s.gatePolicyRegistry()
+	gateViolations := releaseGuardGatePolicyViolations(gatePolicies)
+	enforcedGateCount := 0
+	for _, policy := range gatePolicies {
+		if policy.Mode == model.GatePolicyModeEnforced {
+			enforcedGateCount++
+		}
+	}
+	if len(gateViolations) > 0 {
+		blockedReasons = append(blockedReasons, fmt.Sprintf("gate policy validation failed: %d", len(gateViolations)))
+	}
 	status := model.ReleaseGuardStatus{
 		GeneratedAt:              time.Now().UTC(),
-		Pass:                     !baseline.BlockRollout && drift == 0 && artifactFailures == 0,
-		BlockRollout:             baseline.BlockRollout || drift > 0 || artifactFailures > 0,
+		Pass:                     !baseline.BlockRollout && drift == 0 && artifactFailures == 0 && len(gateViolations) == 0,
+		BlockRollout:             baseline.BlockRollout || drift > 0 || artifactFailures > 0 || len(gateViolations) > 0,
 		Mode:                     "enforced",
 		RobustnessBaseline:       baseline,
 		FailureContractCount:     len(baseline.FailureContracts),
 		PlatformArtifactKinds:    artifactKinds,
 		PlatformArtifactFailures: artifactFailures,
 		PlatformConsumerDrift:    drift,
+		GatePolicyCount:          len(gatePolicies),
+		EnforcedGateCount:        enforcedGateCount,
+		GatePolicyViolations:     gateViolations,
+		GatePolicies:             gatePolicies,
 		ReleaseSignals:           baseline.ReleaseSignals,
 		BlockedReasons:           blockedReasons,
 		RecommendedOperatorSteps: releaseGuardRecommendedSteps(blockedReasons),
@@ -617,5 +632,7 @@ func platformArtifactKindList() []string {
 		model.PlatformArtifactKindEdgeRankingPolicy,
 		model.PlatformArtifactKindTrafficSafetyPolicy,
 		model.PlatformArtifactKindSubsystemFailureContracts,
+		model.PlatformArtifactKindGatePolicyRegistry,
+		model.PlatformArtifactKindAutomaticActionContracts,
 	}
 }

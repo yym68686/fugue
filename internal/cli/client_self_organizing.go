@@ -52,6 +52,22 @@ type releaseGuardStatusEnvelope struct {
 	Status model.ReleaseGuardStatus `json:"status"`
 }
 
+type gatePolicyListEnvelope struct {
+	Policies []model.GatePolicy `json:"policies"`
+}
+
+type gatePolicyEnvelope struct {
+	Policy model.GatePolicy `json:"policy"`
+}
+
+type gatePolicyPromotionEnvelope struct {
+	Policy   model.GatePolicy              `json:"policy"`
+	Artifact model.PlatformArtifact        `json:"artifact"`
+	Release  model.PlatformArtifactRelease `json:"release"`
+	Message  model.PlatformReleaseMessage  `json:"message"`
+	LKG      *model.PlatformLKGSnapshot    `json:"lkg,omitempty"`
+}
+
 type trafficSafetyExplainEnvelope struct {
 	State model.ServiceTrafficSafetyState `json:"state"`
 }
@@ -191,6 +207,36 @@ func (c *Client) GetReleaseGuardStatus(subject string) (model.ReleaseGuardStatus
 		return model.ReleaseGuardStatus{}, err
 	}
 	return response.Status, nil
+}
+
+func (c *Client) ListGatePolicies() ([]model.GatePolicy, error) {
+	var response gatePolicyListEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/gates", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Policies, nil
+}
+
+func (c *Client) GetGatePolicy(gateID string) (model.GatePolicy, error) {
+	var response gatePolicyEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/gates/"+url.PathEscape(strings.TrimSpace(gateID)), nil, &response); err != nil {
+		return model.GatePolicy{}, err
+	}
+	return response.Policy, nil
+}
+
+func (c *Client) PromoteGatePolicy(gateID string, request model.GatePolicyPromoteRequest) (model.GatePolicyPromotionResponse, error) {
+	var response gatePolicyPromotionEnvelope
+	if err := c.doJSON(http.MethodPost, "/v1/admin/gates/"+url.PathEscape(strings.TrimSpace(gateID))+"/promote", request, &response); err != nil {
+		return model.GatePolicyPromotionResponse{}, err
+	}
+	return model.GatePolicyPromotionResponse{
+		Policy:   response.Policy,
+		Artifact: response.Artifact,
+		Release:  response.Release,
+		Message:  response.Message,
+		LKG:      response.LKG,
+	}, nil
 }
 
 func (c *Client) ExplainTrafficSafety(hostname string, minHealthyEdges int) (model.ServiceTrafficSafetyState, error) {

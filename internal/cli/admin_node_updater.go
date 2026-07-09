@@ -23,7 +23,116 @@ func (c *CLI) newAdminNodeUpdaterCommand() *cobra.Command {
 		c.newAdminNodeUpdaterHealthCommand(),
 		c.newAdminNodeUpdaterTaskCommand(),
 		c.newAdminNodeUpdaterRepairHistoryCommand(),
+		c.newAdminNodeUpdaterRolloutCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAdminNodeUpdaterRolloutCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rollout",
+		Short: "Inspect and control node-updater generation rollout",
+	}
+	cmd.AddCommand(
+		c.newAdminNodeUpdaterRolloutStatusCommand(),
+		c.newAdminNodeUpdaterRolloutPauseCommand(),
+		c.newAdminNodeUpdaterRolloutResumeCommand(),
+	)
+	return cmd
+}
+
+func (c *CLI) newAdminNodeUpdaterRolloutStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show node-updater rollout status",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			updaters, err := client.ListNodeUpdaters()
+			if err != nil {
+				return err
+			}
+			gate, err := client.GetGatePolicy("node_updater.generation_rollout")
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{
+					"target_generation": model.NodeUpdaterCurrentVersion,
+					"gate":              gate,
+					"node_updaters":     updaters,
+				})
+			}
+			return writeNodeUpdaterRolloutStatus(c.stdout, gate, updaters)
+		},
+	}
+}
+
+func (c *CLI) newAdminNodeUpdaterRolloutPauseCommand() *cobra.Command {
+	opts := struct{ Reason string }{}
+	cmd := &cobra.Command{
+		Use:   "pause",
+		Short: "Pause node-updater generation rollout",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.PromoteGatePolicy("node_updater.generation_rollout", model.GatePolicyPromoteRequest{
+				Mode:   model.GatePolicyModeDisabled,
+				Reason: firstNonEmpty(opts.Reason, "pause node-updater rollout"),
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeGatePolicy(c.stdout, response.Policy)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Pause reason")
+	return cmd
+}
+
+func (c *CLI) newAdminNodeUpdaterRolloutResumeCommand() *cobra.Command {
+	opts := struct {
+		Reason string
+		Canary []string
+	}{}
+	cmd := &cobra.Command{
+		Use:   "resume",
+		Short: "Resume node-updater generation rollout in canary mode",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			canary := opts.Canary
+			if len(canary) == 0 {
+				canary = []string{"single-node"}
+			}
+			response, err := client.PromoteGatePolicy("node_updater.generation_rollout", model.GatePolicyPromoteRequest{
+				Mode:         model.GatePolicyModeCanary,
+				Reason:       firstNonEmpty(opts.Reason, "resume node-updater rollout canary"),
+				CanaryScopes: canary,
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writeGatePolicy(c.stdout, response.Policy)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Resume reason")
+	cmd.Flags().StringArrayVar(&opts.Canary, "canary-scope", nil, "Canary failure-domain scope (repeatable)")
 	return cmd
 }
 
@@ -336,6 +445,38 @@ func writeNodeUpdaterTable(w io.Writer, updaters []model.NodeUpdater) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func writeNodeUpdaterRolloutStatus(w io.Writer, gate model.GatePolicy, updaters []model.NodeUpdater) error {
+	current := 0
+	outdated := 0
+	missing := 0
+	for _, updater := range updaters {
+		switch strings.TrimSpace(updater.UpdaterVersion) {
+		case model.NodeUpdaterCurrentVersion:
+			current++
+		case "":
+			missing++
+		default:
+			outdated++
+		}
+	}
+	if err := writeKeyValues(w,
+		kvPair{Key: "target_generation", Value: model.NodeUpdaterCurrentVersion},
+		kvPair{Key: "gate_mode", Value: firstNonEmpty(gate.Mode, "-")},
+		kvPair{Key: "canary_scopes", Value: stringsJoin(gate.CanaryFailureDomains)},
+		kvPair{Key: "total_nodes", Value: fmt.Sprintf("%d", len(updaters))},
+		kvPair{Key: "current", Value: fmt.Sprintf("%d", current)},
+		kvPair{Key: "outdated", Value: fmt.Sprintf("%d", outdated)},
+		kvPair{Key: "missing_version", Value: fmt.Sprintf("%d", missing)},
+		kvPair{Key: "kill_switch", Value: firstNonEmpty(gate.KillSwitchEnv, "-")},
+	); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeNodeUpdaterTable(w, updaters)
 }
 
 func writeNodeDeepHealthTable(w io.Writer, results []model.NodeDeepHealthResult) error {

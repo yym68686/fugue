@@ -361,6 +361,28 @@ FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
 public_data_plane_worker_image_changed || fail "edge code changes must mark worker image changed"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/api/node_updater.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "node_updater" "node-updater changed files must select node-updater subsystem"
+assert_eq "$(FUGUE_NODE_UPDATER_TIMER_CYCLE_SECONDS=123 release_safety_watch_window_seconds)" "123" "node-updater changed files must require a full timer-cycle watch window"
+node_updater_gates="$(release_safety_required_gates)"
+[[ "${node_updater_gates}" == *"node_deep_health"* && "${node_updater_gates}" == *"public_synthetic"* ]] ||
+  fail "node-updater changed files must require node deep health and public synthetic gates, got ${node_updater_gates}"
+
+FUGUE_RELEASE_CHANGED_FILES=$'internal/api/edge_routes.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "edge_route" "edge route changed files must select edge_route subsystem"
+edge_route_gates="$(release_safety_required_gates)"
+[[ "${edge_route_gates}" == *"route_check"* && "${edge_route_gates}" == *"dns_answer_audit"* ]] ||
+  fail "edge route changed files must require route-check and DNS answer audit gates, got ${edge_route_gates}"
+
+assert_eq "$(public_synthetic_error_class 503 'no healthy edge groups')" "public_synthetic_503_no_healthy_edge_groups" "synthetic no healthy edge groups class"
+public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'edge group has no healthy non-excluded edge nodes')" ||
+  fail "synthetic 503 no healthy non-excluded edge nodes must trigger hard rollback"
+public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'no healthy edge groups')" ||
+  fail "synthetic 503 no healthy edge groups must trigger hard rollback"
+if public_synthetic_status_is_hard_rollback "$(public_synthetic_error_class 503 'upstream unavailable')"; then
+  fail "generic upstream unavailable must not hard rollback without Fugue routing attribution"
+fi
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/bundleauth/bundleauth.go'
 public_data_plane_changed || fail "bundle auth changes must mark public data-plane changed"
 public_data_plane_worker_image_changed || fail "bundle auth changes must mark worker image changed"

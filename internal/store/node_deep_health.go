@@ -91,7 +91,9 @@ func normalizeNodeDeepHealthResult(result model.NodeDeepHealthResult, now time.T
 	result.UpdatedAt = now
 	result.Checks = normalizeNodeDeepHealthChecks(result.Checks, result.ReportedAt)
 	result.OverallStatus, result.QuarantineState, result.QuarantineReason = nodeDeepHealthDecision(result.Checks, result.ObservedOnly)
-	if result.QuarantineState == model.NodeQuarantineStateQuarantined && result.QuarantineExpiresAt == nil {
+	if result.ObservedOnly {
+		result.QuarantineExpiresAt = nil
+	} else if result.QuarantineState == model.NodeQuarantineStateQuarantined && result.QuarantineExpiresAt == nil {
 		expires := now.Add(15 * time.Minute)
 		result.QuarantineExpiresAt = &expires
 	}
@@ -113,6 +115,22 @@ func normalizeNodeDeepHealthChecks(checks []model.NodeDeepHealthCheck, fallback 
 		}
 		check.Category = strings.TrimSpace(check.Category)
 		check.Status = normalizeNodeDeepHealthStatus(check.Status)
+		check.GateID = normalizeNodeDeepHealthGateID(check)
+		check.GateMode = normalizeNodeDeepHealthGateMode(check.GateMode)
+		if check.GateMode == "" {
+			check.GateMode = model.GatePolicyModeShadow
+		}
+		if check.GateMode == model.GatePolicyModeEnforced && !knownNodeDeepHealthGateID(check.GateID) {
+			check.GateMode = model.GatePolicyModeShadow
+			check.HardFail = false
+			if check.Evidence == nil {
+				check.Evidence = map[string]string{}
+			}
+			check.Evidence["gate_policy"] = "unknown_gate_downgraded_to_shadow"
+		}
+		if check.GateMode == model.GatePolicyModeShadow || check.GateMode == model.GatePolicyModeDisabled {
+			check.HardFail = false
+		}
 		check.Expected = strings.TrimSpace(check.Expected)
 		check.Observed = strings.TrimSpace(check.Observed)
 		check.Message = strings.TrimSpace(check.Message)
@@ -126,6 +144,64 @@ func normalizeNodeDeepHealthChecks(checks []model.NodeDeepHealthCheck, fallback 
 		return out[i].Name < out[j].Name
 	})
 	return out
+}
+
+func normalizeNodeDeepHealthGateMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case model.GatePolicyModeShadow:
+		return model.GatePolicyModeShadow
+	case model.GatePolicyModeCanary:
+		return model.GatePolicyModeCanary
+	case model.GatePolicyModeEnforced:
+		return model.GatePolicyModeEnforced
+	case model.GatePolicyModeDisabled:
+		return model.GatePolicyModeDisabled
+	default:
+		return ""
+	}
+}
+
+func normalizeNodeDeepHealthGateID(check model.NodeDeepHealthCheck) string {
+	if gateID := strings.TrimSpace(check.GateID); gateID != "" {
+		return gateID
+	}
+	switch check.Name {
+	case model.NodeDeepHealthCheckPodDNSToKubeDNSService,
+		model.NodeDeepHealthCheckPodDNSToCoreDNSPod,
+		model.NodeDeepHealthCheckKubernetesDefaultDNS,
+		model.NodeDeepHealthCheckNamespaceServiceDNS,
+		model.NodeDeepHealthCheckNamespaceServiceTCP,
+		model.NodeDeepHealthCheckExternalDNS:
+		return "node.kubernetes_service_dns"
+	case model.NodeDeepHealthCheckManagedIptablesStale,
+		model.NodeDeepHealthCheckKubeProxyRules:
+		return "node.kube_proxy_rules"
+	case model.NodeDeepHealthCheckCNIBridge:
+		return "node.cni_bridge"
+	case model.NodeDeepHealthCheckConntrackSaturation:
+		return "node.conntrack_saturation"
+	case model.NodeDeepHealthCheckUpdaterGenerationDrift:
+		return "node_updater.generation_rollout"
+	default:
+		name := strings.TrimSpace(check.Name)
+		if name == "" {
+			return ""
+		}
+		return "node." + name
+	}
+}
+
+func knownNodeDeepHealthGateID(gateID string) bool {
+	switch strings.TrimSpace(gateID) {
+	case "node.kubernetes_service_dns",
+		"node.kube_proxy_rules",
+		"node.cni_bridge",
+		"node.conntrack_saturation",
+		"node_updater.generation_rollout":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeNodeDeepHealthStatus(status string) string {

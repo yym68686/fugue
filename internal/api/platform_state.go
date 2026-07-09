@@ -429,6 +429,8 @@ func platformArtifactInvariantValidation(artifact model.PlatformArtifact) model.
 		message = "DNS artifacts must include records or answers"
 	case model.PlatformArtifactKindReleaseGuardPolicy:
 		return releaseSignalPolicyValidationResult(artifact)
+	case model.PlatformArtifactKindGatePolicyRegistry:
+		return gatePolicyValidationResult(artifact)
 	}
 	return model.PlatformArtifactValidationResult{
 		Name:     "invariant." + artifact.ArtifactKind,

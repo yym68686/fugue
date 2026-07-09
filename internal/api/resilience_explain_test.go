@@ -169,6 +169,82 @@ func TestReleaseGuardStatusIncludesExplicitReleaseSignals(t *testing.T) {
 	}
 }
 
+func TestGatePolicyRegistryPromotionAndReleaseGuard(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+
+	listRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/gates", platformAdminKey, nil)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("expected gate list status %d, got %d body=%s", http.StatusOK, listRecorder.Code, listRecorder.Body.String())
+	}
+	var listed model.GatePolicyListResponse
+	mustDecodeJSON(t, listRecorder, &listed)
+	if _, ok := gatePolicyByID(listed.Policies, "node.kubernetes_service_dns"); !ok {
+		t.Fatalf("expected default node.kubernetes_service_dns gate policy, got %+v", listed.Policies)
+	}
+
+	rejected := performJSONRequest(t, server, http.MethodPost, "/v1/admin/gates/node.kube_proxy_rules/promote", platformAdminKey, model.GatePolicyPromoteRequest{
+		Mode: model.GatePolicyModeEnforced,
+	})
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("expected enforced promotion without reason to be rejected, got %d body=%s", rejected.Code, rejected.Body.String())
+	}
+
+	promoted := performJSONRequest(t, server, http.MethodPost, "/v1/admin/gates/node.kube_proxy_rules/promote", platformAdminKey, model.GatePolicyPromoteRequest{
+		Mode:         model.GatePolicyModeCanary,
+		Reason:       "test canary promotion",
+		CanaryScopes: []string{"node:test-canary"},
+	})
+	if promoted.Code != http.StatusOK {
+		t.Fatalf("expected gate promotion status %d, got %d body=%s", http.StatusOK, promoted.Code, promoted.Body.String())
+	}
+	var promotion model.GatePolicyPromotionResponse
+	mustDecodeJSON(t, promoted, &promotion)
+	if promotion.Policy.Mode != model.GatePolicyModeCanary || promotion.Artifact.ArtifactKind != model.PlatformArtifactKindGatePolicyRegistry || promotion.Release.ID == "" {
+		t.Fatalf("unexpected gate promotion response: %+v", promotion)
+	}
+
+	statusRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/release-guard/status", platformAdminKey, nil)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected release guard status %d, got %d body=%s", http.StatusOK, statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var status model.ReleaseGuardStatusResponse
+	mustDecodeJSON(t, statusRecorder, &status)
+	if status.Status.GatePolicyCount == 0 || status.Status.EnforcedGateCount == 0 {
+		t.Fatalf("expected release guard to include gate policy counts, got %+v", status.Status)
+	}
+	if len(status.Status.GatePolicyViolations) != 0 {
+		t.Fatalf("expected valid gate policy registry, got violations %+v", status.Status.GatePolicyViolations)
+	}
+}
+
+func TestEdgeRouteInventoryBlastRadiusKeepsLastHealthyGroups(t *testing.T) {
+	t.Parallel()
+
+	beforeHealthy := map[string]bool{
+		"edge-group-country-us": true,
+		"edge-group-country-jp": true,
+	}
+	beforeIDs := map[string][]string{
+		"edge-group-country-us": []string{"edge-us-1"},
+		"edge-group-country-jp": []string{"edge-jp-1"},
+	}
+	afterHealthy := map[string]bool{
+		"edge-group-country-us": false,
+		"edge-group-country-jp": false,
+	}
+	afterIDs := map[string][]string{}
+
+	healthy, ids := applyEdgeRouteInventoryBlastRadiusCap(beforeHealthy, beforeIDs, afterHealthy, afterIDs)
+	if !healthy["edge-group-country-us"] || !healthy["edge-group-country-jp"] {
+		t.Fatalf("blast-radius cap must preserve previously healthy edge groups, got healthy=%v ids=%v", healthy, ids)
+	}
+	if !stringSliceContains(ids["edge-group-country-us"], "edge-us-1") || !stringSliceContains(ids["edge-group-country-jp"], "edge-jp-1") {
+		t.Fatalf("blast-radius cap must preserve previous healthy edge ids, got %+v", ids)
+	}
+}
+
 func TestTrafficSafetyExplainReportsUnroutedHostname(t *testing.T) {
 	t.Parallel()
 

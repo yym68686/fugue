@@ -1016,6 +1016,75 @@ paths:
                 $ref: "#/components/schemas/ReleaseGuardStatusResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/gates:
+    get:
+      operationId: listGatePolicies
+      summary: List Gate Policies
+      tags: [Admin]
+      x-fugue-handler: handleListGatePolicies
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatePolicyListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/gates/{gate_id}:
+    get:
+      operationId: getGatePolicy
+      summary: Get Gate Policy
+      tags: [Admin]
+      x-fugue-handler: handleGetGatePolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: gate_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatePolicyResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/gates/{gate_id}/promote:
+    post:
+      operationId: promoteGatePolicy
+      summary: Promote Gate Policy
+      tags: [Admin]
+      x-fugue-handler: handlePromoteGatePolicy
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: gate_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GatePolicyPromoteRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatePolicyPromotionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/traffic-safety/explain/{hostname}:
     get:
       operationId: explainTrafficSafety
@@ -19070,6 +19139,11 @@ components:
         status:
           type: string
           enum: [pass, warning, fail]
+        gate_id:
+          type: string
+        gate_mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
         expected:
           type: string
         observed:
@@ -19154,6 +19228,8 @@ components:
         generated_at:
           type: string
           format: date-time
+        node_updater_generation:
+          type: string
         node_updater:
           $ref: "#/components/schemas/NodeUpdater"
         discovery_bundle:
@@ -22720,10 +22796,131 @@ components:
       properties:
         report:
           $ref: "#/components/schemas/PlatformFailureDrillReport"
+    GateBlastRadiusPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        max_nodes:
+          type: integer
+          format: int32
+        max_edges_per_group:
+          type: integer
+          format: int32
+        preserve_min_healthy_edge_groups:
+          type: integer
+          format: int32
+        preserve_min_eligible_edges_per_host:
+          type: integer
+          format: int32
+    GatePolicy:
+      type: object
+      additionalProperties: false
+      required: [id, mode, scope]
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        scope:
+          type: string
+          enum: [cluster, node, edge-node, edge-group, hostname, service, runtime]
+        default_mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        introduced_at:
+          type: string
+          format: date-time
+        introduced_by_release:
+          type: string
+        soak_started_at:
+          type: string
+          format: date-time
+        soak_min_duration:
+          type: string
+        minimum_samples:
+          type: integer
+          format: int32
+        minimum_failure_domains:
+          type: integer
+          format: int32
+        canary_failure_domains:
+          type: array
+          items:
+            type: string
+        blast_radius:
+          $ref: "#/components/schemas/GateBlastRadiusPolicy"
+        rollback_on:
+          type: array
+          items:
+            type: string
+        kill_switch_env:
+          type: string
+        runbook_ref:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: string
+        promotion_reason:
+          type: string
+    GatePolicyListResponse:
+      type: object
+      additionalProperties: false
+      required: [policies, generated_at]
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/GatePolicy"
+        generated_at:
+          type: string
+          format: date-time
+    GatePolicyResponse:
+      type: object
+      additionalProperties: false
+      required: [policy]
+      properties:
+        policy:
+          $ref: "#/components/schemas/GatePolicy"
+    GatePolicyPromoteRequest:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        reason:
+          type: string
+        canary_scopes:
+          type: array
+          items:
+            type: string
+        introduced_by_release:
+          type: string
+    GatePolicyPromotionResponse:
+      type: object
+      additionalProperties: false
+      required: [policy, artifact, release, message]
+      properties:
+        policy:
+          $ref: "#/components/schemas/GatePolicy"
+        artifact:
+          $ref: "#/components/schemas/PlatformArtifact"
+        release:
+          $ref: "#/components/schemas/PlatformArtifactRelease"
+        message:
+          $ref: "#/components/schemas/PlatformReleaseMessage"
+        lkg:
+          $ref: "#/components/schemas/PlatformLKGSnapshot"
     ReleaseGuardStatus:
       type: object
       additionalProperties: false
-      required: [generated_at, pass, block_rollout, mode, robustness_baseline, failure_contract_count, platform_artifact_validation_failures, platform_consumer_drift]
+      required: [generated_at, pass, block_rollout, mode, robustness_baseline, failure_contract_count, platform_artifact_validation_failures, platform_consumer_drift, gate_policy_count, enforced_gate_count]
       properties:
         generated_at:
           type: string
@@ -22749,6 +22946,20 @@ components:
         platform_consumer_drift:
           type: integer
           format: int32
+        gate_policy_count:
+          type: integer
+          format: int32
+        enforced_gate_count:
+          type: integer
+          format: int32
+        gate_policy_violations:
+          type: array
+          items:
+            type: string
+        gate_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/GatePolicy"
         release_signals:
           type: array
           items:

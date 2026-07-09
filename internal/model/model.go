@@ -729,12 +729,13 @@ type NodeUpdater struct {
 }
 
 type NodeUpdaterDesiredState struct {
-	GeneratedAt     time.Time                  `json:"generated_at"`
-	NodeUpdater     NodeUpdater                `json:"node_updater"`
-	DiscoveryBundle DiscoveryBundle            `json:"discovery_bundle"`
-	NodePolicy      *ClusterNodePolicyStatus   `json:"node_policy,omitempty"`
-	EdgeCredential  *NodeUpdaterEdgeCredential `json:"edge_credential,omitempty"`
-	Warnings        []string                   `json:"warnings,omitempty"`
+	GeneratedAt           time.Time                  `json:"generated_at"`
+	NodeUpdaterGeneration string                     `json:"node_updater_generation,omitempty"`
+	NodeUpdater           NodeUpdater                `json:"node_updater"`
+	DiscoveryBundle       DiscoveryBundle            `json:"discovery_bundle"`
+	NodePolicy            *ClusterNodePolicyStatus   `json:"node_policy,omitempty"`
+	EdgeCredential        *NodeUpdaterEdgeCredential `json:"edge_credential,omitempty"`
+	Warnings              []string                   `json:"warnings,omitempty"`
 }
 
 type NodeUpdaterEdgeCredential struct {

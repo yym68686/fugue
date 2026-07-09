@@ -336,6 +336,9 @@ func TestRobustnessRepairPlanIsReadOnlyUntilSafeAutomationExists(t *testing.T) {
 	if runRecorder.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, runRecorder.Code, runRecorder.Body.String())
 	}
+	if !strings.Contains(runRecorder.Body.String(), "registered safety contract") {
+		t.Fatalf("expected missing safety contract rejection, got body=%s", runRecorder.Body.String())
+	}
 }
 
 func configureRobustnessTestPreflight(t *testing.T, server *Server) {

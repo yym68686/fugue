@@ -19,7 +19,35 @@ func (c *CLI) newAdminReleaseCommand() *cobra.Command {
 		Short: "Inspect release guard decisions",
 	}
 	guard.AddCommand(c.newAdminReleaseGuardStatusCommand(), c.newAdminReleaseGuardSignalsCommand())
-	cmd.AddCommand(guard)
+	cmd.AddCommand(guard, c.newAdminReleaseExplainCommand())
+	return cmd
+}
+
+func (c *CLI) newAdminReleaseExplainCommand() *cobra.Command {
+	opts := struct{ Subject string }{}
+	cmd := &cobra.Command{
+		Use:   "explain <release-id>",
+		Short: "Explain release safety state for a release id",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			status, err := client.GetReleaseGuardStatus(opts.Subject)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"release_id": args[0], "status": status})
+			}
+			if _, err := fmt.Fprintf(c.stdout, "release_id=%s\n", args[0]); err != nil {
+				return err
+			}
+			return writeReleaseGuardStatus(c.stdout, status)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Subject, "subject", "", "Optional hostname, app, node, or subsystem scope")
 	return cmd
 }
 
@@ -116,6 +144,9 @@ func writeReleaseGuardStatus(w io.Writer, status model.ReleaseGuardStatus) error
 		kvPair{Key: "artifact_kinds", Value: stringsJoin(status.PlatformArtifactKinds)},
 		kvPair{Key: "artifact_validation_failures", Value: fmt.Sprintf("%d", status.PlatformArtifactFailures)},
 		kvPair{Key: "consumer_drift", Value: fmt.Sprintf("%d", status.PlatformConsumerDrift)},
+		kvPair{Key: "gate_policies", Value: fmt.Sprintf("%d", status.GatePolicyCount)},
+		kvPair{Key: "enforced_gates", Value: fmt.Sprintf("%d", status.EnforcedGateCount)},
+		kvPair{Key: "gate_policy_violations", Value: stringsJoin(status.GatePolicyViolations)},
 		kvPair{Key: "release_signals", Value: fmt.Sprintf("%d", len(status.ReleaseSignals))},
 		kvPair{Key: "blocked_reasons", Value: stringsJoin(status.BlockedReasons)},
 		kvPair{Key: "next_steps", Value: stringsJoin(status.RecommendedOperatorSteps)},
