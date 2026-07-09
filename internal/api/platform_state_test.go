@@ -10,7 +10,7 @@ import (
 func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	t.Parallel()
 
-	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	_, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 
 	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
 		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
@@ -37,14 +37,14 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 		t.Fatalf("expected persisted validation pass, got %+v", validation)
 	}
 
-	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull})
-	if release.Code != http.StatusOK {
-		t.Fatalf("expected release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
-	}
-	var released model.PlatformArtifactReleaseResponse
-	mustDecodeJSON(t, release, &released)
-	if released.Release.Generation != created.Artifact.Generation || released.LKG == nil {
-		t.Fatalf("expected full release and LKG, got %+v", released)
+	seeded := seedVerifiedPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	released := releaseAndVerifyFullPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	if released.Release.Generation != created.Artifact.Generation ||
+		released.Release.VerificationState != model.PlatformArtifactVerificationStateVerified ||
+		released.LKG == nil ||
+		released.LKG.Generation != created.Artifact.Generation ||
+		seeded.LKG == nil {
+		t.Fatalf("expected explicitly verified full release and LKG, seeded=%+v released=%+v", seeded, released)
 	}
 
 	pull := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/artifacts/edge_ranking_policy?scope_key=global", platformAdminKey, nil)
@@ -79,6 +79,14 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	if len(consumerResponse.Consumers) != 1 || consumerResponse.Consumers[0].ConsumerID != "edge-worker-api-test" {
 		t.Fatalf("expected heartbeat consumer, got %+v", consumerResponse.Consumers)
 	}
+	rejectedHeartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/heartbeat", tenantKey, model.PlatformConsumerHeartbeatRequest{
+		ConsumerID:   "forged-edge-worker",
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:     "global",
+	})
+	if rejectedHeartbeat.Code != http.StatusForbidden {
+		t.Fatalf("ordinary tenant key must not write platform heartbeat, got %d body=%s", rejectedHeartbeat.Code, rejectedHeartbeat.Body.String())
+	}
 
 	contracts := performJSONRequest(t, server, http.MethodGet, "/v1/admin/failure-contracts", platformAdminKey, nil)
 	if contracts.Code != http.StatusOK {
@@ -89,4 +97,58 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	if len(contractList.Contracts) < 16 {
 		t.Fatalf("expected critical subsystem contracts, got %d", len(contractList.Contracts))
 	}
+}
+
+func seedVerifiedPlatformArtifactAPI(t *testing.T, server *Server, platformAdminKey, artifactID string) model.PlatformArtifactReleaseResponse {
+	t.Helper()
+	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifactID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+		IdempotencyKey: "seed-" + artifactID,
+		Reason:         "test initial shadow seed",
+	})
+	if release.Code != http.StatusOK {
+		t.Fatalf("expected initial shadow release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
+	}
+	var released model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, release, &released)
+	return verifyPlatformArtifactReleaseAPI(t, server, platformAdminKey, released.Release, true)
+}
+
+func releaseAndVerifyFullPlatformArtifactAPI(t *testing.T, server *Server, platformAdminKey, artifactID string) model.PlatformArtifactReleaseResponse {
+	t.Helper()
+	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+artifactID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		IdempotencyKey: "full-" + artifactID,
+		Reason:         "test full release",
+	})
+	if release.Code != http.StatusOK {
+		t.Fatalf("expected full release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
+	}
+	var released model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, release, &released)
+	return verifyPlatformArtifactReleaseAPI(t, server, platformAdminKey, released.Release, false)
+}
+
+func verifyPlatformArtifactReleaseAPI(t *testing.T, server *Server, platformAdminKey string, release model.PlatformArtifactRelease, allowInitial bool) model.PlatformArtifactReleaseResponse {
+	t.Helper()
+	verify := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifact-releases/"+release.ID+"/verify-lkg", platformAdminKey, model.PlatformArtifactVerifyLKGRequest{
+		FencingToken:    release.FencingToken,
+		Reason:          "test verification completed",
+		AllowInitialLKG: allowInitial,
+		Evidence: model.PlatformArtifactVerificationEvidence{
+			ConsumerConvergence:        true,
+			LocalProbe:                 true,
+			PublicSynthetic:            true,
+			WatchWindow:                true,
+			BaselineMonotonic:          true,
+			DatabaseRollbackCompatible: true,
+			EvidenceRefs:               []string{"test:evidence"},
+		},
+	})
+	if verify.Code != http.StatusOK {
+		t.Fatalf("expected LKG verification status %d, got %d body=%s", http.StatusOK, verify.Code, verify.Body.String())
+	}
+	var verified model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, verify, &verified)
+	return verified
 }

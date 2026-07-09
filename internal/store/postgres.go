@@ -1744,8 +1744,37 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS lane_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS idempotency_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS candidate_generation TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS serving_unverified_generation TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verified_lkg_generation TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS pinned_rollback_generation TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verification_state TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verification_evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ NULL`,
+	`UPDATE fugue_platform_artifact_releases
+	SET lane_key = LOWER(artifact_kind) || '|' || LOWER(scope_key) || '|' || LOWER(release_channel)
+	WHERE lane_key = ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_releases_active ON fugue_platform_artifact_releases (artifact_kind, scope_key, release_channel, status, released_at DESC)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_platform_releases_one_active ON fugue_platform_artifact_releases (artifact_kind, scope_key, release_channel) WHERE status = 'active'`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_platform_releases_idempotency ON fugue_platform_artifact_releases (lane_key, idempotency_key) WHERE idempotency_key <> ''`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_releases_artifact ON fugue_platform_artifact_releases (artifact_id, released_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS fugue_platform_release_lanes (
+		lane_key TEXT PRIMARY KEY,
+		artifact_kind TEXT NOT NULL,
+		scope_key TEXT NOT NULL,
+		release_channel TEXT NOT NULL,
+		fencing_token BIGINT NOT NULL DEFAULT 0,
+		version BIGINT NOT NULL DEFAULT 0,
+		active_release_id TEXT NOT NULL DEFAULT '',
+		frozen BOOLEAN NOT NULL DEFAULT FALSE,
+		freeze_reason TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_release_lanes_active ON fugue_platform_release_lanes (active_release_id) WHERE active_release_id <> ''`,
 	`CREATE TABLE IF NOT EXISTS fugue_platform_release_messages (
 		id TEXT PRIMARY KEY,
 		release_id TEXT NOT NULL REFERENCES fugue_platform_artifact_releases(id) ON DELETE CASCADE,
@@ -1794,6 +1823,8 @@ var postgresSchemaStatements = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_platform_lkg_snapshots ADD COLUMN IF NOT EXISTS verified_by_release_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_lkg_snapshots ADD COLUMN IF NOT EXISTS verification_evidence_hash TEXT NOT NULL DEFAULT ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_platform_lkg_kind_scope ON fugue_platform_lkg_snapshots (artifact_kind, scope_key)`,
 	`CREATE TABLE IF NOT EXISTS fugue_resource_usage_samples (
 		id TEXT PRIMARY KEY,

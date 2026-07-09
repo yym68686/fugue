@@ -224,6 +224,43 @@ func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.R
 	})
 }
 
+func (s *Server) handleVerifyPlatformArtifactReleaseLKG(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.verify_lkg") {
+		httpx.WriteError(w, http.StatusForbidden, "artifact.verify_lkg scope required")
+		return
+	}
+	var req model.PlatformArtifactVerifyLKGRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.FencingToken <= 0 || strings.TrimSpace(req.Reason) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "positive fencing_token and reason are required")
+		return
+	}
+	artifact, release, message, lkg, err := s.store.VerifyPlatformArtifactReleaseLKG(r.PathValue("release_id"), req, principal)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	s.appendAudit(principal, "platform_artifact.verified_lkg_promoted", "platform_artifact_release", release.ID, "", map[string]string{
+		"artifact_id":   artifact.ID,
+		"artifact_kind": artifact.ArtifactKind,
+		"scope_key":     artifact.ScopeKey,
+		"generation":    artifact.Generation,
+		"fencing_token": fmt.Sprintf("%d", release.FencingToken),
+		"evidence_hash": lkg.VerificationEvidenceHash,
+		"reason":        strings.TrimSpace(req.Reason),
+	})
+	httpx.WriteJSON(w, http.StatusOK, model.PlatformArtifactReleaseResponse{
+		Artifact: artifact,
+		Release:  release,
+		Message:  message,
+		LKG:      lkg,
+	})
+}
+
 func (s *Server) handleListPlatformArtifactConsumers(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.HasScope("artifact.read") {
@@ -263,6 +300,33 @@ func (s *Server) handleGetPlatformArtifactLKG(w http.ResponseWriter, r *http.Req
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformArtifactLKGResponse{LKG: lkg})
+}
+
+func (s *Server) verifiedPlatformArtifactForScope(kind, scopeKey string) (model.PlatformArtifact, bool, error) {
+	lkg, err := s.store.GetPlatformLKG(kind, scopeKey)
+	if err != nil {
+		return model.PlatformArtifact{}, false, err
+	}
+	if lkg == nil {
+		return model.PlatformArtifact{}, false, nil
+	}
+	if !lkg.ExpiresAt.After(time.Now().UTC()) ||
+		strings.TrimSpace(lkg.VerifiedByReleaseID) == "" ||
+		!strings.HasPrefix(strings.TrimSpace(lkg.VerificationEvidenceHash), "sha256:") {
+		return model.PlatformArtifact{}, false, nil
+	}
+	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
+	if err != nil {
+		return model.PlatformArtifact{}, false, err
+	}
+	if artifact.Status != model.PlatformArtifactStatusValidated ||
+		artifact.ArtifactKind != kind ||
+		artifact.ScopeKey != scopeKey ||
+		artifact.Generation != lkg.Generation ||
+		artifact.ContentHash != lkg.ContentHash {
+		return model.PlatformArtifact{}, false, nil
+	}
+	return artifact, true, nil
 }
 
 func platformArtifactReleaseScope(channel string) string {
@@ -344,7 +408,11 @@ func (s *Server) handleGetPlatformStateArtifact(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) handlePlatformConsumerHeartbeat(w http.ResponseWriter, r *http.Request) {
-	_ = mustPrincipal(r)
+	principal := mustPrincipal(r)
+	if !principal.HasScope("platform.consumer.heartbeat") {
+		httpx.WriteError(w, http.StatusForbidden, "platform.consumer.heartbeat scope required")
+		return
+	}
 	var req model.PlatformConsumerHeartbeatRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())

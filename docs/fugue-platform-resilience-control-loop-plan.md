@@ -1820,15 +1820,17 @@ DNS/edge failover 必须满足：
 
 ### Phase -1: Safety Semantics 和可信控制闭环基础
 
+> 2026-07-10 implementation checkpoint: 本轮勾选的 Release Lane、fencing、idempotency 和 Verified LKG 项目仅覆盖 Platform Artifact 发布路径。跨 API image、controller、edge/DNS、Caddy、node desired-state 和 schema migration 的完整 Platform Release Set 仍以对应未勾选项为准。
+
 #### Phase -1A: 不可绕过安全内核
 
-- [ ] 定义 `PlatformSafetyKernel` 的职责边界。
-- [ ] 列出所有不可由配置关闭的 invariant。
+- [x] 定义 `PlatformSafetyKernel` 的职责边界。
+- [x] 列出所有不可由配置关闭的 invariant。
 - [ ] 定义 artifact schema/hash/signature 硬规则。
 - [ ] 定义 generation 单调性硬规则。
 - [ ] 定义 shadow no-production-impact 硬规则。
 - [ ] 定义 canary scope isolation 硬规则。
-- [ ] 定义 full release rollback-target 硬规则。
+- [x] 定义 full release rollback-target 硬规则。
 - [ ] 定义 blast-radius maximum hard cap。
 - [ ] 定义 kill switch precedence。
 - [ ] 定义 expired/corrupt/signature-invalid LKG 硬规则。
@@ -1841,41 +1843,41 @@ DNS/edge failover 必须满足：
 - [ ] 增加 shadow 不影响生产的 property test。
 - [ ] 增加 canary 不越过 scope 的 property test。
 - [ ] 增加 kill switch 并发优先级测试。
-- [ ] 新增 runbook: platform safety kernel。
+- [x] 新增 runbook: platform safety kernel。
 - [ ] 新增 runbook: kernel break-glass。
 
 #### Phase -1B: Verified LKG 语义
 
-- [ ] 盘点当前所有把 full generation 立即写成 LKG 的路径。
-- [ ] 定义 `candidate_generation`。
-- [ ] 定义 `serving_unverified_generation`。
-- [ ] 定义 `verified_lkg_generation`。
+- [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
+- [x] 定义 `candidate_generation`。
+- [x] 定义 `serving_unverified_generation`。
+- [x] 定义 `verified_lkg_generation`。
 - [ ] 定义 `previous_verified_lkg_generations`。
-- [ ] 定义 `pinned_rollback_generation`。
-- [ ] 定义 `verification_state` 和 evidence ref。
-- [ ] artifact full release 不再立即覆盖 verified LKG。
-- [ ] release prepare 阶段固定 rollback target。
+- [x] 定义 `pinned_rollback_generation`。
+- [x] 定义 `verification_state` 和 evidence ref。
+- [x] artifact full release 不再立即覆盖 verified LKG。
+- [x] release prepare 阶段固定 rollback target。
 - [ ] 验证 rollback artifact content/hash/signature。
 - [ ] 验证 rollback image digest 可拉取。
 - [ ] 验证 rollback Caddy/DNS/route config 存在。
 - [ ] 验证 rollback node desired-state generation 存在。
-- [ ] verified LKG 晋升检查 consumer convergence。
-- [ ] verified LKG 晋升检查 local probe。
-- [ ] verified LKG 晋升检查 public synthetic。
-- [ ] verified LKG 晋升检查 watch window。
-- [ ] verified LKG 晋升检查 baseline monotonic comparison。
-- [ ] verified LKG 晋升检查 database rollback compatibility。
-- [ ] verified LKG 晋升检查 fencing token。
+- [x] verified LKG 晋升检查 consumer convergence。
+- [x] verified LKG 晋升检查 local probe。
+- [x] verified LKG 晋升检查 public synthetic。
+- [x] verified LKG 晋升检查 watch window。
+- [x] verified LKG 晋升检查 baseline monotonic comparison。
+- [x] verified LKG 晋升检查 database rollback compatibility。
+- [x] verified LKG 晋升检查 fencing token。
 - [ ] 每个 artifact kind 定义 LKG TTL/max stale。
 - [ ] 至少保留三代 verified LKG。
 - [ ] GC 保护 verified LKG 和 pinned rollback target。
 - [ ] rollback 后重新验证旧 generation。
-- [ ] 增加 bad full generation 不覆盖旧 LKG 的回归测试。
+- [x] 增加 bad full generation 不覆盖旧 LKG 的回归测试。
 - [ ] 增加 serving-unverified crash recovery 测试。
 - [ ] 增加 LKG retention/GC 测试。
-- [ ] 增加 rollback target missing 硬阻断测试。
-- [ ] 新增 runbook: verified LKG promotion。
-- [ ] 新增 runbook: pinned rollback recovery。
+- [x] 增加 rollback target missing 硬阻断测试。
+- [x] 新增 runbook: verified LKG promotion。
+- [x] 新增 runbook: pinned rollback recovery。
 
 #### Phase -1C: Evidence 四态和可信身份
 
@@ -1902,7 +1904,7 @@ DNS/edge failover 必须满足：
 - [ ] 为 DNS server 定义专用 platform component identity。
 - [ ] 为 Caddy edge front 定义专用 platform component identity。
 - [ ] 为 node guardian 定义专用 platform component identity。
-- [ ] heartbeat endpoint 不接受普通 tenant API key。
+- [x] heartbeat endpoint 不接受普通 tenant API key。
 - [ ] 服务端从凭证绑定 component/node/scope。
 - [ ] heartbeat 请求增加 sequence。
 - [ ] heartbeat 请求增加 issued_at。
@@ -1915,33 +1917,33 @@ DNS/edge failover 必须满足：
 - [ ] consumer credential 支持轮换和撤销。
 - [ ] consumer heartbeat 写入可信 audit。
 - [ ] 增加 missing consumer 不得 pass 的回归测试。
-- [ ] 增加 tenant key 无法写 heartbeat 的权限测试。
+- [x] 增加 tenant key 无法写 heartbeat 的权限测试。
 - [ ] 增加 heartbeat replay/impersonation 测试。
 - [ ] 新增 runbook: platform consumer identity。
 - [ ] 新增 runbook: missing/stale consumer。
 
 #### Phase -1D: Release Lane 和 Fencing
 
-- [ ] 定义 release lane key。
-- [ ] 为 release lane 增加唯一 active release 约束。
+- [x] 定义 release lane key。
+- [x] 为 release lane 增加唯一 active release 约束。
 - [ ] 设计 coordinator lease。
-- [ ] 设计 monotonic fencing token。
+- [x] 设计 monotonic fencing token。
 - [ ] 设计 release-set CAS/version 字段。
-- [ ] 设计 release-set idempotency key。
+- [x] 设计 release-set idempotency key。
 - [ ] 定义 prepare/commit/verify/finalize 状态机。
 - [ ] 定义 abort/rollback 状态机。
 - [ ] prepare 阶段固定 generation vector。
 - [ ] prepare 阶段固定 rollback vector。
 - [ ] commit 前验证所有对象 prepared。
 - [ ] consumer apply 校验 fencing token。
-- [ ] stale coordinator 写入被拒绝。
+- [x] stale coordinator 写入被拒绝。
 - [ ] promotion 与 rollback 并发时 rollback/hold 优先。
 - [ ] coordinator crash 后支持安全 takeover。
 - [ ] takeover 能区分 resume、abort 和 rollback。
 - [ ] rollback 失败时冻结 release lane。
 - [ ] 限制同一 lane 自动 rollback attempt。
-- [ ] 增加并发 release 不产生双 active 的数据库测试。
-- [ ] 增加 stale fencing token 测试。
+- [x] 增加并发 release 不产生双 active 的数据库测试。
+- [x] 增加 stale fencing token 测试。
 - [ ] 增加 coordinator crash/recovery 集成测试。
 - [ ] 增加 promotion/rollback race 测试。
 - [ ] 新增 runbook: release lane recovery。

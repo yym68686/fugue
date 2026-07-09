@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -18,15 +20,69 @@ func (c *CLI) newAdminArtifactCommand() *cobra.Command {
 		Short: "Inspect and release platform state artifacts",
 	}
 	cmd.AddCommand(
+		c.newAdminArtifactCreateCommand(),
 		c.newAdminArtifactListCommand(),
 		c.newAdminArtifactShowCommand(),
 		c.newAdminArtifactDiffCommand(),
 		c.newAdminArtifactValidateCommand(),
 		c.newAdminArtifactReleaseCommand(),
+		c.newAdminArtifactVerifyLKGCommand(),
 		c.newAdminArtifactRollbackCommand(),
 		c.newAdminArtifactConsumersCommand(),
 		c.newAdminArtifactLKGCommand(),
 	)
+	return cmd
+}
+
+func (c *CLI) newAdminArtifactCreateCommand() *cobra.Command {
+	opts := struct {
+		Kind               string
+		Scope              string
+		Generation         string
+		File               string
+		CompatibilityFloor string
+	}{Scope: "global"}
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a platform artifact draft from a JSON content file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(opts.Kind) == "" || strings.TrimSpace(opts.File) == "" {
+				return fmt.Errorf("--kind and --file are required")
+			}
+			raw, err := os.ReadFile(strings.TrimSpace(opts.File))
+			if err != nil {
+				return fmt.Errorf("read artifact content: %w", err)
+			}
+			var content map[string]any
+			if err := json.Unmarshal(raw, &content); err != nil {
+				return fmt.Errorf("decode artifact content JSON: %w", err)
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			artifact, err := client.CreatePlatformArtifact(model.PlatformArtifactCreateRequest{
+				ArtifactKind:       opts.Kind,
+				Scope:              model.PlatformArtifactScope{ScopeType: "global", Key: opts.Scope},
+				Generation:         opts.Generation,
+				Content:            content,
+				CompatibilityFloor: opts.CompatibilityFloor,
+			})
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, map[string]any{"artifact": artifact})
+			}
+			return writePlatformArtifact(c.stdout, artifact)
+		},
+	}
+	cmd.Flags().StringVar(&opts.Kind, "kind", "", "Artifact kind")
+	cmd.Flags().StringVar(&opts.Scope, "scope", opts.Scope, "Artifact scope key")
+	cmd.Flags().StringVar(&opts.Generation, "generation", "", "Optional explicit generation")
+	cmd.Flags().StringVar(&opts.File, "file", "", "JSON file containing artifact content")
+	cmd.Flags().StringVar(&opts.CompatibilityFloor, "compatibility-floor", "", "Optional minimum consumer version")
 	return cmd
 }
 
@@ -164,6 +220,45 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.CanaryRuleRef, "canary-rule-ref", "", "Optional canary or gray rule reference")
 	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Publish despite validation status; requires --reason")
 	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Reason for release or force publish")
+	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "Stable idempotency key for retrying the same release")
+	return cmd
+}
+
+func (c *CLI) newAdminArtifactVerifyLKGCommand() *cobra.Command {
+	opts := model.PlatformArtifactVerifyLKGRequest{}
+	cmd := &cobra.Command{
+		Use:   "verify-lkg <release-id>",
+		Short: "Verify a serving release and promote it to verified LKG",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.FencingToken <= 0 || strings.TrimSpace(opts.Reason) == "" {
+				return fmt.Errorf("--fencing-token and --reason are required")
+			}
+			client, err := c.newClient()
+			if err != nil {
+				return err
+			}
+			response, err := client.VerifyPlatformArtifactReleaseLKG(args[0], opts)
+			if err != nil {
+				return err
+			}
+			if c.wantsJSON() {
+				return writeJSON(c.stdout, response)
+			}
+			return writePlatformArtifactRelease(c.stdout, response)
+		},
+	}
+	cmd.Flags().Int64Var(&opts.FencingToken, "fencing-token", 0, "Current release fencing token")
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Verification reason")
+	cmd.Flags().BoolVar(&opts.AllowInitialLKG, "allow-initial-lkg", false, "Explicitly allow an initial shadow release to seed verified LKG")
+	cmd.Flags().BoolVar(&opts.Evidence.ConsumerConvergence, "consumer-convergence", false, "Required consumers converged")
+	cmd.Flags().BoolVar(&opts.Evidence.LocalProbe, "local-probe", false, "Local apply and serving probes passed")
+	cmd.Flags().BoolVar(&opts.Evidence.PublicSynthetic, "public-synthetic", false, "Public synthetic probes passed")
+	cmd.Flags().BoolVar(&opts.Evidence.WatchWindow, "watch-window", false, "Required watch window completed")
+	cmd.Flags().BoolVar(&opts.Evidence.BaselineMonotonic, "baseline-monotonic", false, "No new or worsened baseline blocker")
+	cmd.Flags().BoolVar(&opts.Evidence.DatabaseRollbackCompatible, "database-rollback-compatible", false, "Database remains rollback compatible")
+	cmd.Flags().StringVar(&opts.Evidence.ExpectedConsumerSetID, "expected-consumer-set", "", "Expected consumer set identifier")
+	cmd.Flags().StringArrayVar(&opts.Evidence.EvidenceRefs, "evidence-ref", nil, "Evidence reference (repeatable)")
 	return cmd
 }
 
@@ -366,6 +461,9 @@ func writePlatformArtifactRelease(w io.Writer, response platformArtifactReleaseE
 		kvPair{Key: "release", Value: response.Release.ID},
 		kvPair{Key: "channel", Value: response.Release.ReleaseChannel},
 		kvPair{Key: "status", Value: response.Release.Status},
+		kvPair{Key: "verification_state", Value: firstNonEmpty(response.Release.VerificationState, "-")},
+		kvPair{Key: "fencing_token", Value: fmt.Sprintf("%d", response.Release.FencingToken)},
+		kvPair{Key: "pinned_rollback_generation", Value: firstNonEmpty(response.Release.PinnedRollbackGeneration, "-")},
 		kvPair{Key: "message", Value: response.Message.ID},
 		kvPair{Key: "lkg_generation", Value: platformLKGGeneration(response.LKG)},
 	)
@@ -440,6 +538,8 @@ func writePlatformLKG(w io.Writer, lkg *model.PlatformLKGSnapshot) error {
 		kvPair{Key: "scope", Value: lkg.ScopeKey},
 		kvPair{Key: "generation", Value: lkg.Generation},
 		kvPair{Key: "content_hash", Value: lkg.ContentHash},
+		kvPair{Key: "verified_by_release", Value: firstNonEmpty(lkg.VerifiedByReleaseID, "-")},
+		kvPair{Key: "evidence_hash", Value: firstNonEmpty(lkg.VerificationEvidenceHash, "-")},
 		kvPair{Key: "expires_at", Value: formatTime(lkg.ExpiresAt)},
 	)
 }

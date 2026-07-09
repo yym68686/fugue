@@ -111,8 +111,15 @@ func (s *Server) handlePromoteGatePolicy(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
+	releaseChannel := model.PlatformArtifactReleaseChannelFull
+	if currentLKG, lkgErr := s.store.GetPlatformLKG(model.PlatformArtifactKindGatePolicyRegistry, "global"); lkgErr != nil {
+		s.writeStoreError(w, lkgErr)
+		return
+	} else if currentLKG == nil {
+		releaseChannel = model.PlatformArtifactReleaseChannelShadow
+	}
 	artifact, release, message, lkg, err := s.store.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		ReleaseChannel: releaseChannel,
 		Reason:         firstNonEmpty(strings.TrimSpace(req.Reason), "gate policy promotion"),
 	}, principal)
 	if err != nil {
@@ -135,19 +142,9 @@ func (s *Server) handlePromoteGatePolicy(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) gatePolicyRegistry() []model.GatePolicy {
 	policies := defaultGatePolicies()
-	artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{
-		ArtifactKind: model.PlatformArtifactKindGatePolicyRegistry,
-		Status:       model.PlatformArtifactStatusValidated,
-		Limit:        20,
-	})
-	if err == nil {
-		for _, artifact := range artifacts {
-			overrides, ok := gatePoliciesFromArtifact(artifact)
-			if !ok || len(overrides) == 0 {
-				continue
-			}
+	if artifact, ok, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindGatePolicyRegistry, "global"); err == nil && ok {
+		if overrides, valid := gatePoliciesFromArtifact(artifact); valid && len(overrides) > 0 {
 			policies = mergeGatePolicies(policies, overrides)
-			break
 		}
 	}
 	for index := range policies {

@@ -1493,6 +1493,35 @@ paths:
                 $ref: "#/components/schemas/PlatformArtifactReleaseResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/artifact-releases/{release_id}/verify-lkg:
+    post:
+      operationId: verifyPlatformArtifactReleaseLKG
+      summary: Verify Platform Artifact Release And Promote LKG
+      tags: [Admin]
+      x-fugue-handler: handleVerifyPlatformArtifactReleaseLKG
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: release_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformArtifactVerifyLKGRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformArtifactReleaseResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/consumers:
     get:
       operationId: listPlatformArtifactConsumers
@@ -23701,6 +23730,34 @@ components:
         status:
           type: string
           enum: [active, superseded, rolled_back]
+        lane_key:
+          type: string
+        fencing_token:
+          type: integer
+          format: int64
+        version:
+          type: integer
+          format: int64
+        idempotency_key:
+          type: string
+        candidate_generation:
+          type: string
+        serving_unverified_generation:
+          type: string
+        verified_lkg_generation:
+          type: string
+        pinned_rollback_generation:
+          type: string
+        verification_state:
+          type: string
+          enum: [serving_unverified, verified, failed]
+        verification_evidence:
+          type: object
+          additionalProperties:
+            type: string
+        verified_at:
+          type: string
+          format: date-time
         rollback_target_generation:
           type: string
         canary_rule_ref:
@@ -23744,7 +23801,7 @@ components:
           enum: [shadow, gray, full]
         message_type:
           type: string
-          enum: [release, rollback]
+          enum: [release, rollback, verified_lkg]
         created_at:
           type: string
           format: date-time
@@ -23815,6 +23872,10 @@ components:
           type: string
         content_hash:
           type: string
+        verified_by_release_id:
+          type: string
+        verification_evidence_hash:
+          type: string
         expires_at:
           type: string
           format: date-time
@@ -23864,6 +23925,8 @@ components:
           type: boolean
         reason:
           type: string
+        idempotency_key:
+          type: string
     PlatformArtifactRollbackRequest:
       type: object
       additionalProperties: false
@@ -23880,6 +23943,45 @@ components:
           type: boolean
         canary_rule_ref:
           type: string
+    PlatformArtifactVerificationEvidence:
+      type: object
+      additionalProperties: false
+      required: [consumer_convergence, local_probe, public_synthetic, watch_window, baseline_monotonic, database_rollback_compatible]
+      properties:
+        consumer_convergence:
+          type: boolean
+        local_probe:
+          type: boolean
+        public_synthetic:
+          type: boolean
+        watch_window:
+          type: boolean
+        baseline_monotonic:
+          type: boolean
+        database_rollback_compatible:
+          type: boolean
+        expected_consumer_set_id:
+          type: string
+        evidence_refs:
+          type: array
+          items:
+            type: string
+    PlatformArtifactVerifyLKGRequest:
+      type: object
+      additionalProperties: false
+      required: [fencing_token, reason, evidence]
+      properties:
+        fencing_token:
+          type: integer
+          format: int64
+          minimum: 1
+        reason:
+          type: string
+          minLength: 1
+        allow_initial_lkg:
+          type: boolean
+        evidence:
+          $ref: "#/components/schemas/PlatformArtifactVerificationEvidence"
     PlatformConsumerHeartbeatRequest:
       type: object
       additionalProperties: false

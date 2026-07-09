@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformsafety"
 )
 
 type platformStateDB interface {
@@ -210,12 +212,73 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
-	if artifact.Status != model.PlatformArtifactStatusValidated && !req.ForcePublish {
+	if artifact.Status != model.PlatformArtifactStatusValidated {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
-	entry := buildPlatformArtifactReleaseLedgerEntry(artifact, channel, "", req.CanaryRuleRef, req.Reason, model.PlatformReleaseMessageTypeRelease, principal, now)
+	laneKey := platformsafety.ReleaseLaneKey(artifact.ArtifactKind, artifact.ScopeKey, channel)
+	if strings.TrimSpace(req.IdempotencyKey) != "" {
+		if existingRelease, found, err := pgGetPlatformArtifactReleaseByIdempotency(ctx, tx, laneKey, req.IdempotencyKey); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		} else if found {
+			existingArtifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, existingRelease.ArtifactID, false)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+			}
+			existingMessage, err := pgGetLatestPlatformReleaseMessage(ctx, tx, existingRelease.ID)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			}
+			existingLKG, err := pgGetVerifiedPlatformLKGForUpdate(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, now)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			}
+			return existingArtifact, existingRelease, existingMessage, existingLKG, nil
+		}
+	}
+	lkg, err := pgGetVerifiedPlatformLKGForUpdate(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, now)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	pinnedRollbackGeneration := ""
+	if lkg != nil {
+		pinnedRollbackGeneration = lkg.Generation
+	}
+	if decision := platformsafety.EvaluateArtifactRelease(artifact, channel, pinnedRollbackGeneration); !decision.Pass {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	lane, err := pgNextPlatformReleaseLane(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if strings.TrimSpace(req.IdempotencyKey) != "" {
+		if existingRelease, found, err := pgGetPlatformArtifactReleaseByIdempotency(ctx, tx, laneKey, req.IdempotencyKey); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		} else if found {
+			existingArtifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, existingRelease.ArtifactID, false)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+			}
+			existingMessage, err := pgGetLatestPlatformReleaseMessage(ctx, tx, existingRelease.ID)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			}
+			return existingArtifact, existingRelease, existingMessage, lkg, nil
+		}
+	}
+	entry := buildPlatformArtifactReleaseLedgerEntry(
+		artifact,
+		channel,
+		pinnedRollbackGeneration,
+		req.CanaryRuleRef,
+		req.Reason,
+		req.IdempotencyKey,
+		model.PlatformReleaseMessageTypeRelease,
+		principal,
+		lane,
+		now,
+	)
 	release := entry.Release
 	if err := pgSupersedePlatformReleases(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -227,12 +290,8 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	var lkg *model.PlatformLKGSnapshot
-	if entry.LKG != nil {
-		if _, err := pgUpsertPlatformLKGSnapshot(ctx, tx, *entry.LKG); err != nil {
-			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
-		}
-		lkg = entry.LKG
+	if err := pgSetPlatformReleaseLaneActive(ctx, tx, lane.LaneKey, release.ID, lane.FencingToken, now); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -256,12 +315,38 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
-	if target.Status != model.PlatformArtifactStatusValidated && !req.ForcePublish {
+	if target.Status != model.PlatformArtifactStatusValidated {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
-	entry := buildPlatformArtifactReleaseLedgerEntry(target, channel, current.Generation, req.CanaryRuleRef, req.Reason, model.PlatformReleaseMessageTypeRollback, principal, now)
+	lkg, err := pgGetVerifiedPlatformLKGForUpdate(ctx, tx, target.ArtifactKind, target.ScopeKey, now)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	pinnedRollbackGeneration := ""
+	if lkg != nil {
+		pinnedRollbackGeneration = lkg.Generation
+	}
+	if decision := platformsafety.EvaluateArtifactRelease(target, channel, pinnedRollbackGeneration); !decision.Pass {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	lane, err := pgNextPlatformReleaseLane(ctx, tx, target.ArtifactKind, target.ScopeKey, channel, now)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	entry := buildPlatformArtifactReleaseLedgerEntry(
+		target,
+		channel,
+		pinnedRollbackGeneration,
+		req.CanaryRuleRef,
+		req.Reason,
+		"",
+		model.PlatformReleaseMessageTypeRollback,
+		principal,
+		lane,
+		now,
+	)
 	release := entry.Release
 	if err := pgSupersedePlatformReleases(ctx, tx, target.ArtifactKind, target.ScopeKey, channel, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -273,17 +358,101 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	var lkg *model.PlatformLKGSnapshot
-	if entry.LKG != nil {
-		if _, err := pgUpsertPlatformLKGSnapshot(ctx, tx, *entry.LKG); err != nil {
-			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
-		}
-		lkg = entry.LKG
+	if err := pgSetPlatformReleaseLaneActive(ctx, tx, lane.LaneKey, release.ID, lane.FencingToken, now); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
 	return target, release, message, lkg, nil
+}
+
+func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
+	_ = principal
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	defer tx.Rollback()
+	releaseSnapshot, err := pgGetPlatformArtifactRelease(ctx, tx, releaseID, false)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+	}
+	// Release/rollback transactions lock LKG -> lane -> active release. Keep the
+	// same order here so verification cannot deadlock with a newer release.
+	currentLKG, err := pgGetVerifiedPlatformLKGForUpdate(ctx, tx, releaseSnapshot.ArtifactKind, releaseSnapshot.ScopeKey, time.Now().UTC())
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	lane, err := pgGetPlatformReleaseLaneForUpdate(ctx, tx, releaseSnapshot.LaneKey)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	release, err := pgGetPlatformArtifactRelease(ctx, tx, releaseID, true)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+	}
+	if release.Status != model.PlatformArtifactReleaseStatusActive ||
+		release.LaneKey != releaseSnapshot.LaneKey ||
+		release.ArtifactKind != releaseSnapshot.ArtifactKind ||
+		release.ScopeKey != releaseSnapshot.ScopeKey {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	if lane.Frozen || lane.ActiveReleaseID != release.ID || lane.FencingToken != release.FencingToken {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	requestEvidenceHash := platformsafety.VerificationEvidenceHash(req)
+	if release.VerificationState == model.PlatformArtifactVerificationStateVerified {
+		if currentLKG != nil &&
+			currentLKG.Generation == release.Generation &&
+			currentLKG.VerifiedByReleaseID == release.ID &&
+			currentLKG.VerificationEvidenceHash == requestEvidenceHash {
+			artifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, release.ArtifactID, false)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+			}
+			message, err := pgGetLatestPlatformReleaseMessage(ctx, tx, release.ID)
+			if err != nil {
+				return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+			}
+			return artifact, release, message, currentLKG, nil
+		}
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	artifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, release.ArtifactID, false)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
+	}
+	if decision := platformsafety.EvaluateLKGPromotion(release, req, currentLKG != nil); !decision.Pass {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
+	now := time.Now().UTC()
+	snapshot := buildPlatformLKGSnapshot(artifact, release.ID, requestEvidenceHash, now)
+	lkg, err := pgUpsertPlatformLKGSnapshot(ctx, tx, snapshot)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	release.VerificationState = model.PlatformArtifactVerificationStateVerified
+	release.VerificationEvidence = platformsafety.VerificationEvidenceMap(req)
+	release.VerifiedLKGGeneration = artifact.Generation
+	release.ServingUnverifiedGeneration = ""
+	release.VerifiedAt = &now
+	release.Version++
+	release.UpdatedAt = now
+	release, err = pgUpdatePlatformArtifactReleaseVerification(ctx, tx, release)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	message := buildPlatformReleaseMessage(artifact, release, model.PlatformReleaseMessageTypeVerifiedLKG, now)
+	if _, err := pgInsertPlatformReleaseMessage(ctx, tx, message); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	return artifact, release, message, &lkg, nil
 }
 
 func pgGetPlatformArtifactByGenerationForUpdate(ctx context.Context, db platformStateDB, kind, scopeKey, generation string) (model.PlatformArtifact, error) {
@@ -295,6 +464,189 @@ FROM fugue_platform_artifacts
 WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3
 LIMIT 1
 FOR UPDATE`, kind, scopeKey, generation))
+}
+
+func pgNextPlatformReleaseLane(ctx context.Context, db platformStateDB, kind, scopeKey, channel string, now time.Time) (model.PlatformReleaseLane, error) {
+	laneKey := platformsafety.ReleaseLaneKey(kind, scopeKey, channel)
+	lane, err := scanPlatformReleaseLane(db.QueryRowContext(ctx, `
+INSERT INTO fugue_platform_release_lanes (
+	lane_key, artifact_kind, scope_key, release_channel, fencing_token, version,
+	active_release_id, frozen, freeze_reason, updated_at
+) VALUES ($1, $2, $3, $4, 1, 1, '', FALSE, '', $5)
+ON CONFLICT (lane_key) DO UPDATE SET
+	fencing_token = fugue_platform_release_lanes.fencing_token + 1,
+	version = fugue_platform_release_lanes.version + 1,
+	updated_at = EXCLUDED.updated_at
+WHERE fugue_platform_release_lanes.frozen = FALSE
+RETURNING lane_key, artifact_kind, scope_key, release_channel, fencing_token, version,
+	active_release_id, frozen, freeze_reason, updated_at`,
+		laneKey, kind, scopeKey, channel, now))
+	if err != nil {
+		if mapDBErr(err) == ErrNotFound {
+			return model.PlatformReleaseLane{}, ErrConflict
+		}
+		return model.PlatformReleaseLane{}, mapDBErr(err)
+	}
+	return lane, nil
+}
+
+func pgSetPlatformReleaseLaneActive(ctx context.Context, db platformStateDB, laneKey, releaseID string, fencingToken int64, now time.Time) error {
+	result, err := db.ExecContext(ctx, `
+UPDATE fugue_platform_release_lanes
+SET active_release_id = $2, updated_at = $4
+WHERE lane_key = $1 AND fencing_token = $3 AND frozen = FALSE`,
+		laneKey, releaseID, fencingToken, now)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func pgGetPlatformReleaseLaneForUpdate(ctx context.Context, db platformStateDB, laneKey string) (model.PlatformReleaseLane, error) {
+	lane, err := scanPlatformReleaseLane(db.QueryRowContext(ctx, `
+SELECT lane_key, artifact_kind, scope_key, release_channel, fencing_token, version,
+	active_release_id, frozen, freeze_reason, updated_at
+FROM fugue_platform_release_lanes
+WHERE lane_key = $1
+FOR UPDATE`, laneKey))
+	if err != nil {
+		return model.PlatformReleaseLane{}, mapDBErr(err)
+	}
+	return lane, nil
+}
+
+func pgGetPlatformArtifactRelease(ctx context.Context, db platformStateDB, releaseID string, forUpdate bool) (model.PlatformArtifactRelease, error) {
+	query := `
+SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+	release_channel, status, lane_key, fencing_token, version, idempotency_key,
+	candidate_generation, serving_unverified_generation, verified_lkg_generation,
+	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+	rollback_target_generation, canary_rule_ref, reason,
+	released_by_type, released_by_id, released_at, created_at, updated_at
+FROM fugue_platform_artifact_releases
+WHERE id = $1`
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	release, err := scanPlatformArtifactRelease(db.QueryRowContext(ctx, query, releaseID))
+	if err != nil {
+		return model.PlatformArtifactRelease{}, mapDBErr(err)
+	}
+	return release, nil
+}
+
+func pgGetPlatformArtifactReleaseByIdempotency(ctx context.Context, db platformStateDB, laneKey, idempotencyKey string) (model.PlatformArtifactRelease, bool, error) {
+	release, err := scanPlatformArtifactRelease(db.QueryRowContext(ctx, `
+SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+	release_channel, status, lane_key, fencing_token, version, idempotency_key,
+	candidate_generation, serving_unverified_generation, verified_lkg_generation,
+	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+	rollback_target_generation, canary_rule_ref, reason,
+	released_by_type, released_by_id, released_at, created_at, updated_at
+FROM fugue_platform_artifact_releases
+WHERE lane_key = $1 AND idempotency_key = $2
+LIMIT 1`, laneKey, strings.TrimSpace(idempotencyKey)))
+	if err != nil {
+		if mapDBErr(err) == ErrNotFound {
+			return model.PlatformArtifactRelease{}, false, nil
+		}
+		return model.PlatformArtifactRelease{}, false, mapDBErr(err)
+	}
+	return release, true, nil
+}
+
+func pgGetLatestPlatformReleaseMessage(ctx context.Context, db platformStateDB, releaseID string) (model.PlatformReleaseMessage, error) {
+	message, err := scanPlatformReleaseMessage(db.QueryRowContext(ctx, `
+SELECT id, release_id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+	release_channel, message_type, created_at, expires_at, ack_count
+FROM fugue_platform_release_messages
+WHERE release_id = $1
+ORDER BY created_at DESC, id ASC
+LIMIT 1`, releaseID))
+	if err != nil {
+		return model.PlatformReleaseMessage{}, mapDBErr(err)
+	}
+	return message, nil
+}
+
+func pgGetPlatformLKGForUpdate(ctx context.Context, db platformStateDB, kind, scopeKey string) (*model.PlatformLKGSnapshot, error) {
+	snapshot, err := scanPlatformLKGSnapshot(db.QueryRowContext(ctx, `
+SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+	content_hash, verified_by_release_id, verification_evidence_hash,
+	expires_at, created_at, updated_at
+FROM fugue_platform_lkg_snapshots
+WHERE artifact_kind = $1 AND scope_key = $2
+LIMIT 1
+FOR UPDATE`, kind, scopeKey))
+	if err != nil {
+		if mapDBErr(err) == ErrNotFound {
+			return nil, nil
+		}
+		return nil, mapDBErr(err)
+	}
+	return &snapshot, nil
+}
+
+func pgGetVerifiedPlatformLKGForUpdate(ctx context.Context, db platformStateDB, kind, scopeKey string, now time.Time) (*model.PlatformLKGSnapshot, error) {
+	snapshot, err := pgGetPlatformLKGForUpdate(ctx, db, kind, scopeKey)
+	if err != nil || snapshot == nil {
+		return snapshot, err
+	}
+	artifact, err := pgGetPlatformArtifactForUpdate(ctx, db, snapshot.ArtifactID, false)
+	if err != nil {
+		if mapDBErr(err) == ErrNotFound {
+			return nil, nil
+		}
+		return nil, mapDBErr(err)
+	}
+	if !platformLKGSnapshotMatchesArtifact(*snapshot, artifact, now) {
+		return nil, nil
+	}
+	return snapshot, nil
+}
+
+func pgUpdatePlatformArtifactReleaseVerification(ctx context.Context, db platformStateDB, release model.PlatformArtifactRelease) (model.PlatformArtifactRelease, error) {
+	evidenceJSON, err := marshalJSON(release.VerificationEvidence)
+	if err != nil {
+		return model.PlatformArtifactRelease{}, err
+	}
+	out, err := scanPlatformArtifactRelease(db.QueryRowContext(ctx, `
+UPDATE fugue_platform_artifact_releases
+SET serving_unverified_generation = $2,
+	verified_lkg_generation = $3,
+	verification_state = $4,
+	verification_evidence_json = $5::jsonb,
+	verified_at = $6,
+	version = $7,
+	updated_at = $8
+WHERE id = $1 AND fencing_token = $9 AND status = $10
+RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+	release_channel, status, lane_key, fencing_token, version, idempotency_key,
+	candidate_generation, serving_unverified_generation, verified_lkg_generation,
+	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+	rollback_target_generation, canary_rule_ref, reason,
+	released_by_type, released_by_id, released_at, created_at, updated_at`,
+		release.ID,
+		release.ServingUnverifiedGeneration,
+		release.VerifiedLKGGeneration,
+		release.VerificationState,
+		evidenceJSON,
+		release.VerifiedAt,
+		release.Version,
+		release.UpdatedAt,
+		release.FencingToken,
+		model.PlatformArtifactReleaseStatusActive))
+	if err != nil {
+		return model.PlatformArtifactRelease{}, mapDBErr(err)
+	}
+	return out, nil
 }
 
 func pgSupersedePlatformReleases(ctx context.Context, db platformStateDB, kind, scopeKey, channel string, now time.Time) error {
@@ -311,20 +663,36 @@ func pgInsertPlatformArtifactRelease(ctx context.Context, db platformStateDB, re
 	if err != nil {
 		return model.PlatformArtifactRelease{}, err
 	}
+	verificationEvidenceJSON, err := marshalJSON(release.VerificationEvidence)
+	if err != nil {
+		return model.PlatformArtifactRelease{}, err
+	}
 	out, err := scanPlatformArtifactRelease(db.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_artifact_releases (
 	id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	release_channel, status, rollback_target_generation, canary_rule_ref, reason,
+	release_channel, status, lane_key, fencing_token, version, idempotency_key,
+	candidate_generation, serving_unverified_generation, verified_lkg_generation,
+	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+	rollback_target_generation, canary_rule_ref, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5::jsonb, $6,
-	$7, $8, $9, $10, $11,
-	$12, $13, $14, $15, $16
+	$7, $8, $9, $10, $11, $12,
+	$13, $14, $15,
+	$16, $17, $18::jsonb, $19,
+	$20, $21, $22,
+	$23, $24, $25, $26, $27
 ) RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	release_channel, status, rollback_target_generation, canary_rule_ref, reason,
+	release_channel, status, lane_key, fencing_token, version, idempotency_key,
+	candidate_generation, serving_unverified_generation, verified_lkg_generation,
+	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+	rollback_target_generation, canary_rule_ref, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at`,
 		release.ID, release.ArtifactID, release.ArtifactKind, release.ScopeKey, scopeJSON, release.Generation,
-		release.ReleaseChannel, release.Status, release.RollbackTargetGeneration, release.CanaryRuleRef, release.Reason,
+		release.ReleaseChannel, release.Status, release.LaneKey, release.FencingToken, release.Version, release.IdempotencyKey,
+		release.CandidateGeneration, release.ServingUnverifiedGeneration, release.VerifiedLKGGeneration,
+		release.PinnedRollbackGeneration, release.VerificationState, verificationEvidenceJSON, release.VerifiedAt,
+		release.RollbackTargetGeneration, release.CanaryRuleRef, release.Reason,
 		release.ReleasedByType, release.ReleasedByID, release.ReleasedAt, release.CreatedAt, release.UpdatedAt))
 	if err != nil {
 		return model.PlatformArtifactRelease{}, mapDBErr(err)
@@ -362,22 +730,28 @@ func pgUpsertPlatformLKGSnapshot(ctx context.Context, db platformStateDB, snapsh
 	out, err := scanPlatformLKGSnapshot(db.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_lkg_snapshots (
 	id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	content_hash, expires_at, created_at, updated_at
+	content_hash, verified_by_release_id, verification_evidence_hash,
+	expires_at, created_at, updated_at
 ) VALUES (
 	$1, $2, $3, $4, $5::jsonb, $6,
-	$7, $8, $9, $10
+	$7, $8, $9,
+	$10, $11, $12
 ) ON CONFLICT (artifact_kind, scope_key) DO UPDATE SET
 	id = EXCLUDED.id,
 	artifact_id = EXCLUDED.artifact_id,
 	scope_json = EXCLUDED.scope_json,
 	generation = EXCLUDED.generation,
 	content_hash = EXCLUDED.content_hash,
+	verified_by_release_id = EXCLUDED.verified_by_release_id,
+	verification_evidence_hash = EXCLUDED.verification_evidence_hash,
 	expires_at = EXCLUDED.expires_at,
 	updated_at = EXCLUDED.updated_at
 RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	content_hash, expires_at, created_at, updated_at`,
+	content_hash, verified_by_release_id, verification_evidence_hash,
+	expires_at, created_at, updated_at`,
 		snapshot.ID, snapshot.ArtifactID, snapshot.ArtifactKind, snapshot.ScopeKey, scopeJSON, snapshot.Generation,
-		snapshot.ContentHash, snapshot.ExpiresAt, snapshot.CreatedAt, snapshot.UpdatedAt))
+		snapshot.ContentHash, snapshot.VerifiedByReleaseID, snapshot.VerificationEvidenceHash,
+		snapshot.ExpiresAt, snapshot.CreatedAt, snapshot.UpdatedAt))
 	if err != nil {
 		return model.PlatformLKGSnapshot{}, mapDBErr(err)
 	}
@@ -389,7 +763,10 @@ func (s *Store) pgGetActivePlatformArtifact(kind, scopeKey, channel string) (mod
 	defer cancel()
 	release, err := scanPlatformArtifactRelease(s.db.QueryRowContext(ctx, `
 SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	release_channel, status, rollback_target_generation, canary_rule_ref, reason,
+	release_channel, status, lane_key, fencing_token, version, idempotency_key,
+	candidate_generation, serving_unverified_generation, verified_lkg_generation,
+	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+	rollback_target_generation, canary_rule_ref, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at
 FROM fugue_platform_artifact_releases
 WHERE artifact_kind = $1 AND scope_key = $2 AND release_channel = $3 AND status = $4
@@ -519,7 +896,8 @@ func (s *Store) pgGetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnaps
 	defer cancel()
 	snapshot, err := scanPlatformLKGSnapshot(s.db.QueryRowContext(ctx, `
 SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	content_hash, expires_at, created_at, updated_at
+	content_hash, verified_by_release_id, verification_evidence_hash,
+	expires_at, created_at, updated_at
 FROM fugue_platform_lkg_snapshots
 WHERE artifact_kind = $1 AND scope_key = $2
 LIMIT 1`, kind, scopeKey))
@@ -599,7 +977,7 @@ func scanPlatformArtifactContent(scanner sqlScanner) (model.PlatformArtifactCont
 
 func scanPlatformArtifactRelease(scanner sqlScanner) (model.PlatformArtifactRelease, error) {
 	var release model.PlatformArtifactRelease
-	var scopeRaw []byte
+	var scopeRaw, verificationEvidenceRaw []byte
 	if err := scanner.Scan(
 		&release.ID,
 		&release.ArtifactID,
@@ -609,6 +987,17 @@ func scanPlatformArtifactRelease(scanner sqlScanner) (model.PlatformArtifactRele
 		&release.Generation,
 		&release.ReleaseChannel,
 		&release.Status,
+		&release.LaneKey,
+		&release.FencingToken,
+		&release.Version,
+		&release.IdempotencyKey,
+		&release.CandidateGeneration,
+		&release.ServingUnverifiedGeneration,
+		&release.VerifiedLKGGeneration,
+		&release.PinnedRollbackGeneration,
+		&release.VerificationState,
+		&verificationEvidenceRaw,
+		&release.VerifiedAt,
 		&release.RollbackTargetGeneration,
 		&release.CanaryRuleRef,
 		&release.Reason,
@@ -624,8 +1013,32 @@ func scanPlatformArtifactRelease(scanner sqlScanner) (model.PlatformArtifactRele
 	if err != nil {
 		return model.PlatformArtifactRelease{}, err
 	}
+	verificationEvidence, err := decodeJSONValue[map[string]string](verificationEvidenceRaw)
+	if err != nil {
+		return model.PlatformArtifactRelease{}, err
+	}
 	release.Scope = scope
+	release.VerificationEvidence = verificationEvidence
 	return release, nil
+}
+
+func scanPlatformReleaseLane(scanner sqlScanner) (model.PlatformReleaseLane, error) {
+	var lane model.PlatformReleaseLane
+	if err := scanner.Scan(
+		&lane.LaneKey,
+		&lane.ArtifactKind,
+		&lane.ScopeKey,
+		&lane.ReleaseChannel,
+		&lane.FencingToken,
+		&lane.Version,
+		&lane.ActiveReleaseID,
+		&lane.Frozen,
+		&lane.FreezeReason,
+		&lane.UpdatedAt,
+	); err != nil {
+		return model.PlatformReleaseLane{}, mapDBErr(err)
+	}
+	return lane, nil
 }
 
 func scanPlatformReleaseMessage(scanner sqlScanner) (model.PlatformReleaseMessage, error) {
@@ -698,6 +1111,8 @@ func scanPlatformLKGSnapshot(scanner sqlScanner) (model.PlatformLKGSnapshot, err
 		&scopeRaw,
 		&snapshot.Generation,
 		&snapshot.ContentHash,
+		&snapshot.VerifiedByReleaseID,
+		&snapshot.VerificationEvidenceHash,
 		&snapshot.ExpiresAt,
 		&snapshot.CreatedAt,
 		&snapshot.UpdatedAt,

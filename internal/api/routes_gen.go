@@ -10,6 +10,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /install/join-cluster.sh", http.HandlerFunc(s.handleJoinClusterInstallScript))
 	mux.Handle("GET /install/node-updater.sh", http.HandlerFunc(s.handleNodeUpdaterInstallScript))
 	mux.Handle("GET /readyz", http.HandlerFunc(s.handleReadyz))
+	mux.Handle("POST /v1/admin/artifact-releases/{release_id}/verify-lkg", s.auth.RequireAPI(http.HandlerFunc(s.handleVerifyPlatformArtifactReleaseLKG)))
 	mux.Handle("GET /v1/admin/artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformArtifacts)))
 	mux.Handle("POST /v1/admin/artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleCreatePlatformArtifact)))
 	mux.Handle("GET /v1/admin/artifacts/{artifact_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetPlatformArtifact)))

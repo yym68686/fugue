@@ -104,7 +104,18 @@ func (c *CLI) newAdminGatePromoteCommand() *cobra.Command {
 			if err := writeGatePolicy(c.stdout, response.Policy); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(c.stdout, "\nartifact_generation=%s\nrelease_id=%s\n", response.Artifact.Generation, response.Release.ID)
+			_, err = fmt.Fprintf(
+				c.stdout,
+				"\nartifact_generation=%s\nrelease_id=%s\nrelease_channel=%s\nverification_state=%s\nfencing_token=%d\nverify_command=fugue admin artifact verify-lkg %s --fencing-token %d --reason %q\n",
+				response.Artifact.Generation,
+				response.Release.ID,
+				response.Release.ReleaseChannel,
+				firstNonEmpty(response.Release.VerificationState, "-"),
+				response.Release.FencingToken,
+				response.Release.ID,
+				response.Release.FencingToken,
+				"gate policy evidence verified",
+			)
 			return err
 		},
 	}

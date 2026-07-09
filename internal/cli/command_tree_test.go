@@ -706,11 +706,13 @@ func TestAdminReleaseGuardSignalAddPublishesPolicyArtifact(t *testing.T) {
 			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"draft","content_hash":"sha256:test","content":{"version":"v1","signals":[{"id":"sig_api","enabled":true,"owner_scope":"tenant_workload","gate_scope":"control_plane","mode":"hard_gate","subject":"app:api","check_name":"app_continuity_invariant","reason":"test"}]},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/artifacts/artifact_signal/validate":
 			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"results":[{"name":"schema","pass":true,"severity":"info"}],"pass":true,"dry_run":false}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/admin/artifacts/artifact_signal/lkg":
+			_, _ = w.Write([]byte(`{"lkg":null}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/artifacts/artifact_signal/release":
 			if err := json.NewDecoder(r.Body).Decode(&releaseBody); err != nil {
 				t.Fatalf("decode release artifact body: %v", err)
 			}
-			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"release":{"id":"release_signal","artifact_id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","release_channel":"full","status":"active","released_at":"2026-04-02T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"message":{"id":"msg_signal","release_id":"release_signal","artifact_id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","release_channel":"full","message_type":"release","created_at":"2026-04-02T00:00:00Z","ack_count":0}}`))
+			_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"release":{"id":"release_signal","artifact_id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","release_channel":"shadow","status":"active","fencing_token":1,"verification_state":"serving_unverified","released_at":"2026-04-02T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"message":{"id":"msg_signal","release_id":"release_signal","artifact_id":"artifact_signal","artifact_kind":"release_guard_policy","scope":{"scope_type":"global"},"scope_key":"global","generation":"release_signals_test","release_channel":"shadow","message_type":"release","created_at":"2026-04-02T00:00:00Z","ack_count":0}}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
@@ -736,11 +738,104 @@ func TestAdminReleaseGuardSignalAddPublishesPolicyArtifact(t *testing.T) {
 	if !ok || len(signals) != 1 {
 		t.Fatalf("expected one signal in artifact content, got %+v", createdBody.Content)
 	}
-	if releaseBody.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || releaseBody.Reason != "test" {
-		t.Fatalf("expected full release with reason, got %+v", releaseBody)
+	if releaseBody.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow || releaseBody.Reason != "test" || releaseBody.IdempotencyKey == "" {
+		t.Fatalf("expected initial shadow release with reason and idempotency key, got %+v", releaseBody)
 	}
-	if out := stdout.String(); !strings.Contains(out, "release_signals_test") || !strings.Contains(out, "artifact_signal") {
+	if out := stdout.String(); !strings.Contains(out, "release_signals_test") || !strings.Contains(out, "artifact_signal") || !strings.Contains(out, "verify-lkg release_signal") {
 		t.Fatalf("expected release signal publish output, got %q", out)
+	}
+}
+
+func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
+	t.Parallel()
+
+	var request model.PlatformArtifactVerifyLKGRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/artifact-releases/release_123/verify-lkg" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode verify request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"release":{"id":"release_123","artifact_id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","release_channel":"full","status":"active","fencing_token":9,"verification_state":"verified","verified_lkg_generation":"gen_2","released_at":"2026-04-02T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"message":{"id":"message_123","release_id":"release_123","artifact_id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","release_channel":"full","message_type":"verified_lkg","created_at":"2026-04-02T00:00:00Z","ack_count":0},"lkg":{"id":"lkg_123","artifact_id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","content_hash":"sha256:test","verified_by_release_id":"release_123","verification_evidence_hash":"sha256:evidence","expires_at":"2026-04-09T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "artifact", "verify-lkg", "release_123",
+		"--fencing-token", "9",
+		"--reason", "verified after canary",
+		"--consumer-convergence",
+		"--local-probe",
+		"--public-synthetic",
+		"--watch-window",
+		"--baseline-monotonic",
+		"--database-rollback-compatible",
+		"--evidence-ref", "probe:123",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run verify-lkg: %v; stderr=%s", err, stderr.String())
+	}
+	if request.FencingToken != 9 ||
+		!request.Evidence.ConsumerConvergence ||
+		!request.Evidence.LocalProbe ||
+		!request.Evidence.PublicSynthetic ||
+		!request.Evidence.WatchWindow ||
+		!request.Evidence.BaselineMonotonic ||
+		!request.Evidence.DatabaseRollbackCompatible ||
+		len(request.Evidence.EvidenceRefs) != 1 {
+		t.Fatalf("unexpected verification request: %+v", request)
+	}
+	if out := stdout.String(); !strings.Contains(out, "verification_state") || !strings.Contains(out, "verified") || !strings.Contains(out, "release_123") {
+		t.Fatalf("expected verified LKG output, got %q", out)
+	}
+}
+
+func TestAdminArtifactCreateReadsJSONContentFile(t *testing.T) {
+	t.Parallel()
+
+	contentPath := filepath.Join(t.TempDir(), "artifact.json")
+	if err := os.WriteFile(contentPath, []byte(`{"routes":[{"hostname":"api.example.test"}]}`), 0o600); err != nil {
+		t.Fatalf("write artifact content: %v", err)
+	}
+	var request model.PlatformArtifactCreateRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/artifacts" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode create request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global","key":"edge:test"},"scope_key":"edge:test","generation":"routes_123","status":"draft","content_hash":"sha256:test","content":{"routes":[{"hostname":"api.example.test"}]},"created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "artifact", "create",
+		"--kind", "edge_route_bundle",
+		"--scope", "edge:test",
+		"--generation", "routes_123",
+		"--file", contentPath,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run artifact create: %v; stderr=%s", err, stderr.String())
+	}
+	if request.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle ||
+		request.Scope.Key != "edge:test" ||
+		request.Generation != "routes_123" ||
+		request.Content["routes"] == nil {
+		t.Fatalf("unexpected artifact create request: %+v", request)
+	}
+	if out := stdout.String(); !strings.Contains(out, "artifact_123") || !strings.Contains(out, "routes_123") {
+		t.Fatalf("expected artifact output, got %q", out)
 	}
 }
 

@@ -30,12 +30,8 @@ func TestReleaseGuardStatusDetectsPlatformConsumerDrift(t *testing.T) {
 	if validate.Code != http.StatusOK {
 		t.Fatalf("expected validate status %d, got %d body=%s", http.StatusOK, validate.Code, validate.Body.String())
 	}
-	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
-	})
-	if release.Code != http.StatusOK {
-		t.Fatalf("expected release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
-	}
+	seedVerifiedPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	releaseAndVerifyFullPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
 
 	heartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/heartbeat", platformAdminKey, model.PlatformConsumerHeartbeatRequest{
 		ConsumerID:        "edge-worker-drift-test",
@@ -65,7 +61,7 @@ func TestReleaseGuardStatusDetectsPlatformConsumerDrift(t *testing.T) {
 	}
 }
 
-func TestReleaseGuardStatusBlocksInvalidActivePlatformArtifact(t *testing.T) {
+func TestPlatformSafetyKernelRejectsForcePublishingInvalidArtifact(t *testing.T) {
 	t.Parallel()
 
 	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -83,25 +79,12 @@ func TestReleaseGuardStatusBlocksInvalidActivePlatformArtifact(t *testing.T) {
 	mustDecodeJSON(t, create, &created)
 
 	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
 		ForcePublish:   true,
-		Reason:         "test guard must catch invalid active artifact",
+		Reason:         "test force publish cannot bypass hard invariants",
 	})
-	if release.Code != http.StatusOK {
-		t.Fatalf("expected force release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
-	}
-
-	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/release-guard/status", platformAdminKey, nil)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected release guard status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
-	}
-	var response model.ReleaseGuardStatusResponse
-	mustDecodeJSON(t, recorder, &response)
-	if response.Status.PlatformArtifactFailures != 1 || !response.Status.BlockRollout {
-		t.Fatalf("expected artifact validation failure to block rollout, got %+v", response.Status)
-	}
-	if !stringSliceContains(response.Status.BlockedReasons, "platform artifact validation failed: 1") {
-		t.Fatalf("expected artifact failure blocked reason, got %+v", response.Status.BlockedReasons)
+	if release.Code != http.StatusConflict {
+		t.Fatalf("force_publish must not bypass validation/hash safety, got %d body=%s", release.Code, release.Body.String())
 	}
 }
 
@@ -144,13 +127,8 @@ func TestReleaseGuardStatusIncludesExplicitReleaseSignals(t *testing.T) {
 		t.Fatalf("expected release guard policy validation to pass, got %+v", validation.Results)
 	}
 
-	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
-		Reason:         "activate test release signal",
-	})
-	if release.Code != http.StatusOK {
-		t.Fatalf("expected release status %d, got %d body=%s", http.StatusOK, release.Code, release.Body.String())
-	}
+	seedVerifiedPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
+	releaseAndVerifyFullPlatformArtifactAPI(t, server, platformAdminKey, created.Artifact.ID)
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/release-guard/status", platformAdminKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -203,6 +181,19 @@ func TestGatePolicyRegistryPromotionAndReleaseGuard(t *testing.T) {
 	mustDecodeJSON(t, promoted, &promotion)
 	if promotion.Policy.Mode != model.GatePolicyModeCanary || promotion.Artifact.ArtifactKind != model.PlatformArtifactKindGatePolicyRegistry || promotion.Release.ID == "" {
 		t.Fatalf("unexpected gate promotion response: %+v", promotion)
+	}
+	if promotion.Release.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+		t.Fatalf("first gate policy artifact must bootstrap through shadow, got %+v", promotion.Release)
+	}
+	verifyPlatformArtifactReleaseAPI(t, server, platformAdminKey, promotion.Release, true)
+	activeGate := performJSONRequest(t, server, http.MethodGet, "/v1/admin/gates/node.kube_proxy_rules", platformAdminKey, nil)
+	if activeGate.Code != http.StatusOK {
+		t.Fatalf("expected active gate status %d, got %d body=%s", http.StatusOK, activeGate.Code, activeGate.Body.String())
+	}
+	var activeGateResponse model.GatePolicyResponse
+	mustDecodeJSON(t, activeGate, &activeGateResponse)
+	if activeGateResponse.Policy.Mode != model.GatePolicyModeCanary {
+		t.Fatalf("verified gate policy did not become active: %+v", activeGateResponse.Policy)
 	}
 
 	statusRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/admin/release-guard/status", platformAdminKey, nil)

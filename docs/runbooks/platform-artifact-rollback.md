@@ -26,11 +26,27 @@ fugue admin artifact rollback <current-artifact-id> \
 ```
 
 Use full-channel rollback only when the previous generation is validated and
-compatible. Gray rollback must not replace full-channel LKG.
+compatible. A rollback release also enters `serving_unverified`; it does not
+replace verified LKG until rollback verification succeeds. Gray rollback must
+not replace full-channel LKG.
+
+```bash
+fugue admin artifact verify-lkg <rollback-release-id> \
+  --fencing-token <token> \
+  --consumer-convergence \
+  --local-probe \
+  --public-synthetic \
+  --watch-window \
+  --baseline-monotonic \
+  --database-rollback-compatible \
+  --evidence-ref <ref> \
+  --reason "<rollback verified>"
+```
 
 ## Verification
 
 - A rollback release record exists.
 - Release message type is `rollback`.
 - Consumers converge to the rollback generation.
-- LKG generation matches the active full release.
+- A later `verified_lkg` message exists.
+- LKG generation changes only after rollback verification.

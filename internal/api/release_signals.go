@@ -17,7 +17,7 @@ func (s *Server) activeReleaseSignalPolicy() (model.ReleaseSignalPolicy, error) 
 	if s == nil || s.store == nil {
 		return policy, nil
 	}
-	artifact, _, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseGuardPolicy, releaseSignalPolicyScopeKey, model.PlatformArtifactReleaseChannelFull)
+	artifact, found, err := s.verifiedPlatformArtifactForScope(model.PlatformArtifactKindReleaseGuardPolicy, releaseSignalPolicyScopeKey)
 	if err != nil {
 		return policy, err
 	}

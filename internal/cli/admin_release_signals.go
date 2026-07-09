@@ -103,14 +103,14 @@ func (c *CLI) newAdminReleaseGuardSignalsAddCommand() *cobra.Command {
 				return err
 			}
 			policy = upsertReleaseSignal(policy, signal)
-			artifact, err := publishReleaseSignalPolicy(client, policy, opts.Reason)
+			artifact, release, err := publishReleaseSignalPolicy(client, policy, opts.Reason)
 			if err != nil {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact, "policy": policy, "signal": signal})
+				return writeJSON(c.stdout, map[string]any{"artifact": artifact, "release": release, "policy": policy, "signal": signal})
 			}
-			return writeReleaseSignalPublish(c.stdout, artifact, policy)
+			return writeReleaseSignalPublish(c.stdout, artifact, release, policy)
 		},
 	}
 	cmd.Flags().StringVar(&opts.Name, "name", "", "Human-readable signal name")
@@ -148,14 +148,14 @@ func (c *CLI) newAdminReleaseGuardSignalsRemoveCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			artifact, err := publishReleaseSignalPolicy(client, policy, opts.Reason)
+			artifact, release, err := publishReleaseSignalPolicy(client, policy, opts.Reason)
 			if err != nil {
 				return err
 			}
 			if c.wantsJSON() {
-				return writeJSON(c.stdout, map[string]any{"artifact": artifact, "policy": policy, "removed": removed})
+				return writeJSON(c.stdout, map[string]any{"artifact": artifact, "release": release, "policy": policy, "removed": removed})
 			}
-			return writeReleaseSignalPublish(c.stdout, artifact, policy)
+			return writeReleaseSignalPublish(c.stdout, artifact, release, policy)
 		},
 	}
 	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Audit reason for publishing the release guard policy")
@@ -167,10 +167,14 @@ func loadReleaseSignalPolicy(client *Client) (model.ReleaseSignalPolicy, error) 
 	if err != nil {
 		return model.ReleaseSignalPolicy{}, err
 	}
-	if response.Artifact == nil {
+	if response.LKG == nil {
 		return model.ReleaseSignalPolicy{Version: "v1"}, nil
 	}
-	return releaseSignalPolicyFromArtifact(*response.Artifact)
+	artifact, err := client.GetPlatformArtifact(response.LKG.ArtifactID)
+	if err != nil {
+		return model.ReleaseSignalPolicy{}, err
+	}
+	return releaseSignalPolicyFromArtifact(artifact)
 }
 
 func releaseSignalPolicyFromArtifact(artifact model.PlatformArtifact) (model.ReleaseSignalPolicy, error) {
@@ -219,10 +223,10 @@ func removeReleaseSignal(policy model.ReleaseSignalPolicy, id string) (model.Rel
 	return policy, model.ReleaseSignal{}, fmt.Errorf("release signal %q not found", id)
 }
 
-func publishReleaseSignalPolicy(client *Client, policy model.ReleaseSignalPolicy, reason string) (model.PlatformArtifact, error) {
+func publishReleaseSignalPolicy(client *Client, policy model.ReleaseSignalPolicy, reason string) (model.PlatformArtifact, model.PlatformArtifactRelease, error) {
 	content, err := releaseSignalPolicyContent(policy)
 	if err != nil {
-		return model.PlatformArtifact{}, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
 	generation := "release_signals_" + time.Now().UTC().Format("20060102T150405.000000000Z")
 	artifact, err := client.CreatePlatformArtifact(model.PlatformArtifactCreateRequest{
@@ -235,23 +239,32 @@ func publishReleaseSignalPolicy(client *Client, policy model.ReleaseSignalPolicy
 		},
 	})
 	if err != nil {
-		return model.PlatformArtifact{}, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
 	validation, err := client.ValidatePlatformArtifact(artifact.ID, false)
 	if err != nil {
-		return model.PlatformArtifact{}, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
 	if !validation.Pass {
-		return model.PlatformArtifact{}, fmt.Errorf("release guard policy validation failed")
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, fmt.Errorf("release guard policy validation failed")
+	}
+	channel := model.PlatformArtifactReleaseChannelFull
+	lkg, err := client.GetPlatformArtifactLKG(artifact.ID)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
+	}
+	if lkg == nil {
+		channel = model.PlatformArtifactReleaseChannelShadow
 	}
 	release, err := client.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		ReleaseChannel: channel,
 		Reason:         strings.TrimSpace(reason),
+		IdempotencyKey: "release-signal-" + generation,
 	})
 	if err != nil {
-		return model.PlatformArtifact{}, err
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
-	return release.Artifact, nil
+	return release.Artifact, release.Release, nil
 }
 
 func releaseSignalPolicyContent(policy model.ReleaseSignalPolicy) (map[string]any, error) {
@@ -288,11 +301,16 @@ func writeReleaseSignalTable(w io.Writer, signals []model.ReleaseSignal) error {
 	return tw.Flush()
 }
 
-func writeReleaseSignalPublish(w io.Writer, artifact model.PlatformArtifact, policy model.ReleaseSignalPolicy) error {
+func writeReleaseSignalPublish(w io.Writer, artifact model.PlatformArtifact, release model.PlatformArtifactRelease, policy model.ReleaseSignalPolicy) error {
 	if err := writeKeyValues(w,
 		kvPair{Key: "artifact", Value: artifact.ID},
 		kvPair{Key: "generation", Value: artifact.Generation},
 		kvPair{Key: "status", Value: artifact.Status},
+		kvPair{Key: "release", Value: release.ID},
+		kvPair{Key: "release_channel", Value: release.ReleaseChannel},
+		kvPair{Key: "verification_state", Value: firstNonEmpty(release.VerificationState, "-")},
+		kvPair{Key: "fencing_token", Value: fmt.Sprintf("%d", release.FencingToken)},
+		kvPair{Key: "verify_command", Value: fmt.Sprintf("fugue admin artifact verify-lkg %s --fencing-token %d --reason %q", release.ID, release.FencingToken, "release guard policy evidence verified")},
 		kvPair{Key: "signals", Value: fmt.Sprintf("%d", len(policy.Signals))},
 	); err != nil {
 		return err

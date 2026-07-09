@@ -30,8 +30,13 @@ const (
 	PlatformArtifactReleaseStatusSuperseded = "superseded"
 	PlatformArtifactReleaseStatusRolledBack = "rolled_back"
 
-	PlatformReleaseMessageTypeRelease  = "release"
-	PlatformReleaseMessageTypeRollback = "rollback"
+	PlatformArtifactVerificationStateServingUnverified = "serving_unverified"
+	PlatformArtifactVerificationStateVerified          = "verified"
+	PlatformArtifactVerificationStateFailed            = "failed"
+
+	PlatformReleaseMessageTypeRelease     = "release"
+	PlatformReleaseMessageTypeRollback    = "rollback"
+	PlatformReleaseMessageTypeVerifiedLKG = "verified_lkg"
 )
 
 type PlatformArtifactScope struct {
@@ -84,22 +89,46 @@ type PlatformArtifactContent struct {
 }
 
 type PlatformArtifactRelease struct {
-	ID                       string                `json:"id"`
-	ArtifactID               string                `json:"artifact_id"`
-	ArtifactKind             string                `json:"artifact_kind"`
-	Scope                    PlatformArtifactScope `json:"scope"`
-	ScopeKey                 string                `json:"scope_key"`
-	Generation               string                `json:"generation"`
-	ReleaseChannel           string                `json:"release_channel"`
-	Status                   string                `json:"status"`
-	RollbackTargetGeneration string                `json:"rollback_target_generation,omitempty"`
-	CanaryRuleRef            string                `json:"canary_rule_ref,omitempty"`
-	Reason                   string                `json:"reason,omitempty"`
-	ReleasedByType           string                `json:"released_by_type,omitempty"`
-	ReleasedByID             string                `json:"released_by_id,omitempty"`
-	ReleasedAt               time.Time             `json:"released_at"`
-	CreatedAt                time.Time             `json:"created_at"`
-	UpdatedAt                time.Time             `json:"updated_at"`
+	ID                          string                `json:"id"`
+	ArtifactID                  string                `json:"artifact_id"`
+	ArtifactKind                string                `json:"artifact_kind"`
+	Scope                       PlatformArtifactScope `json:"scope"`
+	ScopeKey                    string                `json:"scope_key"`
+	Generation                  string                `json:"generation"`
+	ReleaseChannel              string                `json:"release_channel"`
+	Status                      string                `json:"status"`
+	LaneKey                     string                `json:"lane_key,omitempty"`
+	FencingToken                int64                 `json:"fencing_token,omitempty"`
+	Version                     int64                 `json:"version,omitempty"`
+	IdempotencyKey              string                `json:"idempotency_key,omitempty"`
+	CandidateGeneration         string                `json:"candidate_generation,omitempty"`
+	ServingUnverifiedGeneration string                `json:"serving_unverified_generation,omitempty"`
+	VerifiedLKGGeneration       string                `json:"verified_lkg_generation,omitempty"`
+	PinnedRollbackGeneration    string                `json:"pinned_rollback_generation,omitempty"`
+	VerificationState           string                `json:"verification_state,omitempty"`
+	VerificationEvidence        map[string]string     `json:"verification_evidence,omitempty"`
+	VerifiedAt                  *time.Time            `json:"verified_at,omitempty"`
+	RollbackTargetGeneration    string                `json:"rollback_target_generation,omitempty"`
+	CanaryRuleRef               string                `json:"canary_rule_ref,omitempty"`
+	Reason                      string                `json:"reason,omitempty"`
+	ReleasedByType              string                `json:"released_by_type,omitempty"`
+	ReleasedByID                string                `json:"released_by_id,omitempty"`
+	ReleasedAt                  time.Time             `json:"released_at"`
+	CreatedAt                   time.Time             `json:"created_at"`
+	UpdatedAt                   time.Time             `json:"updated_at"`
+}
+
+type PlatformReleaseLane struct {
+	LaneKey         string    `json:"lane_key"`
+	ArtifactKind    string    `json:"artifact_kind"`
+	ScopeKey        string    `json:"scope_key"`
+	ReleaseChannel  string    `json:"release_channel"`
+	FencingToken    int64     `json:"fencing_token"`
+	Version         int64     `json:"version"`
+	ActiveReleaseID string    `json:"active_release_id,omitempty"`
+	Frozen          bool      `json:"frozen,omitempty"`
+	FreezeReason    string    `json:"freeze_reason,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type PlatformReleaseMessage struct {
@@ -138,16 +167,18 @@ type PlatformConsumerInstance struct {
 }
 
 type PlatformLKGSnapshot struct {
-	ID           string                `json:"id"`
-	ArtifactID   string                `json:"artifact_id"`
-	ArtifactKind string                `json:"artifact_kind"`
-	Scope        PlatformArtifactScope `json:"scope"`
-	ScopeKey     string                `json:"scope_key"`
-	Generation   string                `json:"generation"`
-	ContentHash  string                `json:"content_hash"`
-	ExpiresAt    time.Time             `json:"expires_at"`
-	CreatedAt    time.Time             `json:"created_at"`
-	UpdatedAt    time.Time             `json:"updated_at"`
+	ID                       string                `json:"id"`
+	ArtifactID               string                `json:"artifact_id"`
+	ArtifactKind             string                `json:"artifact_kind"`
+	Scope                    PlatformArtifactScope `json:"scope"`
+	ScopeKey                 string                `json:"scope_key"`
+	Generation               string                `json:"generation"`
+	ContentHash              string                `json:"content_hash"`
+	VerifiedByReleaseID      string                `json:"verified_by_release_id,omitempty"`
+	VerificationEvidenceHash string                `json:"verification_evidence_hash,omitempty"`
+	ExpiresAt                time.Time             `json:"expires_at"`
+	CreatedAt                time.Time             `json:"created_at"`
+	UpdatedAt                time.Time             `json:"updated_at"`
 }
 
 type PlatformArtifactFilter struct {
@@ -175,6 +206,7 @@ type PlatformArtifactReleaseRequest struct {
 	CanaryRuleRef  string `json:"canary_rule_ref,omitempty"`
 	ForcePublish   bool   `json:"force_publish,omitempty"`
 	Reason         string `json:"reason,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 type PlatformArtifactRollbackRequest struct {
@@ -183,6 +215,24 @@ type PlatformArtifactRollbackRequest struct {
 	Reason         string `json:"reason"`
 	ForcePublish   bool   `json:"force_publish,omitempty"`
 	CanaryRuleRef  string `json:"canary_rule_ref,omitempty"`
+}
+
+type PlatformArtifactVerificationEvidence struct {
+	ConsumerConvergence        bool     `json:"consumer_convergence"`
+	LocalProbe                 bool     `json:"local_probe"`
+	PublicSynthetic            bool     `json:"public_synthetic"`
+	WatchWindow                bool     `json:"watch_window"`
+	BaselineMonotonic          bool     `json:"baseline_monotonic"`
+	DatabaseRollbackCompatible bool     `json:"database_rollback_compatible"`
+	ExpectedConsumerSetID      string   `json:"expected_consumer_set_id,omitempty"`
+	EvidenceRefs               []string `json:"evidence_refs,omitempty"`
+}
+
+type PlatformArtifactVerifyLKGRequest struct {
+	FencingToken    int64                                `json:"fencing_token"`
+	Reason          string                               `json:"reason"`
+	AllowInitialLKG bool                                 `json:"allow_initial_lkg,omitempty"`
+	Evidence        PlatformArtifactVerificationEvidence `json:"evidence"`
 }
 
 type PlatformConsumerHeartbeatRequest struct {

@@ -11,28 +11,54 @@ failure contract releases.
 1. Create draft artifact.
 2. Validate schema, invariant, compatibility, and secret safety.
 3. Release to shadow.
-4. Release to gray with a scoped canary rule.
-5. Release to full only after release guard passes.
+4. For the first generation in a scope, explicitly verify the shadow release and
+   seed the initial verified LKG.
+5. Release later generations to gray or full with the current verified LKG
+   pinned as the rollback target.
+6. Verify consumer convergence, local probes, public synthetics, watch window,
+   baseline monotonicity, database rollback compatibility, and fencing token.
+7. Only the explicit verification step promotes the generation to verified LKG.
 
 ## Commands
 
 ```bash
 fugue admin artifact create --kind <kind> --file artifact.json
-fugue admin artifact validate <artifact-id> --dry-run
-fugue admin artifact release <artifact-id> --channel shadow
-fugue admin artifact release <artifact-id> --channel gray --canary-rule <rule>
+fugue admin artifact validate <artifact-id> --dry-run=false
+fugue admin artifact release <artifact-id> --channel shadow --idempotency-key <key>
+fugue admin artifact verify-lkg <release-id> \
+  --fencing-token <token> \
+  --allow-initial-lkg \
+  --consumer-convergence \
+  --local-probe \
+  --public-synthetic \
+  --watch-window \
+  --baseline-monotonic \
+  --database-rollback-compatible \
+  --evidence-ref <ref> \
+  --reason "<verified evidence>"
+fugue admin artifact release <artifact-id> --channel gray --canary-rule-ref <rule>
 fugue admin release guard status
-fugue admin artifact release <artifact-id> --channel full
+fugue admin artifact release <artifact-id> --channel full --idempotency-key <key>
 ```
 
 ## Safety Rules
 
-- Full release is blocked by invalid invariants, consumer drift, or expired LKG.
+- Full release is blocked unless a non-expired verified LKG and its exact
+  artifact/hash remain readable.
+- Full release enters `serving_unverified`; it does not overwrite verified LKG.
+- The release lane permits one active release and allocates a monotonic fencing
+  token.
 - Secret-like content is rejected by validation.
-- Force publish requires `artifact.force_publish` and a reason.
+- `force_publish` cannot bypass validation, canonical content hash, fencing, or
+  pinned rollback requirements.
+- Only assert evidence flags after checking the referenced evidence. The
+  verification request and evidence hash are audited.
 
 ## Verification
 
 - Active release generation matches the expected artifact.
 - Consumers report desired and actual generation convergence.
-- LKG snapshot exists for full release.
+- Release state is `verified`, not `serving_unverified`.
+- LKG points to the verified release and contains a verification evidence hash.
+- Repeating the same release idempotency key or verification evidence is
+  idempotent.
