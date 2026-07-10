@@ -45,8 +45,11 @@ fugue admin artifact show <artifact-id>
 ```
 
 The release must show `verification_state=verified`; LKG must reference the same
-release and contain a SHA-256 evidence hash. Repeating the same request is
-idempotent.
+release and contain a SHA-256 evidence hash. Its schema, generation sequence,
+content hash, artifact provenance, and snapshot provenance must match the
+referenced artifact, and both signatures must verify against a trusted,
+non-revoked key. Repeating the same request is idempotent and must return the
+same signed LKG snapshot.
 
 ## Failure Handling
 
@@ -54,3 +57,6 @@ idempotent.
 - Missing evidence: keep the candidate serving-unverified or abort it.
 - Public or local probe failure: rollback using the pinned generation.
 - Missing consumer: do not promote. Treat missing evidence as unknown, not pass.
+- Expired or signature-invalid current LKG: stop full promotion and follow
+  `pinned-rollback-recovery.md`; do not treat the invalid snapshot as an
+  existing healthy LKG.

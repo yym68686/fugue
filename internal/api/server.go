@@ -241,6 +241,9 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	if server.controlPlaneGitHubWorkflow == "" {
 		server.controlPlaneGitHubWorkflow = "deploy-control-plane.yml"
 	}
+	if server.store != nil {
+		server.store.ConfigurePlatformArtifactSigning(server.bundleKeyring())
+	}
 	server.reservedAppHosts = reservedAppHosts(server.apiPublicDomain, server.registryPushBase, server.registryPullBase)
 	server.ready.Store(true)
 	return server

@@ -23663,22 +23663,46 @@ components:
           type: object
           additionalProperties:
             type: string
+    PlatformArtifactProvenance:
+      type: object
+      additionalProperties: false
+      required: [issuer, key_id, algorithm, signature, signed_at]
+      properties:
+        issuer:
+          type: string
+        key_id:
+          type: string
+        algorithm:
+          type: string
+          enum: [hmac-sha256]
+        signature:
+          type: string
+        signed_at:
+          type: string
+          format: date-time
     PlatformArtifact:
       type: object
       additionalProperties: false
-      required: [id, artifact_kind, scope, scope_key, generation, status, content_hash, created_at, updated_at]
+      required: [id, artifact_kind, scope, scope_key, schema_version, generation, generation_sequence, status, content_hash, provenance, created_at, updated_at]
       properties:
         id:
           type: string
         artifact_kind:
           type: string
-          enum: [edge_route_bundle, dns_answer_bundle, caddy_route_config, discovery_bundle, node_desired_state, runtime_placement_plan, runtime_continuity_plan, node_guardian_policy, release_guard_policy, edge_ranking_policy, traffic_safety_policy, subsystem_failure_contracts]
+          enum: [edge_route_bundle, dns_answer_bundle, caddy_route_config, discovery_bundle, node_desired_state, runtime_placement_plan, runtime_continuity_plan, node_guardian_policy, release_guard_policy, edge_ranking_policy, traffic_safety_policy, subsystem_failure_contracts, gate_policy_registry, automatic_action_contracts]
         scope:
           $ref: "#/components/schemas/PlatformArtifactScope"
         scope_key:
           type: string
+        schema_version:
+          type: string
+          enum: ["1.0"]
         generation:
           type: string
+        generation_sequence:
+          type: integer
+          format: int64
+          minimum: 1
         status:
           type: string
           enum: [draft, validated, rejected]
@@ -23701,6 +23725,8 @@ components:
           type: string
         created_by_id:
           type: string
+        provenance:
+          $ref: "#/components/schemas/PlatformArtifactProvenance"
         created_at:
           type: string
           format: date-time
@@ -23856,7 +23882,7 @@ components:
     PlatformLKGSnapshot:
       type: object
       additionalProperties: false
-      required: [id, artifact_id, artifact_kind, scope, scope_key, generation, content_hash, expires_at, created_at, updated_at]
+      required: [id, artifact_id, artifact_kind, scope, scope_key, schema_version, generation, generation_sequence, content_hash, artifact_provenance, snapshot_provenance, expires_at, created_at, updated_at]
       properties:
         id:
           type: string
@@ -23868,14 +23894,25 @@ components:
           $ref: "#/components/schemas/PlatformArtifactScope"
         scope_key:
           type: string
+        schema_version:
+          type: string
+          enum: ["1.0"]
         generation:
           type: string
+        generation_sequence:
+          type: integer
+          format: int64
+          minimum: 1
         content_hash:
           type: string
+        artifact_provenance:
+          $ref: "#/components/schemas/PlatformArtifactProvenance"
         verified_by_release_id:
           type: string
         verification_evidence_hash:
           type: string
+        snapshot_provenance:
+          $ref: "#/components/schemas/PlatformArtifactProvenance"
         expires_at:
           type: string
           format: date-time

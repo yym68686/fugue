@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -38,6 +39,48 @@ type Store struct {
 	advisoryLockMu          sync.Mutex
 	edgeDNSBundleArtifactMu sync.Mutex
 	edgeDNSBundleArtifacts  map[string]EdgeDNSBundleArtifact
+
+	platformArtifactKeyringMu sync.RWMutex
+	platformArtifactKeyring   bundleauth.Keyring
+}
+
+func (s *Store) ConfigurePlatformArtifactSigning(keyring bundleauth.Keyring) {
+	if s == nil {
+		return
+	}
+	s.platformArtifactKeyringMu.Lock()
+	defer s.platformArtifactKeyringMu.Unlock()
+	s.platformArtifactKeyring = bundleauth.NewKeyring(
+		keyring.PrimaryKey,
+		keyring.PrimaryKeyID,
+		keyring.PreviousKey,
+		keyring.PreviousKeyID,
+		platformArtifactRevokedKeyIDs(keyring),
+	)
+}
+
+func (s *Store) platformArtifactSigningKeyring() bundleauth.Keyring {
+	if s == nil {
+		return bundleauth.Keyring{}
+	}
+	s.platformArtifactKeyringMu.RLock()
+	defer s.platformArtifactKeyringMu.RUnlock()
+	keyring := s.platformArtifactKeyring
+	return bundleauth.NewKeyring(
+		keyring.PrimaryKey,
+		keyring.PrimaryKeyID,
+		keyring.PreviousKey,
+		keyring.PreviousKeyID,
+		platformArtifactRevokedKeyIDs(keyring),
+	)
+}
+
+func platformArtifactRevokedKeyIDs(keyring bundleauth.Keyring) []string {
+	values := make([]string, 0, len(keyring.RevokedKeyIDs))
+	for keyID := range keyring.RevokedKeyIDs {
+		values = append(values, keyID)
+	}
+	return values
 }
 
 type ProjectUpdate struct {

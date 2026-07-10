@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
 
@@ -310,20 +311,12 @@ func (s *Server) verifiedPlatformArtifactForScope(kind, scopeKey string) (model.
 	if lkg == nil {
 		return model.PlatformArtifact{}, false, nil
 	}
-	if !lkg.ExpiresAt.After(time.Now().UTC()) ||
-		strings.TrimSpace(lkg.VerifiedByReleaseID) == "" ||
-		!strings.HasPrefix(strings.TrimSpace(lkg.VerificationEvidenceHash), "sha256:") {
-		return model.PlatformArtifact{}, false, nil
-	}
 	artifact, err := s.store.GetPlatformArtifact(lkg.ArtifactID)
 	if err != nil {
 		return model.PlatformArtifact{}, false, err
 	}
 	if artifact.Status != model.PlatformArtifactStatusValidated ||
-		artifact.ArtifactKind != kind ||
-		artifact.ScopeKey != scopeKey ||
-		artifact.Generation != lkg.Generation ||
-		artifact.ContentHash != lkg.ContentHash {
+		!platformsafety.EvaluatePlatformLKGSnapshot(*lkg, artifact, s.bundleKeyring(), time.Now().UTC()).Pass {
 		return model.PlatformArtifact{}, false, nil
 	}
 	return artifact, true, nil
@@ -462,8 +455,20 @@ func validatePlatformArtifactDraft(artifact model.PlatformArtifact) []model.Plat
 	results := []model.PlatformArtifactValidationResult{
 		{Name: "schema.kind", Pass: store.NormalizePlatformArtifactKind(artifact.ArtifactKind) != "", Severity: model.RobustnessSeverityBlockPublish, Message: "artifact kind must be known"},
 		{Name: "schema.scope", Pass: strings.TrimSpace(artifact.ScopeKey) != "", Severity: model.RobustnessSeverityBlockPublish, Message: "artifact scope key must be derived"},
+		{Name: "schema.version", Pass: artifact.SchemaVersion == model.PlatformArtifactSchemaVersionV1, Severity: model.RobustnessSeverityBlockPublish, Message: "artifact schema version must be supported"},
 		{Name: "schema.content", Pass: len(artifact.Content) > 0, Severity: model.RobustnessSeverityBlockPublish, Message: "artifact content must be a non-empty JSON object"},
 		{Name: "content.hash", Pass: strings.HasPrefix(artifact.ContentHash, "sha256:"), Severity: model.RobustnessSeverityBlockPublish, Message: "artifact must have a content-addressed sha256 hash"},
+		{Name: "generation.sequence", Pass: artifact.GenerationSequence > 0, Severity: model.RobustnessSeverityBlockPublish, Message: "artifact generation sequence must be positive"},
+		{
+			Name: "provenance.signature",
+			Pass: artifact.Provenance.Issuer == model.PlatformArtifactIssuerFugue &&
+				artifact.Provenance.Algorithm == model.PlatformSignatureHMACSHA256 &&
+				strings.TrimSpace(artifact.Provenance.KeyID) != "" &&
+				strings.TrimSpace(artifact.Provenance.Signature) != "" &&
+				!artifact.Provenance.SignedAt.IsZero(),
+			Severity: model.RobustnessSeverityBlockPublish,
+			Message:  "artifact must carry control-plane provenance",
+		},
 	}
 	secretPath := firstSecretLikeContentPath(artifact.Content, "")
 	results = append(results, model.PlatformArtifactValidationResult{

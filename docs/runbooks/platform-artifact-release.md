@@ -9,15 +9,19 @@ failure contract releases.
 ## Release Flow
 
 1. Create draft artifact.
-2. Validate schema, invariant, compatibility, and secret safety.
-3. Release to shadow.
-4. For the first generation in a scope, explicitly verify the shadow release and
+2. The store assigns a positive monotonic generation sequence, canonical
+   SHA-256 content hash, supported schema version, and trusted provenance
+   signature. Artifact creation fails closed if no signing key is available.
+3. Validate schema, invariant, compatibility, and secret safety.
+4. Release to shadow.
+5. For the first generation in a scope, explicitly verify the shadow release and
    seed the initial verified LKG.
-5. Release later generations to gray or full with the current verified LKG
+6. Release later generations to gray or full with the current verified LKG
    pinned as the rollback target.
-6. Verify consumer convergence, local probes, public synthetics, watch window,
+7. Verify consumer convergence, local probes, public synthetics, watch window,
    baseline monotonicity, database rollback compatibility, and fencing token.
-7. Only the explicit verification step promotes the generation to verified LKG.
+8. Only the explicit verification step promotes the generation to verified LKG
+   and signs a new LKG snapshot.
 
 ## Commands
 
@@ -44,7 +48,15 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
 ## Safety Rules
 
 - Full release is blocked unless a non-expired verified LKG and its exact
-  artifact/hash remain readable.
+  artifact/hash/signatures remain readable and trusted.
+- Artifact schema, canonical hash, generation sequence, and provenance
+  signature are rechecked at release time, not trusted only because draft
+  validation previously passed.
+- Generation sequences are allocated monotonically per artifact kind and
+  normalized scope. Ordinary publication must move forward within each
+  release-channel lane.
+- Publishing an older generation is only allowed through the explicit rollback
+  operation. `force_publish` is not a rollback mechanism.
 - Full release enters `serving_unverified`; it does not overwrite verified LKG.
 - Shadow and gray releases never set the production
   `serving_unverified_generation`.
@@ -52,9 +64,11 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
   selectors are rejected by the Safety Kernel.
 - The release lane permits one active release and allocates a monotonic fencing
   token.
+- Key rotation accepts a configured current or previous signing key; revoked
+  key ids are always rejected.
 - Secret-like content is rejected by validation.
-- `force_publish` cannot bypass validation, canonical content hash, fencing, or
-  pinned rollback requirements.
+- `force_publish` cannot bypass validation, schema, canonical content hash,
+  signature, generation monotonicity, fencing, or pinned rollback requirements.
 - Only assert evidence flags after checking the referenced evidence. The
   verification request and evidence hash are audited.
 
@@ -63,6 +77,8 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
 - Active release generation matches the expected artifact.
 - Consumers report desired and actual generation convergence.
 - Release state is `verified`, not `serving_unverified`.
-- LKG points to the verified release and contains a verification evidence hash.
+- LKG points to the verified release, contains a verification evidence hash,
+  matches the exact signed artifact, has a trusted snapshot signature, and has
+  not expired.
 - Repeating the same release idempotency key or verification evidence is
   idempotent.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformsafety"
 )
@@ -108,6 +109,15 @@ func (s *Store) CreatePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 		return s.pgCreatePlatformArtifact(artifact)
 	}
 	err = s.withLockedState(true, func(state *model.State) error {
+		artifact.GenerationSequence = nextPlatformArtifactGenerationSequence(
+			state.PlatformArtifacts,
+			artifact.ArtifactKind,
+			artifact.ScopeKey,
+		)
+		artifact, err = platformsafety.SignPlatformArtifact(artifact, s.platformArtifactSigningKeyring())
+		if err != nil {
+			return err
+		}
 		for _, existing := range state.PlatformArtifacts {
 			if existing.ID == artifact.ID {
 				return ErrConflict
@@ -236,18 +246,7 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 			return ErrNotFound
 		}
 		artifact = state.PlatformArtifacts[index]
-		if artifact.Status != model.PlatformArtifactStatusValidated {
-			return ErrConflict
-		}
 		now := time.Now().UTC()
-		lkg = verifiedPlatformLKGSnapshotFromState(state, artifact.ArtifactKind, artifact.ScopeKey, now)
-		pinnedRollbackGeneration := ""
-		if lkg != nil {
-			pinnedRollbackGeneration = lkg.Generation
-		}
-		if decision := platformsafety.EvaluateArtifactRelease(artifact, channel, pinnedRollbackGeneration, req.CanaryRuleRef); !decision.Pass {
-			return ErrConflict
-		}
 		laneKey := platformsafety.ReleaseLaneKey(artifact.ArtifactKind, artifact.ScopeKey, channel)
 		if existingRelease, ok := platformReleaseByIdempotencyKey(state.PlatformArtifactReleases, laneKey, req.IdempotencyKey); ok {
 			existingArtifactIndex := platformArtifactIndex(state.PlatformArtifacts, existingRelease.ArtifactID)
@@ -262,6 +261,40 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 			release = existingRelease
 			message = existingMessage
 			return nil
+		}
+		if artifact.Status != model.PlatformArtifactStatusValidated {
+			return ErrConflict
+		}
+		lkg = verifiedPlatformLKGSnapshotFromState(
+			state,
+			artifact.ArtifactKind,
+			artifact.ScopeKey,
+			now,
+			s.platformArtifactSigningKeyring(),
+		)
+		pinnedRollbackGeneration := ""
+		if lkg != nil {
+			pinnedRollbackGeneration = lkg.Generation
+		}
+		previousGenerationSequence, err := activePlatformReleaseGenerationSequence(
+			state.PlatformArtifactReleases,
+			state.PlatformArtifacts,
+			artifact.ArtifactKind,
+			artifact.ScopeKey,
+			channel,
+		)
+		if err != nil {
+			return err
+		}
+		if decision := platformsafety.EvaluateArtifactRelease(
+			artifact,
+			channel,
+			pinnedRollbackGeneration,
+			req.CanaryRuleRef,
+			previousGenerationSequence,
+			s.platformArtifactSigningKeyring(),
+		); !decision.Pass {
+			return ErrConflict
 		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
 		if err != nil {
@@ -321,7 +354,13 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			return ErrConflict
 		}
 		now := time.Now().UTC()
-		lkg = verifiedPlatformLKGSnapshotFromState(state, target.ArtifactKind, target.ScopeKey, now)
+		lkg = verifiedPlatformLKGSnapshotFromState(
+			state,
+			target.ArtifactKind,
+			target.ScopeKey,
+			now,
+			s.platformArtifactSigningKeyring(),
+		)
 		pinnedRollbackGeneration := ""
 		if lkg != nil {
 			pinnedRollbackGeneration = lkg.Generation
@@ -332,7 +371,13 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 				canaryRuleRef = activeRelease.CanaryRuleRef
 			}
 		}
-		if decision := platformsafety.EvaluateArtifactRelease(target, channel, pinnedRollbackGeneration, canaryRuleRef); !decision.Pass {
+		if decision := platformsafety.EvaluateArtifactRollback(
+			target,
+			channel,
+			pinnedRollbackGeneration,
+			canaryRuleRef,
+			s.platformArtifactSigningKeyring(),
+		); !decision.Pass {
 			return ErrConflict
 		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, target.ArtifactKind, target.ScopeKey, channel, now)
@@ -384,7 +429,13 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 		if release.Status != model.PlatformArtifactReleaseStatusActive {
 			return ErrConflict
 		}
-		currentLKG := verifiedPlatformLKGSnapshotFromState(state, release.ArtifactKind, release.ScopeKey, time.Now().UTC())
+		currentLKG := verifiedPlatformLKGSnapshotFromState(
+			state,
+			release.ArtifactKind,
+			release.ScopeKey,
+			time.Now().UTC(),
+			s.platformArtifactSigningKeyring(),
+		)
 		requestEvidenceHash := platformsafety.VerificationEvidenceHash(req)
 		if release.VerificationState == model.PlatformArtifactVerificationStateVerified {
 			if currentLKG != nil &&
@@ -411,12 +462,23 @@ func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 			return ErrNotFound
 		}
 		artifact = state.PlatformArtifacts[artifactIndex]
-		currentLKG = platformLKGSnapshotForScope(state.PlatformLKGSnapshots, artifact.ArtifactKind, artifact.ScopeKey)
+		if decision := platformsafety.EvaluateArtifactIntegrity(artifact, s.platformArtifactSigningKeyring()); !decision.Pass {
+			return ErrConflict
+		}
 		if decision := platformsafety.EvaluateLKGPromotion(release, req, currentLKG != nil); !decision.Pass {
 			return ErrConflict
 		}
 		now := time.Now().UTC()
-		snapshot := buildPlatformLKGSnapshot(artifact, release.ID, requestEvidenceHash, now)
+		snapshot, err := buildPlatformLKGSnapshot(
+			artifact,
+			release.ID,
+			requestEvidenceHash,
+			now,
+			s.platformArtifactSigningKeyring(),
+		)
+		if err != nil {
+			return err
+		}
 		state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, snapshot)
 		lkg = &snapshot
 		release.VerificationState = model.PlatformArtifactVerificationStateVerified
@@ -602,6 +664,15 @@ func normalizePlatformArtifactForStore(artifact model.PlatformArtifact) (model.P
 		return model.PlatformArtifact{}, ErrInvalidInput
 	}
 	artifact.Scope, artifact.ScopeKey = NormalizePlatformArtifactScope(artifact.Scope)
+	artifact.SchemaVersion = strings.TrimSpace(artifact.SchemaVersion)
+	if artifact.SchemaVersion == "" {
+		artifact.SchemaVersion = model.PlatformArtifactSchemaVersionV1
+	}
+	if artifact.SchemaVersion != model.PlatformArtifactSchemaVersionV1 {
+		return model.PlatformArtifact{}, ErrInvalidInput
+	}
+	artifact.GenerationSequence = 0
+	artifact.Provenance = model.PlatformArtifactProvenance{}
 	canonicalContent, err := canonicalPlatformArtifactContent(artifact.Content)
 	if err != nil {
 		return model.PlatformArtifact{}, err
@@ -631,6 +702,18 @@ func normalizePlatformArtifactForStore(artifact model.PlatformArtifact) (model.P
 	}
 	artifact.UpdatedAt = now
 	return artifact, nil
+}
+
+func nextPlatformArtifactGenerationSequence(artifacts []model.PlatformArtifact, kind, scopeKey string) int64 {
+	var sequence int64
+	for _, artifact := range artifacts {
+		if artifact.ArtifactKind == kind &&
+			artifact.ScopeKey == scopeKey &&
+			artifact.GenerationSequence > sequence {
+			sequence = artifact.GenerationSequence
+		}
+	}
+	return sequence + 1
 }
 
 func platformArtifactContentHash(content map[string]any) (string, error) {
@@ -856,6 +939,24 @@ func activePlatformReleaseForScope(releases []model.PlatformArtifactRelease, kin
 	return out, found
 }
 
+func activePlatformReleaseGenerationSequence(
+	releases []model.PlatformArtifactRelease,
+	artifacts []model.PlatformArtifact,
+	kind string,
+	scopeKey string,
+	channel string,
+) (int64, error) {
+	release, found := activePlatformReleaseForScope(releases, kind, scopeKey, channel)
+	if !found {
+		return 0, nil
+	}
+	index := platformArtifactIndex(artifacts, release.ArtifactID)
+	if index < 0 {
+		return 0, ErrConflict
+	}
+	return artifacts[index].GenerationSequence, nil
+}
+
 func platformReleaseMessageForRelease(messages []model.PlatformReleaseMessage, releaseID string) (model.PlatformReleaseMessage, bool) {
 	var out model.PlatformReleaseMessage
 	found := false
@@ -953,21 +1054,31 @@ func sortPlatformReleaseMessages(messages []model.PlatformReleaseMessage) {
 	})
 }
 
-func buildPlatformLKGSnapshot(artifact model.PlatformArtifact, releaseID, evidenceHash string, now time.Time) model.PlatformLKGSnapshot {
-	return model.PlatformLKGSnapshot{
+func buildPlatformLKGSnapshot(
+	artifact model.PlatformArtifact,
+	releaseID string,
+	evidenceHash string,
+	now time.Time,
+	keyring bundleauth.Keyring,
+) (model.PlatformLKGSnapshot, error) {
+	snapshot := model.PlatformLKGSnapshot{
 		ID:                       model.NewID("artifactlkg"),
 		ArtifactID:               artifact.ID,
 		ArtifactKind:             artifact.ArtifactKind,
 		Scope:                    artifact.Scope,
 		ScopeKey:                 artifact.ScopeKey,
+		SchemaVersion:            artifact.SchemaVersion,
 		Generation:               artifact.Generation,
+		GenerationSequence:       artifact.GenerationSequence,
 		ContentHash:              artifact.ContentHash,
+		ArtifactProvenance:       artifact.Provenance,
 		VerifiedByReleaseID:      strings.TrimSpace(releaseID),
 		VerificationEvidenceHash: strings.TrimSpace(evidenceHash),
 		ExpiresAt:                now.Add(platformLKGDefaultTTL),
 		CreatedAt:                now,
 		UpdatedAt:                now,
 	}
+	return platformsafety.SignPlatformLKGSnapshot(snapshot, keyring)
 }
 
 func platformLKGSnapshotForScope(snapshots []model.PlatformLKGSnapshot, kind, scopeKey string) *model.PlatformLKGSnapshot {
@@ -981,7 +1092,13 @@ func platformLKGSnapshotForScope(snapshots []model.PlatformLKGSnapshot, kind, sc
 	return nil
 }
 
-func verifiedPlatformLKGSnapshotFromState(state *model.State, kind, scopeKey string, now time.Time) *model.PlatformLKGSnapshot {
+func verifiedPlatformLKGSnapshotFromState(
+	state *model.State,
+	kind string,
+	scopeKey string,
+	now time.Time,
+	keyring bundleauth.Keyring,
+) *model.PlatformLKGSnapshot {
 	if state == nil {
 		return nil
 	}
@@ -990,24 +1107,22 @@ func verifiedPlatformLKGSnapshotFromState(state *model.State, kind, scopeKey str
 		return nil
 	}
 	artifactIndex := platformArtifactIndex(state.PlatformArtifacts, snapshot.ArtifactID)
-	if artifactIndex < 0 || !platformLKGSnapshotMatchesArtifact(*snapshot, state.PlatformArtifacts[artifactIndex], now) {
+	if artifactIndex < 0 || !platformLKGSnapshotMatchesArtifact(*snapshot, state.PlatformArtifacts[artifactIndex], now, keyring) {
 		return nil
 	}
 	return snapshot
 }
 
-func platformLKGSnapshotMatchesArtifact(snapshot model.PlatformLKGSnapshot, artifact model.PlatformArtifact, now time.Time) bool {
-	if strings.TrimSpace(snapshot.VerifiedByReleaseID) == "" ||
-		!strings.HasPrefix(strings.TrimSpace(snapshot.VerificationEvidenceHash), "sha256:") ||
-		!snapshot.ExpiresAt.After(now) {
+func platformLKGSnapshotMatchesArtifact(
+	snapshot model.PlatformLKGSnapshot,
+	artifact model.PlatformArtifact,
+	now time.Time,
+	keyring bundleauth.Keyring,
+) bool {
+	if artifact.Status != model.PlatformArtifactStatusValidated {
 		return false
 	}
-	return artifact.Status == model.PlatformArtifactStatusValidated &&
-		artifact.ID == snapshot.ArtifactID &&
-		artifact.ArtifactKind == snapshot.ArtifactKind &&
-		artifact.ScopeKey == snapshot.ScopeKey &&
-		artifact.Generation == snapshot.Generation &&
-		artifact.ContentHash == snapshot.ContentHash
+	return platformsafety.EvaluatePlatformLKGSnapshot(snapshot, artifact, keyring, now).Pass
 }
 
 func upsertPlatformLKGSnapshot(snapshots []model.PlatformLKGSnapshot, snapshot model.PlatformLKGSnapshot) []model.PlatformLKGSnapshot {

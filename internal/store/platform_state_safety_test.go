@@ -54,6 +54,7 @@ func TestShadowAndGrayLedgerEntriesNeverClaimProductionServingProperty(t *testin
 
 func TestGrayReleaseCannotEscapeBoundedCanaryScope(t *testing.T) {
 	s := New(filepath.Join(t.TempDir(), "store.json"))
+	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

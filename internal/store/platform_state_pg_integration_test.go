@@ -20,6 +20,7 @@ func TestPlatformReleaseStateMachinePostgres(t *testing.T) {
 	}
 
 	s := New("", databaseURL)
+	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init postgres store: %v", err)
 	}
@@ -81,16 +82,21 @@ func TestPlatformReleaseStateMachinePostgres(t *testing.T) {
 	close(results)
 
 	releases := []releaseResult{}
+	conflicts := 0
 	for result := range results {
 		if result.err != nil {
-			t.Fatalf("concurrent release failed: %v", result.err)
+			if errors.Is(result.err, ErrConflict) {
+				conflicts++
+				continue
+			}
+			t.Fatalf("concurrent release failed with unexpected error: %v", result.err)
 		}
 		releases = append(releases, result)
 	}
-	if len(releases) != 2 {
-		t.Fatalf("expected two serialized release results, got %d", len(releases))
+	if len(releases) < 1 || len(releases) > 2 || len(releases)+conflicts != 2 {
+		t.Fatalf("expected monotonic serialization to accept one or two releases, releases=%d conflicts=%d", len(releases), conflicts)
 	}
-	if releases[0].release.FencingToken == releases[1].release.FencingToken {
+	if len(releases) == 2 && releases[0].release.FencingToken == releases[1].release.FencingToken {
 		t.Fatalf("concurrent releases reused fencing token: %+v", releases)
 	}
 
@@ -104,6 +110,9 @@ func TestPlatformReleaseStateMachinePostgres(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected one active release")
+	}
+	if activeArtifact.ID != second.ID {
+		t.Fatalf("monotonic release lane must end on the highest sequence, active=%+v second=%+v", activeArtifact, second)
 	}
 	var activeCount int
 	if err := s.db.QueryRow(`
@@ -121,22 +130,24 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND release_channel = $3 AND status 
 		t.Fatalf("unique release lane allowed %d active releases", activeCount)
 	}
 
-	var staleRelease model.PlatformArtifactRelease
-	for _, result := range releases {
-		if result.release.ID != activeRelease.ID {
-			staleRelease = result.release
-			break
+	if len(releases) == 2 {
+		var staleRelease model.PlatformArtifactRelease
+		for _, result := range releases {
+			if result.release.ID != activeRelease.ID {
+				staleRelease = result.release
+				break
+			}
 		}
-	}
-	if staleRelease.ID == "" {
-		t.Fatalf("could not identify stale release: active=%+v releases=%+v", activeRelease, releases)
-	}
-	if _, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(
-		staleRelease.ID,
-		completePlatformVerificationRequest(staleRelease.FencingToken, false),
-		testPlatformPrincipal(),
-	); !errors.Is(err, ErrConflict) {
-		t.Fatalf("stale fenced release verification must fail, got %v", err)
+		if staleRelease.ID == "" {
+			t.Fatalf("could not identify stale release: active=%+v releases=%+v", activeRelease, releases)
+		}
+		if _, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(
+			staleRelease.ID,
+			completePlatformVerificationRequest(staleRelease.FencingToken, false),
+			testPlatformPrincipal(),
+		); !errors.Is(err, ErrConflict) {
+			t.Fatalf("stale fenced release verification must fail, got %v", err)
+		}
 	}
 
 	beforeVerify, err := s.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)

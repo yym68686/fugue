@@ -1022,6 +1022,8 @@ func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*s
 		EdgeQualityRankingMode: "active",
 		EdgeTLSAskToken:        "edge-secret",
 		AllowLegacyEdgeToken:   true,
+		BundleSigningKey:       "platform-artifact-api-test-signing-key",
+		BundleSigningKeyID:     "platform-artifact-api-test",
 	})
 	resolver := &fakeAppDomainResolver{
 		cname: map[string]string{},

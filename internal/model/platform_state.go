@@ -3,6 +3,10 @@ package model
 import "time"
 
 const (
+	PlatformArtifactSchemaVersionV1 = "1.0"
+	PlatformArtifactIssuerFugue     = "fugue-control-plane"
+	PlatformSignatureHMACSHA256     = "hmac-sha256"
+
 	PlatformArtifactKindEdgeRouteBundle           = "edge_route_bundle"
 	PlatformArtifactKindDNSAnswerBundle           = "dns_answer_bundle"
 	PlatformArtifactKindCaddyRouteConfig          = "caddy_route_config"
@@ -62,12 +66,22 @@ type PlatformArtifactValidationResult struct {
 	Evidence map[string]string `json:"evidence,omitempty"`
 }
 
+type PlatformArtifactProvenance struct {
+	Issuer    string    `json:"issuer"`
+	KeyID     string    `json:"key_id"`
+	Algorithm string    `json:"algorithm"`
+	Signature string    `json:"signature"`
+	SignedAt  time.Time `json:"signed_at"`
+}
+
 type PlatformArtifact struct {
 	ID                 string                             `json:"id"`
 	ArtifactKind       string                             `json:"artifact_kind"`
 	Scope              PlatformArtifactScope              `json:"scope"`
 	ScopeKey           string                             `json:"scope_key"`
+	SchemaVersion      string                             `json:"schema_version"`
 	Generation         string                             `json:"generation"`
+	GenerationSequence int64                              `json:"generation_sequence"`
 	Status             string                             `json:"status"`
 	ContentHash        string                             `json:"content_hash"`
 	Content            map[string]any                     `json:"content,omitempty"`
@@ -76,6 +90,7 @@ type PlatformArtifact struct {
 	Metadata           map[string]string                  `json:"metadata,omitempty"`
 	CreatedByType      string                             `json:"created_by_type,omitempty"`
 	CreatedByID        string                             `json:"created_by_id,omitempty"`
+	Provenance         PlatformArtifactProvenance         `json:"provenance"`
 	CreatedAt          time.Time                          `json:"created_at"`
 	UpdatedAt          time.Time                          `json:"updated_at"`
 }
@@ -167,18 +182,22 @@ type PlatformConsumerInstance struct {
 }
 
 type PlatformLKGSnapshot struct {
-	ID                       string                `json:"id"`
-	ArtifactID               string                `json:"artifact_id"`
-	ArtifactKind             string                `json:"artifact_kind"`
-	Scope                    PlatformArtifactScope `json:"scope"`
-	ScopeKey                 string                `json:"scope_key"`
-	Generation               string                `json:"generation"`
-	ContentHash              string                `json:"content_hash"`
-	VerifiedByReleaseID      string                `json:"verified_by_release_id,omitempty"`
-	VerificationEvidenceHash string                `json:"verification_evidence_hash,omitempty"`
-	ExpiresAt                time.Time             `json:"expires_at"`
-	CreatedAt                time.Time             `json:"created_at"`
-	UpdatedAt                time.Time             `json:"updated_at"`
+	ID                       string                     `json:"id"`
+	ArtifactID               string                     `json:"artifact_id"`
+	ArtifactKind             string                     `json:"artifact_kind"`
+	Scope                    PlatformArtifactScope      `json:"scope"`
+	ScopeKey                 string                     `json:"scope_key"`
+	SchemaVersion            string                     `json:"schema_version"`
+	Generation               string                     `json:"generation"`
+	GenerationSequence       int64                      `json:"generation_sequence"`
+	ContentHash              string                     `json:"content_hash"`
+	ArtifactProvenance       PlatformArtifactProvenance `json:"artifact_provenance"`
+	VerifiedByReleaseID      string                     `json:"verified_by_release_id,omitempty"`
+	VerificationEvidenceHash string                     `json:"verification_evidence_hash,omitempty"`
+	SnapshotProvenance       PlatformArtifactProvenance `json:"snapshot_provenance"`
+	ExpiresAt                time.Time                  `json:"expires_at"`
+	CreatedAt                time.Time                  `json:"created_at"`
+	UpdatedAt                time.Time                  `json:"updated_at"`
 }
 
 type PlatformArtifactFilter struct {

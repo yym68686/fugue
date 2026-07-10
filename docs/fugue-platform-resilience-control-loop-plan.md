@@ -1826,14 +1826,14 @@ DNS/edge failover 必须满足：
 
 - [x] 定义 `PlatformSafetyKernel` 的职责边界。
 - [x] 列出所有不可由配置关闭的 invariant。
-- [ ] 定义 artifact schema/hash/signature 硬规则。
-- [ ] 定义 generation 单调性硬规则。
+- [x] 定义 artifact schema/hash/signature 硬规则。
+- [x] 定义 generation 单调性硬规则。
 - [x] 定义 shadow no-production-impact 硬规则。
 - [x] 定义 canary scope isolation 硬规则。
 - [x] 定义 full release rollback-target 硬规则。
 - [x] 定义 blast-radius maximum hard cap。
 - [x] 定义 kill switch precedence。
-- [ ] 定义 expired/corrupt/signature-invalid LKG 硬规则。
+- [x] 定义 expired/corrupt/signature-invalid LKG 硬规则。
 - [ ] 将普通 `force_publish` 拆成 `soft_override`。
 - [ ] 设计独立 `kernel_break_glass` 权限。
 - [ ] kernel break-glass 要求 reason、双重确认和短 TTL。
@@ -1857,7 +1857,7 @@ DNS/edge failover 必须满足：
 - [x] 定义 `verification_state` 和 evidence ref。
 - [x] artifact full release 不再立即覆盖 verified LKG。
 - [x] release prepare 阶段固定 rollback target。
-- [ ] 验证 rollback artifact content/hash/signature。
+- [x] 验证 rollback artifact content/hash/signature。
 - [ ] 验证 rollback image digest 可拉取。
 - [ ] 验证 rollback Caddy/DNS/route config 存在。
 - [ ] 验证 rollback node desired-state generation 存在。
