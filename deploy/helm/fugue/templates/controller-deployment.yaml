@@ -34,7 +34,7 @@ spec:
     spec:
       terminationGracePeriodSeconds: {{ .Values.controller.terminationGracePeriodSeconds }}
       {{- if .Values.rbac.create }}
-      serviceAccountName: {{ include "fugue.serviceAccountName" . }}
+      serviceAccountName: {{ include "fugue.controlPlaneServiceAccountName" . }}
       {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
