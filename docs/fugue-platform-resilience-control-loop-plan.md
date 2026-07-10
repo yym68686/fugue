@@ -1881,7 +1881,7 @@ DNS/edge failover 必须满足：
 
 #### Phase -1C: Evidence 四态和可信身份
 
-> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、短期 component identity/heartbeat 防重放纯验证原语、credential 到 ExpectedConsumerSet 的服务端字段绑定和 verified consumer instance 生成纯策略、独立 fail-closed component Bearer middleware 及 OpenAPI auth kind、从现有 bundle key 域隔离派生并支持重叠轮换/撤销的生产 keyring，以及 optional shadow heartbeat envelope 的 OpenAPI/Store 持久化已实现并有单元测试；middleware 尚无生产 operation，尚未接入 release prepare、真实 heartbeat、凭证签发、handler enforcement 或 release guard。
+> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、短期 component identity/heartbeat 防重放纯验证原语、credential 到 ExpectedConsumerSet 的服务端字段绑定和 verified consumer instance 生成纯策略、可信 heartbeat 的 JSON/Postgres 原子单调持久化与 legacy downgrade guard、独立 fail-closed component Bearer middleware 及 OpenAPI auth kind、从现有 bundle key 域隔离派生并支持重叠轮换/撤销的生产 keyring，以及 optional shadow heartbeat envelope 的 OpenAPI/Store 持久化已实现并有单元测试；middleware 尚无生产 operation，尚未接入 release prepare、真实 heartbeat、凭证签发、handler enforcement 或 release guard。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
@@ -1909,6 +1909,8 @@ DNS/edge failover 必须满足：
 - [x] heartbeat endpoint 不接受普通 tenant API key。
 - [x] 实现带 key-id 的短期 platform component identity token 原语，允许轮换期间验旧 key；生产签发和撤销仍未接线。
 - [x] 实现 credential-bound heartbeat identity、canonical evidence hash、sequence/nonce/time-window/fencing/generation rollback 纯验证器；生产 handler 仍未 enforcement。
+- [x] 可信 heartbeat 在 JSON/Postgres Store 中按服务端 ExpectedConsumerSet 绑定，并使用行锁和 guarded upsert 单调持久化；生产 handler 仍未接线。
+- [x] 已验证 consumer 不能被 legacy 未验证 heartbeat 覆盖。
 - [ ] 服务端从凭证绑定 component/node/scope。
 - [x] heartbeat 请求增加 sequence，并以 optional shadow 字段持久化；生产 enforcement 尚未开启。
 - [x] heartbeat 请求增加 issued_at，并以 optional shadow 字段持久化；生产 enforcement 尚未开启。
@@ -1922,6 +1924,7 @@ DNS/edge failover 必须满足：
 - [ ] consumer heartbeat 写入可信 audit。
 - [x] 增加 missing consumer 不得 pass 的回归测试。
 - [x] 增加 tenant key 无法写 heartbeat 的权限测试。
+- [x] 增加 heartbeat Store replay、并发首次写入和 legacy downgrade 回归测试。
 - [ ] 增加 heartbeat replay/impersonation 测试。
 - [x] 新增 runbook: platform consumer identity。
 - [x] 新增 runbook: missing/stale consumer。
@@ -2287,6 +2290,8 @@ DNS/edge failover 必须满足：
 ### Phase 9: Incident DAG / Explain
 
 - [ ] 设计 incident DAG 数据模型。
+- [ ] incident identity、`created_at`、first/last detected、recovered_at 和 lifecycle 状态必须持久化，重复诊断不得把既有 incident 伪装成新事件。
+- [ ] incident 查询支持按 diagnosis epoch/release set/generation 和真实时间水位筛选。
 - [ ] public synthetic failure 写入 DAG。
 - [ ] DNS answer decision 写入 DAG。
 - [ ] edge request error 写入 DAG。
@@ -2751,6 +2756,8 @@ DNS/edge failover 必须满足：
 - [ ] health fail/recover 使用不同 threshold。
 - [ ] health 状态变化要求连续样本。
 - [ ] health 状态变化要求 minimum dwell time。
+- [ ] 发布 preflight 对 node/edge/DNS/resource pressure 要求连续稳定样本和最小稳定窗口，禁止单次 pass 立即放行。
+- [ ] 发布 preflight 失败必须输出具体 failing check、subject、observed、evidence timestamp 和建议命令，禁止只返回总括错误。
 - [ ] quarantine 增加 cooldown。
 - [ ] DNS filtering 增加 cooldown。
 - [ ] service restart 增加 cooldown。
@@ -2768,6 +2775,14 @@ DNS/edge failover 必须满足：
 
 #### Phase 15C: Retention、GC 和容量治理
 
+- [ ] 定义每节点 root filesystem 容量预算，覆盖 containerd、image-cache、system journal、local PV/workspace、WAL 和临时文件。
+- [ ] 节点 admission/scheduler 预留 kubelet image-GC/eviction headroom，不能按 PVC request 和 ephemeral request 的简单总和过度承诺根盘。
+- [ ] node onboarding/updater 配置按节点容量计算的 persistent journal 上限、保留期和 vacuum 水位。
+- [ ] journal vacuum 仅删除 archived journals，并具有 one-node canary、kill switch、释放字节审计和最小诊断保留窗口。
+- [ ] containerd/image-cache/PVC/workspace 分目录容量指标能区分常驻占用、临时峰值和 deleted-but-open 文件。
+- [ ] DiskPressure/image-GC 失败进入 flapping 时保持节点 cordon，达到连续恢复窗口后才重新接纳 workload。
+- [ ] 节点容量不足时阻断新 placement/build，不驱逐后立刻把同一 workload 调度回同一压力节点形成循环。
+- [ ] 增加小根盘、大 workspace、SQLite/WAL 临时翻倍和 journal 接近上限的容量仿真。
 - [ ] 定义 platform artifact retention。
 - [ ] 定义 artifact content dedup/compaction。
 - [ ] 定义 artifact release message retention。
