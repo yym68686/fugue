@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,10 @@ const (
 	InvariantLKGNotExpired              = "lkg.not_expired"
 	InvariantLKGContentIntegrity        = "lkg.content_integrity"
 	InvariantLKGSignature               = "lkg.signature"
+
+	KernelBreakGlassConfirmation = "BYPASS_PLATFORM_SAFETY_KERNEL"
+	PlatformSafetyAuditChainID   = "platform-safety"
+	KernelBreakGlassMaxTTL       = 15 * time.Minute
 )
 
 var immutableInvariantIDs = []string{
@@ -64,6 +69,7 @@ type Violation struct {
 type Decision struct {
 	Pass       bool
 	Violations []Violation
+	Bypassed   []Violation
 }
 
 func ImmutableInvariantIDs() []string {
@@ -97,6 +103,28 @@ func EvaluateArtifactRelease(
 	)
 }
 
+func EvaluateArtifactReleaseWithOverride(
+	artifact model.PlatformArtifact,
+	channel string,
+	pinnedRollbackGeneration string,
+	canaryRuleRef string,
+	previousGenerationSequence int64,
+	overrideMode string,
+	keyring bundleauth.Keyring,
+) Decision {
+	return applyPublicationOverride(
+		EvaluateArtifactRelease(
+			artifact,
+			channel,
+			pinnedRollbackGeneration,
+			canaryRuleRef,
+			previousGenerationSequence,
+			keyring,
+		),
+		overrideMode,
+	)
+}
+
 func EvaluateArtifactRollback(
 	artifact model.PlatformArtifact,
 	channel string,
@@ -113,6 +141,108 @@ func EvaluateArtifactRollback(
 		true,
 		keyring,
 	)
+}
+
+func EvaluateArtifactRollbackWithOverride(
+	artifact model.PlatformArtifact,
+	channel string,
+	pinnedRollbackGeneration string,
+	canaryRuleRef string,
+	overrideMode string,
+	keyring bundleauth.Keyring,
+) Decision {
+	return applyPublicationOverride(
+		EvaluateArtifactRollback(
+			artifact,
+			channel,
+			pinnedRollbackGeneration,
+			canaryRuleRef,
+			keyring,
+		),
+		overrideMode,
+	)
+}
+
+func applyPublicationOverride(decision Decision, overrideMode string) Decision {
+	overrideMode = strings.TrimSpace(strings.ToLower(overrideMode))
+	if overrideMode == model.PlatformArtifactOverrideModeNone {
+		return decision
+	}
+	remaining := make([]Violation, 0, len(decision.Violations))
+	bypassed := append([]Violation(nil), decision.Bypassed...)
+	for _, violation := range decision.Violations {
+		if publicationOverrideAllowsInvariant(overrideMode, violation.Invariant) {
+			bypassed = append(bypassed, violation)
+			continue
+		}
+		remaining = append(remaining, violation)
+	}
+	decision.Violations = remaining
+	decision.Bypassed = bypassed
+	decision.Pass = len(remaining) == 0
+	return decision
+}
+
+func publicationOverrideAllowsInvariant(overrideMode, invariant string) bool {
+	switch overrideMode {
+	case model.PlatformArtifactOverrideModeSoft:
+		return invariant == InvariantArtifactValidated
+	case model.PlatformArtifactOverrideModeKernelBreakGlass:
+		switch invariant {
+		case InvariantArtifactValidated, InvariantGenerationMonotonic, InvariantFullPinnedRollback:
+			return true
+		}
+	}
+	return false
+}
+
+func BypassedInvariantIDs(decision Decision) []string {
+	if len(decision.Bypassed) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(decision.Bypassed))
+	ids := make([]string, 0, len(decision.Bypassed))
+	for _, violation := range decision.Bypassed {
+		id := strings.TrimSpace(violation.Invariant)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func ValidateKernelBreakGlassAuthorization(
+	authorization *model.PlatformKernelBreakGlassRequest,
+	artifact model.PlatformArtifact,
+	now time.Time,
+) error {
+	if authorization == nil {
+		return errors.New("kernel break-glass authorization is required")
+	}
+	now = now.UTC()
+	expiresAt := authorization.ExpiresAt.UTC()
+	if expiresAt.IsZero() || !expiresAt.After(now) {
+		return errors.New("kernel break-glass authorization is expired")
+	}
+	if expiresAt.After(now.Add(KernelBreakGlassMaxTTL)) {
+		return fmt.Errorf("kernel break-glass TTL cannot exceed %s", KernelBreakGlassMaxTTL)
+	}
+	if strings.TrimSpace(authorization.Confirmation) != KernelBreakGlassConfirmation {
+		return errors.New("kernel break-glass safety-kernel confirmation is invalid")
+	}
+	targetConfirmation := strings.TrimSpace(authorization.TargetConfirmation)
+	if targetConfirmation == "" ||
+		(targetConfirmation != strings.TrimSpace(artifact.ID) &&
+			targetConfirmation != strings.TrimSpace(artifact.Generation)) {
+		return errors.New("kernel break-glass target confirmation does not match the artifact")
+	}
+	return nil
 }
 
 func evaluateArtifactPublication(
@@ -234,6 +364,111 @@ func VerifyPlatformArtifactSignature(artifact model.PlatformArtifact, keyring bu
 	return nil
 }
 
+func SignTamperEvidentAuditEvent(event model.AuditEvent, keyring bundleauth.Keyring) (model.AuditEvent, error) {
+	key, keyID, err := primaryPlatformSigningKey(keyring)
+	if err != nil {
+		return model.AuditEvent{}, err
+	}
+	event.ChainID = strings.TrimSpace(event.ChainID)
+	event.PreviousHash = strings.TrimSpace(strings.ToLower(event.PreviousHash))
+	if event.ChainID == "" || event.ChainSequence <= 0 {
+		return model.AuditEvent{}, errors.New("tamper-evident audit chain identity and positive sequence are required")
+	}
+	if event.ChainSequence == 1 && event.PreviousHash != "" {
+		return model.AuditEvent{}, errors.New("first tamper-evident audit event must not have a previous hash")
+	}
+	if event.ChainSequence > 1 &&
+		(!strings.HasPrefix(event.PreviousHash, "sha256:") || len(event.PreviousHash) != len("sha256:")+sha256.Size*2) {
+		return model.AuditEvent{}, errors.New("tamper-evident audit event requires a canonical previous sha256 hash")
+	}
+	event.CreatedAt = canonicalPlatformSignatureTime(event.CreatedAt)
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = canonicalPlatformSignatureTime(time.Now())
+	}
+	raw, err := json.Marshal(platformAuditEventHashPayloadFor(event))
+	if err != nil {
+		return model.AuditEvent{}, fmt.Errorf("marshal platform audit event hash payload: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	event.EventHash = "sha256:" + hex.EncodeToString(sum[:])
+	event.Provenance = model.PlatformArtifactProvenance{
+		Issuer:    model.PlatformArtifactIssuerFugue,
+		KeyID:     keyID,
+		Algorithm: model.PlatformSignatureHMACSHA256,
+		SignedAt:  event.CreatedAt,
+	}
+	signatureRaw, err := json.Marshal(platformAuditEventSignaturePayloadFor(event))
+	if err != nil {
+		return model.AuditEvent{}, fmt.Errorf("marshal platform audit event signature payload: %w", err)
+	}
+	event.Provenance.Signature = signPlatformPayload(signatureRaw, key)
+	return event, nil
+}
+
+func VerifyTamperEvidentAuditEvent(event model.AuditEvent, keyring bundleauth.Keyring) error {
+	if strings.TrimSpace(event.ChainID) == "" ||
+		event.ChainSequence <= 0 ||
+		!strings.HasPrefix(strings.TrimSpace(event.EventHash), "sha256:") {
+		return ErrPlatformSignatureInvalid
+	}
+	raw, err := json.Marshal(platformAuditEventHashPayloadFor(event))
+	if err != nil {
+		return fmt.Errorf("marshal platform audit event hash payload: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	expectedHash := "sha256:" + hex.EncodeToString(sum[:])
+	if !strings.EqualFold(strings.TrimSpace(event.EventHash), expectedHash) {
+		return ErrPlatformSignatureInvalid
+	}
+	provenance := event.Provenance
+	if strings.TrimSpace(provenance.Issuer) != model.PlatformArtifactIssuerFugue ||
+		strings.TrimSpace(provenance.Algorithm) != model.PlatformSignatureHMACSHA256 ||
+		strings.TrimSpace(provenance.KeyID) == "" ||
+		strings.TrimSpace(provenance.Signature) == "" ||
+		provenance.SignedAt.IsZero() {
+		return ErrPlatformSignatureInvalid
+	}
+	key, err := platformVerificationKey(keyring, provenance.KeyID)
+	if err != nil {
+		return err
+	}
+	signatureRaw, err := json.Marshal(platformAuditEventSignaturePayloadFor(event))
+	if err != nil {
+		return fmt.Errorf("marshal platform audit event signature payload: %w", err)
+	}
+	expectedSignature := signPlatformPayload(signatureRaw, key)
+	if !hmac.Equal([]byte(strings.TrimSpace(provenance.Signature)), []byte(expectedSignature)) {
+		return ErrPlatformSignatureInvalid
+	}
+	return nil
+}
+
+func VerifyTamperEvidentAuditChain(events []model.AuditEvent, chainID string, keyring bundleauth.Keyring) error {
+	chainID = strings.TrimSpace(chainID)
+	chain := make([]model.AuditEvent, 0, len(events))
+	for _, event := range events {
+		if strings.TrimSpace(event.ChainID) == chainID {
+			chain = append(chain, event)
+		}
+	}
+	sort.Slice(chain, func(i, j int) bool {
+		return chain[i].ChainSequence < chain[j].ChainSequence
+	})
+	previousHash := ""
+	for index, event := range chain {
+		expectedSequence := int64(index + 1)
+		if event.ChainSequence != expectedSequence ||
+			!strings.EqualFold(strings.TrimSpace(event.PreviousHash), previousHash) {
+			return ErrPlatformSignatureInvalid
+		}
+		if err := VerifyTamperEvidentAuditEvent(event, keyring); err != nil {
+			return err
+		}
+		previousHash = strings.TrimSpace(strings.ToLower(event.EventHash))
+	}
+	return nil
+}
+
 func SignPlatformLKGSnapshot(snapshot model.PlatformLKGSnapshot, keyring bundleauth.Keyring) (model.PlatformLKGSnapshot, error) {
 	key, keyID, err := primaryPlatformSigningKey(keyring)
 	if err != nil {
@@ -340,6 +575,60 @@ type platformArtifactSigningPayload struct {
 	KeyID              string                      `json:"key_id"`
 	Algorithm          string                      `json:"algorithm"`
 	SignedAt           time.Time                   `json:"signed_at"`
+}
+
+type platformAuditEventHashPayload struct {
+	ID            string            `json:"id"`
+	TenantID      string            `json:"tenant_id,omitempty"`
+	ActorType     string            `json:"actor_type"`
+	ActorID       string            `json:"actor_id"`
+	Action        string            `json:"action"`
+	TargetType    string            `json:"target_type"`
+	TargetID      string            `json:"target_id,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+	ChainID       string            `json:"chain_id"`
+	ChainSequence int64             `json:"chain_sequence"`
+	PreviousHash  string            `json:"previous_hash,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+}
+
+type platformAuditEventSignaturePayload struct {
+	ChainID       string    `json:"chain_id"`
+	ChainSequence int64     `json:"chain_sequence"`
+	EventHash     string    `json:"event_hash"`
+	Issuer        string    `json:"issuer"`
+	KeyID         string    `json:"key_id"`
+	Algorithm     string    `json:"algorithm"`
+	SignedAt      time.Time `json:"signed_at"`
+}
+
+func platformAuditEventHashPayloadFor(event model.AuditEvent) platformAuditEventHashPayload {
+	return platformAuditEventHashPayload{
+		ID:            strings.TrimSpace(event.ID),
+		TenantID:      strings.TrimSpace(event.TenantID),
+		ActorType:     strings.TrimSpace(event.ActorType),
+		ActorID:       strings.TrimSpace(event.ActorID),
+		Action:        strings.TrimSpace(event.Action),
+		TargetType:    strings.TrimSpace(event.TargetType),
+		TargetID:      strings.TrimSpace(event.TargetID),
+		Metadata:      event.Metadata,
+		ChainID:       strings.TrimSpace(event.ChainID),
+		ChainSequence: event.ChainSequence,
+		PreviousHash:  strings.TrimSpace(strings.ToLower(event.PreviousHash)),
+		CreatedAt:     canonicalPlatformSignatureTime(event.CreatedAt),
+	}
+}
+
+func platformAuditEventSignaturePayloadFor(event model.AuditEvent) platformAuditEventSignaturePayload {
+	return platformAuditEventSignaturePayload{
+		ChainID:       strings.TrimSpace(event.ChainID),
+		ChainSequence: event.ChainSequence,
+		EventHash:     strings.TrimSpace(strings.ToLower(event.EventHash)),
+		Issuer:        strings.TrimSpace(event.Provenance.Issuer),
+		KeyID:         strings.TrimSpace(event.Provenance.KeyID),
+		Algorithm:     strings.TrimSpace(event.Provenance.Algorithm),
+		SignedAt:      canonicalPlatformSignatureTime(event.Provenance.SignedAt),
+	}
 }
 
 func platformArtifactSigningPayloadFor(artifact model.PlatformArtifact) platformArtifactSigningPayload {

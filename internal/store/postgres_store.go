@@ -4574,10 +4574,19 @@ func (s *Store) pgAppendAuditEventTx(ctx context.Context, exec sqlExecContexter,
 	if err != nil {
 		return err
 	}
+	provenanceJSON, err := marshalJSON(event.Provenance)
+	if err != nil {
+		return err
+	}
 	_, err = exec.ExecContext(ctx, `
-	INSERT INTO fugue_audit_events (id, tenant_id, actor_type, actor_id, action, target_type, target_id, metadata_json, created_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, event.ID, nullIfEmpty(event.TenantID), event.ActorType, event.ActorID, event.Action, event.TargetType, event.TargetID, metadataJSON, event.CreatedAt)
+	INSERT INTO fugue_audit_events (
+		id, tenant_id, actor_type, actor_id, action, target_type, target_id,
+		metadata_json, chain_id, chain_sequence, previous_hash, event_hash,
+		provenance_json, created_at
+	)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	`, event.ID, nullIfEmpty(event.TenantID), event.ActorType, event.ActorID, event.Action, event.TargetType, event.TargetID,
+		metadataJSON, event.ChainID, event.ChainSequence, event.PreviousHash, event.EventHash, provenanceJSON, event.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("append audit event: %w", err)
 	}
@@ -4589,7 +4598,8 @@ func (s *Store) pgListAuditEvents(tenantID string, platformAdmin bool, limit int
 	defer cancel()
 
 	query := `
-SELECT id, tenant_id, actor_type, actor_id, action, target_type, target_id, metadata_json, created_at
+SELECT id, tenant_id, actor_type, actor_id, action, target_type, target_id,
+	metadata_json, chain_id, chain_sequence, previous_hash, event_hash, provenance_json, created_at
 FROM fugue_audit_events
 `
 	args := make([]any, 0, 1)
@@ -5582,8 +5592,23 @@ func scanOperationSummary(scanner sqlScanner) (model.Operation, error) {
 func scanAuditEvent(scanner sqlScanner) (model.AuditEvent, error) {
 	var event model.AuditEvent
 	var tenantID sql.NullString
-	var metadataRaw []byte
-	if err := scanner.Scan(&event.ID, &tenantID, &event.ActorType, &event.ActorID, &event.Action, &event.TargetType, &event.TargetID, &metadataRaw, &event.CreatedAt); err != nil {
+	var metadataRaw, provenanceRaw []byte
+	if err := scanner.Scan(
+		&event.ID,
+		&tenantID,
+		&event.ActorType,
+		&event.ActorID,
+		&event.Action,
+		&event.TargetType,
+		&event.TargetID,
+		&metadataRaw,
+		&event.ChainID,
+		&event.ChainSequence,
+		&event.PreviousHash,
+		&event.EventHash,
+		&provenanceRaw,
+		&event.CreatedAt,
+	); err != nil {
 		return model.AuditEvent{}, err
 	}
 	event.TenantID = tenantID.String
@@ -5592,6 +5617,11 @@ func scanAuditEvent(scanner sqlScanner) (model.AuditEvent, error) {
 		return model.AuditEvent{}, err
 	}
 	event.Metadata = metadata
+	provenance, err := decodeJSONValue[model.PlatformArtifactProvenance](provenanceRaw)
+	if err != nil {
+		return model.AuditEvent{}, err
+	}
+	event.Provenance = provenance
 	return event, nil
 }
 

@@ -267,6 +267,20 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
+	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := validatePlatformArtifactOverrideAuthorization(
+		overrideMode,
+		req.Reason,
+		req.KernelBreakGlass,
+		artifact,
+		principal,
+		now,
+	); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	laneKey := platformsafety.ReleaseLaneKey(artifact.ArtifactKind, artifact.ScopeKey, channel)
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
 		if existingRelease, found, err := pgGetPlatformArtifactReleaseByIdempotency(ctx, tx, laneKey, req.IdempotencyKey); err != nil {
@@ -287,7 +301,8 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 			return existingArtifact, existingRelease, existingMessage, existingLKG, nil
 		}
 	}
-	if artifact.Status != model.PlatformArtifactStatusValidated {
+	if artifact.Status != model.PlatformArtifactStatusValidated &&
+		overrideMode == model.PlatformArtifactOverrideModeNone {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	lkg, err := s.pgGetVerifiedPlatformLKGForUpdate(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, now)
@@ -321,14 +336,16 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
-	if decision := platformsafety.EvaluateArtifactRelease(
+	decision := platformsafety.EvaluateArtifactReleaseWithOverride(
 		artifact,
 		channel,
 		pinnedRollbackGeneration,
 		req.CanaryRuleRef,
 		previousGenerationSequence,
+		overrideMode,
 		s.platformArtifactSigningKeyring(),
-	); !decision.Pass {
+	)
+	if !decision.Pass {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
@@ -339,6 +356,9 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 		req.Reason,
 		req.IdempotencyKey,
 		model.PlatformReleaseMessageTypeRelease,
+		overrideMode,
+		platformKernelBreakGlassExpiry(req.KernelBreakGlass),
+		platformsafety.BypassedInvariantIDs(decision),
 		principal,
 		lane,
 		now,
@@ -356,6 +376,16 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	}
 	if err := pgSetPlatformReleaseLaneActive(ctx, tx, lane.LaneKey, release.ID, lane.FencingToken, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if overrideMode != model.PlatformArtifactOverrideModeNone {
+		if err := s.pgAppendPlatformSafetyOverrideAuditEventTx(
+			ctx,
+			tx,
+			release,
+			model.PlatformReleaseMessageTypeRelease,
+		); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -379,11 +409,26 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
-	if target.Status != model.PlatformArtifactStatusValidated {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
-	}
 	now := time.Now().UTC()
 	channel := NormalizePlatformReleaseChannel(req.ReleaseChannel)
+	overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
+	if err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if err := validatePlatformArtifactOverrideAuthorization(
+		overrideMode,
+		req.Reason,
+		req.KernelBreakGlass,
+		target,
+		principal,
+		now,
+	); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if target.Status != model.PlatformArtifactStatusValidated &&
+		overrideMode == model.PlatformArtifactOverrideModeNone {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+	}
 	lkg, err := s.pgGetVerifiedPlatformLKGForUpdate(ctx, tx, target.ArtifactKind, target.ScopeKey, now)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -409,13 +454,15 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		}
 		canaryRuleRef = activeRelease.CanaryRuleRef
 	}
-	if decision := platformsafety.EvaluateArtifactRollback(
+	decision := platformsafety.EvaluateArtifactRollbackWithOverride(
 		target,
 		channel,
 		pinnedRollbackGeneration,
 		canaryRuleRef,
+		overrideMode,
 		s.platformArtifactSigningKeyring(),
-	); !decision.Pass {
+	)
+	if !decision.Pass {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
@@ -426,6 +473,9 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 		req.Reason,
 		"",
 		model.PlatformReleaseMessageTypeRollback,
+		overrideMode,
+		platformKernelBreakGlassExpiry(req.KernelBreakGlass),
+		platformsafety.BypassedInvariantIDs(decision),
 		principal,
 		lane,
 		now,
@@ -443,6 +493,16 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	}
 	if err := pgSetPlatformReleaseLaneActive(ctx, tx, lane.LaneKey, release.ID, lane.FencingToken, now); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	if overrideMode != model.PlatformArtifactOverrideModeNone {
+		if err := s.pgAppendPlatformSafetyOverrideAuditEventTx(
+			ctx,
+			tx,
+			release,
+			model.PlatformReleaseMessageTypeRollback,
+		); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -646,7 +706,8 @@ SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
 	release_channel, status, lane_key, fencing_token, version, idempotency_key,
 	candidate_generation, serving_unverified_generation, verified_lkg_generation,
 	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
-	rollback_target_generation, canary_rule_ref, reason,
+		rollback_target_generation, canary_rule_ref, override_mode, override_expires_at,
+		bypassed_invariants_json, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at
 FROM fugue_platform_artifact_releases
 WHERE id = $1`
@@ -666,7 +727,8 @@ SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
 	release_channel, status, lane_key, fencing_token, version, idempotency_key,
 	candidate_generation, serving_unverified_generation, verified_lkg_generation,
 	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
-	rollback_target_generation, canary_rule_ref, reason,
+		rollback_target_generation, canary_rule_ref, override_mode, override_expires_at,
+		bypassed_invariants_json, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at
 FROM fugue_platform_artifact_releases
 WHERE lane_key = $1 AND idempotency_key = $2
@@ -756,7 +818,8 @@ RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, generation,
 	release_channel, status, lane_key, fencing_token, version, idempotency_key,
 	candidate_generation, serving_unverified_generation, verified_lkg_generation,
 	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
-	rollback_target_generation, canary_rule_ref, reason,
+		rollback_target_generation, canary_rule_ref, override_mode, override_expires_at,
+		bypassed_invariants_json, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at`,
 		release.ID,
 		release.ServingUnverifiedGeneration,
@@ -792,37 +855,107 @@ func pgInsertPlatformArtifactRelease(ctx context.Context, db platformStateDB, re
 	if err != nil {
 		return model.PlatformArtifactRelease{}, err
 	}
+	bypassedInvariantsJSON, err := marshalJSON(release.BypassedInvariants)
+	if err != nil {
+		return model.PlatformArtifactRelease{}, err
+	}
 	out, err := scanPlatformArtifactRelease(db.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_artifact_releases (
 	id, artifact_id, artifact_kind, scope_key, scope_json, generation,
 	release_channel, status, lane_key, fencing_token, version, idempotency_key,
 	candidate_generation, serving_unverified_generation, verified_lkg_generation,
 	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
-	rollback_target_generation, canary_rule_ref, reason,
-	released_by_type, released_by_id, released_at, created_at, updated_at
-) VALUES (
-	$1, $2, $3, $4, $5::jsonb, $6,
-	$7, $8, $9, $10, $11, $12,
-	$13, $14, $15,
-	$16, $17, $18::jsonb, $19,
-	$20, $21, $22,
-	$23, $24, $25, $26, $27
-) RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, generation,
-	release_channel, status, lane_key, fencing_token, version, idempotency_key,
-	candidate_generation, serving_unverified_generation, verified_lkg_generation,
-	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
-	rollback_target_generation, canary_rule_ref, reason,
-	released_by_type, released_by_id, released_at, created_at, updated_at`,
+		rollback_target_generation, canary_rule_ref, override_mode, override_expires_at,
+		bypassed_invariants_json, reason,
+		released_by_type, released_by_id, released_at, created_at, updated_at
+	) VALUES (
+		$1, $2, $3, $4, $5::jsonb, $6,
+		$7, $8, $9, $10, $11, $12,
+		$13, $14, $15,
+		$16, $17, $18::jsonb, $19,
+		$20, $21, $22, $23, $24::jsonb, $25,
+		$26, $27, $28, $29, $30
+	) RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+		release_channel, status, lane_key, fencing_token, version, idempotency_key,
+		candidate_generation, serving_unverified_generation, verified_lkg_generation,
+		pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
+		rollback_target_generation, canary_rule_ref, override_mode, override_expires_at,
+		bypassed_invariants_json, reason,
+		released_by_type, released_by_id, released_at, created_at, updated_at`,
 		release.ID, release.ArtifactID, release.ArtifactKind, release.ScopeKey, scopeJSON, release.Generation,
 		release.ReleaseChannel, release.Status, release.LaneKey, release.FencingToken, release.Version, release.IdempotencyKey,
 		release.CandidateGeneration, release.ServingUnverifiedGeneration, release.VerifiedLKGGeneration,
 		release.PinnedRollbackGeneration, release.VerificationState, verificationEvidenceJSON, release.VerifiedAt,
-		release.RollbackTargetGeneration, release.CanaryRuleRef, release.Reason,
+		release.RollbackTargetGeneration, release.CanaryRuleRef, release.OverrideMode, release.OverrideExpiresAt,
+		bypassedInvariantsJSON, release.Reason,
 		release.ReleasedByType, release.ReleasedByID, release.ReleasedAt, release.CreatedAt, release.UpdatedAt))
 	if err != nil {
 		return model.PlatformArtifactRelease{}, mapDBErr(err)
 	}
 	return out, nil
+}
+
+func (s *Store) pgAppendPlatformSafetyOverrideAuditEventTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	release model.PlatformArtifactRelease,
+	messageType string,
+) error {
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_security_audit_chain_state (chain_id, last_sequence, last_hash, updated_at)
+VALUES ($1, 0, '', $2)
+ON CONFLICT (chain_id) DO NOTHING`,
+		platformsafety.PlatformSafetyAuditChainID,
+		release.CreatedAt,
+	); err != nil {
+		return fmt.Errorf("initialize platform safety audit chain: %w", err)
+	}
+	var sequence int64
+	var previousHash string
+	if err := tx.QueryRowContext(ctx, `
+SELECT last_sequence, last_hash
+FROM fugue_security_audit_chain_state
+WHERE chain_id = $1
+FOR UPDATE`,
+		platformsafety.PlatformSafetyAuditChainID,
+	).Scan(&sequence, &previousHash); err != nil {
+		return fmt.Errorf("lock platform safety audit chain: %w", err)
+	}
+	sequence++
+	event, err := buildPlatformSafetyOverrideAuditEvent(
+		release,
+		messageType,
+		sequence,
+		previousHash,
+		s.platformArtifactSigningKeyring(),
+	)
+	if err != nil {
+		return err
+	}
+	if err := s.pgAppendAuditEventTx(ctx, tx, event); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE fugue_security_audit_chain_state
+SET last_sequence = $2, last_hash = $3, updated_at = $4
+WHERE chain_id = $1 AND last_sequence = $5`,
+		platformsafety.PlatformSafetyAuditChainID,
+		event.ChainSequence,
+		event.EventHash,
+		event.CreatedAt,
+		event.ChainSequence-1,
+	)
+	if err != nil {
+		return fmt.Errorf("advance platform safety audit chain: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect platform safety audit chain advance: %w", err)
+	}
+	if affected != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func pgInsertPlatformReleaseMessage(ctx context.Context, db platformStateDB, message model.PlatformReleaseMessage) (model.PlatformReleaseMessage, error) {
@@ -908,7 +1041,8 @@ SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
 	release_channel, status, lane_key, fencing_token, version, idempotency_key,
 	candidate_generation, serving_unverified_generation, verified_lkg_generation,
 	pinned_rollback_generation, verification_state, verification_evidence_json, verified_at,
-	rollback_target_generation, canary_rule_ref, reason,
+		rollback_target_generation, canary_rule_ref, override_mode, override_expires_at,
+		bypassed_invariants_json, reason,
 	released_by_type, released_by_id, released_at, created_at, updated_at
 FROM fugue_platform_artifact_releases
 WHERE artifact_kind = $1 AND scope_key = $2 AND release_channel = $3 AND status = $4
@@ -1128,7 +1262,7 @@ func scanPlatformArtifactContent(scanner sqlScanner) (model.PlatformArtifactCont
 
 func scanPlatformArtifactRelease(scanner sqlScanner) (model.PlatformArtifactRelease, error) {
 	var release model.PlatformArtifactRelease
-	var scopeRaw, verificationEvidenceRaw []byte
+	var scopeRaw, verificationEvidenceRaw, bypassedInvariantsRaw []byte
 	if err := scanner.Scan(
 		&release.ID,
 		&release.ArtifactID,
@@ -1151,6 +1285,9 @@ func scanPlatformArtifactRelease(scanner sqlScanner) (model.PlatformArtifactRele
 		&release.VerifiedAt,
 		&release.RollbackTargetGeneration,
 		&release.CanaryRuleRef,
+		&release.OverrideMode,
+		&release.OverrideExpiresAt,
+		&bypassedInvariantsRaw,
 		&release.Reason,
 		&release.ReleasedByType,
 		&release.ReleasedByID,
@@ -1170,6 +1307,11 @@ func scanPlatformArtifactRelease(scanner sqlScanner) (model.PlatformArtifactRele
 	}
 	release.Scope = scope
 	release.VerificationEvidence = verificationEvidence
+	bypassedInvariants, err := decodeJSONValue[[]string](bypassedInvariantsRaw)
+	if err != nil {
+		return model.PlatformArtifactRelease{}, err
+	}
+	release.BypassedInvariants = bypassedInvariants
 	return release, nil
 }
 

@@ -103,6 +103,184 @@ func TestOrdinaryReleaseRequiresMonotonicSequenceButRollbackDoesNot(t *testing.T
 	}
 }
 
+func TestPublicationOverridesCannotBypassImmutableIntegrityOrCanaryScope(t *testing.T) {
+	artifact := testSignedPlatformArtifact(t, map[string]any{"version": "v1"})
+	artifact.Status = model.PlatformArtifactStatusDraft
+
+	soft := EvaluateArtifactReleaseWithOverride(
+		artifact,
+		model.PlatformArtifactReleaseChannelShadow,
+		"",
+		"",
+		0,
+		model.PlatformArtifactOverrideModeSoft,
+		testPlatformSafetyKeyring(),
+	)
+	if !soft.Pass ||
+		!decisionHasBypassedInvariant(soft, InvariantArtifactValidated) ||
+		len(soft.Violations) != 0 {
+		t.Fatalf("soft override must bypass only ordinary validation status: %+v", soft)
+	}
+
+	tampered := artifact
+	tampered.Content = map[string]any{"version": "tampered"}
+	soft = EvaluateArtifactReleaseWithOverride(
+		tampered,
+		model.PlatformArtifactReleaseChannelShadow,
+		"",
+		"",
+		0,
+		model.PlatformArtifactOverrideModeSoft,
+		testPlatformSafetyKeyring(),
+	)
+	if soft.Pass ||
+		!decisionHasInvariant(soft, InvariantArtifactContentHash) ||
+		decisionHasBypassedInvariant(soft, InvariantArtifactContentHash) {
+		t.Fatalf("soft override must not bypass content integrity: %+v", soft)
+	}
+
+	kernel := EvaluateArtifactReleaseWithOverride(
+		artifact,
+		model.PlatformArtifactReleaseChannelFull,
+		"",
+		"",
+		artifact.GenerationSequence,
+		model.PlatformArtifactOverrideModeKernelBreakGlass,
+		testPlatformSafetyKeyring(),
+	)
+	if !kernel.Pass ||
+		!decisionHasBypassedInvariant(kernel, InvariantArtifactValidated) ||
+		!decisionHasBypassedInvariant(kernel, InvariantGenerationMonotonic) ||
+		!decisionHasBypassedInvariant(kernel, InvariantFullPinnedRollback) {
+		t.Fatalf("kernel break-glass must bypass only its explicit recovery allowlist: %+v", kernel)
+	}
+
+	kernel = EvaluateArtifactReleaseWithOverride(
+		artifact,
+		model.PlatformArtifactReleaseChannelGray,
+		"",
+		"*",
+		0,
+		model.PlatformArtifactOverrideModeKernelBreakGlass,
+		testPlatformSafetyKeyring(),
+	)
+	if kernel.Pass ||
+		!decisionHasInvariant(kernel, InvariantCanaryScopeIsolation) ||
+		decisionHasBypassedInvariant(kernel, InvariantCanaryScopeIsolation) {
+		t.Fatalf("kernel break-glass must not bypass canary isolation: %+v", kernel)
+	}
+}
+
+func TestKernelBreakGlassAuthorizationRequiresBoundedTTLAndDualConfirmation(t *testing.T) {
+	now := time.Date(2026, 7, 10, 3, 0, 0, 0, time.UTC)
+	artifact := testSignedPlatformArtifact(t, map[string]any{"version": "v1"})
+	valid := &model.PlatformKernelBreakGlassRequest{
+		ExpiresAt:          now.Add(5 * time.Minute),
+		Confirmation:       KernelBreakGlassConfirmation,
+		TargetConfirmation: artifact.ID,
+	}
+	if err := ValidateKernelBreakGlassAuthorization(valid, artifact, now); err != nil {
+		t.Fatalf("valid bounded kernel break-glass authorization was rejected: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		authorization *model.PlatformKernelBreakGlassRequest
+	}{
+		{name: "missing", authorization: nil},
+		{name: "expired", authorization: &model.PlatformKernelBreakGlassRequest{
+			ExpiresAt:          now,
+			Confirmation:       KernelBreakGlassConfirmation,
+			TargetConfirmation: artifact.ID,
+		}},
+		{name: "ttl-too-long", authorization: &model.PlatformKernelBreakGlassRequest{
+			ExpiresAt:          now.Add(KernelBreakGlassMaxTTL + time.Second),
+			Confirmation:       KernelBreakGlassConfirmation,
+			TargetConfirmation: artifact.ID,
+		}},
+		{name: "bad-safety-confirmation", authorization: &model.PlatformKernelBreakGlassRequest{
+			ExpiresAt:          now.Add(time.Minute),
+			Confirmation:       "BYPASS",
+			TargetConfirmation: artifact.ID,
+		}},
+		{name: "bad-target-confirmation", authorization: &model.PlatformKernelBreakGlassRequest{
+			ExpiresAt:          now.Add(time.Minute),
+			Confirmation:       KernelBreakGlassConfirmation,
+			TargetConfirmation: "other-artifact",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateKernelBreakGlassAuthorization(test.authorization, artifact, now); err == nil {
+				t.Fatalf("invalid authorization was accepted: %+v", test.authorization)
+			}
+		})
+	}
+}
+
+func TestTamperEvidentAuditChainRejectsMutationAndBrokenLinks(t *testing.T) {
+	now := time.Date(2026, 7, 10, 4, 0, 0, 0, time.UTC)
+	first, err := SignTamperEvidentAuditEvent(model.AuditEvent{
+		ID:            "audit-1",
+		ActorType:     model.ActorTypeAPIKey,
+		ActorID:       "operator-1",
+		Action:        "platform_artifact.kernel_break_glass",
+		TargetType:    "platform_artifact_release",
+		TargetID:      "release-1",
+		Metadata:      map[string]string{"reason": "recovery"},
+		ChainID:       PlatformSafetyAuditChainID,
+		ChainSequence: 1,
+		CreatedAt:     now,
+	}, testPlatformSafetyKeyring())
+	if err != nil {
+		t.Fatalf("sign first audit event: %v", err)
+	}
+	second, err := SignTamperEvidentAuditEvent(model.AuditEvent{
+		ID:            "audit-2",
+		ActorType:     model.ActorTypeAPIKey,
+		ActorID:       "operator-2",
+		Action:        "platform_artifact.soft_override",
+		TargetType:    "platform_artifact_release",
+		TargetID:      "release-2",
+		Metadata:      map[string]string{"reason": "validation exception"},
+		ChainID:       PlatformSafetyAuditChainID,
+		ChainSequence: 2,
+		PreviousHash:  first.EventHash,
+		CreatedAt:     now.Add(time.Second),
+	}, testPlatformSafetyKeyring())
+	if err != nil {
+		t.Fatalf("sign second audit event: %v", err)
+	}
+	chain := []model.AuditEvent{first, second}
+	if err := VerifyTamperEvidentAuditChain(chain, PlatformSafetyAuditChainID, testPlatformSafetyKeyring()); err != nil {
+		t.Fatalf("valid audit chain was rejected: %v", err)
+	}
+
+	tampered := append([]model.AuditEvent(nil), chain...)
+	tampered[0].Metadata = map[string]string{"reason": "rewritten"}
+	if err := VerifyTamperEvidentAuditChain(tampered, PlatformSafetyAuditChainID, testPlatformSafetyKeyring()); err == nil {
+		t.Fatal("tampered audit event was accepted")
+	}
+
+	tamperedTenant := append([]model.AuditEvent(nil), chain...)
+	tamperedTenant[0].TenantID = "forged-tenant"
+	if err := VerifyTamperEvidentAuditChain(tamperedTenant, PlatformSafetyAuditChainID, testPlatformSafetyKeyring()); err == nil {
+		t.Fatal("tampered audit tenant identity was accepted")
+	}
+
+	brokenLink := append([]model.AuditEvent(nil), chain...)
+	brokenLink[1].PreviousHash = strings.Repeat("0", 64)
+	if err := VerifyTamperEvidentAuditChain(brokenLink, PlatformSafetyAuditChainID, testPlatformSafetyKeyring()); err == nil {
+		t.Fatal("broken audit chain link was accepted")
+	}
+
+	brokenSequence := append([]model.AuditEvent(nil), chain...)
+	brokenSequence[1].ChainSequence = 3
+	if err := VerifyTamperEvidentAuditChain(brokenSequence, PlatformSafetyAuditChainID, testPlatformSafetyKeyring()); err == nil {
+		t.Fatal("non-contiguous audit sequence was accepted")
+	}
+}
+
 func TestArtifactIntegrityRejectsSchemaSequenceSignatureAndRevocation(t *testing.T) {
 	artifact := testSignedPlatformArtifact(t, map[string]any{"version": "v1"})
 	if decision := EvaluateArtifactIntegrity(artifact, testPlatformSafetyKeyring()); !decision.Pass {
@@ -256,6 +434,15 @@ func TestPlatformSignaturesCanonicalizePostgresTimestampPrecision(t *testing.T) 
 
 func decisionHasInvariant(decision Decision, invariant string) bool {
 	for _, violation := range decision.Violations {
+		if violation.Invariant == invariant {
+			return true
+		}
+	}
+	return false
+}
+
+func decisionHasBypassedInvariant(decision Decision, invariant string) bool {
+	for _, violation := range decision.Bypassed {
 		if violation.Invariant == invariant {
 			return true
 		}

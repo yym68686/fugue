@@ -56,7 +56,8 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
   normalized scope. Ordinary publication must move forward within each
   release-channel lane.
 - Publishing an older generation is only allowed through the explicit rollback
-  operation. `force_publish` is not a rollback mechanism.
+  operation. The deprecated `force_publish` flag maps to `soft_override` and is
+  not a rollback mechanism.
 - Full release enters `serving_unverified`; it does not overwrite verified LKG.
 - Shadow and gray releases never set the production
   `serving_unverified_generation`.
@@ -67,8 +68,20 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
 - Key rotation accepts a configured current or previous signing key; revoked
   key ids are always rejected.
 - Secret-like content is rejected by validation.
-- `force_publish` cannot bypass validation, schema, canonical content hash,
-  signature, generation monotonicity, fencing, or pinned rollback requirements.
+- `soft_override` may bypass only ordinary artifact validation status and
+  requires a reason. It cannot bypass schema, canonical content hash,
+  signature, generation monotonicity, canary isolation, fencing, or pinned
+  rollback requirements.
+- `kernel_break_glass` is a separate, explicit, non-inherited permission. It
+  can bypass only validation status, generation monotonicity, and a missing
+  pinned rollback target for one transaction with dual confirmation and a
+  maximum 15-minute authorization window.
+- Neither override can bypass schema/hash/signature integrity, gray canary
+  isolation, blast-radius caps, kill-switch precedence, fencing, LKG
+  integrity/signature, or verification evidence.
+- Override release and rollback records persist `override_mode`,
+  `override_expires_at`, and `bypassed_invariants`; the same transaction appends
+  a signed hash-chain security audit event.
 - Only assert evidence flags after checking the referenced evidence. The
   verification request and evidence hash are audited.
 
@@ -82,3 +95,7 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
   not expired.
 - Repeating the same release idempotency key or verification evidence is
   idempotent.
+- A normal `platform.admin` key cannot perform kernel break-glass unless the key
+  also carries the explicit `artifact.kernel_break_glass` scope.
+- A failed or expired break-glass request must leave the release lane, active
+  generation, LKG, and security audit chain unchanged.

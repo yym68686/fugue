@@ -1834,17 +1834,17 @@ DNS/edge failover 必须满足：
 - [x] 定义 blast-radius maximum hard cap。
 - [x] 定义 kill switch precedence。
 - [x] 定义 expired/corrupt/signature-invalid LKG 硬规则。
-- [ ] 将普通 `force_publish` 拆成 `soft_override`。
-- [ ] 设计独立 `kernel_break_glass` 权限。
-- [ ] kernel break-glass 要求 reason、双重确认和短 TTL。
-- [ ] kernel break-glass 到期自动恢复默认保护。
-- [ ] kernel break-glass 写入 tamper-evident audit。
+- [x] 将普通 `force_publish` 拆成 `soft_override`。
+- [x] 设计独立 `kernel_break_glass` 权限。
+- [x] kernel break-glass 要求 reason、双重确认和短 TTL。
+- [x] kernel break-glass 到期自动恢复默认保护。
+- [x] kernel break-glass 写入 tamper-evident audit。
 - [x] 增加配置只能收紧、不能放宽安全内核的测试。
 - [x] 增加 shadow 不影响生产的 property test。
 - [x] 增加 canary 不越过 scope 的 property test。
 - [x] 增加 kill switch 并发优先级测试。
 - [x] 新增 runbook: platform safety kernel。
-- [ ] 新增 runbook: kernel break-glass。
+- [x] 新增 runbook: kernel break-glass。
 
 #### Phase -1B: Verified LKG 语义
 

@@ -3799,6 +3799,13 @@ func (s *Store) ListAssignedOperations(runtimeID string) ([]model.Operation, err
 }
 
 func (s *Store) AppendAuditEvent(event model.AuditEvent) error {
+	if strings.TrimSpace(event.ChainID) != "" ||
+		event.ChainSequence != 0 ||
+		strings.TrimSpace(event.PreviousHash) != "" ||
+		strings.TrimSpace(event.EventHash) != "" ||
+		strings.TrimSpace(event.Provenance.Signature) != "" {
+		return ErrInvalidInput
+	}
 	if event.ID == "" {
 		event.ID = model.NewID("audit")
 	}

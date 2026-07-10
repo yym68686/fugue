@@ -247,6 +247,20 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 		}
 		artifact = state.PlatformArtifacts[index]
 		now := time.Now().UTC()
+		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
+		if err != nil {
+			return err
+		}
+		if err := validatePlatformArtifactOverrideAuthorization(
+			overrideMode,
+			req.Reason,
+			req.KernelBreakGlass,
+			artifact,
+			principal,
+			now,
+		); err != nil {
+			return err
+		}
 		laneKey := platformsafety.ReleaseLaneKey(artifact.ArtifactKind, artifact.ScopeKey, channel)
 		if existingRelease, ok := platformReleaseByIdempotencyKey(state.PlatformArtifactReleases, laneKey, req.IdempotencyKey); ok {
 			existingArtifactIndex := platformArtifactIndex(state.PlatformArtifacts, existingRelease.ArtifactID)
@@ -262,7 +276,8 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 			message = existingMessage
 			return nil
 		}
-		if artifact.Status != model.PlatformArtifactStatusValidated {
+		if artifact.Status != model.PlatformArtifactStatusValidated &&
+			overrideMode == model.PlatformArtifactOverrideModeNone {
 			return ErrConflict
 		}
 		lkg = verifiedPlatformLKGSnapshotFromState(
@@ -286,14 +301,16 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 		if err != nil {
 			return err
 		}
-		if decision := platformsafety.EvaluateArtifactRelease(
+		decision := platformsafety.EvaluateArtifactReleaseWithOverride(
 			artifact,
 			channel,
 			pinnedRollbackGeneration,
 			req.CanaryRuleRef,
 			previousGenerationSequence,
+			overrideMode,
 			s.platformArtifactSigningKeyring(),
-		); !decision.Pass {
+		)
+		if !decision.Pass {
 			return ErrConflict
 		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
@@ -308,6 +325,9 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 			req.Reason,
 			req.IdempotencyKey,
 			model.PlatformReleaseMessageTypeRelease,
+			overrideMode,
+			platformKernelBreakGlassExpiry(req.KernelBreakGlass),
+			platformsafety.BypassedInvariantIDs(decision),
 			principal,
 			lane,
 			now,
@@ -319,6 +339,16 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 		state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
 		message = entry.Message
 		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
+		if overrideMode != model.PlatformArtifactOverrideModeNone {
+			if err := appendPlatformSafetyOverrideAuditEventToState(
+				state,
+				release,
+				model.PlatformReleaseMessageTypeRelease,
+				s.platformArtifactSigningKeyring(),
+			); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return artifact, release, message, lkg, err
@@ -350,10 +380,25 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			return ErrNotFound
 		}
 		target = state.PlatformArtifacts[targetIndex]
-		if target.Status != model.PlatformArtifactStatusValidated {
+		now := time.Now().UTC()
+		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
+		if err != nil {
+			return err
+		}
+		if err := validatePlatformArtifactOverrideAuthorization(
+			overrideMode,
+			req.Reason,
+			req.KernelBreakGlass,
+			target,
+			principal,
+			now,
+		); err != nil {
+			return err
+		}
+		if target.Status != model.PlatformArtifactStatusValidated &&
+			overrideMode == model.PlatformArtifactOverrideModeNone {
 			return ErrConflict
 		}
-		now := time.Now().UTC()
 		lkg = verifiedPlatformLKGSnapshotFromState(
 			state,
 			target.ArtifactKind,
@@ -371,13 +416,15 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 				canaryRuleRef = activeRelease.CanaryRuleRef
 			}
 		}
-		if decision := platformsafety.EvaluateArtifactRollback(
+		decision := platformsafety.EvaluateArtifactRollbackWithOverride(
 			target,
 			channel,
 			pinnedRollbackGeneration,
 			canaryRuleRef,
+			overrideMode,
 			s.platformArtifactSigningKeyring(),
-		); !decision.Pass {
+		)
+		if !decision.Pass {
 			return ErrConflict
 		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, target.ArtifactKind, target.ScopeKey, channel, now)
@@ -392,6 +439,9 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			req.Reason,
 			"",
 			model.PlatformReleaseMessageTypeRollback,
+			overrideMode,
+			platformKernelBreakGlassExpiry(req.KernelBreakGlass),
+			platformsafety.BypassedInvariantIDs(decision),
 			principal,
 			lane,
 			now,
@@ -403,6 +453,16 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 		state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
 		message = entry.Message
 		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
+		if overrideMode != model.PlatformArtifactOverrideModeNone {
+			if err := appendPlatformSafetyOverrideAuditEventToState(
+				state,
+				release,
+				model.PlatformReleaseMessageTypeRollback,
+				s.platformArtifactSigningKeyring(),
+			); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return target, release, message, lkg, err
@@ -855,6 +915,9 @@ func buildPlatformArtifactReleaseLedgerEntry(
 	reason string,
 	idempotencyKey string,
 	messageType string,
+	overrideMode string,
+	overrideExpiresAt *time.Time,
+	bypassedInvariants []string,
 	principal model.Principal,
 	lane model.PlatformReleaseLane,
 	now time.Time,
@@ -883,6 +946,9 @@ func buildPlatformArtifactReleaseLedgerEntry(
 		VerificationState:           model.PlatformArtifactVerificationStateServingUnverified,
 		RollbackTargetGeneration:    strings.TrimSpace(rollbackTargetGeneration),
 		CanaryRuleRef:               strings.TrimSpace(canaryRuleRef),
+		OverrideMode:                strings.TrimSpace(overrideMode),
+		OverrideExpiresAt:           clonePlatformTimePointer(overrideExpiresAt),
+		BypassedInvariants:          append([]string(nil), bypassedInvariants...),
 		Reason:                      strings.TrimSpace(reason),
 		ReleasedByType:              strings.TrimSpace(principal.ActorType),
 		ReleasedByID:                strings.TrimSpace(principal.ActorID),
@@ -896,6 +962,145 @@ func buildPlatformArtifactReleaseLedgerEntry(
 		Message:  buildPlatformReleaseMessage(artifact, release, messageType, now),
 	}
 	return entry
+}
+
+func platformArtifactOverrideMode(
+	softOverride bool,
+	forcePublish bool,
+	kernelBreakGlass *model.PlatformKernelBreakGlassRequest,
+) (string, error) {
+	softOverride = softOverride || forcePublish
+	if softOverride && kernelBreakGlass != nil {
+		return "", ErrInvalidInput
+	}
+	if kernelBreakGlass != nil {
+		return model.PlatformArtifactOverrideModeKernelBreakGlass, nil
+	}
+	if softOverride {
+		return model.PlatformArtifactOverrideModeSoft, nil
+	}
+	return model.PlatformArtifactOverrideModeNone, nil
+}
+
+func validatePlatformArtifactOverrideAuthorization(
+	overrideMode string,
+	reason string,
+	kernelBreakGlass *model.PlatformKernelBreakGlassRequest,
+	artifact model.PlatformArtifact,
+	principal model.Principal,
+	now time.Time,
+) error {
+	switch overrideMode {
+	case model.PlatformArtifactOverrideModeNone:
+		return nil
+	case model.PlatformArtifactOverrideModeSoft:
+		if strings.TrimSpace(reason) == "" ||
+			(!principal.HasScope("artifact.soft_override") &&
+				!principal.HasScope("artifact.force_publish")) {
+			return ErrInvalidInput
+		}
+		return nil
+	case model.PlatformArtifactOverrideModeKernelBreakGlass:
+		if strings.TrimSpace(reason) == "" ||
+			!principal.IsPlatformAdmin() ||
+			!principal.HasExplicitScope("artifact.kernel_break_glass") {
+			return ErrInvalidInput
+		}
+		if err := platformsafety.ValidateKernelBreakGlassAuthorization(kernelBreakGlass, artifact, now); err != nil {
+			return ErrInvalidInput
+		}
+		return nil
+	default:
+		return ErrInvalidInput
+	}
+}
+
+func platformKernelBreakGlassExpiry(authorization *model.PlatformKernelBreakGlassRequest) *time.Time {
+	if authorization == nil || authorization.ExpiresAt.IsZero() {
+		return nil
+	}
+	expiresAt := authorization.ExpiresAt.UTC()
+	return &expiresAt
+}
+
+func clonePlatformTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
+}
+
+func appendPlatformSafetyOverrideAuditEventToState(
+	state *model.State,
+	release model.PlatformArtifactRelease,
+	messageType string,
+	keyring bundleauth.Keyring,
+) error {
+	if state == nil {
+		return ErrInvalidInput
+	}
+	var sequence int64
+	previousHash := ""
+	for _, event := range state.AuditEvents {
+		if event.ChainID != platformsafety.PlatformSafetyAuditChainID ||
+			event.ChainSequence <= sequence {
+			continue
+		}
+		sequence = event.ChainSequence
+		previousHash = event.EventHash
+	}
+	sequence++
+	event, err := buildPlatformSafetyOverrideAuditEvent(
+		release,
+		messageType,
+		sequence,
+		previousHash,
+		keyring,
+	)
+	if err != nil {
+		return err
+	}
+	state.AuditEvents = append(state.AuditEvents, event)
+	return nil
+}
+
+func buildPlatformSafetyOverrideAuditEvent(
+	release model.PlatformArtifactRelease,
+	messageType string,
+	sequence int64,
+	previousHash string,
+	keyring bundleauth.Keyring,
+) (model.AuditEvent, error) {
+	action := "platform_artifact." + release.OverrideMode + "_" + strings.TrimSpace(messageType)
+	metadata := map[string]string{
+		"artifact_id":          release.ArtifactID,
+		"artifact_kind":        release.ArtifactKind,
+		"scope_key":            release.ScopeKey,
+		"generation":           release.Generation,
+		"release_channel":      release.ReleaseChannel,
+		"override_mode":        release.OverrideMode,
+		"bypassed_invariants":  strings.Join(release.BypassedInvariants, ","),
+		"reason":               release.Reason,
+		"fencing_token":        fmt.Sprintf("%d", release.FencingToken),
+		"automatic_expiration": "operation_scoped",
+	}
+	if release.OverrideExpiresAt != nil {
+		metadata["override_expires_at"] = release.OverrideExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return platformsafety.SignTamperEvidentAuditEvent(model.AuditEvent{
+		ID:            model.NewID("audit"),
+		ActorType:     release.ReleasedByType,
+		ActorID:       release.ReleasedByID,
+		Action:        action,
+		TargetType:    "platform_artifact_release",
+		TargetID:      release.ID,
+		Metadata:      metadata,
+		ChainID:       platformsafety.PlatformSafetyAuditChainID,
+		ChainSequence: sequence,
+		PreviousHash:  previousHash,
+		CreatedAt:     release.CreatedAt,
+	}, keyring)
 }
 
 func platformArtifactReleaseIndex(releases []model.PlatformArtifactRelease, releaseID string) int {

@@ -150,13 +150,47 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusForbidden, scope+" scope required")
 		return
 	}
-	if req.ForcePublish && !principal.HasScope("artifact.force_publish") {
-		httpx.WriteError(w, http.StatusForbidden, "artifact.force_publish scope required")
+	if req.ForcePublish {
+		req.SoftOverride = true
+	}
+	if req.SoftOverride && req.KernelBreakGlass != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "soft_override and kernel_break_glass are mutually exclusive")
 		return
 	}
-	if req.ForcePublish && strings.TrimSpace(req.Reason) == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "force_publish requires reason")
+	if req.SoftOverride &&
+		!principal.HasScope("artifact.soft_override") &&
+		!principal.HasScope("artifact.force_publish") {
+		httpx.WriteError(w, http.StatusForbidden, "artifact.soft_override scope required")
 		return
+	}
+	if req.SoftOverride && strings.TrimSpace(req.Reason) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "soft_override requires reason")
+		return
+	}
+	if req.KernelBreakGlass != nil {
+		if !principal.HasExplicitScope("artifact.kernel_break_glass") {
+			httpx.WriteError(w, http.StatusForbidden, "explicit artifact.kernel_break_glass scope required")
+			return
+		}
+		if strings.TrimSpace(req.Reason) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "kernel_break_glass requires reason")
+			return
+		}
+		artifact, err := s.store.GetPlatformArtifact(r.PathValue("artifact_id"))
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if err := platformsafety.ValidateKernelBreakGlassAuthorization(req.KernelBreakGlass, artifact, time.Now().UTC()); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.SoftOverride {
+		req.ForcePublish = false
+	}
+	if req.KernelBreakGlass == nil && !req.SoftOverride {
+		req.ForcePublish = false
 	}
 	artifact, release, message, lkg, err := s.store.ReleasePlatformArtifact(r.PathValue("artifact_id"), req, principal)
 	if err != nil {
@@ -170,7 +204,10 @@ func (s *Server) handleReleasePlatformArtifact(w http.ResponseWriter, r *http.Re
 		"generation":      artifact.Generation,
 		"release_id":      release.ID,
 		"release_channel": release.ReleaseChannel,
-		"force_publish":   fmt.Sprintf("%t", req.ForcePublish),
+		"override_mode":   firstNonEmpty(release.OverrideMode, "none"),
+		"override_expiry": platformReleaseOverrideExpiry(release.OverrideExpiresAt),
+		"bypassed":        strings.Join(release.BypassedInvariants, ","),
+		"reason":          strings.TrimSpace(req.Reason),
 	})
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformArtifactReleaseResponse{
 		Artifact: artifact,
@@ -200,9 +237,35 @@ func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.R
 		httpx.WriteError(w, http.StatusBadRequest, "release_channel must be shadow, gray, or full")
 		return
 	}
-	if req.ForcePublish && !principal.HasScope("artifact.force_publish") {
-		httpx.WriteError(w, http.StatusForbidden, "artifact.force_publish scope required")
+	if req.ForcePublish {
+		req.SoftOverride = true
+	}
+	if req.SoftOverride && req.KernelBreakGlass != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "soft_override and kernel_break_glass are mutually exclusive")
 		return
+	}
+	if req.SoftOverride &&
+		!principal.HasScope("artifact.soft_override") &&
+		!principal.HasScope("artifact.force_publish") {
+		httpx.WriteError(w, http.StatusForbidden, "artifact.soft_override scope required")
+		return
+	}
+	if req.KernelBreakGlass != nil {
+		if !principal.IsPlatformAdmin() || !principal.HasExplicitScope("artifact.kernel_break_glass") {
+			httpx.WriteError(w, http.StatusForbidden, "explicit artifact.kernel_break_glass scope required")
+			return
+		}
+		if err := platformsafety.ValidateKernelBreakGlassAuthorization(
+			req.KernelBreakGlass,
+			model.PlatformArtifact{ID: req.ToGeneration, Generation: req.ToGeneration},
+			time.Now().UTC(),
+		); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.SoftOverride {
+		req.ForcePublish = false
 	}
 	artifact, release, message, lkg, err := s.store.RollbackPlatformArtifact(r.PathValue("artifact_id"), req, principal)
 	if err != nil {
@@ -216,6 +279,10 @@ func (s *Server) handleRollbackPlatformArtifact(w http.ResponseWriter, r *http.R
 		"release_id":      release.ID,
 		"release_channel": release.ReleaseChannel,
 		"to_generation":   req.ToGeneration,
+		"override_mode":   firstNonEmpty(release.OverrideMode, "none"),
+		"override_expiry": platformReleaseOverrideExpiry(release.OverrideExpiresAt),
+		"bypassed":        strings.Join(release.BypassedInvariants, ","),
+		"reason":          strings.TrimSpace(req.Reason),
 	})
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformArtifactReleaseResponse{
 		Artifact: artifact,
@@ -333,6 +400,13 @@ func platformArtifactReleaseScope(channel string) string {
 	default:
 		return "artifact.release"
 	}
+}
+
+func platformReleaseOverrideExpiry(expiresAt *time.Time) string {
+	if expiresAt == nil {
+		return ""
+	}
+	return expiresAt.UTC().Format(time.RFC3339Nano)
 }
 
 func (s *Server) handleGetPlatformStateArtifact(w http.ResponseWriter, r *http.Request) {
@@ -629,7 +703,8 @@ func subsystemFailureContracts() []model.SubsystemFailureContract {
 			},
 			AttributionClasses: []string{item.subsystem + ".unavailable", item.subsystem + ".stale_generation", item.subsystem + ".bad_output"},
 			HumanApprovalBoundaries: []model.HumanApprovalBoundary{
-				{Action: "force_publish", Description: "publishing despite failed validation requires explicit human reason", Required: true},
+				{Action: "soft_override", Description: "bypassing non-kernel validation requires platform administration and an explicit human reason", Required: true},
+				{Action: "kernel_break_glass", Description: "a narrowly bounded kernel recovery requires explicit non-inherited permission, dual confirmation, and a short TTL", Required: true},
 				{Action: "stateful_repair", Description: "stateful failover or destructive repair requires fence and backup evidence", Required: true},
 			},
 			ObserveOnlyAllowed:         true,

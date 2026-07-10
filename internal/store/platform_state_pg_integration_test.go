@@ -6,8 +6,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/platformsafety"
 )
 
 func TestPlatformReleaseStateMachinePostgres(t *testing.T) {
@@ -243,5 +246,113 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND release_channel = $3 AND status 
 		if err != nil {
 			t.Fatalf("iteration %d verify next active release: %v", iteration, err)
 		}
+	}
+}
+
+func TestPlatformOverrideAuditPostgres(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set FUGUE_TEST_DATABASE_URL to run platform override Postgres integration test")
+	}
+	if !strings.Contains(databaseURL, "fugue-pgtest") && !strings.Contains(databaseURL, "fugue_test") {
+		t.Fatalf("refusing to run platform override integration test against non-test database URL %q", databaseURL)
+	}
+
+	s := New("", databaseURL)
+	configureTestPlatformArtifactSigning(s)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init postgres store: %v", err)
+	}
+	scopeKey := "pg-override-" + model.NewID("scope")
+	scope := model.PlatformArtifactScope{ScopeType: "test", Key: scopeKey}
+	createDraft := func(generation string) model.PlatformArtifact {
+		t.Helper()
+		artifact, err := s.CreatePlatformArtifact(model.PlatformArtifact{
+			ArtifactKind: model.PlatformArtifactKindTrafficSafetyPolicy,
+			Scope:        scope,
+			Generation:   generation,
+			Content:      map[string]any{"min_healthy_edges": 1},
+		})
+		if err != nil {
+			t.Fatalf("create draft artifact %s: %v", generation, err)
+		}
+		return artifact
+	}
+
+	softArtifact := createDraft("soft-" + model.NewID("generation"))
+	_, softRelease, _, _, err := s.ReleasePlatformArtifact(softArtifact.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
+		SoftOverride:   true,
+		Reason:         "postgres soft override transaction",
+	}, testPlatformSoftOverridePrincipal())
+	if err != nil {
+		t.Fatalf("release postgres soft override: %v", err)
+	}
+
+	kernelArtifact := createDraft("kernel-" + model.NewID("generation"))
+	expiresAt := time.Now().UTC().Add(5 * time.Minute)
+	_, kernelRelease, _, _, err := s.ReleasePlatformArtifact(kernelArtifact.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		KernelBreakGlass: &model.PlatformKernelBreakGlassRequest{
+			ExpiresAt:          expiresAt,
+			Confirmation:       platformsafety.KernelBreakGlassConfirmation,
+			TargetConfirmation: kernelArtifact.ID,
+		},
+		Reason: "postgres kernel break-glass transaction",
+	}, testPlatformKernelBreakGlassPrincipal())
+	if err != nil {
+		t.Fatalf("release postgres kernel break-glass: %v", err)
+	}
+	if kernelRelease.OverrideExpiresAt == nil ||
+		!kernelRelease.OverrideExpiresAt.Equal(expiresAt) ||
+		!stringSliceContains(kernelRelease.BypassedInvariants, platformsafety.InvariantFullPinnedRollback) {
+		t.Fatalf("unexpected persisted kernel release: %+v", kernelRelease)
+	}
+
+	events, err := s.ListAuditEvents("", true, 0)
+	if err != nil {
+		t.Fatalf("list postgres audit events: %v", err)
+	}
+	foundTargets := map[string]bool{}
+	for _, event := range events {
+		if event.ChainID == platformsafety.PlatformSafetyAuditChainID {
+			foundTargets[event.TargetID] = true
+		}
+	}
+	if !foundTargets[softRelease.ID] || !foundTargets[kernelRelease.ID] {
+		t.Fatalf("override release audit events missing: soft=%s kernel=%s events=%+v", softRelease.ID, kernelRelease.ID, events)
+	}
+	if err := platformsafety.VerifyTamperEvidentAuditChain(
+		events,
+		platformsafety.PlatformSafetyAuditChainID,
+		s.platformArtifactSigningKeyring(),
+	); err != nil {
+		t.Fatalf("postgres platform safety audit chain did not verify: %v", err)
+	}
+
+	failedArtifact := createDraft("audit-failure-" + model.NewID("generation"))
+	s.ConfigurePlatformArtifactSigning(bundleauth.NewKeyring(
+		"",
+		"",
+		"platform-artifact-test-signing-key",
+		"platform-artifact-test",
+		nil,
+	))
+	if _, _, _, _, err := s.ReleasePlatformArtifact(failedArtifact.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelGray,
+		CanaryRuleRef:  "edge=test",
+		SoftOverride:   true,
+		Reason:         "postgres audit signing failure",
+	}, testPlatformSoftOverridePrincipal()); !errors.Is(err, platformsafety.ErrPlatformSigningKeyUnavailable) {
+		t.Fatalf("expected postgres audit signing failure, got %v", err)
+	}
+	if _, _, found, err := s.GetActivePlatformArtifact(
+		failedArtifact.ArtifactKind,
+		failedArtifact.ScopeKey,
+		model.PlatformArtifactReleaseChannelGray,
+	); err != nil {
+		t.Fatalf("get postgres active artifact after failed release: %v", err)
+	} else if found {
+		t.Fatal("postgres release committed despite audit signing failure")
 	}
 }

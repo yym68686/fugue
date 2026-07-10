@@ -38,6 +38,10 @@ const (
 	PlatformArtifactVerificationStateVerified          = "verified"
 	PlatformArtifactVerificationStateFailed            = "failed"
 
+	PlatformArtifactOverrideModeNone             = ""
+	PlatformArtifactOverrideModeSoft             = "soft_override"
+	PlatformArtifactOverrideModeKernelBreakGlass = "kernel_break_glass"
+
 	PlatformReleaseMessageTypeRelease     = "release"
 	PlatformReleaseMessageTypeRollback    = "rollback"
 	PlatformReleaseMessageTypeVerifiedLKG = "verified_lkg"
@@ -125,6 +129,9 @@ type PlatformArtifactRelease struct {
 	VerifiedAt                  *time.Time            `json:"verified_at,omitempty"`
 	RollbackTargetGeneration    string                `json:"rollback_target_generation,omitempty"`
 	CanaryRuleRef               string                `json:"canary_rule_ref,omitempty"`
+	OverrideMode                string                `json:"override_mode,omitempty"`
+	OverrideExpiresAt           *time.Time            `json:"override_expires_at,omitempty"`
+	BypassedInvariants          []string              `json:"bypassed_invariants,omitempty"`
 	Reason                      string                `json:"reason,omitempty"`
 	ReleasedByType              string                `json:"released_by_type,omitempty"`
 	ReleasedByID                string                `json:"released_by_id,omitempty"`
@@ -221,19 +228,29 @@ type PlatformArtifactValidateRequest struct {
 }
 
 type PlatformArtifactReleaseRequest struct {
-	ReleaseChannel string `json:"release_channel"`
-	CanaryRuleRef  string `json:"canary_rule_ref,omitempty"`
-	ForcePublish   bool   `json:"force_publish,omitempty"`
-	Reason         string `json:"reason,omitempty"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	ReleaseChannel   string                           `json:"release_channel"`
+	CanaryRuleRef    string                           `json:"canary_rule_ref,omitempty"`
+	SoftOverride     bool                             `json:"soft_override,omitempty"`
+	ForcePublish     bool                             `json:"force_publish,omitempty"`
+	KernelBreakGlass *PlatformKernelBreakGlassRequest `json:"kernel_break_glass,omitempty"`
+	Reason           string                           `json:"reason,omitempty"`
+	IdempotencyKey   string                           `json:"idempotency_key,omitempty"`
 }
 
 type PlatformArtifactRollbackRequest struct {
-	ReleaseChannel string `json:"release_channel,omitempty"`
-	ToGeneration   string `json:"to_generation"`
-	Reason         string `json:"reason"`
-	ForcePublish   bool   `json:"force_publish,omitempty"`
-	CanaryRuleRef  string `json:"canary_rule_ref,omitempty"`
+	ReleaseChannel   string                           `json:"release_channel,omitempty"`
+	ToGeneration     string                           `json:"to_generation"`
+	Reason           string                           `json:"reason"`
+	SoftOverride     bool                             `json:"soft_override,omitempty"`
+	ForcePublish     bool                             `json:"force_publish,omitempty"`
+	KernelBreakGlass *PlatformKernelBreakGlassRequest `json:"kernel_break_glass,omitempty"`
+	CanaryRuleRef    string                           `json:"canary_rule_ref,omitempty"`
+}
+
+type PlatformKernelBreakGlassRequest struct {
+	ExpiresAt          time.Time `json:"expires_at"`
+	Confirmation       string    `json:"confirmation"`
+	TargetConfirmation string    `json:"target_confirmation"`
 }
 
 type PlatformArtifactVerificationEvidence struct {

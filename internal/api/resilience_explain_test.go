@@ -61,7 +61,7 @@ func TestReleaseGuardStatusDetectsPlatformConsumerDrift(t *testing.T) {
 	}
 }
 
-func TestPlatformSafetyKernelRejectsForcePublishingInvalidArtifact(t *testing.T) {
+func TestPlatformSafetyKernelTreatsForcePublishAsBoundedSoftOverride(t *testing.T) {
 	t.Parallel()
 
 	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
@@ -81,10 +81,27 @@ func TestPlatformSafetyKernelRejectsForcePublishingInvalidArtifact(t *testing.T)
 	release := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
 		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
 		ForcePublish:   true,
-		Reason:         "test force publish cannot bypass hard invariants",
+		Reason:         "test legacy force publish is bounded soft override",
 	})
-	if release.Code != http.StatusConflict {
-		t.Fatalf("force_publish must not bypass validation/hash safety, got %d body=%s", release.Code, release.Body.String())
+	if release.Code != http.StatusOK {
+		t.Fatalf("force_publish compatibility alias should bypass ordinary validation status, got %d body=%s", release.Code, release.Body.String())
+	}
+	var released model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, release, &released)
+	if released.Release.OverrideMode != model.PlatformArtifactOverrideModeSoft ||
+		len(released.Release.BypassedInvariants) != 1 ||
+		released.Release.BypassedInvariants[0] != "artifact.validated" {
+		t.Fatalf("unexpected bounded soft override ledger: %+v", released.Release)
+	}
+
+	hardInvariant := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts/"+created.Artifact.ID+"/release", platformAdminKey, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelGray,
+		CanaryRuleRef:  "*",
+		ForcePublish:   true,
+		Reason:         "test legacy force publish cannot bypass canary isolation",
+	})
+	if hardInvariant.Code != http.StatusConflict {
+		t.Fatalf("force_publish must not bypass immutable canary isolation, got %d body=%s", hardInvariant.Code, hardInvariant.Body.String())
 	}
 }
 

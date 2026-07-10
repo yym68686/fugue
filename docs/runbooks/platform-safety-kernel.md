@@ -2,34 +2,56 @@
 
 ## Purpose
 
-The Platform Safety Kernel is the non-configurable minimum protection applied
-to Platform Artifact release and verified LKG promotion. Ordinary artifact
-content, gate policy, environment overrides, and `force_publish` cannot disable
-these checks.
+The Platform Safety Kernel is the compiled minimum protection applied to
+Platform Artifact release and verified LKG promotion. Ordinary artifact
+content, gate policy, and environment configuration cannot disable it.
+`force_publish` is a deprecated compatibility alias for `soft_override`; it
+only skips ordinary artifact validation status and cannot disable immutable
+integrity or traffic-safety checks.
 
 ## Hard Failures
 
-- Artifact is not validated.
 - Artifact does not use the supported Platform Artifact schema version or has
   no positive generation sequence.
 - Canonical artifact content does not match its SHA-256 content hash.
 - Artifact provenance is missing, signed by an unknown or revoked key, or does
   not match the immutable artifact identity, scope, generation, hash, creator,
   compatibility floor, and metadata.
-- An ordinary release tries to publish a generation sequence that is not newer
-  than the active generation in the same artifact kind, normalized scope, and
-  release-channel lane.
 - Gray release has no single bounded canary selector, or uses a global,
   wildcard, or multi-target selector.
-- Full release has no readable verified rollback generation, or the LKG is
-  expired, corrupt, signature-invalid, signed by an unknown or revoked key, or
-  no longer matches its signed artifact and evidence hash.
 - Verification fencing token is stale.
 - Initial LKG bootstrap is not an explicitly approved shadow release.
 - Required verification evidence is incomplete.
 
-These failures return a conflict and must not be bypassed by retrying with
-`force_publish`.
+Schema, content hash, provenance signature, canary isolation, blast-radius
+caps, kill-switch precedence, fencing, LKG integrity/signature, and
+verification evidence are never bypassable by either override mode.
+
+## Override Boundaries
+
+`soft_override`:
+
+- Requires platform administration and a non-empty reason.
+- May bypass only `artifact.validated`.
+- Is operation-scoped and does not leave a persistent disabled state.
+- `--force-publish` maps to this mode and sends the canonical
+  `soft_override` request.
+
+`kernel_break_glass`:
+
+- Requires platform administration plus the explicit, non-inherited
+  `artifact.kernel_break_glass` scope. A normal `platform.admin` API key is not
+  sufficient.
+- Requires a reason, the exact `BYPASS_PLATFORM_SAFETY_KERNEL` confirmation,
+  an exact artifact id or generation confirmation, and an expiry no more than
+  15 minutes in the future.
+- May bypass only `artifact.validated`, `generation.monotonic`, and
+  `full.pinned_rollback`.
+- Authorizes one release or rollback transaction. The TTL bounds when that
+  request may execute; it does not create a cluster-wide override mode.
+- Writes the override mode, expiry, bypassed invariant ids, reason, actor,
+  target, and fencing token into a signed hash-chain audit event in the same
+  transaction. Audit signing or append failure aborts the release.
 
 ## Diagnosis
 
@@ -44,7 +66,20 @@ fugue admin robustness status --json
 Check the artifact schema version, generation sequence, provenance key id and
 signature, status/hash, release channel, fencing token,
 `pinned_rollback_generation`, `verification_state`, LKG expiry, verified release
-id, artifact and snapshot provenance, evidence hash, and `canary_rule_ref`.
+id, artifact and snapshot provenance, evidence hash, `canary_rule_ref`,
+`override_mode`, `override_expires_at`, and `bypassed_invariants`.
+
+Inspect override audit records:
+
+```bash
+fugue ops audit --json
+```
+
+For `chain_id=platform-safety`, verify that `chain_sequence` is contiguous,
+`previous_hash` links to the prior `event_hash`, and provenance is present.
+The internal chain verifier used by the release transaction tests checks the
+canonical event hash, signature, chain ordering, and link continuity. Missing,
+rewritten, reordered-by-sequence, or unsigned events fail verification.
 
 For gate-policy issues, compare the effective policy with its compiled default:
 
@@ -84,6 +119,18 @@ may only move a gate toward `shadow` or `disabled`; it cannot promote a gate.
    `*`, or a comma-separated target list.
 10. If a gate must be disabled during incident recovery, use its compiled kill
    switch. Do not publish a weaker gate-policy artifact.
+11. Use `soft_override` only when the artifact is structurally valid and signed
+    but ordinary validation policy is intentionally being bypassed:
+
+    ```bash
+    fugue admin artifact release <artifact-id-or-generation> \
+      --channel shadow \
+      --soft-override \
+      --reason "<incident and evidence>"
+    ```
+
+12. Use kernel break-glass only after the normal shadow/LKG recovery path is
+    unavailable. Follow `kernel-break-glass.md`.
 
 ## Invariants
 
@@ -91,9 +138,9 @@ may only move a gate toward `shadow` or `disabled`; it cannot promote a gate.
 - Artifact creation fails closed when no trusted signing key is configured.
 - Artifact schema, canonical content hash, provenance signature, and positive
   generation sequence are checked again at publication time.
-- Ordinary releases are monotonic within their release lane. Only the explicit
-  rollback operation has the narrow exemption required to publish an older
-  signed generation.
+- Ordinary releases are monotonic within their release lane. Explicit rollback
+  is the normal narrow exemption for publishing an older signed generation;
+  kernel break-glass can bypass monotonicity only as an audited recovery action.
 - Shadow and gray ledger entries never claim a production
   `serving_unverified_generation`.
 - Shadow recovery remains available when no usable verified LKG exists; making
@@ -110,3 +157,6 @@ may only move a gate toward `shadow` or `disabled`; it cannot promote a gate.
   treated as unavailable, never as a healthy rollback target.
 - Database uniqueness prevents two active releases in one Platform Artifact
   lane.
+- Ordinary audit append paths cannot populate reserved hash-chain fields.
+- Override authorization is checked both at the API boundary and again inside
+  the Store transaction.

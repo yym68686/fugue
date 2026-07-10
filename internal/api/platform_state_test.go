@@ -3,8 +3,10 @@ package api
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformsafety"
 )
 
 func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
@@ -96,6 +98,108 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	mustDecodeJSON(t, contracts, &contractList)
 	if len(contractList.Contracts) < 16 {
 		t.Fatalf("expected critical subsystem contracts, got %d", len(contractList.Contracts))
+	}
+}
+
+func TestPlatformKernelBreakGlassRequiresExplicitScopeAndDualConfirmation(t *testing.T) {
+	t.Parallel()
+
+	s, server, _, platformAdminKey, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	create := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", platformAdminKey, model.PlatformArtifactCreateRequest{
+		ArtifactKind: model.PlatformArtifactKindTrafficSafetyPolicy,
+		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
+		Generation:   "kernel-break-glass-api",
+		Content:      map[string]any{"min_healthy_edges": 1},
+	})
+	if create.Code != http.StatusCreated {
+		t.Fatalf("expected create status %d, got %d body=%s", http.StatusCreated, create.Code, create.Body.String())
+	}
+	var created model.PlatformArtifactResponse
+	mustDecodeJSON(t, create, &created)
+
+	validRequest := model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		KernelBreakGlass: &model.PlatformKernelBreakGlassRequest{
+			ExpiresAt:          time.Now().UTC().Add(5 * time.Minute),
+			Confirmation:       platformsafety.KernelBreakGlassConfirmation,
+			TargetConfirmation: created.Artifact.ID,
+		},
+		Reason: "test API emergency release",
+	}
+	forbidden := performJSONRequest(
+		t,
+		server,
+		http.MethodPost,
+		"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
+		platformAdminKey,
+		validRequest,
+	)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("platform.admin without explicit break-glass scope must be rejected, got %d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+
+	_, breakGlassKey, err := s.CreateAPIKey(app.TenantID, "kernel-break-glass", []string{
+		"platform.admin",
+		"artifact.kernel_break_glass",
+	})
+	if err != nil {
+		t.Fatalf("create explicit break-glass key: %v", err)
+	}
+
+	badConfirmation := validRequest
+	badConfirmation.KernelBreakGlass = &model.PlatformKernelBreakGlassRequest{
+		ExpiresAt:          time.Now().UTC().Add(5 * time.Minute),
+		Confirmation:       "BYPASS",
+		TargetConfirmation: created.Artifact.ID,
+	}
+	rejected := performJSONRequest(
+		t,
+		server,
+		http.MethodPost,
+		"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
+		breakGlassKey,
+		badConfirmation,
+	)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("invalid safety confirmation must be rejected, got %d body=%s", rejected.Code, rejected.Body.String())
+	}
+
+	tooLong := validRequest
+	tooLong.KernelBreakGlass = &model.PlatformKernelBreakGlassRequest{
+		ExpiresAt:          time.Now().UTC().Add(platformsafety.KernelBreakGlassMaxTTL + time.Minute),
+		Confirmation:       platformsafety.KernelBreakGlassConfirmation,
+		TargetConfirmation: created.Artifact.ID,
+	}
+	rejected = performJSONRequest(
+		t,
+		server,
+		http.MethodPost,
+		"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
+		breakGlassKey,
+		tooLong,
+	)
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("overlong break-glass TTL must be rejected, got %d body=%s", rejected.Code, rejected.Body.String())
+	}
+
+	accepted := performJSONRequest(
+		t,
+		server,
+		http.MethodPost,
+		"/v1/admin/artifacts/"+created.Artifact.ID+"/release",
+		breakGlassKey,
+		validRequest,
+	)
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("valid explicitly authorized break-glass release failed, got %d body=%s", accepted.Code, accepted.Body.String())
+	}
+	var released model.PlatformArtifactReleaseResponse
+	mustDecodeJSON(t, accepted, &released)
+	if released.Release.OverrideMode != model.PlatformArtifactOverrideModeKernelBreakGlass ||
+		released.Release.OverrideExpiresAt == nil ||
+		!stringSliceContains(released.Release.BypassedInvariants, platformsafety.InvariantArtifactValidated) ||
+		!stringSliceContains(released.Release.BypassedInvariants, platformsafety.InvariantFullPinnedRollback) {
+		t.Fatalf("unexpected break-glass release ledger: %+v", released.Release)
 	}
 }
 

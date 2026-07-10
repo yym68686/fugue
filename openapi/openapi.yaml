@@ -11570,6 +11570,17 @@ components:
           format: int64
         metadata:
           $ref: "#/components/schemas/StringMap"
+        chain_id:
+          type: string
+        chain_sequence:
+          type: integer
+          format: int64
+        previous_hash:
+          type: string
+        event_hash:
+          type: string
+        provenance:
+          $ref: "#/components/schemas/PlatformArtifactProvenance"
         created_at:
           type: string
           format: date-time
@@ -23788,6 +23799,16 @@ components:
           type: string
         canary_rule_ref:
           type: string
+        override_mode:
+          type: string
+          enum: [soft_override, kernel_break_glass]
+        override_expires_at:
+          type: string
+          format: date-time
+        bypassed_invariants:
+          type: array
+          items:
+            type: string
         reason:
           type: string
         released_by_type:
@@ -23948,6 +23969,21 @@ components:
       properties:
         dry_run:
           type: boolean
+    PlatformKernelBreakGlassRequest:
+      type: object
+      additionalProperties: false
+      required: [expires_at, confirmation, target_confirmation]
+      properties:
+        expires_at:
+          type: string
+          format: date-time
+          description: Operation-scoped expiry. The server rejects values more than 15 minutes in the future.
+        confirmation:
+          type: string
+          description: Must equal BYPASS_PLATFORM_SAFETY_KERNEL.
+        target_confirmation:
+          type: string
+          description: Must exactly match the target artifact id or generation.
     PlatformArtifactReleaseRequest:
       type: object
       additionalProperties: false
@@ -23958,8 +23994,15 @@ components:
           enum: [shadow, gray, full]
         canary_rule_ref:
           type: string
+        soft_override:
+          type: boolean
+          description: Skips non-kernel artifact validation only. It cannot bypass integrity, signature, generation, rollback-target, canary-scope, fencing, or kill-switch rules.
         force_publish:
           type: boolean
+          deprecated: true
+          description: Deprecated compatibility alias for soft_override.
+        kernel_break_glass:
+          $ref: "#/components/schemas/PlatformKernelBreakGlassRequest"
         reason:
           type: string
         idempotency_key:
@@ -23976,8 +24019,15 @@ components:
           type: string
         reason:
           type: string
+        soft_override:
+          type: boolean
+          description: Skips non-kernel artifact validation only.
         force_publish:
           type: boolean
+          deprecated: true
+          description: Deprecated compatibility alias for soft_override.
+        kernel_break_glass:
+          $ref: "#/components/schemas/PlatformKernelBreakGlassRequest"
         canary_rule_ref:
           type: string
     PlatformArtifactVerificationEvidence:

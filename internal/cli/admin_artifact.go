@@ -8,8 +8,10 @@ import (
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformsafety"
 
 	"github.com/spf13/cobra"
 )
@@ -194,6 +196,12 @@ func (c *CLI) newAdminArtifactValidateCommand() *cobra.Command {
 
 func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 	opts := model.PlatformArtifactReleaseRequest{}
+	overrideOpts := struct {
+		KernelBreakGlass bool
+		TTL              time.Duration
+		Confirmation     string
+		Target           string
+	}{TTL: 5 * time.Minute}
 	cmd := &cobra.Command{
 		Use:   "release <artifact-id-or-generation>",
 		Short: "Release a validated platform artifact",
@@ -201,6 +209,35 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(opts.ReleaseChannel) == "" {
 				return fmt.Errorf("--channel is required: shadow, gray, or full")
+			}
+			if opts.ForcePublish {
+				opts.SoftOverride = true
+				opts.ForcePublish = false
+			}
+			if opts.SoftOverride && overrideOpts.KernelBreakGlass {
+				return fmt.Errorf("--soft-override and --kernel-break-glass are mutually exclusive")
+			}
+			if opts.SoftOverride && strings.TrimSpace(opts.Reason) == "" {
+				return fmt.Errorf("--reason is required with --soft-override")
+			}
+			if overrideOpts.KernelBreakGlass {
+				if overrideOpts.TTL <= 0 || overrideOpts.TTL > platformsafety.KernelBreakGlassMaxTTL {
+					return fmt.Errorf("--break-glass-ttl must be positive and no greater than %s", platformsafety.KernelBreakGlassMaxTTL)
+				}
+				if strings.TrimSpace(overrideOpts.Confirmation) == "" || strings.TrimSpace(overrideOpts.Target) == "" {
+					return fmt.Errorf("--confirm-kernel-bypass and --confirm-target are required with --kernel-break-glass")
+				}
+				if strings.TrimSpace(overrideOpts.Confirmation) != platformsafety.KernelBreakGlassConfirmation {
+					return fmt.Errorf("--confirm-kernel-bypass must exactly equal %s", platformsafety.KernelBreakGlassConfirmation)
+				}
+				if strings.TrimSpace(overrideOpts.Target) != strings.TrimSpace(args[0]) {
+					return fmt.Errorf("--confirm-target must exactly match the artifact id or generation argument")
+				}
+				opts.KernelBreakGlass = &model.PlatformKernelBreakGlassRequest{
+					ExpiresAt:          time.Now().UTC().Add(overrideOpts.TTL),
+					Confirmation:       overrideOpts.Confirmation,
+					TargetConfirmation: overrideOpts.Target,
+				}
 			}
 			client, err := c.newClient()
 			if err != nil {
@@ -218,8 +255,14 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.ReleaseChannel, "channel", "", "Release channel: shadow, gray, or full")
 	cmd.Flags().StringVar(&opts.CanaryRuleRef, "canary-rule-ref", "", "Optional canary or gray rule reference")
-	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Publish despite validation status; requires --reason")
-	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Reason for release or force publish")
+	cmd.Flags().BoolVar(&opts.SoftOverride, "soft-override", false, "Skip non-kernel validation policy; requires --reason")
+	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Deprecated alias for --soft-override")
+	_ = cmd.Flags().MarkDeprecated("force-publish", "use --soft-override; it cannot bypass the Platform Safety Kernel")
+	cmd.Flags().BoolVar(&overrideOpts.KernelBreakGlass, "kernel-break-glass", false, "Use one operation-scoped Platform Safety Kernel recovery authorization")
+	cmd.Flags().DurationVar(&overrideOpts.TTL, "break-glass-ttl", overrideOpts.TTL, "Kernel break-glass authorization validity, maximum 15m")
+	cmd.Flags().StringVar(&overrideOpts.Confirmation, "confirm-kernel-bypass", "", "Must equal "+platformsafety.KernelBreakGlassConfirmation)
+	cmd.Flags().StringVar(&overrideOpts.Target, "confirm-target", "", "Must exactly match the artifact id or generation")
+	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Release or override reason")
 	cmd.Flags().StringVar(&opts.IdempotencyKey, "idempotency-key", "", "Stable idempotency key for retrying the same release")
 	return cmd
 }
@@ -264,6 +307,12 @@ func (c *CLI) newAdminArtifactVerifyLKGCommand() *cobra.Command {
 
 func (c *CLI) newAdminArtifactRollbackCommand() *cobra.Command {
 	opts := model.PlatformArtifactRollbackRequest{}
+	overrideOpts := struct {
+		KernelBreakGlass bool
+		TTL              time.Duration
+		Confirmation     string
+		Target           string
+	}{TTL: 5 * time.Minute}
 	cmd := &cobra.Command{
 		Use:   "rollback <artifact-id-or-generation>",
 		Short: "Roll back by publishing a previous artifact generation",
@@ -271,6 +320,32 @@ func (c *CLI) newAdminArtifactRollbackCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(opts.ToGeneration) == "" || strings.TrimSpace(opts.Reason) == "" {
 				return fmt.Errorf("--to-generation and --reason are required")
+			}
+			if opts.ForcePublish {
+				opts.SoftOverride = true
+				opts.ForcePublish = false
+			}
+			if opts.SoftOverride && overrideOpts.KernelBreakGlass {
+				return fmt.Errorf("--soft-override and --kernel-break-glass are mutually exclusive")
+			}
+			if overrideOpts.KernelBreakGlass {
+				if overrideOpts.TTL <= 0 || overrideOpts.TTL > platformsafety.KernelBreakGlassMaxTTL {
+					return fmt.Errorf("--break-glass-ttl must be positive and no greater than %s", platformsafety.KernelBreakGlassMaxTTL)
+				}
+				if strings.TrimSpace(overrideOpts.Confirmation) == "" || strings.TrimSpace(overrideOpts.Target) == "" {
+					return fmt.Errorf("--confirm-kernel-bypass and --confirm-target are required with --kernel-break-glass")
+				}
+				if strings.TrimSpace(overrideOpts.Confirmation) != platformsafety.KernelBreakGlassConfirmation {
+					return fmt.Errorf("--confirm-kernel-bypass must exactly equal %s", platformsafety.KernelBreakGlassConfirmation)
+				}
+				if strings.TrimSpace(overrideOpts.Target) != strings.TrimSpace(opts.ToGeneration) {
+					return fmt.Errorf("--confirm-target must exactly match --to-generation")
+				}
+				opts.KernelBreakGlass = &model.PlatformKernelBreakGlassRequest{
+					ExpiresAt:          time.Now().UTC().Add(overrideOpts.TTL),
+					Confirmation:       overrideOpts.Confirmation,
+					TargetConfirmation: overrideOpts.Target,
+				}
 			}
 			client, err := c.newClient()
 			if err != nil {
@@ -289,7 +364,13 @@ func (c *CLI) newAdminArtifactRollbackCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ReleaseChannel, "channel", "full", "Release channel: shadow, gray, or full")
 	cmd.Flags().StringVar(&opts.ToGeneration, "to-generation", "", "Previously validated generation to publish")
 	cmd.Flags().StringVar(&opts.Reason, "reason", "", "Rollback reason")
-	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Publish despite validation status")
+	cmd.Flags().BoolVar(&opts.SoftOverride, "soft-override", false, "Skip non-kernel validation policy")
+	cmd.Flags().BoolVar(&opts.ForcePublish, "force-publish", false, "Deprecated alias for --soft-override")
+	_ = cmd.Flags().MarkDeprecated("force-publish", "use --soft-override; it cannot bypass the Platform Safety Kernel")
+	cmd.Flags().BoolVar(&overrideOpts.KernelBreakGlass, "kernel-break-glass", false, "Use one operation-scoped Platform Safety Kernel recovery authorization")
+	cmd.Flags().DurationVar(&overrideOpts.TTL, "break-glass-ttl", overrideOpts.TTL, "Kernel break-glass authorization validity, maximum 15m")
+	cmd.Flags().StringVar(&overrideOpts.Confirmation, "confirm-kernel-bypass", "", "Must equal "+platformsafety.KernelBreakGlassConfirmation)
+	cmd.Flags().StringVar(&overrideOpts.Target, "confirm-target", "", "Must exactly match --to-generation")
 	cmd.Flags().StringVar(&opts.CanaryRuleRef, "canary-rule-ref", "", "Optional canary or gray rule reference")
 	return cmd
 }
@@ -464,9 +545,19 @@ func writePlatformArtifactRelease(w io.Writer, response platformArtifactReleaseE
 		kvPair{Key: "verification_state", Value: firstNonEmpty(response.Release.VerificationState, "-")},
 		kvPair{Key: "fencing_token", Value: fmt.Sprintf("%d", response.Release.FencingToken)},
 		kvPair{Key: "pinned_rollback_generation", Value: firstNonEmpty(response.Release.PinnedRollbackGeneration, "-")},
+		kvPair{Key: "override_mode", Value: firstNonEmpty(response.Release.OverrideMode, "none")},
+		kvPair{Key: "override_expires_at", Value: formatPlatformOptionalTime(response.Release.OverrideExpiresAt)},
+		kvPair{Key: "bypassed_invariants", Value: strings.Join(response.Release.BypassedInvariants, ",")},
 		kvPair{Key: "message", Value: response.Message.ID},
 		kvPair{Key: "lkg_generation", Value: platformLKGGeneration(response.LKG)},
 	)
+}
+
+func formatPlatformOptionalTime(value *time.Time) string {
+	if value == nil {
+		return "-"
+	}
+	return formatTime(value.UTC())
 }
 
 func writePlatformArtifactDiff(w io.Writer, left, right model.PlatformArtifact) error {

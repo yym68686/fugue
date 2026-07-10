@@ -2904,15 +2904,20 @@ func NormalizeOperationSourceState(op *Operation) {
 }
 
 type AuditEvent struct {
-	ID         string            `json:"id"`
-	TenantID   string            `json:"tenant_id,omitempty"`
-	ActorType  string            `json:"actor_type"`
-	ActorID    string            `json:"actor_id"`
-	Action     string            `json:"action"`
-	TargetType string            `json:"target_type"`
-	TargetID   string            `json:"target_id,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-	CreatedAt  time.Time         `json:"created_at"`
+	ID            string                     `json:"id"`
+	TenantID      string                     `json:"tenant_id,omitempty"`
+	ActorType     string                     `json:"actor_type"`
+	ActorID       string                     `json:"actor_id"`
+	Action        string                     `json:"action"`
+	TargetType    string                     `json:"target_type"`
+	TargetID      string                     `json:"target_id,omitempty"`
+	Metadata      map[string]string          `json:"metadata,omitempty"`
+	ChainID       string                     `json:"chain_id,omitempty"`
+	ChainSequence int64                      `json:"chain_sequence,omitempty"`
+	PreviousHash  string                     `json:"previous_hash,omitempty"`
+	EventHash     string                     `json:"event_hash,omitempty"`
+	Provenance    PlatformArtifactProvenance `json:"provenance,omitempty"`
+	CreatedAt     time.Time                  `json:"created_at"`
 }
 
 type StorePromotion struct {
@@ -3059,6 +3064,19 @@ type Principal struct {
 
 func (p Principal) HasScope(scope string) bool {
 	if _, ok := p.Scopes["platform.admin"]; ok {
+		return true
+	}
+	if _, ok := p.Scopes["*"]; ok {
+		return true
+	}
+	_, ok := p.Scopes[scope]
+	return ok
+}
+
+// HasExplicitScope is used for powers that must not be inherited from
+// platform.admin. The bootstrap credential remains the root recovery identity.
+func (p Principal) HasExplicitScope(scope string) bool {
+	if p.ActorType == ActorTypeBootstrap {
 		return true
 	}
 	if _, ok := p.Scopes["*"]; ok {

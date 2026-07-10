@@ -1668,13 +1668,30 @@ var postgresSchemaStatements = []string{
 		actor_type TEXT NOT NULL,
 		actor_id TEXT NOT NULL,
 		action TEXT NOT NULL,
-		target_type TEXT NOT NULL,
-		target_id TEXT NOT NULL DEFAULT '',
-		metadata_json JSONB NULL,
-		created_at TIMESTAMPTZ NOT NULL
-	)`,
+			target_type TEXT NOT NULL,
+			target_id TEXT NOT NULL DEFAULT '',
+			metadata_json JSONB NULL,
+			chain_id TEXT NOT NULL DEFAULT '',
+			chain_sequence BIGINT NOT NULL DEFAULT 0,
+			previous_hash TEXT NOT NULL DEFAULT '',
+			event_hash TEXT NOT NULL DEFAULT '',
+			provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+	`ALTER TABLE fugue_audit_events ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_audit_events ADD COLUMN IF NOT EXISTS chain_sequence BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE fugue_audit_events ADD COLUMN IF NOT EXISTS previous_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_audit_events ADD COLUMN IF NOT EXISTS event_hash TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_audit_events ADD COLUMN IF NOT EXISTS provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_audit_events_created_at ON fugue_audit_events (created_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_audit_events_tenant_created_at ON fugue_audit_events (tenant_id, created_at DESC)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_audit_events_chain_sequence ON fugue_audit_events (chain_id, chain_sequence) WHERE chain_id <> '' AND chain_sequence > 0`,
+	`CREATE TABLE IF NOT EXISTS fugue_security_audit_chain_state (
+			chain_id TEXT PRIMARY KEY,
+			last_sequence BIGINT NOT NULL DEFAULT 0,
+			last_hash TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
 	`CREATE TABLE IF NOT EXISTS fugue_store_promotions (
 		id TEXT PRIMARY KEY,
 		source_kind TEXT NOT NULL,
@@ -1769,6 +1786,9 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verification_state TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verification_evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb`,
 	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS override_mode TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS override_expires_at TIMESTAMPTZ NULL`,
+	`ALTER TABLE fugue_platform_artifact_releases ADD COLUMN IF NOT EXISTS bypassed_invariants_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
 	`UPDATE fugue_platform_artifact_releases
 	SET lane_key = LOWER(artifact_kind) || '|' || LOWER(scope_key) || '|' || LOWER(release_channel)
 	WHERE lane_key = ''`,
