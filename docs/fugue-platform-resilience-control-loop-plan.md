@@ -1910,6 +1910,9 @@ DNS/edge failover 必须满足：
 - [x] 实现带 key-id 的短期 platform component identity token 原语，允许轮换期间验旧 key；生产签发和撤销仍未接线。
 - [x] API component identity verifier 不复用或回退到下发给 edge/DNS 的 bundle signing key；专用 key 缺失时 fail closed。
 - [ ] component identity signing key 使用独立 Secret/RBAC，只挂载到受信任 issuer/verifier，不挂载到 edge/DNS/普通 runtime consumer。
+  - [x] 先以纯加法创建独立 control-plane ServiceAccount 与等价 ClusterRoleBinding，不切换现有 Pod、不收紧旧权限。
+  - [ ] API/controller 分别 canary 切换到独立 control-plane ServiceAccount，并验证现有权限等价。
+  - [ ] 收紧普通平台组件 ServiceAccount 的 Secret 权限后，再创建并挂载 component identity Secret。
 - [ ] component identity verifier key 支持当前/上一把 key 重叠验证和显式 revoked key id，并完成线上轮换演练。
 - [ ] 增加 Helm/外部 Secret 不存在、旧 Secret 升级和回滚时不轮换 key 的测试。
 - [ ] 增加受损 edge 持有 bundle key 仍不能签发任意 component identity 的安全回归测试。

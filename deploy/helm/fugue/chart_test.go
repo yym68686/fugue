@@ -36,6 +36,43 @@ func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	}
 }
 
+func TestDedicatedControlPlaneServiceAccountIsProvisionedAdditively(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	serviceAccount := manifestDocumentForKindAndName(manifest, "ServiceAccount", "fugue-fugue-control-plane-sa")
+	if serviceAccount == "" {
+		t.Fatalf("rendered manifest missing dedicated control-plane service account:\n%s", manifest)
+	}
+	binding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane")
+	if binding == "" {
+		t.Fatalf("rendered manifest missing dedicated control-plane role binding:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"kind: ClusterRole",
+		"name: fugue-fugue",
+		"kind: ServiceAccount",
+		"name: fugue-fugue-control-plane-sa",
+	} {
+		if !strings.Contains(binding, want) {
+			t.Fatalf("dedicated control-plane binding missing %q:\n%s", want, binding)
+		}
+	}
+}
+
 func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

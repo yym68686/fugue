@@ -81,4 +81,20 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "fugue.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "fugue.fullname" . }}-control-plane
+  labels:
+    {{- include "fugue.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: fugue-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "fugue.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fugue.controlPlaneServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}

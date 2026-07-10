@@ -37,6 +37,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- printf "%s-sa" (include "fugue.fullname" .) -}}
 {{- end -}}
 
+{{- define "fugue.controlPlaneServiceAccountName" -}}
+{{- printf "%s-control-plane-sa" (include "fugue.fullname" .) -}}
+{{- end -}}
+
 {{- define "fugue.apiDeploymentName" -}}
 {{- printf "%s-api" (include "fugue.fullname" .) -}}
 {{- end -}}
