@@ -52,7 +52,8 @@ func TestTrustedPlatformConsumerHeartbeatEndpointBindsIdentityAndRejectsReplay(t
 		t.Fatalf("parse platform component identity: %v", err)
 	}
 
-	heartbeat := trustedPlatformHeartbeatRequest(t, claims, set, now, 12, 42, 8, "nonce-value-api-0001")
+	boundHeartbeat := trustedPlatformHeartbeatRequest(t, claims, set, now, 12, 42, 8, "nonce-value-api-0001")
+	heartbeat := boundHeartbeat
 	heartbeat.ConsumerID = ""
 	heartbeat.Component = ""
 	heartbeat.NodeID = ""
@@ -80,13 +81,52 @@ func TestTrustedPlatformConsumerHeartbeatEndpointBindsIdentityAndRejectsReplay(t
 		t.Fatalf("replayed heartbeat must be rejected with %d, got %d body=%s", http.StatusConflict, replayed.Code, replayed.Body.String())
 	}
 
-	impersonated := heartbeat
-	impersonated.Component = model.PlatformConsumerComponentDNSServer
-	impersonated.Sequence++
-	impersonated.Nonce = "nonce-value-api-0002"
-	impersonationResponse := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", token, impersonated)
-	if impersonationResponse.Code != http.StatusForbidden {
-		t.Fatalf("cross-component impersonation must be rejected with %d, got %d body=%s", http.StatusForbidden, impersonationResponse.Code, impersonationResponse.Body.String())
+	impersonationTests := []struct {
+		name   string
+		nonce  string
+		mutate func(*platformcontrol.PlatformConsumerHeartbeatEnvelope)
+	}{
+		{
+			name:  "component",
+			nonce: "nonce-value-api-0002",
+			mutate: func(candidate *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+				candidate.Component = model.PlatformConsumerComponentDNSServer
+				candidate.ConsumerID = model.PlatformConsumerComponentDNSServer + ":" + claims.NodeID
+			},
+		},
+		{
+			name:  "node",
+			nonce: "nonce-value-api-0003",
+			mutate: func(candidate *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+				candidate.NodeID = "other-edge-node"
+				candidate.ConsumerID = claims.Component + ":other-edge-node"
+			},
+		},
+		{
+			name:  "scope",
+			nonce: "nonce-value-api-0004",
+			mutate: func(candidate *platformcontrol.PlatformConsumerHeartbeatEnvelope) {
+				candidate.ScopeKey = "other-scope"
+			},
+		},
+	}
+	for index, test := range impersonationTests {
+		test := test
+		t.Run("rejects "+test.name+" impersonation", func(t *testing.T) {
+			impersonated := boundHeartbeat
+			impersonated.Sequence += int64(index + 1)
+			impersonated.Nonce = test.nonce
+			test.mutate(&impersonated)
+			evidenceHash, hashErr := platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(impersonated)
+			if hashErr != nil {
+				t.Fatalf("compute valid evidence hash for %s impersonation: %v", test.name, hashErr)
+			}
+			impersonated.EvidenceHash = evidenceHash
+			response := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", token, impersonated)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("cross-%s impersonation with a valid evidence hash must be rejected with %d, got %d body=%s", test.name, http.StatusForbidden, response.Code, response.Body.String())
+			}
+		})
 	}
 
 	tenantResponse := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", tenantKey, heartbeat)

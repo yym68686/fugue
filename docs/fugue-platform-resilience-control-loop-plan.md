@@ -2169,7 +2169,7 @@ DNS/edge failover 必须满足：
 - [x] 增加 consumer convergence 单元测试。
 - [x] 增加 zero consumer 不得 pass 的回归测试。
 - [x] 增加 stale/empty heartbeat 回归测试。
-- [ ] 增加 heartbeat 身份冒充测试。
+- [x] 增加 heartbeat 身份冒充测试。
 - [x] 增加 consumer N/N-1 compatibility 测试。
 - [x] 增加 LKG expired 回归测试。
 
