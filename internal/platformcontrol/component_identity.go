@@ -469,6 +469,62 @@ func ValidatePlatformConsumerHeartbeat(
 	return nil
 }
 
+func VerifyTrustedPlatformConsumerHeartbeat(
+	claims PlatformComponentIdentityClaims,
+	set model.PlatformExpectedConsumerSet,
+	heartbeat PlatformConsumerHeartbeatEnvelope,
+	previous *PlatformConsumerHeartbeatCursor,
+	receivedAt time.Time,
+	policy PlatformConsumerHeartbeatValidationPolicy,
+) (model.PlatformConsumerInstance, PlatformConsumerHeartbeatCursor, error) {
+	claims, err := normalizePlatformComponentIdentityClaims(claims)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, PlatformConsumerHeartbeatCursor{}, err
+	}
+	bound, err := BindPlatformConsumerHeartbeatToExpectedSet(claims, set, heartbeat)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, PlatformConsumerHeartbeatCursor{}, err
+	}
+	receivedAt = normalizedPlatformIdentityTime(receivedAt)
+	if err := ValidatePlatformConsumerHeartbeat(bound, previous, receivedAt, policy); err != nil {
+		return model.PlatformConsumerInstance{}, PlatformConsumerHeartbeatCursor{}, err
+	}
+	issuedAt := bound.IssuedAt.UTC()
+	consumer := model.PlatformConsumerInstance{
+		ConsumerID:                bound.ConsumerID,
+		CredentialID:              claims.CredentialID,
+		TokenID:                   claims.TokenID,
+		Component:                 bound.Component,
+		NodeID:                    bound.NodeID,
+		ArtifactKind:              bound.ArtifactKind,
+		ScopeKey:                  bound.ScopeKey,
+		ReleaseSetID:              bound.ReleaseSetID,
+		ExpectedConsumerSetID:     bound.ExpectedConsumerSetID,
+		FencingToken:              bound.FencingToken,
+		SupportedKinds:            append([]string(nil), claims.ArtifactKinds...),
+		ProtocolVersion:           bound.ProtocolVersion,
+		SchemaVersion:             bound.SchemaVersion,
+		CompatibilityCapabilities: append([]string(nil), bound.CompatibilityCapabilities...),
+		Sequence:                  bound.Sequence,
+		IssuedAt:                  &issuedAt,
+		Nonce:                     bound.Nonce,
+		GenerationSequence:        bound.GenerationSequence,
+		EvidenceHash:              bound.EvidenceHash,
+		IdentityVerified:          true,
+		DesiredGeneration:         bound.DesiredGeneration,
+		ActualGeneration:          bound.ActualGeneration,
+		LKGGeneration:             bound.LKGGeneration,
+		ApplyStatus:               bound.ApplyStatus,
+		ProbeStatus:               bound.ProbeStatus,
+		ServingLKG:                bound.ServingLKG,
+		LKGExpired:                bound.LKGExpired,
+		LastError:                 bound.LastError,
+		LastHeartbeatAt:           receivedAt,
+		UpdatedAt:                 receivedAt,
+	}
+	return consumer, AdvancePlatformConsumerHeartbeatCursor(previous, bound, 32), nil
+}
+
 func AdvancePlatformConsumerHeartbeatCursor(
 	previous *PlatformConsumerHeartbeatCursor,
 	heartbeat PlatformConsumerHeartbeatEnvelope,

@@ -363,6 +363,71 @@ func TestValidatePlatformConsumerHeartbeatRejectsBadTimeAndEvidence(t *testing.T
 	}
 }
 
+func TestVerifyTrustedPlatformConsumerHeartbeatProducesVerifiedServerOwnedInstance(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{
+		ReleaseSetID: "release-set-1",
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:     "global",
+		Generation:   "generation-42",
+		PreparedAt:   now,
+		Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
+			ID: "edge-node-1", EdgeGroupID: "edge-group-1", Country: "US",
+		}}},
+	})
+	claims := platformComponentTestClaims()
+	claims.Version = platformComponentIdentityVersion
+	claims.TokenID = "token-1"
+	claims.IssuedAtUnix = now.Add(-time.Minute).Unix()
+	claims.ExpiresAtUnix = now.Add(time.Minute).Unix()
+	heartbeat, err := BindPlatformConsumerHeartbeatToExpectedSet(claims, set, PlatformConsumerHeartbeatEnvelope{
+		ArtifactKind:       model.PlatformArtifactKindEdgeRankingPolicy,
+		FencingToken:       8,
+		ProtocolVersion:    model.PlatformConsumerProtocolVersionV1,
+		SchemaVersion:      model.PlatformConsumerSchemaVersionV1,
+		Sequence:           12,
+		IssuedAt:           now.Add(-time.Second),
+		Nonce:              "nonce-value-0001",
+		GenerationSequence: 42,
+		ActualGeneration:   "generation-42",
+		LKGGeneration:      "generation-41",
+		ApplyStatus:        model.PlatformConsumerApplyStatusApplied,
+		ProbeStatus:        model.PlatformConsumerProbeStatusPassed,
+	})
+	if err != nil {
+		t.Fatalf("bind heartbeat: %v", err)
+	}
+	heartbeat.EvidenceHash = mustPlatformConsumerHeartbeatHash(t, heartbeat)
+
+	consumer, cursor, err := VerifyTrustedPlatformConsumerHeartbeat(
+		claims, set, heartbeat, nil, now, PlatformConsumerHeartbeatValidationPolicy{},
+	)
+	if err != nil {
+		t.Fatalf("verify trusted heartbeat: %v", err)
+	}
+	if !consumer.IdentityVerified || consumer.CredentialID != "credential-1" || consumer.TokenID != "token-1" ||
+		consumer.ConsumerID != "edge-worker:edge-node-1" || consumer.ReleaseSetID != "release-set-1" ||
+		consumer.ExpectedConsumerSetID != set.ID || consumer.DesiredGeneration != "generation-42" ||
+		consumer.LastHeartbeatAt != now || consumer.IssuedAt == nil || !consumer.IssuedAt.Equal(now.Add(-time.Second)) {
+		t.Fatalf("unexpected verified consumer instance: %+v", consumer)
+	}
+	if cursor.Sequence != 12 || cursor.GenerationSequence != 42 || cursor.FencingToken != 8 ||
+		len(cursor.RecentNonces) != 1 || cursor.RecentNonces[0] != "nonce-value-0001" {
+		t.Fatalf("unexpected trusted heartbeat cursor: %+v", cursor)
+	}
+
+	replayed := heartbeat
+	replayed.Sequence++
+	replayed.EvidenceHash = mustPlatformConsumerHeartbeatHash(t, replayed)
+	if _, _, err := VerifyTrustedPlatformConsumerHeartbeat(
+		claims, set, replayed, &cursor, now.Add(time.Second), PlatformConsumerHeartbeatValidationPolicy{},
+	); !errors.Is(err, ErrPlatformConsumerHeartbeatReplay) {
+		t.Fatalf("trusted verification must reject a reused nonce, got %v", err)
+	}
+}
+
 func platformComponentTestKeyring() PlatformComponentIdentityKeyring {
 	return PlatformComponentIdentityKeyring{
 		ActiveKeyID: "identity-key-1",
