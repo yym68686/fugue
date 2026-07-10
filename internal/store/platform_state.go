@@ -660,6 +660,34 @@ func (s *Store) UpsertPlatformConsumerHeartbeat(req model.PlatformConsumerHeartb
 	return out, err
 }
 
+func (s *Store) AcceptTrustedPlatformConsumerHeartbeat(
+	claims platformcontrol.PlatformComponentIdentityClaims,
+	expectedSetID string,
+	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
+	receivedAt time.Time,
+	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
+) (model.PlatformConsumerInstance, error) {
+	expectedSetID = strings.TrimSpace(expectedSetID)
+	if expectedSetID == "" {
+		return model.PlatformConsumerInstance{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy)
+	}
+	var out model.PlatformConsumerInstance
+	err := s.withLockedState(true, func(state *model.State) error {
+		consumer, err := acceptTrustedPlatformConsumerHeartbeatInState(
+			state, claims, expectedSetID, heartbeat, receivedAt, policy,
+		)
+		if err != nil {
+			return err
+		}
+		out = consumer
+		return nil
+	})
+	return out, err
+}
+
 func (s *Store) ListPlatformConsumers(kind, scopeKey string) ([]model.PlatformConsumerInstance, error) {
 	kind = NormalizePlatformArtifactKind(kind)
 	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
