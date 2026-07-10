@@ -1088,7 +1088,7 @@ with socket.create_connection((host, port), timeout=timeout):
   done < <(node_ips_for_daemonset "${daemonset_name}")
 }
 
-worker_smoke_target() {
+worker_smoke_targets() {
   public_data_plane_smoke_urls | python3 -c '
 import sys
 from urllib.parse import urlsplit
@@ -1104,7 +1104,6 @@ for raw in sys.stdin:
     if parsed.query:
         path += "?" + parsed.query
     print(parsed.hostname + "\t" + path)
-    break
 '
 }
 
@@ -1114,30 +1113,53 @@ public_data_plane_smoke_urls() {
   printf '%s\n' "${urls}" | tr ',;' '\n'
 }
 
+smoke_curl_with_retry() {
+  local label="$1"
+  shift
+  local attempts="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS:-18}"
+  local delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS:-5}"
+  local attempt=1
+
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS must be a positive integer"
+  [[ "${delay_seconds}" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS must be a non-negative number"
+  while (( attempt <= attempts )); do
+    if curl "$@"; then
+      return 0
+    fi
+    if (( attempt == attempts )); then
+      log "smoke failed after ${attempts} attempt(s): ${label}"
+      return 1
+    fi
+    log "smoke attempt ${attempt}/${attempts} failed; retrying in ${delay_seconds}s: ${label}"
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+  done
+}
+
 check_worker_https_smoke() {
   local daemonset_name="$1"
   local port="$2"
-  local target
   local host
   local path
   local host_ip
 
-  target="$(worker_smoke_target)"
-  [[ -n "$(trim_field "${target}")" ]] || return 0
-  IFS=$'\t' read -r host path <<<"${target}"
-  [[ -n "$(trim_field "${host}")" ]] || return 0
-  path="${path:-/}"
-  while IFS= read -r host_ip; do
-    host_ip="$(trim_field "${host_ip}")"
-    [[ -n "${host_ip}" ]] || continue
-    log "checking inactive worker HTTPS smoke ${host_ip}:${port} host=${host} path=${path}"
-    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
-      continue
-    fi
-    curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
-      --resolve "${host}:${port}:${host_ip}" \
-      "https://${host}:${port}${path}" >/dev/null
-  done < <(node_ips_for_daemonset "${daemonset_name}")
+  while IFS=$'\t' read -r host path; do
+    host="$(trim_field "${host}")"
+    [[ -n "${host}" ]] || continue
+    path="${path:-/}"
+    while IFS= read -r host_ip; do
+      host_ip="$(trim_field "${host_ip}")"
+      [[ -n "${host_ip}" ]] || continue
+      log "checking inactive worker HTTPS smoke ${host_ip}:${port} host=${host} path=${path}"
+      if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+        continue
+      fi
+      smoke_curl_with_retry "inactive worker ${host_ip}:${port} host=${host} path=${path}" \
+        -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
+        --resolve "${host}:${port}:${host_ip}" \
+        "https://${host}:${port}${path}" >/dev/null
+    done < <(node_ips_for_daemonset "${daemonset_name}")
+  done < <(worker_smoke_targets)
 }
 
 container_patch_for_front() {
@@ -1286,7 +1308,8 @@ check_public_smoke_on_front_nodes() {
       if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
         continue
       fi
-      curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
+      smoke_curl_with_retry "front ${host_ip}:443 host=${host} path=${path}" \
+        -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
         --resolve "${host}:443:${host_ip}" \
         "https://${host}${path}" >/dev/null
     done < <(node_ips_for_daemonset "${front_daemonset}")
@@ -1450,7 +1473,8 @@ run_smoke_urls() {
     url="$(trim_field "${url}")"
     [[ -n "${url}" ]] || continue
     log "smoke ${url}"
-    curl -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" "${url}" >/dev/null
+    smoke_curl_with_retry "public ${url}" \
+      -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" "${url}" >/dev/null
   done < <(public_data_plane_smoke_urls)
 }
 

@@ -332,7 +332,65 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.fugue.pro/healthz; https://oaix.fugue.pro/healthz,https://argus.fugue.pro/healthz'
   assert_eq "$(public_data_plane_smoke_urls | wc -l | tr -d ' ')" "3" "public data-plane smoke URL parser must split comma and semicolon"
-  assert_eq "$(worker_smoke_target)" $'api.fugue.pro\t/healthz' "worker smoke target must parse the first HTTPS smoke URL after splitting"
+  assert_eq "$(worker_smoke_targets)" $'api.fugue.pro\t/healthz\noaix.fugue.pro\t/healthz\nargus.fugue.pro\t/healthz' "worker smoke targets must preserve every HTTPS smoke URL"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://app.example.test/ready?full=1'
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=1
+  calls=""
+  node_ips_for_daemonset() {
+    printf '192.0.2.10\n192.0.2.11\n'
+  }
+  curl() {
+    calls="${calls}${*: -1};"
+  }
+
+  check_worker_https_smoke test-worker 18443
+  assert_eq "${calls}" "https://api.example.test:18443/healthz;https://api.example.test:18443/healthz;https://app.example.test:18443/ready?full=1;https://app.example.test:18443/ready?full=1;" "inactive worker smoke must cover every configured URL on every scheduled node"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=3
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS=0
+  curl_calls=0
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    (( curl_calls >= 3 ))
+  }
+  sleep() { :; }
+
+  smoke_curl_with_retry "transient test" -fsS https://example.test/healthz
+  assert_eq "${curl_calls}" "3" "public data-plane smoke must recover inside its bounded retry budget"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=2
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS=0
+  curl_calls=0
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    return 22
+  }
+  sleep() { :; }
+
+  if smoke_curl_with_retry "persistent test" -fsS https://example.test/healthz; then
+    fail "public data-plane smoke must fail closed after exhausting retries"
+  fi
+  assert_eq "${curl_calls}" "2" "public data-plane smoke exhausted retry attempts"
 )
 
 (
