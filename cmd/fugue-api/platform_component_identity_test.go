@@ -7,6 +7,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
 )
 
 func TestPlatformComponentIdentityKeyringDoesNotReuseBundleKey(t *testing.T) {
@@ -82,6 +83,81 @@ func TestPlatformComponentIdentityKeyringUsesDedicatedRotatingKeys(t *testing.T)
 	}
 	if _, err := platformcontrol.ParsePlatformComponentIdentity(keyring, token, now.Add(30*time.Second)); err != nil {
 		t.Fatalf("parse component identity: %v", err)
+	}
+}
+
+func TestPlatformConsumerHeartbeatAuditKeyringIsDedicatedRotatableAndRevocable(t *testing.T) {
+	now := time.Date(2026, 7, 10, 9, 30, 0, 0, time.UTC)
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY", "widely-distributed-bundle-key")
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "bundle-key-1")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY", "component-secret-v1")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID", "component-key-v1")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY", "")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID", "")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS", "")
+
+	identityKeyring := platformComponentIdentityKeyringFromEnv()
+	previousAudit := platformConsumerHeartbeatAuditKeyringFromEnv()
+	if previousAudit.PrimaryKeyID != "heartbeat-audit:component-key-v1" ||
+		previousAudit.PrimaryKey == "" ||
+		previousAudit.PrimaryKey == identityKeyring.Keys[identityKeyring.ActiveKeyID] ||
+		previousAudit.PrimaryKey == "widely-distributed-bundle-key" {
+		t.Fatalf("heartbeat audit key must be dedicated and domain-separated: identity=%+v audit=%+v", identityKeyring, previousAudit)
+	}
+
+	event, err := platformsafety.SignTamperEvidentAuditEvent(model.AuditEvent{
+		ID:            "audit-heartbeat-1",
+		ActorType:     "platform_component",
+		ActorID:       "credential-1",
+		Action:        "platform_consumer.heartbeat_accepted",
+		TargetType:    "platform_consumer",
+		TargetID:      "edge-worker:edge-node-1",
+		ChainID:       "platform-consumer-heartbeat",
+		ChainSequence: 1,
+		CreatedAt:     now,
+	}, previousAudit)
+	if err != nil {
+		t.Fatalf("sign heartbeat audit event: %v", err)
+	}
+
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY", "component-secret-v2")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID", "component-key-v2")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY", "component-secret-v1")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID", "component-key-v1")
+	rotatedAudit := platformConsumerHeartbeatAuditKeyringFromEnv()
+	if rotatedAudit.PrimaryKeyID != "heartbeat-audit:component-key-v2" ||
+		rotatedAudit.PreviousKeyID != "heartbeat-audit:component-key-v1" {
+		t.Fatalf("rotated heartbeat audit keyring has wrong key ids: %+v", rotatedAudit)
+	}
+	if err := platformsafety.VerifyTamperEvidentAuditEvent(event, rotatedAudit); err != nil {
+		t.Fatalf("rotation overlap must verify an audit event signed by the previous key: %v", err)
+	}
+
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS", "component-key-v1")
+	revokedAudit := platformConsumerHeartbeatAuditKeyringFromEnv()
+	if err := platformsafety.VerifyTamperEvidentAuditEvent(event, revokedAudit); err == nil {
+		t.Fatal("revoked previous component identity key must not verify heartbeat audit events")
+	}
+}
+
+func TestPlatformConsumerHeartbeatAuditKeyringDoesNotFallBackToBundleKey(t *testing.T) {
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY", "widely-distributed-bundle-key")
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "bundle-key-1")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY", "")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID", "")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY", "")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID", "")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS", "")
+
+	auditKeyring := platformConsumerHeartbeatAuditKeyringFromEnv()
+	if auditKeyring.PrimaryKey != "" || auditKeyring.PrimaryKeyID != "" {
+		t.Fatalf("bundle key must not populate heartbeat audit keyring: %+v", auditKeyring)
+	}
+	if _, err := platformsafety.SignTamperEvidentAuditEvent(model.AuditEvent{
+		ChainID:       "platform-consumer-heartbeat",
+		ChainSequence: 1,
+	}, auditKeyring); err == nil {
+		t.Fatal("missing dedicated component identity secret must fail heartbeat audit signing closed")
 	}
 }
 
