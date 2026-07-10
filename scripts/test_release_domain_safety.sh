@@ -929,6 +929,19 @@ FUGUE_EDGE_IMAGE_TAG="${EDGE_WORKER_REF}"
 public_data_plane_live_worker_image_changed || fail "live edge worker tag drift must trigger public data-plane worker release"
 
 (
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_NAMESPACE=fugue-system
+  helm() {
+    printf '{"edge":{"image":{"repository":"ghcr.io/acme/fugue-edge","tag":"base-stable"}}}'
+  }
+  assert_eq "$(live_helm_release_value "edge.image.repository")" "ghcr.io/acme/fugue-edge" "live Helm nested repository value"
+  assert_eq "$(live_helm_release_value "edge.image.tag")" "base-stable" "live Helm nested tag value"
+  if live_helm_release_value "edge.image.missing" >/dev/null; then
+    fail "missing live Helm value must fail closed"
+  fi
+)
+
+(
   FUGUE_NAMESPACE=fugue-system
   FUGUE_RELEASE_FULLNAME=fugue-fugue
   KUBECTL=true
@@ -958,14 +971,37 @@ public_data_plane_live_worker_image_changed || fail "live edge worker tag drift 
   }
   live_daemonset_container_resources_json() { :; }
   live_daemonset_container_env_value() { :; }
+  live_helm_release_value() {
+    case "$1" in
+      edge.image.repository)
+        printf 'ghcr.io/acme/fugue-edge'
+        ;;
+      edge.image.tag)
+        printf 'base-stable'
+        ;;
+    esac
+  }
   append_dns_group_image_args_from_live() { :; }
+  FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge
+  FUGUE_EDGE_IMAGE_TAG=unreleased-target
   preserve_public_data_plane_from_live
   joined_args="$(printf '%s\n' "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}")"
   [[ "${joined_args}" == *"edge.sshFront.image.repository=ghcr.io/acme/fugue-edge"* ]] ||
     fail "control-plane preserve mode must retain the live SSH front image repository"
   [[ "${joined_args}" == *"edge.sshFront.image.tag=ssh-stable"* ]] ||
     fail "control-plane preserve mode must retain the live SSH front image tag"
+  [[ "${FUGUE_EDGE_HELM_IMAGE_REPOSITORY}" == "ghcr.io/acme/fugue-edge" ]] ||
+    fail "control-plane preserve mode must retain the live Helm base image repository"
+  [[ "${FUGUE_EDGE_HELM_IMAGE_TAG}" == "base-stable" ]] ||
+    fail "control-plane preserve mode must retain the live Helm base image tag"
+  [[ "${FUGUE_EDGE_IMAGE_TAG}" == "unreleased-target" ]] ||
+    fail "control-plane preserve mode must not overwrite the edge release target"
 )
+
+grep -Fq -- '--set-string edge.image.repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY}}"' "${ORIGINAL_REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "Helm upgrade must use the preserved edge base image repository"
+grep -Fq -- '--set-string edge.image.tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG}}"' "${ORIGINAL_REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "Helm upgrade must use the preserved edge base image tag"
 
 BEFORE_SHA="${IMAGE_CACHE_REF}"
 AFTER_SHA="${IMAGE_CACHE_RESOURCES_REF}"

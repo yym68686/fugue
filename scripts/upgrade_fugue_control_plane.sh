@@ -2926,6 +2926,49 @@ append_image_ref_helm_args() {
   log "${domain} image helm args preserved from live pod: ${repository}:${tag}"
 }
 
+live_helm_release_value() {
+  local value_path="$1"
+
+  helm get values "${FUGUE_RELEASE_NAME}" \
+    -n "${FUGUE_NAMESPACE}" \
+    -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+value = json.load(sys.stdin)
+for part in sys.argv[1].split("."):
+    if not isinstance(value, dict) or part not in value:
+        raise SystemExit(1)
+    value = value[part]
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, (str, int, float)):
+    print(value)
+else:
+    raise SystemExit(1)
+' "${value_path}"
+}
+
+preserve_edge_base_image_from_live_release() {
+  local repository tag image_ref
+
+  repository="$(trim_field "$(live_helm_release_value "edge.image.repository" || true)")"
+  tag="$(trim_field "$(live_helm_release_value "edge.image.tag" || true)")"
+  if [[ -z "${repository}" || -z "${tag}" ]]; then
+    image_ref="$(trim_field "$(live_daemonset_container_image "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge")")"
+    repository="$(image_ref_repository "${image_ref}")"
+    tag="$(image_ref_tag "${image_ref}")"
+  fi
+  if [[ -z "${repository}" || -z "${tag}" ]]; then
+    log "public data-plane base image preserve skipped; current Helm values and live worker-a image were unavailable"
+    return 1
+  fi
+
+  FUGUE_EDGE_HELM_IMAGE_REPOSITORY="${repository}"
+  FUGUE_EDGE_HELM_IMAGE_TAG="${tag}"
+  log "public data-plane base image Helm values preserved from live release: ${repository}:${tag}"
+}
+
 append_dns_group_image_args_from_live() {
   local dns_prefix="${FUGUE_RELEASE_FULLNAME}-dns-"
   local daemonset_name
@@ -2974,6 +3017,7 @@ preserve_public_data_plane_from_live() {
 
   if daemonset_exists "${edge_front_ds}" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"; then
     log "public data-plane blue/green DaemonSets detected; preserving front and per-slot worker templates from live state"
+    preserve_edge_base_image_from_live_release || true
     PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(
       --set edge.blueGreen.enabled=true
       --set edge.caddy.publicHostPorts.enabled=false
@@ -3016,7 +3060,7 @@ preserve_public_data_plane_from_live() {
     return 0
   fi
 
-  preserve_image_from_live_daemonset "public data-plane" "${edge_ds}" "edge" FUGUE_EDGE_IMAGE_REPOSITORY FUGUE_EDGE_IMAGE_TAG || true
+  preserve_image_from_live_daemonset "public data-plane" "${edge_ds}" "edge" FUGUE_EDGE_HELM_IMAGE_REPOSITORY FUGUE_EDGE_HELM_IMAGE_TAG || true
   append_live_daemonset_image_helm_args "public data-plane" "${edge_ds}" "caddy" "edge.caddy.image" || true
   append_live_daemonset_image_helm_args "public data-plane dns" "${dns_ds}" "dns" "dns.image" || true
   append_dns_group_image_args_from_live
@@ -6337,6 +6381,8 @@ prepare_release_domains() {
   build_mode="${FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE:-auto}"
   stateful_mode="${FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE:-guard}"
   maintenance_mode="${FUGUE_MAINTENANCE_AGENT_RELEASE_MODE:-preserve}"
+  FUGUE_EDGE_HELM_IMAGE_REPOSITORY="${FUGUE_EDGE_IMAGE_REPOSITORY}"
+  FUGUE_EDGE_HELM_IMAGE_TAG="${FUGUE_EDGE_IMAGE_TAG}"
 
   case "${public_mode}" in
     auto|preserve|allow)
@@ -7958,8 +8004,8 @@ PY
     --set registryJanitor.enabled="${FUGUE_REGISTRY_JANITOR_ENABLED}" \
     --set registryGC.enabled="${FUGUE_REGISTRY_GC_ENABLED}" \
     --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
-    --set-string edge.image.repository="${FUGUE_EDGE_IMAGE_REPOSITORY}" \
-    --set-string edge.image.tag="${FUGUE_EDGE_IMAGE_TAG}" \
+    --set-string edge.image.repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY}}" \
+    --set-string edge.image.tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG}}" \
     --set-string edge.edgeGroupID="${FUGUE_EDGE_GROUP_ID}" \
     --set-string edge.region="${FUGUE_EDGE_REGION}" \
     --set-string edge.country="${FUGUE_EDGE_COUNTRY}" \
