@@ -21,6 +21,7 @@ assert_eq() {
 bash -n "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 bash -n "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
+bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
 
@@ -46,6 +47,7 @@ assert_build_plan() {
   log_file="$(mktemp)"
   GITHUB_OUTPUT="${output_file}" \
     FUGUE_RELEASE_CHANGED_FILES="${changed_files}" \
+    FUGUE_RELEASE_CHANGED_FILES_SET=true \
     "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${log_file}"
   while [[ "$#" -gt 0 ]]; do
     assert_eq "$(plan_value "${output_file}" "$1")" "$2" "${label} $1"
@@ -83,6 +85,51 @@ assert_build_plan \
   build_api false \
   build_controller false \
   build_edge false
+
+assert_build_plan \
+  '' \
+  "missing live baseline rebuilds every image" \
+  target_count 7 \
+  build_api true \
+  build_controller true \
+  build_drain_agent true \
+  build_telemetry_agent true \
+  build_image_cache true \
+  build_edge true \
+  build_app_ssh true
+
+RESOLVE_TEST_DIR="$(mktemp -d)"
+RESOLVE_TEST_OUTPUT="$(mktemp)"
+cat >"${RESOLVE_TEST_DIR}/kubectl" <<'SH'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"spec":{"template":{"spec":{"containers":[
+  {"name":"api","image":"ghcr.io/acme/fugue-api:api-live"},
+  {"name":"controller","image":"ghcr.io/acme/fugue-controller:controller-live","env":[
+    {"name":"FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY","value":"ghcr.io/acme/fugue-drain-agent"},
+    {"name":"FUGUE_DRAIN_AGENT_IMAGE_TAG","value":"drain-live"}
+  ]},
+  {"name":"telemetry-agent","image":"ghcr.io/acme/fugue-telemetry-agent:telemetry-live"},
+  {"name":"image-cache","image":"ghcr.io/acme/fugue-image-cache:image-cache-live"},
+  {"name":"edge","image":"ghcr.io/acme/fugue-edge:edge-live"}
+]}}}}
+JSON
+SH
+chmod +x "${RESOLVE_TEST_DIR}/kubectl"
+PATH="${RESOLVE_TEST_DIR}:${PATH}" \
+  GITHUB_OUTPUT="${RESOLVE_TEST_OUTPUT}" \
+  FUGUE_IMAGE_TAG=fallback-target \
+  "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh" >/dev/null
+release_baseline_tags="$(
+  awk '
+    $0 == "release_baseline_tags<<EOF" { capture = 1; next }
+    capture && $0 == "EOF" { exit }
+    capture { print }
+  ' "${RESOLVE_TEST_OUTPUT}"
+)"
+assert_eq "${release_baseline_tags}" $'api-live\ncontroller-live' "release baseline only includes core control-plane images"
+rm -rf "${RESOLVE_TEST_DIR}"
+rm -f "${RESOLVE_TEST_OUTPUT}"
 
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
@@ -687,6 +734,28 @@ printf 'package main\nfunc main() { println("fixed") }\n' >"${TMP_REPO_ROOT}/cmd
 git -C "${TMP_REPO_ROOT}" add .
 git -C "${TMP_REPO_ROOT}" commit -q -m image-cache
 IMAGE_CACHE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+live_diff="$(
+  FUGUE_RELEASE_REPO_ROOT="${TMP_REPO_ROOT}" \
+  FUGUE_RELEASE_TARGET_REF="${IMAGE_CACHE_REF}" \
+  FUGUE_RELEASE_BASE_REFS="${BASE_REF}
+${SCRIPT_REF}" \
+    "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
+)"
+[[ "${live_diff}" == *"cmd/fugue-image-cache/main.go"* && "${live_diff}" == *"scripts/upgrade_fugue_control_plane.sh"* ]] ||
+  fail "live-to-target release diff must retain changes skipped by an intervening failed deploy, got ${live_diff}"
+if FUGUE_RELEASE_REPO_ROOT="${TMP_REPO_ROOT}" \
+  FUGUE_RELEASE_TARGET_REF="${IMAGE_CACHE_REF}" \
+  FUGUE_RELEASE_BASE_REFS="missing-live-image-tag" \
+  "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh" >/dev/null 2>&1; then
+  fail "unresolvable live image refs must fail closed"
+fi
+if FUGUE_RELEASE_REPO_ROOT="${TMP_REPO_ROOT}" \
+  FUGUE_RELEASE_TARGET_REF="${IMAGE_CACHE_REF}" \
+  FUGUE_RELEASE_BASE_REFS="" \
+  FUGUE_RELEASE_REQUIRE_BASELINE=true \
+  "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh" >/dev/null 2>&1; then
+  fail "required live release baseline must fail closed when no core image ref is available"
+fi
 (
   REPO_ROOT="${TMP_REPO_ROOT}"
   FUGUE_API_DEPLOYMENT_NAME=fugue-api
@@ -903,7 +972,7 @@ if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-headscale; th
   fail "node-local build-plane override must not skip headscale singleton rollout waits"
 fi
 
-FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\nscripts/build_control_plane_images.sh\nscripts/compute_control_plane_image_build_plan.sh\nscripts/resolve_control_plane_live_images.sh\nscripts/test_release_domain_safety.sh\nscripts/upgrade_fugue_control_plane.sh'
+FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\nscripts/build_control_plane_images.sh\nscripts/compute_control_plane_image_build_plan.sh\nscripts/compute_release_changed_files_from_live.sh\nscripts/resolve_control_plane_live_images.sh\nscripts/test_release_domain_safety.sh\nscripts/upgrade_fugue_control_plane.sh'
 node_local_build_plane_preflight_override_allowed || fail "deploy tooling changes must allow existing node-local build-plane preflight degradation"
 
 live_deployment_replicas() {

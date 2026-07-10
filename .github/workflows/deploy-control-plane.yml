@@ -38,6 +38,7 @@ on:
       - 'go.sum'
       - 'scripts/build_control_plane_images.sh'
       - 'scripts/compute_control_plane_image_build_plan.sh'
+      - 'scripts/compute_release_changed_files_from_live.sh'
       - 'scripts/export_cloudflare_zone_static_records.sh'
       - 'scripts/install_fugue_ha.sh'
       - 'scripts/issue_fugue_app_wildcard_tls.sh'
@@ -65,7 +66,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-baseline:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - fugue
+      - control-plane
+    outputs:
+      changed_files: ${{ steps.release_changes.outputs.changed_files }}
+      baseline_refs: ${{ steps.release_changes.outputs.baseline_refs }}
+      source: ${{ steps.release_changes.outputs.source }}
+      target_ref: ${{ steps.release_changes.outputs.target_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve live image metadata
+        id: live_images
+        env:
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+          FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
+          FUGUE_IMAGE_TAG: ${{ inputs.existing_image_tag || github.sha }}
+        run: ./scripts/resolve_control_plane_live_images.sh
+
+      - name: Compute live-to-target release changed files
+        id: release_changes
+        env:
+          FUGUE_RELEASE_TARGET_REF: ${{ inputs.existing_image_tag || github.sha }}
+          FUGUE_RELEASE_BASE_REFS: ${{ steps.live_images.outputs.release_baseline_tags }}
+          FUGUE_RELEASE_REQUIRE_BASELINE: "true"
+        run: ./scripts/compute_release_changed_files_from_live.sh
+
   build:
+    needs: release-baseline
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.existing_image_tag == '' }}
     runs-on: ubuntu-latest
     outputs:
@@ -110,30 +147,11 @@ jobs:
           echo "edge_image_repository=ghcr.io/${owner_lc}/fugue-edge" >> "${GITHUB_OUTPUT}"
           echo "app_ssh_image_repository=ghcr.io/${owner_lc}/fugue-app-ssh" >> "${GITHUB_OUTPUT}"
 
-      - name: Compute release changed files
-        id: release_changes
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
-        run: |
-          changed_files=""
-          if [[ "${EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]] &&
-            git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
-          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            changed_files="$(git diff --name-only HEAD^ HEAD)"
-          fi
-          {
-            echo "changed_files<<EOF"
-            printf '%s\n' "${changed_files}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
-
       - name: Compute image build plan
         id: plan
         env:
-          FUGUE_RELEASE_CHANGED_FILES: ${{ steps.release_changes.outputs.changed_files }}
+          FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
+          FUGUE_RELEASE_CHANGED_FILES_SET: "true"
         run: ./scripts/compute_control_plane_image_build_plan.sh
 
       - name: Setup Docker Buildx
@@ -163,7 +181,9 @@ jobs:
         run: ./scripts/build_control_plane_images.sh
 
   deploy:
-    needs: build
+    needs:
+      - release-baseline
+      - build
     if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '')) }}
     timeout-minutes: 30
     runs-on:
@@ -179,47 +199,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute release changed files
-        id: release_changes
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
-        run: |
-          changed_files=""
-          if [[ "${EVENT_NAME}" == "push" && -n "${BEFORE_SHA}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]] &&
-            git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
-          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            changed_files="$(git diff --name-only HEAD^ HEAD)"
-          fi
-          {
-            echo "changed_files<<EOF"
-            printf '%s\n' "${changed_files}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
-
       - name: Guard stateful component files
         if: github.event_name == 'push'
         env:
-          BEFORE_SHA: ${{ github.event.before }}
-          AFTER_SHA: ${{ github.sha }}
+          FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
-          if [[ -z "${BEFORE_SHA}" || "${BEFORE_SHA}" == "0000000000000000000000000000000000000000" ]]; then
-            echo "skip stateful-file guard on initial push"
-            exit 0
-          fi
-          if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            changed_files="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
-          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            changed_files="$(git diff --name-only HEAD^ HEAD)"
-          else
-            changed_files=""
-          fi
           forbidden_pattern='^deploy/helm/fugue/templates/(postgres-(deployment|service)|registry-(configmap|deployment|pvc|service)|headscale-.*|control-plane-postgres-.*|shared-workspace-.*|snapshot-controller)\.yaml$'
-          if printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" >/dev/null; then
-            echo "stateful component manifests changed in this push:"
-            printf '%s\n' "${changed_files}" | grep -E "${forbidden_pattern}" || true
+          if printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES}" | grep -E "${forbidden_pattern}" >/dev/null; then
+            echo "stateful component manifests changed since the live release:"
+            printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES}" | grep -E "${forbidden_pattern}" || true
             echo "control-plane auto deploy refuses postgres/registry/headscale changes; ship those with a manual release"
             exit 1
           fi
@@ -240,7 +228,7 @@ jobs:
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag || github.sha }}
           FUGUE_IMAGE_TARGETS: ${{ needs.build.outputs.image_targets || '' }}
-          FUGUE_RELEASE_CHANGED_FILES: ${{ steps.release_changes.outputs.changed_files }}
+          FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/fugue-release"
@@ -478,7 +466,7 @@ jobs:
           FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_NAME || '' }}
           FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_KEY || '' }}
           FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL: ${{ vars.FUGUE_MESH_RECOVERY_REJOIN_AUTH_KEY_SECRET_OPTIONAL || '' }}
-          FUGUE_RELEASE_CHANGED_FILES: ${{ steps.release_changes.outputs.changed_files }}
+          FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
           FUGUE_EDGE_DYNAMIC_ENABLED: ${{ vars.FUGUE_EDGE_DYNAMIC_ENABLED || 'true' }}
           FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE || 'terminate' }}
           FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS || '120' }}

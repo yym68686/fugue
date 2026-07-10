@@ -12,7 +12,7 @@ trim_field() {
 }
 
 release_changed_files() {
-  if [[ -n "${FUGUE_RELEASE_CHANGED_FILES:-}" ]]; then
+  if [[ "${FUGUE_RELEASE_CHANGED_FILES_SET:-false}" == "true" || -n "${FUGUE_RELEASE_CHANGED_FILES:-}" ]]; then
     printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES}" | sed '/^[[:space:]]*$/d'
     return
   fi

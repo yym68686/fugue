@@ -60,6 +60,21 @@ emit_output() {
   fi
 }
 
+emit_multiline_output() {
+  local key="$1"
+  local value="$2"
+
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    {
+      printf '%s<<EOF\n' "${key}"
+      printf '%s\n' "${value}" | sed '/^[[:space:]]*$/d'
+      printf 'EOF\n'
+    } >>"${GITHUB_OUTPUT}"
+  else
+    printf '%s=%s\n' "${key}" "${value}"
+  fi
+}
+
 resource_container_image() {
   local kind="$1"
   local name="$2"
@@ -114,12 +129,16 @@ output_image_ref() {
   local image_ref="$2"
   local fallback_repository="$3"
   local fallback_tag="$4"
+  local include_release_baseline="${5:-false}"
   local repository tag
 
   image_ref="$(trim_field "${image_ref}")"
   if [[ -n "${image_ref}" ]]; then
     repository="$(image_ref_repository "${image_ref}")"
     tag="$(image_ref_tag "${image_ref}")"
+    if [[ "${include_release_baseline}" == "true" ]]; then
+      RELEASE_BASELINE_TAGS="${RELEASE_BASELINE_TAGS}${RELEASE_BASELINE_TAGS:+$'\n'}${tag}"
+    fi
   else
     repository="$(trim_field "${fallback_repository}")"
     tag="$(trim_field "${fallback_tag}")"
@@ -132,6 +151,7 @@ output_image_ref() {
 FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
 FUGUE_RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME:-fugue-fugue}"
 KUBECTL_CMD="$(detect_kubectl)"
+RELEASE_BASELINE_TAGS=""
 
 api_image="$(resource_container_image deploy "${FUGUE_RELEASE_FULLNAME}-api" api)"
 if [[ -z "$(trim_field "${api_image}")" ]]; then
@@ -153,9 +173,10 @@ if [[ -n "$(trim_field "${drain_repository}")" && -n "$(trim_field "${drain_tag}
 fi
 
 fallback_tag="${FUGUE_IMAGE_TAG:-${GITHUB_SHA:-latest}}"
-output_image_ref api "${api_image}" "${FUGUE_API_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-api}" "${fallback_tag}"
-output_image_ref controller "${controller_image}" "${FUGUE_CONTROLLER_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-controller}" "${fallback_tag}"
+output_image_ref api "${api_image}" "${FUGUE_API_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-api}" "${fallback_tag}" true
+output_image_ref controller "${controller_image}" "${FUGUE_CONTROLLER_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-controller}" "${fallback_tag}" true
 output_image_ref telemetry_agent "${telemetry_image}" "${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-telemetry-agent}" "${fallback_tag}"
 output_image_ref drain_agent "${drain_image}" "${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-drain-agent}" "${fallback_tag}"
 output_image_ref image_cache "${image_cache_image}" "${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-image-cache}" "${fallback_tag}"
 output_image_ref edge "${edge_image}" "${FUGUE_EDGE_IMAGE_REPOSITORY:-ghcr.io/yym68686/fugue-edge}" "${fallback_tag}"
+emit_multiline_output release_baseline_tags "$(printf '%s\n' "${RELEASE_BASELINE_TAGS}" | sed '/^[[:space:]]*$/d' | sort -u)"

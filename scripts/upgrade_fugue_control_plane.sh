@@ -678,6 +678,7 @@ release_safety_changed_file_subsystems() {
       scripts/release_fugue_public_data_plane.sh|\
       scripts/build_control_plane_images.sh|\
       scripts/compute_control_plane_image_build_plan.sh|\
+      scripts/compute_release_changed_files_from_live.sh|\
       scripts/resolve_control_plane_live_images.sh|\
       .github/workflows/deploy-control-plane.yml)
         release_safety_emit_subsystem deploy_script
@@ -1590,6 +1591,7 @@ node_local_build_plane_preflight_override_allowed() {
 	      .github/workflows/deploy-control-plane.yml|\
 	      scripts/build_control_plane_images.sh|\
 	      scripts/compute_control_plane_image_build_plan.sh|\
+	      scripts/compute_release_changed_files_from_live.sh|\
 	      scripts/resolve_control_plane_live_images.sh|\
 	      scripts/upgrade_fugue_control_plane.sh|\
 	      scripts/test_release_domain_safety.sh)
