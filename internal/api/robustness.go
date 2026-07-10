@@ -552,22 +552,23 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 		dnsNodes = activeDNSNodesForPolicy(dnsNodes, nodePolicies)
 	}
 	dnsNodes = freshDNSNodes(dnsNodes, now)
-	expectedDNSGenerationByGroup := mostCommonNonEmptyDNSGenerationByGroup(dnsNodes)
+	expectedDNSGenerationByScope := mostCommonNonEmptyDNSGenerationByScope(dnsNodes)
 	checks = append(checks, model.RobustnessCheck{
 		Name:     "dns_generation_inventory",
 		Pass:     true,
 		Severity: model.RobustnessSeverityInfo,
 		Subject:  "dns_nodes",
 		Expected: "DNS nodes report active and LKG generations",
-		Observed: fmt.Sprintf("nodes=%d expected_generations=%s", len(dnsNodes), formatStringStringMap(expectedDNSGenerationByGroup)),
-		Evidence: map[string]string{"guardian": "node-health", "desired_generation_by_group": formatStringStringMap(expectedDNSGenerationByGroup)},
+		Observed: fmt.Sprintf("nodes=%d expected_generations=%s", len(dnsNodes), formatStringStringMap(expectedDNSGenerationByScope)),
+		Evidence: map[string]string{"guardian": "node-health", "desired_generation_by_scope": formatStringStringMap(expectedDNSGenerationByScope)},
 	})
 	for _, node := range dnsNodes {
 		subject := "dns-node:" + strings.TrimSpace(node.ID)
 		if strings.TrimSpace(node.ID) == "" {
 			continue
 		}
-		expectedDNSGeneration := expectedDNSGenerationByGroup[strings.TrimSpace(node.EdgeGroupID)]
+		scopeKey := dnsGenerationScopeKey(node)
+		expectedDNSGeneration := expectedDNSGenerationByScope[scopeKey]
 		dnsGeneration := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		generationPass := expectedDNSGeneration == "" || dnsGeneration == "" || dnsGeneration == expectedDNSGeneration
 		checks = append(checks, model.RobustnessCheck{
@@ -581,6 +582,8 @@ func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Prin
 			Evidence: map[string]string{
 				"guardian":           "node-health",
 				"edge_group_id":      node.EdgeGroupID,
+				"zone":               node.Zone,
+				"generation_scope":   scopeKey,
 				"desired_generation": expectedDNSGeneration,
 				"serving_generation": node.ServingGeneration,
 				"lkg_generation":     node.LKGGeneration,
@@ -633,22 +636,31 @@ func mostCommonNonEmptyEdgeRouteGenerationByGroup(nodes []model.EdgeNode) map[st
 	return mostCommonGenerationByGroup(countsByGroup)
 }
 
-func mostCommonNonEmptyDNSGenerationByGroup(nodes []model.DNSNode) map[string]string {
-	countsByGroup := map[string]map[string]int{}
+func dnsGenerationScopeKey(node model.DNSNode) string {
+	groupID := strings.TrimSpace(node.EdgeGroupID)
+	if groupID == "" {
+		groupID = "default"
+	}
+	zone := strings.TrimSpace(strings.ToLower(node.Zone))
+	if zone == "" {
+		zone = "default"
+	}
+	return groupID + "|zone=" + zone
+}
+
+func mostCommonNonEmptyDNSGenerationByScope(nodes []model.DNSNode) map[string]string {
+	countsByScope := map[string]map[string]int{}
 	for _, node := range nodes {
-		groupID := strings.TrimSpace(node.EdgeGroupID)
-		if groupID == "" {
-			groupID = "default"
-		}
+		scopeKey := dnsGenerationScopeKey(node)
 		generation := firstNonEmpty(strings.TrimSpace(node.DNSBundleVersion), strings.TrimSpace(node.ServingGeneration))
 		if generation != "" {
-			if countsByGroup[groupID] == nil {
-				countsByGroup[groupID] = map[string]int{}
+			if countsByScope[scopeKey] == nil {
+				countsByScope[scopeKey] = map[string]int{}
 			}
-			countsByGroup[groupID][generation]++
+			countsByScope[scopeKey][generation]++
 		}
 	}
-	return mostCommonGenerationByGroup(countsByGroup)
+	return mostCommonGenerationByGroup(countsByScope)
 }
 
 func mostCommonGenerationByGroup(countsByGroup map[string]map[string]int) map[string]string {

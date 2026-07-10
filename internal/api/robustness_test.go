@@ -269,7 +269,7 @@ func TestRobustnessMetricsExposeGuardiansGenerationAndRepairEvents(t *testing.T)
 	for _, want := range []string{
 		`fugue_robustness_guardian_enabled{guardian="route-dns"} 1.000000`,
 		`fugue_robustness_node_generation_drift_seconds`,
-		`fugue_robustness_lkg_serving{edge_group_id="edge-group-country-us",kind="dns",node_id="dns-us-1"} 1.000000`,
+		`fugue_robustness_lkg_serving{edge_group_id="edge-group-country-us",kind="dns",node_id="dns-us-1",zone="fugue.pro"} 1.000000`,
 		`fugue_robustness_repair_events_total{outcome="dry_run"} 1.000000`,
 		`fugue_robustness_backup_last_success_age_seconds`,
 	} {
@@ -279,7 +279,7 @@ func TestRobustnessMetricsExposeGuardiansGenerationAndRepairEvents(t *testing.T)
 	}
 }
 
-func TestRobustnessGenerationDriftIsScopedByEdgeGroup(t *testing.T) {
+func TestRobustnessGenerationDriftIsScopedByEdgeGroupAndDNSZone(t *testing.T) {
 	t.Parallel()
 
 	edgeExpected := mostCommonNonEmptyEdgeRouteGenerationByGroup([]model.EdgeNode{
@@ -293,15 +293,42 @@ func TestRobustnessGenerationDriftIsScopedByEdgeGroup(t *testing.T) {
 		t.Fatalf("expected no drift for group-local edge generation, got %q", msg)
 	}
 
-	dnsExpected := mostCommonNonEmptyDNSGenerationByGroup([]model.DNSNode{
-		{ID: "dns-us-1", EdgeGroupID: "edge-group-country-us", DNSBundleVersion: "dnsgen_us"},
-		{ID: "dns-de-1", EdgeGroupID: "edge-group-country-de", DNSBundleVersion: "dnsgen_de"},
-	})
-	if dnsExpected["edge-group-country-us"] != "dnsgen_us" || dnsExpected["edge-group-country-de"] != "dnsgen_de" {
-		t.Fatalf("expected DNS generations to be scoped by edge group, got %+v", dnsExpected)
+	dnsNodes := []model.DNSNode{
+		{ID: "dns-us-fugue", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", DNSBundleVersion: "dnsgen_us_fugue"},
+		{ID: "dns-us-oaix", EdgeGroupID: "edge-group-country-us", Zone: "oaix.cc", DNSBundleVersion: "dnsgen_us_oaix"},
+		{ID: "dns-de-fugue", EdgeGroupID: "edge-group-country-de", Zone: "fugue.pro", DNSBundleVersion: "dnsgen_de_fugue"},
 	}
-	if msg := robustnessGenerationDriftMessage("dns", "dns-de-1", dnsExpected["edge-group-country-de"], "dnsgen_de"); msg != "" {
-		t.Fatalf("expected no drift for group-local DNS generation, got %q", msg)
+	dnsExpected := mostCommonNonEmptyDNSGenerationByScope(dnsNodes)
+	if dnsExpected[dnsGenerationScopeKey(dnsNodes[0])] != "dnsgen_us_fugue" ||
+		dnsExpected[dnsGenerationScopeKey(dnsNodes[1])] != "dnsgen_us_oaix" ||
+		dnsExpected[dnsGenerationScopeKey(dnsNodes[2])] != "dnsgen_de_fugue" {
+		t.Fatalf("expected DNS generations to be scoped by edge group and zone, got %+v", dnsExpected)
+	}
+	if msg := robustnessGenerationDriftMessage(
+		"dns",
+		dnsNodes[1].ID,
+		dnsExpected[dnsGenerationScopeKey(dnsNodes[1])],
+		dnsNodes[1].DNSBundleVersion,
+	); msg != "" {
+		t.Fatalf("expected no drift across independent DNS zones in one edge group, got %q", msg)
+	}
+
+	replicatedScope := []model.DNSNode{
+		{ID: "dns-us-fugue-a", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", DNSBundleVersion: "dnsgen_current"},
+		{ID: "dns-us-fugue-b", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", DNSBundleVersion: "dnsgen_current"},
+		{ID: "dns-us-fugue-stale", EdgeGroupID: "edge-group-country-us", Zone: "fugue.pro", DNSBundleVersion: "dnsgen_stale"},
+	}
+	replicatedExpected := mostCommonNonEmptyDNSGenerationByScope(replicatedScope)
+	if got := replicatedExpected[dnsGenerationScopeKey(replicatedScope[0])]; got != "dnsgen_current" {
+		t.Fatalf("expected same-zone replicas to use the majority generation, got %q", got)
+	}
+	if msg := robustnessGenerationDriftMessage(
+		"dns",
+		replicatedScope[2].ID,
+		replicatedExpected[dnsGenerationScopeKey(replicatedScope[2])],
+		replicatedScope[2].DNSBundleVersion,
+	); msg == "" {
+		t.Fatal("expected stale generation within the same DNS zone to remain detectable")
 	}
 }
 

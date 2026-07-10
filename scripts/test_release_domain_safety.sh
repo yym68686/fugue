@@ -79,6 +79,30 @@ assert_build_plan \
   build_app_ssh false
 
 assert_build_plan \
+  $'internal/api/robustness_test.go' \
+  "test-only build plan" \
+  target_count 0 \
+  build_api false \
+  build_controller false \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge false \
+  build_app_ssh false
+
+assert_build_plan \
+  $'internal/api/robustness.go\ninternal/api/robustness_test.go' \
+  "api source plus test build plan" \
+  target_count 1 \
+  build_api true \
+  build_controller false \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge false \
+  build_app_ssh false
+
+assert_build_plan \
   $'scripts/upgrade_fugue_control_plane.sh' \
   "script-only build plan" \
   target_count 0 \

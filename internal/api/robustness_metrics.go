@@ -29,14 +29,14 @@ func (s *Server) writeRobustnessMetrics(w io.Writer) {
 		}
 	}
 	if dnsNodes, err := s.store.ListDNSNodes(""); err == nil {
-		expectedByGroup := mostCommonNonEmptyDNSGenerationByGroup(dnsNodes)
+		expectedByScope := mostCommonNonEmptyDNSGenerationByScope(dnsNodes)
 		observability.WriteMetricHeader(w, "fugue_robustness_dns_query_errors", "DNS node query errors reported by authoritative DNS nodes.", "gauge")
 		for _, node := range dnsNodes {
-			expected := expectedByGroup[strings.TrimSpace(node.EdgeGroupID)]
-			labels := map[string]string{"kind": "dns", "node_id": node.ID, "edge_group_id": node.EdgeGroupID}
+			expected := expectedByScope[dnsGenerationScopeKey(node)]
+			labels := map[string]string{"kind": "dns", "node_id": node.ID, "edge_group_id": node.EdgeGroupID, "zone": node.Zone}
 			observability.WriteMetricSample(w, "fugue_robustness_node_generation_drift_seconds", labels, robustnessGenerationDriftSeconds(now, expected, firstNonEmpty(node.DNSBundleVersion, node.ServingGeneration), node.LastHeartbeatAt, node.UpdatedAt))
 			observability.WriteMetricSample(w, "fugue_robustness_lkg_serving", labels, boolMetric(robustnessNodeServingLKG(node.CacheStatus, node.DNSBundleVersion, node.ServingGeneration, node.LKGGeneration)))
-			observability.WriteMetricSample(w, "fugue_robustness_dns_query_errors", map[string]string{"node_id": node.ID, "edge_group_id": node.EdgeGroupID}, float64(node.QueryErrorCount))
+			observability.WriteMetricSample(w, "fugue_robustness_dns_query_errors", map[string]string{"node_id": node.ID, "edge_group_id": node.EdgeGroupID, "zone": node.Zone}, float64(node.QueryErrorCount))
 		}
 	}
 	if nodeHealth, err := s.store.ListNodeDeepHealthResults(); err == nil {

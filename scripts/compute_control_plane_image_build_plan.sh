@@ -222,6 +222,10 @@ else
         ;;
     esac
 
+    if [[ "${file}" == *_test.go ]]; then
+      continue
+    fi
+
     if [[ "${file}" == *.go && "${file}" != *_test.go ]]; then
       package_dir="$(dirname "${file}")"
       for image in api controller drain_agent telemetry_agent image_cache edge; do
