@@ -6660,13 +6660,49 @@ release_public_data_plane_if_needed() {
   fi
 }
 
+release_status_request() {
+  local url="$1"
+  local token="$2"
+  local output_file="$3"
+  local attempts="${FUGUE_RELEASE_STATUS_TRANSPORT_ATTEMPTS:-3}"
+  local delay="${FUGUE_RELEASE_STATUS_TRANSPORT_RETRY_DELAY_SECONDS:-2}"
+  local connect_timeout="${FUGUE_RELEASE_STATUS_CONNECT_TIMEOUT_SECONDS:-5}"
+  local request_timeout="${FUGUE_RELEASE_STATUS_REQUEST_TIMEOUT_SECONDS:-30}"
+  local attempt=1
+
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || attempts=3
+  [[ "${delay}" =~ ^[0-9]+$ ]] || delay=2
+  [[ "${connect_timeout}" =~ ^[1-9][0-9]*$ ]] || connect_timeout=5
+  [[ "${request_timeout}" =~ ^[1-9][0-9]*$ ]] || request_timeout=30
+
+  while (( attempt <= attempts )); do
+    : >"${output_file}"
+    if curl --http1.1 -fsS \
+      --connect-timeout "${connect_timeout}" \
+      --max-time "${request_timeout}" \
+      -H "Authorization: Bearer ${token}" \
+      "${url}" \
+      -o "${output_file}"; then
+      return 0
+    fi
+    if (( attempt >= attempts )); then
+      log_stderr "release status transport request failed after ${attempts} attempt(s)"
+      return 1
+    fi
+    log_stderr "release status transport request failed; retrying attempt $((attempt + 1))/${attempts}"
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 platform_autonomy_status_summary() {
   local api_base token status_file rc
 
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
   status_file="$(mktemp)"
-  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/platform/autonomy/status" -o "${status_file}"; then
+  if ! release_status_request "${api_base}/v1/admin/platform/autonomy/status" "${token}" "${status_file}"; then
     rm -f "${status_file}"
     printf 'platform autonomy status request failed'
     return 1
@@ -6708,7 +6744,7 @@ release_guard_status_summary() {
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
   status_file="$(mktemp)"
-  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/release-guard/status" -o "${status_file}"; then
+  if ! release_status_request "${api_base}/v1/admin/release-guard/status" "${token}" "${status_file}"; then
     rm -f "${status_file}"
     printf 'release guard status request failed'
     return 1
@@ -6760,7 +6796,7 @@ capture_pre_deploy_robustness_baseline() {
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
   status_file="$(mktemp)"
-  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/robustness/status" -o "${status_file}"; then
+  if ! release_status_request "${api_base}/v1/admin/robustness/status" "${token}" "${status_file}"; then
     rm -f "${status_file}"
     ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
     log "warning: failed to capture pre-deploy robustness baseline; post-deploy robustness gate will use strict mode"
@@ -6806,7 +6842,7 @@ robustness_status_summary() {
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
   status_file="$(mktemp)"
-  if ! curl -fsS -H "Authorization: Bearer ${token}" "${api_base}/v1/admin/robustness/status" -o "${status_file}"; then
+  if ! release_status_request "${api_base}/v1/admin/robustness/status" "${token}" "${status_file}"; then
     rm -f "${status_file}"
     printf 'robustness status request failed'
     return 1

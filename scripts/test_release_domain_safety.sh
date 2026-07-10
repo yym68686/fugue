@@ -164,6 +164,49 @@ export FUGUE_UPGRADE_LIB_ONLY=true
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
 (
+  curl_calls=0
+  curl() {
+    local output_file=""
+    curl_calls=$((curl_calls + 1))
+    while [[ "$#" -gt 0 ]]; do
+      if [[ "$1" == "-o" ]]; then
+        shift
+        output_file="$1"
+      fi
+      shift
+    done
+    if (( curl_calls < 3 )); then
+      return 92
+    fi
+    printf '{"status":{"pass":true}}' >"${output_file}"
+  }
+  output_file="$(mktemp)"
+  FUGUE_RELEASE_STATUS_TRANSPORT_ATTEMPTS=3
+  FUGUE_RELEASE_STATUS_TRANSPORT_RETRY_DELAY_SECONDS=0
+  release_status_request "https://api.example.test/v1/admin/robustness/status" "test-token" "${output_file}" ||
+    fail "release status transport fetch must recover within its bounded retry budget"
+  assert_eq "${curl_calls}" "3" "release status transport retry attempts"
+  assert_eq "$(cat "${output_file}")" '{"status":{"pass":true}}' "release status transport response"
+  rm -f "${output_file}"
+)
+
+(
+  curl_calls=0
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    return 92
+  }
+  output_file="$(mktemp)"
+  FUGUE_RELEASE_STATUS_TRANSPORT_ATTEMPTS=2
+  FUGUE_RELEASE_STATUS_TRANSPORT_RETRY_DELAY_SECONDS=0
+  if release_status_request "https://api.example.test/v1/admin/robustness/status" "test-token" "${output_file}"; then
+    fail "release status transport fetch must fail closed after exhausting retries"
+  fi
+  assert_eq "${curl_calls}" "2" "release status exhausted retry attempts"
+  rm -f "${output_file}"
+)
+
+(
   export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"

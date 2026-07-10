@@ -1994,6 +1994,8 @@ DNS/edge failover 必须满足：
 - [x] 标记哪些机制是 shadow/canary。
 - [x] 控制平面发布工作流在构建和推送镜像前执行独立 fail-closed 测试门禁，deploy 显式依赖门禁成功。
 - [x] 控制平面 preserve 模式固定 live SSH front 镜像，避免共享代码变更绕过 public data-plane 发布隔离。
+- [x] 控制平面 preserve 模式分别保存 edge release target 与 live Helm base image，避免未发布 edge 镜像引起 worker checksum/generation 抖动。
+- [x] release guard / robustness / autonomy 状态请求使用 HTTP/1.1、单次 timeout 和有界传输重试；JSON 或门禁语义失败不在传输层重试。
 
 ### Phase 1: Invariant Registry
 
