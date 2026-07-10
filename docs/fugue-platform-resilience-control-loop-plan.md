@@ -2383,6 +2383,7 @@ DNS/edge failover 必须满足：
 - [ ] ServiceDiagnosisEvidence 增加 release-set id。
 - [ ] ServiceDiagnosisEvidence 增加 source generation/vector。
 - [ ] ServiceDiagnosisEvidence 增加 clock uncertainty。
+- [ ] ServiceDiagnosisEvidence 增加完整 request hop attribution：edge/DNS consumer、API Pod instance、upstream address、connection lifecycle 和 request id。
 - [ ] 定义 `ServiceDiagnosisMissingEvidence`。
 - [ ] 定义 `ServiceDiagnosisRootCauseCandidate`。
 - [ ] 定义 `ServiceDiagnosisRecommendedAction`。

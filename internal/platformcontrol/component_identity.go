@@ -525,6 +525,38 @@ func VerifyTrustedPlatformConsumerHeartbeat(
 	return consumer, AdvancePlatformConsumerHeartbeatCursor(previous, bound, 32), nil
 }
 
+func PlatformConsumerHeartbeatCursorFromInstance(
+	consumer model.PlatformConsumerInstance,
+) (*PlatformConsumerHeartbeatCursor, error) {
+	if !consumer.IdentityVerified {
+		return nil, nil
+	}
+	if strings.TrimSpace(consumer.CredentialID) == "" ||
+		strings.TrimSpace(consumer.TokenID) == "" ||
+		strings.TrimSpace(consumer.ConsumerID) == "" ||
+		!knownPlatformConsumerComponent(consumer.Component) ||
+		strings.TrimSpace(consumer.NodeID) == "" ||
+		normalizeExpectedConsumerArtifactKind(consumer.ArtifactKind) == "" ||
+		strings.TrimSpace(consumer.ScopeKey) == "" ||
+		strings.TrimSpace(consumer.ReleaseSetID) == "" ||
+		strings.TrimSpace(consumer.ExpectedConsumerSetID) == "" ||
+		consumer.FencingToken <= 0 ||
+		consumer.Sequence <= 0 ||
+		consumer.IssuedAt == nil || consumer.IssuedAt.IsZero() ||
+		len([]byte(strings.TrimSpace(consumer.Nonce))) < PlatformConsumerHeartbeatMinNonceLen ||
+		consumer.GenerationSequence <= 0 ||
+		strings.TrimSpace(consumer.EvidenceHash) == "" {
+		return nil, ErrPlatformConsumerHeartbeatInvalid
+	}
+	return &PlatformConsumerHeartbeatCursor{
+		Sequence:           consumer.Sequence,
+		IssuedAt:           consumer.IssuedAt.UTC(),
+		GenerationSequence: consumer.GenerationSequence,
+		FencingToken:       consumer.FencingToken,
+		RecentNonces:       []string{strings.TrimSpace(consumer.Nonce)},
+	}, nil
+}
+
 func AdvancePlatformConsumerHeartbeatCursor(
 	previous *PlatformConsumerHeartbeatCursor,
 	heartbeat PlatformConsumerHeartbeatEnvelope,

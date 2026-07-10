@@ -428,6 +428,51 @@ func TestVerifyTrustedPlatformConsumerHeartbeatProducesVerifiedServerOwnedInstan
 	}
 }
 
+func TestPlatformConsumerHeartbeatCursorFromInstanceFailsClosedForCorruptVerifiedState(t *testing.T) {
+	t.Parallel()
+
+	if cursor, err := PlatformConsumerHeartbeatCursorFromInstance(model.PlatformConsumerInstance{
+		IdentityVerified: false,
+		Sequence:         99,
+	}); err != nil || cursor != nil {
+		t.Fatalf("legacy unverified heartbeat must not become a trusted cursor: cursor=%+v err=%v", cursor, err)
+	}
+
+	corrupt := model.PlatformConsumerInstance{IdentityVerified: true, Sequence: 99}
+	if cursor, err := PlatformConsumerHeartbeatCursorFromInstance(corrupt); !errors.Is(err, ErrPlatformConsumerHeartbeatInvalid) || cursor != nil {
+		t.Fatalf("corrupt verified heartbeat must fail closed: cursor=%+v err=%v", cursor, err)
+	}
+
+	now := time.Date(2026, 7, 10, 10, 30, 0, 0, time.UTC)
+	issuedAt := now.Add(-time.Second)
+	verified := model.PlatformConsumerInstance{
+		ConsumerID:            "edge-worker:edge-node-1",
+		CredentialID:          "credential-1",
+		TokenID:               "token-1",
+		Component:             model.PlatformConsumerComponentEdgeWorker,
+		NodeID:                "edge-node-1",
+		ArtifactKind:          model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:              "global",
+		ReleaseSetID:          "release-set-1",
+		ExpectedConsumerSetID: "expected-set-1",
+		FencingToken:          8,
+		Sequence:              12,
+		IssuedAt:              &issuedAt,
+		Nonce:                 "nonce-value-0001",
+		GenerationSequence:    42,
+		EvidenceHash:          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		IdentityVerified:      true,
+	}
+	cursor, err := PlatformConsumerHeartbeatCursorFromInstance(verified)
+	if err != nil {
+		t.Fatalf("restore trusted heartbeat cursor: %v", err)
+	}
+	if cursor == nil || cursor.Sequence != 12 || cursor.GenerationSequence != 42 ||
+		cursor.FencingToken != 8 || len(cursor.RecentNonces) != 1 || cursor.RecentNonces[0] != "nonce-value-0001" {
+		t.Fatalf("unexpected restored cursor: %+v", cursor)
+	}
+}
+
 func platformComponentTestKeyring() PlatformComponentIdentityKeyring {
 	return PlatformComponentIdentityKeyring{
 		ActiveKeyID: "identity-key-1",
