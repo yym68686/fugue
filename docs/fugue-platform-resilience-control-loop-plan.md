@@ -1868,7 +1868,7 @@ DNS/edge failover 必须满足：
 - [x] verified LKG 晋升检查 baseline monotonic comparison。
 - [x] verified LKG 晋升检查 database rollback compatibility。
 - [x] verified LKG 晋升检查 fencing token。
-- [ ] 每个 artifact kind 定义 LKG TTL/max stale。
+- [x] 每个 artifact kind 定义 LKG TTL/max stale。
 - [ ] 至少保留三代 verified LKG。
 - [ ] GC 保护 verified LKG 和 pinned rollback target。
 - [ ] rollback 后重新验证旧 generation。
@@ -1882,11 +1882,11 @@ DNS/edge failover 必须满足：
 #### Phase -1C: Evidence 四态和可信身份
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
-- [ ] 为每个 invariant 定义 evidence freshness。
-- [ ] 为每个 invariant 定义 unknown behavior。
-- [ ] 为每个 invariant 定义 stale behavior。
-- [ ] 为每个 invariant 定义最少独立来源数。
-- [ ] 为需要 consensus 的 invariant 定义 failure-domain 要求。
+- [x] 为每个 invariant 定义 evidence freshness。
+- [x] 为每个 invariant 定义 unknown behavior。
+- [x] 为每个 invariant 定义 stale behavior。
+- [x] 为每个 invariant 定义最少独立来源数。
+- [x] 为需要 consensus 的 invariant 定义 failure-domain 要求。
 - [ ] 设计 `ExpectedConsumerSet` 模型。
 - [ ] ExpectedConsumerSet 记录 topology revision。
 - [ ] ExpectedConsumerSet 记录 required/optional consumer。
@@ -1978,49 +1978,56 @@ DNS/edge failover 必须满足：
 
 ### Phase 0: 现状梳理和边界确认
 
-- [ ] 列出所有当前平台 artifact kind 和 consumer。
-- [ ] 列出所有当前 gate policy。
-- [ ] 列出所有当前 automatic action。
-- [ ] 列出所有当前 autonomy env / kill switch。
-- [ ] 列出所有当前 release guard signal。
-- [ ] 列出所有当前 public synthetic probe。
-- [ ] 列出所有当前 LKG cache path 和 max stale 策略。
-- [ ] 标记哪些机制目前只是文档设计。
-- [ ] 标记哪些机制已经在代码里 enforcement。
-- [ ] 标记哪些机制是 shadow/canary。
+- [x] 列出所有当前平台 artifact kind 和 consumer。
+- [x] 列出所有当前 gate policy。
+- [x] 列出所有当前 automatic action。
+- [x] 列出所有当前 autonomy env / kill switch。
+- [x] 列出所有当前 release guard signal。
+- [x] 列出所有当前 public synthetic probe。
+- [x] 列出所有当前 LKG cache path 和 max stale 策略。
+- [x] 标记哪些机制目前只是文档设计。
+- [x] 标记哪些机制已经在代码里 enforcement。
+- [x] 标记哪些机制是 shadow/canary。
 
 ### Phase 1: Invariant Registry
 
-- [ ] 定义 `InvariantDefinition` 模型。
-- [ ] 为每个 invariant 增加 scope/category/owner/evidence source。
-- [ ] 为每个 invariant 绑定 gate policy。
-- [ ] 为每个 invariant 绑定 automatic action contract。
-- [ ] 为每个 invariant 绑定 runbook。
-- [ ] 将 release guard 使用的 invariant 接入 registry。
-- [ ] 将 robustness status 使用的 invariant 接入 registry。
-- [ ] 将 node deep health 的 hard/warning 语义接入 registry。
-- [ ] 将 edge eligible set invariant 接入 registry。
-- [ ] 将 DNS answer invariant 接入 registry。
-- [ ] 将 artifact validation invariant 接入 registry。
-- [ ] 将 platform consumer drift invariant 接入 registry。
-- [ ] 增加 `fugue admin invariant ls`。
-- [ ] 增加 `fugue admin invariant show <id>`。
-- [ ] 增加 invariant registry 单元测试。
+- [x] 定义 `InvariantDefinition` 模型。
+- [x] 为每个 invariant 增加 scope/category/owner/evidence source。
+- [x] 为每个 invariant 绑定 gate policy。
+- [x] 为每个 invariant 绑定 automatic action contract。
+- [x] 为每个 invariant 绑定 runbook。
+- [x] 将 release guard 使用的 invariant 接入 registry。
+- [x] 将 robustness status 使用的 invariant 接入 registry。
+- [x] 将 node deep health 的 hard/warning 语义接入 registry。
+- [x] 将 edge eligible set invariant 接入 registry。
+- [x] 将 DNS answer invariant 接入 registry。
+- [x] 将 artifact validation invariant 接入 registry。
+- [x] 将 platform consumer drift invariant 接入 registry。
+- [x] 增加 `fugue admin invariant ls`。
+- [x] 增加 `fugue admin invariant show <id>`。
+- [x] 增加 invariant registry 单元测试。
 
 ### Phase 2: Action Safety Evaluator
 
-- [ ] 定义 `ActionSafetyRequest`。
-- [ ] 定义 `ActionSafetyDecision`。
-- [ ] 实现 contract lookup。
-- [ ] 实现 gate mode 检查。
-- [ ] 实现 kill switch 检查。
-- [ ] 实现 canary scope 检查。
-- [ ] 实现 blast-radius cap 检查。
-- [ ] 实现 minimum samples 检查。
-- [ ] 实现 minimum failure domains 检查。
-- [ ] 实现 soak window 检查。
-- [ ] 实现 rollback target 检查。
-- [ ] 实现 human approval boundary 检查。
+> 2026-07-10 implementation checkpoint: central model, registry, dry-run API/CLI,
+> fail-closed evaluator, audit, unit tests, and blast-radius regression tests are
+> complete. The evaluator is still reported as `shadow`; an action is not
+> considered migrated until its real mutation site consumes the decision.
+> Therefore the eight production action-integration items below remain
+> deliberately unchecked.
+
+- [x] 定义 `ActionSafetyRequest`。
+- [x] 定义 `ActionSafetyDecision`。
+- [x] 实现 contract lookup。
+- [x] 实现 gate mode 检查。
+- [x] 实现 kill switch 检查。
+- [x] 实现 canary scope 检查。
+- [x] 实现 blast-radius cap 检查。
+- [x] 实现 minimum samples 检查。
+- [x] 实现 minimum failure domains 检查。
+- [x] 实现 soak window 检查。
+- [x] 实现 rollback target 检查。
+- [x] 实现 human approval boundary 检查。
 - [ ] 将 node quarantine 接入 evaluator。
 - [ ] 将 edge quarantine 接入 evaluator。
 - [ ] 将 DNS answer-time filtering 接入 evaluator。
@@ -2029,8 +2036,8 @@ DNS/edge failover 必须满足：
 - [ ] 将 LKG reload 接入 evaluator。
 - [ ] 将 endpoint fallback 接入 evaluator。
 - [ ] 将 release rollback 接入 evaluator。
-- [ ] 增加 action safety 单元测试。
-- [ ] 增加 blast-radius 回归测试。
+- [x] 增加 action safety 单元测试。
+- [x] 增加 blast-radius 回归测试。
 
 ### Phase 3: Platform Release Set
 

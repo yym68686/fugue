@@ -68,6 +68,30 @@ type gatePolicyPromotionEnvelope struct {
 	LKG      *model.PlatformLKGSnapshot    `json:"lkg,omitempty"`
 }
 
+type invariantDefinitionListEnvelope struct {
+	Invariants []model.InvariantDefinition `json:"invariants"`
+}
+
+type invariantDefinitionEnvelope struct {
+	Invariant model.InvariantDefinition `json:"invariant"`
+}
+
+type platformControlInventoryEnvelope struct {
+	Inventory model.PlatformControlInventory `json:"inventory"`
+}
+
+type automaticActionContractListEnvelope struct {
+	Contracts []model.AutomaticActionContract `json:"contracts"`
+}
+
+type automaticActionContractEnvelope struct {
+	Contract model.AutomaticActionContract `json:"contract"`
+}
+
+type actionSafetyDecisionEnvelope struct {
+	Decision model.ActionSafetyDecision `json:"decision"`
+}
+
 type trafficSafetyExplainEnvelope struct {
 	State model.ServiceTrafficSafetyState `json:"state"`
 }
@@ -237,6 +261,54 @@ func (c *Client) PromoteGatePolicy(gateID string, request model.GatePolicyPromot
 		Message:  response.Message,
 		LKG:      response.LKG,
 	}, nil
+}
+
+func (c *Client) ListInvariantDefinitions() ([]model.InvariantDefinition, error) {
+	var response invariantDefinitionListEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/invariants", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Invariants, nil
+}
+
+func (c *Client) GetInvariantDefinition(invariantID string) (model.InvariantDefinition, error) {
+	var response invariantDefinitionEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/invariants/"+url.PathEscape(strings.TrimSpace(invariantID)), nil, &response); err != nil {
+		return model.InvariantDefinition{}, err
+	}
+	return response.Invariant, nil
+}
+
+func (c *Client) GetPlatformControlInventory() (model.PlatformControlInventory, error) {
+	var response platformControlInventoryEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/invariants/inventory", nil, &response); err != nil {
+		return model.PlatformControlInventory{}, err
+	}
+	return response.Inventory, nil
+}
+
+func (c *Client) ListAutomaticActionContracts() ([]model.AutomaticActionContract, error) {
+	var response automaticActionContractListEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/action-contracts", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Contracts, nil
+}
+
+func (c *Client) GetAutomaticActionContract(contractID string) (model.AutomaticActionContract, error) {
+	var response automaticActionContractEnvelope
+	if err := c.doJSON(http.MethodGet, "/v1/admin/action-contracts/"+url.PathEscape(strings.TrimSpace(contractID)), nil, &response); err != nil {
+		return model.AutomaticActionContract{}, err
+	}
+	return response.Contract, nil
+}
+
+func (c *Client) EvaluateActionSafety(request model.ActionSafetyRequest) (model.ActionSafetyDecision, error) {
+	var response actionSafetyDecisionEnvelope
+	if err := c.doJSON(http.MethodPost, "/v1/admin/action-safety/evaluate", request, &response); err != nil {
+		return model.ActionSafetyDecision{}, err
+	}
+	return response.Decision, nil
 }
 
 func (c *Client) ExplainTrafficSafety(hostname string, minHealthyEdges int) (model.ServiceTrafficSafetyState, error) {

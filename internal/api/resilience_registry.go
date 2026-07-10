@@ -8,29 +8,11 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 )
 
-func resilienceInvariantRegistry() []model.ResilienceInvariant {
-	return []model.ResilienceInvariant{
-		{ID: "node.pod_dns_to_kube_dns_service", Category: "node", Description: "workload pods can resolve through the kube-dns Service IP", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "node.pod_dns_to_coredns_pod", Category: "node", Description: "workload pods can resolve through a CoreDNS pod IP for service-vip comparison", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "node.kubernetes_default_dns", Category: "node", Description: "workload pods can resolve kubernetes.default.svc", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "node.same_namespace_service_dns_tcp", Category: "node", Description: "workload pods can resolve and connect to a same-namespace service", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "node.managed_iptables_provenance", Category: "node", Description: "Fugue managed iptables rules are identifiable and stale rules are detected before repair", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/stale-iptables-managed-rule.md"},
-		{ID: "node.podcidr_matches_kubernetes", Category: "node", Description: "actual route table still contains the Kubernetes Node PodCIDR", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "node.conntrack_safe", Category: "node", Description: "conntrack saturation stays below the hard fail threshold", HardGate: true, EvidenceSource: "node_deep_health", RunbookRef: "docs/runbooks/node-dns-failure.md"},
-		{ID: "runtime.no_quarantined_node_placement", Category: "tenant_workload", Description: "new runtime placement excludes quarantined nodes when tenant workload failover is enabled", HardGate: false, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
-		{ID: "runtime.stateless_replacement_ready_before_route", Category: "tenant_workload", Description: "stateless replacement plan must become ready before tenant workload route cutover", HardGate: false, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateless-runtime-migration.md"},
-		{ID: "runtime.stateful_fence_before_failover", Category: "tenant_workload", Description: "stateful tenant workload failover requires lease, fence, backup, and restore evidence", HardGate: false, EvidenceSource: "runtime_continuity", RunbookRef: "docs/runbooks/stateful-app-preflight.md"},
-		{ID: "edge.eligible_set_hard_gates", Category: "edge", Description: "DNS answers only contain online, healthy, route-ready, TLS-ready, non-excluded, non-draining, non-quarantined edges", HardGate: true, EvidenceSource: "traffic_safety", RunbookRef: "docs/runbooks/edge-quarantine.md"},
-		{ID: "edge.service_min_healthy_edge_count", Category: "edge", Description: "service-level exclusion or rollout must not leave a hostname with zero healthy eligible edges", HardGate: true, EvidenceSource: "traffic_safety", RunbookRef: "docs/runbooks/traffic-safety-zero-eligible-edge.md"},
-		{ID: "dns.answer_policy_generation_visible", Category: "dns", Description: "DNS answers include ranking version, scope, route generation, and selected edge group evidence", HardGate: false, EvidenceSource: "dns_answer_policy", RunbookRef: "docs/runbooks/request-attribution.md"},
-		{ID: "release.no_block_rollout_incident", Category: "release", Description: "normal releases are blocked while block-rollout incidents exist", HardGate: true, EvidenceSource: "release_guard", RunbookRef: "docs/runbooks/release-guard-blocked.md"},
-		{ID: "release.artifact_shadow_validated", Category: "release", Description: "edge, DNS, route, and Caddy state changes must have validated shadow artifacts before expansion", HardGate: true, EvidenceSource: "platform_state_release_system", RunbookRef: "docs/runbooks/platform-artifact-release.md"},
-		{ID: "request.error_class_attributed", Category: "request", Description: "503 and 5xx requests are attributed to auth, quota, business, edge, origin, DNS, connect, TLS, timeout, or origin-unavailable classes", HardGate: false, EvidenceSource: "request_explain", RunbookRef: "docs/runbooks/request-attribution.md"},
-		{ID: "platform_state.consumer_generation_visible", Category: "release", Description: "data-plane consumers report desired, actual, LKG, apply, and probe generation state", HardGate: true, EvidenceSource: "platform_consumer_heartbeat", RunbookRef: "docs/runbooks/consumer-generation-drift.md"},
-		{ID: "platform_state.lkg_hash_and_expiry_checked", Category: "release", Description: "LKG snapshots are content-addressed, hash-checked, atomically written, and expire into degraded state", HardGate: true, EvidenceSource: "platform_lkg", RunbookRef: "docs/runbooks/lkg-expired.md"},
-	}
+func resilienceInvariantRegistry() []model.InvariantDefinition {
+	return platformcontrol.InvariantDefinitions()
 }
 
 func resilienceDashboards() []model.ResilienceDashboard {
@@ -86,15 +68,22 @@ func resilienceRunbooks() []model.RunbookReference {
 		{Name: "node DNS failure", Path: "docs/runbooks/node-dns-failure.md", IncidentClass: "node_dns_failure"},
 		{Name: "stale managed iptables rule", Path: "docs/runbooks/stale-iptables-managed-rule.md", IncidentClass: "iptables_hard_fail"},
 		{Name: "edge quarantine", Path: "docs/runbooks/edge-quarantine.md", IncidentClass: "edge_quarantine"},
+		{Name: "edge route all unhealthy", Path: "docs/runbooks/edge-route-all-unhealthy.md", IncidentClass: "edge_route_all_unhealthy"},
 		{Name: "traffic safety zero eligible edge", Path: "docs/runbooks/traffic-safety-zero-eligible-edge.md", IncidentClass: "traffic_safety_zero_eligible_edge"},
+		{Name: "quarantine blast radius", Path: "docs/runbooks/quarantine-blast-radius-exceeded.md", IncidentClass: "quarantine_blast_radius"},
 		{Name: "release guard blocked", Path: "docs/runbooks/release-guard-blocked.md", IncidentClass: "release_guard_blocked"},
+		{Name: "bad control-plane release rollback", Path: "docs/runbooks/bad-control-plane-release-rollback.md", IncidentClass: "control_plane_release_regression"},
 		{Name: "request attribution", Path: "docs/runbooks/request-attribution.md", IncidentClass: "request_error_attributed"},
 		{Name: "stateless runtime migration", Path: "docs/runbooks/stateless-runtime-migration.md", IncidentClass: "runtime_continuity"},
 		{Name: "stateful app preflight", Path: "docs/runbooks/stateful-app-preflight.md", IncidentClass: "stateful_preflight"},
 		{Name: "platform artifact release", Path: "docs/runbooks/platform-artifact-release.md", IncidentClass: "platform_artifact_release"},
 		{Name: "platform artifact rollback", Path: "docs/runbooks/platform-artifact-rollback.md", IncidentClass: "platform_artifact_rollback"},
+		{Name: "platform safety kernel", Path: "docs/runbooks/platform-safety-kernel.md", IncidentClass: "platform_safety_kernel"},
+		{Name: "invariant registry", Path: "docs/runbooks/invariant-registry.md", IncidentClass: "platform_invariant"},
+		{Name: "action safety evaluator", Path: "docs/runbooks/action-safety-evaluator.md", IncidentClass: "automatic_action_safety"},
 		{Name: "consumer generation drift", Path: "docs/runbooks/consumer-generation-drift.md", IncidentClass: "platform_consumer_generation_drift"},
 		{Name: "LKG expired", Path: "docs/runbooks/lkg-expired.md", IncidentClass: "platform_lkg_expired"},
+		{Name: "node updater canary restore", Path: "docs/runbooks/node-updater-canary-restore.md", IncidentClass: "node_updater_generation"},
 		{Name: "control-plane outage watchdog", Path: "docs/runbooks/control-plane-outage-watchdog.md", IncidentClass: "control_plane_outage"},
 		{Name: "data-plane LKG autonomy", Path: "docs/runbooks/data-plane-lkg-autonomy.md", IncidentClass: "data_plane_lkg_autonomy"},
 		{Name: "provider power event attribution", Path: "docs/runbooks/provider-power-event-attribution.md", IncidentClass: "provider_power_event"},
@@ -104,20 +93,8 @@ func resilienceRunbooks() []model.RunbookReference {
 	}
 }
 
-type platformStateConsumerContract struct {
-	Component     string
-	ArtifactKinds []string
-	Scope         string
-}
-
-func platformStateConsumerContracts() []platformStateConsumerContract {
-	return []platformStateConsumerContract{
-		{Component: "node-updater", ArtifactKinds: []string{model.PlatformArtifactKindNodeDesiredState, model.PlatformArtifactKindDiscoveryBundle, model.PlatformArtifactKindNodeGuardianPolicy}, Scope: "node"},
-		{Component: "edge-worker", ArtifactKinds: []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindEdgeRankingPolicy, model.PlatformArtifactKindTrafficSafetyPolicy}, Scope: "edge-group/hostname"},
-		{Component: "dns-server", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindEdgeRankingPolicy, model.PlatformArtifactKindTrafficSafetyPolicy}, Scope: "zone/edge-group/hostname"},
-		{Component: "caddy-edge-front", ArtifactKinds: []string{model.PlatformArtifactKindCaddyRouteConfig, model.PlatformArtifactKindEdgeRouteBundle}, Scope: "edge-node"},
-		{Component: "runtime-agent", ArtifactKinds: []string{model.PlatformArtifactKindRuntimePlacementPlan, model.PlatformArtifactKindRuntimeContinuityPlan, model.PlatformArtifactKindNodeDesiredState}, Scope: "runtime/node"},
-	}
+func platformStateConsumerContracts() []model.PlatformConsumerContractDefinition {
+	return platformcontrol.ConsumerContracts()
 }
 
 func (s *Server) buildResilienceInventory(rSubject string) []model.ResilienceInventoryItem {

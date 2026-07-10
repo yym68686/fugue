@@ -62,7 +62,7 @@ func TestPlatformStateConsumerContractsCoverDataPlaneConsumers(t *testing.T) {
 	if len(contracts) != 5 {
 		t.Fatalf("expected five platform-state consumer contracts, got %+v", contracts)
 	}
-	byComponent := map[string]platformStateConsumerContract{}
+	byComponent := map[string]model.PlatformConsumerContractDefinition{}
 	for _, contract := range contracts {
 		if strings.TrimSpace(contract.Component) == "" || strings.TrimSpace(contract.Scope) == "" || len(contract.ArtifactKinds) == 0 {
 			t.Fatalf("consumer contract must include component/scope/artifact kinds: %+v", contract)

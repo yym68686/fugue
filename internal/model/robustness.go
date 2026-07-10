@@ -8,6 +8,21 @@ const (
 	RobustnessSeverityWarning      = "warning"
 	RobustnessSeverityInfo         = "info"
 
+	InvariantEvidenceStatePass    = "pass"
+	InvariantEvidenceStateFail    = "fail"
+	InvariantEvidenceStateUnknown = "unknown"
+	InvariantEvidenceStateStale   = "stale"
+
+	InvariantEvidenceBehaviorPass        = "pass"
+	InvariantEvidenceBehaviorHold        = "hold"
+	InvariantEvidenceBehaviorFailClosed  = "fail_closed"
+	InvariantEvidenceBehaviorPreserveLKG = "preserve_lkg"
+
+	PlatformControlMechanismDesigned = "designed"
+	PlatformControlMechanismShadow   = "shadow"
+	PlatformControlMechanismCanary   = "canary"
+	PlatformControlMechanismEnforced = "enforced"
+
 	RobustnessIncidentStatusDetected             = "detected"
 	RobustnessIncidentStatusManualActionRequired = "manual_action_required"
 
@@ -51,7 +66,7 @@ type RobustnessStatus struct {
 	Summary           map[string]string               `json:"summary,omitempty"`
 	Checks            []RobustnessCheck               `json:"checks"`
 	Incidents         []RobustnessIncident            `json:"incidents"`
-	Invariants        []ResilienceInvariant           `json:"invariants,omitempty"`
+	Invariants        []InvariantDefinition           `json:"invariants,omitempty"`
 	Inventory         []ResilienceInventoryItem       `json:"inventory,omitempty"`
 	Gaps              []ResilienceGap                 `json:"gaps,omitempty"`
 	Dashboards        []ResilienceDashboard           `json:"dashboards,omitempty"`
@@ -109,14 +124,113 @@ type RobustnessRepairPlanResponse struct {
 	Plan RobustnessRepairPlan `json:"plan"`
 }
 
-type ResilienceInvariant struct {
-	ID             string `json:"id"`
-	Category       string `json:"category"`
-	Subject        string `json:"subject,omitempty"`
-	Description    string `json:"description"`
-	HardGate       bool   `json:"hard_gate"`
-	EvidenceSource string `json:"evidence_source,omitempty"`
-	RunbookRef     string `json:"runbook_ref,omitempty"`
+type InvariantEvidencePolicy struct {
+	MaxAge                string `json:"max_age,omitempty"`
+	MinimumSources        int    `json:"minimum_sources,omitempty"`
+	MinimumFailureDomains int    `json:"minimum_failure_domains,omitempty"`
+	AllowLKGEvidence      bool   `json:"allow_lkg_evidence,omitempty"`
+}
+
+type InvariantDefinition struct {
+	ID                        string                  `json:"id"`
+	Category                  string                  `json:"category"`
+	Scope                     string                  `json:"scope"`
+	Subject                   string                  `json:"subject,omitempty"`
+	Owner                     string                  `json:"owner"`
+	Description               string                  `json:"description"`
+	Severity                  string                  `json:"severity"`
+	DefaultMode               string                  `json:"default_mode"`
+	HardGate                  bool                    `json:"hard_gate"`
+	EvidenceSource            string                  `json:"evidence_source,omitempty"`
+	EvidenceSources           []string                `json:"evidence_sources,omitempty"`
+	GatePolicyID              string                  `json:"gate_policy_id,omitempty"`
+	AutomaticActionContractID string                  `json:"automatic_action_contract_id,omitempty"`
+	BlastRadius               GateBlastRadiusPolicy   `json:"blast_radius_policy,omitempty"`
+	RollbackSignal            string                  `json:"rollback_signal,omitempty"`
+	KillSwitchEnv             string                  `json:"kill_switch_env,omitempty"`
+	RunbookRef                string                  `json:"runbook_ref,omitempty"`
+	EvidenceFreshnessPolicy   InvariantEvidencePolicy `json:"evidence_freshness_policy,omitempty"`
+	UnknownBehavior           string                  `json:"unknown_behavior"`
+	StaleBehavior             string                  `json:"stale_behavior"`
+	NonBypassable             bool                    `json:"non_bypassable"`
+	ExpectedConsumerSetRef    string                  `json:"expected_consumer_set_ref,omitempty"`
+	CompatibilityPolicyRef    string                  `json:"compatibility_policy_ref,omitempty"`
+	ClockUncertaintyBudget    string                  `json:"clock_uncertainty_budget,omitempty"`
+}
+
+// ResilienceInvariant remains a source-compatible alias for callers that used
+// the pre-registry name.
+type ResilienceInvariant = InvariantDefinition
+
+type InvariantDefinitionListResponse struct {
+	Invariants  []InvariantDefinition `json:"invariants"`
+	GeneratedAt time.Time             `json:"generated_at"`
+}
+
+type InvariantDefinitionResponse struct {
+	Invariant InvariantDefinition `json:"invariant"`
+}
+
+type PlatformConsumerContractDefinition struct {
+	Component              string   `json:"component"`
+	ArtifactKinds          []string `json:"artifact_kinds"`
+	Scope                  string   `json:"scope"`
+	IdentityKind           string   `json:"identity_kind"`
+	ProtocolVersion        string   `json:"protocol_version"`
+	SchemaVersion          string   `json:"schema_version"`
+	Required               bool     `json:"required"`
+	LoadLKGFirst           bool     `json:"load_lkg_first"`
+	AtomicApply            bool     `json:"atomic_apply"`
+	LocalProbe             bool     `json:"local_probe"`
+	HeartbeatGeneration    bool     `json:"heartbeat_generation"`
+	HeartbeatFreshness     string   `json:"heartbeat_freshness"`
+	CompatibilityFloor     string   `json:"compatibility_floor,omitempty"`
+	ExpectedConsumerSource string   `json:"expected_consumer_source"`
+}
+
+type PlatformSyntheticProbeDefinition struct {
+	ID          string `json:"id"`
+	Scope       string `json:"scope"`
+	Description string `json:"description"`
+	HardGate    bool   `json:"hard_gate"`
+	Timeout     string `json:"timeout"`
+}
+
+type PlatformLKGPolicyDefinition struct {
+	ArtifactKind       string `json:"artifact_kind"`
+	StorageLocation    string `json:"storage_location"`
+	CachePathEnv       string `json:"cache_path_env,omitempty"`
+	MaxAge             string `json:"max_age"`
+	MaxStale           string `json:"max_stale"`
+	MinimumGenerations int    `json:"minimum_generations"`
+	ArchiveLimit       int    `json:"archive_limit,omitempty"`
+	ExpiryBehavior     string `json:"expiry_behavior"`
+}
+
+type PlatformControlMechanism struct {
+	ID                string `json:"id"`
+	Category          string `json:"category"`
+	Status            string `json:"status"`
+	Mode              string `json:"mode,omitempty"`
+	ImplementationRef string `json:"implementation_ref,omitempty"`
+	Summary           string `json:"summary,omitempty"`
+}
+
+type PlatformControlInventory struct {
+	GeneratedAt      time.Time                            `json:"generated_at"`
+	ArtifactKinds    []string                             `json:"artifact_kinds"`
+	Consumers        []PlatformConsumerContractDefinition `json:"consumers"`
+	GatePolicies     []GatePolicy                         `json:"gate_policies"`
+	AutomaticActions []AutomaticActionContract            `json:"automatic_actions"`
+	AutonomyControls AutonomyControls                     `json:"autonomy_controls"`
+	ReleaseSignals   []ReleaseSignal                      `json:"release_signals"`
+	SyntheticProbes  []PlatformSyntheticProbeDefinition   `json:"synthetic_probes"`
+	LKGPolicies      []PlatformLKGPolicyDefinition        `json:"lkg_policies"`
+	Mechanisms       []PlatformControlMechanism           `json:"mechanisms"`
+}
+
+type PlatformControlInventoryResponse struct {
+	Inventory PlatformControlInventory `json:"inventory"`
 }
 
 type ResilienceInventoryItem struct {

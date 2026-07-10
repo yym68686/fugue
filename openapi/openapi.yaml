@@ -993,6 +993,126 @@ paths:
                 $ref: "#/components/schemas/PlatformFailureDrillResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/invariants:
+    get:
+      operationId: listInvariantDefinitions
+      summary: List Invariant Definitions
+      tags: [Admin]
+      x-fugue-handler: handleListInvariantDefinitions
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvariantDefinitionListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/invariants/inventory:
+    get:
+      operationId: getPlatformControlInventory
+      summary: Get Platform Control Inventory
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformControlInventory
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformControlInventoryResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/invariants/{invariant_id}:
+    get:
+      operationId: getInvariantDefinition
+      summary: Get Invariant Definition
+      tags: [Admin]
+      x-fugue-handler: handleGetInvariantDefinition
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: invariant_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvariantDefinitionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/action-contracts:
+    get:
+      operationId: listAutomaticActionContracts
+      summary: List Automatic Action Contracts
+      tags: [Admin]
+      x-fugue-handler: handleListAutomaticActionContracts
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomaticActionContractListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/action-contracts/{contract_id}:
+    get:
+      operationId: getAutomaticActionContract
+      summary: Get Automatic Action Contract
+      tags: [Admin]
+      x-fugue-handler: handleGetAutomaticActionContract
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: contract_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutomaticActionContractResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/action-safety/evaluate:
+    post:
+      operationId: evaluateActionSafety
+      summary: Evaluate Automatic Action Safety
+      tags: [Admin]
+      x-fugue-handler: handleEvaluateActionSafety
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionSafetyRequest"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionSafetyDecisionResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/release-guard/status:
     get:
       operationId: getReleaseGuardStatus
@@ -23298,25 +23418,573 @@ components:
         updated_at:
           type: string
           format: date-time
-    ResilienceInvariant:
+    InvariantEvidencePolicy:
       type: object
       additionalProperties: false
-      required: [id, category, description, hard_gate]
+      properties:
+        max_age:
+          type: string
+        minimum_sources:
+          type: integer
+          format: int32
+        minimum_failure_domains:
+          type: integer
+          format: int32
+        allow_lkg_evidence:
+          type: boolean
+    InvariantDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          category,
+          scope,
+          owner,
+          description,
+          severity,
+          default_mode,
+          hard_gate,
+          unknown_behavior,
+          stale_behavior,
+          non_bypassable,
+        ]
       properties:
         id:
           type: string
         category:
           type: string
+        scope:
+          type: string
         subject:
+          type: string
+        owner:
+          type: string
+        description:
+          type: string
+        severity:
+          type: string
+        default_mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        hard_gate:
+          type: boolean
+        evidence_source:
+          type: string
+        evidence_sources:
+          type: array
+          items:
+            type: string
+        gate_policy_id:
+          type: string
+        automatic_action_contract_id:
+          type: string
+        blast_radius_policy:
+          $ref: "#/components/schemas/GateBlastRadiusPolicy"
+        rollback_signal:
+          type: string
+        kill_switch_env:
+          type: string
+        runbook_ref:
+          type: string
+        evidence_freshness_policy:
+          $ref: "#/components/schemas/InvariantEvidencePolicy"
+        unknown_behavior:
+          type: string
+          enum: [pass, hold, fail_closed, preserve_lkg]
+        stale_behavior:
+          type: string
+          enum: [pass, hold, fail_closed, preserve_lkg]
+        non_bypassable:
+          type: boolean
+        expected_consumer_set_ref:
+          type: string
+        compatibility_policy_ref:
+          type: string
+        clock_uncertainty_budget:
+          type: string
+    ResilienceInvariant:
+      allOf:
+        - $ref: "#/components/schemas/InvariantDefinition"
+    InvariantDefinitionListResponse:
+      type: object
+      additionalProperties: false
+      required: [invariants, generated_at]
+      properties:
+        invariants:
+          type: array
+          items:
+            $ref: "#/components/schemas/InvariantDefinition"
+        generated_at:
+          type: string
+          format: date-time
+    InvariantDefinitionResponse:
+      type: object
+      additionalProperties: false
+      required: [invariant]
+      properties:
+        invariant:
+          $ref: "#/components/schemas/InvariantDefinition"
+    PlatformConsumerContractDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          component,
+          artifact_kinds,
+          scope,
+          identity_kind,
+          protocol_version,
+          schema_version,
+          required,
+          load_lkg_first,
+          atomic_apply,
+          local_probe,
+          heartbeat_generation,
+          heartbeat_freshness,
+          expected_consumer_source,
+        ]
+      properties:
+        component:
+          type: string
+        artifact_kinds:
+          type: array
+          items:
+            type: string
+        scope:
+          type: string
+        identity_kind:
+          type: string
+        protocol_version:
+          type: string
+        schema_version:
+          type: string
+        required:
+          type: boolean
+        load_lkg_first:
+          type: boolean
+        atomic_apply:
+          type: boolean
+        local_probe:
+          type: boolean
+        heartbeat_generation:
+          type: boolean
+        heartbeat_freshness:
+          type: string
+        compatibility_floor:
+          type: string
+        expected_consumer_source:
+          type: string
+    PlatformSyntheticProbeDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, scope, description, hard_gate, timeout]
+      properties:
+        id:
+          type: string
+        scope:
           type: string
         description:
           type: string
         hard_gate:
           type: boolean
+        timeout:
+          type: string
+    PlatformLKGPolicyDefinition:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          artifact_kind,
+          storage_location,
+          max_age,
+          max_stale,
+          minimum_generations,
+          expiry_behavior,
+        ]
+      properties:
+        artifact_kind:
+          type: string
+        storage_location:
+          type: string
+        cache_path_env:
+          type: string
+        max_age:
+          type: string
+        max_stale:
+          type: string
+        minimum_generations:
+          type: integer
+          format: int32
+        archive_limit:
+          type: integer
+          format: int32
+        expiry_behavior:
+          type: string
+    PlatformControlMechanism:
+      type: object
+      additionalProperties: false
+      required: [id, category, status]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        status:
+          type: string
+          enum: [designed, shadow, canary, enforced]
+        mode:
+          type: string
+        implementation_ref:
+          type: string
+        summary:
+          type: string
+    AutomaticActionContract:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          id,
+          action_type,
+          scope,
+          trigger_invariant,
+          evidence_source,
+          gate_policy_id,
+          max_blast_radius,
+          ttl,
+          recovery_condition,
+          rollback_action,
+          dry_run_output,
+          audit_log_location,
+          enable_env,
+          kill_switch_env,
+          runbook_ref,
+        ]
+      properties:
+        id:
+          type: string
+        action_type:
+          type: string
+        scope:
+          type: string
+        trigger_invariant:
+          type: string
         evidence_source:
+          type: string
+        required_evidence:
+          type: array
+          items:
+            type: string
+        gate_policy_id:
+          type: string
+        max_blast_radius:
+          type: string
+        blast_radius:
+          $ref: "#/components/schemas/GateBlastRadiusPolicy"
+        ttl:
+          type: string
+        minimum_samples:
+          type: integer
+          format: int32
+        minimum_failure_domains:
+          type: integer
+          format: int32
+        soak_min_duration:
+          type: string
+        recovery_condition:
+          type: string
+        rollback_action:
+          type: string
+        dry_run_output:
+          type: string
+        audit_log_location:
+          type: string
+        enable_env:
+          type: string
+        kill_switch_env:
+          type: string
+        human_approval_boundary:
           type: string
         runbook_ref:
           type: string
+        allowed_modes:
+          type: array
+          items:
+            type: string
+            enum: [shadow, canary, enforced, disabled]
+        requires_rollback_target:
+          type: boolean
+        requires_audit:
+          type: boolean
+        requires_wal:
+          type: boolean
+        requires_idempotency_key:
+          type: boolean
+        requires_fencing_token:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    AutomaticActionContractListResponse:
+      type: object
+      additionalProperties: false
+      required: [contracts, generated_at]
+      properties:
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomaticActionContract"
+        generated_at:
+          type: string
+          format: date-time
+    AutomaticActionContractResponse:
+      type: object
+      additionalProperties: false
+      required: [contract]
+      properties:
+        contract:
+          $ref: "#/components/schemas/AutomaticActionContract"
+    ActionSafetyEvidence:
+      type: object
+      additionalProperties: false
+      required: [id, state, source]
+      properties:
+        id:
+          type: string
+        state:
+          type: string
+          enum: [pass, fail, unknown, stale]
+        source:
+          type: string
+        failure_domain:
+          type: string
+        observed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        hash:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    ActionSafetyRequest:
+      type: object
+      additionalProperties: false
+      required: [action_type, contract_id, trigger_invariant, scope, subject]
+      properties:
+        action_type:
+          type: string
+        contract_id:
+          type: string
+        trigger_invariant:
+          type: string
+        scope:
+          type: string
+        subject:
+          type: string
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionSafetyEvidence"
+        current_mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        current_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        candidate_counts:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        failure_domains:
+          type: array
+          items:
+            type: string
+        sample_count:
+          type: integer
+          format: int32
+        soak_started_at:
+          type: string
+          format: date-time
+        ttl:
+          type: string
+        rollback_target:
+          type: string
+        requested_by:
+          type: string
+        idempotency_key:
+          type: string
+        fencing_token:
+          type: integer
+          format: int64
+        human_approved:
+          type: boolean
+        audit_ready:
+          type: boolean
+        wal_ready:
+          type: boolean
+        canary_scope_match:
+          type: boolean
+        clock_uncertainty_millis:
+          type: integer
+          format: int64
+    ActionSafetyViolation:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    BlastRadiusEvaluation:
+      type: object
+      additionalProperties: false
+      required: [pass, scope]
+      properties:
+        pass:
+          type: boolean
+        scope:
+          type: string
+        reason:
+          type: string
+        before:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        after:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        violations:
+          type: object
+          additionalProperties:
+            type: string
+    ActionSafetyDecision:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          pass,
+          allowed,
+          would_action,
+          production_mutation_allowed,
+          effective_mode,
+          contract_id,
+          blast_radius,
+          generated_at,
+        ]
+      properties:
+        pass:
+          type: boolean
+        allowed:
+          type: boolean
+        would_action:
+          type: boolean
+        production_mutation_allowed:
+          type: boolean
+        effective_mode:
+          type: string
+          enum: [shadow, canary, enforced, disabled]
+        contract_id:
+          type: string
+        gate_policy_id:
+          type: string
+        subject:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        violations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionSafetyViolation"
+        evidence_states:
+          type: object
+          additionalProperties:
+            type: string
+        blast_radius:
+          $ref: "#/components/schemas/BlastRadiusEvaluation"
+        generated_at:
+          type: string
+          format: date-time
+    ActionSafetyDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision:
+          $ref: "#/components/schemas/ActionSafetyDecision"
+    PlatformControlInventory:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          generated_at,
+          artifact_kinds,
+          consumers,
+          gate_policies,
+          automatic_actions,
+          autonomy_controls,
+          release_signals,
+          synthetic_probes,
+          lkg_policies,
+          mechanisms,
+        ]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        artifact_kinds:
+          type: array
+          items:
+            type: string
+        consumers:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformConsumerContractDefinition"
+        gate_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/GatePolicy"
+        automatic_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AutomaticActionContract"
+        autonomy_controls:
+          $ref: "#/components/schemas/AutonomyControls"
+        release_signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReleaseSignal"
+        synthetic_probes:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformSyntheticProbeDefinition"
+        lkg_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformLKGPolicyDefinition"
+        mechanisms:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformControlMechanism"
+    PlatformControlInventoryResponse:
+      type: object
+      additionalProperties: false
+      required: [inventory]
+      properties:
+        inventory:
+          $ref: "#/components/schemas/PlatformControlInventory"
     ResilienceInventoryItem:
       type: object
       additionalProperties: false
