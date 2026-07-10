@@ -4,6 +4,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# GitHub Actions injects this into every step; individual output-protocol tests
+# set their own file explicitly and all other fixtures must observe CLI output.
+unset GITHUB_OUTPUT
+
 fail() {
   printf '[test_release_domain_safety] ERROR: %s\n' "$*" >&2
   exit 1
