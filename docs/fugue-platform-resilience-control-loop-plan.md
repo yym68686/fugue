@@ -1881,29 +1881,31 @@ DNS/edge failover 必须满足：
 
 #### Phase -1C: Evidence 四态和可信身份
 
+> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder 和四态 convergence evaluator 已实现并有单元测试；本 checkpoint 仍是纯模型层，尚未持久化，也尚未接入 release prepare、真实 heartbeat 或 release guard。
+
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
 - [x] 为每个 invariant 定义 unknown behavior。
 - [x] 为每个 invariant 定义 stale behavior。
 - [x] 为每个 invariant 定义最少独立来源数。
 - [x] 为需要 consensus 的 invariant 定义 failure-domain 要求。
-- [ ] 设计 `ExpectedConsumerSet` 模型。
-- [ ] ExpectedConsumerSet 记录 topology revision。
-- [ ] ExpectedConsumerSet 记录 required/optional consumer。
-- [ ] ExpectedConsumerSet 记录 component/node/scope。
-- [ ] ExpectedConsumerSet 记录 failure domain 和 cohort。
-- [ ] ExpectedConsumerSet 记录 protocol/schema version。
-- [ ] ExpectedConsumerSet 记录 heartbeat/convergence deadline。
+- [x] 设计 `ExpectedConsumerSet` 模型。
+- [x] ExpectedConsumerSet 记录 topology revision。
+- [x] ExpectedConsumerSet 记录 required/optional consumer。
+- [x] ExpectedConsumerSet 记录 component/node/scope。
+- [x] ExpectedConsumerSet 记录 failure domain 和 cohort。
+- [x] ExpectedConsumerSet 记录 protocol/schema version。
+- [x] ExpectedConsumerSet 记录 heartbeat/convergence deadline。
 - [ ] release prepare 从服务端拓扑生成 ExpectedConsumerSet。
-- [ ] required consumer 完全缺失时生成 unknown/block signal。
-- [ ] heartbeat stale 时生成 stale/block signal。
-- [ ] desired/actual/LKG generation 为空时不判 convergence。
-- [ ] apply/probe empty/unknown 时不判 convergence。
+- [x] required consumer 完全缺失时生成 unknown/block signal。
+- [x] heartbeat stale 时生成 stale/block signal。
+- [x] desired/actual/LKG generation 为空时不判 convergence。
+- [x] apply/probe empty/unknown 时不判 convergence。
 - [ ] expected cardinality 与实际 heartbeat 数不一致时阻断扩大。
-- [ ] 为 edge worker 定义专用 platform component identity。
-- [ ] 为 DNS server 定义专用 platform component identity。
-- [ ] 为 Caddy edge front 定义专用 platform component identity。
-- [ ] 为 node guardian 定义专用 platform component identity。
+- [x] 为 edge worker 定义专用 platform component identity。
+- [x] 为 DNS server 定义专用 platform component identity。
+- [x] 为 Caddy edge front 定义专用 platform component identity。
+- [x] 为 node guardian 定义专用 platform component identity。
 - [x] heartbeat endpoint 不接受普通 tenant API key。
 - [ ] 服务端从凭证绑定 component/node/scope。
 - [ ] heartbeat 请求增加 sequence。
@@ -1916,7 +1918,7 @@ DNS/edge failover 必须满足：
 - [ ] 拒绝跨 component/node/scope 冒充。
 - [ ] consumer credential 支持轮换和撤销。
 - [ ] consumer heartbeat 写入可信 audit。
-- [ ] 增加 missing consumer 不得 pass 的回归测试。
+- [x] 增加 missing consumer 不得 pass 的回归测试。
 - [x] 增加 tenant key 无法写 heartbeat 的权限测试。
 - [ ] 增加 heartbeat replay/impersonation 测试。
 - [ ] 新增 runbook: platform consumer identity。
@@ -2101,12 +2103,14 @@ DNS/edge failover 必须满足：
 
 ### Phase 4: Consumer Convergence
 
-- [ ] 定义 platform consumer contract。
-- [ ] 定义 consumer protocol version。
-- [ ] 定义 consumer compatibility capability。
-- [ ] 定义 consumer heartbeat freshness。
-- [ ] 定义 consumer required/optional 语义。
-- [ ] 实现 ExpectedConsumerSet topology builder。
+> 2026-07-10 implementation checkpoint: 本阶段当前勾选项仅代表 contract、topology builder 和纯 evaluator 已完成；真实 consumer heartbeat、可信认证、持久化、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
+
+- [x] 定义 platform consumer contract。
+- [x] 定义 consumer protocol version。
+- [x] 定义 consumer compatibility capability。
+- [x] 定义 consumer heartbeat freshness。
+- [x] 定义 consumer required/optional 语义。
+- [x] 实现 ExpectedConsumerSet topology builder。
 - [ ] 发布期间固定 ExpectedConsumerSet revision。
 - [ ] 节点拓扑变化时记录 convergence scope 变化。
 - [ ] edge worker 上报 desired/actual/LKG/apply/probe。
@@ -2138,12 +2142,12 @@ DNS/edge failover 必须满足：
 - [ ] CLI 增加 `fugue admin consumer show <id>`。
 - [ ] CLI 增加 `fugue admin consumer expected --release-set <id>`。
 - [ ] CLI 区分 pass/fail/unknown/stale。
-- [ ] 增加 consumer convergence 单元测试。
-- [ ] 增加 zero consumer 不得 pass 的回归测试。
-- [ ] 增加 stale/empty heartbeat 回归测试。
+- [x] 增加 consumer convergence 单元测试。
+- [x] 增加 zero consumer 不得 pass 的回归测试。
+- [x] 增加 stale/empty heartbeat 回归测试。
 - [ ] 增加 heartbeat 身份冒充测试。
-- [ ] 增加 consumer N/N-1 compatibility 测试。
-- [ ] 增加 LKG expired 回归测试。
+- [x] 增加 consumer N/N-1 compatibility 测试。
+- [x] 增加 LKG expired 回归测试。
 
 ### Phase 5: Node Guardian
 

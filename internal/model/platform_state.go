@@ -45,6 +45,18 @@ const (
 	PlatformReleaseMessageTypeRelease     = "release"
 	PlatformReleaseMessageTypeRollback    = "rollback"
 	PlatformReleaseMessageTypeVerifiedLKG = "verified_lkg"
+
+	PlatformConsumerComponentEdgeWorker     = "edge-worker"
+	PlatformConsumerComponentDNSServer      = "dns-server"
+	PlatformConsumerComponentCaddyEdgeFront = "caddy-edge-front"
+	PlatformConsumerComponentNodeGuardian   = "node-guardian"
+	PlatformConsumerComponentRuntimeAgent   = "runtime-agent"
+
+	PlatformConsumerProtocolVersionV1 = "v1"
+	PlatformConsumerSchemaVersionV1   = "v1"
+
+	PlatformConsumerApplyStatusApplied = "applied"
+	PlatformConsumerProbeStatusPassed  = "passed"
 )
 
 type PlatformArtifactScope struct {
@@ -169,23 +181,96 @@ type PlatformReleaseMessage struct {
 }
 
 type PlatformConsumerInstance struct {
-	ID                string    `json:"id"`
-	ConsumerID        string    `json:"consumer_id"`
-	Component         string    `json:"component,omitempty"`
-	NodeID            string    `json:"node_id,omitempty"`
-	ArtifactKind      string    `json:"artifact_kind"`
-	ScopeKey          string    `json:"scope_key"`
-	SupportedKinds    []string  `json:"supported_artifact_kinds,omitempty"`
-	DesiredGeneration string    `json:"desired_generation,omitempty"`
-	ActualGeneration  string    `json:"actual_generation,omitempty"`
-	LKGGeneration     string    `json:"lkg_generation,omitempty"`
-	ApplyStatus       string    `json:"apply_status,omitempty"`
-	ProbeStatus       string    `json:"probe_status,omitempty"`
-	ServingLKG        bool      `json:"serving_lkg,omitempty"`
-	LKGExpired        bool      `json:"lkg_expired,omitempty"`
-	LastError         string    `json:"last_error,omitempty"`
-	LastHeartbeatAt   time.Time `json:"last_heartbeat_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                        string    `json:"id"`
+	ConsumerID                string    `json:"consumer_id"`
+	Component                 string    `json:"component,omitempty"`
+	NodeID                    string    `json:"node_id,omitempty"`
+	ArtifactKind              string    `json:"artifact_kind"`
+	ScopeKey                  string    `json:"scope_key"`
+	SupportedKinds            []string  `json:"supported_artifact_kinds,omitempty"`
+	ProtocolVersion           string    `json:"protocol_version,omitempty"`
+	SchemaVersion             string    `json:"schema_version,omitempty"`
+	CompatibilityCapabilities []string  `json:"compatibility_capabilities,omitempty"`
+	DesiredGeneration         string    `json:"desired_generation,omitempty"`
+	ActualGeneration          string    `json:"actual_generation,omitempty"`
+	LKGGeneration             string    `json:"lkg_generation,omitempty"`
+	ApplyStatus               string    `json:"apply_status,omitempty"`
+	ProbeStatus               string    `json:"probe_status,omitempty"`
+	ServingLKG                bool      `json:"serving_lkg,omitempty"`
+	LKGExpired                bool      `json:"lkg_expired,omitempty"`
+	LastError                 string    `json:"last_error,omitempty"`
+	LastHeartbeatAt           time.Time `json:"last_heartbeat_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
+}
+
+type PlatformExpectedConsumer struct {
+	ConsumerID                string    `json:"consumer_id"`
+	Component                 string    `json:"component"`
+	NodeID                    string    `json:"node_id"`
+	ArtifactKind              string    `json:"artifact_kind"`
+	ScopeKey                  string    `json:"scope_key"`
+	FailureDomain             string    `json:"failure_domain"`
+	Cohort                    string    `json:"cohort"`
+	Required                  bool      `json:"required"`
+	ExpectedProtocolVersion   string    `json:"expected_protocol_version"`
+	AcceptedProtocolVersions  []string  `json:"accepted_protocol_versions,omitempty"`
+	ExpectedSchemaVersion     string    `json:"expected_schema_version"`
+	AcceptedSchemaVersions    []string  `json:"accepted_schema_versions,omitempty"`
+	CompatibilityCapabilities []string  `json:"compatibility_capabilities,omitempty"`
+	ExpectedGeneration        string    `json:"expected_generation"`
+	HeartbeatFreshnessSeconds int       `json:"heartbeat_freshness_seconds"`
+	HeartbeatDeadline         time.Time `json:"heartbeat_deadline"`
+	ConvergenceDeadline       time.Time `json:"convergence_deadline"`
+}
+
+type PlatformExpectedConsumerSet struct {
+	ID                  string                     `json:"id"`
+	ReleaseSetID        string                     `json:"release_set_id,omitempty"`
+	ArtifactReleaseID   string                     `json:"artifact_release_id,omitempty"`
+	ArtifactKind        string                     `json:"artifact_kind"`
+	Scope               PlatformArtifactScope      `json:"scope"`
+	ScopeKey            string                     `json:"scope_key"`
+	ExpectedGeneration  string                     `json:"expected_generation"`
+	TopologyRevision    string                     `json:"topology_revision"`
+	Revision            int64                      `json:"revision"`
+	RequiresConsumers   bool                       `json:"requires_consumers"`
+	RequiredCardinality int                        `json:"required_cardinality"`
+	OptionalCardinality int                        `json:"optional_cardinality"`
+	HeartbeatDeadline   time.Time                  `json:"heartbeat_deadline"`
+	ConvergenceDeadline time.Time                  `json:"convergence_deadline"`
+	Consumers           []PlatformExpectedConsumer `json:"consumers"`
+	CreatedAt           time.Time                  `json:"created_at"`
+	UpdatedAt           time.Time                  `json:"updated_at"`
+}
+
+type PlatformConsumerEvidenceAssessment struct {
+	ConsumerID  string                    `json:"consumer_id"`
+	Component   string                    `json:"component"`
+	NodeID      string                    `json:"node_id"`
+	Required    bool                      `json:"required"`
+	State       string                    `json:"state"`
+	Reasons     []string                  `json:"reasons,omitempty"`
+	Expected    PlatformExpectedConsumer  `json:"expected"`
+	Observed    *PlatformConsumerInstance `json:"observed,omitempty"`
+	ObservedAt  *time.Time                `json:"observed_at,omitempty"`
+	FreshUntil  *time.Time                `json:"fresh_until,omitempty"`
+	EvaluatedAt time.Time                 `json:"evaluated_at"`
+}
+
+type PlatformConsumerConvergenceStatus struct {
+	ExpectedConsumerSetID string                               `json:"expected_consumer_set_id"`
+	ArtifactKind          string                               `json:"artifact_kind"`
+	ScopeKey              string                               `json:"scope_key"`
+	ExpectedGeneration    string                               `json:"expected_generation"`
+	State                 string                               `json:"state"`
+	Pass                  bool                                 `json:"pass"`
+	RequiredExpected      int                                  `json:"required_expected"`
+	RequiredObserved      int                                  `json:"required_observed"`
+	RequiredPassing       int                                  `json:"required_passing"`
+	OptionalExpected      int                                  `json:"optional_expected"`
+	UnexpectedConsumers   []string                             `json:"unexpected_consumers,omitempty"`
+	Assessments           []PlatformConsumerEvidenceAssessment `json:"assessments"`
+	EvaluatedAt           time.Time                            `json:"evaluated_at"`
 }
 
 type PlatformLKGSnapshot struct {
