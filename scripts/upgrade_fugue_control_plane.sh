@@ -381,6 +381,7 @@ release_changed_files_match() {
       public:internal/edgefront/*|\
       public:internal/proxyproto/*|\
       public:internal/dnsserver/*|\
+      public:internal/weightedselector/*|\
       public:internal/model/edge_routes.go|\
       public:Dockerfile.edge|\
       public:deploy/helm/fugue/templates/edge-*|\
@@ -451,6 +452,7 @@ public_data_plane_worker_image_changed() {
       internal/edge/*|\
       internal/model/edge_routes.go|\
       internal/proxyproto/*|\
+      internal/weightedselector/*|\
       Dockerfile.edge)
         return 0
         ;;
@@ -490,6 +492,7 @@ public_data_plane_dns_image_changed() {
       internal/bundleauth/*|\
       internal/dnsserver/*|\
       internal/model/edge_routes.go|\
+      internal/weightedselector/*|\
       Dockerfile.edge)
         return 0
         ;;
@@ -557,6 +560,7 @@ release_safety_changed_file_subsystems() {
     esac
     case "${file}" in
       internal/dnsserver/*|\
+      internal/weightedselector/*|\
       cmd/fugue-dns/*|\
       deploy/helm/fugue/templates/dns-*|\
       scripts/render_fugue_dns_systemd_unit.sh)
@@ -568,6 +572,7 @@ release_safety_changed_file_subsystems() {
       internal/edge/*|\
       internal/edgefront/*|\
       internal/proxyproto/*|\
+      internal/weightedselector/*|\
       cmd/fugue-edge/*|\
       cmd/fugue-edge-front/*|\
       Dockerfile.edge|\

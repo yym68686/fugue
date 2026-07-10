@@ -570,6 +570,19 @@ FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
 public_data_plane_worker_image_changed || fail "edge code changes must mark worker image changed"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/weightedselector/weighted_selector.go'
+public_data_plane_changed || fail "weighted selector changes must mark public data-plane changed"
+public_data_plane_worker_image_changed || fail "weighted selector changes must mark worker image changed"
+public_data_plane_dns_image_changed || fail "weighted selector changes must mark DNS image changed"
+if public_data_plane_front_image_changed; then
+  fail "weighted selector changes must not mark front image changed"
+fi
+weighted_selector_subsystems="$(release_safety_changed_file_subsystems)"
+[[ "${weighted_selector_subsystems}" == *"edge_worker"* && "${weighted_selector_subsystems}" == *"dns_server"* ]] ||
+  fail "weighted selector must be owned by edge worker and DNS server, got ${weighted_selector_subsystems}"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "weighted selector must not be classified as unknown high risk"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/node_updater.go'
 node_updater_subsystems="$(release_safety_changed_file_subsystems)"
 [[ "${node_updater_subsystems}" == *"node_updater"* && "${node_updater_subsystems}" == *"control_plane_api"* ]] ||
