@@ -71,6 +71,14 @@ func TestDedicatedControlPlaneServiceAccountIsProvisionedAdditively(t *testing.T
 			t.Fatalf("dedicated control-plane binding missing %q:\n%s", want, binding)
 		}
 	}
+	api := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if !strings.Contains(api, "serviceAccountName: fugue-fugue-control-plane-sa") {
+		t.Fatalf("API should canary the dedicated control-plane service account:\n%s", api)
+	}
+	controller := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if !strings.Contains(controller, "serviceAccountName: fugue-fugue-sa") {
+		t.Fatalf("controller should remain on the original service account during the API canary:\n%s", controller)
+	}
 }
 
 func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
