@@ -26,6 +26,37 @@ func TestPlatformComponentIdentityKeyringDoesNotReuseBundleKey(t *testing.T) {
 	}
 }
 
+func TestCompromisedBundleKeyCannotForgePlatformComponentIdentity(t *testing.T) {
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY", "widely-distributed-bundle-key")
+	t.Setenv("FUGUE_BUNDLE_SIGNING_KEY_ID", "bundle-key-1")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY", "dedicated-component-key")
+	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID", "component-key-1")
+
+	now := time.Now().UTC()
+	forgedKeyring := platformcontrol.DerivePlatformComponentIdentityKeyring(
+		"widely-distributed-bundle-key", "bundle-key-1", "", "", nil,
+	)
+	forgedToken, err := platformcontrol.IssuePlatformComponentIdentity(
+		forgedKeyring, platformComponentIdentityConfigTestClaims(), now, time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("issue syntactically valid forged component identity: %v", err)
+	}
+	apiKeyring := platformComponentIdentityKeyringFromEnv()
+	if _, err := platformcontrol.ParsePlatformComponentIdentity(apiKeyring, forgedToken, now); !errors.Is(err, platformcontrol.ErrPlatformComponentIdentityInvalid) {
+		t.Fatalf("API verifier accepted a token signed with the distributed bundle key: %v", err)
+	}
+	legitimateToken, err := platformcontrol.IssuePlatformComponentIdentity(
+		apiKeyring, platformComponentIdentityConfigTestClaims(), now, time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("issue legitimate component identity: %v", err)
+	}
+	if _, err := platformcontrol.ParsePlatformComponentIdentity(apiKeyring, legitimateToken, now); err != nil {
+		t.Fatalf("API verifier rejected its dedicated component identity: %v", err)
+	}
+}
+
 func TestPlatformComponentIdentityKeyringUsesDedicatedRotatingKeys(t *testing.T) {
 	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY", "dedicated-component-key-current")
 	t.Setenv("FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID", "component-key-current")
