@@ -126,6 +126,44 @@ assert_build_plan \
   build_edge true \
   build_app_ssh true
 
+COMPONENT_PLAN_REPO="$(mktemp -d)"
+COMPONENT_PLAN_OUTPUT="$(mktemp)"
+COMPONENT_PLAN_LOG="$(mktemp)"
+git clone -q --shared "${REPO_ROOT}" "${COMPONENT_PLAN_REPO}"
+git -C "${COMPONENT_PLAN_REPO}" config user.email test@fugue.invalid
+git -C "${COMPONENT_PLAN_REPO}" config user.name fugue-test
+COMPONENT_PLAN_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+printf '\n// component baseline build-plan fixture\n' >>"${COMPONENT_PLAN_REPO}/cmd/fugue-api/main.go"
+git -C "${COMPONENT_PLAN_REPO}" add cmd/fugue-api/main.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m api-change
+COMPONENT_PLAN_API_LIVE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+printf '\ncomponent baseline fixture\n' >>"${COMPONENT_PLAN_REPO}/docs/fugue-platform-resilience-control-loop-plan.md"
+git -C "${COMPONENT_PLAN_REPO}" add docs/fugue-platform-resilience-control-loop-plan.md
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m docs-change
+COMPONENT_PLAN_TARGET="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --name-only "${COMPONENT_PLAN_BASE}" "${COMPONENT_PLAN_TARGET}")"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_API_IMAGE_BASE_REF="${COMPONENT_PLAN_API_LIVE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "current API component baseline suppresses stale union rebuild"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "false" "current API component baseline build flag"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_API_IMAGE_BASE_REF="${COMPONENT_PLAN_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "stale API component baseline still rebuilds"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "true" "stale API component baseline build flag"
+rm -rf "${COMPONENT_PLAN_REPO}"
+rm -f "${COMPONENT_PLAN_OUTPUT}" "${COMPONENT_PLAN_LOG}"
+
 RESOLVE_TEST_DIR="$(mktemp -d)"
 RESOLVE_TEST_OUTPUT="$(mktemp)"
 cat >"${RESOLVE_TEST_DIR}/kubectl" <<'SH'
@@ -156,6 +194,9 @@ release_baseline_tags="$(
   ' "${RESOLVE_TEST_OUTPUT}"
 )"
 assert_eq "${release_baseline_tags}" $'api-live\ncontroller-live' "release baseline only includes core control-plane images"
+assert_eq "$(plan_value "${RESOLVE_TEST_OUTPUT}" api_image_baseline_ref)" "api-live" "API image baseline ref"
+assert_eq "$(plan_value "${RESOLVE_TEST_OUTPUT}" controller_image_baseline_ref)" "controller-live" "controller image baseline ref"
+assert_eq "$(plan_value "${RESOLVE_TEST_OUTPUT}" edge_image_baseline_ref)" "edge-live" "edge image baseline ref"
 rm -rf "${RESOLVE_TEST_DIR}"
 rm -f "${RESOLVE_TEST_OUTPUT}"
 

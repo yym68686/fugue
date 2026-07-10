@@ -130,12 +130,13 @@ output_image_ref() {
   local fallback_repository="$3"
   local fallback_tag="$4"
   local include_release_baseline="${5:-false}"
-  local repository tag
+  local repository tag baseline_ref=""
 
   image_ref="$(trim_field "${image_ref}")"
   if [[ -n "${image_ref}" ]]; then
     repository="$(image_ref_repository "${image_ref}")"
     tag="$(image_ref_tag "${image_ref}")"
+    baseline_ref="${tag}"
     if [[ "${include_release_baseline}" == "true" ]]; then
       RELEASE_BASELINE_TAGS="${RELEASE_BASELINE_TAGS}${RELEASE_BASELINE_TAGS:+$'\n'}${tag}"
     fi
@@ -145,6 +146,7 @@ output_image_ref() {
   fi
   emit_output "${prefix}_image_repository" "${repository}"
   emit_output "${prefix}_image_tag" "${tag}"
+  emit_output "${prefix}_image_baseline_ref" "${baseline_ref}"
   printf '%s live image: %s:%s\n' "${prefix}" "${repository}" "${tag}"
 }
 

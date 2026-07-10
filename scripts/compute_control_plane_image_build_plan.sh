@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT_INPUT="${FUGUE_RELEASE_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+REPO_ROOT="$(cd "${REPO_ROOT_INPUT}" && pwd -P)"
 
 trim_field() {
   local value="$1"
@@ -52,9 +53,34 @@ REASONS_IMAGE_CACHE=""
 REASONS_EDGE=""
 REASONS_APP_SSH=""
 
+image_baseline_ref() {
+  case "$1" in
+    api) printf '%s' "${FUGUE_API_IMAGE_BASE_REF:-}" ;;
+    controller) printf '%s' "${FUGUE_CONTROLLER_IMAGE_BASE_REF:-}" ;;
+    drain_agent) printf '%s' "${FUGUE_DRAIN_AGENT_IMAGE_BASE_REF:-}" ;;
+    telemetry_agent) printf '%s' "${FUGUE_TELEMETRY_AGENT_IMAGE_BASE_REF:-}" ;;
+    image_cache) printf '%s' "${FUGUE_IMAGE_CACHE_IMAGE_BASE_REF:-}" ;;
+    edge) printf '%s' "${FUGUE_EDGE_IMAGE_BASE_REF:-}" ;;
+    app_ssh) printf '%s' "${FUGUE_APP_SSH_IMAGE_BASE_REF:-}" ;;
+    *) return 1 ;;
+  esac
+}
+
+image_reason_matches_component_baseline() {
+  local image="$1"
+  local reason="$2"
+  local marker="${tmp_dir}/component-baseline-${image}"
+  local changed="${tmp_dir}/component-changed-files-${image}"
+
+  [[ "${reason}" == "unknown-change-set" ]] && return 0
+  [[ -e "${marker}" ]] || return 0
+  grep -Fx -- "${reason}" "${changed}" >/dev/null 2>&1
+}
+
 mark_image() {
   local image="$1"
   local reason="$2"
+  image_reason_matches_component_baseline "${image}" "${reason}" || return 0
   case "${image}" in
     api)
       BUILD_API=true
@@ -158,9 +184,32 @@ trap cleanup EXIT
 changed_file="${tmp_dir}/changed-files"
 release_changed_files >"${changed_file}"
 
+TRUSTED_COMPONENT_BASELINE=false
+target_ref="$(trim_field "${FUGUE_RELEASE_TARGET_REF:-}")"
+if [[ -n "${target_ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${target_ref}^{commit}" 2>/dev/null; then
+  for image in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
+    base_ref="$(trim_field "$(image_baseline_ref "${image}")")"
+    [[ -n "${base_ref}" ]] || continue
+    if ! git -C "${REPO_ROOT}" cat-file -e "${base_ref}^{commit}" 2>/dev/null; then
+      printf 'component image baseline is not a local commit; using fail-safe union for %s: %s\n' "${image}" "${base_ref}" >&2
+      continue
+    fi
+    component_changed="${tmp_dir}/component-changed-files-${image}"
+    git -C "${REPO_ROOT}" diff --name-only "${base_ref}" "${target_ref}" | sort -u >"${component_changed}"
+    touch "${tmp_dir}/component-baseline-${image}"
+    cat "${component_changed}" >>"${changed_file}"
+    TRUSTED_COMPONENT_BASELINE=true
+  done
+  sort -u "${changed_file}" -o "${changed_file}"
+elif [[ -n "${target_ref}" ]]; then
+  printf 'release target is not a local commit; using fail-safe union image plan: %s\n' "${target_ref}" >&2
+fi
+
 if [[ ! -s "${changed_file}" ]]; then
-  mark_all_go_images "unknown-change-set"
-  mark_image app_ssh "unknown-change-set"
+  if [[ "${TRUSTED_COMPONENT_BASELINE}" != "true" ]]; then
+    mark_all_go_images "unknown-change-set"
+    mark_image app_ssh "unknown-change-set"
+  fi
 else
   for image in api controller drain_agent telemetry_agent image_cache edge; do
     deps_file="${tmp_dir}/deps-${image}"
