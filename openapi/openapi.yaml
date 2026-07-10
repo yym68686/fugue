@@ -9592,6 +9592,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+    PlatformComponentBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: fugue_pc_v1
+      description: Short-lived, server-bound identity for Fugue platform components; tenant API keys are not accepted.
     EdgeToken:
       type: apiKey
       in: query

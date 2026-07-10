@@ -177,6 +177,12 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 
 	auth := "none"
 	for _, requirement := range security {
+		if _, ok := requirement["PlatformComponentBearerAuth"]; ok {
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
+			}
+			auth = "platform-component"
+		}
 		if _, ok := requirement["RuntimeBearerAuth"]; ok {
 			if auth != "none" {
 				return "", errors.New("cannot combine bearer auth schemes on the same operation")
@@ -217,6 +223,8 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 			handlerExpr = "s.auth.RequireRuntime(" + handlerExpr + ")"
 		case "node-updater":
 			handlerExpr = "s.auth.RequireNodeUpdater(" + handlerExpr + ")"
+		case "platform-component":
+			handlerExpr = "s.auth.RequirePlatformComponent(" + handlerExpr + ")"
 		}
 		fmt.Fprintf(&b, "\tmux.Handle(%q, %s)\n", route.Pattern, handlerExpr)
 	}
