@@ -12,7 +12,6 @@ import (
 	"fugue/internal/api"
 	"fugue/internal/auth"
 	"fugue/internal/config"
-	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
 )
 
@@ -26,13 +25,7 @@ func main() {
 
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
-	authenticator.PlatformComponentIdentityKeyring = platformcontrol.DerivePlatformComponentIdentityKeyring(
-		cfg.BundleSigningKey,
-		cfg.BundleSigningKeyID,
-		cfg.BundleSigningPreviousKey,
-		cfg.BundleSigningPreviousKeyID,
-		cfg.BundleRevokedKeyIDs,
-	)
+	authenticator.PlatformComponentIdentityKeyring = platformComponentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		DatabaseURL:                      cfg.DatabaseURL,
