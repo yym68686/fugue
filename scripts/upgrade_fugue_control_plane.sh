@@ -2966,6 +2966,11 @@ preserve_public_data_plane_from_live() {
 
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
   PUBLIC_DATA_PLANE_PRESERVED=true
+  append_live_daemonset_image_helm_args \
+    "public data-plane ssh front" \
+    "${FUGUE_RELEASE_FULLNAME}-edge-ssh-front" \
+    "ssh-front" \
+    "edge.sshFront.image" || true
 
   if daemonset_exists "${edge_front_ds}" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"; then
     log "public data-plane blue/green DaemonSets detected; preserving front and per-slot worker templates from live state"

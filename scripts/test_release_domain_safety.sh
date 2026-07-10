@@ -928,6 +928,45 @@ FUGUE_RELEASE_FULLNAME=fugue-fugue
 FUGUE_EDGE_IMAGE_TAG="${EDGE_WORKER_REF}"
 public_data_plane_live_worker_image_changed || fail "live edge worker tag drift must trigger public data-plane worker release"
 
+(
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  KUBECTL=true
+  daemonset_exists() {
+    case "$1" in
+      fugue-fugue-edge-front|fugue-fugue-edge-worker-a|fugue-fugue-edge-worker-b)
+        return 0
+        ;;
+    esac
+    return 1
+  }
+  live_bluegreen_front_pod_image() {
+    printf 'ghcr.io/acme/fugue-edge:front-stable'
+  }
+  live_daemonset_container_image() {
+    case "$1/$2" in
+      fugue-fugue-edge-ssh-front/ssh-front)
+        printf 'ghcr.io/acme/fugue-edge:ssh-stable'
+        ;;
+      fugue-fugue-edge-worker-a/edge)
+        printf 'ghcr.io/acme/fugue-edge:worker-a-stable'
+        ;;
+      fugue-fugue-edge-worker-b/edge)
+        printf 'ghcr.io/acme/fugue-edge:worker-b-stable'
+        ;;
+    esac
+  }
+  live_daemonset_container_resources_json() { :; }
+  live_daemonset_container_env_value() { :; }
+  append_dns_group_image_args_from_live() { :; }
+  preserve_public_data_plane_from_live
+  joined_args="$(printf '%s\n' "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}")"
+  [[ "${joined_args}" == *"edge.sshFront.image.repository=ghcr.io/acme/fugue-edge"* ]] ||
+    fail "control-plane preserve mode must retain the live SSH front image repository"
+  [[ "${joined_args}" == *"edge.sshFront.image.tag=ssh-stable"* ]] ||
+    fail "control-plane preserve mode must retain the live SSH front image tag"
+)
+
 BEFORE_SHA="${IMAGE_CACHE_REF}"
 AFTER_SHA="${IMAGE_CACHE_RESOURCES_REF}"
 FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/values.yaml'
