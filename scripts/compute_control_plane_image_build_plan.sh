@@ -197,7 +197,6 @@ if [[ -n "${target_ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${target_ref}^
     component_changed="${tmp_dir}/component-changed-files-${image}"
     git -C "${REPO_ROOT}" diff --name-only "${base_ref}" "${target_ref}" | sort -u >"${component_changed}"
     touch "${tmp_dir}/component-baseline-${image}"
-    cat "${component_changed}" >>"${changed_file}"
     TRUSTED_COMPONENT_BASELINE=true
   done
   sort -u "${changed_file}" -o "${changed_file}"

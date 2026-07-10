@@ -133,6 +133,9 @@ git clone -q --shared "${REPO_ROOT}" "${COMPONENT_PLAN_REPO}"
 git -C "${COMPONENT_PLAN_REPO}" config user.email test@fugue.invalid
 git -C "${COMPONENT_PLAN_REPO}" config user.name fugue-test
 COMPONENT_PLAN_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+printf '\n// component baseline edge fixture\n' >>"${COMPONENT_PLAN_REPO}/cmd/fugue-edge/main.go"
+git -C "${COMPONENT_PLAN_REPO}" add cmd/fugue-edge/main.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m edge-change
 printf '\n// component baseline build-plan fixture\n' >>"${COMPONENT_PLAN_REPO}/cmd/fugue-api/main.go"
 git -C "${COMPONENT_PLAN_REPO}" add cmd/fugue-api/main.go
 git -C "${COMPONENT_PLAN_REPO}" commit -q -m api-change
@@ -148,6 +151,7 @@ GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
   FUGUE_RELEASE_CHANGED_FILES_SET=true \
   FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
   FUGUE_API_IMAGE_BASE_REF="${COMPONENT_PLAN_API_LIVE}" \
+  FUGUE_EDGE_IMAGE_BASE_REF="${COMPONENT_PLAN_API_LIVE}" \
   "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "current API component baseline suppresses stale union rebuild"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "false" "current API component baseline build flag"
@@ -158,9 +162,22 @@ GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
   FUGUE_RELEASE_CHANGED_FILES_SET=true \
   FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
   FUGUE_API_IMAGE_BASE_REF="${COMPONENT_PLAN_BASE}" \
+  FUGUE_EDGE_IMAGE_BASE_REF="${COMPONENT_PLAN_API_LIVE}" \
   "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "stale API component baseline still rebuilds"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "true" "stale API component baseline build flag"
+: >"${COMPONENT_PLAN_OUTPUT}"
+COMPONENT_PLAN_CURRENT_CORE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --name-only "${COMPONENT_PLAN_API_LIVE}" "${COMPONENT_PLAN_TARGET}")"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_CURRENT_CORE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TARGET}" \
+  FUGUE_API_IMAGE_BASE_REF="${COMPONENT_PLAN_API_LIVE}" \
+  FUGUE_EDGE_IMAGE_BASE_REF="${COMPONENT_PLAN_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "stale held edge diff cannot enter an unrelated build plan"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "false" "stale held edge build flag"
 rm -rf "${COMPONENT_PLAN_REPO}"
 rm -f "${COMPONENT_PLAN_OUTPUT}" "${COMPONENT_PLAN_LOG}"
 
