@@ -199,6 +199,29 @@ func TestPlatformComponentIdentityCanUseExternalSecret(t *testing.T) {
 	if secret := manifestDocumentForKindAndName(manifest, "Secret", "external-component-identity"); secret != "" {
 		t.Fatalf("chart must not take ownership of the external component identity secret:\n%s", secret)
 	}
+	api := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	for _, want := range []string{
+		"checksum/platform-component-identity-secret:",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS",
+		"name: external-component-identity",
+	} {
+		if !strings.Contains(api, want) {
+			t.Fatalf("API component identity canary missing %q:\n%s", want, api)
+		}
+	}
+	controller := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
+	if strings.Contains(controller, "FUGUE_PLATFORM_COMPONENT_IDENTITY_") {
+		t.Fatalf("controller must not mount component identity before its independent canary:\n%s", controller)
+	}
 }
 
 func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {

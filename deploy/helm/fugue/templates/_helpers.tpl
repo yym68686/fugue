@@ -259,6 +259,33 @@ tolerations:
 {{- end -}}
 {{- end -}}
 
+{{- define "fugue.platformComponentIdentitySecretChecksum" -}}
+{{- $secretName := include "fugue.platformComponentIdentitySecretName" . -}}
+{{- $existingSecret := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $payload := dict "_secret_name" $secretName -}}
+{{- if $existingSecret -}}
+{{- range $key, $value := $existingSecret.data -}}
+{{- $_ := set $payload $key $value -}}
+{{- end -}}
+{{- end -}}
+{{- if ne .Values.platformComponentIdentity.signingKey "" -}}
+{{- $_ := set $payload "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY" (.Values.platformComponentIdentity.signingKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.platformComponentIdentity.signingKeyID "" -}}
+{{- $_ := set $payload "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID" (.Values.platformComponentIdentity.signingKeyID | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.platformComponentIdentity.previousSigningKey "" -}}
+{{- $_ := set $payload "FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY" (.Values.platformComponentIdentity.previousSigningKey | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.platformComponentIdentity.previousSigningKeyID "" -}}
+{{- $_ := set $payload "FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID" (.Values.platformComponentIdentity.previousSigningKeyID | b64enc) -}}
+{{- end -}}
+{{- if ne .Values.platformComponentIdentity.revokedKeyIDs "" -}}
+{{- $_ := set $payload "FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS" (.Values.platformComponentIdentity.revokedKeyIDs | b64enc) -}}
+{{- end -}}
+{{- toJson $payload | sha256sum -}}
+{{- end -}}
+
 {{- define "fugue.configSecretChecksum" -}}
 {{- if .Values.configSecret.existingSecretName -}}
 {{- printf "external:%s" .Values.configSecret.existingSecretName | sha256sum -}}
