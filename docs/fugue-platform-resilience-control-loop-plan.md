@@ -1923,8 +1923,8 @@ DNS/edge failover 必须满足：
 - [x] 增加 missing consumer 不得 pass 的回归测试。
 - [x] 增加 tenant key 无法写 heartbeat 的权限测试。
 - [ ] 增加 heartbeat replay/impersonation 测试。
-- [ ] 新增 runbook: platform consumer identity。
-- [ ] 新增 runbook: missing/stale consumer。
+- [x] 新增 runbook: platform consumer identity。
+- [x] 新增 runbook: missing/stale consumer。
 
 #### Phase -1D: Release Lane 和 Fencing
 
