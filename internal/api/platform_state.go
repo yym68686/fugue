@@ -2,14 +2,17 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"fugue/internal/auth"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
@@ -528,6 +531,59 @@ func (s *Server) handlePlatformConsumerHeartbeat(w http.ResponseWriter, r *http.
 		Consumer: consumer,
 		Drift:    drift,
 	})
+}
+
+func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
+		return
+	}
+	var heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope
+	if err := httpx.DecodeJSON(r, &heartbeat); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	consumer, err := s.store.AcceptTrustedPlatformConsumerHeartbeat(
+		claims,
+		heartbeat.ExpectedConsumerSetID,
+		heartbeat,
+		time.Now().UTC(),
+		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+	)
+	if err != nil {
+		writeTrustedPlatformConsumerHeartbeatError(w, err)
+		return
+	}
+	drift := consumer.DesiredGeneration != "" && consumer.ActualGeneration != "" && consumer.DesiredGeneration != consumer.ActualGeneration
+	httpx.WriteJSON(w, http.StatusOK, model.PlatformConsumerHeartbeatResponse{
+		Consumer: consumer,
+		Drift:    drift,
+	})
+}
+
+func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrInvalidInput):
+		httpx.WriteError(w, http.StatusBadRequest, "invalid trusted heartbeat request")
+	case errors.Is(err, store.ErrNotFound):
+		httpx.WriteError(w, http.StatusNotFound, "expected consumer set not found")
+	case errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatImpersonation),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatExpectation):
+		httpx.WriteError(w, http.StatusForbidden, "platform component identity does not match expected consumer topology")
+	case errors.Is(err, store.ErrConflict),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatReplay),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatFencingBack):
+		httpx.WriteError(w, http.StatusConflict, "trusted heartbeat is not monotonic")
+	case errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatInvalid),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatStale),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatFuture),
+		errors.Is(err, platformcontrol.ErrPlatformConsumerHeartbeatEvidence):
+		httpx.WriteError(w, http.StatusUnprocessableEntity, "trusted heartbeat evidence is invalid")
+	default:
+		httpx.WriteError(w, http.StatusInternalServerError, "trusted heartbeat could not be recorded")
+	}
 }
 
 func (s *Server) handleListSubsystemFailureContracts(w http.ResponseWriter, r *http.Request) {

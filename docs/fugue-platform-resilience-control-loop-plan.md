@@ -1881,7 +1881,7 @@ DNS/edge failover 必须满足：
 
 #### Phase -1C: Evidence 四态和可信身份
 
-> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、短期 component identity/heartbeat 防重放纯验证原语、credential 到 ExpectedConsumerSet 的服务端字段绑定和 verified consumer instance 生成纯策略、可信 heartbeat 的 JSON/Postgres 原子单调持久化与 legacy downgrade guard、独立 fail-closed component Bearer middleware 及 OpenAPI auth kind、只读取专用 `FUGUE_PLATFORM_COMPONENT_IDENTITY_*` key source 且缺失时 fail closed 的 API verifier，以及 optional shadow heartbeat envelope 的 OpenAPI/Store 持久化已实现并有单元测试；专用 key 已由 retained 独立 Helm/外部 Secret 配置并只挂载到 API/controller，middleware 尚无生产 operation，尚未接入 release prepare、真实 heartbeat、凭证签发、handler enforcement 或 release guard。
+> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、短期 component identity/heartbeat 防重放原语、credential 到 ExpectedConsumerSet 的服务端字段绑定、可信 heartbeat 的 JSON/Postgres 原子单调持久化与 legacy downgrade guard、独立 fail-closed component Bearer middleware/OpenAPI auth kind、只读取专用 `FUGUE_PLATFORM_COMPONENT_IDENTITY_*` key source 且缺失时 fail closed 的 API verifier，以及 optional legacy shadow heartbeat 已实现；专用 key 已由 retained 独立 Helm/外部 Secret 配置并只挂载到 API/controller。新增的 `/v1/platform-state/consumers/trusted-heartbeat` 已真实执行 credential/topology 绑定、evidence/freshness、sequence/nonce、fencing/generation 单调验证并拒绝 tenant key，但尚无真实 consumer、凭证签发、release prepare 或 release guard enforcement 接线。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
@@ -1921,21 +1921,21 @@ DNS/edge failover 必须满足：
 - [x] 实现 credential-bound heartbeat identity、canonical evidence hash、sequence/nonce/time-window/fencing/generation rollback 纯验证器；生产 handler 仍未 enforcement。
 - [x] 可信 heartbeat 在 JSON/Postgres Store 中按服务端 ExpectedConsumerSet 绑定，并使用行锁和 guarded upsert 单调持久化；生产 handler 仍未接线。
 - [x] 已验证 consumer 不能被 legacy 未验证 heartbeat 覆盖。
-- [ ] 服务端从凭证绑定 component/node/scope。
+- [x] 服务端从凭证绑定 component/node/scope。
 - [x] heartbeat 请求增加 sequence，并以 optional shadow 字段持久化；生产 enforcement 尚未开启。
 - [x] heartbeat 请求增加 issued_at，并以 optional shadow 字段持久化；生产 enforcement 尚未开启。
 - [x] heartbeat 请求增加 nonce，并以 optional shadow 字段持久化；生产 enforcement 尚未开启。
 - [x] heartbeat 请求增加 evidence hash，并以 optional shadow 字段持久化；生产 enforcement 尚未开启。
-- [ ] 拒绝 heartbeat replay。
-- [ ] 拒绝 heartbeat future timestamp。
-- [ ] 拒绝 heartbeat generation rollback。
-- [ ] 拒绝跨 component/node/scope 冒充。
+- [x] 拒绝 heartbeat replay。
+- [x] 拒绝 heartbeat future timestamp。
+- [x] 拒绝 heartbeat generation rollback。
+- [x] 拒绝跨 component/node/scope 冒充。
 - [ ] consumer credential 支持轮换和撤销。
 - [ ] consumer heartbeat 写入可信 audit。
 - [x] 增加 missing consumer 不得 pass 的回归测试。
 - [x] 增加 tenant key 无法写 heartbeat 的权限测试。
 - [x] 增加 heartbeat Store replay、并发首次写入和 legacy downgrade 回归测试。
-- [ ] 增加 heartbeat replay/impersonation 测试。
+- [x] 增加 heartbeat replay/impersonation 测试。
 - [x] 新增 runbook: platform consumer identity。
 - [x] 新增 runbook: missing/stale consumer。
 
@@ -2123,7 +2123,7 @@ DNS/edge failover 必须满足：
 
 ### Phase 4: Consumer Convergence
 
-> 2026-07-10 implementation checkpoint: 本阶段当前勾选项代表 contract、topology builder、纯 evaluator、不可变 ExpectedConsumerSet 快照持久化和只读 admin API/CLI 已完成；真实 consumer heartbeat、可信认证、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
+> 2026-07-10 implementation checkpoint: 本阶段当前勾选项代表 contract、topology builder、纯 evaluator、不可变 ExpectedConsumerSet 快照持久化、只读 admin API/CLI，以及专用 component identity 认证的可信 heartbeat handler 已完成；真实 consumer 上报、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
 
 - [x] 定义 platform consumer contract。
 - [x] 定义 consumer protocol version。
@@ -2144,11 +2144,11 @@ DNS/edge failover 必须满足：
 - [ ] 所有 heartbeat 上报 fencing token。
 - [ ] 所有 heartbeat 上报 protocol/schema version。
 - [ ] 所有 heartbeat 上报 sequence/issued-at/evidence hash。
-- [ ] heartbeat 认证使用 platform component identity。
-- [ ] heartbeat handler 服务端绑定 component/node/scope。
-- [ ] heartbeat handler 拒绝 tenant API key。
-- [ ] heartbeat handler 拒绝 replay。
-- [ ] heartbeat handler 拒绝 generation 倒退。
+- [x] heartbeat 认证使用 platform component identity。
+- [x] heartbeat handler 服务端绑定 component/node/scope。
+- [x] heartbeat handler 拒绝 tenant API key。
+- [x] heartbeat handler 拒绝 replay。
+- [x] heartbeat handler 拒绝 generation 倒退。
 - [ ] release guard 检查 consumer drift。
 - [ ] release guard 检查 expected consumer missing。
 - [ ] release guard 检查 expected cardinality。

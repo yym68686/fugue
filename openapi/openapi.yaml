@@ -1805,6 +1805,41 @@ paths:
                 $ref: "#/components/schemas/PlatformConsumerHeartbeatResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/platform-state/consumers/trusted-heartbeat:
+    post:
+      operationId: trustedPlatformConsumerHeartbeat
+      summary: Report Trusted Platform State Consumer Heartbeat
+      tags: [Admin]
+      x-fugue-handler: handleTrustedPlatformConsumerHeartbeat
+      security:
+        - PlatformComponentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrustedPlatformConsumerHeartbeatRequest"
+      responses:
+        '200':
+          description: Heartbeat accepted after identity, topology, freshness, and monotonicity verification.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConsumerHeartbeatResponse"
+        '400':
+          $ref: "#/components/responses/ErrorResponse"
+        '401':
+          $ref: "#/components/responses/ErrorResponse"
+        '403':
+          $ref: "#/components/responses/ErrorResponse"
+        '404':
+          $ref: "#/components/responses/ErrorResponse"
+        '409':
+          $ref: "#/components/responses/ErrorResponse"
+        '422':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/failure-contracts:
     get:
       operationId: listSubsystemFailureContracts
@@ -24993,6 +25028,90 @@ components:
           type: boolean
         last_error:
           type: string
+    TrustedPlatformConsumerHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - artifact_kind
+        - expected_consumer_set_id
+        - fencing_token
+        - protocol_version
+        - schema_version
+        - sequence
+        - issued_at
+        - nonce
+        - generation_sequence
+        - evidence_hash
+      properties:
+        consumer_id:
+          type: string
+          description: Optional assertion; the server derives and verifies the value from component credentials.
+        component:
+          type: string
+          description: Optional assertion; the server derives and verifies the value from component credentials.
+        node_id:
+          type: string
+          description: Optional assertion; the server derives and verifies the value from component credentials.
+        artifact_kind:
+          type: string
+          minLength: 1
+        scope_key:
+          type: string
+          description: Optional assertion; the server derives and verifies the value from component credentials and expected topology.
+        release_set_id:
+          type: string
+          description: Optional assertion; the server derives and verifies the value from the expected consumer set.
+        expected_consumer_set_id:
+          type: string
+          minLength: 1
+        fencing_token:
+          type: integer
+          format: int64
+          minimum: 1
+        protocol_version:
+          type: string
+          enum: [v1]
+        schema_version:
+          type: string
+          enum: [v1]
+        compatibility_capabilities:
+          type: array
+          items:
+            type: string
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        issued_at:
+          type: string
+          format: date-time
+        nonce:
+          type: string
+          minLength: 16
+        generation_sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        desired_generation:
+          type: string
+          description: Optional assertion; the server derives and verifies the value from the expected consumer set.
+        actual_generation:
+          type: string
+        lkg_generation:
+          type: string
+        apply_status:
+          type: string
+        probe_status:
+          type: string
+        serving_lkg:
+          type: boolean
+        lkg_expired:
+          type: boolean
+        last_error:
+          type: string
+        evidence_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
     PlatformArtifactListResponse:
       type: object
       additionalProperties: false
