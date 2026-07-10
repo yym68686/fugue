@@ -167,6 +167,88 @@ func TestBindPlatformConsumerHeartbeatUsesCredentialClaims(t *testing.T) {
 	}
 }
 
+func TestBindPlatformConsumerHeartbeatToExpectedSetDerivesServerOwnedFields(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 10, 9, 30, 0, 0, time.UTC)
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{
+		ReleaseSetID: "release-set-1",
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:     "global",
+		Generation:   "generation-42",
+		PreparedAt:   now,
+		Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
+			ID: "edge-node-1", EdgeGroupID: "edge-group-1", Country: "US",
+		}}},
+	})
+	claims := platformComponentTestClaims()
+	claims.Version = platformComponentIdentityVersion
+	claims.TokenID = "token-1"
+	claims.IssuedAtUnix = now.Add(-time.Minute).Unix()
+	claims.ExpiresAtUnix = now.Add(time.Minute).Unix()
+	bound, err := BindPlatformConsumerHeartbeatToExpectedSet(claims, set, PlatformConsumerHeartbeatEnvelope{
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+	})
+	if err != nil {
+		t.Fatalf("bind heartbeat to expected set: %v", err)
+	}
+	if bound.ConsumerID != "edge-worker:edge-node-1" ||
+		bound.Component != model.PlatformConsumerComponentEdgeWorker ||
+		bound.NodeID != "edge-node-1" ||
+		bound.ScopeKey != "global" ||
+		bound.ReleaseSetID != "release-set-1" ||
+		bound.ExpectedConsumerSetID != set.ID ||
+		bound.DesiredGeneration != "generation-42" {
+		t.Fatalf("heartbeat was not bound to the expected topology: %+v", bound)
+	}
+}
+
+func TestBindPlatformConsumerHeartbeatToExpectedSetRejectsMismatchAndImpersonation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 10, 9, 45, 0, 0, time.UTC)
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{
+		ReleaseSetID: "release-set-1",
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:     "global",
+		Generation:   "generation-42",
+		PreparedAt:   now,
+		Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
+			ID: "edge-node-1", EdgeGroupID: "edge-group-1", Country: "US",
+		}}},
+	})
+	claims := platformComponentTestClaims()
+	claims.Version = platformComponentIdentityVersion
+	claims.TokenID = "token-1"
+	claims.IssuedAtUnix = now.Add(-time.Minute).Unix()
+	claims.ExpiresAtUnix = now.Add(time.Minute).Unix()
+
+	for _, test := range []struct {
+		name      string
+		heartbeat PlatformConsumerHeartbeatEnvelope
+	}{
+		{name: "expected consumer set", heartbeat: PlatformConsumerHeartbeatEnvelope{ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy, ExpectedConsumerSetID: "other-set"}},
+		{name: "release set", heartbeat: PlatformConsumerHeartbeatEnvelope{ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy, ReleaseSetID: "other-release"}},
+		{name: "desired generation", heartbeat: PlatformConsumerHeartbeatEnvelope{ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy, DesiredGeneration: "generation-41"}},
+		{name: "unknown artifact", heartbeat: PlatformConsumerHeartbeatEnvelope{ArtifactKind: "unknown-artifact"}},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := BindPlatformConsumerHeartbeatToExpectedSet(claims, set, test.heartbeat); !errors.Is(err, ErrPlatformConsumerHeartbeatExpectation) {
+				t.Fatalf("expected topology mismatch rejection, got %v", err)
+			}
+		})
+	}
+
+	otherClaims := claims
+	otherClaims.NodeID = "edge-node-2"
+	if _, err := BindPlatformConsumerHeartbeatToExpectedSet(otherClaims, set, PlatformConsumerHeartbeatEnvelope{
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+	}); !errors.Is(err, ErrPlatformConsumerHeartbeatImpersonation) {
+		t.Fatalf("credential outside the expected topology must be rejected, got %v", err)
+	}
+}
+
 func TestValidatePlatformConsumerHeartbeatRejectsReplayAndRollback(t *testing.T) {
 	t.Parallel()
 
@@ -258,6 +340,13 @@ func TestValidatePlatformConsumerHeartbeatRejectsBadTimeAndEvidence(t *testing.T
 			},
 			wantErr: ErrPlatformConsumerHeartbeatEvidence,
 		},
+		{
+			name: "expected consumer set tamper",
+			mutate: func(candidate *PlatformConsumerHeartbeatEnvelope) {
+				candidate.ExpectedConsumerSetID = "expected-set-tampered"
+			},
+			wantErr: ErrPlatformConsumerHeartbeatEvidence,
+		},
 	}
 	for _, test := range tests {
 		test := test
@@ -301,21 +390,22 @@ func validPlatformConsumerHeartbeat(t *testing.T, now time.Time) PlatformConsume
 	claims.IssuedAtUnix = now.Add(-time.Minute).Unix()
 	claims.ExpiresAtUnix = now.Add(time.Minute).Unix()
 	heartbeat, err := BindPlatformConsumerHeartbeat(claims, PlatformConsumerHeartbeatEnvelope{
-		ArtifactKind:       model.PlatformArtifactKindEdgeRankingPolicy,
-		ScopeKey:           "global",
-		ReleaseSetID:       "release-set-1",
-		FencingToken:       8,
-		ProtocolVersion:    model.PlatformConsumerProtocolVersionV1,
-		SchemaVersion:      model.PlatformConsumerSchemaVersionV1,
-		Sequence:           12,
-		IssuedAt:           now,
-		Nonce:              "nonce-value-0001",
-		GenerationSequence: 42,
-		DesiredGeneration:  "generation-42",
-		ActualGeneration:   "generation-42",
-		LKGGeneration:      "generation-41",
-		ApplyStatus:        model.PlatformConsumerApplyStatusApplied,
-		ProbeStatus:        model.PlatformConsumerProbeStatusPassed,
+		ArtifactKind:          model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:              "global",
+		ReleaseSetID:          "release-set-1",
+		ExpectedConsumerSetID: "expected-set-1",
+		FencingToken:          8,
+		ProtocolVersion:       model.PlatformConsumerProtocolVersionV1,
+		SchemaVersion:         model.PlatformConsumerSchemaVersionV1,
+		Sequence:              12,
+		IssuedAt:              now,
+		Nonce:                 "nonce-value-0001",
+		GenerationSequence:    42,
+		DesiredGeneration:     "generation-42",
+		ActualGeneration:      "generation-42",
+		LKGGeneration:         "generation-41",
+		ApplyStatus:           model.PlatformConsumerApplyStatusApplied,
+		ProbeStatus:           model.PlatformConsumerProbeStatusPassed,
 	})
 	if err != nil {
 		t.Fatalf("bind valid heartbeat: %v", err)

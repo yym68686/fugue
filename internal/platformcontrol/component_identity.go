@@ -41,6 +41,7 @@ var (
 	ErrPlatformConsumerHeartbeatGenerationBack = errors.New("platform consumer heartbeat generation rollback")
 	ErrPlatformConsumerHeartbeatFencingBack    = errors.New("platform consumer heartbeat fencing rollback")
 	ErrPlatformConsumerHeartbeatEvidence       = errors.New("platform consumer heartbeat evidence hash mismatch")
+	ErrPlatformConsumerHeartbeatExpectation    = errors.New("platform consumer heartbeat expected consumer mismatch")
 )
 
 type PlatformComponentIdentityKeyring struct {
@@ -68,6 +69,7 @@ type PlatformConsumerHeartbeatEnvelope struct {
 	ArtifactKind              string    `json:"artifact_kind"`
 	ScopeKey                  string    `json:"scope_key"`
 	ReleaseSetID              string    `json:"release_set_id"`
+	ExpectedConsumerSetID     string    `json:"expected_consumer_set_id"`
 	FencingToken              int64     `json:"fencing_token"`
 	ProtocolVersion           string    `json:"protocol_version"`
 	SchemaVersion             string    `json:"schema_version"`
@@ -273,6 +275,7 @@ func BindPlatformConsumerHeartbeat(
 	heartbeat.NodeID = claims.NodeID
 	heartbeat.ScopeKey = claims.ScopeKey
 	heartbeat.ReleaseSetID = strings.TrimSpace(heartbeat.ReleaseSetID)
+	heartbeat.ExpectedConsumerSetID = strings.TrimSpace(heartbeat.ExpectedConsumerSetID)
 	heartbeat.ProtocolVersion = strings.TrimSpace(strings.ToLower(heartbeat.ProtocolVersion))
 	heartbeat.SchemaVersion = strings.TrimSpace(strings.ToLower(heartbeat.SchemaVersion))
 	heartbeat.CompatibilityCapabilities = normalizedPlatformIdentityStrings(heartbeat.CompatibilityCapabilities)
@@ -290,6 +293,68 @@ func BindPlatformConsumerHeartbeat(
 	return heartbeat, nil
 }
 
+func BindPlatformConsumerHeartbeatToExpectedSet(
+	claims PlatformComponentIdentityClaims,
+	set model.PlatformExpectedConsumerSet,
+	heartbeat PlatformConsumerHeartbeatEnvelope,
+) (PlatformConsumerHeartbeatEnvelope, error) {
+	setID := strings.TrimSpace(set.ID)
+	releaseSetID := strings.TrimSpace(set.ReleaseSetID)
+	expectedGeneration := strings.TrimSpace(set.ExpectedGeneration)
+	artifactKind := normalizeExpectedConsumerArtifactKind(set.ArtifactKind)
+	scopeKey := strings.TrimSpace(strings.ToLower(set.ScopeKey))
+	if setID == "" || releaseSetID == "" || expectedGeneration == "" || artifactKind == "" || scopeKey == "" {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+	}
+
+	if value := strings.TrimSpace(heartbeat.ExpectedConsumerSetID); value != "" && value != setID {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+	}
+	if value := strings.TrimSpace(heartbeat.ReleaseSetID); value != "" && value != releaseSetID {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+	}
+	if value := strings.TrimSpace(heartbeat.DesiredGeneration); value != "" && value != expectedGeneration {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+	}
+	if raw := strings.TrimSpace(heartbeat.ArtifactKind); raw != "" {
+		if value := normalizeExpectedConsumerArtifactKind(raw); value == "" || value != artifactKind {
+			return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+		}
+	}
+	if value := strings.TrimSpace(strings.ToLower(heartbeat.ScopeKey)); value != "" && value != scopeKey {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+	}
+
+	heartbeat.ExpectedConsumerSetID = setID
+	heartbeat.ReleaseSetID = releaseSetID
+	heartbeat.DesiredGeneration = expectedGeneration
+	heartbeat.ArtifactKind = artifactKind
+	heartbeat.ScopeKey = scopeKey
+	bound, err := BindPlatformConsumerHeartbeat(claims, heartbeat)
+	if err != nil {
+		return PlatformConsumerHeartbeatEnvelope{}, err
+	}
+
+	matched := 0
+	for _, expected := range set.Consumers {
+		if strings.TrimSpace(expected.ConsumerID) != bound.ConsumerID {
+			continue
+		}
+		if strings.TrimSpace(strings.ToLower(expected.Component)) != bound.Component ||
+			strings.TrimSpace(expected.NodeID) != bound.NodeID ||
+			normalizeExpectedConsumerArtifactKind(expected.ArtifactKind) != bound.ArtifactKind ||
+			strings.TrimSpace(strings.ToLower(expected.ScopeKey)) != bound.ScopeKey ||
+			strings.TrimSpace(expected.ExpectedGeneration) != expectedGeneration {
+			return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatExpectation
+		}
+		matched++
+	}
+	if matched != 1 {
+		return PlatformConsumerHeartbeatEnvelope{}, ErrPlatformConsumerHeartbeatImpersonation
+	}
+	return bound, nil
+}
+
 func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHeartbeatEnvelope) (string, error) {
 	if strings.TrimSpace(heartbeat.ConsumerID) == "" ||
 		strings.TrimSpace(heartbeat.Component) == "" ||
@@ -305,6 +370,7 @@ func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHear
 		ArtifactKind              string   `json:"artifact_kind"`
 		ScopeKey                  string   `json:"scope_key"`
 		ReleaseSetID              string   `json:"release_set_id"`
+		ExpectedConsumerSetID     string   `json:"expected_consumer_set_id"`
 		FencingToken              int64    `json:"fencing_token"`
 		ProtocolVersion           string   `json:"protocol_version"`
 		SchemaVersion             string   `json:"schema_version"`
@@ -328,6 +394,7 @@ func ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat PlatformConsumerHear
 		ArtifactKind:              normalizeExpectedConsumerArtifactKind(heartbeat.ArtifactKind),
 		ScopeKey:                  strings.TrimSpace(strings.ToLower(heartbeat.ScopeKey)),
 		ReleaseSetID:              strings.TrimSpace(heartbeat.ReleaseSetID),
+		ExpectedConsumerSetID:     strings.TrimSpace(heartbeat.ExpectedConsumerSetID),
 		FencingToken:              heartbeat.FencingToken,
 		ProtocolVersion:           strings.TrimSpace(strings.ToLower(heartbeat.ProtocolVersion)),
 		SchemaVersion:             strings.TrimSpace(strings.ToLower(heartbeat.SchemaVersion)),
