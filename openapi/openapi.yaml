@@ -1665,6 +1665,53 @@ paths:
                 $ref: "#/components/schemas/PlatformArtifactConsumersResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/expected-consumer-sets:
+    get:
+      operationId: listPlatformExpectedConsumerSets
+      summary: List Platform Expected Consumer Sets
+      tags: [Admin]
+      x-fugue-handler: handleListPlatformExpectedConsumerSets
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: release_set_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: artifact_release_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: artifact_kind
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: scope_key
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformExpectedConsumerSetListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/admin/artifacts/{artifact_id}/lkg:
     get:
       operationId: getPlatformArtifactLKG
@@ -24568,6 +24615,103 @@ components:
         updated_at:
           type: string
           format: date-time
+    PlatformExpectedConsumer:
+      type: object
+      additionalProperties: false
+      required: [consumer_id, component, node_id, artifact_kind, scope_key, failure_domain, cohort, required, expected_protocol_version, expected_schema_version, expected_generation, heartbeat_freshness_seconds, heartbeat_deadline, convergence_deadline]
+      properties:
+        consumer_id:
+          type: string
+        component:
+          type: string
+        node_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope_key:
+          type: string
+        failure_domain:
+          type: string
+        cohort:
+          type: string
+        required:
+          type: boolean
+        expected_protocol_version:
+          type: string
+        accepted_protocol_versions:
+          type: array
+          items:
+            type: string
+        expected_schema_version:
+          type: string
+        accepted_schema_versions:
+          type: array
+          items:
+            type: string
+        compatibility_capabilities:
+          type: array
+          items:
+            type: string
+        expected_generation:
+          type: string
+        heartbeat_freshness_seconds:
+          type: integer
+          minimum: 1
+        heartbeat_deadline:
+          type: string
+          format: date-time
+        convergence_deadline:
+          type: string
+          format: date-time
+    PlatformExpectedConsumerSet:
+      type: object
+      additionalProperties: false
+      required: [id, artifact_kind, scope, scope_key, expected_generation, topology_revision, revision, requires_consumers, required_cardinality, optional_cardinality, heartbeat_deadline, convergence_deadline, consumers, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        release_set_id:
+          type: string
+        artifact_release_id:
+          type: string
+        artifact_kind:
+          type: string
+        scope:
+          $ref: "#/components/schemas/PlatformArtifactScope"
+        scope_key:
+          type: string
+        expected_generation:
+          type: string
+        topology_revision:
+          type: string
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        requires_consumers:
+          type: boolean
+        required_cardinality:
+          type: integer
+          minimum: 0
+        optional_cardinality:
+          type: integer
+          minimum: 0
+        heartbeat_deadline:
+          type: string
+          format: date-time
+        convergence_deadline:
+          type: string
+          format: date-time
+        consumers:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformExpectedConsumer"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
     PlatformLKGSnapshot:
       type: object
       additionalProperties: false
@@ -24828,6 +24972,18 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlatformConsumerInstance"
+        generated_at:
+          type: string
+          format: date-time
+    PlatformExpectedConsumerSetListResponse:
+      type: object
+      additionalProperties: false
+      required: [expected_consumer_sets, generated_at]
+      properties:
+        expected_consumer_sets:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlatformExpectedConsumerSet"
         generated_at:
           type: string
           format: date-time

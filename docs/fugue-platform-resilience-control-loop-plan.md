@@ -2104,7 +2104,7 @@ DNS/edge failover 必须满足：
 
 ### Phase 4: Consumer Convergence
 
-> 2026-07-10 implementation checkpoint: 本阶段当前勾选项代表 contract、topology builder、纯 evaluator 和不可变 ExpectedConsumerSet 快照持久化已完成；真实 consumer heartbeat、可信认证、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
+> 2026-07-10 implementation checkpoint: 本阶段当前勾选项代表 contract、topology builder、纯 evaluator、不可变 ExpectedConsumerSet 快照持久化和只读 admin API/CLI 已完成；真实 consumer heartbeat、可信认证、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
 
 - [x] 定义 platform consumer contract。
 - [x] 定义 consumer protocol version。
@@ -2113,6 +2113,7 @@ DNS/edge failover 必须满足：
 - [x] 定义 consumer required/optional 语义。
 - [x] 实现 ExpectedConsumerSet topology builder。
 - [x] 将 ExpectedConsumerSet 快照和 revision 持久化到 JSON/Postgres store。
+- [x] 增加 ExpectedConsumerSet 只读 admin API。
 - [ ] 发布期间固定 ExpectedConsumerSet revision。
 - [ ] 节点拓扑变化时记录 convergence scope 变化。
 - [ ] edge worker 上报 desired/actual/LKG/apply/probe。
@@ -2142,7 +2143,7 @@ DNS/edge failover 必须满足：
 - [ ] LKG expired 生成 block incident。
 - [ ] CLI 增加 `fugue admin consumer ls`。
 - [ ] CLI 增加 `fugue admin consumer show <id>`。
-- [ ] CLI 增加 `fugue admin consumer expected --release-set <id>`。
+- [x] CLI 增加 `fugue admin consumer expected --release-set <id>`。
 - [ ] CLI 区分 pass/fail/unknown/stale。
 - [x] 增加 consumer convergence 单元测试。
 - [x] 增加 zero consumer 不得 pass 的回归测试。

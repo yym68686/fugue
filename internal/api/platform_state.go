@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -348,6 +349,38 @@ func (s *Server) handleListPlatformArtifactConsumers(w http.ResponseWriter, r *h
 	httpx.WriteJSON(w, http.StatusOK, model.PlatformArtifactConsumersResponse{
 		Consumers:   consumers,
 		GeneratedAt: time.Now().UTC(),
+	})
+}
+
+func (s *Server) handleListPlatformExpectedConsumerSets(w http.ResponseWriter, r *http.Request) {
+	principal := mustPrincipal(r)
+	if !principal.IsPlatformAdmin() || !principal.HasScope("artifact.read") {
+		httpx.WriteError(w, http.StatusForbidden, "platform admin with artifact.read scope required")
+		return
+	}
+	limit := 50
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 1 || parsed > 200 {
+			httpx.WriteError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+			return
+		}
+		limit = parsed
+	}
+	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{
+		ReleaseSetID:      r.URL.Query().Get("release_set_id"),
+		ArtifactReleaseID: r.URL.Query().Get("artifact_release_id"),
+		ArtifactKind:      r.URL.Query().Get("artifact_kind"),
+		ScopeKey:          r.URL.Query().Get("scope_key"),
+		Limit:             limit,
+	})
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, model.PlatformExpectedConsumerSetListResponse{
+		ExpectedConsumerSets: sets,
+		GeneratedAt:          time.Now().UTC(),
 	})
 }
 

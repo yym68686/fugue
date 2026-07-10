@@ -47,6 +47,7 @@ Use a bootstrap key or admin API key here only when you are doing setup.
 		c.newAdminQuarantineCommand(),
 		c.newAdminSyntheticCommand(),
 		c.newAdminArtifactCommand(),
+		c.newAdminConsumerCommand(),
 		c.newAdminBackupCommand(),
 		c.newAdminRoutesCommand(),
 		c.newAdminRobustnessCommand(),

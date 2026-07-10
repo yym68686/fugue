@@ -6,8 +6,55 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 )
+
+func TestPlatformExpectedConsumerSetListAPIIsReadOnlyAndAdminScoped(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, tenantKey, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
+		ReleaseSetID:      "release-set-api-test",
+		ArtifactReleaseID: "artifact-release-api-test",
+		ArtifactKind:      model.PlatformArtifactKindCaddyRouteConfig,
+		Scope:             model.PlatformArtifactScope{ScopeType: "global"},
+		ScopeKey:          "global",
+		Generation:        "generation-api-test",
+		Revision:          1,
+		PreparedAt:        time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC),
+		Topology: platformcontrol.ExpectedConsumerTopology{
+			EdgeNodes: []model.EdgeNode{{ID: "edge-api-test", EdgeGroupID: "edge-group-api-test", Country: "US"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build expected consumer set: %v", err)
+	}
+	if _, err := storeState.CreatePlatformExpectedConsumerSet(set); err != nil {
+		t.Fatalf("persist expected consumer set: %v", err)
+	}
+
+	response := performJSONRequest(t, server, http.MethodGet,
+		"/v1/admin/expected-consumer-sets?release_set_id=release-set-api-test&artifact_kind=caddy_route_config&scope_key=GLOBAL&limit=1",
+		platformAdminKey, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d body=%s", http.StatusOK, response.Code, response.Body.String())
+	}
+	var listed model.PlatformExpectedConsumerSetListResponse
+	mustDecodeJSON(t, response, &listed)
+	if len(listed.ExpectedConsumerSets) != 1 || listed.ExpectedConsumerSets[0].ID != set.ID || listed.GeneratedAt.IsZero() {
+		t.Fatalf("unexpected expected consumer set response: %+v", listed)
+	}
+	invalidLimit := performJSONRequest(t, server, http.MethodGet, "/v1/admin/expected-consumer-sets?limit=0", platformAdminKey, nil)
+	if invalidLimit.Code != http.StatusBadRequest {
+		t.Fatalf("invalid limit must be rejected, got %d body=%s", invalidLimit.Code, invalidLimit.Body.String())
+	}
+
+	forbidden := performJSONRequest(t, server, http.MethodGet, "/v1/admin/expected-consumer-sets", tenantKey, nil)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("tenant key must not list expected consumer topology, got %d body=%s", forbidden.Code, forbidden.Body.String())
+	}
+}
 
 func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	t.Parallel()

@@ -3,6 +3,7 @@ package cli
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"fugue/internal/model"
@@ -146,6 +147,10 @@ type platformArtifactReleaseEnvelope struct {
 
 type platformArtifactConsumersEnvelope struct {
 	Consumers []model.PlatformConsumerInstance `json:"consumers"`
+}
+
+type platformExpectedConsumerSetListEnvelope struct {
+	ExpectedConsumerSets []model.PlatformExpectedConsumerSet `json:"expected_consumer_sets"`
 }
 
 type platformArtifactLKGEnvelope struct {
@@ -532,6 +537,34 @@ func (c *Client) ListPlatformArtifactConsumers(id string) ([]model.PlatformConsu
 		return nil, err
 	}
 	return response.Consumers, nil
+}
+
+func (c *Client) ListPlatformExpectedConsumerSets(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
+	values := url.Values{}
+	if strings.TrimSpace(filter.ReleaseSetID) != "" {
+		values.Set("release_set_id", strings.TrimSpace(filter.ReleaseSetID))
+	}
+	if strings.TrimSpace(filter.ArtifactReleaseID) != "" {
+		values.Set("artifact_release_id", strings.TrimSpace(filter.ArtifactReleaseID))
+	}
+	if strings.TrimSpace(filter.ArtifactKind) != "" {
+		values.Set("artifact_kind", strings.TrimSpace(filter.ArtifactKind))
+	}
+	if strings.TrimSpace(filter.ScopeKey) != "" {
+		values.Set("scope_key", strings.TrimSpace(filter.ScopeKey))
+	}
+	if filter.Limit > 0 {
+		values.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	path := "/v1/admin/expected-consumer-sets"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var response platformExpectedConsumerSetListEnvelope
+	if err := c.doJSON(http.MethodGet, path, nil, &response); err != nil {
+		return nil, err
+	}
+	return response.ExpectedConsumerSets, nil
 }
 
 func (c *Client) GetPlatformArtifactLKG(id string) (*model.PlatformLKGSnapshot, error) {

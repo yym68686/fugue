@@ -35,6 +35,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/admin/edge/nodes/{edge_id}/drain", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminDrainEdgeNode)))
 	mux.Handle("POST /v1/admin/edge/nodes/{edge_id}/probe", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminProbeEdgeNode)))
 	mux.Handle("POST /v1/admin/edge/nodes/{edge_id}/undrain", s.auth.RequireAPI(http.HandlerFunc(s.handleAdminUndrainEdgeNode)))
+	mux.Handle("GET /v1/admin/expected-consumer-sets", s.auth.RequireAPI(http.HandlerFunc(s.handleListPlatformExpectedConsumerSets)))
 	mux.Handle("GET /v1/admin/failure-contracts", s.auth.RequireAPI(http.HandlerFunc(s.handleListSubsystemFailureContracts)))
 	mux.Handle("GET /v1/admin/failure-contracts/{subsystem}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetSubsystemFailureContract)))
 	mux.Handle("GET /v1/admin/gates", s.auth.RequireAPI(http.HandlerFunc(s.handleListGatePolicies)))

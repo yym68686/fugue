@@ -412,6 +412,11 @@ type PlatformArtifactConsumersResponse struct {
 	GeneratedAt time.Time                  `json:"generated_at"`
 }
 
+type PlatformExpectedConsumerSetListResponse struct {
+	ExpectedConsumerSets []PlatformExpectedConsumerSet `json:"expected_consumer_sets"`
+	GeneratedAt          time.Time                     `json:"generated_at"`
+}
+
 type PlatformArtifactLKGResponse struct {
 	LKG *PlatformLKGSnapshot `json:"lkg,omitempty"`
 }
