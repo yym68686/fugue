@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 )
 
@@ -643,6 +644,9 @@ func (s *Store) UpsertPlatformConsumerHeartbeat(req model.PlatformConsumerHeartb
 			if state.PlatformConsumerInstances[index].ConsumerID == consumer.ConsumerID &&
 				state.PlatformConsumerInstances[index].ArtifactKind == consumer.ArtifactKind &&
 				state.PlatformConsumerInstances[index].ScopeKey == consumer.ScopeKey {
+				if state.PlatformConsumerInstances[index].IdentityVerified {
+					return ErrConflict
+				}
 				consumer.ID = state.PlatformConsumerInstances[index].ID
 				state.PlatformConsumerInstances[index] = consumer
 				out = consumer
@@ -1443,11 +1447,7 @@ func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatReque
 		scopeKey = "global"
 	}
 	consumerID := strings.TrimSpace(req.ConsumerID)
-	id := model.NewID("artifactconsumer")
-	if consumerID != "" {
-		sum := sha256.Sum256([]byte(consumerID + "|" + kind + "|" + scopeKey))
-		id = "artifactconsumer_" + hex.EncodeToString(sum[:8])
-	}
+	id := platformConsumerInstanceID(consumerID, kind, scopeKey)
 	var issuedAt *time.Time
 	if req.IssuedAt != nil && !req.IssuedAt.IsZero() {
 		value := req.IssuedAt.UTC()
@@ -1483,6 +1483,87 @@ func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatReque
 		LastHeartbeatAt:           now,
 		UpdatedAt:                 now,
 	}
+}
+
+func acceptTrustedPlatformConsumerHeartbeatInState(
+	state *model.State,
+	claims platformcontrol.PlatformComponentIdentityClaims,
+	expectedSetID string,
+	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
+	receivedAt time.Time,
+	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
+) (model.PlatformConsumerInstance, error) {
+	expectedSetID = strings.TrimSpace(expectedSetID)
+	if state == nil || expectedSetID == "" {
+		return model.PlatformConsumerInstance{}, ErrInvalidInput
+	}
+	var expectedSet model.PlatformExpectedConsumerSet
+	foundSet := false
+	for _, candidate := range state.ExpectedConsumerSets {
+		if candidate.ID == expectedSetID {
+			expectedSet = candidate
+			foundSet = true
+			break
+		}
+	}
+	if !foundSet {
+		return model.PlatformConsumerInstance{}, ErrNotFound
+	}
+	heartbeat.ExpectedConsumerSetID = firstNonEmptyStoreValue(heartbeat.ExpectedConsumerSetID, expectedSetID)
+	bound, err := platformcontrol.BindPlatformConsumerHeartbeatToExpectedSet(claims, expectedSet, heartbeat)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	index := -1
+	var cursor *platformcontrol.PlatformConsumerHeartbeatCursor
+	for candidateIndex := range state.PlatformConsumerInstances {
+		candidate := state.PlatformConsumerInstances[candidateIndex]
+		if candidate.ConsumerID != bound.ConsumerID ||
+			candidate.ArtifactKind != bound.ArtifactKind ||
+			candidate.ScopeKey != bound.ScopeKey {
+			continue
+		}
+		index = candidateIndex
+		cursor, err = platformcontrol.PlatformConsumerHeartbeatCursorFromInstance(candidate)
+		if err != nil {
+			return model.PlatformConsumerInstance{}, err
+		}
+		break
+	}
+	consumer, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(
+		claims, expectedSet, bound, cursor, receivedAt, policy,
+	)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	consumer.ID = platformConsumerInstanceID(consumer.ConsumerID, consumer.ArtifactKind, consumer.ScopeKey)
+	if index >= 0 {
+		consumer.ID = state.PlatformConsumerInstances[index].ID
+		state.PlatformConsumerInstances[index] = consumer
+	} else {
+		state.PlatformConsumerInstances = append(state.PlatformConsumerInstances, consumer)
+	}
+	return consumer, nil
+}
+
+func platformConsumerInstanceID(consumerID, kind, scopeKey string) string {
+	consumerID = strings.TrimSpace(consumerID)
+	kind = NormalizePlatformArtifactKind(kind)
+	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
+	if consumerID == "" || kind == "" || scopeKey == "" {
+		return model.NewID("artifactconsumer")
+	}
+	sum := sha256.Sum256([]byte(consumerID + "|" + kind + "|" + scopeKey))
+	return "artifactconsumer_" + hex.EncodeToString(sum[:8])
+}
+
+func firstNonEmptyStoreValue(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
