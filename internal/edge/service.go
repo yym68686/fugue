@@ -32,8 +32,8 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
-	"fugue/internal/releaseflow"
 	"fugue/internal/tcpdiag"
+	"fugue/internal/weightedselector"
 )
 
 const cacheFileVersion = 1
@@ -772,13 +772,13 @@ func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBindi
 		return route, model.EdgeRouteUpstream{}
 	}
 	candidates := make([]model.EdgeRouteUpstream, 0, len(route.Upstreams))
-	weighted := make([]releaseflow.WeightedCandidate, 0, len(route.Upstreams))
+	weighted := make([]weightedselector.Candidate, 0, len(route.Upstreams))
 	for _, upstream := range route.Upstreams {
 		candidates = append(candidates, upstream)
 		active := strings.TrimSpace(upstream.UpstreamURL) != "" &&
 			upstream.Weight > 0 &&
 			(strings.TrimSpace(upstream.Status) == "" || strings.EqualFold(strings.TrimSpace(upstream.Status), model.EdgeRouteStatusActive))
-		weighted = append(weighted, releaseflow.WeightedCandidate{
+		weighted = append(weighted, weightedselector.Candidate{
 			ID:     firstNonEmpty(upstream.ReleaseID, upstream.Role, upstream.UpstreamURL),
 			Weight: upstream.Weight,
 			Active: active,
@@ -788,7 +788,7 @@ func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBindi
 		return route, model.EdgeRouteUpstream{}
 	}
 	stickinessKey := weightedReleaseStickinessKey(r, host, route, traceID, edgeRequestID)
-	selection, ok := releaseflow.SelectWeighted(weighted, stickinessKey)
+	selection, ok := weightedselector.Select(weighted, stickinessKey)
 	if !ok || selection.Index < 0 || selection.Index >= len(candidates) {
 		return route, model.EdgeRouteUpstream{}
 	}
@@ -827,7 +827,7 @@ func weightedReleaseStickinessKey(r *http.Request, host string, route model.Edge
 }
 
 func weightedReleaseBucket(key string, total int) int {
-	return releaseflow.WeightedBucket(key, total)
+	return weightedselector.Bucket(key, total)
 }
 
 func (s *Service) hasBundle() bool {

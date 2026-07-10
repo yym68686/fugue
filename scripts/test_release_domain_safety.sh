@@ -715,6 +715,22 @@ FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go'
 node_local_build_plane_changed || fail "image-cache code changes must mark build-plane changed"
 node_local_build_plane_preflight_override_allowed || fail "image-cache fixes must be allowed to bypass registry/node-policy preflight"
 
+for public_command in \
+  ./cmd/fugue-edge \
+  ./cmd/fugue-edge-front \
+  ./cmd/fugue-dns \
+  ./cmd/fugue-ssh-front \
+  ./cmd/fugue-mesh-agent \
+  ./cmd/fugue-mesh-recovery; do
+  public_dependencies="$(go list -deps "${public_command}")"
+  if grep -Fqx 'fugue/internal/store' <<<"${public_dependencies}"; then
+    fail "${public_command} must not depend on the control-plane Store"
+  fi
+  if grep -Fqx 'fugue/internal/releaseflow' <<<"${public_dependencies}"; then
+    fail "${public_command} must not depend on the control-plane releaseflow package"
+  fi
+done
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/controller/image_replication_controller.go\ninternal/controller/image_replication_controller_test.go\ninternal/store/node_updater.go\ninternal/store/node_updater_pg.go'
 node_local_build_plane_preflight_override_allowed || fail "image replication node-task cleanup fixes must be allowed to bypass existing node-policy preflight"
 

@@ -27,7 +27,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
-	"fugue/internal/releaseflow"
+	"fugue/internal/weightedselector"
 )
 
 const cacheFileVersion = 1
@@ -2425,14 +2425,14 @@ func edgeDNSMaybePromoteExploration(record model.EdgeDNSRecord, policy model.DNS
 		return candidates
 	}
 	percent := edgeDNSExplorationPercent(policy)
-	if releaseflow.WeightedBucket(seed, 100) >= percent {
+	if weightedselector.Bucket(seed, 100) >= percent {
 		return candidates
 	}
 	rest := len(candidates) - 1
 	if rest <= 0 {
 		return candidates
 	}
-	index := 1 + releaseflow.WeightedBucket(seed+"|cross-group", rest)
+	index := 1 + weightedselector.Bucket(seed+"|cross-group", rest)
 	if index <= 0 || index >= len(candidates) {
 		return candidates
 	}
@@ -2465,10 +2465,10 @@ func edgeDNSMaybePromoteNodeExploration(record model.EdgeDNSRecord, policy model
 		return candidates, false
 	}
 	percent := edgeDNSExplorationPercent(policy)
-	if releaseflow.WeightedBucket(seed, 100) >= percent {
+	if weightedselector.Bucket(seed, 100) >= percent {
 		return candidates, false
 	}
-	index := siblingIndexes[releaseflow.WeightedBucket(seed+"|same-group", len(siblingIndexes))]
+	index := siblingIndexes[weightedselector.Bucket(seed+"|same-group", len(siblingIndexes))]
 	out := append([]model.EdgeDNSAnswerCandidate(nil), candidates...)
 	explorer := out[index]
 	copy(out[1:index+1], out[0:index])
