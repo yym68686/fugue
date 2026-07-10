@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
 	"fugue/internal/workloadidentity"
 )
@@ -15,10 +17,13 @@ type contextKey string
 
 const principalContextKey contextKey = "principal"
 
+const platformComponentIdentityContextKey contextKey = "platform-component-identity"
+
 type Authenticator struct {
-	Store                      *store.Store
-	BootstrapAdminKey          string
-	WorkloadIdentitySigningKey string
+	Store                            *store.Store
+	BootstrapAdminKey                string
+	WorkloadIdentitySigningKey       string
+	PlatformComponentIdentityKeyring platformcontrol.PlatformComponentIdentityKeyring
 }
 
 func New(store *store.Store, bootstrapAdminKey string) *Authenticator {
@@ -91,24 +96,40 @@ func (a *Authenticator) RequireNodeUpdater(next http.Handler) http.Handler {
 	})
 }
 
+func (a *Authenticator) RequirePlatformComponent(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, err := a.authenticatePlatformComponentRequest(r, time.Now().UTC())
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), platformComponentIdentityContextKey, claims)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func PrincipalFromContext(ctx context.Context) (model.Principal, bool) {
 	principal, ok := ctx.Value(principalContextKey).(model.Principal)
 	return principal, ok
 }
 
-func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, error) {
-	authz := strings.TrimSpace(r.Header.Get("Authorization"))
-	if authz == "" {
-		return model.Principal{}, errors.New("missing authorization header")
-	}
+func PlatformComponentIdentityFromContext(ctx context.Context) (platformcontrol.PlatformComponentIdentityClaims, bool) {
+	claims, ok := ctx.Value(platformComponentIdentityContextKey).(platformcontrol.PlatformComponentIdentityClaims)
+	return claims, ok
+}
 
-	parts := strings.SplitN(authz, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return model.Principal{}, errors.New("invalid authorization header")
+func (a *Authenticator) authenticatePlatformComponentRequest(r *http.Request, now time.Time) (platformcontrol.PlatformComponentIdentityClaims, error) {
+	secret, err := bearerTokenFromRequest(r)
+	if err != nil {
+		return platformcontrol.PlatformComponentIdentityClaims{}, err
 	}
-	secret := strings.TrimSpace(parts[1])
-	if secret == "" {
-		return model.Principal{}, errors.New("empty bearer token")
+	return platformcontrol.ParsePlatformComponentIdentity(a.PlatformComponentIdentityKeyring, secret, now)
+}
+
+func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, error) {
+	secret, err := bearerTokenFromRequest(r)
+	if err != nil {
+		return model.Principal{}, err
 	}
 
 	if secret == a.BootstrapAdminKey {
@@ -162,6 +183,25 @@ func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, e
 	}
 
 	return model.Principal{}, errors.New("invalid credentials")
+}
+
+func bearerTokenFromRequest(r *http.Request) (string, error) {
+	if r == nil {
+		return "", errors.New("request is required")
+	}
+	authz := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authz == "" {
+		return "", errors.New("missing authorization header")
+	}
+	parts := strings.SplitN(authz, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return "", errors.New("invalid authorization header")
+	}
+	secret := strings.TrimSpace(parts[1])
+	if secret == "" {
+		return "", errors.New("empty bearer token")
+	}
+	return secret, nil
 }
 
 func allowWorkloadAPIRequest(r *http.Request) bool {
