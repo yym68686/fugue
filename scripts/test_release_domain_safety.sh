@@ -325,6 +325,80 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-release
+  FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+
+  events=""
+  enable_bluegreen_chart_mode() { :; }
+  bluegreen_worker_bases() {
+    printf 'fugue-fugue-edge\n'
+    printf 'fugue-fugue-edge-country-de\n'
+  }
+  wait_daemonset_ready() { :; }
+  daemonset_desired_count() { printf '1'; }
+  current_active_slot() { printf 'b'; }
+  patch_inactive_worker() { events="${events}prepare:$1;"; }
+  delete_worker_pods() { :; }
+  worker_https_port() { printf '18443'; }
+  check_worker_tcp() { :; }
+  check_worker_https_smoke() { :; }
+  capture_daemonset_pods() { printf 'stable-pods\n'; }
+  write_front_active_slot() { events="${events}switch:$1:$2;"; }
+
+  run_bluegreen_release
+  assert_eq "${events}" "prepare:fugue-fugue-edge-worker-a;prepare:fugue-fugue-edge-country-de-worker-a;switch:fugue-fugue-edge-front:a;switch:fugue-fugue-edge-country-de-front:a;" "blue-green release must prepare every candidate before its first slot switch"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-release
+  FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+
+  smoke_checks=0
+  switches=0
+  enable_bluegreen_chart_mode() { :; }
+  bluegreen_worker_bases() {
+    printf 'fugue-fugue-edge\n'
+    printf 'fugue-fugue-edge-country-de\n'
+  }
+  wait_daemonset_ready() { :; }
+  daemonset_desired_count() { printf '1'; }
+  current_active_slot() { printf 'b'; }
+  patch_inactive_worker() { :; }
+  delete_worker_pods() { :; }
+  worker_https_port() { printf '18443'; }
+  check_worker_tcp() { :; }
+  check_worker_https_smoke() {
+    smoke_checks=$((smoke_checks + 1))
+    (( smoke_checks < 2 ))
+  }
+  capture_daemonset_pods() { printf 'stable-pods\n'; }
+  write_front_active_slot() { switches=$((switches + 1)); }
+
+  if run_bluegreen_release; then
+    fail "blue-green release must fail when any candidate smoke fails"
+  fi
+  assert_eq "${switches}" "0" "candidate failure must occur before every slot switch"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
   FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT=a
   active_slot_from_front() { :; }
   active_slot_from_record() { :; }

@@ -1318,9 +1318,13 @@ check_public_smoke_on_front_nodes() {
 
 run_bluegreen_release() {
   local bases=()
+  local prepared_bases=()
+  local prepared_fronts=()
+  local prepared_slots=()
   local base front_ds active inactive inactive_ds active_ds inactive_port
   local protected_before protected_after
   local active_slots_json="{}"
+  local index
 
   enable_bluegreen_chart_mode
   while IFS= read -r base; do
@@ -1351,12 +1355,12 @@ run_bluegreen_release() {
     log "${base}: active=${active} inactive=${inactive}"
 
     protected_before="$(capture_daemonset_pods "${front_ds}" "${active_ds}")"
-    patch_inactive_worker "${inactive_ds}"
-    delete_worker_pods "${inactive_ds}"
-    wait_daemonset_ready "${inactive_ds}"
+    patch_inactive_worker "${inactive_ds}" || return $?
+    delete_worker_pods "${inactive_ds}" || return $?
+    wait_daemonset_ready "${inactive_ds}" || return $?
     inactive_port="$(worker_https_port "${inactive_ds}")"
-    check_worker_tcp "${inactive_ds}" "${inactive_port}"
-    check_worker_https_smoke "${inactive_ds}" "${inactive_port}"
+    check_worker_tcp "${inactive_ds}" "${inactive_port}" || return $?
+    check_worker_https_smoke "${inactive_ds}" "${inactive_port}" || return $?
     protected_after="$(capture_daemonset_pods "${front_ds}" "${active_ds}")"
     if [[ "${protected_before}" != "${protected_after}" ]]; then
       printf '%s\n' "${protected_before}" >/tmp/fugue-public-data-plane-protected-before.txt
@@ -1364,6 +1368,16 @@ run_bluegreen_release() {
       diff -u /tmp/fugue-public-data-plane-protected-before.txt /tmp/fugue-public-data-plane-protected-after.txt || true
       fail "front or active worker pod set changed while upgrading inactive worker ${inactive_ds}"
     fi
+    prepared_bases+=("${base}")
+    prepared_fronts+=("${front_ds}")
+    prepared_slots+=("${inactive}")
+  done
+
+  log "all ${#prepared_bases[@]} scheduled blue/green candidate(s) passed pre-switch validation"
+  for index in "${!prepared_bases[@]}"; do
+    base="${prepared_bases[${index}]}"
+    front_ds="${prepared_fronts[${index}]}"
+    inactive="${prepared_slots[${index}]}"
     write_front_active_slot "${front_ds}" "${inactive}"
     wait_daemonset_ready "${front_ds}"
     active_slots_json="$(record_active_slot_json "${active_slots_json}" "${base}" "${inactive}")"
