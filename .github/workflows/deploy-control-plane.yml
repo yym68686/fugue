@@ -101,8 +101,30 @@ jobs:
           FUGUE_RELEASE_REQUIRE_BASELINE: "true"
         run: ./scripts/compute_release_changed_files_from_live.sh
 
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify generated OpenAPI artifacts
+        run: make generate-openapi-check
+
+      - name: Verify release-domain safety contracts
+        run: bash scripts/test_release_domain_safety.sh
+
+      - name: Run Go tests
+        run: go test ./...
+
   build:
-    needs: release-baseline
+    needs:
+      - release-baseline
+      - release-gate
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.existing_image_tag == '' }}
     runs-on: ubuntu-latest
     outputs:
@@ -183,8 +205,9 @@ jobs:
   deploy:
     needs:
       - release-baseline
+      - release-gate
       - build
-    if: ${{ always() && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '')) }}
+    if: ${{ always() && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '')) }}
     timeout-minutes: 30
     runs-on:
       - self-hosted

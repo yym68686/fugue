@@ -1990,6 +1990,7 @@ DNS/edge failover 必须满足：
 - [x] 标记哪些机制目前只是文档设计。
 - [x] 标记哪些机制已经在代码里 enforcement。
 - [x] 标记哪些机制是 shadow/canary。
+- [x] 控制平面发布工作流在构建和推送镜像前执行独立 fail-closed 测试门禁，deploy 显式依赖门禁成功。
 
 ### Phase 1: Invariant Registry
 
