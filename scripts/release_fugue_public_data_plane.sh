@@ -1077,14 +1077,16 @@ check_worker_tcp() {
     if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
       continue
     fi
-    python3 -c '
+    if ! python3 -c '
 import socket
 import sys
 
 host, port, timeout = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 with socket.create_connection((host, port), timeout=timeout):
     pass
-' "${host_ip}" "${port}" "${FUGUE_PUBLIC_DATA_PLANE_TCP_TIMEOUT_SECONDS:-5}"
+' "${host_ip}" "${port}" "${FUGUE_PUBLIC_DATA_PLANE_TCP_TIMEOUT_SECONDS:-5}"; then
+      return 1
+    fi
   done < <(node_ips_for_daemonset "${daemonset_name}")
 }
 
@@ -1157,7 +1159,7 @@ check_worker_https_smoke() {
       smoke_curl_with_retry "inactive worker ${host_ip}:${port} host=${host} path=${path}" \
         -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
         --resolve "${host}:${port}:${host_ip}" \
-        "https://${host}:${port}${path}" >/dev/null
+        "https://${host}:${port}${path}" >/dev/null || return $?
     done < <(node_ips_for_daemonset "${daemonset_name}")
   done < <(worker_smoke_targets)
 }
@@ -1311,7 +1313,7 @@ check_public_smoke_on_front_nodes() {
       smoke_curl_with_retry "front ${host_ip}:443 host=${host} path=${path}" \
         -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
         --resolve "${host}:443:${host_ip}" \
-        "https://${host}${path}" >/dev/null
+        "https://${host}${path}" >/dev/null || return $?
     done < <(node_ips_for_daemonset "${front_daemonset}")
   done < <(public_data_plane_smoke_urls)
 }
@@ -1488,7 +1490,7 @@ run_smoke_urls() {
     [[ -n "${url}" ]] || continue
     log "smoke ${url}"
     smoke_curl_with_retry "public ${url}" \
-      -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" "${url}" >/dev/null
+      -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" "${url}" >/dev/null || return $?
   done < <(public_data_plane_smoke_urls)
 }
 

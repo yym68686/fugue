@@ -434,6 +434,86 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://fail.example.test/healthz,https://pass.example.test/healthz'
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=1
+  curl_calls=0
+  node_ips_for_daemonset() { printf '192.0.2.10\n'; }
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    [[ "${*: -1}" != *fail.example.test* ]]
+  }
+
+  if check_worker_https_smoke test-worker 18443; then
+    fail "inactive worker smoke must not let a later URL mask an earlier failure"
+  fi
+  assert_eq "${curl_calls}" "1" "inactive worker smoke must stop at the first exhausted failure"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  tcp_checks=0
+  node_ips_for_daemonset() { printf '192.0.2.10\n192.0.2.11\n'; }
+  python3() {
+    tcp_checks=$((tcp_checks + 1))
+    (( tcp_checks > 1 ))
+  }
+
+  if check_worker_tcp test-worker 18443; then
+    fail "inactive worker TCP check must not let a later node mask an earlier failure"
+  fi
+  assert_eq "${tcp_checks}" "1" "inactive worker TCP check must stop at the first failure"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://fail.example.test/healthz,https://pass.example.test/healthz'
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=1
+  curl_calls=0
+  node_ips_for_daemonset() { printf '192.0.2.10\n'; }
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    [[ "${*: -1}" != *fail.example.test* ]]
+  }
+
+  if check_public_smoke_on_front_nodes test-front; then
+    fail "front smoke must not let a later URL mask an earlier failure"
+  fi
+  assert_eq "${curl_calls}" "1" "front smoke must stop at the first exhausted failure"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://fail.example.test/healthz,https://pass.example.test/healthz'
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=1
+  curl_calls=0
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    [[ "${*: -1}" != *fail.example.test* ]]
+  }
+
+  if run_smoke_urls; then
+    fail "public smoke must not let a later URL mask an earlier failure"
+  fi
+  assert_eq "${curl_calls}" "1" "public smoke must stop at the first exhausted failure"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS=3
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS=0
   curl_calls=0
