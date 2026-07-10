@@ -1097,6 +1097,110 @@ WHERE artifact_kind = $1 AND scope_key = $2`
 	return messages, nil
 }
 
+func (s *Store) pgCreatePlatformExpectedConsumerSet(set model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	scopeJSON, err := marshalJSON(set.Scope)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	consumersJSON, err := marshalJSON(set.Consumers)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	out, err := scanPlatformExpectedConsumerSet(s.db.QueryRowContext(ctx, `
+INSERT INTO fugue_platform_expected_consumer_sets (
+	id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
+	expected_generation, topology_revision, revision, requires_consumers,
+	required_cardinality, optional_cardinality, heartbeat_deadline,
+	convergence_deadline, consumers_json, created_at, updated_at
+) VALUES (
+	$1, $2, $3, $4, $5, $6::jsonb,
+	$7, $8, $9, $10,
+	$11, $12, $13,
+	$14, $15::jsonb, $16, $17
+)
+RETURNING id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
+	expected_generation, topology_revision, revision, requires_consumers,
+	required_cardinality, optional_cardinality, heartbeat_deadline,
+	convergence_deadline, consumers_json, created_at, updated_at`,
+		set.ID, set.ReleaseSetID, set.ArtifactReleaseID, set.ArtifactKind, set.ScopeKey, scopeJSON,
+		set.ExpectedGeneration, set.TopologyRevision, set.Revision, set.RequiresConsumers,
+		set.RequiredCardinality, set.OptionalCardinality, set.HeartbeatDeadline,
+		set.ConvergenceDeadline, consumersJSON, set.CreatedAt, set.UpdatedAt,
+	))
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
+	}
+	return out, nil
+}
+
+func (s *Store) pgGetPlatformExpectedConsumerSet(id string) (model.PlatformExpectedConsumerSet, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	set, err := scanPlatformExpectedConsumerSet(s.db.QueryRowContext(ctx, `
+SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
+	expected_generation, topology_revision, revision, requires_consumers,
+	required_cardinality, optional_cardinality, heartbeat_deadline,
+	convergence_deadline, consumers_json, created_at, updated_at
+FROM fugue_platform_expected_consumer_sets
+WHERE id = $1`, id))
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
+	}
+	return set, nil
+}
+
+func (s *Store) pgListPlatformExpectedConsumerSets(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	query := `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
+	expected_generation, topology_revision, revision, requires_consumers,
+	required_cardinality, optional_cardinality, heartbeat_deadline,
+	convergence_deadline, consumers_json, created_at, updated_at
+FROM fugue_platform_expected_consumer_sets
+WHERE TRUE`
+	args := []any{}
+	appendFilter := func(column string, value any) {
+		args = append(args, value)
+		query += " AND " + column + " = $" + formatStoreArgIndex(len(args))
+	}
+	if filter.ReleaseSetID != "" {
+		appendFilter("release_set_id", filter.ReleaseSetID)
+	}
+	if filter.ArtifactReleaseID != "" {
+		appendFilter("artifact_release_id", filter.ArtifactReleaseID)
+	}
+	if filter.ArtifactKind != "" {
+		appendFilter("artifact_kind", filter.ArtifactKind)
+	}
+	if filter.ScopeKey != "" {
+		appendFilter("scope_key", filter.ScopeKey)
+	}
+	query += " ORDER BY created_at DESC, revision DESC, id ASC"
+	if filter.Limit > 0 {
+		args = append(args, filter.Limit)
+		query += " LIMIT $" + formatStoreArgIndex(len(args))
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	sets := []model.PlatformExpectedConsumerSet{}
+	for rows.Next() {
+		set, err := scanPlatformExpectedConsumerSet(rows)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, set)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	return sets, nil
+}
+
 func (s *Store) pgUpsertPlatformConsumerHeartbeat(consumer model.PlatformConsumerInstance) (model.PlatformConsumerInstance, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1359,6 +1463,43 @@ func scanPlatformReleaseMessage(scanner sqlScanner) (model.PlatformReleaseMessag
 	}
 	message.Scope = scope
 	return message, nil
+}
+
+func scanPlatformExpectedConsumerSet(scanner sqlScanner) (model.PlatformExpectedConsumerSet, error) {
+	var set model.PlatformExpectedConsumerSet
+	var scopeRaw, consumersRaw []byte
+	if err := scanner.Scan(
+		&set.ID,
+		&set.ReleaseSetID,
+		&set.ArtifactReleaseID,
+		&set.ArtifactKind,
+		&set.ScopeKey,
+		&scopeRaw,
+		&set.ExpectedGeneration,
+		&set.TopologyRevision,
+		&set.Revision,
+		&set.RequiresConsumers,
+		&set.RequiredCardinality,
+		&set.OptionalCardinality,
+		&set.HeartbeatDeadline,
+		&set.ConvergenceDeadline,
+		&consumersRaw,
+		&set.CreatedAt,
+		&set.UpdatedAt,
+	); err != nil {
+		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
+	}
+	scope, err := decodeJSONValue[model.PlatformArtifactScope](scopeRaw)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	consumers, err := decodeJSONValue[[]model.PlatformExpectedConsumer](consumersRaw)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	set.Scope = scope
+	set.Consumers = consumers
+	return set, nil
 }
 
 func scanPlatformConsumerInstance(scanner sqlScanner) (model.PlatformConsumerInstance, error) {

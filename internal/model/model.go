@@ -3237,6 +3237,7 @@ type State struct {
 	PlatformReleaseLanes       []PlatformReleaseLane       `json:"platform_release_lanes,omitempty"`
 	PlatformReleaseMessages    []PlatformReleaseMessage    `json:"platform_release_messages,omitempty"`
 	PlatformConsumerInstances  []PlatformConsumerInstance  `json:"platform_consumer_instances,omitempty"`
+	ExpectedConsumerSets       []ExpectedConsumerSet       `json:"platform_expected_consumer_sets,omitempty"`
 	PlatformLKGSnapshots       []PlatformLKGSnapshot       `json:"platform_lkg_snapshots,omitempty"`
 	BackingServices            []BackingService            `json:"backing_services"`
 	ServiceBindings            []ServiceBinding            `json:"service_bindings"`

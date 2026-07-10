@@ -1881,7 +1881,7 @@ DNS/edge failover 必须满足：
 
 #### Phase -1C: Evidence 四态和可信身份
 
-> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder 和四态 convergence evaluator 已实现并有单元测试；本 checkpoint 仍是纯模型层，尚未持久化，也尚未接入 release prepare、真实 heartbeat 或 release guard。
+> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator 和独立 JSON/Postgres 快照持久化已实现并有单元测试；尚未接入 release prepare、真实 heartbeat 或 release guard。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
@@ -2104,7 +2104,7 @@ DNS/edge failover 必须满足：
 
 ### Phase 4: Consumer Convergence
 
-> 2026-07-10 implementation checkpoint: 本阶段当前勾选项仅代表 contract、topology builder 和纯 evaluator 已完成；真实 consumer heartbeat、可信认证、持久化、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
+> 2026-07-10 implementation checkpoint: 本阶段当前勾选项代表 contract、topology builder、纯 evaluator 和不可变 ExpectedConsumerSet 快照持久化已完成；真实 consumer heartbeat、可信认证、release-set 固定 revision 和 release guard enforcement 仍保持未勾选。
 
 - [x] 定义 platform consumer contract。
 - [x] 定义 consumer protocol version。
@@ -2112,6 +2112,7 @@ DNS/edge failover 必须满足：
 - [x] 定义 consumer heartbeat freshness。
 - [x] 定义 consumer required/optional 语义。
 - [x] 实现 ExpectedConsumerSet topology builder。
+- [x] 将 ExpectedConsumerSet 快照和 revision 持久化到 JSON/Postgres store。
 - [ ] 发布期间固定 ExpectedConsumerSet revision。
 - [ ] 节点拓扑变化时记录 convergence scope 变化。
 - [ ] edge worker 上报 desired/actual/LKG/apply/probe。

@@ -155,6 +155,22 @@ func TestPostgresSchemaIncludesOperationLookupIndexes(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaIncludesExpectedConsumerSetPersistence(t *testing.T) {
+	t.Parallel()
+
+	schema := strings.Join(postgresSchemaStatements, "\n")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS fugue_platform_expected_consumer_sets",
+		"idx_fugue_platform_expected_consumers_release_revision",
+		"idx_fugue_platform_expected_consumers_artifact_release",
+		"idx_fugue_platform_expected_consumers_kind_scope",
+	} {
+		if !strings.Contains(schema, required) {
+			t.Fatalf("postgres schema is missing %s", required)
+		}
+	}
+}
+
 func TestPostgresSchemaAppliesToLiveTestDatabase(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
 	if databaseURL == "" {

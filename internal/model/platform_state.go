@@ -244,6 +244,16 @@ type PlatformExpectedConsumerSet struct {
 	UpdatedAt           time.Time                  `json:"updated_at"`
 }
 
+type ExpectedConsumerSet = PlatformExpectedConsumerSet
+
+type PlatformExpectedConsumerSetFilter struct {
+	ReleaseSetID      string `json:"release_set_id,omitempty"`
+	ArtifactReleaseID string `json:"artifact_release_id,omitempty"`
+	ArtifactKind      string `json:"artifact_kind,omitempty"`
+	ScopeKey          string `json:"scope_key,omitempty"`
+	Limit             int    `json:"limit,omitempty"`
+}
+
 type PlatformConsumerEvidenceAssessment struct {
 	ConsumerID  string                    `json:"consumer_id"`
 	Component   string                    `json:"component"`

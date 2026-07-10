@@ -684,6 +684,99 @@ func (s *Store) ListPlatformConsumers(kind, scopeKey string) ([]model.PlatformCo
 	return consumers, nil
 }
 
+func (s *Store) CreatePlatformExpectedConsumerSet(in model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
+	set, err := normalizePlatformExpectedConsumerSetForStore(in)
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	if s.usingDatabase() {
+		return s.pgCreatePlatformExpectedConsumerSet(set)
+	}
+	err = s.withLockedState(true, func(state *model.State) error {
+		for _, existing := range state.ExpectedConsumerSets {
+			if existing.ID == set.ID {
+				return ErrConflict
+			}
+			if set.ReleaseSetID != "" &&
+				existing.ReleaseSetID == set.ReleaseSetID &&
+				existing.ArtifactKind == set.ArtifactKind &&
+				existing.ScopeKey == set.ScopeKey &&
+				existing.Revision == set.Revision {
+				return ErrConflict
+			}
+			if set.ArtifactReleaseID != "" &&
+				existing.ArtifactReleaseID == set.ArtifactReleaseID &&
+				existing.Revision == set.Revision {
+				return ErrConflict
+			}
+		}
+		state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, set)
+		return nil
+	})
+	if err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
+	return clonePlatformExpectedConsumerSet(set), nil
+}
+
+func (s *Store) GetPlatformExpectedConsumerSet(id string) (model.PlatformExpectedConsumerSet, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgGetPlatformExpectedConsumerSet(id)
+	}
+	var out model.PlatformExpectedConsumerSet
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, set := range state.ExpectedConsumerSets {
+			if set.ID == id {
+				out = clonePlatformExpectedConsumerSet(set)
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+	return out, err
+}
+
+func (s *Store) ListPlatformExpectedConsumerSets(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
+	filter, err := normalizePlatformExpectedConsumerSetFilter(filter)
+	if err != nil {
+		return nil, err
+	}
+	if s.usingDatabase() {
+		return s.pgListPlatformExpectedConsumerSets(filter)
+	}
+	sets := []model.PlatformExpectedConsumerSet{}
+	err = s.withLockedState(false, func(state *model.State) error {
+		for _, set := range state.ExpectedConsumerSets {
+			if filter.ReleaseSetID != "" && set.ReleaseSetID != filter.ReleaseSetID {
+				continue
+			}
+			if filter.ArtifactReleaseID != "" && set.ArtifactReleaseID != filter.ArtifactReleaseID {
+				continue
+			}
+			if filter.ArtifactKind != "" && set.ArtifactKind != filter.ArtifactKind {
+				continue
+			}
+			if filter.ScopeKey != "" && set.ScopeKey != filter.ScopeKey {
+				continue
+			}
+			sets = append(sets, clonePlatformExpectedConsumerSet(set))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortPlatformExpectedConsumerSets(sets)
+	if filter.Limit > 0 && len(sets) > filter.Limit {
+		sets = sets[:filter.Limit]
+	}
+	return sets, nil
+}
+
 func (s *Store) GetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnapshot, error) {
 	kind = NormalizePlatformArtifactKind(kind)
 	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
@@ -1374,6 +1467,150 @@ func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatReque
 		LastHeartbeatAt:   now,
 		UpdatedAt:         now,
 	}
+}
+
+func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
+	now := time.Now().UTC()
+	in.ID = strings.TrimSpace(in.ID)
+	in.ReleaseSetID = strings.TrimSpace(in.ReleaseSetID)
+	in.ArtifactReleaseID = strings.TrimSpace(in.ArtifactReleaseID)
+	in.ArtifactKind = NormalizePlatformArtifactKind(in.ArtifactKind)
+	in.ExpectedGeneration = strings.TrimSpace(in.ExpectedGeneration)
+	in.TopologyRevision = strings.TrimSpace(in.TopologyRevision)
+	if in.ID == "" || in.ArtifactKind == "" || in.ExpectedGeneration == "" || in.TopologyRevision == "" || in.Revision <= 0 {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+	if scopeKey := strings.TrimSpace(strings.ToLower(in.ScopeKey)); scopeKey != "" {
+		in.Scope.Key = scopeKey
+	}
+	in.Scope, in.ScopeKey = NormalizePlatformArtifactScope(in.Scope)
+	if in.HeartbeatDeadline.IsZero() || in.ConvergenceDeadline.IsZero() {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+	in.HeartbeatDeadline = in.HeartbeatDeadline.UTC()
+	in.ConvergenceDeadline = in.ConvergenceDeadline.UTC()
+	if in.ConvergenceDeadline.Before(in.HeartbeatDeadline) {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+
+	consumers := make([]model.PlatformExpectedConsumer, 0, len(in.Consumers))
+	consumerIDs := make(map[string]struct{}, len(in.Consumers))
+	required, optional := 0, 0
+	for _, consumer := range in.Consumers {
+		consumer.ConsumerID = strings.TrimSpace(consumer.ConsumerID)
+		consumer.Component = strings.TrimSpace(consumer.Component)
+		consumer.NodeID = strings.TrimSpace(consumer.NodeID)
+		consumer.ArtifactKind = NormalizePlatformArtifactKind(consumer.ArtifactKind)
+		consumer.ScopeKey = strings.TrimSpace(strings.ToLower(consumer.ScopeKey))
+		consumer.FailureDomain = strings.TrimSpace(consumer.FailureDomain)
+		consumer.Cohort = strings.TrimSpace(consumer.Cohort)
+		consumer.ExpectedProtocolVersion = strings.TrimSpace(consumer.ExpectedProtocolVersion)
+		consumer.AcceptedProtocolVersions = normalizeStringList(consumer.AcceptedProtocolVersions)
+		consumer.ExpectedSchemaVersion = strings.TrimSpace(consumer.ExpectedSchemaVersion)
+		consumer.AcceptedSchemaVersions = normalizeStringList(consumer.AcceptedSchemaVersions)
+		consumer.CompatibilityCapabilities = normalizeStringList(consumer.CompatibilityCapabilities)
+		consumer.ExpectedGeneration = strings.TrimSpace(consumer.ExpectedGeneration)
+		if consumer.ConsumerID == "" || consumer.Component == "" || consumer.NodeID == "" ||
+			consumer.FailureDomain == "" || consumer.Cohort == "" || consumer.ExpectedProtocolVersion == "" ||
+			consumer.ExpectedSchemaVersion == "" || consumer.HeartbeatFreshnessSeconds <= 0 ||
+			consumer.HeartbeatDeadline.IsZero() || consumer.ConvergenceDeadline.IsZero() {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		if consumer.ArtifactKind != in.ArtifactKind || consumer.ScopeKey != in.ScopeKey || consumer.ExpectedGeneration != in.ExpectedGeneration {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		if _, exists := consumerIDs[consumer.ConsumerID]; exists {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		consumerIDs[consumer.ConsumerID] = struct{}{}
+		if !platformStringListContains(consumer.AcceptedProtocolVersions, consumer.ExpectedProtocolVersion) ||
+			!platformStringListContains(consumer.AcceptedSchemaVersions, consumer.ExpectedSchemaVersion) {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		consumer.HeartbeatDeadline = consumer.HeartbeatDeadline.UTC()
+		consumer.ConvergenceDeadline = consumer.ConvergenceDeadline.UTC()
+		if consumer.ConvergenceDeadline.Before(consumer.HeartbeatDeadline) ||
+			consumer.HeartbeatDeadline.After(in.HeartbeatDeadline) ||
+			consumer.ConvergenceDeadline.After(in.ConvergenceDeadline) {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		if consumer.Required {
+			required++
+		} else {
+			optional++
+		}
+		consumers = append(consumers, consumer)
+	}
+	if in.RequiredCardinality != required || in.OptionalCardinality != optional || (!in.RequiresConsumers && len(consumers) > 0) {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+	sort.Slice(consumers, func(i, j int) bool {
+		return consumers[i].ConsumerID < consumers[j].ConsumerID
+	})
+	in.Consumers = consumers
+	if in.CreatedAt.IsZero() {
+		in.CreatedAt = now
+	} else {
+		in.CreatedAt = in.CreatedAt.UTC()
+	}
+	if in.UpdatedAt.IsZero() {
+		in.UpdatedAt = in.CreatedAt
+	} else {
+		in.UpdatedAt = in.UpdatedAt.UTC()
+	}
+	if in.UpdatedAt.Before(in.CreatedAt) {
+		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+	}
+	return in, nil
+}
+
+func normalizePlatformExpectedConsumerSetFilter(filter model.PlatformExpectedConsumerSetFilter) (model.PlatformExpectedConsumerSetFilter, error) {
+	filter.ReleaseSetID = strings.TrimSpace(filter.ReleaseSetID)
+	filter.ArtifactReleaseID = strings.TrimSpace(filter.ArtifactReleaseID)
+	if strings.TrimSpace(filter.ArtifactKind) != "" {
+		filter.ArtifactKind = NormalizePlatformArtifactKind(filter.ArtifactKind)
+		if filter.ArtifactKind == "" {
+			return model.PlatformExpectedConsumerSetFilter{}, ErrInvalidInput
+		}
+	}
+	filter.ScopeKey = strings.TrimSpace(strings.ToLower(filter.ScopeKey))
+	if filter.Limit < 0 {
+		return model.PlatformExpectedConsumerSetFilter{}, ErrInvalidInput
+	}
+	return filter, nil
+}
+
+func clonePlatformExpectedConsumerSet(in model.PlatformExpectedConsumerSet) model.PlatformExpectedConsumerSet {
+	out := in
+	out.Consumers = make([]model.PlatformExpectedConsumer, len(in.Consumers))
+	copy(out.Consumers, in.Consumers)
+	for index := range out.Consumers {
+		out.Consumers[index].AcceptedProtocolVersions = append([]string(nil), in.Consumers[index].AcceptedProtocolVersions...)
+		out.Consumers[index].AcceptedSchemaVersions = append([]string(nil), in.Consumers[index].AcceptedSchemaVersions...)
+		out.Consumers[index].CompatibilityCapabilities = append([]string(nil), in.Consumers[index].CompatibilityCapabilities...)
+	}
+	return out
+}
+
+func platformStringListContains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func sortPlatformExpectedConsumerSets(sets []model.PlatformExpectedConsumerSet) {
+	sort.Slice(sets, func(i, j int) bool {
+		if !sets[i].CreatedAt.Equal(sets[j].CreatedAt) {
+			return sets[i].CreatedAt.After(sets[j].CreatedAt)
+		}
+		if sets[i].Revision != sets[j].Revision {
+			return sets[i].Revision > sets[j].Revision
+		}
+		return sets[i].ID < sets[j].ID
+	})
 }
 
 func sortPlatformConsumers(consumers []model.PlatformConsumerInstance) {
