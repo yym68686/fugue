@@ -21,6 +21,7 @@ import (
 const (
 	platformComponentIdentityTokenPrefix = "fugue_pc_v1."
 	platformComponentIdentityVersion     = "v1"
+	platformComponentIdentityKeyContext  = "fugue/platform-component-identity/v1"
 
 	PlatformComponentIdentityMaxTTL      = 15 * time.Minute
 	PlatformComponentIdentityFutureSkew  = 30 * time.Second
@@ -43,8 +44,9 @@ var (
 )
 
 type PlatformComponentIdentityKeyring struct {
-	ActiveKeyID string
-	Keys        map[string]string
+	ActiveKeyID   string
+	Keys          map[string]string
+	RevokedKeyIDs map[string]struct{}
 }
 
 type PlatformComponentIdentityClaims struct {
@@ -99,6 +101,39 @@ type PlatformConsumerHeartbeatValidationPolicy struct {
 	MinNonceLen int
 }
 
+func DerivePlatformComponentIdentityKeyring(
+	activeKey string,
+	activeKeyID string,
+	previousKey string,
+	previousKeyID string,
+	revokedKeyIDs []string,
+) PlatformComponentIdentityKeyring {
+	keyring := PlatformComponentIdentityKeyring{
+		Keys:          map[string]string{},
+		RevokedKeyIDs: map[string]struct{}{},
+	}
+	for _, keyID := range revokedKeyIDs {
+		keyID = strings.TrimSpace(keyID)
+		if keyID != "" {
+			keyring.RevokedKeyIDs[keyID] = struct{}{}
+		}
+	}
+	addKey := func(keyID, key string, active bool) {
+		keyID = strings.TrimSpace(keyID)
+		key = strings.TrimSpace(key)
+		if keyID == "" || key == "" || keyring.isRevoked(keyID) {
+			return
+		}
+		keyring.Keys[keyID] = derivePlatformComponentIdentityKey(key)
+		if active {
+			keyring.ActiveKeyID = keyID
+		}
+	}
+	addKey(previousKeyID, previousKey, false)
+	addKey(activeKeyID, activeKey, true)
+	return keyring
+}
+
 func IssuePlatformComponentIdentity(
 	keyring PlatformComponentIdentityKeyring,
 	claims PlatformComponentIdentityClaims,
@@ -111,7 +146,7 @@ func IssuePlatformComponentIdentity(
 	}
 	keyID := strings.TrimSpace(keyring.ActiveKeyID)
 	secret := strings.TrimSpace(keyring.Keys[keyID])
-	if keyID == "" || secret == "" {
+	if keyID == "" || secret == "" || keyring.isRevoked(keyID) {
 		return "", ErrPlatformComponentIdentityInvalid
 	}
 	claims.Version = platformComponentIdentityVersion
@@ -156,7 +191,7 @@ func ParsePlatformComponentIdentity(
 	}
 	keyID := strings.TrimSpace(string(keyIDBytes))
 	secret := strings.TrimSpace(keyring.Keys[keyID])
-	if keyID == "" || secret == "" {
+	if keyID == "" || secret == "" || keyring.isRevoked(keyID) {
 		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
 	}
 	signingInput := platformComponentIdentityVersion + "." + parts[0] + "." + parts[1]
@@ -508,4 +543,15 @@ func signPlatformComponentIdentity(secret, signingInput string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(signingInput))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func derivePlatformComponentIdentityKey(source string) string {
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(source)))
+	_, _ = mac.Write([]byte(platformComponentIdentityKeyContext))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (keyring PlatformComponentIdentityKeyring) isRevoked(keyID string) bool {
+	_, revoked := keyring.RevokedKeyIDs[strings.TrimSpace(keyID)]
+	return revoked
 }

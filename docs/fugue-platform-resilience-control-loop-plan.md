@@ -1881,7 +1881,7 @@ DNS/edge failover 必须满足：
 
 #### Phase -1C: Evidence 四态和可信身份
 
-> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、未接线的短期 component identity/heartbeat 防重放纯验证原语，以及 optional shadow heartbeat envelope 的 OpenAPI/Store 持久化已实现并有单元测试；尚未接入 release prepare、真实 heartbeat、生产凭证签发、handler enforcement 或 release guard。
+> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、短期 component identity/heartbeat 防重放纯验证原语、独立 fail-closed component Bearer middleware、从现有 bundle key 域隔离派生并支持重叠轮换/撤销的生产 keyring，以及 optional shadow heartbeat envelope 的 OpenAPI/Store 持久化已实现并有单元测试；middleware 尚无生产路由，尚未接入 release prepare、真实 heartbeat、凭证签发、handler enforcement 或 release guard。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。

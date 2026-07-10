@@ -48,6 +48,65 @@ func TestPlatformComponentIdentitySupportsSigningKeyRotation(t *testing.T) {
 	}
 }
 
+func TestDerivePlatformComponentIdentityKeyringSupportsRotationAndRevocation(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	keyring := DerivePlatformComponentIdentityKeyring(
+		"active-bundle-secret",
+		"bundle-key-2",
+		"previous-bundle-secret",
+		"bundle-key-1",
+		nil,
+	)
+	if keyring.ActiveKeyID != "bundle-key-2" ||
+		keyring.Keys["bundle-key-2"] == "active-bundle-secret" ||
+		keyring.Keys["bundle-key-1"] == "previous-bundle-secret" {
+		t.Fatalf("component keyring must use domain-separated derived keys: %+v", keyring)
+	}
+
+	oldToken, err := IssuePlatformComponentIdentity(PlatformComponentIdentityKeyring{
+		ActiveKeyID: "bundle-key-1",
+		Keys: map[string]string{
+			"bundle-key-1": keyring.Keys["bundle-key-1"],
+		},
+	}, platformComponentTestClaims(), now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("issue token with previous key: %v", err)
+	}
+	if _, err := ParsePlatformComponentIdentity(keyring, oldToken, now.Add(time.Minute)); err != nil {
+		t.Fatalf("rotation overlap must accept the previous derived key: %v", err)
+	}
+
+	revoked := DerivePlatformComponentIdentityKeyring(
+		"active-bundle-secret",
+		"bundle-key-2",
+		"previous-bundle-secret",
+		"bundle-key-1",
+		[]string{"bundle-key-1"},
+	)
+	if _, ok := revoked.Keys["bundle-key-1"]; ok {
+		t.Fatal("revoked key must not remain in the component keyring")
+	}
+	if _, err := ParsePlatformComponentIdentity(revoked, oldToken, now.Add(time.Minute)); !errors.Is(err, ErrPlatformComponentIdentityInvalid) {
+		t.Fatalf("revoked component signing key must reject in-flight tokens, got %v", err)
+	}
+
+	activeRevoked := DerivePlatformComponentIdentityKeyring(
+		"active-bundle-secret",
+		"bundle-key-2",
+		"",
+		"",
+		[]string{"bundle-key-2"},
+	)
+	if activeRevoked.ActiveKeyID != "" {
+		t.Fatalf("revoked active key must disable token issuance: %+v", activeRevoked)
+	}
+	if _, err := IssuePlatformComponentIdentity(activeRevoked, platformComponentTestClaims(), now, time.Minute); !errors.Is(err, ErrPlatformComponentIdentityInvalid) {
+		t.Fatalf("revoked active key must fail issuance closed, got %v", err)
+	}
+}
+
 func TestPlatformComponentIdentityRejectsExpiredAndTamperedTokens(t *testing.T) {
 	t.Parallel()
 
