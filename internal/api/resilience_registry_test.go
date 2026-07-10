@@ -59,8 +59,8 @@ func TestPlatformStateConsumerContractsCoverDataPlaneConsumers(t *testing.T) {
 	t.Parallel()
 
 	contracts := platformStateConsumerContracts()
-	if len(contracts) != 5 {
-		t.Fatalf("expected five platform-state consumer contracts, got %+v", contracts)
+	if len(contracts) != 6 {
+		t.Fatalf("expected six platform-state consumer contracts, got %+v", contracts)
 	}
 	byComponent := map[string]model.PlatformConsumerContractDefinition{}
 	for _, contract := range contracts {
@@ -69,7 +69,7 @@ func TestPlatformStateConsumerContractsCoverDataPlaneConsumers(t *testing.T) {
 		}
 		byComponent[contract.Component] = contract
 	}
-	for _, component := range []string{"node-updater", "edge-worker", "dns-server", "caddy-edge-front", "runtime-agent"} {
+	for _, component := range []string{"node-updater", "node-guardian", "edge-worker", "dns-server", "caddy-edge-front", "runtime-agent"} {
 		if _, ok := byComponent[component]; !ok {
 			t.Fatalf("missing platform-state consumer contract for %s", component)
 		}

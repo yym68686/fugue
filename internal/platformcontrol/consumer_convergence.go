@@ -67,12 +67,12 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 				}
 				consumers = append(consumers, expectedDNSConsumer(node, kind, scopeKey, generation, now))
 			}
-		case model.PlatformConsumerComponentNodeGuardian:
+		case model.PlatformConsumerComponentNodeUpdater, model.PlatformConsumerComponentNodeGuardian:
 			for _, updater := range req.Topology.NodeUpdaters {
 				if !expectedNodeUpdaterMatchesScope(updater, req.Scope) {
 					continue
 				}
-				consumers = append(consumers, expectedNodeGuardianConsumer(updater, kind, scopeKey, generation, now))
+				consumers = append(consumers, expectedNodeConsumer(component, updater, kind, scopeKey, generation, now))
 			}
 		case model.PlatformConsumerComponentRuntimeAgent:
 			for _, runtimeObj := range req.Topology.Runtimes {
@@ -270,7 +270,9 @@ func expectedComponentsForArtifact(kind string) []string {
 		return []string{model.PlatformConsumerComponentDNSServer}
 	case model.PlatformArtifactKindCaddyRouteConfig:
 		return []string{model.PlatformConsumerComponentCaddyEdgeFront}
-	case model.PlatformArtifactKindDiscoveryBundle, model.PlatformArtifactKindNodeDesiredState, model.PlatformArtifactKindNodeGuardianPolicy:
+	case model.PlatformArtifactKindDiscoveryBundle, model.PlatformArtifactKindNodeDesiredState:
+		return []string{model.PlatformConsumerComponentNodeUpdater}
+	case model.PlatformArtifactKindNodeGuardianPolicy:
 		return []string{model.PlatformConsumerComponentNodeGuardian}
 	case model.PlatformArtifactKindRuntimePlacementPlan, model.PlatformArtifactKindRuntimeContinuityPlan:
 		return []string{model.PlatformConsumerComponentRuntimeAgent}
@@ -319,12 +321,12 @@ func expectedDNSConsumer(node model.DNSNode, artifactKind, scopeKey, generation 
 	return expectedConsumer(model.PlatformConsumerComponentDNSServer, nodeID, artifactKind, scopeKey, generation, failureDomain, cohort, true, 90*time.Second, now)
 }
 
-func expectedNodeGuardianConsumer(updater model.NodeUpdater, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
+func expectedNodeConsumer(component string, updater model.NodeUpdater, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
 	nodeID := firstNonEmptyExpected(strings.TrimSpace(updater.ClusterNodeName), strings.TrimSpace(updater.MachineID), strings.TrimSpace(updater.ID))
 	failureDomain := topologyFailureDomain(updater.Labels, nodeID)
-	cohort := firstNonEmptyExpected(labelValue(updater.Labels, "fugue.io/cohort"), "node-guardian")
+	cohort := firstNonEmptyExpected(labelValue(updater.Labels, "fugue.io/cohort"), component)
 	required := strings.TrimSpace(strings.ToLower(updater.Status)) != model.NodeUpdaterStatusRevoked
-	return expectedConsumer(model.PlatformConsumerComponentNodeGuardian, nodeID, artifactKind, scopeKey, generation, failureDomain, cohort, required, 2*time.Minute, now)
+	return expectedConsumer(component, nodeID, artifactKind, scopeKey, generation, failureDomain, cohort, required, 2*time.Minute, now)
 }
 
 func expectedRuntimeConsumer(runtimeObj model.Runtime, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {

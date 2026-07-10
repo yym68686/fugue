@@ -129,6 +129,9 @@ func TestEvaluateConsumerConvergenceRejectsDriftIdentityAndExpiredLKG(t *testing
 			ID: "updater-1", ClusterNodeName: "node-1", Status: model.NodeUpdaterStatusActive,
 		}}},
 	})
+	if len(set.Consumers) != 1 || set.Consumers[0].Component != model.PlatformConsumerComponentNodeUpdater {
+		t.Fatalf("node desired state must target the node-updater identity, got %+v", set.Consumers)
+	}
 	bad := passingConsumer(set.Consumers[0], now)
 	bad.Component = model.PlatformConsumerComponentRuntimeAgent
 	bad.ActualGeneration = "node-gen-3"
@@ -136,6 +139,24 @@ func TestEvaluateConsumerConvergenceRejectsDriftIdentityAndExpiredLKG(t *testing
 	status := EvaluateConsumerConvergence(set, []model.PlatformConsumerInstance{bad}, now)
 	if status.Pass || status.State != model.InvariantEvidenceStateFail {
 		t.Fatalf("identity mismatch, generation drift, and expired LKG must fail: %+v", status)
+	}
+}
+
+func TestNodeGuardianPolicyUsesDedicatedGuardianIdentity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 10, 3, 30, 0, 0, time.UTC)
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{
+		ArtifactKind: model.PlatformArtifactKindNodeGuardianPolicy,
+		ScopeKey:     "global",
+		Generation:   "guardian-gen-2",
+		PreparedAt:   now,
+		Topology: ExpectedConsumerTopology{NodeUpdaters: []model.NodeUpdater{{
+			ID: "updater-1", ClusterNodeName: "node-1", Status: model.NodeUpdaterStatusActive,
+		}}},
+	})
+	if len(set.Consumers) != 1 || set.Consumers[0].Component != model.PlatformConsumerComponentNodeGuardian {
+		t.Fatalf("guardian policy must target the dedicated guardian identity, got %+v", set.Consumers)
 	}
 }
 

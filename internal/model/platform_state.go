@@ -49,6 +49,7 @@ const (
 	PlatformConsumerComponentEdgeWorker     = "edge-worker"
 	PlatformConsumerComponentDNSServer      = "dns-server"
 	PlatformConsumerComponentCaddyEdgeFront = "caddy-edge-front"
+	PlatformConsumerComponentNodeUpdater    = "node-updater"
 	PlatformConsumerComponentNodeGuardian   = "node-guardian"
 	PlatformConsumerComponentRuntimeAgent   = "runtime-agent"
 

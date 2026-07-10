@@ -113,10 +113,15 @@ func TestConsumerAndLKGInventoriesCoverPlatformArtifactKinds(t *testing.T) {
 	t.Parallel()
 
 	consumers := ConsumerContracts()
-	if len(consumers) != 5 {
-		t.Fatalf("expected five platform consumer contracts, got %d", len(consumers))
+	if len(consumers) != 6 {
+		t.Fatalf("expected six platform consumer contracts, got %d", len(consumers))
 	}
+	components := map[string]struct{}{}
 	for _, contract := range consumers {
+		if _, exists := components[contract.Component]; exists {
+			t.Fatalf("duplicate platform consumer component %q", contract.Component)
+		}
+		components[contract.Component] = struct{}{}
 		if !contract.Required ||
 			!contract.LoadLKGFirst ||
 			!contract.AtomicApply ||
