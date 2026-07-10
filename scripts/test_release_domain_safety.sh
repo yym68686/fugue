@@ -29,6 +29,76 @@ bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
 
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  kubectl_calls=0
+  container_patch_for_worker() { return 71; }
+  kubectl_cmd() { kubectl_calls=$((kubectl_calls + 1)); }
+
+  if patch_inactive_worker test-worker; then
+    fail "inactive worker patch must propagate render failures"
+  fi
+  assert_eq "${kubectl_calls}" "0" "render failure must stop before kubectl patch"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  pod_names_for_daemonset() { printf 'worker-pod\n'; }
+  kubectl_cmd() { return 72; }
+
+  if delete_worker_pods test-worker; then
+    fail "inactive worker replacement must propagate kubectl delete failures"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  kubectl_cmd() {
+    [[ "$*" == *"get ds/test-worker"* ]] && return 1
+    return 73
+  }
+
+  if wait_daemonset_ready test-worker; then
+    fail "daemonset readiness must propagate rollout failures"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE=/var/lib/fugue/edge-blue-green/active-slot
+  exec_calls=0
+  ready_pods_for_daemonset() { printf 'front-pod-a\nfront-pod-b\n'; }
+  kubectl_cmd() {
+    exec_calls=$((exec_calls + 1))
+    return 74
+  }
+
+  if write_front_active_slot test-front a; then
+    fail "front slot write must propagate the first pod exec failure"
+  fi
+  assert_eq "${exec_calls}" "1" "front slot write must stop after the first exec failure"
+)
+
 if grep -q 'warning: post-deploy release guard' "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
   fail "post-deploy release guard must be a hard gate, not warning-only"
 fi

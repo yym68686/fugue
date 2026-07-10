@@ -6,8 +6,12 @@ log() {
   printf '[fugue-public-data-plane] %s\n' "$*"
 }
 
-fail() {
+error() {
   printf '[fugue-public-data-plane] ERROR: %s\n' "$*" >&2
+}
+
+fail() {
+  error "$*"
   exit 1
 }
 
@@ -815,14 +819,16 @@ patch_inactive_worker() {
   local daemonset_name="$1"
   local patch
 
-  patch="$(container_patch_for_worker "${daemonset_name}")"
+  if ! patch="$(container_patch_for_worker "${daemonset_name}")"; then
+    return 1
+  fi
   log "patching inactive worker ${daemonset_name} template"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     printf '%s\n' "${patch}"
     return 0
   fi
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null
-  wait_daemonset_observed "${daemonset_name}"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null || return $?
+  wait_daemonset_observed "${daemonset_name}" || return $?
 }
 
 delete_worker_pods() {
@@ -843,7 +849,7 @@ delete_worker_pods() {
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     return 0
   fi
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pods[@]}" --wait=true --timeout="${FUGUE_PUBLIC_DATA_PLANE_POD_DELETE_TIMEOUT:-120s}" >/dev/null
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pods[@]}" --wait=true --timeout="${FUGUE_PUBLIC_DATA_PLANE_POD_DELETE_TIMEOUT:-120s}" >/dev/null || return $?
 }
 
 wait_daemonset_ready() {
@@ -866,8 +872,8 @@ wait_daemonset_ready() {
   strategy="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
   strategy="${strategy:-RollingUpdate}"
   if [[ "${strategy}" == "RollingUpdate" ]]; then
-    kubectl_cmd -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${timeout}"
-    return
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${timeout}" || return $?
+    return 0
   fi
 
   timeout_seconds="$(duration_to_seconds "${timeout}")"
@@ -887,7 +893,8 @@ wait_daemonset_ready() {
     fi
 
     if (( $(date +%s) - started_at >= timeout_seconds )); then
-      fail "daemonset ${daemonset_name} not ready: generation=${generation} observed=${observed_generation} desired=${desired} ready=${ready} unavailable=${unavailable}"
+      error "daemonset ${daemonset_name} not ready: generation=${generation} observed=${observed_generation} desired=${desired} ready=${ready} unavailable=${unavailable}"
+      return 1
     fi
     sleep 2
   done
@@ -1035,7 +1042,8 @@ write_front_active_slot() {
     pods+=("${pod}")
   done < <(ready_pods_for_daemonset "${front_daemonset}")
   if (( ${#pods[@]} == 0 )); then
-    fail "front daemonset ${front_daemonset} has no ready pods"
+    error "front daemonset ${front_daemonset} has no ready pods"
+    return 1
   fi
   log "switching ${front_daemonset} active slot to ${slot} on ${#pods[@]} node(s)"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
@@ -1044,7 +1052,7 @@ write_front_active_slot() {
   for pod in "${pods[@]}"; do
     kubectl_cmd -n "${FUGUE_NAMESPACE}" exec "${pod}" -c edge-front -- \
       /bin/sh -ec 'slot="$1"; file="$2"; mkdir -p "$(dirname "$file")"; tmp="${file}.tmp"; printf "%s\n" "$slot" >"$tmp"; mv "$tmp" "$file"' \
-      sh "${slot}" "${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE}" >/dev/null
+      sh "${slot}" "${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE}" >/dev/null || return $?
   done
 }
 
@@ -1302,7 +1310,10 @@ check_public_smoke_on_front_nodes() {
     [[ -n "${url}" ]] || continue
     host="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname or "")' "${url}")"
     path="$(python3 -c 'from urllib.parse import urlsplit; import sys; p=urlsplit(sys.argv[1]); path=p.path or "/"; print(path + (("?" + p.query) if p.query else ""))' "${url}")"
-    [[ -n "$(trim_field "${host}")" ]] || fail "front smoke URL must include a hostname: ${url}"
+    if [[ -z "$(trim_field "${host}")" ]]; then
+      error "front smoke URL must include a hostname: ${url}"
+      return 1
+    fi
     while IFS= read -r host_ip; do
       host_ip="$(trim_field "${host_ip}")"
       [[ -n "${host_ip}" ]] || continue
