@@ -182,26 +182,37 @@ type PlatformReleaseMessage struct {
 }
 
 type PlatformConsumerInstance struct {
-	ID                        string    `json:"id"`
-	ConsumerID                string    `json:"consumer_id"`
-	Component                 string    `json:"component,omitempty"`
-	NodeID                    string    `json:"node_id,omitempty"`
-	ArtifactKind              string    `json:"artifact_kind"`
-	ScopeKey                  string    `json:"scope_key"`
-	SupportedKinds            []string  `json:"supported_artifact_kinds,omitempty"`
-	ProtocolVersion           string    `json:"protocol_version,omitempty"`
-	SchemaVersion             string    `json:"schema_version,omitempty"`
-	CompatibilityCapabilities []string  `json:"compatibility_capabilities,omitempty"`
-	DesiredGeneration         string    `json:"desired_generation,omitempty"`
-	ActualGeneration          string    `json:"actual_generation,omitempty"`
-	LKGGeneration             string    `json:"lkg_generation,omitempty"`
-	ApplyStatus               string    `json:"apply_status,omitempty"`
-	ProbeStatus               string    `json:"probe_status,omitempty"`
-	ServingLKG                bool      `json:"serving_lkg,omitempty"`
-	LKGExpired                bool      `json:"lkg_expired,omitempty"`
-	LastError                 string    `json:"last_error,omitempty"`
-	LastHeartbeatAt           time.Time `json:"last_heartbeat_at"`
-	UpdatedAt                 time.Time `json:"updated_at"`
+	ID                        string     `json:"id"`
+	ConsumerID                string     `json:"consumer_id"`
+	CredentialID              string     `json:"credential_id,omitempty"`
+	TokenID                   string     `json:"token_id,omitempty"`
+	Component                 string     `json:"component,omitempty"`
+	NodeID                    string     `json:"node_id,omitempty"`
+	ArtifactKind              string     `json:"artifact_kind"`
+	ScopeKey                  string     `json:"scope_key"`
+	ReleaseSetID              string     `json:"release_set_id,omitempty"`
+	ExpectedConsumerSetID     string     `json:"expected_consumer_set_id,omitempty"`
+	FencingToken              int64      `json:"fencing_token,omitempty"`
+	SupportedKinds            []string   `json:"supported_artifact_kinds,omitempty"`
+	ProtocolVersion           string     `json:"protocol_version,omitempty"`
+	SchemaVersion             string     `json:"schema_version,omitempty"`
+	CompatibilityCapabilities []string   `json:"compatibility_capabilities,omitempty"`
+	Sequence                  int64      `json:"sequence,omitempty"`
+	IssuedAt                  *time.Time `json:"issued_at,omitempty"`
+	Nonce                     string     `json:"nonce,omitempty"`
+	GenerationSequence        int64      `json:"generation_sequence,omitempty"`
+	EvidenceHash              string     `json:"evidence_hash,omitempty"`
+	IdentityVerified          bool       `json:"identity_verified"`
+	DesiredGeneration         string     `json:"desired_generation,omitempty"`
+	ActualGeneration          string     `json:"actual_generation,omitempty"`
+	LKGGeneration             string     `json:"lkg_generation,omitempty"`
+	ApplyStatus               string     `json:"apply_status,omitempty"`
+	ProbeStatus               string     `json:"probe_status,omitempty"`
+	ServingLKG                bool       `json:"serving_lkg,omitempty"`
+	LKGExpired                bool       `json:"lkg_expired,omitempty"`
+	LastError                 string     `json:"last_error,omitempty"`
+	LastHeartbeatAt           time.Time  `json:"last_heartbeat_at"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 }
 
 type PlatformExpectedConsumer struct {
@@ -368,20 +379,31 @@ type PlatformArtifactVerifyLKGRequest struct {
 }
 
 type PlatformConsumerHeartbeatRequest struct {
-	ConsumerID        string   `json:"consumer_id"`
-	Component         string   `json:"component,omitempty"`
-	NodeID            string   `json:"node_id,omitempty"`
-	ArtifactKind      string   `json:"artifact_kind"`
-	ScopeKey          string   `json:"scope_key,omitempty"`
-	SupportedKinds    []string `json:"supported_artifact_kinds,omitempty"`
-	DesiredGeneration string   `json:"desired_generation,omitempty"`
-	ActualGeneration  string   `json:"actual_generation,omitempty"`
-	LKGGeneration     string   `json:"lkg_generation,omitempty"`
-	ApplyStatus       string   `json:"apply_status,omitempty"`
-	ProbeStatus       string   `json:"probe_status,omitempty"`
-	ServingLKG        bool     `json:"serving_lkg,omitempty"`
-	LKGExpired        bool     `json:"lkg_expired,omitempty"`
-	LastError         string   `json:"last_error,omitempty"`
+	ConsumerID                string     `json:"consumer_id"`
+	Component                 string     `json:"component,omitempty"`
+	NodeID                    string     `json:"node_id,omitempty"`
+	ArtifactKind              string     `json:"artifact_kind"`
+	ScopeKey                  string     `json:"scope_key,omitempty"`
+	ReleaseSetID              string     `json:"release_set_id,omitempty"`
+	ExpectedConsumerSetID     string     `json:"expected_consumer_set_id,omitempty"`
+	FencingToken              int64      `json:"fencing_token,omitempty"`
+	SupportedKinds            []string   `json:"supported_artifact_kinds,omitempty"`
+	ProtocolVersion           string     `json:"protocol_version,omitempty"`
+	SchemaVersion             string     `json:"schema_version,omitempty"`
+	CompatibilityCapabilities []string   `json:"compatibility_capabilities,omitempty"`
+	Sequence                  int64      `json:"sequence,omitempty"`
+	IssuedAt                  *time.Time `json:"issued_at,omitempty"`
+	Nonce                     string     `json:"nonce,omitempty"`
+	GenerationSequence        int64      `json:"generation_sequence,omitempty"`
+	EvidenceHash              string     `json:"evidence_hash,omitempty"`
+	DesiredGeneration         string     `json:"desired_generation,omitempty"`
+	ActualGeneration          string     `json:"actual_generation,omitempty"`
+	LKGGeneration             string     `json:"lkg_generation,omitempty"`
+	ApplyStatus               string     `json:"apply_status,omitempty"`
+	ProbeStatus               string     `json:"probe_status,omitempty"`
+	ServingLKG                bool       `json:"serving_lkg,omitempty"`
+	LKGExpired                bool       `json:"lkg_expired,omitempty"`
+	LastError                 string     `json:"last_error,omitempty"`
 }
 
 type PlatformArtifactListResponse struct {

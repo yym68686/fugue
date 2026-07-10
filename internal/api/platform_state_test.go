@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,18 +107,33 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 		t.Fatalf("expected active artifact and LKG in pull response, got %+v", pulled)
 	}
 
+	heartbeatIssuedAt := time.Now().UTC().Add(-time.Second).Truncate(time.Millisecond)
 	heartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/heartbeat", platformAdminKey, model.PlatformConsumerHeartbeatRequest{
-		ConsumerID:        "edge-worker-api-test",
-		Component:         "edge-worker",
-		ArtifactKind:      model.PlatformArtifactKindEdgeRankingPolicy,
-		ScopeKey:          "global",
-		DesiredGeneration: created.Artifact.Generation,
-		ActualGeneration:  created.Artifact.Generation,
-		ApplyStatus:       "applied",
-		ProbeStatus:       "passed",
+		ConsumerID:                "edge-worker-api-test",
+		Component:                 "edge-worker",
+		ArtifactKind:              model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:                  "global",
+		ReleaseSetID:              "release-set-api-test",
+		ExpectedConsumerSetID:     "expected-set-api-test",
+		FencingToken:              9,
+		ProtocolVersion:           model.PlatformConsumerProtocolVersionV1,
+		SchemaVersion:             model.PlatformConsumerSchemaVersionV1,
+		CompatibilityCapabilities: []string{"route-bundle-v1"},
+		Sequence:                  3,
+		IssuedAt:                  &heartbeatIssuedAt,
+		Nonce:                     "nonce-value-api-1",
+		GenerationSequence:        created.Artifact.GenerationSequence,
+		EvidenceHash:              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		DesiredGeneration:         created.Artifact.Generation,
+		ActualGeneration:          created.Artifact.Generation,
+		ApplyStatus:               "applied",
+		ProbeStatus:               "passed",
 	})
 	if heartbeat.Code != http.StatusOK {
 		t.Fatalf("expected heartbeat status %d, got %d body=%s", http.StatusOK, heartbeat.Code, heartbeat.Body.String())
+	}
+	if !strings.Contains(heartbeat.Body.String(), `"identity_verified":false`) {
+		t.Fatalf("legacy admin heartbeat must be explicitly marked unverified, body=%s", heartbeat.Body.String())
 	}
 	consumers := performJSONRequest(t, server, http.MethodGet, "/v1/admin/artifacts/"+created.Artifact.ID+"/consumers", platformAdminKey, nil)
 	if consumers.Code != http.StatusOK {
@@ -127,6 +143,19 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	mustDecodeJSON(t, consumers, &consumerResponse)
 	if len(consumerResponse.Consumers) != 1 || consumerResponse.Consumers[0].ConsumerID != "edge-worker-api-test" {
 		t.Fatalf("expected heartbeat consumer, got %+v", consumerResponse.Consumers)
+	}
+	consumer := consumerResponse.Consumers[0]
+	if consumer.ReleaseSetID != "release-set-api-test" ||
+		consumer.ExpectedConsumerSetID != "expected-set-api-test" ||
+		consumer.FencingToken != 9 ||
+		consumer.ProtocolVersion != model.PlatformConsumerProtocolVersionV1 ||
+		consumer.SchemaVersion != model.PlatformConsumerSchemaVersionV1 ||
+		consumer.Sequence != 3 ||
+		consumer.IssuedAt == nil || !consumer.IssuedAt.Equal(heartbeatIssuedAt) ||
+		consumer.GenerationSequence != created.Artifact.GenerationSequence ||
+		consumer.EvidenceHash == "" ||
+		consumer.IdentityVerified {
+		t.Fatalf("expected unverified shadow heartbeat envelope, got %+v", consumer)
 	}
 	rejectedHeartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/heartbeat", tenantKey, model.PlatformConsumerHeartbeatRequest{
 		ConsumerID:   "forged-edge-worker",

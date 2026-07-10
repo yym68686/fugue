@@ -24575,11 +24575,15 @@ components:
     PlatformConsumerInstance:
       type: object
       additionalProperties: false
-      required: [id, consumer_id, artifact_kind, scope_key, last_heartbeat_at, updated_at]
+      required: [id, consumer_id, artifact_kind, scope_key, identity_verified, last_heartbeat_at, updated_at]
       properties:
         id:
           type: string
         consumer_id:
+          type: string
+        credential_id:
+          type: string
+        token_id:
           type: string
         component:
           type: string
@@ -24589,10 +24593,43 @@ components:
           type: string
         scope_key:
           type: string
+        release_set_id:
+          type: string
+        expected_consumer_set_id:
+          type: string
+        fencing_token:
+          type: integer
+          format: int64
         supported_artifact_kinds:
           type: array
           items:
             type: string
+        protocol_version:
+          type: string
+          enum: [v1]
+        schema_version:
+          type: string
+          enum: [v1]
+        compatibility_capabilities:
+          type: array
+          items:
+            type: string
+        sequence:
+          type: integer
+          format: int64
+        issued_at:
+          type: string
+          format: date-time
+        nonce:
+          type: string
+        generation_sequence:
+          type: integer
+          format: int64
+        evidence_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        identity_verified:
+          type: boolean
         desired_generation:
           type: string
         actual_generation:
@@ -24896,10 +24933,45 @@ components:
           type: string
         scope_key:
           type: string
+        release_set_id:
+          type: string
+        expected_consumer_set_id:
+          type: string
+        fencing_token:
+          type: integer
+          format: int64
+          minimum: 1
         supported_artifact_kinds:
           type: array
           items:
             type: string
+        protocol_version:
+          type: string
+          enum: [v1]
+        schema_version:
+          type: string
+          enum: [v1]
+        compatibility_capabilities:
+          type: array
+          items:
+            type: string
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        issued_at:
+          type: string
+          format: date-time
+        nonce:
+          type: string
+          minLength: 16
+        generation_sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        evidence_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
         desired_generation:
           type: string
         actual_generation:

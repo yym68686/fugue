@@ -1448,24 +1448,40 @@ func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatReque
 		sum := sha256.Sum256([]byte(consumerID + "|" + kind + "|" + scopeKey))
 		id = "artifactconsumer_" + hex.EncodeToString(sum[:8])
 	}
+	var issuedAt *time.Time
+	if req.IssuedAt != nil && !req.IssuedAt.IsZero() {
+		value := req.IssuedAt.UTC()
+		issuedAt = &value
+	}
 	return model.PlatformConsumerInstance{
-		ID:                id,
-		ConsumerID:        consumerID,
-		Component:         strings.TrimSpace(req.Component),
-		NodeID:            strings.TrimSpace(req.NodeID),
-		ArtifactKind:      kind,
-		ScopeKey:          scopeKey,
-		SupportedKinds:    normalizeStringList(req.SupportedKinds),
-		DesiredGeneration: strings.TrimSpace(req.DesiredGeneration),
-		ActualGeneration:  strings.TrimSpace(req.ActualGeneration),
-		LKGGeneration:     strings.TrimSpace(req.LKGGeneration),
-		ApplyStatus:       strings.TrimSpace(strings.ToLower(req.ApplyStatus)),
-		ProbeStatus:       strings.TrimSpace(strings.ToLower(req.ProbeStatus)),
-		ServingLKG:        req.ServingLKG,
-		LKGExpired:        req.LKGExpired,
-		LastError:         strings.TrimSpace(req.LastError),
-		LastHeartbeatAt:   now,
-		UpdatedAt:         now,
+		ID:                        id,
+		ConsumerID:                consumerID,
+		Component:                 strings.TrimSpace(req.Component),
+		NodeID:                    strings.TrimSpace(req.NodeID),
+		ArtifactKind:              kind,
+		ScopeKey:                  scopeKey,
+		ReleaseSetID:              strings.TrimSpace(req.ReleaseSetID),
+		ExpectedConsumerSetID:     strings.TrimSpace(req.ExpectedConsumerSetID),
+		FencingToken:              req.FencingToken,
+		SupportedKinds:            normalizeStringList(req.SupportedKinds),
+		ProtocolVersion:           strings.TrimSpace(strings.ToLower(req.ProtocolVersion)),
+		SchemaVersion:             strings.TrimSpace(strings.ToLower(req.SchemaVersion)),
+		CompatibilityCapabilities: normalizeStringList(req.CompatibilityCapabilities),
+		Sequence:                  req.Sequence,
+		IssuedAt:                  issuedAt,
+		Nonce:                     strings.TrimSpace(req.Nonce),
+		GenerationSequence:        req.GenerationSequence,
+		EvidenceHash:              strings.TrimSpace(strings.ToLower(req.EvidenceHash)),
+		DesiredGeneration:         strings.TrimSpace(req.DesiredGeneration),
+		ActualGeneration:          strings.TrimSpace(req.ActualGeneration),
+		LKGGeneration:             strings.TrimSpace(req.LKGGeneration),
+		ApplyStatus:               strings.TrimSpace(strings.ToLower(req.ApplyStatus)),
+		ProbeStatus:               strings.TrimSpace(strings.ToLower(req.ProbeStatus)),
+		ServingLKG:                req.ServingLKG,
+		LKGExpired:                req.LKGExpired,
+		LastError:                 strings.TrimSpace(req.LastError),
+		LastHeartbeatAt:           now,
+		UpdatedAt:                 now,
 	}
 }
 

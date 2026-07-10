@@ -1208,19 +1208,43 @@ func (s *Store) pgUpsertPlatformConsumerHeartbeat(consumer model.PlatformConsume
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
+	compatibilityCapabilitiesJSON, err := marshalJSON(consumer.CompatibilityCapabilities)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
 	out, err := scanPlatformConsumerInstance(s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_platform_consumer_instances (
-	id, consumer_id, component, node_id, artifact_kind, scope_key, supported_kinds_json,
+	id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
+	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
+	protocol_version, schema_version, compatibility_capabilities_json,
+	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
 	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
 ) VALUES (
-	$1, $2, $3, $4, $5, $6, $7::jsonb,
-	$8, $9, $10, $11, $12,
-	$13, $14, $15, $16, $17
+	$1, $2, $3, $4, $5, $6, $7, $8,
+	$9, $10, $11, $12::jsonb,
+	$13, $14, $15::jsonb,
+	$16, $17, $18, $19, $20, $21,
+	$22, $23, $24, $25, $26,
+	$27, $28, $29, $30, $31
 ) ON CONFLICT (consumer_id, artifact_kind, scope_key) DO UPDATE SET
+	credential_id = EXCLUDED.credential_id,
+	token_id = EXCLUDED.token_id,
 	component = EXCLUDED.component,
 	node_id = EXCLUDED.node_id,
+	release_set_id = EXCLUDED.release_set_id,
+	expected_consumer_set_id = EXCLUDED.expected_consumer_set_id,
+	fencing_token = EXCLUDED.fencing_token,
 	supported_kinds_json = EXCLUDED.supported_kinds_json,
+	protocol_version = EXCLUDED.protocol_version,
+	schema_version = EXCLUDED.schema_version,
+	compatibility_capabilities_json = EXCLUDED.compatibility_capabilities_json,
+	sequence = EXCLUDED.sequence,
+	issued_at = EXCLUDED.issued_at,
+	nonce = EXCLUDED.nonce,
+	generation_sequence = EXCLUDED.generation_sequence,
+	evidence_hash = EXCLUDED.evidence_hash,
+	identity_verified = EXCLUDED.identity_verified,
 	desired_generation = EXCLUDED.desired_generation,
 	actual_generation = EXCLUDED.actual_generation,
 	lkg_generation = EXCLUDED.lkg_generation,
@@ -1231,10 +1255,16 @@ INSERT INTO fugue_platform_consumer_instances (
 	last_error = EXCLUDED.last_error,
 	last_heartbeat_at = EXCLUDED.last_heartbeat_at,
 	updated_at = EXCLUDED.updated_at
-RETURNING id, consumer_id, component, node_id, artifact_kind, scope_key, supported_kinds_json,
+RETURNING id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
+	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
+	protocol_version, schema_version, compatibility_capabilities_json,
+	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
 	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at`,
-		consumer.ID, consumer.ConsumerID, consumer.Component, consumer.NodeID, consumer.ArtifactKind, consumer.ScopeKey, supportedKindsJSON,
+		consumer.ID, consumer.ConsumerID, consumer.CredentialID, consumer.TokenID, consumer.Component, consumer.NodeID, consumer.ArtifactKind, consumer.ScopeKey,
+		consumer.ReleaseSetID, consumer.ExpectedConsumerSetID, consumer.FencingToken, supportedKindsJSON,
+		consumer.ProtocolVersion, consumer.SchemaVersion, compatibilityCapabilitiesJSON,
+		consumer.Sequence, consumer.IssuedAt, consumer.Nonce, consumer.GenerationSequence, consumer.EvidenceHash, consumer.IdentityVerified,
 		consumer.DesiredGeneration, consumer.ActualGeneration, consumer.LKGGeneration, consumer.ApplyStatus, consumer.ProbeStatus,
 		consumer.ServingLKG, consumer.LKGExpired, consumer.LastError, consumer.LastHeartbeatAt, consumer.UpdatedAt))
 	if err != nil {
@@ -1247,7 +1277,10 @@ func (s *Store) pgListPlatformConsumers(kind, scopeKey string) ([]model.Platform
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, consumer_id, component, node_id, artifact_kind, scope_key, supported_kinds_json,
+SELECT id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,
+	release_set_id, expected_consumer_set_id, fencing_token, supported_kinds_json,
+	protocol_version, schema_version, compatibility_capabilities_json,
+	sequence, issued_at, nonce, generation_sequence, evidence_hash, identity_verified,
 	desired_generation, actual_generation, lkg_generation, apply_status, probe_status,
 	serving_lkg, lkg_expired, last_error, last_heartbeat_at, updated_at
 FROM fugue_platform_consumer_instances
@@ -1504,15 +1537,30 @@ func scanPlatformExpectedConsumerSet(scanner sqlScanner) (model.PlatformExpected
 
 func scanPlatformConsumerInstance(scanner sqlScanner) (model.PlatformConsumerInstance, error) {
 	var consumer model.PlatformConsumerInstance
-	var supportedRaw []byte
+	var supportedRaw, compatibilityCapabilitiesRaw []byte
+	var issuedAt sql.NullTime
 	if err := scanner.Scan(
 		&consumer.ID,
 		&consumer.ConsumerID,
+		&consumer.CredentialID,
+		&consumer.TokenID,
 		&consumer.Component,
 		&consumer.NodeID,
 		&consumer.ArtifactKind,
 		&consumer.ScopeKey,
+		&consumer.ReleaseSetID,
+		&consumer.ExpectedConsumerSetID,
+		&consumer.FencingToken,
 		&supportedRaw,
+		&consumer.ProtocolVersion,
+		&consumer.SchemaVersion,
+		&compatibilityCapabilitiesRaw,
+		&consumer.Sequence,
+		&issuedAt,
+		&consumer.Nonce,
+		&consumer.GenerationSequence,
+		&consumer.EvidenceHash,
+		&consumer.IdentityVerified,
 		&consumer.DesiredGeneration,
 		&consumer.ActualGeneration,
 		&consumer.LKGGeneration,
@@ -1531,6 +1579,15 @@ func scanPlatformConsumerInstance(scanner sqlScanner) (model.PlatformConsumerIns
 		return model.PlatformConsumerInstance{}, err
 	}
 	consumer.SupportedKinds = supported
+	compatibilityCapabilities, err := decodeJSONValue[[]string](compatibilityCapabilitiesRaw)
+	if err != nil {
+		return model.PlatformConsumerInstance{}, err
+	}
+	consumer.CompatibilityCapabilities = compatibilityCapabilities
+	if issuedAt.Valid {
+		value := issuedAt.Time.UTC()
+		consumer.IssuedAt = &value
+	}
 	return consumer, nil
 }
 

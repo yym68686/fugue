@@ -107,22 +107,45 @@ func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 	if !found || active.ID != second.ID || activeRelease.ID != release.ID {
 		t.Fatalf("expected second active artifact, found=%t artifact=%+v release=%+v", found, active, activeRelease)
 	}
+	heartbeatIssuedAt := time.Now().UTC().Add(-time.Second).Truncate(time.Millisecond)
 	consumer, err := s.UpsertPlatformConsumerHeartbeat(model.PlatformConsumerHeartbeatRequest{
-		ConsumerID:        "edge-worker-1",
-		Component:         "edge-worker",
-		ArtifactKind:      model.PlatformArtifactKindEdgeRankingPolicy,
-		ScopeKey:          "global",
-		DesiredGeneration: second.Generation,
-		ActualGeneration:  first.Generation,
-		LKGGeneration:     second.Generation,
-		ApplyStatus:       "drifted",
-		ProbeStatus:       "unknown",
+		ConsumerID:                "edge-worker-1",
+		Component:                 "edge-worker",
+		ArtifactKind:              model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:                  "global",
+		ReleaseSetID:              "release-set-1",
+		ExpectedConsumerSetID:     "expected-set-1",
+		FencingToken:              7,
+		ProtocolVersion:           model.PlatformConsumerProtocolVersionV1,
+		SchemaVersion:             model.PlatformConsumerSchemaVersionV1,
+		CompatibilityCapabilities: []string{"route-bundle-v1"},
+		Sequence:                  11,
+		IssuedAt:                  &heartbeatIssuedAt,
+		Nonce:                     "nonce-value-0001",
+		GenerationSequence:        second.GenerationSequence,
+		EvidenceHash:              "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		DesiredGeneration:         second.Generation,
+		ActualGeneration:          first.Generation,
+		LKGGeneration:             second.Generation,
+		ApplyStatus:               "drifted",
+		ProbeStatus:               "unknown",
 	})
 	if err != nil {
 		t.Fatalf("upsert consumer heartbeat: %v", err)
 	}
 	if consumer.DesiredGeneration != second.Generation || consumer.ActualGeneration != first.Generation {
 		t.Fatalf("unexpected consumer generation state: %+v", consumer)
+	}
+	if consumer.ReleaseSetID != "release-set-1" ||
+		consumer.ExpectedConsumerSetID != "expected-set-1" ||
+		consumer.FencingToken != 7 ||
+		consumer.ProtocolVersion != model.PlatformConsumerProtocolVersionV1 ||
+		consumer.Sequence != 11 ||
+		consumer.IssuedAt == nil || !consumer.IssuedAt.Equal(heartbeatIssuedAt) ||
+		consumer.GenerationSequence != second.GenerationSequence ||
+		consumer.EvidenceHash == "" ||
+		consumer.IdentityVerified {
+		t.Fatalf("unexpected shadow heartbeat envelope state: %+v", consumer)
 	}
 	consumers, err := s.ListPlatformConsumers(model.PlatformArtifactKindEdgeRankingPolicy, "global")
 	if err != nil {

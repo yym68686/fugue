@@ -171,6 +171,31 @@ func TestPostgresSchemaIncludesExpectedConsumerSetPersistence(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaIncludesPlatformConsumerHeartbeatEnvelope(t *testing.T) {
+	t.Parallel()
+
+	schema := strings.Join(postgresSchemaStatements, "\n")
+	for _, required := range []string{
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS credential_id",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS release_set_id",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS expected_consumer_set_id",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS fencing_token",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS protocol_version",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS schema_version",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS sequence",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS issued_at",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS nonce",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS generation_sequence",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS evidence_hash",
+		"ALTER TABLE fugue_platform_consumer_instances ADD COLUMN IF NOT EXISTS identity_verified",
+		"idx_fugue_platform_consumers_release_set",
+	} {
+		if !strings.Contains(schema, required) {
+			t.Fatalf("postgres schema is missing %s", required)
+		}
+	}
+}
+
 func TestPostgresSchemaAppliesToLiveTestDatabase(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
 	if databaseURL == "" {
