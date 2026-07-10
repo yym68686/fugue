@@ -1,11 +1,27 @@
 package api
 
 import (
+	"sort"
 	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 )
+
+func cloneBundleAuthKeyring(keyring bundleauth.Keyring) bundleauth.Keyring {
+	revokedKeyIDs := make([]string, 0, len(keyring.RevokedKeyIDs))
+	for keyID := range keyring.RevokedKeyIDs {
+		revokedKeyIDs = append(revokedKeyIDs, keyID)
+	}
+	sort.Strings(revokedKeyIDs)
+	return bundleauth.NewKeyring(
+		keyring.PrimaryKey,
+		keyring.PrimaryKeyID,
+		keyring.PreviousKey,
+		keyring.PreviousKeyID,
+		revokedKeyIDs,
+	)
+}
 
 func (s *Server) bundleKeyring() bundleauth.Keyring {
 	if s == nil {

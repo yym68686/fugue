@@ -3,6 +3,7 @@ package api
 import (
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/observability"
 )
 
@@ -50,6 +51,7 @@ type ServerConfig struct {
 	BundleSigningPreviousKey         string
 	BundleSigningPreviousKeyID       string
 	BundleRevokedKeyIDs              []string
+	HeartbeatAuditKeyring            bundleauth.Keyring
 	BundleValidFor                   time.Duration
 	ImportWorkDir                    string
 	Observability                    observability.Config

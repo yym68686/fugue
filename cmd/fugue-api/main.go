@@ -71,6 +71,7 @@ func main() {
 		BundleSigningPreviousKey:         cfg.BundleSigningPreviousKey,
 		BundleSigningPreviousKeyID:       cfg.BundleSigningPreviousKeyID,
 		BundleRevokedKeyIDs:              cfg.BundleRevokedKeyIDs,
+		HeartbeatAuditKeyring:            platformConsumerHeartbeatAuditKeyringFromEnv(),
 		BundleValidFor:                   cfg.BundleValidFor,
 		ImportWorkDir:                    cfg.ImportWorkDir,
 		Observability:                    cfg.Observability,

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/bundleauth"
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -77,6 +78,7 @@ type Server struct {
 	bundleSigningPreviousKey         string
 	bundleSigningPreviousKeyID       string
 	bundleRevokedKeyIDs              []string
+	heartbeatAuditKeyring            bundleauth.Keyring
 	bundleValidFor                   time.Duration
 	observabilityConfig              observability.Config
 	importer                         *sourceimport.Importer
@@ -195,6 +197,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		bundleSigningPreviousKey:         strings.TrimSpace(cfg.BundleSigningPreviousKey),
 		bundleSigningPreviousKeyID:       strings.TrimSpace(cfg.BundleSigningPreviousKeyID),
 		bundleRevokedKeyIDs:              append([]string(nil), cfg.BundleRevokedKeyIDs...),
+		heartbeatAuditKeyring:            cloneBundleAuthKeyring(cfg.HeartbeatAuditKeyring),
 		bundleValidFor:                   cfg.BundleValidFor,
 		observabilityConfig:              cfg.Observability.Normalize(),
 		importer:                         sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
