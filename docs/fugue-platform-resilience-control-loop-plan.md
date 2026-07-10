@@ -1918,7 +1918,7 @@ DNS/edge failover 必须满足：
 - [ ] component identity verifier key 支持当前/上一把 key 重叠验证和显式 revoked key id，并完成线上轮换演练。
   - [x] verifier/issuer 支持当前 key、上一把 key 重叠验证和显式 revoked key id。
   - [ ] 使用专用 Secret 完成线上无中断轮换、重叠验证和旧 key 撤销演练。
-- [ ] 增加 Helm/外部 Secret 不存在、旧 Secret 升级和回滚时不轮换 key 的测试。
+- [x] 增加 Helm/外部 Secret 不存在、旧 Secret 升级和回滚时不轮换 key 的测试。
 - [x] 增加受损 edge 持有 bundle key 仍不能签发任意 component identity 的安全回归测试。
 - [x] 实现 credential-bound heartbeat identity、canonical evidence hash、sequence/nonce/time-window/fencing/generation rollback 纯验证器；生产 handler 仍未 enforcement。
 - [x] 可信 heartbeat 在 JSON/Postgres Store 中按服务端 ExpectedConsumerSet 绑定，并使用行锁和 guarded upsert 单调持久化；生产 handler 仍未接线。

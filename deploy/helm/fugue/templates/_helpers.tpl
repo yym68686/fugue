@@ -259,6 +259,90 @@ tolerations:
 {{- end -}}
 {{- end -}}
 
+{{- define "fugue.resolvePlatformComponentIdentityData" -}}
+{{- $root := .root -}}
+{{- $existingData := default (dict) .existingData -}}
+{{- $existingSigningKey := "" -}}
+{{- with (index $existingData "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY") -}}
+  {{- $existingSigningKey = (. | b64dec | trim) -}}
+{{- end -}}
+{{- $existingSigningKeyID := "" -}}
+{{- with (index $existingData "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID") -}}
+  {{- $existingSigningKeyID = (. | b64dec | trim) -}}
+{{- end -}}
+{{- $existingPreviousSigningKey := "" -}}
+{{- with (index $existingData "FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY") -}}
+  {{- $existingPreviousSigningKey = (. | b64dec | trim) -}}
+{{- end -}}
+{{- $existingPreviousSigningKeyID := "" -}}
+{{- with (index $existingData "FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID") -}}
+  {{- $existingPreviousSigningKeyID = (. | b64dec | trim) -}}
+{{- end -}}
+{{- $existingRevokedKeyIDs := "" -}}
+{{- with (index $existingData "FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS") -}}
+  {{- $existingRevokedKeyIDs = (. | b64dec | trim) -}}
+{{- end -}}
+
+{{- $configuredSigningKey := $root.Values.platformComponentIdentity.signingKey | trim -}}
+{{- $signingKey := $configuredSigningKey -}}
+{{- if eq $signingKey "" -}}
+  {{- $signingKey = $existingSigningKey -}}
+{{- end -}}
+{{- if eq $signingKey "" -}}
+  {{- $signingKey = randAlphaNum 48 -}}
+{{- end -}}
+{{- $signingKeyID := $root.Values.platformComponentIdentity.signingKeyID | trim -}}
+{{- if eq $signingKeyID "" -}}
+  {{- if and (ne $existingSigningKeyID "") (eq $signingKey $existingSigningKey) -}}
+    {{- $signingKeyID = $existingSigningKeyID -}}
+  {{- else -}}
+    {{- $signingKeyID = printf "pci-%s" ($signingKey | sha256sum | trunc 16) -}}
+  {{- end -}}
+{{- end -}}
+
+{{- $configuredPreviousSigningKey := $root.Values.platformComponentIdentity.previousSigningKey | trim -}}
+{{- $configuredPreviousSigningKeyID := $root.Values.platformComponentIdentity.previousSigningKeyID | trim -}}
+{{- $previousSigningKey := $configuredPreviousSigningKey -}}
+{{- $previousSigningKeyID := $configuredPreviousSigningKeyID -}}
+{{- $rotatingCurrentKey := and (ne $configuredSigningKey "") (ne $existingSigningKey "") (ne $configuredSigningKey $existingSigningKey) -}}
+{{- if $rotatingCurrentKey -}}
+  {{- if eq $previousSigningKey "" -}}
+    {{- $previousSigningKey = $existingSigningKey -}}
+  {{- end -}}
+  {{- if eq $previousSigningKeyID "" -}}
+    {{- $previousSigningKeyID = $existingSigningKeyID -}}
+  {{- end -}}
+{{- else -}}
+  {{- if eq $previousSigningKey "" -}}
+    {{- $previousSigningKey = $existingPreviousSigningKey -}}
+  {{- end -}}
+  {{- if eq $previousSigningKeyID "" -}}
+    {{- $previousSigningKeyID = $existingPreviousSigningKeyID -}}
+  {{- end -}}
+{{- end -}}
+{{- if and (ne $previousSigningKey "") (eq $previousSigningKeyID "") -}}
+  {{- $previousSigningKeyID = printf "pci-%s" ($previousSigningKey | sha256sum | trunc 16) -}}
+{{- end -}}
+{{- if and (eq $previousSigningKey "") (ne $previousSigningKeyID "") -}}
+  {{- fail "platformComponentIdentity.previousSigningKeyID requires previousSigningKey" -}}
+{{- end -}}
+{{- if and (ne $previousSigningKey "") (eq $signingKeyID $previousSigningKeyID) (ne $signingKey $previousSigningKey) -}}
+  {{- fail "platform component identity current and previous keys cannot share a key id" -}}
+{{- end -}}
+
+{{- $revokedKeyIDs := $root.Values.platformComponentIdentity.revokedKeyIDs | trim -}}
+{{- if eq $revokedKeyIDs "" -}}
+  {{- $revokedKeyIDs = $existingRevokedKeyIDs -}}
+{{- end -}}
+{{- dict
+  "signingKey" $signingKey
+  "signingKeyID" $signingKeyID
+  "previousSigningKey" $previousSigningKey
+  "previousSigningKeyID" $previousSigningKeyID
+  "revokedKeyIDs" $revokedKeyIDs
+  | toJson -}}
+{{- end -}}
+
 {{- define "fugue.platformComponentIdentitySecretChecksum" -}}
 {{- $secretName := include "fugue.platformComponentIdentitySecretName" . -}}
 {{- $existingSecret := lookup "v1" "Secret" .Release.Namespace $secretName -}}

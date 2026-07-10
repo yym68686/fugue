@@ -1,9 +1,12 @@
 package fuguechart_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -173,7 +176,127 @@ func TestPlatformComponentIdentitySecretIsIndependentAndRetained(t *testing.T) {
 	}
 }
 
-func TestPlatformComponentIdentityCanUseExternalSecret(t *testing.T) {
+func TestPlatformComponentIdentityMissingManagedSecretBootstrapsOneKey(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set-string", "workloadIdentity.signingKey=workload-test-key",
+		"--set-string", "bundle.signingKey=bundle-test-key",
+		"--set-string", "postgres.password=postgres-test-password",
+		"--set-string", "api.edgeTLSAskToken=edge-test-token",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	secret := manifestDocumentForKindAndName(string(output), "Secret", "fugue-fugue-platform-component-identity")
+	if secret == "" {
+		t.Fatalf("rendered manifest missing managed platform component identity secret:\n%s", output)
+	}
+	signingKey, ok := manifestStringDataValue(secret, "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY")
+	if !ok || len(signingKey) != 48 {
+		t.Fatalf("missing managed secret must bootstrap one 48-character signing key, got %q:\n%s", signingKey, secret)
+	}
+	signingKeyID, ok := manifestStringDataValue(secret, "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID")
+	if !ok {
+		t.Fatalf("managed component identity secret missing signing key id:\n%s", secret)
+	}
+	digest := sha256.Sum256([]byte(signingKey))
+	wantKeyID := "pci-" + hex.EncodeToString(digest[:])[:16]
+	if signingKeyID != wantKeyID {
+		t.Fatalf("managed component identity key id = %q, want %q", signingKeyID, wantKeyID)
+	}
+	for _, key := range []string{
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY",
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID",
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS",
+	} {
+		if value, ok := manifestStringDataValue(secret, key); !ok || value != "" {
+			t.Fatalf("new managed component identity secret %s = %q, want empty", key, value)
+		}
+	}
+}
+
+func TestPlatformComponentIdentityManagedSecretUpgradeAndRollbackPreserveKeys(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	testChartDir := copyChartWithPlatformComponentIdentityProbe(t, chartDir)
+	v1Settings := []string{
+		"platformComponentIdentityResolutionTest.existingSigningKey=component-current-v1",
+		"platformComponentIdentityResolutionTest.existingSigningKeyID=component-v1",
+		"platformComponentIdentityResolutionTest.existingPreviousSigningKey=component-previous-v0",
+		"platformComponentIdentityResolutionTest.existingPreviousSigningKeyID=component-v0",
+		"platformComponentIdentityResolutionTest.existingRevokedKeyIDs=component-revoked-v0",
+	}
+	firstUpgrade := renderPlatformComponentIdentityResolution(t, testChartDir, v1Settings...)
+	secondUpgrade := renderPlatformComponentIdentityResolution(t, testChartDir, v1Settings...)
+	if firstUpgrade != secondUpgrade {
+		t.Fatalf("unchanged upgrade generated different component identity data:\nfirst:\n%s\nsecond:\n%s", firstUpgrade, secondUpgrade)
+	}
+	for _, want := range []string{
+		`signingKey: "component-current-v1"`,
+		`signingKeyID: "component-v1"`,
+		`previousSigningKey: "component-previous-v0"`,
+		`previousSigningKeyID: "component-v0"`,
+		`revokedKeyIDs: "component-revoked-v0"`,
+	} {
+		if !strings.Contains(firstUpgrade, want) {
+			t.Fatalf("unchanged upgrade did not retain %q:\n%s", want, firstUpgrade)
+		}
+	}
+
+	rotated := renderPlatformComponentIdentityResolution(t, testChartDir, append(v1Settings,
+		"platformComponentIdentity.signingKey=component-current-v2",
+		"platformComponentIdentity.signingKeyID=component-v2",
+	)...)
+	for _, want := range []string{
+		`signingKey: "component-current-v2"`,
+		`signingKeyID: "component-v2"`,
+		`previousSigningKey: "component-current-v1"`,
+		`previousSigningKeyID: "component-v1"`,
+	} {
+		if !strings.Contains(rotated, want) {
+			t.Fatalf("explicit rotation did not produce %q:\n%s", want, rotated)
+		}
+	}
+
+	rollbackSettings := []string{
+		"platformComponentIdentityResolutionTest.existingSigningKey=component-current-v2",
+		"platformComponentIdentityResolutionTest.existingSigningKeyID=component-v2",
+		"platformComponentIdentityResolutionTest.existingPreviousSigningKey=component-current-v1",
+		"platformComponentIdentityResolutionTest.existingPreviousSigningKeyID=component-v1",
+		"platformComponentIdentityResolutionTest.existingRevokedKeyIDs=component-revoked-v0",
+	}
+	rollback := renderPlatformComponentIdentityResolution(t, testChartDir, rollbackSettings...)
+	for _, want := range []string{
+		`signingKey: "component-current-v2"`,
+		`signingKeyID: "component-v2"`,
+		`previousSigningKey: "component-current-v1"`,
+		`previousSigningKeyID: "component-v1"`,
+		`revokedKeyIDs: "component-revoked-v0"`,
+	} {
+		if !strings.Contains(rollback, want) {
+			t.Fatalf("rollback with historical empty values rotated retained key %q:\n%s", want, rollback)
+		}
+	}
+}
+
+func TestPlatformComponentIdentityMissingExternalSecretFailsClosed(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
 	}
@@ -218,6 +341,15 @@ func TestPlatformComponentIdentityCanUseExternalSecret(t *testing.T) {
 			t.Fatalf("API component identity canary missing %q:\n%s", want, api)
 		}
 	}
+	for _, requiredEnv := range []string{
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY",
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID",
+	} {
+		block := manifestEnvBlock(api, requiredEnv)
+		if block == "" || strings.Contains(block, "optional: true") {
+			t.Fatalf("API %s reference must fail closed when the external secret or key is absent:\n%s", requiredEnv, block)
+		}
+	}
 	controller := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
 	for _, want := range []string{
 		"checksum/platform-component-identity-secret:",
@@ -235,6 +367,15 @@ func TestPlatformComponentIdentityCanUseExternalSecret(t *testing.T) {
 	} {
 		if !strings.Contains(controller, want) {
 			t.Fatalf("controller component identity canary missing %q:\n%s", want, controller)
+		}
+	}
+	for _, requiredEnv := range []string{
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY",
+		"FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID",
+	} {
+		block := manifestEnvBlock(controller, requiredEnv)
+		if block == "" || strings.Contains(block, "optional: true") {
+			t.Fatalf("controller %s reference must fail closed when the external secret or key is absent:\n%s", requiredEnv, block)
 		}
 	}
 }
@@ -3307,6 +3448,103 @@ func manifestDocumentForKindAndName(manifest string, kind string, name string) s
 		}
 	}
 	return ""
+}
+
+func manifestStringDataValue(manifest string, key string) (string, bool) {
+	prefix := key + ":"
+	for _, line := range strings.Split(manifest, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		value, err := strconv.Unquote(raw)
+		if err != nil {
+			return "", false
+		}
+		return value, true
+	}
+	return "", false
+}
+
+func manifestEnvBlock(manifest string, envName string) string {
+	lines := strings.Split(manifest, "\n")
+	want := "- name: " + envName
+	for start, line := range lines {
+		if strings.TrimSpace(line) != want {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		end := len(lines)
+		for i := start + 1; i < len(lines); i++ {
+			candidate := lines[i]
+			candidateIndent := len(candidate) - len(strings.TrimLeft(candidate, " \t"))
+			if candidateIndent == indent && strings.HasPrefix(strings.TrimSpace(candidate), "- name:") {
+				end = i
+				break
+			}
+		}
+		return strings.Join(lines[start:end], "\n")
+	}
+	return ""
+}
+
+func copyChartWithPlatformComponentIdentityProbe(t *testing.T, sourceDir string) string {
+	t.Helper()
+	destinationDir := filepath.Join(t.TempDir(), "fugue")
+	if err := os.CopyFS(destinationDir, os.DirFS(sourceDir)); err != nil {
+		t.Fatalf("copy chart for component identity lifecycle test: %v", err)
+	}
+	const probeTemplate = `{{- $test := .Values.platformComponentIdentityResolutionTest -}}
+{{- $existingData := dict
+  "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY" ((default "" $test.existingSigningKey) | b64enc)
+  "FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID" ((default "" $test.existingSigningKeyID) | b64enc)
+  "FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY" ((default "" $test.existingPreviousSigningKey) | b64enc)
+  "FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID" ((default "" $test.existingPreviousSigningKeyID) | b64enc)
+  "FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS" ((default "" $test.existingRevokedKeyIDs) | b64enc)
+-}}
+{{- $resolved := include "fugue.resolvePlatformComponentIdentityData" (dict "root" . "existingData" $existingData) | fromJson -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fugue-component-identity-resolution-probe
+data:
+  signingKey: {{ index $resolved "signingKey" | quote }}
+  signingKeyID: {{ index $resolved "signingKeyID" | quote }}
+  previousSigningKey: {{ index $resolved "previousSigningKey" | quote }}
+  previousSigningKeyID: {{ index $resolved "previousSigningKeyID" | quote }}
+  revokedKeyIDs: {{ index $resolved "revokedKeyIDs" | quote }}
+`
+	probePath := filepath.Join(destinationDir, "templates", "platform-component-identity-resolution-probe.yaml")
+	if err := os.WriteFile(probePath, []byte(probeTemplate), 0o600); err != nil {
+		t.Fatalf("write component identity lifecycle probe template: %v", err)
+	}
+	return destinationDir
+}
+
+func renderPlatformComponentIdentityResolution(t *testing.T, chartDir string, settings ...string) string {
+	t.Helper()
+	args := []string{
+		"template", "fugue", chartDir,
+		"--set-string", "workloadIdentity.signingKey=workload-test-key",
+		"--set-string", "bundle.signingKey=bundle-test-key",
+		"--set-string", "postgres.password=postgres-test-password",
+		"--set-string", "api.edgeTLSAskToken=edge-test-token",
+	}
+	for _, setting := range settings {
+		args = append(args, "--set-string", setting)
+	}
+	cmd := exec.Command("helm", args...)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template component identity lifecycle probe failed: %v\n%s", err, output)
+	}
+	probe := manifestDocumentForKindAndName(string(output), "ConfigMap", "fugue-component-identity-resolution-probe")
+	if probe == "" {
+		t.Fatalf("rendered manifest missing component identity lifecycle probe:\n%s", output)
+	}
+	return probe
 }
 
 func manifestTolerationsBlock(doc string) string {
