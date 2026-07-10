@@ -34,6 +34,7 @@ on:
       - 'Dockerfile.image-cache'
       - 'Dockerfile.edge'
       - 'Dockerfile.app-ssh'
+      - 'Makefile'
       - 'go.mod'
       - 'go.sum'
       - 'scripts/build_control_plane_images.sh'
@@ -49,6 +50,7 @@ on:
       - 'scripts/resolve_control_plane_live_images.sh'
       - 'scripts/release_fugue_public_data_plane.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
+      - 'scripts/test_release_domain_safety.sh'
       - 'scripts/upgrade_fugue_control_plane.sh'
   workflow_dispatch:
     inputs:

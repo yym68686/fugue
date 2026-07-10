@@ -33,7 +33,16 @@ func (n *workflowNeeds) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type releaseWorkflow struct {
+	On   releaseWorkflowTriggers       `yaml:"on"`
 	Jobs map[string]releaseWorkflowJob `yaml:"jobs"`
+}
+
+type releaseWorkflowTriggers struct {
+	Push releaseWorkflowPushTrigger `yaml:"push"`
+}
+
+type releaseWorkflowPushTrigger struct {
+	Paths []string `yaml:"paths"`
 }
 
 type releaseWorkflowJob struct {
@@ -58,6 +67,14 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	for _, required := range []string{
+		"Makefile",
+		"scripts/test_release_domain_safety.sh",
+	} {
+		if !containsString(workflow.On.Push.Paths, required) {
+			t.Fatalf("control-plane workflow must run when release-gate dependency %q changes", required)
+		}
 	}
 
 	gate, ok := workflow.Jobs["release-gate"]
@@ -101,8 +118,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 }
 
 func containsWorkflowNeed(needs workflowNeeds, expected string) bool {
-	for _, need := range needs {
-		if need == expected {
+	return containsString([]string(needs), expected)
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
 			return true
 		}
 	}
