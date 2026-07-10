@@ -14,6 +14,14 @@ bundle:
 configSecret:
   existingSecretName: ""
 
+platformComponentIdentity:
+  existingSecretName: ""
+  signingKey: ""
+  signingKeyID: ""
+  previousSigningKey: ""
+  previousSigningKeyID: ""
+  revokedKeyIDs: ""
+
 observability:
   enabled: false
   retention: 24h

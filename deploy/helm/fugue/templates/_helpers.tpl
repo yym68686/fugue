@@ -251,6 +251,14 @@ tolerations:
 {{- end -}}
 {{- end -}}
 
+{{- define "fugue.platformComponentIdentitySecretName" -}}
+{{- if .Values.platformComponentIdentity.existingSecretName -}}
+{{- .Values.platformComponentIdentity.existingSecretName | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-platform-component-identity" (include "fugue.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fugue.configSecretChecksum" -}}
 {{- if .Values.configSecret.existingSecretName -}}
 {{- printf "external:%s" .Values.configSecret.existingSecretName | sha256sum -}}

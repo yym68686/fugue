@@ -122,6 +122,85 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	}
 }
 
+func TestPlatformComponentIdentitySecretIsIndependentAndRetained(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set-string", "platformComponentIdentity.signingKey=component-current-secret",
+		"--set-string", "platformComponentIdentity.signingKeyID=component-current",
+		"--set-string", "platformComponentIdentity.previousSigningKey=component-previous-secret",
+		"--set-string", "platformComponentIdentity.previousSigningKeyID=component-previous",
+		"--set-string", "platformComponentIdentity.revokedKeyIDs=component-revoked",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	secret := manifestDocumentForKindAndName(manifest, "Secret", "fugue-fugue-platform-component-identity")
+	if secret == "" {
+		t.Fatalf("rendered manifest missing platform component identity secret:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"helm.sh/resource-policy: keep",
+		`FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY: "component-current-secret"`,
+		`FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID: "component-current"`,
+		`FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY: "component-previous-secret"`,
+		`FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID: "component-previous"`,
+		`FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS: "component-revoked"`,
+	} {
+		if !strings.Contains(secret, want) {
+			t.Fatalf("platform component identity secret missing %q:\n%s", want, secret)
+		}
+	}
+	for _, forbidden := range []string{
+		"FUGUE_BOOTSTRAP_ADMIN_KEY",
+		"FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY",
+		"FUGUE_BUNDLE_SIGNING_KEY",
+	} {
+		if strings.Contains(secret, forbidden) {
+			t.Fatalf("platform component identity secret must not contain %q:\n%s", forbidden, secret)
+		}
+	}
+}
+
+func TestPlatformComponentIdentityCanUseExternalSecret(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set-string", "platformComponentIdentity.existingSecretName=external-component-identity",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	if secret := manifestDocumentForKindAndName(manifest, "Secret", "fugue-fugue-platform-component-identity"); secret != "" {
+		t.Fatalf("generated component identity secret must be omitted when an external secret is configured:\n%s", secret)
+	}
+	if secret := manifestDocumentForKindAndName(manifest, "Secret", "external-component-identity"); secret != "" {
+		t.Fatalf("chart must not take ownership of the external component identity secret:\n%s", secret)
+	}
+}
+
 func TestMaintenanceDaemonSetsDefaultToInternalNodes(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
