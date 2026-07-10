@@ -1828,21 +1828,21 @@ DNS/edge failover 必须满足：
 - [x] 列出所有不可由配置关闭的 invariant。
 - [ ] 定义 artifact schema/hash/signature 硬规则。
 - [ ] 定义 generation 单调性硬规则。
-- [ ] 定义 shadow no-production-impact 硬规则。
-- [ ] 定义 canary scope isolation 硬规则。
+- [x] 定义 shadow no-production-impact 硬规则。
+- [x] 定义 canary scope isolation 硬规则。
 - [x] 定义 full release rollback-target 硬规则。
-- [ ] 定义 blast-radius maximum hard cap。
-- [ ] 定义 kill switch precedence。
+- [x] 定义 blast-radius maximum hard cap。
+- [x] 定义 kill switch precedence。
 - [ ] 定义 expired/corrupt/signature-invalid LKG 硬规则。
 - [ ] 将普通 `force_publish` 拆成 `soft_override`。
 - [ ] 设计独立 `kernel_break_glass` 权限。
 - [ ] kernel break-glass 要求 reason、双重确认和短 TTL。
 - [ ] kernel break-glass 到期自动恢复默认保护。
 - [ ] kernel break-glass 写入 tamper-evident audit。
-- [ ] 增加配置只能收紧、不能放宽安全内核的测试。
-- [ ] 增加 shadow 不影响生产的 property test。
-- [ ] 增加 canary 不越过 scope 的 property test。
-- [ ] 增加 kill switch 并发优先级测试。
+- [x] 增加配置只能收紧、不能放宽安全内核的测试。
+- [x] 增加 shadow 不影响生产的 property test。
+- [x] 增加 canary 不越过 scope 的 property test。
+- [x] 增加 kill switch 并发优先级测试。
 - [x] 新增 runbook: platform safety kernel。
 - [ ] 新增 runbook: kernel break-glass。
 

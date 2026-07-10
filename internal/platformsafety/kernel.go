@@ -15,6 +15,9 @@ const (
 	InvariantArtifactContentHash        = "artifact.content_hash"
 	InvariantGenerationMonotonic        = "generation.monotonic"
 	InvariantShadowNoProductionImpact   = "shadow.no_production_impact"
+	InvariantCanaryScopeIsolation       = "canary.scope_isolation"
+	InvariantBlastRadiusHardCap         = "action.blast_radius_hard_cap"
+	InvariantKillSwitchPrecedence       = "action.kill_switch_precedence"
 	InvariantFullPinnedRollback         = "full.pinned_rollback"
 	InvariantFencingTokenCurrent        = "release.fencing_token_current"
 	InvariantVerificationEvidencePassed = "lkg.verification_evidence_passed"
@@ -25,6 +28,9 @@ var immutableInvariantIDs = []string{
 	InvariantArtifactContentHash,
 	InvariantGenerationMonotonic,
 	InvariantShadowNoProductionImpact,
+	InvariantCanaryScopeIsolation,
+	InvariantBlastRadiusHardCap,
+	InvariantKillSwitchPrecedence,
 	InvariantFullPinnedRollback,
 	InvariantFencingTokenCurrent,
 	InvariantVerificationEvidencePassed,
@@ -52,7 +58,7 @@ func ReleaseLaneKey(kind, scopeKey, channel string) string {
 	}, "|")
 }
 
-func EvaluateArtifactRelease(artifact model.PlatformArtifact, channel, pinnedRollbackGeneration string) Decision {
+func EvaluateArtifactRelease(artifact model.PlatformArtifact, channel, pinnedRollbackGeneration, canaryRuleRef string) Decision {
 	violations := []Violation{}
 	if artifact.Status != model.PlatformArtifactStatusValidated {
 		violations = append(violations, Violation{
@@ -75,7 +81,39 @@ func EvaluateArtifactRelease(artifact model.PlatformArtifact, channel, pinnedRol
 			Message:   "full release requires a pinned verified rollback generation",
 		})
 	}
+	if channel == model.PlatformArtifactReleaseChannelGray && !CanaryScopeRefValid(canaryRuleRef) {
+		violations = append(violations, Violation{
+			Invariant: InvariantCanaryScopeIsolation,
+			Message:   "gray release requires one bounded canary scope",
+		})
+	}
 	return Decision{Pass: len(violations) == 0, Violations: violations}
+}
+
+func CanaryScopeRefValid(raw string) bool {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	switch raw {
+	case "", "*", "all", "global", "scope=global", "scope:global":
+		return false
+	}
+	var key, value string
+	if left, right, ok := strings.Cut(raw, "="); ok {
+		key, value = left, right
+	} else if left, right, ok := strings.Cut(raw, ":"); ok {
+		key, value = left, right
+	} else {
+		return false
+	}
+	switch strings.TrimSpace(key) {
+	case "node", "edge", "edge_group", "failure_domain", "region", "country", "cohort", "consumer", "hostname", "service", "app":
+	default:
+		return false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || value == "*" || value == "all" || value == "global" || strings.ContainsAny(value, ",;") {
+		return false
+	}
+	return true
 }
 
 func EvaluateLKGPromotion(release model.PlatformArtifactRelease, req model.PlatformArtifactVerifyLKGRequest, hasExistingLKG bool) Decision {

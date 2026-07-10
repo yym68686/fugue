@@ -245,7 +245,7 @@ func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactRel
 		if lkg != nil {
 			pinnedRollbackGeneration = lkg.Generation
 		}
-		if decision := platformsafety.EvaluateArtifactRelease(artifact, channel, pinnedRollbackGeneration); !decision.Pass {
+		if decision := platformsafety.EvaluateArtifactRelease(artifact, channel, pinnedRollbackGeneration, req.CanaryRuleRef); !decision.Pass {
 			return ErrConflict
 		}
 		laneKey := platformsafety.ReleaseLaneKey(artifact.ArtifactKind, artifact.ScopeKey, channel)
@@ -326,7 +326,13 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 		if lkg != nil {
 			pinnedRollbackGeneration = lkg.Generation
 		}
-		if decision := platformsafety.EvaluateArtifactRelease(target, channel, pinnedRollbackGeneration); !decision.Pass {
+		canaryRuleRef := strings.TrimSpace(req.CanaryRuleRef)
+		if channel == model.PlatformArtifactReleaseChannelGray && canaryRuleRef == "" {
+			if activeRelease, ok := activePlatformReleaseForScope(state.PlatformArtifactReleases, current.ArtifactKind, current.ScopeKey, channel); ok {
+				canaryRuleRef = activeRelease.CanaryRuleRef
+			}
+		}
+		if decision := platformsafety.EvaluateArtifactRelease(target, channel, pinnedRollbackGeneration, canaryRuleRef); !decision.Pass {
 			return ErrConflict
 		}
 		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, target.ArtifactKind, target.ScopeKey, channel, now)
@@ -337,7 +343,7 @@ func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			target,
 			channel,
 			pinnedRollbackGeneration,
-			req.CanaryRuleRef,
+			canaryRuleRef,
 			req.Reason,
 			"",
 			model.PlatformReleaseMessageTypeRollback,
@@ -770,6 +776,10 @@ func buildPlatformArtifactReleaseLedgerEntry(
 	lane model.PlatformReleaseLane,
 	now time.Time,
 ) platformArtifactReleaseLedgerEntry {
+	servingUnverifiedGeneration := ""
+	if channel == model.PlatformArtifactReleaseChannelFull {
+		servingUnverifiedGeneration = artifact.Generation
+	}
 	release := model.PlatformArtifactRelease{
 		ID:                          model.NewID("artifactrel"),
 		ArtifactID:                  artifact.ID,
@@ -784,7 +794,7 @@ func buildPlatformArtifactReleaseLedgerEntry(
 		Version:                     1,
 		IdempotencyKey:              strings.TrimSpace(idempotencyKey),
 		CandidateGeneration:         artifact.Generation,
-		ServingUnverifiedGeneration: artifact.Generation,
+		ServingUnverifiedGeneration: servingUnverifiedGeneration,
 		VerifiedLKGGeneration:       strings.TrimSpace(rollbackTargetGeneration),
 		PinnedRollbackGeneration:    strings.TrimSpace(rollbackTargetGeneration),
 		VerificationState:           model.PlatformArtifactVerificationStateServingUnverified,
@@ -826,6 +836,24 @@ func platformReleaseByIdempotencyKey(releases []model.PlatformArtifactRelease, l
 		}
 	}
 	return model.PlatformArtifactRelease{}, false
+}
+
+func activePlatformReleaseForScope(releases []model.PlatformArtifactRelease, kind, scopeKey, channel string) (model.PlatformArtifactRelease, bool) {
+	var out model.PlatformArtifactRelease
+	found := false
+	for _, release := range releases {
+		if release.ArtifactKind != kind ||
+			release.ScopeKey != scopeKey ||
+			release.ReleaseChannel != channel ||
+			release.Status != model.PlatformArtifactReleaseStatusActive {
+			continue
+		}
+		if !found || release.ReleasedAt.After(out.ReleasedAt) {
+			out = release
+			found = true
+		}
+	}
+	return out, found
 }
 
 func platformReleaseMessageForRelease(messages []model.PlatformReleaseMessage, releaseID string) (model.PlatformReleaseMessage, bool) {

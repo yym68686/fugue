@@ -257,7 +257,7 @@ func TestPlatformGrayReleaseAbortDoesNotOverwriteFullLKG(t *testing.T) {
 	} else if lkg == nil || lkg.Generation != stable.Generation {
 		t.Fatalf("gray release must retain the stable full LKG, got %+v", lkg)
 	}
-	if _, _, _, lkg, err := s.RollbackPlatformArtifact(canary.ID, model.PlatformArtifactRollbackRequest{
+	if _, rollbackRelease, _, lkg, err := s.RollbackPlatformArtifact(canary.ID, model.PlatformArtifactRollbackRequest{
 		ReleaseChannel: model.PlatformArtifactReleaseChannelGray,
 		ToGeneration:   stable.Generation,
 		Reason:         "abort gray release",
@@ -265,6 +265,8 @@ func TestPlatformGrayReleaseAbortDoesNotOverwriteFullLKG(t *testing.T) {
 		t.Fatalf("rollback gray artifact: %v", err)
 	} else if lkg == nil || lkg.Generation != stable.Generation {
 		t.Fatalf("gray rollback must retain the stable full LKG, got %+v", lkg)
+	} else if rollbackRelease.CanaryRuleRef != "edge=bwg" {
+		t.Fatalf("gray rollback must inherit the active canary scope, got %+v", rollbackRelease)
 	}
 	activeFull, _, found, err := s.GetActivePlatformArtifact(model.PlatformArtifactKindEdgeRouteBundle, "global", model.PlatformArtifactReleaseChannelFull)
 	if err != nil {

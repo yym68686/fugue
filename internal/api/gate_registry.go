@@ -198,16 +198,16 @@ func mergeGatePolicies(defaults, overrides []model.GatePolicy) []model.GatePolic
 			out[index] = mergeGatePolicy(out[index], override)
 			continue
 		}
-		out = append(out, override)
+		out = append(out, restrictNewGatePolicy(override))
 	}
 	return out
 }
 
 func mergeGatePolicy(base, override model.GatePolicy) model.GatePolicy {
 	if strings.TrimSpace(override.Mode) != "" {
-		base.Mode = normalizeGatePolicyMode(override.Mode)
+		base.Mode = tighterGatePolicyMode(base.Mode, override.Mode)
 	}
-	if strings.TrimSpace(override.Scope) != "" {
+	if strings.TrimSpace(base.Scope) == "" && strings.TrimSpace(override.Scope) != "" {
 		base.Scope = normalizeGatePolicyScope(override.Scope)
 	}
 	if strings.TrimSpace(override.IntroducedByRelease) != "" {
@@ -217,27 +217,29 @@ func mergeGatePolicy(base, override model.GatePolicy) model.GatePolicy {
 		base.SoakStartedAt = override.SoakStartedAt
 	}
 	if strings.TrimSpace(override.SoakMinDuration) != "" {
-		base.SoakMinDuration = strings.TrimSpace(override.SoakMinDuration)
+		base.SoakMinDuration = longerGatePolicyDuration(base.SoakMinDuration, override.SoakMinDuration)
 	}
 	if override.MinimumSamples > 0 {
-		base.MinimumSamples = override.MinimumSamples
+		base.MinimumSamples = gateMaxInt(base.MinimumSamples, override.MinimumSamples)
 	}
 	if override.MinimumFailureDomains > 0 {
-		base.MinimumFailureDomains = override.MinimumFailureDomains
+		base.MinimumFailureDomains = gateMaxInt(base.MinimumFailureDomains, override.MinimumFailureDomains)
 	}
 	if len(override.CanaryFailureDomains) > 0 {
 		base.CanaryFailureDomains = uniqueSortedStrings(override.CanaryFailureDomains)
 	}
 	if override.BlastRadius != (model.GateBlastRadiusPolicy{}) {
-		base.BlastRadius = override.BlastRadius
+		base.BlastRadius = tighterGateBlastRadius(base.BlastRadius, override.BlastRadius)
 	}
+	base.BlastRadius = applyCompiledGateBlastRadiusFloor(base.Scope, base.BlastRadius)
+	base.CanaryFailureDomains = boundedCanaryFailureDomains(base.CanaryFailureDomains, base.BlastRadius)
 	if len(override.RollbackOn) > 0 {
-		base.RollbackOn = uniqueSortedStrings(override.RollbackOn)
+		base.RollbackOn = uniqueSortedStrings(append(append([]string(nil), base.RollbackOn...), override.RollbackOn...))
 	}
-	if strings.TrimSpace(override.KillSwitchEnv) != "" {
+	if strings.TrimSpace(base.KillSwitchEnv) == "" && strings.TrimSpace(override.KillSwitchEnv) != "" {
 		base.KillSwitchEnv = strings.TrimSpace(override.KillSwitchEnv)
 	}
-	if strings.TrimSpace(override.RunbookRef) != "" {
+	if strings.TrimSpace(base.RunbookRef) == "" && strings.TrimSpace(override.RunbookRef) != "" {
 		base.RunbookRef = strings.TrimSpace(override.RunbookRef)
 	}
 	if !override.UpdatedAt.IsZero() {
@@ -249,18 +251,152 @@ func mergeGatePolicy(base, override model.GatePolicy) model.GatePolicy {
 }
 
 func effectiveGatePolicyMode(policy model.GatePolicy) string {
+	mode := normalizeGatePolicyMode(policy.Mode)
+	if mode == "" {
+		mode = normalizeGatePolicyMode(policy.DefaultMode)
+	}
+	if mode == "" {
+		mode = model.GatePolicyModeShadow
+	}
 	if strings.TrimSpace(policy.KillSwitchEnv) != "" {
 		if override := normalizeGatePolicyMode(os.Getenv(strings.TrimSpace(policy.KillSwitchEnv))); override != "" {
-			return override
+			return resolveGatePolicyMode(mode, override)
 		}
 	}
-	if mode := normalizeGatePolicyMode(policy.Mode); mode != "" {
-		return mode
+	return mode
+}
+
+func resolveGatePolicyMode(configuredMode, killSwitchMode string) string {
+	configuredMode = normalizeGatePolicyMode(configuredMode)
+	if configuredMode == "" {
+		configuredMode = model.GatePolicyModeShadow
 	}
-	if mode := normalizeGatePolicyMode(policy.DefaultMode); mode != "" {
-		return mode
+	killSwitchMode = normalizeGatePolicyMode(killSwitchMode)
+	if killSwitchMode == "" || gatePolicyModeRank(killSwitchMode) >= gatePolicyModeRank(configuredMode) {
+		return configuredMode
 	}
-	return model.GatePolicyModeShadow
+	return killSwitchMode
+}
+
+func tighterGatePolicyMode(baseMode, overrideMode string) string {
+	baseMode = normalizeGatePolicyMode(baseMode)
+	if baseMode == "" {
+		baseMode = model.GatePolicyModeShadow
+	}
+	overrideMode = normalizeGatePolicyMode(overrideMode)
+	if overrideMode == "" || gatePolicyModeRank(overrideMode) < gatePolicyModeRank(baseMode) {
+		return baseMode
+	}
+	return overrideMode
+}
+
+func gatePolicyModeRank(mode string) int {
+	switch normalizeGatePolicyMode(mode) {
+	case model.GatePolicyModeDisabled:
+		return 0
+	case model.GatePolicyModeShadow:
+		return 1
+	case model.GatePolicyModeCanary:
+		return 2
+	case model.GatePolicyModeEnforced:
+		return 3
+	default:
+		return -1
+	}
+}
+
+func restrictNewGatePolicy(policy model.GatePolicy) model.GatePolicy {
+	policy.Mode = model.GatePolicyModeShadow
+	policy.DefaultMode = model.GatePolicyModeShadow
+	policy.Scope = normalizeGatePolicyScope(policy.Scope)
+	policy.BlastRadius = applyCompiledGateBlastRadiusFloor(policy.Scope, policy.BlastRadius)
+	policy.CanaryFailureDomains = nil
+	return policy
+}
+
+func longerGatePolicyDuration(baseRaw, overrideRaw string) string {
+	baseRaw = strings.TrimSpace(baseRaw)
+	overrideRaw = strings.TrimSpace(overrideRaw)
+	baseDuration, baseErr := time.ParseDuration(baseRaw)
+	overrideDuration, overrideErr := time.ParseDuration(overrideRaw)
+	switch {
+	case baseErr != nil && overrideErr != nil:
+		return baseRaw
+	case baseErr != nil:
+		return overrideRaw
+	case overrideErr != nil:
+		return baseRaw
+	case overrideDuration > baseDuration:
+		return overrideRaw
+	default:
+		return baseRaw
+	}
+}
+
+func tighterGateBlastRadius(base, override model.GateBlastRadiusPolicy) model.GateBlastRadiusPolicy {
+	return model.GateBlastRadiusPolicy{
+		MaxNodes:                        smallerPositiveInt(base.MaxNodes, override.MaxNodes),
+		MaxEdgesPerGroup:                smallerPositiveInt(base.MaxEdgesPerGroup, override.MaxEdgesPerGroup),
+		PreserveMinHealthyEdgeGroups:    gateMaxInt(base.PreserveMinHealthyEdgeGroups, override.PreserveMinHealthyEdgeGroups),
+		PreserveMinEligibleEdgesPerHost: gateMaxInt(base.PreserveMinEligibleEdgesPerHost, override.PreserveMinEligibleEdgesPerHost),
+	}
+}
+
+func applyCompiledGateBlastRadiusFloor(scope string, policy model.GateBlastRadiusPolicy) model.GateBlastRadiusPolicy {
+	switch normalizeGatePolicyScope(scope) {
+	case model.GatePolicyScopeNode, model.GatePolicyScopeRuntime:
+		policy.MaxNodes = clampPositiveMaximum(policy.MaxNodes, 1)
+	case model.GatePolicyScopeEdgeNode, model.GatePolicyScopeEdgeGroup:
+		policy.MaxEdgesPerGroup = clampPositiveMaximum(policy.MaxEdgesPerGroup, 1)
+		policy.PreserveMinHealthyEdgeGroups = gateMaxInt(policy.PreserveMinHealthyEdgeGroups, 1)
+	case model.GatePolicyScopeHostname, model.GatePolicyScopeService:
+		policy.PreserveMinEligibleEdgesPerHost = gateMaxInt(policy.PreserveMinEligibleEdgesPerHost, 1)
+	case model.GatePolicyScopeCluster:
+		policy.PreserveMinHealthyEdgeGroups = gateMaxInt(policy.PreserveMinHealthyEdgeGroups, 1)
+	}
+	return policy
+}
+
+func boundedCanaryFailureDomains(values []string, policy model.GateBlastRadiusPolicy) []string {
+	values = uniqueSortedStrings(values)
+	limit := policy.MaxNodes
+	if limit <= 0 {
+		limit = policy.MaxEdgesPerGroup
+	}
+	if limit > 0 && len(values) > limit {
+		return append([]string(nil), values[:limit]...)
+	}
+	return values
+}
+
+func smallerPositiveInt(left, right int) int {
+	switch {
+	case left <= 0:
+		return right
+	case right <= 0:
+		return left
+	case left < right:
+		return left
+	default:
+		return right
+	}
+}
+
+func clampPositiveMaximum(value, maximum int) int {
+	if maximum <= 0 {
+		return value
+	}
+	if value <= 0 || value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func gateMaxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func gatePolicyValidationResult(artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {

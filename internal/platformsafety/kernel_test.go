@@ -24,18 +24,36 @@ func TestFullReleaseRequiresValidatedArtifactHashAndPinnedRollback(t *testing.T)
 		Content: map[string]any{"version": "v1"},
 	}
 	artifact.ContentHash = artifactContentHash(artifact.Content)
-	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelFull, "gen_stable"); !decision.Pass {
+	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelFull, "gen_stable", ""); !decision.Pass {
 		t.Fatalf("expected valid full release, got %+v", decision)
 	}
-	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelFull, ""); decision.Pass {
+	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelFull, "", ""); decision.Pass {
 		t.Fatalf("full release without rollback target must fail: %+v", decision)
 	}
-	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelShadow, ""); !decision.Pass {
+	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelShadow, "", ""); !decision.Pass {
 		t.Fatalf("shadow release does not require a production rollback target: %+v", decision)
 	}
 	artifact.Content["version"] = "tampered"
-	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelShadow, ""); decision.Pass {
+	if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelShadow, "", ""); decision.Pass {
 		t.Fatalf("tampered content must not pass with a stale content hash: %+v", decision)
+	}
+}
+
+func TestGrayReleaseRequiresBoundedCanaryScope(t *testing.T) {
+	artifact := model.PlatformArtifact{
+		Status:  model.PlatformArtifactStatusValidated,
+		Content: map[string]any{"version": "v1"},
+	}
+	artifact.ContentHash = artifactContentHash(artifact.Content)
+	for _, ref := range []string{"edge=bwg", "node:test-node", "failure_domain:provider-us"} {
+		if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelGray, "", ref); !decision.Pass {
+			t.Fatalf("expected bounded canary scope %q to pass: %+v", ref, decision)
+		}
+	}
+	for _, ref := range []string{"", "*", "all", "global", "scope=global", "edge=*", "edge=a,b", "unknown=x"} {
+		if decision := EvaluateArtifactRelease(artifact, model.PlatformArtifactReleaseChannelGray, "", ref); decision.Pass {
+			t.Fatalf("expected unbounded canary scope %q to fail: %+v", ref, decision)
+		}
 	}
 }
 

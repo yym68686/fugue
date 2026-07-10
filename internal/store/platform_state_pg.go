@@ -245,7 +245,7 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 	if lkg != nil {
 		pinnedRollbackGeneration = lkg.Generation
 	}
-	if decision := platformsafety.EvaluateArtifactRelease(artifact, channel, pinnedRollbackGeneration); !decision.Pass {
+	if decision := platformsafety.EvaluateArtifactRelease(artifact, channel, pinnedRollbackGeneration, req.CanaryRuleRef); !decision.Pass {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	lane, err := pgNextPlatformReleaseLane(ctx, tx, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
@@ -328,18 +328,31 @@ func (s *Store) pgRollbackPlatformArtifact(id string, req model.PlatformArtifact
 	if lkg != nil {
 		pinnedRollbackGeneration = lkg.Generation
 	}
-	if decision := platformsafety.EvaluateArtifactRelease(target, channel, pinnedRollbackGeneration); !decision.Pass {
-		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
-	}
 	lane, err := pgNextPlatformReleaseLane(ctx, tx, target.ArtifactKind, target.ScopeKey, channel, now)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
+	canaryRuleRef := strings.TrimSpace(req.CanaryRuleRef)
+	if channel == model.PlatformArtifactReleaseChannelGray && canaryRuleRef == "" && strings.TrimSpace(lane.ActiveReleaseID) != "" {
+		activeRelease, releaseErr := pgGetPlatformArtifactRelease(ctx, tx, lane.ActiveReleaseID, true)
+		if releaseErr != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, releaseErr
+		}
+		if activeRelease.Status != model.PlatformArtifactReleaseStatusActive ||
+			activeRelease.LaneKey != lane.LaneKey ||
+			activeRelease.ReleaseChannel != channel {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
+		}
+		canaryRuleRef = activeRelease.CanaryRuleRef
+	}
+	if decision := platformsafety.EvaluateArtifactRelease(target, channel, pinnedRollbackGeneration, canaryRuleRef); !decision.Pass {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrConflict
 	}
 	entry := buildPlatformArtifactReleaseLedgerEntry(
 		target,
 		channel,
 		pinnedRollbackGeneration,
-		req.CanaryRuleRef,
+		canaryRuleRef,
 		req.Reason,
 		"",
 		model.PlatformReleaseMessageTypeRollback,

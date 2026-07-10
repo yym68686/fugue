@@ -36,7 +36,7 @@ fugue admin artifact verify-lkg <release-id> \
   --database-rollback-compatible \
   --evidence-ref <ref> \
   --reason "<verified evidence>"
-fugue admin artifact release <artifact-id> --channel gray --canary-rule-ref <rule>
+fugue admin artifact release <artifact-id> --channel gray --canary-rule-ref edge=<edge-id>
 fugue admin release guard status
 fugue admin artifact release <artifact-id> --channel full --idempotency-key <key>
 ```
@@ -46,6 +46,10 @@ fugue admin artifact release <artifact-id> --channel full --idempotency-key <key
 - Full release is blocked unless a non-expired verified LKG and its exact
   artifact/hash remain readable.
 - Full release enters `serving_unverified`; it does not overwrite verified LKG.
+- Shadow and gray releases never set the production
+  `serving_unverified_generation`.
+- Gray requires one bounded selector. Global, wildcard, and multi-target
+  selectors are rejected by the Safety Kernel.
 - The release lane permits one active release and allocates a monotonic fencing
   token.
 - Secret-like content is rejected by validation.
