@@ -604,6 +604,7 @@ release_safety_changed_file_subsystems() {
       internal/bundleauth/*|\
       internal/platformcontrol/*|\
       internal/platformsafety/*|\
+      cmd/fugue-openapi-gen/*|\
       openapi/*|\
       go.mod|\
       go.sum)
