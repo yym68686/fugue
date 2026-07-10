@@ -28,6 +28,7 @@ spec:
         {{- end }}
       annotations:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
+        checksum/platform-component-identity-secret: {{ include "fugue.platformComponentIdentitySecretChecksum" . }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -72,6 +73,34 @@ spec:
                 secretKeyRef:
                   name: {{ include "fugue.configSecretName" . }}
                   key: FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY
+            - name: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.platformComponentIdentitySecretName" . }}
+                  key: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY
+            - name: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.platformComponentIdentitySecretName" . }}
+                  key: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID
+            - name: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.platformComponentIdentitySecretName" . }}
+                  key: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY
+                  optional: true
+            - name: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.platformComponentIdentitySecretName" . }}
+                  key: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID
+                  optional: true
+            - name: FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "fugue.platformComponentIdentitySecretName" . }}
+                  key: FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS
+                  optional: true
             - name: FUGUE_REGISTRY_PUSH_BASE
               value: {{ include "fugue.registryPushBase" . | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE

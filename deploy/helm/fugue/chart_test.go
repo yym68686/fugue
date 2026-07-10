@@ -219,8 +219,23 @@ func TestPlatformComponentIdentityCanUseExternalSecret(t *testing.T) {
 		}
 	}
 	controller := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-controller")
-	if strings.Contains(controller, "FUGUE_PLATFORM_COMPONENT_IDENTITY_") {
-		t.Fatalf("controller must not mount component identity before its independent canary:\n%s", controller)
+	for _, want := range []string{
+		"checksum/platform-component-identity-secret:",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_SIGNING_KEY_ID",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_PREVIOUS_SIGNING_KEY_ID",
+		"name: FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS",
+		"key: FUGUE_PLATFORM_COMPONENT_IDENTITY_REVOKED_KEY_IDS",
+		"name: external-component-identity",
+	} {
+		if !strings.Contains(controller, want) {
+			t.Fatalf("controller component identity canary missing %q:\n%s", want, controller)
+		}
 	}
 }
 
