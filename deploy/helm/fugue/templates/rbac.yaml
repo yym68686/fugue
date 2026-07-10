@@ -7,7 +7,7 @@ metadata:
     {{- include "fugue.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["namespaces", "services", "secrets", "pods", "endpoints", "persistentvolumeclaims", "persistentvolumes"]
+    resources: ["namespaces", "services", "pods", "endpoints", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims/status"]

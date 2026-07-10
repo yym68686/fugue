@@ -1913,7 +1913,8 @@ DNS/edge failover 必须满足：
   - [x] 先以纯加法创建独立 control-plane ServiceAccount 与等价 ClusterRoleBinding，不切换现有 Pod、不收紧旧权限。
   - [x] API canary 切换到独立 control-plane ServiceAccount，并在切换前验证新旧权限列表完全等价。
   - [x] controller 单独 canary 切换到独立 control-plane ServiceAccount，并再次验证运行时权限。
-  - [ ] 收紧普通平台组件 ServiceAccount 的 Secret 权限后，再创建并挂载 component identity Secret。
+  - [x] 收紧普通平台组件 ServiceAccount 的 Secret API 权限，只在专用 control-plane 角色保留 Secret 权限。
+  - [ ] 创建并挂载独立 component identity Secret，只供受信任 issuer/verifier 使用。
 - [ ] component identity verifier key 支持当前/上一把 key 重叠验证和显式 revoked key id，并完成线上轮换演练。
 - [ ] 增加 Helm/外部 Secret 不存在、旧 Secret 升级和回滚时不轮换 key 的测试。
 - [ ] 增加受损 edge 持有 bundle key 仍不能签发任意 component identity 的安全回归测试。

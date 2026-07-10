@@ -36,7 +36,7 @@ func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
 	}
 }
 
-func TestDedicatedControlPlaneServiceAccountIsProvisionedAdditively(t *testing.T) {
+func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
 	}
@@ -75,8 +75,14 @@ func TestDedicatedControlPlaneServiceAccountIsProvisionedAdditively(t *testing.T
 	if sharedRulesOffset < 0 || controlPlaneRulesOffset < 0 {
 		t.Fatalf("rendered roles must both contain rules:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
 	}
-	if strings.TrimSpace(sharedRole[sharedRulesOffset:]) != strings.TrimSpace(role[controlPlaneRulesOffset:]) {
-		t.Fatalf("additive control-plane role must preserve the exact shared role rules before privilege separation:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+	sharedRules := strings.TrimSpace(sharedRole[sharedRulesOffset:])
+	controlPlaneRules := strings.TrimSpace(role[controlPlaneRulesOffset:])
+	if strings.Contains(sharedRules, `"secrets"`) {
+		t.Fatalf("shared platform role must not grant Kubernetes Secret API access:\n%s", sharedRole)
+	}
+	wantSharedRules := strings.Replace(controlPlaneRules, `"secrets", `, "", 1)
+	if sharedRules != wantSharedRules {
+		t.Fatalf("shared and control-plane roles must differ only by Secret API access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
 	}
 	binding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane")
 	if binding == "" {
