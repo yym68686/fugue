@@ -1881,7 +1881,7 @@ DNS/edge failover 必须满足：
 
 #### Phase -1C: Evidence 四态和可信身份
 
-> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator 和独立 JSON/Postgres 快照持久化已实现并有单元测试；尚未接入 release prepare、真实 heartbeat 或 release guard。
+> 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化，以及未接线的短期 component identity/heartbeat 防重放纯验证原语已实现并有单元测试；尚未接入 release prepare、真实 heartbeat、生产凭证签发或 release guard。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
@@ -1907,6 +1907,8 @@ DNS/edge failover 必须满足：
 - [x] 为 Caddy edge front 定义专用 platform component identity。
 - [x] 为 node guardian 定义专用 platform component identity。
 - [x] heartbeat endpoint 不接受普通 tenant API key。
+- [x] 实现带 key-id 的短期 platform component identity token 原语，允许轮换期间验旧 key；生产签发和撤销仍未接线。
+- [x] 实现 credential-bound heartbeat identity、canonical evidence hash、sequence/nonce/time-window/fencing/generation rollback 纯验证器；生产 handler 仍未 enforcement。
 - [ ] 服务端从凭证绑定 component/node/scope。
 - [ ] heartbeat 请求增加 sequence。
 - [ ] heartbeat 请求增加 issued_at。
