@@ -57,6 +57,27 @@ func TestDedicatedControlPlaneServiceAccountIsProvisionedAdditively(t *testing.T
 	if serviceAccount == "" {
 		t.Fatalf("rendered manifest missing dedicated control-plane service account:\n%s", manifest)
 	}
+	role := manifestDocumentForKindAndName(manifest, "ClusterRole", "fugue-fugue-control-plane")
+	if role == "" {
+		t.Fatalf("rendered manifest missing dedicated control-plane role:\n%s", manifest)
+	}
+	for _, want := range []string{
+		`resources: ["namespaces", "services", "secrets", "pods", "endpoints", "persistentvolumeclaims", "persistentvolumes"]`,
+		`verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]`,
+	} {
+		if !strings.Contains(role, want) {
+			t.Fatalf("dedicated control-plane role missing %q:\n%s", want, role)
+		}
+	}
+	sharedRole := manifestDocumentForKindAndName(manifest, "ClusterRole", "fugue-fugue")
+	sharedRulesOffset := strings.Index(sharedRole, "rules:")
+	controlPlaneRulesOffset := strings.Index(role, "rules:")
+	if sharedRulesOffset < 0 || controlPlaneRulesOffset < 0 {
+		t.Fatalf("rendered roles must both contain rules:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+	}
+	if strings.TrimSpace(sharedRole[sharedRulesOffset:]) != strings.TrimSpace(role[controlPlaneRulesOffset:]) {
+		t.Fatalf("additive control-plane role must preserve the exact shared role rules before privilege separation:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+	}
 	binding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane")
 	if binding == "" {
 		t.Fatalf("rendered manifest missing dedicated control-plane role binding:\n%s", manifest)
@@ -69,6 +90,20 @@ func TestDedicatedControlPlaneServiceAccountIsProvisionedAdditively(t *testing.T
 	} {
 		if !strings.Contains(binding, want) {
 			t.Fatalf("dedicated control-plane binding missing %q:\n%s", want, binding)
+		}
+	}
+	isolatedBinding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane-isolated")
+	if isolatedBinding == "" {
+		t.Fatalf("rendered manifest missing isolated control-plane role binding:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"kind: ClusterRole",
+		"name: fugue-fugue-control-plane",
+		"kind: ServiceAccount",
+		"name: fugue-fugue-control-plane-sa",
+	} {
+		if !strings.Contains(isolatedBinding, want) {
+			t.Fatalf("isolated control-plane binding missing %q:\n%s", want, isolatedBinding)
 		}
 	}
 	api := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
