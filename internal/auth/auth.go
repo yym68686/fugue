@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
@@ -100,7 +101,7 @@ func (a *Authenticator) RequirePlatformComponent(next http.Handler) http.Handler
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, err := a.authenticatePlatformComponentRequest(r, time.Now().UTC())
 		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		ctx := context.WithValue(r.Context(), platformComponentIdentityContextKey, claims)

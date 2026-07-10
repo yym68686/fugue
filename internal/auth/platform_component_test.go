@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -67,6 +68,19 @@ func TestRequirePlatformComponentRejectsOtherBearerCredentials(t *testing.T) {
 		handler.ServeHTTP(recorder, req)
 		if recorder.Code != http.StatusUnauthorized {
 			t.Fatalf("token %q: expected status %d, got %d", token, http.StatusUnauthorized, recorder.Code)
+		}
+		if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
+			t.Fatalf("token %q: expected JSON error response, got content type %q", token, contentType)
+		}
+		var response struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("token %q: decode JSON error response: %v", token, err)
+		}
+		if response.Error != "unauthorized" || response.Code != "auth_required" {
+			t.Fatalf("token %q: unexpected JSON error response: %+v", token, response)
 		}
 	}
 }
