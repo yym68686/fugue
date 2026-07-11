@@ -870,6 +870,63 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 )
 
 (
+  command_exists() { [[ "$1" == "k3s" || "$1" == "ctr" ]]; }
+  container_runtime_socket_accessible() { [[ "$1" == "/run/test-containerd.sock" ]]; }
+  FUGUE_K3S_CONTAINERD_SOCKET=/run/test-k3s.sock
+  FUGUE_CONTAINERD_SOCKET=/run/test-containerd.sock
+  assert_eq "$(container_runtime_pull_command)" "ctr" "runtime selection must require effective socket access"
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS=17
+  registry_ref=""
+  registry_timeout=""
+  container_runtime_pull_command() { return 1; }
+  verify_registry_image_by_digest() {
+    registry_ref="$1"
+    registry_timeout="$2"
+  }
+  pull_rollback_image_by_digest "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+    fail "registry fallback must verify a rollback digest when the runtime socket is inaccessible"
+  assert_eq \
+    "${registry_ref}" \
+    "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "registry fallback must receive the exact rollback digest"
+  assert_eq "${registry_timeout}" "17" "registry fallback must inherit the bounded pull timeout"
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS=17
+  FUGUE_K3S_CONTAINERD_SOCKET=/run/test-k3s.sock
+  timeout_args=""
+  registry_calls=0
+  container_runtime_pull_command() { printf '%s' "k3s"; }
+  command_exists() { [[ "$1" == "timeout" ]]; }
+  timeout() { timeout_args="$*"; }
+  verify_registry_image_by_digest() { registry_calls=$((registry_calls + 1)); }
+  pull_rollback_image_by_digest "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+    fail "accessible runtime socket must retain the real pull path"
+  assert_eq \
+    "${timeout_args}" \
+    "--kill-after=10s 17s k3s ctr --address /run/test-k3s.sock images pull ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "runtime rollback verification must pull the exact digest through the selected socket"
+  assert_eq "${registry_calls}" "0" "accessible runtime pull must not invoke registry fallback"
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS=17
+  registry_calls=0
+  container_runtime_pull_command() { printf '%s' "k3s"; }
+  command_exists() { [[ "$1" == "timeout" ]]; }
+  timeout() { return 77; }
+  verify_registry_image_by_digest() { registry_calls=$((registry_calls + 1)); }
+  if pull_rollback_image_by_digest "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; then
+    fail "a real runtime pull failure must fail closed"
+  fi
+  assert_eq "${registry_calls}" "0" "runtime pull failure must not be hidden by registry fallback"
+)
+
+(
   FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS=1
   FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS=0
   pull_calls=0

@@ -1912,7 +1912,15 @@ DNS/edge failover 必须满足：
 > OCI Distribution Bearer verifier，按顶层 digest 获取 index、唯一选择目标 platform manifest、
 > 校验 manifest/config 内容 digest，并对全部 layer 做存在性和 size 检查；不提权、不创建 Pod、
 > 不下载 layer。本地 synthetic registry 负向测试和真实 `github-runner` 身份下的 API/controller
-> GHCR 验证均通过。当前 shadow 仍使用原 containerd pull，生产验证 TODO 保持未勾选。
+> GHCR 验证均通过。该 foundation 检查点尚未接入生产调用点，生产验证 TODO 保持未勾选。
+>
+> 2026-07-11 socket-aware rollback image checkpoint: 已由正式 workflow 日志、runner uid/gid 和
+> `/run/k3s/containerd/containerd.sock` 的 owner/mode 100% 确认，原 shadow 失败是 self-hosted
+> `github-runner` 对 root-owned `0660` socket 没有读写权限，不是 digest、registry 或镜像缺失。
+> rollback probe 现在先检查 runtime CLI 和 socket 的有效读写权限：有权限时继续执行真实 digest
+> pull，且真实 pull 失败不会降级；无权限时使用同一 bounded timeout 通过 OCI registry verifier
+> 验证 index/目标 platform manifest/config/全部 layer。该路径仍保持 `shadow`，待持续证据、显式
+> `enforced` promotion 和真实 rollback drill 全部完成前，下方生产验证 TODO 继续保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

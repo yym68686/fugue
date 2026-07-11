@@ -2757,28 +2757,80 @@ rollback_image_digest_ref_valid() {
   [[ "${digest_ref}" =~ ^[^@[:space:]]+@sha256:[0-9a-fA-F]{64}$ ]]
 }
 
+container_runtime_socket_accessible() {
+  local socket_path="$1"
+  [[ -S "${socket_path}" && -r "${socket_path}" && -w "${socket_path}" ]]
+}
+
+container_runtime_pull_command() {
+  local k3s_socket="${FUGUE_K3S_CONTAINERD_SOCKET:-/run/k3s/containerd/containerd.sock}"
+  local containerd_socket="${FUGUE_CONTAINERD_SOCKET:-/run/containerd/containerd.sock}"
+
+  if command_exists k3s && container_runtime_socket_accessible "${k3s_socket}"; then
+    printf '%s' "k3s"
+    return 0
+  fi
+  if command_exists ctr && container_runtime_socket_accessible "${containerd_socket}"; then
+    printf '%s' "ctr"
+    return 0
+  fi
+  return 1
+}
+
+verify_registry_image_by_digest() {
+  local digest_ref="$1"
+  local timeout_seconds="$2"
+  local verifier="${REPO_ROOT}/scripts/verify_registry_image.py"
+  local platform="${FUGUE_ROLLBACK_IMAGE_PLATFORM:-linux/amd64}"
+
+  command_exists python3 || {
+    log "rollback registry verification requires python3"
+    return 1
+  }
+  [[ -f "${verifier}" && -r "${verifier}" ]] || {
+    log "rollback registry verifier is unavailable: ${verifier}"
+    return 1
+  }
+  python3 "${verifier}" \
+    --image "${digest_ref}" \
+    --platform "${platform}" \
+    --timeout-seconds "${timeout_seconds}"
+}
+
 pull_rollback_image_by_digest() {
   local digest_ref="$1"
   local timeout_seconds="${FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS:-120}"
+  local runtime_command=""
 
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || {
     log "rollback image pull timeout must be a positive integer: ${timeout_seconds}"
     return 1
   }
-  command_exists timeout || {
-    log "rollback image pull requires the timeout command"
-    return 1
-  }
-  if command_exists k3s; then
-    timeout --kill-after=10s "${timeout_seconds}s" k3s ctr images pull "${digest_ref}" >/dev/null
+  if runtime_command="$(container_runtime_pull_command)"; then
+    command_exists timeout || {
+      log "rollback image pull requires the timeout command"
+      return 1
+    }
+    case "${runtime_command}" in
+      k3s)
+        timeout --kill-after=10s "${timeout_seconds}s" \
+          k3s ctr --address "${FUGUE_K3S_CONTAINERD_SOCKET:-/run/k3s/containerd/containerd.sock}" \
+          images pull "${digest_ref}" >/dev/null
+        ;;
+      ctr)
+        timeout --kill-after=10s "${timeout_seconds}s" \
+          ctr --address "${FUGUE_CONTAINERD_SOCKET:-/run/containerd/containerd.sock}" \
+          --namespace k8s.io images pull "${digest_ref}" >/dev/null
+        ;;
+      *)
+        log "unsupported container runtime pull command: ${runtime_command}"
+        return 1
+        ;;
+    esac
     return
   fi
-  if command_exists ctr; then
-    timeout --kill-after=10s "${timeout_seconds}s" ctr --namespace k8s.io images pull "${digest_ref}" >/dev/null
-    return
-  fi
-  log "rollback image pull requires k3s ctr or ctr"
-  return 1
+  log "container runtime socket is unavailable to the release runner; verifying rollback image through the OCI registry"
+  verify_registry_image_by_digest "${digest_ref}" "${timeout_seconds}"
 }
 
 verify_rollback_deployment_image() {
