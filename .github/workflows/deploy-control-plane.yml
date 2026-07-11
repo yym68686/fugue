@@ -144,6 +144,13 @@ jobs:
       image_cache_image_repository: ${{ steps.meta.outputs.image_cache_image_repository }}
       edge_image_repository: ${{ steps.meta.outputs.edge_image_repository }}
       app_ssh_image_repository: ${{ steps.meta.outputs.app_ssh_image_repository }}
+      api_image_digest: ${{ steps.build_images.outputs.api_image_digest }}
+      controller_image_digest: ${{ steps.build_images.outputs.controller_image_digest }}
+      drain_agent_image_digest: ${{ steps.build_images.outputs.drain_agent_image_digest }}
+      telemetry_agent_image_digest: ${{ steps.build_images.outputs.telemetry_agent_image_digest }}
+      image_cache_image_digest: ${{ steps.build_images.outputs.image_cache_image_digest }}
+      edge_image_digest: ${{ steps.build_images.outputs.edge_image_digest }}
+      app_ssh_image_digest: ${{ steps.build_images.outputs.app_ssh_image_digest }}
       build_api: ${{ steps.plan.outputs.build_api }}
       build_controller: ${{ steps.plan.outputs.build_controller }}
       build_drain_agent: ${{ steps.plan.outputs.build_drain_agent }}
@@ -204,6 +211,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push selected control-plane images
+        id: build_images
         if: steps.plan.outputs.target_count != '0'
         env:
           FUGUE_CONTROL_PLANE_IMAGE_TARGETS: ${{ steps.plan.outputs.targets }}

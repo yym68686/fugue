@@ -45,6 +45,44 @@ image_dockerfile() {
   esac
 }
 
+image_digest_from_metadata() {
+  local metadata_file="$1"
+  python3 - "${metadata_file}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+try:
+    metadata = json.loads(path.read_text())
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"invalid build metadata {path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(metadata, dict):
+    print(f"build metadata {path} must be a JSON object", file=sys.stderr)
+    raise SystemExit(1)
+
+digest = metadata.get("containerimage.digest")
+if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+    print(f"build metadata {path} has no complete containerimage.digest", file=sys.stderr)
+    raise SystemExit(1)
+
+print(digest)
+PY
+}
+
+emit_output() {
+  local key="$1"
+  local value="$2"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf '%s=%s\n' "${key}" "${value}" >>"${GITHUB_OUTPUT}"
+    return
+  fi
+  printf '%s=%s\n' "${key}" "${value}"
+}
+
 targets="$(trim_field "${FUGUE_CONTROL_PLANE_IMAGE_TARGETS:-}")"
 if [[ -z "${targets}" ]]; then
   printf 'no control-plane images selected for build\n'
@@ -52,6 +90,13 @@ if [[ -z "${targets}" ]]; then
 fi
 
 require_env FUGUE_IMAGE_TAG
+
+metadata_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+metadata_dir="$(mktemp -d "${metadata_root%/}/fugue-build-metadata.XXXXXX")"
+cleanup() {
+  rm -rf "${metadata_dir}"
+}
+trap cleanup EXIT
 
 pids=()
 names=()
@@ -65,6 +110,7 @@ for target in ${targets}; do
   repository="${!repo_var}"
   tag="${repository}:${FUGUE_IMAGE_TAG}"
   cache_scope="fugue-control-plane-${target}"
+  metadata_file="${metadata_dir}/${target}.json"
   printf 'building %s -> %s\n' "${target}" "${tag}"
   (
     cd "${REPO_ROOT}"
@@ -72,6 +118,7 @@ for target in ${targets}; do
       --platform linux/amd64 \
       --file "${dockerfile}" \
       --tag "${tag}" \
+      --metadata-file "${metadata_file}" \
       --label "org.opencontainers.image.revision=${FUGUE_IMAGE_TAG}" \
       --cache-from "type=gha,scope=${cache_scope}" \
       --cache-to "type=gha,scope=${cache_scope},mode=max,ignore-error=true" \
@@ -88,6 +135,29 @@ for index in "${!pids[@]}"; do
     printf 'image build failed: %s\n' "${names[${index}]}" >&2
     rc=1
   fi
+done
+
+if [[ "${rc}" -ne 0 ]]; then
+  exit "${rc}"
+fi
+
+digests=()
+for target in "${names[@]}"; do
+  metadata_file="${metadata_dir}/${target}.json"
+  if ! digest="$(image_digest_from_metadata "${metadata_file}")"; then
+    printf 'image digest metadata verification failed: %s\n' "${target}" >&2
+    rc=1
+    continue
+  fi
+  digests+=("${digest}")
+done
+
+if [[ "${rc}" -ne 0 ]]; then
+  exit "${rc}"
+fi
+
+for index in "${!names[@]}"; do
+  emit_output "${names[${index}]}_image_digest" "${digests[${index}]}"
 done
 
 exit "${rc}"

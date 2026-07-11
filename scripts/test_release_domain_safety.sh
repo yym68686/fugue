@@ -428,6 +428,127 @@ plan_value() {
   awk -F= -v key="${key}" '$1 == key {print substr($0, length(key) + 2); exit}' "${output_file}"
 }
 
+BUILD_DIGEST_FIXTURE_DIR="$(mktemp -d)"
+mkdir -p "${BUILD_DIGEST_FIXTURE_DIR}/bin" "${BUILD_DIGEST_FIXTURE_DIR}/calls"
+cat >"${BUILD_DIGEST_FIXTURE_DIR}/bin/docker" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "buildx" && "${2:-}" == "build" ]] || exit 90
+shift 2
+metadata_file=
+tag=
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --metadata-file)
+      metadata_file="${2:-}"
+      shift 2
+      ;;
+    --tag)
+      tag="${2:-}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+[[ -n "${metadata_file}" && -n "${tag}" ]] || exit 91
+case "${tag}" in
+  */fugue-api:*) target=api; hex=a ;;
+  */fugue-controller:*) target=controller; hex=b ;;
+  */fugue-drain-agent:*) target=drain_agent; hex=c ;;
+  */fugue-telemetry-agent:*) target=telemetry_agent; hex=d ;;
+  */fugue-image-cache:*) target=image_cache; hex=e ;;
+  */fugue-edge:*) target=edge; hex=f ;;
+  */fugue-app-ssh:*) target=app_ssh; hex=1 ;;
+  *) exit 92 ;;
+esac
+printf '%s\n' "${tag}" >"${FUGUE_BUILD_TEST_CALL_DIR}/${target}"
+case "${FUGUE_BUILD_TEST_METADATA_MODE:-valid}" in
+  valid)
+    printf '{"containerimage.digest":"sha256:%064d"}\n' 0 | tr '0' "${hex}" >"${metadata_file}"
+    ;;
+  mixed)
+    if [[ "${target}" == "controller" ]]; then
+      printf '{"containerimage.digest":"sha256:abcd"}\n' >"${metadata_file}"
+    else
+      printf '{"containerimage.digest":"sha256:%064d"}\n' 0 | tr '0' "${hex}" >"${metadata_file}"
+    fi
+    ;;
+  missing)
+    ;;
+  malformed)
+    printf '{"containerimage.digest":"sha256:abcd"}\n' >"${metadata_file}"
+    ;;
+  *) exit 93 ;;
+esac
+SH
+chmod +x "${BUILD_DIGEST_FIXTURE_DIR}/bin/docker"
+
+BUILD_DIGEST_OUTPUT="${BUILD_DIGEST_FIXTURE_DIR}/outputs"
+BUILD_DIGEST_LOG="${BUILD_DIGEST_FIXTURE_DIR}/build.log"
+PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller drain_agent telemetry_agent image_cache edge app_ssh' \
+  FUGUE_IMAGE_TAG=test-build-digest \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
+  FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY=ghcr.io/acme/fugue-drain-agent \
+  FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY=ghcr.io/acme/fugue-telemetry-agent \
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-image-cache \
+  FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge \
+  FUGUE_APP_SSH_IMAGE_REPOSITORY=ghcr.io/acme/fugue-app-ssh \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" api_image_digest)" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "API build digest output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" controller_image_digest)" "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "controller build digest output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" drain_agent_image_digest)" "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "drain-agent build digest output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" telemetry_agent_image_digest)" "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" "telemetry-agent build digest output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" image_cache_image_digest)" "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "image-cache build digest output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" edge_image_digest)" "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" "edge build digest output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" app_ssh_image_digest)" "sha256:1111111111111111111111111111111111111111111111111111111111111111" "app-ssh build digest output"
+assert_eq "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f | wc -l | tr -d ' ')" "7" "every selected image target must run exactly once"
+
+for metadata_mode in missing malformed; do
+  : >"${BUILD_DIGEST_OUTPUT}"
+  if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+    GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+    FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+    FUGUE_BUILD_TEST_METADATA_MODE="${metadata_mode}" \
+    FUGUE_CONTROL_PLANE_IMAGE_TARGETS=api \
+    FUGUE_IMAGE_TAG=test-build-digest \
+    FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+    "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+    fail "${metadata_mode} build metadata must fail closed"
+  fi
+  [[ ! -s "${BUILD_DIGEST_OUTPUT}" ]] || fail "${metadata_mode} build metadata must not emit a partial digest output"
+done
+
+: >"${BUILD_DIGEST_OUTPUT}"
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_METADATA_MODE=mixed \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller' \
+  FUGUE_IMAGE_TAG=test-build-digest \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "one invalid digest must fail the entire parallel image build"
+fi
+[[ ! -s "${BUILD_DIGEST_OUTPUT}" ]] || fail "parallel image digest validation must be atomic"
+
+rm -rf "${BUILD_DIGEST_FIXTURE_DIR}"
+
+WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/deploy-control-plane.yml"
+grep -Fq 'id: build_images' "${WORKFLOW_FILE}" || fail "control-plane build step must expose digest outputs"
+for target in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
+  grep -Fq "${target}_image_digest: \${{ steps.build_images.outputs.${target}_image_digest }}" "${WORKFLOW_FILE}" ||
+    fail "control-plane build job must expose ${target} digest"
+done
+
 assert_build_plan() {
   local changed_files="$1"
   local label="$2"

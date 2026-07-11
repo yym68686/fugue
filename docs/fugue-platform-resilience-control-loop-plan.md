@@ -1885,6 +1885,13 @@ DNS/edge failover 必须满足：
 > 并通过 `k3s ctr`/`ctr` 按 digest 做有 timeout 和重试预算的真实 pull 验证函数；混合 digest、
 > 缺失 digest、repository mismatch 和 pull failure 均 fail closed。该函数尚未接入 `main`
 > 的 release prepare，因此不会改变现有发布行为，rollback image 生产验证项保持未勾选。
+>
+> 2026-07-11 build digest checkpoint: `build_control_plane_images.sh` 已要求每个实际构建目标
+> 通过独立 Buildx metadata file 返回完整 `sha256` digest，所有并行构建和全部 metadata
+> 校验成功后才统一写入 GitHub Actions step/job output；missing、malformed 或截断 digest 均
+> fail closed，且不会发布部分 digest output。当前 deploy job 尚未消费这些 output，仍按原 tag
+> 行为部署，因此本检查点不改变线上镜像选择；控制面/edge digest pin 和 rollback image 生产验证
+> 项继续保持未勾选，待后续原子接线、回滚和线上验证完成。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。
