@@ -1871,7 +1871,7 @@ DNS/edge failover 必须满足：
 - [x] 每个 artifact kind 定义 LKG TTL/max stale。
 - [x] 至少保留三代 verified LKG。
 - [ ] GC 保护 verified LKG 和 pinned rollback target。
-- [ ] rollback 后重新验证旧 generation。
+- [x] rollback 后重新验证旧 generation。
 - [x] 增加 bad full generation 不覆盖旧 LKG 的回归测试。
 - [ ] 增加 serving-unverified crash recovery 测试。
 - [x] 增加 LKG retention 测试。

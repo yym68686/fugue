@@ -1066,7 +1066,7 @@ INSERT INTO fugue_platform_lkg_snapshot_history (
 	$7, $8, $9, $10::jsonb,
 	$11, $12, $13::jsonb,
 	$14, $15, $16
-) ON CONFLICT (artifact_kind, scope_key, generation) DO NOTHING`,
+) ON CONFLICT (id) DO NOTHING`,
 		snapshot.ID, snapshot.ArtifactID, snapshot.ArtifactKind, snapshot.ScopeKey, scopeJSON, snapshot.SchemaVersion,
 		snapshot.Generation, snapshot.GenerationSequence, snapshot.ContentHash, artifactProvenanceJSON,
 		snapshot.VerifiedByReleaseID, snapshot.VerificationEvidenceHash, snapshotProvenanceJSON,
@@ -1087,8 +1087,8 @@ SELECT id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
 	verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
 	expires_at, created_at, updated_at
 FROM fugue_platform_lkg_snapshot_history
-WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3
-LIMIT 1`, snapshot.ArtifactKind, snapshot.ScopeKey, snapshot.Generation))
+WHERE id = $1
+LIMIT 1`, snapshot.ID))
 	if err != nil {
 		return mapDBErr(err)
 	}
@@ -1601,7 +1601,7 @@ SELECT id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
 	expires_at, created_at, updated_at
 FROM fugue_platform_lkg_snapshot_history
 WHERE artifact_kind = $1 AND scope_key = $2
-ORDER BY generation_sequence DESC, updated_at DESC, id DESC
+ORDER BY updated_at DESC, created_at DESC, generation_sequence DESC, id DESC
 LIMIT $3`, kind, scopeKey, limit)
 	if err != nil {
 		return nil, mapDBErr(err)

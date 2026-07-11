@@ -1934,10 +1934,11 @@ var postgresSchemaStatements = []string{
 		snapshot_provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb,
 		expires_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL,
-		updated_at TIMESTAMPTZ NOT NULL,
-		UNIQUE (artifact_kind, scope_key, generation)
+		updated_at TIMESTAMPTZ NOT NULL
 	)`,
+	`ALTER TABLE fugue_platform_lkg_snapshot_history DROP CONSTRAINT IF EXISTS fugue_platform_lkg_snapshot_h_artifact_kind_scope_key_gener_key`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_lkg_history_kind_scope_sequence ON fugue_platform_lkg_snapshot_history (artifact_kind, scope_key, generation_sequence DESC, updated_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_lkg_history_kind_scope_verified ON fugue_platform_lkg_snapshot_history (artifact_kind, scope_key, updated_at DESC, created_at DESC)`,
 	`INSERT INTO fugue_platform_lkg_snapshot_history (
 		id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
 		generation, generation_sequence, content_hash, artifact_provenance_json,
@@ -1949,7 +1950,7 @@ var postgresSchemaStatements = []string{
 		verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
 		expires_at, created_at, updated_at
 	FROM fugue_platform_lkg_snapshots
-	ON CONFLICT (artifact_kind, scope_key, generation) DO NOTHING`,
+	ON CONFLICT (id) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS fugue_resource_usage_samples (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

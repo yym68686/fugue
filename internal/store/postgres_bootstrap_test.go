@@ -202,14 +202,18 @@ func TestPostgresSchemaIncludesPlatformLKGHistoryRetention(t *testing.T) {
 	schema := strings.Join(postgresSchemaStatements, "\n")
 	for _, required := range []string{
 		"CREATE TABLE IF NOT EXISTS fugue_platform_lkg_snapshot_history",
-		"UNIQUE (artifact_kind, scope_key, generation)",
+		"DROP CONSTRAINT IF EXISTS fugue_platform_lkg_snapshot_h_artifact_kind_scope_key_gener_key",
 		"idx_fugue_platform_lkg_history_kind_scope_sequence",
+		"idx_fugue_platform_lkg_history_kind_scope_verified",
 		"FROM fugue_platform_lkg_snapshots",
-		"ON CONFLICT (artifact_kind, scope_key, generation) DO NOTHING",
+		"ON CONFLICT (id) DO NOTHING",
 	} {
 		if !strings.Contains(schema, required) {
 			t.Fatalf("postgres schema is missing %s", required)
 		}
+	}
+	if strings.Contains(schema, "UNIQUE (artifact_kind, scope_key, generation)") {
+		t.Fatal("PostgreSQL LKG history must allow a rollback generation to be re-verified as a new immutable event")
 	}
 }
 

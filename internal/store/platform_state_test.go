@@ -182,6 +182,13 @@ func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 		rollbackLKG.Generation != first.Generation {
 		t.Fatalf("expected verified rollback LKG for first generation, release=%+v message=%+v lkg=%+v", rollbackRelease, rollbackMessage, rollbackLKG)
 	}
+	currentAfterRollback, err := s.GetPlatformLKG(model.PlatformArtifactKindEdgeRankingPolicy, "global")
+	if err != nil {
+		t.Fatalf("get current LKG after rollback verification: %v", err)
+	}
+	if currentAfterRollback == nil || currentAfterRollback.ID != rollbackLKG.ID || currentAfterRollback.Generation != first.Generation {
+		t.Fatalf("verified rollback must become the current LKG: current=%+v rollback=%+v", currentAfterRollback, rollbackLKG)
+	}
 }
 
 func TestPlatformLKGHistoryRetainsCurrentAndPreviousGenerations(t *testing.T) {

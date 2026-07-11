@@ -1465,14 +1465,14 @@ func platformLKGSnapshotForScope(snapshots []model.PlatformLKGSnapshot, kind, sc
 }
 
 func platformLKGSnapshotIsNewer(candidate, current model.PlatformLKGSnapshot) bool {
-	if candidate.GenerationSequence != current.GenerationSequence {
-		return candidate.GenerationSequence > current.GenerationSequence
-	}
 	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
 		return candidate.UpdatedAt.After(current.UpdatedAt)
 	}
 	if !candidate.CreatedAt.Equal(current.CreatedAt) {
 		return candidate.CreatedAt.After(current.CreatedAt)
+	}
+	if candidate.GenerationSequence != current.GenerationSequence {
+		return candidate.GenerationSequence > current.GenerationSequence
 	}
 	return candidate.ID > current.ID
 }

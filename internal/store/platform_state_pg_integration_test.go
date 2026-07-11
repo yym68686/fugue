@@ -212,6 +212,42 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`,
 	if recoveredPrevious != 1 {
 		t.Fatalf("mixed-version current LKG was not archived before overwrite: count=%d", recoveredPrevious)
 	}
+	_, rollbackRelease, _, rollbackLKG, err := s.RollbackPlatformArtifact(mixedVersionCandidate.ID, model.PlatformArtifactRollbackRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		ToGeneration:   verifiedLKG.Generation,
+		Reason:         "postgres rollback re-verification",
+	}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatalf("create PostgreSQL rollback release: %v", err)
+	}
+	if rollbackLKG == nil || rollbackLKG.Generation != mixedVersionCandidate.Generation {
+		t.Fatalf("rollback must preserve current LKG until re-verification: %+v", rollbackLKG)
+	}
+	_, rollbackRelease, _, rollbackLKG, err = s.VerifyPlatformArtifactReleaseLKG(
+		rollbackRelease.ID,
+		completePlatformVerificationRequest(rollbackRelease.FencingToken, false),
+		testPlatformPrincipal(),
+	)
+	if err != nil {
+		t.Fatalf("re-verify PostgreSQL rollback generation: %v", err)
+	}
+	if rollbackLKG == nil || rollbackLKG.Generation != verifiedLKG.Generation {
+		t.Fatalf("rollback generation did not become current after re-verification: %+v", rollbackLKG)
+	}
+	currentAfterRollback, err := s.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
+	if err != nil {
+		t.Fatalf("get PostgreSQL LKG after rollback verification: %v", err)
+	}
+	if currentAfterRollback == nil || currentAfterRollback.ID != rollbackLKG.ID {
+		t.Fatalf("PostgreSQL current LKG must point at re-verified rollback: current=%+v rollback=%+v", currentAfterRollback, rollbackLKG)
+	}
+	rollbackHistory, err := s.ListPlatformLKGHistory(model.PlatformArtifactKindDNSAnswerBundle, scopeKey, 10)
+	if err != nil {
+		t.Fatalf("list PostgreSQL rollback LKG history: %v", err)
+	}
+	if len(rollbackHistory) < 3 || rollbackHistory[0].ID != rollbackLKG.ID {
+		t.Fatalf("rollback verification event must lead retained history: %+v", rollbackHistory)
+	}
 
 	retryArtifact := createValidated("retry-" + model.NewID("gen"))
 	retryRequest := model.PlatformArtifactReleaseRequest{
