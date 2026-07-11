@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
@@ -1375,6 +1376,7 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
 	receivedAt time.Time,
 	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
+	auditKeyring *bundleauth.Keyring,
 ) (model.PlatformConsumerInstance, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1438,10 +1440,70 @@ FOR UPDATE`, bound.ConsumerID, bound.ArtifactKind, bound.ScopeKey))
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
+	if auditKeyring != nil {
+		if err := s.pgAppendPlatformConsumerHeartbeatAuditEventTx(ctx, tx, out, *auditKeyring); err != nil {
+			return model.PlatformConsumerInstance{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return model.PlatformConsumerInstance{}, mapDBErr(err)
 	}
 	return out, nil
+}
+
+func (s *Store) pgAppendPlatformConsumerHeartbeatAuditEventTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	consumer model.PlatformConsumerInstance,
+	keyring bundleauth.Keyring,
+) error {
+	chainID := platformConsumerHeartbeatAuditChainID(consumer)
+	if chainID == "" {
+		return ErrInvalidInput
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_security_audit_chain_state (chain_id, last_sequence, last_hash, updated_at)
+VALUES ($1, 0, '', $2)
+ON CONFLICT (chain_id) DO NOTHING`, chainID, consumer.LastHeartbeatAt); err != nil {
+		return fmt.Errorf("initialize platform consumer heartbeat audit chain: %w", err)
+	}
+	var sequence int64
+	var previousHash string
+	if err := tx.QueryRowContext(ctx, `
+SELECT last_sequence, last_hash
+FROM fugue_security_audit_chain_state
+WHERE chain_id = $1
+FOR UPDATE`, chainID).Scan(&sequence, &previousHash); err != nil {
+		return fmt.Errorf("lock platform consumer heartbeat audit chain: %w", err)
+	}
+	event, err := buildPlatformConsumerHeartbeatAuditEvent(consumer, sequence+1, previousHash, keyring)
+	if err != nil {
+		return err
+	}
+	if err := s.pgAppendAuditEventTx(ctx, tx, event); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE fugue_security_audit_chain_state
+SET last_sequence = $2, last_hash = $3, updated_at = $4
+WHERE chain_id = $1 AND last_sequence = $5`,
+		chainID,
+		event.ChainSequence,
+		event.EventHash,
+		event.CreatedAt,
+		event.ChainSequence-1,
+	)
+	if err != nil {
+		return fmt.Errorf("advance platform consumer heartbeat audit chain: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect platform consumer heartbeat audit chain advance: %w", err)
+	}
+	if affected != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func pgUpsertTrustedPlatformConsumerHeartbeat(

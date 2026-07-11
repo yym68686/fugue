@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 
@@ -135,6 +136,68 @@ func TestPostgresAcceptTrustedPlatformConsumerHeartbeatIsTransactional(t *testin
 	if !created.IdentityVerified || created.ID != verified.ID || created.Sequence != heartbeat.Sequence ||
 		created.ExpectedConsumerSetID != set.ID || created.CredentialID != claims.CredentialID {
 		t.Fatalf("unexpected trusted postgres consumer: %+v", created)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sqlmock expectations: %v", err)
+	}
+}
+
+func TestPostgresAcceptTrustedPlatformConsumerHeartbeatWithAuditCommitsAtomically(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := &Store{databaseURL: "postgres://example", db: db, dbReady: true}
+	now := time.Date(2026, 7, 11, 6, 45, 0, 0, time.UTC)
+	set := trustedHeartbeatExpectedSet(t, now)
+	claims := trustedHeartbeatClaims(t, now)
+	heartbeat := trustedHeartbeatEnvelope(t, claims, set, now)
+	verified, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(
+		claims, set, heartbeat, nil, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+	)
+	if err != nil {
+		t.Fatalf("build verified consumer: %v", err)
+	}
+	verified.ID = platformConsumerInstanceID(verified.ConsumerID, verified.ArtifactKind, verified.ScopeKey)
+	chainID := platformConsumerHeartbeatAuditChainID(verified)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`(?s)FROM fugue_platform_expected_consumer_sets\s+WHERE id = \$1\s+FOR SHARE`).
+		WithArgs(set.ID).
+		WillReturnRows(expectedConsumerSetRows(t, set))
+	mock.ExpectQuery(`(?s)FROM fugue_platform_consumer_instances\s+WHERE consumer_id = \$1 AND artifact_kind = \$2 AND scope_key = \$3\s+FOR UPDATE`).
+		WithArgs(verified.ConsumerID, verified.ArtifactKind, verified.ScopeKey).
+		WillReturnRows(sqlmock.NewRows(platformConsumerColumns()))
+	mock.ExpectQuery(`(?s)INSERT INTO fugue_platform_consumer_instances .*RETURNING`).
+		WillReturnRows(platformConsumerRows(t, verified))
+	mock.ExpectExec(`(?s)INSERT INTO fugue_security_audit_chain_state`).
+		WithArgs(chainID, verified.LastHeartbeatAt).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`(?s)SELECT last_sequence, last_hash.*FOR UPDATE`).
+		WithArgs(chainID).
+		WillReturnRows(sqlmock.NewRows([]string{"last_sequence", "last_hash"}).AddRow(0, ""))
+	mock.ExpectExec(`(?s)INSERT INTO fugue_audit_events`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`(?s)UPDATE fugue_security_audit_chain_state`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	created, err := s.AcceptTrustedPlatformConsumerHeartbeatWithAudit(
+		claims,
+		set.ID,
+		heartbeat,
+		now,
+		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+		bundleauth.NewKeyring("audit-key", "heartbeat-audit:key", "", "", nil),
+	)
+	if err != nil {
+		t.Fatalf("accept postgres audited trusted heartbeat: %v", err)
+	}
+	if !created.IdentityVerified || created.Sequence != heartbeat.Sequence {
+		t.Fatalf("unexpected audited postgres consumer: %+v", created)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("sqlmock expectations: %v", err)

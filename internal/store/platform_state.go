@@ -670,12 +670,34 @@ func (s *Store) AcceptTrustedPlatformConsumerHeartbeat(
 	receivedAt time.Time,
 	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
 ) (model.PlatformConsumerInstance, error) {
+	return s.acceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, nil)
+}
+
+func (s *Store) AcceptTrustedPlatformConsumerHeartbeatWithAudit(
+	claims platformcontrol.PlatformComponentIdentityClaims,
+	expectedSetID string,
+	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
+	receivedAt time.Time,
+	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
+	auditKeyring bundleauth.Keyring,
+) (model.PlatformConsumerInstance, error) {
+	return s.acceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, &auditKeyring)
+}
+
+func (s *Store) acceptTrustedPlatformConsumerHeartbeat(
+	claims platformcontrol.PlatformComponentIdentityClaims,
+	expectedSetID string,
+	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
+	receivedAt time.Time,
+	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
+	auditKeyring *bundleauth.Keyring,
+) (model.PlatformConsumerInstance, error) {
 	expectedSetID = strings.TrimSpace(expectedSetID)
 	if expectedSetID == "" {
 		return model.PlatformConsumerInstance{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy)
+		return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, auditKeyring)
 	}
 	var out model.PlatformConsumerInstance
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -684,6 +706,11 @@ func (s *Store) AcceptTrustedPlatformConsumerHeartbeat(
 		)
 		if err != nil {
 			return err
+		}
+		if auditKeyring != nil {
+			if err := appendPlatformConsumerHeartbeatAuditEventToState(state, consumer, *auditKeyring); err != nil {
+				return err
+			}
 		}
 		out = consumer
 		return nil
@@ -1627,6 +1654,94 @@ func acceptTrustedPlatformConsumerHeartbeatInState(
 		state.PlatformConsumerInstances = append(state.PlatformConsumerInstances, consumer)
 	}
 	return consumer, nil
+}
+
+func appendPlatformConsumerHeartbeatAuditEventToState(
+	state *model.State,
+	consumer model.PlatformConsumerInstance,
+	keyring bundleauth.Keyring,
+) error {
+	if state == nil {
+		return ErrInvalidInput
+	}
+	chainID := platformConsumerHeartbeatAuditChainID(consumer)
+	if chainID == "" {
+		return ErrInvalidInput
+	}
+	var sequence int64
+	previousHash := ""
+	for _, event := range state.AuditEvents {
+		if event.ChainID != chainID || event.ChainSequence <= sequence {
+			continue
+		}
+		sequence = event.ChainSequence
+		previousHash = event.EventHash
+	}
+	event, err := buildPlatformConsumerHeartbeatAuditEvent(consumer, sequence+1, previousHash, keyring)
+	if err != nil {
+		return err
+	}
+	state.AuditEvents = append(state.AuditEvents, event)
+	return nil
+}
+
+func buildPlatformConsumerHeartbeatAuditEvent(
+	consumer model.PlatformConsumerInstance,
+	sequence int64,
+	previousHash string,
+	keyring bundleauth.Keyring,
+) (model.AuditEvent, error) {
+	chainID := platformConsumerHeartbeatAuditChainID(consumer)
+	if chainID == "" || sequence <= 0 || !consumer.IdentityVerified ||
+		strings.TrimSpace(consumer.CredentialID) == "" || strings.TrimSpace(consumer.EvidenceHash) == "" ||
+		consumer.Sequence <= 0 || consumer.IssuedAt == nil || consumer.IssuedAt.IsZero() ||
+		consumer.LastHeartbeatAt.IsZero() {
+		return model.AuditEvent{}, ErrInvalidInput
+	}
+	metadata := map[string]string{
+		"credential_id":            strings.TrimSpace(consumer.CredentialID),
+		"token_id":                 strings.TrimSpace(consumer.TokenID),
+		"component":                strings.TrimSpace(consumer.Component),
+		"node_id":                  strings.TrimSpace(consumer.NodeID),
+		"artifact_kind":            strings.TrimSpace(consumer.ArtifactKind),
+		"scope_key":                strings.TrimSpace(consumer.ScopeKey),
+		"release_set_id":           strings.TrimSpace(consumer.ReleaseSetID),
+		"expected_consumer_set_id": strings.TrimSpace(consumer.ExpectedConsumerSetID),
+		"fencing_token":            fmt.Sprintf("%d", consumer.FencingToken),
+		"heartbeat_sequence":       fmt.Sprintf("%d", consumer.Sequence),
+		"issued_at":                consumer.IssuedAt.UTC().Format(time.RFC3339Nano),
+		"generation_sequence":      fmt.Sprintf("%d", consumer.GenerationSequence),
+		"desired_generation":       strings.TrimSpace(consumer.DesiredGeneration),
+		"actual_generation":        strings.TrimSpace(consumer.ActualGeneration),
+		"lkg_generation":           strings.TrimSpace(consumer.LKGGeneration),
+		"apply_status":             strings.TrimSpace(consumer.ApplyStatus),
+		"probe_status":             strings.TrimSpace(consumer.ProbeStatus),
+		"serving_lkg":              fmt.Sprintf("%t", consumer.ServingLKG),
+		"lkg_expired":              fmt.Sprintf("%t", consumer.LKGExpired),
+		"last_error_present":       fmt.Sprintf("%t", strings.TrimSpace(consumer.LastError) != ""),
+		"evidence_hash":            strings.TrimSpace(strings.ToLower(consumer.EvidenceHash)),
+	}
+	return platformsafety.SignTamperEvidentAuditEvent(model.AuditEvent{
+		ID:            model.NewID("audit"),
+		ActorType:     "platform_component",
+		ActorID:       strings.TrimSpace(consumer.CredentialID),
+		Action:        "platform_consumer.heartbeat_accepted",
+		TargetType:    "platform_consumer",
+		TargetID:      strings.TrimSpace(consumer.ID),
+		Metadata:      metadata,
+		ChainID:       chainID,
+		ChainSequence: sequence,
+		PreviousHash:  strings.TrimSpace(previousHash),
+		CreatedAt:     consumer.LastHeartbeatAt.UTC(),
+	}, keyring)
+}
+
+func platformConsumerHeartbeatAuditChainID(consumer model.PlatformConsumerInstance) string {
+	consumerID := strings.TrimSpace(consumer.ID)
+	if consumerID == "" {
+		return ""
+	}
+	return "platform-consumer-heartbeat:" + consumerID
 }
 
 func platformConsumerInstanceID(consumerID, kind, scopeKey string) string {
