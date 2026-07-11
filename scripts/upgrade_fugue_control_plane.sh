@@ -2820,6 +2820,41 @@ verify_control_plane_rollback_images() {
   verify_rollback_deployment_image "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}" "controller"
 }
 
+run_control_plane_rollback_image_preflight() {
+  local mode
+  mode="$(trim_field "${FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE:-shadow}")"
+
+  case "${mode}" in
+    off|disabled)
+      log "rollback image preflight disabled"
+      return 0
+      ;;
+    shadow)
+      local FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS="${FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_TIMEOUT_SECONDS:-20}"
+      local FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS="${FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_ATTEMPTS:-1}"
+      local FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS="${FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_RETRY_DELAY_SECONDS:-0}"
+      if verify_control_plane_rollback_images; then
+        log "rollback image preflight shadow passed"
+      else
+        log "rollback image preflight shadow failed; continuing without enforcement"
+      fi
+      return 0
+      ;;
+    enforced)
+      if ! verify_control_plane_rollback_images; then
+        log "rollback image preflight enforced failure"
+        return 1
+      fi
+      log "rollback image preflight enforced passed"
+      return 0
+      ;;
+    *)
+      log "rollback image preflight mode must be off, disabled, shadow, or enforced: ${mode:-<empty>}"
+      return 1
+      ;;
+  esac
+}
+
 live_deployment_container_env_value() {
   local deployment_name="$1"
   local container_name="$2"
@@ -8120,6 +8155,9 @@ PY
 
   PREVIOUS_REVISION="$(helm_current_revision)"
   [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
+  if ! run_control_plane_rollback_image_preflight; then
+    fail "rollback image preflight failed"
+  fi
 
   log "upgrading ${FUGUE_RELEASE_NAME} in namespace ${FUGUE_NAMESPACE}"
   log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"

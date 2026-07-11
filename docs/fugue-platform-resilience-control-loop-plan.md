@@ -1899,6 +1899,14 @@ DNS/edge failover 必须满足：
 > 才能暂时保留旧 tag-only 引用，且 allowance 不能接受 malformed digest。所有 pinned 记录仍保留
 > source tag 用于源码 attribution，同时 runtime ref 固定为 `repository@digest`。该 contract 尚未接入
 > resolver/workflow/Helm，因此没有改变生产发布行为，相关 digest pin TODO 继续保持未勾选。
+>
+> 2026-07-11 rollback image shadow checkpoint: rollback image digest pull probe 已接入 Helm mutation
+> 之前的 release prepare，并提供 `off`/`shadow`/`enforced` 三态、invalid mode fail-closed 和 workflow
+> 显式配置。当前默认固定为 `shadow`：真实提取 API/controller Ready Pod digest 并执行 bounded pull，
+> shadow 使用独立的 1 attempt/20s/0 delay 短预算，成败均写发布日志但失败不阻断现有发布；只有
+> 经过线上 soak 后显式 promotion 到 `enforced` 才成为
+> 硬门禁。因此 rollback image 生产验证 TODO 暂不勾选，待 shadow 证据稳定、enforced 发布和 rollback
+> 演练均完成后再确认。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

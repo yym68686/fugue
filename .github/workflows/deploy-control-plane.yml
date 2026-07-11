@@ -397,6 +397,10 @@ jobs:
           FUGUE_SYNC_EDGE_PROXY: ${{ vars.FUGUE_SYNC_EDGE_PROXY || 'false' }}
           FUGUE_SMOKE_URL: ${{ vars.FUGUE_SMOKE_URL || '' }}
           FUGUE_SMOKE_URLS: ${{ vars.FUGUE_SMOKE_URLS || '' }}
+          FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE: ${{ vars.FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE || 'shadow' }}
+          FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_TIMEOUT_SECONDS: ${{ vars.FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_TIMEOUT_SECONDS || '20' }}
+          FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_ATTEMPTS: ${{ vars.FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_ATTEMPTS || '1' }}
+          FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_RETRY_DELAY_SECONDS: ${{ vars.FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_RETRY_DELAY_SECONDS || '0' }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.api_image_repository || (needs.build.outputs.build_api == 'true' && needs.build.outputs.api_image_repository || steps.live_images.outputs.api_image_repository) }}
           FUGUE_API_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_api == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.api_image_tag) }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.controller_image_repository || (needs.build.outputs.build_controller == 'true' && needs.build.outputs.controller_image_repository || steps.live_images.outputs.controller_image_repository) }}

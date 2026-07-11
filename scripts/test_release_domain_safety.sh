@@ -909,6 +909,71 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 )
 
 (
+  verify_calls=0
+  shadow_budget=""
+  verify_control_plane_rollback_images() {
+    verify_calls=$((verify_calls + 1))
+    shadow_budget="${FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS}/${FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS}/${FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS}"
+    return 76
+  }
+  FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE=shadow
+  run_control_plane_rollback_image_preflight || fail "shadow rollback image preflight must not block a release"
+  assert_eq "${verify_calls}" "1" "shadow rollback image preflight must still execute the real probe"
+  assert_eq "${shadow_budget}" "1/20/0" "shadow rollback image preflight must use a short independent pull budget"
+)
+
+(
+  verify_calls=0
+  verify_control_plane_rollback_images() { verify_calls=$((verify_calls + 1)); return 77; }
+  FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE=enforced
+  if run_control_plane_rollback_image_preflight; then
+    fail "enforced rollback image preflight must block a failed probe"
+  fi
+  assert_eq "${verify_calls}" "1" "enforced rollback image preflight must execute once"
+)
+
+(
+  verify_calls=0
+  verify_control_plane_rollback_images() { verify_calls=$((verify_calls + 1)); }
+  FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE=enforced
+  run_control_plane_rollback_image_preflight || fail "enforced rollback image preflight must accept complete evidence"
+  assert_eq "${verify_calls}" "1" "successful enforced rollback image preflight must execute once"
+)
+
+(
+  verify_calls=0
+  verify_control_plane_rollback_images() { verify_calls=$((verify_calls + 1)); return 78; }
+  FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE=off
+  run_control_plane_rollback_image_preflight || fail "rollback image preflight kill switch must be non-blocking"
+  assert_eq "${verify_calls}" "0" "rollback image preflight kill switch must skip the probe"
+)
+
+(
+  verify_calls=0
+  verify_control_plane_rollback_images() { verify_calls=$((verify_calls + 1)); }
+  FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE=invalid
+  if run_control_plane_rollback_image_preflight; then
+    fail "invalid rollback image preflight mode must fail closed"
+  fi
+  assert_eq "${verify_calls}" "0" "invalid rollback image preflight mode must fail before probing"
+)
+
+python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+main = source[source.index("\nmain() {"):]
+preflight = main.index("\n  if ! run_control_plane_rollback_image_preflight; then")
+helm_mutation = main.index("\n  if ! helm upgrade")
+if preflight > helm_mutation:
+    raise SystemExit("rollback image preflight must run before Helm mutation")
+PY
+
+grep -Fq "FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE: \${{ vars.FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE || 'shadow' }}" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane workflow must explicitly default rollback image preflight to shadow"
+
+(
   curl_calls=0
   curl() {
     local output_file=""
