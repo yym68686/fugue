@@ -48,6 +48,14 @@ if blue_branch.index("run_bluegreen_release") > blue_branch.index("write_release
     raise SystemExit("blue-green release record must be written only after the transaction succeeds")
 if "run_smoke_urls" in blue_branch:
     raise SystemExit("blue-green final smoke belongs inside the rollback-capable transaction")
+
+dns_start = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" ]]', blue_end)
+dns_end = source.index("\n  while IFS= read -r daemonset_name", dns_start)
+dns_branch = source[dns_start:dns_end]
+if dns_branch.index("run_dns_ondelete_release") > dns_branch.index("write_release_record"):
+    raise SystemExit("DNS release record must be written only after the transaction succeeds")
+if "run_smoke_urls" in dns_branch:
+    raise SystemExit("DNS final smoke belongs inside the rollback-capable transaction")
 PY
 
 (
@@ -128,6 +136,214 @@ PY
     fail "authoritative DNS validation must fail closed after an exhausted query"
   fi
   assert_eq "${host_calls}" "2" "authoritative DNS validation must stop before querying later hostnames or nodes"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-dns-release
+  events=""
+  dns_daemonset_names() { printf 'dns-us\ndns-de\n'; }
+  wait_daemonset_ready() { events="${events}preflight:$1;"; }
+  dns_rollback_patch_for_daemonset() { printf '[{"op":"test","path":"/metadata/name","value":"%s"}]' "$1"; }
+  daemonset_pod_uids() { printf '%s-old-uid\n' "$1"; }
+  patch_dns_template() { events="${events}patch:$1;"; }
+  delete_daemonset_pods_no_wait() { events="${events}delete:$1;"; }
+  wait_daemonset_replaced_and_ready() { events="${events}ready:$1;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative:$1;"; }
+  run_smoke_urls() { events="${events}public-smoke;"; }
+
+  run_dns_ondelete_release
+  assert_eq "${events}" "preflight:dns-us;preflight:dns-de;patch:dns-us;delete:dns-us;ready:dns-us;authoritative:dns-us;patch:dns-de;delete:dns-de;ready:dns-de;authoritative:dns-de;public-smoke;" "DNS transaction must validate each replacement before advancing and run final public smoke"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-dns-release
+  patches=0
+  dns_daemonset_names() { printf 'dns-us\ndns-de\n'; }
+  wait_daemonset_ready() { :; }
+  dns_rollback_patch_for_daemonset() {
+    [[ "$1" != "dns-de" ]] || return 76
+    printf '[]'
+  }
+  daemonset_pod_uids() { printf '%s-old-uid\n' "$1"; }
+  patch_dns_template() { patches=$((patches + 1)); }
+
+  if run_dns_ondelete_release; then
+    fail "DNS release must fail when any rollback snapshot cannot be pinned"
+  fi
+  assert_eq "${patches}" "0" "DNS release must pin every rollback target before its first mutation"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  kubectl_cmd() {
+    printf '%s\n' '{"spec":{"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns"},"annotations":{"checksum/config":"abc"}},"spec":{"hostNetwork":true,"containers":[{"name":"dns","image":"registry.example/dns:stable","env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"}]}]}}}}'
+  }
+
+  dns_rollback_patch_for_daemonset dns-us | python3 -c '
+import json
+import sys
+
+patch = json.load(sys.stdin)
+assert patch[0] == {"op": "replace", "path": "/spec/updateStrategy", "value": {"type": "OnDelete"}}
+assert patch[1]["op"] == "replace"
+assert patch[1]["path"] == "/spec/template"
+template = patch[1]["value"]
+assert template["metadata"]["annotations"]["checksum/config"] == "abc"
+assert template["spec"]["hostNetwork"] is True
+assert template["spec"]["containers"][0]["image"] == "registry.example/dns:stable"
+' || fail "DNS rollback snapshot must preserve the complete pre-release pod template"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-dns-release
+  events=""
+  authoritative_calls=0
+  dns_daemonset_names() { printf 'dns-us\ndns-de\n'; }
+  wait_daemonset_ready() { :; }
+  dns_rollback_patch_for_daemonset() { printf '[{"op":"test","path":"/metadata/name","value":"%s"}]' "$1"; }
+  daemonset_pod_uids() { printf '%s-old-uid\n' "$1"; }
+  patch_dns_template() { events="${events}patch:$1;"; }
+  delete_daemonset_pods_no_wait() { :; }
+  wait_daemonset_replaced_and_ready() { :; }
+  check_authoritative_dns_on_nodes() {
+    authoritative_calls=$((authoritative_calls + 1))
+    events="${events}authoritative:$1;"
+    (( authoritative_calls < 2 ))
+  }
+  restore_dns_daemonset() { events="${events}restore:$1;"; }
+  run_smoke_urls() { events="${events}public-smoke;"; }
+
+  if run_dns_ondelete_release; then
+    fail "DNS transaction must fail when a replacement fails authoritative validation"
+  fi
+  assert_eq "${events}" "patch:dns-us;authoritative:dns-us;patch:dns-de;authoritative:dns-de;restore:dns-de;restore:dns-us;public-smoke;" "DNS validation failure must restore every touched daemonset in reverse order"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-dns-release
+  events=""
+  public_smoke_calls=0
+  dns_daemonset_names() { printf 'dns-us\ndns-de\n'; }
+  wait_daemonset_ready() { :; }
+  dns_rollback_patch_for_daemonset() { printf '[]'; }
+  daemonset_pod_uids() { printf '%s-old-uid\n' "$1"; }
+  patch_dns_template() { events="${events}patch:$1;"; }
+  delete_daemonset_pods_no_wait() { :; }
+  wait_daemonset_replaced_and_ready() { :; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative:$1;"; }
+  restore_dns_daemonset() { events="${events}restore:$1;"; }
+  run_smoke_urls() {
+    public_smoke_calls=$((public_smoke_calls + 1))
+    events="${events}public-smoke:${public_smoke_calls};"
+    (( public_smoke_calls > 1 ))
+  }
+
+  if run_dns_ondelete_release; then
+    fail "DNS transaction must fail when final public smoke fails"
+  fi
+  assert_eq "${events}" "patch:dns-us;authoritative:dns-us;patch:dns-de;authoritative:dns-de;public-smoke:1;restore:dns-de;restore:dns-us;public-smoke:2;" "final public smoke failure must restore every DNS daemonset and verify recovery"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  events=""
+  restore_dns_daemonset() {
+    events="${events}restore:$1;"
+    [[ "$1" != "dns-de" ]]
+  }
+  run_smoke_urls() { events="${events}public-smoke;"; }
+
+  if rollback_dns_daemonsets dns-us patch-us uid-us dns-de patch-de uid-de; then
+    fail "DNS rollback must report failure when any daemonset restore fails"
+  fi
+  assert_eq "${events}" "restore:dns-de;restore:dns-us;public-smoke;" "DNS rollback must continue in reverse order and verify public smoke after one restore fails"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  events=""
+  kubectl_cmd() { events="${events}patch;"; }
+  wait_daemonset_observed() { events="${events}observed;"; }
+  daemonset_pod_uids() { printf 'original-uid\n'; }
+  wait_daemonset_ready() { events="${events}ready;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
+  delete_daemonset_pods_no_wait() { fail "unchanged original DNS pod must not be restarted during rollback"; }
+
+  restore_dns_daemonset dns-us '[]' 'original-uid'
+  assert_eq "${events}" "patch;observed;ready;authoritative;" "DNS rollback must preserve an unchanged original pod UID set"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  events=""
+  kubectl_cmd() { events="${events}patch;"; }
+  wait_daemonset_observed() { events="${events}observed;"; }
+  daemonset_pod_uids() { printf 'candidate-uid\n'; }
+  delete_daemonset_pods_no_wait() { events="${events}delete;"; }
+  wait_daemonset_replaced_and_ready() { events="${events}replacement;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
+
+  restore_dns_daemonset dns-us '[]' 'original-uid'
+  assert_eq "${events}" "patch;observed;delete;replacement;authoritative;" "DNS rollback must recreate a pod whose UID changed during the failed release"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  kubectl_calls=0
+  container_patch_for_dns() { return 75; }
+  kubectl_cmd() { kubectl_calls=$((kubectl_calls + 1)); }
+
+  if patch_dns_template test-dns; then
+    fail "DNS template patch must propagate render failures"
+  fi
+  assert_eq "${kubectl_calls}" "0" "DNS render failure must stop before kubectl patch"
 )
 
 (

@@ -343,13 +343,14 @@ wait_daemonset_observed() {
 
   started_at="$(date +%s)"
   while true; do
-    generation="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}')"
-    observed="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.observedGeneration}')"
+    generation="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}')" || return $?
+    observed="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.observedGeneration}')" || return $?
     if [[ -n "${generation}" && "${generation}" == "${observed}" ]]; then
       return 0
     fi
     if (( $(date +%s) - started_at >= timeout_seconds )); then
-      fail "daemonset ${daemonset_name} did not observe generation ${generation}; observed=${observed}"
+      error "daemonset ${daemonset_name} did not observe generation ${generation}; observed=${observed}"
+      return 1
     fi
     sleep 2
   done
@@ -641,7 +642,8 @@ wait_daemonset_replaced_and_ready() {
       return 0
     fi
     if (( $(date +%s) - started_at >= timeout_seconds )); then
-      fail "daemonset ${daemonset_name} replacement not ready: old_uid_present=${old_uid_present} desired=${desired} ready=${ready} unavailable=${unavailable}"
+      error "daemonset ${daemonset_name} replacement not ready: old_uid_present=${old_uid_present} desired=${desired} ready=${ready} unavailable=${unavailable}"
+      return 1
     fi
     sleep 2
   done
@@ -1437,14 +1439,111 @@ patch_dns_template() {
   local daemonset_name="$1"
   local patch
 
-  patch="$(container_patch_for_dns "${daemonset_name}")"
+  if ! patch="$(container_patch_for_dns "${daemonset_name}")"; then
+    return 1
+  fi
   log "patching dns ${daemonset_name} template"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
     printf '%s\n' "${patch}"
     return 0
   fi
-  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null
-  wait_daemonset_observed "${daemonset_name}"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null || return $?
+  wait_daemonset_observed "${daemonset_name}" || return $?
+}
+
+dns_rollback_patch_for_daemonset() {
+  local daemonset_name="$1"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+spec = doc.get("spec") or {}
+template = spec.get("template")
+if not isinstance(template, dict):
+    raise SystemExit("DNS daemonset has no pod template")
+update_strategy = spec.get("updateStrategy")
+if not isinstance(update_strategy, dict):
+    update_strategy = {"type": "RollingUpdate"}
+patch = [
+    {"op": "replace", "path": "/spec/updateStrategy", "value": update_strategy},
+    {"op": "replace", "path": "/spec/template", "value": template},
+]
+print(json.dumps(patch, separators=(",", ":")))
+'
+}
+
+restore_dns_daemonset() {
+  local daemonset_name="$1"
+  local rollback_patch="$2"
+  local original_uids="$3"
+  local current_uids
+  local replacement_uids
+
+  log "restoring DNS daemonset ${daemonset_name} to its pinned pre-release template"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    return 0
+  fi
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=json -p "${rollback_patch}" >/dev/null || return $?
+  wait_daemonset_observed "${daemonset_name}" || return $?
+  if ! current_uids="$(daemonset_pod_uids "${daemonset_name}")"; then
+    return 1
+  fi
+  if [[ -n "$(trim_field "${original_uids}")" && "${current_uids}" == "${original_uids}" ]]; then
+    log "DNS daemonset ${daemonset_name} still has its original pod UID set; rollback will not restart it"
+    wait_daemonset_ready "${daemonset_name}" || return $?
+    check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+    return 0
+  fi
+  replacement_uids="${current_uids}"
+  delete_daemonset_pods_no_wait "${daemonset_name}" "DNS rollback" || return $?
+  wait_daemonset_replaced_and_ready "${daemonset_name}" "${replacement_uids}" || return $?
+  check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+}
+
+rollback_dns_daemonsets() {
+  local rollback_state=("$@")
+  local rollback_failed=false
+  local index
+  local daemonset_name
+  local rollback_patch
+  local original_uids
+
+  if (( ${#rollback_state[@]} % 3 != 0 )); then
+    error "invalid DNS rollback state"
+    return 1
+  fi
+  log "restoring $(( ${#rollback_state[@]} / 3 )) DNS daemonset(s) in reverse order"
+  for (( index=${#rollback_state[@]} - 3; index >= 0; index-=3 )); do
+    daemonset_name="${rollback_state[${index}]}"
+    rollback_patch="${rollback_state[$((index + 1))]}"
+    original_uids="${rollback_state[$((index + 2))]}"
+    if ! restore_dns_daemonset "${daemonset_name}" "${rollback_patch}" "${original_uids}"; then
+      error "failed to restore DNS daemonset ${daemonset_name}"
+      rollback_failed=true
+    fi
+  done
+  if ! run_smoke_urls; then
+    error "public smoke failed after restoring DNS daemonsets"
+    rollback_failed=true
+  fi
+  if [[ "${rollback_failed}" == "true" ]]; then
+    return 1
+  fi
+  log "DNS daemonset rollback completed and public smoke recovered"
+}
+
+abort_dns_release() {
+  local reason="$1"
+  shift
+
+  error "${reason}; aborting DNS release and restoring pinned templates"
+  if ! rollback_dns_daemonsets "$@"; then
+    error "DNS rollback verification failed; release remains failed and requires operator review"
+    return 1
+  fi
+  error "DNS release aborted; authoritative answers and public smoke were restored"
+  return 1
 }
 
 check_public_smoke_on_front_nodes() {
@@ -1676,6 +1775,10 @@ run_dns_ondelete_release() {
   local daemonsets=()
   local daemonset_name
   local before_uids
+  local rollback_patch
+  local prepared_state=()
+  local rollback_state=()
+  local index
 
   while IFS= read -r daemonset_name; do
     daemonset_name="$(trim_field "${daemonset_name}")"
@@ -1688,15 +1791,44 @@ run_dns_ondelete_release() {
 
   log "dns-ondelete release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} daemonsets=${daemonsets[*]}"
   for daemonset_name in "${daemonsets[@]}"; do
-    wait_daemonset_ready "${daemonset_name}"
+    if ! wait_daemonset_ready "${daemonset_name}"; then
+      error "DNS daemonset ${daemonset_name} failed preflight readiness; no DNS mutation was attempted"
+      return 1
+    fi
   done
   for daemonset_name in "${daemonsets[@]}"; do
-    patch_dns_template "${daemonset_name}"
-    before_uids="$(daemonset_pod_uids "${daemonset_name}")"
-    delete_daemonset_pods_no_wait "${daemonset_name}" "dns"
-    wait_daemonset_replaced_and_ready "${daemonset_name}" "${before_uids}"
-    check_authoritative_dns_on_nodes "${daemonset_name}"
+    if ! rollback_patch="$(dns_rollback_patch_for_daemonset "${daemonset_name}")"; then
+      error "could not pin DNS rollback template for ${daemonset_name}; no DNS mutation was attempted"
+      return 1
+    fi
+    if ! before_uids="$(daemonset_pod_uids "${daemonset_name}")"; then
+      error "could not pin DNS pod UID set for ${daemonset_name}; no DNS mutation was attempted"
+      return 1
+    fi
+    prepared_state+=("${daemonset_name}" "${rollback_patch}" "${before_uids}")
   done
+  log "pinned rollback templates and pod UID sets for all ${#daemonsets[@]} DNS daemonset(s) before mutation"
+  for index in "${!daemonsets[@]}"; do
+    daemonset_name="${prepared_state[$((index * 3))]}"
+    rollback_patch="${prepared_state[$((index * 3 + 1))]}"
+    before_uids="${prepared_state[$((index * 3 + 2))]}"
+    rollback_state+=("${daemonset_name}" "${rollback_patch}" "${before_uids}")
+    if ! patch_dns_template "${daemonset_name}"; then
+      abort_dns_release "failed to patch DNS template ${daemonset_name}" "${rollback_state[@]}" || return 1
+    fi
+    if ! delete_daemonset_pods_no_wait "${daemonset_name}" "dns"; then
+      abort_dns_release "failed to replace DNS pods for ${daemonset_name}" "${rollback_state[@]}" || return 1
+    fi
+    if ! wait_daemonset_replaced_and_ready "${daemonset_name}" "${before_uids}"; then
+      abort_dns_release "DNS daemonset ${daemonset_name} did not become ready" "${rollback_state[@]}" || return 1
+    fi
+    if ! check_authoritative_dns_on_nodes "${daemonset_name}"; then
+      abort_dns_release "authoritative DNS validation failed for ${daemonset_name}" "${rollback_state[@]}" || return 1
+    fi
+  done
+  if ! run_smoke_urls; then
+    abort_dns_release "public smoke failed after all DNS daemonsets were replaced" "${rollback_state[@]}" || return 1
+  fi
 }
 
 write_release_record() {
@@ -1842,7 +1974,6 @@ main() {
     run_dns_ondelete_release
     daemonsets_csv="$(dns_daemonset_names | paste -sd, -)"
     write_release_record "${daemonsets_csv}"
-    run_smoke_urls
     if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
       log "dry-run complete; DNS pods would be replaced one DaemonSet at a time"
       return 0
