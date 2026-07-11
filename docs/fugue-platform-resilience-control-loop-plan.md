@@ -1931,6 +1931,16 @@ DNS/edge failover 必须满足：
 > GHCR digest 验证也通过。生产 release prepare 继续保持 `shadow`，待正式 workflow soak 和显式
 > `enforced` promotion 后再勾选 rollback image 生产验证项。
 >
+> 2026-07-11 rollback image enforced promotion checkpoint: GitHub Actions repository variable
+> `FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE` 已显式设为 `enforced`。正式 workflow run
+> `29152344456` 在 Helm mutation 前对当前 API/controller rollback digest 分别验证 8/10 个 layer
+> 的 HEAD 与 bounded GET，并明确记录 `rollback image preflight enforced passed`；随后 Helm
+> `663 -> 664`、release guard、public synthetic 和 180 秒 watch window 全部完成，没有本次发布归因
+> 的 blocker。promotion 前还在本机空镜像缓存中用 Docker 完整拉取两个精确 `linux/amd64` digest，
+> 所有新下载 layer 均完成 checksum verification，最终 digest 与 pinned target 一致。因此“rollback
+> image digest 可拉取”已有 registry metadata/permission、正式硬门禁和完整冷缓存 pull 三层证据，
+> 下方对应生产验证项可以勾选；完整 PlatformReleaseSet rollback 编排与演练仍由后续 phase 单独完成。
+>
 > 2026-07-11 rollback artifact store collector checkpoint: 已在独立、未被 runtime 导入的包中增加
 > 无 I/O、无生产调用点的证据 collector，可对 pinned Caddy/DNS/edge-route/node-desired
 > generation 逐项验证唯一 artifact、
@@ -1962,7 +1972,7 @@ DNS/edge failover 必须满足：
 - [x] artifact full release 不再立即覆盖 verified LKG。
 - [x] release prepare 阶段固定 rollback target。
 - [x] 验证 rollback artifact content/hash/signature。
-- [ ] 验证 rollback image digest 可拉取。
+- [x] 验证 rollback image digest 可拉取。
 - [ ] 验证 rollback Caddy/DNS/route config 存在。
 - [ ] 验证 rollback node desired-state generation 存在。
 - [x] verified LKG 晋升检查 consumer convergence。
