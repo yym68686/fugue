@@ -2949,6 +2949,109 @@ image_ref_tag() {
   fi
 }
 
+release_image_digest_valid() {
+  local digest
+  digest="$(trim_field "$1")"
+  [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+release_image_repository_valid() {
+  local repository last
+  repository="$(trim_field "$1")"
+  [[ -n "${repository}" && "${repository}" =~ ^[^@\|[:space:]]+$ ]] || return 1
+  last="${repository##*/}"
+  [[ "${last}" != *:* ]]
+}
+
+release_image_tag_valid() {
+  local tag
+  tag="$(trim_field "$1")"
+  [[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]
+}
+
+select_release_image_record() {
+  local component="$1"
+  local source_mode="$2"
+  local candidate_repository="$3"
+  local candidate_tag="$4"
+  local candidate_digest="$5"
+  local live_repository="$6"
+  local live_tag="$7"
+  local live_digest="$8"
+  local allow_legacy_unpinned="$9"
+  local repository tag digest runtime_ref pin_state
+
+  component="$(trim_field "${component}")"
+  source_mode="$(trim_field "${source_mode}")"
+  [[ "${component}" =~ ^[a-z0-9_]+$ ]] || {
+    printf 'invalid release image component: %s\n' "${component:-<empty>}" >&2
+    return 1
+  }
+
+  case "${source_mode}" in
+    built|existing)
+      repository="$(trim_field "${candidate_repository}")"
+      tag="$(trim_field "${candidate_tag}")"
+      digest="$(trim_field "${candidate_digest}")"
+      ;;
+    preserve)
+      repository="$(trim_field "${live_repository}")"
+      tag="$(trim_field "${live_tag}")"
+      digest="$(trim_field "${live_digest}")"
+      ;;
+    *)
+      printf 'invalid release image source mode for %s: %s\n' "${component}" "${source_mode:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+
+  release_image_repository_valid "${repository}" || {
+    printf 'invalid release image repository for %s/%s: %s\n' "${component}" "${source_mode}" "${repository:-<empty>}" >&2
+    return 1
+  }
+  release_image_tag_valid "${tag}" || {
+    printf 'invalid release image source tag for %s/%s: %s\n' "${component}" "${source_mode}" "${tag:-<empty>}" >&2
+    return 1
+  }
+
+  if [[ -n "${digest}" ]]; then
+    release_image_digest_valid "${digest}" || {
+      printf 'invalid release image digest for %s/%s: %s\n' "${component}" "${source_mode}" "${digest}" >&2
+      return 1
+    }
+    runtime_ref="${repository}@${digest}"
+    pin_state="pinned"
+  else
+    case "${allow_legacy_unpinned}" in
+      1|true|TRUE|yes|YES)
+        [[ "${source_mode}" == "preserve" ]] || {
+          printf 'legacy unpinned release image is only valid for preserve mode: %s/%s\n' "${component}" "${source_mode}" >&2
+          return 1
+        }
+        ;;
+      0|false|FALSE|no|NO|"")
+        printf 'release image digest is required for %s/%s\n' "${component}" "${source_mode}" >&2
+        return 1
+        ;;
+      *)
+        printf 'invalid legacy unpinned release image policy for %s: %s\n' "${component}" "${allow_legacy_unpinned}" >&2
+        return 1
+        ;;
+    esac
+    runtime_ref="${repository}:${tag}"
+    pin_state="legacy_unpinned"
+  fi
+
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "${component}" \
+    "${source_mode}" \
+    "${repository}" \
+    "${tag}" \
+    "${digest}" \
+    "${runtime_ref}" \
+    "${pin_state}"
+}
+
 preserve_image_from_live_daemonset() {
   local domain="$1"
   local daemonset_name="$2"

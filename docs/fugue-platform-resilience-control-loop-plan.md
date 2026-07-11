@@ -1892,6 +1892,13 @@ DNS/edge failover 必须满足：
 > fail closed，且不会发布部分 digest output。当前 deploy job 尚未消费这些 output，仍按原 tag
 > 行为部署，因此本检查点不改变线上镜像选择；控制面/edge digest pin 和 rollback image 生产验证
 > 项继续保持未勾选，待后续原子接线、回滚和线上验证完成。
+>
+> 2026-07-11 release image selection checkpoint: 升级脚本已增加无生产调用点的 fail-closed
+> image selection contract，显式区分 `built`、`existing`、`preserve` 来源。built 和手工 existing
+> tag 必须同时具备完整 digest；preserve 默认必须保留 live tag+digest，只有显式 migration allowance
+> 才能暂时保留旧 tag-only 引用，且 allowance 不能接受 malformed digest。所有 pinned 记录仍保留
+> source tag 用于源码 attribution，同时 runtime ref 固定为 `repository@digest`。该 contract 尚未接入
+> resolver/workflow/Helm，因此没有改变生产发布行为，相关 digest pin TODO 继续保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

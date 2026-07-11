@@ -1448,6 +1448,47 @@ assert_eq "$(image_ref_repository 'localhost:5000/acme/fugue-edge:sha123')" "loc
 assert_eq "$(image_ref_tag 'localhost:5000/acme/fugue-edge')" "latest" "missing tag defaults to latest"
 assert_eq "$(image_ref_repository 'ghcr.io/acme/fugue-edge@sha256:abc')" "ghcr.io/acme/fugue-edge" "repository strips digest"
 
+RELEASE_IMAGE_DIGEST_A="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+RELEASE_IMAGE_DIGEST_B="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+assert_eq \
+  "$(select_release_image_record api built ghcr.io/acme/fugue-api target-sha "${RELEASE_IMAGE_DIGEST_A}" '' '' '' false)" \
+  "api|built|ghcr.io/acme/fugue-api|target-sha|${RELEASE_IMAGE_DIGEST_A}|ghcr.io/acme/fugue-api@${RELEASE_IMAGE_DIGEST_A}|pinned" \
+  "newly built image selection must retain source tag and pin the runtime digest"
+assert_eq \
+  "$(select_release_image_record controller existing ghcr.io/acme/fugue-controller release-tag "${RELEASE_IMAGE_DIGEST_B}" '' '' '' false)" \
+  "controller|existing|ghcr.io/acme/fugue-controller|release-tag|${RELEASE_IMAGE_DIGEST_B}|ghcr.io/acme/fugue-controller@${RELEASE_IMAGE_DIGEST_B}|pinned" \
+  "existing-tag selection must require a separately resolved digest"
+assert_eq \
+  "$(select_release_image_record edge preserve '' '' '' ghcr.io/acme/fugue-edge live-sha "${RELEASE_IMAGE_DIGEST_A}" false)" \
+  "edge|preserve|ghcr.io/acme/fugue-edge|live-sha|${RELEASE_IMAGE_DIGEST_A}|ghcr.io/acme/fugue-edge@${RELEASE_IMAGE_DIGEST_A}|pinned" \
+  "unchanged image selection must preserve live tag and digest"
+assert_eq \
+  "$(select_release_image_record image_cache preserve '' '' '' localhost:5000/acme/fugue-image-cache live-sha '' true)" \
+  "image_cache|preserve|localhost:5000/acme/fugue-image-cache|live-sha||localhost:5000/acme/fugue-image-cache:live-sha|legacy_unpinned" \
+  "legacy unpinned image preservation must require an explicit migration allowance"
+
+if select_release_image_record api built ghcr.io/acme/fugue-api target-sha '' '' '' '' true >/dev/null 2>&1; then
+  fail "newly built images must never use the legacy unpinned allowance"
+fi
+if select_release_image_record controller existing ghcr.io/acme/fugue-controller release-tag '' '' '' '' false >/dev/null 2>&1; then
+  fail "existing image tags must be resolved to a digest before selection"
+fi
+if select_release_image_record edge preserve '' '' '' ghcr.io/acme/fugue-edge live-sha '' false >/dev/null 2>&1; then
+  fail "unpinned live images must fail closed without the migration allowance"
+fi
+if select_release_image_record edge preserve '' '' '' ghcr.io/acme/fugue-edge live-sha sha256:abcd true >/dev/null 2>&1; then
+  fail "the legacy migration allowance must not accept a malformed digest"
+fi
+if select_release_image_record api built ghcr.io/acme/fugue-api '' "${RELEASE_IMAGE_DIGEST_A}" '' '' '' false >/dev/null 2>&1; then
+  fail "digest-pinned images must still retain a source revision tag"
+fi
+if select_release_image_record api built ghcr.io/acme/fugue-api:wrong target-sha "${RELEASE_IMAGE_DIGEST_A}" '' '' '' false >/dev/null 2>&1; then
+  fail "release image repositories must not contain a tag"
+fi
+if select_release_image_record api unknown ghcr.io/acme/fugue-api target-sha "${RELEASE_IMAGE_DIGEST_A}" '' '' '' false >/dev/null 2>&1; then
+  fail "unknown release image source modes must fail closed"
+fi
+
 PUBLIC_DATA_PLANE_PRESERVED=false
 public_data_plane_daemonset_rollout_wait_required || fail "non-preserved public data-plane releases must wait for edge/DNS daemonsets"
 PUBLIC_DATA_PLANE_PRESERVED=true
