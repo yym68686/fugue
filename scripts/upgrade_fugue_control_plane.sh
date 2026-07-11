@@ -610,6 +610,7 @@ release_safety_changed_file_subsystems() {
       internal/apispec/*|\
       internal/observability/*|\
       internal/bundleauth/*|\
+      internal/releaseflow/*|\
       internal/platformcontrol/*|\
       internal/platformsafety/*|\
       cmd/fugue-openapi-gen/*|\
