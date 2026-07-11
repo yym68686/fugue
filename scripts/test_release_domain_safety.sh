@@ -55,6 +55,36 @@ PY
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 
+  unset FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
+  if validate_bluegreen_smoke_configuration; then
+    fail "blue-green smoke validation must reject an empty smoke set"
+  fi
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://api.example.test/ready'
+  if validate_bluegreen_smoke_configuration; then
+    fail "blue-green smoke validation must count distinct hostnames"
+  fi
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='http://api.example.test/healthz,https://app.example.test/healthz'
+  if validate_bluegreen_smoke_configuration; then
+    fail "blue-green smoke validation must reject non-HTTPS URLs"
+  fi
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://app.example.test/healthz'
+  validate_bluegreen_smoke_configuration
+
+  FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS=1
+  if validate_bluegreen_smoke_configuration; then
+    fail "blue-green smoke validation must not allow lowering the two-host safety floor"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
   FUGUE_NAMESPACE=fugue-system
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
   kubectl_calls=0

@@ -34,10 +34,9 @@ on:
         type: string
         default: ''
       smoke_urls:
-        description: Optional comma-separated URLs to smoke after the release.
-        required: false
+        description: Comma-separated HTTPS URLs covering at least two distinct hostnames.
+        required: true
         type: string
-        default: ''
 
 permissions:
   contents: read

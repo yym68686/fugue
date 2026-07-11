@@ -1123,6 +1123,43 @@ public_data_plane_smoke_urls() {
   printf '%s\n' "${urls}" | tr ',;' '\n'
 }
 
+validate_bluegreen_smoke_configuration() {
+  local minimum_hosts="${FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS:-2}"
+  local distinct_hosts
+
+  [[ "${minimum_hosts}" =~ ^[1-9][0-9]*$ ]] || {
+    error "FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS must be a positive integer"
+    return 1
+  }
+  if (( minimum_hosts < 2 )); then
+    error "FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS cannot be lower than the safety floor of 2"
+    return 1
+  fi
+  if ! distinct_hosts="$(public_data_plane_smoke_urls | python3 -c '
+import sys
+from urllib.parse import urlsplit
+
+hosts = set()
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    parsed = urlsplit(raw)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise SystemExit(f"invalid blue-green smoke URL (HTTPS hostname required): {raw}")
+    hosts.add(parsed.hostname.lower())
+print(len(hosts))
+')"; then
+    error "blue-green smoke URL validation failed"
+    return 1
+  fi
+  if (( distinct_hosts < minimum_hosts )); then
+    error "blue-green release requires at least ${minimum_hosts} distinct HTTPS smoke hostnames; found ${distinct_hosts}"
+    return 1
+  fi
+  log "blue-green smoke configuration validated: distinct_https_hosts=${distinct_hosts} minimum=${minimum_hosts}"
+}
+
 smoke_curl_with_retry() {
   local label="$1"
   shift
@@ -1655,6 +1692,7 @@ main() {
 
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "blue-green" ]]; then
     FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="node-local-blue-green"
+    validate_bluegreen_smoke_configuration
     run_bluegreen_release
     daemonsets_csv="$(bluegreen_worker_bases | paste -sd, -)"
     write_release_record "${daemonsets_csv}"
