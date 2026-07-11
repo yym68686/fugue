@@ -1879,6 +1879,12 @@ DNS/edge failover 必须满足：
 > stale、identity mismatch、duplicate evidence 均阻断，并有回归测试。真实 registry、
 > artifact store 和 node desired-state probe 尚未接入 release prepare，因此下方三个
 > 生产验证项保持未勾选。
+>
+> 2026-07-11 rollback image probe checkpoint: 控制面升级脚本已增加从当前 Deployment
+> selector 下 Ready Pod 提取唯一完整 imageID digest、校验 digest 与 live repository 一致，
+> 并通过 `k3s ctr`/`ctr` 按 digest 做有 timeout 和重试预算的真实 pull 验证函数；混合 digest、
+> 缺失 digest、repository mismatch 和 pull failure 均 fail closed。该函数尚未接入 `main`
+> 的 release prepare，因此不会改变现有发布行为，rollback image 生产验证项保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

@@ -2688,6 +2688,138 @@ live_deployment_container_image() {
     -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
 }
 
+live_deployment_container_digest_ref() {
+  local deployment_name="$1"
+  local container_name="$2"
+  local selector=""
+
+  selector="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    deployment = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+selector = deployment.get("spec", {}).get("selector", {}) or {}
+labels = selector.get("matchLabels") or {}
+if not labels or selector.get("matchExpressions"):
+    raise SystemExit(1)
+print(",".join(f"{key}={labels[key]}" for key in sorted(labels)))
+')" || return 1
+  selector="$(trim_field "${selector}")"
+  [[ -n "${selector}" ]] || return 1
+
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json 2>/dev/null | python3 -c '
+import json
+import re
+import sys
+
+container_name = sys.argv[1]
+try:
+    pods = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+digest_refs = set()
+for pod in pods.get("items", []):
+    metadata = pod.get("metadata", {})
+    status = pod.get("status", {})
+    if metadata.get("deletionTimestamp") or status.get("phase") != "Running":
+        continue
+    if not any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in status.get("conditions") or []
+    ):
+        continue
+    for container in status.get("containerStatuses") or []:
+        if container.get("name") != container_name or not container.get("ready"):
+            continue
+        image_id = str(container.get("imageID") or "").strip()
+        for prefix in ("docker-pullable://", "containerd://"):
+            if image_id.startswith(prefix):
+                image_id = image_id[len(prefix):]
+                break
+        if re.fullmatch(r"[^@\s]+@sha256:[0-9a-fA-F]{64}", image_id):
+            digest_refs.add(image_id)
+if len(digest_refs) != 1:
+    raise SystemExit(1)
+print(next(iter(digest_refs)))
+' "${container_name}"
+}
+
+rollback_image_digest_ref_valid() {
+  local digest_ref
+  digest_ref="$(trim_field "$1")"
+  [[ "${digest_ref}" =~ ^[^@[:space:]]+@sha256:[0-9a-fA-F]{64}$ ]]
+}
+
+pull_rollback_image_by_digest() {
+  local digest_ref="$1"
+  local timeout_seconds="${FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS:-120}"
+
+  [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || {
+    log "rollback image pull timeout must be a positive integer: ${timeout_seconds}"
+    return 1
+  }
+  command_exists timeout || {
+    log "rollback image pull requires the timeout command"
+    return 1
+  }
+  if command_exists k3s; then
+    timeout --kill-after=10s "${timeout_seconds}s" k3s ctr images pull "${digest_ref}" >/dev/null
+    return
+  fi
+  if command_exists ctr; then
+    timeout --kill-after=10s "${timeout_seconds}s" ctr --namespace k8s.io images pull "${digest_ref}" >/dev/null
+    return
+  fi
+  log "rollback image pull requires k3s ctr or ctr"
+  return 1
+}
+
+verify_rollback_deployment_image() {
+  local deployment_name="$1"
+  local container_name="$2"
+  local image_ref digest_ref image_repository digest_repository
+  local attempts="${FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS:-3}"
+  local delay_seconds="${FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS:-2}"
+
+  image_ref="$(trim_field "$(live_deployment_container_image "${deployment_name}" "${container_name}")")"
+  [[ -n "${image_ref}" ]] || {
+    log "rollback image preflight could not read live image for ${deployment_name}/${container_name}"
+    return 1
+  }
+  if ! digest_ref="$(live_deployment_container_digest_ref "${deployment_name}" "${container_name}")"; then
+    log "rollback image preflight requires one consistent Ready Pod digest for ${deployment_name}/${container_name}"
+    return 1
+  fi
+  digest_ref="$(trim_field "${digest_ref}")"
+  rollback_image_digest_ref_valid "${digest_ref}" || {
+    log "rollback image preflight found an invalid digest ref for ${deployment_name}/${container_name}: ${digest_ref:-<empty>}"
+    return 1
+  }
+  image_repository="$(image_ref_repository "${image_ref}")"
+  digest_repository="$(image_ref_repository "${digest_ref}")"
+  if [[ -z "${image_repository}" || "${image_repository}" != "${digest_repository}" ]]; then
+    log "rollback image preflight repository mismatch for ${deployment_name}/${container_name}: live=${image_repository:-<empty>} digest=${digest_repository:-<empty>}"
+    return 1
+  fi
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ && "${delay_seconds}" =~ ^[0-9]+$ ]] || {
+    log "rollback image pull retry settings are invalid: attempts=${attempts} delay_seconds=${delay_seconds}"
+    return 1
+  }
+  if ! retry "${attempts}" "${delay_seconds}" pull_rollback_image_by_digest "${digest_ref}"; then
+    log "rollback image digest is not pullable for ${deployment_name}/${container_name}: ${digest_ref}"
+    return 1
+  fi
+  log "rollback image digest verified for ${deployment_name}/${container_name}: ${digest_ref}"
+}
+
+verify_control_plane_rollback_images() {
+  verify_rollback_deployment_image "${FUGUE_API_DEPLOYMENT_NAME}" "api" || return 1
+  verify_rollback_deployment_image "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}" "controller"
+}
+
 live_deployment_container_env_value() {
   local deployment_name="$1"
   local container_name="$2"

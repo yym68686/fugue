@@ -680,6 +680,114 @@ export FUGUE_UPGRADE_LIB_ONLY=true
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
 (
+  FUGUE_NAMESPACE=fugue-system
+  KUBECTL=rollback_digest_kubectl
+  rollback_digest_kubectl() {
+    case "$*" in
+      *"get deploy/fugue-api -o json"*)
+        printf '%s\n' '{"spec":{"selector":{"matchLabels":{"tier":"control","app":"api"}}}}'
+        ;;
+      *"get pods -l app=api,tier=control -o json"*)
+        printf '%s\n' '{"items":[
+          {"metadata":{"name":"api-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","ready":true,"imageID":"ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},
+          {"metadata":{"name":"api-b"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","ready":true,"imageID":"docker-pullable://ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}
+        ]}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  assert_eq \
+    "$(live_deployment_container_digest_ref fugue-api api)" \
+    "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "rollback image digest must come from consistent Ready Pods"
+)
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  KUBECTL=rollback_mixed_digest_kubectl
+  rollback_mixed_digest_kubectl() {
+    case "$*" in
+      *"get deploy/fugue-api -o json"*)
+        printf '%s\n' '{"spec":{"selector":{"matchLabels":{"app":"api"}}}}'
+        ;;
+      *"get pods -l app=api -o json"*)
+        printf '%s\n' '{"items":[
+          {"metadata":{"name":"api-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","ready":true,"imageID":"ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},
+          {"metadata":{"name":"api-b"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","ready":true,"imageID":"ghcr.io/acme/fugue-api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}
+        ]}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  if live_deployment_container_digest_ref fugue-api api >/dev/null; then
+    fail "rollback image digest must reject mixed Ready Pod digests"
+  fi
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS=1
+  FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS=0
+  pulled_ref=""
+  live_deployment_container_image() { printf '%s' "ghcr.io/acme/fugue-api:stable"; }
+  live_deployment_container_digest_ref() { printf '%s' "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; }
+  pull_rollback_image_by_digest() { pulled_ref="$1"; }
+  verify_rollback_deployment_image fugue-api api || fail "matching rollback image digest must pass"
+  assert_eq \
+    "${pulled_ref}" \
+    "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "rollback image preflight must pull the exact live digest"
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS=1
+  FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS=0
+  pull_calls=0
+  live_deployment_container_image() { printf '%s' "ghcr.io/acme/fugue-api:stable"; }
+  live_deployment_container_digest_ref() { printf '%s' "ghcr.io/acme/other@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; }
+  pull_rollback_image_by_digest() { pull_calls=$((pull_calls + 1)); }
+  if verify_rollback_deployment_image fugue-api api; then
+    fail "rollback image preflight must reject a digest from another repository"
+  fi
+  assert_eq "${pull_calls}" "0" "repository mismatch must fail before image pull"
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS=1
+  FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS=0
+  pull_calls=0
+  live_deployment_container_image() { printf '%s' "ghcr.io/acme/fugue-api:stable"; }
+  live_deployment_container_digest_ref() { return 76; }
+  pull_rollback_image_by_digest() { pull_calls=$((pull_calls + 1)); }
+  if verify_rollback_deployment_image fugue-api api; then
+    fail "rollback image preflight must reject missing Ready Pod digest evidence"
+  fi
+  assert_eq "${pull_calls}" "0" "missing digest evidence must fail before image pull"
+)
+
+(
+  FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS=2
+  FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS=0
+  pull_calls=0
+  live_deployment_container_image() { printf '%s' "ghcr.io/acme/fugue-api:stable"; }
+  live_deployment_container_digest_ref() { printf '%s' "ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; }
+  pull_rollback_image_by_digest() { pull_calls=$((pull_calls + 1)); return 77; }
+  sleep() { :; }
+  if verify_rollback_deployment_image fugue-api api; then
+    fail "rollback image preflight must fail closed when the digest cannot be pulled"
+  fi
+  assert_eq "${pull_calls}" "2" "rollback image pull must use the bounded retry budget"
+)
+
+(
+  FUGUE_API_DEPLOYMENT_NAME=fugue-api
+  FUGUE_CONTROLLER_DEPLOYMENT_NAME=fugue-controller
+  verified=""
+  verify_rollback_deployment_image() { verified="${verified}${1}/${2};"; }
+  verify_control_plane_rollback_images
+  assert_eq "${verified}" "fugue-api/api;fugue-controller/controller;" "control-plane rollback preflight must cover API and controller"
+)
+
+(
   curl_calls=0
   curl() {
     local output_file=""
