@@ -1971,6 +1971,15 @@ DNS/edge failover 必须满足：
 > 同一语义 generation 在不同签名刷新和不同节点 scope 下生成相同 content，便于后续 content-addressed
 > dedup。该批次尚未写入 Store、未发布 artifact、未改变 route/DNS handler，也未接入 release prepare，
 > 因此下方生产验证项继续保持未勾选。
+>
+> 2026-07-11 idempotent rollback artifact store checkpoint: JSON/Postgres Store 已增加显式
+> `EnsurePlatformArtifact` 原语，使用 `(artifact_kind, scope_key, generation)` 精确身份；同一 generation
+> 只有在现有 artifact 签名/内容哈希完整，且 schema、scope、compatibility floor、metadata、creator
+> 全部一致时才幂等返回，不能被重复轮询降级回 draft。内容或 metadata 冲突、损坏签名和 JSON
+> 重复身份均 fail closed。JSON 32 路并发测试只允许一个 creator；Postgres 使用唯一约束序列化并在
+> concurrent insert 冲突后重新精确读取、重新做完整性比较，不把无关 ID 冲突误判为成功。现有
+> `CreatePlatformArtifact` 语义未改变，且 `EnsurePlatformArtifact` 尚无生产调用点，所以线上仍不会自动
+> 持久化 route/DNS/Caddy/node desired-state artifact，生产验证 TODO 继续保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

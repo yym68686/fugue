@@ -137,6 +137,98 @@ func (s *Store) CreatePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 	return artifact, nil
 }
 
+// EnsurePlatformArtifact creates an immutable generation once and otherwise
+// returns the existing equivalent artifact. A reused generation with different
+// signed inputs is a conflict rather than an update.
+func (s *Store) EnsurePlatformArtifact(in model.PlatformArtifact) (model.PlatformArtifact, bool, error) {
+	artifact, err := normalizePlatformArtifactForStore(in)
+	if err != nil {
+		return model.PlatformArtifact{}, false, err
+	}
+	if s.usingDatabase() {
+		return s.pgEnsurePlatformArtifact(artifact)
+	}
+
+	created := false
+	err = s.withLockedState(true, func(state *model.State) error {
+		matches := make([]model.PlatformArtifact, 0, 1)
+		for _, existing := range state.PlatformArtifacts {
+			if platformArtifactHasIdentity(existing, artifact.ArtifactKind, artifact.ScopeKey, artifact.Generation) {
+				matches = append(matches, existing)
+			}
+		}
+		switch len(matches) {
+		case 0:
+		case 1:
+			if err := ensurePlatformArtifactEquivalent(matches[0], artifact, s.platformArtifactSigningKeyring()); err != nil {
+				return err
+			}
+			artifact = matches[0]
+			return nil
+		default:
+			return fmt.Errorf("%w: multiple platform artifacts use kind=%s scope=%s generation=%s", ErrConflict, artifact.ArtifactKind, artifact.ScopeKey, artifact.Generation)
+		}
+
+		artifact.GenerationSequence = nextPlatformArtifactGenerationSequence(
+			state.PlatformArtifacts,
+			artifact.ArtifactKind,
+			artifact.ScopeKey,
+		)
+		artifact, err = platformsafety.SignPlatformArtifact(artifact, s.platformArtifactSigningKeyring())
+		if err != nil {
+			return err
+		}
+		for _, existing := range state.PlatformArtifacts {
+			if existing.ID == artifact.ID {
+				return ErrConflict
+			}
+		}
+		state.PlatformArtifactContents = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
+		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
+		created = true
+		return nil
+	})
+	if err != nil {
+		return model.PlatformArtifact{}, false, err
+	}
+	return artifact, created, nil
+}
+
+func platformArtifactHasIdentity(artifact model.PlatformArtifact, kind, scopeKey, generation string) bool {
+	return strings.TrimSpace(artifact.ArtifactKind) == strings.TrimSpace(kind) &&
+		strings.TrimSpace(artifact.ScopeKey) == strings.TrimSpace(scopeKey) &&
+		strings.TrimSpace(artifact.Generation) == strings.TrimSpace(generation)
+}
+
+func ensurePlatformArtifactEquivalent(existing, candidate model.PlatformArtifact, keyring bundleauth.Keyring) error {
+	decision := platformsafety.EvaluateArtifactIntegrity(existing, keyring)
+	if !decision.Pass {
+		return fmt.Errorf("%w: existing platform artifact integrity verification failed", ErrConflict)
+	}
+	if existing.Scope != candidate.Scope ||
+		strings.TrimSpace(existing.SchemaVersion) != strings.TrimSpace(candidate.SchemaVersion) ||
+		!strings.EqualFold(strings.TrimSpace(existing.ContentHash), strings.TrimSpace(candidate.ContentHash)) ||
+		strings.TrimSpace(existing.CompatibilityFloor) != strings.TrimSpace(candidate.CompatibilityFloor) ||
+		strings.TrimSpace(existing.CreatedByType) != strings.TrimSpace(candidate.CreatedByType) ||
+		strings.TrimSpace(existing.CreatedByID) != strings.TrimSpace(candidate.CreatedByID) ||
+		!equalPlatformArtifactMetadata(existing.Metadata, candidate.Metadata) {
+		return fmt.Errorf("%w: platform artifact generation is already bound to different immutable content or metadata", ErrConflict)
+	}
+	return nil
+}
+
+func equalPlatformArtifactMetadata(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if rightValue, ok := right[key]; !ok || rightValue != value {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) ListPlatformArtifacts(filter model.PlatformArtifactFilter) ([]model.PlatformArtifact, error) {
 	filter.ArtifactKind = NormalizePlatformArtifactKind(filter.ArtifactKind)
 	filter.ScopeKey = strings.TrimSpace(strings.ToLower(filter.ScopeKey))

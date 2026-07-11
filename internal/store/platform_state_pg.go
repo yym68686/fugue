@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -51,6 +52,57 @@ func (s *Store) pgCreatePlatformArtifact(artifact model.PlatformArtifact) (model
 		return model.PlatformArtifact{}, err
 	}
 	return out, nil
+}
+
+func (s *Store) pgEnsurePlatformArtifact(artifact model.PlatformArtifact) (model.PlatformArtifact, bool, error) {
+	existing, err := s.pgGetPlatformArtifactByIdentity(artifact.ArtifactKind, artifact.ScopeKey, artifact.Generation)
+	if err == nil {
+		if err := ensurePlatformArtifactEquivalent(existing, artifact, s.platformArtifactSigningKeyring()); err != nil {
+			return model.PlatformArtifact{}, false, err
+		}
+		return existing, false, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return model.PlatformArtifact{}, false, err
+	}
+
+	created, createErr := s.pgCreatePlatformArtifact(artifact)
+	if createErr == nil {
+		return created, true, nil
+	}
+	if !errors.Is(createErr, ErrConflict) {
+		return model.PlatformArtifact{}, false, createErr
+	}
+
+	// A concurrent writer may have committed the same immutable generation
+	// after our first lookup. Re-read that exact identity and compare it before
+	// treating the uniqueness conflict as a successful idempotent ensure.
+	existing, err = s.pgGetPlatformArtifactByIdentity(artifact.ArtifactKind, artifact.ScopeKey, artifact.Generation)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return model.PlatformArtifact{}, false, createErr
+		}
+		return model.PlatformArtifact{}, false, err
+	}
+	if err := ensurePlatformArtifactEquivalent(existing, artifact, s.platformArtifactSigningKeyring()); err != nil {
+		return model.PlatformArtifact{}, false, err
+	}
+	return existing, false, nil
+}
+
+func (s *Store) pgGetPlatformArtifactByIdentity(kind, scopeKey, generation string) (model.PlatformArtifact, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	artifact, err := scanPlatformArtifact(s.db.QueryRowContext(ctx, `
+SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
+	content_json, validation_results_json, compatibility_floor, metadata_json,
+	created_by_type, created_by_id, provenance_json, created_at, updated_at
+FROM fugue_platform_artifacts
+WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`, kind, scopeKey, generation))
+	if err != nil {
+		return model.PlatformArtifact{}, mapDBErr(err)
+	}
+	return artifact, nil
 }
 
 func pgNextPlatformArtifactGenerationSequence(
