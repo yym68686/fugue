@@ -1921,6 +1921,14 @@ DNS/edge failover 必须满足：
 > pull，且真实 pull 失败不会降级；无权限时使用同一 bounded timeout 通过 OCI registry verifier
 > 验证 index/目标 platform manifest/config/全部 layer。该路径仍保持 `shadow`，待持续证据、显式
 > `enforced` promotion 和真实 rollback drill 全部完成前，下方生产验证 TODO 继续保持未勾选。
+>
+> 2026-07-11 rollback artifact store collector checkpoint: 已在独立、未被 runtime 导入的包中增加
+> 无 I/O、无生产调用点的证据 collector，可对 pinned Caddy/DNS/edge-route/node-desired
+> generation 逐项验证唯一 artifact、
+> content-addressed payload hash/size/signature、最新匹配的 signed verified-LKG snapshot 和 expiry，
+> 并把 missing/duplicate/corrupt/expired 分别映射为 unknown/fail/stale 后交给统一 preflight evaluator。
+> 线上权威 `fugue admin artifact ls --json` 此时返回 0 个持久化 artifact，因此不能把 collector 接成
+> enforcement，也不能勾选下方两个生产验证项；必须先完成真实 generation 的持久化和 shadow 接线。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

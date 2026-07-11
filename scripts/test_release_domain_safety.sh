@@ -1833,6 +1833,11 @@ assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "pl
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
   fail "platform safety kernel files must have explicit release-risk ownership"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/rollbackpreflight/artifact_store.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "rollback preflight changes must propagate shared control-plane risk"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "rollback preflight files must have explicit release-risk ownership"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/platformcontrol/action_safety.go\ninternal/platformcontrol/registry.go'
 assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "platform control policy changes must propagate shared control-plane risk"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||

@@ -614,6 +614,7 @@ release_safety_changed_file_subsystems() {
       internal/releaseflow/*|\
       internal/platformcontrol/*|\
       internal/platformsafety/*|\
+      internal/rollbackpreflight/*|\
       cmd/fugue-openapi-gen/*|\
       openapi/*|\
       go.mod|\
