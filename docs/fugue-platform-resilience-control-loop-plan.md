@@ -1961,6 +1961,16 @@ DNS/edge failover 必须满足：
 > 同一语义 generation 的定时刷新副本；Caddy config 仍由 route bundle 与节点本地配置派生，node
 > desired state 仍只有 current file/hash、没有 rollback archive。collector 尚无生产调用点，因此
 > 下方 Caddy/DNS/route 与 node desired-state 生产验证项继续保持未勾选。
+>
+> 2026-07-11 semantic rollback artifact checkpoint: 已增加无 I/O、无生产调用点的 edge route / DNS
+> 语义回滚资产构建器。构建器把签名、key id、generated/valid 时间窗、previous generation 和仅用于
+> 展示的对象时间戳从持久化内容中剥离，只保留真正决定 `routegen_*` / `dnsgen_*` 的服务语义；随后
+> 独立重算 bundle 及 route/record generation，任何沿用旧 generation 的内容变化、version/generation
+> 冲突、错误子对象 generation、未知 schema 或缺失 node scope 都 fail closed。API 等价性测试使用
+> 现有私有 generation 算法生成完整 route/DNS fixture，再由新构建器重新验证，证明当前算法完全一致；
+> 同一语义 generation 在不同签名刷新和不同节点 scope 下生成相同 content，便于后续 content-addressed
+> dedup。该批次尚未写入 Store、未发布 artifact、未改变 route/DNS handler，也未接入 release prepare，
+> 因此下方生产验证项继续保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。
