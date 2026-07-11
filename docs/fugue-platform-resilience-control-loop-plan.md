@@ -1915,6 +1915,11 @@ DNS/edge failover 必须满足：
 > 支持 current/previous overlap 和 revoked key id。签名、chain-state CAS 或 audit insert
 > 失败会回滚 heartbeat；replay/impersonation 等被拒请求不会追加 event。当前线上
 > ExpectedConsumerSet 数量为 0，因此启用时没有既有 heartbeat 写流量。
+>
+> 2026-07-11 four-state migration checkpoint: 已增加无副作用、fail-closed 的 evidence
+> state 兼容归一化原语和穷举测试。legacy `true` 仅映射为 `pass`，legacy `false`
+> 映射为 `unknown`；显式 `pass/fail/unknown/stale` 与 legacy bool 冲突或状态非法时
+> 拒绝处理。该原语尚未接入 API/Store/CLI，因此下方完整迁移项保持未勾选。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
