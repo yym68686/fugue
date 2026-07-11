@@ -515,7 +515,8 @@ release_safety_file_is_non_runtime() {
     *.md|\
     *_test.go|\
     */testdata/*|\
-    scripts/test_*.sh)
+    scripts/test_*.sh|\
+    scripts/test_*.py)
       return 0
       ;;
   esac
@@ -691,6 +692,7 @@ release_safety_changed_file_subsystems() {
       scripts/compute_control_plane_image_build_plan.sh|\
       scripts/compute_release_changed_files_from_live.sh|\
       scripts/resolve_control_plane_live_images.sh|\
+      scripts/verify_registry_image.py|\
       .github/workflows/deploy-control-plane.yml|\
       .github/workflows/release-public-data-plane.yml)
         release_safety_emit_subsystem deploy_script
@@ -1606,8 +1608,10 @@ node_local_build_plane_preflight_override_allowed() {
 	      scripts/compute_control_plane_image_build_plan.sh|\
 	      scripts/compute_release_changed_files_from_live.sh|\
 	      scripts/resolve_control_plane_live_images.sh|\
+	      scripts/verify_registry_image.py|\
 	      scripts/upgrade_fugue_control_plane.sh|\
-	      scripts/test_release_domain_safety.sh)
+	      scripts/test_release_domain_safety.sh|\
+	      scripts/test_verify_registry_image.py)
 	        saw_allowed="true"
 	        ;;
 	      docs/*|\

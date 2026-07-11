@@ -51,7 +51,9 @@ on:
       - 'scripts/release_fugue_public_data_plane.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/test_release_domain_safety.sh'
+      - 'scripts/test_verify_registry_image.py'
       - 'scripts/upgrade_fugue_control_plane.sh'
+      - 'scripts/verify_registry_image.py'
   workflow_dispatch:
     inputs:
       existing_image_tag:

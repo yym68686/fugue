@@ -1907,6 +1907,12 @@ DNS/edge failover 必须满足：
 > 经过线上 soak 后显式 promotion 到 `enforced` 才成为
 > 硬门禁。因此 rollback image 生产验证 TODO 暂不勾选，待 shadow 证据稳定、enforced 发布和 rollback
 > 演练均完成后再确认。
+>
+> 2026-07-11 OCI registry verifier foundation checkpoint: 已增加独立、尚未接入生产调用点的
+> OCI Distribution Bearer verifier，按顶层 digest 获取 index、唯一选择目标 platform manifest、
+> 校验 manifest/config 内容 digest，并对全部 layer 做存在性和 size 检查；不提权、不创建 Pod、
+> 不下载 layer。本地 synthetic registry 负向测试和真实 `github-runner` 身份下的 API/controller
+> GHCR 验证均通过。当前 shadow 仍使用原 containerd pull，生产验证 TODO 保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。

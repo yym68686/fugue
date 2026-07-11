@@ -28,6 +28,8 @@ bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
 bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
+python3 -m py_compile "${REPO_ROOT}/scripts/verify_registry_image.py" "${REPO_ROOT}/scripts/test_verify_registry_image.py"
+python3 "${REPO_ROOT}/scripts/test_verify_registry_image.py"
 
 python3 - "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
 from pathlib import Path
@@ -617,6 +619,14 @@ assert_build_plan \
 assert_build_plan \
   $'scripts/upgrade_fugue_control_plane.sh' \
   "script-only build plan" \
+  target_count 0 \
+  build_api false \
+  build_controller false \
+  build_edge false
+
+assert_build_plan \
+  $'scripts/verify_registry_image.py' \
+  "registry verifier script build plan" \
   target_count 0 \
   build_api false \
   build_controller false \
@@ -2417,7 +2427,7 @@ if skip_singleton_rollout_wait_for_node_local_override fugue-fugue-headscale; th
   fail "node-local build-plane override must not skip headscale singleton rollout waits"
 fi
 
-FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\nscripts/build_control_plane_images.sh\nscripts/compute_control_plane_image_build_plan.sh\nscripts/compute_release_changed_files_from_live.sh\nscripts/resolve_control_plane_live_images.sh\nscripts/test_release_domain_safety.sh\nscripts/upgrade_fugue_control_plane.sh'
+FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/deploy-control-plane.yml\nscripts/build_control_plane_images.sh\nscripts/compute_control_plane_image_build_plan.sh\nscripts/compute_release_changed_files_from_live.sh\nscripts/resolve_control_plane_live_images.sh\nscripts/test_release_domain_safety.sh\nscripts/test_verify_registry_image.py\nscripts/upgrade_fugue_control_plane.sh\nscripts/verify_registry_image.py'
 node_local_build_plane_preflight_override_allowed || fail "deploy tooling changes must allow existing node-local build-plane preflight degradation"
 
 live_deployment_replicas() {
