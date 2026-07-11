@@ -1922,6 +1922,15 @@ DNS/edge failover 必须满足：
 > 验证 index/目标 platform manifest/config/全部 layer。该路径仍保持 `shadow`，待持续证据、显式
 > `enforced` promotion 和真实 rollback drill 全部完成前，下方生产验证 TODO 继续保持未勾选。
 >
+> 2026-07-11 bounded layer GET checkpoint: OCI registry fallback 不再只用 `HEAD` 证明 layer 存在；
+> 它在逐层校验 descriptor digest/size 和 HEAD 后，继续对每个非空 layer 发出
+> `Range: bytes=0-0` 的 GET，并严格要求有效 `206 Content-Range` 和恰好一个响应字节。registry
+> 忽略 Range、GET 被拒、Content-Range/size/digest header 异常都会 fail closed，因而既验证真实
+> pull 权限又把单层下载上限限制为 1 byte。synthetic registry 的 HEAD-pass/GET-denied、忽略 Range
+> 和错误 Content-Range 负向测试均通过；对当前 API 8 个 layer 与 controller 10 个 layer 的真实
+> GHCR digest 验证也通过。生产 release prepare 继续保持 `shadow`，待正式 workflow soak 和显式
+> `enforced` promotion 后再勾选 rollback image 生产验证项。
+>
 > 2026-07-11 rollback artifact store collector checkpoint: 已在独立、未被 runtime 导入的包中增加
 > 无 I/O、无生产调用点的证据 collector，可对 pinned Caddy/DNS/edge-route/node-desired
 > generation 逐项验证唯一 artifact、

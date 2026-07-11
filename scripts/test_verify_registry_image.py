@@ -79,6 +79,9 @@ class RegistryFixture:
         }
         self.requests = []
         self.token_requests = 0
+        self.deny_layer_get = False
+        self.ignore_layer_range = False
+        self.invalid_layer_content_range = False
         self.lock = threading.Lock()
 
     def record(self, method, path):
@@ -93,13 +96,22 @@ def fixture_handler(fixture):
         def log_message(self, _format, *_args):
             return
 
-        def send_bytes(self, status, body=b"", content_type="application/octet-stream", digest_header=""):
+        def send_bytes(
+            self,
+            status,
+            body=b"",
+            content_type="application/octet-stream",
+            digest_header="",
+            extra_headers=None,
+        ):
             self.send_response(status)
             self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Content-Type", content_type)
             if digest_header:
                 self.send_header("Docker-Content-Digest", digest_header)
+            for name, value in (extra_headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             if self.command != "HEAD" and body:
                 self.wfile.write(body)
@@ -145,6 +157,24 @@ def fixture_handler(fixture):
                 body = fixture.blobs.get(requested_digest)
                 if body is None:
                     self.send_bytes(404, b'{"errors":[{"code":"BLOB_UNKNOWN"}]}', "application/json")
+                    return
+                if self.headers.get("Range") == "bytes=0-0" and body:
+                    if fixture.deny_layer_get:
+                        self.send_bytes(403)
+                        return
+                    if fixture.ignore_layer_range:
+                        self.send_bytes(200, body, "application/octet-stream", requested_digest)
+                        return
+                    content_range = f"bytes 0-0/{len(body)}"
+                    if fixture.invalid_layer_content_range:
+                        content_range = f"bytes 1-1/{len(body)}"
+                    self.send_bytes(
+                        206,
+                        body[:1],
+                        "application/octet-stream",
+                        requested_digest,
+                        {"Content-Range": content_range},
+                    )
                     return
                 self.send_bytes(200, body, "application/octet-stream", requested_digest)
                 return
@@ -210,9 +240,12 @@ class RegistryImageVerificationTests(unittest.TestCase):
         self.assertEqual(payload["manifest_digest"], fixture.manifest_digest)
         self.assertEqual(payload["platform"], "linux/amd64")
         self.assertEqual(payload["blob_count"], 2)
+        self.assertEqual(payload["layer_get_probe_count"], 1)
+        self.assertEqual(payload["verification"], "registry_manifest_config_and_layer_get")
         self.assertEqual(fixture.token_requests, 1)
         self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.config_digest}"), fixture.requests)
         self.assertIn(("HEAD", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+        self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
 
     def test_missing_layer_fails(self):
         fixture = RegistryFixture()
@@ -227,6 +260,56 @@ class RegistryImageVerificationTests(unittest.TestCase):
         result = run_verifier(fixture)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("manifest body digest mismatch", result.stderr)
+
+    def test_layer_get_denied_fails_even_when_head_succeeds(self):
+        fixture = RegistryFixture()
+        fixture.deny_layer_get = True
+        result = run_verifier(fixture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bounded GET returned HTTP 403", result.stderr)
+        self.assertIn(("HEAD", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+        self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+
+    def test_registry_must_honor_bounded_layer_range(self):
+        fixture = RegistryFixture()
+        fixture.ignore_layer_range = True
+        result = run_verifier(fixture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("registry GET", result.stderr)
+
+    def test_invalid_layer_content_range_fails(self):
+        fixture = RegistryFixture()
+        fixture.invalid_layer_content_range = True
+        result = run_verifier(fixture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid Content-Range", result.stderr)
+
+    def test_zero_size_layer_fails_before_get(self):
+        fixture = RegistryFixture()
+        empty_layer = b""
+        empty_layer_digest = digest(empty_layer)
+        del fixture.blobs[fixture.layer_digest]
+        fixture.blobs[empty_layer_digest] = empty_layer
+        manifest = json.loads(fixture.manifests[fixture.manifest_digest])
+        manifest["layers"][0]["digest"] = empty_layer_digest
+        manifest["layers"][0]["size"] = 0
+        manifest_body = encoded(manifest)
+        new_manifest_digest = digest(manifest_body)
+        del fixture.manifests[fixture.manifest_digest]
+        fixture.manifests[new_manifest_digest] = manifest_body
+
+        index = json.loads(fixture.manifests[fixture.index_digest])
+        index["manifests"][0]["digest"] = new_manifest_digest
+        index["manifests"][0]["size"] = len(manifest_body)
+        index_body = encoded(index)
+        new_index_digest = digest(index_body)
+        del fixture.manifests[fixture.index_digest]
+        fixture.manifests[new_index_digest] = index_body
+        fixture.index_digest = new_index_digest
+
+        result = run_verifier(fixture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no bytes to probe", result.stderr)
 
     def test_missing_platform_fails(self):
         fixture = RegistryFixture()

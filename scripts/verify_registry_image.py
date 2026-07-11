@@ -235,7 +235,7 @@ class RegistryClient:
             raise VerificationError("registry bearer token response has no token")
         self.token = token
 
-    def request(self, method, path, accept, body_limit):
+    def request(self, method, path, accept, body_limit, extra_headers=None):
         url = f"{self.scheme}://{self.registry}{path}"
         for attempt in range(2):
             headers = {
@@ -243,6 +243,8 @@ class RegistryClient:
                 "Accept-Encoding": "identity",
                 "User-Agent": "fugue-registry-verifier/1",
             }
+            if extra_headers:
+                headers.update(extra_headers)
             if self.token:
                 headers["Authorization"] = f"Bearer {self.token}"
             status, response_headers, body = self._open(method, url, headers, body_limit)
@@ -303,6 +305,34 @@ class RegistryClient:
             if actual != digest:
                 raise VerificationError(f"registry blob body digest mismatch: expected {digest}, got {actual}")
         return body
+
+    def probe_blob_get(self, digest, expected_size):
+        if expected_size <= 0:
+            raise VerificationError(f"registry layer {digest} has no bytes to probe")
+        path = f"/v2/{urllib.parse.quote(self.repository, safe='/')}/blobs/{digest}"
+        status, headers, body = self.request(
+            "GET",
+            path,
+            "application/octet-stream",
+            1,
+            {"Range": "bytes=0-0"},
+        )
+        if status == 206:
+            content_range = headers.get("Content-Range", "").strip()
+            match = re.fullmatch(r"bytes\s+0-0/(\d+)", content_range, flags=re.IGNORECASE)
+            if match is None or int(match.group(1)) != expected_size:
+                raise VerificationError(
+                    f"registry blob {digest} returned an invalid Content-Range for bounded GET"
+                )
+        elif status != 200 or expected_size != 1:
+            raise VerificationError(f"registry blob {digest} bounded GET returned HTTP {status}")
+        if len(body) != 1:
+            raise VerificationError(
+                f"registry blob {digest} bounded GET returned {len(body)} bytes instead of 1"
+            )
+        declared = headers.get("Docker-Content-Digest", "").strip()
+        if declared and declared != digest:
+            raise VerificationError(f"registry blob header digest mismatch: expected {digest}, got {declared}")
 
 
 def select_platform_manifest(manifests, os_name, architecture, variant):
@@ -383,16 +413,18 @@ def verify_image(client, top_digest, platform):
             raise VerificationError(f"image manifest repeats layer digest {digest}")
         layer_digests.add(digest)
         client.blob(digest, size, False)
+        client.probe_blob_get(digest, size)
         total_layer_bytes += size
 
     return {
         "blob_count": len(layers) + 1,
         "index_digest": index_digest,
         "manifest_digest": manifest_digest,
+        "layer_get_probe_count": len(layers),
         "platform": "/".join(item for item in platform if item),
         "request_count": client.request_count,
         "total_layer_bytes": total_layer_bytes,
-        "verification": "registry_manifest_config_and_layers",
+        "verification": "registry_manifest_config_and_layer_get",
     }
 
 
