@@ -2953,6 +2953,74 @@ func TestProxyHandlerReusesOriginConnections(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerDoesNotReuseOriginConnectionAcrossDeploymentGenerations(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = fmt.Fprint(w, r.RemoteAddr)
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_origin_generation_1")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].DeploymentGeneration = "deploygen_origin_1"
+
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(ioDiscard{}, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_origin_generation_1"`, time.Now().UTC(), false)
+
+	proxyRequest := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+		service.ProxyHandler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("unexpected proxy status=%d body=%q", recorder.Code, recorder.Body.String())
+		}
+		return recorder
+	}
+
+	first := proxyRequest()
+	second := proxyRequest()
+	firstOriginConnection := strings.TrimSpace(first.Body.String())
+	secondOriginConnection := strings.TrimSpace(second.Body.String())
+	if firstOriginConnection == "" || firstOriginConnection != secondOriginConnection {
+		t.Fatalf("expected same-generation requests to reuse one origin connection, got first=%q second=%q", firstOriginConnection, secondOriginConnection)
+	}
+	if timing := strings.Join(second.Header().Values("Server-Timing"), ","); strings.Contains(timing, "fugue_origin_connect") {
+		t.Fatalf("expected same-generation request to reuse its origin connection, got %q", timing)
+	}
+
+	service.proxyTransportMu.Lock()
+	poolCount := len(service.proxyTransports)
+	service.proxyTransportMu.Unlock()
+	if poolCount != 1 {
+		t.Fatalf("expected one active origin pool before rollout, got %d", poolCount)
+	}
+
+	bundle.Version = "routegen_origin_generation_2"
+	bundle.Routes[0].DeploymentGeneration = "deploygen_origin_2"
+	service.recordSyncSuccess(bundle, `"routegen_origin_generation_2"`, time.Now().UTC(), false)
+
+	service.proxyTransportMu.Lock()
+	poolCount = len(service.proxyTransports)
+	service.proxyTransportMu.Unlock()
+	if poolCount != 0 {
+		t.Fatalf("expected rollout to retire the old generation pool, got %d pools", poolCount)
+	}
+
+	third := proxyRequest()
+	thirdOriginConnection := strings.TrimSpace(third.Body.String())
+	if thirdOriginConnection == "" || thirdOriginConnection == secondOriginConnection {
+		t.Fatalf("expected new deployment generation to dial a new origin connection, got old=%q new=%q", secondOriginConnection, thirdOriginConnection)
+	}
+	if timing := strings.Join(third.Header().Values("Server-Timing"), ","); !strings.Contains(timing, "fugue_origin_connect") {
+		t.Fatalf("expected first request in new generation to include origin connect timing, got %q", timing)
+	}
+}
+
 func TestProxyHandlerCachesHTMLDocumentsWithShortTTL(t *testing.T) {
 	t.Parallel()
 

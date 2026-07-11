@@ -53,6 +53,11 @@ type Service struct {
 	caddyWarmup              func(context.Context, string, string) error
 	cacheWarmupClientFactory func(string, string) *http.Client
 	proxyBase                http.RoundTripper
+	proxyTransportMu         sync.Mutex
+	proxyTransportPrototype  *http.Transport
+	proxyTransports          map[string]*http.Transport
+	proxyTransportActiveKeys map[string]struct{}
+	proxyTransportBundleSet  bool
 	bodyBuffer               *edgeRequestBodyBufferManager
 
 	mu                    sync.Mutex
@@ -348,6 +353,8 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		caddyWarmup:              warmupCaddyTLS,
 		cacheWarmupClientFactory: newEdgeCacheWarmupClient,
 		proxyBase:                newDefaultEdgeProxyTransport(),
+		proxyTransports:          map[string]*http.Transport{},
+		proxyTransportActiveKeys: map[string]struct{}{},
 		bodyBuffer:               newEdgeRequestBodyBufferManager(cfg),
 		walActionLast:            map[string]time.Time{},
 		snapshot: Status{
@@ -373,6 +380,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.proxyBase == nil {
 		s.proxyBase = newDefaultEdgeProxyTransport()
 	}
+	defer s.closeEdgeProxyTransports()
 	if err := s.RefreshDesiredState(ctx); err != nil && s.Logger != nil {
 		s.Logger.Printf("edge desired state refresh failed on startup: %s", s.redact(err.Error()))
 	}
@@ -793,13 +801,17 @@ func selectWeightedEdgeRouteUpstream(r *http.Request, route model.EdgeRouteBindi
 		return route, model.EdgeRouteUpstream{}
 	}
 	selected := candidates[selection.Index]
+	return edgeRouteWithUpstream(route, selected), selected
+}
+
+func edgeRouteWithUpstream(route model.EdgeRouteBinding, selected model.EdgeRouteUpstream) model.EdgeRouteBinding {
 	route.UpstreamURL = selected.UpstreamURL
 	route.UpstreamKind = firstNonEmpty(selected.UpstreamKind, route.UpstreamKind)
 	route.UpstreamScope = firstNonEmpty(selected.UpstreamScope, route.UpstreamScope)
 	route.RuntimeID = firstNonEmpty(selected.RuntimeID, route.RuntimeID)
 	route.ServicePort = firstNonEmptyInt(selected.ServicePort, route.ServicePort)
 	route.DeploymentGeneration = firstNonEmpty(selected.DeploymentGeneration, route.DeploymentGeneration)
-	return route, selected
+	return route
 }
 
 func weightedReleaseStickinessKey(r *http.Request, host string, route model.EdgeRouteBinding, traceID, edgeRequestID string) string {
@@ -1997,7 +2009,7 @@ type edgeProxyTransport struct {
 func (s *Service) newEdgeProxyTransport(observation *edgeProxyObservation) http.RoundTripper {
 	base := http.RoundTripper(nil)
 	if s != nil {
-		base = s.proxyBase
+		base = s.edgeProxyBaseForObservation(observation)
 	}
 	if base == nil {
 		base = newDefaultEdgeProxyTransport()
@@ -2005,6 +2017,126 @@ func (s *Service) newEdgeProxyTransport(observation *edgeProxyObservation) http.
 	return &edgeProxyTransport{
 		base:        base,
 		observation: observation,
+	}
+}
+
+func (s *Service) edgeProxyBaseForObservation(observation *edgeProxyObservation) http.RoundTripper {
+	if s == nil || s.proxyBase == nil {
+		return nil
+	}
+	prototype, ok := s.proxyBase.(*http.Transport)
+	if !ok {
+		// Tests and specialized callers can inject a complete RoundTripper.
+		return s.proxyBase
+	}
+	key := edgeOriginTransportKey(observation)
+	if key == "" {
+		return prototype
+	}
+
+	s.proxyTransportMu.Lock()
+	defer s.proxyTransportMu.Unlock()
+	if s.proxyTransportPrototype != prototype {
+		s.closeEdgeProxyTransportsLocked()
+		s.proxyTransportPrototype = prototype
+	}
+	if transport := s.proxyTransports[key]; transport != nil {
+		return transport
+	}
+	transport := prototype.Clone()
+	if s.proxyTransportBundleSet {
+		if _, active := s.proxyTransportActiveKeys[key]; !active {
+			// A request can race a bundle swap after reading the old route. Let it
+			// finish without making its obsolete connection reusable.
+			transport.DisableKeepAlives = true
+			return transport
+		}
+	}
+	if s.proxyTransports == nil {
+		s.proxyTransports = map[string]*http.Transport{}
+	}
+	s.proxyTransports[key] = transport
+	return transport
+}
+
+func edgeOriginTransportKey(observation *edgeProxyObservation) string {
+	if observation == nil {
+		return ""
+	}
+	return edgeOriginTransportKeyForRoute(observation.Route, observation.ReleaseID)
+}
+
+func edgeOriginTransportKeyForRoute(route model.EdgeRouteBinding, releaseID string) string {
+	upstreamURL := strings.TrimSpace(route.UpstreamURL)
+	if upstreamURL == "" {
+		return ""
+	}
+	generation := strings.TrimSpace(route.DeploymentGeneration)
+	if generation == "" {
+		generation = strings.TrimSpace(route.RouteGeneration)
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(route.AppID),
+		strings.TrimSpace(route.RuntimeID),
+		upstreamURL,
+		generation,
+		strings.TrimSpace(releaseID),
+	}, "\x00")
+}
+
+func edgeOriginTransportKeys(bundle model.EdgeRouteBundle) map[string]struct{} {
+	keys := make(map[string]struct{}, len(bundle.Routes))
+	for _, route := range bundle.Routes {
+		if key := edgeOriginTransportKeyForRoute(route, ""); key != "" {
+			keys[key] = struct{}{}
+		}
+		for _, upstream := range route.Upstreams {
+			active := strings.TrimSpace(upstream.UpstreamURL) != "" &&
+				upstream.Weight > 0 &&
+				(strings.TrimSpace(upstream.Status) == "" || strings.EqualFold(strings.TrimSpace(upstream.Status), model.EdgeRouteStatusActive))
+			if !active {
+				continue
+			}
+			selectedRoute := edgeRouteWithUpstream(route, upstream)
+			if key := edgeOriginTransportKeyForRoute(selectedRoute, upstream.ReleaseID); key != "" {
+				keys[key] = struct{}{}
+			}
+		}
+	}
+	return keys
+}
+
+func (s *Service) reconcileEdgeProxyTransports(bundle model.EdgeRouteBundle) {
+	if s == nil {
+		return
+	}
+	activeKeys := edgeOriginTransportKeys(bundle)
+	s.proxyTransportMu.Lock()
+	defer s.proxyTransportMu.Unlock()
+	s.proxyTransportActiveKeys = activeKeys
+	s.proxyTransportBundleSet = true
+	for key, transport := range s.proxyTransports {
+		if _, active := activeKeys[key]; active {
+			continue
+		}
+		transport.CloseIdleConnections()
+		delete(s.proxyTransports, key)
+	}
+}
+
+func (s *Service) closeEdgeProxyTransports() {
+	if s == nil {
+		return
+	}
+	s.proxyTransportMu.Lock()
+	defer s.proxyTransportMu.Unlock()
+	s.closeEdgeProxyTransportsLocked()
+}
+
+func (s *Service) closeEdgeProxyTransportsLocked() {
+	for key, transport := range s.proxyTransports {
+		transport.CloseIdleConnections()
+		delete(s.proxyTransports, key)
 	}
 }
 
@@ -3368,13 +3500,14 @@ func edgeCacheGeneration(bundle model.EdgeRouteBundle) string {
 func (s *Service) recordCacheLoaded(cached cacheFile) {
 	bundle := cached.Bundle
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.bundle = &bundle
 	s.etag = strings.TrimSpace(cached.ETag)
 	if s.etag == "" {
 		s.etag = quoteETag(bundle.Version)
 	}
 	s.snapshot = s.statusForBundleLocked(bundle, cached.CachedAt, nil, true)
+	s.mu.Unlock()
+	s.reconcileEdgeProxyTransports(bundle)
 }
 
 func (s *Service) recordCacheCorruptGeneration(generation string) {
@@ -3389,10 +3522,11 @@ func (s *Service) recordCacheCorruptGeneration(generation string) {
 
 func (s *Service) recordSyncSuccess(bundle model.EdgeRouteBundle, etag string, now time.Time, stale bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.bundle = &bundle
 	s.etag = strings.TrimSpace(etag)
 	s.snapshot = s.statusForBundleLocked(bundle, now, &now, stale)
+	s.mu.Unlock()
+	s.reconcileEdgeProxyTransports(bundle)
 }
 
 func (s *Service) recordNotModified(now time.Time) {
