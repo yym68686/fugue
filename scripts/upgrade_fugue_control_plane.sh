@@ -391,7 +391,8 @@ release_changed_files_match() {
       public:deploy/helm/fugue/values-production-ha.yaml|\
       public:scripts/render_fugue_edge_systemd_unit.sh|\
       public:scripts/render_fugue_dns_systemd_unit.sh|\
-      public:scripts/release_fugue_public_data_plane.sh)
+      public:scripts/release_fugue_public_data_plane.sh|\
+      public:.github/workflows/release-public-data-plane.yml)
         return 0
         ;;
       build:cmd/fugue-image-cache/*|\
@@ -563,7 +564,8 @@ release_safety_changed_file_subsystems() {
       internal/weightedselector/*|\
       cmd/fugue-dns/*|\
       deploy/helm/fugue/templates/dns-*|\
-      scripts/render_fugue_dns_systemd_unit.sh)
+      scripts/render_fugue_dns_systemd_unit.sh|\
+      .github/workflows/release-public-data-plane.yml)
         release_safety_emit_subsystem dns_server
         matched="true"
         ;;
@@ -578,7 +580,8 @@ release_safety_changed_file_subsystems() {
       Dockerfile.edge|\
       deploy/helm/fugue/templates/edge-*|\
       scripts/render_fugue_edge_systemd_unit.sh|\
-      scripts/sync_fugue_edge_proxy.sh)
+      scripts/sync_fugue_edge_proxy.sh|\
+      .github/workflows/release-public-data-plane.yml)
         release_safety_emit_subsystem edge_worker
         matched="true"
         ;;
@@ -687,7 +690,8 @@ release_safety_changed_file_subsystems() {
       scripts/compute_control_plane_image_build_plan.sh|\
       scripts/compute_release_changed_files_from_live.sh|\
       scripts/resolve_control_plane_live_images.sh|\
-      .github/workflows/deploy-control-plane.yml)
+      .github/workflows/deploy-control-plane.yml|\
+      .github/workflows/release-public-data-plane.yml)
         release_safety_emit_subsystem deploy_script
         matched="true"
         ;;
@@ -1596,6 +1600,7 @@ node_local_build_plane_preflight_override_allowed() {
 	      deploy/helm/fugue/templates/_helpers.tpl|\
 	      deploy/helm/fugue/templates/controller-deployment.yaml|\
 	      .github/workflows/deploy-control-plane.yml|\
+	      .github/workflows/release-public-data-plane.yml|\
 	      scripts/build_control_plane_images.sh|\
 	      scripts/compute_control_plane_image_build_plan.sh|\
 	      scripts/compute_release_changed_files_from_live.sh|\

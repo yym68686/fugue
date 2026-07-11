@@ -1022,6 +1022,20 @@ FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/te
 if control_plane_backup_drain_required; then
   fail "deploy tooling changes must not require control-plane backup drain in auto mode"
 fi
+FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/release-public-data-plane.yml'
+public_data_plane_changed || fail "public data-plane release workflow must be owned by the public data-plane domain"
+public_workflow_subsystems="$(release_safety_changed_file_subsystems)"
+[[ "${public_workflow_subsystems}" == *"deploy_script"* && "${public_workflow_subsystems}" == *"edge_worker"* && "${public_workflow_subsystems}" == *"dns_server"* ]] ||
+  fail "public data-plane release workflow must select deploy, edge, and DNS safety domains, got ${public_workflow_subsystems}"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "public data-plane release workflow must not be classified as unknown high risk"
+public_workflow_gates="$(release_safety_required_gates)"
+[[ "${public_workflow_gates}" == *"inactive_worker_smoke"* && "${public_workflow_gates}" == *"authoritative_dns"* && "${public_workflow_gates}" == *"rollback_path_smoke"* ]] ||
+  fail "public data-plane release workflow must require edge, DNS, and rollback gates, got ${public_workflow_gates}"
+assert_eq "$(release_safety_watch_window_seconds)" "180" "public data-plane release workflow watch window"
+if control_plane_backup_drain_required; then
+  fail "public data-plane release workflow changes must not require control-plane backup drain"
+fi
 FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=true
 control_plane_backup_drain_required || fail "explicit backup drain required=true must force drain"
 FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED=false
