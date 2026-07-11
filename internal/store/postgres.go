@@ -1918,6 +1918,38 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_platform_lkg_snapshots ADD COLUMN IF NOT EXISTS verification_evidence_hash TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE fugue_platform_lkg_snapshots ADD COLUMN IF NOT EXISTS snapshot_provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_platform_lkg_kind_scope ON fugue_platform_lkg_snapshots (artifact_kind, scope_key)`,
+	`CREATE TABLE IF NOT EXISTS fugue_platform_lkg_snapshot_history (
+		id TEXT PRIMARY KEY,
+		artifact_id TEXT NOT NULL REFERENCES fugue_platform_artifacts(id) ON DELETE RESTRICT,
+		artifact_kind TEXT NOT NULL,
+		scope_key TEXT NOT NULL,
+		scope_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+		schema_version TEXT NOT NULL DEFAULT '',
+		generation TEXT NOT NULL,
+		generation_sequence BIGINT NOT NULL DEFAULT 0,
+		content_hash TEXT NOT NULL,
+		artifact_provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+		verified_by_release_id TEXT NOT NULL DEFAULT '',
+		verification_evidence_hash TEXT NOT NULL DEFAULT '',
+		snapshot_provenance_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		UNIQUE (artifact_kind, scope_key, generation)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_lkg_history_kind_scope_sequence ON fugue_platform_lkg_snapshot_history (artifact_kind, scope_key, generation_sequence DESC, updated_at DESC)`,
+	`INSERT INTO fugue_platform_lkg_snapshot_history (
+		id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
+		generation, generation_sequence, content_hash, artifact_provenance_json,
+		verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
+		expires_at, created_at, updated_at
+	)
+	SELECT id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
+		generation, generation_sequence, content_hash, artifact_provenance_json,
+		verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
+		expires_at, created_at, updated_at
+	FROM fugue_platform_lkg_snapshots
+	ON CONFLICT (artifact_kind, scope_key, generation) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS fugue_resource_usage_samples (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NULL REFERENCES fugue_tenants(id) ON DELETE CASCADE,

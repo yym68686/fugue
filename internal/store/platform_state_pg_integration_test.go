@@ -180,6 +180,39 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND release_channel = $3 AND status 
 		t.Fatalf("repeat verification mutated state: first=%+v/%+v repeated=%+v/%+v", verifiedRelease, verifiedLKG, repeatedRelease, repeatedLKG)
 	}
 
+	if _, err := s.db.Exec(`
+DELETE FROM fugue_platform_lkg_snapshot_history
+WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`,
+		verifiedLKG.ArtifactKind, verifiedLKG.ScopeKey, verifiedLKG.Generation); err != nil {
+		t.Fatalf("simulate mixed-version current-only LKG write: %v", err)
+	}
+	mixedVersionCandidate := createValidated("mixed-version-" + model.NewID("gen"))
+	_, mixedVersionRelease, _, _, err := s.ReleasePlatformArtifact(mixedVersionCandidate.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		IdempotencyKey: "mixed-version-history-recovery",
+	}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatalf("release mixed-version history recovery candidate: %v", err)
+	}
+	if _, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(
+		mixedVersionRelease.ID,
+		completePlatformVerificationRequest(mixedVersionRelease.FencingToken, false),
+		testPlatformPrincipal(),
+	); err != nil {
+		t.Fatalf("verify mixed-version history recovery candidate: %v", err)
+	}
+	var recoveredPrevious int
+	if err := s.db.QueryRow(`
+SELECT COUNT(*)
+FROM fugue_platform_lkg_snapshot_history
+WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`,
+		verifiedLKG.ArtifactKind, verifiedLKG.ScopeKey, verifiedLKG.Generation).Scan(&recoveredPrevious); err != nil {
+		t.Fatalf("count recovered previous LKG history: %v", err)
+	}
+	if recoveredPrevious != 1 {
+		t.Fatalf("mixed-version current LKG was not archived before overwrite: count=%d", recoveredPrevious)
+	}
+
 	retryArtifact := createValidated("retry-" + model.NewID("gen"))
 	retryRequest := model.PlatformArtifactReleaseRequest{
 		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
@@ -246,6 +279,21 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND release_channel = $3 AND status 
 		if err != nil {
 			t.Fatalf("iteration %d verify next active release: %v", iteration, err)
 		}
+	}
+
+	currentLKG, err := s.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, scopeKey)
+	if err != nil {
+		t.Fatalf("get current LKG after release races: %v", err)
+	}
+	history, err := s.ListPlatformLKGHistory(model.PlatformArtifactKindDNSAnswerBundle, scopeKey, 100)
+	if err != nil {
+		t.Fatalf("list PostgreSQL LKG history: %v", err)
+	}
+	if len(history) < platformLKGHistoryDefaultLimit {
+		t.Fatalf("expected at least %d retained PostgreSQL LKG generations, got %+v", platformLKGHistoryDefaultLimit, history)
+	}
+	if currentLKG == nil || history[0].ID != currentLKG.ID {
+		t.Fatalf("current PostgreSQL LKG must be the newest retained generation: current=%+v history=%+v", currentLKG, history)
 	}
 }
 

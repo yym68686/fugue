@@ -184,6 +184,120 @@ func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 	}
 }
 
+func TestPlatformLKGHistoryRetainsCurrentAndPreviousGenerations(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "store.json")
+	s := New(statePath)
+	configureTestPlatformArtifactSigning(s)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	generations := []string{"history_gen_1", "history_gen_2", "history_gen_3"}
+	artifacts := make([]model.PlatformArtifact, 0, len(generations))
+	for index, generation := range generations {
+		artifacts = append(artifacts, createValidatedPlatformArtifact(
+			t,
+			s,
+			model.PlatformArtifactKindEdgeRouteBundle,
+			generation,
+			map[string]any{"revision": index + 1},
+		))
+	}
+	seedVerifiedPlatformLKG(t, s, artifacts[0])
+	for index := 1; index < len(artifacts); index++ {
+		_, release, _, _, err := s.ReleasePlatformArtifact(artifacts[index].ID, model.PlatformArtifactReleaseRequest{
+			ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+			IdempotencyKey: "retain-" + artifacts[index].Generation,
+		}, testPlatformPrincipal())
+		if err != nil {
+			t.Fatalf("release %s: %v", artifacts[index].Generation, err)
+		}
+		if _, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(
+			release.ID,
+			completePlatformVerificationRequest(release.FencingToken, false),
+			testPlatformPrincipal(),
+		); err != nil {
+			t.Fatalf("verify %s: %v", artifacts[index].Generation, err)
+		}
+	}
+
+	assertHistory := func(store *Store) {
+		t.Helper()
+		history, err := store.ListPlatformLKGHistory(model.PlatformArtifactKindEdgeRouteBundle, "global", 10)
+		if err != nil {
+			t.Fatalf("list LKG history: %v", err)
+		}
+		if len(history) != len(generations) {
+			t.Fatalf("expected %d retained generations, got %+v", len(generations), history)
+		}
+		for index, snapshot := range history {
+			want := generations[len(generations)-1-index]
+			if snapshot.Generation != want {
+				t.Fatalf("history[%d] generation=%s, want %s", index, snapshot.Generation, want)
+			}
+		}
+		current, err := store.GetPlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
+		if err != nil {
+			t.Fatalf("get current LKG: %v", err)
+		}
+		if current == nil || current.ID != history[0].ID || current.Generation != generations[len(generations)-1] {
+			t.Fatalf("current LKG must remain the newest retained generation: current=%+v history=%+v", current, history)
+		}
+	}
+	assertHistory(s)
+
+	reloaded := New(statePath)
+	configureTestPlatformArtifactSigning(reloaded)
+	if err := reloaded.Init(); err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	assertHistory(reloaded)
+}
+
+func TestPlatformLKGHistorySnapshotEquivalentRequiresSignedIdentity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	existing := model.PlatformLKGSnapshot{
+		ID:                 "lkg-history-1",
+		ArtifactID:         "artifact-1",
+		ArtifactKind:       model.PlatformArtifactKindEdgeRouteBundle,
+		Scope:              model.PlatformArtifactScope{ScopeType: "global"},
+		ScopeKey:           "global",
+		SchemaVersion:      "v1",
+		Generation:         "generation-1",
+		GenerationSequence: 1,
+		ContentHash:        "content-hash-1",
+		ArtifactProvenance: model.PlatformArtifactProvenance{
+			Issuer: "artifact-issuer", KeyID: "artifact-key", Algorithm: "hmac-sha256", Signature: "artifact-signature", SignedAt: now,
+		},
+		VerifiedByReleaseID:      "release-1",
+		VerificationEvidenceHash: "evidence-hash-1",
+		SnapshotProvenance: model.PlatformArtifactProvenance{
+			Issuer: "snapshot-issuer", KeyID: "snapshot-key", Algorithm: "hmac-sha256", Signature: "snapshot-signature", SignedAt: now,
+		},
+		ExpiresAt: now.Add(time.Hour),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if !platformLKGHistorySnapshotEquivalent(existing, existing) {
+		t.Fatal("identical signed snapshots must be idempotent")
+	}
+
+	mismatchedContent := existing
+	mismatchedContent.ContentHash = "content-hash-2"
+	if platformLKGHistorySnapshotEquivalent(existing, mismatchedContent) {
+		t.Fatal("same generation with different content must fail closed")
+	}
+	mismatchedSignature := existing
+	mismatchedSignature.SnapshotProvenance.Signature = "snapshot-signature-2"
+	if platformLKGHistorySnapshotEquivalent(existing, mismatchedSignature) {
+		t.Fatal("same generation with different snapshot signature must fail closed")
+	}
+}
+
 func TestPlatformStatePeriodicPullSurvivesReleaseMessageLoss(t *testing.T) {
 	t.Parallel()
 

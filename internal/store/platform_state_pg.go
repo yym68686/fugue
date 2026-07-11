@@ -586,6 +586,14 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKG(releaseID string, req model.P
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
+	if currentLKG != nil {
+		if err := pgInsertPlatformLKGHistorySnapshot(ctx, tx, *currentLKG); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
+	if err := pgInsertPlatformLKGHistorySnapshot(ctx, tx, snapshot); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+	}
 	lkg, err := pgUpsertPlatformLKGSnapshot(ctx, tx, snapshot)
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
@@ -1032,6 +1040,89 @@ RETURNING id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
 		return model.PlatformLKGSnapshot{}, mapDBErr(err)
 	}
 	return out, nil
+}
+
+func pgInsertPlatformLKGHistorySnapshot(ctx context.Context, db platformStateDB, snapshot model.PlatformLKGSnapshot) error {
+	scopeJSON, err := marshalJSON(snapshot.Scope)
+	if err != nil {
+		return err
+	}
+	artifactProvenanceJSON, err := marshalJSON(snapshot.ArtifactProvenance)
+	if err != nil {
+		return err
+	}
+	snapshotProvenanceJSON, err := marshalJSON(snapshot.SnapshotProvenance)
+	if err != nil {
+		return err
+	}
+	result, err := db.ExecContext(ctx, `
+INSERT INTO fugue_platform_lkg_snapshot_history (
+	id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
+	generation, generation_sequence, content_hash, artifact_provenance_json,
+	verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
+	expires_at, created_at, updated_at
+) VALUES (
+	$1, $2, $3, $4, $5::jsonb, $6,
+	$7, $8, $9, $10::jsonb,
+	$11, $12, $13::jsonb,
+	$14, $15, $16
+) ON CONFLICT (artifact_kind, scope_key, generation) DO NOTHING`,
+		snapshot.ID, snapshot.ArtifactID, snapshot.ArtifactKind, snapshot.ScopeKey, scopeJSON, snapshot.SchemaVersion,
+		snapshot.Generation, snapshot.GenerationSequence, snapshot.ContentHash, artifactProvenanceJSON,
+		snapshot.VerifiedByReleaseID, snapshot.VerificationEvidenceHash, snapshotProvenanceJSON,
+		snapshot.ExpiresAt, snapshot.CreatedAt, snapshot.UpdatedAt)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 1 {
+		return nil
+	}
+	existing, err := scanPlatformLKGSnapshot(db.QueryRowContext(ctx, `
+SELECT id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
+	generation, generation_sequence, content_hash, artifact_provenance_json,
+	verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
+	expires_at, created_at, updated_at
+FROM fugue_platform_lkg_snapshot_history
+WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3
+LIMIT 1`, snapshot.ArtifactKind, snapshot.ScopeKey, snapshot.Generation))
+	if err != nil {
+		return mapDBErr(err)
+	}
+	if !platformLKGHistorySnapshotEquivalent(existing, snapshot) {
+		return ErrConflict
+	}
+	return nil
+}
+
+func platformLKGHistorySnapshotEquivalent(existing, candidate model.PlatformLKGSnapshot) bool {
+	return existing.ID == candidate.ID &&
+		existing.ArtifactID == candidate.ArtifactID &&
+		existing.ArtifactKind == candidate.ArtifactKind &&
+		existing.Scope == candidate.Scope &&
+		existing.ScopeKey == candidate.ScopeKey &&
+		existing.SchemaVersion == candidate.SchemaVersion &&
+		existing.Generation == candidate.Generation &&
+		existing.GenerationSequence == candidate.GenerationSequence &&
+		existing.ContentHash == candidate.ContentHash &&
+		platformArtifactProvenanceEquivalent(existing.ArtifactProvenance, candidate.ArtifactProvenance) &&
+		existing.VerifiedByReleaseID == candidate.VerifiedByReleaseID &&
+		existing.VerificationEvidenceHash == candidate.VerificationEvidenceHash &&
+		platformArtifactProvenanceEquivalent(existing.SnapshotProvenance, candidate.SnapshotProvenance) &&
+		existing.ExpiresAt.Equal(candidate.ExpiresAt) &&
+		existing.CreatedAt.Equal(candidate.CreatedAt) &&
+		existing.UpdatedAt.Equal(candidate.UpdatedAt)
+}
+
+func platformArtifactProvenanceEquivalent(existing, candidate model.PlatformArtifactProvenance) bool {
+	return existing.Issuer == candidate.Issuer &&
+		existing.KeyID == candidate.KeyID &&
+		existing.Algorithm == candidate.Algorithm &&
+		existing.Signature == candidate.Signature &&
+		existing.SignedAt.Equal(candidate.SignedAt)
 }
 
 func (s *Store) pgGetActivePlatformArtifact(kind, scopeKey, channel string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
@@ -1498,6 +1589,36 @@ LIMIT 1`, kind, scopeKey))
 		return nil, mapDBErr(err)
 	}
 	return &snapshot, nil
+}
+
+func (s *Store) pgListPlatformLKGHistory(kind, scopeKey string, limit int) ([]model.PlatformLKGSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, artifact_id, artifact_kind, scope_key, scope_json, schema_version,
+	generation, generation_sequence, content_hash, artifact_provenance_json,
+	verified_by_release_id, verification_evidence_hash, snapshot_provenance_json,
+	expires_at, created_at, updated_at
+FROM fugue_platform_lkg_snapshot_history
+WHERE artifact_kind = $1 AND scope_key = $2
+ORDER BY generation_sequence DESC, updated_at DESC, id DESC
+LIMIT $3`, kind, scopeKey, limit)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	history := make([]model.PlatformLKGSnapshot, 0, limit)
+	for rows.Next() {
+		snapshot, err := scanPlatformLKGSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		history = append(history, snapshot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	return history, nil
 }
 
 func scanPlatformArtifact(scanner sqlScanner) (model.PlatformArtifact, error) {

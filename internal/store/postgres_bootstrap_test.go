@@ -196,6 +196,23 @@ func TestPostgresSchemaIncludesPlatformConsumerHeartbeatEnvelope(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaIncludesPlatformLKGHistoryRetention(t *testing.T) {
+	t.Parallel()
+
+	schema := strings.Join(postgresSchemaStatements, "\n")
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS fugue_platform_lkg_snapshot_history",
+		"UNIQUE (artifact_kind, scope_key, generation)",
+		"idx_fugue_platform_lkg_history_kind_scope_sequence",
+		"FROM fugue_platform_lkg_snapshots",
+		"ON CONFLICT (artifact_kind, scope_key, generation) DO NOTHING",
+	} {
+		if !strings.Contains(schema, required) {
+			t.Fatalf("postgres schema is missing %s", required)
+		}
+	}
+}
+
 func TestPostgresSchemaAppliesToLiveTestDatabase(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
 	if databaseURL == "" {

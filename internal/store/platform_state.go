@@ -15,7 +15,10 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-const platformLKGDefaultTTL = 7 * 24 * time.Hour
+const (
+	platformLKGDefaultTTL          = 7 * 24 * time.Hour
+	platformLKGHistoryDefaultLimit = 3
+)
 
 var validPlatformArtifactKinds = map[string]struct{}{
 	model.PlatformArtifactKindEdgeRouteBundle:           {},
@@ -828,7 +831,7 @@ func (s *Store) GetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnapsho
 			if snapshot.ArtifactKind != kind || snapshot.ScopeKey != scopeKey {
 				continue
 			}
-			if out == nil || snapshot.UpdatedAt.After(out.UpdatedAt) {
+			if out == nil || platformLKGSnapshotIsNewer(snapshot, *out) {
 				copy := snapshot
 				out = &copy
 			}
@@ -836,6 +839,43 @@ func (s *Store) GetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnapsho
 		return nil
 	})
 	return out, err
+}
+
+func (s *Store) ListPlatformLKGHistory(kind, scopeKey string, limit int) ([]model.PlatformLKGSnapshot, error) {
+	kind = NormalizePlatformArtifactKind(kind)
+	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
+	if scopeKey == "" {
+		scopeKey = "global"
+	}
+	if kind == "" || limit < 0 {
+		return nil, ErrInvalidInput
+	}
+	if limit == 0 {
+		limit = platformLKGHistoryDefaultLimit
+	}
+	if s.usingDatabase() {
+		return s.pgListPlatformLKGHistory(kind, scopeKey, limit)
+	}
+	var out []model.PlatformLKGSnapshot
+	err := s.withLockedState(false, func(state *model.State) error {
+		for index := range state.PlatformLKGSnapshots {
+			snapshot := state.PlatformLKGSnapshots[index]
+			if snapshot.ArtifactKind == kind && snapshot.ScopeKey == scopeKey {
+				out = append(out, snapshot)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return platformLKGSnapshotIsNewer(out[i], out[j])
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func normalizePlatformArtifactForStore(artifact model.PlatformArtifact) (model.PlatformArtifact, error) {
@@ -1412,14 +1452,29 @@ func buildPlatformLKGSnapshot(
 }
 
 func platformLKGSnapshotForScope(snapshots []model.PlatformLKGSnapshot, kind, scopeKey string) *model.PlatformLKGSnapshot {
+	var out *model.PlatformLKGSnapshot
 	for index := range snapshots {
 		snapshot := snapshots[index]
-		if snapshot.ArtifactKind == kind && snapshot.ScopeKey == scopeKey {
+		if snapshot.ArtifactKind == kind && snapshot.ScopeKey == scopeKey &&
+			(out == nil || platformLKGSnapshotIsNewer(snapshot, *out)) {
 			copy := snapshot
-			return &copy
+			out = &copy
 		}
 	}
-	return nil
+	return out
+}
+
+func platformLKGSnapshotIsNewer(candidate, current model.PlatformLKGSnapshot) bool {
+	if candidate.GenerationSequence != current.GenerationSequence {
+		return candidate.GenerationSequence > current.GenerationSequence
+	}
+	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
+		return candidate.UpdatedAt.After(current.UpdatedAt)
+	}
+	if !candidate.CreatedAt.Equal(current.CreatedAt) {
+		return candidate.CreatedAt.After(current.CreatedAt)
+	}
+	return candidate.ID > current.ID
 }
 
 func verifiedPlatformLKGSnapshotFromState(
@@ -1458,7 +1513,9 @@ func platformLKGSnapshotMatchesArtifact(
 func upsertPlatformLKGSnapshot(snapshots []model.PlatformLKGSnapshot, snapshot model.PlatformLKGSnapshot) []model.PlatformLKGSnapshot {
 	out := make([]model.PlatformLKGSnapshot, 0, len(snapshots)+1)
 	for _, existing := range snapshots {
-		if existing.ArtifactKind == snapshot.ArtifactKind && existing.ScopeKey == snapshot.ScopeKey {
+		if existing.ArtifactKind == snapshot.ArtifactKind &&
+			existing.ScopeKey == snapshot.ScopeKey &&
+			existing.Generation == snapshot.Generation {
 			continue
 		}
 		out = append(out, existing)
