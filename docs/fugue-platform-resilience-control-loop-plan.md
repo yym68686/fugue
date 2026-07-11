@@ -1920,6 +1920,11 @@ DNS/edge failover 必须满足：
 > state 兼容归一化原语和穷举测试。legacy `true` 仅映射为 `pass`，legacy `false`
 > 映射为 `unknown`；显式 `pass/fail/unknown/stale` 与 legacy bool 冲突或状态非法时
 > 拒绝处理。该原语尚未接入 API/Store/CLI，因此下方完整迁移项保持未勾选。
+>
+> 2026-07-11 four-state API checkpoint: verify-LKG HTTP 边界已增加六项可选
+> `*_state` 字段，并保持 legacy bool 请求兼容。state-only 请求缺失项按 `unknown`
+> fail closed，非 `pass` 在进入 Store 前阻断，冲突/非法状态返回参数错误。共享 Store、
+> CLI 和其他核心 evidence 尚未迁移，因此完整四态项仍保持未勾选。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。

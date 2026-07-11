@@ -302,13 +302,22 @@ func (s *Server) handleVerifyPlatformArtifactReleaseLKG(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusForbidden, "artifact.verify_lkg scope required")
 		return
 	}
-	var req model.PlatformArtifactVerifyLKGRequest
-	if err := httpx.DecodeJSON(r, &req); err != nil {
+	var wireReq platformArtifactVerifyLKGHTTPRequest
+	if err := httpx.DecodeJSON(r, &wireReq); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.FencingToken <= 0 || strings.TrimSpace(req.Reason) == "" {
+	if wireReq.FencingToken <= 0 || strings.TrimSpace(wireReq.Reason) == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "positive fencing_token and reason are required")
+		return
+	}
+	req, evidenceStates, err := wireReq.modelRequest()
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if nonPassing := nonPassingPlatformVerificationEvidence(evidenceStates); len(nonPassing) > 0 {
+		httpx.WriteError(w, http.StatusConflict, "verification evidence did not pass: "+strings.Join(nonPassing, ","))
 		return
 	}
 	artifact, release, message, lkg, err := s.store.VerifyPlatformArtifactReleaseLKG(r.PathValue("release_id"), req, principal)

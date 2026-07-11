@@ -24922,20 +24922,49 @@ components:
     PlatformArtifactVerificationEvidence:
       type: object
       additionalProperties: false
-      required: [consumer_convergence, local_probe, public_synthetic, watch_window, baseline_monotonic, database_rollback_compatible]
       properties:
         consumer_convergence:
           type: boolean
+          deprecated: true
+          description: Legacy compatibility field. Prefer consumer_convergence_state.
+        consumer_convergence_state:
+          type: string
+          enum: [pass, fail, unknown, stale]
         local_probe:
           type: boolean
+          deprecated: true
+          description: Legacy compatibility field. Prefer local_probe_state.
+        local_probe_state:
+          type: string
+          enum: [pass, fail, unknown, stale]
         public_synthetic:
           type: boolean
+          deprecated: true
+          description: Legacy compatibility field. Prefer public_synthetic_state.
+        public_synthetic_state:
+          type: string
+          enum: [pass, fail, unknown, stale]
         watch_window:
           type: boolean
+          deprecated: true
+          description: Legacy compatibility field. Prefer watch_window_state.
+        watch_window_state:
+          type: string
+          enum: [pass, fail, unknown, stale]
         baseline_monotonic:
           type: boolean
+          deprecated: true
+          description: Legacy compatibility field. Prefer baseline_monotonic_state.
+        baseline_monotonic_state:
+          type: string
+          enum: [pass, fail, unknown, stale]
         database_rollback_compatible:
           type: boolean
+          deprecated: true
+          description: Legacy compatibility field. Prefer database_rollback_compatible_state.
+        database_rollback_compatible_state:
+          type: string
+          enum: [pass, fail, unknown, stale]
         expected_consumer_set_id:
           type: string
         evidence_refs:
