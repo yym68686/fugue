@@ -1929,6 +1929,19 @@ DNS/edge failover 必须满足：
 > 并把 missing/duplicate/corrupt/expired 分别映射为 unknown/fail/stale 后交给统一 preflight evaluator。
 > 线上权威 `fugue admin artifact ls --json` 此时返回 0 个持久化 artifact，因此不能把 collector 接成
 > enforcement，也不能勾选下方两个生产验证项；必须先完成真实 generation 的持久化和 shadow 接线。
+>
+> 2026-07-11 local rollback cache collector checkpoint: 已在同一独立、未被 runtime 导入的包中增加
+> 无 I/O 的 edge route/DNS 本地缓存证据 collector。collector 不信任 `.previous` 文件名或 mtime，
+> 而是从 current、previous 和 version archive 候选内容中选择精确 pinned generation；edge route
+> 校验 bundle 签名和有效期，DNS 同时校验 envelope schema/kind/content hash/expiry、内部 bundle
+> generation 和签名，并按配置的 max-stale、clock uncertainty 映射为 pass/fail/unknown/stale。
+> 重复 candidate identity、generation/version 冲突、损坏 payload、错误签名和 envelope/bundle
+> generation 冲突均 fail closed；同一 generation 存在一个损坏副本但另有独立验证通过的 archive
+> 时保留可恢复结论并在 detail 中保留 degraded 计数。线上只读审计确认当前 edge/DNS 节点已有签名
+> route bundle、带内容哈希 envelope 的 DNS bundle 和最多五代本地 archive，但 `.previous` 可能只是
+> 同一语义 generation 的定时刷新副本；Caddy config 仍由 route bundle 与节点本地配置派生，node
+> desired state 仍只有 current file/hash、没有 rollback archive。collector 尚无生产调用点，因此
+> 下方 Caddy/DNS/route 与 node desired-state 生产验证项继续保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。
