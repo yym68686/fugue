@@ -1123,7 +1123,7 @@ public_data_plane_smoke_urls() {
   printf '%s\n' "${urls}" | tr ',;' '\n'
 }
 
-validate_bluegreen_smoke_configuration() {
+validate_representative_smoke_configuration() {
   local minimum_hosts="${FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS:-2}"
   local distinct_hosts
 
@@ -1146,18 +1146,132 @@ for raw in sys.stdin:
         continue
     parsed = urlsplit(raw)
     if parsed.scheme != "https" or not parsed.hostname:
-        raise SystemExit(f"invalid blue-green smoke URL (HTTPS hostname required): {raw}")
+        raise SystemExit(f"invalid public data-plane smoke URL (HTTPS hostname required): {raw}")
     hosts.add(parsed.hostname.lower())
 print(len(hosts))
 ')"; then
-    error "blue-green smoke URL validation failed"
+    error "public data-plane smoke URL validation failed"
     return 1
   fi
   if (( distinct_hosts < minimum_hosts )); then
-    error "blue-green release requires at least ${minimum_hosts} distinct HTTPS smoke hostnames; found ${distinct_hosts}"
+    error "public data-plane release requires at least ${minimum_hosts} distinct HTTPS smoke hostnames; found ${distinct_hosts}"
     return 1
   fi
-  log "blue-green smoke configuration validated: distinct_https_hosts=${distinct_hosts} minimum=${minimum_hosts}"
+  log "representative smoke configuration validated: distinct_https_hosts=${distinct_hosts} minimum=${minimum_hosts}"
+}
+
+authoritative_dns_hostnames() {
+  public_data_plane_smoke_urls | python3 -c '
+import sys
+from urllib.parse import urlsplit
+
+hosts = set()
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    parsed = urlsplit(raw)
+    if parsed.scheme == "https" and parsed.hostname:
+        hosts.add(parsed.hostname.lower())
+for host in sorted(hosts):
+    print(host)
+'
+}
+
+dns_zone_for_daemonset() {
+  local daemonset_name="$1"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    if container.get("name") != "dns":
+        continue
+    for entry in container.get("env") or []:
+        if entry.get("name") == "FUGUE_DNS_ZONE":
+            print((entry.get("value") or "").strip())
+            raise SystemExit(0)
+'
+}
+
+authoritative_dns_query_with_retry() {
+  local label="$1"
+  local record_type="$2"
+  local name="$3"
+  local server="$4"
+  local attempts="${FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS:-6}"
+  local delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS:-2}"
+  local timeout_seconds="${FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_TIMEOUT_SECONDS:-3}"
+  local attempt=1
+  local output_file
+
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS must be a positive integer"
+  [[ "${delay_seconds}" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS must be a non-negative number"
+  [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_TIMEOUT_SECONDS must be a positive integer"
+  output_file="$(mktemp "${TMPDIR:-/tmp}/fugue-authoritative-dns.XXXXXX")"
+  while (( attempt <= attempts )); do
+    if host -W "${timeout_seconds}" -t "${record_type}" "${name}" "${server}" >"${output_file}" 2>&1 &&
+      grep -Eiq ' has (IPv6 )?address | has SOA record | is an alias for ' "${output_file}"; then
+      rm -f "${output_file}"
+      return 0
+    fi
+    if (( attempt == attempts )); then
+      error "authoritative DNS query failed after ${attempts} attempt(s): ${label}"
+      sed -n '1,4p' "${output_file}" >&2 || true
+      rm -f "${output_file}"
+      return 1
+    fi
+    log "authoritative DNS query attempt ${attempt}/${attempts} failed; retrying in ${delay_seconds}s: ${label}"
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+  done
+}
+
+check_authoritative_dns_on_nodes() {
+  local daemonset_name="$1"
+  local zone
+  local host_ip
+  local hostname
+  local checked_nodes=0
+  local checked_hosts=0
+
+  if ! zone="$(dns_zone_for_daemonset "${daemonset_name}")"; then
+    error "could not read DNS zone from ${daemonset_name}"
+    return 1
+  fi
+  zone="$(trim_field "${zone}")"
+  if [[ -z "${zone}" ]]; then
+    error "DNS daemonset ${daemonset_name} has no FUGUE_DNS_ZONE value"
+    return 1
+  fi
+  while IFS= read -r host_ip; do
+    host_ip="$(trim_field "${host_ip}")"
+    [[ -n "${host_ip}" ]] || continue
+    checked_nodes=$((checked_nodes + 1))
+    log "checking authoritative DNS SOA server=${host_ip} zone=${zone}"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
+      authoritative_dns_query_with_retry "${daemonset_name} server=${host_ip} zone=${zone} type=SOA" SOA "${zone}" "${host_ip}" || return $?
+    fi
+    checked_hosts=0
+    while IFS= read -r hostname; do
+      hostname="$(trim_field "${hostname}")"
+      [[ -n "${hostname}" ]] || continue
+      checked_hosts=$((checked_hosts + 1))
+      log "checking authoritative DNS A server=${host_ip} hostname=${hostname}"
+      if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
+        authoritative_dns_query_with_retry "${daemonset_name} server=${host_ip} hostname=${hostname} type=A" A "${hostname}" "${host_ip}" || return $?
+      fi
+    done < <(authoritative_dns_hostnames)
+    if (( checked_hosts == 0 )); then
+      error "DNS authoritative validation requires at least one representative hostname"
+      return 1
+    fi
+  done < <(node_ips_for_daemonset "${daemonset_name}")
+  if (( checked_nodes == 0 )); then
+    error "DNS daemonset ${daemonset_name} has no node IPs to validate"
+    return 1
+  fi
 }
 
 smoke_curl_with_retry() {
@@ -1581,6 +1695,7 @@ run_dns_ondelete_release() {
     before_uids="$(daemonset_pod_uids "${daemonset_name}")"
     delete_daemonset_pods_no_wait "${daemonset_name}" "dns"
     wait_daemonset_replaced_and_ready "${daemonset_name}" "${before_uids}"
+    check_authoritative_dns_on_nodes "${daemonset_name}"
   done
 }
 
@@ -1688,11 +1803,14 @@ main() {
 
   command_exists python3 || fail "python3 is required"
   command_exists curl || fail "curl is required"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" ]]; then
+    command_exists host || fail "host is required for authoritative DNS release validation"
+  fi
   detect_kubectl
 
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "blue-green" ]]; then
     FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="node-local-blue-green"
-    validate_bluegreen_smoke_configuration
+    validate_representative_smoke_configuration
     run_bluegreen_release
     daemonsets_csv="$(bluegreen_worker_bases | paste -sd, -)"
     write_release_record "${daemonsets_csv}"
@@ -1720,6 +1838,7 @@ main() {
 
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" ]]; then
     FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="dns-ondelete"
+    validate_representative_smoke_configuration
     run_dns_ondelete_release
     daemonsets_csv="$(dns_daemonset_names | paste -sd, -)"
     write_release_record "${daemonsets_csv}"

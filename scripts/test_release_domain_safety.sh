@@ -57,27 +57,77 @@ PY
 
   unset FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
-  if validate_bluegreen_smoke_configuration; then
+  if validate_representative_smoke_configuration; then
     fail "blue-green smoke validation must reject an empty smoke set"
   fi
 
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://api.example.test/ready'
-  if validate_bluegreen_smoke_configuration; then
+  if validate_representative_smoke_configuration; then
     fail "blue-green smoke validation must count distinct hostnames"
   fi
 
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='http://api.example.test/healthz,https://app.example.test/healthz'
-  if validate_bluegreen_smoke_configuration; then
+  if validate_representative_smoke_configuration; then
     fail "blue-green smoke validation must reject non-HTTPS URLs"
   fi
 
   FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://app.example.test/healthz'
-  validate_bluegreen_smoke_configuration
+  validate_representative_smoke_configuration
 
   FUGUE_PUBLIC_DATA_PLANE_MIN_SMOKE_HOSTS=1
-  if validate_bluegreen_smoke_configuration; then
+  if validate_representative_smoke_configuration; then
     fail "blue-green smoke validation must not allow lowering the two-host safety floor"
   fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://app.example.test/ready,https://api.example.test/ready'
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS=1
+  dns_queries="$(mktemp)"
+  dns_zone_for_daemonset() { printf 'example.test\n'; }
+  node_ips_for_daemonset() { printf '192.0.2.10\n192.0.2.11\n'; }
+  host() {
+    printf '%s\n' "$*" >>"${dns_queries}"
+    if [[ "$*" == *" -t SOA "* ]]; then
+      printf 'example.test has SOA record ns1.example.test. hostmaster.example.test. 1 300 60 3600 60\n'
+    else
+      printf 'api.example.test has address 192.0.2.20\n'
+    fi
+  }
+
+  check_authoritative_dns_on_nodes test-dns
+  assert_eq "$(cat "${dns_queries}")" $'-W 3 -t SOA example.test 192.0.2.10\n-W 3 -t A api.example.test 192.0.2.10\n-W 3 -t A app.example.test 192.0.2.10\n-W 3 -t SOA example.test 192.0.2.11\n-W 3 -t A api.example.test 192.0.2.11\n-W 3 -t A app.example.test 192.0.2.11' "authoritative DNS validation must cover SOA and every distinct representative hostname on every node"
+  rm -f "${dns_queries}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://api.example.test/healthz,https://app.example.test/ready'
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS=2
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS=0
+  host_calls=0
+  dns_zone_for_daemonset() { printf 'example.test\n'; }
+  node_ips_for_daemonset() { printf '192.0.2.10\n192.0.2.11\n'; }
+  host() {
+    host_calls=$((host_calls + 1))
+    printf 'timed out\n'
+    return 1
+  }
+  sleep() { :; }
+
+  if check_authoritative_dns_on_nodes test-dns; then
+    fail "authoritative DNS validation must fail closed after an exhausted query"
+  fi
+  assert_eq "${host_calls}" "2" "authoritative DNS validation must stop before querying later hostnames or nodes"
 )
 
 (
