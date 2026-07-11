@@ -51,6 +51,13 @@ referenced artifact, and both signatures must verify against a trusted,
 non-revoked key. Repeating the same request is idempotent and must return the
 same signed LKG snapshot.
 
+`previous_verified_lkg_generations` is a derived, newest-verification-first list
+of distinct generations excluding the current verified LKG. A rollback followed
+by re-verification creates a new immutable verification event, but does not
+duplicate that generation in the derived list. An expired historical event may
+remain available for audit and must not be selected as a healthy rollback
+target.
+
 ## Failure Handling
 
 - Stale fencing token: stop and inspect the current active release.

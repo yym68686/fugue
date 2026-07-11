@@ -1142,6 +1142,20 @@ LKG 不能简单等于“最新 full release”。新 generation 刚进入 full 
 - `verified_at`
 - `expires_at`
 
+`previous_verified_lkg_generations` 是当前 verified LKG 之外的、按最近一次可信
+验证时间倒序排列的 distinct generation 列表。它从不可变 LKG verification event
+history 派生，而不是由调用方直接覆盖：
+
+- 排除 `verified_lkg_generation` 当前 generation；
+- 同一 generation 因 rollback 后重新验证而出现多条 event 时只保留最近一次；
+- 排序使用服务端持久化的 verification event 时间，不使用 generation 字符串或
+  客户端时间；
+- 每个条目仍必须能解析到 content/hash/signature/provenance 完整且未撤销的 snapshot；
+- expired generation 可以留在审计历史，但不能作为健康 rollback target；
+- serving-unverified、held、rejected generation 永远不能进入该列表；
+- retention 至少保留当前代加两代 previous verified generation（三代 verified LKG）；GC 必须同时保护
+  当前 verified LKG 和 release 已 pinned 的 rollback generation。
+
 Generation 状态机：
 
 ```text
@@ -1852,7 +1866,7 @@ DNS/edge failover 必须满足：
 - [x] 定义 `candidate_generation`。
 - [x] 定义 `serving_unverified_generation`。
 - [x] 定义 `verified_lkg_generation`。
-- [ ] 定义 `previous_verified_lkg_generations`。
+- [x] 定义 `previous_verified_lkg_generations`。
 - [x] 定义 `pinned_rollback_generation`。
 - [x] 定义 `verification_state` 和 evidence ref。
 - [x] artifact full release 不再立即覆盖 verified LKG。
