@@ -1156,6 +1156,12 @@ history 派生，而不是由调用方直接覆盖：
 - retention 至少保留当前代加两代 previous verified generation（三代 verified LKG）；GC 必须同时保护
   当前 verified LKG 和 release 已 pinned 的 rollback generation。
 
+LKG GC 必须先生成 side-effect-free plan。plan 只有在 current/history identity
+一致、所有 pinned generation 可解析、artifact scope 单一、服务端时间完整且
+`delete_before <= evaluated_at` 时才允许 `safe_to_apply=true`；否则全量保留并输出
+blocker。当前 verified generation、pinned rollback generation、最近三代 verified
+generation 和 retention window 内 event 都不能进入 delete set。
+
 Generation 状态机：
 
 ```text
@@ -1862,6 +1868,11 @@ DNS/edge failover 必须满足：
 
 #### Phase -1B: Verified LKG 语义
 
+> 2026-07-11 implementation checkpoint: LKG GC 当前只实现 side-effect-free、
+> fail-closed retention planner 和安全回归测试；没有 API、timer 或 controller
+> executor 会执行删除。后续 retention/GC phase 仍负责 dry-run/apply、budget、audit、
+> kill switch 和 active release/incident 等扩展保护集合。
+
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。
 - [x] 定义 `serving_unverified_generation`。
@@ -1884,12 +1895,12 @@ DNS/edge failover 必须满足：
 - [x] verified LKG 晋升检查 fencing token。
 - [x] 每个 artifact kind 定义 LKG TTL/max stale。
 - [x] 至少保留三代 verified LKG。
-- [ ] GC 保护 verified LKG 和 pinned rollback target。
+- [x] GC 保护 verified LKG 和 pinned rollback target。
 - [x] rollback 后重新验证旧 generation。
 - [x] 增加 bad full generation 不覆盖旧 LKG 的回归测试。
 - [x] 增加 serving-unverified crash recovery 测试。
 - [x] 增加 LKG retention 测试。
-- [ ] 增加 LKG GC 测试。
+- [x] 增加 LKG GC 测试。
 - [x] 增加 rollback target missing 硬阻断测试。
 - [x] 新增 runbook: verified LKG promotion。
 - [x] 新增 runbook: pinned rollback recovery。
