@@ -1872,6 +1872,13 @@ DNS/edge failover 必须满足：
 > fail-closed retention planner 和安全回归测试；没有 API、timer 或 controller
 > executor 会执行删除。后续 retention/GC phase 仍负责 dry-run/apply、budget、audit、
 > kill switch 和 active release/incident 等扩展保护集合。
+>
+> 2026-07-11 rollback asset preflight checkpoint: 已增加无 I/O、无生产调用点的
+> fail-closed evaluator，统一表达 rollback image digest、Caddy/DNS/route config generation
+> 和 node desired-state generation 的完整 requirement/evidence 匹配；missing、非 pass、
+> stale、identity mismatch、duplicate evidence 均阻断，并有回归测试。真实 registry、
+> artifact store 和 node desired-state probe 尚未接入 release prepare，因此下方三个
+> 生产验证项保持未勾选。
 
 - [x] 盘点当前所有把 full generation 立即写成 LKG 的路径。
 - [x] 定义 `candidate_generation`。
