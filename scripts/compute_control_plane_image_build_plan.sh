@@ -20,11 +20,11 @@ release_changed_files() {
   if [[ -n "${BEFORE_SHA:-}" && -n "${AFTER_SHA:-}" ]] &&
     git -C "${REPO_ROOT}" cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null &&
     git -C "${REPO_ROOT}" cat-file -e "${AFTER_SHA}^{commit}" 2>/dev/null; then
-    git -C "${REPO_ROOT}" diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}"
+    git -C "${REPO_ROOT}" diff --no-renames --name-only "${BEFORE_SHA}" "${AFTER_SHA}"
     return
   fi
   if git -C "${REPO_ROOT}" rev-parse --verify HEAD^ >/dev/null 2>&1; then
-    git -C "${REPO_ROOT}" diff --name-only HEAD^ HEAD
+    git -C "${REPO_ROOT}" diff --no-renames --name-only HEAD^ HEAD
   fi
 }
 
@@ -195,7 +195,7 @@ if [[ -n "${target_ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${target_ref}^
       continue
     fi
     component_changed="${tmp_dir}/component-changed-files-${image}"
-    git -C "${REPO_ROOT}" diff --name-only "${base_ref}" "${target_ref}" | sort -u >"${component_changed}"
+    git -C "${REPO_ROOT}" diff --no-renames --name-only "${base_ref}" "${target_ref}" | sort -u >"${component_changed}"
     touch "${tmp_dir}/component-baseline-${image}"
     TRUSTED_COMPONENT_BASELINE=true
   done

@@ -565,6 +565,77 @@ GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
   "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "stale held edge diff cannot enter an unrelated build plan"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "false" "stale held edge build flag"
+
+mkdir -p "${COMPONENT_PLAN_REPO}/internal/releaseflow" "${COMPONENT_PLAN_REPO}/internal/weightedselector"
+cat >"${COMPONENT_PLAN_REPO}/internal/releaseflow/rename_build_plan_fixture.go" <<'GO'
+package releaseflow
+
+const (
+	renameBuildPlanFixtureA = "a"
+	renameBuildPlanFixtureB = "b"
+	renameBuildPlanFixtureC = "c"
+	renameBuildPlanFixtureD = "d"
+	renameBuildPlanFixtureE = "e"
+)
+GO
+git -C "${COMPONENT_PLAN_REPO}" add internal/releaseflow/rename_build_plan_fixture.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m rename-source
+COMPONENT_PLAN_RENAME_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+git -C "${COMPONENT_PLAN_REPO}" mv \
+  internal/releaseflow/rename_build_plan_fixture.go \
+  internal/weightedselector/rename_build_plan_fixture.go
+python3 - "${COMPONENT_PLAN_REPO}/internal/weightedselector/rename_build_plan_fixture.go" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("package releaseflow", "package weightedselector", 1))
+PY
+git -C "${COMPONENT_PLAN_REPO}" add internal/weightedselector/rename_build_plan_fixture.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m rename-target
+COMPONENT_PLAN_RENAME_TARGET="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_RENAME_STATUS="$(git -C "${COMPONENT_PLAN_REPO}" diff --name-status "${COMPONENT_PLAN_RENAME_BASE}" "${COMPONENT_PLAN_RENAME_TARGET}")"
+[[ "${COMPONENT_PLAN_RENAME_STATUS}" == R* ]] ||
+  fail "cross-package move fixture must be detected as a Git rename, got ${COMPONENT_PLAN_RENAME_STATUS}"
+COMPONENT_PLAN_RENAME_CHANGED="$(
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+    FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_RENAME_TARGET}" \
+    FUGUE_RELEASE_BASE_REFS="${COMPONENT_PLAN_RENAME_BASE}" \
+    "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
+)"
+grep -Fqx 'internal/releaseflow/rename_build_plan_fixture.go' <<<"${COMPONENT_PLAN_RENAME_CHANGED}" ||
+  fail "live release diff must retain the deleted side of a cross-package rename"
+grep -Fqx 'internal/weightedselector/rename_build_plan_fixture.go' <<<"${COMPONENT_PLAN_RENAME_CHANGED}" ||
+  fail "live release diff must retain the added side of a cross-package rename"
+
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_RENAME_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_RENAME_TARGET}" \
+  FUGUE_API_IMAGE_BASE_REF="${COMPONENT_PLAN_RENAME_BASE}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_RENAME_BASE}" \
+  FUGUE_EDGE_IMAGE_BASE_REF="${COMPONENT_PLAN_RENAME_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "3" "cross-package rename component build count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "true" "cross-package rename API build flag"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "cross-package rename controller build flag"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "true" "cross-package rename edge build flag"
+
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES= \
+  FUGUE_RELEASE_CHANGED_FILES_SET=false \
+  FUGUE_RELEASE_TARGET_REF= \
+  BEFORE_SHA="${COMPONENT_PLAN_RENAME_BASE}" \
+  AFTER_SHA="${COMPONENT_PLAN_RENAME_TARGET}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "3" "fallback cross-package rename build count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_api)" "true" "fallback cross-package rename API build flag"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "fallback cross-package rename controller build flag"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "true" "fallback cross-package rename edge build flag"
 rm -rf "${COMPONENT_PLAN_REPO}"
 rm -f "${COMPONENT_PLAN_OUTPUT}" "${COMPONENT_PLAN_LOG}"
 
@@ -1686,6 +1757,53 @@ fi
   if node_local_build_plane_manifest_changed; then
     fail "rebased live diff must not treat reverted image-cache templates as manifest changes"
   fi
+)
+
+mkdir -p "${TMP_REPO_ROOT}/internal/releaseflow" "${TMP_REPO_ROOT}/internal/weightedselector"
+cat >"${TMP_REPO_ROOT}/internal/releaseflow/rename_upgrade_fixture.go" <<'GO'
+package releaseflow
+
+const (
+	renameUpgradeFixtureA = "a"
+	renameUpgradeFixtureB = "b"
+	renameUpgradeFixtureC = "c"
+	renameUpgradeFixtureD = "d"
+	renameUpgradeFixtureE = "e"
+)
+GO
+git -C "${TMP_REPO_ROOT}" add internal/releaseflow/rename_upgrade_fixture.go
+git -C "${TMP_REPO_ROOT}" commit -q -m upgrade-rename-source
+UPGRADE_RENAME_BASE="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+git -C "${TMP_REPO_ROOT}" mv \
+  internal/releaseflow/rename_upgrade_fixture.go \
+  internal/weightedselector/rename_upgrade_fixture.go
+python3 - "${TMP_REPO_ROOT}/internal/weightedselector/rename_upgrade_fixture.go" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("package releaseflow", "package weightedselector", 1))
+PY
+git -C "${TMP_REPO_ROOT}" add internal/weightedselector/rename_upgrade_fixture.go
+git -C "${TMP_REPO_ROOT}" commit -q -m upgrade-rename-target
+UPGRADE_RENAME_TARGET="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+(
+  REPO_ROOT="${TMP_REPO_ROOT}"
+  FUGUE_API_DEPLOYMENT_NAME=fugue-api
+  FUGUE_LEGACY_API_DEPLOYMENT_NAME=fugue
+  FUGUE_API_IMAGE_TAG="${UPGRADE_RENAME_TARGET}"
+  RELEASE_CHANGED_FILES_EFFECTIVE=""
+  deployment_exists() {
+    [[ "$1" == "fugue-api" ]]
+  }
+  live_deployment_container_image() {
+    printf 'ghcr.io/acme/fugue-api:%s' "${UPGRADE_RENAME_BASE}"
+  }
+  refresh_release_changed_files_from_live_api
+  grep -Fqx 'internal/releaseflow/rename_upgrade_fixture.go' < <(release_changed_files) ||
+    fail "upgrade live rebase must retain the deleted side of a cross-package rename"
+  grep -Fqx 'internal/weightedselector/rename_upgrade_fixture.go' < <(release_changed_files) ||
+    fail "upgrade live rebase must retain the added side of a cross-package rename"
 )
 python3 - "${TMP_REPO_ROOT}/deploy/helm/fugue/values.yaml" <<'PY'
 import pathlib

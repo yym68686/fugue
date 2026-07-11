@@ -73,7 +73,7 @@ while IFS= read -r raw_ref; do
   if [[ "$(git -C "${REPO_ROOT}" rev-parse "${ref}^{commit}")" == "$(git -C "${REPO_ROOT}" rev-parse "${TARGET_REF}^{commit}")" ]]; then
     continue
   fi
-  git -C "${REPO_ROOT}" diff --name-only "${ref}" "${TARGET_REF}" >>"${changed_file}"
+  git -C "${REPO_ROOT}" diff --no-renames --name-only "${ref}" "${TARGET_REF}" >>"${changed_file}"
 done < <(normalized_base_refs)
 
 sort -u "${base_file}" -o "${base_file}"

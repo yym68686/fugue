@@ -352,7 +352,7 @@ refresh_release_changed_files_from_live_api() {
     ! git -C "${REPO_ROOT}" cat-file -e "${target_tag}^{commit}" 2>/dev/null; then
     return 0
   fi
-  changed_files="$(git -C "${REPO_ROOT}" diff --name-only "${live_tag}" "${target_tag}")"
+  changed_files="$(git -C "${REPO_ROOT}" diff --no-renames --name-only "${live_tag}" "${target_tag}")"
   RELEASE_CHANGED_FILES_EFFECTIVE="${changed_files}"
   log "release changed files rebased from live API tag ${live_tag} to target ${target_tag}"
 }
