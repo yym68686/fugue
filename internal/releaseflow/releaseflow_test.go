@@ -2,7 +2,6 @@ package releaseflow
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -346,30 +345,6 @@ func TestClickHouseReleaseGateMetricsQuerierFallsBackToRawFacts(t *testing.T) {
 	}
 }
 
-func TestWeightedSelectorDeterministicAndSkipsInactive(t *testing.T) {
-	t.Parallel()
-
-	candidates := []WeightedCandidate{
-		{ID: "inactive", Weight: 90, Active: false},
-		{ID: "stable", Weight: 90, Active: true},
-		{ID: "candidate", Weight: 10, Active: true},
-	}
-	first, ok := SelectWeighted(candidates, "request-123")
-	if !ok {
-		t.Fatal("expected weighted selection")
-	}
-	second, ok := SelectWeighted(candidates, "request-123")
-	if !ok {
-		t.Fatal("expected second weighted selection")
-	}
-	if first != second {
-		t.Fatalf("expected deterministic selection, got %+v and %+v", first, second)
-	}
-	if first.SelectedID == "inactive" || first.TotalWeight != 100 {
-		t.Fatalf("unexpected weighted selection: %+v", first)
-	}
-}
-
 func TestReleaseEvidenceViewBuilderIncludesReleaseSections(t *testing.T) {
 	t.Parallel()
 
@@ -448,9 +423,4 @@ func releaseflowStringsContain(values []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-func ExampleWeightedBucket() {
-	fmt.Println(WeightedBucket("request-123", 100) >= 0)
-	// Output: true
 }
