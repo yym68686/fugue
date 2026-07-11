@@ -333,6 +333,132 @@ WHERE artifact_kind = $1 AND scope_key = $2 AND generation = $3`,
 	}
 }
 
+func TestPlatformServingUnverifiedCrashRecoveryPostgres(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("set FUGUE_TEST_DATABASE_URL to run platform crash recovery Postgres integration test")
+	}
+	if !strings.Contains(databaseURL, "fugue-pgtest") && !strings.Contains(databaseURL, "fugue_test") {
+		t.Fatalf("refusing to run platform crash recovery integration test against non-test database URL %q", databaseURL)
+	}
+
+	s := New("", databaseURL)
+	configureTestPlatformArtifactSigning(s)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init postgres store: %v", err)
+	}
+	scopeKey := "pg-crash-" + model.NewID("scope")
+	scope := model.PlatformArtifactScope{ScopeType: "test", Key: scopeKey}
+	createValidated := func(generation string, revision int) model.PlatformArtifact {
+		t.Helper()
+		artifact, err := s.CreatePlatformArtifact(model.PlatformArtifact{
+			ArtifactKind: model.PlatformArtifactKindNodeDesiredState,
+			Scope:        scope,
+			Generation:   generation,
+			Content:      map[string]any{"revision": revision},
+		})
+		if err != nil {
+			t.Fatalf("create artifact %s: %v", generation, err)
+		}
+		artifact, err = s.ValidatePlatformArtifact(artifact.ID, []model.PlatformArtifactValidationResult{{
+			Name:     "schema",
+			Pass:     true,
+			Severity: model.RobustnessSeverityInfo,
+		}})
+		if err != nil {
+			t.Fatalf("validate artifact %s: %v", generation, err)
+		}
+		return artifact
+	}
+	stable := createValidated("pg-crash-stable-"+model.NewID("gen"), 1)
+	candidate := createValidated("pg-crash-candidate-"+model.NewID("gen"), 2)
+	stableLKG := seedVerifiedPlatformLKG(t, s, stable)
+	_, candidateRelease, _, retainedLKG, err := s.ReleasePlatformArtifact(candidate.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		IdempotencyKey: "pg-crash-before-verification",
+	}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatalf("release PostgreSQL serving-unverified candidate: %v", err)
+	}
+	if retainedLKG == nil || retainedLKG.ID != stableLKG.ID {
+		t.Fatalf("PostgreSQL candidate release did not retain stable LKG: %+v", retainedLKG)
+	}
+
+	restarted := New("", databaseURL)
+	configureTestPlatformArtifactSigning(restarted)
+	if err := restarted.Init(); err != nil {
+		t.Fatalf("restart PostgreSQL store while candidate is serving-unverified: %v", err)
+	}
+	activeArtifact, activeRelease, found, err := restarted.GetActivePlatformArtifact(
+		model.PlatformArtifactKindNodeDesiredState,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil {
+		t.Fatalf("get PostgreSQL active release after restart: %v", err)
+	}
+	if !found || activeArtifact.ID != candidate.ID || activeRelease.ID != candidateRelease.ID ||
+		activeRelease.VerificationState != model.PlatformArtifactVerificationStateServingUnverified ||
+		activeRelease.PinnedRollbackGeneration != stable.Generation {
+		t.Fatalf("PostgreSQL serving-unverified state did not survive restart: artifact=%+v release=%+v", activeArtifact, activeRelease)
+	}
+	currentLKG, err := restarted.GetPlatformLKG(model.PlatformArtifactKindNodeDesiredState, scopeKey)
+	if err != nil {
+		t.Fatalf("get PostgreSQL retained LKG after restart: %v", err)
+	}
+	if currentLKG == nil || currentLKG.ID != stableLKG.ID {
+		t.Fatalf("PostgreSQL restart lost stable LKG: %+v", currentLKG)
+	}
+
+	_, rollbackRelease, _, rollbackLKG, err := restarted.RollbackPlatformArtifact(candidate.ID, model.PlatformArtifactRollbackRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		ToGeneration:   stable.Generation,
+		Reason:         "recover PostgreSQL release after coordinator crash",
+	}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatalf("create PostgreSQL rollback after restart: %v", err)
+	}
+	if rollbackLKG == nil || rollbackLKG.ID != stableLKG.ID {
+		t.Fatalf("PostgreSQL rollback replaced stable LKG before verification: %+v", rollbackLKG)
+	}
+
+	restartedAgain := New("", databaseURL)
+	configureTestPlatformArtifactSigning(restartedAgain)
+	if err := restartedAgain.Init(); err != nil {
+		t.Fatalf("restart PostgreSQL store while rollback is serving-unverified: %v", err)
+	}
+	_, recoveredRelease, found, err := restartedAgain.GetActivePlatformArtifact(
+		model.PlatformArtifactKindNodeDesiredState,
+		scopeKey,
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil {
+		t.Fatalf("get PostgreSQL rollback release after second restart: %v", err)
+	}
+	if !found || recoveredRelease.ID != rollbackRelease.ID ||
+		recoveredRelease.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
+		t.Fatalf("PostgreSQL rollback state did not survive second restart: %+v", recoveredRelease)
+	}
+	_, _, _, verifiedRollbackLKG, err := restartedAgain.VerifyPlatformArtifactReleaseLKG(
+		recoveredRelease.ID,
+		completePlatformVerificationRequest(recoveredRelease.FencingToken, false),
+		testPlatformPrincipal(),
+	)
+	if err != nil {
+		t.Fatalf("verify PostgreSQL rollback after second restart: %v", err)
+	}
+	if verifiedRollbackLKG == nil || verifiedRollbackLKG.Generation != stable.Generation {
+		t.Fatalf("PostgreSQL rollback verification did not restore stable generation: %+v", verifiedRollbackLKG)
+	}
+	history, err := restartedAgain.ListPlatformLKGHistory(model.PlatformArtifactKindNodeDesiredState, scopeKey, 10)
+	if err != nil {
+		t.Fatalf("list PostgreSQL crash recovery LKG history: %v", err)
+	}
+	if len(history) != 2 || history[0].ID != verifiedRollbackLKG.ID || history[1].ID != stableLKG.ID {
+		t.Fatalf("PostgreSQL crash recovery history lost an immutable verification event: %+v", history)
+	}
+}
+
 func TestPlatformOverrideAuditPostgres(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
 	if databaseURL == "" {

@@ -1873,7 +1873,7 @@ DNS/edge failover 必须满足：
 - [ ] GC 保护 verified LKG 和 pinned rollback target。
 - [x] rollback 后重新验证旧 generation。
 - [x] 增加 bad full generation 不覆盖旧 LKG 的回归测试。
-- [ ] 增加 serving-unverified crash recovery 测试。
+- [x] 增加 serving-unverified crash recovery 测试。
 - [x] 增加 LKG retention 测试。
 - [ ] 增加 LKG GC 测试。
 - [x] 增加 rollback target missing 硬阻断测试。

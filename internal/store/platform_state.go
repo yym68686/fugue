@@ -1513,9 +1513,7 @@ func platformLKGSnapshotMatchesArtifact(
 func upsertPlatformLKGSnapshot(snapshots []model.PlatformLKGSnapshot, snapshot model.PlatformLKGSnapshot) []model.PlatformLKGSnapshot {
 	out := make([]model.PlatformLKGSnapshot, 0, len(snapshots)+1)
 	for _, existing := range snapshots {
-		if existing.ArtifactKind == snapshot.ArtifactKind &&
-			existing.ScopeKey == snapshot.ScopeKey &&
-			existing.Generation == snapshot.Generation {
+		if existing.ID == snapshot.ID {
 			continue
 		}
 		out = append(out, existing)

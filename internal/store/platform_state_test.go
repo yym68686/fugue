@@ -189,6 +189,16 @@ func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 	if currentAfterRollback == nil || currentAfterRollback.ID != rollbackLKG.ID || currentAfterRollback.Generation != first.Generation {
 		t.Fatalf("verified rollback must become the current LKG: current=%+v rollback=%+v", currentAfterRollback, rollbackLKG)
 	}
+	historyAfterRollback, err := s.ListPlatformLKGHistory(model.PlatformArtifactKindEdgeRankingPolicy, "global", 10)
+	if err != nil {
+		t.Fatalf("list LKG history after rollback verification: %v", err)
+	}
+	if len(historyAfterRollback) != 3 ||
+		historyAfterRollback[0].ID != rollbackLKG.ID ||
+		historyAfterRollback[1].Generation != second.Generation ||
+		historyAfterRollback[2].Generation != first.Generation {
+		t.Fatalf("rollback must append an immutable verification event without deleting prior history: %+v", historyAfterRollback)
+	}
 }
 
 func TestPlatformLKGHistoryRetainsCurrentAndPreviousGenerations(t *testing.T) {
@@ -302,6 +312,116 @@ func TestPlatformLKGHistorySnapshotEquivalentRequiresSignedIdentity(t *testing.T
 	mismatchedSignature.SnapshotProvenance.Signature = "snapshot-signature-2"
 	if platformLKGHistorySnapshotEquivalent(existing, mismatchedSignature) {
 		t.Fatal("same generation with different snapshot signature must fail closed")
+	}
+}
+
+func TestPlatformServingUnverifiedCrashRecovery(t *testing.T) {
+	t.Parallel()
+
+	statePath := filepath.Join(t.TempDir(), "store.json")
+	s := New(statePath)
+	configureTestPlatformArtifactSigning(s)
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	stable := createValidatedPlatformArtifact(
+		t,
+		s,
+		model.PlatformArtifactKindNodeDesiredState,
+		"crash_stable",
+		map[string]any{"revision": 1},
+	)
+	candidate := createValidatedPlatformArtifact(
+		t,
+		s,
+		model.PlatformArtifactKindNodeDesiredState,
+		"crash_candidate",
+		map[string]any{"revision": 2},
+	)
+	stableLKG := seedVerifiedPlatformLKG(t, s, stable)
+	_, candidateRelease, _, retainedLKG, err := s.ReleasePlatformArtifact(candidate.ID, model.PlatformArtifactReleaseRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		IdempotencyKey: "crash-before-verification",
+	}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatalf("release serving-unverified candidate: %v", err)
+	}
+	if retainedLKG == nil || retainedLKG.ID != stableLKG.ID {
+		t.Fatalf("candidate release did not retain stable LKG: %+v", retainedLKG)
+	}
+
+	restarted := New(statePath)
+	configureTestPlatformArtifactSigning(restarted)
+	if err := restarted.Init(); err != nil {
+		t.Fatalf("restart store while candidate is serving-unverified: %v", err)
+	}
+	activeArtifact, activeRelease, found, err := restarted.GetActivePlatformArtifact(
+		model.PlatformArtifactKindNodeDesiredState,
+		"global",
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil {
+		t.Fatalf("get active release after restart: %v", err)
+	}
+	if !found || activeArtifact.ID != candidate.ID || activeRelease.ID != candidateRelease.ID ||
+		activeRelease.VerificationState != model.PlatformArtifactVerificationStateServingUnverified ||
+		activeRelease.PinnedRollbackGeneration != stable.Generation {
+		t.Fatalf("serving-unverified state did not survive restart: artifact=%+v release=%+v", activeArtifact, activeRelease)
+	}
+	currentLKG, err := restarted.GetPlatformLKG(model.PlatformArtifactKindNodeDesiredState, "global")
+	if err != nil {
+		t.Fatalf("get retained LKG after restart: %v", err)
+	}
+	if currentLKG == nil || currentLKG.ID != stableLKG.ID {
+		t.Fatalf("restart lost the stable LKG: %+v", currentLKG)
+	}
+
+	_, rollbackRelease, _, rollbackLKG, err := restarted.RollbackPlatformArtifact(candidate.ID, model.PlatformArtifactRollbackRequest{
+		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
+		ToGeneration:   stable.Generation,
+		Reason:         "recover after coordinator crash",
+	}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatalf("create rollback after restart: %v", err)
+	}
+	if rollbackLKG == nil || rollbackLKG.ID != stableLKG.ID {
+		t.Fatalf("rollback replaced stable LKG before verification: %+v", rollbackLKG)
+	}
+
+	restartedAgain := New(statePath)
+	configureTestPlatformArtifactSigning(restartedAgain)
+	if err := restartedAgain.Init(); err != nil {
+		t.Fatalf("restart store while rollback is serving-unverified: %v", err)
+	}
+	_, recoveredRelease, found, err := restartedAgain.GetActivePlatformArtifact(
+		model.PlatformArtifactKindNodeDesiredState,
+		"global",
+		model.PlatformArtifactReleaseChannelFull,
+	)
+	if err != nil {
+		t.Fatalf("get rollback release after second restart: %v", err)
+	}
+	if !found || recoveredRelease.ID != rollbackRelease.ID ||
+		recoveredRelease.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
+		t.Fatalf("rollback state did not survive second restart: %+v", recoveredRelease)
+	}
+	_, _, _, verifiedRollbackLKG, err := restartedAgain.VerifyPlatformArtifactReleaseLKG(
+		recoveredRelease.ID,
+		completePlatformVerificationRequest(recoveredRelease.FencingToken, false),
+		testPlatformPrincipal(),
+	)
+	if err != nil {
+		t.Fatalf("verify rollback after second restart: %v", err)
+	}
+	if verifiedRollbackLKG == nil || verifiedRollbackLKG.Generation != stable.Generation {
+		t.Fatalf("rollback verification did not restore stable generation: %+v", verifiedRollbackLKG)
+	}
+	history, err := restartedAgain.ListPlatformLKGHistory(model.PlatformArtifactKindNodeDesiredState, "global", 10)
+	if err != nil {
+		t.Fatalf("list crash recovery LKG history: %v", err)
+	}
+	if len(history) != 2 || history[0].ID != verifiedRollbackLKG.ID || history[1].ID != stableLKG.ID {
+		t.Fatalf("crash recovery history lost an immutable verification event: %+v", history)
 	}
 }
 
