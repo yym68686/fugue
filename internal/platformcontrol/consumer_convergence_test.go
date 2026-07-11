@@ -76,6 +76,50 @@ func TestEvaluateConsumerConvergenceRequiresAllExpectedConsumers(t *testing.T) {
 	}
 }
 
+func TestEvaluateConsumerConvergenceBlocksCardinalityMismatch(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 10, 1, 30, 0, 0, time.UTC)
+	set := mustBuildExpectedConsumerSet(t, ExpectedConsumerSetBuildRequest{
+		ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
+		ScopeKey:     "global",
+		Generation:   "route-gen-cardinality",
+		PreparedAt:   now,
+		Topology: ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
+			ID: "edge-cardinality-1", EdgeGroupID: "edge-group-cardinality", Status: model.EdgeHealthHealthy,
+		}}},
+	})
+	observed := []model.PlatformConsumerInstance{
+		passingConsumer(set.Consumers[0], now),
+		passingConsumer(set.Consumers[1], now),
+	}
+
+	t.Run("missing required heartbeat", func(t *testing.T) {
+		status := EvaluateConsumerConvergence(set, observed[:1], now)
+		if status.Pass || status.RequiredObserved != 1 || status.RequiredExpected != 2 {
+			t.Fatalf("missing required heartbeat must block expansion: %+v", status)
+		}
+	})
+
+	t.Run("expected cardinality metadata mismatch", func(t *testing.T) {
+		inconsistent := set
+		inconsistent.RequiredCardinality++
+		status := EvaluateConsumerConvergence(inconsistent, observed, now)
+		if status.Pass || status.RequiredPassing == status.RequiredExpected {
+			t.Fatalf("inconsistent ExpectedConsumerSet cardinality must block expansion: %+v", status)
+		}
+	})
+
+	t.Run("unexpected consumer", func(t *testing.T) {
+		unexpected := passingConsumer(set.Consumers[0], now)
+		unexpected.ConsumerID = "unexpected-edge-worker"
+		status := EvaluateConsumerConvergence(set, append(observed, unexpected), now)
+		if status.Pass || status.State != model.InvariantEvidenceStateFail || len(status.UnexpectedConsumers) != 1 {
+			t.Fatalf("unexpected consumer must fail closed: %+v", status)
+		}
+	})
+}
+
 func TestEvaluateConsumerConvergenceRejectsZeroConsumerStaleAndEmptyEvidence(t *testing.T) {
 	t.Parallel()
 

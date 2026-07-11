@@ -1902,7 +1902,7 @@ DNS/edge failover 必须满足：
 - [x] heartbeat stale 时生成 stale/block signal。
 - [x] desired/actual/LKG generation 为空时不判 convergence。
 - [x] apply/probe empty/unknown 时不判 convergence。
-- [ ] expected cardinality 与实际 heartbeat 数不一致时阻断扩大。
+- [x] expected cardinality 与实际 heartbeat 数不一致时阻断扩大。
 - [x] 为 edge worker 定义专用 platform component identity。
 - [x] 为 DNS server 定义专用 platform component identity。
 - [x] 为 Caddy edge front 定义专用 platform component identity。
