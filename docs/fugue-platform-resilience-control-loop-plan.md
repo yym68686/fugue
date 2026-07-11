@@ -1925,6 +1925,11 @@ DNS/edge failover 必须满足：
 > `*_state` 字段，并保持 legacy bool 请求兼容。state-only 请求缺失项按 `unknown`
 > fail closed，非 `pass` 在进入 Store 前阻断，冲突/非法状态返回参数错误。共享 Store、
 > CLI 和其他核心 evidence 尚未迁移，因此完整四态项仍保持未勾选。
+>
+> 2026-07-11 four-state CLI checkpoint: `fugue admin artifact verify-lkg` 已支持六项
+> `--*-state` 参数，并保留 legacy bool 参数；CLI 在发请求前拒绝非法状态和 bool/state
+> 冲突，未显式提供的证据不会被填充为 `pass`。其他 CLI evidence 展示尚未迁移，
+> 因此完整 CLI 四态项保持未勾选。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。

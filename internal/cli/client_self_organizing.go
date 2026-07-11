@@ -519,7 +519,7 @@ func (c *Client) ReleasePlatformArtifact(id string, req model.PlatformArtifactRe
 	return response, err
 }
 
-func (c *Client) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest) (platformArtifactReleaseEnvelope, error) {
+func (c *Client) VerifyPlatformArtifactReleaseLKG(releaseID string, req platformArtifactVerifyLKGWireRequest) (platformArtifactReleaseEnvelope, error) {
 	var response platformArtifactReleaseEnvelope
 	err := c.doJSON(http.MethodPost, "/v1/admin/artifact-releases/"+url.PathEscape(strings.TrimSpace(releaseID))+"/verify-lkg", req, &response)
 	return response, err

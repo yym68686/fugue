@@ -269,6 +269,7 @@ func (c *CLI) newAdminArtifactReleaseCommand() *cobra.Command {
 
 func (c *CLI) newAdminArtifactVerifyLKGCommand() *cobra.Command {
 	opts := model.PlatformArtifactVerifyLKGRequest{}
+	stateOpts := platformArtifactVerificationEvidenceStateOptions{}
 	cmd := &cobra.Command{
 		Use:   "verify-lkg <release-id>",
 		Short: "Verify a serving release and promote it to verified LKG",
@@ -277,11 +278,15 @@ func (c *CLI) newAdminArtifactVerifyLKGCommand() *cobra.Command {
 			if opts.FencingToken <= 0 || strings.TrimSpace(opts.Reason) == "" {
 				return fmt.Errorf("--fencing-token and --reason are required")
 			}
+			request, err := buildPlatformArtifactVerifyLKGWireRequest(opts, stateOpts, cmd.Flags().Changed)
+			if err != nil {
+				return err
+			}
 			client, err := c.newClient()
 			if err != nil {
 				return err
 			}
-			response, err := client.VerifyPlatformArtifactReleaseLKG(args[0], opts)
+			response, err := client.VerifyPlatformArtifactReleaseLKG(args[0], request)
 			if err != nil {
 				return err
 			}
@@ -300,6 +305,12 @@ func (c *CLI) newAdminArtifactVerifyLKGCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&opts.Evidence.WatchWindow, "watch-window", false, "Required watch window completed")
 	cmd.Flags().BoolVar(&opts.Evidence.BaselineMonotonic, "baseline-monotonic", false, "No new or worsened baseline blocker")
 	cmd.Flags().BoolVar(&opts.Evidence.DatabaseRollbackCompatible, "database-rollback-compatible", false, "Database remains rollback compatible")
+	cmd.Flags().StringVar(&stateOpts.ConsumerConvergence, "consumer-convergence-state", "", "Consumer convergence evidence: pass, fail, unknown, or stale")
+	cmd.Flags().StringVar(&stateOpts.LocalProbe, "local-probe-state", "", "Local probe evidence: pass, fail, unknown, or stale")
+	cmd.Flags().StringVar(&stateOpts.PublicSynthetic, "public-synthetic-state", "", "Public synthetic evidence: pass, fail, unknown, or stale")
+	cmd.Flags().StringVar(&stateOpts.WatchWindow, "watch-window-state", "", "Watch window evidence: pass, fail, unknown, or stale")
+	cmd.Flags().StringVar(&stateOpts.BaselineMonotonic, "baseline-monotonic-state", "", "Baseline monotonicity evidence: pass, fail, unknown, or stale")
+	cmd.Flags().StringVar(&stateOpts.DatabaseRollbackCompatible, "database-rollback-compatible-state", "", "Database rollback evidence: pass, fail, unknown, or stale")
 	cmd.Flags().StringVar(&opts.Evidence.ExpectedConsumerSetID, "expected-consumer-set", "", "Expected consumer set identifier")
 	cmd.Flags().StringArrayVar(&opts.Evidence.EvidenceRefs, "evidence-ref", nil, "Evidence reference (repeatable)")
 	return cmd

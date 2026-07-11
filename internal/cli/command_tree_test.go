@@ -749,14 +749,16 @@ func TestAdminReleaseGuardSignalAddPublishesPolicyArtifact(t *testing.T) {
 func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
 	t.Parallel()
 
-	var request model.PlatformArtifactVerifyLKGRequest
+	var requests []platformArtifactVerifyLKGWireRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/artifact-releases/release_123/verify-lkg" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
 		}
+		var request platformArtifactVerifyLKGWireRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode verify request: %v", err)
 		}
+		requests = append(requests, request)
 		_, _ = w.Write([]byte(`{"artifact":{"id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","status":"validated","content_hash":"sha256:test","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"release":{"id":"release_123","artifact_id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","release_channel":"full","status":"active","fencing_token":9,"verification_state":"verified","verified_lkg_generation":"gen_2","released_at":"2026-04-02T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"},"message":{"id":"message_123","release_id":"release_123","artifact_id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","release_channel":"full","message_type":"verified_lkg","created_at":"2026-04-02T00:00:00Z","ack_count":0},"lkg":{"id":"lkg_123","artifact_id":"artifact_123","artifact_kind":"edge_route_bundle","scope":{"scope_type":"global"},"scope_key":"global","generation":"gen_2","content_hash":"sha256:test","verified_by_release_id":"release_123","verification_evidence_hash":"sha256:evidence","expires_at":"2026-04-09T00:00:00Z","created_at":"2026-04-02T00:00:00Z","updated_at":"2026-04-02T00:00:00Z"}}`))
 	}))
 	defer server.Close()
@@ -780,18 +782,74 @@ func TestAdminArtifactVerifyLKGSubmitsExplicitEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run verify-lkg: %v; stderr=%s", err, stderr.String())
 	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one legacy verification request, got %+v", requests)
+	}
+	request := requests[0]
 	if request.FencingToken != 9 ||
-		!request.Evidence.ConsumerConvergence ||
-		!request.Evidence.LocalProbe ||
-		!request.Evidence.PublicSynthetic ||
-		!request.Evidence.WatchWindow ||
-		!request.Evidence.BaselineMonotonic ||
-		!request.Evidence.DatabaseRollbackCompatible ||
+		request.Evidence.ConsumerConvergence == nil || !*request.Evidence.ConsumerConvergence ||
+		request.Evidence.LocalProbe == nil || !*request.Evidence.LocalProbe ||
+		request.Evidence.PublicSynthetic == nil || !*request.Evidence.PublicSynthetic ||
+		request.Evidence.WatchWindow == nil || !*request.Evidence.WatchWindow ||
+		request.Evidence.BaselineMonotonic == nil || !*request.Evidence.BaselineMonotonic ||
+		request.Evidence.DatabaseRollbackCompatible == nil || !*request.Evidence.DatabaseRollbackCompatible ||
 		len(request.Evidence.EvidenceRefs) != 1 {
 		t.Fatalf("unexpected verification request: %+v", request)
 	}
 	if out := stdout.String(); !strings.Contains(out, "verification_state") || !strings.Contains(out, "verified") || !strings.Contains(out, "release_123") {
 		t.Fatalf("expected verified LKG output, got %q", out)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	err = runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "artifact", "verify-lkg", "release_123",
+		"--fencing-token", "9",
+		"--reason", "verified with four-state evidence",
+		"--consumer-convergence-state", "pass",
+		"--local-probe-state", "pass",
+		"--public-synthetic-state", "pass",
+		"--watch-window-state", "pass",
+		"--baseline-monotonic-state", "pass",
+		"--database-rollback-compatible-state", "pass",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run state-only verify-lkg: %v; stderr=%s", err, stderr.String())
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected state-only verification request, got %+v", requests)
+	}
+	stateRequest := requests[1]
+	if stateRequest.Evidence.ConsumerConvergence != nil || stateRequest.Evidence.LocalProbe != nil ||
+		stateRequest.Evidence.PublicSynthetic != nil || stateRequest.Evidence.WatchWindow != nil ||
+		stateRequest.Evidence.BaselineMonotonic != nil || stateRequest.Evidence.DatabaseRollbackCompatible != nil ||
+		stateRequest.Evidence.ConsumerConvergenceState != model.InvariantEvidenceStatePass ||
+		stateRequest.Evidence.LocalProbeState != model.InvariantEvidenceStatePass ||
+		stateRequest.Evidence.PublicSyntheticState != model.InvariantEvidenceStatePass ||
+		stateRequest.Evidence.WatchWindowState != model.InvariantEvidenceStatePass ||
+		stateRequest.Evidence.BaselineMonotonicState != model.InvariantEvidenceStatePass ||
+		stateRequest.Evidence.DatabaseRollbackState != model.InvariantEvidenceStatePass {
+		t.Fatalf("unexpected state-only verification request: %+v", stateRequest)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	err = runWithStreams([]string{
+		"--base-url", server.URL,
+		"--token", "token",
+		"admin", "artifact", "verify-lkg", "release_123",
+		"--fencing-token", "9",
+		"--reason", "contradictory evidence",
+		"--local-probe=false",
+		"--local-probe-state", "pass",
+	}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "conflicts with legacy pass=false") {
+		t.Fatalf("contradictory evidence must fail locally, err=%v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("contradictory evidence must not send a request, got %+v", requests)
 	}
 }
 
