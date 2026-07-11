@@ -1908,6 +1908,13 @@ DNS/edge failover 必须满足：
 #### Phase -1C: Evidence 四态和可信身份
 
 > 2026-07-10 implementation checkpoint: ExpectedConsumerSet topology builder、四态 convergence evaluator、独立 JSON/Postgres 快照持久化、短期 component identity/heartbeat 防重放原语、credential 到 ExpectedConsumerSet 的服务端字段绑定、可信 heartbeat 的 JSON/Postgres 原子单调持久化与 legacy downgrade guard、独立 fail-closed component Bearer middleware/OpenAPI auth kind、只读取专用 `FUGUE_PLATFORM_COMPONENT_IDENTITY_*` key source 且缺失时 fail closed 的 API verifier，以及 optional legacy shadow heartbeat 已实现；专用 key 已由 retained 独立 Helm/外部 Secret 配置并只挂载到 API/controller。新增的 `/v1/platform-state/consumers/trusted-heartbeat` 已真实执行 credential/topology 绑定、evidence/freshness、sequence/nonce、fencing/generation 单调验证并拒绝 tenant key，但尚无真实 consumer、凭证签发、release prepare 或 release guard enforcement 接线。
+>
+> 2026-07-11 trusted audit checkpoint: 每个成功的 trusted heartbeat 与 consumer
+> state update 在同一 JSON lock/PostgreSQL transaction 中写入独立、per-consumer
+> tamper-evident hash chain；audit key 由 component identity key domain-separated 派生，
+> 支持 current/previous overlap 和 revoked key id。签名、chain-state CAS 或 audit insert
+> 失败会回滚 heartbeat；replay/impersonation 等被拒请求不会追加 event。当前线上
+> ExpectedConsumerSet 数量为 0，因此启用时没有既有 heartbeat 写流量。
 
 - [ ] 将核心 evidence 状态从 bool 扩展为 pass/fail/unknown/stale。
 - [x] 为每个 invariant 定义 evidence freshness。
@@ -1959,7 +1966,7 @@ DNS/edge failover 必须满足：
 - [x] 拒绝 heartbeat generation rollback。
 - [x] 拒绝跨 component/node/scope 冒充。
 - [ ] consumer credential 支持轮换和撤销。
-- [ ] consumer heartbeat 写入可信 audit。
+- [x] consumer heartbeat 写入可信 audit。
 - [x] 增加 missing consumer 不得 pass 的回归测试。
 - [x] 增加 tenant key 无法写 heartbeat 的权限测试。
 - [x] 增加 heartbeat Store replay、并发首次写入和 legacy downgrade 回归测试。

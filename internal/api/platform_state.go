@@ -544,12 +544,13 @@ func (s *Server) handleTrustedPlatformConsumerHeartbeat(w http.ResponseWriter, r
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	consumer, err := s.store.AcceptTrustedPlatformConsumerHeartbeat(
+	consumer, err := s.store.AcceptTrustedPlatformConsumerHeartbeatWithAudit(
 		claims,
 		heartbeat.ExpectedConsumerSetID,
 		heartbeat,
 		time.Now().UTC(),
 		platformcontrol.PlatformConsumerHeartbeatValidationPolicy{},
+		s.heartbeatAuditKeyring,
 	)
 	if err != nil {
 		writeTrustedPlatformConsumerHeartbeatError(w, err)

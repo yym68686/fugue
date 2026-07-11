@@ -5,8 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
 )
 
 func TestTrustedPlatformConsumerHeartbeatEndpointBindsIdentityAndRejectsReplay(t *testing.T) {
@@ -20,6 +22,7 @@ func TestTrustedPlatformConsumerHeartbeatEndpointBindsIdentityAndRejectsReplay(t
 		},
 	}
 	server.auth.PlatformComponentIdentityKeyring = keyring
+	server.heartbeatAuditKeyring = trustedHeartbeatAuditTestKeyring()
 	now := time.Now().UTC().Truncate(time.Second)
 	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
 		ReleaseSetID: "release-set-api-trusted",
@@ -75,10 +78,41 @@ func TestTrustedPlatformConsumerHeartbeatEndpointBindsIdentityAndRejectsReplay(t
 		acceptedResponse.Consumer.DesiredGeneration != set.ExpectedGeneration {
 		t.Fatalf("trusted heartbeat was not server-bound: %+v", acceptedResponse.Consumer)
 	}
+	auditEvents, err := storeState.ListAuditEvents("", true, 100)
+	if err != nil {
+		t.Fatalf("list trusted heartbeat audit: %v", err)
+	}
+	chainID := "platform-consumer-heartbeat:" + acceptedResponse.Consumer.ID
+	var heartbeatAudit []model.AuditEvent
+	for _, event := range auditEvents {
+		if event.ChainID == chainID {
+			heartbeatAudit = append(heartbeatAudit, event)
+		}
+	}
+	if len(heartbeatAudit) != 1 || heartbeatAudit[0].Action != "platform_consumer.heartbeat_accepted" ||
+		heartbeatAudit[0].Metadata["evidence_hash"] != acceptedResponse.Consumer.EvidenceHash {
+		t.Fatalf("trusted endpoint did not atomically persist heartbeat audit: %+v", heartbeatAudit)
+	}
+	if err := platformsafety.VerifyTamperEvidentAuditChain(heartbeatAudit, chainID, server.heartbeatAuditKeyring); err != nil {
+		t.Fatalf("verify trusted endpoint heartbeat audit: %v", err)
+	}
 
 	replayed := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", token, heartbeat)
 	if replayed.Code != http.StatusConflict {
 		t.Fatalf("replayed heartbeat must be rejected with %d, got %d body=%s", http.StatusConflict, replayed.Code, replayed.Body.String())
+	}
+	auditEvents, err = storeState.ListAuditEvents("", true, 100)
+	if err != nil {
+		t.Fatalf("list heartbeat audit after replay: %v", err)
+	}
+	heartbeatAudit = heartbeatAudit[:0]
+	for _, event := range auditEvents {
+		if event.ChainID == chainID {
+			heartbeatAudit = append(heartbeatAudit, event)
+		}
+	}
+	if len(heartbeatAudit) != 1 {
+		t.Fatalf("rejected replay must not append a trusted audit event: %+v", heartbeatAudit)
 	}
 
 	impersonationTests := []struct {
@@ -146,6 +180,7 @@ func TestTrustedPlatformConsumerHeartbeatEndpointRejectsFutureAndGenerationRollb
 		},
 	}
 	server.auth.PlatformComponentIdentityKeyring = keyring
+	server.heartbeatAuditKeyring = trustedHeartbeatAuditTestKeyring()
 	now := time.Now().UTC().Truncate(time.Second)
 	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
 		ReleaseSetID: "release-set-api-monotonic",
@@ -195,6 +230,73 @@ func TestTrustedPlatformConsumerHeartbeatEndpointRejectsFutureAndGenerationRollb
 	if futureResponse.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("future heartbeat must be rejected with %d, got %d body=%s", http.StatusUnprocessableEntity, futureResponse.Code, futureResponse.Body.String())
 	}
+}
+
+func TestTrustedPlatformConsumerHeartbeatEndpointFailsClosedWithoutAuditKey(t *testing.T) {
+	t.Parallel()
+
+	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	keyring := platformcontrol.PlatformComponentIdentityKeyring{
+		ActiveKeyID: "component-key-audit-required",
+		Keys: map[string]string{
+			"component-key-audit-required": "component-signing-secret-audit-required",
+		},
+	}
+	server.auth.PlatformComponentIdentityKeyring = keyring
+	server.heartbeatAuditKeyring = bundleauth.Keyring{}
+	now := time.Now().UTC().Truncate(time.Second)
+	set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{
+		ReleaseSetID: "release-set-audit-required",
+		ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy,
+		ScopeKey:     "global",
+		Generation:   "generation-audit-required",
+		PreparedAt:   now,
+		Topology: platformcontrol.ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{
+			ID: "edge-audit-required", EdgeGroupID: "edge-group-audit-required", Country: "US",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("build expected consumer set: %v", err)
+	}
+	if _, err := storeState.CreatePlatformExpectedConsumerSet(set); err != nil {
+		t.Fatalf("persist expected consumer set: %v", err)
+	}
+	token, err := platformcontrol.IssuePlatformComponentIdentity(keyring, platformcontrol.PlatformComponentIdentityClaims{
+		CredentialID:  "credential-audit-required",
+		Component:     model.PlatformConsumerComponentEdgeWorker,
+		NodeID:        "edge-audit-required",
+		ScopeKey:      "global",
+		ArtifactKinds: []string{model.PlatformArtifactKindEdgeRankingPolicy},
+	}, now.Add(-time.Second), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("issue component identity: %v", err)
+	}
+	claims, err := platformcontrol.ParsePlatformComponentIdentity(keyring, token, now)
+	if err != nil {
+		t.Fatalf("parse component identity: %v", err)
+	}
+	heartbeat := trustedPlatformHeartbeatRequest(t, claims, set, now, 1, 1, 1, "nonce-audit-required")
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/trusted-heartbeat", token, heartbeat)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("missing audit key must fail closed with %d, got %d body=%s", http.StatusInternalServerError, response.Code, response.Body.String())
+	}
+	consumers, err := storeState.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
+	if err != nil {
+		t.Fatalf("list consumers after audit failure: %v", err)
+	}
+	if len(consumers) != 0 {
+		t.Fatalf("audit failure must roll back trusted heartbeat: %+v", consumers)
+	}
+}
+
+func trustedHeartbeatAuditTestKeyring() bundleauth.Keyring {
+	return bundleauth.NewKeyring(
+		"trusted-heartbeat-audit-test-key",
+		"heartbeat-audit:test-current",
+		"",
+		"",
+		nil,
+	)
 }
 
 func trustedPlatformHeartbeatRequest(
