@@ -29,6 +29,27 @@ bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
 
+python3 - "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+transaction_start = source.index("\nrun_bluegreen_release() {")
+transaction_end = source.index("\nrun_front_ondelete_release()", transaction_start)
+transaction = source[transaction_start:transaction_end]
+if transaction.index("if ! run_smoke_urls") > transaction.index("FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="):
+    raise SystemExit("blue-green transaction must pass final public smoke before publishing active slots")
+
+main_start = source.index("\nmain() {")
+blue_start = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "blue-green" ]]', main_start)
+blue_end = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "front-ondelete" ]]', blue_start)
+blue_branch = source[blue_start:blue_end]
+if blue_branch.index("run_bluegreen_release") > blue_branch.index("write_release_record"):
+    raise SystemExit("blue-green release record must be written only after the transaction succeeds")
+if "run_smoke_urls" in blue_branch:
+    raise SystemExit("blue-green final smoke belongs inside the rollback-capable transaction")
+PY
+
 (
   export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
@@ -419,9 +440,11 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   check_worker_https_smoke() { :; }
   capture_daemonset_pods() { printf 'stable-pods\n'; }
   write_front_active_slot() { events="${events}switch:$1:$2;"; }
+  check_public_smoke_on_front_nodes() { events="${events}front-smoke:$1;"; }
+  run_smoke_urls() { events="${events}public-smoke;"; }
 
   run_bluegreen_release
-  assert_eq "${events}" "prepare:fugue-fugue-edge-worker-a;prepare:fugue-fugue-edge-country-de-worker-a;switch:fugue-fugue-edge-front:a;switch:fugue-fugue-edge-country-de-front:a;" "blue-green release must prepare every candidate before its first slot switch"
+  assert_eq "${events}" "prepare:fugue-fugue-edge-worker-a;prepare:fugue-fugue-edge-country-de-worker-a;switch:fugue-fugue-edge-front:a;front-smoke:fugue-fugue-edge-front;switch:fugue-fugue-edge-country-de-front:a;front-smoke:fugue-fugue-edge-country-de-front;public-smoke;" "blue-green release must prepare every candidate, validate each switched front, then run final public smoke"
 )
 
 (
@@ -462,6 +485,113 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
     fail "blue-green release must fail when any candidate smoke fails"
   fi
   assert_eq "${switches}" "0" "candidate failure must occur before every slot switch"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-release
+  FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+
+  events=""
+  public_smoke_calls=0
+  enable_bluegreen_chart_mode() { :; }
+  bluegreen_worker_bases() {
+    printf 'fugue-fugue-edge\n'
+    printf 'fugue-fugue-edge-country-de\n'
+  }
+  wait_daemonset_ready() { :; }
+  daemonset_desired_count() { printf '1'; }
+  current_active_slot() { printf 'b'; }
+  patch_inactive_worker() { :; }
+  delete_worker_pods() { :; }
+  worker_https_port() { printf '18443'; }
+  check_worker_tcp() { :; }
+  check_worker_https_smoke() { :; }
+  check_public_smoke_on_front_nodes() { :; }
+  capture_daemonset_pods() { printf 'stable-pods\n'; }
+  write_front_active_slot() { events="${events}${1}:$2;"; }
+  run_smoke_urls() {
+    public_smoke_calls=$((public_smoke_calls + 1))
+    (( public_smoke_calls > 1 ))
+  }
+
+  if run_bluegreen_release; then
+    fail "blue-green release must fail when final public smoke fails"
+  fi
+  assert_eq "${events}" "fugue-fugue-edge-front:a;fugue-fugue-edge-country-de-front:a;fugue-fugue-edge-country-de-front:b;fugue-fugue-edge-front:b;" "final smoke failure must restore every switched front in reverse order"
+  assert_eq "${public_smoke_calls}" "2" "blue-green abort must verify public smoke after rollback"
+  assert_eq "${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON:-}" "" "failed blue-green release must not publish proposed active slots"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-release
+  FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS=
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID
+
+  events=""
+  front_smoke_calls=0
+  enable_bluegreen_chart_mode() { :; }
+  bluegreen_worker_bases() {
+    printf 'fugue-fugue-edge\n'
+    printf 'fugue-fugue-edge-country-de\n'
+  }
+  wait_daemonset_ready() { :; }
+  daemonset_desired_count() { printf '1'; }
+  current_active_slot() { printf 'b'; }
+  patch_inactive_worker() { :; }
+  delete_worker_pods() { :; }
+  worker_https_port() { printf '18443'; }
+  check_worker_tcp() { :; }
+  check_worker_https_smoke() { :; }
+  capture_daemonset_pods() { printf 'stable-pods\n'; }
+  write_front_active_slot() { events="${events}${1}:$2;"; }
+  check_public_smoke_on_front_nodes() {
+    front_smoke_calls=$((front_smoke_calls + 1))
+    return 1
+  }
+  run_smoke_urls() { :; }
+
+  if run_bluegreen_release; then
+    fail "blue-green release must fail when switched front smoke fails"
+  fi
+  assert_eq "${events}" "fugue-fugue-edge-front:a;fugue-fugue-edge-front:b;" "front smoke failure must restore the touched front before switching another base"
+  assert_eq "${front_smoke_calls}" "2" "front smoke failure must stop further switches and verify the restored front"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  events=""
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  write_front_active_slot() {
+    events="${events}${1}:$2;"
+    [[ "$1" != "front-de" ]]
+  }
+  wait_daemonset_ready() { :; }
+  check_public_smoke_on_front_nodes() { :; }
+
+  if rollback_bluegreen_fronts front-us b front-de b; then
+    fail "blue-green rollback must report a failed front restore"
+  fi
+  assert_eq "${events}" "front-de:b;front-us:b;" "rollback must continue restoring remaining fronts after one restore fails"
 )
 
 (
@@ -615,6 +745,28 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
     fail "public data-plane smoke must fail closed after exhausting retries"
   fi
   assert_eq "${curl_calls}" "2" "public data-plane smoke exhausted retry attempts"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS='https://fail.example.test/healthz'
+  FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SMOKE_RETRY_DELAY_SECONDS=0
+  unset FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS
+  unset FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SMOKE_ATTEMPTS
+  curl_calls=0
+  curl() {
+    curl_calls=$((curl_calls + 1))
+    return 22
+  }
+  sleep() { :; }
+
+  if run_smoke_urls; then
+    fail "active public smoke must fail after its short retry budget"
+  fi
+  assert_eq "${curl_calls}" "3" "active public smoke default retry attempts"
 )
 
 (

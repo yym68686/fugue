@@ -1303,6 +1303,8 @@ check_public_smoke_on_front_nodes() {
   local host
   local path
   local host_ip
+  local active_attempts="${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SMOKE_ATTEMPTS:-${FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS:-3}}"
+  local active_delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SMOKE_RETRY_DELAY_SECONDS:-${FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS:-2}}"
 
   [[ -n "$(trim_field "${urls}")" ]] || return 0
   while IFS= read -r url; do
@@ -1321,7 +1323,9 @@ check_public_smoke_on_front_nodes() {
       if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
         continue
       fi
-      smoke_curl_with_retry "front ${host_ip}:443 host=${host} path=${path}" \
+      FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS="${active_attempts}" \
+        FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS="${active_delay_seconds}" \
+        smoke_curl_with_retry "front ${host_ip}:443 host=${host} path=${path}" \
         -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" \
         --resolve "${host}:443:${host_ip}" \
         "https://${host}${path}" >/dev/null || return $?
@@ -1329,11 +1333,75 @@ check_public_smoke_on_front_nodes() {
   done < <(public_data_plane_smoke_urls)
 }
 
+rollback_bluegreen_fronts() {
+  local switch_state=("$@")
+  local rollback_failed=false
+  local index
+  local front_ds
+  local original_slot
+  local front_count
+
+  if (( ${#switch_state[@]} % 2 != 0 )); then
+    error "invalid blue/green rollback state"
+    return 1
+  fi
+  front_count=$(( ${#switch_state[@]} / 2 ))
+  log "restoring ${front_count} blue/green front slot(s) in reverse order"
+  for (( index=${#switch_state[@]} - 2; index >= 0; index-=2 )); do
+    front_ds="${switch_state[${index}]}"
+    original_slot="${switch_state[$((index + 1))]}"
+    if ! write_front_active_slot "${front_ds}" "${original_slot}"; then
+      error "failed to restore ${front_ds} to slot ${original_slot}"
+      rollback_failed=true
+      continue
+    fi
+    if ! wait_daemonset_ready "${front_ds}"; then
+      error "front ${front_ds} did not become ready after restoring slot ${original_slot}"
+      rollback_failed=true
+    fi
+  done
+  for (( index=0; index < ${#switch_state[@]}; index+=2 )); do
+    front_ds="${switch_state[${index}]}"
+    original_slot="${switch_state[$((index + 1))]}"
+    if ! check_public_smoke_on_front_nodes "${front_ds}"; then
+      error "front smoke failed for ${front_ds} after restoring slot ${original_slot}"
+      rollback_failed=true
+    fi
+  done
+  if [[ "${rollback_failed}" == "true" ]]; then
+    return 1
+  fi
+  log "blue/green front slot restore completed"
+}
+
+abort_bluegreen_release() {
+  local reason="$1"
+  shift
+  local rollback_failed=false
+
+  error "${reason}; aborting blue/green release and restoring original slots"
+  if ! rollback_bluegreen_fronts "$@"; then
+    rollback_failed=true
+  fi
+  if ! run_smoke_urls; then
+    error "public smoke still fails after blue/green slot restore"
+    rollback_failed=true
+  fi
+  if [[ "${rollback_failed}" == "true" ]]; then
+    error "blue/green rollback verification failed; release remains failed and requires operator review"
+  else
+    log "blue/green release aborted; original slots and public smoke were restored"
+  fi
+  return 1
+}
+
 run_bluegreen_release() {
   local bases=()
   local prepared_bases=()
   local prepared_fronts=()
+  local prepared_original_slots=()
   local prepared_slots=()
+  local rollback_state=()
   local base front_ds active inactive inactive_ds active_ds inactive_port
   local protected_before protected_after
   local active_slots_json="{}"
@@ -1383,6 +1451,7 @@ run_bluegreen_release() {
     fi
     prepared_bases+=("${base}")
     prepared_fronts+=("${front_ds}")
+    prepared_original_slots+=("${active}")
     prepared_slots+=("${inactive}")
   done
 
@@ -1390,11 +1459,30 @@ run_bluegreen_release() {
   for index in "${!prepared_bases[@]}"; do
     base="${prepared_bases[${index}]}"
     front_ds="${prepared_fronts[${index}]}"
+    active="${prepared_original_slots[${index}]}"
     inactive="${prepared_slots[${index}]}"
-    write_front_active_slot "${front_ds}" "${inactive}"
-    wait_daemonset_ready "${front_ds}"
-    active_slots_json="$(record_active_slot_json "${active_slots_json}" "${base}" "${inactive}")"
+    rollback_state+=("${front_ds}" "${active}")
+    if ! write_front_active_slot "${front_ds}" "${inactive}"; then
+      abort_bluegreen_release "failed to switch ${front_ds} to slot ${inactive}" "${rollback_state[@]}"
+      return 1
+    fi
+    if ! wait_daemonset_ready "${front_ds}"; then
+      abort_bluegreen_release "front ${front_ds} was not ready after switching to slot ${inactive}" "${rollback_state[@]}"
+      return 1
+    fi
+    if ! check_public_smoke_on_front_nodes "${front_ds}"; then
+      abort_bluegreen_release "front smoke failed for ${front_ds} on slot ${inactive}" "${rollback_state[@]}"
+      return 1
+    fi
+    if ! active_slots_json="$(record_active_slot_json "${active_slots_json}" "${base}" "${inactive}")"; then
+      abort_bluegreen_release "could not record proposed active slot for ${base}" "${rollback_state[@]}"
+      return 1
+    fi
   done
+  if ! run_smoke_urls; then
+    abort_bluegreen_release "public smoke failed after all front slot switches" "${rollback_state[@]}"
+    return 1
+  fi
   FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON="${active_slots_json}"
 }
 
@@ -1494,13 +1582,17 @@ write_release_record() {
 run_smoke_urls() {
   local urls="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-}"
   local url
+  local active_attempts="${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SMOKE_ATTEMPTS:-${FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS:-3}}"
+  local active_delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SMOKE_RETRY_DELAY_SECONDS:-${FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS:-2}}"
 
   [[ -n "$(trim_field "${urls}")" ]] || return 0
   while IFS= read -r url; do
     url="$(trim_field "${url}")"
     [[ -n "${url}" ]] || continue
     log "smoke ${url}"
-    smoke_curl_with_retry "public ${url}" \
+    FUGUE_PUBLIC_DATA_PLANE_SMOKE_ATTEMPTS="${active_attempts}" \
+      FUGUE_PUBLIC_DATA_PLANE_SMOKE_RETRY_DELAY_SECONDS="${active_delay_seconds}" \
+      smoke_curl_with_retry "public ${url}" \
       -fsS --max-time "${FUGUE_PUBLIC_DATA_PLANE_SMOKE_TIMEOUT_SECONDS:-10}" "${url}" >/dev/null || return $?
   done < <(public_data_plane_smoke_urls)
 }
@@ -1566,7 +1658,6 @@ main() {
     run_bluegreen_release
     daemonsets_csv="$(bluegreen_worker_bases | paste -sd, -)"
     write_release_record "${daemonsets_csv}"
-    run_smoke_urls
     if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
       log "dry-run complete; inactive edge workers would be upgraded and switched with front pods preserved"
       return 0
