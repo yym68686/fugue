@@ -1868,6 +1868,11 @@ assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "re
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
   fail "releaseflow files must have explicit release-risk ownership"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/backupschedule/schedule.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "backup schedule runtime changes must propagate shared control-plane risk"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "backup schedule runtime files must have explicit release-risk ownership"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/platformsafety/kernel.go'
 assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "platform safety kernel changes must propagate shared control-plane risk"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||

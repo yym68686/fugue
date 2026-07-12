@@ -615,6 +615,7 @@ release_safety_changed_file_subsystems() {
       internal/config/*|\
       internal/auth/*|\
       internal/apispec/*|\
+      internal/backupschedule/*|\
       internal/observability/*|\
       internal/bundleauth/*|\
       internal/releaseflow/*|\
