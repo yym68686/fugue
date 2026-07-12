@@ -10,7 +10,7 @@ import (
 	"fugue/internal/runtime"
 )
 
-func TestManagedAppOnlineRolloutSnapshotMismatchFieldsReportsBackingServiceRuntimeDrift(t *testing.T) {
+func TestManagedAppOnlineRolloutSnapshotIgnoresBindingAndBackingServiceObservedDrift(t *testing.T) {
 	t.Parallel()
 
 	createdAt := time.Date(2026, time.July, 12, 12, 0, 0, 0, time.UTC)
@@ -33,15 +33,29 @@ func TestManagedAppOnlineRolloutSnapshotMismatchFieldsReportsBackingServiceRunti
 			RuntimeID:     "runtime_demo",
 			RolloutIntent: model.AppRolloutIntentOnlineImageUpdate,
 		},
+		Bindings: []model.ServiceBinding{{
+			ID:        "binding_demo",
+			TenantID:  "tenant_demo",
+			AppID:     "app_demo",
+			ServiceID: "service_demo",
+			Alias:     "database",
+			CreatedAt: createdAt,
+			UpdatedAt: oldRuntimeAt,
+		}},
 		BackingServices: []model.BackingService{{
-			ID:                      "service_demo",
-			TenantID:                "tenant_demo",
-			ProjectID:               "project_demo",
-			OwnerAppID:              "app_demo",
-			Name:                    "database",
-			Type:                    model.BackingServiceTypePostgres,
-			Provisioner:             model.BackingServiceProvisionerManaged,
-			Status:                  model.BackingServiceStatusActive,
+			ID:          "service_demo",
+			TenantID:    "tenant_demo",
+			ProjectID:   "project_demo",
+			OwnerAppID:  "app_demo",
+			Name:        "database",
+			Type:        model.BackingServiceTypePostgres,
+			Provisioner: model.BackingServiceProvisionerManaged,
+			Status:      model.BackingServiceStatusActive,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				Database:    "app",
+				User:        "app",
+				ServiceName: "database",
+			}},
 			CurrentRuntimeStartedAt: &oldRuntimeAt,
 			CurrentRuntimeReadyAt:   &oldRuntimeAt,
 			CreatedAt:               createdAt,
@@ -50,22 +64,41 @@ func TestManagedAppOnlineRolloutSnapshotMismatchFieldsReportsBackingServiceRunti
 	}
 	stored := managedSnapshot
 	stored.Spec.RolloutIntent = ""
+	stored.Bindings = append([]model.ServiceBinding(nil), managedSnapshot.Bindings...)
+	stored.Bindings[0].CreatedAt = newRuntimeAt
+	stored.Bindings[0].UpdatedAt = newRuntimeAt
 	stored.BackingServices = append([]model.BackingService(nil), managedSnapshot.BackingServices...)
+	cpuMilliCores := int64(32)
+	stored.BackingServices[0].CurrentResourceUsage = &model.ResourceUsage{CPUMilliCores: &cpuMilliCores}
 	stored.BackingServices[0].CurrentRuntimeStartedAt = &newRuntimeAt
 	stored.BackingServices[0].CurrentRuntimeReadyAt = &newRuntimeAt
+	stored.BackingServices[0].CreatedAt = newRuntimeAt
 	stored.BackingServices[0].UpdatedAt = newRuntimeAt
 
-	got := managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, stored)
-	want := []string{
-		"Identity.BackingServices[0].CurrentRuntimeStartedAt",
-		"Identity.BackingServices[0].CurrentRuntimeReadyAt",
-		"Identity.BackingServices[0].UpdatedAt",
+	if got := managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, stored); len(got) != 0 {
+		t.Fatalf("expected observed timestamps to be ignored, got mismatches %v", got)
 	}
+	if _, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false); useStored {
+		t.Fatal("expected online rollout snapshot to survive runtime-only service drift")
+	}
+
+	changedBinding := stored
+	changedBinding.Bindings = append([]model.ServiceBinding(nil), stored.Bindings...)
+	changedBinding.Bindings[0].ServiceID = "service_other"
+	got := managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, changedBinding)
+	want := []string{"Identity.Bindings[0].ServiceID"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("unexpected mismatch fields: got %v want %v", got, want)
+		t.Fatalf("unexpected binding mismatch fields: got %v want %v", got, want)
 	}
-	if _, useStored := selectManagedAppDesiredApp(managedSnapshot, stored, false); !useStored {
-		t.Fatal("expected current comparison to reject the online rollout snapshot after runtime-only service drift")
+	if _, useStored := selectManagedAppDesiredApp(managedSnapshot, changedBinding, false); !useStored {
+		t.Fatal("expected changed service binding to reject the online rollout snapshot")
+	}
+
+	changedService := stored
+	changedService.BackingServices = cloneControllerBackingServices(stored.BackingServices)
+	changedService.BackingServices[0].Spec.Postgres.Database = "other"
+	if managedAppRolloutSnapshotIdentityEqual(managedSnapshot, changedService) {
+		t.Fatal("expected changed backing service spec to reject the online rollout snapshot")
 	}
 }
 

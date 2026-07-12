@@ -539,14 +539,8 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		spec.RolloutIntent = ""
 		model.ApplyAppSpecDefaults(spec)
 	}
-	bindings := app.Bindings
-	if len(bindings) == 0 {
-		bindings = nil
-	}
-	backingServices := app.BackingServices
-	if len(backingServices) == 0 {
-		backingServices = nil
-	}
+	bindings := comparableManagedAppServiceBindings(app.Bindings)
+	backingServices := comparableManagedAppBackingServices(app.BackingServices)
 	return managedAppRolloutSnapshot{
 		ID:              strings.TrimSpace(app.ID),
 		TenantID:        strings.TrimSpace(app.TenantID),
@@ -557,6 +551,33 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		Bindings:        bindings,
 		BackingServices: backingServices,
 	}
+}
+
+func comparableManagedAppServiceBindings(bindings []model.ServiceBinding) []model.ServiceBinding {
+	if len(bindings) == 0 {
+		return nil
+	}
+	out := cloneControllerServiceBindings(bindings)
+	for index := range out {
+		out[index].CreatedAt = time.Time{}
+		out[index].UpdatedAt = time.Time{}
+	}
+	return out
+}
+
+func comparableManagedAppBackingServices(services []model.BackingService) []model.BackingService {
+	if len(services) == 0 {
+		return nil
+	}
+	out := cloneControllerBackingServices(services)
+	for index := range out {
+		out[index].CurrentResourceUsage = nil
+		out[index].CurrentRuntimeStartedAt = nil
+		out[index].CurrentRuntimeReadyAt = nil
+		out[index].CreatedAt = time.Time{}
+		out[index].UpdatedAt = time.Time{}
+	}
+	return out
 }
 
 func managedAppRolloutSnapshotIdentityEqual(left, right model.App) bool {
