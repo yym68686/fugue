@@ -59,6 +59,8 @@ type Service struct {
 	proxyTransportActiveKeys map[string]struct{}
 	proxyTransportBundleSet  bool
 	bodyBuffer               *edgeRequestBodyBufferManager
+	requestBodyPolicyMu      sync.Mutex
+	requestBodyPolicyGuards  map[string]*edgeRequestBodyPolicyGuard
 
 	mu                    sync.Mutex
 	snapshot              Status
@@ -356,6 +358,7 @@ func NewService(cfg config.EdgeConfig, logger *log.Logger) *Service {
 		proxyTransports:          map[string]*http.Transport{},
 		proxyTransportActiveKeys: map[string]struct{}{},
 		bodyBuffer:               newEdgeRequestBodyBufferManager(cfg),
+		requestBodyPolicyGuards:  map[string]*edgeRequestBodyPolicyGuard{},
 		walActionLast:            map[string]time.Time{},
 		snapshot: Status{
 			Status:      "unhealthy",
@@ -944,7 +947,6 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > 0 {
 		observed.RequestBytes = r.ContentLength
 	}
-	observeEdgeProxyRequestBody(r, &observed)
 	observed.Streaming = observed.WebSocket || observed.SSE
 	cacheDecision := s.edgeCacheDecision(r, selectedRoute)
 	if len(route.Upstreams) > 0 {
@@ -982,6 +984,16 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "edge route upstream is unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	var releaseRequestBodyPolicy func()
+	r, releaseRequestBodyPolicy, handled, policyStatus := s.applyEdgeRequestBodyPolicy(w, r, selectedRoute)
+	if handled {
+		observed.StatusCode = policyStatus
+		return
+	}
+	if releaseRequestBodyPolicy != nil {
+		defer releaseRequestBodyPolicy()
+	}
+	observeEdgeProxyRequestBody(r, &observed)
 	observedWriter := newEdgeProxyObservationResponseWriter(w, startedAt, &observed)
 	if cacheDecision.Enabled {
 		observedWriter.cacheDecision = &cacheDecision
@@ -1216,6 +1228,16 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			if observed != nil {
 				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
+				if edgeRequestBodyPolicyErrorIsTooLarge(proxyErr) {
+					observed.StatusCode = http.StatusRequestEntityTooLarge
+					http.Error(rw, "request body too large", http.StatusRequestEntityTooLarge)
+					return
+				}
+				if edgeRequestBodyPolicyErrorIsTimeout(req, proxyErr) {
+					observed.StatusCode = http.StatusRequestTimeout
+					http.Error(rw, "request timeout", http.StatusRequestTimeout)
+					return
+				}
 				if edgeProxyErrorIsClientCanceled(req, proxyErr) {
 					observed.ClientCanceled = true
 					observed.StatusCode = edgeStatusClientClosedRequest
@@ -3335,6 +3357,9 @@ func (s *Service) validateConfig() error {
 		if strings.TrimSpace(s.Config.CaddyProxyListenAddr) == "" {
 			return fmt.Errorf("FUGUE_EDGE_PROXY_LISTEN_ADDR is required when caddy mode is enabled")
 		}
+		if !edgeProxyListenAddrIsLoopback(s.Config.CaddyProxyListenAddr) {
+			return fmt.Errorf("FUGUE_EDGE_PROXY_LISTEN_ADDR must bind an explicit loopback IP when caddy mode is enabled")
+		}
 		switch s.normalizedCaddyTLSMode() {
 		case caddyTLSModeOff, caddyTLSModeInternal:
 		case caddyTLSModePublicOnDemand:
@@ -3354,6 +3379,15 @@ func (s *Service) validateConfig() error {
 		return fmt.Errorf("FUGUE_EDGE_CADDY_STATIC_TLS_CERT_FILE requires FUGUE_EDGE_CADDY_ENABLED=true")
 	}
 	return nil
+}
+
+func edgeProxyListenAddrIsLoopback(raw string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Service) routeAllowedForThisEdge(route model.EdgeRouteBinding) bool {

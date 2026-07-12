@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -14,10 +13,14 @@ import (
 
 func (s *Server) handleInspectUploadTemplate(w http.ResponseWriter, r *http.Request) {
 	_ = mustPrincipal(r)
+	finish, ok := s.beginSourceUploadRequest(w, r)
+	if !ok {
+		return
+	}
+	defer finish()
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxSourceUploadArchiveBytes+multipartFormMemoryBytes)
-	if err := r.ParseMultipartForm(multipartFormMemoryBytes); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("parse multipart form: %v", err))
+	if err := parseImportUploadMultipart(w, r); err != nil {
+		writeImportUploadError(w, err)
 		return
 	}
 	defer func() {
@@ -28,7 +31,7 @@ func (s *Server) handleInspectUploadTemplate(w http.ResponseWriter, r *http.Requ
 
 	req, archiveHeader, archiveBytes, err := decodeImportUploadMultipart(r)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		writeImportUploadError(w, err)
 		return
 	}
 

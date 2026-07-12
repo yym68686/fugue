@@ -1,15 +1,18 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -18,9 +21,148 @@ import (
 )
 
 const (
-	maxSourceUploadArchiveBytes = 128 << 20
-	multipartFormMemoryBytes    = 32 << 20
+	maxSourceUploadArchiveBytes       = 128 << 20
+	multipartFormMemoryBytes          = 32 << 20
+	maxSourceUploadRequestBytes       = maxSourceUploadArchiveBytes + multipartFormMemoryBytes
+	maxConcurrentSourceUploadRequests = 2
+	sourceUploadRequestTimeout        = 5 * time.Minute
+	sourceUploadRetryAfterSeconds     = 5
 )
+
+func (s *Server) acquireSourceUploadSlot() (func(), bool) {
+	if s == nil || s.sourceUploadSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case s.sourceUploadSlots <- struct{}{}:
+		return func() { <-s.sourceUploadSlots }, true
+	default:
+		return nil, false
+	}
+}
+
+func startSourceUploadDeadline(r *http.Request, timeout time.Duration) func() {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	body := r.Body
+	*r = *r.WithContext(ctx)
+	stopClose := context.AfterFunc(ctx, func() {
+		if body != nil {
+			_ = body.Close()
+		}
+	})
+	return func() {
+		stopClose()
+		cancel()
+	}
+}
+
+func (s *Server) beginSourceUploadRequest(w http.ResponseWriter, r *http.Request) (func(), bool) {
+	release, ok := s.acquireSourceUploadSlot()
+	if !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", sourceUploadRetryAfterSeconds))
+		httpx.WriteError(w, http.StatusTooManyRequests, "too many source uploads are already being processed")
+		return nil, false
+	}
+	stopDeadline := startSourceUploadDeadline(r, sourceUploadRequestTimeout)
+	return func() {
+		stopDeadline()
+		release()
+	}, true
+}
+
+type importUploadRequestError struct {
+	status  int
+	message string
+}
+
+func (e *importUploadRequestError) Error() string {
+	return e.message
+}
+
+func newImportUploadRequestError(status int, message string) error {
+	return &importUploadRequestError{status: status, message: message}
+}
+
+func importUploadErrorStatus(err error) int {
+	var requestErr *importUploadRequestError
+	if errors.As(err, &requestErr) {
+		return requestErr.status
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
+func writeImportUploadError(w http.ResponseWriter, err error) {
+	status := importUploadErrorStatus(err)
+	message := err.Error()
+	var requestErr *importUploadRequestError
+	if status == http.StatusRequestEntityTooLarge && !errors.As(err, &requestErr) {
+		message = fmt.Sprintf("upload request exceeds %d bytes", maxSourceUploadRequestBytes)
+	}
+	httpx.WriteError(w, status, message)
+}
+
+func parseImportUploadMultipart(w http.ResponseWriter, r *http.Request) error {
+	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		if strings.EqualFold(strings.TrimSpace(strings.Split(contentType, ";")[0]), "multipart/form-data") {
+			return newImportUploadRequestError(http.StatusBadRequest, "multipart Content-Type is malformed")
+		}
+		return newImportUploadRequestError(http.StatusUnsupportedMediaType, "Content-Type must be multipart/form-data")
+	}
+	if !strings.EqualFold(mediaType, "multipart/form-data") {
+		return newImportUploadRequestError(http.StatusUnsupportedMediaType, "Content-Type must be multipart/form-data")
+	}
+	if r.ContentLength > maxSourceUploadRequestBytes {
+		return newImportUploadRequestError(
+			http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("upload request exceeds %d bytes", maxSourceUploadRequestBytes),
+		)
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxSourceUploadRequestBytes)
+	if err := r.ParseMultipartForm(multipartFormMemoryBytes); err != nil {
+		if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			return newImportUploadRequestError(http.StatusRequestTimeout, "source upload timed out")
+		}
+		return fmt.Errorf("parse multipart form: %w", err)
+	}
+	return validateImportUploadMultipartFields(r.MultipartForm)
+}
+
+func validateImportUploadMultipartFields(form *multipart.Form) error {
+	if form == nil {
+		return newImportUploadRequestError(http.StatusBadRequest, "multipart form is required")
+	}
+	for field := range form.Value {
+		if field != "request" {
+			return newImportUploadRequestError(http.StatusBadRequest, fmt.Sprintf("unsupported multipart field %q", field))
+		}
+	}
+	for field := range form.File {
+		if field != "archive" {
+			return newImportUploadRequestError(http.StatusBadRequest, fmt.Sprintf("unsupported multipart file field %q", field))
+		}
+	}
+	if len(form.Value["request"]) != 1 {
+		return newImportUploadRequestError(http.StatusBadRequest, "multipart field request must be sent exactly once")
+	}
+	archives := form.File["archive"]
+	if len(archives) != 1 {
+		return newImportUploadRequestError(http.StatusBadRequest, "multipart file archive must be sent exactly once")
+	}
+	if archives[0].Size > maxSourceUploadArchiveBytes {
+		return newImportUploadRequestError(
+			http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("archive exceeds %d bytes", maxSourceUploadArchiveBytes),
+		)
+	}
+	return nil
+}
 
 type importUploadRequest struct {
 	AppID                    string                                            `json:"app_id"`
@@ -55,10 +197,14 @@ type importUploadRequest struct {
 
 func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
+	finish, ok := s.beginSourceUploadRequest(w, r)
+	if !ok {
+		return
+	}
+	defer finish()
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxSourceUploadArchiveBytes+multipartFormMemoryBytes)
-	if err := r.ParseMultipartForm(multipartFormMemoryBytes); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("parse multipart form: %v", err))
+	if err := parseImportUploadMultipart(w, r); err != nil {
+		writeImportUploadError(w, err)
 		return
 	}
 	defer func() {
@@ -69,7 +215,7 @@ func (s *Server) handleImportUploadApp(w http.ResponseWriter, r *http.Request) {
 
 	req, archiveHeader, archiveBytes, err := decodeImportUploadMultipart(r)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		writeImportUploadError(w, err)
 		return
 	}
 	if req.DeleteMissing && !req.UpdateExisting {
@@ -530,10 +676,13 @@ func decodeImportUploadMultipart(r *http.Request) (importUploadRequest, *multipa
 		return importUploadRequest{}, nil, nil, fmt.Errorf("archive is empty")
 	}
 	if len(archiveBytes) > maxSourceUploadArchiveBytes {
-		return importUploadRequest{}, nil, nil, fmt.Errorf("archive exceeds %d bytes", maxSourceUploadArchiveBytes)
+		return importUploadRequest{}, nil, nil, newImportUploadRequestError(
+			http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("archive exceeds %d bytes", maxSourceUploadArchiveBytes),
+		)
 	}
 	if _, err := sourceimport.DetectUploadArchiveFormat(archiveHeader.Filename, archiveBytes); err != nil {
-		return importUploadRequest{}, nil, nil, err
+		return importUploadRequest{}, nil, nil, newImportUploadRequestError(http.StatusUnsupportedMediaType, err.Error())
 	}
 	return req, archiveHeader, archiveBytes, nil
 }

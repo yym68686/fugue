@@ -4239,21 +4239,56 @@ paths:
           required: false
           schema:
             type: string
+            maxLength: 256
         - in: query
           name: q
           required: false
           schema:
             type: string
+            maxLength: 200
         - in: query
           name: domain
           required: false
           schema:
             type: string
+            maxLength: 253
         - in: query
           name: source_ref
           required: false
           schema:
             type: string
+            maxLength: 512
+        - in: query
+          name: phase
+          required: false
+          description: Case-insensitive exact app phase filter.
+          schema:
+            type: string
+            maxLength: 64
+        - in: query
+          name: limit
+          required: false
+          description: >-
+            Enables bounded cursor pagination. Existing callers that omit limit,
+            cursor, and sort retain the legacy unpaginated response.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: cursor
+          required: false
+          description: Opaque cursor returned in page_info. Supplying a cursor enables pagination.
+          schema:
+            type: string
+            maxLength: 1024
+        - in: query
+          name: sort
+          required: false
+          description: Stable sort; every option uses app id as its final tie-breaker.
+          schema:
+            $ref: "#/components/schemas/AppListSort"
         - in: query
           name: include_live_status
           required: false
@@ -4358,12 +4393,19 @@ paths:
     post:
       operationId: inspectUploadTemplate
       summary: Inspect Upload Template
+      description: >-
+        Inspects one source archive without creating an app. The request must use
+        multipart/form-data with exactly one JSON `request` field and one `archive`
+        file. The archive may be at most 134217728 bytes (128 MiB), and the complete
+        multipart request may be at most 167772160 bytes (160 MiB). Accepted archive
+        formats are .zip, .tgz, and .tar.gz; the filename extension must match the
+        uploaded bytes.
       tags: [Templates]
       x-fugue-handler: handleInspectUploadTemplate
       security:
         - BearerAuth: []
       requestBody:
-        required: false
+        required: true
         content:
           multipart/form-data:
             schema:
@@ -4378,6 +4420,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InspectUploadTemplateResponse"
+        '400':
+          description: The multipart body or JSON request field is malformed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '408':
+          description: The upload did not complete within five minutes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '413':
+          description: The complete multipart request or archive exceeds its byte limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '415':
+          description: The request is not multipart/form-data or the archive format is unsupported or mismatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '429':
+          description: Two source uploads are already being processed by this API instance. Retry-After is returned.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/import-image:
@@ -4407,12 +4485,18 @@ paths:
     post:
       operationId: importUploadApp
       summary: Import Upload App
+      description: >-
+        Imports one source archive. The request must use multipart/form-data with
+        exactly one JSON `request` field and one `archive` file. The archive may be
+        at most 134217728 bytes (128 MiB), and the complete multipart request may be
+        at most 167772160 bytes (160 MiB). Accepted archive formats are .zip, .tgz,
+        and .tar.gz; the filename extension must match the uploaded bytes.
       tags: [Apps]
       x-fugue-handler: handleImportUploadApp
       security:
         - BearerAuth: []
       requestBody:
-        required: false
+        required: true
         content:
           multipart/form-data:
             schema:
@@ -4427,6 +4511,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ImportUploadResponse"
+        '400':
+          description: The multipart body, JSON request field, or import options are malformed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '408':
+          description: The upload did not complete within five minutes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '413':
+          description: The complete multipart request or archive exceeds its byte limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '415':
+          description: The request is not multipart/form-data or the archive format is unsupported or mismatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '429':
+          description: Two source uploads are already being processed by this API instance. Retry-After is returned.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}:
@@ -12246,6 +12366,8 @@ components:
       properties:
         hostname:
           type: string
+        path_prefix:
+          type: string
         route_kind:
           type: string
           enum: [platform, custom-domain, platform-domain, platform-route, control-plane-api]
@@ -12327,6 +12449,13 @@ components:
           type: string
         deployment_generation:
           type: string
+        request_body_policies:
+          type: array
+          description: >-
+            App-scoped exact-path request-body limits enforced by Fugue Edge.
+            Omitted routes retain the ordinary streaming proxy behavior.
+          items:
+            $ref: "#/components/schemas/EdgeRequestBodyPolicy"
         streaming:
           type: boolean
         status:
@@ -12342,6 +12471,55 @@ components:
         updated_at:
           type: string
           format: date-time
+    EdgeRequestBodyPolicy:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - methods
+        - paths
+        - max_bytes
+        - timeout_seconds
+        - max_concurrent
+      properties:
+        name:
+          type: string
+          maxLength: 64
+        methods:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+        paths:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+            pattern: ^/
+        max_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1099511627776
+        timeout_seconds:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 86400
+        max_concurrent:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 1024
+        retry_after_seconds:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 3600
     EdgeRouteUpstream:
       type: object
       additionalProperties: false
@@ -20704,6 +20882,44 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/App"
+        page_info:
+          $ref: "#/components/schemas/CursorPageInfo"
+    AppListSort:
+      type: string
+      enum:
+        - created_at_desc
+        - created_at_asc
+        - updated_at_desc
+        - name_asc
+    CursorPageInfo:
+      type: object
+      additionalProperties: false
+      required:
+        - limit
+        - sort
+        - total_items
+        - has_next_page
+        - has_previous_page
+      properties:
+        limit:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 200
+        sort:
+          $ref: "#/components/schemas/AppListSort"
+        total_items:
+          type: integer
+          format: int64
+          minimum: 0
+        has_next_page:
+          type: boolean
+        has_previous_page:
+          type: boolean
+        next_cursor:
+          type: string
+        previous_cursor:
+          type: string
     AppResponse:
       type: object
       additionalProperties: false
@@ -21078,14 +21294,22 @@ components:
     ImportUploadMultipartRequest:
       type: object
       additionalProperties: false
+      description: >-
+        Multipart upload containing exactly one JSON request field and one source
+        archive. The complete multipart request is limited to 167772160 bytes
+        (160 MiB).
       required: [request, archive]
       properties:
         request:
           $ref: "#/components/schemas/ImportUploadRequest"
         archive:
-          description: Source archive upload. Fugue accepts .zip, .tgz, and .tar.gz archives.
+          description: >-
+            Source archive upload, limited to 134217728 bytes (128 MiB). Fugue
+            accepts .zip, .tgz, and .tar.gz archives, and verifies that the
+            filename extension matches the uploaded bytes.
           type: string
           format: binary
+          maxLength: 134217728
     ImportGitHubResponse:
       type: object
       additionalProperties: false

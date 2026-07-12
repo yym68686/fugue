@@ -59,6 +59,14 @@ func classifyError(status int, message string) (string, string, bool) {
 		return "conflict", "conflict", false
 	case status == http.StatusPaymentRequired:
 		return "billing_required", "billing", false
+	case status == http.StatusRequestTimeout:
+		return "request_timeout", "transport", true
+	case status == http.StatusRequestEntityTooLarge:
+		return "request_too_large", "validation", false
+	case status == http.StatusUnsupportedMediaType:
+		return "unsupported_media_type", "validation", false
+	case status == http.StatusTooManyRequests:
+		return "rate_limited", "rate_limit", true
 	case status == http.StatusBadRequest && (strings.Contains(normalized, "unexpected eof") || strings.Contains(normalized, "connection reset")):
 		return "upload_retryable", "transport", true
 	case status == http.StatusBadRequest && strings.Contains(normalized, "parse multipart form"):

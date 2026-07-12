@@ -296,6 +296,11 @@ var postgresSchemaStatements = []string{
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_created_id_desc ON fugue_apps (created_at DESC, id DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_updated_id_desc ON fugue_apps (updated_at DESC, id DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_name_id_ci ON fugue_apps (lower(name), id)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_created_id_desc ON fugue_apps (tenant_id, project_id, created_at DESC, id DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_phase_created_id_desc ON fugue_apps (lower(trim(COALESCE(status_json->>'phase', ''))), created_at DESC, id DESC)`,
 	`DROP INDEX IF EXISTS idx_fugue_apps_route_hostname_ci`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_apps_route_hostname_lookup_ci ON fugue_apps (lower((route_json->>'hostname'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_route_host_path_ci ON fugue_apps (lower((route_json->>'hostname')), lower(COALESCE(NULLIF(route_json->>'path_prefix', ''), '/'))) WHERE route_json IS NOT NULL AND COALESCE(route_json->>'hostname', '') <> ''`,
@@ -731,6 +736,7 @@ var postgresSchemaStatements = []string{
 	`ALTER TABLE fugue_app_domains ADD COLUMN IF NOT EXISTS tls_ready_at TIMESTAMPTZ NULL`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_app_domains_hostname_ci ON fugue_app_domains (lower(hostname))`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_app_domains_app_id ON fugue_app_domains (app_id, created_at ASC)`,
+	`CREATE INDEX IF NOT EXISTS idx_fugue_app_domains_verified_app_hostname_ci ON fugue_app_domains (app_id, lower(hostname)) WHERE status = 'verified'`,
 	`CREATE TABLE IF NOT EXISTS fugue_edge_tls_certificates (
 		hostname TEXT PRIMARY KEY REFERENCES fugue_app_domains(hostname) ON DELETE CASCADE,
 		tenant_id TEXT NOT NULL DEFAULT '',

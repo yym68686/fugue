@@ -155,6 +155,24 @@ func TestPostgresSchemaIncludesOperationLookupIndexes(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaIncludesBoundedAppPaginationIndexes(t *testing.T) {
+	t.Parallel()
+
+	schema := strings.Join(postgresSchemaStatements, "\n")
+	for _, indexName := range []string{
+		"idx_fugue_apps_created_id_desc",
+		"idx_fugue_apps_updated_id_desc",
+		"idx_fugue_apps_name_id_ci",
+		"idx_fugue_apps_tenant_project_created_id_desc",
+		"idx_fugue_apps_phase_created_id_desc",
+		"idx_fugue_app_domains_verified_app_hostname_ci",
+	} {
+		if !strings.Contains(schema, indexName) {
+			t.Fatalf("postgres schema is missing pagination index %s", indexName)
+		}
+	}
+}
+
 func TestPostgresSchemaIncludesExpectedConsumerSetPersistence(t *testing.T) {
 	t.Parallel()
 

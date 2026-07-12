@@ -11,6 +11,7 @@ type appListFilter struct {
 	Query     string
 	ProjectID string
 	Domain    string
+	Phase     string
 	SourceRef string
 }
 
@@ -19,6 +20,7 @@ func (f appListFilter) HasAny() bool {
 		strings.TrimSpace(f.Query) != "" ||
 		strings.TrimSpace(f.ProjectID) != "" ||
 		strings.TrimSpace(f.Domain) != "" ||
+		strings.TrimSpace(f.Phase) != "" ||
 		strings.TrimSpace(f.SourceRef) != ""
 }
 
@@ -33,6 +35,9 @@ func filterAppListResults(apps []model.App, filter appListFilter, domainHostsByA
 			continue
 		}
 		if projectID := strings.TrimSpace(filter.ProjectID); projectID != "" && strings.TrimSpace(app.ProjectID) != projectID {
+			continue
+		}
+		if phase := strings.TrimSpace(filter.Phase); phase != "" && !strings.EqualFold(strings.TrimSpace(app.Status.Phase), phase) {
 			continue
 		}
 		if domain := strings.TrimSpace(filter.Domain); domain != "" && !appMatchesDomainFilter(app, domain, domainHostsByAppID[strings.TrimSpace(app.ID)]) {

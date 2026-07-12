@@ -98,6 +98,7 @@ type Server struct {
 	managedAppStatusCache            managedAppStatusCache
 	consoleGalleryCache              expiringResponseCache[consoleGalleryResponse]
 	billingImageStorageRefresh       billingImageStorageRefreshScheduler
+	sourceUploadSlots                chan struct{}
 	newLogsClient                    func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister           func(namespace string) (filesystemPodLister, error)
 	filesystemExecRunner             filesystemPodExecRunner
@@ -214,6 +215,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newManagedAppStatusClient:        newManagedAppStatusClient,
 		managedAppStatusCache:            newManagedAppStatusCache(0, 0),
 		consoleGalleryCache:              newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
+		sourceUploadSlots:                make(chan struct{}, maxConcurrentSourceUploadRequests),
 		billingImageStorageRefresh:       newBillingImageStorageRefreshScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
@@ -1081,7 +1083,41 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		Query:     strings.TrimSpace(query.Get("q")),
 		ProjectID: projectIDForPrincipal(principal, query.Get("project_id")),
 		Domain:    strings.TrimSpace(query.Get("domain")),
+		Phase:     strings.TrimSpace(query.Get("phase")),
 		SourceRef: strings.TrimSpace(query.Get("source_ref")),
+	}
+	pagination, err := readAppListPagination(r, principal, filter)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if pagination.Enabled {
+		storeStartedAt := time.Now()
+		page, pageErr := s.store.ListAppsPage(pagination.Options)
+		timings.Add("store_apps_page", time.Since(storeStartedAt))
+		if pageErr != nil {
+			s.writeStoreError(w, pageErr)
+			return
+		}
+		if pagination.Options.Cursor != nil && len(page.Apps) == 0 {
+			httpx.WriteError(w, http.StatusConflict, errInvalidAppListCursor.Error())
+			return
+		}
+		if includeLiveStatus {
+			liveStatusStartedAt := time.Now()
+			page.Apps = s.overlayManagedAppStatuses(r.Context(), page.Apps)
+			timings.Add("live_status", time.Since(liveStatusStartedAt))
+		}
+		if includeResourceUsage {
+			resourceUsageStartedAt := time.Now()
+			page.Apps = s.overlayCurrentResourceUsageOnApps(r.Context(), page.Apps)
+			timings.Add("resource_usage", time.Since(resourceUsageStartedAt))
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"apps":      sanitizeAppsForAPI(page.Apps),
+			"page_info": buildAppListPageInfo(page, pagination),
+		})
+		return
 	}
 
 	storeStartedAt := time.Now()
