@@ -142,6 +142,33 @@ PATH="${renewal_bin_dir}:${PATH}" FRESH_CERT_B64="${fresh_cert_b64}" \
     --renew-before-days 30 >"${renew_skip}"
 assert_contains "${renew_skip}" "skipping renewal; Kubernetes TLS Secret fugue-system/fugue-app-wildcard-tls is valid for at least 30 days"
 
+tls_preflight="${tmpdir}/tls-preflight.out"
+PATH="${renewal_bin_dir}:${PATH}" FRESH_CERT_B64="${fresh_cert_b64}" \
+  bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
+    --domain "fugue.pro" \
+    --namespace "fugue-system" \
+    --secret-name "fugue-app-wildcard-tls" \
+    --acme "${tmpdir}/missing-acme.sh" \
+    --check-only \
+    --renew-before-days 7 >"${tls_preflight}"
+assert_contains "${tls_preflight}" "certificate preflight passed; Kubernetes TLS Secret fugue-system/fugue-app-wildcard-tls is valid for at least 7 days"
+
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj "/CN=*.fugue.pro" \
+  -keyout "${tmpdir}/expiring-tls.key" \
+  -out "${tmpdir}/expiring-tls.crt" >/dev/null 2>&1
+expiring_cert_b64="$(base64 <"${tmpdir}/expiring-tls.crt" | tr -d '\n')"
+if PATH="${renewal_bin_dir}:${PATH}" FRESH_CERT_B64="${expiring_cert_b64}" \
+  bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
+    --domain "fugue.pro" \
+    --namespace "fugue-system" \
+    --secret-name "fugue-app-wildcard-tls" \
+    --check-only \
+    --renew-before-days 7 >"${tmpdir}/expiring-preflight.out" 2>"${tmpdir}/expiring-preflight.err"; then
+  fail "expected an expiring TLS Secret to fail the release preflight"
+fi
+assert_contains "${tmpdir}/expiring-preflight.err" "certificate preflight failed; Kubernetes TLS Secret fugue-system/fugue-app-wildcard-tls is missing, invalid, or expires within 7 days"
+
 if bash "${REPO_ROOT}/scripts/issue_fugue_app_wildcard_tls.sh" \
   --cloudflare-env-file "${tmpdir}/missing.env" \
   --dry-run >"${tmpdir}/bad-issue.out" 2>"${tmpdir}/bad-issue.err"; then

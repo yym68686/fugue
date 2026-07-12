@@ -2993,6 +2993,18 @@ DNS/edge failover 必须满足：
 
 #### Phase 15D: 供应链和控制闭环信任
 
+> 2026-07-12 release TLS dependency incident checkpoint: workflow run `29188153448` 在 Helm
+> workload mutation 前被 wildcard TLS 续期阻断。证据链确认 runner/host 均没有 ACME client，
+> 现有证书于 `2026-08-11T08:41:22Z` 到期，前一日尚满足 30 天早退条件，首次跌破 30 天后才暴露
+> 潜伏依赖。控制面发布现改为只读检查既有 Secret 的 7 天安全窗口，不再在发布事务中签发证书；
+> check-only 路径不读取 API key、不要求 ACME client，也不修改 Secret。检查同时要求 OpenSSL 命令
+> 成功且输出明确为 `Certificate will not expire`，避免 OpenSSL 3.6 在本机对即将过期证书输出
+> `will expire` 却返回 0 的跨平台误判。真实线上证书已只读验证可覆盖 7 天；独立、可验证的续期
+> maintenance lane 仍是下方未完成项，不能因发布解耦而省略。
+>
+- [x] 控制面发布只读校验平台 wildcard TLS Secret 至少覆盖 7 天安全窗口，不在发布事务中签发证书或修改 Secret。
+- [ ] 将平台 wildcard TLS 签发/续期拆到独立 maintenance lane，失败不阻塞仍处于安全有效期的平台发布。
+- [ ] 独立 TLS maintenance lane 使用版本与 digest 固定的 ACME client，并在更新 Secret 前校验证书链、SAN、密钥匹配和有效期。
 - [ ] 控制面镜像使用 digest pin。
 - [ ] edge/DNS/node guardian 镜像使用 digest pin。
 - [ ] 关键平台镜像支持 signature verification。

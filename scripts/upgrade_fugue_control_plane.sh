@@ -8266,16 +8266,14 @@ PY
   apply_chart_crds
 
   if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" ]]; then
-    log "renewing edge static TLS secret ${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME} if needed"
+    log "checking edge static TLS secret ${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME} for the 7-day release safety horizon"
     if ! bash ./scripts/issue_fugue_app_wildcard_tls.sh \
-      --dns-provider fugue \
-      --api-url "$(release_api_base_url)" \
-      --api-key "$(release_api_token)" \
       --namespace "${FUGUE_NAMESPACE}" \
       --secret-name "${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}" \
       --domain "${FUGUE_APP_BASE_DOMAIN}" \
-      --renew-before-days 30; then
-      fail "edge static TLS renewal failed"
+      --check-only \
+      --renew-before-days 7; then
+      fail "edge static TLS certificate preflight failed"
     fi
   fi
 

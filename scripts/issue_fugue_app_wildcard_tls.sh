@@ -23,6 +23,7 @@ Options:
   --acme <path>                 acme.sh executable. Default: acme.sh.
   --kubectl <path>              kubectl executable. Default: kubectl.
   --renew-before-days <days>    Skip ACME if the current Secret cert is valid for at least this many days. Default: 0.
+  --check-only                  Only verify the current Secret certificate; never invoke ACME or update the Secret.
   --dry-run                     Print the planned commands without issuing or writing.
   -h, --help                    Show this help.
 EOF
@@ -70,7 +71,7 @@ read_env_value() {
 
 current_secret_cert_is_fresh() {
   local days="$1"
-  local seconds encoded cert_path
+  local seconds encoded cert_path check_output
   (( days > 0 )) || return 1
   seconds=$((days * 86400))
   encoded="$("${kubectl_cmd}" -n "${namespace}" get secret "${secret_name}" -o 'jsonpath={.data.tls\.crt}' 2>/dev/null || true)"
@@ -80,7 +81,10 @@ current_secret_cert_is_fresh() {
   if ! printf '%s' "${encoded}" | openssl base64 -d -A >"${cert_path}" 2>/dev/null; then
     return 1
   fi
-  openssl x509 -in "${cert_path}" -noout -checkend "${seconds}" >/dev/null 2>&1
+  if ! check_output="$(openssl x509 -in "${cert_path}" -noout -checkend "${seconds}" 2>&1)"; then
+    return 1
+  fi
+  [[ "${check_output}" == *"Certificate will not expire"* ]]
 }
 
 namespace="${FUGUE_NAMESPACE:-fugue-system}"
@@ -97,6 +101,7 @@ kubectl_cmd="${KUBECTL:-kubectl}"
 challenge_ttl="${FUGUE_ACME_CHALLENGE_TTL:-60}"
 challenge_expires_in_seconds="${FUGUE_ACME_CHALLENGE_EXPIRES_IN_SECONDS:-3600}"
 renew_before_days="${FUGUE_APP_WILDCARD_TLS_RENEW_BEFORE_DAYS:-0}"
+check_only="false"
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -113,6 +118,7 @@ while [[ $# -gt 0 ]]; do
     --acme) require_value "$1" "${2:-}"; acme_cmd="$2"; shift 2 ;;
     --kubectl) require_value "$1" "${2:-}"; kubectl_cmd="$2"; shift 2 ;;
     --renew-before-days) require_value "$1" "${2:-}"; renew_before_days="$2"; shift 2 ;;
+    --check-only) check_only="true"; shift ;;
     --dry-run) dry_run="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -124,13 +130,21 @@ done
 [[ -n "${domain}" ]] || fail "--domain is required"
 [[ "${domain}" != "*."* ]] || fail "--domain must be the base domain, not a wildcard"
 [[ "${renew_before_days}" =~ ^[0-9]+$ ]] || fail "--renew-before-days must be a non-negative integer"
+if [[ "${check_only}" == "true" && "${dry_run}" == "true" ]]; then
+  fail "--check-only and --dry-run cannot be used together"
+fi
+if [[ "${check_only}" == "true" && "${renew_before_days}" == "0" ]]; then
+  fail "--check-only requires --renew-before-days greater than zero"
+fi
 case "${dns_provider}" in
   fugue|cloudflare) ;;
   *) fail "--dns-provider must be fugue or cloudflare" ;;
 esac
 
 cloudflare_token=""
-if [[ "${dns_provider}" == "cloudflare" ]]; then
+if [[ "${check_only}" == "true" ]]; then
+  :
+elif [[ "${dns_provider}" == "cloudflare" ]]; then
   cloudflare_token="${CLOUDFLARE_DNS_API_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}"
   if [[ -z "${cloudflare_token}" && -n "${cloudflare_env_file}" ]]; then
     [[ -f "${cloudflare_env_file}" ]] || fail "Cloudflare env file not found: ${cloudflare_env_file}"
@@ -177,13 +191,20 @@ key_file="${tmpdir}/tls.key"
 if (( renew_before_days > 0 )); then
   command -v openssl >/dev/null 2>&1 || fail "openssl is required when --renew-before-days is set"
 fi
+command -v "${kubectl_cmd}" >/dev/null 2>&1 || fail "kubectl executable not found: ${kubectl_cmd}"
+if [[ "${check_only}" == "true" ]]; then
+  if current_secret_cert_is_fresh "${renew_before_days}"; then
+    printf 'certificate preflight passed; Kubernetes TLS Secret %s/%s is valid for at least %s days\n' "${namespace}" "${secret_name}" "${renew_before_days}"
+    exit 0
+  fi
+  fail "certificate preflight failed; Kubernetes TLS Secret ${namespace}/${secret_name} is missing, invalid, or expires within ${renew_before_days} days"
+fi
 if current_secret_cert_is_fresh "${renew_before_days}"; then
   printf 'skipping renewal; Kubernetes TLS Secret %s/%s is valid for at least %s days\n' "${namespace}" "${secret_name}" "${renew_before_days}"
   exit 0
 fi
 
 command -v "${acme_cmd}" >/dev/null 2>&1 || fail "acme.sh executable not found: ${acme_cmd}"
-command -v "${kubectl_cmd}" >/dev/null 2>&1 || fail "kubectl executable not found: ${kubectl_cmd}"
 
 if [[ "${dns_provider}" == "cloudflare" ]]; then
   export CF_Token="${cloudflare_token}"
