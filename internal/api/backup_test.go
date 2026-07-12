@@ -202,6 +202,125 @@ func TestTenantCannotTargetAnotherTenantsAppOrWorkspaceForBackup(t *testing.T) {
 	}
 }
 
+func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	appTenant, err := stateStore.CreateTenant("App Tenant")
+	if err != nil {
+		t.Fatalf("create app tenant: %v", err)
+	}
+	runtimeOwner, err := stateStore.CreateTenant("Runtime Owner")
+	if err != nil {
+		t.Fatalf("create runtime owner: %v", err)
+	}
+	project, err := stateStore.CreateProject(appTenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	appRuntime, _, err := stateStore.CreateRuntime(appTenant.ID, "app-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create app runtime: %v", err)
+	}
+	databaseRuntime, _, err := stateStore.CreateRuntime(runtimeOwner.ID, "database-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create database runtime: %v", err)
+	}
+	unrelatedRuntime, _, err := stateStore.CreateRuntime(runtimeOwner.ID, "unrelated-runtime", model.RuntimeTypeManagedOwned, "", nil)
+	if err != nil {
+		t.Fatalf("create unrelated runtime: %v", err)
+	}
+	if _, err := stateStore.GrantRuntimeAccess(databaseRuntime.ID, runtimeOwner.ID, appTenant.ID); err != nil {
+		t.Fatalf("grant database runtime access: %v", err)
+	}
+	app, err := stateStore.CreateApp(appTenant.ID, project.ID, "postgres-app", "", model.AppSpec{
+		Image:     "ghcr.io/example/app:latest",
+		RuntimeID: appRuntime.ID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:    "appdb",
+			User:        "app",
+			Password:    "test-password",
+			ServiceName: "postgres-app-db",
+			RuntimeID:   databaseRuntime.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if revoked, err := stateStore.RevokeRuntimeAccess(databaseRuntime.ID, runtimeOwner.ID, appTenant.ID); err != nil || !revoked {
+		t.Fatalf("revoke database runtime access: revoked=%t err=%v", revoked, err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get hydrated app: %v", err)
+	}
+	visible, err := stateStore.RuntimeVisibleToTenant(databaseRuntime.ID, appTenant.ID, false)
+	if err != nil {
+		t.Fatalf("check database runtime visibility: %v", err)
+	}
+	if visible {
+		t.Fatal("expected the platform-assigned database runtime not to be directly tenant-visible")
+	}
+	_, apiKey, err := stateStore.CreateAPIKey(appTenant.ID, "backup-writer", []string{"app.read", "backup.write"})
+	if err != nil {
+		t.Fatalf("create API key: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	target, ok := resolveAppBackupTarget(recorder, app, model.BackupTarget{Type: model.BackupTargetAppDatabase})
+	if !ok {
+		t.Fatalf("resolve app backup target: code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if target.RuntimeID != databaseRuntime.ID {
+		t.Fatalf("expected database runtime %q, got %+v", databaseRuntime.ID, target)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/backups/policies", apiKey, map[string]any{
+		"target": map[string]any{"type": model.BackupTargetAppDatabase},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected app backup policy to accept its referenced database runtime, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var policyResponse struct {
+		Policy model.BackupPolicy `json:"policy"`
+	}
+	mustDecodeJSON(t, recorder, &policyResponse)
+	if policyResponse.Policy.Target.RuntimeID != databaseRuntime.ID {
+		t.Fatalf("expected policy database runtime %q, got %+v", databaseRuntime.ID, policyResponse.Policy.Target)
+	}
+	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); err != nil {
+		t.Fatalf("expected app-referenced database runtime to be authorized, got %v", err)
+	}
+	if _, err := server.runBackup(context.Background(), model.BackupRun{
+		TenantID:  appTenant.ID,
+		ProjectID: project.ID,
+		AppID:     app.ID,
+		Target:    target,
+	}); err == nil || errors.Is(err, errBackupTargetNotAuthorized) || !strings.Contains(err.Error(), "backup_backend_missing") {
+		t.Fatalf("expected worker authorization to pass before the missing-backend check, got %v", err)
+	}
+
+	target.RuntimeID = appRuntime.ID
+	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
+		t.Fatalf("expected visible app runtime unrelated to the database target to be unauthorized, got %v", err)
+	}
+
+	target.RuntimeID = unrelatedRuntime.ID
+	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
+		t.Fatalf("expected unrelated hidden runtime to remain unauthorized, got %v", err)
+	}
+
+	target.RuntimeID = databaseRuntime.ID
+	target.Type = model.BackupTargetDataWorkspace
+	if err := server.validateTenantBackupTarget(appTenant.ID, project.ID, app.ID, target); !errors.Is(err, errBackupTargetNotAuthorized) {
+		t.Fatalf("expected non-app backup target not to inherit the app runtime exception, got %v", err)
+	}
+}
+
 func TestTenantCannotRunLegacyPolicyPointingAtAnotherTenant(t *testing.T) {
 	t.Parallel()
 

@@ -1436,6 +1436,7 @@ func (s *Server) validateTenantBackupTarget(tenantID, projectID, appID string, t
 	}
 
 	effectiveAppID := firstNonEmptyString(appID, target.AppID)
+	var effectiveApp *model.App
 	if effectiveAppID != "" {
 		app, err := s.store.GetApp(effectiveAppID)
 		if err != nil || app.TenantID != tenantID {
@@ -1444,10 +1445,23 @@ func (s *Server) validateTenantBackupTarget(tenantID, projectID, appID string, t
 		if effectiveProjectID != "" && app.ProjectID != effectiveProjectID {
 			return errBackupTargetNotAuthorized
 		}
+		effectiveApp = &app
 	}
 	if target.RuntimeID != "" {
 		visible, err := s.store.RuntimeVisibleToTenant(target.RuntimeID, tenantID, false)
-		if err != nil || !visible {
+		appReferenced := effectiveApp != nil && backupTargetRuntimeMatchesApp(*effectiveApp, target)
+		if err != nil {
+			return errBackupTargetNotAuthorized
+		}
+		if effectiveApp != nil && backupTargetUsesAppRuntime(target.Type) && !appReferenced {
+			return errBackupTargetNotAuthorized
+		}
+		if !visible && appReferenced {
+			if _, err := s.store.GetRuntime(target.RuntimeID); err != nil {
+				return errBackupTargetNotAuthorized
+			}
+		}
+		if !visible && !appReferenced {
 			return errBackupTargetNotAuthorized
 		}
 	}
@@ -1466,6 +1480,31 @@ func (s *Server) validateTenantBackupTarget(tenantID, projectID, appID string, t
 		}
 	}
 	return nil
+}
+
+func backupTargetUsesAppRuntime(targetType string) bool {
+	switch model.NormalizeBackupTargetType(targetType) {
+	case model.BackupTargetAppDatabase, model.BackupTargetPersistentStorage:
+		return true
+	default:
+		return false
+	}
+}
+
+func backupTargetRuntimeMatchesApp(app model.App, target model.BackupTarget) bool {
+	runtimeID := strings.TrimSpace(target.RuntimeID)
+	if runtimeID == "" {
+		return false
+	}
+	switch model.NormalizeBackupTargetType(target.Type) {
+	case model.BackupTargetAppDatabase:
+		postgres := store.OwnedManagedPostgresSpec(app)
+		return postgres != nil && runtimeID == firstNonEmptyString(postgres.RuntimeID, app.Spec.RuntimeID)
+	case model.BackupTargetPersistentStorage:
+		return runtimeID == strings.TrimSpace(app.Spec.RuntimeID) || runtimeID == strings.TrimSpace(app.Status.CurrentRuntimeID)
+	default:
+		return false
+	}
 }
 
 func (s *Server) executeBackupRun(parent context.Context, runID string) {
