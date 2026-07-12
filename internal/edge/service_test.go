@@ -670,6 +670,120 @@ func TestEdgeProxyTransportRecordsOriginRequestPhases(t *testing.T) {
 	}
 }
 
+func TestRootedKubernetesServiceDialAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		address string
+		want    string
+	}{
+		{
+			name:    "cluster service",
+			address: "app-demo.fg-tenant-demo.svc.cluster.local:8080",
+			want:    "app-demo.fg-tenant-demo.svc.cluster.local.:8080",
+		},
+		{
+			name:    "uppercase cluster service",
+			address: "APP-DEMO.FG-TENANT-DEMO.SVC.CLUSTER.LOCAL:8080",
+			want:    "APP-DEMO.FG-TENANT-DEMO.SVC.CLUSTER.LOCAL.:8080",
+		},
+		{
+			name:    "already rooted cluster service",
+			address: "app-demo.fg-tenant-demo.svc.cluster.local.:8080",
+			want:    "app-demo.fg-tenant-demo.svc.cluster.local.:8080",
+		},
+		{
+			name:    "public hostname",
+			address: "api.example.com:443",
+			want:    "api.example.com:443",
+		},
+		{
+			name:    "lookalike public hostname",
+			address: "app.svc.cluster.local.example.com:8080",
+			want:    "app.svc.cluster.local.example.com:8080",
+		},
+		{
+			name:    "ip address",
+			address: "10.42.5.243:8000",
+			want:    "10.42.5.243:8000",
+		},
+		{
+			name:    "ipv6 address",
+			address: "[fd00::1]:8000",
+			want:    "[fd00::1]:8000",
+		},
+		{
+			name:    "invalid dial address",
+			address: "app-demo.fg-tenant-demo.svc.cluster.local",
+			want:    "app-demo.fg-tenant-demo.svc.cluster.local",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := rootedKubernetesServiceDialAddress(tt.address); got != tt.want {
+				t.Fatalf("expected rooted dial address %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRootedKubernetesServiceDialContextChangesOnlyDialAddress(t *testing.T) {
+	t.Parallel()
+
+	const originalAddress = "app-demo.fg-tenant-demo.svc.cluster.local:8080"
+	const rootedAddress = "app-demo.fg-tenant-demo.svc.cluster.local.:8080"
+	sentinel := errors.New("dial stopped")
+	var gotNetwork string
+	var gotAddress string
+	dial := rootedKubernetesServiceDialContext(func(_ context.Context, network, address string) (net.Conn, error) {
+		gotNetwork = network
+		gotAddress = address
+		return nil, sentinel
+	})
+
+	if _, err := dial(context.Background(), "tcp", originalAddress); !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped dial error, got %v", err)
+	}
+	if gotNetwork != "tcp" || gotAddress != rootedAddress {
+		t.Fatalf("unexpected dial call network=%q address=%q", gotNetwork, gotAddress)
+	}
+}
+
+func TestRootedKubernetesServiceDialKeepsUpstreamHostUnchanged(t *testing.T) {
+	t.Parallel()
+
+	const upstreamHost = "app-demo.fg-tenant-demo.svc.cluster.local:8080"
+	target, err := url.Parse("http://" + upstreamHost)
+	if err != nil {
+		t.Fatalf("parse target: %v", err)
+	}
+	service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
+	var gotHost string
+	service.proxyBase = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotHost = req.Host
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    req,
+		}, nil
+	})
+	proxy := service.newEdgeReverseProxy("demo.fugue.pro", target, model.EdgeRouteBinding{}, &edgeProxyObservation{}, false, nil)
+
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/v1/models", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected successful proxy response, got %d", recorder.Code)
+	}
+	if gotHost != upstreamHost {
+		t.Fatalf("expected upstream Host %q to remain unchanged, got %q", upstreamHost, gotHost)
+	}
+}
+
 func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	t.Parallel()
 

@@ -2321,16 +2321,42 @@ func (s *Service) proxyPeerFallback(w http.ResponseWriter, r *http.Request, host
 func newDefaultEdgeProxyTransport() http.RoundTripper {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
 		return &http.Transport{
 			Proxy:               nil,
+			DialContext:         rootedKubernetesServiceDialContext(dialer.DialContext),
 			ForceAttemptHTTP2:   false,
 			TLSHandshakeTimeout: 10 * time.Second,
 		}
 	}
 	transport := base.Clone()
 	transport.Proxy = nil
+	transport.DialContext = rootedKubernetesServiceDialContext(transport.DialContext)
 	transport.ForceAttemptHTTP2 = false
 	return transport
+}
+
+func rootedKubernetesServiceDialContext(next func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		return next(ctx, network, rootedKubernetesServiceDialAddress(address))
+	}
+}
+
+// rootedKubernetesServiceDialAddress makes Kubernetes service DNS lookups
+// absolute at the dial boundary. Keeping the route URL unchanged preserves the
+// upstream HTTP Host header and TLS SNI while avoiding ndots search expansion.
+func rootedKubernetesServiceDialAddress(address string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil || strings.HasSuffix(host, ".") {
+		return address
+	}
+	if !strings.HasSuffix(strings.ToLower(host), ".svc.cluster.local") {
+		return address
+	}
+	return net.JoinHostPort(host+".", port)
 }
 
 func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request) {
