@@ -315,7 +315,7 @@ func TestOperationDiagnosisIncludesFailedBackupHint(t *testing.T) {
 		AppID:        app.ID,
 		Target:       target,
 		BackendID:    backend.ID,
-		Trigger:      model.BackupRunTriggerScheduled,
+		Trigger:      model.BackupRunTriggerManual,
 		Status:       model.BackupRunStatusFailed,
 		ErrorCode:    "pg_dump_failed",
 		ErrorMessage: "pg_dump exited non-zero",

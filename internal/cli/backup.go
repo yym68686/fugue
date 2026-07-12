@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/backupschedule"
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
@@ -349,7 +350,10 @@ func (c *CLI) newBackupPolicyEnableCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := backupPolicyRequestMap(opts, true)
+			req, err := backupPolicyRequestMap(opts, true)
+			if err != nil {
+				return err
+			}
 			policy, err := client.UpsertBackupPolicy(req)
 			if err != nil {
 				return err
@@ -402,7 +406,7 @@ func addBackupPolicyFlags(cmd *cobra.Command, opts *backupPolicyOptions) {
 	cmd.Flags().StringVar(&opts.Name, "name", "", "Policy name")
 	cmd.Flags().StringVar(&opts.TargetType, "target", opts.TargetType, "Target: control-plane-db, app-database, persistent-storage, data-workspace, registry")
 	cmd.Flags().StringVar(&opts.BackendID, "backend", "", "Backup backend id/name")
-	cmd.Flags().StringVar(&opts.Schedule, "schedule", opts.Schedule, "Cron schedule")
+	cmd.Flags().StringVar(&opts.Schedule, "schedule", opts.Schedule, "Numeric five-field UTC cron schedule (or @hourly)")
 	cmd.Flags().IntVar(&opts.RetainCount, "retain-count", opts.RetainCount, "Number of successful artifacts to retain")
 	cmd.Flags().IntVar(&opts.RetainCount, "retain", opts.RetainCount, "Alias for --retain-count")
 	cmd.Flags().StringVar(&opts.Version, "version", "", "Version label for manual/user backups")
@@ -411,7 +415,10 @@ func addBackupPolicyFlags(cmd *cobra.Command, opts *backupPolicyOptions) {
 	cmd.Flags().StringVar(&opts.WorkspaceID, "workspace-id", "", "Data workspace id target")
 }
 
-func backupPolicyRequestMap(opts backupPolicyOptions, enabled bool) map[string]any {
+func backupPolicyRequestMap(opts backupPolicyOptions, enabled bool) (map[string]any, error) {
+	if err := backupschedule.Validate(opts.Schedule); err != nil {
+		return nil, fmt.Errorf("invalid backup schedule: %w", err)
+	}
 	target := map[string]any{
 		"type":         strings.TrimSpace(opts.TargetType),
 		"project_id":   strings.TrimSpace(opts.ProjectID),
@@ -427,7 +434,7 @@ func backupPolicyRequestMap(opts backupPolicyOptions, enabled bool) map[string]a
 		"retain_count": opts.RetainCount,
 		"version":      strings.TrimSpace(opts.Version),
 	}
-	return req
+	return req, nil
 }
 
 func (c *CLI) newBackupRunCommand() *cobra.Command {
@@ -545,13 +552,16 @@ func addBackupRunFlags(cmd *cobra.Command, opts *backupRunOptions) {
 }
 
 func backupRunRequestMap(opts backupRunOptions) map[string]any {
-	return map[string]any{
+	req := map[string]any{
 		"policy_id":  strings.TrimSpace(opts.PolicyID),
-		"target":     map[string]any{"type": strings.TrimSpace(opts.TargetType)},
 		"backend_id": strings.TrimSpace(opts.BackendID),
 		"version":    strings.TrimSpace(opts.Version),
 		"wait":       opts.Wait,
 	}
+	if strings.TrimSpace(opts.PolicyID) == "" {
+		req["target"] = map[string]any{"type": strings.TrimSpace(opts.TargetType)}
+	}
+	return req
 }
 
 func (c *CLI) createBackupRunAndMaybeWait(client *Client, req map[string]any, wait bool, create func(map[string]any) (backupRunEnvelope, error)) (backupRunEnvelope, error) {
@@ -852,7 +862,10 @@ func (c *CLI) newAdminBackupEnableCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := backupPolicyRequestMap(opts, true)
+			req, err := backupPolicyRequestMap(opts, true)
+			if err != nil {
+				return err
+			}
 			policy, err := client.UpsertBackupPolicy(req)
 			if err != nil {
 				return err
@@ -982,7 +995,10 @@ func (c *CLI) newAppBackupEnableCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := backupPolicyRequestMap(opts, true)
+			req, err := backupPolicyRequestMap(opts, true)
+			if err != nil {
+				return err
+			}
 			policy, err := client.CreateAppBackupPolicy(app.ID, req)
 			if err != nil {
 				return err

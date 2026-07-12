@@ -122,6 +122,9 @@ func (s *Store) Init() error {
 		if err := s.EnsureDefaultBackupPolicy(); err != nil {
 			return err
 		}
+		if err := s.repairBackupPolicySchedules(); err != nil {
+			return err
+		}
 		if err := s.pgRepairAppStatuses(); err != nil {
 			return err
 		}
@@ -134,7 +137,11 @@ func (s *Store) Init() error {
 		if err := seedDefaultDataBackendFromEnvInState(state); err != nil {
 			return err
 		}
-		return seedDefaultBackupBackendFromEnvInState(state)
+		if err := seedDefaultBackupBackendFromEnvInState(state); err != nil {
+			return err
+		}
+		repairBackupPolicySchedulesInState(state, time.Now().UTC())
+		return nil
 	})
 }
 

@@ -91,12 +91,15 @@ fugue backup artifact ls --target-type control-plane-db
 ```bash
 fugue app backup status my-app
 fugue app backup enable my-app \
-  --database \
+  --target app-database \
   --backend prod-r2 \
   --schedule '0 */6 * * *' \
   --retain-count 7 \
   --version daily
 ```
+
+Backup schedules use numeric five-field cron syntax in UTC. The `@hourly`
+shortcut is also accepted; timezone prefixes and other descriptors are not.
 
 The status command reports disabled targets before opt-in. Creating an app
 database policy resolves the app-owned managed PostgreSQL target from the app

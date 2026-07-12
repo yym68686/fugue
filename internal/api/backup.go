@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/backupschedule"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/observability"
@@ -36,6 +37,11 @@ const (
 	backupRunHeartbeatPeriod = 30 * time.Second
 	backupBackendProbeTTL    = 30 * time.Second
 	backupRunMaxRetries      = 3
+)
+
+var (
+	errBackupTargetNotAuthorized  = errors.New("tenant-scoped backup target does not belong to tenant")
+	errBackupBackendNotAuthorized = errors.New("tenant-scoped backup backend does not belong to tenant")
 )
 
 type backupBackendRequest struct {
@@ -144,80 +150,45 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 
 func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 	now := time.Now().UTC()
-	for _, status := range []string{model.BackupRunStatusRunning, model.BackupRunStatusPending} {
-		runs, err := s.store.ListBackupRuns(store.BackupRunFilter{Status: status, PlatformAdmin: true, Limit: 500})
+	runs, err := s.store.ListStaleBackupRuns(now, backupRunLeaseTTL, 500)
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("backup scheduler list stale runs for recovery failed: %v", err)
+		}
+		return
+	}
+	for _, run := range runs {
+		updated, err := s.store.RecoverStaleBackupRun(run, now, backupRunLeaseTTL)
+		if errors.Is(err, store.ErrConflict) {
+			continue
+		}
 		if err != nil {
 			if s.log != nil {
-				s.log.Printf("backup scheduler list %s runs for recovery failed: %v", status, err)
+				s.log.Printf("backup scheduler recover stale run=%s failed: %v", run.ID, err)
 			}
 			continue
 		}
-		for _, run := range runs {
-			if !backupRunIsStale(run, now) {
-				continue
-			}
-			failed := model.BackupRunStatusFailed
-			code := "backup_run_lost"
-			message := "backup run lease expired before completion; worker likely restarted or lost ownership"
-			finishedAt := now
-			updated, err := s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
-				Status:       &failed,
-				ErrorCode:    &code,
-				ErrorMessage: &message,
-				FinishedAt:   timePtrPtr(&finishedAt),
-				HeartbeatAt:  timePtrPtr(&now),
-			})
-			if err != nil {
-				if s.log != nil {
-					s.log.Printf("backup scheduler recover stale run=%s failed: %v", run.ID, err)
-				}
-				continue
-			}
-			if s.log != nil {
-				s.log.Printf("backup scheduler recovered stale run=%s target=%s retry_count=%d", updated.ID, updated.Target.Type, updated.RetryCount)
-			}
-			s.scheduleBackupRetry(contextWithoutCancel(ctx), updated)
+		if s.log != nil {
+			s.log.Printf("backup scheduler recovered stale run=%s target=%s retry_count=%d", updated.ID, updated.Target.Type, updated.RetryCount)
 		}
+		s.scheduleBackupRetry(contextWithoutCancel(ctx), updated)
 	}
 }
 
 func backupRunIsStale(run model.BackupRun, now time.Time) bool {
-	run = model.NormalizeBackupRun(run)
-	if run.Status != model.BackupRunStatusRunning && run.Status != model.BackupRunStatusPending {
-		return false
-	}
-	if run.Status == model.BackupRunStatusPending && run.Trigger == model.BackupRunTriggerRetry && run.NextRetryAt != nil && run.NextRetryAt.After(now) {
-		return false
-	}
-	if run.LockedUntil != nil {
-		return run.LockedUntil.Before(now)
-	}
-	lastSeen := run.UpdatedAt
-	if run.HeartbeatAt != nil {
-		lastSeen = *run.HeartbeatAt
-	}
-	if run.Status == model.BackupRunStatusPending && run.Trigger == model.BackupRunTriggerRetry && run.NextRetryAt != nil && run.NextRetryAt.After(lastSeen) {
-		lastSeen = *run.NextRetryAt
-	}
-	if lastSeen.IsZero() {
-		lastSeen = run.CreatedAt
-	}
-	return !lastSeen.IsZero() && lastSeen.Add(backupRunLeaseTTL).Before(now)
+	return store.BackupRunIsStale(run, now, backupRunLeaseTTL)
 }
 
 func (s *Server) enqueueDueBackupRetries(ctx context.Context) {
-	runs, err := s.store.ListBackupRuns(store.BackupRunFilter{Status: model.BackupRunStatusPending, PlatformAdmin: true, Limit: 100})
+	now := time.Now().UTC()
+	runs, err := s.store.ListDueBackupRetryRuns(now, 100)
 	if err != nil {
 		if s.log != nil {
 			s.log.Printf("backup scheduler list pending retries failed: %v", err)
 		}
 		return
 	}
-	now := time.Now().UTC()
 	for _, run := range runs {
-		if run.Trigger != model.BackupRunTriggerRetry || run.NextRetryAt == nil || run.NextRetryAt.After(now) {
-			continue
-		}
 		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
 	}
 }
@@ -259,6 +230,9 @@ func (s *Server) handleCreateBackupBackend(w http.ResponseWriter, r *http.Reques
 		billable = true
 	}
 	if req.RotateOnly {
+		if !s.authorizeBackupBackendMutation(w, principal, req.Name) {
+			return
+		}
 		backend, err := s.store.RotateBackupBackendCredentials(req.Name, tenantID, principal.IsPlatformAdmin(), req.Credentials)
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -312,7 +286,11 @@ func (s *Server) handleDeleteBackupBackend(w http.ResponseWriter, r *http.Reques
 		httpx.WriteError(w, http.StatusForbidden, "missing backup.write scope")
 		return
 	}
-	backend, err := s.store.DeleteBackupBackend(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
+	backendID := r.PathValue("id")
+	if !s.authorizeBackupBackendMutation(w, principal, backendID) {
+		return
+	}
+	backend, err := s.store.DeleteBackupBackend(backendID, principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -328,6 +306,9 @@ func (s *Server) handleTestBackupBackend(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	backendID := r.PathValue("id")
+	if !s.authorizeBackupBackendMutation(w, principal, backendID) {
+		return
+	}
 	pass, message := s.testBackupBackend(r.Context(), backendID, principal)
 	backend, err := s.store.RecordBackupBackendTest(backendID, principal.TenantID, principal.IsPlatformAdmin(), pass, message)
 	if err != nil {
@@ -339,6 +320,19 @@ func (s *Server) handleTestBackupBackend(w http.ResponseWriter, r *http.Request)
 		status = "ok"
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": status, "message": message, "backend": backend})
+}
+
+func (s *Server) authorizeBackupBackendMutation(w http.ResponseWriter, principal model.Principal, idOrName string) bool {
+	backend, err := s.store.GetBackupBackend(idOrName, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return false
+	}
+	if !principal.IsPlatformAdmin() && (principal.TenantID == "" || backend.TenantID != principal.TenantID) {
+		httpx.WriteError(w, http.StatusForbidden, "platform backup backends require platform administrator access for mutation")
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleListBackupPolicies(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +368,7 @@ func (s *Server) handleUpsertBackupPolicy(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	policy, ok := s.backupPolicyFromRequest(w, principal, req, nil)
+	policy, ok := s.backupPolicyUpsertFromRequest(w, principal, req)
 	if !ok {
 		return
 	}
@@ -415,12 +409,25 @@ func (s *Server) handlePatchBackupPolicy(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
+	if err := s.authorizeTenantBackupPolicy(principal, current); err != nil {
+		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+		return
+	}
 	var req backupPolicyRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Enabled != nil && req.Name == "" && req.BackendID == "" && req.Schedule == "" && req.RetainCount == 0 && req.Version == "" && req.Target.Type == "" {
+	if strings.TrimSpace(req.ID) != "" {
+		httpx.WriteError(w, http.StatusBadRequest, "id is read-only; use the policy PATCH endpoint to update an existing policy")
+		return
+	}
+	if backupPolicyRequestOnlyEnabled(req) {
+		if *req.Enabled && strings.TrimSpace(current.BackendID) != "" {
+			if _, ok := s.backupBackendIDForScope(w, principal, current.TenantID, current.BackendID); !ok {
+				return
+			}
+		}
 		policy, err := s.store.SetBackupPolicyEnabled(current.ID, principal.TenantID, principal.IsPlatformAdmin(), *req.Enabled, "disabled by user")
 		if err != nil {
 			s.writeStoreError(w, err)
@@ -441,6 +448,23 @@ func (s *Server) handlePatchBackupPolicy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"policy": saved})
+}
+
+func backupPolicyRequestOnlyEnabled(req backupPolicyRequest) bool {
+	return req.Enabled != nil &&
+		strings.TrimSpace(req.ID) == "" &&
+		strings.TrimSpace(req.TenantID) == "" &&
+		strings.TrimSpace(req.ProjectID) == "" &&
+		strings.TrimSpace(req.AppID) == "" &&
+		strings.TrimSpace(req.Name) == "" &&
+		backupTargetRequestIsEmpty(req.Target) &&
+		strings.TrimSpace(req.BackendID) == "" &&
+		strings.TrimSpace(req.Schedule) == "" &&
+		req.RetainCount == 0 &&
+		req.Retention.RetainCount == 0 &&
+		req.Retention.RetainDays == 0 &&
+		req.Retention.ProtectLatest == 0 &&
+		strings.TrimSpace(req.Version) == ""
 }
 
 func (s *Server) handleListBackupRuns(w http.ResponseWriter, r *http.Request) {
@@ -491,9 +515,55 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if !principal.IsPlatformAdmin() {
 		run.TenantID = principal.TenantID
-		if run.Target.TenantID == "" {
-			run.Target.TenantID = principal.TenantID
+		run.Target.TenantID = principal.TenantID
+		requestedTargetType := strings.TrimSpace(req.Target.Type)
+		if run.PolicyID == "" && requestedTargetType == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "policy_id or target.type is required")
+			return
 		}
+		if run.PolicyID == "" && requestedTargetType != "" && backupTargetRequiresPlatformAdmin(run.Target.Type) {
+			httpx.WriteError(w, http.StatusForbidden, "platform backup targets require platform administrator access")
+			return
+		}
+		if run.PolicyID == "" && requestedTargetType != "" {
+			if err := s.validateTenantBackupTarget(principal.TenantID, "", "", run.Target); err != nil {
+				httpx.WriteError(w, http.StatusForbidden, "backup target is not available to this tenant")
+				return
+			}
+		}
+		if run.PolicyID != "" {
+			policy, err := s.store.GetBackupPolicy(run.PolicyID, principal.TenantID, false)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
+				httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+				return
+			}
+			if run.BackendID == "" && policy.BackendID != "" {
+				run.BackendID = policy.BackendID
+			}
+			run.PolicyID = policy.ID
+			run.ProjectID = policy.ProjectID
+			run.AppID = policy.AppID
+			run.Target = policy.Target
+		}
+	}
+	if principal.IsPlatformAdmin() && run.PolicyID != "" {
+		policy, err := s.store.GetBackupPolicy(run.PolicyID, "", true)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if run.BackendID == "" && policy.BackendID != "" {
+			run.BackendID = policy.BackendID
+		}
+		run.PolicyID = policy.ID
+		run.TenantID = policy.TenantID
+		run.ProjectID = policy.ProjectID
+		run.AppID = policy.AppID
+		run.Target = policy.Target
 	}
 	if principal.IsPlatformAdmin() {
 		var err error
@@ -502,6 +572,13 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 			s.writeStoreError(w, err)
 			return
 		}
+	}
+	if run.BackendID != "" {
+		backendID, ok := s.backupBackendIDForScope(w, principal, firstNonEmptyString(run.TenantID, run.Target.TenantID), run.BackendID)
+		if !ok {
+			return
+		}
+		run.BackendID = backendID
 	}
 	created, err := s.store.CreateBackupRun(run)
 	if err != nil {
@@ -620,7 +697,7 @@ func (s *Server) handleDeleteBackupArtifact(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "missing backup.write scope")
 		return
 	}
-	artifact, err := s.store.MarkBackupArtifactDeleted(r.PathValue("id"))
+	artifact, err := s.store.MarkBackupArtifactDeleted(r.PathValue("id"), principal.TenantID, principal.IsPlatformAdmin())
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -642,13 +719,44 @@ func (s *Server) handleCreateBackupRestorePlan(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := s.store.GetBackupArtifact(req.ArtifactID, principal.TenantID, principal.IsPlatformAdmin()); err != nil {
+	artifact, err := s.store.GetBackupArtifact(req.ArtifactID, principal.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	if artifact.Status != model.BackupArtifactStatusActive {
+		httpx.WriteError(w, http.StatusConflict, "backup artifact is not active")
+		return
+	}
+	if !principal.IsPlatformAdmin() && (artifact.TenantID == "" || artifact.TenantID != principal.TenantID) {
+		httpx.WriteError(w, http.StatusForbidden, "backup artifact is not available to this tenant")
+		return
+	}
+	target := req.Target
+	if backupTargetRequestIsEmpty(target) {
+		target = artifact.Target
+	}
+	target = model.NormalizeBackupTarget(target)
+	if !principal.IsPlatformAdmin() {
+		if err := s.validateTenantBackupTarget(principal.TenantID, target.ProjectID, target.AppID, target); err != nil {
+			httpx.WriteError(w, http.StatusForbidden, "backup restore target is not available to this tenant")
+			return
+		}
+		target.TenantID = principal.TenantID
+	}
+	if target.Type != model.NormalizeBackupTarget(artifact.Target).Type {
+		httpx.WriteError(w, http.StatusBadRequest, "backup artifact target type is not compatible with the restore target")
+		return
+	}
+	planTenantID := firstNonEmptyString(target.TenantID, artifact.TenantID)
+	planProjectID := firstNonEmptyString(target.ProjectID, artifact.ProjectID)
+	planAppID := firstNonEmptyString(target.AppID, artifact.AppID)
 	plan, err := s.store.CreateBackupRestorePlan(model.BackupRestorePlan{
 		ArtifactID:    req.ArtifactID,
-		Target:        req.Target,
+		TenantID:      planTenantID,
+		ProjectID:     planProjectID,
+		AppID:         planAppID,
+		Target:        target,
 		Mode:          req.Mode,
 		Status:        model.BackupRestoreStatusPlanned,
 		CreatedByType: principal.ActorType,
@@ -663,6 +771,19 @@ func (s *Server) handleCreateBackupRestorePlan(w http.ResponseWriter, r *http.Re
 		"mode":        plan.Mode,
 	})
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"plan": plan})
+}
+
+func backupTargetRequestIsEmpty(target model.BackupTarget) bool {
+	return strings.TrimSpace(target.Type) == "" &&
+		strings.TrimSpace(target.TenantID) == "" &&
+		strings.TrimSpace(target.ProjectID) == "" &&
+		strings.TrimSpace(target.AppID) == "" &&
+		strings.TrimSpace(target.WorkspaceID) == "" &&
+		strings.TrimSpace(target.RuntimeID) == "" &&
+		strings.TrimSpace(target.Name) == "" &&
+		strings.TrimSpace(target.ServiceName) == "" &&
+		strings.TrimSpace(target.Database) == "" &&
+		strings.TrimSpace(target.Component) == ""
 }
 
 func (s *Server) handleListBackupRestorePlans(w http.ResponseWriter, r *http.Request) {
@@ -856,7 +977,18 @@ func (s *Server) handleCreateAppBackupPolicy(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	req.Target = target
-	policy, ok := s.backupPolicyFromRequest(w, principal, req, nil)
+	if strings.TrimSpace(req.ID) != "" {
+		current, err := s.store.GetBackupPolicy(req.ID, app.TenantID, principal.IsPlatformAdmin())
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if !backupPolicyTargetsApp(current, app) {
+			httpx.WriteError(w, http.StatusForbidden, "backup policy is not available for this app")
+			return
+		}
+	}
+	policy, ok := s.backupPolicyUpsertFromRequest(w, principal, req)
 	if !ok {
 		return
 	}
@@ -929,30 +1061,60 @@ func (s *Server) handleCreateAppBackupRun(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if req.PolicyID == "" {
+		requestedTargetType := model.BackupTargetAppDatabase
+		if strings.TrimSpace(req.Target.Type) != "" {
+			requestedTargetType = model.NormalizeBackupTargetType(req.Target.Type)
+		}
 		policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{
 			TenantID:        app.TenantID,
 			AppID:           app.ID,
+			TargetType:      requestedTargetType,
 			IncludeDisabled: false,
-			PlatformAdmin:   true,
-			Limit:           1,
+			PlatformAdmin:   principal.IsPlatformAdmin(),
+			Limit:           100,
 		})
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
-		if len(policies) == 0 {
+		policy, found := preferredBackupPolicy(policies)
+		if !found {
 			httpx.WriteError(w, http.StatusConflict, "app backup is disabled")
 			return
 		}
-		req.PolicyID = policies[0].ID
+		req.PolicyID = policy.ID
+	}
+	policy, err := s.store.GetBackupPolicy(req.PolicyID, app.TenantID, principal.IsPlatformAdmin())
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if !backupPolicyTargetsApp(policy, app) {
+		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available for this app")
+		return
+	}
+	if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
+		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+		return
+	}
+	backendID := strings.TrimSpace(req.BackendID)
+	if backendID == "" {
+		backendID = policy.BackendID
+	}
+	if backendID != "" {
+		var ok bool
+		backendID, ok = s.backupBackendIDForScope(w, principal, app.TenantID, backendID)
+		if !ok {
+			return
+		}
 	}
 	run, err := s.store.CreateBackupRun(model.BackupRun{
-		PolicyID:        req.PolicyID,
+		PolicyID:        policy.ID,
 		TenantID:        app.TenantID,
 		ProjectID:       app.ProjectID,
 		AppID:           app.ID,
-		Target:          req.Target,
-		BackendID:       req.BackendID,
+		Target:          policy.Target,
+		BackendID:       backendID,
 		Trigger:         firstNonEmptyString(req.Trigger, model.BackupRunTriggerManual),
 		Version:         req.Version,
 		Status:          model.BackupRunStatusPending,
@@ -967,13 +1129,90 @@ func (s *Server) handleCreateAppBackupRun(w http.ResponseWriter, r *http.Request
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"run": run})
 }
 
+func (s *Server) backupPolicyUpsertFromRequest(w http.ResponseWriter, principal model.Principal, req backupPolicyRequest) (model.BackupPolicy, bool) {
+	var current *model.BackupPolicy
+	if id := strings.TrimSpace(req.ID); id != "" {
+		policy, err := s.store.GetBackupPolicy(id, principal.TenantID, principal.IsPlatformAdmin())
+		if err != nil {
+			s.writeStoreError(w, err)
+			return model.BackupPolicy{}, false
+		}
+		if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
+			httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+			return model.BackupPolicy{}, false
+		}
+		current = &policy
+	} else if principal.IsPlatformAdmin() && req.Name == "" &&
+		model.NormalizeBackupTargetType(req.Target.Type) == model.BackupTargetControlPlaneDatabase &&
+		strings.TrimSpace(req.TenantID) == "" && strings.TrimSpace(req.ProjectID) == "" && strings.TrimSpace(req.AppID) == "" &&
+		strings.TrimSpace(req.Target.TenantID) == "" && strings.TrimSpace(req.Target.ProjectID) == "" && strings.TrimSpace(req.Target.AppID) == "" {
+		policy, err := s.store.GetBackupPolicy(s.store.DefaultControlPlaneBackupPolicyID(), "", true)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.writeStoreError(w, err)
+			return model.BackupPolicy{}, false
+		}
+		if err == nil {
+			current = &policy
+		}
+	}
+
+	policy, ok := s.backupPolicyFromRequest(w, principal, req, current)
+	if !ok {
+		return model.BackupPolicy{}, false
+	}
+	if current == nil {
+		policies, err := s.store.ListBackupPolicies(store.BackupPolicyFilter{
+			TenantID:        policy.TenantID,
+			IncludeDisabled: true,
+			PlatformAdmin:   principal.IsPlatformAdmin(),
+		})
+		if err != nil {
+			s.writeStoreError(w, err)
+			return model.BackupPolicy{}, false
+		}
+		for idx := range policies {
+			candidate := model.NormalizeBackupPolicy(policies[idx])
+			if candidate.TenantID != policy.TenantID || candidate.ProjectID != policy.ProjectID || candidate.AppID != policy.AppID || candidate.Slug != policy.Slug {
+				continue
+			}
+			if err := s.authorizeTenantBackupPolicy(principal, candidate); err != nil {
+				httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
+				return model.BackupPolicy{}, false
+			}
+			current = &candidate
+			policy, ok = s.backupPolicyFromRequest(w, principal, req, current)
+			if !ok {
+				return model.BackupPolicy{}, false
+			}
+			break
+		}
+	}
+	if current != nil {
+		policy.ID = current.ID
+		policy.CreatedAt = current.CreatedAt
+	}
+	return policy, true
+}
+
+func mergeBackupTargetDefaults(target, defaults model.BackupTarget) model.BackupTarget {
+	target = model.NormalizeBackupTarget(target)
+	defaults = model.NormalizeBackupTarget(defaults)
+	target.TenantID = firstNonEmptyString(target.TenantID, defaults.TenantID)
+	target.ProjectID = firstNonEmptyString(target.ProjectID, defaults.ProjectID)
+	target.AppID = firstNonEmptyString(target.AppID, defaults.AppID)
+	target.WorkspaceID = firstNonEmptyString(target.WorkspaceID, defaults.WorkspaceID)
+	target.RuntimeID = firstNonEmptyString(target.RuntimeID, defaults.RuntimeID)
+	target.Name = firstNonEmptyString(target.Name, defaults.Name)
+	target.ServiceName = firstNonEmptyString(target.ServiceName, defaults.ServiceName)
+	target.Database = firstNonEmptyString(target.Database, defaults.Database)
+	target.Component = firstNonEmptyString(target.Component, defaults.Component)
+	return model.NormalizeBackupTarget(target)
+}
+
 func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.Principal, req backupPolicyRequest, current *model.BackupPolicy) (model.BackupPolicy, bool) {
 	policy := model.BackupPolicy{}
 	if current != nil {
 		policy = *current
-	}
-	if req.ID != "" {
-		policy.ID = strings.TrimSpace(req.ID)
 	}
 	if req.Name != "" {
 		policy.Name = strings.TrimSpace(req.Name)
@@ -982,10 +1221,18 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 		policy.Name = defaultBackupPolicyName(req.Target)
 	}
 	if req.Target.Type != "" {
-		policy.Target = model.NormalizeBackupTarget(req.Target)
+		requestedTarget := model.NormalizeBackupTarget(req.Target)
+		if current != nil && requestedTarget.Type == model.NormalizeBackupTarget(current.Target).Type {
+			requestedTarget = mergeBackupTargetDefaults(requestedTarget, current.Target)
+		}
+		policy.Target = requestedTarget
 	}
 	if policy.Target.Type == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "target.type is required")
+		return model.BackupPolicy{}, false
+	}
+	if !principal.IsPlatformAdmin() && backupTargetRequiresPlatformAdmin(policy.Target.Type) {
+		httpx.WriteError(w, http.StatusForbidden, "platform backup targets require platform administrator access")
 		return model.BackupPolicy{}, false
 	}
 	if req.TenantID != "" || current == nil {
@@ -993,9 +1240,7 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 	}
 	if !principal.IsPlatformAdmin() {
 		policy.TenantID = principal.TenantID
-		if policy.Target.TenantID == "" {
-			policy.Target.TenantID = principal.TenantID
-		}
+		policy.Target.TenantID = principal.TenantID
 	}
 	if req.ProjectID != "" || current == nil {
 		policy.ProjectID = strings.TrimSpace(req.ProjectID)
@@ -1017,6 +1262,12 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 	if policy.Schedule == "" {
 		policy.Schedule = model.BackupDefaultSchedule
 	}
+	if policy.Enabled {
+		if err := backupschedule.Validate(policy.Schedule); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid backup schedule: "+err.Error())
+			return model.BackupPolicy{}, false
+		}
+	}
 	if req.RetainCount > 0 || current == nil {
 		policy.RetainCount = req.RetainCount
 	}
@@ -1031,6 +1282,17 @@ func (s *Server) backupPolicyFromRequest(w http.ResponseWriter, principal model.
 	}
 	if req.Version != "" || current == nil {
 		policy.Version = strings.TrimSpace(req.Version)
+	}
+	if err := s.authorizeTenantBackupPolicy(principal, policy); err != nil {
+		httpx.WriteError(w, http.StatusForbidden, "backup target is not available to this tenant")
+		return model.BackupPolicy{}, false
+	}
+	if policy.BackendID != "" {
+		backendID, ok := s.backupBackendIDForScope(w, principal, policy.TenantID, policy.BackendID)
+		if !ok {
+			return model.BackupPolicy{}, false
+		}
+		policy.BackendID = backendID
 	}
 	if policy.BackendID == "" {
 		policy.Status = model.BackupPolicyStatusBlockedNoBackend
@@ -1062,32 +1324,169 @@ func defaultBackupPolicyName(target model.BackupTarget) string {
 	}
 }
 
+func backupTargetRequiresPlatformAdmin(targetType string) bool {
+	switch model.NormalizeBackupTargetType(targetType) {
+	case model.BackupTargetControlPlaneDatabase, model.BackupTargetRegistry, model.BackupTargetPlatformComponent:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) authorizeTenantBackupPolicy(principal model.Principal, policy model.BackupPolicy) error {
+	if principal.IsPlatformAdmin() {
+		return nil
+	}
+	tenantID := strings.TrimSpace(principal.TenantID)
+	if tenantID == "" || strings.TrimSpace(policy.TenantID) != tenantID {
+		return errBackupTargetNotAuthorized
+	}
+	return s.validateTenantBackupTarget(tenantID, policy.ProjectID, policy.AppID, policy.Target)
+}
+
+func backupPolicyTargetsApp(policy model.BackupPolicy, app model.App) bool {
+	policy = model.NormalizeBackupPolicy(policy)
+	if strings.TrimSpace(policy.TenantID) != strings.TrimSpace(app.TenantID) {
+		return false
+	}
+	if policy.ProjectID != "" && policy.ProjectID != app.ProjectID {
+		return false
+	}
+	if policy.Target.TenantID != "" && policy.Target.TenantID != app.TenantID {
+		return false
+	}
+	if policy.Target.ProjectID != "" && policy.Target.ProjectID != app.ProjectID {
+		return false
+	}
+	if policy.AppID != "" && policy.AppID != app.ID {
+		return false
+	}
+	if policy.Target.AppID != "" && policy.Target.AppID != app.ID {
+		return false
+	}
+	return policy.AppID != "" || policy.Target.AppID != ""
+}
+
+func (s *Server) backupBackendIDForPrincipal(w http.ResponseWriter, principal model.Principal, idOrName string) (string, bool) {
+	return s.backupBackendIDForScope(w, principal, principal.TenantID, idOrName)
+}
+
+func (s *Server) backupBackendIDForScope(w http.ResponseWriter, principal model.Principal, tenantID, idOrName string) (string, bool) {
+	tenantID = strings.TrimSpace(tenantID)
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" {
+		return "", true
+	}
+	backend, err := s.store.GetBackupBackend(idOrName, tenantID, false)
+	if err != nil {
+		if !principal.IsPlatformAdmin() && errors.Is(err, store.ErrNotFound) {
+			httpx.WriteError(w, http.StatusForbidden, "backup backend is not available to this tenant")
+		} else {
+			s.writeStoreError(w, err)
+		}
+		return "", false
+	}
+	if backend.TenantID != "" && backend.TenantID != tenantID {
+		httpx.WriteError(w, http.StatusForbidden, "backup backend is not available to this tenant")
+		return "", false
+	}
+	return backend.ID, true
+}
+
+func (s *Server) validateTenantBackupBackend(tenantID, idOrName string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" {
+		return nil
+	}
+	if tenantID == "" {
+		return errBackupBackendNotAuthorized
+	}
+	backend, err := s.store.GetBackupBackend(idOrName, tenantID, false)
+	if err != nil || backend.TenantID != "" && backend.TenantID != tenantID {
+		return errBackupBackendNotAuthorized
+	}
+	return nil
+}
+
+func (s *Server) validateTenantBackupTarget(tenantID, projectID, appID string, target model.BackupTarget) error {
+	tenantID = strings.TrimSpace(tenantID)
+	projectID = strings.TrimSpace(projectID)
+	appID = strings.TrimSpace(appID)
+	target = model.NormalizeBackupTarget(target)
+	if tenantID == "" || backupTargetRequiresPlatformAdmin(target.Type) {
+		return errBackupTargetNotAuthorized
+	}
+	if target.TenantID != "" && target.TenantID != tenantID {
+		return errBackupTargetNotAuthorized
+	}
+	if projectID != "" && target.ProjectID != "" && projectID != target.ProjectID {
+		return errBackupTargetNotAuthorized
+	}
+	if appID != "" && target.AppID != "" && appID != target.AppID {
+		return errBackupTargetNotAuthorized
+	}
+
+	effectiveProjectID := firstNonEmptyString(projectID, target.ProjectID)
+	if effectiveProjectID != "" {
+		project, err := s.store.GetProject(effectiveProjectID)
+		if err != nil || project.TenantID != tenantID {
+			return errBackupTargetNotAuthorized
+		}
+	}
+
+	effectiveAppID := firstNonEmptyString(appID, target.AppID)
+	if effectiveAppID != "" {
+		app, err := s.store.GetApp(effectiveAppID)
+		if err != nil || app.TenantID != tenantID {
+			return errBackupTargetNotAuthorized
+		}
+		if effectiveProjectID != "" && app.ProjectID != effectiveProjectID {
+			return errBackupTargetNotAuthorized
+		}
+	}
+	if target.RuntimeID != "" {
+		visible, err := s.store.RuntimeVisibleToTenant(target.RuntimeID, tenantID, false)
+		if err != nil || !visible {
+			return errBackupTargetNotAuthorized
+		}
+	}
+
+	workspaceID := strings.TrimSpace(target.WorkspaceID)
+	if target.Type == model.BackupTargetDataWorkspace {
+		workspaceID = firstNonEmptyString(workspaceID, target.Name)
+	}
+	if workspaceID != "" {
+		workspace, err := s.store.GetDataWorkspace(workspaceID, tenantID, false)
+		if err != nil || workspace.TenantID != tenantID {
+			return errBackupTargetNotAuthorized
+		}
+		if effectiveProjectID != "" && workspace.ProjectID != effectiveProjectID {
+			return errBackupTargetNotAuthorized
+		}
+	}
+	return nil
+}
+
 func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	if parent == nil {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(parent, backupRunTimeout)
 	defer cancel()
-	run, err := s.store.GetBackupRun(runID, "", true)
+	now := time.Now().UTC()
+	leaseOwner := backupLeaseOwner()
+	run, err := s.store.ClaimBackupRun(runID, leaseOwner, now, backupRunLeaseTTL)
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return
+		}
 		if s.log != nil {
-			s.log.Printf("load backup run %s failed: %v", runID, err)
+			s.log.Printf("claim backup run %s failed: %v", runID, err)
 		}
 		return
 	}
-	now := time.Now().UTC()
-	startedAt := now
-	lockedUntil := now.Add(backupRunLeaseTTL)
-	status := model.BackupRunStatusRunning
-	leaseOwner := backupLeaseOwner()
-	_, _ = s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
-		Status:      &status,
-		LeaseOwner:  &leaseOwner,
-		LockedUntil: timePtrPtr(&lockedUntil),
-		StartedAt:   timePtrPtr(&startedAt),
-		HeartbeatAt: timePtrPtr(&startedAt),
-	})
-	stopHeartbeat := s.startBackupRunHeartbeat(ctx, run.ID)
+	stopHeartbeat := s.startBackupRunHeartbeat(ctx, cancel, run.ID, leaseOwner)
 	runner := s.backupRunner
 	if runner == nil {
 		runner = s.runBackup
@@ -1095,41 +1494,46 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	artifacts, err := runner(ctx, run)
 	finishedAt := time.Now().UTC()
 	stopHeartbeat()
+	status := model.BackupRunStatusSucceeded
 	if err != nil {
 		status = model.BackupRunStatusFailed
 		code := backupErrorCode(err)
 		message := err.Error()
-		_, _ = s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
-			Status:       &status,
-			ErrorCode:    &code,
-			ErrorMessage: &message,
-			LockedUntil:  timePtrPtr(nil),
-			FinishedAt:   timePtrPtr(&finishedAt),
-			HeartbeatAt:  timePtrPtr(&finishedAt),
+		finished, finishErr := s.store.FinishBackupRun(run.ID, leaseOwner, store.BackupRunFinish{
+			Status:       status,
+			ErrorCode:    code,
+			ErrorMessage: message,
+			FinishedAt:   finishedAt,
 		})
 		if s.log != nil {
 			s.log.Printf("backup run %s failed: %v", run.ID, err)
 		}
-		s.scheduleBackupRetry(contextWithoutCancel(parent), run)
+		if finishErr != nil {
+			if s.log != nil && !errors.Is(finishErr, store.ErrConflict) {
+				s.log.Printf("finish failed backup run %s failed: %v", run.ID, finishErr)
+			}
+			return
+		}
+		s.scheduleBackupRetry(contextWithoutCancel(parent), finished)
 		return
 	}
 	var bytesWritten int64
 	for _, artifact := range artifacts {
 		bytesWritten += artifact.SizeBytes
 	}
-	status = model.BackupRunStatusSucceeded
 	count := len(artifacts)
-	_, _ = s.store.UpdateBackupRun(run.ID, store.BackupRunUpdate{
-		Status:        &status,
-		LockedUntil:   timePtrPtr(nil),
-		BytesWritten:  &bytesWritten,
-		ArtifactCount: &count,
-		FinishedAt:    timePtrPtr(&finishedAt),
-		HeartbeatAt:   timePtrPtr(&finishedAt),
+	_, finishErr := s.store.FinishBackupRun(run.ID, leaseOwner, store.BackupRunFinish{
+		Status:        status,
+		BytesWritten:  bytesWritten,
+		ArtifactCount: count,
+		FinishedAt:    finishedAt,
 	})
+	if finishErr != nil && s.log != nil && !errors.Is(finishErr, store.ErrConflict) {
+		s.log.Printf("finish successful backup run %s failed: %v", run.ID, finishErr)
+	}
 }
 
-func (s *Server) startBackupRunHeartbeat(ctx context.Context, runID string) func() {
+func (s *Server) startBackupRunHeartbeat(ctx context.Context, cancel context.CancelFunc, runID, leaseOwner string) func() {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1148,11 +1552,17 @@ func (s *Server) startBackupRunHeartbeat(ctx context.Context, runID string) func
 				return
 			case <-ticker.C:
 				now := time.Now().UTC()
-				lockedUntil := now.Add(backupRunLeaseTTL)
-				_, _ = s.store.UpdateBackupRun(runID, store.BackupRunUpdate{
-					LockedUntil: timePtrPtr(&lockedUntil),
-					HeartbeatAt: timePtrPtr(&now),
-				})
+				if _, err := s.store.HeartbeatBackupRun(runID, leaseOwner, now, backupRunLeaseTTL); err != nil {
+					if errors.Is(err, store.ErrConflict) {
+						if cancel != nil {
+							cancel()
+						}
+						return
+					}
+					if s.log != nil {
+						s.log.Printf("heartbeat backup run %s failed: %v", runID, err)
+					}
+				}
 			}
 		}
 	}()
@@ -1228,6 +1638,14 @@ func backupRetryDelay(retryCount int) time.Duration {
 }
 
 func (s *Server) runBackup(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
+	if strings.TrimSpace(run.TenantID) != "" {
+		if err := s.validateTenantBackupTarget(run.TenantID, run.ProjectID, run.AppID, run.Target); err != nil {
+			return nil, errBackupTargetNotAuthorized
+		}
+		if err := s.validateTenantBackupBackend(run.TenantID, run.BackendID); err != nil {
+			return nil, errBackupBackendNotAuthorized
+		}
+	}
 	switch model.NormalizeBackupTargetType(run.Target.Type) {
 	case model.BackupTargetControlPlaneDatabase:
 		return s.runControlPlaneDatabaseBackup(ctx, run)
@@ -1339,7 +1757,7 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload control-plane manifest: %w", err)
 	}
-	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID:             run.ID,
 		PolicyID:          run.PolicyID,
 		TenantID:          run.TenantID,
@@ -1358,7 +1776,7 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 		Billable:          backend.Billable,
 		BillingClass:      backupBillingClass(backend),
 		Manifest:          manifest,
-	})
+	}, run.LeaseOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -1406,10 +1824,7 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 
 	backend, err := s.store.GetBackupBackendForUse(run.BackendID, app.TenantID, false)
 	if err != nil {
-		backend, err = s.store.GetBackupBackendForUse(run.BackendID, "", true)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	objectBackend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(backend))
 	if err != nil {
@@ -1496,7 +1911,7 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload app database manifest: %w", err)
 	}
-	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID:             run.ID,
 		PolicyID:          run.PolicyID,
 		TenantID:          app.TenantID,
@@ -1515,7 +1930,7 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 		Billable:          backend.Billable,
 		BillingClass:      backupBillingClass(backend),
 		Manifest:          manifest,
-	})
+	}, run.LeaseOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -1632,7 +2047,7 @@ func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.Backu
 	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload persistent storage manifest: %w", err)
 	}
-	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID:             run.ID,
 		PolicyID:          run.PolicyID,
 		TenantID:          app.TenantID,
@@ -1651,7 +2066,7 @@ func (s *Server) runPersistentStorageBackup(ctx context.Context, run model.Backu
 		Billable:          backend.Billable,
 		BillingClass:      backupBillingClass(backend),
 		Manifest:          manifest,
-	})
+	}, run.LeaseOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -1666,12 +2081,9 @@ func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun
 	if workspaceID == "" {
 		return nil, fmt.Errorf("workspace_id_missing: data workspace backup requires a workspace id")
 	}
-	workspace, err := s.store.GetDataWorkspace(workspaceID, run.TenantID, false)
+	workspace, err := s.store.GetDataWorkspace(workspaceID, run.TenantID, run.TenantID == "")
 	if err != nil {
-		workspace, err = s.store.GetDataWorkspace(workspaceID, "", true)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	snapshot, err := s.resolveDataWorkspaceBackupSnapshot(workspace, run)
 	if err != nil {
@@ -1726,7 +2138,7 @@ func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun
 	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload data workspace backup manifest: %w", err)
 	}
-	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID:             run.ID,
 		PolicyID:          run.PolicyID,
 		TenantID:          workspace.TenantID,
@@ -1746,7 +2158,7 @@ func (s *Server) runDataWorkspaceBackup(ctx context.Context, run model.BackupRun
 		BillingClass:      backupBillingClass(backend),
 		ManifestDigest:    snapshot.ManifestDigest,
 		Manifest:          manifest,
-	})
+	}, run.LeaseOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -1795,7 +2207,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 		if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 			return nil, fmt.Errorf("upload registry reference manifest: %w", err)
 		}
-		artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+		artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 			RunID:             run.ID,
 			PolicyID:          run.PolicyID,
 			Target:            target,
@@ -1810,7 +2222,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 			Billable:          backend.Billable,
 			BillingClass:      backupBillingClass(backend),
 			Manifest:          manifest,
-		})
+		}, run.LeaseOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -1880,7 +2292,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload registry manifest: %w", err)
 	}
-	artifact, err := s.store.CreateBackupArtifact(model.BackupArtifact{
+	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID:             run.ID,
 		PolicyID:          run.PolicyID,
 		Target:            target,
@@ -1896,7 +2308,7 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 		Billable:          backend.Billable,
 		BillingClass:      backupBillingClass(backend),
 		Manifest:          manifest,
-	})
+	}, run.LeaseOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -1905,9 +2317,6 @@ func (s *Server) runRegistryBackup(ctx context.Context, run model.BackupRun) ([]
 
 func (s *Server) backupObjectBackendForRun(run model.BackupRun, tenantID string, platformAdmin bool) (model.BackupBackend, *dataObjectBackend, error) {
 	backend, err := s.store.GetBackupBackendForUse(run.BackendID, tenantID, platformAdmin)
-	if err != nil && tenantID != "" {
-		backend, err = s.store.GetBackupBackendForUse(run.BackendID, "", true)
-	}
 	if err != nil {
 		return model.BackupBackend{}, nil, err
 	}
@@ -2551,10 +2960,10 @@ func boolLabel(value bool) string {
 	return "false"
 }
 
-func (s *Server) persistentStoragePostureMessage(app model.App) string {
+func (s *Server) persistentStoragePostureMessage(app model.App) (string, bool) {
 	storage, kind := appPersistentStorageBackupSpec(app)
 	if storage == nil {
-		return "persistent storage is not configured"
+		return "persistent storage is not configured", true
 	}
 	runtimeID := strings.TrimSpace(app.Spec.RuntimeID)
 	runtimeType := ""
@@ -2564,7 +2973,7 @@ func (s *Server) persistentStoragePostureMessage(app model.App) string {
 		}
 	}
 	if runtimeType != "" && !model.RuntimeSupportsPersistentWorkspace(runtimeType) {
-		return fmt.Sprintf("%s backup blocked: runtime %s does not support persistent workspaces", kind, runtimeType)
+		return fmt.Sprintf("%s backup blocked: runtime %s does not support persistent workspaces", kind, runtimeType), true
 	}
 	strategy := "file-archive"
 	if detectCSIVolumeSnapshotSupport() {
@@ -2576,7 +2985,7 @@ func (s *Server) persistentStoragePostureMessage(app model.App) string {
 	if _, ok := persistentStorageBackupSourceRoot(app); ok {
 		workerRoot = "mounted"
 	}
-	return fmt.Sprintf("%s backup strategy=%s csi_snapshot=%t pvc_clone=%t file_worker=%s", kind, strategy, detectCSIVolumeSnapshotSupport(), storageSupportsPVCClone(*storage), workerRoot)
+	return fmt.Sprintf("%s backup strategy=%s csi_snapshot=%t pvc_clone=%t file_worker=%s", kind, strategy, detectCSIVolumeSnapshotSupport(), storageSupportsPVCClone(*storage), workerRoot), false
 }
 
 func (s *Server) appBackupPosture(app model.App, policies []model.BackupPolicy, artifacts []model.BackupArtifact) []model.BackupPosture {
@@ -2587,19 +2996,18 @@ func (s *Server) appBackupPosture(app model.App, policies []model.BackupPolicy, 
 	out := make([]model.BackupPosture, 0, len(targets))
 	for _, target := range targets {
 		posture := model.BackupPosture{Target: target, Status: "disabled", Message: "backup is disabled by default"}
-		for _, policy := range policies {
-			if policy.Target.Type != target.Type {
-				continue
-			}
+		if policy, ok := preferredBackupPolicyForTarget(policies, target.Type); ok {
 			posture.PolicyID = policy.ID
 			posture.Status = policy.Status
+			posture.Message = policy.DisabledReason
 			if !policy.Enabled {
 				posture.Status = "disabled"
-				posture.Message = policy.DisabledReason
+			}
+			if policy.Enabled && policy.Status == model.BackupPolicyStatusActive {
+				posture.Message = ""
 			}
 			posture.LastSuccessfulRunID = policy.LastSuccessfulRunID
 			posture.LastSuccessfulAt = policy.LastSuccessfulAt
-			break
 		}
 		for _, artifact := range artifacts {
 			if artifact.Target.Type == target.Type {
@@ -2607,9 +3015,69 @@ func (s *Server) appBackupPosture(app model.App, policies []model.BackupPolicy, 
 			}
 		}
 		if target.Type == model.BackupTargetPersistentStorage {
-			posture.Message = firstNonEmptyString(posture.Message, s.persistentStoragePostureMessage(app))
+			storageMessage, blocked := s.persistentStoragePostureMessage(app)
+			posture.Message = firstNonEmptyString(posture.Message, storageMessage)
+			if blocked && posture.PolicyID != "" && posture.Status == model.BackupPolicyStatusActive {
+				posture.Status = "blocked"
+				posture.Message = storageMessage
+			}
 		}
 		out = append(out, posture)
 	}
 	return out
+}
+
+func preferredBackupPolicyForTarget(policies []model.BackupPolicy, targetType string) (model.BackupPolicy, bool) {
+	filtered := make([]model.BackupPolicy, 0, len(policies))
+	for _, policy := range policies {
+		if policy.Target.Type == targetType {
+			filtered = append(filtered, policy)
+		}
+	}
+	return preferredBackupPolicy(filtered)
+}
+
+func preferredBackupPolicy(policies []model.BackupPolicy) (model.BackupPolicy, bool) {
+	var selected model.BackupPolicy
+	selectedPriority := -1
+	for _, policy := range policies {
+		priority := backupPolicyPosturePriority(policy)
+		if priority > selectedPriority || priority == selectedPriority && backupPolicyPreferredOnTie(policy, selected) {
+			selected = policy
+			selectedPriority = priority
+		}
+	}
+	return selected, selectedPriority >= 0
+}
+
+func backupPolicyPreferredOnTie(candidate, current model.BackupPolicy) bool {
+	if candidate.LastSuccessfulAt != nil || current.LastSuccessfulAt != nil {
+		if candidate.LastSuccessfulAt == nil {
+			return false
+		}
+		if current.LastSuccessfulAt == nil {
+			return true
+		}
+		if !candidate.LastSuccessfulAt.Equal(*current.LastSuccessfulAt) {
+			return candidate.LastSuccessfulAt.After(*current.LastSuccessfulAt)
+		}
+	}
+	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
+		return candidate.UpdatedAt.After(current.UpdatedAt)
+	}
+	return candidate.ID < current.ID
+}
+
+func backupPolicyPosturePriority(policy model.BackupPolicy) int {
+	if !policy.Enabled || policy.Status == model.BackupPolicyStatusDisabled {
+		return 0
+	}
+	switch policy.Status {
+	case model.BackupPolicyStatusActive:
+		return 3
+	case model.BackupPolicyStatusBlockedNoBackend, model.BackupPolicyStatusError:
+		return 2
+	default:
+		return 1
+	}
 }

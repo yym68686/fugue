@@ -8324,6 +8324,7 @@ paths:
     get:
       operationId: listBackupBackends
       summary: List Backup Backends
+      description: Tenant callers receive their tenant-owned backends and shared platform backends. Shared platform backends are read-only to tenant callers.
       tags: [Backups]
       x-fugue-handler: handleListBackupBackends
       security:
@@ -8340,6 +8341,7 @@ paths:
     post:
       operationId: createBackupBackend
       summary: Create Backup Backend
+      description: Creates a tenant-owned backend or, when rotate_only is true, rotates credentials for a backend owned by the caller's tenant. Creating or rotating a shared platform backend requires platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleCreateBackupBackend
       security:
@@ -8363,6 +8365,7 @@ paths:
     get:
       operationId: getBackupBackend
       summary: Get Backup Backend
+      description: Tenant callers can read backends owned by their tenant and shared platform backends. Shared platform backends are read-only to tenant callers.
       tags: [Backups]
       x-fugue-handler: handleGetBackupBackend
       security:
@@ -8381,6 +8384,7 @@ paths:
     delete:
       operationId: deleteBackupBackend
       summary: Delete Backup Backend
+      description: Tenant callers may delete only backends owned by their tenant; deleting shared platform backends requires platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleDeleteBackupBackend
       security:
@@ -8400,6 +8404,7 @@ paths:
     post:
       operationId: testBackupBackend
       summary: Test Backup Backend
+      description: Tests a tenant-owned backend and records the result. Testing shared platform backends requires platform administrator access because it mutates backend health metadata.
       tags: [Backups]
       x-fugue-handler: handleTestBackupBackend
       security:
@@ -8419,6 +8424,7 @@ paths:
     get:
       operationId: listBackupPolicies
       summary: List Backup Policies
+      description: Tenant callers receive only policies owned by their tenant; platform policies require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleListBackupPolicies
       security:
@@ -8461,6 +8467,7 @@ paths:
     post:
       operationId: upsertBackupPolicy
       summary: Upsert Backup Policy
+      description: Creates a policy with a server-generated id or safely updates an existing authorized policy by id or scope-local slug. Non-platform callers may target only apps, projects, data workspaces, and backup backends available to their tenant; platform targets require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleUpsertBackupPolicy
       security:
@@ -8484,6 +8491,7 @@ paths:
     get:
       operationId: getBackupPolicy
       summary: Get Backup Policy
+      description: Tenant callers can read only policies owned by their tenant; platform policies require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleGetBackupPolicy
       security:
@@ -8502,6 +8510,7 @@ paths:
     patch:
       operationId: patchBackupPolicy
       summary: Patch Backup Policy
+      description: Updates a backup policy, including enabled-only changes. Non-platform callers may modify only tenant-owned policies whose referenced resources belong to their tenant; platform policies require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handlePatchBackupPolicy
       security:
@@ -8527,6 +8536,7 @@ paths:
     get:
       operationId: listBackupRuns
       summary: List Backup Runs
+      description: Tenant callers receive only runs owned by their tenant; platform runs require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleListBackupRuns
       security:
@@ -8568,6 +8578,7 @@ paths:
     post:
       operationId: createBackupRun
       summary: Create Backup Run
+      description: Starts a direct or policy-backed backup. Non-platform callers may use only policies and target resources owned by their tenant; platform targets require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleCreateBackupRun
       security:
@@ -8591,6 +8602,7 @@ paths:
     get:
       operationId: getBackupRun
       summary: Get Backup Run
+      description: Tenant callers can read only runs owned by their tenant; platform runs require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleGetBackupRun
       security:
@@ -8610,6 +8622,7 @@ paths:
     get:
       operationId: listBackupArtifacts
       summary: List Backup Artifacts
+      description: Tenant callers receive only artifacts owned by their tenant; platform artifacts require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleListBackupArtifacts
       security:
@@ -8656,6 +8669,7 @@ paths:
     get:
       operationId: getBackupArtifact
       summary: Get Backup Artifact
+      description: Tenant callers can read only artifacts owned by their tenant; platform artifacts require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleGetBackupArtifact
       security:
@@ -8674,6 +8688,7 @@ paths:
     delete:
       operationId: deleteBackupArtifact
       summary: Delete Backup Artifact
+      description: Tenant callers may delete only artifacts owned by their tenant; platform artifacts and artifacts owned by other tenants require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleDeleteBackupArtifact
       security:
@@ -8693,6 +8708,7 @@ paths:
     get:
       operationId: listBackupRestorePlans
       summary: List Backup Restore Plans
+      description: Tenant callers receive only restore plans owned by their tenant; platform plans require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleListBackupRestorePlans
       security:
@@ -8714,6 +8730,7 @@ paths:
     post:
       operationId: createBackupRestorePlan
       summary: Create Backup Restore Plan
+      description: Creates a restore plan from an active, authorized artifact whose target type matches the restore target. Tenant callers may use only artifacts and targets owned by their tenant.
       tags: [Backups]
       x-fugue-handler: handleCreateBackupRestorePlan
       security:
@@ -8737,6 +8754,7 @@ paths:
     get:
       operationId: listBackupRestoreRuns
       summary: List Backup Restore Runs
+      description: Tenant callers receive only restore runs owned by their tenant; platform restore runs require platform administrator access.
       tags: [Backups]
       x-fugue-handler: handleListBackupRestoreRuns
       security:
@@ -10440,6 +10458,7 @@ components:
           type: string
         schedule:
           type: string
+          description: Numeric five-field cron expression evaluated in UTC. The @hourly shortcut is also accepted.
         retain_count:
           type: integer
         retention:
@@ -10473,6 +10492,7 @@ components:
       properties:
         id:
           type: string
+          description: Existing policy id to update. The id must already be visible and authorized to the caller; omit it to create or upsert by the scope-local slug.
         tenant_id:
           type: string
         project_id:
@@ -10489,6 +10509,7 @@ components:
           type: boolean
         schedule:
           type: string
+          description: Numeric five-field cron expression evaluated in UTC. The @hourly shortcut is also accepted.
         retain_count:
           type: integer
         retention:

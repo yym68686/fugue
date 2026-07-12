@@ -20,12 +20,25 @@ const (
 	defaultBackupBackendID            = "backup_backend_fugue_default_r2"
 	defaultControlPlaneBackupPolicyID = "backup_policy_control_plane_db_default"
 	backupUsageCloudflareR2PriceCode  = "cloudflare-r2-standard-storage"
+	backupRunLostErrorCode            = "backup_run_lost"
+	backupRunLostErrorMessage         = "backup run lease expired before completion; worker likely restarted or lost ownership"
 	defaultBackupDueScannerLimit      = 100
 	defaultBackupRunHistoryLimit      = 100
 	defaultBackupArtifactHistoryLimit = 100
 	defaultBackupRestorePlanListLimit = 100
 	defaultBackupRestoreRunListLimit  = 100
 )
+
+const pgRepairBackupPolicyScheduleSQL = `
+UPDATE fugue_backup_policies
+SET schedule = $2, status = $3, disabled_reason = $4, next_run_at = $5, updated_at = $6
+WHERE id = $1
+  AND enabled = TRUE
+  AND status = 'active'
+  AND schedule = $7
+  AND next_run_at IS NOT DISTINCT FROM $8
+  AND last_run_at IS NOT DISTINCT FROM $9
+`
 
 type BackupPolicyFilter struct {
 	TenantID        string
@@ -73,6 +86,15 @@ type BackupRunUpdate struct {
 	NextRetryAt   **time.Time
 	StartedAt     **time.Time
 	FinishedAt    **time.Time
+}
+
+type BackupRunFinish struct {
+	Status        string
+	BytesWritten  int64
+	ArtifactCount int
+	ErrorCode     string
+	ErrorMessage  string
+	FinishedAt    time.Time
 }
 
 func ensureBackupDefaults(state *model.State) {
@@ -147,6 +169,73 @@ func (s *Store) EnsureDefaultBackupPolicy() error {
 		ensureDefaultBackupPolicyInState(state)
 		return nil
 	})
+}
+
+func (s *Store) repairBackupPolicySchedules() error {
+	if s == nil {
+		return nil
+	}
+	if s.usingDatabase() {
+		return s.pgRepairBackupPolicySchedules()
+	}
+	return s.withLockedState(true, func(state *model.State) error {
+		repairBackupPolicySchedulesInState(state, time.Now().UTC())
+		return nil
+	})
+}
+
+func repairBackupPolicySchedulesInState(state *model.State, now time.Time) {
+	if state == nil {
+		return
+	}
+	for idx := range state.BackupPolicies {
+		policy, changed := repairBackupPolicySchedule(state.BackupPolicies[idx], now)
+		if changed {
+			state.BackupPolicies[idx] = policy
+		}
+	}
+}
+
+func repairBackupPolicySchedule(policy model.BackupPolicy, now time.Time) (model.BackupPolicy, bool) {
+	policy = model.NormalizeBackupPolicy(policy)
+	if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
+		return policy, false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	changed := false
+	if policy.Schedule == "" {
+		policy.Schedule = model.BackupDefaultSchedule
+		changed = true
+	}
+	anchor := now.UTC()
+	if policy.LastRunAt != nil {
+		anchor = policy.LastRunAt.UTC()
+	} else if !policy.CreatedAt.IsZero() {
+		anchor = policy.CreatedAt.UTC()
+	}
+	next, err := nextBackupRunAfter(policy.Schedule, anchor)
+	if err != nil {
+		reason := "invalid backup schedule: " + err.Error()
+		policy.Status = model.BackupPolicyStatusError
+		policy.DisabledReason = reason
+		policy.NextRunAt = nil
+		changed = true
+	} else {
+		if policy.NextRunAt == nil {
+			policy.NextRunAt = next
+			changed = true
+		}
+		if policy.DisabledReason != "" {
+			policy.DisabledReason = ""
+			changed = true
+		}
+	}
+	if changed {
+		policy.UpdatedAt = now.UTC()
+	}
+	return model.NormalizeBackupPolicy(policy), changed
 }
 
 func seedDefaultBackupBackendFromEnvInState(state *model.State) error {
@@ -456,7 +545,7 @@ func (s *Store) RotateBackupBackendCredentials(idOrName, tenantID string, platfo
 	}
 	var rotated model.BackupBackend
 	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
+		index := findOwnedBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
 		if index < 0 {
 			return ErrNotFound
 		}
@@ -501,7 +590,7 @@ func (s *Store) DeleteBackupBackend(idOrName, tenantID string, platformAdmin boo
 	}
 	var deleted model.BackupBackend
 	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
+		index := findOwnedBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
 		if index < 0 {
 			return ErrNotFound
 		}
@@ -528,7 +617,7 @@ func (s *Store) RecordBackupBackendTest(idOrName, tenantID string, platformAdmin
 	}
 	var updated model.BackupBackend
 	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
+		index := findOwnedBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
 		if index < 0 {
 			return ErrNotFound
 		}
@@ -762,6 +851,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 	}
 	var created model.BackupRun
 	err := s.withLockedState(true, func(state *model.State) error {
+		now := time.Now().UTC()
 		if run.PolicyID != "" {
 			index := findBackupPolicy(state, run.PolicyID)
 			if index < 0 {
@@ -771,7 +861,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 			if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
 				return ErrConflict
 			}
-			if err := validateBackupRunRolloutCompatibility(policy.Schedule, run); err != nil {
+			if err := validateScheduledBackupPolicyDue(run, policy, now); err != nil {
 				return err
 			}
 			if run.TenantID == "" {
@@ -803,7 +893,6 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 		if backupTargetHasActiveRun(state.BackupRuns, run.Target) {
 			return ErrConflict
 		}
-		now := time.Now().UTC()
 		if run.ID == "" {
 			run.ID = model.NewID("backup_run")
 		}
@@ -816,7 +905,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 			if index < 0 {
 				return ErrNotFound
 			}
-			next, err := nextSupportedBackupRunAfter(state.BackupPolicies[index].Schedule, now)
+			next, err := nextBackupRunAfter(state.BackupPolicies[index].Schedule, now)
 			if err != nil {
 				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
 			}
@@ -839,6 +928,236 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 		return nil
 	})
 	return created, err
+}
+
+func (s *Store) ClaimBackupRun(id, leaseOwner string, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
+	id = strings.TrimSpace(id)
+	leaseOwner = strings.TrimSpace(leaseOwner)
+	if id == "" || leaseOwner == "" || leaseTTL <= 0 {
+		return model.BackupRun{}, ErrInvalidInput
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if s.usingDatabase() {
+		return s.pgClaimBackupRun(id, leaseOwner, now, leaseTTL)
+	}
+	var claimed model.BackupRun
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findBackupRun(state, id)
+		if index < 0 {
+			return ErrConflict
+		}
+		run := model.NormalizeBackupRun(state.BackupRuns[index])
+		if run.Status != model.BackupRunStatusPending || run.NextRetryAt != nil && run.NextRetryAt.After(now) {
+			return ErrConflict
+		}
+		lockedUntil := now.Add(leaseTTL)
+		run.Status = model.BackupRunStatusRunning
+		run.LeaseOwner = leaseOwner
+		run.LockedUntil = &lockedUntil
+		run.HeartbeatAt = &now
+		run.StartedAt = &now
+		run.UpdatedAt = now
+		state.BackupRuns[index] = model.NormalizeBackupRun(run)
+		claimed = state.BackupRuns[index]
+		return nil
+	})
+	return claimed, err
+}
+
+func (s *Store) HeartbeatBackupRun(id, leaseOwner string, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
+	id = strings.TrimSpace(id)
+	leaseOwner = strings.TrimSpace(leaseOwner)
+	if id == "" || leaseOwner == "" || leaseTTL <= 0 {
+		return model.BackupRun{}, ErrInvalidInput
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if s.usingDatabase() {
+		return s.pgHeartbeatBackupRun(id, leaseOwner, now, leaseTTL)
+	}
+	var heartbeat model.BackupRun
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findBackupRun(state, id)
+		if index < 0 {
+			return ErrConflict
+		}
+		run := model.NormalizeBackupRun(state.BackupRuns[index])
+		if run.Status != model.BackupRunStatusRunning || run.LeaseOwner != leaseOwner || run.LockedUntil == nil || run.LockedUntil.Before(now) {
+			return ErrConflict
+		}
+		lockedUntil := now.Add(leaseTTL)
+		run.LockedUntil = &lockedUntil
+		run.HeartbeatAt = &now
+		run.UpdatedAt = now
+		state.BackupRuns[index] = model.NormalizeBackupRun(run)
+		heartbeat = state.BackupRuns[index]
+		return nil
+	})
+	return heartbeat, err
+}
+
+// BackupRunIsStale reports whether an active backup run has exceeded its
+// observed lease or activity grace period. Callers that act on a listed run
+// must still use RecoverStaleBackupRun so the observation is checked again
+// atomically with the state transition.
+func BackupRunIsStale(run model.BackupRun, now time.Time, leaseTTL time.Duration) bool {
+	if leaseTTL <= 0 {
+		return false
+	}
+	run = model.NormalizeBackupRun(run)
+	now = now.UTC()
+	if run.Status != model.BackupRunStatusRunning && run.Status != model.BackupRunStatusPending {
+		return false
+	}
+	if run.Status == model.BackupRunStatusPending && run.Trigger == model.BackupRunTriggerRetry && run.NextRetryAt != nil && run.NextRetryAt.After(now) {
+		return false
+	}
+	deadline, ok := backupRunStaleDeadline(run, leaseTTL)
+	return ok && deadline.Before(now)
+}
+
+func backupRunStaleDeadline(run model.BackupRun, leaseTTL time.Duration) (time.Time, bool) {
+	run = model.NormalizeBackupRun(run)
+	if run.Status != model.BackupRunStatusRunning && run.Status != model.BackupRunStatusPending {
+		return time.Time{}, false
+	}
+	if run.LockedUntil != nil {
+		return run.LockedUntil.UTC(), true
+	}
+	lastSeen := run.UpdatedAt
+	if run.HeartbeatAt != nil {
+		lastSeen = *run.HeartbeatAt
+	}
+	if run.Status == model.BackupRunStatusPending && run.Trigger == model.BackupRunTriggerRetry && run.NextRetryAt != nil && run.NextRetryAt.After(lastSeen) {
+		lastSeen = *run.NextRetryAt
+	}
+	if lastSeen.IsZero() {
+		lastSeen = run.CreatedAt
+	}
+	if lastSeen.IsZero() {
+		return time.Time{}, false
+	}
+	return lastSeen.Add(leaseTTL), true
+}
+
+// RecoverStaleBackupRun atomically fails the exact active-run observation
+// supplied by a stale-run scanner. A heartbeat, claim, or competing recovery
+// changes at least one compared lease/version field and causes ErrConflict.
+func (s *Store) RecoverStaleBackupRun(observed model.BackupRun, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
+	observed = model.NormalizeBackupRun(observed)
+	if strings.TrimSpace(observed.ID) == "" || observed.UpdatedAt.IsZero() || leaseTTL <= 0 ||
+		(observed.Status != model.BackupRunStatusRunning && observed.Status != model.BackupRunStatusPending) {
+		return model.BackupRun{}, ErrInvalidInput
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if !BackupRunIsStale(observed, now, leaseTTL) {
+		return model.BackupRun{}, ErrConflict
+	}
+	if s.usingDatabase() {
+		return s.pgRecoverStaleBackupRun(observed, now)
+	}
+	var recovered model.BackupRun
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findBackupRun(state, observed.ID)
+		if index < 0 {
+			return ErrConflict
+		}
+		current := model.NormalizeBackupRun(state.BackupRuns[index])
+		if !backupRunRecoveryObservationMatches(current, observed) || !BackupRunIsStale(current, now, leaseTTL) {
+			return ErrConflict
+		}
+		current.Status = model.BackupRunStatusFailed
+		current.LockedUntil = nil
+		current.HeartbeatAt = &now
+		current.ErrorCode = backupRunLostErrorCode
+		current.ErrorMessage = backupRunLostErrorMessage
+		current.FinishedAt = &now
+		current.UpdatedAt = now
+		state.BackupRuns[index] = model.NormalizeBackupRun(current)
+		recovered = state.BackupRuns[index]
+		return nil
+	})
+	return recovered, err
+}
+
+func backupRunRecoveryObservationMatches(current, observed model.BackupRun) bool {
+	return current.Status == observed.Status &&
+		current.LeaseOwner == observed.LeaseOwner &&
+		current.UpdatedAt.Equal(observed.UpdatedAt) &&
+		backupOptionalTimeEqual(current.LockedUntil, observed.LockedUntil) &&
+		backupOptionalTimeEqual(current.HeartbeatAt, observed.HeartbeatAt) &&
+		backupOptionalTimeEqual(current.NextRetryAt, observed.NextRetryAt)
+}
+
+func backupOptionalTimeEqual(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
+}
+
+func (s *Store) FinishBackupRun(id, leaseOwner string, finish BackupRunFinish) (model.BackupRun, error) {
+	id = strings.TrimSpace(id)
+	leaseOwner = strings.TrimSpace(leaseOwner)
+	finish.Status = strings.TrimSpace(strings.ToLower(finish.Status))
+	finish.ErrorCode = strings.TrimSpace(finish.ErrorCode)
+	finish.ErrorMessage = strings.TrimSpace(finish.ErrorMessage)
+	if id == "" || leaseOwner == "" || !backupRunFinishStatus(finish.Status) || finish.BytesWritten < 0 || finish.ArtifactCount < 0 {
+		return model.BackupRun{}, ErrInvalidInput
+	}
+	if finish.FinishedAt.IsZero() {
+		finish.FinishedAt = time.Now().UTC()
+	} else {
+		finish.FinishedAt = finish.FinishedAt.UTC()
+	}
+	if s.usingDatabase() {
+		return s.pgFinishBackupRun(id, leaseOwner, finish)
+	}
+	var finished model.BackupRun
+	err := s.withLockedState(true, func(state *model.State) error {
+		index := findBackupRun(state, id)
+		if index < 0 {
+			return ErrConflict
+		}
+		run := model.NormalizeBackupRun(state.BackupRuns[index])
+		if run.Status != model.BackupRunStatusRunning || run.LeaseOwner != leaseOwner || run.LockedUntil == nil || run.LockedUntil.Before(finish.FinishedAt) {
+			return ErrConflict
+		}
+		run.Status = finish.Status
+		run.LockedUntil = nil
+		run.HeartbeatAt = &finish.FinishedAt
+		run.BytesWritten = finish.BytesWritten
+		run.ArtifactCount = finish.ArtifactCount
+		run.ErrorCode = finish.ErrorCode
+		run.ErrorMessage = finish.ErrorMessage
+		run.FinishedAt = &finish.FinishedAt
+		run.UpdatedAt = finish.FinishedAt
+		state.BackupRuns[index] = model.NormalizeBackupRun(run)
+		finished = state.BackupRuns[index]
+		if finished.Status == model.BackupRunStatusSucceeded && finished.PolicyID != "" {
+			if policyIndex := findBackupPolicy(state, finished.PolicyID); policyIndex >= 0 {
+				policy := model.NormalizeBackupPolicy(state.BackupPolicies[policyIndex])
+				policy.LastSuccessfulRunID = finished.ID
+				policy.LastSuccessfulAt = &finish.FinishedAt
+				policy.UpdatedAt = finish.FinishedAt
+				state.BackupPolicies[policyIndex] = policy
+			}
+			applyBackupRetentionInState(state, finished.PolicyID)
+		}
+		return nil
+	})
+	return finished, err
 }
 
 func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error) {
@@ -872,6 +1191,84 @@ func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error
 		}
 		sortBackupRuns(runs)
 		runs = limitBackupRuns(runs, filter.Limit)
+		return nil
+	})
+	return runs, err
+}
+
+// ListDueBackupRetryRuns filters and orders due retries before applying the
+// scan limit so newer future work cannot starve an older runnable retry.
+func (s *Store) ListDueBackupRetryRuns(now time.Time, limit int) ([]model.BackupRun, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if limit <= 0 {
+		limit = defaultBackupDueScannerLimit
+	}
+	if s.usingDatabase() {
+		return s.pgListDueBackupRetryRuns(now, limit)
+	}
+	runs := []model.BackupRun{}
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, run := range state.BackupRuns {
+			run = model.NormalizeBackupRun(run)
+			if run.Status != model.BackupRunStatusPending || run.Trigger != model.BackupRunTriggerRetry || run.NextRetryAt == nil || run.NextRetryAt.After(now) {
+				continue
+			}
+			runs = append(runs, run)
+		}
+		sort.Slice(runs, func(i, j int) bool {
+			if !runs[i].NextRetryAt.Equal(*runs[j].NextRetryAt) {
+				return runs[i].NextRetryAt.Before(*runs[j].NextRetryAt)
+			}
+			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+		})
+		if len(runs) > limit {
+			runs = runs[:limit]
+		}
+		return nil
+	})
+	return runs, err
+}
+
+// ListStaleBackupRuns filters and orders expired observations before applying
+// the scan limit. RecoverStaleBackupRun remains the authoritative CAS.
+func (s *Store) ListStaleBackupRuns(now time.Time, leaseTTL time.Duration, limit int) ([]model.BackupRun, error) {
+	if leaseTTL <= 0 {
+		return nil, ErrInvalidInput
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if limit <= 0 {
+		limit = defaultBackupDueScannerLimit
+	}
+	if s.usingDatabase() {
+		return s.pgListStaleBackupRuns(now, leaseTTL, limit)
+	}
+	runs := []model.BackupRun{}
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, run := range state.BackupRuns {
+			run = model.NormalizeBackupRun(run)
+			if BackupRunIsStale(run, now, leaseTTL) {
+				runs = append(runs, run)
+			}
+		}
+		sort.Slice(runs, func(i, j int) bool {
+			left, _ := backupRunStaleDeadline(runs[i], leaseTTL)
+			right, _ := backupRunStaleDeadline(runs[j], leaseTTL)
+			if !left.Equal(right) {
+				return left.Before(right)
+			}
+			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+		})
+		if len(runs) > limit {
+			runs = runs[:limit]
+		}
 		return nil
 	})
 	return runs, err
@@ -926,16 +1323,46 @@ func (s *Store) UpdateBackupRun(id string, update BackupRunUpdate) (model.Backup
 }
 
 func (s *Store) CreateBackupArtifact(artifact model.BackupArtifact) (model.BackupArtifact, error) {
+	return s.createBackupArtifact(artifact, "")
+}
+
+// CreateBackupArtifactForRun persists an artifact only while the creating
+// worker still owns an unexpired lease for the linked run.
+func (s *Store) CreateBackupArtifactForRun(artifact model.BackupArtifact, leaseOwner string) (model.BackupArtifact, error) {
+	leaseOwner = strings.TrimSpace(leaseOwner)
+	artifact.RunID = strings.TrimSpace(artifact.RunID)
+	if artifact.RunID == "" || leaseOwner == "" {
+		return model.BackupArtifact{}, ErrInvalidInput
+	}
+	return s.createBackupArtifact(artifact, leaseOwner)
+}
+
+func (s *Store) createBackupArtifact(artifact model.BackupArtifact, leaseOwner string) (model.BackupArtifact, error) {
 	artifact = model.NormalizeBackupArtifact(artifact)
 	if artifact.Kind == "" || artifact.Target.Type == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgCreateBackupArtifact(artifact)
+		return s.pgCreateBackupArtifact(artifact, leaseOwner)
 	}
 	var created model.BackupArtifact
 	err := s.withLockedState(true, func(state *model.State) error {
 		now := time.Now().UTC()
+		if leaseOwner != "" {
+			runIndex := findBackupRun(state, artifact.RunID)
+			if runIndex < 0 {
+				return ErrConflict
+			}
+			run := model.NormalizeBackupRun(state.BackupRuns[runIndex])
+			if run.Status != model.BackupRunStatusRunning || run.LeaseOwner != leaseOwner || run.LockedUntil == nil || run.LockedUntil.Before(now) {
+				return ErrConflict
+			}
+			if artifact.PolicyID == "" {
+				artifact.PolicyID = run.PolicyID
+			} else if artifact.PolicyID != run.PolicyID {
+				return ErrConflict
+			}
+		}
 		if artifact.ID == "" {
 			artifact.ID = model.NewID("backup_artifact")
 		}
@@ -969,17 +1396,6 @@ func (s *Store) CreateBackupArtifact(artifact model.BackupArtifact) (model.Backu
 				run.UpdatedAt = now
 				state.BackupRuns[index] = run
 			}
-		}
-		if artifact.PolicyID != "" {
-			if index := findBackupPolicy(state, artifact.PolicyID); index >= 0 {
-				policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
-				policy.LastSuccessfulRunID = artifact.RunID
-				successAt := artifact.CreatedAt
-				policy.LastSuccessfulAt = &successAt
-				policy.UpdatedAt = now
-				state.BackupPolicies[index] = policy
-			}
-			applyBackupRetentionInState(state, artifact.PolicyID)
 		}
 		created = artifact
 		return nil
@@ -1050,13 +1466,17 @@ func (s *Store) GetBackupArtifact(id string, tenantID string, platformAdmin bool
 	return artifact, err
 }
 
-func (s *Store) MarkBackupArtifactDeleted(id string) (model.BackupArtifact, error) {
+func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin bool) (model.BackupArtifact, error) {
 	id = strings.TrimSpace(id)
+	tenantID = strings.TrimSpace(tenantID)
 	if id == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
 	}
+	if !platformAdmin && tenantID == "" {
+		return model.BackupArtifact{}, ErrNotFound
+	}
 	if s.usingDatabase() {
-		return s.pgMarkBackupArtifactDeleted(id)
+		return s.pgMarkBackupArtifactDeleted(id, tenantID, platformAdmin)
 	}
 	var deleted model.BackupArtifact
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -1065,6 +1485,9 @@ func (s *Store) MarkBackupArtifactDeleted(id string) (model.BackupArtifact, erro
 			return ErrNotFound
 		}
 		artifact := model.NormalizeBackupArtifact(state.BackupArtifacts[index])
+		if !platformAdmin && artifact.TenantID != tenantID {
+			return ErrNotFound
+		}
 		if artifact.Protected {
 			return ErrConflict
 		}
@@ -1332,83 +1755,31 @@ func applyBackupRunUpdate(run *model.BackupRun, update BackupRunUpdate) {
 	}
 }
 
-func nextBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
-	schedule = strings.TrimSpace(schedule)
-	if schedule == "" {
-		return nil, nil
+func validateScheduledBackupPolicyDue(run model.BackupRun, policy model.BackupPolicy, now time.Time) error {
+	if run.Trigger != model.BackupRunTriggerScheduled {
+		return nil
 	}
-	if after.IsZero() {
-		after = time.Now().UTC()
+	if policy.NextRunAt == nil || policy.NextRunAt.After(now) {
+		return ErrConflict
 	}
-	after = after.UTC()
-	switch schedule {
-	case "@hourly", model.BackupDefaultSchedule:
-		next := after.Truncate(time.Hour).Add(time.Hour)
-		return &next, nil
-	}
-	fields := strings.Fields(schedule)
-	if len(fields) == 5 && strings.HasPrefix(fields[0], "*/") && fields[1] == "*" && fields[2] == "*" && fields[3] == "*" && fields[4] == "*" {
-		rawEvery := strings.TrimPrefix(fields[0], "*/")
-		every, err := parsePositiveInt(rawEvery)
-		if err == nil && every > 0 && every <= 59 {
-			minute := after.Minute()
-			nextMinute := ((minute / every) + 1) * every
-			next := after.Truncate(time.Hour)
-			if nextMinute >= 60 {
-				next = next.Add(time.Hour)
-				nextMinute = 0
-			}
-			next = next.Add(time.Duration(nextMinute) * time.Minute)
-			return &next, nil
-		}
-	}
-	if len(fields) == 5 && fields[0] != "*" && fields[1] == "*" && fields[2] == "*" && fields[3] == "*" && fields[4] == "*" {
-		minute, err := parsePositiveInt(fields[0])
-		if err == nil && minute >= 0 && minute <= 59 {
-			next := after.Truncate(time.Hour).Add(time.Duration(minute) * time.Minute)
-			if !next.After(after) {
-				next = next.Add(time.Hour)
-			}
-			return &next, nil
-		}
-	}
-	return nil, nil
+	return nil
 }
 
-func nextSupportedBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
+func backupRunFinishStatus(status string) bool {
+	switch status {
+	case model.BackupRunStatusSucceeded, model.BackupRunStatusFailed, model.BackupRunStatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+func nextBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
 	next, err := backupschedule.Next(schedule, after)
 	if err != nil {
 		return nil, err
 	}
 	return &next, nil
-}
-
-func validateBackupRunRolloutCompatibility(schedule string, run model.BackupRun) error {
-	legacyNext, err := nextBackupRunAfter(schedule, time.Now().UTC())
-	if err != nil || legacyNext != nil {
-		return err
-	}
-	if _, err := nextSupportedBackupRunAfter(schedule, time.Now().UTC()); err != nil {
-		return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-	}
-	if run.RequestedByType == "system" && (run.RequestedByID == "backup-scheduler" || run.RequestedByID == "backup-retry") {
-		return nil
-	}
-	return ErrConflict
-}
-
-func parsePositiveInt(raw string) (int, error) {
-	var out int
-	if raw == "" {
-		return 0, fmt.Errorf("empty integer")
-	}
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0, fmt.Errorf("invalid integer")
-		}
-		out = out*10 + int(r-'0')
-	}
-	return out, nil
 }
 
 func backupTargetHasActiveRun(runs []model.BackupRun, target model.BackupTarget) bool {
@@ -1560,50 +1931,35 @@ func backupPolicyVisible(policy model.BackupPolicy, tenantID string, platformAdm
 	if platformAdmin {
 		return true
 	}
-	if policy.TenantID == "" {
-		return true
-	}
-	return policy.TenantID == tenantID
+	return tenantID != "" && policy.TenantID == tenantID
 }
 
 func backupRunVisible(run model.BackupRun, tenantID string, platformAdmin bool) bool {
 	if platformAdmin {
 		return true
 	}
-	if run.TenantID == "" {
-		return true
-	}
-	return run.TenantID == tenantID
+	return tenantID != "" && run.TenantID == tenantID
 }
 
 func backupArtifactVisible(artifact model.BackupArtifact, tenantID string, platformAdmin bool) bool {
 	if platformAdmin {
 		return true
 	}
-	if artifact.TenantID == "" {
-		return true
-	}
-	return artifact.TenantID == tenantID
+	return tenantID != "" && artifact.TenantID == tenantID
 }
 
 func backupRestorePlanVisible(plan model.BackupRestorePlan, tenantID string, platformAdmin bool) bool {
 	if platformAdmin {
 		return true
 	}
-	if plan.TenantID == "" {
-		return true
-	}
-	return plan.TenantID == tenantID
+	return tenantID != "" && plan.TenantID == tenantID
 }
 
 func backupRestoreRunVisible(run model.BackupRestoreRun, tenantID string, platformAdmin bool) bool {
 	if platformAdmin {
 		return true
 	}
-	if run.TenantID == "" {
-		return true
-	}
-	return run.TenantID == tenantID
+	return tenantID != "" && run.TenantID == tenantID
 }
 
 func sortBackupPolicies(policies []model.BackupPolicy) {
@@ -1695,6 +2051,28 @@ func findBackupBackendByIDNameOrSlug(state *model.State, value, tenantID string,
 	for idx, backend := range state.BackupBackends {
 		backend = model.NormalizeBackupBackend(backend)
 		if !platformAdmin && backend.TenantID != "" && backend.TenantID != tenantID {
+			continue
+		}
+		if backend.ID == value || backend.Name == value || backend.Slug == slug {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findOwnedBackupBackendByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
+	if platformAdmin {
+		return findBackupBackendByIDNameOrSlug(state, value, tenantID, true)
+	}
+	value = strings.TrimSpace(value)
+	tenantID = strings.TrimSpace(tenantID)
+	if value == "" || tenantID == "" {
+		return -1
+	}
+	slug := model.Slugify(value)
+	for idx, candidate := range state.BackupBackends {
+		backend := model.NormalizeBackupBackend(candidate)
+		if backend.TenantID != tenantID {
 			continue
 		}
 		if backend.ID == value || backend.Name == value || backend.Slug == slug {
@@ -2183,9 +2561,32 @@ func (s *Store) pgGetBackupBackend(idOrName, tenantID string, platformAdmin bool
 	if err != nil {
 		return model.BackupBackend{}, err
 	}
+	return s.pgLoadBackupBackendCredentials(ctx, backend, redact)
+}
+
+func (s *Store) pgGetBackupBackendForMutation(idOrName, tenantID string, platformAdmin bool, redact bool) (model.BackupBackend, error) {
+	if platformAdmin {
+		return s.pgGetBackupBackend(idOrName, tenantID, true, redact)
+	}
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return model.BackupBackend{}, ErrNotFound
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	slug := model.Slugify(idOrName)
+	backend, err := scanBackupBackend(s.db.QueryRowContext(ctx, backupBackendSelectSQL()+`
+ WHERE (id = $1 OR name = $1 OR slug = $2) AND tenant_id = $3`, idOrName, slug, tenantID))
+	if err != nil {
+		return model.BackupBackend{}, err
+	}
+	return s.pgLoadBackupBackendCredentials(ctx, backend, redact)
+}
+
+func (s *Store) pgLoadBackupBackendCredentials(ctx context.Context, backend model.BackupBackend, redact bool) (model.BackupBackend, error) {
 	if !redact {
 		var secret model.BackupBackendSecret
-		err = s.db.QueryRowContext(ctx, `
+		err := s.db.QueryRowContext(ctx, `
 SELECT id, COALESCE(tenant_id, ''), backend_id, ciphertext, key_id, created_at, updated_at, last_rotated_at
 FROM fugue_backup_backend_secrets WHERE backend_id = $1
 `, backend.ID).Scan(&secret.ID, &secret.TenantID, &secret.BackendID, &secret.Ciphertext, &secret.KeyID, &secret.CreatedAt, &secret.UpdatedAt, &secret.LastRotated)
@@ -2343,6 +2744,97 @@ ON CONFLICT (backend_id) DO UPDATE SET
 	return s.pgEnsureDefaultBackupPolicy()
 }
 
+func (s *Store) pgRepairBackupPolicySchedules() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, backupPolicySelectSQL()+` WHERE enabled = TRUE AND status = 'active'`)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	policies := []model.BackupPolicy{}
+	for rows.Next() {
+		policy, scanErr := scanBackupPolicy(rows)
+		if scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		policies = append(policies, policy)
+	}
+	if err := rows.Close(); err != nil {
+		return mapDBErr(err)
+	}
+	if err := rows.Err(); err != nil {
+		return mapDBErr(err)
+	}
+	now := time.Now().UTC()
+	for _, policy := range policies {
+		if _, err := s.pgRepairBackupPolicyScheduleCAS(ctx, policy, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) pgRepairNullBackupPolicySchedules(ctx context.Context, now time.Time, limit int) error {
+	if limit <= 0 {
+		limit = defaultBackupDueScannerLimit
+	}
+	rows, err := s.db.QueryContext(ctx, backupPolicySelectSQL()+`
+ WHERE enabled = TRUE AND status = 'active' AND next_run_at IS NULL
+ ORDER BY created_at ASC, id ASC
+ LIMIT $1`, limit)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	policies := []model.BackupPolicy{}
+	for rows.Next() {
+		policy, scanErr := scanBackupPolicy(rows)
+		if scanErr != nil {
+			rows.Close()
+			return scanErr
+		}
+		policies = append(policies, policy)
+	}
+	if err := rows.Close(); err != nil {
+		return mapDBErr(err)
+	}
+	if err := rows.Err(); err != nil {
+		return mapDBErr(err)
+	}
+	for _, policy := range policies {
+		if _, err := s.pgRepairBackupPolicyScheduleCAS(ctx, policy, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) pgRepairBackupPolicyScheduleCAS(ctx context.Context, policy model.BackupPolicy, now time.Time) (bool, error) {
+	repaired, changed := repairBackupPolicySchedule(policy, now)
+	if !changed {
+		return false, nil
+	}
+	result, err := s.db.ExecContext(ctx, pgRepairBackupPolicyScheduleSQL,
+		repaired.ID,
+		repaired.Schedule,
+		repaired.Status,
+		repaired.DisabledReason,
+		repaired.NextRunAt,
+		repaired.UpdatedAt,
+		policy.Schedule,
+		policy.NextRunAt,
+		policy.LastRunAt,
+	)
+	if err != nil {
+		return false, mapDBErr(err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, mapDBErr(err)
+	}
+	return rowsAffected == 1, nil
+}
+
 func (s *Store) pgEnsureDefaultBackupPolicy() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2410,16 +2902,19 @@ ON CONFLICT (id) DO UPDATE SET
 	schedule = CASE WHEN fugue_backup_policies.schedule = '' THEN EXCLUDED.schedule ELSE fugue_backup_policies.schedule END,
 	retain_count = CASE WHEN fugue_backup_policies.retain_count <= 0 THEN EXCLUDED.retain_count ELSE fugue_backup_policies.retain_count END,
 	retention_json = CASE WHEN fugue_backup_policies.retention_json IS NULL THEN EXCLUDED.retention_json ELSE fugue_backup_policies.retention_json END,
-	next_run_at = COALESCE(fugue_backup_policies.next_run_at, EXCLUDED.next_run_at),
+	next_run_at = fugue_backup_policies.next_run_at,
 	updated_at = EXCLUDED.updated_at
 `, policy.ID, policy.Name, policy.Slug, policy.Scope, policy.Target.Type, targetJSON, backend, policy.Enabled, policy.Status, policy.DisabledReason, policy.Schedule, policy.RetainCount, retentionJSON, policy.NextRunAt, policy.CreatedBy, policy.CreatedAt, policy.UpdatedAt)
 	return mapDBErr(err)
 }
 
 func (s *Store) pgRotateBackupBackendCredentials(idOrName, tenantID string, platformAdmin bool, credentials model.DataBackendCredentials) (model.BackupBackend, error) {
-	backend, err := s.pgGetBackupBackend(idOrName, tenantID, platformAdmin, false)
+	backend, err := s.pgGetBackupBackendForMutation(idOrName, tenantID, platformAdmin, false)
 	if err != nil {
 		return model.BackupBackend{}, err
+	}
+	if !platformAdmin && (tenantID == "" || backend.TenantID != tenantID) {
+		return model.BackupBackend{}, ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2473,9 +2968,12 @@ ON CONFLICT (backend_id) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, key_id 
 }
 
 func (s *Store) pgDeleteBackupBackend(idOrName, tenantID string, platformAdmin bool) (model.BackupBackend, error) {
-	backend, err := s.pgGetBackupBackend(idOrName, tenantID, platformAdmin, false)
+	backend, err := s.pgGetBackupBackendForMutation(idOrName, tenantID, platformAdmin, false)
 	if err != nil {
 		return model.BackupBackend{}, err
+	}
+	if !platformAdmin && (tenantID == "" || backend.TenantID != tenantID) {
+		return model.BackupBackend{}, ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2496,9 +2994,12 @@ func (s *Store) pgDeleteBackupBackend(idOrName, tenantID string, platformAdmin b
 }
 
 func (s *Store) pgRecordBackupBackendTest(idOrName, tenantID string, platformAdmin bool, success bool, message string) (model.BackupBackend, error) {
-	backend, err := s.pgGetBackupBackend(idOrName, tenantID, platformAdmin, false)
+	backend, err := s.pgGetBackupBackendForMutation(idOrName, tenantID, platformAdmin, false)
 	if err != nil {
 		return model.BackupBackend{}, err
+	}
+	if !platformAdmin && (tenantID == "" || backend.TenantID != tenantID) {
+		return model.BackupBackend{}, ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2556,7 +3057,7 @@ func (s *Store) pgGetBackupPolicy(idOrName, tenantID string, platformAdmin bool)
 	args := []any{idOrName, slug}
 	if !platformAdmin {
 		args = append(args, tenantID)
-		query += ` AND (tenant_id IS NULL OR tenant_id = $3)`
+		query += ` AND tenant_id = $3`
 	}
 	return scanBackupPolicy(s.db.QueryRowContext(ctx, query, args...))
 }
@@ -2666,6 +3167,9 @@ func (s *Store) pgListDueBackupPolicies(now time.Time, limit int) ([]model.Backu
 	if limit <= 0 {
 		limit = defaultBackupDueScannerLimit
 	}
+	if err := s.pgRepairNullBackupPolicySchedules(ctx, now, limit); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, backupPolicySelectSQL()+`
  WHERE enabled = TRUE AND status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= $1
  ORDER BY next_run_at ASC
@@ -2695,6 +3199,7 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 	}
 	defer tx.Rollback()
 	policySchedule := model.BackupDefaultSchedule
+	var now time.Time
 	if run.PolicyID != "" {
 		policy, err := scanBackupPolicy(tx.QueryRowContext(ctx, backupPolicySelectSQL()+` WHERE id = $1 FOR UPDATE`, run.PolicyID))
 		if err != nil {
@@ -2703,7 +3208,8 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 		if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
 			return model.BackupRun{}, ErrConflict
 		}
-		if err := validateBackupRunRolloutCompatibility(policy.Schedule, run); err != nil {
+		now = time.Now().UTC()
+		if err := validateScheduledBackupPolicyDue(run, policy, now); err != nil {
 			return model.BackupRun{}, err
 		}
 		if run.TenantID == "" {
@@ -2736,7 +3242,9 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 	if active {
 		return model.BackupRun{}, ErrConflict
 	}
-	now := time.Now().UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	if run.ID == "" {
 		run.ID = model.NewID("backup_run")
 	}
@@ -2756,7 +3264,7 @@ RETURNING `+backupRunReturningColumns(), run.ID, run.PolicyID, nullIfEmpty(run.T
 		return model.BackupRun{}, mapDBErr(err)
 	}
 	if run.PolicyID != "" {
-		next, err := nextSupportedBackupRunAfter(policySchedule, now)
+		next, err := nextBackupRunAfter(policySchedule, now)
 		if err != nil {
 			return model.BackupRun{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
 		}
@@ -2768,6 +3276,89 @@ RETURNING `+backupRunReturningColumns(), run.ID, run.PolicyID, nullIfEmpty(run.T
 		return model.BackupRun{}, err
 	}
 	return created, nil
+}
+
+func (s *Store) pgClaimBackupRun(id, leaseOwner string, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lockedUntil := now.Add(leaseTTL)
+	claimed, err := scanBackupRun(s.db.QueryRowContext(ctx, `
+UPDATE fugue_backup_runs
+SET status = 'running', lease_owner = $2, locked_until = $3, heartbeat_at = $4, updated_at = $4, started_at = $4
+WHERE id = $1 AND status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= $4)
+RETURNING `+backupRunReturningColumns(), id, leaseOwner, lockedUntil, now))
+	if errors.Is(err, ErrNotFound) {
+		return model.BackupRun{}, ErrConflict
+	}
+	return claimed, err
+}
+
+func (s *Store) pgHeartbeatBackupRun(id, leaseOwner string, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lockedUntil := now.Add(leaseTTL)
+	heartbeat, err := scanBackupRun(s.db.QueryRowContext(ctx, `
+UPDATE fugue_backup_runs
+SET locked_until = $3, heartbeat_at = $4, updated_at = $4
+WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND locked_until IS NOT NULL AND locked_until >= $4
+RETURNING `+backupRunReturningColumns(), id, leaseOwner, lockedUntil, now))
+	if errors.Is(err, ErrNotFound) {
+		return model.BackupRun{}, ErrConflict
+	}
+	return heartbeat, err
+}
+
+func (s *Store) pgRecoverStaleBackupRun(observed model.BackupRun, now time.Time) (model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	recovered, err := scanBackupRun(s.db.QueryRowContext(ctx, `
+UPDATE fugue_backup_runs
+SET status = 'failed', locked_until = NULL, heartbeat_at = $8, error_code = $9, error_message = $10, updated_at = $8, finished_at = $8
+WHERE id = $1
+  AND status = $2
+  AND lease_owner = $3
+  AND updated_at = $4
+  AND locked_until IS NOT DISTINCT FROM $5
+  AND heartbeat_at IS NOT DISTINCT FROM $6
+  AND next_retry_at IS NOT DISTINCT FROM $7
+RETURNING `+backupRunReturningColumns(), observed.ID, observed.Status, observed.LeaseOwner, observed.UpdatedAt, observed.LockedUntil, observed.HeartbeatAt, observed.NextRetryAt, now, backupRunLostErrorCode, backupRunLostErrorMessage))
+	if errors.Is(err, ErrNotFound) {
+		return model.BackupRun{}, ErrConflict
+	}
+	return recovered, err
+}
+
+func (s *Store) pgFinishBackupRun(id, leaseOwner string, finish BackupRunFinish) (model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BackupRun{}, err
+	}
+	defer tx.Rollback()
+	finished, err := scanBackupRun(tx.QueryRowContext(ctx, `
+UPDATE fugue_backup_runs
+SET status = $3, locked_until = NULL, heartbeat_at = $4, bytes_written = $5, artifact_count = $6, error_code = $7, error_message = $8, updated_at = $4, finished_at = $4
+WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND locked_until IS NOT NULL AND locked_until >= $4
+RETURNING `+backupRunReturningColumns(), id, leaseOwner, finish.Status, finish.FinishedAt, finish.BytesWritten, finish.ArtifactCount, finish.ErrorCode, finish.ErrorMessage))
+	if errors.Is(err, ErrNotFound) {
+		return model.BackupRun{}, ErrConflict
+	}
+	if err != nil {
+		return model.BackupRun{}, err
+	}
+	if finished.Status == model.BackupRunStatusSucceeded && finished.PolicyID != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE fugue_backup_policies SET last_successful_run_id = $2, last_successful_at = $3, updated_at = $3 WHERE id = $1`, finished.PolicyID, finished.ID, finish.FinishedAt); err != nil {
+			return model.BackupRun{}, mapDBErr(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return model.BackupRun{}, err
+	}
+	if finished.Status == model.BackupRunStatusSucceeded && finished.PolicyID != "" {
+		_ = s.pgApplyBackupRetention(finished.PolicyID)
+	}
+	return finished, nil
 }
 
 func (s *Store) pgListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error) {
@@ -2801,6 +3392,64 @@ func (s *Store) pgListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, err
 	return runs, mapDBErr(rows.Err())
 }
 
+func (s *Store) pgListDueBackupRetryRuns(now time.Time, limit int) ([]model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, backupRunSelectSQL()+`
+ WHERE status = 'pending'
+   AND trigger = 'retry'
+   AND next_retry_at IS NOT NULL
+   AND next_retry_at <= $1
+ ORDER BY next_retry_at ASC, created_at ASC
+ LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	runs := []model.BackupRun{}
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, mapDBErr(rows.Err())
+}
+
+func (s *Store) pgListStaleBackupRuns(now time.Time, leaseTTL time.Duration, limit int) ([]model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lastSeenSQL := `CASE
+     WHEN status = 'pending' AND trigger = 'retry' THEN GREATEST(COALESCE(heartbeat_at, updated_at), COALESCE(next_retry_at, updated_at))
+     ELSE COALESCE(heartbeat_at, updated_at)
+   END`
+	deadlineSQL := `CASE
+     WHEN locked_until IS NOT NULL THEN locked_until
+     ELSE (` + lastSeenSQL + `) + ($2 * INTERVAL '1 microsecond')
+   END`
+	query := backupRunSelectSQL() + `
+ WHERE status IN ('running', 'pending')
+   AND NOT (status = 'pending' AND trigger = 'retry' AND next_retry_at IS NOT NULL AND next_retry_at > $1)
+   AND (` + deadlineSQL + `) < $1
+ ORDER BY (` + deadlineSQL + `) ASC, created_at ASC
+ LIMIT $3`
+	rows, err := s.db.QueryContext(ctx, query, now, leaseTTL.Microseconds(), limit)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	runs := []model.BackupRun{}
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, mapDBErr(rows.Err())
+}
+
 func (s *Store) pgGetBackupRun(id string, tenantID string, platformAdmin bool) (model.BackupRun, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2808,7 +3457,7 @@ func (s *Store) pgGetBackupRun(id string, tenantID string, platformAdmin bool) (
 	args := []any{id}
 	if !platformAdmin {
 		args = append(args, tenantID)
-		query += ` AND (tenant_id IS NULL OR tenant_id = $2)`
+		query += ` AND tenant_id = $2`
 	}
 	return scanBackupRun(s.db.QueryRowContext(ctx, query, args...))
 }
@@ -2828,11 +3477,39 @@ WHERE id = $1
 RETURNING `+backupRunReturningColumns(), current.ID, current.Status, current.LeaseOwner, current.LockedUntil, current.HeartbeatAt, current.BytesWritten, current.LogicalBytes, current.ArtifactCount, current.ErrorCode, current.ErrorMessage, current.NextRetryAt, current.UpdatedAt, current.StartedAt, current.FinishedAt))
 }
 
-func (s *Store) pgCreateBackupArtifact(artifact model.BackupArtifact) (model.BackupArtifact, error) {
+func (s *Store) pgCreateBackupArtifact(artifact model.BackupArtifact, leaseOwner string) (model.BackupArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	artifact = model.NormalizeBackupArtifact(artifact)
 	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BackupArtifact{}, err
+	}
+	defer tx.Rollback()
+	if leaseOwner != "" {
+		var runPolicyID sql.NullString
+		err := tx.QueryRowContext(ctx, `
+SELECT policy_id
+FROM fugue_backup_runs
+WHERE id = $1 AND status = 'running' AND lease_owner = $2 AND locked_until IS NOT NULL AND locked_until >= $3
+FOR UPDATE`, artifact.RunID, leaseOwner, now).Scan(&runPolicyID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.BackupArtifact{}, ErrConflict
+		}
+		if err != nil {
+			return model.BackupArtifact{}, mapDBErr(err)
+		}
+		linkedPolicyID := ""
+		if runPolicyID.Valid {
+			linkedPolicyID = runPolicyID.String
+		}
+		if artifact.PolicyID == "" {
+			artifact.PolicyID = linkedPolicyID
+		} else if artifact.PolicyID != linkedPolicyID {
+			return model.BackupArtifact{}, ErrConflict
+		}
+	}
 	if artifact.ID == "" {
 		artifact.ID = model.NewID("backup_artifact")
 	}
@@ -2863,11 +3540,6 @@ func (s *Store) pgCreateBackupArtifact(artifact model.BackupArtifact) (model.Bac
 	if err != nil {
 		return model.BackupArtifact{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.BackupArtifact{}, err
-	}
-	defer tx.Rollback()
 	created, err := scanBackupArtifact(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_backup_artifacts (id, run_id, policy_id, tenant_id, project_id, app_id, target_type, target_tenant_id, target_project_id, target_app_id, target_json, backend_id, kind, version, object_key, manifest_object_key, sha256, size_bytes, logical_bytes, status, protected, billable, billing_class, manifest_digest, manifest_json, created_at, deleted_at)
 VALUES ($1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
@@ -2876,20 +3548,28 @@ RETURNING `+backupArtifactReturningColumns(), artifact.ID, artifact.RunID, artif
 		return model.BackupArtifact{}, mapDBErr(err)
 	}
 	if artifact.RunID != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE fugue_backup_runs SET artifact_count = artifact_count + 1, bytes_written = bytes_written + $2, logical_bytes = logical_bytes + $3, updated_at = $4 WHERE id = $1`, artifact.RunID, artifact.SizeBytes, artifact.LogicalBytes, now); err != nil {
+		query := `UPDATE fugue_backup_runs SET artifact_count = artifact_count + 1, bytes_written = bytes_written + $2, logical_bytes = logical_bytes + $3, updated_at = $4 WHERE id = $1`
+		args := []any{artifact.RunID, artifact.SizeBytes, artifact.LogicalBytes, now}
+		if leaseOwner != "" {
+			query += ` AND status = 'running' AND lease_owner = $5 AND locked_until IS NOT NULL AND locked_until >= $4`
+			args = append(args, leaseOwner)
+		}
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
 			return model.BackupArtifact{}, mapDBErr(err)
 		}
-	}
-	if artifact.PolicyID != "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE fugue_backup_policies SET last_successful_run_id = $2, last_successful_at = $3, updated_at = $4 WHERE id = $1`, artifact.PolicyID, artifact.RunID, artifact.CreatedAt, now); err != nil {
-			return model.BackupArtifact{}, mapDBErr(err)
+		if leaseOwner != "" {
+			rowsAffected, err := result.RowsAffected()
+			if err != nil {
+				return model.BackupArtifact{}, err
+			}
+			if rowsAffected != 1 {
+				return model.BackupArtifact{}, ErrConflict
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.BackupArtifact{}, err
-	}
-	if artifact.PolicyID != "" {
-		_ = s.pgApplyBackupRetention(artifact.PolicyID)
 	}
 	return created, nil
 }
@@ -2932,18 +3612,23 @@ func (s *Store) pgGetBackupArtifact(id string, tenantID string, platformAdmin bo
 	args := []any{id}
 	if !platformAdmin {
 		args = append(args, tenantID)
-		query += ` AND (tenant_id IS NULL OR tenant_id = $2)`
+		query += ` AND tenant_id = $2`
 	}
 	return scanBackupArtifact(s.db.QueryRowContext(ctx, query, args...))
 }
 
-func (s *Store) pgMarkBackupArtifactDeleted(id string) (model.BackupArtifact, error) {
+func (s *Store) pgMarkBackupArtifactDeleted(id, tenantID string, platformAdmin bool) (model.BackupArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	now := time.Now().UTC()
-	artifact, err := scanBackupArtifact(s.db.QueryRowContext(ctx, `
-UPDATE fugue_backup_artifacts SET status = 'deleted', deleted_at = $2 WHERE id = $1 AND protected = FALSE
-RETURNING `+backupArtifactReturningColumns(), id, now))
+	query := `UPDATE fugue_backup_artifacts SET status = 'deleted', deleted_at = $2 WHERE id = $1 AND protected = FALSE`
+	args := []any{id, now}
+	if !platformAdmin {
+		query += ` AND tenant_id = $3`
+		args = append(args, tenantID)
+	}
+	query += ` RETURNING ` + backupArtifactReturningColumns()
+	artifact, err := scanBackupArtifact(s.db.QueryRowContext(ctx, query, args...))
 	if err != nil {
 		return model.BackupArtifact{}, mapDBErr(err)
 	}
@@ -2978,7 +3663,7 @@ func (s *Store) pgApplyBackupRetention(policyID string) error {
 		return mapDBErr(err)
 	}
 	for _, id := range ids {
-		if _, err := s.pgMarkBackupArtifactDeleted(id); err != nil && !errors.Is(err, ErrConflict) {
+		if _, err := s.pgMarkBackupArtifactDeleted(id, "", true); err != nil && !errors.Is(err, ErrConflict) {
 			return err
 		}
 	}
@@ -3039,7 +3724,7 @@ func (s *Store) pgListBackupRestorePlans(tenantID string, platformAdmin bool, li
 	args := []any{}
 	if !platformAdmin {
 		args = append(args, tenantID)
-		query += ` WHERE tenant_id IS NULL OR tenant_id = $1`
+		query += ` WHERE tenant_id = $1`
 	}
 	query += ` ORDER BY created_at DESC`
 	if limit <= 0 {
@@ -3070,7 +3755,7 @@ func (s *Store) pgGetBackupRestorePlan(id string, tenantID string, platformAdmin
 	args := []any{id}
 	if !platformAdmin {
 		args = append(args, tenantID)
-		query += ` AND (tenant_id IS NULL OR tenant_id = $2)`
+		query += ` AND tenant_id = $2`
 	}
 	return scanBackupRestorePlan(s.db.QueryRowContext(ctx, query, args...))
 }
@@ -3116,7 +3801,7 @@ func (s *Store) pgListBackupRestoreRuns(tenantID string, platformAdmin bool, lim
 	args := []any{}
 	if !platformAdmin {
 		args = append(args, tenantID)
-		query += ` WHERE tenant_id IS NULL OR tenant_id = $1`
+		query += ` WHERE tenant_id = $1`
 	}
 	query += ` ORDER BY created_at DESC`
 	if limit <= 0 {
@@ -3218,7 +3903,7 @@ func backupPolicyFilterClauses(filter BackupPolicyFilter) ([]string, []any) {
 	var args []any
 	if !filter.PlatformAdmin {
 		args = append(args, filter.TenantID)
-		clauses = append(clauses, fmt.Sprintf(`(tenant_id IS NULL OR tenant_id = $%d)`, len(args)))
+		clauses = append(clauses, fmt.Sprintf(`tenant_id = $%d`, len(args)))
 	}
 	if !filter.IncludeDisabled {
 		clauses = append(clauses, `enabled = TRUE`)
@@ -3244,7 +3929,7 @@ func backupRunFilterClauses(filter BackupRunFilter) ([]string, []any) {
 	var args []any
 	if !filter.PlatformAdmin {
 		args = append(args, filter.TenantID)
-		clauses = append(clauses, fmt.Sprintf(`(tenant_id IS NULL OR tenant_id = $%d)`, len(args)))
+		clauses = append(clauses, fmt.Sprintf(`tenant_id = $%d`, len(args)))
 	}
 	if filter.ProjectID != "" {
 		args = append(args, filter.ProjectID)
@@ -3274,7 +3959,7 @@ func backupArtifactFilterClauses(filter BackupArtifactFilter) ([]string, []any) 
 	var args []any
 	if !filter.PlatformAdmin {
 		args = append(args, filter.TenantID)
-		clauses = append(clauses, fmt.Sprintf(`(tenant_id IS NULL OR tenant_id = $%d)`, len(args)))
+		clauses = append(clauses, fmt.Sprintf(`tenant_id = $%d`, len(args)))
 	}
 	if filter.ActiveOnly {
 		clauses = append(clauses, `status = 'active'`)

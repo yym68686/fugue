@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -152,8 +153,23 @@ func TestBackupRetentionKeepsLatestSuccessfulArtifacts(t *testing.T) {
 	base := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
 	var ids []string
 	for i := 0; i < 4; i++ {
-		artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
-			RunID:     "run_" + string(rune('a'+i)),
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create backup run %d: %v", i, err)
+		}
+		claimedAt := time.Now().UTC()
+		claimed, err := stateStore.ClaimBackupRun(run.ID, "retention-worker", claimedAt, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("claim backup run %d: %v", i, err)
+		}
+		artifact, err := stateStore.CreateBackupArtifactForRun(model.BackupArtifact{
+			RunID:     claimed.ID,
 			PolicyID:  policy.ID,
 			Target:    policy.Target,
 			BackendID: backend.ID,
@@ -162,11 +178,19 @@ func TestBackupRetentionKeepsLatestSuccessfulArtifacts(t *testing.T) {
 			SizeBytes: int64(100 + i),
 			Status:    model.BackupArtifactStatusActive,
 			CreatedAt: base.Add(time.Duration(i) * time.Minute),
-		})
+		}, claimed.LeaseOwner)
 		if err != nil {
 			t.Fatalf("create artifact %d: %v", i, err)
 		}
 		ids = append(ids, artifact.ID)
+		if _, err := stateStore.FinishBackupRun(claimed.ID, claimed.LeaseOwner, BackupRunFinish{
+			Status:        model.BackupRunStatusSucceeded,
+			BytesWritten:  artifact.SizeBytes,
+			ArtifactCount: 1,
+			FinishedAt:    claimedAt.Add(time.Second),
+		}); err != nil {
+			t.Fatalf("finish backup run %d: %v", i, err)
+		}
 	}
 
 	active, err := stateStore.ListBackupArtifacts(BackupArtifactFilter{PolicyID: policy.ID, ActiveOnly: true, PlatformAdmin: true})
@@ -190,6 +214,56 @@ func TestBackupRetentionKeepsLatestSuccessfulArtifacts(t *testing.T) {
 	}
 }
 
+func TestMarkBackupArtifactDeletedEnforcesTenantOwnership(t *testing.T) {
+	t.Parallel()
+
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	createArtifact := func(id, tenantID string) model.BackupArtifact {
+		t.Helper()
+		artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
+			ID:        id,
+			TenantID:  tenantID,
+			Target:    model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: tenantID},
+			Kind:      model.BackupArtifactKindAppPGDump,
+			ObjectKey: id + ".dump",
+			Status:    model.BackupArtifactStatusActive,
+		})
+		if err != nil {
+			t.Fatalf("create artifact %q: %v", id, err)
+		}
+		return artifact
+	}
+	attackerArtifact := createArtifact("artifact_attacker", "tenant_attacker")
+	victimArtifact := createArtifact("artifact_victim", "tenant_victim")
+	platformArtifact := createArtifact("artifact_platform", "")
+
+	for _, artifact := range []model.BackupArtifact{victimArtifact, platformArtifact} {
+		if _, err := stateStore.MarkBackupArtifactDeleted(artifact.ID, "tenant_attacker", false); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expected tenant deletion of artifact %q to be hidden, got %v", artifact.ID, err)
+		}
+		unchanged, err := stateStore.GetBackupArtifact(artifact.ID, "", true)
+		if err != nil {
+			t.Fatalf("get artifact %q after rejected deletion: %v", artifact.ID, err)
+		}
+		if unchanged.Status != model.BackupArtifactStatusActive || unchanged.DeletedAt != nil {
+			t.Fatalf("artifact %q changed after rejected deletion: %+v", artifact.ID, unchanged)
+		}
+	}
+	deleted, err := stateStore.MarkBackupArtifactDeleted(attackerArtifact.ID, "tenant_attacker", false)
+	if err != nil {
+		t.Fatalf("delete tenant-owned artifact: %v", err)
+	}
+	if deleted.Status != model.BackupArtifactStatusDeleted || deleted.DeletedAt == nil {
+		t.Fatalf("expected tenant-owned artifact to be deleted, got %+v", deleted)
+	}
+	if _, err := stateStore.MarkBackupArtifactDeleted(victimArtifact.ID, "", true); err != nil {
+		t.Fatalf("platform admin delete victim artifact: %v", err)
+	}
+}
+
 func TestBackupScheduleDueCalculation(t *testing.T) {
 	after := time.Date(2026, 6, 13, 10, 17, 30, 0, time.UTC)
 	tests := []struct {
@@ -201,6 +275,7 @@ func TestBackupScheduleDueCalculation(t *testing.T) {
 		{name: "hourly shortcut", schedule: "@hourly", want: time.Date(2026, 6, 13, 11, 0, 0, 0, time.UTC)},
 		{name: "every fifteen", schedule: "*/15 * * * *", want: time.Date(2026, 6, 13, 10, 30, 0, 0, time.UTC)},
 		{name: "fixed minute", schedule: "20 * * * *", want: time.Date(2026, 6, 13, 10, 20, 0, 0, time.UTC)},
+		{name: "every six hours", schedule: "0 */6 * * *", want: time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -213,12 +288,12 @@ func TestBackupScheduleDueCalculation(t *testing.T) {
 			}
 		})
 	}
-	if got, err := nextBackupRunAfter("bad schedule", after); err != nil || got != nil {
-		t.Fatalf("expected legacy scheduler to leave unsupported schedule inactive, got %v err=%v", got, err)
+	if got, err := nextBackupRunAfter("bad schedule", after); err == nil || got != nil {
+		t.Fatalf("expected invalid schedule to fail closed, got %v err=%v", got, err)
 	}
 }
 
-func TestBackupWorkerAdvancesNewScheduleWithoutActivatingPolicyWrites(t *testing.T) {
+func TestUpsertBackupPolicyValidatesAndRecalculatesSchedule(t *testing.T) {
 	t.Parallel()
 
 	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
@@ -235,34 +310,17 @@ func TestBackupWorkerAdvancesNewScheduleWithoutActivatingPolicyWrites(t *testing
 	if err != nil {
 		t.Fatalf("upsert six-hour policy: %v", err)
 	}
-	if policy.NextRunAt != nil {
-		t.Fatalf("phase-one compatibility must not activate a formerly unsupported schedule during a mixed-version rollout: %+v", policy)
+	if policy.NextRunAt == nil || policy.NextRunAt.Minute() != 0 || policy.NextRunAt.Hour()%6 != 0 {
+		t.Fatalf("expected aligned six-hour next run, got %+v", policy)
 	}
-	if _, err := stateStore.CreateBackupRun(model.BackupRun{
-		PolicyID: policy.ID,
-		Target:   policy.Target,
-		Trigger:  model.BackupRunTriggerManual,
-		Status:   model.BackupRunStatusPending,
-	}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("expected manual activation to remain frozen during compatibility rollout, got %v", err)
-	}
-	_, err = stateStore.CreateBackupRun(model.BackupRun{
-		PolicyID:        policy.ID,
-		Target:          policy.Target,
-		Trigger:         model.BackupRunTriggerScheduled,
-		Status:          model.BackupRunStatusPending,
-		RequestedByType: "system",
-		RequestedByID:   "backup-scheduler",
-	})
+	originalNext := *policy.NextRunAt
+	policy.Schedule = "7 * * * *"
+	updated, err := stateStore.UpsertBackupPolicy(policy)
 	if err != nil {
-		t.Fatalf("create compatibility backup run: %v", err)
+		t.Fatalf("change policy schedule: %v", err)
 	}
-	advanced, err := stateStore.GetBackupPolicy(policy.ID, "", true)
-	if err != nil {
-		t.Fatalf("get advanced policy: %v", err)
-	}
-	if advanced.NextRunAt == nil || advanced.NextRunAt.Minute() != 0 || advanced.NextRunAt.Hour()%6 != 0 {
-		t.Fatalf("expected a worker handling the policy to advance its six-hour schedule, got %+v", advanced)
+	if updated.NextRunAt == nil || updated.NextRunAt.Equal(originalNext) || updated.NextRunAt.Minute() != 7 {
+		t.Fatalf("expected schedule change to recalculate next run, old=%s updated=%+v", originalNext, updated)
 	}
 
 	if _, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
@@ -304,6 +362,476 @@ func TestBackupWorkerAdvancesNewScheduleWithoutActivatingPolicyWrites(t *testing
 	if _, err := stateStore.SetBackupPolicyEnabled(invalidDisabled.ID, "", true, false, "disabled by user"); err != nil {
 		t.Fatalf("expected invalid policy kill-switch to remain available: %v", err)
 	}
+}
+
+func TestCreateScheduledBackupRunRechecksPolicyDueAndAllowsManualRun(t *testing.T) {
+	t.Parallel()
+
+	stateStore, backend, policy := newBackupClaimTestStore(t)
+	if policy.NextRunAt == nil || !policy.NextRunAt.After(time.Now().UTC()) {
+		t.Fatalf("expected newly created policy to be scheduled in the future, got %+v", policy)
+	}
+	if _, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:  policy.ID,
+		Target:    policy.Target,
+		BackendID: backend.ID,
+		Trigger:   model.BackupRunTriggerScheduled,
+		Status:    model.BackupRunStatusPending,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected stale scheduled enqueue to fail when policy is not due, got %v", err)
+	}
+
+	manual, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:  policy.ID,
+		Target:    policy.Target,
+		BackendID: backend.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("manual policy run must remain allowed before next_run_at: %v", err)
+	}
+	if manual.Trigger != model.BackupRunTriggerManual || manual.Status != model.BackupRunStatusPending {
+		t.Fatalf("unexpected manual backup run: %+v", manual)
+	}
+}
+
+func TestClaimBackupRunIsAtomicAndHonorsRetryDueTime(t *testing.T) {
+	t.Parallel()
+
+	t.Run("only one claimant transitions pending to running", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create pending backup run: %v", err)
+		}
+		now := time.Date(2026, time.July, 12, 12, 30, 0, 0, time.UTC)
+		claimed, err := stateStore.ClaimBackupRun(run.ID, "worker-a", now, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("claim pending backup run: %v", err)
+		}
+		wantLockedUntil := now.Add(2 * time.Minute)
+		if claimed.Status != model.BackupRunStatusRunning || claimed.LeaseOwner != "worker-a" || claimed.LockedUntil == nil || !claimed.LockedUntil.Equal(wantLockedUntil) || claimed.StartedAt == nil || !claimed.StartedAt.Equal(now) {
+			t.Fatalf("unexpected claimed run: %+v", claimed)
+		}
+		if _, err := stateStore.ClaimBackupRun(run.ID, "worker-b", now, 2*time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected second claimant to lose atomically, got %v", err)
+		}
+	})
+
+	t.Run("future retry cannot be claimed early", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		now := time.Date(2026, time.July, 12, 12, 30, 0, 0, time.UTC)
+		nextRetryAt := now.Add(5 * time.Minute)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:    policy.ID,
+			Target:      policy.Target,
+			BackendID:   backend.ID,
+			Trigger:     model.BackupRunTriggerRetry,
+			Status:      model.BackupRunStatusPending,
+			NextRetryAt: &nextRetryAt,
+		})
+		if err != nil {
+			t.Fatalf("create pending retry run: %v", err)
+		}
+		if _, err := stateStore.ClaimBackupRun(run.ID, "worker-early", now, 2*time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected early retry claim to fail, got %v", err)
+		}
+		claimed, err := stateStore.ClaimBackupRun(run.ID, "worker-due", nextRetryAt, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("claim due retry run: %v", err)
+		}
+		if claimed.Status != model.BackupRunStatusRunning || claimed.LeaseOwner != "worker-due" {
+			t.Fatalf("unexpected due retry claim: %+v", claimed)
+		}
+	})
+
+	t.Run("heartbeat and finish are fenced by owner", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create pending backup run: %v", err)
+		}
+		now := time.Date(2026, time.July, 12, 12, 30, 0, 0, time.UTC)
+		if _, err := stateStore.ClaimBackupRun(run.ID, "worker-owner", now, 2*time.Minute); err != nil {
+			t.Fatalf("claim backup run: %v", err)
+		}
+		if _, err := stateStore.HeartbeatBackupRun(run.ID, "worker-stale", now.Add(time.Minute), 2*time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected stale heartbeat to be fenced, got %v", err)
+		}
+		heartbeatAt := now.Add(time.Minute)
+		heartbeat, err := stateStore.HeartbeatBackupRun(run.ID, "worker-owner", heartbeatAt, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("heartbeat claimed backup run: %v", err)
+		}
+		if heartbeat.HeartbeatAt == nil || !heartbeat.HeartbeatAt.Equal(heartbeatAt) || heartbeat.LockedUntil == nil || !heartbeat.LockedUntil.Equal(heartbeatAt.Add(2*time.Minute)) {
+			t.Fatalf("unexpected fenced heartbeat result: %+v", heartbeat)
+		}
+		finish := BackupRunFinish{Status: model.BackupRunStatusSucceeded, BytesWritten: 42, ArtifactCount: 1, FinishedAt: heartbeatAt.Add(time.Minute)}
+		if _, err := stateStore.FinishBackupRun(run.ID, "worker-stale", finish); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected stale finish to be fenced, got %v", err)
+		}
+		finished, err := stateStore.FinishBackupRun(run.ID, "worker-owner", finish)
+		if err != nil {
+			t.Fatalf("finish claimed backup run: %v", err)
+		}
+		if finished.Status != model.BackupRunStatusSucceeded || finished.BytesWritten != 42 || finished.ArtifactCount != 1 || finished.LockedUntil != nil {
+			t.Fatalf("unexpected fenced finish result: %+v", finished)
+		}
+		if _, err := stateStore.FinishBackupRun(run.ID, "worker-owner", finish); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected terminal run to reject repeated finish, got %v", err)
+		}
+	})
+
+	t.Run("expired owner cannot renew or finish", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create pending backup run: %v", err)
+		}
+		claimedAt := time.Now().UTC()
+		if _, err := stateStore.ClaimBackupRun(run.ID, "worker-expired", claimedAt, time.Minute); err != nil {
+			t.Fatalf("claim backup run: %v", err)
+		}
+		afterExpiry := claimedAt.Add(time.Minute + time.Second)
+		if _, err := stateStore.HeartbeatBackupRun(run.ID, "worker-expired", afterExpiry, time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected expired heartbeat to conflict, got %v", err)
+		}
+		if _, err := stateStore.FinishBackupRun(run.ID, "worker-expired", BackupRunFinish{Status: model.BackupRunStatusSucceeded, FinishedAt: afterExpiry}); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected expired finish to conflict, got %v", err)
+		}
+	})
+}
+
+func TestRecoverStaleBackupRunUsesObservedLeaseCAS(t *testing.T) {
+	t.Parallel()
+
+	t.Run("recovers an unchanged stale running observation", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
+		staleLock := staleHeartbeat.Add(time.Minute)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:    policy.ID,
+			Target:      policy.Target,
+			BackendID:   backend.ID,
+			Trigger:     model.BackupRunTriggerManual,
+			Status:      model.BackupRunStatusRunning,
+			LeaseOwner:  "worker-owner",
+			LockedUntil: &staleLock,
+			HeartbeatAt: &staleHeartbeat,
+		})
+		if err != nil {
+			t.Fatalf("create stale running backup run: %v", err)
+		}
+		recoveredAt := time.Now().UTC()
+		recovered, err := stateStore.RecoverStaleBackupRun(run, recoveredAt, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("recover unchanged stale backup run: %v", err)
+		}
+		if recovered.Status != model.BackupRunStatusFailed || recovered.ErrorCode != backupRunLostErrorCode || recovered.LockedUntil != nil || recovered.FinishedAt == nil || !recovered.FinishedAt.Equal(recoveredAt) {
+			t.Fatalf("unexpected recovered backup run: %+v", recovered)
+		}
+	})
+
+	t.Run("heartbeat renewal invalidates running observation", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
+		staleLock := staleHeartbeat.Add(time.Minute)
+		observed, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:    policy.ID,
+			Target:      policy.Target,
+			BackendID:   backend.ID,
+			Trigger:     model.BackupRunTriggerManual,
+			Status:      model.BackupRunStatusRunning,
+			LeaseOwner:  "worker-owner",
+			LockedUntil: &staleLock,
+			HeartbeatAt: &staleHeartbeat,
+		})
+		if err != nil {
+			t.Fatalf("create stale running backup run: %v", err)
+		}
+		replica := New(stateStore.path)
+		if err := replica.Init(); err != nil {
+			t.Fatalf("init heartbeat replica store: %v", err)
+		}
+		recoveredAt := time.Now().UTC()
+		// Model a heartbeat that started before the old lease expired but
+		// committed after the recovery scanner read the stale observation.
+		renewedAt := staleLock.Add(-time.Second)
+		renewed, err := replica.HeartbeatBackupRun(observed.ID, observed.LeaseOwner, renewedAt, 15*time.Minute)
+		if err != nil {
+			t.Fatalf("renew backup run lease: %v", err)
+		}
+		if _, err := stateStore.RecoverStaleBackupRun(observed, recoveredAt, 2*time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected pre-heartbeat observation to conflict, got %v", err)
+		}
+		current, err := stateStore.GetBackupRun(observed.ID, "", true)
+		if err != nil {
+			t.Fatalf("get renewed backup run: %v", err)
+		}
+		if current.Status != model.BackupRunStatusRunning || current.HeartbeatAt == nil || !current.HeartbeatAt.Equal(renewedAt) || current.LockedUntil == nil || renewed.LockedUntil == nil || !current.LockedUntil.Equal(*renewed.LockedUntil) {
+			t.Fatalf("stale recovery overwrote renewed backup run: %+v", current)
+		}
+	})
+
+	t.Run("pending claim invalidates scanner observation", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		observed, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create pending backup run: %v", err)
+		}
+		replica := New(stateStore.path)
+		if err := replica.Init(); err != nil {
+			t.Fatalf("init claiming replica store: %v", err)
+		}
+		claimAt := observed.UpdatedAt.Add(2*time.Minute + time.Second)
+		claimed, err := replica.ClaimBackupRun(observed.ID, "worker-claim", claimAt, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("claim pending backup run: %v", err)
+		}
+		if _, err := stateStore.RecoverStaleBackupRun(observed, claimAt, 2*time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected pre-claim pending observation to conflict, got %v", err)
+		}
+		current, err := stateStore.GetBackupRun(observed.ID, "", true)
+		if err != nil {
+			t.Fatalf("get claimed backup run: %v", err)
+		}
+		if current.Status != model.BackupRunStatusRunning || current.LeaseOwner != claimed.LeaseOwner || current.LockedUntil == nil {
+			t.Fatalf("stale recovery overwrote claimed backup run: %+v", current)
+		}
+	})
+}
+
+func TestCreateBackupArtifactForRunFencesLeaseAndDefersPolicySuccess(t *testing.T) {
+	t.Parallel()
+
+	t.Run("owned artifact is persisted but policy advances only after finish", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create backup run: %v", err)
+		}
+		claimedAt := time.Now().UTC()
+		claimed, err := stateStore.ClaimBackupRun(run.ID, "artifact-worker", claimedAt, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("claim backup run: %v", err)
+		}
+		artifactInput := model.BackupArtifact{
+			RunID:        claimed.ID,
+			PolicyID:     policy.ID,
+			Target:       policy.Target,
+			BackendID:    backend.ID,
+			Kind:         model.BackupArtifactKindControlPlanePGDump,
+			ObjectKey:    "fenced.dump",
+			SizeBytes:    42,
+			LogicalBytes: 84,
+			Status:       model.BackupArtifactStatusActive,
+		}
+		if _, err := stateStore.CreateBackupArtifactForRun(artifactInput, "wrong-worker"); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected wrong artifact owner to conflict, got %v", err)
+		}
+		artifact, err := stateStore.CreateBackupArtifactForRun(artifactInput, claimed.LeaseOwner)
+		if err != nil {
+			t.Fatalf("persist fenced backup artifact: %v", err)
+		}
+		beforeFinish, err := stateStore.GetBackupPolicy(policy.ID, "", true)
+		if err != nil {
+			t.Fatalf("get policy before finish: %v", err)
+		}
+		if beforeFinish.LastSuccessfulRunID != "" || beforeFinish.LastSuccessfulAt != nil {
+			t.Fatalf("artifact insertion advanced policy success before finish: %+v", beforeFinish)
+		}
+		finishedAt := claimedAt.Add(time.Minute)
+		if _, err := stateStore.FinishBackupRun(claimed.ID, claimed.LeaseOwner, BackupRunFinish{
+			Status:        model.BackupRunStatusSucceeded,
+			BytesWritten:  artifact.SizeBytes,
+			ArtifactCount: 1,
+			FinishedAt:    finishedAt,
+		}); err != nil {
+			t.Fatalf("finish backup run: %v", err)
+		}
+		afterFinish, err := stateStore.GetBackupPolicy(policy.ID, "", true)
+		if err != nil {
+			t.Fatalf("get policy after finish: %v", err)
+		}
+		if afterFinish.LastSuccessfulRunID != claimed.ID || afterFinish.LastSuccessfulAt == nil || !afterFinish.LastSuccessfulAt.Equal(finishedAt) {
+			t.Fatalf("successful fenced finish did not advance policy: %+v", afterFinish)
+		}
+	})
+
+	t.Run("expired owner cannot persist active artifact", func(t *testing.T) {
+		stateStore, backend, policy := newBackupClaimTestStore(t)
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerManual,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create backup run: %v", err)
+		}
+		claimedAt := time.Now().UTC().Add(-2 * time.Minute)
+		claimed, err := stateStore.ClaimBackupRun(run.ID, "expired-artifact-worker", claimedAt, time.Minute)
+		if err != nil {
+			t.Fatalf("claim backup run with expired lease: %v", err)
+		}
+		if _, err := stateStore.CreateBackupArtifactForRun(model.BackupArtifact{
+			RunID:     claimed.ID,
+			PolicyID:  policy.ID,
+			Target:    policy.Target,
+			BackendID: backend.ID,
+			Kind:      model.BackupArtifactKindControlPlanePGDump,
+			ObjectKey: "must-not-persist.dump",
+			Status:    model.BackupArtifactStatusActive,
+		}, claimed.LeaseOwner); !errors.Is(err, ErrConflict) {
+			t.Fatalf("expected expired artifact writer to conflict, got %v", err)
+		}
+		artifacts, err := stateStore.ListBackupArtifacts(BackupArtifactFilter{RunID: claimed.ID, PlatformAdmin: true})
+		if err != nil {
+			t.Fatalf("list artifacts after rejected write: %v", err)
+		}
+		if len(artifacts) != 0 {
+			t.Fatalf("expired worker persisted active artifact: %+v", artifacts)
+		}
+	})
+}
+
+func TestBackupSchedulerQueriesFilterBeforeLimit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("due retries are ordered by oldest due time before limit", func(t *testing.T) {
+		stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+		if err := stateStore.Init(); err != nil {
+			t.Fatalf("init store: %v", err)
+		}
+		now := time.Date(2026, time.July, 12, 14, 0, 0, 0, time.UTC)
+		oldestDue := now.Add(-10 * time.Minute)
+		newerDue := now.Add(-time.Minute)
+		if err := stateStore.withLockedState(true, func(state *model.State) error {
+			state.BackupRuns = append(state.BackupRuns,
+				model.BackupRun{ID: "retry_oldest_due", Trigger: model.BackupRunTriggerRetry, Status: model.BackupRunStatusPending, NextRetryAt: &oldestDue, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
+				model.BackupRun{ID: "retry_newer_due", Trigger: model.BackupRunTriggerRetry, Status: model.BackupRunStatusPending, NextRetryAt: &newerDue, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
+			)
+			for idx := 0; idx < 150; idx++ {
+				future := now.Add(time.Duration(idx+1) * time.Minute)
+				state.BackupRuns = append(state.BackupRuns, model.BackupRun{
+					ID:          fmt.Sprintf("retry_future_%03d", idx),
+					Trigger:     model.BackupRunTriggerRetry,
+					Status:      model.BackupRunStatusPending,
+					NextRetryAt: &future,
+					CreatedAt:   now.Add(time.Duration(idx) * time.Minute),
+					UpdatedAt:   now.Add(time.Duration(idx) * time.Minute),
+				})
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("seed retry runs: %v", err)
+		}
+		runs, err := stateStore.ListDueBackupRetryRuns(now, 1)
+		if err != nil {
+			t.Fatalf("list due retry runs: %v", err)
+		}
+		if len(runs) != 1 || runs[0].ID != "retry_oldest_due" {
+			t.Fatalf("newer future retries starved oldest due retry: %+v", runs)
+		}
+	})
+
+	t.Run("stale runs are ordered by oldest expiry before limit", func(t *testing.T) {
+		stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+		if err := stateStore.Init(); err != nil {
+			t.Fatalf("init store: %v", err)
+		}
+		now := time.Date(2026, time.July, 12, 14, 0, 0, 0, time.UTC)
+		oldestLock := now.Add(-30 * time.Minute)
+		if err := stateStore.withLockedState(true, func(state *model.State) error {
+			state.BackupRuns = append(state.BackupRuns,
+				model.BackupRun{ID: "run_oldest_stale", Trigger: model.BackupRunTriggerManual, Status: model.BackupRunStatusRunning, LeaseOwner: "worker-old", LockedUntil: &oldestLock, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
+				model.BackupRun{ID: "run_newer_stale", Trigger: model.BackupRunTriggerManual, Status: model.BackupRunStatusPending, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)},
+			)
+			for idx := 0; idx < 600; idx++ {
+				healthyLock := now.Add(time.Duration(idx+1) * time.Minute)
+				state.BackupRuns = append(state.BackupRuns, model.BackupRun{
+					ID:          fmt.Sprintf("run_healthy_%03d", idx),
+					Trigger:     model.BackupRunTriggerManual,
+					Status:      model.BackupRunStatusRunning,
+					LeaseOwner:  "worker-healthy",
+					LockedUntil: &healthyLock,
+					CreatedAt:   now.Add(time.Duration(idx) * time.Minute),
+					UpdatedAt:   now,
+				})
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("seed stale and healthy runs: %v", err)
+		}
+		runs, err := stateStore.ListStaleBackupRuns(now, 2*time.Minute, 1)
+		if err != nil {
+			t.Fatalf("list stale backup runs: %v", err)
+		}
+		if len(runs) != 1 || runs[0].ID != "run_oldest_stale" {
+			t.Fatalf("newer healthy runs starved oldest stale run: %+v", runs)
+		}
+	})
+}
+
+func newBackupClaimTestStore(t *testing.T) (*Store, model.BackupBackend, model.BackupPolicy) {
+	t.Helper()
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "claim-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "claim-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:      "claim-policy",
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backend.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create backup policy: %v", err)
+	}
+	return stateStore, backend, policy
 }
 
 func TestBackupUsageCountsBillableR2BytesWithMarkup(t *testing.T) {
