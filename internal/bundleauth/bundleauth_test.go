@@ -58,8 +58,18 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 						UpstreamKind: model.EdgeRouteUpstreamKindKubernetesService,
 					},
 				},
-				ServicePort:     80,
-				TLSPolicy:       model.EdgeRouteTLSPolicyPlatform,
+				ServicePort: 80,
+				TLSPolicy:   model.EdgeRouteTLSPolicyPlatform,
+				RequestBodyPolicies: []model.EdgeRequestBodyPolicy{
+					{
+						Name:           "upload",
+						Methods:        []string{"POST"},
+						Paths:          []string{"/upload"},
+						MaxBytes:       1 << 20,
+						TimeoutSeconds: 30,
+						MaxConcurrent:  2,
+					},
+				},
 				Streaming:       true,
 				Status:          model.EdgeRouteStatusActive,
 				RouteGeneration: "route_binding_test",
@@ -70,15 +80,24 @@ func TestEdgeRouteBundleSignsLegacyRouteProjectionForOldEdges(t *testing.T) {
 	}
 
 	signed := SignEdgeRouteBundleWithKeyring(bundle, keyring, time.Hour)
-	if len(signed.Signatures) < 2 {
-		t.Fatalf("expected current and legacy route signatures, got %+v", signed.Signatures)
+	if len(signed.Signatures) < 3 {
+		t.Fatalf("expected current, pre-request-policy, and legacy route signatures, got %+v", signed.Signatures)
 	}
 	if err := VerifyEdgeRouteBundleWithKeyring(signed, keyring, now); err != nil {
 		t.Fatalf("verify signed bundle with current route model: %v", err)
 	}
 
-	legacyDecoded := signed
-	legacyDecoded.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
+	preRequestPolicyDecoded := signed
+	preRequestPolicyDecoded.Routes = append([]model.EdgeRouteBinding(nil), signed.Routes...)
+	for idx := range preRequestPolicyDecoded.Routes {
+		preRequestPolicyDecoded.Routes[idx].RequestBodyPolicies = nil
+	}
+	if err := VerifyEdgeRouteBundleWithKeyring(preRequestPolicyDecoded, keyring, now); err != nil {
+		t.Fatalf("verify signed bundle after pre-request-policy edge drops unknown policies: %v", err)
+	}
+
+	legacyDecoded := preRequestPolicyDecoded
+	legacyDecoded.Routes = append([]model.EdgeRouteBinding(nil), preRequestPolicyDecoded.Routes...)
 	for idx := range legacyDecoded.Routes {
 		legacyDecoded.Routes[idx].Upstreams = nil
 		legacyDecoded.Routes[idx].ExcludedEdgeIDs = nil

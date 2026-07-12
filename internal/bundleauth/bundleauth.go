@@ -265,6 +265,13 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		payload := cloneBundleForSigning(out, validUntil, keyID)
 		return signPayload(payload, key)
 	}
+	appendPreRequestBodyPolicyEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
+		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
+			return ""
+		}
+		payload := cloneEdgeRouteBundleBeforeRequestBodyPoliciesForSigning(bundle, validUntil, keyID)
+		return signPayload(payload, key)
+	}
 	appendLegacyEdgeRouteSignature := func(bundle model.EdgeRouteBundle, key, keyID string) string {
 		if key == "" || keyID == "" || keyring.isRevoked(keyID) {
 			return ""
@@ -303,6 +310,14 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 		}
 		if previousSignature != "" {
 			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), previousSignature, typed.GeneratedAt, validUntil))
+		}
+		preRequestBodyPolicySignature := appendPreRequestBodyPolicyEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
+		if preRequestBodyPolicySignature != "" && preRequestBodyPolicySignature != signature {
+			signatures = append(signatures, bundleSignature(typed.Issuer, primaryKeyID, preRequestBodyPolicySignature, typed.GeneratedAt, validUntil))
+		}
+		preRequestBodyPolicyPreviousSignature := appendPreRequestBodyPolicyEdgeRouteSignature(*typed, keyring.previousKey(), keyring.previousKeyID())
+		if preRequestBodyPolicyPreviousSignature != "" && preRequestBodyPolicyPreviousSignature != previousSignature {
+			signatures = append(signatures, bundleSignature(typed.Issuer, keyring.previousKeyID(), preRequestBodyPolicyPreviousSignature, typed.GeneratedAt, validUntil))
 		}
 		legacySignature := appendLegacyEdgeRouteSignature(*typed, primaryKey, primaryKeyID)
 		if legacySignature != "" && legacySignature != signature {
@@ -349,10 +364,32 @@ func signBundle[T any](bundle T, keyring Keyring, validFor time.Duration, genera
 	return out
 }
 
+func cloneEdgeRouteBundleBeforeRequestBodyPoliciesForSigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
+	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
+	for idx := range routes {
+		routes[idx].RequestBodyPolicies = nil
+	}
+	return bundleSigningPayload{
+		SchemaVersion:      bundle.SchemaVersion,
+		Version:            bundle.Version,
+		Generation:         bundle.Generation,
+		PreviousGeneration: bundle.PreviousGeneration,
+		GeneratedAt:        bundle.GeneratedAt,
+		ValidUntil:         validUntil,
+		Issuer:             bundle.Issuer,
+		KeyID:              keyID,
+		EdgeID:             bundle.EdgeID,
+		EdgeGroupID:        bundle.EdgeGroupID,
+		Routes:             routes,
+		TLSAllowlist:       bundle.TLSAllowlist,
+	}
+}
+
 func cloneEdgeRouteBundleForLegacySigning(bundle model.EdgeRouteBundle, validUntil time.Time, keyID string) bundleSigningPayload {
 	routes := append([]model.EdgeRouteBinding(nil), bundle.Routes...)
 	for idx := range routes {
 		routes[idx].Upstreams = nil
+		routes[idx].RequestBodyPolicies = nil
 		routes[idx].ExcludedEdgeIDs = nil
 		routes[idx].ExcludedEdgeGroupIDs = nil
 		routes[idx].ExclusionReason = ""
