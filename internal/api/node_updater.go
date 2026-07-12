@@ -1139,6 +1139,12 @@ FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${FUGUE_NODE_UPDATER_DNS_ESCAPE
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE:-fugue-node-dns-escape-hatch.service}"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER:-fugue-node-dns-escape-hatch.timer}"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED="${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_ENABLED:-false}"
+FUGUE_NODE_UPDATER_DNSMASQ_SERVICE="${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE:-dnsmasq.service}"
+FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_FILE="${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_FILE:-/etc/dnsmasq.conf}"
+FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR="${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR:-/etc/dnsmasq.d}"
+FUGUE_NODE_UPDATER_RESOLV_CONF_FILE="${FUGUE_NODE_UPDATER_RESOLV_CONF_FILE:-/etc/resolv.conf}"
+FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE="${FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE:-/run/systemd/resolve/resolv.conf}"
+FUGUE_NODE_UPDATER_RESOLVECTL_BIN="${FUGUE_NODE_UPDATER_RESOLVECTL_BIN:-resolvectl}"
 FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN="${FUGUE_NODE_UPDATER_TIMESYNCD_DROPIN:-/etc/systemd/timesyncd.conf.d/10-fugue-managed.conf}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MIN_POLL_SEC:-32}"
 FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC="${FUGUE_NODE_UPDATER_TIMESYNCD_MAX_POLL_SEC:-64}"
@@ -2215,21 +2221,191 @@ cleanup_node_dns_escape_hatch_redirect_rules() {
   return "${changed}"
 }
 
+node_dns_escape_hatch_config_matches_mode() {
+  local bind_mode="$1"
+  local expected=""
+  [ -f "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" ] || return 1
+  expected="$(mktemp)"
+  cat >"${expected}" <<EOF_DNSMASQ
+interface=cni0
+${bind_mode}
+listen-address=127.0.0.1
+no-resolv
+no-hosts
+cache-size=1000
+addn-hosts=/var/lib/fugue-node-dns/hosts.generated
+server=1.1.1.1
+server=8.8.8.8
+EOF_DNSMASQ
+  if cmp -s "${expected}" "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"; then
+    rm -f "${expected}"
+    return 0
+  fi
+  rm -f "${expected}"
+  return 1
+}
+
+node_dns_escape_hatch_config_is_managed() {
+  node_dns_escape_hatch_config_matches_mode bind-interfaces ||
+    node_dns_escape_hatch_config_matches_mode bind-dynamic
+}
+
+dnsmasq_has_non_fugue_effective_config() {
+  local path=""
+  if [ -f "${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_FILE}" ] &&
+     grep -Eq '^[[:space:]]*[^#[:space:]]' "${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_FILE}"; then
+    return 0
+  fi
+  if [ ! -d "${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR}" ]; then
+    return 1
+  fi
+  for path in "${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR}"/*; do
+    [ -f "${path}" ] || continue
+    [ "${path}" = "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" ] && continue
+    if grep -Eq '^[[:space:]]*[^#[:space:]]' "${path}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+host_resolver_depends_on_fugue_dnsmasq() {
+  local cni_bridge_ip=""
+  local resolved_dns=""
+  local resolv_path=""
+  local target=""
+  cni_bridge_ip="$(detect_dns_escape_hatch_cni_bridge_ip || true)"
+  for resolv_path in \
+    "${FUGUE_NODE_UPDATER_RESOLV_CONF_FILE}" \
+    "${FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE}"; do
+    [ -r "${resolv_path}" ] || continue
+    if awk -v cni_address="${cni_bridge_ip}" '
+      $1 == "nameserver" && ($2 == "127.0.0.1" || $2 == "::1" || (cni_address != "" && $2 == cni_address)) { found=1 }
+      END { exit(found ? 0 : 1) }
+    ' "${resolv_path}"; then
+      return 0
+    fi
+  done
+  if ! systemctl is-active --quiet systemd-resolved.service 2>/dev/null; then
+    return 1
+  fi
+  if ! command -v "${FUGUE_NODE_UPDATER_RESOLVECTL_BIN}" >/dev/null 2>&1; then
+    log "refusing DNS escape hatch cleanup because systemd-resolved is active but resolvectl is unavailable"
+    return 0
+  fi
+  if ! resolved_dns="$("${FUGUE_NODE_UPDATER_RESOLVECTL_BIN}" dns 2>/dev/null)" || [ -z "${resolved_dns}" ]; then
+    log "refusing DNS escape hatch cleanup because systemd-resolved upstreams could not be verified"
+    return 0
+  fi
+  for target in 127.0.0.1 ::1 ${cni_bridge_ip}; do
+    [ -n "${target}" ] || continue
+    if printf '%s\n' "${resolved_dns}" | awk -v address="${target}" '
+      { for (i = 1; i <= NF; i++) if ($i == address) found=1 }
+      END { exit(found ? 0 : 1) }
+    '; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+cleanup_node_dns_escape_hatch_dnsmasq() {
+  local backup=""
+  local dnsmasq_was_active=0
+  local dnsmasq_was_enabled=0
+  [ -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" ] || return 1
+  if ! node_dns_escape_hatch_config_is_managed; then
+    log "refusing to remove non-standard DNS escape hatch config ${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+    return 1
+  fi
+  if dnsmasq_has_non_fugue_effective_config; then
+    log "refusing to remove DNS escape hatch config while dnsmasq has non-Fugue effective configuration"
+    return 1
+  fi
+  if host_resolver_depends_on_fugue_dnsmasq; then
+    log "refusing to remove DNS escape hatch config while the host resolver depends on it"
+    return 1
+  fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log "refusing to remove DNS escape hatch config because systemctl is unavailable"
+    return 1
+  fi
+  backup="$(mktemp)"
+  cp "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" "${backup}"
+  rm -f "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+  systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" && dnsmasq_was_active=1
+  systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" 2>/dev/null && dnsmasq_was_enabled=1
+  if [ "${dnsmasq_was_active}" -eq 1 ] || [ "${dnsmasq_was_enabled}" -eq 1 ]; then
+    if ! systemctl disable --now "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1; then
+      cp "${backup}" "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+      if [ "${dnsmasq_was_enabled}" -eq 1 ]; then
+        systemctl enable "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1 || true
+      fi
+      if [ "${dnsmasq_was_active}" -eq 1 ]; then
+        systemctl restart "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1 || true
+      fi
+      rm -f "${backup}"
+      log "failed to stop the Fugue-owned dnsmasq service after removing the escape hatch config"
+      return 1
+    fi
+    if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" ||
+       systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" 2>/dev/null; then
+      cp "${backup}" "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+      if [ "${dnsmasq_was_enabled}" -eq 1 ]; then
+        systemctl enable "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1 || true
+      fi
+      if [ "${dnsmasq_was_active}" -eq 1 ]; then
+        systemctl restart "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1 || true
+      fi
+      rm -f "${backup}"
+      log "dnsmasq remained active or enabled; restored the DNS escape hatch config and refused partial cleanup"
+      return 1
+    fi
+  fi
+  rm -f "${backup}"
+  return 0
+}
+
 disable_node_dns_escape_hatch() {
   local changed=1
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" || \
        systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" 2>/dev/null; then
-      systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" >/dev/null 2>&1 || true
+      if ! systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" >/dev/null 2>&1; then
+        log "failed to disable ${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}; refusing partial DNS escape hatch cleanup"
+        return 1
+      fi
+      if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}"; then
+        log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER} remained active; refusing partial DNS escape hatch cleanup"
+        return 1
+      fi
+      if systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" 2>/dev/null; then
+        log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER} remained enabled; refusing partial DNS escape hatch cleanup"
+        return 1
+      fi
       changed=0
     fi
     if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" || \
        systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" 2>/dev/null; then
-      systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1 || true
+      if ! systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1; then
+        log "failed to disable ${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}; refusing partial DNS escape hatch cleanup"
+        return 1
+      fi
+      if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}"; then
+        log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE} remained active; refusing partial DNS escape hatch cleanup"
+        return 1
+      fi
+      if systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" 2>/dev/null; then
+        log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE} remained enabled; refusing partial DNS escape hatch cleanup"
+        return 1
+      fi
       changed=0
     fi
   fi
   if cleanup_node_dns_escape_hatch_redirect_rules; then
+    changed=0
+  fi
+  if cleanup_node_dns_escape_hatch_dnsmasq; then
     changed=0
   fi
   return "${changed}"

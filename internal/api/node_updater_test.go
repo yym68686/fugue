@@ -1067,7 +1067,27 @@ iptables_rules="${tmpdir}/iptables.rules"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${tmpdir}/fugue-node-dns-escape-hatch.conf"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE="fugue-node-dns-escape-hatch.service"
 FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER="fugue-node-dns-escape-hatch.timer"
-: >"${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+FUGUE_NODE_UPDATER_DNSMASQ_SERVICE="dnsmasq.service"
+FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_FILE="${tmpdir}/dnsmasq.conf"
+FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR="${tmpdir}/dnsmasq.d"
+FUGUE_NODE_UPDATER_RESOLV_CONF_FILE="${tmpdir}/resolv.conf"
+FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE="${tmpdir}/systemd-resolv.conf"
+FUGUE_NODE_UPDATER_RESOLVECTL_BIN="${tmpdir}/missing-resolvectl"
+mkdir -p "${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR}"
+FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE="${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_DIR}/fugue-node-dns-escape-hatch.conf"
+cat >"${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" <<'EOF_DNSMASQ'
+interface=cni0
+bind-interfaces
+listen-address=127.0.0.1
+no-resolv
+no-hosts
+cache-size=1000
+addn-hosts=/var/lib/fugue-node-dns/hosts.generated
+server=1.1.1.1
+server=8.8.8.8
+EOF_DNSMASQ
+: >"${FUGUE_NODE_UPDATER_DNSMASQ_CONFIG_FILE}"
+printf 'nameserver 127.0.0.53\n' >"${FUGUE_NODE_UPDATER_RESOLV_CONF_FILE}"
 cat >"${iptables_rules}" <<'EOF_IPTABLES_RULES'
 -A KUBE-SERVICES -d 10.43.0.10/32 -p udp -m comment --comment "kube-system/kube-dns:dns cluster IP" -m udp --dport 53 -j KUBE-SVC-TCOU7JCQXEZGVUNU
 -A PREROUTING -d 10.43.0.10/32 -i cni0 -p udp --dport 53 -j DNAT --to-destination 10.42.8.1:53
@@ -1080,13 +1100,58 @@ cat >"${iptables_rules}" <<'EOF_IPTABLES_RULES'
 -A OUTPUT -d 10.43.0.10/32 -p tcp --dport 53 -j DNAT --to-destination 10.42.7.1:53
 EOF_IPTABLES_RULES
 
+dnsmasq_active=1
+dnsmasq_enabled=1
+escape_timer_active=1
+escape_timer_enabled=1
+escape_service_active=1
+escape_service_enabled=1
+systemd_resolved_active=0
 systemctl() {
   printf 'systemctl %s\n' "$*" >>"${actions}"
+  if [ "${1:-}" = "disable" ] && [ "${3:-}" = "dnsmasq.service" ] && [ "${dnsmasq_disable_fail:-0}" -eq 1 ]; then
+    return 1
+  fi
+  if [ "${1:-}" = "disable" ] && [ "${3:-}" = "fugue-node-dns-escape-hatch.timer" ] && [ "${escape_timer_disable_fail:-0}" -eq 1 ]; then
+    return 1
+  fi
   case "$1" in
-    is-active|is-enabled|list-unit-files)
+    is-active)
+      case "${3:-${2:-}}" in
+        dnsmasq.service) [ "${dnsmasq_active}" -eq 1 ] ;;
+        fugue-node-dns-escape-hatch.timer) [ "${escape_timer_active}" -eq 1 ] ;;
+        fugue-node-dns-escape-hatch.service) [ "${escape_service_active}" -eq 1 ] ;;
+        systemd-resolved.service) [ "${systemd_resolved_active}" -eq 1 ] ;;
+        *) return 1 ;;
+      esac
+      return
+      ;;
+    is-enabled)
+      case "${3:-${2:-}}" in
+        dnsmasq.service) [ "${dnsmasq_enabled}" -eq 1 ] ;;
+        fugue-node-dns-escape-hatch.timer) [ "${escape_timer_enabled}" -eq 1 ] ;;
+        fugue-node-dns-escape-hatch.service) [ "${escape_service_enabled}" -eq 1 ] ;;
+        *) return 1 ;;
+      esac
+      return
+      ;;
+    list-unit-files)
       return 0
       ;;
     disable)
+      case "${3:-}" in
+        dnsmasq.service) dnsmasq_active=0; dnsmasq_enabled=0 ;;
+        fugue-node-dns-escape-hatch.timer) escape_timer_active=0; escape_timer_enabled=0 ;;
+        fugue-node-dns-escape-hatch.service) escape_service_active=0; escape_service_enabled=0 ;;
+      esac
+      return 0
+      ;;
+    enable)
+      [ "${2:-}" = "dnsmasq.service" ] && dnsmasq_enabled=1
+      return 0
+      ;;
+    restart)
+      [ "${2:-}" = "dnsmasq.service" ] && dnsmasq_active=1
       return 0
       ;;
   esac
@@ -1164,11 +1229,76 @@ if grep -q '10.42.8.1:53' "${iptables_rules}"; then
   cat "${actions}" >&2
   exit 1
 fi
-if grep -q 'dnsmasq.service' "${actions}"; then
-  echo "dnsmasq should not be restarted while disabling the escape hatch" >&2
+grep -q 'systemctl disable --now dnsmasq.service' "${actions}"
+if [ -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" ]; then
+  echo "Fugue-owned dnsmasq config was not removed while disabling the escape hatch" >&2
   cat "${actions}" >&2
   exit 1
 fi
+
+printf 'server=192.0.2.53\n' >"${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+if cleanup_node_dns_escape_hatch_dnsmasq; then
+  echo "non-standard dnsmasq config must not be removed" >&2
+  exit 1
+fi
+grep -q '^server=192.0.2.53$' "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+
+cat >"${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" <<'EOF_DNSMASQ'
+interface=cni0
+bind-interfaces
+listen-address=127.0.0.1
+no-resolv
+no-hosts
+cache-size=1000
+addn-hosts=/var/lib/fugue-node-dns/hosts.generated
+server=1.1.1.1
+server=8.8.8.8
+EOF_DNSMASQ
+printf 'nameserver 127.0.0.1\n' >"${FUGUE_NODE_UPDATER_RESOLV_CONF_FILE}"
+if cleanup_node_dns_escape_hatch_dnsmasq; then
+  echo "dnsmasq config must remain while the host resolver depends on it" >&2
+  exit 1
+fi
+test -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+
+printf 'nameserver 127.0.0.53\n' >"${FUGUE_NODE_UPDATER_RESOLV_CONF_FILE}"
+: >"${FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE}"
+systemd_resolved_active=1
+if cleanup_node_dns_escape_hatch_dnsmasq; then
+  echo "dnsmasq config must remain when active resolved upstreams cannot be inspected" >&2
+  exit 1
+fi
+test -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+systemd_resolved_active=0
+
+printf 'nameserver 127.0.0.1\n' >"${FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE}"
+if cleanup_node_dns_escape_hatch_dnsmasq; then
+  echo "dnsmasq config must remain while resolved uses dnsmasq upstream" >&2
+  exit 1
+fi
+test -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+
+: >"${FUGUE_NODE_UPDATER_SYSTEMD_RESOLV_CONF_FILE}"
+dnsmasq_disable_fail=1
+dnsmasq_active=1
+dnsmasq_enabled=1
+if cleanup_node_dns_escape_hatch_dnsmasq; then
+  echo "dnsmasq cleanup must fail when service disable fails" >&2
+  exit 1
+fi
+test -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
+grep -q 'systemctl enable dnsmasq.service' "${actions}"
+grep -q 'systemctl restart dnsmasq.service' "${actions}"
+dnsmasq_disable_fail=0
+
+escape_timer_disable_fail=1
+escape_timer_active=1
+escape_timer_enabled=1
+if disable_node_dns_escape_hatch; then
+  echo "escape hatch cleanup must fail when its timer cannot be disabled" >&2
+  exit 1
+fi
+test -e "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
 `
 	scriptPath := filepath.Join(t.TempDir(), "node-updater-disable-dns-escape-hatch.sh")
 	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
