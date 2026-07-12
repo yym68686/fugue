@@ -204,17 +204,105 @@ func TestBackupScheduleDueCalculation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := nextBackupRunAfter(tt.schedule, after)
-			if got == nil {
-				t.Fatalf("expected next run for %q", tt.schedule)
+			got, err := nextBackupRunAfter(tt.schedule, after)
+			if err != nil {
+				t.Fatalf("expected next run for %q: %v", tt.schedule, err)
 			}
 			if !got.Equal(tt.want) {
 				t.Fatalf("expected %s, got %s", tt.want, *got)
 			}
 		})
 	}
-	if got := nextBackupRunAfter("bad schedule", after); got != nil {
-		t.Fatalf("expected unsupported schedule to return nil, got %s", *got)
+	if got, err := nextBackupRunAfter("bad schedule", after); err != nil || got != nil {
+		t.Fatalf("expected legacy scheduler to leave unsupported schedule inactive, got %v err=%v", got, err)
+	}
+}
+
+func TestBackupWorkerAdvancesNewScheduleWithoutActivatingPolicyWrites(t *testing.T) {
+	t.Parallel()
+
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:     "six-hour",
+		Target:   model.BackupTarget{Type: model.BackupTargetAppDatabase, AppID: "app_a"},
+		Enabled:  true,
+		Status:   model.BackupPolicyStatusActive,
+		Schedule: "0 */6 * * *",
+	})
+	if err != nil {
+		t.Fatalf("upsert six-hour policy: %v", err)
+	}
+	if policy.NextRunAt != nil {
+		t.Fatalf("phase-one compatibility must not activate a formerly unsupported schedule during a mixed-version rollout: %+v", policy)
+	}
+	if _, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID: policy.ID,
+		Target:   policy.Target,
+		Trigger:  model.BackupRunTriggerManual,
+		Status:   model.BackupRunStatusPending,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected manual activation to remain frozen during compatibility rollout, got %v", err)
+	}
+	_, err = stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:        policy.ID,
+		Target:          policy.Target,
+		Trigger:         model.BackupRunTriggerScheduled,
+		Status:          model.BackupRunStatusPending,
+		RequestedByType: "system",
+		RequestedByID:   "backup-scheduler",
+	})
+	if err != nil {
+		t.Fatalf("create compatibility backup run: %v", err)
+	}
+	advanced, err := stateStore.GetBackupPolicy(policy.ID, "", true)
+	if err != nil {
+		t.Fatalf("get advanced policy: %v", err)
+	}
+	if advanced.NextRunAt == nil || advanced.NextRunAt.Minute() != 0 || advanced.NextRunAt.Hour()%6 != 0 {
+		t.Fatalf("expected a worker handling the policy to advance its six-hour schedule, got %+v", advanced)
+	}
+
+	if _, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:     "invalid",
+		Target:   model.BackupTarget{Type: model.BackupTargetAppDatabase, AppID: "app_b"},
+		Enabled:  true,
+		Status:   model.BackupPolicyStatusActive,
+		Schedule: "not cron",
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected invalid schedule to return ErrInvalidInput, got %v", err)
+	}
+
+	defaulted, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:    "defaulted",
+		Target:  model.BackupTarget{Type: model.BackupTargetAppDatabase, AppID: "app_c"},
+		Enabled: true,
+		Status:  model.BackupPolicyStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("upsert defaulted schedule: %v", err)
+	}
+	if defaulted.Schedule != model.BackupDefaultSchedule || defaulted.NextRunAt == nil {
+		t.Fatalf("expected missing schedule to default safely, got %+v", defaulted)
+	}
+
+	invalidDisabled, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:     "invalid-disabled",
+		Target:   model.BackupTarget{Type: model.BackupTargetAppDatabase, AppID: "app_d"},
+		Enabled:  false,
+		Status:   model.BackupPolicyStatusDisabled,
+		Schedule: "not cron",
+	})
+	if err != nil {
+		t.Fatalf("disabled invalid policy must remain operable: %v", err)
+	}
+	if _, err := stateStore.SetBackupPolicyEnabled(invalidDisabled.ID, "", true, true, ""); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected enabling invalid policy to fail validation, got %v", err)
+	}
+	if _, err := stateStore.SetBackupPolicyEnabled(invalidDisabled.ID, "", true, false, "disabled by user"); err != nil {
+		t.Fatalf("expected invalid policy kill-switch to remain available: %v", err)
 	}
 }
 
