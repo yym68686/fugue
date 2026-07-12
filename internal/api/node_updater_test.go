@@ -1128,12 +1128,12 @@ systemctl() {
       ;;
     is-enabled)
       case "${3:-${2:-}}" in
-        dnsmasq.service) [ "${dnsmasq_enabled}" -eq 1 ] ;;
-        fugue-node-dns-escape-hatch.timer) [ "${escape_timer_enabled}" -eq 1 ] ;;
-        fugue-node-dns-escape-hatch.service) [ "${escape_service_enabled}" -eq 1 ] ;;
+        dnsmasq.service) [ "${dnsmasq_enabled}" -eq 1 ] && echo enabled || echo disabled ;;
+        fugue-node-dns-escape-hatch.timer) [ "${escape_timer_enabled}" -eq 1 ] && echo enabled || echo disabled ;;
+        fugue-node-dns-escape-hatch.service) [ "${escape_service_enabled}" -eq 1 ] && echo enabled || echo static ;;
         *) return 1 ;;
       esac
-      return
+      return 0
       ;;
     list-unit-files)
       return 0

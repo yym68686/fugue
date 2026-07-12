@@ -2109,6 +2109,19 @@ dns_escape_hatch_enabled() {
   esac
 }
 
+systemd_unit_enabled_for_start() {
+  local state=""
+  state="$(systemctl is-enabled "$1" 2>/dev/null || true)"
+  case "${state}" in
+    enabled|enabled-runtime|linked|linked-runtime)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 detect_dns_escape_hatch_cni_bridge_ip() {
   ip -4 addr show dev cni0 2>/dev/null | awk '/inet / {split($2, parts, "/"); print parts[1]; exit}'
 }
@@ -2334,7 +2347,7 @@ cleanup_node_dns_escape_hatch_dnsmasq() {
   cp "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}" "${backup}"
   rm -f "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
   systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" && dnsmasq_was_active=1
-  systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" 2>/dev/null && dnsmasq_was_enabled=1
+  systemd_unit_enabled_for_start "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" && dnsmasq_was_enabled=1
   if [ "${dnsmasq_was_active}" -eq 1 ] || [ "${dnsmasq_was_enabled}" -eq 1 ]; then
     if ! systemctl disable --now "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1; then
       cp "${backup}" "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
@@ -2349,7 +2362,7 @@ cleanup_node_dns_escape_hatch_dnsmasq() {
       return 1
     fi
     if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" ||
-       systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" 2>/dev/null; then
+       systemd_unit_enabled_for_start "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}"; then
       cp "${backup}" "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_CONFIG_FILE}"
       if [ "${dnsmasq_was_enabled}" -eq 1 ]; then
         systemctl enable "${FUGUE_NODE_UPDATER_DNSMASQ_SERVICE}" >/dev/null 2>&1 || true
@@ -2370,7 +2383,7 @@ disable_node_dns_escape_hatch() {
   local changed=1
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" || \
-       systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" 2>/dev/null; then
+       systemd_unit_enabled_for_start "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}"; then
       if ! systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" >/dev/null 2>&1; then
         log "failed to disable ${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}; refusing partial DNS escape hatch cleanup"
         return 1
@@ -2379,14 +2392,14 @@ disable_node_dns_escape_hatch() {
         log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER} remained active; refusing partial DNS escape hatch cleanup"
         return 1
       fi
-      if systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}" 2>/dev/null; then
+      if systemd_unit_enabled_for_start "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER}"; then
         log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_TIMER} remained enabled; refusing partial DNS escape hatch cleanup"
         return 1
       fi
       changed=0
     fi
     if systemctl is-active --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" || \
-       systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" 2>/dev/null; then
+       systemd_unit_enabled_for_start "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}"; then
       if ! systemctl disable --now "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" >/dev/null 2>&1; then
         log "failed to disable ${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}; refusing partial DNS escape hatch cleanup"
         return 1
@@ -2395,7 +2408,7 @@ disable_node_dns_escape_hatch() {
         log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE} remained active; refusing partial DNS escape hatch cleanup"
         return 1
       fi
-      if systemctl is-enabled --quiet "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}" 2>/dev/null; then
+      if systemd_unit_enabled_for_start "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE}"; then
         log "${FUGUE_NODE_UPDATER_DNS_ESCAPE_HATCH_SERVICE} remained enabled; refusing partial DNS escape hatch cleanup"
         return 1
       fi
