@@ -6139,6 +6139,15 @@ paths:
     post:
       operationId: importAppDatabase
       summary: Import App Database
+      description: >-
+        Queues a managed PostgreSQL import from exactly one multipart JSON
+        `request` field and exactly one `dump` file. The request field is limited
+        to 65536 bytes, the dump file is limited to 134217728 bytes (128 MiB),
+        and the complete multipart request is limited to 136314880 bytes
+        (130 MiB). Gzip-compressed dumps may expand to at most 268435456 bytes
+        (256 MiB) when the background import runs. The control plane stores the
+        bounded upload before execution; this endpoint is not an end-to-end
+        streaming database import.
       tags: [Apps]
       x-fugue-handler: handleImportAppDatabase
       security:
@@ -6161,6 +6170,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppDatabaseImportResponse"
+        '400':
+          description: The multipart body, field inventory, or JSON request is malformed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '413':
+          description: The JSON request field, dump file, or complete multipart request exceeds its byte limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '415':
+          description: Content-Type is not multipart/form-data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/database/import/retry:
@@ -9656,6 +9683,11 @@ paths:
     get:
       operationId: getDataBlob
       summary: Get Data Blob
+      description: >-
+        Reads one blob that is explicitly present in the active download
+        transfer plan. The digest is a canonical lowercase SHA-256 value.
+        Supports one byte range and conditional GET; invalid or unsatisfiable
+        ranges return the JSON ErrorResponse model.
       tags: [Data Workspaces]
       x-fugue-handler: handleGetDataBlob
       security:
@@ -9666,6 +9698,9 @@ paths:
           required: true
           schema:
             type: string
+            minLength: 64
+            maxLength: 64
+            pattern: '^[0-9a-f]{64}$'
         - in: query
           name: transfer_id
           required: true
@@ -9677,12 +9712,41 @@ paths:
           required: false
           schema:
             type: string
-          description: Optional byte range for resumable downloads.
+          description: Optional single byte range for resumable downloads.
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Conditional request using the blob SHA-256 ETag.
+        - in: header
+          name: If-Modified-Since
+          required: false
+          schema:
+            type: string
+          description: Conditional request using the stored blob modification time.
+        - in: header
+          name: If-Range
+          required: false
+          schema:
+            type: string
+          description: Apply Range only when the ETag or modification time still matches.
       responses:
         '200':
-          description: Successful response
+          description: Complete blob response.
           headers:
             Accept-Ranges:
+              schema:
+                type: string
+                enum: [bytes]
+            Content-Length:
+              schema:
+                type: integer
+                format: int64
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
               schema:
                 type: string
             X-Fugue-Data-SHA256:
@@ -9693,11 +9757,56 @@ paths:
               schema:
                 type: string
                 format: binary
+        '206':
+          description: Single-range partial blob response.
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+                enum: [bytes]
+            Content-Length:
+              schema:
+                type: integer
+                format: int64
+            Content-Range:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            Last-Modified:
+              schema:
+                type: string
+            X-Fugue-Data-SHA256:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '304':
+          description: Blob has not changed for the supplied conditional request.
+        '416':
+          description: Range is malformed, multiple, or unsatisfiable for this blob.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
     put:
       operationId: putDataBlob
       summary: Put Data Blob
+      description: >-
+        Writes one blob that is explicitly present in the active upload transfer
+        plan. Content-Type must be application/octet-stream. Content-Length,
+        when supplied, must equal the planned size; streamed bodies are also
+        hard-limited to that exact size before the blob is committed.
       tags: [Data Workspaces]
       x-fugue-handler: handlePutDataBlob
       security:
@@ -9708,6 +9817,9 @@ paths:
           required: true
           schema:
             type: string
+            minLength: 64
+            maxLength: 64
+            pattern: '^[0-9a-f]{64}$'
         - in: query
           name: transfer_id
           required: true
@@ -9723,12 +9835,35 @@ paths:
               format: binary
       responses:
         '200':
-          description: Successful response
+          description: Blob stored with the planned digest and size.
           content:
             application/json:
               schema:
                 type: object
-                additionalProperties: true
+                additionalProperties: false
+                required: [sha256, size]
+                properties:
+                  sha256:
+                    type: string
+                    minLength: 64
+                    maxLength: 64
+                    pattern: '^[0-9a-f]{64}$'
+                  size:
+                    type: integer
+                    format: int64
+                    minimum: 0
+        '413':
+          description: Content-Length or the streamed body exceeds the size recorded in the transfer plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '415':
+          description: Content-Type is not application/octet-stream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
 components:
@@ -10796,6 +10931,9 @@ components:
       properties:
         sha256:
           type: string
+          minLength: 64
+          maxLength: 64
+          pattern: '^[0-9a-f]{64}$'
         size:
           type: integer
           format: int64
@@ -11190,6 +11328,11 @@ components:
           format: int32
         blobs:
           type: array
+          description: >-
+            Progress checkpoints for blobs already present in the transfer plan.
+            The canonical sha256 must match an existing plan entry. Blob size,
+            object key, upload parameters, and part boundaries are immutable;
+            checkpoints may only advance exists, completed, and etag state.
           items:
             $ref: "#/components/schemas/DataTransferPlanBlob"
     DataMultipartCompleteRequest:
@@ -25827,14 +25970,22 @@ components:
     AppDatabaseImportMultipartRequest:
       type: object
       additionalProperties: false
+      description: >-
+        Exactly one JSON request field and one PostgreSQL dump file. The request
+        field is limited to 65536 bytes, the dump to 134217728 bytes (128 MiB),
+        and the complete multipart request to 136314880 bytes (130 MiB).
       required: [request, dump]
       properties:
         request:
           $ref: "#/components/schemas/AppDatabaseImportRequest"
         dump:
-          description: PostgreSQL dump file to import. Fugue accepts plain SQL, custom-format dumps, and gzip-compressed variants.
+          description: >-
+            PostgreSQL dump file to import, limited to 134217728 bytes (128 MiB).
+            Fugue accepts plain SQL, custom-format dumps, and gzip-compressed
+            variants. Gzip output is limited to 268435456 bytes (256 MiB).
           type: string
           format: binary
+          maxLength: 134217728
     AppDatabaseImportRequest:
       type: object
       additionalProperties: false

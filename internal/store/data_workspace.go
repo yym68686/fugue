@@ -25,6 +25,11 @@ import (
 const defaultDataBackendID = "data_backend_fugue_default_r2"
 const defaultDataMultipartPartSize int64 = 64 * 1024 * 1024
 
+var (
+	ErrDataBlobSizeMismatch = errors.New("data blob size does not match transfer plan")
+	ErrDataBlobTooLarge     = errors.New("data blob exceeds transfer plan size")
+)
+
 type DataWorkspaceUpdate struct {
 	Name             *string
 	ProjectID        *string
@@ -1136,15 +1141,29 @@ func (s *Store) DataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorI
 }
 
 func (s *Store) DataBlobExists(sha256Digest string) bool {
+	if !validDataBlobSHA256(sha256Digest) {
+		return false
+	}
 	_, err := os.Stat(s.dataBlobPath(sha256Digest))
 	return err == nil
 }
 
 func (s *Store) WriteDataBlob(sha256Digest string, reader io.Reader) (int64, error) {
-	digest := strings.TrimSpace(strings.ToLower(sha256Digest))
-	if len(digest) != 64 {
+	return s.writeDataBlob(sha256Digest, reader, 0, false)
+}
+
+func (s *Store) WriteDataBlobExact(sha256Digest string, reader io.Reader, expectedSize int64) (int64, error) {
+	if expectedSize < 0 {
 		return 0, ErrInvalidInput
 	}
+	return s.writeDataBlob(sha256Digest, reader, expectedSize, true)
+}
+
+func (s *Store) writeDataBlob(sha256Digest string, reader io.Reader, expectedSize int64, requireExactSize bool) (int64, error) {
+	if !validDataBlobSHA256(sha256Digest) || reader == nil {
+		return 0, ErrInvalidInput
+	}
+	digest := sha256Digest
 	target := s.dataBlobPath(digest)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return 0, fmt.Errorf("create data blob directory: %w", err)
@@ -1157,12 +1176,29 @@ func (s *Store) WriteDataBlob(sha256Digest string, reader io.Reader) (int64, err
 	defer os.Remove(tempPath)
 
 	hasher := sha256.New()
-	written, err := io.Copy(io.MultiWriter(temp, hasher), reader)
+	copySource := reader
+	if requireExactSize {
+		copySource = io.LimitReader(reader, expectedSize)
+	}
+	written, err := io.Copy(io.MultiWriter(temp, hasher), copySource)
 	if closeErr := temp.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return 0, fmt.Errorf("write data blob: %w", err)
+	}
+	if requireExactSize {
+		if written != expectedSize {
+			return 0, fmt.Errorf("%w: expected %d bytes, received %d", ErrDataBlobSizeMismatch, expectedSize, written)
+		}
+		var extra [1]byte
+		extraBytes, extraErr := io.ReadFull(reader, extra[:])
+		if extraBytes > 0 {
+			return 0, fmt.Errorf("%w: expected %d bytes", ErrDataBlobTooLarge, expectedSize)
+		}
+		if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+			return 0, fmt.Errorf("read data blob size boundary: %w", extraErr)
+		}
 	}
 	got := hex.EncodeToString(hasher.Sum(nil))
 	if got != digest {
@@ -1175,6 +1211,9 @@ func (s *Store) WriteDataBlob(sha256Digest string, reader io.Reader) (int64, err
 }
 
 func (s *Store) OpenDataBlob(sha256Digest string) (*os.File, os.FileInfo, error) {
+	if !validDataBlobSHA256(sha256Digest) {
+		return nil, nil, ErrInvalidInput
+	}
 	path := s.dataBlobPath(sha256Digest)
 	file, err := os.Open(path)
 	if err != nil {
@@ -1205,7 +1244,7 @@ func (s *Store) ListDataBlobDigests() ([]model.DataGCSweepCandidate, error) {
 			return nil
 		}
 		name := entry.Name()
-		if len(name) != 64 {
+		if !validDataBlobSHA256(name) {
 			return nil
 		}
 		info, err := entry.Info()
@@ -1222,6 +1261,9 @@ func (s *Store) ListDataBlobDigests() ([]model.DataGCSweepCandidate, error) {
 }
 
 func (s *Store) DeleteDataBlobDigest(sha256Digest string) error {
+	if !validDataBlobSHA256(sha256Digest) {
+		return ErrInvalidInput
+	}
 	err := os.Remove(s.dataBlobPath(sha256Digest))
 	if os.IsNotExist(err) {
 		return nil
@@ -1238,11 +1280,19 @@ func (s *Store) dataBlobRoot() string {
 }
 
 func (s *Store) dataBlobPath(sha256Digest string) string {
-	digest := strings.TrimSpace(strings.ToLower(sha256Digest))
-	if len(digest) >= 4 {
-		return filepath.Join(s.dataBlobRoot(), "sha256", digest[:2], digest[2:4], digest)
+	return filepath.Join(s.dataBlobRoot(), "sha256", sha256Digest[:2], sha256Digest[2:4], sha256Digest)
+}
+
+func validDataBlobSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
 	}
-	return filepath.Join(s.dataBlobRoot(), "sha256", digest)
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeDataBackend(backend model.DataBackend) model.DataBackend {

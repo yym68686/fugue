@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -27,11 +28,49 @@ import (
 )
 
 const (
-	maxAppDatabaseImportDumpBytes = 1024 << 20
-	appDatabaseImportPollInterval = 5 * time.Second
-	appDatabaseImportBatchSize    = 5
-	appDatabaseTunnelBufferBytes  = 32 * 1024
+	maxAppDatabaseImportRequestFieldBytes = 64 << 10
+	maxAppDatabaseImportDumpBytes         = 128 << 20
+	maxAppDatabaseImportRequestBytes      = 130 << 20
+	maxAppDatabaseImportExpandedBytes     = 256 << 20
+	appDatabaseImportPollInterval         = 5 * time.Second
+	appDatabaseImportBatchSize            = 5
+	appDatabaseTunnelBufferBytes          = 32 * 1024
 )
+
+type appDatabaseImportRequestError struct {
+	status  int
+	message string
+}
+
+func (e *appDatabaseImportRequestError) Error() string {
+	return e.message
+}
+
+func newAppDatabaseImportRequestError(status int, message string) error {
+	return &appDatabaseImportRequestError{status: status, message: message}
+}
+
+func appDatabaseImportErrorStatus(err error) int {
+	var requestErr *appDatabaseImportRequestError
+	if errors.As(err, &requestErr) {
+		return requestErr.status
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusInternalServerError
+}
+
+func writeAppDatabaseImportError(w http.ResponseWriter, err error) {
+	status := appDatabaseImportErrorStatus(err)
+	message := err.Error()
+	var maxBytesErr *http.MaxBytesError
+	if status == http.StatusRequestEntityTooLarge && errors.As(err, &maxBytesErr) {
+		message = fmt.Sprintf("database import request exceeds %d bytes", maxAppDatabaseImportRequestBytes)
+	}
+	httpx.WriteError(w, status, message)
+}
 
 func (s *Server) handleGetAppDatabaseImport(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -74,20 +113,9 @@ func (s *Server) handleImportAppDatabase(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxAppDatabaseImportDumpBytes+multipartFormMemoryBytes)
-	if err := r.ParseMultipartForm(multipartFormMemoryBytes); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("parse multipart form: %v", err))
-		return
-	}
-	defer func() {
-		if r.MultipartForm != nil {
-			_ = r.MultipartForm.RemoveAll()
-		}
-	}()
-
-	req, dumpHeader, dumpBytes, err := decodeAppDatabaseImportMultipart(r)
+	req, dumpFilename, dumpContentType, dumpBytes, err := decodeAppDatabaseImportMultipart(w, r)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		writeAppDatabaseImportError(w, err)
 		return
 	}
 	req.Label = strings.TrimSpace(req.Label)
@@ -97,7 +125,7 @@ func (s *Server) handleImportAppDatabase(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	upload, err := s.store.CreateSourceUpload(app.TenantID, appDatabaseImportDumpFilename(dumpHeader), dumpHeader.Header.Get("Content-Type"), dumpBytes)
+	upload, err := s.store.CreateSourceUpload(app.TenantID, dumpFilename, dumpContentType, dumpBytes)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -448,6 +476,9 @@ func (s *Server) runAppDatabaseImportJob(ctx context.Context, job model.AppDatab
 	if len(dumpBytes) == 0 {
 		return "", fmt.Errorf("database import dump is empty")
 	}
+	if len(dumpBytes) > maxAppDatabaseImportDumpBytes {
+		return "", fmt.Errorf("database import dump exceeds %d bytes", maxAppDatabaseImportDumpBytes)
+	}
 	data, err := maybeGunzipDatabaseDump(dumpBytes, upload.Filename)
 	if err != nil {
 		return "", err
@@ -470,42 +501,186 @@ func (s *Server) runAppDatabaseImportJob(ctx context.Context, job model.AppDatab
 	return message, nil
 }
 
-func decodeAppDatabaseImportMultipart(r *http.Request) (model.AppDatabaseImportRequest, *multipart.FileHeader, []byte, error) {
+func decodeAppDatabaseImportMultipart(w http.ResponseWriter, r *http.Request) (model.AppDatabaseImportRequest, string, string, []byte, error) {
 	var req model.AppDatabaseImportRequest
-	requestValues := r.MultipartForm.Value["request"]
-	if len(requestValues) > 0 && strings.TrimSpace(requestValues[0]) != "" {
-		if err := json.Unmarshal([]byte(requestValues[0]), &req); err != nil {
-			return req, nil, nil, fmt.Errorf("decode request: %w", err)
+	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	mediaType, parameters, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		if strings.EqualFold(strings.TrimSpace(strings.Split(contentType, ";")[0]), "multipart/form-data") {
+			return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart Content-Type is malformed")
+		}
+		return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusUnsupportedMediaType, "Content-Type must be multipart/form-data")
+	}
+	if !strings.EqualFold(mediaType, "multipart/form-data") {
+		return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusUnsupportedMediaType, "Content-Type must be multipart/form-data")
+	}
+	boundary := strings.TrimSpace(parameters["boundary"])
+	if boundary == "" {
+		return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart boundary is required")
+	}
+	if r.ContentLength > maxAppDatabaseImportRequestBytes {
+		return req, "", "", nil, newAppDatabaseImportRequestError(
+			http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("database import request exceeds %d bytes", maxAppDatabaseImportRequestBytes),
+		)
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxAppDatabaseImportRequestBytes)
+	reader := multipart.NewReader(r.Body, boundary)
+	var (
+		dumpContentType string
+		dumpFilename    string
+		dumpPath        string
+		dumpSize        int64
+		requestSeen     bool
+		dumpSeen        bool
+	)
+	defer func() {
+		if dumpPath != "" {
+			_ = os.Remove(dumpPath)
+		}
+	}()
+
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(nextErr, &maxBytesErr) {
+				return req, "", "", nil, nextErr
+			}
+			return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, fmt.Sprintf("parse multipart body: %v", nextErr))
+		}
+
+		field := part.FormName()
+		dispositionType, disposition, dispositionErr := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+		_, hasFilename := disposition["filename"]
+		if dispositionErr != nil || !strings.EqualFold(dispositionType, "form-data") || field == "" {
+			_ = part.Close()
+			return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart part Content-Disposition must be form-data with a name")
+		}
+
+		switch field {
+		case "request":
+			if requestSeen {
+				_ = part.Close()
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart field request must be sent exactly once")
+			}
+			if hasFilename {
+				_ = part.Close()
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart field request must be a JSON field, not a file")
+			}
+			requestSeen = true
+			rawRequest, readErr := io.ReadAll(io.LimitReader(part, maxAppDatabaseImportRequestFieldBytes+1))
+			_ = part.Close()
+			if readErr != nil {
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(readErr, &maxBytesErr) {
+					return req, "", "", nil, readErr
+				}
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, fmt.Sprintf("read multipart field request: %v", readErr))
+			}
+			if len(rawRequest) > maxAppDatabaseImportRequestFieldBytes {
+				return req, "", "", nil, newAppDatabaseImportRequestError(
+					http.StatusRequestEntityTooLarge,
+					fmt.Sprintf("multipart field request exceeds %d bytes", maxAppDatabaseImportRequestFieldBytes),
+				)
+			}
+			if len(bytes.TrimSpace(rawRequest)) == 0 {
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart field request is required")
+			}
+			decoder := json.NewDecoder(bytes.NewReader(rawRequest))
+			decoder.DisallowUnknownFields()
+			if decodeErr := decoder.Decode(&req); decodeErr != nil {
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, fmt.Sprintf("decode request: %v", decodeErr))
+			}
+			if decodeErr := decoder.Decode(&struct{}{}); !errors.Is(decodeErr, io.EOF) {
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "request must contain a single JSON document")
+			}
+		case "dump":
+			if dumpSeen {
+				_ = part.Close()
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart file dump must be sent exactly once")
+			}
+			if !hasFilename {
+				_ = part.Close()
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart field dump must be a file")
+			}
+			dumpSeen = true
+			dumpFilename = appDatabaseImportDumpFilename(part.FileName())
+			dumpContentType = strings.TrimSpace(part.Header.Get("Content-Type"))
+			if dumpContentType == "" {
+				dumpContentType = "application/octet-stream"
+			}
+			temp, createErr := os.CreateTemp("", "fugue-database-import-*")
+			if createErr != nil {
+				_ = part.Close()
+				return req, "", "", nil, fmt.Errorf("create database import temporary file: %w", createErr)
+			}
+			dumpPath = temp.Name()
+			dumpSize, err = copyAppDatabaseImportDump(temp, part, maxAppDatabaseImportDumpBytes)
+			closeErr := temp.Close()
+			_ = part.Close()
+			if err != nil {
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(err, &maxBytesErr) {
+					return req, "", "", nil, err
+				}
+				var pathErr *os.PathError
+				if !errors.As(err, &pathErr) {
+					return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, fmt.Sprintf("read multipart file dump: %v", err))
+				}
+				return req, "", "", nil, fmt.Errorf("write database import temporary file: %w", err)
+			}
+			if closeErr != nil {
+				return req, "", "", nil, fmt.Errorf("close database import temporary file: %w", closeErr)
+			}
+		default:
+			_ = part.Close()
+			if hasFilename {
+				return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, fmt.Sprintf("unsupported multipart file field %q", field))
+			}
+			return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, fmt.Sprintf("unsupported multipart field %q", field))
 		}
 	}
-	files := r.MultipartForm.File["dump"]
-	if len(files) == 0 {
-		return req, nil, nil, fmt.Errorf("dump file is required")
+
+	if !requestSeen {
+		return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart field request must be sent exactly once")
 	}
-	header := files[0]
-	file, err := header.Open()
+	if !dumpSeen {
+		return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "multipart file dump must be sent exactly once")
+	}
+	if dumpSize == 0 {
+		return req, "", "", nil, newAppDatabaseImportRequestError(http.StatusBadRequest, "dump file is empty")
+	}
+	dumpBytes, err := os.ReadFile(dumpPath)
 	if err != nil {
-		return req, nil, nil, fmt.Errorf("open dump file: %w", err)
+		return req, "", "", nil, fmt.Errorf("read database import temporary file: %w", err)
 	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxAppDatabaseImportDumpBytes+1))
-	if err != nil {
-		return req, nil, nil, fmt.Errorf("read dump file: %w", err)
-	}
-	if len(data) == 0 {
-		return req, nil, nil, fmt.Errorf("dump file is empty")
-	}
-	if len(data) > maxAppDatabaseImportDumpBytes {
-		return req, nil, nil, fmt.Errorf("dump file exceeds %d bytes", maxAppDatabaseImportDumpBytes)
-	}
-	return req, header, data, nil
+	return req, dumpFilename, dumpContentType, dumpBytes, nil
 }
 
-func appDatabaseImportDumpFilename(header *multipart.FileHeader) string {
-	if header == nil {
-		return "database.dump"
+func copyAppDatabaseImportDump(destination io.Writer, source io.Reader, maxBytes int64) (int64, error) {
+	if destination == nil || source == nil || maxBytes < 0 {
+		return 0, errors.New("invalid database import dump boundary")
 	}
-	name := strings.TrimSpace(filepath.Base(header.Filename))
+	written, err := io.Copy(destination, io.LimitReader(source, maxBytes+1))
+	if err != nil {
+		return written, err
+	}
+	if written > maxBytes {
+		return written, newAppDatabaseImportRequestError(
+			http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("dump file exceeds %d bytes", maxBytes),
+		)
+	}
+	return written, nil
+}
+
+func appDatabaseImportDumpFilename(raw string) string {
+	name := strings.TrimSpace(filepath.Base(raw))
 	if name == "." || name == "/" || name == "" {
 		return "database.dump"
 	}
@@ -535,19 +710,29 @@ func normalizeAppDatabaseAccessMode(raw string) string {
 }
 
 func maybeGunzipDatabaseDump(data []byte, filename string) ([]byte, error) {
+	return maybeGunzipDatabaseDumpWithLimit(data, filename, maxAppDatabaseImportExpandedBytes)
+}
+
+func maybeGunzipDatabaseDumpWithLimit(data []byte, filename string, maxExpandedBytes int64) ([]byte, error) {
 	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
 		if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(filename)), ".gz") {
 			return data, nil
 		}
+	}
+	if maxExpandedBytes < 0 {
+		return nil, errors.New("invalid gzip database import expansion boundary")
 	}
 	reader, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("open gzip dump: %w", err)
 	}
 	defer reader.Close()
-	out, err := io.ReadAll(reader)
+	out, err := io.ReadAll(io.LimitReader(reader, maxExpandedBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read gzip dump: %w", err)
+	}
+	if int64(len(out)) > maxExpandedBytes {
+		return nil, fmt.Errorf("gzip database import expands beyond %d bytes", maxExpandedBytes)
 	}
 	return out, nil
 }

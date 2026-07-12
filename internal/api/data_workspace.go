@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"sort"
@@ -1084,7 +1086,12 @@ func (s *Server) handleCheckpointDataTransfer(w http.ResponseWriter, r *http.Req
 		transfer.FilesDone = *req.FilesDone
 	}
 	if len(req.Blobs) > 0 {
-		transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, mergeTransferPlanBlobCheckpoints(transfer.PlanBlobs, req.Blobs))
+		mergedBlobs, err := mergeTransferPlanBlobCheckpoints(transfer.PlanBlobs, transfer.Manifest, transfer.Direction, req.Blobs)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		transfer.PlanBlobs = s.storedDataTransferPlanBlobs(workspace, transfer.Direction, mergedBlobs)
 	}
 	transfer.Status = model.DataTransferStatusRunning
 	if transfer.StartedAt == nil {
@@ -1410,13 +1417,41 @@ func (s *Server) handlePutDataBlob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing data.write scope")
 		return
 	}
-	if !s.authorizeDataBlobTransfer(w, r, principal, model.DataTransferDirectionUpload) {
+	digest, ok := readDataBlobDigest(w, r)
+	if !ok {
 		return
 	}
-	digest := strings.TrimSpace(strings.ToLower(r.PathValue("sha256")))
-	written, err := s.store.WriteDataBlob(digest, r.Body)
+	blob, ok := s.authorizeDataBlobTransfer(w, r, principal, model.DataTransferDirectionUpload, digest)
+	if !ok {
+		return
+	}
+	if !requireDataBlobUploadMediaType(w, r) {
+		return
+	}
+	if blob.Size < 0 {
+		httpx.WriteError(w, http.StatusConflict, "data transfer plan contains an invalid blob size")
+		return
+	}
+	if r.ContentLength > blob.Size {
+		httpx.WriteError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("data blob exceeds planned size of %d bytes", blob.Size))
+		return
+	}
+	if r.ContentLength >= 0 && r.ContentLength < blob.Size {
+		httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("Content-Length must equal planned blob size of %d bytes", blob.Size))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, blob.Size)
+	written, err := s.store.WriteDataBlobExact(digest, r.Body, blob.Size)
 	if err != nil {
-		s.writeStoreError(w, err)
+		var maxBytesErr *http.MaxBytesError
+		switch {
+		case errors.As(err, &maxBytesErr), errors.Is(err, store.ErrDataBlobTooLarge):
+			httpx.WriteError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("data blob exceeds planned size of %d bytes", blob.Size))
+		case errors.Is(err, store.ErrDataBlobSizeMismatch):
+			httpx.WriteError(w, http.StatusBadRequest, fmt.Sprintf("data blob must contain exactly %d bytes", blob.Size))
+		default:
+			s.writeStoreError(w, err)
+		}
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sha256": digest, "size": written})
@@ -1428,19 +1463,177 @@ func (s *Server) handleGetDataBlob(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "missing data.read scope")
 		return
 	}
-	if !s.authorizeDataBlobTransfer(w, r, principal, model.DataTransferDirectionDownload) {
+	digest, ok := readDataBlobDigest(w, r)
+	if !ok {
 		return
 	}
-	digest := strings.TrimSpace(strings.ToLower(r.PathValue("sha256")))
+	blob, ok := s.authorizeDataBlobTransfer(w, r, principal, model.DataTransferDirectionDownload, digest)
+	if !ok {
+		return
+	}
 	file, info, err := s.store.OpenDataBlob(digest)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	defer file.Close()
+	if blob.Size < 0 || info.Size() != blob.Size {
+		httpx.WriteError(w, http.StatusConflict, "stored data blob size does not match the transfer plan")
+		return
+	}
+	writeDataBlobDownload(w, r, file, info.ModTime(), info.Size(), digest)
+}
+
+func readDataBlobDigest(w http.ResponseWriter, r *http.Request) (string, bool) {
+	digest := r.PathValue("sha256")
+	if !validDataBlobSHA256(digest) {
+		httpx.WriteError(w, http.StatusBadRequest, "sha256 must be exactly 64 lowercase hexadecimal characters")
+		return "", false
+	}
+	return digest, true
+}
+
+func validDataBlobSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func requireDataBlobUploadMediaType(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/octet-stream") {
+		httpx.WriteError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/octet-stream")
+		return false
+	}
+	return true
+}
+
+type dataBlobByteRange struct {
+	length int64
+	start  int64
+}
+
+func parseDataBlobByteRange(raw string, size int64) (dataBlobByteRange, error) {
+	unit, value, found := strings.Cut(strings.TrimSpace(raw), "=")
+	if !found || !strings.EqualFold(strings.TrimSpace(unit), "bytes") {
+		return dataBlobByteRange{}, errors.New("Range must use the bytes unit")
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, ",") {
+		return dataBlobByteRange{}, errors.New("Range must contain exactly one byte range")
+	}
+	startRaw, endRaw, found := strings.Cut(value, "-")
+	if !found {
+		return dataBlobByteRange{}, errors.New("Range must contain a start or suffix length")
+	}
+	startRaw = strings.TrimSpace(startRaw)
+	endRaw = strings.TrimSpace(endRaw)
+	if startRaw == "" {
+		suffix, err := strconv.ParseInt(endRaw, 10, 64)
+		if err != nil || suffix <= 0 || size <= 0 {
+			return dataBlobByteRange{}, errors.New("Range suffix is invalid or unsatisfiable")
+		}
+		if suffix > size {
+			suffix = size
+		}
+		return dataBlobByteRange{start: size - suffix, length: suffix}, nil
+	}
+	start, err := strconv.ParseInt(startRaw, 10, 64)
+	if err != nil || start < 0 || start >= size {
+		return dataBlobByteRange{}, errors.New("Range start is invalid or unsatisfiable")
+	}
+	end := size - 1
+	if endRaw != "" {
+		end, err = strconv.ParseInt(endRaw, 10, 64)
+		if err != nil || end < start {
+			return dataBlobByteRange{}, errors.New("Range end is invalid")
+		}
+		if end >= size {
+			end = size - 1
+		}
+	}
+	return dataBlobByteRange{start: start, length: end - start + 1}, nil
+}
+
+func dataBlobETagMatches(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" {
+			return true
+		}
+		candidate = strings.TrimPrefix(candidate, "W/")
+		if candidate == etag {
+			return true
+		}
+	}
+	return false
+}
+
+func dataBlobNotModified(r *http.Request, etag string, modifiedAt time.Time) bool {
+	if value := strings.TrimSpace(r.Header.Get("If-None-Match")); value != "" {
+		return dataBlobETagMatches(value, etag)
+	}
+	value := strings.TrimSpace(r.Header.Get("If-Modified-Since"))
+	if value == "" || modifiedAt.IsZero() {
+		return false
+	}
+	since, err := http.ParseTime(value)
+	return err == nil && !modifiedAt.UTC().Truncate(time.Second).After(since.UTC())
+}
+
+func dataBlobIfRangeMatches(r *http.Request, etag string, modifiedAt time.Time) bool {
+	value := strings.TrimSpace(r.Header.Get("If-Range"))
+	if value == "" {
+		return true
+	}
+	if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "W/\"") {
+		return value == etag
+	}
+	validatorTime, err := http.ParseTime(value)
+	return err == nil && !modifiedAt.UTC().Truncate(time.Second).After(validatorTime.UTC())
+}
+
+func writeDataBlobDownload(w http.ResponseWriter, r *http.Request, file io.ReadSeeker, modifiedAt time.Time, size int64, digest string) {
+	etag := `"` + digest + `"`
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Last-Modified", modifiedAt.UTC().Format(http.TimeFormat))
 	w.Header().Set("X-Fugue-Data-SHA256", digest)
-	http.ServeContent(w, r, digest, info.ModTime(), file)
+
+	if dataBlobNotModified(r, etag, modifiedAt) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
+	if rangeHeader != "" && dataBlobIfRangeMatches(r, etag, modifiedAt) {
+		byteRange, err := parseDataBlobByteRange(rangeHeader, size)
+		if err != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			httpx.WriteError(w, http.StatusRequestedRangeNotSatisfiable, err.Error())
+			return
+		}
+		if _, err := file.Seek(byteRange.start, io.SeekStart); err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "failed to seek data blob")
+			return
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(byteRange.length, 10))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", byteRange.start, byteRange.start+byteRange.length-1, size))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.CopyN(w, file, byteRange.length)
+		return
+	}
+
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.CopyN(w, file, size)
 }
 
 func (s *Server) dataPlanBlobs(ctx context.Context, r *http.Request, workspace model.DataWorkspace, transfer model.DataTransfer, manifest model.DataManifest, upload bool, authorizeDirect bool) ([]dataTransferPlanBlob, error) {
@@ -2363,16 +2556,41 @@ func markTransferPlanBlobComplete(blobs []dataTransferPlanBlob, sha256 string, p
 	return out
 }
 
-func mergeTransferPlanBlobCheckpoints(current, checkpoints []dataTransferPlanBlob) []dataTransferPlanBlob {
+func mergeTransferPlanBlobCheckpoints(current []dataTransferPlanBlob, manifest model.DataManifest, direction string, checkpoints []dataTransferPlanBlob) ([]dataTransferPlanBlob, error) {
 	out := append([]dataTransferPlanBlob(nil), current...)
 	indexByDigest := map[string]int{}
 	for idx := range out {
-		indexByDigest[strings.ToLower(strings.TrimSpace(out[idx].SHA256))] = idx
+		digest := out[idx].SHA256
+		if !validDataBlobSHA256(digest) {
+			return nil, fmt.Errorf("data transfer plan contains an invalid blob sha256")
+		}
+		if _, duplicate := indexByDigest[digest]; duplicate {
+			return nil, fmt.Errorf("data transfer plan contains duplicate blob sha256 %s", digest)
+		}
+		indexByDigest[digest] = idx
 	}
+	checkpointedDigests := map[string]struct{}{}
 	for _, checkpoint := range checkpoints {
-		digest := strings.ToLower(strings.TrimSpace(checkpoint.SHA256))
-		if digest == "" {
-			continue
+		digest := checkpoint.SHA256
+		if !validDataBlobSHA256(digest) {
+			return nil, fmt.Errorf("checkpoint blob sha256 must be exactly 64 lowercase hexadecimal characters")
+		}
+		if _, duplicate := checkpointedDigests[digest]; duplicate {
+			return nil, fmt.Errorf("checkpoint contains duplicate blob sha256 %s", digest)
+		}
+		checkpointedDigests[digest] = struct{}{}
+		idx, ok := indexByDigest[digest]
+		if !ok {
+			manifestBlob, found := transferPlanBlobFromManifest(manifest, direction, digest)
+			if !found {
+				return nil, fmt.Errorf("checkpoint blob %s is not included in the transfer plan", digest)
+			}
+			idx = len(out)
+			indexByDigest[digest] = idx
+			out = append(out, manifestBlob)
+		}
+		if err := validateTransferPlanBlobCheckpoint(out[idx], checkpoint); err != nil {
+			return nil, err
 		}
 		checkpoint.UploadURL = ""
 		checkpoint.DownloadURL = ""
@@ -2382,14 +2600,84 @@ func mergeTransferPlanBlobCheckpoints(current, checkpoints []dataTransferPlanBlo
 			checkpoint.Parts[idx].DownloadURL = ""
 			checkpoint.Parts[idx].ExpiresAt = time.Time{}
 		}
-		if idx, ok := indexByDigest[digest]; ok {
-			out[idx] = mergeTransferPlanBlobCheckpoint(out[idx], checkpoint)
+		out[idx] = mergeTransferPlanBlobCheckpoint(out[idx], checkpoint)
+	}
+	return out, nil
+}
+
+func transferPlanBlobFromManifest(manifest model.DataManifest, direction, digest string) (dataTransferPlanBlob, bool) {
+	if direction != model.DataTransferDirectionUpload && direction != model.DataTransferDirectionDownload {
+		return dataTransferPlanBlob{}, false
+	}
+	for _, entry := range manifest.Entries {
+		if entry.Kind != model.DataManifestEntryKindFile || entry.SHA256 != digest {
 			continue
 		}
-		indexByDigest[digest] = len(out)
-		out = append(out, checkpoint)
+		if entry.Size < 0 || strings.TrimSpace(entry.ObjectKey) == "" {
+			return dataTransferPlanBlob{}, false
+		}
+		blob := dataTransferPlanBlob{
+			SHA256:    digest,
+			Size:      entry.Size,
+			ObjectKey: entry.ObjectKey,
+		}
+		if direction == model.DataTransferDirectionUpload {
+			blob.UploadMode = model.DataBlobUploadModeSingle
+		}
+		return blob, true
 	}
-	return out
+	return dataTransferPlanBlob{}, false
+}
+
+func validateTransferPlanBlobCheckpoint(current, checkpoint dataTransferPlanBlob) error {
+	digest := current.SHA256
+	if checkpoint.Size != 0 && checkpoint.Size != current.Size {
+		return fmt.Errorf("checkpoint cannot change size for blob %s", digest)
+	}
+	if checkpoint.ObjectKey != "" && checkpoint.ObjectKey != current.ObjectKey {
+		return fmt.Errorf("checkpoint cannot change object_key for blob %s", digest)
+	}
+	if checkpoint.UploadMode != "" && checkpoint.UploadMode != current.UploadMode {
+		return fmt.Errorf("checkpoint cannot change upload_mode for blob %s", digest)
+	}
+	if checkpoint.UploadID != "" && checkpoint.UploadID != current.UploadID {
+		return fmt.Errorf("checkpoint cannot change upload_id for blob %s", digest)
+	}
+	if checkpoint.PartSize != 0 && checkpoint.PartSize != current.PartSize {
+		return fmt.Errorf("checkpoint cannot change part_size for blob %s", digest)
+	}
+
+	partsByNumber := make(map[int32]model.DataTransferPart, len(current.Parts))
+	for _, part := range current.Parts {
+		if part.PartNumber <= 0 {
+			return fmt.Errorf("data transfer plan contains an invalid part number for blob %s", digest)
+		}
+		if _, duplicate := partsByNumber[part.PartNumber]; duplicate {
+			return fmt.Errorf("data transfer plan contains duplicate part number %d for blob %s", part.PartNumber, digest)
+		}
+		partsByNumber[part.PartNumber] = part
+	}
+	checkpointedParts := map[int32]struct{}{}
+	for _, part := range checkpoint.Parts {
+		if part.PartNumber <= 0 {
+			return fmt.Errorf("checkpoint part_number must be positive for blob %s", digest)
+		}
+		if _, duplicate := checkpointedParts[part.PartNumber]; duplicate {
+			return fmt.Errorf("checkpoint contains duplicate part number %d for blob %s", part.PartNumber, digest)
+		}
+		checkpointedParts[part.PartNumber] = struct{}{}
+		plannedPart, ok := partsByNumber[part.PartNumber]
+		if !ok {
+			return fmt.Errorf("checkpoint part %d is not included in the transfer plan for blob %s", part.PartNumber, digest)
+		}
+		if part.Size != 0 && part.Size != plannedPart.Size {
+			return fmt.Errorf("checkpoint cannot change size for part %d of blob %s", part.PartNumber, digest)
+		}
+		if part.Offset != 0 && part.Offset != plannedPart.Offset {
+			return fmt.Errorf("checkpoint cannot change offset for part %d of blob %s", part.PartNumber, digest)
+		}
+	}
+	return nil
 }
 
 func mergeTransferPlanBlobCheckpoint(current, checkpoint dataTransferPlanBlob) dataTransferPlanBlob {
@@ -2463,31 +2751,37 @@ func (s *Server) dataBlobURL(r *http.Request, transferID, digest string) string 
 	return base + "/v1/data/blobs/" + url.PathEscape(digest) + "?transfer_id=" + url.QueryEscape(transferID)
 }
 
-func (s *Server) authorizeDataBlobTransfer(w http.ResponseWriter, r *http.Request, principal model.Principal, direction string) bool {
+func (s *Server) authorizeDataBlobTransfer(w http.ResponseWriter, r *http.Request, principal model.Principal, direction, digest string) (dataTransferPlanBlob, bool) {
 	transferID := strings.TrimSpace(r.URL.Query().Get("transfer_id"))
 	if transferID == "" {
 		httpx.WriteError(w, http.StatusForbidden, "data blob transfer_id is required")
-		return false
+		return dataTransferPlanBlob{}, false
 	}
 	transfer, err := s.store.GetDataTransfer(transferID)
 	if err != nil {
 		s.writeStoreError(w, err)
-		return false
+		return dataTransferPlanBlob{}, false
 	}
 	if !principal.IsPlatformAdmin() && transfer.TenantID != principal.TenantID {
 		httpx.WriteError(w, http.StatusForbidden, "data transfer is not visible to this tenant")
-		return false
+		return dataTransferPlanBlob{}, false
 	}
 	if transfer.Direction != direction {
 		httpx.WriteError(w, http.StatusForbidden, "data transfer direction does not allow this blob operation")
-		return false
+		return dataTransferPlanBlob{}, false
 	}
 	switch transfer.Status {
 	case model.DataTransferStatusPlanned, model.DataTransferStatusRunning:
-		return true
+		for _, blob := range transfer.PlanBlobs {
+			if blob.SHA256 == digest {
+				return blob, true
+			}
+		}
+		httpx.WriteError(w, http.StatusNotFound, "data blob is not included in the transfer plan")
+		return dataTransferPlanBlob{}, false
 	default:
 		httpx.WriteError(w, http.StatusConflict, "data transfer is not active")
-		return false
+		return dataTransferPlanBlob{}, false
 	}
 }
 
