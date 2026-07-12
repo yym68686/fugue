@@ -658,17 +658,37 @@ func (s *Server) nodeLocalImageCacheReachabilityCheck(ctx context.Context) (bool
 		return false, "image-cache daemonset is missing"
 	}
 	status := daemonSet.Status
-	desired := status.DesiredNumberScheduled
+	return imageCacheDaemonSetAvailability(
+		status.DesiredNumberScheduled,
+		status.NumberReady,
+		status.NumberAvailable,
+		status.UpdatedNumberScheduled,
+		status.NumberMisscheduled,
+		s.imageStoreMinReplicas,
+	)
+}
+
+func imageCacheDaemonSetAvailability(desired, ready, available, updated, misscheduled int32, minimumReplicas int) (bool, string) {
+	required := minimumReplicas
+	if required <= 0 {
+		required = 1
+	}
 	if desired <= 0 {
 		return false, "image-cache daemonset has no scheduled nodes"
 	}
-	if status.NumberMisscheduled > 0 {
-		return false, fmt.Sprintf("image-cache daemonset has %d misscheduled pods", status.NumberMisscheduled)
+	if misscheduled > 0 {
+		return false, fmt.Sprintf("image-cache daemonset has %d misscheduled pods", misscheduled)
 	}
-	if status.NumberReady < desired || status.NumberAvailable < desired || status.UpdatedNumberScheduled < desired {
-		return false, fmt.Sprintf("image-cache daemonset not ready: ready=%d available=%d updated=%d desired=%d", status.NumberReady, status.NumberAvailable, status.UpdatedNumberScheduled, desired)
+	if int(desired) < required {
+		return false, fmt.Sprintf("image-cache daemonset scheduled below configured minimum: ready=%d available=%d updated=%d desired=%d required=%d", ready, available, updated, desired, required)
 	}
-	return true, fmt.Sprintf("image-cache daemonset ready: ready=%d available=%d desired=%d", status.NumberReady, status.NumberAvailable, desired)
+	if int(ready) < required || int(available) < required {
+		return false, fmt.Sprintf("image-cache daemonset available below configured minimum: ready=%d available=%d updated=%d desired=%d required=%d", ready, available, updated, desired, required)
+	}
+	if ready < desired || available < desired || updated < desired {
+		return true, fmt.Sprintf("image-cache daemonset serves configured minimum with partial convergence: ready=%d available=%d updated=%d desired=%d required=%d", ready, available, updated, desired, required)
+	}
+	return true, fmt.Sprintf("image-cache daemonset ready: ready=%d available=%d updated=%d desired=%d required=%d", ready, available, updated, desired, required)
 }
 
 func registryEndpointIsNodeLocalImageCache(endpoint, registryPullBase string) bool {

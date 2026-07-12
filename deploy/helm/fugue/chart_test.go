@@ -681,6 +681,37 @@ func TestAPIAndControllerReceivePublicAPIDomain(t *testing.T) {
 	}
 }
 
+func TestAPIReceivesImageStoreMinimumReplicas(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "--set", "imageStore.minReplicas=3")
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	apiDoc := manifestDocumentForKindAndName(manifest, "Deployment", "fugue-fugue-api")
+	if apiDoc == "" {
+		t.Fatalf("rendered manifest missing fugue-fugue-api deployment:\n%s", manifest)
+	}
+	for _, want := range []string{
+		"name: FUGUE_IMAGE_STORE_MIN_REPLICAS",
+		`value: "3"`,
+	} {
+		if !strings.Contains(apiDoc, want) {
+			t.Fatalf("api deployment should receive image-store minimum replicas; missing %q:\n%s", want, apiDoc)
+		}
+	}
+}
+
 func TestTelemetryAgentIsDisabledByDefaultAndAPIReceivesObservabilityDefaults(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

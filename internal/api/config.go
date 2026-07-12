@@ -1,11 +1,22 @@
 package api
 
 import (
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/observability"
 )
+
+func imageStoreMinimumReplicasFromEnv() int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("FUGUE_IMAGE_STORE_MIN_REPLICAS")))
+	if err != nil || value <= 0 {
+		return 1
+	}
+	return value
+}
 
 type ServerConfig struct {
 	DatabaseURL                      string
@@ -33,6 +44,7 @@ type ServerConfig struct {
 	EdgeTLSAskToken                  string
 	AllowLegacyEdgeToken             bool
 	ImageStoreMode                   string
+	ImageStoreMinReplicas            int
 	RegistryPushBase                 string
 	RegistryPullBase                 string
 	ClusterJoinRegistryEndpoint      string

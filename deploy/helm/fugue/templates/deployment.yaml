@@ -192,6 +192,8 @@ spec:
               value: {{ .Values.api.allowLegacyEdgeToken | quote }}
             - name: FUGUE_IMAGE_STORE_MODE
               value: {{ include "fugue.imageStoreMode" . | quote }}
+            - name: FUGUE_IMAGE_STORE_MIN_REPLICAS
+              value: {{ .Values.imageStore.minReplicas | quote }}
             - name: FUGUE_REGISTRY_PUSH_BASE
               value: {{ include "fugue.registryPushBase" . | quote }}
             - name: FUGUE_REGISTRY_PULL_BASE

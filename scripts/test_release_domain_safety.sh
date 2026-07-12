@@ -1539,7 +1539,11 @@ case "${url}" in
     body='{"generation":"generation_test","schema_version":"1.0","signature":"sig"}'
     ;;
   */v1/admin/platform/autonomy/status)
-    body='{"status":{"pass":false,"block_rollout":true,"control_plane_store":{"permission_verification_status":"passed","block_rollout":false},"checks":[{"name":"dns","pass":false,"message":"active=2 total=2"}]}}'
+    if [[ "${TEST_AUTONOMY_CASE:-dns}" == "registry" ]]; then
+      body='{"status":{"pass":false,"block_rollout":true,"control_plane_store":{"permission_verification_status":"passed","block_rollout":false},"checks":[{"name":"registry","pass":false,"message":"legacy registry unavailable"}]}}'
+    else
+      body='{"status":{"pass":false,"block_rollout":true,"control_plane_store":{"permission_verification_status":"passed","block_rollout":false},"checks":[{"name":"dns","pass":false,"message":"active=2 total=2"}]}}'
+    fi
     ;;
   */v1/edge/nodes)
     body='{"nodes":[{"id":"edge-us-1","edge_group_id":"edge-group-country-us","healthy":true,"status":"healthy","last_seen_at":"2999-01-01T00:00:00Z","caddy_route_count":1,"cache_status":"ready"}]}'
@@ -1563,13 +1567,36 @@ fi
 [[ -z "${writeout}" ]] || printf '200'
 SH
   chmod +x "${TMP_CURL_DIR}/curl"
+  cat >"${TMP_CURL_DIR}/kubectl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'JSON'
+{"status":{"desiredNumberScheduled":7,"numberReady":6,"numberAvailable":6,"updatedNumberScheduled":7,"numberMisscheduled":0}}
+JSON
+SH
+  chmod +x "${TMP_CURL_DIR}/kubectl"
   PATH="${TMP_CURL_DIR}:${PATH}"
   FUGUE_API_URL="https://api.example.test"
   FUGUE_API_KEY="test-token"
+  export TEST_AUTONOMY_CASE=dns
   FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT=
   FUGUE_REGISTRY_PULL_BASE=
   KUBECTL=
   run_release_preflight || fail "release preflight must allow serving degraded DNS nodes"
+
+  export TEST_AUTONOMY_CASE=registry
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT=http://127.0.0.1:5000
+  FUGUE_REGISTRY_PULL_BASE=registry.fugue.internal:5000
+  FUGUE_IMAGE_STORE_MIN_REPLICAS=1
+  KUBECTL=kubectl
+  run_release_preflight || fail "release preflight must keep the global registry available when image-cache satisfies the configured minimum"
+
+  FUGUE_IMAGE_STORE_MIN_REPLICAS=7
+  if run_release_preflight; then
+    fail "release preflight must fail closed when image-cache is below the configured minimum"
+  fi
   PATH="${ORIGINAL_PATH}"
   rm -rf "${TMP_CURL_DIR}"
 )

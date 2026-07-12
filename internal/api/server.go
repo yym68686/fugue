@@ -59,6 +59,7 @@ type Server struct {
 	edgeTLSAskToken                  string
 	allowLegacyEdgeToken             bool
 	imageStoreMode                   string
+	imageStoreMinReplicas            int
 	registryPushBase                 string
 	registryPullBase                 string
 	clusterJoinRegistryEndpoint      string
@@ -148,6 +149,10 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	if dnsBundleTTL <= 0 || dnsBundleTTL > 3600 {
 		dnsBundleTTL = defaultEdgeDNSTTL
 	}
+	imageStoreMinReplicas := cfg.ImageStoreMinReplicas
+	if imageStoreMinReplicas <= 0 {
+		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
+	}
 	server := &Server{
 		store:                            store,
 		auth:                             authn,
@@ -180,6 +185,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		edgeTLSAskToken:                  strings.TrimSpace(cfg.EdgeTLSAskToken),
 		allowLegacyEdgeToken:             cfg.AllowLegacyEdgeToken,
 		imageStoreMode:                   strings.TrimSpace(cfg.ImageStoreMode),
+		imageStoreMinReplicas:            imageStoreMinReplicas,
 		registryPushBase:                 strings.TrimSpace(cfg.RegistryPushBase),
 		registryPullBase:                 strings.TrimSpace(cfg.RegistryPullBase),
 		clusterJoinRegistryEndpoint:      strings.TrimSpace(cfg.ClusterJoinRegistryEndpoint),

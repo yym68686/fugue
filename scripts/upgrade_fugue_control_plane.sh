@@ -4272,7 +4272,7 @@ PY
   if node_local_build_plane_preflight_override_allowed; then
     node_local_build_plane_override_allowed="true"
   fi
-  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${node_local_build_plane_override_allowed}" "${image_cache_status_file}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" "${FUGUE_REGISTRY_PULL_BASE}" <<'PY'
+  if ! autonomy_override_message="$(python3 - "${autonomy_status_file}" "${edge_nodes_file}" "${dns_nodes_file}" "${node_policies_file}" "${node_local_build_plane_override_allowed}" "${image_cache_status_file}" "${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" "${FUGUE_REGISTRY_PULL_BASE}" "${FUGUE_IMAGE_STORE_MIN_REPLICAS:-1}" <<'PY'
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -4472,7 +4472,7 @@ def node_local_image_cache_endpoint(endpoint, registry_pull_base):
         return False
     return bool(parsed.port) and parsed.port == pull.port
 
-def image_cache_daemonset_ready(path, endpoint, registry_pull_base):
+def image_cache_daemonset_ready(path, endpoint, registry_pull_base, minimum_replicas):
     if not node_local_image_cache_endpoint(endpoint, registry_pull_base):
         return False, ""
     try:
@@ -4486,13 +4486,18 @@ def image_cache_daemonset_ready(path, endpoint, registry_pull_base):
     available = int(status.get("numberAvailable") or 0)
     updated = int(status.get("updatedNumberScheduled") or 0)
     misscheduled = int(status.get("numberMisscheduled") or 0)
+    required = max(1, as_int(minimum_replicas))
     if desired <= 0:
         return False, "image-cache daemonset has no scheduled nodes"
     if misscheduled > 0:
         return False, f"image-cache daemonset has {misscheduled} misscheduled pods"
+    if desired < required:
+        return False, f"image-cache daemonset scheduled below configured minimum: ready={ready} available={available} updated={updated} desired={desired} required={required}"
+    if ready < required or available < required:
+        return False, f"image-cache daemonset available below configured minimum: ready={ready} available={available} updated={updated} desired={desired} required={required}"
     if ready < desired or available < desired or updated < desired:
-        return False, f"image-cache daemonset not ready: ready={ready} available={available} updated={updated} desired={desired}"
-    return True, f"image-cache daemonset ready: ready={ready} available={available} desired={desired}"
+        return True, f"image-cache daemonset serves configured minimum with partial convergence: ready={ready} available={available} updated={updated} desired={desired} required={required}"
+    return True, f"image-cache daemonset ready: ready={ready} available={available} updated={updated} desired={desired} required={required}"
 
 status_path = sys.argv[1]
 nodes_path = sys.argv[2]
@@ -4502,6 +4507,7 @@ node_local_build_plane_override_allowed = trim(sys.argv[5]).lower() == "true"
 image_cache_status_path = sys.argv[6]
 cluster_join_registry_endpoint = sys.argv[7]
 registry_pull_base = sys.argv[8]
+image_store_min_replicas = sys.argv[9]
 with open(status_path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
@@ -4518,7 +4524,7 @@ checks = {str(item.get("name", "")).strip(): item for item in status.get("checks
 failing_checks = [name for name, check in checks.items() if not check.get("pass", False)]
 bootstrap_override, bootstrap_pending, route_bootstrap_pending, route_bootstrap_groups = edge_inventory_healthy(nodes)
 dns_bootstrap_override, dns_bootstrap_pending = dns_inventory_bootstrap_healthy(dns_nodes, set(filter(None, route_bootstrap_groups)))
-image_cache_override, image_cache_message = image_cache_daemonset_ready(image_cache_status_path, cluster_join_registry_endpoint, registry_pull_base)
+image_cache_override, image_cache_message = image_cache_daemonset_ready(image_cache_status_path, cluster_join_registry_endpoint, registry_pull_base, image_store_min_replicas)
 changed_files = {trim(line) for line in os.environ.get("FUGUE_RELEASE_CHANGED_FILES", "").splitlines() if trim(line)}
 edge_control_plane_repair_files = {
     "internal/api/dns_nodes_test.go",

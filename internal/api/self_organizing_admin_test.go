@@ -121,6 +121,58 @@ func TestRegistryReachabilityCheckFallsBackToReadyNodeLocalImageCache(t *testing
 	}
 }
 
+func TestImageCacheDaemonSetAvailabilityHonorsConfiguredMinimum(t *testing.T) {
+	tests := []struct {
+		name            string
+		desired         int32
+		ready           int32
+		available       int32
+		updated         int32
+		misscheduled    int32
+		minimumReplicas int
+		wantPass        bool
+		wantMessage     string
+	}{
+		{name: "fully converged", desired: 3, ready: 3, available: 3, updated: 3, minimumReplicas: 1, wantPass: true, wantMessage: "ready"},
+		{name: "one unavailable node remains globally serviceable", desired: 7, ready: 6, available: 6, updated: 7, minimumReplicas: 1, wantPass: true, wantMessage: "partial convergence"},
+		{name: "old serving pods remain globally serviceable during rollout", desired: 7, ready: 7, available: 7, updated: 6, minimumReplicas: 1, wantPass: true, wantMessage: "partial convergence"},
+		{name: "no available cache fails", desired: 7, ready: 0, available: 0, updated: 7, minimumReplicas: 1, wantPass: false, wantMessage: "below configured minimum"},
+		{name: "configured quorum fails closed", desired: 7, ready: 1, available: 1, updated: 7, minimumReplicas: 2, wantPass: false, wantMessage: "below configured minimum"},
+		{name: "insufficient scheduled capacity fails closed", desired: 1, ready: 1, available: 1, updated: 1, minimumReplicas: 2, wantPass: false, wantMessage: "scheduled below configured minimum"},
+		{name: "misscheduled pod fails closed", desired: 7, ready: 7, available: 7, updated: 7, misscheduled: 1, minimumReplicas: 1, wantPass: false, wantMessage: "misscheduled"},
+		{name: "invalid minimum normalizes to one", desired: 1, ready: 1, available: 1, updated: 1, minimumReplicas: 0, wantPass: true, wantMessage: "required=1"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pass, message := imageCacheDaemonSetAvailability(test.desired, test.ready, test.available, test.updated, test.misscheduled, test.minimumReplicas)
+			if pass != test.wantPass {
+				t.Fatalf("expected pass=%t, got pass=%t message=%q", test.wantPass, pass, message)
+			}
+			if !strings.Contains(message, test.wantMessage) {
+				t.Fatalf("expected message containing %q, got %q", test.wantMessage, message)
+			}
+		})
+	}
+}
+
+func TestImageStoreMinimumReplicasFromEnv(t *testing.T) {
+	t.Setenv("FUGUE_IMAGE_STORE_MIN_REPLICAS", "")
+	if got := imageStoreMinimumReplicasFromEnv(); got != 1 {
+		t.Fatalf("expected image-store minimum replicas to default to 1, got %d", got)
+	}
+
+	t.Setenv("FUGUE_IMAGE_STORE_MIN_REPLICAS", "3")
+	if got := imageStoreMinimumReplicasFromEnv(); got != 3 {
+		t.Fatalf("expected image-store minimum replicas from env, got %d", got)
+	}
+
+	t.Setenv("FUGUE_IMAGE_STORE_MIN_REPLICAS", "invalid")
+	if got := imageStoreMinimumReplicasFromEnv(); got != 1 {
+		t.Fatalf("expected invalid image-store minimum replicas to fail safe to 1, got %d", got)
+	}
+}
+
 func TestRegistryEndpointIsNodeLocalImageCacheRejectsLegacyNodePort(t *testing.T) {
 	if registryEndpointIsNodeLocalImageCache("127.0.0.1:30500", "registry.fugue.internal:5000") {
 		t.Fatal("expected legacy local registry NodePort to be rejected")

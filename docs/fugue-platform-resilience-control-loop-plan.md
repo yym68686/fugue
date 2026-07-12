@@ -1979,6 +1979,22 @@ DNS/edge failover 必须满足：
 > 回归测试。该修正仍只存在于无生产调用点的纯构建器和测试中，没有发布、持久化或流量副作用，
 > 因此不改变任何生产 TODO 状态。
 >
+> 2026-07-12 image-cache global-scope rollback checkpoint: workflow run `29188743417`
+> 已完成 Helm `669 -> 670`、API/controller rollout、初始 release guard 和公网 smoke，随后
+> dmit 的 kubelet 在既有 CPU/memory/IO pressure 下出现 housekeeping stall 并短暂
+> `NodeNotReady`，使未发生版本滚动的 image-cache DaemonSet 从 `7/7` 变成 `6/7`。
+> 旧 `nodeLocalImageCacheReachabilityCheck` 把任一 DaemonSet pod 不可用或尚未 updated 都提升为
+> 全局 `registry unavailable`，release guard 因而按设计自动回滚到 Helm revision `669`
+>（现行 revision `671`）；自动回滚、API/controller 恢复和公网 synthetic 均成功。已确认的代码
+> 缺陷是“节点局部 image-cache 降级被错误提升为全局 registry 故障”，不是 rollback 失效。
+> 全局判定现按 `imageStore.minReplicas` 检查 ready/available，低于 minimum、无 scheduled pod 或
+> misscheduled 仍 fail closed；minimum 已满足但未全量 ready/updated 时返回带
+> `ready/available/updated/desired/required` 的 degraded success，由独立 DaemonSet rollout gate
+> 继续负责版本收敛。发布脚本的旧 API 修复 override 使用同一语义，避免修复版本本身被旧错误
+> gate 阻断。dmit pressure 的唯一触发源没有达到 100% 归因，本批次不修改 node-updater、资源参数
+> 或节点策略；节点局部压力仍应由 scoped node evidence/incident 表达，不能再次扩大成全局 registry
+> blocker。本 checkpoint 只修复已经 100% 证实的作用域错误，不改变其他 TODO 状态。
+>
 > 2026-07-11 idempotent rollback artifact store checkpoint: JSON/Postgres Store 已增加显式
 > `EnsurePlatformArtifact` 原语，使用 `(artifact_kind, scope_key, generation)` 精确身份；同一 generation
 > 只有在现有 artifact 签名/内容哈希完整，且 schema、scope、compatibility floor、metadata、creator
