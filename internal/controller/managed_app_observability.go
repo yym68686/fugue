@@ -3,11 +3,17 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
+
+const managedAppRolloutSnapshotMismatchLimit = 32
+
+var managedAppRolloutSnapshotTimeType = reflect.TypeOf(time.Time{})
 
 type managedAppRolloutDecision struct {
 	Source         string
@@ -173,6 +179,124 @@ func (s *Service) recordManagedAppRolloutDecision(ctx context.Context, app model
 	s.logControllerAppEvent(ctx, "managed_app_rollout_decision", "info", app, "managed app rollout decision", attrs)
 	if managedAppDecisionRequiresDowntimeWarning(app, decision) {
 		s.logControllerAppEvent(ctx, "managed_app_downtime_required", "warning", app, "managed app rollout requires downtime", attrs)
+	}
+}
+
+func (s *Service) recordManagedAppOnlineRolloutSnapshotRejected(ctx context.Context, managedSnapshot, stored model.App) {
+	mismatchFields := managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, stored)
+	if len(mismatchFields) == 0 {
+		mismatchFields = []string{"unknown"}
+	}
+	s.logControllerAppEvent(ctx, "managed_app_online_rollout_snapshot_rejected", "warning", managedSnapshot, "managed app online rollout snapshot rejected in favor of stored desired state", map[string]any{
+		"rollout_intent":  strings.TrimSpace(managedSnapshot.Spec.RolloutIntent),
+		"mismatch_fields": mismatchFields,
+	})
+}
+
+func managedAppOnlineRolloutSnapshotMismatchFields(managedSnapshot, stored model.App) []string {
+	if !appHasOnlineRolloutIntent(managedSnapshot) {
+		return []string{"Spec.RolloutIntent"}
+	}
+
+	managedIdentity := comparableManagedAppRolloutSnapshot(managedSnapshot)
+	storedIdentity := comparableManagedAppRolloutSnapshot(stored)
+	managedIdentity.Spec = model.AppSpec{}
+	storedIdentity.Spec = model.AppSpec{}
+	if fields := reflectMismatchFields("Identity", managedIdentity, storedIdentity); len(fields) > 0 {
+		return fields
+	}
+
+	switch strings.TrimSpace(managedSnapshot.Spec.RolloutIntent) {
+	case model.AppRolloutIntentOnlineImageUpdate:
+		if strings.TrimSpace(managedSnapshot.Spec.Image) == "" || strings.TrimSpace(managedSnapshot.Spec.Image) != strings.TrimSpace(stored.Spec.Image) {
+			return []string{"Spec.Image"}
+		}
+		return reflectMismatchFields("Spec", comparableImageOnlySpec(managedSnapshot.Spec), comparableImageOnlySpec(stored.Spec))
+	case model.AppRolloutIntentOnlineResourceUpdate:
+		if managedDeployOperationResourcesDiffer(managedSnapshot.Spec, stored.Spec) {
+			return []string{"Spec.Resources"}
+		}
+		return reflectMismatchFields("Spec", comparableResourceOnlySpec(managedSnapshot.Spec), comparableResourceOnlySpec(stored.Spec))
+	case model.AppRolloutIntentOnlineLifecycleUpdate:
+		if managedSnapshot.Spec.TerminationGracePeriodSeconds != stored.Spec.TerminationGracePeriodSeconds {
+			return []string{"Spec.TerminationGracePeriodSeconds"}
+		}
+		return reflectMismatchFields("Spec", comparableLifecycleOnlySpec(managedSnapshot.Spec), comparableLifecycleOnlySpec(stored.Spec))
+	case model.AppRolloutIntentOnlineRestart:
+		if strings.TrimSpace(managedSnapshot.Spec.RestartToken) == "" || strings.TrimSpace(managedSnapshot.Spec.RestartToken) != strings.TrimSpace(stored.Spec.RestartToken) {
+			return []string{"Spec.RestartToken"}
+		}
+		return reflectMismatchFields("Spec", comparableRestartSpec(managedSnapshot.Spec), comparableRestartSpec(stored.Spec))
+	case model.AppRolloutIntentOnlineConfigUpdate:
+		return reflectMismatchFields("Snapshot", comparableManagedAppRolloutSnapshot(managedSnapshot), comparableManagedAppRolloutSnapshot(stored))
+	default:
+		return reflectMismatchFields("Snapshot", comparableManagedAppRolloutSnapshot(managedSnapshot), comparableManagedAppRolloutSnapshot(stored))
+	}
+}
+
+func reflectMismatchFields(path string, left, right any) []string {
+	fields := make([]string, 0, 4)
+	appendReflectMismatchFields(&fields, path, reflect.ValueOf(left), reflect.ValueOf(right))
+	return fields
+}
+
+func appendReflectMismatchFields(fields *[]string, path string, left, right reflect.Value) {
+	if len(*fields) >= managedAppRolloutSnapshotMismatchLimit {
+		return
+	}
+	if !left.IsValid() || !right.IsValid() {
+		if left.IsValid() != right.IsValid() {
+			*fields = append(*fields, path)
+		}
+		return
+	}
+	if left.Type() != right.Type() {
+		*fields = append(*fields, path)
+		return
+	}
+	if left.Type() == managedAppRolloutSnapshotTimeType {
+		if !reflect.DeepEqual(left.Interface(), right.Interface()) {
+			*fields = append(*fields, path)
+		}
+		return
+	}
+
+	switch left.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if left.IsNil() || right.IsNil() {
+			if left.IsNil() != right.IsNil() {
+				*fields = append(*fields, path)
+			}
+			return
+		}
+		appendReflectMismatchFields(fields, path, left.Elem(), right.Elem())
+	case reflect.Struct:
+		for index := 0; index < left.NumField(); index++ {
+			field := left.Type().Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			appendReflectMismatchFields(fields, path+"."+field.Name, left.Field(index), right.Field(index))
+		}
+	case reflect.Slice, reflect.Array:
+		if left.Len() != right.Len() {
+			*fields = append(*fields, path+".Length")
+		}
+		limit := left.Len()
+		if right.Len() < limit {
+			limit = right.Len()
+		}
+		for index := 0; index < limit; index++ {
+			appendReflectMismatchFields(fields, fmt.Sprintf("%s[%d]", path, index), left.Index(index), right.Index(index))
+		}
+	case reflect.Map:
+		if !reflect.DeepEqual(left.Interface(), right.Interface()) {
+			*fields = append(*fields, path)
+		}
+	default:
+		if !reflect.DeepEqual(left.Interface(), right.Interface()) {
+			*fields = append(*fields, path)
+		}
 	}
 }
 

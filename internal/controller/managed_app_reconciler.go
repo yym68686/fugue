@@ -171,7 +171,11 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 					return s.disableUnrecoverableManagedAppSnapshot(ctx, client, namespace, managed, app, "managed app has no deployable stored baseline and the live snapshot is not ready")
 				}
 			}
-			app, useStoredBaseline := selectManagedAppDesiredApp(app, storedApp, false)
+			managedSnapshot := app
+			app, useStoredBaseline := selectManagedAppDesiredApp(managedSnapshot, storedApp, false)
+			if useStoredBaseline && appHasOnlineRolloutIntent(managedSnapshot) {
+				s.recordManagedAppOnlineRolloutSnapshotRejected(ctx, managedSnapshot, storedApp)
+			}
 			syncStoredManagedAppSnapshot = useStoredBaseline
 			if !useStoredBaseline {
 				break
