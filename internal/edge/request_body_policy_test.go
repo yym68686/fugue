@@ -1,8 +1,10 @@
 package edge
 
 import (
+	"bufio"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -243,6 +245,47 @@ func TestEdgeRequestBodyPolicyMapsDeadlineToRequestTimeout(t *testing.T) {
 
 	if recorder.Code != http.StatusRequestTimeout {
 		t.Fatalf("expected 408, got %d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestEdgeRequestBodyPolicyInterruptsBlockedClientBodyRead(t *testing.T) {
+	t.Parallel()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer backend.Close()
+
+	service := newRequestBodyPolicyTestService(t, backend.URL, model.EdgeRequestBodyPolicy{
+		Name: "upload", Methods: []string{"POST"}, Paths: []string{"/upload"},
+		MaxBytes: 1024, TimeoutSeconds: 1, MaxConcurrent: 2, RetryAfterSeconds: 5,
+	})
+	edgeServer := httptest.NewServer(service.ProxyHandler())
+	defer edgeServer.Close()
+
+	edgeAddress := strings.TrimPrefix(edgeServer.URL, "http://")
+	connection, err := net.DialTimeout("tcp", edgeAddress, time.Second)
+	if err != nil {
+		t.Fatalf("dial edge server: %v", err)
+	}
+	defer connection.Close()
+	if _, err := io.WriteString(connection, "POST /upload HTTP/1.1\r\nHost: demo.fugue.pro\r\nTransfer-Encoding: chunked\r\nContent-Type: multipart/form-data; boundary=test\r\nConnection: close\r\n\r\n1\r\nx\r\n"); err != nil {
+		t.Fatalf("write partial request body: %v", err)
+	}
+
+	started := time.Now()
+	response, err := http.ReadResponse(bufio.NewReader(connection), &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("read edge response: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusRequestTimeout {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("expected blocked body read to terminate with 408, got %d body=%q", response.StatusCode, body)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("body read was not interrupted near the configured timeout: %s", elapsed)
 	}
 }
 

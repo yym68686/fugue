@@ -16,12 +16,15 @@ import (
 
 var errEdgeRequestBodyPolicyTooLarge = errors.New("edge request body policy limit exceeded")
 
+type edgeRequestBodyPolicyDeadlineContextKey struct{}
+
 type edgeRequestBodyPolicyGuard struct {
 	slots chan struct{}
 }
 
 type edgePolicyLimitedReadCloser struct {
 	reader   io.ReadCloser
+	ctx      context.Context
 	maxBytes int64
 	read     int64
 	once     sync.Once
@@ -53,16 +56,24 @@ func (s *Service) applyEdgeRequestBodyPolicy(w http.ResponseWriter, r *http.Requ
 	}
 
 	timeout := time.Duration(policy.TimeoutSeconds) * time.Second
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
+	ctx = context.WithValue(ctx, edgeRequestBodyPolicyDeadlineContextKey{}, deadline)
 	r = r.WithContext(ctx)
+	responseController := http.NewResponseController(w)
+	readDeadlineSet := responseController.SetReadDeadline(deadline) == nil
 	if r.Body != nil {
 		r.Body = &edgePolicyLimitedReadCloser{
 			reader:   r.Body,
+			ctx:      ctx,
 			maxBytes: policy.MaxBytes,
 		}
 	}
 	release := func() {
 		cancel()
+		if readDeadlineSet {
+			_ = responseController.SetReadDeadline(time.Time{})
+		}
 		guard.release()
 	}
 	return r, release, false, 0
@@ -126,7 +137,7 @@ func (r *edgePolicyLimitedReadCloser) Read(buffer []byte) (int, error) {
 		}
 		n, err := r.reader.Read(buffer)
 		r.read += int64(n)
-		return n, err
+		return n, r.normalizeReadError(err)
 	}
 
 	var probe [1]byte
@@ -134,7 +145,21 @@ func (r *edgePolicyLimitedReadCloser) Read(buffer []byte) (int, error) {
 	if n > 0 {
 		return 0, fmt.Errorf("%w: max_bytes=%d", errEdgeRequestBodyPolicyTooLarge, r.maxBytes)
 	}
-	return 0, err
+	return 0, r.normalizeReadError(err)
+}
+
+func (r *edgePolicyLimitedReadCloser) normalizeReadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if r != nil && r.ctx != nil && errors.Is(r.ctx.Err(), context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return context.DeadlineExceeded
+	}
+	return err
 }
 
 func (r *edgePolicyLimitedReadCloser) Close() error {
@@ -155,7 +180,14 @@ func edgeRequestBodyPolicyErrorIsTimeout(req *http.Request, err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	return req != nil && errors.Is(req.Context().Err(), context.DeadlineExceeded)
+	if req == nil {
+		return false
+	}
+	if errors.Is(req.Context().Err(), context.DeadlineExceeded) {
+		return true
+	}
+	deadline, ok := req.Context().Value(edgeRequestBodyPolicyDeadlineContextKey{}).(time.Time)
+	return ok && !deadline.IsZero() && !time.Now().Before(deadline)
 }
 
 func errString(err error) string {

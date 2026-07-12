@@ -889,6 +889,162 @@ func TestSyncOnceWritesRouteBundleCache(t *testing.T) {
 	}
 }
 
+func TestSyncOnceActivatesBundleBeforeAsynchronousWarmupCompletes(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_async_warmup")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/edge/routes":
+			w.Header().Set("ETag", `"routegen_async_warmup"`)
+			if err := json.NewEncoder(w).Encode(bundle); err != nil {
+				t.Fatalf("encode bundle: %v", err)
+			}
+		case "/load":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	warmupStarted := make(chan struct{})
+	releaseWarmup := make(chan struct{})
+	defer close(releaseWarmup)
+	service := NewService(config.EdgeConfig{
+		APIURL:               server.URL,
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        server.URL,
+		CaddyListenAddr:      "127.0.0.1:18443",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyTLSAskURL:       server.URL + "/v1/edge/tls/ask",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+		CacheWarmupEnabled:   false,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(context.Context, string, string) error {
+		close(warmupStarted)
+		<-releaseWarmup
+		return nil
+	}
+
+	started := time.Now()
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("sync once: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("route sync blocked on warmup for %s", elapsed)
+	}
+	status := service.Status()
+	if status.BundleVersion != bundle.Version || status.CaddyAppliedVersion != bundle.Version || !status.Healthy {
+		t.Fatalf("bundle was not active before warmup: %+v", status)
+	}
+	select {
+	case <-warmupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("asynchronous warmup did not start")
+	}
+}
+
+func TestSyncOnceDoesNotCancelEquivalentWarmupOnNotModified(t *testing.T) {
+	t.Parallel()
+
+	bundle := testBundle("routegen_warmup_idempotent")
+	var routeFetches atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/edge/routes":
+			if routeFetches.Add(1) == 1 {
+				w.Header().Set("ETag", `"routegen_warmup_idempotent"`)
+				if err := json.NewEncoder(w).Encode(bundle); err != nil {
+					t.Fatalf("encode bundle: %v", err)
+				}
+				return
+			}
+			w.WriteHeader(http.StatusNotModified)
+		case "/load":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	warmupStarted := make(chan struct{})
+	releaseWarmup := make(chan struct{})
+	warmupCompleted := make(chan struct{})
+	var warmupStarts atomic.Int64
+	var warmupCancels atomic.Int64
+	service := NewService(config.EdgeConfig{
+		APIURL:               server.URL,
+		EdgeToken:            "edge-secret",
+		EdgeGroupID:          "edge-group-default",
+		CaddyEnabled:         true,
+		CaddyAdminURL:        server.URL,
+		CaddyListenAddr:      "127.0.0.1:18443",
+		CaddyTLSMode:         caddyTLSModePublicOnDemand,
+		CaddyTLSAskURL:       server.URL + "/v1/edge/tls/ask",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+		CacheWarmupEnabled:   false,
+	}, log.New(ioDiscard{}, "", 0))
+	service.caddyWarmup = func(ctx context.Context, _ string, _ string) error {
+		if warmupStarts.Add(1) == 1 {
+			close(warmupStarted)
+		}
+		select {
+		case <-releaseWarmup:
+			close(warmupCompleted)
+			return nil
+		case <-ctx.Done():
+			warmupCancels.Add(1)
+			return ctx.Err()
+		}
+	}
+
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+	select {
+	case <-warmupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial warmup did not start")
+	}
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("not-modified sync: %v", err)
+	}
+	if got := warmupStarts.Load(); got != 1 {
+		t.Fatalf("equivalent bundle started %d warmups while the first was active", got)
+	}
+	if got := warmupCancels.Load(); got != 0 {
+		t.Fatalf("equivalent bundle canceled the active warmup %d times", got)
+	}
+	close(releaseWarmup)
+	select {
+	case <-warmupCompleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("warmup did not finish after release")
+	}
+	configSignature, err := service.caddyConfigSignature(bundle)
+	if err != nil {
+		t.Fatalf("caddy signature: %v", err)
+	}
+	tlsWarmupSignature := service.caddyTLSWarmupSignature(bundle, configSignature)
+	deadline := time.Now().Add(2 * time.Second)
+	for service.needsCaddyWarmup(tlsWarmupSignature) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if service.needsCaddyWarmup(tlsWarmupSignature) {
+		t.Fatal("completed warmup was not recorded")
+	}
+	if err := service.SyncOnce(context.Background()); err != nil {
+		t.Fatalf("post-warmup not-modified sync: %v", err)
+	}
+	if got := warmupStarts.Load(); got != 1 {
+		t.Fatalf("completed equivalent warmup was redundantly scheduled; starts=%d", got)
+	}
+}
+
 func TestSyncOnceDoesNotPromoteBundleToLKGWhenCaddyApplyFails(t *testing.T) {
 	t.Parallel()
 
@@ -1532,8 +1688,14 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 	if err := service.applyCaddyConfig(context.Background(), bundle); err != nil {
 		t.Fatalf("apply unchanged caddy config: %v", err)
 	}
+	equivalentBundle := bundle
+	equivalentBundle.Version = "routegen_caddy_equivalent"
+	equivalentBundle.Generation = "routegen_caddy_equivalent"
+	if err := service.applyCaddyConfig(context.Background(), equivalentBundle); err != nil {
+		t.Fatalf("apply semantically equivalent caddy config: %v", err)
+	}
 	if len(loads) != 1 {
-		t.Fatalf("expected unchanged bundle version to be applied once, got %d loads", len(loads))
+		t.Fatalf("expected route-only bundle generation change not to reload caddy, got %d loads", len(loads))
 	}
 	adminURL, err := url.Parse(admin.URL)
 	if err != nil {
@@ -1556,13 +1718,50 @@ func TestApplyCaddyConfigBuildsHostRoutesForBundle(t *testing.T) {
 		}
 	}
 	status := service.Status()
-	if status.CaddyAppliedVersion != "routegen_caddy" || status.CaddyTLSMode != caddyTLSModeOff || status.CaddyLastError != "" {
+	if status.CaddyAppliedVersion != "routegen_caddy_equivalent" || status.CaddyTLSMode != caddyTLSModeOff || status.CaddyLastError != "" {
 		t.Fatalf("unexpected caddy status: %+v", status)
 	}
 	metrics := renderMetrics(t, service)
 	if !strings.Contains(metrics, `fugue_edge_caddy_config_apply_total{result="success"} 1`) ||
-		!strings.Contains(metrics, `fugue_edge_caddy_routes{bundle_version="routegen_caddy"} 2`) {
+		!strings.Contains(metrics, `fugue_edge_caddy_routes{bundle_version="routegen_caddy_equivalent"} 2`) {
 		t.Fatalf("expected caddy apply metrics, got %s", metrics)
+	}
+}
+
+func TestCaddyConfigSignatureTracksHostsNotRouteGeneration(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(config.EdgeConfig{
+		CaddyEnabled:         true,
+		CaddyAdminURL:        "http://127.0.0.1:2019",
+		CaddyListenAddr:      "127.0.0.1:18443",
+		CaddyProxyListenAddr: "127.0.0.1:7833",
+	}, log.New(ioDiscard{}, "", 0))
+	bundle := testBundle("routegen_signature_one")
+	first, err := service.caddyConfigSignature(bundle)
+	if err != nil {
+		t.Fatalf("first signature: %v", err)
+	}
+	bundle.Version = "routegen_signature_two"
+	bundle.Generation = "routegen_signature_two"
+	bundle.Routes[0].RouteGeneration = "routegen_route_two"
+	second, err := service.caddyConfigSignature(bundle)
+	if err != nil {
+		t.Fatalf("equivalent signature: %v", err)
+	}
+	if first != second {
+		t.Fatalf("route-only generation change altered caddy signature: first=%s second=%s", first, second)
+	}
+
+	additional := bundle.Routes[0]
+	additional.Hostname = "second.example.com"
+	bundle.Routes = append(bundle.Routes, additional)
+	third, err := service.caddyConfigSignature(bundle)
+	if err != nil {
+		t.Fatalf("host-changing signature: %v", err)
+	}
+	if third == second {
+		t.Fatal("host set change did not alter caddy signature")
 	}
 }
 
@@ -2194,6 +2393,9 @@ func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
 	service.cacheWarmupClientFactory = func(_, _ string) *http.Client {
 		return &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if got := req.Header.Get(edgeCacheWarmupHeader); got != "1" {
+					t.Errorf("warmup request missing internal marker: %q", got)
+				}
 				requests = append(requests, req.URL.Path+"|"+req.Header.Get("Accept-Encoding")+"|"+req.Header.Get(edgeCacheWarmupDiscoveryHeader))
 				switch req.URL.Path {
 				case "/":
@@ -2241,11 +2443,80 @@ func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
 	if count := countString(requests, "/|identity|1"); count != 1 {
 		t.Fatalf("expected unchanged config not to rerun cache warmup, root discovery count=%d requests=%v", count, requests)
 	}
+	newDeployment := bundle
+	newDeployment.Version = "routegen_cache_warmup_new_deployment"
+	newDeployment.Generation = "routegen_cache_warmup_new_deployment"
+	newDeployment.Routes[0].DeploymentGeneration = "deploygen_cache_warmup_new"
+	newDeployment.Routes[0].CacheNamespace = "app_demo_deploy_2"
+	if err := service.applyCaddyConfig(context.Background(), newDeployment); err != nil {
+		t.Fatalf("apply new cache deployment: %v", err)
+	}
+	if count := countString(requests, "/|identity|1"); count != 2 {
+		t.Fatalf("expected new deployment to rerun cache warmup without requiring caddy route reload, root discovery count=%d requests=%v", count, requests)
+	}
 
 	metrics := renderMetrics(t, service)
-	if !strings.Contains(metrics, `fugue_edge_http_cache_warmup_total{result="success"} 1`) ||
+	if !strings.Contains(metrics, `fugue_edge_http_cache_warmup_total{result="success"} 2`) ||
 		!strings.Contains(metrics, `fugue_edge_http_cache_warmup_total{result="error"} 0`) {
 		t.Fatalf("expected cache warmup metrics, got %s", metrics)
+	}
+}
+
+func TestInternalCacheWarmupDoesNotEnterBusinessQualityMetrics(t *testing.T) {
+	t.Parallel()
+
+	var originWarmupHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originWarmupHeader = r.Header.Get(edgeCacheWarmupHeader)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer backend.Close()
+
+	bundle := testBundle("routegen_internal_warmup_metrics")
+	bundle.Routes[0].UpstreamURL = backend.URL
+	var logs bytes.Buffer
+	service := NewService(config.EdgeConfig{
+		APIURL:    "https://api.example.invalid",
+		EdgeToken: "edge-secret",
+	}, log.New(&logs, "", 0))
+	service.recordSyncSuccess(bundle, `"routegen_internal_warmup_metrics"`, time.Now().UTC(), false)
+
+	internal := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	internal.RemoteAddr = "127.0.0.1:41000"
+	internal.Header.Set(edgeClientRemoteAddrHeader, "127.0.0.1:42000")
+	internal.Header.Set(edgeCacheWarmupHeader, "1")
+	internalResponse := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(internalResponse, internal)
+	if internalResponse.Code != http.StatusOK {
+		t.Fatalf("internal warmup status=%d body=%q", internalResponse.Code, internalResponse.Body.String())
+	}
+	internalLogs := logs.String()
+	if !strings.Contains(internalLogs, "request_source=cache_warmup") {
+		t.Fatalf("plain warmup request log is not explicitly sourced: %s", internalLogs)
+	}
+	if strings.Contains(internalLogs, `"event_type":"request_fact"`) {
+		t.Fatalf("internal warmup emitted a request_fact consumed by quality/release gates: %s", internalLogs)
+	}
+	logs.Reset()
+
+	forged := httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/", nil)
+	forged.RemoteAddr = "198.51.100.10:43000"
+	forged.Header.Set(edgeClientRemoteAddrHeader, "127.0.0.1:44000")
+	forged.Header.Set(edgeCacheWarmupHeader, "1")
+	forgedResponse := httptest.NewRecorder()
+	service.ProxyHandler().ServeHTTP(forgedResponse, forged)
+	if forgedResponse.Code != http.StatusOK {
+		t.Fatalf("forged warmup status=%d body=%q", forgedResponse.Code, forgedResponse.Body.String())
+	}
+
+	if originWarmupHeader != "" {
+		t.Fatalf("internal warmup marker leaked to origin: %q", originWarmupHeader)
+	}
+	metrics := renderMetrics(t, service)
+	want := `fugue_edge_route_requests_total{hostname="demo.fugue.pro",path_prefix="/",method="GET",app="app_demo",route_kind="platform",client_country="",client_region="",client_asn=""} 1`
+	if !strings.Contains(metrics, want) {
+		t.Fatalf("expected only the non-loopback forged request in business metrics; missing %q:\n%s", want, metrics)
 	}
 }
 
@@ -2826,11 +3097,11 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, "uploaded:%s:%s", r.Header.Get("X-Forwarded-Host"), body)
 		case "/events":
-			if !r.Close {
-				t.Errorf("expected streaming upload to use a fresh origin connection")
+			if r.Close {
+				t.Errorf("expected streaming upload to keep its generation-scoped origin connection reusable")
 			}
-			if r.RemoteAddr == uploadRemoteAddr {
-				t.Errorf("expected streaming upload to avoid reusing origin connection %s", r.RemoteAddr)
+			if r.RemoteAddr != uploadRemoteAddr {
+				t.Errorf("expected streaming upload to reuse origin connection %s, got %s", uploadRemoteAddr, r.RemoteAddr)
 			}
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -3064,6 +3335,124 @@ func TestProxyHandlerReusesOriginConnections(t *testing.T) {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
 		}
+	}
+}
+
+func TestDefaultEdgeProxyTransportKeepsConcurrentOriginConnectionsIdle(t *testing.T) {
+	t.Parallel()
+
+	transport, ok := newDefaultEdgeProxyTransport().(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", transport)
+	}
+	defer transport.CloseIdleConnections()
+	if transport.DisableKeepAlives {
+		t.Fatal("edge origin transport must keep deployment-scoped connections reusable")
+	}
+	if transport.MaxIdleConns != edgeOriginMaxIdleConns || transport.MaxIdleConnsPerHost != edgeOriginMaxIdleConnsPerHost {
+		t.Fatalf("unexpected origin idle pool bounds: total=%d per_host=%d", transport.MaxIdleConns, transport.MaxIdleConnsPerHost)
+	}
+}
+
+func TestObservationWriterCapturesBodyOnlyWhenCacheCandidate(t *testing.T) {
+	t.Parallel()
+
+	uncached := newEdgeProxyObservationResponseWriter(httptest.NewRecorder(), time.Now(), &edgeProxyObservation{})
+	if _, err := uncached.Write([]byte("uncached response")); err != nil {
+		t.Fatalf("write uncached response: %v", err)
+	}
+	if len(uncached.body) != 0 {
+		t.Fatalf("uncached response unexpectedly retained %d body bytes", len(uncached.body))
+	}
+
+	cacheCandidate := newEdgeProxyObservationResponseWriter(httptest.NewRecorder(), time.Now(), &edgeProxyObservation{})
+	cacheCandidate.maxBytes = 4
+	cacheCandidate.cacheDecision = &edgeHTTPCacheDecision{Cacheable: true}
+	if _, err := cacheCandidate.Write([]byte("cache")); err != nil {
+		t.Fatalf("write cache candidate: %v", err)
+	}
+	if got := string(cacheCandidate.body); got != "cach" || !cacheCandidate.overflow {
+		t.Fatalf("unexpected bounded cache capture body=%q overflow=%t", got, cacheCandidate.overflow)
+	}
+}
+
+func TestObservationWriterStopsCapturingWhenOriginDisallowsCache(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("x"), 1024*1024)
+	tests := []struct {
+		name        string
+		header      http.Header
+		wantCapture bool
+	}{
+		{
+			name: "no-store",
+			header: http.Header{
+				"Content-Type":  []string{"application/javascript"},
+				"Cache-Control": []string{"no-store"},
+			},
+		},
+		{
+			name: "set-cookie",
+			header: http.Header{
+				"Content-Type": []string{"application/javascript"},
+				"Set-Cookie":   []string{"session=private; HttpOnly"},
+			},
+		},
+		{
+			name: "cacheable",
+			header: http.Header{
+				"Content-Type":  []string{"application/javascript"},
+				"Cache-Control": []string{"public, max-age=60"},
+			},
+			wantCapture: true,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(config.EdgeConfig{}, log.New(ioDiscard{}, "", 0))
+			service.proxyBase = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        test.header.Clone(),
+					Body:          io.NopCloser(bytes.NewReader(payload)),
+					ContentLength: int64(len(payload)),
+					Request:       req,
+				}, nil
+			})
+			target, err := url.Parse("http://origin.example")
+			if err != nil {
+				t.Fatalf("parse target: %v", err)
+			}
+			decision := edgeHTTPCacheDecision{
+				Enabled:   true,
+				Cacheable: true,
+				PolicyID:  "static-assets",
+				Status:    edgeCacheStatusMiss,
+				Policy:    model.CachePolicy{Kind: model.CachePolicyKindStaticAssets, StatusAllowlist: []int{http.StatusOK}},
+			}
+			observed := &edgeProxyObservation{}
+			recorder := httptest.NewRecorder()
+			writer := newEdgeProxyObservationResponseWriter(recorder, time.Now(), observed)
+			writer.maxBytes = int64(len(payload) + 1)
+			writer.cacheDecision = &decision
+			proxy := service.newEdgeReverseProxy("demo.fugue.pro", target, model.EdgeRouteBinding{}, observed, false, &decision)
+			proxy.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "http://demo.fugue.pro/app.js", nil))
+
+			if recorder.Code != http.StatusOK || recorder.Body.Len() != len(payload) {
+				t.Fatalf("client response changed: status=%d bytes=%d", recorder.Code, recorder.Body.Len())
+			}
+			if test.wantCapture {
+				if len(writer.body) != len(payload) || !decision.Cacheable {
+					t.Fatalf("cacheable response was not retained: captured=%d cacheable=%t", len(writer.body), decision.Cacheable)
+				}
+				return
+			}
+			if len(writer.body) != 0 || decision.Cacheable {
+				t.Fatalf("non-cacheable response retained body: captured=%d cacheable=%t", len(writer.body), decision.Cacheable)
+			}
+		})
 	}
 }
 

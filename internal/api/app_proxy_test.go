@@ -150,6 +150,102 @@ func TestServiceURLForAppCachesResolvedServiceHost(t *testing.T) {
 	}
 }
 
+func TestDefaultAppProxyTransportKeepsConnectionsReusable(t *testing.T) {
+	t.Parallel()
+
+	remoteAddrs := make([]string, 0, 2)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteAddrs = append(remoteAddrs, r.RemoteAddr)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer backend.Close()
+
+	transport := newDefaultAppProxyTransport()
+	for index := 0; index < 2; index++ {
+		req, err := http.NewRequest(http.MethodGet, backend.URL, nil)
+		if err != nil {
+			t.Fatalf("build request %d: %v", index+1, err)
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("round trip %d: %v", index+1, err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil || closeErr != nil || string(body) != "ok" {
+			t.Fatalf("unexpected response %d body=%q read_err=%v close_err=%v", index+1, string(body), readErr, closeErr)
+		}
+	}
+
+	if len(remoteAddrs) != 2 {
+		t.Fatalf("expected two backend requests, got %d", len(remoteAddrs))
+	}
+	if remoteAddrs[0] != remoteAddrs[1] {
+		t.Fatalf("expected app proxy connection reuse, got %q then %q", remoteAddrs[0], remoteAddrs[1])
+	}
+
+	retrying, ok := transport.(appProxyRetryTransport)
+	if !ok {
+		t.Fatalf("expected app proxy retry transport, got %T", transport)
+	}
+	base, ok := retrying.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected HTTP transport base, got %T", retrying.base)
+	}
+	if base.DisableKeepAlives {
+		t.Fatal("expected app proxy keep-alives to be enabled")
+	}
+	if base.MaxIdleConns != defaultAppProxyMaxIdleConns || base.MaxIdleConnsPerHost != defaultAppProxyMaxIdlePerHost {
+		t.Fatalf("unexpected app proxy idle pool limits total=%d per_host=%d", base.MaxIdleConns, base.MaxIdleConnsPerHost)
+	}
+}
+
+func TestRootedAppProxyKubernetesServiceDialAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"app-demo.fg-tenant-demo.svc.cluster.local:8080":  "app-demo.fg-tenant-demo.svc.cluster.local.:8080",
+		"APP-DEMO.FG-TENANT-DEMO.SVC.CLUSTER.LOCAL:8080":  "APP-DEMO.FG-TENANT-DEMO.SVC.CLUSTER.LOCAL.:8080",
+		"app-demo.fg-tenant-demo.svc.cluster.local.:8080": "app-demo.fg-tenant-demo.svc.cluster.local.:8080",
+		"api.example.com:443":                             "api.example.com:443",
+		"app.svc.cluster.local.example.com:8080":          "app.svc.cluster.local.example.com:8080",
+		"10.42.5.243:8000":                                "10.42.5.243:8000",
+		"[fd00::1]:8000":                                  "[fd00::1]:8000",
+		"app-demo.fg-tenant-demo.svc.cluster.local":       "app-demo.fg-tenant-demo.svc.cluster.local",
+	}
+	for address, want := range tests {
+		address, want := address, want
+		t.Run(address, func(t *testing.T) {
+			t.Parallel()
+			if got := rootedAppProxyKubernetesServiceDialAddress(address); got != want {
+				t.Fatalf("expected rooted dial address %q, got %q", want, got)
+			}
+		})
+	}
+}
+
+func TestRootedAppProxyKubernetesServiceDialContextChangesOnlyDialAddress(t *testing.T) {
+	t.Parallel()
+
+	const originalAddress = "app-demo.fg-tenant-demo.svc.cluster.local:8080"
+	const rootedAddress = "app-demo.fg-tenant-demo.svc.cluster.local.:8080"
+	sentinel := errors.New("dial stopped")
+	var gotNetwork string
+	var gotAddress string
+	dial := rootedAppProxyKubernetesServiceDialContext(func(_ context.Context, network, address string) (net.Conn, error) {
+		gotNetwork = network
+		gotAddress = address
+		return nil, sentinel
+	})
+
+	if _, err := dial(context.Background(), "tcp", originalAddress); !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped dial error, got %v", err)
+	}
+	if gotNetwork != "tcp" || gotAddress != rootedAddress {
+		t.Fatalf("unexpected dial call network=%q address=%q", gotNetwork, gotAddress)
+	}
+}
+
 func TestLoadAppByHostnameCachedUsesShortTTLCache(t *testing.T) {
 	t.Parallel()
 

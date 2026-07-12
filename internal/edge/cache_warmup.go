@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -43,36 +44,22 @@ type edgeWarmupReport struct {
 }
 
 func (s *Service) maybeWarmupCurrentEdgeCache(ctx context.Context, bundle model.EdgeRouteBundle, configSignature string) error {
-	if !s.edgeCacheWarmupEnabled() {
-		return nil
-	}
-	if !s.Config.CaddyEnabled {
-		return nil
-	}
 	hosts := s.edgeCacheWarmupHosts(bundle)
-	if len(hosts) == 0 {
-		return nil
-	}
 	scheme := s.edgeWarmupScheme()
-	if scheme == "" {
-		return nil
-	}
 	dialAddress := caddyProxyDialAddress(s.Config.CaddyListenAddr)
-	if dialAddress == "" {
+	warmupSignature := s.edgeCacheWarmupSignature(bundle, configSignature)
+	if warmupSignature == "" {
 		return nil
 	}
-	warmupSignature := strings.Join([]string{
-		strings.TrimSpace(configSignature),
-		"cache",
-		scheme,
-		strings.Join(hosts, ","),
-	}, ":")
 	if !s.needsEdgeCacheWarmup(warmupSignature) {
 		return nil
 	}
 	started := time.Now()
 	report, err := s.runEdgeCacheWarmup(ctx, dialAddress, scheme, hosts)
 	duration := time.Since(started)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx.Err()
+	}
 	s.recordEdgeCacheWarmup(warmupSignature, strings.Join(hosts, ","), report, duration, err)
 	if err != nil {
 		return err
@@ -81,6 +68,50 @@ func (s *Service) maybeWarmupCurrentEdgeCache(ctx context.Context, bundle model.
 		s.Logger.Printf("edge cache warmup complete; hosts=%d discovery_targets=%d prime_targets=%d duration=%s", report.Hosts, report.DiscoveryTargets, report.PrimeTargets, duration)
 	}
 	return nil
+}
+
+func (s *Service) edgeCacheWarmupSignature(bundle model.EdgeRouteBundle, configSignature string) string {
+	if s == nil || !s.edgeCacheWarmupEnabled() || !s.Config.CaddyEnabled {
+		return ""
+	}
+	hosts := s.edgeCacheWarmupHosts(bundle)
+	scheme := s.edgeWarmupScheme()
+	if len(hosts) == 0 || scheme == "" || caddyProxyDialAddress(s.Config.CaddyListenAddr) == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(configSignature),
+		"cache",
+		scheme,
+		strings.Join(hosts, ","),
+		edgeCacheWarmupRouteIdentity(s, bundle),
+	}, ":")
+}
+
+func edgeCacheWarmupRouteIdentity(s *Service, bundle model.EdgeRouteBundle) string {
+	if s == nil {
+		return ""
+	}
+	identities := make([]string, 0, len(bundle.Routes))
+	for _, route := range bundle.Routes {
+		if strings.TrimSpace(route.CachePolicyID) == "" || !s.routeAllowedForThisEdge(route) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(route.Status), model.EdgeRouteStatusActive) ||
+			!strings.EqualFold(strings.TrimSpace(route.TLSPolicy), model.EdgeRouteTLSPolicyPlatform) {
+			continue
+		}
+		identities = append(identities, strings.Join([]string{
+			normalizeRouteHost(route.Hostname),
+			strings.TrimSpace(route.CachePolicyID),
+			strings.TrimSpace(route.CacheNamespace),
+			strings.TrimSpace(route.DeploymentGeneration),
+			strings.TrimSpace(route.RouteGeneration),
+			strings.TrimSpace(route.UpstreamURL),
+		}, "\x00"))
+	}
+	sort.Strings(identities)
+	return strings.Join(identities, "\x01")
 }
 
 func (s *Service) edgeCacheWarmupEnabled() bool {
@@ -162,6 +193,9 @@ func (s *Service) runEdgeCacheWarmup(ctx context.Context, dialAddress, scheme st
 	report := edgeWarmupReport{Hosts: len(hosts)}
 	var firstErr error
 	for _, host := range hosts {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
 		hostReport, err := s.warmupEdgeCacheHost(ctx, dialAddress, scheme, host)
 		report.DiscoveryTargets += hostReport.DiscoveryTargets
 		report.DiscoveryRequests += hostReport.DiscoveryRequests
@@ -300,6 +334,7 @@ func (s *Service) edgeWarmupFetch(ctx context.Context, client *http.Client, targ
 	if err != nil {
 		return nil, nil, err
 	}
+	req.Header.Set(edgeCacheWarmupHeader, "1")
 	if discovery {
 		req.Header.Set(edgeCacheWarmupDiscoveryHeader, "1")
 		req.Header.Set("Accept-Encoding", "identity")

@@ -29,6 +29,8 @@ const (
 	defaultAppProxyMaxAttempts     = 4
 	defaultAppProxyRetryDelay      = 100 * time.Millisecond
 	defaultAppProxyReplayBodyLimit = 512 << 10
+	defaultAppProxyMaxIdleConns    = 256
+	defaultAppProxyMaxIdlePerHost  = 32
 )
 
 const (
@@ -623,12 +625,20 @@ func appServiceHost(namespace, serviceName string) string {
 func newDefaultAppProxyTransport() http.RoundTripper {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
+		dialer := &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
 		return appProxyRetryTransport{
 			base: &http.Transport{
-				Proxy:               nil,
-				ForceAttemptHTTP2:   false,
-				DisableKeepAlives:   true,
-				TLSHandshakeTimeout: 10 * time.Second,
+				Proxy:                 nil,
+				DialContext:           rootedAppProxyKubernetesServiceDialContext(dialer.DialContext),
+				ForceAttemptHTTP2:     false,
+				MaxIdleConns:          defaultAppProxyMaxIdleConns,
+				MaxIdleConnsPerHost:   defaultAppProxyMaxIdlePerHost,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: time.Second,
 			},
 			maxAttempts: defaultAppProxyMaxAttempts,
 			retryDelay:  defaultAppProxyRetryDelay,
@@ -636,13 +646,33 @@ func newDefaultAppProxyTransport() http.RoundTripper {
 	}
 	transport := base.Clone()
 	transport.Proxy = nil
+	transport.DialContext = rootedAppProxyKubernetesServiceDialContext(transport.DialContext)
 	transport.ForceAttemptHTTP2 = false
-	transport.DisableKeepAlives = true
+	transport.DisableKeepAlives = false
+	transport.MaxIdleConns = defaultAppProxyMaxIdleConns
+	transport.MaxIdleConnsPerHost = defaultAppProxyMaxIdlePerHost
 	return appProxyRetryTransport{
 		base:        transport,
 		maxAttempts: defaultAppProxyMaxAttempts,
 		retryDelay:  defaultAppProxyRetryDelay,
 	}
+}
+
+func rootedAppProxyKubernetesServiceDialContext(next func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		return next(ctx, network, rootedAppProxyKubernetesServiceDialAddress(address))
+	}
+}
+
+func rootedAppProxyKubernetesServiceDialAddress(address string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return address
+	}
+	if strings.HasSuffix(strings.ToLower(host), ".svc.cluster.local") {
+		host += "."
+	}
+	return net.JoinHostPort(host, port)
 }
 
 type appProxyRetryTransport struct {

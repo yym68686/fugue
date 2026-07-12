@@ -115,6 +115,103 @@ func TestMergeEdgeDNSAnswerCandidatesPreservesRicherQualityMetadata(t *testing.T
 	}
 }
 
+func TestSharedCustomDomainTargetKeepsCoherentLatencySensitiveRoutingProfile(t *testing.T) {
+	t.Parallel()
+
+	apiProfile := model.EdgeDNSRecord{
+		Name:       "shared-target.dns.fugue.pro",
+		Type:       model.EdgeDNSRecordTypeA,
+		Values:     []string{"15.204.94.71", "51.38.126.103"},
+		TTL:        60,
+		RecordKind: model.EdgeDNSRecordKindCustomDomainTarget,
+		Status:     model.EdgeRouteStatusActive,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
+			Reason:              "api_quality_profile",
+			SelectedEdgeGroupID: "edge-group-country-us",
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", TrafficClass: "dynamic_api", Score: 100, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", TrafficClass: "dynamic_api", Score: 500, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+		},
+		ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{
+			{
+				ScopeKey:            "country:us",
+				Country:             "us",
+				PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
+				Reason:              "api_scoped_quality_profile",
+				SelectedEdgeGroupID: "edge-group-country-us",
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", TrafficClass: "dynamic_api", Score: 90, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", TrafficClass: "dynamic_api", Score: 550, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}
+	staticProfile := model.EdgeDNSRecord{
+		Name:       apiProfile.Name,
+		Type:       model.EdgeDNSRecordTypeA,
+		Values:     append([]string(nil), apiProfile.Values...),
+		TTL:        60,
+		RecordKind: model.EdgeDNSRecordKindCustomDomainTarget,
+		Status:     model.EdgeRouteStatusActive,
+		AnswerPolicy: model.DNSAnswerPolicy{
+			PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
+			Reason:              "static_quality_profile",
+			SelectedEdgeGroupID: "edge-group-country-de",
+		},
+		Candidates: []model.EdgeDNSAnswerCandidate{
+			{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", TrafficClass: "static_cacheable", Score: 700, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+			{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", TrafficClass: "static_cacheable", Score: 40, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+		},
+		ScopedCandidates: []model.EdgeDNSScopedAnswerCandidates{
+			{
+				ScopeKey:            "country:us",
+				Country:             "us",
+				PolicyKind:          model.DNSAnswerPolicyKindLatencyAware,
+				Reason:              "static_scoped_quality_profile",
+				SelectedEdgeGroupID: "edge-group-country-de",
+				Candidates: []model.EdgeDNSAnswerCandidate{
+					{IP: "15.204.94.71", EdgeGroupID: "edge-group-country-us", TrafficClass: "static_cacheable", Score: 800, Weight: 20, Healthy: true, RouteReady: true, TLSReady: true},
+					{IP: "51.38.126.103", EdgeGroupID: "edge-group-country-de", TrafficClass: "static_cacheable", Score: 30, Weight: 200, Healthy: true, RouteReady: true, TLSReady: true},
+				},
+			},
+		},
+	}
+
+	for _, input := range [][]model.EdgeDNSRecord{
+		{apiProfile, staticProfile},
+		{staticProfile, apiProfile},
+	} {
+		records := dedupeAndSortEdgeDNSRecords(input)
+		if len(records) != 1 {
+			t.Fatalf("expected one shared target record, got %+v", records)
+		}
+		record := records[0]
+		if record.AnswerPolicy.Reason != "api_quality_profile" || record.AnswerPolicy.SelectedEdgeGroupID != "edge-group-country-us" {
+			t.Fatalf("expected API policy to remain coherent, got %+v", record.AnswerPolicy)
+		}
+		if len(record.Candidates) != 2 {
+			t.Fatalf("expected two API candidates, got %+v", record.Candidates)
+		}
+		for _, candidate := range record.Candidates {
+			if candidate.TrafficClass != "dynamic_api" {
+				t.Fatalf("expected candidate metadata from the same API profile, got %+v", record.Candidates)
+			}
+		}
+		if len(record.ScopedCandidates) != 1 ||
+			record.ScopedCandidates[0].Reason != "api_scoped_quality_profile" ||
+			record.ScopedCandidates[0].SelectedEdgeGroupID != "edge-group-country-us" {
+			t.Fatalf("expected scoped candidates from the same API profile, got %+v", record.ScopedCandidates)
+		}
+		for _, candidate := range record.ScopedCandidates[0].Candidates {
+			if candidate.TrafficClass != "dynamic_api" {
+				t.Fatalf("expected scoped candidate metadata from the same API profile, got %+v", record.ScopedCandidates)
+			}
+		}
+	}
+}
+
 func TestEdgeDNSBundleDerivesCustomDomainTargetsAndProbe(t *testing.T) {
 	t.Parallel()
 

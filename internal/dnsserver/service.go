@@ -115,6 +115,7 @@ type telemetry struct {
 	CacheLoadMiss         uint64
 	CacheLoadError        uint64
 	QueryTotal            map[dnsQueryMetricKey]uint64
+	ScopeResolutionTotal  map[string]uint64
 }
 
 type edgeHealthProbeFunc func(context.Context, string) bool
@@ -130,14 +131,33 @@ type edgeDNSFilteredCandidate struct {
 }
 
 type edgeDNSAnswerAudit struct {
-	OwnerName        string
-	RecordName       string
-	RecordType       string
-	RecordKind       string
-	RecordGeneration string
-	PolicyKind       string
-	Answered         []model.EdgeDNSAnswerCandidate
-	Filtered         []edgeDNSFilteredCandidate
+	OwnerName             string
+	RecordName            string
+	RecordType            string
+	RecordKind            string
+	RecordGeneration      string
+	PolicyKind            string
+	ClientHintSource      string
+	ClientScopeResolution string
+	MatchedScopeKey       string
+	ScopedProfileMatched  bool
+	SelectedEdgeGroupID   string
+	SelectionResult       string
+	ExplorationKind       string
+	Answered              []model.EdgeDNSAnswerCandidate
+	Filtered              []edgeDNSFilteredCandidate
+}
+
+type edgeDNSCandidateOrderDecision struct {
+	Policy                    model.DNSAnswerPolicy
+	ClientScopeResolution     string
+	MatchedScopeKey           string
+	ScopedProfileMatched      bool
+	SelectedEdgeGroupID       string
+	SelectedCandidateEligible bool
+	SelectedCandidateKey      string
+	ExplorationKind           string
+	ExplorationCandidateKey   string
 }
 
 type dnsQueryMetricKey struct {
@@ -559,6 +579,11 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	for _, entry := range sortedQueryMetricEntries(snapshot.Metrics.QueryTotal) {
 		fmt.Fprintf(w, "fugue_dns_query_total{qtype=%q,rcode=%q} %d\n", entry.Key.Type, entry.Key.RCode, entry.Value)
 	}
+	fmt.Fprintln(w, "# HELP fugue_dns_scope_resolution_total Authoritative DNS candidate scope decisions by bounded resolution outcome.")
+	fmt.Fprintln(w, "# TYPE fugue_dns_scope_resolution_total counter")
+	for _, resolution := range sortedStringMapKeys(snapshot.Metrics.ScopeResolutionTotal) {
+		fmt.Fprintf(w, "fugue_dns_scope_resolution_total{resolution=%q} %d\n", resolution, snapshot.Metrics.ScopeResolutionTotal[resolution])
+	}
 }
 
 func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
@@ -743,6 +768,7 @@ func (s *Service) metricSnapshot() metricSnapshot {
 	status := s.snapshot
 	metrics := s.metrics
 	metrics.QueryTotal = cloneQueryMetrics(s.metrics.QueryTotal)
+	metrics.ScopeResolutionTotal = cloneStringCounterMap(s.metrics.ScopeResolutionTotal)
 	var generatedAt *time.Time
 	if s.bundle != nil && !s.bundle.GeneratedAt.IsZero() {
 		value := s.bundle.GeneratedAt
@@ -1630,11 +1656,28 @@ func (s *Service) edgeDNSRecordsForQuestion(ctx context.Context, bundle *model.E
 		peerHealth = s.peerHealthFilterReason
 	}
 	answers, nameExists, audits := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, s.geoHintForQuery(msg, writer), liveHealth, peerHealth)
+	s.recordDNSScopeResolution(audits)
 	s.logDNSAnswerAudits(bundle, name, qtype, audits)
 	if qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA {
 		return answers, nameExists
 	}
 	return s.filterHealthyEdgeAnswers(ctx, answers), nameExists
+}
+
+func (s *Service) recordDNSScopeResolution(audits []edgeDNSAnswerAudit) {
+	if s == nil || len(audits) == 0 {
+		return
+	}
+	resolution := strings.TrimSpace(audits[0].ClientScopeResolution)
+	if resolution == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.metrics.ScopeResolutionTotal == nil {
+		s.metrics.ScopeResolutionTotal = make(map[string]uint64)
+	}
+	s.metrics.ScopeResolutionTotal[resolution]++
 }
 
 func (s *Service) filterHealthyEdgeAnswers(_ context.Context, answers []miekgdns.RR) []miekgdns.RR {
@@ -1692,26 +1735,33 @@ func (s *Service) logDNSAnswerAudits(bundle *model.EdgeDNSBundle, queryName stri
 			continue
 		}
 		writeDNSStructuredLog(s.Logger.Writer(), map[string]any{
-			"event_type":         "dns_answer_audit",
-			"message":            "dns answer decision",
-			"dns_node_id":        dnsNodeID,
-			"edge_group_id":      edgeGroupID,
-			"zone":               zone,
-			"query_name":         normalizeName(queryName),
-			"qtype":              dnsTypeString(qtype),
-			"owner_name":         audit.OwnerName,
-			"record_name":        audit.RecordName,
-			"record_type":        audit.RecordType,
-			"record_kind":        audit.RecordKind,
-			"record_generation":  audit.RecordGeneration,
-			"policy_kind":        audit.PolicyKind,
-			"serving_generation": generation,
-			"lkg_generation":     generation,
-			"answered_edge_ids":  answeredIDs,
-			"answered_ips":       answeredIPs,
-			"filtered_edge_ids":  filteredIDs,
-			"filtered_ips":       filteredIPs,
-			"filter_reasons":     reasons,
+			"event_type":             "dns_answer_audit",
+			"message":                "dns answer decision",
+			"dns_node_id":            dnsNodeID,
+			"edge_group_id":          edgeGroupID,
+			"zone":                   zone,
+			"query_name":             normalizeName(queryName),
+			"qtype":                  dnsTypeString(qtype),
+			"owner_name":             audit.OwnerName,
+			"record_name":            audit.RecordName,
+			"record_type":            audit.RecordType,
+			"record_kind":            audit.RecordKind,
+			"record_generation":      audit.RecordGeneration,
+			"policy_kind":            audit.PolicyKind,
+			"client_hint_source":     audit.ClientHintSource,
+			"scope_resolution":       audit.ClientScopeResolution,
+			"matched_scope_key":      audit.MatchedScopeKey,
+			"scoped_profile":         audit.ScopedProfileMatched,
+			"selected_edge_group_id": audit.SelectedEdgeGroupID,
+			"selection_result":       audit.SelectionResult,
+			"exploration_kind":       audit.ExplorationKind,
+			"serving_generation":     generation,
+			"lkg_generation":         generation,
+			"answered_edge_ids":      answeredIDs,
+			"answered_ips":           answeredIPs,
+			"filtered_edge_ids":      filteredIDs,
+			"filtered_ips":           filteredIPs,
+			"filter_reasons":         reasons,
 		})
 	}
 }
@@ -2195,17 +2245,24 @@ func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string
 	if len(record.Candidates) == 0 || (qtype != miekgdns.TypeA && qtype != miekgdns.TypeAAAA) {
 		return rrForEdgeDNSRecord(record, ownerName), edgeDNSAnswerAudit{}, false
 	}
-	ordered, filteredCandidates := edgeDNSAnswerCandidateDecision(record, hint, time.Now().UTC(), liveHealth, peerHealth)
+	ordered, filteredCandidates, decision := edgeDNSAnswerCandidateDecision(record, hint, time.Now().UTC(), liveHealth, peerHealth)
 	ownerName = normalizeName(firstNonEmpty(ownerName, record.Name))
 	audit := edgeDNSAnswerAudit{
-		OwnerName:        ownerName,
-		RecordName:       normalizeName(record.Name),
-		RecordType:       strings.ToUpper(strings.TrimSpace(record.Type)),
-		RecordKind:       strings.TrimSpace(record.RecordKind),
-		RecordGeneration: strings.TrimSpace(record.RecordGeneration),
-		PolicyKind:       strings.TrimSpace(record.AnswerPolicy.PolicyKind),
-		Answered:         append([]model.EdgeDNSAnswerCandidate(nil), ordered...),
-		Filtered:         append([]edgeDNSFilteredCandidate(nil), filteredCandidates...),
+		OwnerName:             ownerName,
+		RecordName:            normalizeName(record.Name),
+		RecordType:            strings.ToUpper(strings.TrimSpace(record.Type)),
+		RecordKind:            strings.TrimSpace(record.RecordKind),
+		RecordGeneration:      strings.TrimSpace(record.RecordGeneration),
+		PolicyKind:            strings.TrimSpace(decision.Policy.PolicyKind),
+		ClientHintSource:      strings.TrimSpace(hint.Source),
+		ClientScopeResolution: decision.ClientScopeResolution,
+		MatchedScopeKey:       decision.MatchedScopeKey,
+		ScopedProfileMatched:  decision.ScopedProfileMatched,
+		SelectedEdgeGroupID:   decision.SelectedEdgeGroupID,
+		SelectionResult:       edgeDNSSelectionResult(decision, ordered, filteredCandidates),
+		ExplorationKind:       decision.ExplorationKind,
+		Answered:              append([]model.EdgeDNSAnswerCandidate(nil), ordered...),
+		Filtered:              append([]edgeDNSFilteredCandidate(nil), filteredCandidates...),
 	}
 	if len(ordered) == 0 {
 		return nil, audit, len(filteredCandidates) > 0
@@ -2237,8 +2294,8 @@ func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string
 	return rrs, audit, true
 }
 
-func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]model.EdgeDNSAnswerCandidate, []edgeDNSFilteredCandidate) {
-	ordered := edgeDNSOrderedCandidates(record, hint, now)
+func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]model.EdgeDNSAnswerCandidate, []edgeDNSFilteredCandidate, edgeDNSCandidateOrderDecision) {
+	ordered, decision := edgeDNSOrderedCandidatesWithDecision(record, hint, now)
 	filteredCandidates := []edgeDNSFilteredCandidate{}
 	if liveHealth != nil && len(ordered) > 0 {
 		filtered := ordered[:0]
@@ -2270,12 +2327,55 @@ func edgeDNSAnswerCandidateDecision(record model.EdgeDNSRecord, hint dnsGeoHint,
 		ordered = filtered
 	}
 	if len(ordered) == 0 {
-		return nil, filteredCandidates
+		return nil, filteredCandidates, decision
 	}
 	if limit := edgeDNSAnswerCandidateLimit(record.AnswerPolicy, ordered); limit > 0 && len(ordered) > limit {
 		ordered = ordered[:limit]
 	}
-	return ordered, filteredCandidates
+	return ordered, filteredCandidates, decision
+}
+
+func edgeDNSSelectionResult(decision edgeDNSCandidateOrderDecision, answered []model.EdgeDNSAnswerCandidate, filtered []edgeDNSFilteredCandidate) string {
+	selected := strings.TrimSpace(decision.SelectedEdgeGroupID)
+	if selected == "" {
+		return "not_configured"
+	}
+	selectedFiltered := false
+	explorationFiltered := false
+	for _, candidate := range filtered {
+		candidateKey := edgeDNSCandidateDecisionKey(candidate.Candidate)
+		if candidateKey == decision.SelectedCandidateKey {
+			selectedFiltered = true
+		}
+		if decision.ExplorationKind != "" && candidateKey == decision.ExplorationCandidateKey {
+			explorationFiltered = true
+		}
+	}
+	if len(answered) == 0 {
+		if selectedFiltered {
+			return "selected_answer_time_filtered_no_answer"
+		}
+		return "selected_ineligible_no_answer"
+	}
+	if strings.EqualFold(strings.TrimSpace(answered[0].EdgeGroupID), selected) {
+		if explorationFiltered {
+			return "selected_primary_after_exploration_filtered"
+		}
+		if decision.ExplorationKind == "same_group" {
+			return "selected_same_group_exploration"
+		}
+		return "selected_primary"
+	}
+	if selectedFiltered {
+		return "selected_answer_time_filtered_fallback"
+	}
+	if !decision.SelectedCandidateEligible {
+		return "selected_ineligible_fallback"
+	}
+	if decision.ExplorationKind == "cross_group" {
+		return "selected_cross_group_exploration"
+	}
+	return "selected_constraint_not_served"
 }
 
 func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.EdgeDNSAnswerCandidate) int {
@@ -2297,8 +2397,19 @@ func edgeDNSAnswerCandidateLimit(policy model.DNSAnswerPolicy, ordered []model.E
 }
 
 func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) []model.EdgeDNSAnswerCandidate {
+	candidates, _ := edgeDNSOrderedCandidatesWithDecision(record, hint, now)
+	return candidates
+}
+
+func edgeDNSOrderedCandidatesWithDecision(record model.EdgeDNSRecord, hint dnsGeoHint, now time.Time) ([]model.EdgeDNSAnswerCandidate, edgeDNSCandidateOrderDecision) {
 	policy := record.AnswerPolicy
 	sourceCandidates := record.Candidates
+	decision := edgeDNSCandidateOrderDecision{
+		Policy:                policy,
+		ClientScopeResolution: edgeDNSClientScopeResolution(hint, false),
+		MatchedScopeKey:       "global",
+		SelectedEdgeGroupID:   strings.TrimSpace(policy.SelectedEdgeGroupID),
+	}
 	if scoped, ok := edgeDNSScopedCandidatesForHint(record.ScopedCandidates, hint); ok {
 		sourceCandidates = scoped.Candidates
 		if strings.TrimSpace(scoped.PolicyKind) != "" {
@@ -2307,7 +2418,13 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now t
 		if strings.TrimSpace(scoped.Reason) != "" {
 			policy.Reason = scoped.Reason
 		}
+		policy.SelectedEdgeGroupID = strings.TrimSpace(scoped.SelectedEdgeGroupID)
+		decision.ClientScopeResolution = edgeDNSClientScopeResolution(hint, true)
+		decision.MatchedScopeKey = firstNonEmpty(strings.TrimSpace(scoped.ScopeKey), "global")
+		decision.ScopedProfileMatched = true
+		decision.SelectedEdgeGroupID = strings.TrimSpace(scoped.SelectedEdgeGroupID)
 	}
+	decision.Policy = policy
 	candidates := make([]model.EdgeDNSAnswerCandidate, 0, len(sourceCandidates))
 	for _, candidate := range sourceCandidates {
 		if !edgeDNSCandidateEligible(candidate, policy) {
@@ -2333,11 +2450,76 @@ func edgeDNSOrderedCandidates(record model.EdgeDNSRecord, hint dnsGeoHint, now t
 		}
 		return candidates[i].IP < candidates[j].IP
 	})
-	if promoted, ok := edgeDNSMaybePromoteNodeExploration(record, policy, hint, candidates, now); ok {
-		return promoted
+	if index := edgeDNSSelectedCandidateIndex(candidates, decision.SelectedEdgeGroupID); index >= 0 {
+		decision.SelectedCandidateEligible = true
+		if index > 0 {
+			selected := candidates[index]
+			copy(candidates[1:index+1], candidates[0:index])
+			candidates[0] = selected
+		}
+		decision.SelectedCandidateKey = edgeDNSCandidateDecisionKey(candidates[0])
 	}
-	candidates = edgeDNSMaybePromoteExploration(record, policy, hint, candidates, now)
-	return candidates
+	if promoted, ok := edgeDNSMaybePromoteNodeExploration(record, policy, hint, candidates, now); ok {
+		decision.ExplorationKind = "same_group"
+		if len(promoted) > 0 {
+			decision.ExplorationCandidateKey = edgeDNSCandidateDecisionKey(promoted[0])
+		}
+		return promoted, decision
+	}
+	primaryEdgeGroupID := ""
+	if len(candidates) > 0 {
+		primaryEdgeGroupID = strings.TrimSpace(candidates[0].EdgeGroupID)
+	}
+	promoted := edgeDNSMaybePromoteExploration(record, policy, hint, candidates, now)
+	if len(promoted) > 0 && !strings.EqualFold(strings.TrimSpace(promoted[0].EdgeGroupID), primaryEdgeGroupID) {
+		decision.ExplorationKind = "cross_group"
+		decision.ExplorationCandidateKey = edgeDNSCandidateDecisionKey(promoted[0])
+	}
+	return promoted, decision
+}
+
+func edgeDNSCandidateDecisionKey(candidate model.EdgeDNSAnswerCandidate) string {
+	return strings.Join([]string{
+		strings.TrimSpace(candidate.EdgeID),
+		strings.TrimSpace(candidate.EdgeGroupID),
+		strings.TrimSpace(candidate.IP),
+	}, "\x00")
+}
+
+func edgeDNSSelectedCandidateIndex(candidates []model.EdgeDNSAnswerCandidate, selectedEdgeGroupID string) int {
+	selectedEdgeGroupID = strings.TrimSpace(selectedEdgeGroupID)
+	if selectedEdgeGroupID == "" {
+		return -1
+	}
+	for index, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate.EdgeGroupID), selectedEdgeGroupID) {
+			return index
+		}
+	}
+	return -1
+}
+
+func edgeDNSClientScopeResolution(hint dnsGeoHint, matched bool) string {
+	source := strings.TrimSpace(hint.Source)
+	mapped := strings.TrimSpace(hint.Country) != "" || strings.TrimSpace(hint.Region) != "" || strings.TrimSpace(hint.ASN) != "" || strings.TrimSpace(hint.EdgeGroupID) != ""
+	switch {
+	case source == "ecs" && !mapped:
+		return "ecs_unmapped_global_fallback"
+	case source == "ecs" && matched:
+		return "ecs_mapped_scoped_profile"
+	case source == "ecs":
+		return "ecs_mapped_global_fallback"
+	case source == "remote_addr" && !mapped:
+		return "remote_addr_unmapped_global_fallback"
+	case source == "remote_addr" && matched:
+		return "remote_addr_mapped_scoped_profile"
+	case source == "remote_addr":
+		return "remote_addr_mapped_global_fallback"
+	case matched:
+		return "explicit_hint_scoped_profile"
+	default:
+		return "global_no_client_scope"
+	}
 }
 
 func edgeDNSAnyCandidateScore(candidates []model.EdgeDNSAnswerCandidate) bool {
@@ -2723,6 +2905,23 @@ func cloneQueryMetrics(in map[dnsQueryMetricKey]uint64) map[dnsQueryMetricKey]ui
 		out[key] = value
 	}
 	return out
+}
+
+func cloneStringCounterMap(in map[string]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func sortedStringMapKeys(values map[string]uint64) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type queryMetricEntry struct {

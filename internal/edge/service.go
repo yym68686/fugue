@@ -46,6 +46,14 @@ const edgeStatusClientClosedRequest = 499
 
 const edgeRequestBodyCopyBufferSize = 32 * 1024
 
+const (
+	// Origin transports are already isolated by deployment generation and each
+	// transport dials one origin host. Keep the pool bounded per deployment,
+	// while avoiding net/http's two-idle-connection default under API traffic.
+	edgeOriginMaxIdleConns        = 16
+	edgeOriginMaxIdleConnsPerHost = 16
+)
+
 type Service struct {
 	Config                   config.EdgeConfig
 	HTTPClient               *http.Client
@@ -61,6 +69,11 @@ type Service struct {
 	bodyBuffer               *edgeRequestBodyBufferManager
 	requestBodyPolicyMu      sync.Mutex
 	requestBodyPolicyGuards  map[string]*edgeRequestBodyPolicyGuard
+	caddyWarmupMu            sync.Mutex
+	caddyWarmupCancel        context.CancelFunc
+	caddyWarmupDone          <-chan struct{}
+	caddyWarmupIdentity      string
+	caddyWarmupSequence      uint64
 
 	mu                    sync.Mutex
 	snapshot              Status
@@ -257,6 +270,7 @@ type routeCacheMetricKey struct {
 }
 
 type edgeProxyObservation struct {
+	originTraceMu           *sync.RWMutex
 	ReceivedAt              time.Time
 	Host                    string
 	Route                   model.EdgeRouteBinding
@@ -302,6 +316,7 @@ type edgeProxyObservation struct {
 	Streaming               bool
 	Upload                  bool
 	PeerFallback            bool
+	InternalWarmup          bool
 	ClientCanceled          bool
 	CacheStatus             string
 	CachePolicyID           string
@@ -329,6 +344,49 @@ type edgeProxyObservation struct {
 	MinWindowBPS            int64
 	EdgeProxyTCPInfo        tcpdiag.Snapshot
 	ResponseBytes           int64
+}
+
+func (o *edgeProxyObservation) initializeOriginTrace() {
+	if o != nil && o.originTraceMu == nil {
+		o.originTraceMu = &sync.RWMutex{}
+	}
+}
+
+func (o *edgeProxyObservation) withOriginTraceUpdate(update func(*edgeProxyObservation)) {
+	if o == nil || update == nil {
+		return
+	}
+	o.initializeOriginTrace()
+	o.originTraceMu.Lock()
+	defer o.originTraceMu.Unlock()
+	update(o)
+}
+
+func (o *edgeProxyObservation) originTraceSnapshot() edgeProxyObservation {
+	if o == nil {
+		return edgeProxyObservation{}
+	}
+	if o.originTraceMu == nil {
+		return *o
+	}
+	o.originTraceMu.RLock()
+	defer o.originTraceMu.RUnlock()
+	return *o
+}
+
+func (o *edgeProxyObservation) originServerTimingSnapshot() edgeProxyObservation {
+	if o == nil {
+		return edgeProxyObservation{}
+	}
+	if o.originTraceMu != nil {
+		o.originTraceMu.RLock()
+		defer o.originTraceMu.RUnlock()
+	}
+	return edgeProxyObservation{
+		CacheLookup:   o.CacheLookup,
+		OriginConnect: o.OriginConnect,
+		OriginTTFB:    o.OriginTTFB,
+	}
 }
 
 func (e statusError) Error() string {
@@ -384,6 +442,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.proxyBase = newDefaultEdgeProxyTransport()
 	}
 	defer s.closeEdgeProxyTransports()
+	defer s.cancelCurrentCaddyWarmup()
 	if err := s.RefreshDesiredState(ctx); err != nil && s.Logger != nil {
 		s.Logger.Printf("edge desired state refresh failed on startup: %s", s.redact(err.Error()))
 	}
@@ -514,7 +573,8 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 		if etag == "" {
 			etag = quoteETag(bundle.Version)
 		}
-		if err := s.applyCaddyConfig(ctx, bundle); err != nil {
+		configSignature, err := s.applyCaddyConfigOnly(ctx, bundle)
+		if err != nil {
 			s.recordEdgeCaddyReloadWAL("bundle_sync", err)
 			err = fmt.Errorf("apply caddy config: %w", err)
 			s.recordSyncError(err)
@@ -530,6 +590,7 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			return err
 		}
 		s.recordSyncSuccess(bundle, etag, now, false)
+		s.scheduleCurrentCaddyWarmup(bundle, configSignature)
 		result = "success"
 		return nil
 	case http.StatusNotModified:
@@ -943,6 +1004,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		WebSocket:        edgeRequestIsWebSocket(r),
 		SSE:              edgeRequestWantsSSE(r),
 		Upload:           edgeRequestHasUpload(r),
+		InternalWarmup:   edgeRequestIsInternalCacheWarmup(r),
 	}
 	if r.ContentLength > 0 {
 		observed.RequestBytes = r.ContentLength
@@ -959,8 +1021,11 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	observed.CacheKeyHash = cacheDecision.KeyHash
 	observed.AssetClass = cacheDecision.AssetClass
 	defer func() {
+		observed = observed.originTraceSnapshot()
 		observed.Duration = time.Since(startedAt)
-		s.recordProxyObservation(observed)
+		if !observed.InternalWarmup {
+			s.recordProxyObservation(observed)
+		}
 		s.logProxyObservation(observed)
 	}()
 
@@ -1133,6 +1198,7 @@ func (s *Service) edgeCacheRevalidate(r *http.Request, target *url.URL, route mo
 	cacheDecision := decision
 	cacheDecision.Status = edgeCacheStatusMiss
 	cacheDecision.Cacheable = true
+	writer.cacheDecision = &cacheDecision
 	proxy := s.newEdgeReverseProxy(host, target, route, &observed, false, &cacheDecision)
 	proxy.ServeHTTP(writer, req)
 	if observed.UpstreamError != "" {
@@ -1198,6 +1264,8 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 			req.SetURL(target)
 			setEdgeXForwarded(req)
 			req.Out.Header.Del(edgeClientRemoteAddrHeader)
+			req.Out.Header.Del(edgeCacheWarmupHeader)
+			req.Out.Header.Del(edgeCacheWarmupDiscoveryHeader)
 			req.Out.Host = target.Host
 			req.Out.Header.Set("X-Forwarded-Host", host)
 			req.Out.Header.Set("X-Fugue-Edge-Route", strings.TrimSpace(route.Hostname))
@@ -1219,9 +1287,6 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 				if strings.TrimSpace(req.Out.Header.Get("traceparent")) == "" {
 					req.Out.Header.Set("traceparent", edgeTraceparentForProxy(traceID, observed.EdgeRequestID))
 				}
-			}
-			if observed != nil && observed.Streaming && observed.Upload {
-				req.Out.Close = true
 			}
 		},
 		Transport: s.newEdgeProxyTransport(observed),
@@ -1257,7 +1322,7 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 				if strings.TrimSpace(observed.RequestID) == "" {
 					observed.RequestID = edgeRequestIDFromHeader(resp.Header)
 				}
-				addEdgeServerTiming(resp.Header, edgeProxyServerTiming(*observed, true))
+				addEdgeServerTiming(resp.Header, edgeProxyServerTiming(observed.originServerTimingSnapshot(), true))
 			}
 			if resp == nil || cacheDecision == nil || !cacheDecision.Enabled {
 				return nil
@@ -2015,6 +2080,29 @@ func edgeClientASNFromRequest(r *http.Request) string {
 	return "as" + value
 }
 
+func edgeRequestIsInternalCacheWarmup(r *http.Request) bool {
+	if r == nil || strings.TrimSpace(r.Header.Get(edgeCacheWarmupHeader)) != "1" {
+		return false
+	}
+	return edgeRemoteAddressIsLoopback(r.RemoteAddr) && edgeRemoteAddressIsLoopback(edgeClientRemoteAddrFromRequest(r))
+}
+
+func edgeRemoteAddressIsLoopback(remoteAddress string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddress))
+	if err != nil {
+		host = remoteAddress
+	}
+	ip := net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func edgeRequestSource(internalWarmup bool) string {
+	if internalWarmup {
+		return "cache_warmup"
+	}
+	return "external"
+}
+
 func normalizeEdgeClientScopeValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || strings.EqualFold(value, "unknown") || strings.EqualFold(value, "xx") {
@@ -2029,6 +2117,9 @@ type edgeProxyTransport struct {
 }
 
 func (s *Service) newEdgeProxyTransport(observation *edgeProxyObservation) http.RoundTripper {
+	if observation != nil {
+		observation.initializeOriginTrace()
+	}
 	base := http.RoundTripper(nil)
 	if s != nil {
 		base = s.edgeProxyBaseForObservation(observation)
@@ -2166,14 +2257,8 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if t == nil || t.base == nil {
 		return nil, fmt.Errorf("edge proxy transport is unavailable")
 	}
-	base := t.base
-	if t.observation != nil && t.observation.Streaming && t.observation.Upload {
-		if transport, ok := base.(*http.Transport); ok {
-			// Request.Close only closes after the request; a private transport also avoids selecting a stale idle connection.
-			fresh := transport.Clone()
-			fresh.DisableKeepAlives = true
-			base = fresh
-		}
+	if t.observation != nil {
+		t.observation.initializeOriginTrace()
 	}
 	started := time.Now()
 	if t.observation != nil {
@@ -2181,59 +2266,77 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 		var connectStarted time.Time
 		trace := &httptrace.ClientTrace{
 			DNSStart: func(httptrace.DNSStartInfo) {
-				dnsStarted = time.Now()
+				t.observation.withOriginTraceUpdate(func(*edgeProxyObservation) {
+					dnsStarted = time.Now()
+				})
 			},
 			DNSDone: func(info httptrace.DNSDoneInfo) {
-				if !dnsStarted.IsZero() {
-					t.observation.OriginDNS = time.Since(dnsStarted)
-				}
-				if info.Err != nil {
-					t.observation.OriginDNSError = info.Err.Error()
-				}
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					if !dnsStarted.IsZero() {
+						observed.OriginDNS = time.Since(dnsStarted)
+					}
+					if info.Err != nil {
+						observed.OriginDNSError = info.Err.Error()
+					}
+				})
 			},
 			GotConn: func(info httptrace.GotConnInfo) {
-				t.observation.OriginGotConn = true
-				t.observation.OriginConnectionReused = info.Reused
-				if info.Conn != nil {
-					t.observation.OriginRemoteAddr = info.Conn.RemoteAddr().String()
-					t.observation.OriginLocalAddr = info.Conn.LocalAddr().String()
-				}
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					observed.OriginGotConn = true
+					observed.OriginConnectionReused = info.Reused
+					if info.Conn != nil {
+						observed.OriginRemoteAddr = info.Conn.RemoteAddr().String()
+						observed.OriginLocalAddr = info.Conn.LocalAddr().String()
+					}
+				})
 			},
 			ConnectStart: func(_, _ string) {
-				connectStarted = time.Now()
+				t.observation.withOriginTraceUpdate(func(*edgeProxyObservation) {
+					connectStarted = time.Now()
+				})
 			},
 			ConnectDone: func(_, _ string, err error) {
-				if !connectStarted.IsZero() {
-					t.observation.OriginConnect = time.Since(connectStarted)
-				}
-				if err != nil {
-					t.observation.OriginConnectError = err.Error()
-				}
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					if !connectStarted.IsZero() {
+						observed.OriginConnect = time.Since(connectStarted)
+					}
+					if err != nil {
+						observed.OriginConnectError = err.Error()
+					}
+				})
 			},
 			WroteHeaders: func() {
-				t.observation.OriginWroteHeaders = true
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					observed.OriginWroteHeaders = true
+				})
 			},
 			WroteRequest: func(info httptrace.WroteRequestInfo) {
-				t.observation.OriginWroteRequest = true
-				t.observation.OriginRequestWrite = time.Since(started)
-				if info.Err != nil {
-					t.observation.OriginRequestWriteErr = info.Err.Error()
-				}
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					observed.OriginWroteRequest = true
+					observed.OriginRequestWrite = time.Since(started)
+					if info.Err != nil {
+						observed.OriginRequestWriteErr = info.Err.Error()
+					}
+				})
 			},
 			GotFirstResponseByte: func() {
-				if t.observation.OriginTTFB <= 0 {
-					t.observation.OriginTTFB = time.Since(started)
-				}
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					if observed.OriginTTFB <= 0 {
+						observed.OriginTTFB = time.Since(started)
+					}
+				})
 			},
 		}
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	}
-	resp, err := base.RoundTrip(req)
+	resp, err := t.base.RoundTrip(req)
 	if t.observation != nil {
-		t.observation.Upstream = time.Since(started)
-		if resp != nil && t.observation.OriginTTFB <= 0 {
-			t.observation.OriginTTFB = t.observation.Upstream
-		}
+		t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+			observed.Upstream = time.Since(started)
+			if resp != nil && observed.OriginTTFB <= 0 {
+				observed.OriginTTFB = observed.Upstream
+			}
+		})
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols && resp.Body != nil {
 			resp.Body = &edgeOriginTimingBody{
 				ReadCloser:  resp.Body,
@@ -2271,7 +2374,9 @@ func (b *edgeOriginTimingBody) finish() {
 		return
 	}
 	b.once.Do(func() {
-		b.observation.OriginTotal = time.Since(b.startedAt)
+		b.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+			observed.OriginTotal = time.Since(b.startedAt)
+		})
 	})
 }
 
@@ -2330,12 +2435,16 @@ func newDefaultEdgeProxyTransport() http.RoundTripper {
 			DialContext:         rootedKubernetesServiceDialContext(dialer.DialContext),
 			ForceAttemptHTTP2:   false,
 			TLSHandshakeTimeout: 10 * time.Second,
+			MaxIdleConns:        edgeOriginMaxIdleConns,
+			MaxIdleConnsPerHost: edgeOriginMaxIdleConnsPerHost,
 		}
 	}
 	transport := base.Clone()
 	transport.Proxy = nil
 	transport.DialContext = rootedKubernetesServiceDialContext(transport.DialContext)
 	transport.ForceAttemptHTTP2 = false
+	transport.MaxIdleConns = edgeOriginMaxIdleConns
+	transport.MaxIdleConnsPerHost = edgeOriginMaxIdleConnsPerHost
 	return transport
 }
 
@@ -3742,6 +3851,19 @@ func (s *Service) recordCaddyWarmup(signature, host string, duration time.Durati
 	s.metrics.CaddyWarmupLastError = ""
 }
 
+func (s *Service) recordCaddyEquivalentVersion(bundleVersion, configSignature string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(s.metrics.CaddyAppliedSignature) != strings.TrimSpace(configSignature) || strings.TrimSpace(s.metrics.CaddyLastError) != "" {
+		return
+	}
+	s.metrics.CaddyAppliedVersion = strings.TrimSpace(bundleVersion)
+	s.snapshot.CaddyAppliedVersion = s.metrics.CaddyAppliedVersion
+}
+
 func (s *Service) recordProxyObservation(observed edgeProxyObservation) {
 	if observed.StatusCode == 0 {
 		observed.StatusCode = http.StatusOK
@@ -4229,7 +4351,7 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		requestBodyMissing = observed.RequestBytes - observed.RequestBodyReadBytes
 	}
 	s.Logger.Printf(
-		"edge_proxy_request received_at=%s edge_request_id=%s trace_id=%s request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d body_read_block_ms=%d file_write_ms=%d first_body_byte_ms=%d last_body_byte_ms=%d max_read_gap_ms=%d read_calls=%d avg_bps=%d min_window_bps=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t",
+		"edge_proxy_request received_at=%s edge_request_id=%s trace_id=%s request_id=%s host=%s app=%s tenant=%s runtime=%s route_kind=%s edge_group_id=%s runtime_region=%s runtime_edge_group_id=%s route_generation=%s fallback_reason=%s client_ip=%s client_remote_addr=%s protocol=%s method=%s path=%s status=%d duration_ms=%d request_bytes=%d request_body_read_bytes=%d request_body_missing_bytes=%d request_body_complete=%t request_body_eof=%t request_body_read_error=%s request_body_buffered=%t request_body_buffer_bytes=%d request_body_buffer_ms=%d request_body_buffer_error=%s request_body_buffer_budget_bytes=%d request_body_buffer_used_bytes=%d request_body_buffer_active_requests=%d body_read_block_ms=%d file_write_ms=%d first_body_byte_ms=%d last_body_byte_ms=%d max_read_gap_ms=%d read_calls=%d avg_bps=%d min_window_bps=%d response_bytes=%d cache_status=%s cache_policy_id=%s cache_key_hash=%s asset_class=%s cache_lookup_ms=%d origin_dns_ms=%d origin_dns_error=%s origin_connect_ms=%d origin_connect_error=%s origin_got_conn=%t origin_conn_reused=%t origin_remote_addr=%s origin_local_addr=%s origin_wrote_headers=%t origin_wrote_request=%t origin_request_write_ms=%d origin_request_write_error=%s origin_response_wait_ms=%d origin_ttfb_ms=%d origin_total_ms=%d response_write_ms=%d upstream=%s upstream_error=%t fallback_hit=%t websocket=%t sse=%t streaming=%t upload=%t client_canceled=%t request_source=%s",
 		observed.ReceivedAt.Format(time.RFC3339Nano),
 		logSafeValue(observed.EdgeRequestID),
 		logSafeValue(observed.TraceID),
@@ -4302,8 +4424,11 @@ func (s *Service) logProxyObservation(observed edgeProxyObservation) {
 		observed.Streaming,
 		observed.Upload,
 		observed.ClientCanceled,
+		edgeRequestSource(observed.InternalWarmup),
 	)
-	s.logProxyObservationFact(observed)
+	if !observed.InternalWarmup {
+		s.logProxyObservationFact(observed)
+	}
 }
 
 func (s *Service) syncInterval() time.Duration {
@@ -4490,7 +4615,6 @@ func newEdgeProxyObservationResponseWriter(w http.ResponseWriter, startedAt time
 		ResponseWriter: w,
 		startedAt:      startedAt,
 		observation:    observation,
-		maxBytes:       int64(32 * 1024 * 1024),
 	}
 }
 
@@ -4517,7 +4641,7 @@ func (w *edgeProxyObservationResponseWriter) Write(data []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.maxBytes > 0 && !w.overflow {
+	if w.maxBytes > 0 && !w.overflow && w.cacheDecision != nil && w.cacheDecision.Cacheable {
 		remaining := w.maxBytes - int64(len(w.body))
 		if remaining > 0 {
 			chunk := data

@@ -2819,16 +2819,24 @@ func edgeDNSRecord(name, recordType string, values []string, ttl int, kind, stat
 }
 
 func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSRecord {
-	byKey := make(map[string]model.EdgeDNSRecord, len(records))
+	byKey := make(map[string][]model.EdgeDNSRecord, len(records))
 	for _, record := range records {
 		key := record.Name + "\x00" + record.Type
-		if existing, ok := byKey[key]; ok {
-			record = mergeEdgeDNSRecords(existing, record)
-		}
-		byKey[key] = record
+		byKey[key] = append(byKey[key], record)
 	}
 	out := make([]model.EdgeDNSRecord, 0, len(byKey))
-	for _, record := range byKey {
+	for _, groupedRecords := range byKey {
+		if len(groupedRecords) == 0 {
+			continue
+		}
+		record := groupedRecords[0]
+		if edgeDNSRecordsFormSharedConstrainedTarget(groupedRecords) {
+			record = mergeSharedEdgeDNSTargetRecords(groupedRecords)
+		} else {
+			for _, incoming := range groupedRecords[1:] {
+				record = mergeEdgeDNSRecords(record, incoming)
+			}
+		}
 		if len(record.Values) == 0 {
 			continue
 		}
@@ -2843,22 +2851,107 @@ func dedupeAndSortEdgeDNSRecords(records []model.EdgeDNSRecord) []model.EdgeDNSR
 	return out
 }
 
+func edgeDNSRecordsFormSharedConstrainedTarget(records []model.EdgeDNSRecord) bool {
+	if len(records) < 2 {
+		return false
+	}
+	for _, record := range records[1:] {
+		if !edgeDNSRecordsShareConstrainedTarget(records[0], record) {
+			return false
+		}
+	}
+	return true
+}
+
+func mergeSharedEdgeDNSTargetRecords(records []model.EdgeDNSRecord) model.EdgeDNSRecord {
+	if len(records) == 0 {
+		return model.EdgeDNSRecord{}
+	}
+	preferred := records[0]
+	values := append([]string(nil), records[0].Values...)
+	for _, record := range records[1:] {
+		preferred = edgeDNSPreferredSharedTargetRoutingRecord(preferred, record)
+		values = intersectSortedStrings(values, record.Values)
+	}
+	preferred.Values = values
+	preferred = constrainEdgeDNSRecordToValues(preferred)
+	preferred.RecordGeneration = edgeDNSRecordGeneration(preferred)
+	return preferred
+}
+
 func mergeEdgeDNSRecords(existing, incoming model.EdgeDNSRecord) model.EdgeDNSRecord {
-	record := incoming
 	constrainSharedTarget := edgeDNSRecordsShareConstrainedTarget(existing, incoming)
 	if constrainSharedTarget {
+		record := edgeDNSPreferredSharedTargetRoutingRecord(existing, incoming)
 		record.Values = intersectSortedStrings(existing.Values, incoming.Values)
-	} else {
-		record.Values = uniqueSortedStrings(append(existing.Values, record.Values...))
+		record = constrainEdgeDNSRecordToValues(record)
+		record.RecordGeneration = edgeDNSRecordGeneration(record)
+		return record
 	}
+	record := incoming
+	record.Values = uniqueSortedStrings(append(existing.Values, record.Values...))
 	record.Candidates = mergeEdgeDNSAnswerCandidates(existing.Candidates, record.Candidates)
 	record.ScopedCandidates = mergeEdgeDNSScopedAnswerCandidates(existing.ScopedCandidates, record.ScopedCandidates)
 	record.AnswerPolicy = mergeEdgeDNSAnswerPolicy(existing.AnswerPolicy, record.AnswerPolicy)
-	if constrainSharedTarget {
-		record = constrainEdgeDNSRecordToValues(record)
-	}
 	record.RecordGeneration = edgeDNSRecordGeneration(record)
 	return record
+}
+
+func edgeDNSPreferredSharedTargetRoutingRecord(left, right model.EdgeDNSRecord) model.EdgeDNSRecord {
+	leftTrafficPriority := edgeDNSSharedTargetTrafficPriority(left)
+	rightTrafficPriority := edgeDNSSharedTargetTrafficPriority(right)
+	if leftTrafficPriority != rightTrafficPriority {
+		if leftTrafficPriority > rightTrafficPriority {
+			return left
+		}
+		return right
+	}
+	leftPolicyPriority := edgeDNSAnswerPolicyKindRank(left.AnswerPolicy.PolicyKind)
+	rightPolicyPriority := edgeDNSAnswerPolicyKindRank(right.AnswerPolicy.PolicyKind)
+	if leftPolicyPriority != rightPolicyPriority {
+		if leftPolicyPriority > rightPolicyPriority {
+			return left
+		}
+		return right
+	}
+	if edgeDNSRecordGeneration(left) <= edgeDNSRecordGeneration(right) {
+		return left
+	}
+	return right
+}
+
+func edgeDNSSharedTargetTrafficPriority(record model.EdgeDNSRecord) int {
+	// TrafficClass is produced by the existing quality-ranking pipeline. Keep the
+	// distinction intentionally binary: a cache-specific static profile must not
+	// replace an observed non-static profile for an authority shared by both.
+	hasStaticProfile := false
+	hasNonStaticProfile := false
+	observe := func(trafficClass string) {
+		trafficClass = strings.ToLower(strings.TrimSpace(trafficClass))
+		if trafficClass == "" {
+			return
+		}
+		if trafficClass == "static_cacheable" {
+			hasStaticProfile = true
+			return
+		}
+		hasNonStaticProfile = true
+	}
+	for _, candidate := range record.Candidates {
+		observe(candidate.TrafficClass)
+	}
+	for _, scoped := range record.ScopedCandidates {
+		for _, candidate := range scoped.Candidates {
+			observe(candidate.TrafficClass)
+		}
+	}
+	if hasNonStaticProfile {
+		return 2
+	}
+	if hasStaticProfile {
+		return 1
+	}
+	return 0
 }
 
 func edgeDNSRecordsShareConstrainedTarget(left, right model.EdgeDNSRecord) bool {

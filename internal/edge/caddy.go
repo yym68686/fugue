@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,12 +41,26 @@ func (s *Service) applyCurrentCaddyConfig(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	return s.applyCaddyConfig(ctx, bundle)
+	configSignature, err := s.applyCaddyConfigOnly(ctx, bundle)
+	if err != nil {
+		return err
+	}
+	s.scheduleCurrentCaddyWarmup(bundle, configSignature)
+	return nil
 }
 
 func (s *Service) applyCaddyConfig(ctx context.Context, bundle model.EdgeRouteBundle) error {
+	configSignature, err := s.applyCaddyConfigOnly(ctx, bundle)
+	if err != nil {
+		return err
+	}
+	s.warmCurrentCaddyConfig(ctx, bundle, configSignature)
+	return nil
+}
+
+func (s *Service) applyCaddyConfigOnly(ctx context.Context, bundle model.EdgeRouteBundle) (string, error) {
 	if !s.Config.CaddyEnabled {
-		return nil
+		return "", nil
 	}
 	version := strings.TrimSpace(bundle.Version)
 	if version == "" {
@@ -54,42 +69,52 @@ func (s *Service) applyCaddyConfig(ctx context.Context, bundle model.EdgeRouteBu
 	configSignature, err := s.caddyConfigSignature(bundle)
 	if err != nil {
 		s.recordCaddyApply(version, 0, "", err)
-		return err
+		return "", err
 	}
 	if s.needsCaddyApply(configSignature) {
 		configBody, routeCount, err := s.buildCaddyConfig(bundle)
 		if err != nil {
 			s.recordCaddyApply(version, 0, configSignature, err)
-			return err
+			return "", err
 		}
 		endpoint, err := s.caddyAdminEndpoint("/load")
 		if err != nil {
 			s.recordCaddyApply(version, 0, configSignature, err)
-			return err
+			return "", err
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(configBody))
 		if err != nil {
 			err = fmt.Errorf("build caddy config request: %w", err)
 			s.recordCaddyApply(version, 0, configSignature, err)
-			return err
+			return "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := s.HTTPClient.Do(req)
 		if err != nil {
 			err = fmt.Errorf("apply caddy config: %w", err)
 			s.recordCaddyApply(version, 0, configSignature, err)
-			return err
+			return "", err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			err = fmt.Errorf("apply caddy config returned status %d", resp.StatusCode)
 			s.recordCaddyApply(version, 0, configSignature, err)
-			return err
+			return "", err
 		}
 		s.recordCaddyApply(version, routeCount, configSignature, nil)
 		if s.Logger != nil {
 			s.Logger.Printf("edge caddy config applied; version=%s hosts=%d listen=%s tls_mode=%s proxy=%s", version, routeCount, strings.TrimSpace(s.Config.CaddyListenAddr), s.normalizedCaddyTLSMode(), caddyProxyDialAddress(s.Config.CaddyProxyListenAddr))
 		}
+	} else {
+		s.recordCaddyEquivalentVersion(version, configSignature)
+	}
+	return configSignature, nil
+}
+
+func (s *Service) warmCurrentCaddyConfig(ctx context.Context, bundle model.EdgeRouteBundle, configSignature string) {
+	version := strings.TrimSpace(bundle.Version)
+	if version == "" {
+		version = "unknown"
 	}
 	if err := s.maybeWarmupCurrentCaddyTLS(ctx, bundle, configSignature); err != nil && s.Logger != nil {
 		s.Logger.Printf("edge caddy TLS warmup failed; version=%s error=%s", version, s.redact(err.Error()))
@@ -97,7 +122,90 @@ func (s *Service) applyCaddyConfig(ctx context.Context, bundle model.EdgeRouteBu
 	if err := s.maybeWarmupCurrentEdgeCache(ctx, bundle, configSignature); err != nil && s.Logger != nil {
 		s.Logger.Printf("edge cache warmup failed; version=%s error=%s", version, s.redact(err.Error()))
 	}
-	return nil
+}
+
+func (s *Service) scheduleCurrentCaddyWarmup(bundle model.EdgeRouteBundle, configSignature string) {
+	if s == nil || !s.Config.CaddyEnabled || strings.TrimSpace(configSignature) == "" {
+		return
+	}
+	tlsWarmupSignature := s.caddyTLSWarmupSignature(bundle, configSignature)
+	cacheWarmupSignature := s.edgeCacheWarmupSignature(bundle, configSignature)
+	tlsWarmupNeeded := tlsWarmupSignature != "" && s.needsCaddyWarmup(tlsWarmupSignature)
+	cacheWarmupNeeded := cacheWarmupSignature != "" && s.needsEdgeCacheWarmup(cacheWarmupSignature)
+	if !tlsWarmupNeeded && !cacheWarmupNeeded {
+		return
+	}
+	warmupIdentity := tlsWarmupSignature + "|" + cacheWarmupSignature
+
+	s.caddyWarmupMu.Lock()
+	if s.caddyWarmupIdentity == warmupIdentity && s.caddyWarmupDone != nil {
+		select {
+		case <-s.caddyWarmupDone:
+		default:
+			s.caddyWarmupMu.Unlock()
+			return
+		}
+	}
+	if s.caddyWarmupCancel != nil {
+		s.caddyWarmupCancel()
+	}
+	previousDone := s.caddyWarmupDone
+	s.caddyWarmupSequence++
+	sequence := s.caddyWarmupSequence
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.caddyWarmupCancel = cancel
+	s.caddyWarmupDone = done
+	s.caddyWarmupIdentity = warmupIdentity
+	s.caddyWarmupMu.Unlock()
+
+	go func() {
+		defer close(done)
+		if previousDone != nil {
+			select {
+			case <-previousDone:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if ctx.Err() != nil || !s.caddyWarmupRunIsCurrent(sequence) || !s.bundleIsCurrent(bundle) {
+			return
+		}
+		s.warmCurrentCaddyConfig(ctx, bundle, configSignature)
+	}()
+}
+
+func (s *Service) caddyWarmupRunIsCurrent(sequence uint64) bool {
+	if s == nil {
+		return false
+	}
+	s.caddyWarmupMu.Lock()
+	defer s.caddyWarmupMu.Unlock()
+	return s.caddyWarmupSequence == sequence
+}
+
+func (s *Service) bundleIsCurrent(bundle model.EdgeRouteBundle) bool {
+	if s == nil {
+		return false
+	}
+	current, ok := s.Bundle()
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(current.Version) == strings.TrimSpace(bundle.Version) &&
+		strings.TrimSpace(current.Generation) == strings.TrimSpace(bundle.Generation)
+}
+
+func (s *Service) cancelCurrentCaddyWarmup() {
+	if s == nil {
+		return
+	}
+	s.caddyWarmupMu.Lock()
+	defer s.caddyWarmupMu.Unlock()
+	if s.caddyWarmupCancel != nil {
+		s.caddyWarmupCancel()
+		s.caddyWarmupCancel = nil
+	}
 }
 
 func (s *Service) needsCaddyApply(signature string) bool {
@@ -172,8 +280,9 @@ func (s *Service) buildCaddyConfig(bundle model.EdgeRouteBundle) ([]byte, int, e
 	})
 
 	server := map[string]any{
-		"listen": []string{listenAddr},
-		"routes": routes,
+		"listen":    []string{listenAddr},
+		"protocols": caddyHTTPProtocols(),
+		"routes":    routes,
 		"logs": map[string]any{
 			"default_logger_name": "fugue_edge_access",
 		},
@@ -432,14 +541,10 @@ func (s *Service) uniqueBundleHosts(bundle model.EdgeRouteBundle) []string {
 }
 
 func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, error) {
-	version := strings.TrimSpace(bundle.Version)
-	if version == "" {
-		version = "unknown"
-	}
 	parts := []string{
-		"version=" + version,
-		"generation=" + strings.TrimSpace(bundle.Generation),
+		"hosts=" + strings.Join(s.uniqueBundleHosts(bundle), ","),
 		"listen=" + strings.TrimSpace(s.Config.CaddyListenAddr),
+		"protocols=" + strings.Join(caddyHTTPProtocols(), ","),
 		"proxy=" + caddyProxyDialAddress(s.Config.CaddyProxyListenAddr),
 		"tls_mode=" + s.normalizedCaddyTLSMode(),
 	}
@@ -473,6 +578,10 @@ func (s *Service) caddyConfigSignature(bundle model.EdgeRouteBundle) (string, er
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func caddyHTTPProtocols() []string {
+	return []string{"h1", "h2"}
+}
+
 func staticTLSFileFingerprint(certFile, keyFile string) (string, error) {
 	cert, err := os.ReadFile(certFile)
 	if err != nil {
@@ -491,18 +600,12 @@ func staticTLSFileFingerprint(certFile, keyFile string) (string, error) {
 }
 
 func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.EdgeRouteBundle, configSignature string) error {
-	if s.normalizedCaddyTLSMode() != caddyTLSModePublicOnDemand {
-		return nil
-	}
 	hosts := s.caddyWarmupHosts(bundle)
-	if len(hosts) == 0 {
-		return nil
-	}
 	dialAddress := caddyProxyDialAddress(s.Config.CaddyListenAddr)
-	if dialAddress == "" {
+	warmupSignature := s.caddyTLSWarmupSignature(bundle, configSignature)
+	if warmupSignature == "" {
 		return nil
 	}
-	warmupSignature := configSignature + ":" + strings.Join(hosts, ",")
 	if !s.needsCaddyWarmup(warmupSignature) {
 		return nil
 	}
@@ -521,6 +624,10 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 	started := time.Now()
 	var firstErr error
 	for _, host := range hosts {
+		if err := ctx.Err(); err != nil {
+			firstErr = err
+			break
+		}
 		err := warmup(ctx, dialAddress, host)
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -555,6 +662,9 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		}
 	}
 	duration := time.Since(started)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx.Err()
+	}
 	s.recordCaddyWarmup(warmupSignature, strings.Join(hosts, ","), duration, firstErr)
 	if firstErr != nil {
 		return firstErr
@@ -563,6 +673,17 @@ func (s *Service) maybeWarmupCurrentCaddyTLS(ctx context.Context, bundle model.E
 		s.Logger.Printf("edge caddy TLS warmup complete; hosts=%d listen=%s duration=%s", len(hosts), dialAddress, duration)
 	}
 	return nil
+}
+
+func (s *Service) caddyTLSWarmupSignature(bundle model.EdgeRouteBundle, configSignature string) string {
+	if s == nil || s.normalizedCaddyTLSMode() != caddyTLSModePublicOnDemand {
+		return ""
+	}
+	hosts := s.caddyWarmupHosts(bundle)
+	if len(hosts) == 0 || caddyProxyDialAddress(s.Config.CaddyListenAddr) == "" {
+		return ""
+	}
+	return strings.TrimSpace(configSignature) + ":" + strings.Join(hosts, ",")
 }
 
 type caddyTLSCertificateBundle struct {

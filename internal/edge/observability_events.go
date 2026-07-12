@@ -23,7 +23,7 @@ var edgeStructuredLogMu sync.Mutex
 var edgeProxyRequestSequence uint64
 
 func (s *Service) logProxyObservationFact(observed edgeProxyObservation) {
-	if s == nil || s.Logger == nil {
+	if s == nil || s.Logger == nil || observed.InternalWarmup {
 		return
 	}
 	lkgGeneration := ""
@@ -58,6 +58,7 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	}
 	route := observed.Route
 	summary := map[string]any{
+		"request_source":         edgeRequestSource(observed.InternalWarmup),
 		"route_kind":             strings.TrimSpace(route.RouteKind),
 		"route_generation":       strings.TrimSpace(route.RouteGeneration),
 		"lkg_generation":         strings.TrimSpace(lkgGeneration),
@@ -187,6 +188,7 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"bytes_in":       nonNegativeInt64(observed.RequestBytes),
 		"bytes_out":      nonNegativeInt64(observed.ResponseBytes),
 		"streaming":      observed.Streaming,
+		"request_source": edgeRequestSource(observed.InternalWarmup),
 		"error_type":     edgeObservationErrorType(observed),
 		"summary_json":   string(summaryJSON),
 	}

@@ -27,7 +27,10 @@ const (
 	edgeCacheStatusError       = "error"
 )
 
-const edgeCacheWarmupDiscoveryHeader = "X-Fugue-Cache-Warmup-Discovery"
+const (
+	edgeCacheWarmupHeader          = "X-Fugue-Cache-Warmup"
+	edgeCacheWarmupDiscoveryHeader = "X-Fugue-Cache-Warmup-Discovery"
+)
 
 var nextDocumentVaryAllowlist = []string{
 	"Accept-Encoding",
