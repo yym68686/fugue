@@ -1972,6 +1972,13 @@ DNS/edge failover 必须满足：
 > dedup。该批次尚未写入 Store、未发布 artifact、未改变 route/DNS handler，也未接入 release prepare，
 > 因此下方生产验证项继续保持未勾选。
 >
+> 2026-07-12 semantic generation drift checkpoint: 暂停期间 route serving material 新增了
+> `request_body_policies`，生产 API 与 releaseflow 已将其纳入 `routegen_*`，而独立 rollback
+> artifact 构建器最初遗漏该字段。现已按生产实现的字段顺序和深拷贝语义同步，并把 API 等价性
+> fixture 改为非空策略，同时增加“策略内容变化但沿用旧 bundle generation”必须 fail closed 的
+> 回归测试。该修正仍只存在于无生产调用点的纯构建器和测试中，没有发布、持久化或流量副作用，
+> 因此不改变任何生产 TODO 状态。
+>
 > 2026-07-11 idempotent rollback artifact store checkpoint: JSON/Postgres Store 已增加显式
 > `EnsurePlatformArtifact` 原语，使用 `(artifact_kind, scope_key, generation)` 精确身份；同一 generation
 > 只有在现有 artifact 签名/内容哈希完整，且 schema、scope、compatibility floor、metadata、creator

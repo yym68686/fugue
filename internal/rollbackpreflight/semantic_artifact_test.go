@@ -97,6 +97,14 @@ func TestBuildEdgeRouteBundleArtifactRejectsGenerationDrift(t *testing.T) {
 			want: "does not match semantic generation",
 		},
 		{
+			name: "request body policy changed",
+			mutate: func(bundle *model.EdgeRouteBundle) {
+				bundle.Routes[0].RequestBodyPolicies[0].MaxBytes++
+				bundle.Routes[0].RouteGeneration = ""
+			},
+			want: "does not match semantic generation",
+		},
+		{
 			name: "route generation conflict",
 			mutate: func(bundle *model.EdgeRouteBundle) {
 				bundle.Routes[0].RouteGeneration = "routegen_wrong"
@@ -252,11 +260,20 @@ func semanticRouteBundleFixture() model.EdgeRouteBundle {
 		CachePolicyID:        "cache-1",
 		CacheNamespace:       "app-1",
 		DeploymentGeneration: "deploy-1",
-		Streaming:            true,
-		Status:               model.EdgeRouteStatusActive,
-		StatusReason:         "ready",
-		CreatedAt:            now.Add(-time.Hour),
-		UpdatedAt:            now,
+		RequestBodyPolicies: []model.EdgeRequestBodyPolicy{{
+			Name:              "responses-upload",
+			Methods:           []string{"POST"},
+			Paths:             []string{"/v1/responses"},
+			MaxBytes:          64 << 20,
+			TimeoutSeconds:    600,
+			MaxConcurrent:     32,
+			RetryAfterSeconds: 5,
+		}},
+		Streaming:    true,
+		Status:       model.EdgeRouteStatusActive,
+		StatusReason: "ready",
+		CreatedAt:    now.Add(-time.Hour),
+		UpdatedAt:    now,
 	}
 	route.RouteGeneration = routeGeneration(edgeRouteVersionMaterialFromBinding(route))
 	bundle := model.EdgeRouteBundle{

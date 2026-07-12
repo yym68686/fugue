@@ -58,9 +58,18 @@ func TestRollbackSemanticArtifactGenerationMatchesEdgeRouteAPI(t *testing.T) {
 		CachePolicyID:        "cache-1",
 		CacheNamespace:       "app-1",
 		DeploymentGeneration: "deploy-1",
-		Streaming:            true,
-		Status:               model.EdgeRouteStatusActive,
-		StatusReason:         "ready",
+		RequestBodyPolicies: []model.EdgeRequestBodyPolicy{{
+			Name:              "responses-upload",
+			Methods:           []string{"POST"},
+			Paths:             []string{"/v1/responses"},
+			MaxBytes:          64 << 20,
+			TimeoutSeconds:    600,
+			MaxConcurrent:     32,
+			RetryAfterSeconds: 5,
+		}},
+		Streaming:    true,
+		Status:       model.EdgeRouteStatusActive,
+		StatusReason: "ready",
 	}
 	route.RouteGeneration = edgeRouteGeneration(route)
 	bundle := model.EdgeRouteBundle{
