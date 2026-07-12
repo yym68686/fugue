@@ -184,13 +184,50 @@ paths:
       x-fugue-handler: handleEdgeTLSAsk
       security:
         - EdgeToken: []
+      parameters:
+        - in: query
+          name: domain
+          required: true
+          schema:
+            type: string
       responses:
         '200':
           description: Successful response
           content:
+            text/plain:
+              schema:
+                type: string
+                enum: [ok]
+        '400':
+          description: The required domain query parameter is missing or invalid.
+          content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DataTransferActionResponse"
+                $ref: "#/components/schemas/ErrorResponse"
+        '403':
+          description: The edge credential is invalid or the domain is not eligible for a certificate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '404':
+          description: Edge endpoints are disabled on this API instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '500':
+          description: The domain or app lookup failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '502':
+          description: Domain verification failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/edge/domains:
@@ -7978,6 +8015,18 @@ paths:
       responses:
         '200':
           description: Successful response
+          headers:
+            Content-Length:
+              description: Exact archive size in bytes.
+              schema:
+                type: integer
+                format: int64
+                minimum: 0
+            Content-Disposition:
+              description: Attachment disposition containing the original archive filename.
+              schema:
+                type: string
+                example: attachment; filename="site.tgz"
           content:
             application/octet-stream:
               schema:

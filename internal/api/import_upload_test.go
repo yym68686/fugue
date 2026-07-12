@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"fugue/internal/auth"
@@ -878,6 +880,19 @@ func TestGetSourceUploadArchiveRequiresDownloadToken(t *testing.T) {
 	}
 	if got := validTokenRecorder.Body.Bytes(); !bytes.Equal(got, archiveBytes) {
 		t.Fatalf("unexpected archive response body length=%d want=%d", len(got), len(archiveBytes))
+	}
+	if got := validTokenRecorder.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("expected application/octet-stream response, got %q", got)
+	}
+	if got := validTokenRecorder.Header().Get("Content-Length"); got != strconv.Itoa(len(archiveBytes)) {
+		t.Fatalf("expected Content-Length %d, got %q", len(archiveBytes), got)
+	}
+	disposition, params, err := mime.ParseMediaType(validTokenRecorder.Header().Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse Content-Disposition: %v", err)
+	}
+	if disposition != "attachment" || params["filename"] != "site.tgz" {
+		t.Fatalf("unexpected Content-Disposition %q params=%v", disposition, params)
 	}
 }
 

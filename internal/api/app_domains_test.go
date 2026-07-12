@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -469,6 +470,12 @@ func TestEdgeTLSAskAutoVerifiesPendingDomain(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
 	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "text/plain" {
+		t.Fatalf("expected text/plain response, got %q", contentType)
+	}
+	if body := recorder.Body.String(); body != "ok" {
+		t.Fatalf("expected ok response body, got %q", body)
+	}
 
 	domain, err := s.GetAppDomain("www.example.com")
 	if err != nil {
@@ -476,6 +483,148 @@ func TestEdgeTLSAskAutoVerifiesPendingDomain(t *testing.T) {
 	}
 	if domain.Status != model.AppDomainStatusVerified {
 		t.Fatalf("expected app domain to be auto-verified, got %+v", domain)
+	}
+}
+
+func TestEdgeAuthorizationErrorsUseJSONContract(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		server    *Server
+		target    string
+		authorize func(*Server, http.ResponseWriter, *http.Request) bool
+		status    int
+		message   string
+		code      string
+		category  string
+	}{
+		{
+			name:   "edge endpoints disabled",
+			server: &Server{},
+			target: "/v1/edge/domains",
+			authorize: func(server *Server, w http.ResponseWriter, r *http.Request) bool {
+				return server.authorizeEdgeToken(w, r)
+			},
+			status:   http.StatusNotFound,
+			message:  "edge endpoints are disabled",
+			code:     "not_found",
+			category: "not_found",
+		},
+		{
+			name: "missing edge credential",
+			server: &Server{
+				edgeTLSAskToken:      "edge-secret",
+				allowLegacyEdgeToken: true,
+			},
+			target: "/v1/edge/routes",
+			authorize: func(server *Server, w http.ResponseWriter, r *http.Request) bool {
+				_, ok := server.authorizeEdgeRequest(w, r)
+				return ok
+			},
+			status:   http.StatusForbidden,
+			message:  "forbidden",
+			code:     "permission_denied",
+			category: "auth",
+		},
+		{
+			name: "invalid edge credential",
+			server: &Server{
+				edgeTLSAskToken:      "edge-secret",
+				allowLegacyEdgeToken: true,
+			},
+			target: "/v1/edge/routes?token=wrong",
+			authorize: func(server *Server, w http.ResponseWriter, r *http.Request) bool {
+				_, ok := server.authorizeEdgeRequest(w, r)
+				return ok
+			},
+			status:   http.StatusForbidden,
+			message:  "forbidden",
+			code:     "permission_denied",
+			category: "auth",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			if tc.authorize(tc.server, recorder, request) {
+				t.Fatal("expected authorization to fail")
+			}
+			assertHTTPXErrorResponse(t, recorder, tc.status, tc.message, tc.code, tc.category)
+		})
+	}
+}
+
+func TestEdgeTLSAskErrorsMatchJSONContract(t *testing.T) {
+	t.Parallel()
+
+	_, server, _, _, _, _ := setupAppDomainTestServer(t)
+	tests := []struct {
+		name     string
+		target   string
+		status   int
+		message  string
+		code     string
+		category string
+	}{
+		{
+			name:     "missing token",
+			target:   "/v1/edge/tls/ask?domain=unknown.example.com",
+			status:   http.StatusForbidden,
+			message:  "forbidden",
+			code:     "permission_denied",
+			category: "auth",
+		},
+		{
+			name:     "invalid token",
+			target:   "/v1/edge/tls/ask?token=wrong&domain=unknown.example.com",
+			status:   http.StatusForbidden,
+			message:  "forbidden",
+			code:     "permission_denied",
+			category: "auth",
+		},
+		{
+			name:     "missing domain",
+			target:   "/v1/edge/tls/ask?token=edge-secret",
+			status:   http.StatusBadRequest,
+			message:  "domain is required",
+			code:     "invalid_request",
+			category: "validation",
+		},
+		{
+			name:     "unknown domain",
+			target:   "/v1/edge/tls/ask?token=edge-secret&domain=unknown.example.com",
+			status:   http.StatusForbidden,
+			message:  "forbidden",
+			code:     "permission_denied",
+			category: "auth",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, request)
+			assertHTTPXErrorResponse(t, recorder, tc.status, tc.message, tc.code, tc.category)
+		})
+	}
+}
+
+func assertHTTPXErrorResponse(t *testing.T, recorder *httptest.ResponseRecorder, status int, message, code, category string) {
+	t.Helper()
+	if recorder.Code != status {
+		t.Fatalf("expected status %d, got %d body=%s", status, recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Fatalf("expected application/json response, got %q", contentType)
+	}
+	var response httpx.ErrorResponse
+	mustDecodeJSON(t, recorder, &response)
+	if response.Error != message || response.Code != code || response.Category != category {
+		t.Fatalf("unexpected error response: %+v", response)
 	}
 }
 

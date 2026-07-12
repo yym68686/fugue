@@ -451,41 +451,45 @@ func (s *Server) handleEdgeTLSAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	hostname := normalizeExternalAppDomain(r.URL.Query().Get("domain"))
 	if hostname == "" {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		httpx.WriteError(w, http.StatusBadRequest, "domain is required")
 		return
 	}
 	domain, err := s.store.GetAppDomain(hostname)
 	if err != nil {
 		if err == store.ErrNotFound {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			httpx.WriteError(w, http.StatusForbidden, "forbidden")
 			return
 		}
-		http.Error(w, "domain lookup failed", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "domain lookup failed")
 		return
 	}
 	if domain.Status == model.AppDomainStatusVerified && domain.DNSStatus == model.AppDomainDNSStatusReady {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		writeEdgeTLSAskOK(w)
 		return
 	}
 	app, err := s.store.GetApp(domain.AppID)
 	if err != nil {
 		if err == store.ErrNotFound {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			httpx.WriteError(w, http.StatusForbidden, "forbidden")
 			return
 		}
-		http.Error(w, "app lookup failed", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "app lookup failed")
 		return
 	}
 	_, verified, err := s.verifyAndPersistAppDomain(r.Context(), app, domain)
 	if err != nil {
-		http.Error(w, "verification failed", http.StatusBadGateway)
+		httpx.WriteError(w, http.StatusBadGateway, "verification failed")
 		return
 	}
 	if !verified {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		httpx.WriteError(w, http.StatusForbidden, "forbidden")
 		return
 	}
+	writeEdgeTLSAskOK(w)
+}
+
+func writeEdgeTLSAskOK(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
 }
@@ -1535,7 +1539,7 @@ func ipAddrStrings(addrs []net.IPAddr) []string {
 
 func (s *Server) authorizeEdgeToken(w http.ResponseWriter, r *http.Request) bool {
 	if strings.TrimSpace(s.edgeTLSAskToken) == "" && s.store == nil {
-		http.NotFound(w, r)
+		httpx.WriteError(w, http.StatusNotFound, "edge endpoints are disabled")
 		return false
 	}
 	_, ok := s.authorizeEdgeRequest(w, r)

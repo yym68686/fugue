@@ -634,14 +634,10 @@ func (s *Server) handleGetSourceUploadArchive(w http.ResponseWriter, r *http.Req
 		s.writeStoreError(w, err)
 		return
 	}
-	contentType := strings.TrimSpace(upload.ContentType)
-	if contentType == "" {
-		contentType = "application/gzip"
-	}
-	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(archiveBytes)))
 	if strings.TrimSpace(upload.Filename) != "" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", upload.Filename))
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": upload.Filename}))
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(archiveBytes)

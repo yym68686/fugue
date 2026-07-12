@@ -85,3 +85,47 @@ func TestStreamingOperationsDeclareEveryHandlerParameter(t *testing.T) {
 		}
 	}
 }
+
+func TestEdgeTLSAskAndSourceArchiveContracts(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatalf("load embedded OpenAPI YAML: %v", err)
+	}
+
+	edgeTLSAsk := doc.Paths.Find("/v1/edge/tls/ask")
+	if edgeTLSAsk == nil || edgeTLSAsk.Get == nil {
+		t.Fatal("missing GET /v1/edge/tls/ask operation")
+	}
+	domain := edgeTLSAsk.Get.Parameters.GetByInAndName("query", "domain")
+	if domain == nil || !domain.Required {
+		t.Fatal("edge TLS ask domain query parameter must be required")
+	}
+	edgeSuccess := edgeTLSAsk.Get.Responses.Value("200")
+	if edgeSuccess == nil || edgeSuccess.Value == nil || edgeSuccess.Value.Content.Get("text/plain") == nil {
+		t.Fatal("edge TLS ask 200 response must declare text/plain")
+	}
+	for _, status := range []string{"400", "403", "404", "500", "502"} {
+		response := edgeTLSAsk.Get.Responses.Value(status)
+		if response == nil || response.Value == nil || response.Value.Content.Get("application/json") == nil {
+			t.Errorf("edge TLS ask %s response must declare JSON ErrorResponse content", status)
+		}
+	}
+
+	archive := doc.Paths.Find("/v1/source-uploads/{id}/archive")
+	if archive == nil || archive.Get == nil {
+		t.Fatal("missing GET /v1/source-uploads/{id}/archive operation")
+	}
+	archiveSuccess := archive.Get.Responses.Value("200")
+	if archiveSuccess == nil || archiveSuccess.Value == nil {
+		t.Fatal("missing source upload archive 200 response")
+	}
+	if archiveSuccess.Value.Content.Get("application/octet-stream") == nil {
+		t.Fatal("source upload archive must declare application/octet-stream")
+	}
+	for _, header := range []string{"Content-Length", "Content-Disposition"} {
+		if ref := archiveSuccess.Value.Headers[header]; ref == nil || ref.Value == nil {
+			t.Errorf("source upload archive must declare %s", header)
+		}
+	}
+}
