@@ -379,6 +379,7 @@ release_changed_files_match() {
       public:internal/bundleauth/*|\
       public:internal/edge/*|\
       public:internal/edgefront/*|\
+      public:internal/httpx/*|\
       public:internal/proxyproto/*|\
       public:internal/dnsserver/*|\
       public:internal/weightedselector/*|\
@@ -451,6 +452,7 @@ public_data_plane_worker_image_changed() {
       cmd/fugue-edge/*|\
       internal/bundleauth/*|\
       internal/edge/*|\
+      internal/httpx/*|\
       internal/model/edge_routes.go|\
       internal/proxyproto/*|\
       internal/weightedselector/*|\
@@ -492,6 +494,7 @@ public_data_plane_dns_image_changed() {
       cmd/fugue-dns/*|\
       internal/bundleauth/*|\
       internal/dnsserver/*|\
+      internal/httpx/*|\
       internal/model/edge_routes.go|\
       internal/weightedselector/*|\
       Dockerfile.edge)
@@ -562,6 +565,7 @@ release_safety_changed_file_subsystems() {
     esac
     case "${file}" in
       internal/dnsserver/*|\
+      internal/httpx/*|\
       internal/weightedselector/*|\
       cmd/fugue-dns/*|\
       deploy/helm/fugue/templates/dns-*|\
@@ -574,6 +578,7 @@ release_safety_changed_file_subsystems() {
     case "${file}" in
       internal/edge/*|\
       internal/edgefront/*|\
+      internal/httpx/*|\
       internal/proxyproto/*|\
       internal/weightedselector/*|\
       cmd/fugue-edge/*|\
@@ -590,6 +595,7 @@ release_safety_changed_file_subsystems() {
     case "${file}" in
       cmd/fugue-api/*|\
       internal/api/*|\
+      internal/httpx/*|\
       Dockerfile.api)
         release_safety_emit_subsystem control_plane_api
         matched="true"
@@ -1486,6 +1492,7 @@ public_data_plane_worker_source_changed_between_refs() {
 		cmd/fugue-edge \
 		internal/bundleauth \
 		internal/edge \
+		internal/httpx \
 		internal/model/edge_routes.go \
 		internal/proxyproto \
 		Dockerfile.edge \
@@ -1508,6 +1515,7 @@ public_data_plane_dns_source_changed_between_refs() {
 		cmd/fugue-dns \
 		internal/bundleauth \
 		internal/dnsserver \
+		internal/httpx \
 		internal/model/edge_routes.go \
 		Dockerfile.edge \
 		go.mod \

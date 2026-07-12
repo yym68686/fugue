@@ -1787,6 +1787,19 @@ FUGUE_RELEASE_CHANGED_FILES=$'internal/edge/service.go'
 public_data_plane_changed || fail "edge code changes must mark public data-plane changed"
 public_data_plane_worker_image_changed || fail "edge code changes must mark worker image changed"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/httpx/httpx.go'
+httpx_subsystems="$(release_safety_changed_file_subsystems)"
+[[ "${httpx_subsystems}" == *"control_plane_api"* && "${httpx_subsystems}" == *"dns_server"* && "${httpx_subsystems}" == *"edge_worker"* ]] ||
+  fail "shared HTTP response changes must select API, edge, and DNS release domains, got ${httpx_subsystems}"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "shared HTTP response files must have explicit release-risk ownership"
+public_data_plane_changed || fail "shared HTTP response changes must mark public data-plane changed"
+public_data_plane_worker_image_changed || fail "shared HTTP response changes must mark worker image changed"
+public_data_plane_dns_image_changed || fail "shared HTTP response changes must mark DNS image changed"
+if public_data_plane_front_image_changed; then
+  fail "shared HTTP response changes must not mark the edge front image changed"
+fi
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/weightedselector/weighted_selector.go'
 public_data_plane_changed || fail "weighted selector changes must mark public data-plane changed"
 public_data_plane_worker_image_changed || fail "weighted selector changes must mark worker image changed"
