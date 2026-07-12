@@ -45,3 +45,43 @@ func TestEmbeddedSpecIsValid(t *testing.T) {
 		t.Fatalf("expected %d generated routes, got %d", wantRoutes, got)
 	}
 }
+
+func TestStreamingOperationsDeclareEveryHandlerParameter(t *testing.T) {
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(YAML())
+	if err != nil {
+		t.Fatalf("load embedded OpenAPI YAML: %v", err)
+	}
+
+	tests := map[string][]string{
+		"/v1/apps/{id}/build-logs/stream": {
+			"path:id", "query:operation_id", "query:tail_lines", "query:follow", "query:cursor", "header:Last-Event-ID",
+		},
+		"/v1/apps/{id}/runtime-logs/stream": {
+			"path:id", "query:component", "query:pod", "query:tail_lines", "query:previous", "query:follow", "query:cursor", "header:Last-Event-ID",
+		},
+		"/v1/apps/{id}/observability/requests/stream": {
+			"path:id", "query:since", "query:until", "query:limit", "query:trace_id", "query:request_id", "query:status_class", "query:status_code", "query:slow", "query:errors", "query:follow", "header:Last-Event-ID",
+		},
+	}
+
+	for path, expected := range tests {
+		pathItem := doc.Paths.Find(path)
+		if pathItem == nil || pathItem.Get == nil {
+			t.Fatalf("missing GET operation for %s", path)
+		}
+		actual := make(map[string]bool, len(pathItem.Get.Parameters))
+		for _, parameterRef := range pathItem.Get.Parameters {
+			if parameterRef == nil || parameterRef.Value == nil {
+				t.Fatalf("unresolved parameter in %s", path)
+			}
+			parameter := parameterRef.Value
+			actual[parameter.In+":"+parameter.Name] = true
+		}
+		for _, key := range expected {
+			if !actual[key] {
+				t.Errorf("%s does not declare %s", path, key)
+			}
+		}
+	}
+}

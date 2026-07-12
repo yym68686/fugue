@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -572,6 +573,89 @@ func TestAppObservabilityRequestsStreamQueriesClickHouse(t *testing.T) {
 	} {
 		if !strings.Contains(clickHouseQuery, want) {
 			t.Fatalf("expected ClickHouse query to contain %q, got %q", want, clickHouseQuery)
+		}
+	}
+}
+
+func TestAppObservabilityRequestsRejectInvalidFiltersBeforeQuerying(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+
+	for _, suffix := range []string{
+		"?limit=0",
+		"?status_code=700",
+		"?status_class=9xx",
+		"?errors=maybe",
+		"?slow=maybe",
+	} {
+		for _, path := range []string{
+			"/v1/apps/" + app.ID + "/observability/requests" + suffix,
+			"/v1/apps/" + app.ID + "/observability/requests/stream" + suffix,
+		} {
+			recorder := performJSONRequest(t, server, http.MethodGet, path, apiKey, nil)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for %s, got %d body=%s", path, recorder.Code, recorder.Body.String())
+			}
+		}
+	}
+}
+
+func TestAppObservabilityRequestsStreamRespectsExplicitUntil(t *testing.T) {
+	_, server, apiKey, app := setupAppConfigTestServer(t, appObservabilityTestSpec())
+	var clickHouseQuery string
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clickHouseQuery = r.URL.Query().Get("query")
+	}))
+	t.Cleanup(clickHouse.Close)
+	server.observabilityConfig = observability.Config{
+		Enabled:       true,
+		ClickHouseDSN: clickHouse.URL + "?database=fugue_observability",
+	}.Normalize()
+
+	until := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	path := "/v1/apps/" + app.ID + "/observability/requests/stream?follow=false&since=1m&until=" + url.QueryEscape(until.Format(time.RFC3339))
+	recorder := performJSONRequest(t, server, http.MethodGet, path, apiKey, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "snapshot complete") {
+		t.Fatalf("expected bounded stream completion, got %q", recorder.Body.String())
+	}
+	if !strings.Contains(clickHouseQuery, "ts <= "+clickHouseDateTime64Literal(until)) {
+		t.Fatalf("expected query to respect explicit until %s, got %q", until, clickHouseQuery)
+	}
+}
+
+func TestAppObservabilityRequestStreamCursorPreservesTimestampTies(t *testing.T) {
+	timestamp := time.Date(2026, time.July, 12, 12, 0, 0, 123, time.UTC)
+	cursor := newAppObservabilityRequestStreamCursor(timestamp, "request-002")
+	parsed, err := parseAppObservabilityRequestStreamCursor(cursor.encode())
+	if err != nil {
+		t.Fatalf("parse cursor: %v", err)
+	}
+	if parsed.Timestamp != cursor.Timestamp || parsed.RequestID != cursor.RequestID {
+		t.Fatalf("cursor round trip mismatch: got %+v want %+v", parsed, cursor)
+	}
+
+	window := appObservabilityWindow{
+		Since: timestamp.Add(-time.Minute).Format(time.RFC3339Nano),
+		Until: timestamp.Add(time.Minute).Format(time.RFC3339Nano),
+	}
+	query, err := buildAppObservabilityRequestsQueryWithOptions("app_test", window, url.Values{}, appObservabilityRequestQueryOptions{
+		AfterCursor:   &parsed,
+		Ascending:     true,
+		LimitOverride: 50,
+	})
+	if err != nil {
+		t.Fatalf("build cursor query: %v", err)
+	}
+	for _, want := range []string{
+		"ts > " + clickHouseDateTime64Literal(timestamp),
+		"ts = " + clickHouseDateTime64Literal(timestamp),
+		"request_id > 'request-002'",
+		"ORDER BY ts ASC, request_id ASC LIMIT 50",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("expected cursor query to contain %q, got %q", want, query)
 		}
 	}
 }

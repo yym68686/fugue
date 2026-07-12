@@ -5649,11 +5649,18 @@ paths:
       security:
         - BearerAuth: []
       parameters:
-        - in: path
-          name: id
-          required: true
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/OperationIdQueryParam"
+        - $ref: "#/components/parameters/TailLinesQueryParam"
+        - in: query
+          name: follow
+          required: false
+          description: Keep the stream open and follow newly available build log sources. Defaults to true.
           schema:
-            type: string
+            type: boolean
+            default: true
+        - $ref: "#/components/parameters/LogStreamCursorQueryParam"
+        - $ref: "#/components/parameters/LogStreamLastEventIdHeader"
       responses:
         '200':
           description: Successful response
@@ -5695,11 +5702,19 @@ paths:
       security:
         - BearerAuth: []
       parameters:
-        - in: path
-          name: id
-          required: true
+        - $ref: "#/components/parameters/IdPathParam"
+        - $ref: "#/components/parameters/ComponentQueryParam"
+        - $ref: "#/components/parameters/PodQueryParam"
+        - $ref: "#/components/parameters/TailLinesQueryParam"
+        - $ref: "#/components/parameters/PreviousQueryParam"
+        - in: query
+          name: follow
+          required: false
+          description: Keep the stream open and follow newly available runtime log sources. Defaults to true, except previous-container requests default to false.
           schema:
-            type: string
+            type: boolean
+        - $ref: "#/components/parameters/LogStreamCursorQueryParam"
+        - $ref: "#/components/parameters/LogStreamLastEventIdHeader"
       responses:
         '200':
           description: Successful response
@@ -5822,23 +5837,13 @@ paths:
         - $ref: "#/components/parameters/IdPathParam"
         - $ref: "#/components/parameters/SinceQueryParam"
         - $ref: "#/components/parameters/UntilQueryParam"
-        - $ref: "#/components/parameters/LimitQueryParam"
+        - $ref: "#/components/parameters/ObservabilityRequestLimitQueryParam"
         - $ref: "#/components/parameters/TraceIdQueryParam"
-        - in: query
-          name: status_class
-          required: false
-          schema:
-            type: string
-        - in: query
-          name: slow
-          required: false
-          schema:
-            type: boolean
-        - in: query
-          name: errors
-          required: false
-          schema:
-            type: boolean
+        - $ref: "#/components/parameters/RequestIdQueryParam"
+        - $ref: "#/components/parameters/StatusClassQueryParam"
+        - $ref: "#/components/parameters/StatusCodeQueryParam"
+        - $ref: "#/components/parameters/SlowRequestsQueryParam"
+        - $ref: "#/components/parameters/ErrorRequestsQueryParam"
       responses:
         '200':
           description: Successful response
@@ -5860,28 +5865,21 @@ paths:
         - $ref: "#/components/parameters/IdPathParam"
         - $ref: "#/components/parameters/SinceQueryParam"
         - $ref: "#/components/parameters/UntilQueryParam"
-        - $ref: "#/components/parameters/LimitQueryParam"
+        - $ref: "#/components/parameters/ObservabilityRequestLimitQueryParam"
         - $ref: "#/components/parameters/TraceIdQueryParam"
-        - in: query
-          name: status_class
-          required: false
-          schema:
-            type: string
-        - in: query
-          name: slow
-          required: false
-          schema:
-            type: boolean
-        - in: query
-          name: errors
-          required: false
-          schema:
-            type: boolean
+        - $ref: "#/components/parameters/RequestIdQueryParam"
+        - $ref: "#/components/parameters/StatusClassQueryParam"
+        - $ref: "#/components/parameters/StatusCodeQueryParam"
+        - $ref: "#/components/parameters/SlowRequestsQueryParam"
+        - $ref: "#/components/parameters/ErrorRequestsQueryParam"
         - in: query
           name: follow
           required: false
+          description: Keep polling for request summaries after the initial window. Defaults to true.
           schema:
             type: boolean
+            default: true
+        - $ref: "#/components/parameters/ObservabilityLastEventIdHeader"
       responses:
         '200':
           description: Server-sent request summary stream.
@@ -9813,15 +9811,43 @@ components:
       in: query
       name: tail_lines
       required: false
+      description: Number of existing log lines to include before following new output.
       schema:
         type: integer
         format: int32
+        minimum: 1
+        maximum: 5000
+        default: 200
+    LogStreamCursorQueryParam:
+      in: query
+      name: cursor
+      required: false
+      description: Opaque log stream resume cursor returned as an SSE event id. Takes precedence over Last-Event-ID when both are present.
+      schema:
+        type: string
+    LogStreamLastEventIdHeader:
+      in: header
+      name: Last-Event-ID
+      required: false
+      description: Opaque log stream resume cursor from the most recently processed SSE event. Used when cursor is omitted.
+      schema:
+        type: string
+    ObservabilityLastEventIdHeader:
+      in: header
+      name: Last-Event-ID
+      required: false
+      description: Opaque request-stream cursor from the most recently processed SSE event. Legacy RFC3339 timestamp event ids remain accepted.
+      schema:
+        type: string
     ComponentQueryParam:
       in: query
       name: component
       required: false
+      description: Runtime component whose logs or pod inventory should be returned.
       schema:
         type: string
+        enum: [app, postgres]
+        default: app
     PodQueryParam:
       in: query
       name: pod
@@ -9848,6 +9874,55 @@ components:
       required: false
       schema:
         type: string
+    RequestIdQueryParam:
+      in: query
+      name: request_id
+      required: false
+      schema:
+        type: string
+    StatusClassQueryParam:
+      in: query
+      name: status_class
+      required: false
+      schema:
+        type: string
+        enum: [1xx, 2xx, 3xx, 4xx, 5xx]
+    StatusCodeQueryParam:
+      in: query
+      name: status_code
+      required: false
+      schema:
+        type: integer
+        format: int32
+        minimum: 100
+        maximum: 599
+    ObservabilityRequestLimitQueryParam:
+      in: query
+      name: limit
+      required: false
+      description: Maximum request summaries returned per query or stream batch.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 1000
+        default: 200
+    SlowRequestsQueryParam:
+      in: query
+      name: slow
+      required: false
+      description: Restrict results to requests with duration of at least one second.
+      schema:
+        type: boolean
+        default: false
+    ErrorRequestsQueryParam:
+      in: query
+      name: errors
+      required: false
+      description: Restrict results to HTTP error responses or requests with an error type.
+      schema:
+        type: boolean
+        default: false
     TraceIdPathParam:
       in: path
       name: trace_id
@@ -9975,8 +10050,10 @@ components:
       in: query
       name: previous
       required: false
+      description: Read logs from the previous container instance.
       schema:
         type: boolean
+        default: false
     RecursiveQueryParam:
       in: query
       name: recursive

@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,7 @@ const (
 	appObservabilityRequestStreamDefaultWindow = time.Minute
 	appObservabilityRequestStreamPollInterval  = 2 * time.Second
 	appObservabilityRequestStreamRetryMS       = 3000
+	appObservabilityRequestStreamCursorVersion = 1
 	appObservabilityMaxWindow                  = 24 * time.Hour
 )
 
@@ -67,6 +70,18 @@ type appObservabilityRequestStreamWarningEvent struct {
 type appObservabilityRequestStreamEndEvent struct {
 	Cursor string `json:"cursor"`
 	Reason string `json:"reason"`
+}
+
+type appObservabilityRequestStreamCursor struct {
+	Version   int    `json:"v"`
+	Timestamp string `json:"ts"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+type appObservabilityRequestQueryOptions struct {
+	AfterCursor   *appObservabilityRequestStreamCursor
+	Ascending     bool
+	LimitOverride int
 }
 
 func (s *Server) handleGetAppObservabilityMetricsSummary(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +246,10 @@ func (s *Server) handleListAppObservabilityRequests(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
+	if err := validateAppObservabilityRequestQuery(r.URL.Query()); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	source := s.appObservabilitySourceStatus(app.ID, "analytics", "request analytics query backend is not wired yet")
 	s.appendAudit(principal, "app.observability.requests.list", "app", app.ID, app.TenantID, appObservabilityAuditMetadata(window))
 	if source.Status != "disabled" && observabilityExporterActive(source.ActiveExporters, "analytics") {
@@ -282,6 +301,30 @@ func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
+	if err := validateAppObservabilityRequestQuery(r.URL.Query()); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	configuredSince, configuredUntil, err := parseAppObservabilityWindowTimes(window)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cursor := appObservabilityStreamCursorFromWindow(window)
+	if rawCursor := strings.TrimSpace(r.Header.Get("Last-Event-ID")); rawCursor != "" {
+		resumeCursor, err := parseAppObservabilityRequestStreamCursor(rawCursor)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		resumeTimestamp, _ := resumeCursor.timestamp()
+		cursorTimestamp, _ := cursor.timestamp()
+		if resumeTimestamp.After(cursorTimestamp) {
+			cursor = resumeCursor
+		}
+	}
+	batchLimit, _ := parseAppObservabilityRequestLimit(r.URL.Query().Get("limit"))
+	explicitUntil := strings.TrimSpace(r.URL.Query().Get("until")) != ""
 	const queryPendingReason = "request analytics query backend is not wired yet"
 	source := s.appObservabilitySourceStatus(app.ID, "analytics", queryPendingReason)
 	if source.Status != "disabled" && source.Reason == queryPendingReason && observabilityExporterActive(source.ActiveExporters, "analytics") {
@@ -301,9 +344,9 @@ func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *
 	if err := stream.writeRetry(appObservabilityRequestStreamRetryMS); err != nil {
 		return
 	}
-	cursor := appObservabilityStreamCursorFromWindow(window)
-	if err := stream.writeEvent("ready", cursor, appObservabilityRequestStreamReadyEvent{
-		Cursor: cursor,
+	cursorID := cursor.encode()
+	if err := stream.writeEvent("ready", cursorID, appObservabilityRequestStreamReadyEvent{
+		Cursor: cursorID,
 		Source: source,
 		Window: window,
 		Follow: follow,
@@ -311,21 +354,11 @@ func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *
 		return
 	}
 	if source.Status == "disabled" || !observabilityExporterActive(source.ActiveExporters, "analytics") {
-		_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{
-			Cursor: cursor,
+		_ = stream.writeEvent("end", cursorID, appObservabilityRequestStreamEndEvent{
+			Cursor: cursorID,
 			Reason: source.Reason,
 		})
 		return
-	}
-
-	currentSince, _, err := parseAppObservabilityWindowTimes(window)
-	if err != nil {
-		_ = stream.writeEvent("warning", cursor, appObservabilityRequestStreamWarningEvent{Cursor: cursor, Message: err.Error()})
-		_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{Cursor: cursor, Reason: err.Error()})
-		return
-	}
-	if resume, ok := parseAppObservabilityRequestTimestamp(r.Header.Get("Last-Event-ID")); ok && resume.After(currentSince) {
-		currentSince = resume.Add(time.Nanosecond)
 	}
 
 	query := cloneURLValues(r.URL.Query())
@@ -334,38 +367,74 @@ func (s *Server) handleStreamAppObservabilityRequests(w http.ResponseWriter, r *
 	defer ticker.Stop()
 	for {
 		pollUntil := time.Now().UTC()
+		if (!follow || explicitUntil) && configuredUntil.Before(pollUntil) {
+			pollUntil = configuredUntil
+		}
+		cursorTimestamp, cursorErr := cursor.timestamp()
+		if cursorErr != nil {
+			_ = stream.writeEvent("warning", cursorID, appObservabilityRequestStreamWarningEvent{Cursor: cursorID, Message: cursorErr.Error()})
+			_ = stream.writeEvent("end", cursorID, appObservabilityRequestStreamEndEvent{Cursor: cursorID, Reason: cursorErr.Error()})
+			return
+		}
+		if cursorTimestamp.After(pollUntil) || cursorTimestamp.Equal(pollUntil) {
+			if !follow || explicitUntil {
+				_ = stream.writeEvent("end", cursorID, appObservabilityRequestStreamEndEvent{Cursor: cursorID, Reason: "snapshot complete"})
+				return
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+			}
+			continue
+		}
 		pollWindow := appObservabilityWindow{
-			Since: currentSince.UTC().Format(time.RFC3339Nano),
+			Since: configuredSince.UTC().Format(time.RFC3339Nano),
 			Until: pollUntil.Format(time.RFC3339Nano),
 		}
-		requests, err := s.queryAppObservabilityRequests(r.Context(), app.ID, pollWindow, query)
+		requests, err := s.queryAppObservabilityRequestsWithOptions(r.Context(), app.ID, pollWindow, query, appObservabilityRequestQueryOptions{
+			AfterCursor:   &cursor,
+			Ascending:     true,
+			LimitOverride: batchLimit,
+		})
 		if err != nil {
 			source.Status = "degraded"
 			source.Available = false
 			source.Reason = err.Error()
-			_ = stream.writeEvent("warning", cursor, appObservabilityRequestStreamWarningEvent{Cursor: cursor, Message: err.Error()})
-			_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{Cursor: cursor, Reason: err.Error()})
+			_ = stream.writeEvent("warning", cursorID, appObservabilityRequestStreamWarningEvent{Cursor: cursorID, Message: err.Error()})
+			_ = stream.writeEvent("end", cursorID, appObservabilityRequestStreamEndEvent{Cursor: cursorID, Reason: err.Error()})
 			return
 		}
-		for index := len(requests) - 1; index >= 0; index-- {
-			item := requests[index]
-			if ts, ok := parseAppObservabilityRequestTimestamp(stringField(item, "timestamp")); ok {
-				if !ts.Before(currentSince) {
-					currentSince = ts.Add(time.Nanosecond)
-				}
-				cursor = ts.UTC().Format(time.RFC3339Nano)
-			} else {
-				cursor = pollUntil.Format(time.RFC3339Nano)
+		sort.SliceStable(requests, func(i, j int) bool {
+			leftTimestamp, leftOK := parseAppObservabilityRequestTimestamp(stringField(requests[i], "timestamp"))
+			rightTimestamp, rightOK := parseAppObservabilityRequestTimestamp(stringField(requests[j], "timestamp"))
+			if leftOK && rightOK && !leftTimestamp.Equal(rightTimestamp) {
+				return leftTimestamp.Before(rightTimestamp)
 			}
-			if err := stream.writeEvent("request", cursor, appObservabilityRequestStreamRequestEvent{
-				Cursor:  cursor,
+			if leftOK != rightOK {
+				return leftOK
+			}
+			return stringField(requests[i], "request_id") < stringField(requests[j], "request_id")
+		})
+		for _, item := range requests {
+			timestamp, timestampOK := parseAppObservabilityRequestTimestamp(stringField(item, "timestamp"))
+			if !timestampOK {
+				timestamp = pollUntil
+			}
+			cursor = newAppObservabilityRequestStreamCursor(timestamp, stringField(item, "request_id"))
+			cursorID = cursor.encode()
+			if err := stream.writeEvent("request", cursorID, appObservabilityRequestStreamRequestEvent{
+				Cursor:  cursorID,
 				Request: item,
 			}); err != nil {
 				return
 			}
 		}
-		if !follow {
-			_ = stream.writeEvent("end", cursor, appObservabilityRequestStreamEndEvent{Cursor: cursor, Reason: "snapshot complete"})
+		if len(requests) >= batchLimit {
+			continue
+		}
+		if !follow || (explicitUntil && !pollUntil.Before(configuredUntil)) {
+			_ = stream.writeEvent("end", cursorID, appObservabilityRequestStreamEndEvent{Cursor: cursorID, Reason: "snapshot complete"})
 			return
 		}
 		select {
@@ -621,12 +690,64 @@ func parseAppObservabilityRequestTimestamp(raw string) (time.Time, bool) {
 	return parsed, err == nil
 }
 
-func appObservabilityStreamCursorFromWindow(window appObservabilityWindow) string {
+func newAppObservabilityRequestStreamCursor(timestamp time.Time, requestID string) appObservabilityRequestStreamCursor {
+	return appObservabilityRequestStreamCursor{
+		Version:   appObservabilityRequestStreamCursorVersion,
+		Timestamp: timestamp.UTC().Format(time.RFC3339Nano),
+		RequestID: strings.TrimSpace(requestID),
+	}
+}
+
+func (cursor appObservabilityRequestStreamCursor) timestamp() (time.Time, error) {
+	if cursor.Version != appObservabilityRequestStreamCursorVersion {
+		return time.Time{}, fmt.Errorf("unsupported observability stream cursor version %d", cursor.Version)
+	}
+	parsed, err := parseAppObservabilityTimestamp(cursor.Timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid observability stream cursor timestamp: %w", err)
+	}
+	return parsed.UTC(), nil
+}
+
+func (cursor appObservabilityRequestStreamCursor) encode() string {
+	payload, err := json.Marshal(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func parseAppObservabilityRequestStreamCursor(raw string) (appObservabilityRequestStreamCursor, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return appObservabilityRequestStreamCursor{}, nil
+	}
+	if timestamp, ok := parseAppObservabilityRequestTimestamp(raw); ok {
+		// Legacy event ids contained only a timestamp and resumed after every event
+		// at that timestamp. Keep that behavior while issuing lossless cursors for new
+		// clients.
+		return newAppObservabilityRequestStreamCursor(timestamp, "\U0010ffff"), nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return appObservabilityRequestStreamCursor{}, fmt.Errorf("decode observability stream cursor: %w", err)
+	}
+	var cursor appObservabilityRequestStreamCursor
+	if err := json.Unmarshal(payload, &cursor); err != nil {
+		return appObservabilityRequestStreamCursor{}, fmt.Errorf("parse observability stream cursor: %w", err)
+	}
+	if _, err := cursor.timestamp(); err != nil {
+		return appObservabilityRequestStreamCursor{}, err
+	}
+	return cursor, nil
+}
+
+func appObservabilityStreamCursorFromWindow(window appObservabilityWindow) appObservabilityRequestStreamCursor {
 	since, _, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
-		return time.Now().UTC().Format(time.RFC3339Nano)
+		since = time.Now().UTC()
 	}
-	return since.UTC().Format(time.RFC3339Nano)
+	return newAppObservabilityRequestStreamCursor(since.Add(-time.Nanosecond), "")
 }
 
 func cloneURLValues(values url.Values) url.Values {
@@ -1090,6 +1211,51 @@ func boundedAppObservabilityLimit(raw string, defaultLimit, maxLimit int) int {
 	return limit
 }
 
+func parseAppObservabilityRequestLimit(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 200, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > 1000 {
+		return 0, fmt.Errorf("limit must be between 1 and 1000")
+	}
+	return limit, nil
+}
+
+func parseOptionalAppObservabilityBool(query url.Values, name string) (bool, error) {
+	raw := strings.TrimSpace(query.Get(name))
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return value, nil
+}
+
+func validateAppObservabilityRequestQuery(query url.Values) error {
+	if _, err := parseAppObservabilityRequestLimit(query.Get("limit")); err != nil {
+		return err
+	}
+	if statusClass := strings.TrimSpace(query.Get("status_class")); statusClass != "" && !validStatusClass(statusClass) {
+		return fmt.Errorf("status_class must look like 2xx, 4xx, or 5xx")
+	}
+	if statusCode := strings.TrimSpace(query.Get("status_code")); statusCode != "" {
+		parsed, err := strconv.Atoi(statusCode)
+		if err != nil || parsed < 100 || parsed > 599 {
+			return fmt.Errorf("status_code must be between 100 and 599")
+		}
+	}
+	for _, name := range []string{"errors", "slow"} {
+		if _, err := parseOptionalAppObservabilityBool(query, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func normalizeLokiQueryRangeURL(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -1176,7 +1342,11 @@ func formatLokiTimestamp(raw string) string {
 }
 
 func (s *Server) queryAppObservabilityRequests(ctx context.Context, appID string, window appObservabilityWindow, query url.Values) ([]map[string]any, error) {
-	queryText, err := buildAppObservabilityRequestsQuery(appID, window, query)
+	return s.queryAppObservabilityRequestsWithOptions(ctx, appID, window, query, appObservabilityRequestQueryOptions{})
+}
+
+func (s *Server) queryAppObservabilityRequestsWithOptions(ctx context.Context, appID string, window appObservabilityWindow, query url.Values, options appObservabilityRequestQueryOptions) ([]map[string]any, error) {
+	queryText, err := buildAppObservabilityRequestsQueryWithOptions(appID, window, query, options)
 	if err != nil {
 		return nil, err
 	}
@@ -1275,14 +1445,31 @@ func (s *Server) queryAppObservabilityRuleDiagnosis(ctx context.Context, appID s
 }
 
 func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWindow, query url.Values) (string, error) {
+	return buildAppObservabilityRequestsQueryWithOptions(appID, window, query, appObservabilityRequestQueryOptions{})
+}
+
+func buildAppObservabilityRequestsQueryWithOptions(appID string, window appObservabilityWindow, query url.Values, options appObservabilityRequestQueryOptions) (string, error) {
 	since, until, err := parseAppObservabilityWindowTimes(window)
 	if err != nil {
 		return "", err
 	}
 	conditions := []string{
 		"app_id = " + quoteClickHouseString(appID),
-		"ts >= " + clickHouseDateTime64Literal(since),
 		"ts <= " + clickHouseDateTime64Literal(until),
+	}
+	if options.AfterCursor == nil {
+		conditions = append(conditions, "ts >= "+clickHouseDateTime64Literal(since))
+	} else {
+		afterTimestamp, err := options.AfterCursor.timestamp()
+		if err != nil {
+			return "", err
+		}
+		if afterTimestamp.Before(since) {
+			afterTimestamp = since.Add(-time.Nanosecond)
+		}
+		conditions = append(conditions, "(ts > "+clickHouseDateTime64Literal(afterTimestamp)+
+			" OR (ts = "+clickHouseDateTime64Literal(afterTimestamp)+
+			" AND request_id > "+quoteClickHouseString(options.AfterCursor.RequestID)+"))")
 	}
 	if traceID := strings.TrimSpace(query.Get("trace_id")); traceID != "" {
 		conditions = append(conditions, "trace_id = "+quoteClickHouseString(traceID))
@@ -1303,16 +1490,34 @@ func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWin
 		}
 		conditions = append(conditions, fmt.Sprintf("status_code = %d", parsed))
 	}
-	if strings.EqualFold(strings.TrimSpace(query.Get("errors")), "true") {
+	errorsOnly, err := parseOptionalAppObservabilityBool(query, "errors")
+	if err != nil {
+		return "", err
+	}
+	if errorsOnly {
 		conditions = append(conditions, "(status_code >= 400 OR error_type != '')")
 	}
-	if strings.EqualFold(strings.TrimSpace(query.Get("slow")), "true") {
+	slowOnly, err := parseOptionalAppObservabilityBool(query, "slow")
+	if err != nil {
+		return "", err
+	}
+	if slowOnly {
 		conditions = append(conditions, "duration_ms >= 1000")
 	}
-	limit := boundedAppObservabilityLimit(query.Get("limit"), 200, 1000)
+	limit, err := parseAppObservabilityRequestLimit(query.Get("limit"))
+	if err != nil {
+		return "", err
+	}
+	if options.LimitOverride > 0 {
+		limit = options.LimitOverride
+	}
+	order := "DESC"
+	if options.Ascending {
+		order = "ASC"
+	}
 	return "SELECT ts, trace_id, request_id, route_id, hostname, path_template, method, status_code, status_class, duration_ms, ttfb_ms, summary_json " +
 		"FROM request_facts WHERE " + strings.Join(conditions, " AND ") +
-		fmt.Sprintf(" ORDER BY ts DESC LIMIT %d FORMAT JSONEachRow", limit), nil
+		fmt.Sprintf(" ORDER BY ts %s, request_id %s LIMIT %d FORMAT JSONEachRow", order, order, limit), nil
 }
 
 func buildAppObservabilityTraceQuery(appID string, traceID string, window appObservabilityWindow) (string, error) {
