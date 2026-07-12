@@ -12,19 +12,19 @@ import (
 	"strings"
 	"time"
 
-	"fugue/internal/backupschedule"
 	"fugue/internal/model"
 )
 
 const (
-	defaultBackupBackendID            = "backup_backend_fugue_default_r2"
-	defaultControlPlaneBackupPolicyID = "backup_policy_control_plane_db_default"
-	backupUsageCloudflareR2PriceCode  = "cloudflare-r2-standard-storage"
-	defaultBackupDueScannerLimit      = 100
-	defaultBackupRunHistoryLimit      = 100
-	defaultBackupArtifactHistoryLimit = 100
-	defaultBackupRestorePlanListLimit = 100
-	defaultBackupRestoreRunListLimit  = 100
+	defaultBackupBackendID             = "backup_backend_fugue_default_r2"
+	defaultControlPlaneBackupPolicyID  = "backup_policy_control_plane_db_default"
+	backupUsageCloudflareR2PriceCode   = "cloudflare-r2-standard-storage"
+	defaultBackupDueScannerLimit       = 100
+	defaultBackupRunHistoryLimit       = 100
+	defaultBackupArtifactHistoryLimit  = 100
+	defaultBackupRestorePlanListLimit  = 100
+	defaultBackupRestoreRunListLimit   = 100
+	backupPolicyScheduleHourlyShortcut = "@hourly"
 )
 
 type BackupPolicyFilter struct {
@@ -280,12 +280,7 @@ func ensureDefaultBackupPolicyInState(state *model.State) {
 	})
 	index := findBackupPolicy(state, policy.ID)
 	if index < 0 {
-		if next, err := nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour)); err == nil {
-			policy.NextRunAt = next
-		} else {
-			policy.Status = model.BackupPolicyStatusError
-			policy.DisabledReason = "invalid backup schedule: " + err.Error()
-		}
+		policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour))
 		state.BackupPolicies = append(state.BackupPolicies, policy)
 		return
 	}
@@ -318,12 +313,7 @@ func ensureDefaultBackupPolicyInState(state *model.State) {
 		existing.Retention.ProtectLatest = existing.RetainCount
 	}
 	if existing.NextRunAt == nil {
-		if next, err := nextBackupRunAfter(existing.Schedule, now.Add(-time.Hour)); err == nil {
-			existing.NextRunAt = next
-		} else {
-			existing.Status = model.BackupPolicyStatusError
-			existing.DisabledReason = "invalid backup schedule: " + err.Error()
-		}
+		existing.NextRunAt = nextBackupRunAfter(existing.Schedule, now.Add(-time.Hour))
 	}
 	existing.UpdatedAt = now
 	state.BackupPolicies[index] = model.NormalizeBackupPolicy(existing)
@@ -605,16 +595,8 @@ func (s *Store) GetBackupPolicy(idOrName, tenantID string, platformAdmin bool) (
 
 func (s *Store) UpsertBackupPolicy(policy model.BackupPolicy) (model.BackupPolicy, error) {
 	policy = model.NormalizeBackupPolicy(policy)
-	if policy.Schedule == "" {
-		policy.Schedule = model.BackupDefaultSchedule
-	}
 	if policy.Name == "" || policy.Target.Type == "" {
 		return model.BackupPolicy{}, ErrInvalidInput
-	}
-	if policy.Enabled {
-		if err := backupschedule.Validate(policy.Schedule); err != nil {
-			return model.BackupPolicy{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-		}
 	}
 	if s.usingDatabase() {
 		return s.pgUpsertBackupPolicy(policy)
@@ -629,22 +611,13 @@ func (s *Store) UpsertBackupPolicy(policy model.BackupPolicy) (model.BackupPolic
 			policy.CreatedAt = now
 		}
 		policy.UpdatedAt = now
+		if policy.NextRunAt == nil && policy.Enabled && policy.Schedule != "" {
+			policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now)
+		}
 		if policy.BackendID != "" && findBackupBackend(state, policy.BackendID) < 0 {
 			return ErrNotFound
 		}
 		index := findBackupPolicy(state, policy.ID)
-		if index >= 0 && state.BackupPolicies[index].Schedule != policy.Schedule {
-			policy.NextRunAt = nil
-		}
-		if policy.Enabled && policy.NextRunAt == nil {
-			next, err := nextBackupRunAfter(policy.Schedule, now)
-			if err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			policy.NextRunAt = next
-		} else if !policy.Enabled {
-			policy.NextRunAt = nil
-		}
 		if index < 0 {
 			if findBackupPolicyBySlug(state, policy.TenantID, policy.ProjectID, policy.AppID, policy.Slug) >= 0 {
 				return ErrConflict
@@ -678,9 +651,6 @@ func (s *Store) SetBackupPolicyEnabled(idOrName, tenantID string, platformAdmin 
 		policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
 		policy.Enabled = enabled
 		if enabled {
-			if err := backupschedule.Validate(policy.Schedule); err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
 			if policy.BackendID == "" {
 				policy.Status = model.BackupPolicyStatusBlockedNoBackend
 				policy.DisabledReason = "backup backend is not configured"
@@ -688,11 +658,7 @@ func (s *Store) SetBackupPolicyEnabled(idOrName, tenantID string, platformAdmin 
 				policy.Status = model.BackupPolicyStatusActive
 				policy.DisabledReason = ""
 			}
-			next, err := nextBackupRunAfter(policy.Schedule, now)
-			if err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			policy.NextRunAt = next
+			policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now)
 		} else {
 			policy.Status = model.BackupPolicyStatusDisabled
 			policy.DisabledReason = strings.TrimSpace(reason)
@@ -725,11 +691,7 @@ func (s *Store) ListDueBackupPolicies(now time.Time, limit int) ([]model.BackupP
 			}
 			dueAt := policy.NextRunAt
 			if dueAt == nil {
-				var err error
-				dueAt, err = nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour))
-				if err != nil {
-					continue
-				}
+				dueAt = nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour))
 			}
 			if dueAt == nil || dueAt.After(now) {
 				continue
@@ -771,9 +733,6 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 			if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
 				return ErrConflict
 			}
-			if err := validateBackupRunRolloutCompatibility(policy.Schedule, run); err != nil {
-				return err
-			}
 			if run.TenantID == "" {
 				run.TenantID = policy.TenantID
 			}
@@ -810,18 +769,6 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 		if run.CreatedAt.IsZero() {
 			run.CreatedAt = now
 		}
-		var policyNextRunAt *time.Time
-		if run.PolicyID != "" {
-			index := findBackupPolicy(state, run.PolicyID)
-			if index < 0 {
-				return ErrNotFound
-			}
-			next, err := nextSupportedBackupRunAfter(state.BackupPolicies[index].Schedule, now)
-			if err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			policyNextRunAt = next
-		}
 		run.UpdatedAt = now
 		run = model.NormalizeBackupRun(run)
 		state.BackupRuns = append(state.BackupRuns, run)
@@ -830,7 +777,7 @@ func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
 				policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
 				policy.LastRunID = run.ID
 				policy.LastRunAt = &now
-				policy.NextRunAt = policyNextRunAt
+				policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now)
 				policy.UpdatedAt = now
 				state.BackupPolicies[index] = policy
 			}
@@ -1332,19 +1279,19 @@ func applyBackupRunUpdate(run *model.BackupRun, update BackupRunUpdate) {
 	}
 }
 
-func nextBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
+func nextBackupRunAfter(schedule string, after time.Time) *time.Time {
 	schedule = strings.TrimSpace(schedule)
 	if schedule == "" {
-		return nil, nil
+		return nil
 	}
 	if after.IsZero() {
 		after = time.Now().UTC()
 	}
 	after = after.UTC()
 	switch schedule {
-	case "@hourly", model.BackupDefaultSchedule:
+	case backupPolicyScheduleHourlyShortcut, model.BackupDefaultSchedule:
 		next := after.Truncate(time.Hour).Add(time.Hour)
-		return &next, nil
+		return &next
 	}
 	fields := strings.Fields(schedule)
 	if len(fields) == 5 && strings.HasPrefix(fields[0], "*/") && fields[1] == "*" && fields[2] == "*" && fields[3] == "*" && fields[4] == "*" {
@@ -1359,7 +1306,7 @@ func nextBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
 				nextMinute = 0
 			}
 			next = next.Add(time.Duration(nextMinute) * time.Minute)
-			return &next, nil
+			return &next
 		}
 	}
 	if len(fields) == 5 && fields[0] != "*" && fields[1] == "*" && fields[2] == "*" && fields[3] == "*" && fields[4] == "*" {
@@ -1369,32 +1316,10 @@ func nextBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
 			if !next.After(after) {
 				next = next.Add(time.Hour)
 			}
-			return &next, nil
+			return &next
 		}
 	}
-	return nil, nil
-}
-
-func nextSupportedBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
-	next, err := backupschedule.Next(schedule, after)
-	if err != nil {
-		return nil, err
-	}
-	return &next, nil
-}
-
-func validateBackupRunRolloutCompatibility(schedule string, run model.BackupRun) error {
-	legacyNext, err := nextBackupRunAfter(schedule, time.Now().UTC())
-	if err != nil || legacyNext != nil {
-		return err
-	}
-	if _, err := nextSupportedBackupRunAfter(schedule, time.Now().UTC()); err != nil {
-		return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-	}
-	if run.RequestedByType == "system" && (run.RequestedByID == "backup-scheduler" || run.RequestedByID == "backup-retry") {
-		return nil
-	}
-	return ErrConflict
+	return nil
 }
 
 func parsePositiveInt(raw string) (int, error) {
@@ -2380,11 +2305,7 @@ func (s *Store) pgEnsureDefaultBackupPolicy() error {
 		UpdatedAt: now,
 	})
 	if policy.NextRunAt == nil {
-		next, err := nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour))
-		if err != nil {
-			return fmt.Errorf("initialize default backup schedule: %w", err)
-		}
-		policy.NextRunAt = next
+		policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour))
 	}
 	targetJSON, err := marshalJSON(policy.Target)
 	if err != nil {
@@ -2565,17 +2486,6 @@ func (s *Store) pgUpsertBackupPolicy(policy model.BackupPolicy) (model.BackupPol
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	policy = model.NormalizeBackupPolicy(policy)
-	if policy.Schedule == "" {
-		policy.Schedule = model.BackupDefaultSchedule
-	}
-	var freshNextRunAt *time.Time
-	if policy.Enabled {
-		var scheduleErr error
-		freshNextRunAt, scheduleErr = nextBackupRunAfter(policy.Schedule, time.Now().UTC())
-		if scheduleErr != nil {
-			return model.BackupPolicy{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, scheduleErr)
-		}
-	}
 	if policy.ID == "" {
 		policy.ID = model.NewID("backup_policy")
 	}
@@ -2584,10 +2494,8 @@ func (s *Store) pgUpsertBackupPolicy(policy model.BackupPolicy) (model.BackupPol
 		policy.CreatedAt = now
 	}
 	policy.UpdatedAt = now
-	if policy.Enabled && policy.NextRunAt == nil {
-		policy.NextRunAt = freshNextRunAt
-	} else if !policy.Enabled {
-		policy.NextRunAt = nil
+	if policy.NextRunAt == nil && policy.Enabled && policy.Schedule != "" {
+		policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now)
 	}
 	targetJSON, err := marshalJSON(policy.Target)
 	if err != nil {
@@ -2620,13 +2528,9 @@ ON CONFLICT (id) DO UPDATE SET
 	retain_count = EXCLUDED.retain_count,
 	retention_json = EXCLUDED.retention_json,
 	version = EXCLUDED.version,
-	next_run_at = CASE
-		WHEN EXCLUDED.enabled = FALSE THEN NULL
-		WHEN fugue_backup_policies.schedule IS DISTINCT FROM EXCLUDED.schedule THEN $29
-		ELSE EXCLUDED.next_run_at
-	END,
+	next_run_at = EXCLUDED.next_run_at,
 	updated_at = EXCLUDED.updated_at
-RETURNING `+backupPolicyReturningColumns(), policy.ID, nullIfEmpty(policy.TenantID), nullIfEmpty(policy.ProjectID), nullIfEmpty(policy.AppID), policy.Name, policy.Slug, policy.Scope, policy.Target.Type, nullIfEmpty(policy.Target.TenantID), nullIfEmpty(policy.Target.ProjectID), nullIfEmpty(policy.Target.AppID), targetJSON, policy.BackendID, policy.Enabled, policy.Status, policy.DisabledReason, policy.Schedule, policy.RetainCount, retentionJSON, policy.Version, policy.LastRunID, policy.LastSuccessfulRunID, policy.LastRunAt, policy.LastSuccessfulAt, policy.NextRunAt, policy.CreatedBy, policy.CreatedAt, policy.UpdatedAt, freshNextRunAt))
+RETURNING `+backupPolicyReturningColumns(), policy.ID, nullIfEmpty(policy.TenantID), nullIfEmpty(policy.ProjectID), nullIfEmpty(policy.AppID), policy.Name, policy.Slug, policy.Scope, policy.Target.Type, nullIfEmpty(policy.Target.TenantID), nullIfEmpty(policy.Target.ProjectID), nullIfEmpty(policy.Target.AppID), targetJSON, policy.BackendID, policy.Enabled, policy.Status, policy.DisabledReason, policy.Schedule, policy.RetainCount, retentionJSON, policy.Version, policy.LastRunID, policy.LastSuccessfulRunID, policy.LastRunAt, policy.LastSuccessfulAt, policy.NextRunAt, policy.CreatedBy, policy.CreatedAt, policy.UpdatedAt))
 }
 
 func (s *Store) pgSetBackupPolicyEnabled(idOrName, tenantID string, platformAdmin bool, enabled bool, reason string) (model.BackupPolicy, error) {
@@ -2637,9 +2541,6 @@ func (s *Store) pgSetBackupPolicyEnabled(idOrName, tenantID string, platformAdmi
 	now := time.Now().UTC()
 	policy.Enabled = enabled
 	if enabled {
-		if err := backupschedule.Validate(policy.Schedule); err != nil {
-			return model.BackupPolicy{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-		}
 		if policy.BackendID == "" {
 			policy.Status = model.BackupPolicyStatusBlockedNoBackend
 			policy.DisabledReason = "backup backend is not configured"
@@ -2647,11 +2548,7 @@ func (s *Store) pgSetBackupPolicyEnabled(idOrName, tenantID string, platformAdmi
 			policy.Status = model.BackupPolicyStatusActive
 			policy.DisabledReason = ""
 		}
-		next, err := nextBackupRunAfter(policy.Schedule, now)
-		if err != nil {
-			return model.BackupPolicy{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-		}
-		policy.NextRunAt = next
+		policy.NextRunAt = nextBackupRunAfter(policy.Schedule, now)
 	} else {
 		policy.Status = model.BackupPolicyStatusDisabled
 		policy.DisabledReason = strings.TrimSpace(reason)
@@ -2703,9 +2600,6 @@ func (s *Store) pgCreateBackupRun(run model.BackupRun) (model.BackupRun, error) 
 		if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
 			return model.BackupRun{}, ErrConflict
 		}
-		if err := validateBackupRunRolloutCompatibility(policy.Schedule, run); err != nil {
-			return model.BackupRun{}, err
-		}
 		if run.TenantID == "" {
 			run.TenantID = policy.TenantID
 		}
@@ -2756,11 +2650,8 @@ RETURNING `+backupRunReturningColumns(), run.ID, run.PolicyID, nullIfEmpty(run.T
 		return model.BackupRun{}, mapDBErr(err)
 	}
 	if run.PolicyID != "" {
-		next, err := nextSupportedBackupRunAfter(policySchedule, now)
-		if err != nil {
-			return model.BackupRun{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE fugue_backup_policies SET last_run_id = $2, last_run_at = $3, next_run_at = $4, updated_at = $3 WHERE id = $1`, run.PolicyID, run.ID, now, next); err != nil {
+		next := nextBackupRunAfter(policySchedule, now)
+		if _, err := tx.ExecContext(ctx, `UPDATE fugue_backup_policies SET last_run_id = $2, last_run_at = $3, next_run_at = COALESCE($4, next_run_at), updated_at = $3 WHERE id = $1`, run.PolicyID, run.ID, now, next); err != nil {
 			return model.BackupRun{}, mapDBErr(err)
 		}
 	}
