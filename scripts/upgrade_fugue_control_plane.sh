@@ -350,6 +350,9 @@ NODE_LOCAL_DNS_PRESERVED_MODE=""
 NODE_LOCAL_DNS_PRESERVED_PODS_JSON="[]"
 NODE_LOCAL_DNS_PRESERVED_DAEMONSET_JSON=""
 NODE_LOCAL_DNS_SPLIT_COHORT="false"
+IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
+IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
+IMAGE_CACHE_ONDELETE_STRATEGY_MIGRATION="false"
 
 release_changed_files() {
   if [[ -n "${RELEASE_CHANGED_FILES_EFFECTIVE:-}" ]]; then
@@ -1118,8 +1121,9 @@ release_diff_old_ref() {
   local ref="${FUGUE_RELEASE_BEFORE_SHA:-${BEFORE_SHA:-}}"
 
   ref="$(trim_field "${ref}")"
-  if [[ -n "${ref}" && "${ref}" != "0000000000000000000000000000000000000000" ]] &&
-    git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null; then
+  if [[ -n "${ref}" ]]; then
+    [[ "${ref}" != "0000000000000000000000000000000000000000" ]] || return 1
+    git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null || return 1
     printf '%s\n' "${ref}"
     return 0
   fi
@@ -1131,12 +1135,35 @@ release_diff_new_ref() {
   local ref="${FUGUE_RELEASE_AFTER_SHA:-${AFTER_SHA:-${GITHUB_SHA:-}}}"
 
   ref="$(trim_field "${ref}")"
-  if [[ -n "${ref}" ]] && git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null; then
+  if [[ -n "${ref}" ]]; then
+    git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null || return 1
     printf '%s\n' "${ref}"
     return 0
   fi
 
   git -C "${REPO_ROOT}" rev-parse --verify HEAD 2>/dev/null
+}
+
+release_diff_base_refs() {
+  local raw="${FUGUE_RELEASE_BASE_REFS:-}"
+  local ref=""
+  local normalized=""
+
+  if [[ -z "$(trim_field "${raw}")" ]]; then
+    release_diff_old_ref
+    return
+  fi
+
+  while IFS= read -r ref; do
+    ref="$(trim_field "${ref}")"
+    [[ -n "${ref}" ]] || continue
+    [[ "${ref}" != "0000000000000000000000000000000000000000" ]] || return 1
+    git -C "${REPO_ROOT}" cat-file -e "${ref}^{commit}" 2>/dev/null || return 1
+    ref="$(git -C "${REPO_ROOT}" rev-parse "${ref}^{commit}")" || return 1
+    normalized+="${normalized:+$'\n'}${ref}"
+  done < <(printf '%s\n' "${raw}" | tr ',' '\n')
+  [[ -n "$(trim_field "${normalized}")" ]] || return 1
+  printf '%s\n' "${normalized}" | sort -u
 }
 
 values_file_changes_limited_to_yaml_path() {
@@ -1404,6 +1431,194 @@ node_local_build_plane_resource_values_changed() {
   done < <(release_changed_files)
 
   [[ "${saw_resource_values}" == "true" ]]
+}
+
+node_local_build_plane_shared_manifest_changed() {
+  local file=""
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      deploy/helm/fugue/templates/_helpers.tpl|\
+      deploy/helm/fugue/templates/secret.yaml)
+        return 0
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  return 1
+}
+
+node_local_build_plane_any_values_changed() {
+  release_changed_files | grep -Eq '^deploy/helm/fugue/values(-production-ha)?\.yaml$'
+}
+
+file_sha256_matches() {
+  local file="$1"
+  local expected="$2"
+
+  [[ -r "${file}" && "${expected}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  python3 - "${file}" "${expected}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+actual = hashlib.sha256(path.read_bytes()).hexdigest()
+raise SystemExit(0 if actual == expected else 1)
+PY
+}
+
+image_cache_ondelete_strategy_template_migration_only() {
+  local old_ref new_ref
+  local template_path="deploy/helm/fugue/templates/image-cache-daemonset.yaml"
+  local old_template=""
+  local new_template=""
+
+  old_ref="$(release_diff_old_ref)" || return 1
+  new_ref="$(release_diff_new_ref)" || return 1
+  old_template="$(git -C "${REPO_ROOT}" show "${old_ref}:${template_path}")" || return 1
+  new_template="$(git -C "${REPO_ROOT}" show "${new_ref}:${template_path}")" || return 1
+  OLD_TEMPLATE="${old_template}" NEW_TEMPLATE="${new_template}" python3 -c '
+import os
+
+old = os.environ["OLD_TEMPLATE"]
+new = os.environ["NEW_TEMPLATE"]
+old_preamble = """{{- if .Values.imageCache.enabled }}
+apiVersion: apps/v1"""
+new_preamble = """{{- if .Values.imageCache.enabled }}
+{{- $updateStrategyType := required \"imageCache.updateStrategy.type is required\" .Values.imageCache.updateStrategy.type -}}
+{{- if not (has $updateStrategyType (list \"OnDelete\" \"RollingUpdate\")) -}}
+{{- fail \"imageCache.updateStrategy.type must be OnDelete or RollingUpdate\" -}}
+{{- end -}}
+apiVersion: apps/v1"""
+old_strategy = """  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0"""
+new_strategy = """  updateStrategy:
+    type: {{ $updateStrategyType }}
+    {{- if eq $updateStrategyType \"RollingUpdate\" }}
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+    {{- end }}"""
+if old.count(old_preamble) != 1 or old.count(old_strategy) != 1:
+    raise SystemExit(1)
+expected = old.replace(old_preamble, new_preamble, 1).replace(old_strategy, new_strategy, 1)
+raise SystemExit(0 if new == expected else 1)
+'
+}
+
+image_cache_strategy_target_fingerprints_match() {
+  file_sha256_matches \
+    "${REPO_ROOT}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" \
+    "75fdaa91fff878ca633d25671c3a2ae4c06753cb58e3ed9b9804176c4de145f7" || return 1
+  file_sha256_matches \
+    "${REPO_ROOT}/deploy/helm/fugue/values.yaml" \
+    "052d042ecc31f96784cf1323bd67ccf2c1d47d6490cf7d567343536f4663dcd8" || return 1
+  CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" EXPECTED_SHA256="9e0bb3c332b3544f7d90f174ace55521aec218d58c977c92b616434448cb14e7" python3 -c '
+import hashlib
+import os
+from pathlib import Path
+
+root = Path(os.environ["CHART_ROOT"])
+digest = hashlib.sha256()
+files = sorted(
+    path for path in root.rglob("*")
+    if path.is_file() and path.name != "chart_test.go" and not path.name.endswith("_test.go")
+)
+if not files:
+    raise SystemExit(1)
+for path in files:
+    relative = path.relative_to(root).as_posix().encode()
+    content = path.read_bytes()
+    digest.update(len(relative).to_bytes(4, "big"))
+    digest.update(relative)
+    digest.update(len(content).to_bytes(8, "big"))
+    digest.update(content)
+raise SystemExit(0 if digest.hexdigest() == os.environ["EXPECTED_SHA256"] else 1)
+'
+}
+
+image_cache_strategy_migration_already_applied() {
+  local live_value=""
+  local state=""
+  local generation observed strategy max_unavailable max_surge
+
+  [[ "${FUGUE_IMAGE_CACHE_ENABLED:-false}" == "true" ]] || return 1
+  image_cache_strategy_target_fingerprints_match || return 1
+  live_value="$(trim_field "$(live_helm_release_value imageCache.updateStrategy.type || true)")"
+  [[ "${live_value}" == "OnDelete" || "${live_value}" == "RollingUpdate" ]] || return 1
+  state="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-image-cache" \
+    -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.spec.updateStrategy.type}{"\t"}{.spec.updateStrategy.rollingUpdate.maxUnavailable}{"\t"}{.spec.updateStrategy.rollingUpdate.maxSurge}')" || return 1
+  IFS=$'\t' read -r generation observed strategy max_unavailable max_surge <<<"${state}"
+  [[ -n "${generation}" && "${generation}" == "${observed}" && "${strategy}" == "${live_value}" ]] || return 1
+  if [[ "${strategy}" == "OnDelete" ]]; then
+    [[ -z "${max_unavailable}" && -z "${max_surge}" ]]
+  else
+    [[ "${max_unavailable}" == "1" && "${max_surge}" == "0" ]]
+  fi
+}
+
+image_cache_ondelete_strategy_migration_allowed() {
+  local file=""
+  local saw_template="false"
+  local saw_values="false"
+  local baseline_ref=""
+  local new_ref=""
+  local exact_baseline_found="false"
+
+  node_local_dns_split_release_enabled || return 1
+  [[ "${FUGUE_IMAGE_CACHE_ENABLED:-false}" == "true" ]] || return 1
+  new_ref="$(release_diff_new_ref)" || return 1
+  [[ -n "${new_ref}" ]] || return 1
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    case "${file}" in
+      deploy/helm/fugue/templates/image-cache-daemonset.yaml)
+        saw_template="true"
+        ;;
+      deploy/helm/fugue/values.yaml)
+        saw_values="true"
+        ;;
+      deploy/helm/fugue/chart_test.go)
+        ;;
+      deploy/helm/fugue/values-production-ha.yaml|\
+      cmd/fugue-image-cache/*|\
+      Dockerfile.image-cache)
+        return 1
+        ;;
+      deploy/helm/fugue/*)
+        return 1
+        ;;
+    esac
+  done < <(release_changed_files)
+
+  [[ "${saw_template}" == "true" && "${saw_values}" == "true" ]] || return 1
+  while IFS= read -r baseline_ref; do
+    baseline_ref="$(trim_field "${baseline_ref}")"
+    [[ -n "${baseline_ref}" && "${baseline_ref}" != "${new_ref}" ]] || continue
+    if FUGUE_RELEASE_BEFORE_SHA="${baseline_ref}" FUGUE_RELEASE_AFTER_SHA="${new_ref}" \
+        image_cache_ondelete_strategy_template_migration_only && \
+      FUGUE_RELEASE_BEFORE_SHA="${baseline_ref}" FUGUE_RELEASE_AFTER_SHA="${new_ref}" \
+        values_file_changes_limited_to_yaml_path "deploy/helm/fugue/values.yaml" "imageCache.updateStrategy" && \
+      ! image_cache_source_changed_between_refs "${baseline_ref}" "${new_ref}"; then
+      exact_baseline_found="true"
+      break
+    fi
+  done < <(release_diff_base_refs)
+  [[ "${exact_baseline_found}" == "true" ]] || return 1
+
+  # This is intentionally a one-time, fail-closed migration. The whole-file
+  # fingerprints prevent an unrelated edit in either shared chart file from
+  # piggybacking on the narrow updateStrategy exception.
+  image_cache_strategy_target_fingerprints_match
 }
 
 chart_image_cache_resources_json() {
@@ -1701,6 +1916,7 @@ node_local_build_plane_preflight_override_allowed() {
       deploy/helm/fugue/values-production-ha.yaml)
         values_file_changes_limited_to_yaml_path \
           "${file}" \
+          "imageCache.updateStrategy" \
           "imageCache.resources" \
           "imageStore.imageCacheInventory" \
           "imageStore.orphanPrune" || return 1
@@ -3513,13 +3729,16 @@ preserve_public_data_plane_from_live() {
 preserve_node_local_build_plane_from_live() {
   local preserve_image="${1:-true}"
   local preserve_resources="${2:-true}"
+  local strict="${3:-false}"
   local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
   local image_cache_resources
 
   NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 
   if [[ "${preserve_image}" == "true" ]]; then
-    preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG || true
+    if ! preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG; then
+      [[ "${strict}" == "true" ]] && return 1
+    fi
   fi
 
   if [[ "${preserve_resources}" == "true" ]]; then
@@ -3527,6 +3746,9 @@ preserve_node_local_build_plane_from_live() {
     if [[ -n "${image_cache_resources}" ]]; then
       NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
       log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
+    elif [[ "${strict}" == "true" ]]; then
+      log "node-local build-plane strict preserve failed; live ${image_cache_ds}/image-cache resources are empty or unreadable"
+      return 1
     fi
   fi
 }
@@ -3682,6 +3904,792 @@ rollout_daemonset_status() {
 
     sleep 2
   done
+}
+
+image_cache_current_controller_revision() {
+  local daemonset_name="$1"
+  local daemonset_json=""
+  local controller_revisions_json=""
+
+  daemonset_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" -o json)" || return 1
+  controller_revisions_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
+  {
+    printf '%s\n' "${daemonset_json}"
+    printf '%s\n' "${controller_revisions_json}"
+  } | python3 -c '
+import copy
+import json
+import sys
+
+decoder = json.JSONDecoder()
+raw = sys.stdin.read()
+documents = []
+offset = 0
+while offset < len(raw):
+    while offset < len(raw) and raw[offset].isspace():
+        offset += 1
+    if offset >= len(raw):
+        break
+    document, offset = decoder.raw_decode(raw, offset)
+    documents.append(document)
+if len(documents) != 2:
+    raise SystemExit(1)
+
+daemonset, revision_list = documents
+metadata = daemonset.get("metadata") or {}
+status = daemonset.get("status") or {}
+template = ((daemonset.get("spec") or {}).get("template") or {})
+daemonset_name = str(metadata.get("name") or "")
+daemonset_uid = str(metadata.get("uid") or "")
+daemonset_namespace = str(metadata.get("namespace") or "")
+if (
+    not daemonset_name
+    or not daemonset_uid
+    or not daemonset_namespace
+    or not isinstance(template, dict)
+    or not template
+    or str(metadata.get("generation") or "") != str(status.get("observedGeneration") or "")
+    or not isinstance(revision_list, dict)
+    or not isinstance(revision_list.get("items"), list)
+):
+    raise SystemExit(1)
+
+matches = []
+for revision in revision_list["items"]:
+    if not isinstance(revision, dict):
+        raise SystemExit(1)
+    revision_metadata = revision.get("metadata") or {}
+    controllers = [
+        owner
+        for owner in revision_metadata.get("ownerReferences") or []
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    if (
+        str(revision.get("apiVersion") or "") != "apps/v1"
+        or str(revision.get("kind") or "") != "ControllerRevision"
+        or str(revision_metadata.get("namespace") or "") != daemonset_namespace
+        or len(controllers) != 1
+    ):
+        continue
+    controller = controllers[0]
+    if (
+        str(controller.get("apiVersion") or "") != "apps/v1"
+        or str(controller.get("kind") or "") != "DaemonSet"
+        or str(controller.get("name") or "") != daemonset_name
+        or str(controller.get("uid") or "") != daemonset_uid
+    ):
+        continue
+    revision_template = copy.deepcopy((((revision.get("data") or {}).get("spec") or {}).get("template")))
+    if not isinstance(revision_template, dict) or revision_template.pop("$patch", None) != "replace":
+        continue
+    if revision_template == template:
+        matches.append(revision)
+
+if len(matches) != 1:
+    raise SystemExit(1)
+revision_metadata = matches[0].get("metadata") or {}
+revision_name = str(revision_metadata.get("name") or "")
+revision_hash = str((revision_metadata.get("labels") or {}).get("controller-revision-hash") or "")
+if not revision_hash or revision_name != daemonset_name + "-" + revision_hash:
+    raise SystemExit(1)
+print(revision_hash)
+'
+}
+
+image_cache_rollout_plan_json() {
+  local daemonset_name="$1"
+  local target_revision="$2"
+  local daemonset_json=""
+  local controller_revisions_json=""
+  local pods_json=""
+  local nodes_json=""
+
+  daemonset_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" -o json)" || return 1
+  controller_revisions_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
+  pods_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
+  nodes_json="$(${KUBECTL} get nodes -o json)" || return 1
+  DS_JSON="${daemonset_json}" REVISIONS_JSON="${controller_revisions_json}" PODS_JSON="${pods_json}" NODES_JSON="${nodes_json}" \
+    EXPECTED_DS="${daemonset_name}" TARGET_REVISION="${target_revision}" \
+    PRESERVED_NODES="${NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES}" python3 -c '
+import json
+import os
+
+def reject(reason):
+    raise SystemExit("image-cache offline rollout rejected: " + reason)
+
+try:
+    daemonset = json.loads(os.environ["DS_JSON"])
+    revision_list = json.loads(os.environ["REVISIONS_JSON"])
+    pod_list = json.loads(os.environ["PODS_JSON"])
+    node_list = json.loads(os.environ["NODES_JSON"])
+except json.JSONDecodeError:
+    reject("cluster inventory JSON is invalid")
+
+preserved = [item.strip() for item in os.environ["PRESERVED_NODES"].splitlines() if item.strip()]
+if not preserved or len(preserved) != len(set(preserved)):
+    reject("preserved node cohort is empty or duplicated")
+preserved_set = set(preserved)
+target_revision = os.environ["TARGET_REVISION"].strip()
+if not target_revision:
+    reject("target ControllerRevision is empty")
+
+metadata = daemonset.get("metadata") or {}
+spec = daemonset.get("spec") or {}
+status = daemonset.get("status") or {}
+template = spec.get("template") or {}
+template_spec = template.get("spec") or {}
+annotations = metadata.get("annotations")
+if (
+    str(daemonset.get("apiVersion") or "") != "apps/v1"
+    or str(daemonset.get("kind") or "") != "DaemonSet"
+    or str(metadata.get("name") or "") != os.environ["EXPECTED_DS"]
+    or not str(metadata.get("uid") or "")
+    or not str(metadata.get("resourceVersion") or "")
+    or str(metadata.get("generation") or "") != str(status.get("observedGeneration") or "")
+    or not isinstance(annotations, dict)
+):
+    reject("DaemonSet identity or observed generation is invalid")
+if template_spec.get("nodeSelector") not in (None, {}) or template_spec.get("affinity") not in (None, {}):
+    reject("DaemonSet has an unsupported bounded node membership")
+containers = template_spec.get("containers") or []
+if len(containers) != 1 or containers[0].get("name") != "image-cache" or not containers[0].get("image"):
+    reject("DaemonSet image-cache container is invalid")
+ports = containers[0].get("ports") or []
+registry_ports = [
+    item for item in ports
+    if isinstance(item, dict) and item.get("name") == "registry" and item.get("protocol", "TCP") == "TCP"
+]
+if len(registry_ports) != 1 or registry_ports[0].get("containerPort") != registry_ports[0].get("hostPort"):
+    reject("DaemonSet registry hostPort is invalid")
+registry_port = registry_ports[0].get("hostPort")
+if type(registry_port) is not int or registry_port <= 0 or registry_port > 65535:
+    reject("DaemonSet registry port is invalid")
+
+if not isinstance(revision_list, dict) or not isinstance(revision_list.get("items"), list):
+    reject("ControllerRevision inventory is invalid")
+daemonset_uid = str(metadata.get("uid") or "")
+known_revisions = set()
+for revision in revision_list["items"]:
+    if not isinstance(revision, dict):
+        reject("ControllerRevision inventory contains a non-object")
+    revision_metadata = revision.get("metadata") or {}
+    owners = [
+        owner for owner in revision_metadata.get("ownerReferences") or []
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    if len(owners) != 1:
+        continue
+    owner = owners[0]
+    if (
+        revision.get("apiVersion") != "apps/v1"
+        or revision.get("kind") != "ControllerRevision"
+        or owner.get("apiVersion") != "apps/v1"
+        or owner.get("kind") != "DaemonSet"
+        or owner.get("name") != os.environ["EXPECTED_DS"]
+        or str(owner.get("uid") or "") != daemonset_uid
+    ):
+        continue
+    revision_hash = str((revision_metadata.get("labels") or {}).get("controller-revision-hash") or "")
+    if not revision_hash or str(revision_metadata.get("name") or "") != os.environ["EXPECTED_DS"] + "-" + revision_hash:
+        reject("owned ControllerRevision hash identity is invalid")
+    known_revisions.add(revision_hash)
+if target_revision not in known_revisions:
+    reject("target revision is not owned by the current DaemonSet")
+
+strategy = spec.get("updateStrategy") or {}
+strategy_type = str(strategy.get("type") or "")
+rolling = strategy.get("rollingUpdate") or {}
+rolling_exact = strategy_type == "RollingUpdate" and rolling.get("maxUnavailable") == 1 and rolling.get("maxSurge") == 0
+ondelete = strategy_type == "OnDelete" and set(strategy) == {"type"}
+
+legacy_transaction_annotations = {
+    "fugue.io/image-cache-rollout-transaction",
+    "fugue.io/image-cache-rollout-target-revision",
+    "fugue.io/image-cache-rollout-node",
+    "fugue.io/image-cache-rollout-old-pod-uid",
+    "fugue.io/image-cache-rollout-original-strategy",
+}
+if legacy_transaction_annotations.intersection(annotations):
+    reject("legacy rollout transaction annotations require operator review")
+if not (rolling_exact or ondelete):
+    reject("DaemonSet must start from clean OnDelete or RollingUpdate maxUnavailable=1 maxSurge=0")
+
+nodes = {}
+for node in node_list.get("items") or []:
+    name = str((node.get("metadata") or {}).get("name") or "").strip()
+    if not name or name in nodes:
+        reject("node inventory contains an empty or duplicate name")
+    nodes[name] = node
+if not nodes or not preserved_set.issubset(nodes):
+    reject("preserved nodes are absent from the cluster inventory")
+
+pods = []
+for pod in pod_list.get("items") or []:
+    pod_metadata = pod.get("metadata") or {}
+    controllers = [
+        owner for owner in pod_metadata.get("ownerReferences") or []
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    if len(controllers) != 1:
+        continue
+    owner = controllers[0]
+    if (
+        owner.get("apiVersion") != "apps/v1"
+        or owner.get("kind") != "DaemonSet"
+        or owner.get("name") != os.environ["EXPECTED_DS"]
+        or str(owner.get("uid") or "") != daemonset_uid
+    ):
+        continue
+    pod_spec = pod.get("spec") or {}
+    pod_status = pod.get("status") or {}
+    pod_name = str(pod_metadata.get("name") or "")
+    node_name = str(pod_spec.get("nodeName") or "")
+    uid = str(pod_metadata.get("uid") or "")
+    if not pod_name or not node_name or not uid or node_name not in nodes:
+        reject("owned Pod identity is invalid")
+    pod_containers = pod_spec.get("containers") or []
+    if len(pod_containers) != 1 or pod_containers[0].get("name") != "image-cache" or not pod_containers[0].get("image"):
+        reject("owned Pod container spec is invalid")
+    container_statuses = pod_status.get("containerStatuses") or []
+    container_status_valid = len(container_statuses) == 1 and container_statuses[0].get("name") == "image-cache"
+    restart_count = None
+    if container_status_valid:
+        restart_count = container_statuses[0].get("restartCount", 0)
+        if type(restart_count) is not int or restart_count < 0:
+            reject("owned Pod restart count is invalid")
+    ready = any(item.get("type") == "Ready" and item.get("status") == "True" for item in pod_status.get("conditions") or [])
+    pod_revision = str((pod_metadata.get("labels") or {}).get("controller-revision-hash") or "")
+    if pod_revision not in known_revisions:
+        reject("owned Pod revision is empty or unknown: " + pod_name)
+    pods.append({
+        "name": pod_name,
+        "uid": uid,
+        "node": node_name,
+        "revision": pod_revision,
+        "image": str(pod_containers[0].get("image") or ""),
+        "phase": str(pod_status.get("phase") or ""),
+        "ready": ready,
+        "deleting": bool(pod_metadata.get("deletionTimestamp")),
+        "container_status_valid": container_status_valid,
+        "restart_count": restart_count,
+        "pod_ip": str(pod_status.get("podIP") or ""),
+    })
+
+by_node = {}
+for pod in pods:
+    by_node.setdefault(pod["node"], []).append(pod)
+if set(by_node) != set(nodes):
+    reject("DaemonSet Pod nodes do not exactly match the cluster nodes")
+if any(len(items) != 1 for items in by_node.values()):
+    reject("DaemonSet does not have exactly one owned Pod per node")
+
+active = sorted(set(nodes) - preserved_set)
+if not active:
+    reject("active node cohort is empty")
+active_pods = []
+old_active_nodes = []
+updated_total = 0
+for name, node in nodes.items():
+    node_metadata = node.get("metadata") or {}
+    labels = node_metadata.get("labels") or {}
+    node_spec = node.get("spec") or {}
+    node_status = node.get("status") or {}
+    conditions = {str(item.get("type") or ""): str(item.get("status") or "") for item in node_status.get("conditions") or []}
+    taints = node_spec.get("taints") or []
+    pod = by_node[name][0]
+    if pod["revision"] == target_revision:
+        updated_total += 1
+    if name in preserved_set:
+        isolated_taint = any(
+            (item.get("key") == "fugue.io/node-unhealthy" and item.get("effect") == "NoSchedule")
+            or (item.get("key") == "node.kubernetes.io/unreachable" and item.get("effect") in {"NoSchedule", "NoExecute"})
+            for item in taints if isinstance(item, dict)
+        )
+        role_values = [
+            labels.get("fugue.io/role.edge"), labels.get("fugue.io/role.dns"),
+            labels.get("fugue.io/role.app-runtime"), labels.get("fugue.io/role.builder"),
+            labels.get("fugue.io/role.internal-maintenance"),
+        ]
+        if (
+            conditions.get("Ready") == "True"
+            or labels.get("fugue.io/schedulable") != "false"
+            or labels.get("fugue.io/node-health") != "blocked"
+            or any(str(value or "").lower() == "true" for value in role_values)
+            or not isolated_taint
+            or pod["ready"]
+        ):
+            reject("preserved node is not exactly isolated: " + name)
+        continue
+    if (
+        conditions.get("Ready") != "True"
+        or conditions.get("DiskPressure") != "False"
+        or conditions.get("MemoryPressure") != "False"
+        or conditions.get("PIDPressure") != "False"
+        or pod["phase"] != "Running"
+        or not pod["ready"]
+        or pod["deleting"]
+        or not pod["pod_ip"]
+        or not pod["container_status_valid"]
+    ):
+        reject("active node or image-cache Pod is not healthy: " + name)
+    if pod["image"] != str(containers[0].get("image") or "") and pod["revision"] == target_revision:
+        reject("target revision Pod image differs from the DaemonSet template: " + name)
+    if pod["revision"] != target_revision:
+        old_active_nodes.append(name)
+    active_pods.append(pod)
+
+def integer(field, default=0):
+    value = status.get(field, default)
+    if type(value) is not int:
+        reject("DaemonSet status counter is not an integer: " + field)
+    return value
+
+if (
+    integer("desiredNumberScheduled") != len(nodes)
+    or integer("currentNumberScheduled") != len(nodes)
+    or integer("numberReady") != len(active)
+    or integer("numberAvailable") != len(active)
+    or integer("numberUnavailable") != len(preserved)
+    or integer("numberMisscheduled") != 0
+    or integer("updatedNumberScheduled") != updated_total
+):
+    reject("DaemonSet status does not match exact active/preserved Pod state")
+
+print(json.dumps({
+    "daemonset_uid": daemonset_uid,
+    "generation": str(metadata.get("generation") or ""),
+    "resource_version": str(metadata.get("resourceVersion") or ""),
+    "strategy": strategy_type,
+    "transaction": False,
+    "target_revision": target_revision,
+    "target_image": str(containers[0].get("image") or ""),
+    "registry_port": registry_port,
+    "active_nodes": active,
+    "preserved_nodes": sorted(preserved_set),
+    "old_active_nodes": sorted(old_active_nodes),
+    "updated_active_count": sum(1 for pod in active_pods if pod["revision"] == target_revision),
+    "active_pods": sorted(active_pods, key=lambda item: item["node"]),
+    "pods": sorted(pods, key=lambda item: item["node"]),
+}, sort_keys=True, separators=(",", ":")))
+'
+}
+
+image_cache_plan_field() {
+  local plan_json="$1"
+  local field="$2"
+  PLAN_JSON="${plan_json}" PLAN_FIELD="${field}" python3 -c '
+import json
+import os
+value = json.loads(os.environ["PLAN_JSON"])[os.environ["PLAN_FIELD"]]
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif isinstance(value, list):
+    for item in value:
+        print(item)
+else:
+    print(value)
+'
+}
+
+image_cache_bind_plan_to_target() {
+  local daemonset_name="$1"
+  local plan_json="$2"
+  local target_revision="$3"
+  local plan_resource_version=""
+  local current_revision=""
+  local current_resource_version=""
+
+  plan_resource_version="$(image_cache_plan_field "${plan_json}" resource_version)" || return 1
+  [[ -n "${plan_resource_version}" ]] || return 1
+  current_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
+  current_resource_version="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" -o jsonpath='{.metadata.resourceVersion}')" || return 1
+  if [[ "${current_revision}" != "${target_revision}" || "${current_resource_version}" != "${plan_resource_version}" ]]; then
+    log "image-cache DaemonSet changed while binding the rollout plan: expected_revision=${target_revision} current_revision=${current_revision:-unknown} plan_resource_version=${plan_resource_version} current_resource_version=${current_resource_version:-unknown}"
+    return 1
+  fi
+}
+
+image_cache_validate_unchanged_pod_identities() {
+  local before_plan_json="$1"
+  local after_plan_json="$2"
+
+  BEFORE_PLAN_JSON="${before_plan_json}" AFTER_PLAN_JSON="${after_plan_json}" python3 -c '
+import json
+import os
+before = {item["node"]: item for item in json.loads(os.environ["BEFORE_PLAN_JSON"])["pods"]}
+after = {item["node"]: item for item in json.loads(os.environ["AFTER_PLAN_JSON"])["pods"]}
+if set(before) != set(after):
+    raise SystemExit(1)
+for node in before:
+    if before[node]["uid"] != after[node]["uid"] or before[node].get("restart_count") != after[node].get("restart_count"):
+        raise SystemExit(1)
+'
+}
+
+image_cache_probe_endpoint() {
+  local pod_ip="$1"
+  local port="$2"
+  local attempt=1
+  local response=""
+  local status=""
+
+  command_exists curl || return 1
+  while (( attempt <= 3 )); do
+    response="$(curl --noproxy '*' -sS --connect-timeout 5 --max-time 10 -D - -o /dev/null \
+      -w $'\n__FUGUE_STATUS__:%{http_code}\n' "http://${pod_ip}:${port}/v2/" 2>/dev/null || true)"
+    status="$(sed -n 's/^__FUGUE_STATUS__://p' <<<"${response}" | tail -n 1 | tr -d '\r')"
+    if [[ "${status}" == "200" ]] && tr -d '\r' <<<"${response}" | grep -Eiq '^Docker-Distribution-API-Version:[[:space:]]*registry/2\.0[[:space:]]*$'; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+image_cache_probe_active_plan() {
+  local plan_json="$1"
+  local port=""
+  local node_name=""
+  local pod_ip=""
+  local rows=""
+  local expected_count="0"
+  local actual_count="0"
+
+  port="$(image_cache_plan_field "${plan_json}" registry_port)" || return 1
+  rows="$(PLAN_JSON="${plan_json}" python3 -c '
+import json
+import os
+plan = json.loads(os.environ["PLAN_JSON"])
+for pod in plan["active_pods"]:
+    print(str(pod["node"]) + "\t" + str(pod["pod_ip"]))
+')" || return 1
+  expected_count="$(PLAN_JSON="${plan_json}" python3 -c 'import json,os; print(len(json.loads(os.environ["PLAN_JSON"])["active_nodes"]))')" || return 1
+  actual_count="$(awk 'NF {count++} END {print count+0}' <<<"${rows}")"
+  if ! [[ "${expected_count}" =~ ^[1-9][0-9]*$ ]] || [[ "${actual_count}" != "${expected_count}" ]]; then
+    log "image-cache active endpoint inventory is incomplete: expected=${expected_count:-unknown} actual=${actual_count:-unknown}"
+    return 1
+  fi
+  while IFS=$'\t' read -r node_name pod_ip; do
+    [[ -n "${node_name}" && -n "${pod_ip}" ]] || return 1
+    if ! image_cache_probe_endpoint "${pod_ip}" "${port}"; then
+      log "image-cache HTTP /v2/ probe failed on active node ${node_name} podIP=${pod_ip}"
+      return 1
+    fi
+  done <<<"${rows}"
+}
+
+image_cache_wait_strategy_observed() {
+  local daemonset_name="$1"
+  local expected_strategy="$2"
+  local deadline=$((SECONDS + $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")))
+  local state=""
+  local generation=""
+  local observed=""
+  local strategy=""
+  local max_unavailable=""
+  local max_surge=""
+
+  while (( SECONDS < deadline )); do
+    state="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" \
+      -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.spec.updateStrategy.type}{"\t"}{.spec.updateStrategy.rollingUpdate.maxUnavailable}{"\t"}{.spec.updateStrategy.rollingUpdate.maxSurge}' 2>/dev/null || true)"
+    IFS=$'\t' read -r generation observed strategy max_unavailable max_surge <<<"${state}"
+    if [[ -n "${generation}" && "${generation}" == "${observed}" && "${strategy}" == "${expected_strategy}" ]]; then
+      if [[ "${expected_strategy}" == "OnDelete" || ( "${max_unavailable}" == "1" && "${max_surge}" == "0" ) ]]; then
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  log "timed out waiting for image-cache strategy observation: expected=${expected_strategy} generation=${generation:-unknown} observed=${observed:-unknown} strategy=${strategy:-unknown}"
+  return 1
+}
+
+image_cache_patch_clean_ondelete() {
+  local daemonset_name="$1"
+  local resource_version="$2"
+  local patch=""
+
+  [[ -n "${resource_version}" ]] || return 1
+  patch="$(RESOURCE_VERSION="${resource_version}" python3 -c '
+import json
+import os
+print(json.dumps([
+    {"op": "test", "path": "/metadata/resourceVersion", "value": os.environ["RESOURCE_VERSION"]},
+    {"op": "test", "path": "/spec/updateStrategy/type", "value": "RollingUpdate"},
+    {"op": "test", "path": "/spec/updateStrategy/rollingUpdate/maxUnavailable", "value": 1},
+    {"op": "test", "path": "/spec/updateStrategy/rollingUpdate/maxSurge", "value": 0},
+    {"op": "replace", "path": "/spec/updateStrategy", "value": {"type": "OnDelete"}},
+], separators=(",", ":")))
+')" || return 1
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" patch daemonset "${daemonset_name}" --type=json --patch "${patch}" >/dev/null
+}
+
+image_cache_rollback_freeze_snapshot_json() {
+  local daemonset_name="$1"
+  local expected_daemonset_uid="$2"
+  local expected_target_revision="$3"
+  local daemonset_json=""
+  local controller_revisions_json=""
+
+  [[ -n "${expected_daemonset_uid}" && -n "${expected_target_revision}" ]] || return 1
+  daemonset_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" -o json)" || return 1
+  controller_revisions_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
+  DS_JSON="${daemonset_json}" REVISIONS_JSON="${controller_revisions_json}" \
+    EXPECTED_DS="${daemonset_name}" EXPECTED_NAMESPACE="${FUGUE_NAMESPACE}" \
+    EXPECTED_UID="${expected_daemonset_uid}" EXPECTED_TARGET_REVISION="${expected_target_revision}" python3 -c '
+import copy
+import json
+import os
+
+def reject(reason):
+    raise SystemExit("image-cache rollback freeze rejected: " + reason)
+
+try:
+    daemonset = json.loads(os.environ["DS_JSON"])
+    revision_list = json.loads(os.environ["REVISIONS_JSON"])
+except json.JSONDecodeError:
+    reject("cluster inventory JSON is invalid")
+
+metadata = daemonset.get("metadata") or {}
+spec = daemonset.get("spec") or {}
+template = spec.get("template") or {}
+annotations = metadata.get("annotations")
+if (
+    daemonset.get("apiVersion") != "apps/v1"
+    or daemonset.get("kind") != "DaemonSet"
+    or str(metadata.get("name") or "") != os.environ["EXPECTED_DS"]
+    or str(metadata.get("namespace") or "") != os.environ["EXPECTED_NAMESPACE"]
+    or str(metadata.get("uid") or "") != os.environ["EXPECTED_UID"]
+    or not str(metadata.get("resourceVersion") or "")
+    or not str(metadata.get("generation") or "")
+    or not isinstance(template, dict)
+    or not template
+    or not isinstance(annotations, dict)
+):
+    reject("DaemonSet identity is not the pinned pre-Helm object")
+
+legacy_transaction_annotations = {
+    "fugue.io/image-cache-rollout-transaction",
+    "fugue.io/image-cache-rollout-target-revision",
+    "fugue.io/image-cache-rollout-node",
+    "fugue.io/image-cache-rollout-old-pod-uid",
+    "fugue.io/image-cache-rollout-original-strategy",
+}
+if legacy_transaction_annotations.intersection(annotations):
+    reject("legacy rollout transaction annotations require operator review")
+
+strategy = spec.get("updateStrategy") or {}
+strategy_type = str(strategy.get("type") or "")
+rolling = strategy.get("rollingUpdate") or {}
+rolling_exact = strategy_type == "RollingUpdate" and rolling.get("maxUnavailable") == 1 and rolling.get("maxSurge") == 0
+ondelete = strategy_type == "OnDelete" and set(strategy) == {"type"}
+if not (rolling_exact or ondelete):
+    reject("DaemonSet strategy is not clean OnDelete or RollingUpdate 1/0")
+
+if not isinstance(revision_list, dict) or not isinstance(revision_list.get("items"), list):
+    reject("ControllerRevision inventory is invalid")
+matches = []
+for revision in revision_list["items"]:
+    if not isinstance(revision, dict):
+        reject("ControllerRevision inventory contains a non-object")
+    revision_metadata = revision.get("metadata") or {}
+    owners = [
+        owner
+        for owner in revision_metadata.get("ownerReferences") or []
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    revision_hash = str((revision_metadata.get("labels") or {}).get("controller-revision-hash") or "")
+    if (
+        revision.get("apiVersion") != "apps/v1"
+        or revision.get("kind") != "ControllerRevision"
+        or str(revision_metadata.get("namespace") or "") != os.environ["EXPECTED_NAMESPACE"]
+        or revision_hash != os.environ["EXPECTED_TARGET_REVISION"]
+        or str(revision_metadata.get("name") or "") != os.environ["EXPECTED_DS"] + "-" + revision_hash
+        or len(owners) != 1
+    ):
+        continue
+    owner = owners[0]
+    if (
+        owner.get("apiVersion") != "apps/v1"
+        or owner.get("kind") != "DaemonSet"
+        or owner.get("name") != os.environ["EXPECTED_DS"]
+        or str(owner.get("uid") or "") != os.environ["EXPECTED_UID"]
+    ):
+        continue
+    revision_template = copy.deepcopy((((revision.get("data") or {}).get("spec") or {}).get("template")))
+    if isinstance(revision_template, dict) and revision_template.pop("$patch", None) == "replace" and revision_template == template:
+        matches.append(revision)
+if len(matches) != 1:
+    reject("live Pod template does not exactly match the pinned ControllerRevision")
+
+print(json.dumps({
+    "daemonset_uid": str(metadata["uid"]),
+    "generation": str(metadata["generation"]),
+    "resource_version": str(metadata["resourceVersion"]),
+    "strategy": strategy_type,
+    "target_revision": os.environ["EXPECTED_TARGET_REVISION"],
+}, sort_keys=True, separators=(",", ":")))
+'
+}
+
+image_cache_freeze_ondelete_after_helm_rollback() {
+  local daemonset_name="$1"
+  local expected_daemonset_uid="$2"
+  local expected_target_revision="$3"
+  local attempt=1
+  local max_attempts=5
+  local freeze_snapshot_json=""
+  local strategy=""
+  local resource_version=""
+
+  while (( attempt <= max_attempts )); do
+    freeze_snapshot_json="$(image_cache_rollback_freeze_snapshot_json \
+      "${daemonset_name}" "${expected_daemonset_uid}" "${expected_target_revision}")" || return 1
+    strategy="$(image_cache_plan_field "${freeze_snapshot_json}" strategy)" || return 1
+    case "${strategy}" in
+      OnDelete)
+        return 0
+        ;;
+      RollingUpdate)
+        resource_version="$(image_cache_plan_field "${freeze_snapshot_json}" resource_version)" || return 1
+        if image_cache_patch_clean_ondelete "${daemonset_name}" "${resource_version}"; then
+          return 0
+        fi
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    if (( attempt < max_attempts )); then
+      log "image-cache rollback freeze CAS patch was not confirmed; refreshing the exact snapshot before retry ${attempt}/${max_attempts}"
+    fi
+    attempt=$((attempt + 1))
+  done
+  log "image-cache rollback freeze CAS did not succeed after ${max_attempts} exact attempts"
+  return 1
+}
+
+image_cache_wait_for_rollout_plan() {
+  local daemonset_name="$1"
+  local target_revision="$2"
+  local deadline=$((SECONDS + $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")))
+  local plan_json=""
+
+  while (( SECONDS < deadline )); do
+    if plan_json="$(image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}" 2>/dev/null)"; then
+      printf '%s\n' "${plan_json}"
+      return 0
+    fi
+    sleep 2
+  done
+  image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}" >/dev/null
+}
+
+image_cache_prepare_offline_safe_rollout() {
+  local daemonset_name="$1"
+  local target_revision=""
+  local initial_plan_json=""
+  local final_plan_json=""
+  local strategy=""
+  local resource_version=""
+  local current_revision=""
+
+  if ! node_local_dns_split_release_enabled; then
+    return 0
+  fi
+  target_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || {
+    log "image-cache DaemonSet has no exact current ControllerRevision"
+    return 1
+  }
+  initial_plan_json="$(image_cache_rollout_plan_json "${daemonset_name}" "${target_revision}")" || return 1
+  image_cache_bind_plan_to_target "${daemonset_name}" "${initial_plan_json}" "${target_revision}" || return 1
+  node_local_dns_verify_preserved_nodes_isolated || return 1
+  image_cache_probe_active_plan "${initial_plan_json}" || return 1
+  [[ "$(image_cache_plan_field "${initial_plan_json}" transaction)" == "false" ]] || return 1
+  strategy="$(image_cache_plan_field "${initial_plan_json}" strategy)" || return 1
+
+  case "${strategy}" in
+    RollingUpdate)
+      resource_version="$(image_cache_plan_field "${initial_plan_json}" resource_version)" || return 1
+      image_cache_patch_clean_ondelete "${daemonset_name}" "${resource_version}" || return 1
+      image_cache_wait_strategy_observed "${daemonset_name}" OnDelete || return 1
+      final_plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
+      image_cache_bind_plan_to_target "${daemonset_name}" "${final_plan_json}" "${target_revision}" || return 1
+      node_local_dns_verify_preserved_nodes_isolated || return 1
+      image_cache_probe_active_plan "${final_plan_json}" || return 1
+      [[ "$(image_cache_plan_field "${final_plan_json}" transaction)" == "false" ]] || return 1
+      [[ "$(image_cache_plan_field "${final_plan_json}" strategy)" == "OnDelete" ]] || return 1
+      image_cache_validate_unchanged_pod_identities "${initial_plan_json}" "${final_plan_json}" || return 1
+      ;;
+    OnDelete)
+      final_plan_json="${initial_plan_json}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  current_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
+  [[ "${current_revision}" == "${target_revision}" ]] || return 1
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION="${target_revision}"
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON="${final_plan_json}"
+  log "image-cache offline-node guard passed without Pod replacement: target_revision=${target_revision} active_updated=$(image_cache_plan_field "${final_plan_json}" updated_active_count) strategy=OnDelete replacements=0"
+}
+
+image_cache_rollout_status() {
+  local daemonset_name="$1"
+  local target_revision=""
+  local plan_json=""
+
+  if ! node_local_dns_split_release_enabled; then
+    rollout_daemonset_status "${daemonset_name}"
+    return
+  fi
+  [[ -n "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" && -n "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" ]] || return 1
+  target_revision="$(image_cache_current_controller_revision "${daemonset_name}")" || return 1
+  if [[ "${target_revision}" != "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" ]]; then
+    log "image-cache DaemonSet template changed during Helm upgrade while an offline node was preserved: pre_helm=${IMAGE_CACHE_PRE_HELM_TARGET_REVISION} post_helm=${target_revision}"
+    return 1
+  fi
+  plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
+  image_cache_bind_plan_to_target "${daemonset_name}" "${plan_json}" "${target_revision}" || return 1
+  node_local_dns_verify_preserved_nodes_isolated || return 1
+  image_cache_probe_active_plan "${plan_json}" || return 1
+  [[ "$(image_cache_plan_field "${plan_json}" transaction)" == "false" ]] || return 1
+  [[ "$(image_cache_plan_field "${plan_json}" strategy)" == "OnDelete" ]] || return 1
+  image_cache_validate_unchanged_pod_identities "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${plan_json}" || return 1
+  log "image-cache post-Helm verification passed without additional Pod replacement: target_revision=${target_revision} active_updated=$(image_cache_plan_field "${plan_json}" updated_active_count)"
+}
+
+image_cache_restore_ondelete_after_helm_rollback() {
+  local daemonset_name="${FUGUE_RELEASE_FULLNAME}-image-cache"
+  local target_revision="${IMAGE_CACHE_PRE_HELM_TARGET_REVISION:-}"
+  local daemonset_uid=""
+  local plan_json=""
+
+  node_local_dns_split_release_enabled || return 0
+  [[ "${FUGUE_IMAGE_CACHE_ENABLED:-false}" == "true" ]] || return 0
+  [[ -n "${target_revision}" && -n "${IMAGE_CACHE_PRE_HELM_PLAN_JSON:-}" ]] || return 0
+
+  daemonset_uid="$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" daemonset_uid)" || return 1
+  image_cache_freeze_ondelete_after_helm_rollback "${daemonset_name}" "${daemonset_uid}" "${target_revision}" || return 1
+  # Freeze first. Health and cohort validation must never be able to leave a
+  # rollback-restored RollingUpdate controller running while an offline node
+  # has consumed its disruption budget.
+  image_cache_wait_strategy_observed "${daemonset_name}" OnDelete || return 1
+  plan_json="$(image_cache_wait_for_rollout_plan "${daemonset_name}" "${target_revision}")" || return 1
+  image_cache_bind_plan_to_target "${daemonset_name}" "${plan_json}" "${target_revision}" || return 1
+  node_local_dns_verify_preserved_nodes_isolated || return 1
+  image_cache_probe_active_plan "${plan_json}" || return 1
+  [[ "$(image_cache_plan_field "${plan_json}" transaction)" == "false" ]] || return 1
+  [[ "$(image_cache_plan_field "${plan_json}" strategy)" == "OnDelete" ]] || return 1
+  image_cache_validate_unchanged_pod_identities "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" "${plan_json}" || return 1
+  log "image-cache OnDelete guard restored after Helm rollback without changing the Pod cohort"
 }
 
 daemonset_names_by_component_prefix() {
@@ -9991,6 +10999,7 @@ rollback_release() {
   local rollback_api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
   local helm_rollback_failed="false"
   local dns_restore_failed="false"
+  local image_cache_restore_failed="false"
 
   if [[ -z "${PREVIOUS_REVISION:-}" ]]; then
     log "skip rollback because no previous revision was captured"
@@ -10012,11 +11021,16 @@ rollback_release() {
     helm_rollback_failed="true"
   fi
 
+  if ! image_cache_restore_ondelete_after_helm_rollback; then
+    log "image-cache OnDelete guard could not be restored after Helm rollback"
+    image_cache_restore_failed="true"
+  fi
+
   if ! restore_dns_manifest_transaction_after_helm_rollback; then
     log "DNS manifest rollback could not restore the exact pre-Helm cohort"
     dns_restore_failed="true"
   fi
-  if [[ "${helm_rollback_failed}" == "true" || "${dns_restore_failed}" == "true" ]]; then
+  if [[ "${helm_rollback_failed}" == "true" || "${dns_restore_failed}" == "true" || "${image_cache_restore_failed}" == "true" ]]; then
     return 1
   fi
   if ! node_local_dns_verify_preserved_snapshot_after_helm_rollback; then
@@ -10056,6 +11070,7 @@ rollback_release() {
 prepare_release_domains() {
   local public_mode build_mode stateful_mode maintenance_mode
 
+  IMAGE_CACHE_ONDELETE_STRATEGY_MIGRATION="false"
   refresh_release_changed_files_from_live_api
   if ! prepare_release_safety_runtime_intents; then
     fail "failed to attribute runtime release safety intents"
@@ -10102,6 +11117,10 @@ prepare_release_domains() {
       ;;
   esac
 
+  if node_local_dns_split_release_enabled && [[ "${build_mode}" == "allow" ]]; then
+    fail "node-local build-plane release cannot be forced while a preserved offline node exists; restore or remove that node before changing the image-cache Pod template"
+  fi
+
   if stateful_dependency_changed && [[ "${stateful_mode}" != "allow" ]]; then
     fail "stateful dependency manifests changed; ship registry, mesh, postgres, or shared storage through an isolated release window"
   fi
@@ -10119,10 +11138,21 @@ prepare_release_domains() {
   fi
 
   if [[ "${build_mode}" != "allow" ]]; then
-    if node_local_build_plane_manifest_changed; then
-      fail "node-local build-plane manifests changed; ship image-cache through an isolated worker/front release before changing its rendered pod spec"
+    if node_local_build_plane_manifest_changed || \
+      { node_local_dns_split_release_enabled && { node_local_build_plane_any_values_changed || node_local_build_plane_shared_manifest_changed; }; }; then
+      if image_cache_ondelete_strategy_migration_allowed; then
+        IMAGE_CACHE_ONDELETE_STRATEGY_MIGRATION="true"
+        log "allowing the exact image-cache OnDelete strategy-only migration while strictly preserving the live image and resources"
+      elif image_cache_strategy_migration_already_applied; then
+        log "image-cache strategy migration is already recorded in the live Helm release; ignoring the stale image-tag chart baseline"
+      else
+        fail "node-local build-plane manifests changed; ship image-cache through an isolated worker/front release before changing its rendered pod spec"
+      fi
     fi
-    if node_local_build_plane_image_rollout_allowed; then
+    if node_local_dns_split_release_enabled; then
+      log "preserved offline node is present; deferring all image-cache image/resource rollout and freezing the live Pod template"
+      preserve_node_local_build_plane_from_live true true true || fail "failed to strictly preserve the live image-cache image and resources"
+    elif node_local_build_plane_image_rollout_allowed; then
       log "node-local build-plane image-cache source changed since the live tag; allowing image-cache image rollout to ${FUGUE_IMAGE_CACHE_IMAGE_TAG} while preserving live non-image settings"
       preserve_node_local_build_plane_from_live false
     elif node_local_build_plane_resource_values_changed; then
@@ -11241,6 +12271,9 @@ main() {
   if [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" && "${FUGUE_NODE_LOCAL_DNS_ENABLED}" != "true" ]]; then
     fail "FUGUE_NODE_LOCAL_DNS_ENABLED must be true when preserved offline NodeLocal DNSCache nodes are configured"
   fi
+  if [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" && "${FUGUE_IMAGE_CACHE_ENABLED}" != "true" ]]; then
+    fail "image-cache cannot be disabled while a preserved offline node exists"
+  fi
   FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED:-false}"
   FUGUE_SHARED_WORKSPACE_STORAGE_CLASS="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS:-fugue-rwx}"
   FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-}"
@@ -11645,6 +12678,10 @@ PY
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
   validate_control_plane_singleton_anchor
   prepare_release_domains
+  if node_local_dns_split_release_enabled; then
+    [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] || fail "image-cache cannot be disabled while a preserved offline node exists"
+    daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache" || fail "live image-cache DaemonSet is required while a preserved offline node exists"
+  fi
   capture_pre_deploy_robustness_baseline
 
   PREVIOUS_REVISION="$(helm_current_revision)"
@@ -11724,6 +12761,18 @@ PY
   drain_control_plane_backup_before_schema_rollout
   if ! prepare_dns_manifest_transaction; then
     fail "DNS manifest transaction preflight failed before Helm mutation"
+  fi
+  if node_local_dns_split_release_enabled; then
+    [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] || fail "image-cache cannot be disabled while a preserved offline node exists"
+    daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache" || fail "live image-cache DaemonSet is required while a preserved offline node exists"
+    if ! image_cache_prepare_offline_safe_rollout "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+      fail "image-cache offline-node guard failed before Helm mutation"
+    fi
+    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-string imageCache.updateStrategy.type=OnDelete)
+  elif [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
+    # --reset-then-reuse-values retains the last release override. Clear the
+    # split-cohort OnDelete guard explicitly once no preserved node remains.
+    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-string imageCache.updateStrategy.type=RollingUpdate)
   fi
   log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
 
@@ -12005,7 +13054,7 @@ PY
   fi
 
   if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
-    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+    if ! image_cache_rollout_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
       log "image cache rollout check failed; attempting rollback"
       rollback_release || true
       fail "image cache rollout failed"

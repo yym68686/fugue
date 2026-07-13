@@ -772,6 +772,8 @@ imagePrePull:
 
 imageCache:
   enabled: true
+  updateStrategy:
+    type: RollingUpdate
   image:
     repository: fugue-image-cache
     tag: latest

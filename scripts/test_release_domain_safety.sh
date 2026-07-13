@@ -30,6 +30,12 @@ bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
 python3 -m py_compile "${REPO_ROOT}/scripts/verify_registry_image.py" "${REPO_ROOT}/scripts/test_verify_registry_image.py"
 python3 "${REPO_ROOT}/scripts/test_verify_registry_image.py"
+grep -Fq 'FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must pass the trusted live baseline refs to the release guard"
+grep -Fq 'FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref }}' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must pass the exact release target ref to the release guard"
 
 python3 - "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
 from pathlib import Path
@@ -79,10 +85,36 @@ prepare = main.index("prepare_dns_manifest_transaction")
 helm = main.index('helm upgrade "${FUGUE_RELEASE_NAME}"')
 transaction = main.index("run_dns_manifest_transaction_after_helm")
 nodelocal = main.index("node_local_dns_reconcile_after_helm")
+image_cache_prepare = main.index("image_cache_prepare_offline_safe_rollout")
+image_cache_verify = main.index("image_cache_rollout_status")
 public_release = main.index("release_public_data_plane_if_needed")
 finalize = main.index("finalize_dns_manifest_transaction")
 if not prepare < helm < transaction < nodelocal < public_release < finalize:
     raise SystemExit("DNS manifest snapshot/transaction/finalization ordering is unsafe")
+if not image_cache_prepare < helm < image_cache_verify:
+    raise SystemExit("offline-safe image-cache mutation must finish before Helm and post-Helm must be verification-only")
+image_guard_start = source.index("\nimage_cache_prepare_offline_safe_rollout() {")
+image_guard_end = source.index("\nimage_cache_rollout_status() {", image_guard_start)
+image_guard = source[image_guard_start:image_guard_end]
+if "delete --raw" in image_guard or "delete pod" in image_guard.lower():
+    raise SystemExit("offline image-cache guard must never delete a Pod")
+if "imageCache.updateStrategy.type=OnDelete" not in main or "imageCache.updateStrategy.type=RollingUpdate" not in main:
+    raise SystemExit("image-cache split entry and exit must explicitly persist OnDelete and RollingUpdate")
+split_guard = main.index("if node_local_dns_split_release_enabled; then")
+image_cache_enabled_guard = main.index('[[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]', split_guard)
+image_cache_exists_guard = main.index('daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache"', image_cache_enabled_guard)
+recover_primary = main.index("recover_primary_node_if_needed")
+apply_crds = main.index("apply_chart_crds")
+if not split_guard < image_cache_enabled_guard < image_cache_exists_guard < recover_primary < apply_crds < image_cache_prepare < helm:
+    raise SystemExit("split rollout must require an enabled, live image-cache DaemonSet before recovery, CRD, or Helm mutation")
+
+prepare_domains_start = source.index("\nprepare_release_domains() {")
+prepare_domains_end = source.index("\npublic_data_plane_front_daemonsets_ready()", prepare_domains_start)
+prepare_domains = source[prepare_domains_start:prepare_domains_end]
+build_allow_guard = prepare_domains.index('node_local_dns_split_release_enabled && [[ "${build_mode}" == "allow" ]]')
+build_preservation = prepare_domains.index('if [[ "${build_mode}" != "allow" ]]')
+if build_allow_guard > build_preservation:
+    raise SystemExit("split rollout must reject a forced build-plane release before preservation logic")
 
 transaction_start = source.index("\nrun_dns_manifest_transaction_after_helm() {")
 transaction_end = source.index("\nrestore_dns_manifest_transaction_after_helm_rollback()", transaction_start)
@@ -1164,6 +1196,536 @@ rm -f "${RESOLVE_TEST_OUTPUT}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_NAME=fugue
+  NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES=dmit
+  IMAGE_CACHE_TEST_DS='{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"fugue-fugue-image-cache","namespace":"fugue-system","uid":"ds-uid","resourceVersion":"100","generation":3,"annotations":{}},"spec":{"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1,"maxSurge":0}},"template":{"metadata":{"labels":{"app":"image-cache"}},"spec":{"containers":[{"name":"image-cache","image":"registry/image-cache:new","ports":[{"name":"registry","protocol":"TCP","containerPort":5000,"hostPort":5000}]}]}}},"status":{"observedGeneration":3,"desiredNumberScheduled":2,"currentNumberScheduled":2,"numberReady":1,"numberAvailable":1,"numberUnavailable":1,"numberMisscheduled":0,"updatedNumberScheduled":1}}'
+  IMAGE_CACHE_TEST_REVISIONS='{"items":[{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"fugue-fugue-image-cache-rev-new","labels":{"controller-revision-hash":"rev-new"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"fugue-fugue-image-cache","uid":"ds-uid","controller":true}]}},{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"fugue-fugue-image-cache-rev-old","labels":{"controller-revision-hash":"rev-old"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"fugue-fugue-image-cache","uid":"ds-uid","controller":true}]}}]}'
+  IMAGE_CACHE_TEST_PODS='{"items":[{"apiVersion":"v1","kind":"Pod","metadata":{"name":"cache-active","uid":"pod-active","labels":{"controller-revision-hash":"rev-new"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"fugue-fugue-image-cache","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-a","containers":[{"name":"image-cache","image":"registry/image-cache:new"}]},"status":{"phase":"Running","podIP":"10.0.0.1","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"image-cache","restartCount":0}]}},{"apiVersion":"v1","kind":"Pod","metadata":{"name":"cache-dmit","uid":"pod-dmit","deletionTimestamp":"2026-01-01T00:00:00Z","labels":{"controller-revision-hash":"rev-old"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"fugue-fugue-image-cache","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"dmit","containers":[{"name":"image-cache","image":"registry/image-cache:old"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"False"}],"containerStatuses":[{"name":"image-cache","restartCount":0}]}}]}'
+  IMAGE_CACHE_TEST_NODES='{"items":[{"metadata":{"name":"node-a","labels":{}},"spec":{},"status":{"conditions":[{"type":"Ready","status":"True"},{"type":"DiskPressure","status":"False"},{"type":"MemoryPressure","status":"False"},{"type":"PIDPressure","status":"False"}]}},{"metadata":{"name":"dmit","labels":{"fugue.io/schedulable":"false","fugue.io/node-health":"blocked"}},"spec":{"taints":[{"key":"node.kubernetes.io/unreachable","effect":"NoExecute"}]},"status":{"conditions":[{"type":"Ready","status":"Unknown"}]}}]}'
+  fake_image_cache_inventory_kubectl() {
+    case "$*" in
+      *"get daemonset fugue-fugue-image-cache -o json"*) printf '%s' "${IMAGE_CACHE_TEST_DS}" ;;
+      *"get controllerrevisions.apps "*) printf '%s' "${IMAGE_CACHE_TEST_REVISIONS}" ;;
+      *"get pods "*"component=image-cache"*) printf '%s' "${IMAGE_CACHE_TEST_PODS}" ;;
+      *"get nodes -o json"*) printf '%s' "${IMAGE_CACHE_TEST_NODES}" ;;
+      *) return 1 ;;
+    esac
+  }
+  KUBECTL=fake_image_cache_inventory_kubectl
+  image_cache_plan="$(image_cache_rollout_plan_json fugue-fugue-image-cache rev-new)"
+  assert_eq "$(image_cache_plan_field "${image_cache_plan}" updated_active_count)" "1" "image-cache exact plan updated active count"
+  assert_eq "$(image_cache_plan_field "${image_cache_plan}" preserved_nodes)" "dmit" "image-cache exact plan preserved node"
+  assert_eq "$(image_cache_plan_field "${image_cache_plan}" daemonset_uid)" "ds-uid" "image-cache exact plan DaemonSet UID"
+
+  valid_ds="${IMAGE_CACHE_TEST_DS}"
+  IMAGE_CACHE_TEST_DS="${valid_ds/\"annotations\":{},/}"
+  if image_cache_rollout_plan_json fugue-fugue-image-cache rev-new >/dev/null 2>&1; then
+    fail "image-cache exact plan must reject a DaemonSet without metadata.annotations"
+  fi
+  IMAGE_CACHE_TEST_DS="${valid_ds}"
+  valid_pods="${IMAGE_CACHE_TEST_PODS}"
+  IMAGE_CACHE_TEST_PODS="${valid_pods/\"controller-revision-hash\":\"rev-new\"/\"controller-revision-hash\":\"rev-unknown\"}"
+  if image_cache_rollout_plan_json fugue-fugue-image-cache rev-new >/dev/null 2>&1; then
+    fail "image-cache exact plan must reject a Pod with an unknown ControllerRevision"
+  fi
+  IMAGE_CACHE_TEST_PODS="${valid_pods}"
+  valid_nodes="${IMAGE_CACHE_TEST_NODES}"
+  IMAGE_CACHE_TEST_NODES="${valid_nodes/\"type\":\"DiskPressure\",\"status\":\"False\"/\"type\":\"DiskPressure\",\"status\":\"True\"}"
+  if image_cache_rollout_plan_json fugue-fugue-image-cache rev-new >/dev/null 2>&1; then
+    fail "image-cache exact plan must reject active-node DiskPressure"
+  fi
+  IMAGE_CACHE_TEST_NODES="${valid_nodes}"
+  IMAGE_CACHE_TEST_PODS="$(PODS_JSON="${valid_pods}" python3 -c '
+import json
+import os
+doc = json.loads(os.environ["PODS_JSON"])
+preserved = next(item for item in doc["items"] if item["spec"]["nodeName"] == "dmit")
+preserved["metadata"].pop("deletionTimestamp", None)
+preserved["status"] = {"phase": "Pending", "conditions": []}
+print(json.dumps(doc, separators=(",", ":")))
+')"
+  pending_preserved_plan="$(image_cache_rollout_plan_json fugue-fugue-image-cache rev-new)"
+  assert_eq "$(image_cache_plan_field "${pending_preserved_plan}" preserved_nodes)" "dmit" "image-cache plan accepts an isolated Pending preserved Pod without kubelet status"
+  IMAGE_CACHE_TEST_PODS="$(PODS_JSON="${valid_pods}" python3 -c '
+import json
+import os
+doc = json.loads(os.environ["PODS_JSON"])
+active = next(item for item in doc["items"] if item["spec"]["nodeName"] == "node-a")
+active["status"].pop("containerStatuses", None)
+print(json.dumps(doc, separators=(",", ":")))
+')"
+  if image_cache_rollout_plan_json fugue-fugue-image-cache rev-new >/dev/null 2>&1; then
+    fail "image-cache plan must reject an active Pod without kubelet container status"
+  fi
+)
+
+(
+  sleep() { :; }
+  curl() {
+    [[ "$*" == *"--noproxy *"* ]] || return 1
+    printf 'HTTP/1.1 %s Test\r\n' "${IMAGE_CACHE_TEST_HTTP_STATUS}"
+    if [[ "${IMAGE_CACHE_TEST_HTTP_HEADER}" == "true" ]]; then
+      printf 'Docker-Distribution-API-Version: registry/2.0\r\n'
+    fi
+    printf '\r\n__FUGUE_STATUS__:%s\n' "${IMAGE_CACHE_TEST_HTTP_STATUS}"
+  }
+  IMAGE_CACHE_TEST_HTTP_HEADER=true
+  IMAGE_CACHE_TEST_HTTP_STATUS=302
+  if image_cache_probe_endpoint 10.0.0.1 5000; then
+    fail "image-cache endpoint probe must reject HTTP 3xx"
+  fi
+  IMAGE_CACHE_TEST_HTTP_STATUS=200
+  IMAGE_CACHE_TEST_HTTP_HEADER=false
+  if image_cache_probe_endpoint 10.0.0.1 5000; then
+    fail "image-cache endpoint probe must reject a response without the Registry v2 header"
+  fi
+  IMAGE_CACHE_TEST_HTTP_HEADER=true
+  image_cache_probe_endpoint 10.0.0.1 5000 || fail "image-cache endpoint probe must accept exact Registry v2 health"
+)
+
+(
+  patch_marker="$(mktemp)"
+  trap 'rm -f "${patch_marker}"' EXIT
+  FUGUE_NAMESPACE=fugue-system
+  fake_image_cache_strategy_kubectl() {
+    [[ "$1" == "-n" && "$2" == "fugue-system" && "$3" == "patch" && "$4" == "daemonset" && "$5" == "fugue-fugue-image-cache" && "$6" == "--type=json" && "$7" == "--patch" ]] || return 1
+    PATCH_JSON="$8" python3 -c '
+import json
+import os
+operations = json.loads(os.environ["PATCH_JSON"])
+assert operations == [
+    {"op": "test", "path": "/metadata/resourceVersion", "value": "rv-20"},
+    {"op": "test", "path": "/spec/updateStrategy/type", "value": "RollingUpdate"},
+    {"op": "test", "path": "/spec/updateStrategy/rollingUpdate/maxUnavailable", "value": 1},
+    {"op": "test", "path": "/spec/updateStrategy/rollingUpdate/maxSurge", "value": 0},
+    {"op": "replace", "path": "/spec/updateStrategy", "value": {"type": "OnDelete"}},
+]
+'
+    printf 'patched\n' >"${patch_marker}"
+  }
+  KUBECTL=fake_image_cache_strategy_kubectl
+  image_cache_patch_clean_ondelete fugue-fugue-image-cache rv-20
+  assert_eq "$(<"${patch_marker}")" "patched" "image-cache OnDelete patch is resourceVersion-bound and strategy-exact"
+)
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_NAME=fugue
+  IMAGE_CACHE_FREEZE_DS='{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"fugue-fugue-image-cache","namespace":"fugue-system","uid":"ds-uid","resourceVersion":"rv-freeze","generation":9,"annotations":{}},"spec":{"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1,"maxSurge":0}},"template":{"metadata":{"labels":{"app":"image-cache"}},"spec":{"containers":[{"name":"image-cache","image":"registry/image-cache:stable"}]}}},"status":{"observedGeneration":8}}'
+  IMAGE_CACHE_FREEZE_REVISIONS='{"items":[{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"fugue-fugue-image-cache-rev-stable","namespace":"fugue-system","labels":{"controller-revision-hash":"rev-stable"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"fugue-fugue-image-cache","uid":"ds-uid","controller":true}]},"data":{"spec":{"template":{"$patch":"replace","metadata":{"labels":{"app":"image-cache"}},"spec":{"containers":[{"name":"image-cache","image":"registry/image-cache:stable"}]}}}}}]} '
+  fake_image_cache_freeze_kubectl() {
+    case "$*" in
+      *"get daemonset fugue-fugue-image-cache -o json"*) printf '%s' "${IMAGE_CACHE_FREEZE_DS}" ;;
+      *"get controllerrevisions.apps "*) printf '%s' "${IMAGE_CACHE_FREEZE_REVISIONS}" ;;
+      *) return 1 ;;
+    esac
+  }
+  KUBECTL=fake_image_cache_freeze_kubectl
+  freeze_snapshot="$(image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid rev-stable)"
+  assert_eq "$(image_cache_plan_field "${freeze_snapshot}" resource_version)" "rv-freeze" "rollback freeze snapshot resourceVersion"
+  assert_eq "$(image_cache_plan_field "${freeze_snapshot}" strategy)" "RollingUpdate" "rollback freeze accepts an unobserved generation before health validation"
+  valid_freeze_revisions="${IMAGE_CACHE_FREEZE_REVISIONS}"
+  if image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache wrong-uid rev-stable >/dev/null 2>&1; then
+    fail "rollback freeze must reject a DaemonSet UID mismatch"
+  fi
+  if image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid wrong-revision >/dev/null 2>&1; then
+    fail "rollback freeze must reject a Pod template revision mismatch"
+  fi
+  IMAGE_CACHE_FREEZE_REVISIONS="${valid_freeze_revisions/\"uid\":\"ds-uid\"/\"uid\":\"wrong-owner\"}"
+  if image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid rev-stable >/dev/null 2>&1; then
+    fail "rollback freeze must reject a ControllerRevision owned by another DaemonSet UID"
+  fi
+  IMAGE_CACHE_FREEZE_REVISIONS="${valid_freeze_revisions/registry\/image-cache:stable/registry\/image-cache:drift}"
+  if image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid rev-stable >/dev/null 2>&1; then
+    fail "rollback freeze must reject ControllerRevision data that differs from the live Pod template"
+  fi
+  IMAGE_CACHE_FREEZE_REVISIONS="$(REVISIONS_JSON="${valid_freeze_revisions}" python3 -c '
+import json
+import os
+payload = json.loads(os.environ["REVISIONS_JSON"])
+payload["items"].append(payload["items"][0])
+print(json.dumps(payload, separators=(",", ":")))
+')"
+  if image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid rev-stable >/dev/null 2>&1; then
+    fail "rollback freeze must reject duplicate matching ControllerRevisions"
+  fi
+)
+
+(
+  freeze_retry_dir="$(mktemp -d)"
+  trap 'rm -rf "${freeze_retry_dir}"' EXIT
+  printf '0\n' >"${freeze_retry_dir}/snapshots"
+  printf '0\n' >"${freeze_retry_dir}/patches"
+  sleep() { :; }
+  image_cache_rollback_freeze_snapshot_json() {
+    local count
+    count="$(<"${freeze_retry_dir}/snapshots")"
+    count=$((count + 1))
+    printf '%s\n' "${count}" >"${freeze_retry_dir}/snapshots"
+    printf '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-%s","target_revision":"rev-stable"}\n' "${count}"
+  }
+  image_cache_patch_clean_ondelete() {
+    local count
+    count="$(<"${freeze_retry_dir}/patches")"
+    count=$((count + 1))
+    printf '%s\n' "${count}" >"${freeze_retry_dir}/patches"
+    printf '%s\t%s\n' "$1" "$2" >"${freeze_retry_dir}/last-patch"
+    [[ "${count}" -ge 2 ]]
+  }
+  image_cache_freeze_ondelete_after_helm_rollback fugue-fugue-image-cache ds-uid rev-stable ||
+    fail "rollback freeze must retry an unconfirmed CAS from a fresh exact snapshot"
+  assert_eq "$(<"${freeze_retry_dir}/snapshots")" "2" "rollback freeze refreshes its exact snapshot after an unconfirmed CAS"
+  assert_eq "$(<"${freeze_retry_dir}/patches")" "2" "rollback freeze retries only the failed CAS"
+  assert_eq "$(<"${freeze_retry_dir}/last-patch")" $'fugue-fugue-image-cache\trv-2' "rollback freeze binds the retry to the refreshed resourceVersion"
+)
+
+(
+  patch_marker="$(mktemp)"
+  trap 'rm -f "${patch_marker}"' EXIT
+  image_cache_rollback_freeze_snapshot_json() { printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"OnDelete","resource_version":"rv-clean","target_revision":"rev-stable"}'; }
+  image_cache_patch_clean_ondelete() { printf 'unexpected\n' >"${patch_marker}"; return 1; }
+  image_cache_freeze_ondelete_after_helm_rollback fugue-fugue-image-cache ds-uid rev-stable ||
+    fail "rollback freeze must accept an already clean OnDelete strategy"
+  [[ ! -s "${patch_marker}" ]] || fail "rollback freeze must not patch an already clean OnDelete strategy"
+)
+
+(
+  permanent_failure_dir="$(mktemp -d)"
+  trap 'rm -rf "${permanent_failure_dir}"' EXIT
+  printf '0\n' >"${permanent_failure_dir}/snapshots"
+  printf '0\n' >"${permanent_failure_dir}/patches"
+  image_cache_rollback_freeze_snapshot_json() {
+    local count
+    count="$(<"${permanent_failure_dir}/snapshots")"
+    printf '%s\n' "$((count + 1))" >"${permanent_failure_dir}/snapshots"
+    printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-stable","target_revision":"rev-stable"}'
+  }
+  image_cache_patch_clean_ondelete() {
+    local count
+    count="$(<"${permanent_failure_dir}/patches")"
+    printf '%s\n' "$((count + 1))" >"${permanent_failure_dir}/patches"
+    return 1
+  }
+  if image_cache_freeze_ondelete_after_helm_rollback fugue-fugue-image-cache ds-uid rev-stable; then
+    fail "rollback freeze must fail closed after its bounded CAS attempts are exhausted"
+  fi
+  assert_eq "$(<"${permanent_failure_dir}/snapshots")" "5" "rollback freeze has a bounded exact-snapshot retry count"
+  assert_eq "$(<"${permanent_failure_dir}/patches")" "5" "rollback freeze has a bounded CAS retry count"
+)
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  image_cache_current_controller_revision() { printf 'rev-new\n'; }
+  fake_image_cache_resource_version_kubectl() { printf '%s' "${IMAGE_CACHE_TEST_RESOURCE_VERSION}"; }
+  KUBECTL=fake_image_cache_resource_version_kubectl
+  IMAGE_CACHE_TEST_RESOURCE_VERSION=rv-1
+  image_cache_bind_plan_to_target fugue-fugue-image-cache '{"resource_version":"rv-1"}' rev-new || fail "image-cache target binding must accept an unchanged DS snapshot"
+  IMAGE_CACHE_TEST_RESOURCE_VERSION=rv-2
+  if image_cache_bind_plan_to_target fugue-fugue-image-cache '{"resource_version":"rv-1"}' rev-new; then
+    fail "image-cache target binding must reject a changed DS resourceVersion"
+  fi
+)
+
+(
+  strategy_guard_dir="$(mktemp -d)"
+  trap 'rm -rf "${strategy_guard_dir}"' EXIT
+  patch_marker="${strategy_guard_dir}/patch"
+  wait_marker="${strategy_guard_dir}/wait"
+  IC_PLAN_INITIAL='{"resource_version":"rv-20","strategy":"RollingUpdate","transaction":false,"target_revision":"rev-new","registry_port":5000,"old_active_nodes":["node-a"],"updated_active_count":0,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":null},{"node":"node-a","uid":"uid-old-a","restart_count":0}]}'
+  IC_PLAN_FINAL='{"resource_version":"rv-21","strategy":"OnDelete","transaction":false,"target_revision":"rev-new","registry_port":5000,"old_active_nodes":["node-a"],"updated_active_count":0,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":null},{"node":"node-a","uid":"uid-old-a","restart_count":0}]}'
+  node_local_dns_split_release_enabled() { return 0; }
+  node_local_dns_verify_preserved_nodes_isolated() { return 0; }
+  image_cache_current_controller_revision() { printf 'rev-new\n'; }
+  image_cache_rollout_plan_json() { printf '%s\n' "${IC_PLAN_INITIAL}"; }
+  image_cache_wait_for_rollout_plan() {
+    printf 'waited\n' >"${wait_marker}"
+    printf '%s\n' "${IC_PLAN_FINAL}"
+  }
+  image_cache_bind_plan_to_target() { return 0; }
+  image_cache_probe_active_plan() { return 0; }
+  image_cache_patch_clean_ondelete() { printf '%s\t%s\n' "$1" "$2" >"${patch_marker}"; }
+  image_cache_wait_strategy_observed() { [[ "$2" == "OnDelete" ]]; }
+
+  : >"${patch_marker}"
+  : >"${wait_marker}"
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
+  image_cache_prepare_offline_safe_rollout fugue-fugue-image-cache
+  assert_eq "$(<"${patch_marker}")" $'fugue-fugue-image-cache\trv-20' "image-cache guard switches only the strategy"
+  assert_eq "$(<"${wait_marker}")" "waited" "image-cache guard waits for the observed OnDelete generation"
+  assert_eq "${IMAGE_CACHE_PRE_HELM_TARGET_REVISION}" "rev-new" "image-cache guard pins the pre-Helm revision"
+  assert_eq "$(image_cache_plan_field "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" strategy)" "OnDelete" "image-cache guard stores the clean OnDelete plan"
+  image_cache_validate_unchanged_pod_identities "${IC_PLAN_INITIAL}" "${IMAGE_CACHE_PRE_HELM_PLAN_JSON}" || fail "image-cache guard must preserve every Pod UID and restart count"
+
+  IC_PLAN_INITIAL="${IC_PLAN_FINAL}"
+  : >"${patch_marker}"
+  : >"${wait_marker}"
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
+  image_cache_prepare_offline_safe_rollout fugue-fugue-image-cache
+  [[ ! -s "${patch_marker}" && ! -s "${wait_marker}" ]] || fail "clean OnDelete image-cache guard must be read-only"
+)
+
+if grep -Fq 'delete --raw "/api/v1/namespaces/${FUGUE_NAMESPACE}/pods/' "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
+  fail "offline image-cache guard must not delete Pods"
+fi
+
+(
+  node_local_dns_split_release_enabled() { return 0; }
+  node_local_dns_verify_preserved_nodes_isolated() { return 0; }
+  image_cache_bind_plan_to_target() { return 0; }
+  image_cache_probe_active_plan() { return 0; }
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-new
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"strategy":"OnDelete","transaction":false,"updated_active_count":1,"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0},{"node":"node-b","uid":"uid-old-b","restart_count":0}]}'
+  IMAGE_CACHE_POST_HELM_PLAN='{"strategy":"OnDelete","transaction":false,"updated_active_count":1,"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0},{"node":"node-b","uid":"uid-old-b","restart_count":0}]}'
+  image_cache_wait_for_rollout_plan() { printf '%s\n' "${IMAGE_CACHE_POST_HELM_PLAN}"; }
+  image_cache_current_controller_revision() { printf '%s\n' "${IMAGE_CACHE_TEST_CURRENT_REVISION}"; }
+  IMAGE_CACHE_TEST_CURRENT_REVISION=rev-drift
+  if image_cache_rollout_status fugue-fugue-image-cache; then
+    fail "image-cache post-Helm verification must reject target revision drift"
+  fi
+  IMAGE_CACHE_TEST_CURRENT_REVISION=rev-new
+  changed_identity_plan="${IMAGE_CACHE_POST_HELM_PLAN/uid-old-b/uid-unexpected-b}"
+  IMAGE_CACHE_POST_HELM_PLAN="${changed_identity_plan}"
+  if image_cache_rollout_status fugue-fugue-image-cache; then
+    fail "image-cache post-Helm verification must reject an extra Pod identity change"
+  fi
+  IMAGE_CACHE_POST_HELM_PLAN="${IMAGE_CACHE_PRE_HELM_PLAN_JSON}"
+  image_cache_rollout_status fugue-fugue-image-cache || fail "image-cache post-Helm verification must accept an unchanged Pod cohort"
+)
+
+(
+  migration_repo="$(mktemp -d)"
+  trap 'rm -rf "${migration_repo}"' EXIT
+  source_repo="${REPO_ROOT}"
+  mkdir -p "${migration_repo}/deploy/helm/fugue/templates" "${migration_repo}/cmd/fugue-image-cache"
+  cp "${source_repo}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" "${migration_repo}/deploy/helm/fugue/templates/image-cache-daemonset.yaml"
+  cp "${source_repo}/deploy/helm/fugue/values.yaml" "${migration_repo}/deploy/helm/fugue/values.yaml"
+  printf 'package main\nfunc main() {}\n' >"${migration_repo}/cmd/fugue-image-cache/main.go"
+  printf 'FROM scratch\n' >"${migration_repo}/Dockerfile.image-cache"
+  printf 'module example.com/image-cache-migration-test\n' >"${migration_repo}/go.mod"
+  : >"${migration_repo}/go.sum"
+  python3 - "${migration_repo}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" "${migration_repo}/deploy/helm/fugue/values.yaml" <<'PY'
+from pathlib import Path
+import sys
+
+template_path = Path(sys.argv[1])
+values_path = Path(sys.argv[2])
+template = template_path.read_text()
+new_preamble = '''{{- if .Values.imageCache.enabled }}
+{{- $updateStrategyType := required "imageCache.updateStrategy.type is required" .Values.imageCache.updateStrategy.type -}}
+{{- if not (has $updateStrategyType (list "OnDelete" "RollingUpdate")) -}}
+{{- fail "imageCache.updateStrategy.type must be OnDelete or RollingUpdate" -}}
+{{- end -}}
+apiVersion: apps/v1'''
+old_preamble = '''{{- if .Values.imageCache.enabled }}
+apiVersion: apps/v1'''
+new_strategy = '''  updateStrategy:
+    type: {{ $updateStrategyType }}
+    {{- if eq $updateStrategyType "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+    {{- end }}'''
+old_strategy = '''  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0'''
+if template.count(new_preamble) != 1 or template.count(new_strategy) != 1:
+    raise SystemExit(1)
+template_path.write_text(template.replace(new_preamble, old_preamble, 1).replace(new_strategy, old_strategy, 1))
+values = values_path.read_text()
+strategy_values = '''  updateStrategy:
+    type: RollingUpdate
+'''
+if values.count(strategy_values) != 1:
+    raise SystemExit(1)
+values_path.write_text(values.replace(strategy_values, "", 1))
+PY
+  git -C "${migration_repo}" init -q
+  git -C "${migration_repo}" config user.email test@example.com
+  git -C "${migration_repo}" config user.name "Fugue Test"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m base
+  migration_base="$(git -C "${migration_repo}" rev-parse HEAD)"
+  cp "${source_repo}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" "${migration_repo}/deploy/helm/fugue/templates/image-cache-daemonset.yaml"
+  cp "${source_repo}/deploy/helm/fugue/values.yaml" "${migration_repo}/deploy/helm/fugue/values.yaml"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m ondelete-strategy
+  migration_target="$(git -C "${migration_repo}" rev-parse HEAD)"
+
+  REPO_ROOT="${migration_repo}"
+  BEFORE_SHA="${migration_base}"
+  AFTER_SHA="${migration_target}"
+  RELEASE_CHANGED_FILES_EFFECTIVE=""
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml'
+  FUGUE_IMAGE_CACHE_ENABLED=true
+  node_local_dns_split_release_enabled() { return 0; }
+  image_cache_strategy_target_fingerprints_match() { return 0; }
+  image_cache_ondelete_strategy_template_migration_only || fail "exact image-cache OnDelete template rewrite must be recognized"
+  image_cache_ondelete_strategy_migration_allowed || fail "exact image-cache OnDelete strategy migration must be allowed"
+
+  mkdir -p "${migration_repo}/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"${migration_repo}/scripts/followup.sh"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m followup-script
+  migration_followup="$(git -C "${migration_repo}" rev-parse HEAD)"
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml\nscripts/followup.sh'
+  FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_RELEASE_AFTER_SHA="${migration_followup}" \
+    image_cache_ondelete_strategy_migration_allowed ||
+    fail "exact image-cache migration must use the trusted live baseline across a follow-up commit"
+  if FUGUE_RELEASE_AFTER_SHA=missing-explicit-target release_diff_new_ref >/dev/null 2>&1; then
+    fail "an invalid explicit release target must fail closed instead of falling back to HEAD"
+  fi
+  if FUGUE_RELEASE_BEFORE_SHA=missing-explicit-baseline release_diff_old_ref >/dev/null 2>&1; then
+    fail "an invalid explicit release baseline must fail closed instead of falling back to HEAD^"
+  fi
+  if FUGUE_RELEASE_BASE_REFS=$'missing-explicit-baseline\n'"${migration_base}" release_diff_base_refs >/dev/null 2>&1; then
+    fail "a mixed valid/invalid trusted baseline set must fail closed"
+  fi
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml'
+
+  python3 - "${migration_repo}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("            - name: FUGUE_IMAGE_CACHE_LISTEN_ADDR\n", "            - name: UNRELATED_ENV\n", 1))
+PY
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m unrelated-template-change
+  AFTER_SHA="$(git -C "${migration_repo}" rev-parse HEAD)"
+  if image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache OnDelete migration must reject any extra template change"
+  fi
+
+  git -C "${migration_repo}" checkout -q "${migration_target}" -- deploy/helm/fugue/templates/image-cache-daemonset.yaml
+  python3 - "${migration_repo}/deploy/helm/fugue/values.yaml" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("imageCache:\n", "unrelatedValue: true\n\nimageCache:\n", 1))
+PY
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m unrelated-values-change
+  AFTER_SHA="$(git -C "${migration_repo}" rev-parse HEAD)"
+  if image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache OnDelete migration must reject changes outside imageCache.updateStrategy"
+  fi
+
+  AFTER_SHA="${migration_target}"
+  FUGUE_RELEASE_CHANGED_FILES='deploy/helm/fugue/templates/image-cache-daemonset.yaml'
+  if image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache OnDelete migration must require both template and values changes"
+  fi
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml'
+  node_local_dns_split_release_enabled() { return 1; }
+  if image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache OnDelete migration must be limited to a verified split cohort"
+  fi
+  node_local_dns_split_release_enabled() { return 0; }
+  FUGUE_IMAGE_CACHE_ENABLED=false
+  if image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache OnDelete migration must require the live image-cache plane"
+  fi
+)
+
+(
+  source_repo="${REPO_ROOT}"
+  fingerprint_repo="$(mktemp -d)"
+  trap 'rm -rf "${fingerprint_repo}"' EXIT
+  mkdir -p "${fingerprint_repo}/deploy/helm"
+  cp -R "${source_repo}/deploy/helm/fugue" "${fingerprint_repo}/deploy/helm/fugue"
+  REPO_ROOT="${fingerprint_repo}"
+  image_cache_strategy_target_fingerprints_match || fail "exact image-cache strategy migration chart tree fingerprint must pass"
+  printf '\n{{/* unrelated helper mutation */}}\n' >>"${fingerprint_repo}/deploy/helm/fugue/templates/_helpers.tpl"
+  if image_cache_strategy_target_fingerprints_match; then
+    fail "image-cache strategy migration fingerprint must reject any shared chart runtime mutation"
+  fi
+)
+
+(
+  FUGUE_IMAGE_CACHE_ENABLED=true
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  image_cache_strategy_target_fingerprints_match() { return 0; }
+  live_helm_release_value() { printf 'OnDelete\n'; }
+  fake_image_cache_already_applied_kubectl() { printf '5\t5\tOnDelete\t\t'; }
+  KUBECTL=fake_image_cache_already_applied_kubectl
+  image_cache_strategy_migration_already_applied || fail "clean live OnDelete Helm value must mark the exact chart migration as already applied"
+  live_helm_release_value() { return 1; }
+  if image_cache_strategy_migration_already_applied; then
+    fail "image-cache strategy migration cannot be considered applied without a stored Helm value"
+  fi
+)
+
+(
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY=before/repository
+  FUGUE_IMAGE_CACHE_IMAGE_TAG=before-tag
+  preserve_image_from_live_daemonset() { return 1; }
+  live_daemonset_container_resources_json() { printf '{"requests":{"memory":"64Mi"}}'; }
+  if preserve_node_local_build_plane_from_live true true true; then
+    fail "strict image-cache preservation must reject an unreadable live image"
+  fi
+  preserve_image_from_live_daemonset() {
+    FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY=live/repository
+    FUGUE_IMAGE_CACHE_IMAGE_TAG=live-tag
+  }
+  live_daemonset_container_resources_json() { :; }
+  if preserve_node_local_build_plane_from_live true true true; then
+    fail "strict image-cache preservation must reject unreadable live resources"
+  fi
+  live_daemonset_container_resources_json() { printf '{"requests":{"memory":"64Mi"}}'; }
+  preserve_node_local_build_plane_from_live true true true || fail "strict image-cache preservation must accept exact live image and resources"
+  assert_eq "${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}:${FUGUE_IMAGE_CACHE_IMAGE_TAG}" "live/repository:live-tag" "strict image-cache image preservation"
+  [[ "$(printf '%s\n' "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}")" == *'imageCache.resources={"requests":{"memory":"64Mi"}}'* ]] ||
+    fail "strict image-cache resources must be passed to Helm"
+)
+
+(
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_IMAGE_CACHE_ENABLED=true
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-new
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"daemonset_uid":"ds-uid","strategy":"OnDelete","transaction":false,"resource_version":"rv-before","registry_port":5000,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0}]}'
+  rollback_patch_marker="$(mktemp)"
+  trap 'rm -f "${rollback_patch_marker}"' EXIT
+  node_local_dns_split_release_enabled() { return 0; }
+  node_local_dns_verify_preserved_nodes_isolated() { return 0; }
+  image_cache_bind_plan_to_target() { return 0; }
+  image_cache_probe_active_plan() { return 0; }
+  image_cache_wait_strategy_observed() { return 0; }
+  image_cache_rollback_freeze_snapshot_json() { printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-rollback","target_revision":"rev-new"}'; }
+  image_cache_wait_for_rollout_plan() {
+    printf '%s\n' '{"strategy":"OnDelete","transaction":false,"resource_version":"rv-guarded","registry_port":5000,"active_nodes":["node-a"],"active_pods":[{"node":"node-a","pod_ip":"10.0.0.1"}],"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-new-a","restart_count":0}]}'
+  }
+  image_cache_patch_clean_ondelete() { printf '%s\t%s\n' "$1" "$2" >"${rollback_patch_marker}"; }
+  image_cache_restore_ondelete_after_helm_rollback || fail "Helm rollback must restore the image-cache OnDelete guard"
+  assert_eq "$(<"${rollback_patch_marker}")" $'fugue-fugue-image-cache\trv-rollback' "Helm rollback image-cache OnDelete CAS patch"
+)
+
+(
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_IMAGE_CACHE_ENABLED=true
+  IMAGE_CACHE_PRE_HELM_TARGET_REVISION=rev-new
+  IMAGE_CACHE_PRE_HELM_PLAN_JSON='{"daemonset_uid":"ds-uid","strategy":"OnDelete","transaction":false,"pods":[{"node":"dmit","uid":"uid-dmit","restart_count":0},{"node":"node-a","uid":"uid-old-a","restart_count":0}]}'
+  rollback_patch_marker="$(mktemp)"
+  trap 'rm -f "${rollback_patch_marker}"' EXIT
+  node_local_dns_split_release_enabled() { return 0; }
+  image_cache_rollback_freeze_snapshot_json() { printf '%s\n' '{"daemonset_uid":"ds-uid","strategy":"RollingUpdate","resource_version":"rv-rollback","target_revision":"rev-new"}'; }
+  image_cache_patch_clean_ondelete() { printf '%s\t%s\n' "$1" "$2" >"${rollback_patch_marker}"; }
+  image_cache_wait_strategy_observed() { return 0; }
+  image_cache_wait_for_rollout_plan() { return 1; }
+  if image_cache_restore_ondelete_after_helm_rollback; then
+    fail "rollback must still fail when strict post-freeze health validation cannot complete"
+  fi
+  assert_eq "$(<"${rollback_patch_marker}")" $'fugue-fugue-image-cache\trv-rollback' "rollback freezes RollingUpdate before strict health validation"
+)
 
 (
   OFFLINE_GATE_DIR="$(mktemp -d)"

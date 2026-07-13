@@ -4266,6 +4266,85 @@ dns:
 	}
 }
 
+func TestImageCacheOnDeleteStrategyPreservesPodTemplate(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	render := func(strategy string) string {
+		args := []string{"template", "fugue", chartDir, "--show-only", "templates/image-cache-daemonset.yaml"}
+		if strategy != "" {
+			args = append(args, "--set-string", "imageCache.updateStrategy.type="+strategy)
+		}
+		cmd := exec.Command("helm", args...)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template image-cache strategy %q failed: %v\n%s", strategy, err, output)
+		}
+		return string(output)
+	}
+	withoutUpdateStrategy := func(manifest string) string {
+		lines := strings.Split(manifest, "\n")
+		result := make([]string, 0, len(lines))
+		skipping := false
+		for _, line := range lines {
+			if line == "  updateStrategy:" {
+				if skipping {
+					t.Fatal("nested image-cache updateStrategy block")
+				}
+				skipping = true
+				result = append(result, "  updateStrategy: <normalized>")
+				continue
+			}
+			if skipping {
+				indent := len(line) - len(strings.TrimLeft(line, " "))
+				if strings.TrimSpace(line) != "" && indent <= 2 {
+					skipping = false
+					result = append(result, line)
+				}
+				continue
+			}
+			result = append(result, line)
+		}
+		if skipping {
+			t.Fatal("unterminated image-cache updateStrategy block")
+		}
+		return strings.Join(result, "\n")
+	}
+
+	rolling := render("")
+	onDelete := render("OnDelete")
+	rollingDoc := manifestDocumentForKindAndName(rolling, "DaemonSet", "fugue-fugue-image-cache")
+	onDeleteDoc := manifestDocumentForKindAndName(onDelete, "DaemonSet", "fugue-fugue-image-cache")
+	for _, want := range []string{"type: RollingUpdate", "maxUnavailable: 1", "maxSurge: 0"} {
+		if !strings.Contains(rollingDoc, want) {
+			t.Fatalf("default image-cache strategy missing %q:\n%s", want, rollingDoc)
+		}
+	}
+	if !strings.Contains(onDeleteDoc, "type: OnDelete") {
+		t.Fatalf("OnDelete image-cache render missing strategy:\n%s", onDeleteDoc)
+	}
+	for _, unwanted := range []string{"type: RollingUpdate", "rollingUpdate:", "maxUnavailable:", "maxSurge:"} {
+		if strings.Contains(onDeleteDoc, unwanted) {
+			t.Fatalf("OnDelete image-cache render contains %q:\n%s", unwanted, onDeleteDoc)
+		}
+	}
+	if withoutUpdateStrategy(rolling) != withoutUpdateStrategy(onDelete) {
+		t.Fatalf("image-cache OnDelete render changed fields outside spec.updateStrategy\nrolling:\n%s\nonDelete:\n%s", rolling, onDelete)
+	}
+
+	invalid := exec.Command("helm", "template", "fugue", chartDir, "--show-only", "templates/image-cache-daemonset.yaml", "--set-string", "imageCache.updateStrategy.type=Recreate")
+	invalid.Dir = chartDir
+	if output, err := invalid.CombinedOutput(); err == nil || !strings.Contains(string(output), "must be OnDelete or RollingUpdate") {
+		t.Fatalf("invalid image-cache strategy must fail closed: err=%v\n%s", err, output)
+	}
+}
+
 func TestSingletonDependenciesDeclareIsolatedRolloutSemantics(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

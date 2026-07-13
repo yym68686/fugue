@@ -1,4 +1,8 @@
 {{- if .Values.imageCache.enabled }}
+{{- $updateStrategyType := required "imageCache.updateStrategy.type is required" .Values.imageCache.updateStrategy.type -}}
+{{- if not (has $updateStrategyType (list "OnDelete" "RollingUpdate")) -}}
+{{- fail "imageCache.updateStrategy.type must be OnDelete or RollingUpdate" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -11,10 +15,12 @@ metadata:
 spec:
   revisionHistoryLimit: 2
   updateStrategy:
-    type: RollingUpdate
+    type: {{ $updateStrategyType }}
+    {{- if eq $updateStrategyType "RollingUpdate" }}
     rollingUpdate:
       maxUnavailable: 1
       maxSurge: 0
+    {{- end }}
   selector:
     matchLabels:
       {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "image-cache") | nindent 6 }}
