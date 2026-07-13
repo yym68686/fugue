@@ -1,0 +1,275 @@
+{{/*
+Adapted for Fugue's staged cluster-DNS rollout from the Kubernetes NodeLocal
+DNSCache manifest (Apache-2.0):
+cluster/addons/dns/nodelocaldns/nodelocaldns.yaml at
+fc1c3faf47e46f9c257a17f9aae5abc6dd28c118.
+*/}}
+{{- if .Values.nodeLocalDNS.enabled }}
+{{- $config := .Values.nodeLocalDNS -}}
+{{- $mode := required "nodeLocalDNS.mode is required" $config.mode -}}
+{{- if not (has $mode (list "shadow" "iptables")) -}}
+{{- fail "nodeLocalDNS.mode must be shadow or iptables" -}}
+{{- end -}}
+{{- $namespace := required "nodeLocalDNS.namespace is required" $config.namespace -}}
+{{- $localIP := required "nodeLocalDNS.localIP is required" $config.localIP -}}
+{{- $kubeDNSServiceIP := required "nodeLocalDNS.kubeDNSServiceIP is required" $config.kubeDNSServiceIP -}}
+{{- $ipv4Pattern := `^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$` -}}
+{{- if not (regexMatch $ipv4Pattern $localIP) -}}
+{{- fail "nodeLocalDNS.localIP must be a valid IPv4 address" -}}
+{{- end -}}
+{{- if not (hasPrefix "169.254." $localIP) -}}
+{{- fail "nodeLocalDNS.localIP must be in the IPv4 link-local 169.254.0.0/16 range" -}}
+{{- end -}}
+{{- if not (regexMatch $ipv4Pattern $kubeDNSServiceIP) -}}
+{{- fail "nodeLocalDNS.kubeDNSServiceIP must be a valid IPv4 address" -}}
+{{- end -}}
+{{- if eq $localIP $kubeDNSServiceIP -}}
+{{- fail "nodeLocalDNS.localIP and nodeLocalDNS.kubeDNSServiceIP must be different" -}}
+{{- end -}}
+{{- $clusterDomain := required "nodeLocalDNS.clusterDomain is required" $config.clusterDomain | trimSuffix "." -}}
+{{- if not (regexMatch `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` $clusterDomain) -}}
+{{- fail "nodeLocalDNS.clusterDomain must be a lowercase DNS name" -}}
+{{- end -}}
+{{- if not $config.upstreamSelector -}}
+{{- fail "nodeLocalDNS.upstreamSelector must select the central CoreDNS pods" -}}
+{{- end -}}
+{{- if ne (get $config.nodeSelector "kubernetes.io/os") "linux" -}}
+{{- fail "nodeLocalDNS.nodeSelector must require kubernetes.io/os=linux" -}}
+{{- end -}}
+{{- if lt (int $config.updateStrategy.maxUnavailable) 1 -}}
+{{- fail "nodeLocalDNS.updateStrategy.maxUnavailable must be an integer >= 1" -}}
+{{- end -}}
+{{- if lt (int $config.minReadySeconds) 0 -}}
+{{- fail "nodeLocalDNS.minReadySeconds must be an integer >= 0" -}}
+{{- end -}}
+{{- if lt (int $config.terminationGracePeriodSeconds) 1 -}}
+{{- fail "nodeLocalDNS.terminationGracePeriodSeconds must be an integer >= 1" -}}
+{{- end -}}
+{{- $name := printf "%s-node-local-dns" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $defaultUpstreamServiceName := printf "%s-dns-upstream" (include "fugue.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $upstreamServiceName := required "nodeLocalDNS upstream service name is required" (default $defaultUpstreamServiceName $config.upstreamServiceName) -}}
+{{- $listenIPs := $localIP -}}
+{{- if eq $mode "iptables" -}}
+{{- $listenIPs = printf "%s,%s" $localIP $kubeDNSServiceIP -}}
+{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $upstreamServiceName }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns-upstream") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+spec:
+  ports:
+    - name: dns
+      port: 53
+      protocol: UDP
+      targetPort: 53
+    - name: dns-tcp
+      port: 53
+      protocol: TCP
+      targetPort: 53
+  selector:
+    {{- toYaml $config.upstreamSelector | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+data:
+  Corefile: |
+    {{ $clusterDomain }}:53 {
+        errors
+        cache {
+            success 9984 30
+            denial 9984 5
+        }
+        reload
+        loop
+        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
+        forward . __PILLAR__CLUSTER__DNS__ {
+            force_tcp
+        }
+        prometheus :9253
+        health {{ $localIP }}:8080
+    }
+    in-addr.arpa:53 {
+        errors
+        cache 30
+        reload
+        loop
+        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
+        forward . __PILLAR__CLUSTER__DNS__ {
+            force_tcp
+        }
+        prometheus :9253
+    }
+    ip6.arpa:53 {
+        errors
+        cache 30
+        reload
+        loop
+        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
+        forward . __PILLAR__CLUSTER__DNS__ {
+            force_tcp
+        }
+        prometheus :9253
+    }
+    .:53 {
+        errors
+        cache 30
+        reload
+        loop
+        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
+        forward . __PILLAR__CLUSTER__DNS__ {
+            force_tcp
+        }
+        prometheus :9253
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  annotations:
+    prometheus.io/port: "9253"
+    prometheus.io/scrape: "true"
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9253
+      protocol: TCP
+      targetPort: metrics
+    - name: setup-metrics
+      port: 9353
+      protocol: TCP
+      targetPort: setup-metrics
+  selector:
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+    fugue.io/rollout-mode: node-local-rolling
+spec:
+  revisionHistoryLimit: 2
+  minReadySeconds: {{ $config.minReadySeconds }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ $config.updateStrategy.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 8 }}
+        fugue.io/rollout-subsystem: cluster-dns
+        fugue.io/node-local-dns-mode: {{ $mode | quote }}
+      annotations:
+        checksum/node-local-dns-config: {{ toJson (dict "clusterDomain" $clusterDomain "kubeDNSServiceIP" $kubeDNSServiceIP "localIP" $localIP "mode" $mode "upstreamService" $upstreamServiceName) | sha256sum }}
+        prometheus.io/port: "9253"
+        prometheus.io/scrape: "true"
+    spec:
+      priorityClassName: system-node-critical
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      hostNetwork: true
+      dnsPolicy: Default
+      terminationGracePeriodSeconds: {{ $config.terminationGracePeriodSeconds }}
+      containers:
+        - name: node-cache
+          image: {{ include "fugue.imageRef" (dict "repository" $config.image.repository "tag" $config.image.tag "digest" $config.image.digest) | quote }}
+          imagePullPolicy: {{ $config.image.pullPolicy }}
+          args:
+            - -localip
+            - {{ $listenIPs | quote }}
+            - -conf
+            - /etc/Corefile
+            - -upstreamsvc
+            - {{ $upstreamServiceName | quote }}
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          ports:
+            - name: dns
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+            - name: metrics
+              containerPort: 9253
+              protocol: TCP
+            - name: setup-metrics
+              containerPort: 9353
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              host: {{ $localIP }}
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              host: {{ $localIP }}
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml $config.resources | nindent 12 }}
+          volumeMounts:
+            - name: xtables-lock
+              mountPath: /run/xtables.lock
+              readOnly: false
+            - name: config-volume
+              mountPath: /etc/coredns
+      volumes:
+        - name: xtables-lock
+          hostPath:
+            path: /run/xtables.lock
+            type: FileOrCreate
+        - name: config-volume
+          configMap:
+            name: {{ $name }}
+            items:
+              - key: Corefile
+                path: Corefile.base
+      nodeSelector:
+        {{- toYaml $config.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml $config.tolerations | nindent 8 }}
+{{- end }}

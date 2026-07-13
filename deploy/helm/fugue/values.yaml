@@ -563,6 +563,45 @@ edge:
     affinity: {}
   groups: []
 
+nodeLocalDNS:
+  # Disabled in the reusable chart. The production upgrade/install entrypoints
+  # explicitly opt in after validating the cluster DNS service and rollout mode.
+  enabled: false
+  # shadow only listens on localIP for explicit validation queries. iptables
+  # additionally owns kubeDNSServiceIP so existing Pod DNS traffic is cached.
+  mode: shadow
+  namespace: kube-system
+  localIP: 169.254.20.10
+  # Required when enabled. Production entrypoints discover this from the live
+  # kube-dns Service instead of assuming a Service CIDR.
+  kubeDNSServiceIP: ""
+  clusterDomain: cluster.local
+  upstreamServiceName: ""
+  image:
+    repository: registry.k8s.io/dns/k8s-dns-node-cache
+    tag: 1.26.8
+    digest: sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739
+    pullPolicy: IfNotPresent
+  updateStrategy:
+    maxUnavailable: 1
+  minReadySeconds: 10
+  terminationGracePeriodSeconds: 30
+  upstreamSelector:
+    k8s-app: kube-dns
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+    - effect: NoSchedule
+      operator: Exists
+  resources:
+    requests:
+      cpu: 25m
+      memory: 5Mi
+
 dns:
   enabled: false
   image:

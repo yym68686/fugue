@@ -3071,6 +3071,235 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	}
 }
 
+func TestNodeLocalDNSDefaultsDisabled(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	if doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-local-dns"); doc != "" {
+		t.Fatalf("node-local DNS must require an explicit production opt-in:\n%s", doc)
+	}
+}
+
+func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
+		"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=vps-84c8f0a9`,
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	name := "fugue-fugue-node-local-dns"
+	for _, resource := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "ServiceAccount", name: name},
+		{kind: "ConfigMap", name: name},
+		{kind: "Service", name: name},
+		{kind: "Service", name: "fugue-fugue-dns-upstream"},
+		{kind: "DaemonSet", name: name},
+	} {
+		doc := manifestDocumentForKindAndName(manifest, resource.kind, resource.name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s %s:\n%s", resource.kind, resource.name, manifest)
+		}
+		if !strings.Contains(doc, "namespace: kube-system") {
+			t.Fatalf("%s %s must be explicitly owned in kube-system:\n%s", resource.kind, resource.name, doc)
+		}
+	}
+
+	config := manifestDocumentForKindAndName(manifest, "ConfigMap", name)
+	for _, want := range []string{
+		"cluster.local:53 {",
+		"bind 169.254.20.10",
+		"forward . __PILLAR__CLUSTER__DNS__ {",
+		"force_tcp",
+		"health 169.254.20.10:8080",
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("node-local DNS config missing %q:\n%s", want, config)
+		}
+	}
+	if got := strings.Count(config, "forward . __PILLAR__CLUSTER__DNS__ {"); got != 4 {
+		t.Fatalf("every node-local DNS zone must retain central CoreDNS as its fallback; got %d forwards:\n%s", got, config)
+	}
+	for _, unwanted := range []string{
+		"bind 169.254.20.10 10.43.0.10",
+		"__PILLAR__UPSTREAM__SERVERS__",
+		"/etc/resolv.conf",
+	} {
+		if strings.Contains(config, unwanted) {
+			t.Fatalf("shadow node-local DNS must not contain %q:\n%s", unwanted, config)
+		}
+	}
+
+	upstream := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-dns-upstream")
+	for _, want := range []string{
+		"k8s-app: kube-dns",
+		"protocol: UDP",
+		"protocol: TCP",
+	} {
+		if !strings.Contains(upstream, want) {
+			t.Fatalf("central CoreDNS upstream service missing %q:\n%s", want, upstream)
+		}
+	}
+
+	daemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+	for _, want := range []string{
+		`fugue.io/node-local-dns-mode: "shadow"`,
+		"priorityClassName: system-node-critical",
+		"automountServiceAccountToken: false",
+		"hostNetwork: true",
+		"dnsPolicy: Default",
+		"maxUnavailable: 1",
+		`image: "registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739"`,
+		`- "169.254.20.10"`,
+		`- "fugue-fugue-dns-upstream"`,
+		"- NET_ADMIN",
+		"path: /run/xtables.lock",
+		"kubernetes.io/os: linux",
+		"kubernetes.io/hostname: vps-84c8f0a9",
+		"effect: NoSchedule",
+		"effect: NoExecute",
+		"containerPort: 9353",
+	} {
+		if !strings.Contains(daemonSet, want) {
+			t.Fatalf("node-local DNS daemonset missing %q:\n%s", want, daemonSet)
+		}
+	}
+	for _, unwanted := range []string{"hostPort:", `- "169.254.20.10,10.43.0.10"`} {
+		if strings.Contains(daemonSet, unwanted) {
+			t.Fatalf("shadow node-local DNS daemonset must not contain %q:\n%s", unwanted, daemonSet)
+		}
+	}
+}
+
+func TestNodeLocalDNSIPTablesModeInterceptsTheExistingKubeDNSServiceIP(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set", "nodeLocalDNS.mode=iptables",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.0.10",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	config := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-node-local-dns")
+	if got := strings.Count(config, "bind 169.254.20.10 10.44.0.10"); got != 4 {
+		t.Fatalf("iptables mode must bind the local and existing kube-dns service IP in every zone; got %d:\n%s", got, config)
+	}
+	daemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-local-dns")
+	for _, want := range []string{
+		`fugue.io/node-local-dns-mode: "iptables"`,
+		`- "169.254.20.10,10.44.0.10"`,
+		"maxUnavailable: 1",
+		"minReadySeconds: 10",
+	} {
+		if !strings.Contains(daemonSet, want) {
+			t.Fatalf("iptables node-local DNS daemonset missing %q:\n%s", want, daemonSet)
+		}
+	}
+}
+
+func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "unknown mode",
+			args: []string{"--set", "nodeLocalDNS.mode=active"},
+			want: "nodeLocalDNS.mode must be shadow or iptables",
+		},
+		{
+			name: "non link-local cache address",
+			args: []string{"--set-string", "nodeLocalDNS.localIP=10.44.0.11"},
+			want: "nodeLocalDNS.localIP must be in the IPv4 link-local 169.254.0.0/16 range",
+		},
+		{
+			name: "invalid kube-dns service address",
+			args: []string{"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.999.10"},
+			want: "nodeLocalDNS.kubeDNSServiceIP must be a valid IPv4 address",
+		},
+		{
+			name: "same cache and service address",
+			args: []string{
+				"--set-string", "nodeLocalDNS.localIP=169.254.20.10",
+				"--set-string", "nodeLocalDNS.kubeDNSServiceIP=169.254.20.10",
+			},
+			want: "nodeLocalDNS.localIP and nodeLocalDNS.kubeDNSServiceIP must be different",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{
+				"template", "fugue", chartDir,
+				"--set", "nodeLocalDNS.enabled=true",
+				"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
+			}
+			args = append(args, test.args...)
+			cmd := exec.Command("helm", args...)
+			cmd.Dir = chartDir
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected helm template to reject unsafe node-local DNS values:\n%s", output)
+			}
+			if !strings.Contains(string(output), test.want) {
+				t.Fatalf("unexpected helm error; want %q:\n%s", test.want, output)
+			}
+		})
+	}
+}
+
 func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

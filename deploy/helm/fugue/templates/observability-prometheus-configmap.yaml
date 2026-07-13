@@ -58,6 +58,31 @@ data:
             target_label: pod
           - target_label: namespace
             replacement: {{ .Release.Namespace | quote }}
+      {{ if .Values.nodeLocalDNS.enabled }}
+      - job_name: fugue-node-local-dns
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names:
+                - {{ .Values.nodeLocalDNS.namespace | quote }}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+            regex: {{ .Release.Name | quote }}
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            regex: node-local-dns
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: "metrics|setup-metrics"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            target_label: endpoint
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+      {{ end }}
       - job_name: fugue-kubernetes-nodes
         scheme: https
         authorization:
@@ -193,6 +218,26 @@ data:
             annotations:
               summary: "Fugue release attempt may be stuck"
               description: "At least one release attempt has remained in a non-terminal status long enough to require investigation. Use fugue app release attempts/status/explain to inspect the phase timeline."
+      {{ if .Values.nodeLocalDNS.enabled }}
+      - name: fugue-node-local-dns
+        rules:
+          - alert: FugueNodeLocalDNSSetupError
+            expr: increase(coredns_nodecache_setup_errors_total[5m]) > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "NodeLocal DNSCache network setup failed"
+              description: "A NodeLocal DNSCache instance reported an interface or iptables setup error. Stop the rollout and inspect the affected node."
+          - alert: FugueNodeLocalDNSMetricsMissing
+            expr: up{job="fugue-node-local-dns"} == 0 or absent(up{job="fugue-node-local-dns"})
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "NodeLocal DNSCache metrics target is unavailable"
+              description: "A NodeLocal DNSCache CoreDNS or setup-metrics endpoint has been unavailable for five minutes."
+      {{ end }}
       - name: fugue-edge-request-body
         rules:
           - alert: FugueEdgeSlowRequestBodyRead
