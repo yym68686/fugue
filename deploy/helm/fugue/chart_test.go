@@ -3200,6 +3200,7 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 	for _, want := range []string{
 		`fugue.io/node-local-dns-mode: "shadow"`,
 		"priorityClassName: system-node-critical",
+		"preemptionPolicy: Never",
 		"automountServiceAccountToken: false",
 		"hostNetwork: true",
 		"dnsPolicy: Default",
