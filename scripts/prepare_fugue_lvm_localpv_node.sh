@@ -136,20 +136,43 @@ IMAGE_DIR="$(dirname "${IMAGE_PATH}")"
 mkdir -p "${IMAGE_DIR}"
 
 if ! vgs "${VG_NAME}" >/dev/null 2>&1; then
+  IMAGE_CREATED_BY_SCRIPT="false"
   if [[ ! -f "${IMAGE_PATH}" ]]; then
     fallocate -l "${SIZE_GIB}G" "${IMAGE_PATH}"
     chmod 600 "${IMAGE_PATH}"
+    IMAGE_CREATED_BY_SCRIPT="true"
   fi
 
+  LOOP_ATTACHED_BY_SCRIPT="false"
   LOOP_DEVICE="$(losetup -j "${IMAGE_PATH}" | awk -F: 'NR==1{print $1}')"
   if [[ -z "${LOOP_DEVICE}" ]]; then
     LOOP_DEVICE="$(losetup --find --show "${IMAGE_PATH}")"
+    LOOP_ATTACHED_BY_SCRIPT="true"
   fi
 
-  if ! pvs "${LOOP_DEVICE}" >/dev/null 2>&1; then
+  if pvs "${LOOP_DEVICE}" >/dev/null 2>&1; then
+    EXISTING_PV_VG="$(pvs --noheadings -o vg_name "${LOOP_DEVICE}" 2>/dev/null | awk '{$1=$1; print; exit}')"
+    if [[ -n "${EXISTING_PV_VG}" && "${EXISTING_PV_VG}" != "${VG_NAME}" ]]; then
+      if [[ "${LOOP_ATTACHED_BY_SCRIPT}" == "true" ]]; then
+        losetup -d "${LOOP_DEVICE}" >/dev/null 2>&1 || true
+      fi
+      echo "LocalPV image ${IMAGE_PATH} belongs to volume group ${EXISTING_PV_VG}, expected ${VG_NAME}; refusing to modify existing LVM metadata" >&2
+      exit 1
+    fi
+    if [[ -z "${EXISTING_PV_VG}" ]]; then
+      vgcreate "${VG_NAME}" "${LOOP_DEVICE}"
+    fi
+  else
+    if [[ "${IMAGE_CREATED_BY_SCRIPT}" != "true" ]]; then
+      if [[ "${LOOP_ATTACHED_BY_SCRIPT}" == "true" ]]; then
+        losetup -d "${LOOP_DEVICE}" >/dev/null 2>&1 || true
+      fi
+      echo "Existing LocalPV image ${IMAGE_PATH} is not an LVM physical volume; refusing to initialize or overwrite it" >&2
+      exit 1
+    fi
     pvcreate -ff -y "${LOOP_DEVICE}"
+    vgcreate "${VG_NAME}" "${LOOP_DEVICE}"
   fi
-  vgcreate "${VG_NAME}" "${LOOP_DEVICE}"
 fi
 
 SERVICE_PATH="/etc/systemd/system/fugue-lvm-localpv-loop.service"
@@ -163,7 +186,7 @@ Before=k3s.service k3s-agent.service kubelet.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -ec 'losetup -j ${IMAGE_PATH} >/dev/null || losetup --find --show ${IMAGE_PATH} >/dev/null; vgchange -ay ${VG_NAME}'
+ExecStart=/bin/sh -ec 'losetup -j ${IMAGE_PATH} | grep -q . || losetup --find --show ${IMAGE_PATH} >/dev/null; vgchange -ay ${VG_NAME}'
 ExecStop=/bin/sh -ec 'vgchange -an ${VG_NAME} || true'
 
 [Install]

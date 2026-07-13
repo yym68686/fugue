@@ -873,6 +873,51 @@ func TestImageCachePersistsManifestsAcrossRegistryRestart(t *testing.T) {
 			t.Fatalf("head %s status after restart = %d, want %d; body=%q", target, headRec.Code, http.StatusOK, headRec.Body.String())
 		}
 	}
+	inventory, err := restarted.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("management manifest inventory: %v", err)
+	}
+	if len(inventory) != 2 {
+		t.Fatalf("servable manifest inventory = %d, want 2: %+v", len(inventory), inventory)
+	}
+}
+
+func TestManagementManifestInventoryExcludesPersistedIndexThatFailedReplay(t *testing.T) {
+	t.Parallel()
+
+	storeDir := t.TempDir()
+	manifestDir := filepath.Join(storeDir, "_manifests")
+	cache := &imageCache{
+		registry:    registry.New(registry.WithBlobHandler(registry.NewDiskBlobHandler(storeDir))),
+		storeDir:    storeDir,
+		manifestDir: manifestDir,
+	}
+	const missingChildDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	index := fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.list.v2+json","manifests":[{"mediaType":"application/vnd.docker.distribution.manifest.v2+json","digest":%q,"size":123,"platform":{"os":"linux","architecture":"amd64"}}]}`, missingChildDigest)
+	if err := cache.persistManifest("fugue-apps/demo", "image-index", "application/vnd.docker.distribution.manifest.list.v2+json", []byte(index)); err != nil {
+		t.Fatalf("persist index: %v", err)
+	}
+
+	if err := cache.loadPersistedManifests(); err == nil {
+		t.Fatal("expected replay to reject an index whose child manifest is absent")
+	}
+	records, err := cache.managementManifestRecords()
+	if err != nil {
+		t.Fatalf("persisted manifest records: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("persisted manifest records = %d, want 1: %+v", len(records), records)
+	}
+	if cache.localManifestAvailable("fugue-apps/demo", "image-index") {
+		t.Fatal("index with a missing child must not be locally servable")
+	}
+	inventory, err := cache.managementManifestInventory()
+	if err != nil {
+		t.Fatalf("management manifest inventory: %v", err)
+	}
+	if len(inventory) != 0 {
+		t.Fatalf("unservable persisted index must not be reported present: %+v", inventory)
+	}
 }
 
 func TestImageCacheStreamsBlobUploadToDisk(t *testing.T) {

@@ -1097,6 +1097,14 @@ func (c *imageCache) managementManifestInventory() ([]map[string]any, error) {
 	}
 	out := []map[string]any{}
 	for _, record := range records {
+		// Persisted metadata is only a restart journal. A manifest list/index can
+		// remain on disk after one of its child manifests has disappeared, in
+		// which case replay rejects it and the local registry cannot serve it.
+		// Inventory is consumed as an availability signal, so only report records
+		// that the in-memory registry can actually serve.
+		if !c.localManifestAvailable(record.Repo, record.Target) {
+			continue
+		}
 		entry := manifestEntry(record, blobByDigest)
 		out = append(out, map[string]any{
 			"repo":                  entry.Repo,

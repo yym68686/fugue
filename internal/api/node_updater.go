@@ -4356,23 +4356,52 @@ else:
             return False
         affinity = (((pv.get("spec") or {}).get("nodeAffinity") or {}).get("required") or {})
         terms = affinity.get("nodeSelectorTerms") or []
+        if not terms:
+            return True
+        identity_keys = ("kubernetes.io/hostname", "node.kubernetes.io/instance", "openebs.io/nodename")
         for term in terms:
+            could_target = True
             for expr in term.get("matchExpressions") or []:
                 key = expr.get("key")
+                operator = str(expr.get("operator") or "")
                 values = [str(v) for v in (expr.get("values") or [])]
-                if key in ("kubernetes.io/hostname", "node.kubernetes.io/instance") and cluster_node in values:
-                    return True
+                if key not in identity_keys:
+                    continue
+                if operator == "In" and cluster_node not in values:
+                    could_target = False
+                elif operator == "NotIn" and cluster_node in values:
+                    could_target = False
+            for field in term.get("matchFields") or []:
+                if field.get("key") != "metadata.name":
+                    continue
+                operator = str(field.get("operator") or "")
+                values = [str(v) for v in (field.get("values") or [])]
+                if operator == "In" and cluster_node not in values:
+                    could_target = False
+                elif operator == "NotIn" and cluster_node in values:
+                    could_target = False
+            if could_target:
+                return True
         return False
 
     for pv in pv_data.get("items") or []:
         spec = pv.get("spec") or {}
         status = pv.get("status") or {}
         phase = str(status.get("phase") or "")
-        local_path = ((spec.get("local") or {}).get("path") or "")
-        storage_class = str(spec.get("storageClassName") or "")
+        csi = spec.get("csi") or {}
+        csi_driver = str(csi.get("driver") or "").strip()
+        volume_attributes = csi.get("volumeAttributes") or {}
+        volume_group = str(
+            volume_attributes.get("openebs.io/volgroup")
+            or volume_attributes.get("volgroup")
+            or volume_attributes.get("vgname")
+            or ""
+        ).strip()
         if phase != "Bound":
             continue
-        if not local_path and "local" not in storage_class.lower() and "lvm" not in storage_class.lower():
+        if csi_driver != "local.csi.openebs.io":
+            continue
+        if volume_group and volume_group != vg_name:
             continue
         if cluster_node and not pv_targets_node(pv):
             continue
@@ -4433,6 +4462,7 @@ localpv_decommission_decision_json() {
   local expected_bound_pv_count="${7:-}"
   python3 - "${inventory_file}" "${dry_run}" "${allow_delete}" "${allow_policy}" "${expected_image_size}" "${expected_lv_count}" "${expected_bound_pv_count}" <<'PY_LOCALPV_DECISION'
 import json
+import os
 import sys
 
 path, dry_run_raw, allow_delete_raw, allow_policy_raw, expected_image_raw, expected_lv_raw, expected_bound_raw = sys.argv[1:8]

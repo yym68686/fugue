@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1467,6 +1468,436 @@ func TestPrepareLocalPVNodeRolePolicyDryRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrepareLocalPVLoopServiceChecksAssociationOutput(t *testing.T) {
+	t.Parallel()
+
+	scriptPath := filepath.Join("..", "..", "scripts", "prepare_fugue_lvm_localpv_node.sh")
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read LocalPV preparation script: %v", err)
+	}
+	script := string(raw)
+	want := "losetup -j ${IMAGE_PATH} | grep -q . || losetup --find --show ${IMAGE_PATH}"
+	if !strings.Contains(script, want) {
+		t.Fatalf("LocalPV loop service must attach when losetup -j returns success with empty output; missing %q", want)
+	}
+	if strings.Contains(script, "losetup -j ${IMAGE_PATH} >/dev/null || losetup --find --show ${IMAGE_PATH}") {
+		t.Fatal("LocalPV loop service must not use losetup -j exit status as the association test")
+	}
+}
+
+func TestPrepareLocalPVNodeRecoversExistingBackingMetadataWithoutReinitializingIt(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	scriptPath := filepath.Join("..", "..", "scripts", "prepare_fugue_lvm_localpv_node.sh")
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read LocalPV preparation script: %v", err)
+	}
+	harness := string(raw)
+	rootGuard := `if [[ "${EUID}" -ne 0 ]]; then
+  echo "run as root" >&2
+  exit 1
+fi`
+	if !strings.Contains(harness, rootGuard) {
+		t.Fatal("LocalPV preparation script root guard changed; update executable harness deliberately")
+	}
+	harness = strings.Replace(harness, rootGuard, ":", 1)
+	const servicePath = `SERVICE_PATH="/etc/systemd/system/fugue-lvm-localpv-loop.service"`
+	if !strings.Contains(harness, servicePath) {
+		t.Fatal("LocalPV preparation service path changed; update executable harness deliberately")
+	}
+	harness = strings.Replace(harness, servicePath, `SERVICE_PATH="${TEST_SERVICE_PATH}"`, 1)
+
+	tests := []struct {
+		name             string
+		imageExists      bool
+		vgOnline         bool
+		loopAssociated   bool
+		pvPresent        bool
+		pvVG             string
+		wantOK           bool
+		wantOutput       string
+		wantActions      []string
+		forbiddenActions []string
+	}{
+		{
+			name:        "existing backing PV belongs to requested VG",
+			imageExists: true,
+			pvPresent:   true,
+			pvVG:        "fugue-vg",
+			wantOK:      true,
+			wantActions: []string{"losetup --find --show", "pvs /dev/loop-test", "pvs --noheadings -o vg_name /dev/loop-test", "systemctl enable --now fugue-lvm-localpv-loop.service"},
+			forbiddenActions: []string{
+				"pvcreate ",
+				"vgcreate ",
+				"losetup -d ",
+			},
+		},
+		{
+			name:        "existing backing PV belongs to another VG",
+			imageExists: true,
+			pvPresent:   true,
+			pvVG:        "other-vg",
+			wantOutput:  "belongs to volume group other-vg, expected fugue-vg",
+			wantActions: []string{"losetup --find --show", "pvs /dev/loop-test", "pvs --noheadings -o vg_name /dev/loop-test", "losetup -d /dev/loop-test"},
+			forbiddenActions: []string{
+				"pvcreate ",
+				"vgcreate ",
+				"systemctl ",
+			},
+		},
+		{
+			name:        "new empty image is initialized",
+			pvPresent:   false,
+			wantOK:      true,
+			wantActions: []string{"fallocate -l 1G", "losetup --find --show", "pvs /dev/loop-test", "pvcreate -ff -y /dev/loop-test", "vgcreate fugue-vg /dev/loop-test", "systemctl enable --now fugue-lvm-localpv-loop.service"},
+		},
+		{
+			name:        "existing non-PV image is never overwritten",
+			imageExists: true,
+			pvPresent:   false,
+			wantOutput:  "is not an LVM physical volume; refusing to initialize or overwrite it",
+			wantActions: []string{"losetup --find --show", "pvs /dev/loop-test", "losetup -d /dev/loop-test"},
+			forbiddenActions: []string{
+				"pvcreate ",
+				"vgcreate ",
+				"systemctl ",
+			},
+		},
+		{
+			name:             "online VG is never rebuilt",
+			imageExists:      true,
+			vgOnline:         true,
+			loopAssociated:   true,
+			wantOK:           true,
+			wantActions:      []string{"vgs fugue-vg", "systemctl enable --now fugue-lvm-localpv-loop.service"},
+			forbiddenActions: []string{"fallocate ", "losetup ", "pvs ", "pvcreate ", "vgcreate "},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			binDir := filepath.Join(tmpDir, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatalf("create fake command directory: %v", err)
+			}
+			actionsPath := filepath.Join(tmpDir, "actions.log")
+			imagePath := filepath.Join(tmpDir, "fugue-vg.img")
+			serviceFile := filepath.Join(tmpDir, "fugue-lvm-localpv-loop.service")
+			if tt.imageExists {
+				if err := os.WriteFile(imagePath, []byte("existing LVM metadata"), 0o600); err != nil {
+					t.Fatalf("write existing LocalPV image: %v", err)
+				}
+			}
+
+			writeFakeNodeUpdaterCommand(t, binDir, "vgs", `#!/bin/sh
+printf '%s\n' "vgs $*" >>"${TEST_ACTIONS}"
+if [ "${1:-}" = "fugue-vg" ]; then
+  [ "${TEST_VG_ONLINE:-false}" = "true" ]
+  exit $?
+fi
+printf '%s\n' 'fugue-vg 1073741824 1073741824'
+`)
+			writeFakeNodeUpdaterCommand(t, binDir, "pvs", `#!/bin/sh
+printf '%s\n' "pvs $*" >>"${TEST_ACTIONS}"
+if [ "${1:-}" = "--noheadings" ]; then
+  printf '%s\n' "${TEST_PV_VG:-}"
+  exit 0
+fi
+[ "${TEST_PV_PRESENT:-false}" = "true" ]
+`)
+			writeFakeNodeUpdaterCommand(t, binDir, "losetup", `#!/bin/sh
+printf '%s\n' "losetup $*" >>"${TEST_ACTIONS}"
+case "${1:-}" in
+  -j)
+    if [ "${TEST_LOOP_ASSOCIATED:-false}" = "true" ]; then
+      printf '/dev/loop-test: []: (%s)\n' "${2:-}"
+    fi
+    ;;
+  --find)
+    printf '%s\n' /dev/loop-test
+    ;;
+  -d)
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+			writeFakeNodeUpdaterCommand(t, binDir, "fallocate", `#!/bin/sh
+printf '%s\n' "fallocate $*" >>"${TEST_ACTIONS}"
+target=''
+for arg in "$@"; do
+  target="${arg}"
+done
+: >"${target}"
+`)
+			for _, name := range []string{"pvcreate", "vgcreate", "systemctl"} {
+				writeFakeNodeUpdaterCommand(t, binDir, name, `#!/bin/sh
+printf '%s\n' "$(basename "$0") $*" >>"${TEST_ACTIONS}"
+`)
+			}
+
+			testScript := filepath.Join(tmpDir, "prepare-localpv-test.sh")
+			if err := os.WriteFile(testScript, []byte(harness), 0o700); err != nil {
+				t.Fatalf("write LocalPV preparation harness: %v", err)
+			}
+			cmd := exec.Command("bash", testScript, "--size-gib", "1", "--node-role", "storage-agent", "--image-path", imagePath)
+			cmd.Env = append(os.Environ(),
+				"PATH="+binDir+":"+os.Getenv("PATH"),
+				"TEST_ACTIONS="+actionsPath,
+				"TEST_SERVICE_PATH="+serviceFile,
+				"TEST_VG_ONLINE="+fmt.Sprintf("%t", tt.vgOnline),
+				"TEST_LOOP_ASSOCIATED="+fmt.Sprintf("%t", tt.loopAssociated),
+				"TEST_PV_PRESENT="+fmt.Sprintf("%t", tt.pvPresent),
+				"TEST_PV_VG="+tt.pvVG,
+				"FUGUE_NODE_ROLES=",
+			)
+			output, runErr := cmd.CombinedOutput()
+			if tt.wantOK && runErr != nil {
+				t.Fatalf("LocalPV preparation harness failed: %v\n%s", runErr, output)
+			}
+			if !tt.wantOK && runErr == nil {
+				t.Fatalf("LocalPV preparation harness unexpectedly succeeded\n%s", output)
+			}
+			if tt.wantOutput != "" && !strings.Contains(string(output), tt.wantOutput) {
+				t.Fatalf("LocalPV preparation output missing %q:\n%s", tt.wantOutput, output)
+			}
+			actionsRaw, err := os.ReadFile(actionsPath)
+			if err != nil {
+				t.Fatalf("read fake command actions: %v", err)
+			}
+			actions := string(actionsRaw)
+			for _, want := range tt.wantActions {
+				if !strings.Contains(actions, want) {
+					t.Fatalf("LocalPV actions missing %q:\n%s", want, actions)
+				}
+			}
+			for _, forbidden := range tt.forbiddenActions {
+				for _, action := range strings.Split(actions, "\n") {
+					if strings.HasPrefix(action, forbidden) {
+						t.Fatalf("LocalPV actions unexpectedly include %q:\n%s", action, actions)
+					}
+				}
+			}
+			if tt.wantOK {
+				serviceRaw, err := os.ReadFile(serviceFile)
+				if err != nil {
+					t.Fatalf("read generated LocalPV service: %v", err)
+				}
+				if !strings.Contains(string(serviceRaw), "losetup -j "+imagePath+" | grep -q . || losetup --find --show "+imagePath) {
+					t.Fatalf("generated LocalPV service does not test association output:\n%s", serviceRaw)
+				}
+			}
+		})
+	}
+}
+
+func TestNodeUpdaterLocalPVDecommissionDecisionExecutesPathGuard(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	tmpDir := t.TempDir()
+	imagePath := filepath.Join(tmpDir, "fugue-vg.img")
+	if err := os.WriteFile(imagePath, make([]byte, 1024), 0o600); err != nil {
+		t.Fatalf("write LocalPV image fixture: %v", err)
+	}
+	inventoryPath := filepath.Join(tmpDir, "inventory.json")
+	decisionPath := filepath.Join(tmpDir, "decision.json")
+	inventory, err := json.Marshal(map[string]any{
+		"inventory": map[string]any{
+			"image_path":           imagePath,
+			"image_size_bytes":     1024,
+			"loop_device":          "/dev/loop-test",
+			"loop_backing_file":    imagePath,
+			"lv_count":             0,
+			"bound_pv_count":       0,
+			"unsafe_reasons":       []string{},
+			"safe_to_decommission": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal LocalPV inventory fixture: %v", err)
+	}
+	if err := os.WriteFile(inventoryPath, inventory, 0o600); err != nil {
+		t.Fatalf("write LocalPV inventory fixture: %v", err)
+	}
+
+	harness := prefix + `
+localpv_decommission_decision_json "${TEST_INVENTORY_PATH}" true false true "" "" "" >"${TEST_DECISION_PATH}"
+python3 - "${TEST_DECISION_PATH}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    decision = json.load(fh)
+if not decision.get("safe"):
+    raise SystemExit(f"expected safe dry-run decision, got {decision}")
+PY
+`
+	scriptPath := filepath.Join(tmpDir, "node-updater-localpv-decision-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write LocalPV decision harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(),
+		"TEST_INVENTORY_PATH="+inventoryPath,
+		"TEST_DECISION_PATH="+decisionPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("LocalPV decision harness failed: %v\n%s", err, output)
+	}
+}
+
+func TestNodeUpdaterLocalPVInventoryOnlyCountsOpenEBSLVMVolumes(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	tmpDir := t.TempDir()
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create fake command directory: %v", err)
+	}
+	writeFakeNodeUpdaterCommand(t, binDir, "vgs", `#!/bin/sh
+printf '%s\n' '{"report":[{"vg":[{"vg_name":"fugue-vg","vg_size":"8589934592","vg_free":"8589934592"}]}]}'
+`)
+	writeFakeNodeUpdaterCommand(t, binDir, "lvs", `#!/bin/sh
+printf '%s\n' '{"report":[{"lv":[]}]}'
+`)
+	writeFakeNodeUpdaterCommand(t, binDir, "pvs", `#!/bin/sh
+printf '%s\n' '{"report":[{"pv":[{"pv_name":"/dev/loop-test","vg_name":"fugue-vg","pv_size":"8589934592","pv_free":"8589934592"}]}]}'
+`)
+	writeFakeNodeUpdaterCommand(t, binDir, "losetup", `#!/bin/sh
+printf '{"loopdevices":[{"name":"/dev/loop-test","back-file":"%s"}]}\n' "${TEST_IMAGE_PATH}"
+`)
+	writeFakeNodeUpdaterCommand(t, binDir, "kubectl", `#!/bin/sh
+case "${1:-} ${2:-}" in
+  "get node")
+    printf '%s\n' '{"metadata":{"labels":{"node-role.kubernetes.io/worker":"true"}}}'
+    ;;
+  "get pv")
+    cat <<'JSON'
+{"items":[
+  {"metadata":{"name":"pv-hostpath"},"spec":{"storageClassName":"fugue-local-rwo","hostPath":{"path":"/var/lib/rancher/k3s/storage/pv-hostpath"},"claimRef":{"namespace":"apps","name":"hostpath-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/hostname","operator":"In","values":["fortedrape8"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-lvm"},"spec":{"storageClassName":"fugue-workspace-rwo","csi":{"driver":"local.csi.openebs.io","volumeHandle":"pv-lvm","volumeAttributes":{"openebs.io/volgroup":"fugue-vg"}},"claimRef":{"namespace":"apps","name":"lvm-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"In","values":["fortedrape8"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-other-vg"},"spec":{"csi":{"driver":"local.csi.openebs.io","volumeAttributes":{"openebs.io/volgroup":"other-vg"}},"claimRef":{"namespace":"apps","name":"other-vg-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"In","values":["fortedrape8"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-other-node"},"spec":{"csi":{"driver":"local.csi.openebs.io","volumeAttributes":{"openebs.io/volgroup":"fugue-vg"}},"claimRef":{"namespace":"apps","name":"other-node-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"In","values":["worker-2"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-ambiguous-notin"},"spec":{"csi":{"driver":"local.csi.openebs.io","volumeAttributes":{}},"claimRef":{"namespace":"apps","name":"ambiguous-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"NotIn","values":["worker-2"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-excludes-current"},"spec":{"csi":{"driver":"local.csi.openebs.io","volumeAttributes":{}},"claimRef":{"namespace":"apps","name":"excluded-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"NotIn","values":["fortedrape8"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-multi-term"},"spec":{"csi":{"driver":"local.csi.openebs.io","volumeAttributes":{"openebs.io/volgroup":"fugue-vg"}},"claimRef":{"namespace":"apps","name":"multi-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"In","values":["worker-2"]}]},{"matchFields":[{"key":"metadata.name","operator":"In","values":["fortedrape8"]}]}]}}},"status":{"phase":"Bound"}},
+  {"metadata":{"name":"pv-unbound"},"spec":{"csi":{"driver":"local.csi.openebs.io","volumeAttributes":{"openebs.io/volgroup":"fugue-vg"}},"claimRef":{"namespace":"apps","name":"unbound-pvc"},"nodeAffinity":{"required":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"openebs.io/nodename","operator":"In","values":["fortedrape8"]}]}]}}},"status":{"phase":"Available"}}
+]}
+JSON
+    ;;
+  "get pvc")
+    printf '%s\n' '{"items":[{"metadata":{"namespace":"apps","name":"lvm-pvc"},"spec":{"volumeName":"pv-lvm"}}]}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`)
+
+	imagePath := filepath.Join(tmpDir, "fugue-vg.img")
+	if err := os.WriteFile(imagePath, make([]byte, 1024), 0o600); err != nil {
+		t.Fatalf("write LocalPV image fixture: %v", err)
+	}
+	outputPath := filepath.Join(tmpDir, "inventory.json")
+	harness := prefix + `
+localpv_inventory_json >"${TEST_OUTPUT_PATH}"
+`
+	scriptPath := filepath.Join(tmpDir, "node-updater-localpv-inventory-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write LocalPV inventory harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"TEST_IMAGE_PATH="+imagePath,
+		"TEST_OUTPUT_PATH="+outputPath,
+		"FUGUE_LOCALPV_IMAGE_PATH="+imagePath,
+		"FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME=fortedrape8",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("LocalPV inventory harness failed: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read LocalPV inventory output: %v", err)
+	}
+	var report struct {
+		Inventory struct {
+			BoundPVCount       int      `json:"bound_pv_count"`
+			BoundPVCRefs       []string `json:"bound_pvc_refs"`
+			SafeToDecommission bool     `json:"safe_to_decommission"`
+			UnsafeReasons      []string `json:"unsafe_reasons"`
+		} `json:"inventory"`
+	}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("decode LocalPV inventory output: %v\n%s", err, raw)
+	}
+	if report.Inventory.BoundPVCount != 3 {
+		t.Fatalf("bound LVM PV count = %d, want 3: %+v", report.Inventory.BoundPVCount, report.Inventory)
+	}
+	wantRefs := []string{"apps/ambiguous-pvc", "apps/lvm-pvc", "apps/multi-pvc"}
+	if strings.Join(report.Inventory.BoundPVCRefs, ",") != strings.Join(wantRefs, ",") {
+		t.Fatalf("bound LVM PVC refs = %+v, want %+v", report.Inventory.BoundPVCRefs, wantRefs)
+	}
+	if report.Inventory.SafeToDecommission {
+		t.Fatalf("inventory with a bound LVM PV must be unsafe: %+v", report.Inventory)
+	}
+	if !containsNodeUpdaterTestString(report.Inventory.UnsafeReasons, "bound_pvs_present") {
+		t.Fatalf("unsafe reasons = %+v, want bound_pvs_present", report.Inventory.UnsafeReasons)
+	}
+}
+
+func writeFakeNodeUpdaterCommand(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o700); err != nil {
+		t.Fatalf("write fake %s command: %v", name, err)
+	}
+}
+
+func containsNodeUpdaterTestString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNodeUpdaterPrepullAppImagesSkipsMissingManifestRefs(t *testing.T) {
