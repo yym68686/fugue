@@ -1850,6 +1850,62 @@ for gate in central_coredns node_local_dns service_resolution rollback_path_smok
 done
 assert_eq "$(FUGUE_CLUSTER_DNS_WATCH_WINDOW_SECONDS=211 release_safety_watch_window_seconds)" "211" "cluster DNS changes must use the dedicated watch window"
 
+FUGUE_RELEASE_CHANGED_FILES=
+RELEASE_CHANGED_FILES_EFFECTIVE=
+FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT=true
+assert_eq "$(release_safety_changed_file_subsystems)" "cluster_dns" "config-only NodeLocal DNSCache changes must select cluster DNS safety"
+cluster_dns_gates="$(release_safety_required_gates)"
+for gate in central_coredns node_local_dns service_resolution rollback_path_smoke; do
+  [[ ",${cluster_dns_gates}," == *",${gate},"* ]] || fail "config-only NodeLocal DNSCache release gates missing ${gate}: ${cluster_dns_gates}"
+done
+assert_eq "$(FUGUE_CLUSTER_DNS_WATCH_WINDOW_SECONDS=211 release_safety_watch_window_seconds)" "211" "config-only NodeLocal DNSCache changes must use the dedicated watch window"
+unset FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT
+
+(
+  FUGUE_NODE_LOCAL_DNS_NAMESPACE=kube-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  KUBECTL=fake_node_local_dns_intent_kubectl
+  node_local_dns_intent_queries="$(mktemp)"
+  fake_node_local_dns_intent_kubectl() {
+    printf '%s\n' "$*" >>"${node_local_dns_intent_queries}"
+    case "${TEST_NODE_LOCAL_DNS_LIVE_STATE:-absent}:$*" in
+      present:*"get daemonset fugue-fugue-node-local-dns --ignore-not-found -o name"*)
+        printf '%s\n' 'daemonset.apps/fugue-fugue-node-local-dns'
+        ;;
+      absent:*"get daemonset fugue-fugue-node-local-dns --ignore-not-found -o name"*)
+        ;;
+      error:*"get daemonset fugue-fugue-node-local-dns --ignore-not-found -o name"*)
+        return 17
+        ;;
+      *)
+        return 18
+        ;;
+    esac
+  }
+
+  FUGUE_NODE_LOCAL_DNS_ENABLED=true
+  prepare_release_safety_runtime_intents || fail "enabled NodeLocal DNSCache intent preparation must pass"
+  assert_eq "${FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT}" "true" "enabled NodeLocal DNSCache must declare runtime intent"
+  assert_eq "$(awk 'END { print NR + 0 }' "${node_local_dns_intent_queries}")" "0" "enabled NodeLocal DNSCache intent must not depend on the previous live state"
+
+  FUGUE_NODE_LOCAL_DNS_ENABLED=false
+  TEST_NODE_LOCAL_DNS_LIVE_STATE=present
+  prepare_release_safety_runtime_intents || fail "NodeLocal DNSCache teardown intent preparation must pass"
+  assert_eq "${FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT}" "true" "live NodeLocal DNSCache teardown must declare runtime intent"
+
+  TEST_NODE_LOCAL_DNS_LIVE_STATE=absent
+  prepare_release_safety_runtime_intents || fail "absent NodeLocal DNSCache intent preparation must pass"
+  assert_eq "${FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT}" "false" "disabled and absent NodeLocal DNSCache must not declare runtime intent"
+
+  TEST_NODE_LOCAL_DNS_LIVE_STATE=error
+  if prepare_release_safety_runtime_intents; then
+    fail "NodeLocal DNSCache runtime intent inspection must fail closed on Kubernetes API errors"
+  fi
+  assert_eq "${FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT}" "false" "failed NodeLocal DNSCache inspection must not retain stale runtime intent"
+  assert_eq "$(awk 'END { print NR + 0 }' "${node_local_dns_intent_queries}")" "3" "disabled NodeLocal DNSCache intent must inspect live state on every release"
+  rm -f "${node_local_dns_intent_queries}"
+)
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/node_updater.go'
 node_updater_subsystems="$(release_safety_changed_file_subsystems)"
 [[ "${node_updater_subsystems}" == *"node_updater"* && "${node_updater_subsystems}" == *"control_plane_api"* ]] ||

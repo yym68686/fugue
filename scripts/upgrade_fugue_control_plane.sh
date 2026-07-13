@@ -540,6 +540,27 @@ release_safety_emit_subsystem() {
   fi
 }
 
+prepare_release_safety_runtime_intents() {
+  local daemonset_ref=""
+
+  FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT=false
+  export FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
+    FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT=true
+    export FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT
+    return 0
+  fi
+
+  if ! daemonset_ref="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" --ignore-not-found -o name)"; then
+    log_stderr "failed to inspect live NodeLocal DNSCache state for release safety attribution"
+    return 1
+  fi
+  if [[ -n "$(trim_field "${daemonset_ref}")" ]]; then
+    FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT=true
+    export FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT
+  fi
+}
+
 release_safety_changed_file_subsystems() {
   local file=""
   local seen=" "
@@ -731,6 +752,10 @@ release_safety_changed_file_subsystems() {
       release_safety_emit_subsystem unknown_high_risk
     fi
   done < <(release_changed_files)
+
+  if [[ "${FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT:-false}" == "true" ]]; then
+    release_safety_emit_subsystem cluster_dns
+  fi
 }
 
 release_safety_unknown_high_risk_files() {
@@ -7537,6 +7562,9 @@ prepare_release_domains() {
   local public_mode build_mode stateful_mode maintenance_mode
 
   refresh_release_changed_files_from_live_api
+  if ! prepare_release_safety_runtime_intents; then
+    fail "failed to attribute runtime release safety intents"
+  fi
   log "release safety watch selection: $(release_safety_watch_window_summary)"
   write_release_safety_attribution || true
   if ! require_release_safety_attribution; then
