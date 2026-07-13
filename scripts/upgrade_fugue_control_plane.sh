@@ -4288,71 +4288,82 @@ node_local_dns_offline_preserve_policy_gate() {
 import json
 import os
 
+def reject(reason):
+    raise SystemExit("NodeLocal offline-preserve policy gate rejected: " + reason)
+
 def names(value):
     items = [item.strip() for item in value.splitlines() if item.strip()]
     if not items or len(items) != len(set(items)):
-        raise SystemExit(1)
+        reject("node list is empty or contains duplicates")
     return items
 
-def load(path):
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+def load(path, label):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        reject(f"{label} JSON is unreadable or invalid")
 
-autonomy_payload = load(os.environ["AUTONOMY_STATUS_FILE"])
-policy_payload = load(os.environ["NODE_POLICIES_FILE"])
+autonomy_payload = load(os.environ["AUTONOMY_STATUS_FILE"], "autonomy status")
+policy_payload = load(os.environ["NODE_POLICIES_FILE"], "node policy")
 status = autonomy_payload.get("status")
 if not isinstance(status, dict):
-    raise SystemExit(1)
+    reject("autonomy status is missing")
 checks_raw = status.get("checks")
 if not isinstance(checks_raw, list) or not checks_raw:
-    raise SystemExit(1)
+    reject("autonomy checks are missing")
 checks = {}
 for item in checks_raw:
     if not isinstance(item, dict):
-        raise SystemExit(1)
+        reject("autonomy check item is invalid")
     name = str(item.get("name") or "").strip()
     if not name or name in checks:
-        raise SystemExit(1)
+        reject("autonomy check name is empty or duplicated")
     checks[name] = item
 failing = {name for name, item in checks.items() if item.get("pass") is not True}
 if failing != {"node_policy"} or status.get("pass") is not False or status.get("block_rollout") is not False:
-    raise SystemExit(1)
+    reject("autonomy failures are not exactly the non-blocking node_policy check")
 store = status.get("control_plane_store")
 if not isinstance(store, dict) or store.get("block_rollout") is not False or str(store.get("permission_verification_status") or "").strip() != "passed":
-    raise SystemExit(1)
+    reject("control-plane store gate did not pass")
 
 preserved = set(names(os.environ["PRESERVED_NODES"]))
 active = set(names(os.environ["ACTIVE_NODES"]))
 if preserved & active:
-    raise SystemExit(1)
+    reject("active and preserved cohorts overlap")
 raw_statuses = policy_payload.get("node_policies")
 if not isinstance(raw_statuses, list) or not raw_statuses:
-    raise SystemExit(1)
+    reject("node policy list is missing")
 by_name = {}
 for item in raw_statuses:
     if not isinstance(item, dict):
-        raise SystemExit(1)
+        reject("node policy item is invalid")
     name = str(item.get("node_name") or "").strip()
     if not name or name in by_name:
-        raise SystemExit(1)
+        reject("node policy name is empty or duplicated")
     by_name[name] = item
 if not preserved.issubset(by_name) or not active.issubset(by_name):
-    raise SystemExit(1)
+    reject("active or preserved cohort is missing from node policy inventory")
 blockers = {name for name, item in by_name.items() if item.get("block_rollout") is True}
 if blockers != preserved:
-    raise SystemExit(1)
+    reject("rollout blockers do not exactly match the preserved cohort")
 
 for name, item in by_name.items():
     policy = item.get("policy")
     if not isinstance(policy, dict):
-        raise SystemExit(1)
-    if item.get("reconciled") is not True or item.get("disk_pressure") is not False or item.get("filesystem_pressure") is not False:
-        raise SystemExit(1)
+        reject(f"node policy view is missing node={name}")
+    filesystem_pressure = item.get("filesystem_pressure")
+    if filesystem_pressure is not True and filesystem_pressure is not False:
+        reject(f"filesystem pressure is not boolean node={name}")
+    if item.get("reconciled") is not True:
+        reject(f"node policy is not reconciled node={name}")
+    if item.get("disk_pressure") is not False:
+        reject(f"node reports DiskPressure node={name}")
     if name in preserved:
         labels = item.get("labels")
         taints = item.get("taints")
         if not isinstance(labels, dict) or not isinstance(taints, list):
-            raise SystemExit(1)
+            reject(f"preserved node labels or taints are invalid node={name}")
         isolated = any(
             isinstance(taint, dict)
             and (
@@ -4380,30 +4391,40 @@ for name, item in by_name.items():
             or str(labels.get("fugue.io/schedulable") or "").lower() != "false"
             or not isolated
         ):
-            raise SystemExit(1)
+            reject(f"preserved node isolation invariant failed node={name}")
     else:
+        if name in active and filesystem_pressure is not False:
+            reject(f"active node reports filesystem pressure node={name}")
         if (
             item.get("ready") is not True
             or item.get("node_schedulable") is not True
             or item.get("block_rollout") is not False
             or policy.get("effective_schedulable") is not True
         ):
-            raise SystemExit(1)
+            reject(f"non-preserved node readiness invariant failed node={name}")
 
+filesystem_pressure_count = sum(
+    1 for item in by_name.values() if item.get("filesystem_pressure") is True
+)
 summary = policy_payload.get("summary")
-if isinstance(summary, dict):
-    if (
-        int(summary.get("total", -1)) != len(by_name)
-        or int(summary.get("reconciled", -1)) != len(by_name)
-        or int(summary.get("drifted", -1)) != 0
-        or int(summary.get("ready", -1)) != len(by_name) - len(preserved)
-        or int(summary.get("disk_pressure", -1)) != 0
-        or int(summary.get("filesystem_pressure", -1)) != 0
-        or int(summary.get("blocked_by_health", -1)) != len(preserved)
-    ):
-        raise SystemExit(1)
-elif summary is not None:
-    raise SystemExit(1)
+if not isinstance(summary, dict):
+    reject("node policy summary is missing")
+def summary_count(field):
+    value = summary.get(field)
+    if type(value) is not int:
+        reject(f"node policy summary counter is not an integer field={field}")
+    return value
+
+if (
+    summary_count("total") != len(by_name)
+    or summary_count("reconciled") != len(by_name)
+    or summary_count("drifted") != 0
+    or summary_count("ready") != len(by_name) - len(preserved)
+    or summary_count("disk_pressure") != 0
+    or summary_count("filesystem_pressure") != filesystem_pressure_count
+    or summary_count("blocked_by_health") != len(preserved)
+):
+    reject("node policy summary does not match item-level state")
 
 phase = os.environ.get("GATE_PHASE", "release")
 print(

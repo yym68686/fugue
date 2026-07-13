@@ -1286,6 +1286,37 @@ elif mutation == "taint_drift":
     by_name["dmit"]["taints"] = []
 elif mutation == "pressure_drift":
     by_name["dmit"]["filesystem_pressure"] = True
+    payload["summary"]["filesystem_pressure"] = 1
+elif mutation == "active_pressure":
+    by_name["node-a"]["filesystem_pressure"] = True
+    payload["summary"]["filesystem_pressure"] = 1
+elif mutation == "unrelated_pressure":
+    extra = copy.deepcopy(by_name["node-a"])
+    extra["node_name"] = "node-b"
+    extra["filesystem_pressure"] = True
+    payload["node_policies"].append(extra)
+    payload["summary"].update({
+        "total": 3,
+        "reconciled": 3,
+        "ready": 2,
+        "filesystem_pressure": 1,
+    })
+elif mutation == "filesystem_summary_drift":
+    payload["summary"]["filesystem_pressure"] = 1
+elif mutation == "filesystem_summary_underreport":
+    extra = copy.deepcopy(by_name["node-a"])
+    extra["node_name"] = "node-b"
+    extra["filesystem_pressure"] = True
+    payload["node_policies"].append(extra)
+    payload["summary"].update({
+        "total": 3,
+        "reconciled": 3,
+        "ready": 2,
+    })
+elif mutation == "malformed_summary_counter":
+    payload["summary"]["total"] = "2"
+elif mutation == "missing_summary":
+    payload.pop("summary", None)
 elif mutation == "active_not_ready":
     by_name["node-a"]["ready"] = False
 elif mutation == "duplicate":
@@ -1326,7 +1357,9 @@ PY
     role_drift \
     schedulable_drift \
     taint_drift \
-    pressure_drift \
+    filesystem_summary_drift \
+    filesystem_summary_underreport \
+    missing_summary \
     active_not_ready \
     duplicate \
     missing_list; do
@@ -1334,13 +1367,52 @@ PY
     expect_offline_policy_gate_rejects "${mutation}"
   done
 
+  mutate_offline_policy_fixture active_pressure
+  active_pressure_error=""
+  if active_pressure_error="$(node_local_dns_offline_preserve_policy_gate \
+    "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test 2>&1)"; then
+    fail "offline-preserve policy gate accepted active_pressure"
+  fi
+  if [[ "${active_pressure_error}" != *"active node reports filesystem pressure node=node-a"* ]]; then
+    fail "offline-preserve policy gate did not identify the active pressure node: ${active_pressure_error}"
+  fi
+
+  mutate_offline_policy_fixture malformed_summary_counter
+  malformed_summary_error=""
+  if malformed_summary_error="$(node_local_dns_offline_preserve_policy_gate \
+    "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test 2>&1)"; then
+    fail "offline-preserve policy gate accepted malformed_summary_counter"
+  fi
+  if [[ "${malformed_summary_error}" != *"node policy summary counter is not an integer field=total"* ]]; then
+    fail "offline-preserve policy gate did not identify the malformed summary counter: ${malformed_summary_error}"
+  fi
+
+  mutate_offline_policy_fixture pressure_drift
+  assert_eq \
+    "$(node_local_dns_offline_preserve_policy_gate "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a" \
+    "offline-preserve policy gate keeps a preserved-node filesystem warning observable without changing that node"
+
+  mutate_offline_policy_fixture unrelated_pressure
+  assert_eq \
+    "$(node_local_dns_offline_preserve_policy_gate "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a" \
+    "offline-preserve policy gate keeps a non-target filesystem warning observable without blocking the active cohort"
+
   reset_offline_policy_fixture
   NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES=$'dmit\nnode-a'
   expect_offline_policy_gate_rejects "an active/preserved overlap"
   NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES=node-a
 
   printf '{' >"${OFFLINE_POLICY_FILE}"
-  expect_offline_policy_gate_rejects "invalid node-policy JSON"
+  invalid_json_error=""
+  if invalid_json_error="$(node_local_dns_offline_preserve_policy_gate \
+    "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test 2>&1)"; then
+    fail "offline-preserve policy gate accepted invalid node-policy JSON"
+  fi
+  if [[ "${invalid_json_error}" != *"node policy JSON is unreadable or invalid"* ]]; then
+    fail "offline-preserve policy gate did not bound its invalid JSON error: ${invalid_json_error}"
+  fi
 
   reset_offline_policy_fixture
   FUGUE_API_URL=https://api.example.test
