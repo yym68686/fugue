@@ -951,6 +951,22 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	if strings.Contains(script, `ok_link, link_out = run(["ip", "link", "show"], 3)`) {
 		t.Fatal("node-updater deep health must inspect the complete ip link output before deciding whether cni0 is absent")
 	}
+	if strings.Contains(script, `node_name = os.uname().nodename`) ||
+		strings.Contains(script, `["get", "node", os.uname().nodename`) {
+		t.Fatal("node-updater deep health must use the resolved Kubernetes node identity instead of the host OS hostname")
+	}
+	for _, want := range []string{
+		`FUGUE_HEARTBEAT_CLUSTER_NODE_NAME="$(node_deep_health_cluster_node_name)"`,
+		`node_name = os.environ.get("FUGUE_HEARTBEAT_CLUSTER_NODE_NAME", "").strip() or os.uname().nodename`,
+		`["get", "node", node_name, "-o", "jsonpath={.spec.podCIDR}"]`,
+		`edge_role = os.environ.get("FUGUE_HEARTBEAT_EDGE_ROLE", "unknown").strip().lower()`,
+		`if edge_role == "edge":`,
+		`elif edge_role != "non-edge":`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected node-updater deep health script to contain %q", want)
+		}
+	}
 	scriptPath := filepath.Join(t.TempDir(), "node-updater.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
 		t.Fatalf("write node-updater script: %v", err)
@@ -959,6 +975,82 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", scriptPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n %s: %v\n%s", scriptPath, err, output)
+	}
+}
+
+func TestNodeUpdaterDeepHealthUsesKubernetesIdentityAndExplicitEdgeRole(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.fugue.pro")
+	prefix, _, ok := strings.Cut(script, "\ncase \"${1:-run-once}\" in")
+	if !ok {
+		t.Fatalf("node updater script missing command dispatch")
+	}
+
+	harness := prefix + `
+tmpdir="$(mktemp -d)"
+FUGUE_NODE_UPDATER_DESIRED_STATE_FILE="${tmpdir}/desired-state.json"
+cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
+{
+  "desired_state": {
+    "node_updater": {"cluster_node_name": "desired-node"},
+    "node_policy": {
+      "node_name": "policy-node",
+      "policy": {"allow_edge": false, "effective_edge": false},
+      "labels": {"fugue.io/role.edge": "false"}
+    }
+  }
+}
+JSON
+
+FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME="explicit-node"
+if [ "$(node_deep_health_cluster_node_name)" != "explicit-node" ]; then
+  echo "explicit cluster node identity did not take precedence" >&2
+  exit 1
+fi
+unset FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME
+if [ "$(node_deep_health_cluster_node_name)" != "desired-node" ]; then
+  echo "desired node-updater identity was not used as the fallback" >&2
+  exit 1
+fi
+if [ "$(node_deep_health_edge_role)" != "non-edge" ]; then
+  echo "explicit non-edge desired policy was not classified as non-edge" >&2
+  exit 1
+fi
+
+cat >"${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" <<'JSON'
+{
+  "desired_state": {
+    "node_updater": {"cluster_node_name": "edge-node"},
+    "node_policy": {
+      "node_name": "edge-node",
+      "policy": {"allow_edge": true, "effective_edge": true},
+      "labels": {"fugue.io/role.edge": "true"}
+    }
+  }
+}
+JSON
+if [ "$(node_deep_health_edge_role)" != "edge" ]; then
+  echo "explicit edge desired policy was not classified as edge" >&2
+  exit 1
+fi
+`
+
+	scriptPath := filepath.Join(t.TempDir(), "node-updater-deep-health-identity-test.sh")
+	if err := os.WriteFile(scriptPath, []byte(harness), 0o700); err != nil {
+		t.Fatalf("write node updater deep health identity harness: %v", err)
+	}
+	cmd := exec.Command("bash", scriptPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node updater deep health identity harness failed: %v\n%s", err, output)
 	}
 }
 

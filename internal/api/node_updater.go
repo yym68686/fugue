@@ -2796,6 +2796,91 @@ api_json() {
     --data "${body}"
 }
 
+node_deep_health_cluster_node_name() {
+  local state_file="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}"
+  local desired_name=""
+  if [ -n "${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME:-}" ]; then
+    printf '%s\n' "${FUGUE_NODE_UPDATER_CLUSTER_NODE_NAME}"
+    return 0
+  fi
+  if [ -r "${state_file}" ] && command -v python3 >/dev/null 2>&1; then
+    if ! desired_name="$(python3 - "${state_file}" <<'PY_NODE_DEEP_HEALTH_IDENTITY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    state = (json.load(fh).get("desired_state") or {})
+
+node_updater = state.get("node_updater") or {}
+node_policy = state.get("node_policy") or {}
+for value in (node_updater.get("cluster_node_name"), node_policy.get("node_name")):
+    value = str(value or "").strip()
+    if value:
+        print(value)
+        break
+PY_NODE_DEEP_HEALTH_IDENTITY
+)"; then
+      desired_name=""
+    fi
+    if [ -n "${desired_name}" ]; then
+      printf '%s\n' "${desired_name}"
+      return 0
+    fi
+  fi
+  if [ -n "${FUGUE_JOIN_NODE_NAME:-}" ]; then
+    printf '%s\n' "${FUGUE_JOIN_NODE_NAME}"
+    return 0
+  fi
+  hostname -s 2>/dev/null || hostname 2>/dev/null || true
+}
+
+node_deep_health_edge_role() {
+  local state_file="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}"
+  local role=""
+  if [ ! -r "${state_file}" ] || ! command -v python3 >/dev/null 2>&1; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if ! role="$(python3 - "${state_file}" <<'PY_NODE_DEEP_HEALTH_EDGE_ROLE'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    state = (json.load(fh).get("desired_state") or {})
+
+node_policy = state.get("node_policy") or {}
+policy = node_policy.get("policy") or {}
+labels = node_policy.get("labels") or {}
+edge_credential = state.get("edge_credential") or {}
+
+def truthy(value):
+    return value is True or str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+explicit_values = []
+for key in ("allow_edge", "effective_edge"):
+    if key in policy:
+        explicit_values.append(policy.get(key))
+if "fugue.io/role.edge" in labels:
+    explicit_values.append(labels.get("fugue.io/role.edge"))
+
+# Any explicit positive assignment wins over stale or contradictory negative
+# metadata, so an edge node is never allowed to skip its listener probe.
+if any(truthy(value) for value in explicit_values) or str(edge_credential.get("edge_id") or "").strip():
+    print("edge")
+elif explicit_values:
+    print("non-edge")
+else:
+    print("unknown")
+PY_NODE_DEEP_HEALTH_EDGE_ROLE
+)"; then
+    role="unknown"
+  fi
+  case "${role}" in
+    edge|non-edge|unknown) printf '%s\n' "${role}" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
 node_deep_health_heartbeat_json() {
   local current_k3s="$1"
   FUGUE_HEARTBEAT_K3S_VERSION="${current_k3s}" \
@@ -2810,6 +2895,8 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_OS="$(uname -s 2>/dev/null || true)" \
   FUGUE_HEARTBEAT_ARCH="$(uname -m 2>/dev/null || true)" \
   FUGUE_HEARTBEAT_LAST_ERROR="$(last_error)" \
+  FUGUE_HEARTBEAT_CLUSTER_NODE_NAME="$(node_deep_health_cluster_node_name)" \
+  FUGUE_HEARTBEAT_EDGE_ROLE="$(node_deep_health_edge_role)" \
   python3 - <<'PY_NODE_DEEP_HEALTH'
 import datetime
 import json
@@ -2909,7 +2996,7 @@ if server_host:
 else:
     checks.append(check("remotedialer_control_plane_endpoint", "kubernetes", "warning", "control-plane endpoint unavailable", "k3s server endpoint"))
 
-node_name = os.uname().nodename
+node_name = os.environ.get("FUGUE_HEARTBEAT_CLUSTER_NODE_NAME", "").strip() or os.uname().nodename
 kubectl_base = kubectl_base_command()
 if kubectl_base:
     ok_lease, lease_out = run(kubectl_base + ["-n", "kube-node-lease", "get", "lease", node_name, "-o", "jsonpath={.spec.renewTime}"], 5)
@@ -3242,7 +3329,7 @@ else:
 pod_cidr = ""
 kubectl_base = kubectl_base_command()
 if kubectl_base:
-    ok_podcidr, podcidr_out = run(kubectl_base + ["get", "node", os.uname().nodename, "-o", "jsonpath={.spec.podCIDR}"], 5)
+    ok_podcidr, podcidr_out = run(kubectl_base + ["get", "node", node_name, "-o", "jsonpath={.spec.podCIDR}"], 5)
     if ok_podcidr:
         pod_cidr = podcidr_out.strip()
 if pod_cidr:
@@ -3325,16 +3412,20 @@ else:
     ok_chrony, chrony_out = run(["chronyc", "tracking"], 3)
     checks.append(check("time_sync_ntp", "time", "pass" if ok_chrony else "warning", chrony_out if ok_chrony else time_out, "NTP synchronized"))
 
-edge_listener_pass = False
-edge_listener_errors = []
-for host, port in [("127.0.0.1", 18443), ("127.0.0.1", 443), ("127.0.0.1", 80)]:
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            edge_listener_pass = True
-            break
-    except Exception as exc:
-        edge_listener_errors.append(f"{host}:{port} {exc}")
-checks.append(check("edge_caddy_listener", "edge", "pass" if edge_listener_pass else "warning", "listener reachable" if edge_listener_pass else "; ".join(edge_listener_errors)[-240:], "edge/Caddy listener reachable when this node has edge role"))
+edge_role = os.environ.get("FUGUE_HEARTBEAT_EDGE_ROLE", "unknown").strip().lower()
+if edge_role == "edge":
+    edge_listener_pass = False
+    edge_listener_errors = []
+    for host, port in [("127.0.0.1", 18443), ("127.0.0.1", 443), ("127.0.0.1", 80)]:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                edge_listener_pass = True
+                break
+        except Exception as exc:
+            edge_listener_errors.append(f"{host}:{port} {exc}")
+    checks.append(check("edge_caddy_listener", "edge", "pass" if edge_listener_pass else "warning", "listener reachable" if edge_listener_pass else "; ".join(edge_listener_errors)[-240:], "edge/Caddy listener reachable for explicitly assigned edge node"))
+elif edge_role != "non-edge":
+    checks.append(check("edge_caddy_listener", "edge", "warning", "explicit edge role unavailable", "desired node policy or edge label identifies whether listener probe applies"))
 
 try:
     with open("/proc/sys/net/netfilter/nf_conntrack_count", "r", encoding="utf-8") as fh:
