@@ -36,6 +36,12 @@ grep -Fq 'FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_r
 grep -Fq 'FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref }}' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must pass the exact release target ref to the release guard"
+grep -Fq 'FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ steps.live_images.outputs.image_cache_image_baseline_ref }}' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must refresh the exact live image-cache component baseline immediately before upgrade"
+grep -Fq 'FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must retain the release-baseline image-cache snapshot for drift detection"
 
 python3 - "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" <<'PY'
 from pathlib import Path
@@ -1574,10 +1580,79 @@ PY
   git -C "${migration_repo}" add .
   git -C "${migration_repo}" commit -q -m followup-script
   migration_followup="$(git -C "${migration_repo}" rev-parse HEAD)"
-  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml\nscripts/followup.sh'
-  FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_RELEASE_AFTER_SHA="${migration_followup}" \
+  FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-image-cache/main.go\ndeploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml\nscripts/followup.sh'
+  FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+    FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+    FUGUE_RELEASE_AFTER_SHA="${migration_followup}" \
     image_cache_ondelete_strategy_migration_allowed ||
-    fail "exact image-cache migration must use the trusted live baseline across a follow-up commit"
+    fail "exact image-cache migration must use its component baseline across global historical source paths and a follow-up commit"
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF= \
+      FUGUE_RELEASE_AFTER_SHA="${migration_followup}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "a workflow-style multi-component release baseline must not guess the image-cache source baseline"
+  fi
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_followup}" \
+      FUGUE_RELEASE_AFTER_SHA="${migration_followup}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache migration must reject drift between the release snapshot and the immediate pre-upgrade component baseline"
+  fi
+  printf '\n// component source drift\n' >>"${migration_repo}/cmd/fugue-image-cache/main.go"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m image-cache-source-drift
+  migration_source_drift="$(git -C "${migration_repo}" rev-parse HEAD)"
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_RELEASE_AFTER_SHA="${migration_source_drift}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache migration must reject source drift from its real component baseline"
+  fi
+
+  git -C "${migration_repo}" checkout -q "${migration_followup}"
+  printf '\nRUN false\n' >>"${migration_repo}/Dockerfile.image-cache"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m image-cache-dockerfile-drift
+  migration_dockerfile_drift="$(git -C "${migration_repo}" rev-parse HEAD)"
+  FUGUE_RELEASE_CHANGED_FILES=$'Dockerfile.image-cache\ndeploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml'
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_RELEASE_AFTER_SHA="${migration_dockerfile_drift}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache migration must reject Dockerfile drift from its real component baseline"
+  fi
+
+  git -C "${migration_repo}" checkout -q "${migration_followup}"
+  printf '\nrequire example.com/drift v0.0.0\n' >>"${migration_repo}/go.mod"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m image-cache-module-drift
+  migration_module_drift="$(git -C "${migration_repo}" rev-parse HEAD)"
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml\ngo.mod'
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_RELEASE_AFTER_SHA="${migration_module_drift}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache migration must reject Go module drift from its real component baseline"
+  fi
+
+  git -C "${migration_repo}" checkout -q "${migration_followup}"
+  printf 'unexpected: true\n' >"${migration_repo}/deploy/helm/fugue/values-production-ha.yaml"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m image-cache-production-values-drift
+  migration_values_production_drift="$(git -C "${migration_repo}" rev-parse HEAD)"
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values-production-ha.yaml\ndeploy/helm/fugue/values.yaml'
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_RELEASE_AFTER_SHA="${migration_values_production_drift}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache migration must reject values-production-ha drift from its real component baseline"
+  fi
+
+  git -C "${migration_repo}" checkout -q "${migration_followup}"
+  printf '{{/* unexpected helper drift */}}\n' >"${migration_repo}/deploy/helm/fugue/templates/_helpers.tpl"
+  git -C "${migration_repo}" add .
+  git -C "${migration_repo}" commit -q -m image-cache-helper-drift
+  migration_helper_drift="$(git -C "${migration_repo}" rev-parse HEAD)"
+  FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/_helpers.tpl\ndeploy/helm/fugue/templates/image-cache-daemonset.yaml\ndeploy/helm/fugue/values.yaml'
+  if FUGUE_RELEASE_BASE_REFS="${migration_base}" FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF="${migration_base}" \
+      FUGUE_RELEASE_AFTER_SHA="${migration_helper_drift}" image_cache_ondelete_strategy_migration_allowed; then
+    fail "image-cache migration must reject any additional chart runtime drift from its real component baseline"
+  fi
+  git -C "${migration_repo}" checkout -q "${migration_followup}"
   if FUGUE_RELEASE_AFTER_SHA=missing-explicit-target release_diff_new_ref >/dev/null 2>&1; then
     fail "an invalid explicit release target must fail closed instead of falling back to HEAD"
   fi

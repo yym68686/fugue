@@ -542,6 +542,8 @@ jobs:
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
           FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}
           FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref }}
+          FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ steps.live_images.outputs.image_cache_image_baseline_ref }}
+          FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}
           FUGUE_EDGE_DYNAMIC_ENABLED: ${{ vars.FUGUE_EDGE_DYNAMIC_ENABLED || 'true' }}
           FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE || 'terminate' }}
           FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS || '120' }}

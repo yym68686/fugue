@@ -1166,6 +1166,30 @@ release_diff_base_refs() {
   printf '%s\n' "${normalized}" | sort -u
 }
 
+image_cache_release_baseline_refs() {
+  local image_cache_ref="${FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF:-}"
+  local expected_ref="${FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF:-}"
+  local canonical_ref=""
+  local canonical_expected_ref=""
+
+  image_cache_ref="$(trim_field "${image_cache_ref}")"
+  expected_ref="$(trim_field "${expected_ref}")"
+  if [[ -n "${image_cache_ref}" ]]; then
+    canonical_ref="$(FUGUE_RELEASE_BASE_REFS="${image_cache_ref}" release_diff_base_refs)" || return 1
+    if [[ -n "$(trim_field "${FUGUE_RELEASE_BASE_REFS:-}")" ]]; then
+      [[ -n "${expected_ref}" ]] || return 1
+      canonical_expected_ref="$(FUGUE_RELEASE_BASE_REFS="${expected_ref}" release_diff_base_refs)" || return 1
+      [[ "${canonical_ref}" == "${canonical_expected_ref}" ]] || return 1
+    fi
+    printf '%s\n' "${canonical_ref}"
+    return
+  fi
+  # Once a workflow supplies a trusted multi-component baseline set, the
+  # image-cache migration must not guess which component ref owns its source.
+  [[ -z "$(trim_field "${FUGUE_RELEASE_BASE_REFS:-}")" ]] || return 1
+  release_diff_base_refs
+}
+
 values_file_changes_limited_to_yaml_path() {
   local file="$1"
   shift
@@ -1513,6 +1537,35 @@ raise SystemExit(0 if new == expected else 1)
 '
 }
 
+image_cache_strategy_chart_changes_only_between_refs() {
+  local old_ref="$1"
+  local new_ref="$2"
+  local file=""
+  local saw_file="false"
+
+  old_ref="$(trim_field "${old_ref}")"
+  new_ref="$(trim_field "${new_ref}")"
+  [[ -n "${old_ref}" && -n "${new_ref}" && "${old_ref}" != "${new_ref}" ]] || return 1
+  git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null || return 1
+  git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null || return 1
+
+  while IFS= read -r file; do
+    file="$(trim_field "${file}")"
+    [[ -n "${file}" ]] || continue
+    saw_file="true"
+    case "${file}" in
+      deploy/helm/fugue/templates/image-cache-daemonset.yaml|\
+      deploy/helm/fugue/values.yaml|\
+      deploy/helm/fugue/chart_test.go)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done < <(git -C "${REPO_ROOT}" diff --no-renames --name-only "${old_ref}" "${new_ref}" -- deploy/helm/fugue)
+  [[ "${saw_file}" == "true" ]]
+}
+
 image_cache_strategy_target_fingerprints_match() {
   file_sha256_matches \
     "${REPO_ROOT}/deploy/helm/fugue/templates/image-cache-daemonset.yaml" \
@@ -1589,13 +1642,9 @@ image_cache_ondelete_strategy_migration_allowed() {
         ;;
       deploy/helm/fugue/chart_test.go)
         ;;
-      deploy/helm/fugue/values-production-ha.yaml|\
       cmd/fugue-image-cache/*|\
-      Dockerfile.image-cache)
-        return 1
-        ;;
+      Dockerfile.image-cache|\
       deploy/helm/fugue/*)
-        return 1
         ;;
     esac
   done < <(release_changed_files)
@@ -1608,11 +1657,12 @@ image_cache_ondelete_strategy_migration_allowed() {
         image_cache_ondelete_strategy_template_migration_only && \
       FUGUE_RELEASE_BEFORE_SHA="${baseline_ref}" FUGUE_RELEASE_AFTER_SHA="${new_ref}" \
         values_file_changes_limited_to_yaml_path "deploy/helm/fugue/values.yaml" "imageCache.updateStrategy" && \
+      image_cache_strategy_chart_changes_only_between_refs "${baseline_ref}" "${new_ref}" && \
       ! image_cache_source_changed_between_refs "${baseline_ref}" "${new_ref}"; then
       exact_baseline_found="true"
       break
     fi
-  done < <(release_diff_base_refs)
+  done < <(image_cache_release_baseline_refs)
   [[ "${exact_baseline_found}" == "true" ]] || return 1
 
   # This is intentionally a one-time, fail-closed migration. The whole-file
