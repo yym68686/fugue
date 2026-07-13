@@ -6521,6 +6521,35 @@ node_local_dns_candidate_nodes() {
     sort
 }
 
+node_local_dns_pod_dns_host_port_conflicts() {
+  local node_name="$1"
+  local pod_inventory=""
+
+  pod_inventory="$(${KUBECTL} get pods --all-namespaces --field-selector "spec.nodeName=${node_name}" -o json)" || return 1
+  printf '%s' "${pod_inventory}" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+conflicts = []
+for pod in payload.get("items") or []:
+    metadata = pod.get("metadata") or {}
+    status = pod.get("status") or {}
+    if status.get("phase") in {"Succeeded", "Failed"}:
+        continue
+    spec = pod.get("spec") or {}
+    host_network = bool(spec.get("hostNetwork"))
+    for container in (spec.get("initContainers") or []) + (spec.get("containers") or []):
+        for port in container.get("ports") or []:
+            container_port = int(port.get("containerPort") or 0)
+            host_port = int(port.get("hostPort") or (container_port if host_network else 0))
+            protocol = str(port.get("protocol") or "TCP").upper()
+            if host_port == 53 and protocol in {"TCP", "UDP"}:
+                conflicts.append("{}/{}:{}/53".format(metadata.get("namespace", "default"), metadata.get("name", "<unknown>"), protocol))
+print(" ".join(sorted(set(conflicts))))
+'
+}
+
 node_local_dns_verify_shadow_artifact() {
   local service_ip="$1"
   local daemonset_json=""
@@ -6631,6 +6660,7 @@ prepare_node_local_dns_helm_args() {
   local ready=""
   local node_os=""
   local node_arch=""
+  local host_port_conflicts=""
   local live_mode=""
   local live_node_name=""
   local desired_nodes=""
@@ -6717,6 +6747,12 @@ print(cluster_ip + "\t" + json.dumps(selector, sort_keys=True, separators=(",", 
     node_os="$(${KUBECTL} get node "${node_name}" -o jsonpath='{.metadata.labels.kubernetes\.io/os}' 2>/dev/null || true)"
     node_arch="$(${KUBECTL} get node "${node_name}" -o jsonpath='{.metadata.labels.kubernetes\.io/arch}' 2>/dev/null || true)"
     [[ "${ready}" == "True" && "${node_os}" == "linux" && "${node_arch}" == "amd64" ]] || fail "NodeLocal DNSCache target ${node_name} must be a Ready linux/amd64 node"
+    if ! host_port_conflicts="$(node_local_dns_pod_dns_host_port_conflicts "${node_name}")"; then
+      fail "cannot inspect existing Pod host-port allocations on NodeLocal DNSCache target ${node_name}"
+    fi
+    if [[ -n "$(trim_field "${host_port_conflicts}")" ]]; then
+      fail "NodeLocal DNSCache target ${node_name} already runs Pod DNS host-port owners (${host_port_conflicts}); refusing a system-critical Pod that could preempt them"
+    fi
   done <<<"${desired_nodes}"
 
   if [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "iptables" ]]; then
@@ -6858,7 +6894,7 @@ node_local_dns_shadow_host_preflight() {
   fi
   local_hex="$(node_local_dns_proc_ipv4_hex "${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}")"
   service_hex="$(node_local_dns_proc_ipv4_hex "${service_ip}")"
-  script="$(cat <<EOF
+  read -r -d '' script <<EOF || true
 set -eu
 command -v iptables-save >/dev/null 2>&1
 if [ -e /sys/class/net/nodelocaldns ]; then
@@ -6904,7 +6940,6 @@ if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-all.rules; then
   exit 1
 fi
 EOF
-)"
   while IFS= read -r node_name; do
     [[ -n "${node_name}" ]] || continue
     if grep -Fqx "${node_name}" <<<"${live_nodes}"; then

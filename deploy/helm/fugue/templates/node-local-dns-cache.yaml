@@ -159,11 +159,11 @@ spec:
     - name: metrics
       port: 9253
       protocol: TCP
-      targetPort: metrics
+      targetPort: 9253
     - name: setup-metrics
       port: 9353
       protocol: TCP
-      targetPort: setup-metrics
+      targetPort: 9353
   selector:
     {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
 ---
@@ -218,19 +218,6 @@ spec:
             capabilities:
               add:
                 - NET_ADMIN
-          ports:
-            - name: dns
-              containerPort: 53
-              protocol: UDP
-            - name: dns-tcp
-              containerPort: 53
-              protocol: TCP
-            - name: metrics
-              containerPort: 9253
-              protocol: TCP
-            - name: setup-metrics
-              containerPort: 9353
-              protocol: TCP
           readinessProbe:
             httpGet:
               host: {{ $localIP }}

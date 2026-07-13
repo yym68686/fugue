@@ -109,6 +109,14 @@ if [[ "${args}" == *"get nodes -l kubernetes.io/os=linux --no-headers"* ]]; then
   printf 'vps-84c8f0a9 Ready control-plane 1d v1.35.4\n'
   exit 0
 fi
+if [[ "${args}" == *"get pods --all-namespaces --field-selector spec.nodeName=vps-84c8f0a9 -o json"* ]]; then
+  if [[ "${MOCK_HOSTPORT_CONFLICT:-false}" == "true" ]]; then
+    printf '{"items":[{"metadata":{"namespace":"fugue-system","name":"fugue-fugue-dns-country-de-test"},"status":{"phase":"Running"},"spec":{"hostNetwork":false,"containers":[{"name":"dns","ports":[{"containerPort":53,"hostPort":53,"protocol":"UDP"},{"containerPort":53,"hostPort":53,"protocol":"TCP"}]}]}}]}'
+  else
+    printf '{"items":[]}'
+  fi
+  exit 0
+fi
 if [[ "${args}" == *"get node vps-84c8f0a9"*"status.conditions"* ]]; then
   printf 'True'
   exit 0
@@ -216,8 +224,9 @@ set_common_values() {
   MOCK_DS_GET_ERROR=false
   MOCK_DS_DELETE_ERROR=false
   MOCK_PROBE_FAIL_PURPOSE=""
+  MOCK_HOSTPORT_CONFLICT=false
   rm -f "${MOCK_DS_STATE}"
-  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_USE_DS_STATE MOCK_DS_GET_ERROR MOCK_DS_DELETE_ERROR MOCK_PROBE_FAIL_PURPOSE
+  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_USE_DS_STATE MOCK_DS_GET_ERROR MOCK_DS_DELETE_ERROR MOCK_PROBE_FAIL_PURPOSE MOCK_HOSTPORT_CONFLICT
 }
 
 set_common_values
@@ -227,6 +236,17 @@ grep -Fq 'nodeLocalDNS.kubeDNSServiceIP=10.43.0.10' <<<"${helm_args}"
 grep -Fq 'nodeLocalDNS.upstreamSelector={"k8s-app":"kube-dns"}' <<<"${helm_args}"
 grep -Fq 'nodeLocalDNS.nodeSelector={"kubernetes.io/hostname":"vps-84c8f0a9","kubernetes.io/os":"linux"}' <<<"${helm_args}"
 [[ "${NODE_LOCAL_DNS_TARGET_NODES}" == "vps-84c8f0a9" ]]
+
+node_local_dns_shadow_host_preflight "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"
+
+MOCK_HOSTPORT_CONFLICT=true
+export MOCK_HOSTPORT_CONFLICT
+if (prepare_node_local_dns_helm_args) >/dev/null 2>&1; then
+  echo "release preparation must reject an existing authoritative DNS host-port owner in every NodeLocal mode" >&2
+  exit 1
+fi
+MOCK_HOSTPORT_CONFLICT=false
+export MOCK_HOSTPORT_CONFLICT
 
 if (
   set_common_values

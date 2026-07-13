@@ -3107,6 +3107,7 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		"--set", "nodeLocalDNS.enabled=true",
 		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
 		"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=vps-84c8f0a9`,
+		"--set", "observability.metrics.enabled=true",
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -3170,7 +3171,31 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 			t.Fatalf("central CoreDNS upstream service missing %q:\n%s", want, upstream)
 		}
 	}
-
+	metricsService := manifestDocumentForKindAndName(manifest, "Service", name)
+	for _, want := range []string{"targetPort: 9253", "targetPort: 9353"} {
+		if !strings.Contains(metricsService, want) {
+			t.Fatalf("node-local DNS metrics service missing numeric %q after removing host-network container ports:\n%s", want, metricsService)
+		}
+	}
+	prometheusConfig := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-prometheus")
+	for _, want := range []string{
+		"job_name: fugue-node-local-dns",
+		"role: endpoints",
+		"__meta_kubernetes_service_label_app_kubernetes_io_component",
+		"__meta_kubernetes_endpoint_port_name",
+		`regex: "metrics|setup-metrics"`,
+	} {
+		if !strings.Contains(prometheusConfig, want) {
+			t.Fatalf("node-local DNS Prometheus endpoint discovery missing %q after removing container ports:\n%s", want, prometheusConfig)
+		}
+	}
+	nodeLocalJob := prometheusConfig[strings.Index(prometheusConfig, "job_name: fugue-node-local-dns"):]
+	if nextJob := strings.Index(nodeLocalJob[len("job_name: fugue-node-local-dns"):], "- job_name:"); nextJob >= 0 {
+		nodeLocalJob = nodeLocalJob[:len("job_name: fugue-node-local-dns")+nextJob]
+	}
+	if strings.Contains(nodeLocalJob, "__meta_kubernetes_pod_container_port_name") {
+		t.Fatalf("node-local DNS Prometheus job must not depend on removed pod container ports:\n%s", nodeLocalJob)
+	}
 	daemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
 	for _, want := range []string{
 		`fugue.io/node-local-dns-mode: "shadow"`,
@@ -3188,13 +3213,12 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		"kubernetes.io/hostname: vps-84c8f0a9",
 		"effect: NoSchedule",
 		"effect: NoExecute",
-		"containerPort: 9353",
 	} {
 		if !strings.Contains(daemonSet, want) {
 			t.Fatalf("node-local DNS daemonset missing %q:\n%s", want, daemonSet)
 		}
 	}
-	for _, unwanted := range []string{"hostPort:", `- "169.254.20.10,10.43.0.10"`} {
+	for _, unwanted := range []string{"containerPort:", "hostPort:", `- "169.254.20.10,10.43.0.10"`} {
 		if strings.Contains(daemonSet, unwanted) {
 			t.Fatalf("shadow node-local DNS daemonset must not contain %q:\n%s", unwanted, daemonSet)
 		}
