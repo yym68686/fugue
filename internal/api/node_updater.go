@@ -3252,7 +3252,7 @@ if pod_cidr:
 else:
     checks.append(check("pod_cidr_drift", "cni", "warning", "PodCIDR unavailable", "Kubernetes node spec podCIDR"))
 
-ok_link, link_out = run(["ip", "link", "show"], 3)
+ok_link, link_out = run_capture(["ip", "link", "show"], 3)
 if ok_link is None:
     checks.append(check("cni_bridge", "cni", "warning", link_out, "CNI bridge interface visible"))
 elif ok_link:

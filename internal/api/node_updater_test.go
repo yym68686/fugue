@@ -942,10 +942,14 @@ func TestNodeUpdaterInstallScriptHasValidBashSyntax(t *testing.T) {
 		`pod-netns DNS query to kube-dns service IP`,
 		`pod-netns resolver resolves same-namespace ClusterIP service FQDN`,
 		`missing marker requires corroborating node evidence before hard gating`,
+		`ok_link, link_out = run_capture(["ip", "link", "show"], 3)`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected node-updater script to contain %q", want)
 		}
+	}
+	if strings.Contains(script, `ok_link, link_out = run(["ip", "link", "show"], 3)`) {
+		t.Fatal("node-updater deep health must inspect the complete ip link output before deciding whether cni0 is absent")
 	}
 	scriptPath := filepath.Join(t.TempDir(), "node-updater.sh")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
