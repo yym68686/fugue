@@ -261,8 +261,23 @@ export FUGUE_UPGRADE_LIB_ONLY=true
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
 if command -v docker >/dev/null 2>&1; then
-  docker run --rm --platform linux/amd64 --entrypoint /bin/sh \
-    registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc7c80faba5261a740a9f878ab8f7403e72444b0a2fa0a9a42ed26577a48290a \
+  node_local_dns_test_image='registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc7c80faba5261a740a9f878ab8f7403e72444b0a2fa0a9a42ed26577a48290a'
+  pulled=false
+  for attempt in 1 2 3; do
+    if docker pull --platform linux/amd64 "${node_local_dns_test_image}"; then
+      pulled=true
+      break
+    fi
+    if [[ "${attempt}" != "3" ]]; then
+      sleep $((attempt * 2))
+    fi
+  done
+  [[ "${pulled}" == "true" ]] || {
+    echo "failed to pull the pinned NodeLocal DNSCache test image after 3 attempts" >&2
+    exit 1
+  }
+  docker run --rm --pull=never --platform linux/amd64 --entrypoint /bin/sh \
+    "${node_local_dns_test_image}" \
     -ec 'command -v sh >/dev/null; command -v grep >/dev/null; command -v iptables >/dev/null; command -v iptables-save >/dev/null'
 fi
 
