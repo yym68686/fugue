@@ -3374,6 +3374,7 @@ func TestNodeLocalDNSSplitCohortsPreserveIPTablesWhileActiveUsesShadow(t *testin
 		"--set-string", `nodeLocalDNS.targetNodes[0]=online-a`,
 		"--set-string", `nodeLocalDNS.targetNodes[1]=online-b`,
 		"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=dmit`,
+		"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=`,
 		"--set", "observability.metrics.enabled=true",
 	)
 	cmd.Dir = chartDir
@@ -3389,6 +3390,15 @@ func TestNodeLocalDNSSplitCohortsPreserveIPTablesWhileActiveUsesShadow(t *testin
 	activeDaemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", activeName)
 	if preservedDaemonSet == "" || activeDaemonSet == "" {
 		t.Fatalf("split node-local DNS render must contain distinct preserved and active DaemonSets:\npreserved:\n%s\nactive:\n%s\nmanifest:\n%s", preservedDaemonSet, activeDaemonSet, manifest)
+	}
+	for name, daemonSet := range map[string]string{
+		"preserved": preservedDaemonSet,
+		"active":    activeDaemonSet,
+	} {
+		const canonicalSelector = "      nodeSelector:\n        kubernetes.io/os: linux\n      affinity:\n"
+		if !strings.Contains(daemonSet, canonicalSelector) {
+			t.Fatalf("%s DaemonSet must discard the empty legacy hostname selector and render only the canonical OS selector:\n%s", name, daemonSet)
+		}
 	}
 	nodeLocalDaemonSetCount := 0
 	for _, document := range strings.Split(manifest, "\n---") {
@@ -3821,6 +3831,11 @@ func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
 		{
 			name: "legacy hostname node selector",
 			args: []string{"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=node-a`},
+			want: "nodeLocalDNS.nodeSelector must not set kubernetes.io/hostname; use nodeLocalDNS.targetNodes",
+		},
+		{
+			name: "nonempty legacy hostname migration sentinel",
+			args: []string{"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname= `},
 			want: "nodeLocalDNS.nodeSelector must not set kubernetes.io/hostname; use nodeLocalDNS.targetNodes",
 		},
 	}

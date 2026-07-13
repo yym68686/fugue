@@ -904,6 +904,7 @@ prepare_node_local_dns_helm_args
 helm_args="${NODE_LOCAL_DNS_HELM_SET_ARGS[*]}"
 grep -Fq 'nodeLocalDNS.kubeDNSServiceIP=10.43.0.10' <<<"${helm_args}"
 grep -Fq 'nodeLocalDNS.nodeSelector={"kubernetes.io/os":"linux"}' <<<"${helm_args}"
+grep -Fq 'nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=' <<<"${helm_args}"
 grep -Fq 'nodeLocalDNS.targetNodes=["node-a"]' <<<"${helm_args}"
 grep -Fq 'nodeLocalDNS.updateStrategy.type=OnDelete' <<<"${helm_args}"
 [[ "${NODE_LOCAL_DNS_ADDED_NODES}" == "node-a" ]]
@@ -2008,6 +2009,7 @@ unset DUAL_MOCK_POD_PADDING_BYTES
 dual_helm_args="${NODE_LOCAL_DNS_HELM_SET_ARGS[*]}"
 grep -Fq 'nodeLocalDNS.mode=shadow' <<<"${dual_helm_args}"
 grep -Fq 'nodeLocalDNS.legacyMode=iptables' <<<"${dual_helm_args}"
+grep -Fq 'nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=' <<<"${dual_helm_args}"
 grep -Fq 'nodeLocalDNS.targetNodes=["node-a"]' <<<"${dual_helm_args}"
 grep -Fq 'nodeLocalDNS.preservedOfflineNodes=["dmit"]' <<<"${dual_helm_args}"
 

@@ -131,11 +131,19 @@ ip6.arpa:53 {
 {{- if and $splitCohort (eq (trim (default "" $config.legacyMode)) "") -}}
 {{- fail "nodeLocalDNS.legacyMode must be explicit when preservedOfflineNodes is non-empty" -}}
 {{- end -}}
-{{- if ne (get $config.nodeSelector "kubernetes.io/os") "linux" -}}
-{{- fail "nodeLocalDNS.nodeSelector must require kubernetes.io/os=linux" -}}
-{{- end -}}
-{{- if hasKey $config.nodeSelector "kubernetes.io/hostname" -}}
+{{- /* --reset-then-reuse-values recursively retains legacy map keys. The release entrypoint overwrites the retired hostname key with an empty migration sentinel; only that empty value may be discarded. */ -}}
+{{- $nodeSelector := deepCopy $config.nodeSelector -}}
+{{- if hasKey $nodeSelector "kubernetes.io/hostname" -}}
+{{- $legacyHostname := get $nodeSelector "kubernetes.io/hostname" -}}
+{{- if not (kindIs "string" $legacyHostname) -}}
 {{- fail "nodeLocalDNS.nodeSelector must not set kubernetes.io/hostname; use nodeLocalDNS.targetNodes" -}}
+{{- else if ne $legacyHostname "" -}}
+{{- fail "nodeLocalDNS.nodeSelector must not set kubernetes.io/hostname; use nodeLocalDNS.targetNodes" -}}
+{{- end -}}
+{{- $_ := unset $nodeSelector "kubernetes.io/hostname" -}}
+{{- end -}}
+{{- if ne (get $nodeSelector "kubernetes.io/os") "linux" -}}
+{{- fail "nodeLocalDNS.nodeSelector must require kubernetes.io/os=linux" -}}
 {{- end -}}
 {{- $updateStrategyType := required "nodeLocalDNS.updateStrategy.type is required" $config.updateStrategy.type -}}
 {{- if not (has $updateStrategyType (list "OnDelete" "RollingUpdate")) -}}
@@ -401,7 +409,7 @@ spec:
               - key: {{ get $cohort "corefileKey" }}
                 path: Corefile.base
       nodeSelector:
-        {{- toYaml $config.nodeSelector | nindent 8 }}
+        {{- toYaml $nodeSelector | nindent 8 }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

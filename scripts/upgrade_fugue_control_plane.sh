@@ -8146,6 +8146,9 @@ print(json.dumps({"kubernetes.io/os": "linux"}, sort_keys=True, separators=(",",
     --set-string "nodeLocalDNS.image.digest=${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}"
     --set-string "nodeLocalDNS.image.pullPolicy=${FUGUE_NODE_LOCAL_DNS_IMAGE_PULL_POLICY}"
     --set-json "nodeLocalDNS.nodeSelector=${node_selector_json}"
+    # Helm recursively reuses legacy map keys, so explicitly shadow the retired
+    # hostname selector. The chart accepts only this empty migration sentinel.
+    --set-string "nodeLocalDNS.nodeSelector.kubernetes\\.io/hostname="
     --set-json "nodeLocalDNS.targetNodes=${target_nodes_json}"
     --set-json "nodeLocalDNS.preservedOfflineNodes=${preserved_nodes_json}"
     --set-string "nodeLocalDNS.updateStrategy.type=OnDelete"
