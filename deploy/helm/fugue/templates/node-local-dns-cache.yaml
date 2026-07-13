@@ -52,6 +52,18 @@ fc1c3faf47e46f9c257a17f9aae5abc6dd28c118.
 {{- if eq $mode "iptables" -}}
 {{- $listenIPs = printf "%s,%s" $localIP $kubeDNSServiceIP -}}
 {{- end -}}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+value: 1000000000
+globalDefault: false
+preemptionPolicy: Never
+description: "Fugue NodeLocal DNSCache canary: high scheduling priority without preempting existing workloads."
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -197,8 +209,7 @@ spec:
         prometheus.io/port: "9253"
         prometheus.io/scrape: "true"
     spec:
-      priorityClassName: system-node-critical
-      preemptionPolicy: Never
+      priorityClassName: {{ $name }}
       serviceAccountName: {{ $name }}
       automountServiceAccountToken: false
       hostNetwork: true

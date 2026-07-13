@@ -3088,8 +3088,10 @@ func TestNodeLocalDNSDefaultsDisabled(t *testing.T) {
 	}
 
 	manifest := string(output)
-	if doc := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-local-dns"); doc != "" {
-		t.Fatalf("node-local DNS must require an explicit production opt-in:\n%s", doc)
+	for _, kind := range []string{"DaemonSet", "PriorityClass"} {
+		if doc := manifestDocumentForKindAndName(manifest, kind, "fugue-fugue-node-local-dns"); doc != "" {
+			t.Fatalf("node-local DNS %s must require an explicit production opt-in:\n%s", kind, doc)
+		}
 	}
 }
 
@@ -3133,6 +3135,12 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		}
 		if !strings.Contains(doc, "namespace: kube-system") {
 			t.Fatalf("%s %s must be explicitly owned in kube-system:\n%s", resource.kind, resource.name, doc)
+		}
+	}
+	priorityClass := manifestDocumentForKindAndName(manifest, "PriorityClass", name)
+	for _, want := range []string{"value: 1000000000", "globalDefault: false", "preemptionPolicy: Never"} {
+		if !strings.Contains(priorityClass, want) {
+			t.Fatalf("node-local DNS priority class missing %q:\n%s", want, priorityClass)
 		}
 	}
 
@@ -3199,8 +3207,7 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 	daemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
 	for _, want := range []string{
 		`fugue.io/node-local-dns-mode: "shadow"`,
-		"priorityClassName: system-node-critical",
-		"preemptionPolicy: Never",
+		"priorityClassName: fugue-fugue-node-local-dns",
 		"automountServiceAccountToken: false",
 		"hostNetwork: true",
 		"dnsPolicy: Default",
