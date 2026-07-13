@@ -7473,11 +7473,12 @@ node_local_dns_verify_preserved_nodes_isolated() {
 
   [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" ]] || return 0
   nodes_json="$(${KUBECTL} get nodes -o json)" || return 1
-  NODES_JSON="${nodes_json}" TARGET_NODES="${NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES}" python3 -c '
+  printf '%s' "${nodes_json}" | TARGET_NODES="${NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES}" python3 -c '
 import json
 import os
+import sys
 
-payload = json.loads(os.environ["NODES_JSON"])
+payload = json.load(sys.stdin)
 targets = [item.strip() for item in os.environ["TARGET_NODES"].splitlines() if item.strip()]
 nodes = {str((item.get("metadata") or {}).get("name") or ""): item for item in payload.get("items") or []}
 if not targets or len(set(targets)) != len(targets) or any(name not in nodes for name in targets):
@@ -8566,11 +8567,12 @@ node_local_dns_replacement_order() {
   local nodes_json=""
 
   nodes_json="$(${KUBECTL} get nodes -o json)" || return 1
-  NODES_JSON="${nodes_json}" TARGET_NODES="${target_nodes}" python3 -c '
+  printf '%s' "${nodes_json}" | TARGET_NODES="${target_nodes}" python3 -c '
 import json
 import os
+import sys
 
-payload = json.loads(os.environ["NODES_JSON"])
+payload = json.load(sys.stdin)
 targets = [item.strip() for item in os.environ["TARGET_NODES"].splitlines() if item.strip()]
 nodes = {str((item.get("metadata") or {}).get("name") or ""): item for item in payload.get("items") or []}
 if not targets or any(name not in nodes for name in targets):

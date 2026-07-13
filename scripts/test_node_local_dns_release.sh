@@ -1614,10 +1614,14 @@ def node_json(name, record):
         "kubernetes.io/hostname": name,
     }
     labels.update(record.get("labels") or {})
+    metadata = {"name": name, "labels": labels}
+    padding_bytes = int(os.environ.get("DUAL_MOCK_NODE_PADDING_BYTES", "0") or "0")
+    if name == "dmit" and padding_bytes > 0:
+        metadata["annotations"] = {"test.fugue.io/padding": "x" * padding_bytes}
     return {
         "apiVersion": "v1",
         "kind": "Node",
-        "metadata": {"name": name, "labels": labels},
+        "metadata": metadata,
         "spec": {
             "unschedulable": bool(record.get("unschedulable")),
             "taints": record.get("taints") or [],
@@ -1967,6 +1971,15 @@ node_local_dns_verify_teardown() {
 : >"${DUAL_MOCK_LOG}"
 set_dual_cohort_values
 prepare_node_local_dns_helm_args
+
+# Real Node objects include image inventories and can exceed Linux's 128 KiB
+# per-argument/per-environment-entry limit. Both whole-cluster consumers must
+# stream the document over stdin instead of exporting it as one environment
+# variable.
+export DUAL_MOCK_NODE_PADDING_BYTES=140000
+node_local_dns_verify_preserved_nodes_isolated
+[[ "$(node_local_dns_replacement_order node-a)" == "node-a" ]]
+unset DUAL_MOCK_NODE_PADDING_BYTES
 
 [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" ]]
 [[ "${NODE_LOCAL_DNS_PRESERVED_DAEMONSET_NAME}" == "fugue-fugue-node-local-dns" ]]
