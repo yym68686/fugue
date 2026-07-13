@@ -53,7 +53,11 @@ if [[ "${args}" == *"get configmap coredns"* ]]; then
   exit 0
 fi
 if [[ "${args}" == *"get configmap fugue-fugue-node-local-dns"* ]]; then
-  cat <<'EOF_COREFILE'
+  bind_ips='169.254.20.10'
+  if [[ "${MOCK_LIVE_MODE:-shadow}" == "iptables" ]]; then
+    bind_ips='169.254.20.10 10.43.0.10'
+  fi
+  corefile="$(cat <<'EOF_COREFILE'
 cluster.local:53 {
   errors
   cache {
@@ -103,6 +107,12 @@ ip6.arpa:53 {
   prometheus :9253
 }
 EOF_COREFILE
+)"
+  corefile="$(printf '%s\n' "${corefile}" | sed "s/bind 169.254.20.10/bind ${bind_ips}/g")"
+  if [[ "${MOCK_COREFILE_DRIFT:-false}" == "true" ]]; then
+    corefile="${corefile/force_tcp/prefer_udp}"
+  fi
+  printf '%s\n' "${corefile}"
   exit 0
 fi
 if [[ "${args}" == *"get nodes -l kubernetes.io/os=linux --no-headers"* ]]; then
@@ -145,7 +155,72 @@ if [[ "${args}" == *"get daemonset fugue-fugue-node-local-dns"* ]]; then
   if [[ "${args}" == *"--ignore-not-found -o name"* ]]; then
     printf 'daemonset.apps/fugue-fugue-node-local-dns'
   elif [[ "${args}" == *" -o json" ]]; then
-    printf '{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"fugue-fugue-node-local-dns","namespace":"kube-system","labels":{"app.kubernetes.io/name":"fugue","app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"node-local-dns"}},"spec":{"selector":{"matchLabels":{"app.kubernetes.io/name":"fugue","app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"node-local-dns"}},"template":{"metadata":{"labels":{"app.kubernetes.io/name":"fugue","app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"node-local-dns","fugue.io/node-local-dns-mode":"shadow"}},"spec":{"nodeSelector":{"kubernetes.io/os":"linux","kubernetes.io/hostname":"vps-84c8f0a9"},"containers":[{"name":"node-cache","image":"registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739","args":["-localip","169.254.20.10","-conf","/etc/Corefile","-upstreamsvc","fugue-fugue-dns-upstream"]}]}}}}'
+    mode="${MOCK_LIVE_MODE:-shadow}"
+    listen_ips='169.254.20.10'
+    if [[ "${mode}" == "iptables" ]]; then
+      listen_ips='169.254.20.10,10.43.0.10'
+    fi
+    MODE="${mode}" LISTEN_IPS="${listen_ips}" ARTIFACT_DRIFT="${MOCK_ARTIFACT_DRIFT:-}" python3 - <<'PY'
+import json
+import os
+
+mode = os.environ["MODE"]
+listen_ips = os.environ["LISTEN_IPS"]
+name = "fugue-fugue-node-local-dns"
+container = {
+    "name": "node-cache",
+    "image": "registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739",
+    "imagePullPolicy": "IfNotPresent",
+    "args": ["-localip", listen_ips, "-conf", "/etc/Corefile", "-upstreamsvc", "fugue-fugue-dns-upstream"],
+    "securityContext": {"capabilities": {"add": ["NET_ADMIN"]}},
+    "volumeMounts": [
+        {"name": "xtables-lock", "mountPath": "/run/xtables.lock"},
+        {"name": "config-volume", "mountPath": "/etc/coredns"},
+    ],
+}
+pod_spec = {
+    "automountServiceAccountToken": False,
+    "containers": [container],
+    "dnsPolicy": "Default",
+    "hostNetwork": True,
+    "nodeSelector": {"kubernetes.io/os": "linux", "kubernetes.io/hostname": "vps-84c8f0a9"},
+    "priorityClassName": name,
+    "serviceAccountName": name,
+    "volumes": [
+        {"name": "xtables-lock", "hostPath": {"path": "/run/xtables.lock", "type": "FileOrCreate"}},
+        {"name": "config-volume", "configMap": {"name": name, "items": [{"key": "Corefile", "path": "Corefile.base"}]}},
+    ],
+}
+drift = os.environ.get("ARTIFACT_DRIFT", "")
+mode_label = mode
+if drift == "image":
+    container["image"] = "registry.k8s.io/dns/k8s-dns-node-cache@sha256:" + "0" * 64
+elif drift == "args":
+    container["args"][1] = "169.254.20.11"
+elif drift == "host-network":
+    pod_spec["hostNetwork"] = False
+elif drift == "dns-policy":
+    pod_spec["dnsPolicy"] = "ClusterFirst"
+elif drift == "capabilities":
+    container["securityContext"]["capabilities"]["add"] = []
+elif drift == "ports":
+    container["ports"] = [{"containerPort": 53, "protocol": "UDP"}]
+elif drift == "mode-label":
+    mode_label = "shadow" if mode == "iptables" else "iptables"
+
+payload = {
+    "apiVersion": "apps/v1",
+    "kind": "DaemonSet",
+    "metadata": {"name": name, "namespace": "kube-system"},
+    "spec": {
+        "template": {
+            "metadata": {"labels": {"fugue.io/node-local-dns-mode": mode_label}},
+            "spec": pod_spec,
+        }
+    },
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY
   elif [[ "${args}" == *"spec.updateStrategy.type"* ]]; then
     printf 'RollingUpdate'
   elif [[ "${args}" == *"node-local-dns-mode"* ]]; then
@@ -174,7 +249,8 @@ if [[ "${args}" == *"get pods -l app.kubernetes.io/name=fugue,app.kubernetes.io/
   exit 0
 fi
 if [[ "${args}" == *" exec fugue-fugue-node-local-dns-test "* ]]; then
-  exit 0
+  [[ "${MOCK_EXEC_FAIL:-false}" != "true" ]]
+  exit
 fi
 exit 1
 EOF
@@ -225,8 +301,11 @@ set_common_values() {
   MOCK_DS_DELETE_ERROR=false
   MOCK_PROBE_FAIL_PURPOSE=""
   MOCK_HOSTPORT_CONFLICT=false
+  MOCK_ARTIFACT_DRIFT=""
+  MOCK_COREFILE_DRIFT=false
+  MOCK_EXEC_FAIL=false
   rm -f "${MOCK_DS_STATE}"
-  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_USE_DS_STATE MOCK_DS_GET_ERROR MOCK_DS_DELETE_ERROR MOCK_PROBE_FAIL_PURPOSE MOCK_HOSTPORT_CONFLICT
+  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_USE_DS_STATE MOCK_DS_GET_ERROR MOCK_DS_DELETE_ERROR MOCK_PROBE_FAIL_PURPOSE MOCK_HOSTPORT_CONFLICT MOCK_ARTIFACT_DRIFT MOCK_COREFILE_DRIFT MOCK_EXEC_FAIL
 }
 
 set_common_values
@@ -263,6 +342,79 @@ MOCK_LIVE_MODE=shadow
 MOCK_LIVE_NODE=vps-84c8f0a9
 export MOCK_LIVE_MODE MOCK_LIVE_NODE
 prepare_node_local_dns_helm_args
+
+set_common_values
+FUGUE_NODE_LOCAL_DNS_MODE=iptables
+MOCK_LIVE_MODE=iptables
+MOCK_LIVE_NODE=vps-84c8f0a9
+export MOCK_LIVE_MODE MOCK_LIVE_NODE
+prepare_node_local_dns_helm_args
+
+for artifact_drift in mode-label image args host-network dns-policy capabilities ports; do
+  if (
+    set_common_values
+    FUGUE_NODE_LOCAL_DNS_MODE=iptables
+    MOCK_LIVE_MODE=iptables
+    MOCK_LIVE_NODE=vps-84c8f0a9
+    MOCK_ARTIFACT_DRIFT="${artifact_drift}"
+    export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_ARTIFACT_DRIFT
+    prepare_node_local_dns_helm_args
+  ) >/dev/null 2>&1; then
+    echo "iptables idempotent release must reject ${artifact_drift} artifact drift" >&2
+    exit 1
+  fi
+done
+
+if (
+  set_common_values
+  FUGUE_NODE_LOCAL_DNS_MODE=iptables
+  MOCK_LIVE_MODE=iptables
+  MOCK_LIVE_NODE=other-node
+  export MOCK_LIVE_MODE MOCK_LIVE_NODE
+  prepare_node_local_dns_helm_args
+) >/dev/null 2>&1; then
+  echo "iptables idempotent release must reject a changed target node" >&2
+  exit 1
+fi
+
+if (
+  set_common_values
+  FUGUE_NODE_LOCAL_DNS_MODE=iptables
+  MOCK_LIVE_MODE=iptables
+  MOCK_LIVE_NODE=vps-84c8f0a9
+  MOCK_COREFILE_DRIFT=true
+  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_COREFILE_DRIFT
+  prepare_node_local_dns_helm_args
+) >/dev/null 2>&1; then
+  echo "iptables idempotent release must reject Corefile drift" >&2
+  exit 1
+fi
+
+if (
+  set_common_values
+  FUGUE_NODE_LOCAL_DNS_MODE=iptables
+  MOCK_LIVE_MODE=iptables
+  MOCK_LIVE_NODE=vps-84c8f0a9
+  MOCK_PROBE_FAIL_PURPOSE=dns
+  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_PROBE_FAIL_PURPOSE
+  prepare_node_local_dns_helm_args
+) >/dev/null 2>&1; then
+  echo "iptables idempotent release must reject failed DNS and metrics probes" >&2
+  exit 1
+fi
+
+if (
+  set_common_values
+  FUGUE_NODE_LOCAL_DNS_MODE=iptables
+  MOCK_LIVE_MODE=iptables
+  MOCK_LIVE_NODE=vps-84c8f0a9
+  MOCK_EXEC_FAIL=true
+  export MOCK_LIVE_MODE MOCK_LIVE_NODE MOCK_EXEC_FAIL
+  prepare_node_local_dns_helm_args
+) >/dev/null 2>&1; then
+  echo "iptables idempotent release must reject failed host-network and rule verification" >&2
+  exit 1
+fi
 
 set_common_values
 node_local_dns_run_probe_pod vps-84c8f0a9 unit-test \

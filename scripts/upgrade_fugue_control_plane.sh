@@ -6575,20 +6575,30 @@ print(" ".join(sorted(set(conflicts))))
 '
 }
 
-node_local_dns_verify_shadow_artifact() {
-  local service_ip="$1"
+node_local_dns_verify_artifact() {
+  local expected_mode="$1"
+  local service_ip="$2"
   local daemonset_json=""
   local corefile=""
   local expected_image="${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}"
+  local expected_listen_ips="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}"
+  local expected_bind_ips="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}"
   local upstream_service="${FUGUE_RELEASE_FULLNAME}-dns-upstream"
+  local workload_name="${FUGUE_RELEASE_FULLNAME}-node-local-dns"
 
+  [[ "${expected_mode}" == "shadow" || "${expected_mode}" == "iptables" ]] || return 1
+  if [[ "${expected_mode}" == "iptables" ]]; then
+    expected_listen_ips="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP},${service_ip}"
+    expected_bind_ips="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP} ${service_ip}"
+  fi
   daemonset_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o json 2>/dev/null || true)"
   [[ -n "${daemonset_json}" ]] || return 1
-  DAEMONSET_JSON="${daemonset_json}" EXPECTED_IMAGE="${expected_image}" EXPECTED_LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" \
-    EXPECTED_UPSTREAM="${upstream_service}" EXPECTED_NODE="${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" python3 -c '
+  if ! DAEMONSET_JSON="${daemonset_json}" EXPECTED_IMAGE="${expected_image}" \
+    EXPECTED_LISTEN_IPS="${expected_listen_ips}" EXPECTED_MODE="${expected_mode}" \
+    EXPECTED_UPSTREAM="${upstream_service}" EXPECTED_NODE="${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" \
+    EXPECTED_NAME="${workload_name}" EXPECTED_PULL_POLICY="${FUGUE_NODE_LOCAL_DNS_IMAGE_PULL_POLICY}" python3 -c '
 import json
 import os
-import sys
 
 daemonset = json.loads(os.environ["DAEMONSET_JSON"])
 template = ((daemonset.get("spec") or {}).get("template") or {})
@@ -6596,20 +6606,46 @@ metadata = template.get("metadata") or {}
 labels = metadata.get("labels") or {}
 spec = template.get("spec") or {}
 containers = spec.get("containers") or []
-if labels.get("fugue.io/node-local-dns-mode") != "shadow" or len(containers) != 1:
+if labels.get("fugue.io/node-local-dns-mode") != os.environ["EXPECTED_MODE"] or len(containers) != 1:
     raise SystemExit(1)
 container = containers[0]
-expected_args = ["-localip", os.environ["EXPECTED_LOCAL_IP"], "-conf", "/etc/Corefile", "-upstreamsvc", os.environ["EXPECTED_UPSTREAM"]]
-if container.get("image") != os.environ["EXPECTED_IMAGE"] or container.get("args") != expected_args:
+expected_args = ["-localip", os.environ["EXPECTED_LISTEN_IPS"], "-conf", "/etc/Corefile", "-upstreamsvc", os.environ["EXPECTED_UPSTREAM"]]
+if container.get("name") != "node-cache" or container.get("image") != os.environ["EXPECTED_IMAGE"] or container.get("args") != expected_args:
+    raise SystemExit(1)
+if container.get("imagePullPolicy") != os.environ["EXPECTED_PULL_POLICY"] or container.get("ports"):
     raise SystemExit(1)
 selector = spec.get("nodeSelector") or {}
 if selector != {"kubernetes.io/os": "linux", "kubernetes.io/hostname": os.environ["EXPECTED_NODE"]}:
     raise SystemExit(1)
-'
+if spec.get("hostNetwork") is not True or spec.get("dnsPolicy") != "Default":
+    raise SystemExit(1)
+if spec.get("priorityClassName") != os.environ["EXPECTED_NAME"] or spec.get("serviceAccountName") != os.environ["EXPECTED_NAME"]:
+    raise SystemExit(1)
+if spec.get("automountServiceAccountToken") is not False:
+    raise SystemExit(1)
+security = container.get("securityContext") or {}
+if security.get("privileged") is True or (security.get("capabilities") or {}).get("add") != ["NET_ADMIN"]:
+    raise SystemExit(1)
+mounts = {(item.get("name"), item.get("mountPath"), bool(item.get("readOnly", False))) for item in container.get("volumeMounts") or []}
+if mounts != {("xtables-lock", "/run/xtables.lock", False), ("config-volume", "/etc/coredns", False)}:
+    raise SystemExit(1)
+volumes = {item.get("name"): item for item in spec.get("volumes") or []}
+if set(volumes) != {"xtables-lock", "config-volume"}:
+    raise SystemExit(1)
+host_path = volumes["xtables-lock"].get("hostPath") or {}
+if host_path.get("path") != "/run/xtables.lock" or host_path.get("type") != "FileOrCreate":
+    raise SystemExit(1)
+config_map = volumes["config-volume"].get("configMap") or {}
+if config_map.get("name") != os.environ["EXPECTED_NAME"] or config_map.get("items") != [{"key": "Corefile", "path": "Corefile.base"}]:
+    raise SystemExit(1)
+'; then
+    return 1
+  fi
 
   corefile="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get configmap "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.data.Corefile}' 2>/dev/null || true)"
   [[ -n "${corefile}" ]] || return 1
-  COREFILE="${corefile}" CLUSTER_DOMAIN="${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}" LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" SERVICE_IP="${service_ip}" python3 -c '
+  if ! COREFILE="${corefile}" CLUSTER_DOMAIN="${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}" LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" \
+    BIND_IPS="${expected_bind_ips}" python3 -c '
 import os
 
 def normalize(value):
@@ -6617,6 +6653,7 @@ def normalize(value):
 
 domain = os.environ["CLUSTER_DOMAIN"]
 local_ip = os.environ["LOCAL_IP"]
+bind_ips = os.environ["BIND_IPS"]
 expected = f"""
 {domain}:53 {{
 errors
@@ -6626,7 +6663,7 @@ denial 9984 5
 }}
 reload
 loop
-bind {local_ip}
+bind {bind_ips}
 forward . __PILLAR__CLUSTER__DNS__ {{
 force_tcp
 }}
@@ -6638,7 +6675,7 @@ errors
 cache 30
 reload
 loop
-bind {local_ip}
+bind {bind_ips}
 forward . __PILLAR__CLUSTER__DNS__ {{
 force_tcp
 }}
@@ -6649,7 +6686,7 @@ errors
 cache 30
 reload
 loop
-bind {local_ip}
+bind {bind_ips}
 forward . __PILLAR__CLUSTER__DNS__ {{
 force_tcp
 }}
@@ -6660,7 +6697,7 @@ errors
 cache 30
 reload
 loop
-bind {local_ip}
+bind {bind_ips}
 forward . __PILLAR__CLUSTER__DNS__ {{
 force_tcp
 }}
@@ -6669,9 +6706,14 @@ prometheus :9253
 """
 if normalize(os.environ["COREFILE"]) != normalize(expected):
     raise SystemExit(1)
-if os.environ["SERVICE_IP"] in os.environ["COREFILE"]:
-    raise SystemExit(1)
-'
+'; then
+    return 1
+  fi
+  return 0
+}
+
+node_local_dns_verify_shadow_artifact() {
+  node_local_dns_verify_artifact shadow "$1"
 }
 
 prepare_node_local_dns_helm_args() {
@@ -6782,15 +6824,15 @@ print(cluster_ip + "\t" + json.dumps(selector, sort_keys=True, separators=(",", 
 
   if [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "iptables" ]]; then
     [[ "${FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES}" == "false" && -n "${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" ]] || fail "iptables interception requires exactly one named canary node"
-    live_mode="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.spec.template.metadata.labels.fugue\.io/node-local-dns-mode}' 2>/dev/null || true)"
+    live_mode="${NODE_LOCAL_DNS_PREVIOUS_MODE}"
     live_node_name="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}' 2>/dev/null || true)"
-    [[ "${live_mode}" == "shadow" ]] || fail "iptables interception requires a healthy shadow-mode release immediately beforehand"
-    [[ "${live_node_name}" == "${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" ]] || fail "iptables interception target differs from the validated shadow release"
-    if ! node_local_dns_verify_shadow_artifact "${kube_dns_service_ip}"; then
-      fail "iptables interception target artifact differs from the validated shadow image, args, selector, or Corefile"
+    [[ "${live_mode}" == "shadow" || "${live_mode}" == "iptables" ]] || fail "iptables interception requires a healthy shadow release or the same healthy iptables release immediately beforehand"
+    [[ "${live_node_name}" == "${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" ]] || fail "iptables interception target differs from the validated live release"
+    if ! node_local_dns_verify_artifact "${live_mode}" "${kube_dns_service_ip}"; then
+      fail "iptables interception target artifact differs from the validated ${live_mode} image, args, selector, or Corefile"
     fi
-    if ! node_local_dns_verify_running shadow "${kube_dns_service_ip}"; then
-      fail "iptables interception requires the live shadow release to pass DNS, metrics, and host-network verification"
+    if ! node_local_dns_verify_running "${live_mode}" "${kube_dns_service_ip}"; then
+      fail "iptables interception requires the live ${live_mode} release to pass DNS, metrics, host-network, and rule verification"
     fi
   fi
 
