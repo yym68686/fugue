@@ -512,16 +512,27 @@ func platformAutonomyBlockRollout(storeStatus model.ControlPlaneStoreStatus, che
 	if storeStatus.BlockRollout {
 		return true
 	}
+	return len(platformAutonomyBlockingChecks(checks)) > 0
+}
+
+func platformAutonomyBlockingChecks(checks []model.StoreInvariantCheck) []model.StoreInvariantCheck {
+	blocking := make([]model.StoreInvariantCheck, 0, len(checks))
 	for _, check := range checks {
-		if check.Pass {
+		if check.Pass || !platformAutonomyCheckBlocksRollout(check.Name) {
 			continue
 		}
-		switch strings.TrimSpace(check.Name) {
-		case "discovery_bundle", "registry", "headscale", "restore_readiness":
-			return true
-		}
+		blocking = append(blocking, check)
 	}
-	return false
+	return blocking
+}
+
+func platformAutonomyCheckBlocksRollout(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "discovery_bundle", "registry", "headscale", "restore_readiness":
+		return true
+	default:
+		return false
+	}
 }
 
 func platformAutonomyControlsFromEnv() model.AutonomyControls {

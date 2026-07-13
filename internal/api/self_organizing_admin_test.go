@@ -534,6 +534,15 @@ func TestPlatformAutonomyBlockRolloutOnlyHardFailures(t *testing.T) {
 	if !platformAutonomyBlockRollout(model.ControlPlaneStoreStatus{BlockRollout: true}, nil) {
 		t.Fatalf("expected control-plane store block to block rollout")
 	}
+	blocking := platformAutonomyBlockingChecks([]model.StoreInvariantCheck{
+		{Name: "edge", Pass: false},
+		{Name: "discovery_bundle", Pass: false},
+		{Name: "registry", Pass: false},
+		{Name: "headscale", Pass: true},
+	})
+	if len(blocking) != 2 || blocking[0].Name != "discovery_bundle" || blocking[1].Name != "registry" {
+		t.Fatalf("expected exact failing hard-check set, got %+v", blocking)
+	}
 }
 
 func TestActiveInventoryFiltersNodesAbsentFromNodePolicyInventory(t *testing.T) {

@@ -61,6 +61,73 @@ func TestReleaseGuardStatusDetectsPlatformConsumerDrift(t *testing.T) {
 	}
 }
 
+func TestReleaseGuardAutonomyBlockedReasonsExposeHardFailures(t *testing.T) {
+	t.Parallel()
+
+	autonomy := &model.PlatformAutonomyStatus{
+		BlockRollout: true,
+		Checks: []model.StoreInvariantCheck{
+			{Name: "node_policy", Pass: false, Message: "soft degradation"},
+			{Name: "registry", Pass: false, Message: "connection refused"},
+			{Name: "headscale", Pass: false, Message: "context deadline exceeded"},
+		},
+	}
+	reasons := releaseGuardAutonomyBlockedReasons(autonomy)
+	if !stringSliceContains(reasons, "platform autonomy registry failed: error_class=connection_refused") {
+		t.Fatalf("expected registry blocker, got %+v", reasons)
+	}
+	if !stringSliceContains(reasons, "platform autonomy headscale failed: error_class=timeout") {
+		t.Fatalf("expected headscale blocker, got %+v", reasons)
+	}
+	for _, reason := range reasons {
+		if strings.Contains(reason, "node_policy") {
+			t.Fatalf("soft autonomy failures must not be reported as rollout blockers: %+v", reasons)
+		}
+	}
+	steps := releaseGuardRecommendedSteps(true, reasons)
+	for _, step := range steps {
+		if strings.Contains(step, "release guard passed") {
+			t.Fatalf("blocked release guard must not recommend continuing rollout: %+v", steps)
+		}
+	}
+}
+
+func TestReleaseGuardAutonomyBlockedReasonsClassifyStoreInvariants(t *testing.T) {
+	t.Parallel()
+
+	autonomy := &model.PlatformAutonomyStatus{
+		BlockRollout: true,
+		ControlPlaneStore: model.ControlPlaneStoreStatus{
+			BlockRollout: true,
+			GateReason:   "do not copy raw store detail secret-value",
+			Invariants: []model.StoreInvariantCheck{
+				{Name: "permission_verification", Pass: false, Message: "secret-value"},
+				{Name: "schema", Pass: true},
+			},
+		},
+	}
+	reasons := releaseGuardAutonomyBlockedReasons(autonomy)
+	if !stringSliceContains(reasons, "control plane store blocked rollout: failed_invariants=permission_verification") {
+		t.Fatalf("expected exact failed store invariant, got %+v", reasons)
+	}
+	if strings.Contains(strings.Join(reasons, " "), "secret-value") {
+		t.Fatalf("blocked reasons must not copy raw store messages: %+v", reasons)
+	}
+}
+
+func TestReleaseGuardAutonomyBlockedReasonsFailClosedOnInconsistentStatus(t *testing.T) {
+	t.Parallel()
+
+	reasons := releaseGuardAutonomyBlockedReasons(&model.PlatformAutonomyStatus{BlockRollout: true})
+	if !stringSliceContains(reasons, "platform autonomy reported block_rollout=true without a failing blocking check") {
+		t.Fatalf("expected classified invariant failure, got %+v", reasons)
+	}
+	steps := releaseGuardRecommendedSteps(true, reasons)
+	if len(steps) == 0 || strings.Contains(strings.Join(steps, " "), "continue normal rollout") {
+		t.Fatalf("inconsistent blocked status must remain fail closed, got %+v", steps)
+	}
+}
+
 func TestPlatformSafetyKernelTreatsForcePublishAsBoundedSoftOverride(t *testing.T) {
 	t.Parallel()
 

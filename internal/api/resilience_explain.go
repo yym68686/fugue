@@ -55,6 +55,7 @@ func (s *Server) handleGetReleaseGuardStatus(w http.ResponseWriter, r *http.Requ
 			blockedReasons = append(blockedReasons, incident.CheckName+": "+firstNonEmpty(incident.Message, incident.Observed, incident.Title))
 		}
 	}
+	blockedReasons = append(blockedReasons, releaseGuardAutonomyBlockedReasons(baseline.Autonomy)...)
 	if drift > 0 {
 		blockedReasons = append(blockedReasons, fmt.Sprintf("platform consumer generation drift: %d", drift))
 	}
@@ -72,10 +73,15 @@ func (s *Server) handleGetReleaseGuardStatus(w http.ResponseWriter, r *http.Requ
 	if len(gateViolations) > 0 {
 		blockedReasons = append(blockedReasons, fmt.Sprintf("gate policy validation failed: %d", len(gateViolations)))
 	}
+	blockRollout := baseline.BlockRollout || drift > 0 || artifactFailures > 0 || len(gateViolations) > 0
+	blockedReasons = dedupeStrings(blockedReasons)
+	if blockRollout && len(blockedReasons) == 0 {
+		blockedReasons = []string{"release guard blocked without a classified blocking source"}
+	}
 	status := model.ReleaseGuardStatus{
 		GeneratedAt:              time.Now().UTC(),
-		Pass:                     !baseline.BlockRollout && drift == 0 && artifactFailures == 0 && len(gateViolations) == 0,
-		BlockRollout:             baseline.BlockRollout || drift > 0 || artifactFailures > 0 || len(gateViolations) > 0,
+		Pass:                     !blockRollout,
+		BlockRollout:             blockRollout,
 		Mode:                     "enforced",
 		RobustnessBaseline:       baseline,
 		FailureContractCount:     len(baseline.FailureContracts),
@@ -88,7 +94,7 @@ func (s *Server) handleGetReleaseGuardStatus(w http.ResponseWriter, r *http.Requ
 		GatePolicies:             gatePolicies,
 		ReleaseSignals:           baseline.ReleaseSignals,
 		BlockedReasons:           blockedReasons,
-		RecommendedOperatorSteps: releaseGuardRecommendedSteps(blockedReasons),
+		RecommendedOperatorSteps: releaseGuardRecommendedSteps(blockRollout, blockedReasons),
 	}
 	httpx.WriteJSON(w, http.StatusOK, model.ReleaseGuardStatusResponse{Status: status})
 }
@@ -245,15 +251,80 @@ func (s *Server) releaseGuardArtifactNeedsValidation(artifact model.PlatformArti
 	return false, nil
 }
 
-func releaseGuardRecommendedSteps(blockedReasons []string) []string {
-	if len(blockedReasons) == 0 {
+func releaseGuardAutonomyBlockedReasons(autonomy *model.PlatformAutonomyStatus) []string {
+	if autonomy == nil || !autonomy.BlockRollout {
+		return nil
+	}
+	reasons := []string{}
+	if autonomy.ControlPlaneStore.BlockRollout {
+		reason := "control plane store blocked rollout"
+		failedInvariants := []string{}
+		for _, invariant := range autonomy.ControlPlaneStore.Invariants {
+			if !invariant.Pass && strings.TrimSpace(invariant.Name) != "" {
+				failedInvariants = append(failedInvariants, strings.TrimSpace(invariant.Name))
+			}
+		}
+		failedInvariants = dedupeStrings(failedInvariants)
+		if len(failedInvariants) > 0 {
+			reason += ": failed_invariants=" + strings.Join(failedInvariants, ",")
+		}
+		reasons = append(reasons, reason)
+	}
+	for _, check := range platformAutonomyBlockingChecks(autonomy.Checks) {
+		name := strings.TrimSpace(check.Name)
+		if name == "restore_readiness" && autonomy.ControlPlaneStore.BlockRollout {
+			continue
+		}
+		reason := "platform autonomy " + name + " failed"
+		if errorClass := releaseGuardCheckErrorClass(check.Message); errorClass != "check_failed" {
+			reason += ": error_class=" + errorClass
+		}
+		if check.Count != 0 {
+			reason += fmt.Sprintf(" count=%d", check.Count)
+		}
+		reasons = append(reasons, reason)
+	}
+	reasons = dedupeStrings(reasons)
+	if len(reasons) == 0 {
+		return []string{"platform autonomy reported block_rollout=true without a failing blocking check"}
+	}
+	return reasons
+}
+
+func releaseGuardCheckErrorClass(message string) string {
+	message = strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(message, "context deadline exceeded"), strings.Contains(message, "timeout"), strings.Contains(message, "timed out"):
+		return "timeout"
+	case strings.Contains(message, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(message, "connection reset"):
+		return "connection_reset"
+	case strings.Contains(message, "no route to host"):
+		return "no_route_to_host"
+	case strings.Contains(message, "not configured"):
+		return "not_configured"
+	case strings.Contains(message, "invalid"):
+		return "invalid"
+	case strings.Contains(message, "missing"):
+		return "missing"
+	case strings.Contains(message, "unavailable"):
+		return "unavailable"
+	default:
+		return "check_failed"
+	}
+}
+
+func releaseGuardRecommendedSteps(blockRollout bool, blockedReasons []string) []string {
+	if !blockRollout {
 		return []string{"release guard passed; continue normal rollout"}
 	}
 	return []string{
 		"run fugue admin robustness status --json for full evidence",
+		"inspect the named platform autonomy checks when an autonomy blocker is present",
 		"run fugue admin artifact consumers <artifact> when generation drift is present",
 		"run fugue admin artifact validate <artifact> before releasing invalid platform state",
-		"hold rollout until block_publish incidents clear",
+		"hold rollout until every blocked reason clears",
 	}
 }
 

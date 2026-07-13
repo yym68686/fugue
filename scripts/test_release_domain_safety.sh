@@ -36,6 +36,9 @@ grep -Fq 'FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_r
 grep -Fq 'FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref }}' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must pass the exact release target ref to the release guard"
+grep -Fq 'FUGUE_RELEASE_ATTRIBUTION_DIR: ${{ runner.temp }}/fugue-release' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must persist release-guard samples in the uploaded attribution artifact"
 grep -Fq 'FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ steps.live_images.outputs.image_cache_image_baseline_ref }}' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must refresh the exact live image-cache component baseline immediately before upgrade"
@@ -1202,6 +1205,175 @@ rm -f "${RESOLVE_TEST_OUTPUT}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+(
+  RELEASE_GUARD_EVIDENCE_DIR="$(mktemp -d)"
+  trap 'rm -rf "${RELEASE_GUARD_EVIDENCE_DIR}"' EXIT
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${RELEASE_GUARD_EVIDENCE_DIR}"
+  release_api_base_url() {
+    printf 'https://control-plane.invalid\n'
+  }
+  release_api_token() {
+    printf 'test-token-not-written\n'
+  }
+  release_status_request() {
+    local output_file="$3"
+    if [[ -n "${RELEASE_GUARD_OVERRIDE_FILE:-}" ]]; then
+      cp "${RELEASE_GUARD_OVERRIDE_FILE}" "${output_file}"
+      return 0
+    fi
+    printf '%s\n' '{
+      "status": {
+        "generated_at": "2026-07-13T21:02:50Z",
+        "pass": false,
+        "block_rollout": true,
+        "platform_artifact_validation_failures": 0,
+        "platform_consumer_drift": 0,
+        "failure_contract_count": 26,
+        "gate_policy_count": 15,
+        "enforced_gate_count": 2,
+        "gate_policy_violations": ["gate-secret-value"],
+        "blocked_reasons": ["platform autonomy registry failed: context deadline exceeded super-secret-value"],
+        "robustness_baseline": {
+          "pass": false,
+          "block_rollout": true,
+          "incidents": [],
+          "autonomy": {
+            "pass": false,
+            "block_rollout": true,
+            "control_plane_store": {"block_rollout": false},
+            "checks": [
+              {"name": "registry", "pass": false, "count": 0, "message": "context deadline exceeded super-secret-value"},
+              {"name": "edge", "pass": false, "count": 1, "message": "soft degradation"}
+            ]
+          }
+        }
+      }
+    }' >"${output_file}"
+  }
+  if RELEASE_GUARD_SUMMARY="$(release_guard_status_summary)"; then
+    fail "blocking release-guard fixture must fail closed"
+  fi
+  [[ "${RELEASE_GUARD_SUMMARY}" == *"baseline_block_rollout=true"* ]] ||
+    fail "release-guard summary must expose baseline block state"
+  [[ "${RELEASE_GUARD_SUMMARY}" == *"autonomy_block_rollout=true"* ]] ||
+    fail "release-guard summary must expose autonomy block state"
+  [[ "${RELEASE_GUARD_SUMMARY}" == *"autonomy_failures=registry:timeout"* ]] ||
+    fail "release-guard summary must classify the exact failing hard autonomy check"
+  [[ "${RELEASE_GUARD_SUMMARY}" == *"gate_violations=1"* ]] ||
+    fail "release-guard summary must expose only the gate violation count"
+  [[ "${RELEASE_GUARD_SUMMARY}" == *"evidence=recorded"* ]] ||
+    fail "release-guard summary must expose successful evidence persistence"
+  for forbidden in super-secret-value gate-secret-value; do
+    [[ "${RELEASE_GUARD_SUMMARY}" != *"${forbidden}"* ]] ||
+      fail "release-guard summary must not copy raw failure text into Actions logs"
+  done
+
+  RELEASE_GUARD_CONCURRENT_FIXTURE="$(mktemp)"
+  release_status_request unused unused "${RELEASE_GUARD_CONCURRENT_FIXTURE}"
+  write_release_guard_sample "${RELEASE_GUARD_CONCURRENT_FIXTURE}" &
+  RELEASE_GUARD_WRITER_ONE=$!
+  write_release_guard_sample "${RELEASE_GUARD_CONCURRENT_FIXTURE}" &
+  RELEASE_GUARD_WRITER_TWO=$!
+  wait "${RELEASE_GUARD_WRITER_ONE}"
+  wait "${RELEASE_GUARD_WRITER_TWO}"
+  rm -f "${RELEASE_GUARD_CONCURRENT_FIXTURE}"
+
+  RELEASE_GUARD_BOUNDED_FIXTURE="$(mktemp)"
+  python3 - "${RELEASE_GUARD_BOUNDED_FIXTURE}" <<'PY'
+import json
+import sys
+
+incidents = [
+    {
+        "check_name": "incident-" + str(index) + "-" + ("x" * 200),
+        "severity": "block_publish",
+        "message": "must-not-be-persisted-secret",
+    }
+    for index in range(40)
+]
+payload = {
+    "status": {
+        "generated_at": "2026-07-13T21:02:51Z",
+        "pass": False,
+        "block_rollout": True,
+        "robustness_baseline": {
+            "pass": False,
+            "block_rollout": True,
+            "incidents": incidents,
+            "autonomy": {"pass": True, "block_rollout": False, "checks": []},
+        },
+    }
+}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+PY
+  write_release_guard_sample "${RELEASE_GUARD_BOUNDED_FIXTURE}"
+  RELEASE_GUARD_OVERRIDE_FILE="${RELEASE_GUARD_BOUNDED_FIXTURE}"
+  if RELEASE_GUARD_BOUNDED_SUMMARY="$(release_guard_status_summary)"; then
+    fail "bounded block-publish fixture must fail closed"
+  fi
+  unset RELEASE_GUARD_OVERRIDE_FILE
+  [[ "${RELEASE_GUARD_BOUNDED_SUMMARY}" == *"blocker_count=40"* ]] ||
+    fail "release-guard summary must report the full blocker count"
+  [[ "${RELEASE_GUARD_BOUNDED_SUMMARY}" == *"blockers_truncated=true"* ]] ||
+    fail "release-guard summary must report bounded blocker output"
+  [[ "${RELEASE_GUARD_BOUNDED_SUMMARY}" != *"must-not-be-persisted-secret"* ]] ||
+    fail "bounded release-guard summary must not copy incident messages"
+  rm -f "${RELEASE_GUARD_BOUNDED_FIXTURE}"
+
+  python3 - "${RELEASE_GUARD_EVIDENCE_DIR}/release-guard-samples" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+paths = sorted(directory.glob("*.json"))
+if len(paths) != 5:
+    raise SystemExit(f"expected five independent release-guard sample files, got {len(paths)}")
+samples = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+primary = [sample for sample in samples if sample.get("generated_at") == "2026-07-13T21:02:50Z"]
+if len(primary) != 3:
+    raise SystemExit(f"concurrent evidence writers lost a sample: {len(primary)}")
+sample = primary[0]
+blocking = sample["robustness_baseline"]["autonomy"]["blocking_checks"]
+if blocking != [{"count": 0, "error_class": "timeout", "name": "registry", "pass": False}]:
+    raise SystemExit(f"unexpected secret-safe blocking checks: {blocking!r}")
+bounded_samples = [sample for sample in samples if sample.get("generated_at") == "2026-07-13T21:02:51Z"]
+if len(bounded_samples) != 2:
+    raise SystemExit(f"expected two bounded samples, got {len(bounded_samples)}")
+bounded = bounded_samples[0]
+baseline = bounded["robustness_baseline"]
+if baseline["block_publish_incident_count"] != 40 or not baseline["block_publish_incidents_truncated"]:
+    raise SystemExit(f"incident cardinality bound was not recorded: {baseline!r}")
+if len(baseline["block_publish_incidents"]) != 32:
+    raise SystemExit("release-guard sample retained more than 32 incidents")
+if any(len(item["check_name"]) > 96 for item in baseline["block_publish_incidents"]):
+    raise SystemExit("release-guard sample retained an overlong incident identifier")
+serialized = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+for forbidden in ("super-secret-value", "gate-secret-value", "must-not-be-persisted-secret", "test-token-not-written", "Authorization"):
+    if forbidden in serialized:
+        raise SystemExit(f"release-guard evidence leaked forbidden value {forbidden!r}")
+PY
+
+  RELEASE_GUARD_RETENTION_DIR="$(mktemp -d)"
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${RELEASE_GUARD_RETENTION_DIR}"
+  mkdir -p "${RELEASE_GUARD_RETENTION_DIR}/release-guard-samples"
+  python3 - "${RELEASE_GUARD_RETENTION_DIR}/release-guard-samples" <<'PY'
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+for index in range(201):
+    (directory / f"{index:020d}-fixture.json").write_text("{}\n", encoding="utf-8")
+PY
+  RELEASE_GUARD_RETENTION_FIXTURE="$(mktemp)"
+  release_status_request unused unused "${RELEASE_GUARD_RETENTION_FIXTURE}"
+  write_release_guard_sample "${RELEASE_GUARD_RETENTION_FIXTURE}"
+  assert_eq "$(find "${RELEASE_GUARD_RETENTION_DIR}/release-guard-samples" -type f -name '*.json' | wc -l | tr -d ' ')" "200" "release-guard evidence retention"
+  rm -f "${RELEASE_GUARD_RETENTION_FIXTURE}"
+  rm -rf "${RELEASE_GUARD_RETENTION_DIR}"
+)
 
 (
   FUGUE_NAMESPACE=fugue-system

@@ -11553,8 +11553,143 @@ PY
   return "${rc}"
 }
 
+write_release_guard_sample() {
+  local status_file="$1"
+  local dir="${FUGUE_RELEASE_ATTRIBUTION_DIR:-}"
+  local evidence_dir
+
+  [[ -n "$(trim_field "${dir}")" ]] || return 0
+  evidence_dir="${dir}/release-guard-samples"
+  mkdir -p "${evidence_dir}"
+  python3 - "${status_file}" "${evidence_dir}" <<'PY'
+import json
+import os
+import re
+import sys
+import time
+import uuid
+
+source_path, evidence_dir = sys.argv[1:3]
+with open(source_path, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+
+status = payload.get("status") or {}
+baseline = status.get("robustness_baseline") or {}
+autonomy = baseline.get("autonomy") or {}
+store = autonomy.get("control_plane_store") or {}
+hard_checks = {"discovery_bundle", "registry", "headscale", "restore_readiness"}
+max_incidents = 32
+max_samples = 200
+
+def bounded_count(value):
+    try:
+        return max(-1_000_000_000, min(1_000_000_000, int(value or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+def bounded_identifier(value, fallback="unknown"):
+    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value or "").strip())[:96]
+    return normalized or fallback
+
+def error_class(message):
+    value = str(message or "").lower()
+    if "context deadline exceeded" in value or "timeout" in value or "timed out" in value:
+        return "timeout"
+    if "connection refused" in value:
+        return "connection_refused"
+    if "connection reset" in value:
+        return "connection_reset"
+    if "no route to host" in value:
+        return "no_route_to_host"
+    if "not configured" in value:
+        return "not_configured"
+    if "invalid" in value:
+        return "invalid"
+    if "missing" in value:
+        return "missing"
+    if "unavailable" in value:
+        return "unavailable"
+    return "check_failed"
+
+blocking_checks = []
+seen_checks = set()
+for check in autonomy.get("checks") or []:
+    if not isinstance(check, dict) or bool(check.get("pass")):
+        continue
+    name = str(check.get("name") or "").strip()
+    if name not in hard_checks or name in seen_checks:
+        continue
+    seen_checks.add(name)
+    blocking_checks.append({
+        "name": name,
+        "pass": False,
+        "count": bounded_count(check.get("count")),
+        "error_class": error_class(check.get("message")),
+    })
+
+block_publish_incidents = []
+block_publish_incident_count = 0
+for incident in baseline.get("incidents") or []:
+    if not isinstance(incident, dict) or incident.get("severity") != "block_publish":
+        continue
+    block_publish_incident_count += 1
+    if len(block_publish_incidents) >= max_incidents:
+        continue
+    block_publish_incidents.append({
+        "check_name": bounded_identifier(incident.get("check_name")),
+        "severity": "block_publish",
+    })
+
+sample = {
+    "generated_at": str(status.get("generated_at") or "")[:64],
+    "pass": bool(status.get("pass")),
+    "block_rollout": bool(status.get("block_rollout")),
+    "platform_artifact_validation_failures": bounded_count(status.get("platform_artifact_validation_failures")),
+    "platform_consumer_drift": bounded_count(status.get("platform_consumer_drift")),
+    "gate_policy_violation_count": min(1_000_000, len(status.get("gate_policy_violations") or [])),
+    "robustness_baseline": {
+        "pass": bool(baseline.get("pass")),
+        "block_rollout": bool(baseline.get("block_rollout")),
+        "block_publish_incident_count": block_publish_incident_count,
+        "block_publish_incidents_truncated": block_publish_incident_count > len(block_publish_incidents),
+        "block_publish_incidents": block_publish_incidents,
+        "autonomy": {
+            "pass": bool(autonomy.get("pass")),
+            "block_rollout": bool(autonomy.get("block_rollout")),
+            "control_plane_store_block_rollout": bool(store.get("block_rollout")),
+            "blocking_checks": blocking_checks,
+        },
+    },
+}
+
+sample_name = f"{time.time_ns():020d}-{os.getpid()}-{uuid.uuid4().hex}.json"
+evidence_path = os.path.join(evidence_dir, sample_name)
+temporary_path = evidence_path + ".tmp"
+try:
+    with open(temporary_path, "w", encoding="utf-8") as fh:
+        json.dump(sample, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(temporary_path, evidence_path)
+finally:
+    try:
+        os.remove(temporary_path)
+    except FileNotFoundError:
+        pass
+
+sample_files = sorted(
+    (name for name in os.listdir(evidence_dir) if name.endswith(".json")),
+    reverse=True,
+)
+for stale_name in sample_files[max_samples:]:
+    try:
+        os.remove(os.path.join(evidence_dir, stale_name))
+    except FileNotFoundError:
+        pass
+PY
+}
+
 release_guard_status_summary() {
-  local api_base token status_file rc
+  local api_base token status_file evidence_status rc
 
   api_base="$(release_api_base_url)"
   token="$(release_api_token)"
@@ -11564,19 +11699,89 @@ release_guard_status_summary() {
     printf 'release guard status request failed'
     return 1
   fi
-  python3 - "${status_file}" <<'PY'
+  if [[ -z "$(trim_field "${FUGUE_RELEASE_ATTRIBUTION_DIR:-}")" ]]; then
+    evidence_status="disabled"
+  elif write_release_guard_sample "${status_file}"; then
+    evidence_status="recorded"
+  else
+    evidence_status="failed"
+  fi
+  python3 - "${status_file}" "${evidence_status}" <<'PY'
 import json
 import sys
 
-path = sys.argv[1]
+path, evidence_status = sys.argv[1:3]
 with open(path, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 status = payload.get("status") or {}
-blocked = status.get("blocked_reasons") or []
+baseline = status.get("robustness_baseline") or {}
+autonomy = baseline.get("autonomy") or {}
+hard_checks = {"discovery_bundle", "registry", "headscale", "restore_readiness"}
+
+def error_class(message):
+    value = str(message or "").lower()
+    if "context deadline exceeded" in value or "timeout" in value or "timed out" in value:
+        return "timeout"
+    if "connection refused" in value:
+        return "connection_refused"
+    if "connection reset" in value:
+        return "connection_reset"
+    if "no route to host" in value:
+        return "no_route_to_host"
+    if "not configured" in value:
+        return "not_configured"
+    if "invalid" in value:
+        return "invalid"
+    if "missing" in value:
+        return "missing"
+    if "unavailable" in value:
+        return "unavailable"
+    return "check_failed"
+
+autonomy_failures = []
+seen = set()
+for check in autonomy.get("checks") or []:
+    if not isinstance(check, dict) or bool(check.get("pass")):
+        continue
+    name = str(check.get("name") or "").strip()
+    if name not in hard_checks or name in seen:
+        continue
+    seen.add(name)
+    autonomy_failures.append(f"{name}:{error_class(check.get('message'))}")
+
+safe_blockers = []
+if int(status.get("platform_artifact_validation_failures") or 0) > 0:
+    safe_blockers.append("platform_artifact_validation")
+if int(status.get("platform_consumer_drift") or 0) > 0:
+    safe_blockers.append("platform_consumer_drift")
+if status.get("gate_policy_violations") or []:
+    safe_blockers.append("gate_policy_validation")
+for incident in baseline.get("incidents") or []:
+    if not isinstance(incident, dict) or incident.get("severity") != "block_publish":
+        continue
+    name = str(incident.get("check_name") or "").strip()
+    name = "".join(char for char in name if char.isalnum() or char in "_.:-")[:64]
+    safe_blockers.append("block_publish:" + (name or "unknown"))
+if bool(autonomy.get("block_rollout")):
+    store = autonomy.get("control_plane_store") or {}
+    if bool(store.get("block_rollout")):
+        safe_blockers.append("control_plane_store")
+    safe_blockers.extend("autonomy:" + item.split(":", 1)[0] for item in autonomy_failures)
+    if not bool(store.get("block_rollout")) and not autonomy_failures:
+        safe_blockers.append("autonomy:unclassified")
+safe_blockers = list(dict.fromkeys(safe_blockers))
+if bool(status.get("block_rollout")) and not safe_blockers:
+    safe_blockers.append("unclassified")
+safe_blocker_count = len(safe_blockers)
+safe_blockers = safe_blockers[:32]
+safe_blockers_truncated = safe_blocker_count > len(safe_blockers)
 print(
     "pass={pass_} block_rollout={block} artifact_failures={artifact_failures} "
     "consumer_drift={consumer_drift} failure_contracts={contracts} gate_policies={gates} "
-    "enforced_gates={enforced_gates} gate_violations={gate_violations} blockers={blockers}".format(
+    "enforced_gates={enforced_gates} gate_violations={gate_violations} "
+    "baseline_block_rollout={baseline_block} autonomy_block_rollout={autonomy_block} "
+    "autonomy_failures={autonomy_failures} blocker_count={blocker_count} "
+    "blockers_truncated={blockers_truncated} blockers={blockers} evidence={evidence}".format(
         pass_=str(bool(status.get("pass"))).lower(),
         block=str(bool(status.get("block_rollout"))).lower(),
         artifact_failures=int(status.get("platform_artifact_validation_failures") or 0),
@@ -11584,8 +11789,14 @@ print(
         contracts=int(status.get("failure_contract_count") or 0),
         gates=int(status.get("gate_policy_count") or 0),
         enforced_gates=int(status.get("enforced_gate_count") or 0),
-        gate_violations="; ".join(str(item) for item in (status.get("gate_policy_violations") or [])) or "none",
-        blockers="; ".join(str(item) for item in blocked) if blocked else "none",
+        gate_violations=len(status.get("gate_policy_violations") or []),
+        baseline_block=str(bool(baseline.get("block_rollout"))).lower(),
+        autonomy_block=str(bool(autonomy.get("block_rollout"))).lower(),
+        autonomy_failures=",".join(autonomy_failures) or "none",
+        blocker_count=safe_blocker_count,
+        blockers_truncated=str(safe_blockers_truncated).lower(),
+        blockers=",".join(safe_blockers) or "none",
+        evidence=evidence_status,
     )
 )
 raise SystemExit(0 if bool(status.get("pass")) and not bool(status.get("block_rollout")) else 1)
