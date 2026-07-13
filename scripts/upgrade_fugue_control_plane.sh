@@ -311,6 +311,7 @@ PRIMARY_POSTGRES_DATA_ROOT="${FUGUE_PRIMARY_POSTGRES_DATA_ROOT:-/var/lib/fugue/p
 PRIMARY_POSTGRES_IMAGE="${FUGUE_PRIMARY_POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}"
 FUGUE_DEFAULT_REGISTRY_PULL_BASE="${FUGUE_DEFAULT_REGISTRY_PULL_BASE:-}"
 DNS_HELM_SET_ARGS=()
+NODE_LOCAL_DNS_HELM_SET_ARGS=()
 HEADSCALE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_PRESERVED=false
@@ -322,6 +323,10 @@ PRESERVE_REGISTRY_ZERO_REPLICAS="false"
 RELEASE_CHANGED_FILES_EFFECTIVE=""
 STRICT_DRAIN_AGENT_IMAGE_PRESERVED=false
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
+NODE_LOCAL_DNS_PREVIOUS_ENABLED="false"
+NODE_LOCAL_DNS_PREVIOUS_MODE=""
+NODE_LOCAL_DNS_TARGET_NODES=""
+NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP=""
 
 release_changed_files() {
   if [[ -n "${RELEASE_CHANGED_FILES_EFFECTIVE:-}" ]]; then
@@ -564,6 +569,13 @@ release_safety_changed_file_subsystems() {
         ;;
     esac
     case "${file}" in
+      deploy/helm/fugue/templates/node-local-dns-cache.yaml|\
+      deploy/helm/fugue/templates/observability-prometheus-configmap.yaml)
+        release_safety_emit_subsystem cluster_dns
+        matched="true"
+        ;;
+    esac
+    case "${file}" in
       internal/dnsserver/*|\
       internal/httpx/*|\
       internal/weightedselector/*|\
@@ -772,6 +784,9 @@ release_safety_watch_window_seconds() {
       dns_server)
         seconds="${FUGUE_DNS_WATCH_WINDOW_SECONDS:-180}"
         ;;
+      cluster_dns)
+        seconds="${FUGUE_CLUSTER_DNS_WATCH_WINDOW_SECONDS:-180}"
+        ;;
       edge_worker)
         seconds="${FUGUE_PUBLIC_DATA_PLANE_WATCH_WINDOW_SECONDS:-180}"
         ;;
@@ -821,6 +836,9 @@ release_safety_required_gates() {
         ;;
       dns_server)
         gates+=("authoritative_dns" "dns_answer_audit" "release_guard")
+        ;;
+      cluster_dns)
+        gates+=("central_coredns" "node_local_dns" "service_resolution" "release_guard" "public_synthetic" "rollback_path_smoke")
         ;;
       edge_worker)
         gates+=("inactive_worker_smoke" "active_slot_smoke" "edge_request_error_class")
@@ -3568,12 +3586,13 @@ preserve_maintenance_agents_from_live() {
 
 rollout_daemonset_status() {
   local daemonset_name="$1"
+  local namespace="${2:-${FUGUE_NAMESPACE}}"
   local strategy
-  strategy="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
+  strategy="$(${KUBECTL} -n "${namespace}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
   strategy="${strategy:-RollingUpdate}"
 
   if [[ "${strategy}" == "RollingUpdate" ]]; then
-    ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+    ${KUBECTL} -n "${namespace}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
     return
   fi
 
@@ -3595,7 +3614,7 @@ rollout_daemonset_status() {
   deadline=$((SECONDS + timeout_seconds))
 
   while true; do
-    status="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true)"
+    status="$(${KUBECTL} -n "${namespace}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true)"
     IFS=$'\t' read -r generation observed_generation desired ready unavailable <<<"${status}"
     generation="${generation:-0}"
     observed_generation="${observed_generation:-0}"
@@ -6492,6 +6511,744 @@ EOF
   ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" rollout status "deploy/${FUGUE_COREDNS_DEPLOYMENT_NAME}" --timeout=180s
 }
 
+node_local_dns_candidate_nodes() {
+  if [[ -n "$(trim_field "${FUGUE_NODE_LOCAL_DNS_NODE_NAME:-}")" ]]; then
+    printf '%s\n' "${FUGUE_NODE_LOCAL_DNS_NODE_NAME}"
+    return
+  fi
+  ${KUBECTL} get nodes -l kubernetes.io/os=linux --no-headers 2>/dev/null |
+    awk '$2 == "Ready" || $2 ~ /^Ready,/ {print $1}' |
+    sort
+}
+
+node_local_dns_verify_shadow_artifact() {
+  local service_ip="$1"
+  local daemonset_json=""
+  local corefile=""
+  local expected_image="${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}"
+  local upstream_service="${FUGUE_RELEASE_FULLNAME}-dns-upstream"
+
+  daemonset_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o json 2>/dev/null || true)"
+  [[ -n "${daemonset_json}" ]] || return 1
+  DAEMONSET_JSON="${daemonset_json}" EXPECTED_IMAGE="${expected_image}" EXPECTED_LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" \
+    EXPECTED_UPSTREAM="${upstream_service}" EXPECTED_NODE="${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" python3 -c '
+import json
+import os
+import sys
+
+daemonset = json.loads(os.environ["DAEMONSET_JSON"])
+template = ((daemonset.get("spec") or {}).get("template") or {})
+metadata = template.get("metadata") or {}
+labels = metadata.get("labels") or {}
+spec = template.get("spec") or {}
+containers = spec.get("containers") or []
+if labels.get("fugue.io/node-local-dns-mode") != "shadow" or len(containers) != 1:
+    raise SystemExit(1)
+container = containers[0]
+expected_args = ["-localip", os.environ["EXPECTED_LOCAL_IP"], "-conf", "/etc/Corefile", "-upstreamsvc", os.environ["EXPECTED_UPSTREAM"]]
+if container.get("image") != os.environ["EXPECTED_IMAGE"] or container.get("args") != expected_args:
+    raise SystemExit(1)
+selector = spec.get("nodeSelector") or {}
+if selector != {"kubernetes.io/os": "linux", "kubernetes.io/hostname": os.environ["EXPECTED_NODE"]}:
+    raise SystemExit(1)
+'
+
+  corefile="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get configmap "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.data.Corefile}' 2>/dev/null || true)"
+  [[ -n "${corefile}" ]] || return 1
+  COREFILE="${corefile}" CLUSTER_DOMAIN="${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}" LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" SERVICE_IP="${service_ip}" python3 -c '
+import os
+
+def normalize(value):
+    return "\n".join(line.strip() for line in value.splitlines() if line.strip())
+
+domain = os.environ["CLUSTER_DOMAIN"]
+local_ip = os.environ["LOCAL_IP"]
+expected = f"""
+{domain}:53 {{
+errors
+cache {{
+success 9984 30
+denial 9984 5
+}}
+reload
+loop
+bind {local_ip}
+forward . __PILLAR__CLUSTER__DNS__ {{
+force_tcp
+}}
+prometheus :9253
+health {local_ip}:8080
+}}
+in-addr.arpa:53 {{
+errors
+cache 30
+reload
+loop
+bind {local_ip}
+forward . __PILLAR__CLUSTER__DNS__ {{
+force_tcp
+}}
+prometheus :9253
+}}
+ip6.arpa:53 {{
+errors
+cache 30
+reload
+loop
+bind {local_ip}
+forward . __PILLAR__CLUSTER__DNS__ {{
+force_tcp
+}}
+prometheus :9253
+}}
+.:53 {{
+errors
+cache 30
+reload
+loop
+bind {local_ip}
+forward . __PILLAR__CLUSTER__DNS__ {{
+force_tcp
+}}
+prometheus :9253
+}}
+"""
+if normalize(os.environ["COREFILE"]) != normalize(expected):
+    raise SystemExit(1)
+if os.environ["SERVICE_IP"] in os.environ["COREFILE"]:
+    raise SystemExit(1)
+'
+}
+
+prepare_node_local_dns_helm_args() {
+  local service_data=""
+  local live_daemonset_ref=""
+  local kube_dns_service_ip=""
+  local upstream_selector_json=""
+  local endpoint_count="0"
+  local coredns_corefile=""
+  local node_name=""
+  local ready=""
+  local node_os=""
+  local node_arch=""
+  local live_mode=""
+  local live_node_name=""
+  local desired_nodes=""
+  local desired_node_count="0"
+  local node_selector_json=""
+
+  if ! live_daemonset_ref="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" --ignore-not-found -o name)"; then
+    fail "cannot determine the live NodeLocal DNSCache state before preparing the release"
+  fi
+  if [[ -n "$(trim_field "${live_daemonset_ref}")" ]]; then
+    NODE_LOCAL_DNS_PREVIOUS_ENABLED="true"
+    if ! NODE_LOCAL_DNS_PREVIOUS_MODE="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.spec.template.metadata.labels.fugue\.io/node-local-dns-mode}')"; then
+      fail "cannot inspect the live NodeLocal DNSCache mode before preparing the release"
+    fi
+    [[ "${NODE_LOCAL_DNS_PREVIOUS_MODE}" == "shadow" || "${NODE_LOCAL_DNS_PREVIOUS_MODE}" == "iptables" ]] || fail "live NodeLocal DNSCache mode is missing or unsupported"
+  else
+    NODE_LOCAL_DNS_PREVIOUS_ENABLED="false"
+    NODE_LOCAL_DNS_PREVIOUS_MODE=""
+  fi
+  NODE_LOCAL_DNS_HELM_SET_ARGS=(--set "nodeLocalDNS.enabled=${FUGUE_NODE_LOCAL_DNS_ENABLED}")
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" != "true" ]]; then
+    if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
+      if ! NODE_LOCAL_DNS_TARGET_NODES="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}')"; then
+        fail "cannot inspect the live NodeLocal DNSCache target before disabling it"
+      fi
+      [[ -n "$(trim_field "${NODE_LOCAL_DNS_TARGET_NODES}")" ]] || fail "cannot safely disable NodeLocal DNSCache because its live DaemonSet has no exact hostname selector"
+      if ! NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get service "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}" -o jsonpath='{.spec.clusterIP}')"; then
+        fail "cannot inspect the live kube-dns ServiceIP before disabling NodeLocal DNSCache"
+      fi
+      [[ "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "cannot safely disable NodeLocal DNSCache because the live kube-dns ServiceIP is unavailable"
+    fi
+    return 0
+  fi
+
+  command_exists python3 || fail "python3 is required for NodeLocal DNSCache preflight"
+  case "${FUGUE_NODE_LOCAL_DNS_MODE}" in
+    shadow|iptables) ;;
+    *) fail "FUGUE_NODE_LOCAL_DNS_MODE must be shadow or iptables" ;;
+  esac
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES}" == "true" ]]; then
+    fail "all-node NodeLocal DNSCache rollout is disabled until per-node intercepted-query gates are implemented"
+  fi
+  [[ -n "$(trim_field "${FUGUE_NODE_LOCAL_DNS_NODE_NAME:-}")" ]] || fail "FUGUE_NODE_LOCAL_DNS_NODE_NAME is required for bounded NodeLocal DNSCache rollout"
+
+  service_data="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get service "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}" -o json 2>/dev/null || true)"
+  [[ -n "${service_data}" ]] || fail "NodeLocal DNSCache requires service/${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME} in ${FUGUE_NODE_LOCAL_DNS_NAMESPACE}"
+  IFS=$'\t' read -r kube_dns_service_ip upstream_selector_json < <(
+    printf '%s' "${service_data}" | python3 -c '
+import json
+import sys
+
+service = json.load(sys.stdin)
+spec = service.get("spec") or {}
+cluster_ip = str(spec.get("clusterIP") or "").strip()
+selector = spec.get("selector") or {}
+print(cluster_ip + "\t" + json.dumps(selector, sort_keys=True, separators=(",", ":")))
+'
+  )
+  [[ "${kube_dns_service_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "live kube-dns Service has no IPv4 ClusterIP"
+  NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP="${kube_dns_service_ip}"
+  [[ "${upstream_selector_json}" != "{}" ]] || fail "live kube-dns Service has no selector for the central CoreDNS upstream"
+  if [[ -n "$(trim_field "${FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP:-}")" &&
+        "${FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP}" != "${kube_dns_service_ip}" ]]; then
+    fail "live kube-dns ServiceIP ${kube_dns_service_ip} differs from expected ${FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP}"
+  fi
+
+  endpoint_count="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get endpoints "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}" -o json 2>/dev/null |
+    python3 -c 'import json,sys; payload=json.load(sys.stdin); print(sum(len(s.get("addresses") or []) for s in payload.get("subsets") or []))' 2>/dev/null || printf '0')"
+  [[ "${endpoint_count}" =~ ^[0-9]+$ ]] && (( endpoint_count > 0 )) || fail "central CoreDNS has no Ready kube-dns endpoints"
+
+  coredns_corefile="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get configmap "${FUGUE_NODE_LOCAL_DNS_COREDNS_CONFIGMAP_NAME}" -o jsonpath='{.data.Corefile}' 2>/dev/null || true)"
+  [[ -n "${coredns_corefile}" ]] || fail "central CoreDNS Corefile is unavailable"
+  if ! grep -Eq "kubernetes[[:space:]]+${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}([[:space:]]|$)" <<<"${coredns_corefile}"; then
+    fail "central CoreDNS Corefile does not serve ${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}"
+  fi
+
+  desired_nodes="$(node_local_dns_candidate_nodes)"
+  NODE_LOCAL_DNS_TARGET_NODES="${desired_nodes}"
+  desired_node_count="$(wc -l <<<"${desired_nodes}" | awk '{print $1}')"
+  [[ -n "$(trim_field "${desired_nodes}")" ]] && (( desired_node_count > 0 )) || fail "NodeLocal DNSCache selector has no Ready linux nodes"
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    ready="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true)"
+    node_os="$(${KUBECTL} get node "${node_name}" -o jsonpath='{.metadata.labels.kubernetes\.io/os}' 2>/dev/null || true)"
+    node_arch="$(${KUBECTL} get node "${node_name}" -o jsonpath='{.metadata.labels.kubernetes\.io/arch}' 2>/dev/null || true)"
+    [[ "${ready}" == "True" && "${node_os}" == "linux" && "${node_arch}" == "amd64" ]] || fail "NodeLocal DNSCache target ${node_name} must be a Ready linux/amd64 node"
+  done <<<"${desired_nodes}"
+
+  if [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "iptables" ]]; then
+    [[ "${FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES}" == "false" && -n "${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" ]] || fail "iptables interception requires exactly one named canary node"
+    live_mode="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.spec.template.metadata.labels.fugue\.io/node-local-dns-mode}' 2>/dev/null || true)"
+    live_node_name="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${FUGUE_RELEASE_FULLNAME}-node-local-dns" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}' 2>/dev/null || true)"
+    [[ "${live_mode}" == "shadow" ]] || fail "iptables interception requires a healthy shadow-mode release immediately beforehand"
+    [[ "${live_node_name}" == "${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" ]] || fail "iptables interception target differs from the validated shadow release"
+    if ! node_local_dns_verify_shadow_artifact "${kube_dns_service_ip}"; then
+      fail "iptables interception target artifact differs from the validated shadow image, args, selector, or Corefile"
+    fi
+    if ! node_local_dns_verify_running shadow "${kube_dns_service_ip}"; then
+      fail "iptables interception requires the live shadow release to pass DNS, metrics, and host-network verification"
+    fi
+  fi
+
+  node_selector_json="$(NODE_NAME="${FUGUE_NODE_LOCAL_DNS_NODE_NAME}" python3 -c '
+import json
+import os
+
+selector = {"kubernetes.io/os": "linux"}
+node_name = os.environ.get("NODE_NAME", "").strip()
+if node_name:
+    selector["kubernetes.io/hostname"] = node_name
+print(json.dumps(selector, sort_keys=True, separators=(",", ":")))
+')"
+
+  NODE_LOCAL_DNS_HELM_SET_ARGS+=(
+    --set-string "nodeLocalDNS.mode=${FUGUE_NODE_LOCAL_DNS_MODE}"
+    --set-string "nodeLocalDNS.namespace=${FUGUE_NODE_LOCAL_DNS_NAMESPACE}"
+    --set-string "nodeLocalDNS.localIP=${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}"
+    --set-string "nodeLocalDNS.kubeDNSServiceIP=${kube_dns_service_ip}"
+    --set-string "nodeLocalDNS.clusterDomain=${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}"
+    --set-json "nodeLocalDNS.upstreamSelector=${upstream_selector_json}"
+    --set-string "nodeLocalDNS.image.repository=${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}"
+    --set-string "nodeLocalDNS.image.tag=${FUGUE_NODE_LOCAL_DNS_IMAGE_TAG}"
+    --set-string "nodeLocalDNS.image.digest=${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}"
+    --set-string "nodeLocalDNS.image.pullPolicy=${FUGUE_NODE_LOCAL_DNS_IMAGE_PULL_POLICY}"
+    --set-json "nodeLocalDNS.nodeSelector=${node_selector_json}"
+  )
+  log "NodeLocal DNSCache preflight passed: mode=${FUGUE_NODE_LOCAL_DNS_MODE} nodes=${desired_node_count} kube_dns=${kube_dns_service_ip} central_endpoints=${endpoint_count}"
+}
+
+node_local_dns_run_probe_pod() {
+  local node_name="$1"
+  local purpose="$2"
+  local image_ref="$3"
+  local host_network="$4"
+  local net_admin="$5"
+  local script="$6"
+  local safe_node=""
+  local pod_name=""
+  local phase=""
+  local deadline=0
+  local result=1
+
+  safe_node="$(printf '%s' "${node_name}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9.-' | cut -c1-32 | sed 's/^[^a-z0-9]*//; s/[^a-z0-9]*$//')"
+  pod_name="fugue-nld-${purpose}-${safe_node}-$$"
+  pod_name="${pod_name:0:63}"
+  POD_NAME="${pod_name}" NODE_NAME="${node_name}" POD_IMAGE="${image_ref}" POD_SCRIPT="${script}" \
+    POD_HOST_NETWORK="${host_network}" POD_NET_ADMIN="${net_admin}" POD_TIMEOUT="${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS}" \
+    POD_NAMESPACE="${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" \
+    python3 -c '
+import json
+import os
+
+container = {
+    "name": "probe",
+    "image": os.environ["POD_IMAGE"],
+    "imagePullPolicy": "IfNotPresent",
+    "command": ["/bin/sh", "-ec", os.environ["POD_SCRIPT"]],
+    "resources": {"requests": {"cpu": "1m", "memory": "4Mi"}, "limits": {"memory": "64Mi"}},
+}
+if os.environ.get("POD_NET_ADMIN") == "true":
+    container["securityContext"] = {"capabilities": {"add": ["NET_ADMIN"]}}
+manifest = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {"name": os.environ["POD_NAME"], "namespace": os.environ["POD_NAMESPACE"], "labels": {"fugue.io/purpose": "node-local-dns-release-probe"}},
+    "spec": {
+        "automountServiceAccountToken": False,
+        "restartPolicy": "Never",
+        "activeDeadlineSeconds": int(os.environ["POD_TIMEOUT"]),
+        "terminationGracePeriodSeconds": 1,
+        "nodeName": os.environ["NODE_NAME"],
+        "hostNetwork": os.environ.get("POD_HOST_NETWORK") == "true",
+        "dnsPolicy": "Default" if os.environ.get("POD_HOST_NETWORK") == "true" else "ClusterFirst",
+        "tolerations": [{"operator": "Exists", "effect": "NoSchedule"}, {"operator": "Exists", "effect": "NoExecute"}],
+        "containers": [container],
+    },
+}
+print(json.dumps(manifest, separators=(",", ":")))
+' | ${KUBECTL} apply -f - >/dev/null
+
+  deadline=$((SECONDS + FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    phase="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pod "${pod_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    case "${phase}" in
+      Succeeded)
+        result=0
+        break
+        ;;
+      Failed)
+        break
+        ;;
+    esac
+    sleep 2
+  done
+  ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" logs "${pod_name}" 2>/dev/null || true
+  if (( result != 0 )); then
+    ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" describe pod "${pod_name}" 2>/dev/null || true
+    log "NodeLocal DNSCache ${purpose} probe failed on ${node_name} with phase=${phase:-unknown}"
+  fi
+  ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" delete pod "${pod_name}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  return "${result}"
+}
+
+node_local_dns_proc_ipv4_hex() {
+  local address="$1"
+  ADDRESS="${address}" python3 -c '
+import ipaddress
+import os
+
+packed = ipaddress.IPv4Address(os.environ["ADDRESS"]).packed
+print(packed[::-1].hex().upper())
+'
+}
+
+node_local_dns_shadow_host_preflight() {
+  local service_ip="$1"
+  local local_hex=""
+  local service_hex=""
+  local node_name=""
+  local live_nodes=""
+  local script=""
+  [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "shadow" ]] || return 0
+  if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
+    live_nodes="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pods -l 'app.kubernetes.io/component=node-local-dns' -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u)"
+  fi
+  local_hex="$(node_local_dns_proc_ipv4_hex "${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}")"
+  service_hex="$(node_local_dns_proc_ipv4_hex "${service_ip}")"
+  script="$(cat <<EOF
+set -eu
+command -v iptables-save >/dev/null 2>&1
+if [ -e /sys/class/net/nodelocaldns ]; then
+  echo 'nodelocaldns interface already exists' >&2
+  exit 1
+fi
+if grep -Fq '${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}' /proc/net/fib_trie 2>/dev/null; then
+  echo 'NodeLocal link-local address is already present' >&2
+  exit 1
+fi
+for table in /proc/net/tcp /proc/net/udp /proc/net/tcp6 /proc/net/udp6; do
+  [ -r "\${table}" ] || continue
+  while read -r slot endpoint remainder; do
+    [ "\${slot}" = 'sl' ] && continue
+    address="\${endpoint%:*}"
+    port="\${endpoint##*:}"
+    case "\${port}" in
+      0035|1F90|2425|2489)
+        case "\${address}" in
+          00000000|00000000000000000000000000000000|${local_hex}|${service_hex})
+            echo "conflicting listener \${endpoint} in \${table}" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    esac
+  done <"\${table}"
+done
+iptables-save -t nat > /tmp/fugue-nld-nat.rules 2>/dev/null || exit 1
+for protocol in udp tcp; do
+  if ! grep -F -- '-A KUBE-SERVICES ' /tmp/fugue-nld-nat.rules | grep -F -- '-d ${service_ip}/32' | grep -F -- "-p \${protocol}" | grep -F -- '--dport 53' | grep -E -- '-j KUBE-SVC-[A-Z0-9]+' >/dev/null; then
+    echo "live kube-dns \${protocol}/53 is not implemented by kube-proxy iptables rules" >&2
+    exit 1
+  fi
+done
+if grep -E -- '-d ${service_ip}/32 .*--dport 53 .* -j DNAT .*--to-destination' /tmp/fugue-nld-nat.rules; then
+  echo 'legacy kube-dns DNAT remains' >&2
+  exit 1
+fi
+iptables-save > /tmp/fugue-nld-all.rules 2>/dev/null || exit 1
+if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-all.rules; then
+  echo 'stale NodeLocal DNSCache rules already exist' >&2
+  exit 1
+fi
+EOF
+)"
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    if grep -Fqx "${node_name}" <<<"${live_nodes}"; then
+      log "NodeLocal DNSCache shadow host preflight already satisfied by the live pod on ${node_name}"
+      continue
+    fi
+    node_local_dns_run_probe_pod "${node_name}" preflight "${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}" true true "${script}" || return 1
+  done <<<"${NODE_LOCAL_DNS_TARGET_NODES}"
+}
+
+node_local_dns_verify_running() {
+  local mode="$1"
+  local service_ip="$2"
+  local query_server="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}"
+  local upstream_service="${FUGUE_RELEASE_FULLNAME}-dns-upstream"
+  local endpoint_count="0"
+  local pod_rows=""
+  local pod_name=""
+  local node_name=""
+  local actual_nodes=""
+  local expected_nodes=""
+  local exec_script=""
+  local probe_script=""
+
+  [[ "${mode}" == "shadow" || "${mode}" == "iptables" ]] || return 1
+  [[ "${mode}" == "shadow" ]] || query_server="${service_ip}"
+  if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-node-local-dns" "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}"; then
+    return 1
+  fi
+  endpoint_count="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get endpoints "${upstream_service}" -o json 2>/dev/null |
+    python3 -c 'import json,sys; payload=json.load(sys.stdin); print(sum(len(s.get("addresses") or []) for s in payload.get("subsets") or []))' 2>/dev/null || printf '0')"
+  [[ "${endpoint_count}" =~ ^[0-9]+$ ]] && (( endpoint_count > 0 )) || return 1
+  pod_rows="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pods -l 'app.kubernetes.io/component=node-local-dns' \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeName}{"\n"}{end}' 2>/dev/null || true)"
+  [[ -n "$(trim_field "${pod_rows}")" ]] || return 1
+  actual_nodes="$(cut -f2 <<<"${pod_rows}" | sed '/^[[:space:]]*$/d' | sort -u)"
+  expected_nodes="$(printf '%s\n' "${NODE_LOCAL_DNS_TARGET_NODES}" | sed '/^[[:space:]]*$/d' | sort -u)"
+  [[ "${actual_nodes}" == "${expected_nodes}" ]] || {
+    log "NodeLocal DNSCache actual pod nodes differ from preflight targets: expected=$(paste -sd, <<<"${expected_nodes}") actual=$(paste -sd, <<<"${actual_nodes}")"
+    return 1
+  }
+  exec_script="$(cat <<EOF
+set -eu
+command -v iptables-save >/dev/null 2>&1
+test -e /sys/class/net/nodelocaldns
+iptables-save -t nat > /tmp/fugue-nld-kube-proxy.rules 2>/dev/null || exit 1
+for protocol in udp tcp; do
+  if ! grep -F -- '-A KUBE-SERVICES ' /tmp/fugue-nld-kube-proxy.rules | grep -F -- '-d ${service_ip}/32' | grep -F -- "-p \${protocol}" | grep -F -- '--dport 53' | grep -E -- '-j KUBE-SVC-[A-Z0-9]+' >/dev/null; then
+    echo "live kube-dns \${protocol}/53 iptables service rule disappeared" >&2
+    exit 1
+  fi
+done
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50; do
+  iptables-save > /tmp/fugue-nld-running.rules 2>/dev/null || exit 1
+  if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-running.rules >/dev/null; then
+    break
+  fi
+  sleep 2
+done
+grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-running.rules >/dev/null
+if [ '${mode}' = 'shadow' ]; then
+  if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-running.rules | grep -F '${service_ip}' >/dev/null; then
+    echo 'shadow mode retained NodeLocal rules for the kube-dns ServiceIP' >&2
+    exit 1
+  fi
+  if grep -Fq '${service_ip}' /proc/net/fib_trie 2>/dev/null; then
+    echo 'shadow mode retained the kube-dns ServiceIP as a local address' >&2
+    exit 1
+  fi
+else
+  grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-running.rules | grep -F '${service_ip}' >/dev/null
+fi
+EOF
+)"
+  probe_script="$(cat <<EOF
+set -eu
+grep -Eq '^nameserver[[:space:]]+${service_ip}([[:space:]]|$)' /etc/resolv.conf
+nslookup kubernetes.default.svc.${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN} ${query_server}
+nslookup ${FUGUE_RELEASE_FULLNAME}-node-local-dns.${FUGUE_NODE_LOCAL_DNS_NAMESPACE}.svc.${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN} ${query_server}
+nslookup -type=SRV _metrics._tcp.${FUGUE_RELEASE_FULLNAME}-node-local-dns.${FUGUE_NODE_LOCAL_DNS_NAMESPACE}.svc.${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN} ${query_server}
+nslookup ${FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME} ${query_server}
+nslookup kubernetes.default.svc.${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN}
+nslookup ${FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME}
+if nslookup fugue-node-local-dns-$$.invalid ${query_server}; then
+  echo 'reserved .invalid name unexpectedly resolved' >&2
+  exit 1
+fi
+wget -T 5 -qO /tmp/fugue-nld-setup.metrics http://${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}:9353/metrics
+wget -T 5 -qO /tmp/fugue-nld-core.metrics http://${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}:9253/metrics
+grep -F 'coredns_nodecache_setup_errors_total' /tmp/fugue-nld-setup.metrics >/dev/null
+grep -F 'coredns_cache_' /tmp/fugue-nld-core.metrics >/dev/null
+awk '/^coredns_nodecache_setup_errors_total/ {sum += \$NF} END {print sum + 0}' /tmp/fugue-nld-setup.metrics > /tmp/fugue-nld-errors
+read -r errors < /tmp/fugue-nld-errors
+[ "\${errors}" = '0' ]
+EOF
+)"
+  while IFS=$'\t' read -r pod_name node_name; do
+    [[ -n "${pod_name}" && -n "${node_name}" ]] || continue
+    ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" exec "${pod_name}" -- /bin/sh -ec "${exec_script}" || return 1
+    node_local_dns_run_probe_pod "${node_name}" dns "${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE}" false false "${probe_script}" || return 1
+  done <<<"${pod_rows}"
+  log "NodeLocal DNSCache ${mode} verification passed on $(wc -l <<<"${pod_rows}" | awk '{print $1}') node(s)"
+}
+
+node_local_dns_verify_teardown() {
+  local service_ip="$1"
+  local node_name=""
+  local script=""
+  script="$(cat <<EOF
+set -eu
+command -v iptables-save >/dev/null 2>&1
+test ! -e /sys/class/net/nodelocaldns
+iptables-save > /tmp/fugue-nld-teardown.rules 2>/dev/null || exit 1
+if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-teardown.rules; then
+  echo 'NodeLocal DNSCache iptables rules remain after teardown' >&2
+  exit 1
+fi
+EOF
+)"
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    node_local_dns_run_probe_pod "${node_name}" teardown "${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}" true true "${script}" || return 1
+    node_local_dns_run_probe_pod "${node_name}" fallback "${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE}" false false \
+      "set -eu; grep -Eq '^nameserver[[:space:]]+${service_ip}([[:space:]]|$)' /etc/resolv.conf; nslookup kubernetes.default.svc.${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN} ${service_ip}; nslookup ${FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME} ${service_ip}" || return 1
+  done <<<"${NODE_LOCAL_DNS_TARGET_NODES}"
+}
+
+node_local_dns_verify_central_coredns_ready() {
+  local endpoint_ips=""
+  local node_name=""
+  local probe_script=""
+
+  if ! endpoint_ips="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get endpoints "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}" -o json |
+    python3 -c 'import json,sys; payload=json.load(sys.stdin); print(" ".join(address["ip"] for subset in payload.get("subsets") or [] for address in subset.get("addresses") or [] if address.get("ip")))')"; then
+    log "cannot verify central CoreDNS because its Ready endpoint inventory is unavailable"
+    return 1
+  fi
+  [[ -n "$(trim_field "${endpoint_ips}")" ]] || {
+    log "cannot remove NodeLocal DNSCache because central CoreDNS has no Ready endpoints"
+    return 1
+  }
+  probe_script="$(cat <<EOF
+set -eu
+for endpoint in ${endpoint_ips}; do
+  nc -z -w 5 "\${endpoint}" 53
+  nslookup kubernetes.default.svc.${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN} "\${endpoint}"
+  nslookup ${FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME} "\${endpoint}"
+done
+EOF
+)"
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    node_local_dns_run_probe_pod "${node_name}" central-coredns "${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE}" false false "${probe_script}" || return 1
+  done <<<"${NODE_LOCAL_DNS_TARGET_NODES}"
+  log "central CoreDNS direct UDP/TCP and internal/external resolution checks passed before NodeLocal DNSCache removal"
+}
+
+node_local_dns_restore_daemonset_snapshot() {
+  local daemonset_snapshot="$1"
+  local previous_mode="$2"
+  local service_ip="$3"
+
+  [[ -n "$(trim_field "${daemonset_snapshot}")" ]] || return 1
+  log "restoring the exact pre-removal NodeLocal DNSCache DaemonSet snapshot"
+  printf '%s' "${daemonset_snapshot}" | ${KUBECTL} apply -f - >/dev/null || return 1
+  node_local_dns_verify_running "${previous_mode}" "${service_ip}"
+}
+
+node_local_dns_recover_exact_residue() {
+  local service_ip="$1"
+  local local_hex=""
+  local service_hex=""
+  local node_name=""
+  local rules_script=""
+  local interface_script=""
+  local remaining_pods=""
+
+  if ! remaining_pods="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pods \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=node-local-dns" --no-headers)"; then
+    log "refusing NodeLocal DNSCache residue cleanup because the Pod inventory is unavailable"
+    return 1
+  fi
+  [[ -z "$(trim_field "${remaining_pods}")" ]] || {
+    log "refusing NodeLocal DNSCache residue cleanup while node-cache pods still exist"
+    return 1
+  }
+  local_hex="$(node_local_dns_proc_ipv4_hex "${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}")"
+  service_hex="$(node_local_dns_proc_ipv4_hex "${service_ip}")"
+  rules_script="$(cat <<EOF
+set -eu
+command -v iptables >/dev/null 2>&1
+command -v iptables-save >/dev/null 2>&1
+for table_file in /proc/net/tcp /proc/net/udp /proc/net/tcp6 /proc/net/udp6; do
+  [ -r "\${table_file}" ] || continue
+  while read -r slot endpoint remainder; do
+    [ "\${slot}" = 'sl' ] && continue
+    address="\${endpoint%:*}"
+    port="\${endpoint##*:}"
+    if [ "\${port}" = '0035' ]; then
+      case "\${address}" in
+        00000000|00000000000000000000000000000000|${local_hex}|${service_hex})
+          echo "refusing residue cleanup while DNS listener \${endpoint} remains" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  done <"\${table_file}"
+done
+for table in raw filter; do
+  iptables-save -t "\${table}" > "/tmp/fugue-nld-\${table}.rules" 2>/dev/null || exit 1
+  while IFS= read -r line; do
+    case "\${line}" in
+      -A\ *"NodeLocal DNS Cache:"*)
+        delete_args="\${line#-A }"
+        eval "iptables -t \${table} -D \${delete_args}"
+        ;;
+    esac
+  done < "/tmp/fugue-nld-\${table}.rules"
+done
+iptables-save > /tmp/fugue-nld-remaining.rules 2>/dev/null || exit 1
+if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-remaining.rules; then
+  echo 'exact NodeLocal DNSCache rules remain after controlled cleanup' >&2
+  exit 1
+fi
+EOF
+)"
+  interface_script="$(cat <<'EOF'
+set -eu
+command -v ip >/dev/null 2>&1
+if ip link show nodelocaldns >/dev/null 2>&1; then
+  ip link delete nodelocaldns
+fi
+test ! -e /sys/class/net/nodelocaldns
+EOF
+)"
+  while IFS= read -r node_name; do
+    [[ -n "${node_name}" ]] || continue
+    node_local_dns_run_probe_pod "${node_name}" rule-cleanup "${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}" true true "${rules_script}" || return 1
+    node_local_dns_run_probe_pod "${node_name}" interface-cleanup "${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE}" true true "${interface_script}" || return 1
+  done <<<"${NODE_LOCAL_DNS_TARGET_NODES}"
+  node_local_dns_verify_teardown "${service_ip}"
+}
+
+node_local_dns_delete_daemonset_safely() {
+  local service_ip="$1"
+  local daemonset_name="${FUGUE_RELEASE_FULLNAME}-node-local-dns"
+  local daemonset_ref=""
+  local daemonset_json=""
+  local daemonset_snapshot=""
+  local previous_mode=""
+  local deadline=""
+  local remaining_pods=""
+  local pod_selector="app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=node-local-dns"
+
+  if ! daemonset_ref="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${daemonset_name}" --ignore-not-found -o name)"; then
+    log "cannot determine whether the NodeLocal DNSCache DaemonSet exists"
+    return 1
+  fi
+  if [[ -n "$(trim_field "${daemonset_ref}")" ]]; then
+    node_local_dns_verify_central_coredns_ready || return 1
+    if ! daemonset_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${daemonset_name}" -o json)"; then
+      log "cannot snapshot the NodeLocal DNSCache DaemonSet before removal"
+      return 1
+    fi
+    if ! daemonset_snapshot="$(printf '%s' "${daemonset_json}" | python3 -c '
+import json
+import sys
+
+source = json.load(sys.stdin)
+metadata = source.get("metadata") or {}
+snapshot = {
+    "apiVersion": source["apiVersion"],
+    "kind": source["kind"],
+    "metadata": {
+        "name": metadata["name"],
+        "namespace": metadata["namespace"],
+        "labels": metadata.get("labels") or {},
+        "annotations": metadata.get("annotations") or {},
+    },
+    "spec": source["spec"],
+}
+print(json.dumps(snapshot, separators=(",", ":")))
+')"; then
+      log "cannot normalize the NodeLocal DNSCache DaemonSet rollback snapshot"
+      return 1
+    fi
+    previous_mode="$(printf '%s' "${daemonset_json}" | python3 -c 'import json,sys; print((((json.load(sys.stdin).get("spec") or {}).get("template") or {}).get("metadata") or {}).get("labels", {}).get("fugue.io/node-local-dns-mode", ""))')"
+    [[ "${previous_mode}" == "shadow" || "${previous_mode}" == "iptables" ]] || {
+      log "cannot safely remove NodeLocal DNSCache because its current mode is unknown"
+      return 1
+    }
+    log "deleting NodeLocal DNSCache DaemonSet before removing its central CoreDNS upstream"
+    if ! ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" delete daemonset "${daemonset_name}" \
+      --cascade=foreground --wait=true --timeout="${FUGUE_ROLLOUT_TIMEOUT}"; then
+      log "NodeLocal DNSCache DaemonSet deletion failed"
+      return 1
+    fi
+  fi
+  deadline=$((SECONDS + FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if ! remaining_pods="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pods -l "${pod_selector}" --no-headers)"; then
+      log "cannot verify NodeLocal DNSCache Pod termination"
+      [[ -z "${daemonset_snapshot}" ]] || node_local_dns_restore_daemonset_snapshot "${daemonset_snapshot}" "${previous_mode}" "${service_ip}" || true
+      return 1
+    fi
+    [[ -z "$(trim_field "${remaining_pods}")" ]] && break
+    sleep 2
+  done
+  if ! remaining_pods="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pods -l "${pod_selector}" --no-headers)"; then
+    log "cannot complete NodeLocal DNSCache Pod termination verification"
+    [[ -z "${daemonset_snapshot}" ]] || node_local_dns_restore_daemonset_snapshot "${daemonset_snapshot}" "${previous_mode}" "${service_ip}" || true
+    return 1
+  fi
+  if [[ -n "$(trim_field "${remaining_pods}")" ]]; then
+    log "NodeLocal DNSCache Pods remain after foreground DaemonSet deletion; refusing teardown while they can still own host networking state"
+    [[ -z "${daemonset_snapshot}" ]] || node_local_dns_restore_daemonset_snapshot "${daemonset_snapshot}" "${previous_mode}" "${service_ip}" || true
+    return 1
+  fi
+  if ! daemonset_ref="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${daemonset_name}" --ignore-not-found -o name)"; then
+    log "cannot verify final NodeLocal DNSCache DaemonSet absence"
+    [[ -z "${daemonset_snapshot}" ]] || node_local_dns_restore_daemonset_snapshot "${daemonset_snapshot}" "${previous_mode}" "${service_ip}" || true
+    return 1
+  fi
+  if [[ -n "$(trim_field "${daemonset_ref}")" ]]; then
+    log "NodeLocal DNSCache DaemonSet still exists after deletion"
+    return 1
+  fi
+  if node_local_dns_verify_teardown "${service_ip}"; then
+    return 0
+  fi
+  log "normal NodeLocal DNSCache teardown left residue; attempting exact-comment and exact-interface cleanup"
+  if node_local_dns_recover_exact_residue "${service_ip}"; then
+    return 0
+  fi
+  if [[ -n "${daemonset_snapshot}" ]]; then
+    if ! node_local_dns_restore_daemonset_snapshot "${daemonset_snapshot}" "${previous_mode}" "${service_ip}"; then
+      log "NodeLocal DNSCache removal failed and its pre-removal DaemonSet snapshot could not be restored"
+      return 1
+    fi
+    log "NodeLocal DNSCache removal postconditions failed; the exact pre-removal DaemonSet was restored and verified"
+  fi
+  return 1
+}
+
 relieve_primary_disk_pressure() {
   local primary_node_name=""
   local cleanup_cmd=""
@@ -6703,6 +7460,13 @@ rollback_release() {
     return 1
   fi
 
+  if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" != "true" && "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
+    if ! node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      log "refusing Helm rollback until NodeLocal DNSCache interception is safely removed"
+      return 1
+    fi
+  fi
+
   log "rolling back release ${FUGUE_RELEASE_NAME} to revision ${PREVIOUS_REVISION}"
   helm rollback "${FUGUE_RELEASE_NAME}" "${PREVIOUS_REVISION}" \
     -n "${FUGUE_NAMESPACE}" \
@@ -6717,6 +7481,19 @@ rollback_release() {
     rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"
   else
     log "rollback target does not include ${FUGUE_CONTROLLER_DEPLOYMENT_NAME}; skipping controller rollout check"
+  fi
+  if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
+    if ! node_local_dns_verify_running "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      log "NodeLocal DNSCache rollback did not restore the previous healthy ${NODE_LOCAL_DNS_PREVIOUS_MODE} state; rebuilding it after exact teardown"
+      node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" || return 1
+      helm rollback "${FUGUE_RELEASE_NAME}" "${PREVIOUS_REVISION}" -n "${FUGUE_NAMESPACE}" --timeout "${FUGUE_HELM_TIMEOUT}"
+      node_local_dns_verify_running "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" || return 1
+    fi
+  elif [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" && -n "$(trim_field "${NODE_LOCAL_DNS_TARGET_NODES:-}")" ]]; then
+    if ! node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      log "NodeLocal DNSCache rollback left network state or failed central DNS fallback verification"
+      return 1
+    fi
   fi
   retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test
 }
@@ -7860,6 +8637,23 @@ main() {
   FUGUE_COREDNS_NAMESPACE="${FUGUE_COREDNS_NAMESPACE:-kube-system}"
   FUGUE_COREDNS_DEPLOYMENT_NAME="${FUGUE_COREDNS_DEPLOYMENT_NAME:-coredns}"
   FUGUE_COREDNS_TARGET_REPLICAS="${FUGUE_COREDNS_TARGET_REPLICAS:-2}"
+  FUGUE_NODE_LOCAL_DNS_ENABLED="${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}"
+  FUGUE_NODE_LOCAL_DNS_MODE="${FUGUE_NODE_LOCAL_DNS_MODE:-shadow}"
+  FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES="${FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES:-false}"
+  FUGUE_NODE_LOCAL_DNS_NODE_NAME="${FUGUE_NODE_LOCAL_DNS_NODE_NAME:-}"
+  FUGUE_NODE_LOCAL_DNS_NAMESPACE="${FUGUE_NODE_LOCAL_DNS_NAMESPACE:-kube-system}"
+  FUGUE_NODE_LOCAL_DNS_LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP:-169.254.20.10}"
+  FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN="${FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN:-cluster.local}"
+  FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME="${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME:-kube-dns}"
+  FUGUE_NODE_LOCAL_DNS_COREDNS_CONFIGMAP_NAME="${FUGUE_NODE_LOCAL_DNS_COREDNS_CONFIGMAP_NAME:-coredns}"
+  FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP="${FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP:-}"
+  FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME="${FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME:-${FUGUE_API_PUBLIC_DOMAIN:-kubernetes.io}}"
+  FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY="${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY:-registry.k8s.io/dns/k8s-dns-node-cache}"
+  FUGUE_NODE_LOCAL_DNS_IMAGE_TAG="${FUGUE_NODE_LOCAL_DNS_IMAGE_TAG:-1.26.8}"
+  FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST="${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST:-sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739}"
+  FUGUE_NODE_LOCAL_DNS_IMAGE_PULL_POLICY="${FUGUE_NODE_LOCAL_DNS_IMAGE_PULL_POLICY:-IfNotPresent}"
+  FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE="${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE:-docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028}"
+  FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS="${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS:-180}"
   FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED:-false}"
   FUGUE_SHARED_WORKSPACE_STORAGE_CLASS="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS:-fugue-rwx}"
   FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP:-}"
@@ -8025,6 +8819,30 @@ main() {
     true|false) ;;
     *) fail "FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED must be true or false" ;;
   esac
+  case "${FUGUE_NODE_LOCAL_DNS_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_NODE_LOCAL_DNS_ENABLED must be true or false" ;;
+  esac
+  case "${FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES}" in
+    true|false) ;;
+    *) fail "FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES must be true or false" ;;
+  esac
+  case "${FUGUE_NODE_LOCAL_DNS_MODE}" in
+    shadow|iptables) ;;
+    *) fail "FUGUE_NODE_LOCAL_DNS_MODE must be shadow or iptables" ;;
+  esac
+  if ! [[ "${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" =~ ^169\.254\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    fail "FUGUE_NODE_LOCAL_DNS_LOCAL_IP must be an IPv4 link-local address"
+  fi
+  if ! [[ "${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    fail "FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST must be a sha256 digest"
+  fi
+  if ! [[ "${FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])$ ]]; then
+    fail "FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME must be a DNS name"
+  fi
+  if ! [[ "${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || (( FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS < 30 )); then
+    fail "FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS must be an integer >= 30"
+  fi
   case "${FUGUE_EDGE_DYNAMIC_ENABLED}" in
     true|false) ;;
     *) fail "FUGUE_EDGE_DYNAMIC_ENABLED must be true or false" ;;
@@ -8269,6 +9087,16 @@ PY
   recover_primary_postgres_if_needed
   restore_primary_mesh_network_if_needed
   ensure_coredns_multinode_scheduling
+  prepare_node_local_dns_helm_args
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" && "${FUGUE_NODE_LOCAL_DNS_MODE}" == "shadow" ]]; then
+    if ! node_local_dns_shadow_host_preflight "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      fail "NodeLocal DNSCache shadow host preflight failed before Helm mutation"
+    fi
+  elif [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" != "true" && "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
+    if ! node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      fail "NodeLocal DNSCache could not be safely removed before deleting its upstream resources"
+    fi
+  fi
 
   apply_chart_crds
 
@@ -8305,6 +9133,7 @@ PY
     -f "${upgrade_override_values_file}" \
     "${HEADSCALE_HELM_SET_ARGS[@]}" \
     "${DNS_HELM_SET_ARGS[@]}" \
+    "${NODE_LOCAL_DNS_HELM_SET_ARGS[@]}" \
     "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}" \
     "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}" \
     "${MAINTENANCE_AGENT_HELM_SET_ARGS[@]}" \
@@ -8475,6 +9304,20 @@ PY
     log "helm upgrade failed; attempting rollback"
     rollback_release || true
     fail "helm upgrade failed"
+  fi
+
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" ]]; then
+    if ! node_local_dns_verify_running "${FUGUE_NODE_LOCAL_DNS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      log "NodeLocal DNSCache rollout verification failed; attempting rollback"
+      rollback_release || true
+      fail "NodeLocal DNSCache rollout verification failed"
+    fi
+  elif [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
+    if ! node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      log "NodeLocal DNSCache teardown verification failed; attempting rollback"
+      rollback_release || true
+      fail "NodeLocal DNSCache teardown verification failed"
+    fi
   fi
 
   patch_control_plane_singleton_deployments

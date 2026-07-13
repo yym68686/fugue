@@ -1840,6 +1840,16 @@ weighted_selector_subsystems="$(release_safety_changed_file_subsystems)"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
   fail "weighted selector must not be classified as unknown high risk"
 
+FUGUE_RELEASE_CHANGED_FILES=$'deploy/helm/fugue/templates/node-local-dns-cache.yaml'
+cluster_dns_subsystems="$(release_safety_changed_file_subsystems | paste -sd, -)"
+[[ "${cluster_dns_subsystems}" == *"cluster_dns"* && "${cluster_dns_subsystems}" == *"helm_shared"* ]] ||
+  fail "NodeLocal DNSCache manifest must select cluster_dns and helm_shared, got ${cluster_dns_subsystems}"
+cluster_dns_gates="$(release_safety_required_gates)"
+for gate in central_coredns node_local_dns service_resolution rollback_path_smoke; do
+  [[ ",${cluster_dns_gates}," == *",${gate},"* ]] || fail "cluster DNS release gates missing ${gate}: ${cluster_dns_gates}"
+done
+assert_eq "$(FUGUE_CLUSTER_DNS_WATCH_WINDOW_SECONDS=211 release_safety_watch_window_seconds)" "211" "cluster DNS changes must use the dedicated watch window"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/api/node_updater.go'
 node_updater_subsystems="$(release_safety_changed_file_subsystems)"
 [[ "${node_updater_subsystems}" == *"node_updater"* && "${node_updater_subsystems}" == *"control_plane_api"* ]] ||

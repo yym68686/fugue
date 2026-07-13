@@ -53,6 +53,9 @@ FUGUE_MESH_ENABLED="${FUGUE_MESH_ENABLED:-false}"
 FUGUE_MESH_PROVIDER="${FUGUE_MESH_PROVIDER:-tailscale}"
 FUGUE_MESH_DOMAIN="${FUGUE_MESH_DOMAIN:-mesh.${FUGUE_APP_BASE_DOMAIN}}"
 FUGUE_MESH_AUTH_KEY="${FUGUE_MESH_AUTH_KEY:-}"
+FUGUE_NODE_LOCAL_DNS_ENABLED="${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}"
+FUGUE_NODE_LOCAL_DNS_MODE="${FUGUE_NODE_LOCAL_DNS_MODE:-shadow}"
+FUGUE_NODE_LOCAL_DNS_LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP:-169.254.20.10}"
 FUGUE_APP_TLS_CERT_FILE="${FUGUE_APP_TLS_CERT_FILE:-}"
 FUGUE_APP_TLS_KEY_FILE="${FUGUE_APP_TLS_KEY_FILE:-}"
 RECONCILE_K3S_CLUSTER="${FUGUE_RECONCILE_K3S_CLUSTER:-false}"
@@ -118,6 +121,13 @@ ensure_legacy_bootstrap_allowed() {
   [[ -n "$(registry_pull_base_value)" ]] || fail "FUGUE_REGISTRY_PULL_BASE is required for legacy bootstrap"
   if [[ -n "${FUGUE_APP_TLS_CERT_FILE}${FUGUE_APP_TLS_KEY_FILE}" ]]; then
     [[ -n "${FUGUE_APP_TLS_CERT_FILE}" && -n "${FUGUE_APP_TLS_KEY_FILE}" ]] || fail "FUGUE_APP_TLS_CERT_FILE and FUGUE_APP_TLS_KEY_FILE must be set together"
+  fi
+  case "${FUGUE_NODE_LOCAL_DNS_ENABLED}" in
+    true|false) ;;
+    *) fail "FUGUE_NODE_LOCAL_DNS_ENABLED must be true or false" ;;
+  esac
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" ]]; then
+    fail "legacy bootstrap cannot enable NodeLocal DNSCache without per-node host and DNS probes; use the control-plane release workflow"
   fi
 }
 
@@ -2307,6 +2317,12 @@ write_values_override() {
 
   cat >"${VALUES_FILE}" <<EOF
 bootstrapAdminKey: "${BOOTSTRAP_KEY}"
+
+nodeLocalDNS:
+  enabled: ${FUGUE_NODE_LOCAL_DNS_ENABLED}
+  mode: "${FUGUE_NODE_LOCAL_DNS_MODE}"
+  localIP: "${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}"
+  kubeDNSServiceIP: ""
 
 api:
   replicaCount: 2

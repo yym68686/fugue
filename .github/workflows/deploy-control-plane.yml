@@ -51,6 +51,7 @@ on:
       - 'scripts/release_fugue_public_data_plane.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/test_release_domain_safety.sh'
+      - 'scripts/test_node_local_dns_release.sh'
       - 'scripts/test_verify_registry_image.py'
       - 'scripts/upgrade_fugue_control_plane.sh'
       - 'scripts/verify_registry_image.py'
@@ -126,7 +127,9 @@ jobs:
         run: make generate-openapi-check
 
       - name: Verify release-domain safety contracts
-        run: bash scripts/test_release_domain_safety.sh
+        run: |
+          bash scripts/test_release_domain_safety.sh
+          bash scripts/test_node_local_dns_release.sh
 
       - name: Run Go tests
         run: go test ./...
@@ -500,6 +503,18 @@ jobs:
           FUGUE_DNS_TCP_ADDR: ${{ vars.FUGUE_DNS_TCP_ADDR || '' }}
           FUGUE_DNS_ZONE: ${{ vars.FUGUE_DNS_ZONE || '' }}
           FUGUE_DNS_TTL: ${{ vars.FUGUE_DNS_TTL || '' }}
+          FUGUE_NODE_LOCAL_DNS_ENABLED: ${{ vars.FUGUE_NODE_LOCAL_DNS_ENABLED || 'false' }}
+          FUGUE_NODE_LOCAL_DNS_MODE: ${{ vars.FUGUE_NODE_LOCAL_DNS_MODE || 'shadow' }}
+          FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES: ${{ vars.FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES || 'false' }}
+          FUGUE_NODE_LOCAL_DNS_NODE_NAME: ${{ vars.FUGUE_NODE_LOCAL_DNS_NODE_NAME || '' }}
+          FUGUE_NODE_LOCAL_DNS_NAMESPACE: ${{ vars.FUGUE_NODE_LOCAL_DNS_NAMESPACE || 'kube-system' }}
+          FUGUE_NODE_LOCAL_DNS_LOCAL_IP: ${{ vars.FUGUE_NODE_LOCAL_DNS_LOCAL_IP || '169.254.20.10' }}
+          FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN: ${{ vars.FUGUE_NODE_LOCAL_DNS_CLUSTER_DOMAIN || 'cluster.local' }}
+          FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP: ${{ vars.FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP || '' }}
+          FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME: ${{ vars.FUGUE_NODE_LOCAL_DNS_EXTERNAL_PROBE_NAME || vars.FUGUE_API_PUBLIC_DOMAIN || 'kubernetes.io' }}
+          FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY: ${{ vars.FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY || 'registry.k8s.io/dns/k8s-dns-node-cache' }}
+          FUGUE_NODE_LOCAL_DNS_IMAGE_TAG: ${{ vars.FUGUE_NODE_LOCAL_DNS_IMAGE_TAG || '1.26.8' }}
+          FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST: ${{ vars.FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST || 'sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739' }}
           FUGUE_MESH_RECOVERY_ENABLED: ${{ vars.FUGUE_MESH_RECOVERY_ENABLED || 'false' }}
           FUGUE_MESH_RECOVERY_LISTEN_ADDR: ${{ vars.FUGUE_MESH_RECOVERY_LISTEN_ADDR || '' }}
           FUGUE_MESH_RECOVERY_GENERATION: ${{ vars.FUGUE_MESH_RECOVERY_GENERATION || '' }}
