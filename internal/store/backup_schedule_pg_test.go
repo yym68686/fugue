@@ -91,11 +91,27 @@ func TestPGEnsureDefaultBackupPolicyPreservesLegacyNullForRepair(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_backup_backends WHERE id = $1 AND status = 'active'`)).
 		WithArgs(defaultBackupBackendID).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(defaultBackupBackendID))
-	mock.ExpectExec(`(?s)INSERT INTO fugue_backup_policies .*next_run_at = fugue_backup_policies.next_run_at`).
+	mock.ExpectExec(`(?s)INSERT INTO fugue_backup_policies .*next_run_at = CASE.*ELSE fugue_backup_policies.next_run_at\s+END`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := s.pgEnsureDefaultBackupPolicy(); err != nil {
 		t.Fatalf("ensure default backup policy: %v", err)
+	}
+	assertBackupSchedulePGExpectations(t, mock)
+}
+
+func TestPGEnsureDefaultBackupPolicyPreservesDisabledConflictState(t *testing.T) {
+	t.Parallel()
+
+	s, mock := newBackupSchedulePGTestStore(t)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT id FROM fugue_backup_backends WHERE id = $1 AND status = 'active'`)).
+		WithArgs(defaultBackupBackendID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(defaultBackupBackendID))
+	mock.ExpectExec(`(?s)ON CONFLICT \(id\) DO UPDATE SET.*enabled = CASE\s+WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN FALSE\s+ELSE TRUE\s+END,.*status = CASE\s+WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN 'disabled'.*next_run_at = CASE\s+WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN NULL\s+ELSE fugue_backup_policies.next_run_at\s+END,`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := s.pgEnsureDefaultBackupPolicy(); err != nil {
+		t.Fatalf("ensure disabled default backup policy: %v", err)
 	}
 	assertBackupSchedulePGExpectations(t, mock)
 }

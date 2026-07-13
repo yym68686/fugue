@@ -99,6 +99,67 @@ func TestDefaultBackupPolicyUsesConfiguredPlatformR2Backend(t *testing.T) {
 	}
 }
 
+func TestDefaultBackupPolicyDisableSurvivesBackendSeedAndRestart(t *testing.T) {
+	t.Setenv("FUGUE_DATA_BACKEND_PROVIDER", model.DataBackendProviderCloudflareR2)
+	t.Setenv("FUGUE_DATA_R2_ACCOUNT_ID", "acct123")
+	t.Setenv("FUGUE_DATA_BACKEND_BUCKET", "fugue-backups")
+	t.Setenv("FUGUE_DATA_BACKEND_PREFIX", "prod")
+	t.Setenv("FUGUE_DATA_BACKEND_ACCESS_KEY_ID", "access-key")
+	t.Setenv("FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY", "secret-key")
+	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "test-encryption-key")
+
+	storePath := filepath.Join(t.TempDir(), "store.json")
+	stateStore := New(storePath)
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	const reason = "planned maintenance"
+	disabled, err := stateStore.SetBackupPolicyEnabled(stateStore.DefaultControlPlaneBackupPolicyID(), "", true, false, reason)
+	if err != nil {
+		t.Fatalf("disable default backup policy: %v", err)
+	}
+	assertDisabled := func(stage string, policy model.BackupPolicy) {
+		t.Helper()
+		if policy.Enabled || policy.Status != model.BackupPolicyStatusDisabled || policy.NextRunAt != nil {
+			t.Fatalf("expected default policy to remain disabled after %s, got %+v", stage, policy)
+		}
+		if policy.DisabledReason != reason {
+			t.Fatalf("expected disable reason %q after %s, got %q", reason, stage, policy.DisabledReason)
+		}
+	}
+	assertDisabled("disable", disabled)
+
+	if err := stateStore.SeedDefaultBackupBackendFromEnv(); err != nil {
+		t.Fatalf("reseed default backup backend: %v", err)
+	}
+	afterSeed, err := stateStore.GetBackupPolicy(stateStore.DefaultControlPlaneBackupPolicyID(), "", true)
+	if err != nil {
+		t.Fatalf("get default backup policy after backend seed: %v", err)
+	}
+	assertDisabled("backend seed", afterSeed)
+
+	restarted := New(storePath)
+	if err := restarted.Init(); err != nil {
+		t.Fatalf("restart store: %v", err)
+	}
+	afterRestart, err := restarted.GetBackupPolicy(restarted.DefaultControlPlaneBackupPolicyID(), "", true)
+	if err != nil {
+		t.Fatalf("get default backup policy after restart: %v", err)
+	}
+	assertDisabled("restart", afterRestart)
+
+	due, err := restarted.ListDueBackupPolicies(time.Now().UTC().Add(24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("list due backup policies after restart: %v", err)
+	}
+	for _, policy := range due {
+		if policy.ID == restarted.DefaultControlPlaneBackupPolicyID() {
+			t.Fatalf("disabled default policy became schedulable after restart: %+v", policy)
+		}
+	}
+}
+
 func TestUserAppBackupPolicyAbsentByDefault(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 

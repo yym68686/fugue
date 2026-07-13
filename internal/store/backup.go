@@ -379,6 +379,7 @@ func ensureDefaultBackupPolicyInState(state *model.State) {
 		return
 	}
 	existing := model.NormalizeBackupPolicy(state.BackupPolicies[index])
+	explicitlyDisabled := !existing.Enabled || existing.Status == model.BackupPolicyStatusDisabled
 	existing.Name = policy.Name
 	existing.Slug = policy.Slug
 	existing.Scope = policy.Scope
@@ -386,13 +387,20 @@ func ensureDefaultBackupPolicyInState(state *model.State) {
 	if existing.BackendID == "" || existing.BackendID == defaultBackupBackendID || backendID == "" {
 		existing.BackendID = backendID
 	}
-	existing.Enabled = true
-	if backendID == "" {
+	if explicitlyDisabled {
+		existing.Enabled = false
+		existing.Status = model.BackupPolicyStatusDisabled
+		existing.NextRunAt = nil
+	} else if backendID == "" {
+		existing.Enabled = true
 		existing.Status = model.BackupPolicyStatusBlockedNoBackend
 		existing.DisabledReason = disabledReason
-	} else if existing.Status == "" || existing.Status == model.BackupPolicyStatusBlockedNoBackend {
-		existing.Status = model.BackupPolicyStatusActive
-		existing.DisabledReason = ""
+	} else {
+		existing.Enabled = true
+		if existing.Status == "" || existing.Status == model.BackupPolicyStatusBlockedNoBackend {
+			existing.Status = model.BackupPolicyStatusActive
+			existing.DisabledReason = ""
+		}
 	}
 	if existing.Schedule == "" {
 		existing.Schedule = model.BackupDefaultSchedule
@@ -406,7 +414,7 @@ func ensureDefaultBackupPolicyInState(state *model.State) {
 	if existing.Retention.ProtectLatest <= 0 {
 		existing.Retention.ProtectLatest = existing.RetainCount
 	}
-	if existing.NextRunAt == nil {
+	if !explicitlyDisabled && existing.NextRunAt == nil {
 		if next, err := nextBackupRunAfter(existing.Schedule, now.Add(-time.Hour)); err == nil {
 			existing.NextRunAt = next
 		} else {
@@ -2896,13 +2904,29 @@ ON CONFLICT (id) DO UPDATE SET
 	target_type = EXCLUDED.target_type,
 	target_json = EXCLUDED.target_json,
 	backend_id = CASE WHEN fugue_backup_policies.backend_id IS NULL OR fugue_backup_policies.backend_id = '' OR EXCLUDED.backend_id IS NULL THEN EXCLUDED.backend_id ELSE fugue_backup_policies.backend_id END,
-	enabled = TRUE,
-	status = CASE WHEN EXCLUDED.backend_id IS NULL THEN $9 WHEN fugue_backup_policies.status = 'blocked_no_backend' THEN 'active' ELSE fugue_backup_policies.status END,
-	disabled_reason = CASE WHEN EXCLUDED.backend_id IS NULL THEN $10 WHEN fugue_backup_policies.status = 'blocked_no_backend' THEN '' ELSE fugue_backup_policies.disabled_reason END,
+	enabled = CASE
+		WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN FALSE
+		ELSE TRUE
+	END,
+	status = CASE
+		WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN 'disabled'
+		WHEN EXCLUDED.backend_id IS NULL THEN $9
+		WHEN fugue_backup_policies.status = 'blocked_no_backend' THEN 'active'
+		ELSE fugue_backup_policies.status
+	END,
+	disabled_reason = CASE
+		WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN fugue_backup_policies.disabled_reason
+		WHEN EXCLUDED.backend_id IS NULL THEN $10
+		WHEN fugue_backup_policies.status = 'blocked_no_backend' THEN ''
+		ELSE fugue_backup_policies.disabled_reason
+	END,
 	schedule = CASE WHEN fugue_backup_policies.schedule = '' THEN EXCLUDED.schedule ELSE fugue_backup_policies.schedule END,
 	retain_count = CASE WHEN fugue_backup_policies.retain_count <= 0 THEN EXCLUDED.retain_count ELSE fugue_backup_policies.retain_count END,
 	retention_json = CASE WHEN fugue_backup_policies.retention_json IS NULL THEN EXCLUDED.retention_json ELSE fugue_backup_policies.retention_json END,
-	next_run_at = fugue_backup_policies.next_run_at,
+	next_run_at = CASE
+		WHEN fugue_backup_policies.enabled = FALSE OR fugue_backup_policies.status = 'disabled' THEN NULL
+		ELSE fugue_backup_policies.next_run_at
+	END,
 	updated_at = EXCLUDED.updated_at
 `, policy.ID, policy.Name, policy.Slug, policy.Scope, policy.Target.Type, targetJSON, backend, policy.Enabled, policy.Status, policy.DisabledReason, policy.Schedule, policy.RetainCount, retentionJSON, policy.NextRunAt, policy.CreatedBy, policy.CreatedAt, policy.UpdatedAt)
 	return mapDBErr(err)
