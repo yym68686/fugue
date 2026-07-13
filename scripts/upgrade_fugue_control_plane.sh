@@ -8163,6 +8163,7 @@ node_local_dns_run_probe_pod() {
   local host_network="$4"
   local net_admin="$5"
   local script="$6"
+  local host_pid="${7:-false}"
   local safe_node=""
   local pod_name=""
   local phase=""
@@ -8174,7 +8175,7 @@ node_local_dns_run_probe_pod() {
   pod_name="${pod_name:0:63}"
   POD_NAME="${pod_name}" NODE_NAME="${node_name}" POD_IMAGE="${image_ref}" POD_SCRIPT="${script}" \
     POD_HOST_NETWORK="${host_network}" POD_NET_ADMIN="${net_admin}" POD_TIMEOUT="${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS}" \
-    POD_NAMESPACE="${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" \
+    POD_HOST_PID="${host_pid}" POD_NAMESPACE="${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" \
     python3 -c '
 import json
 import os
@@ -8204,6 +8205,8 @@ manifest = {
         "containers": [container],
     },
 }
+if os.environ.get("POD_HOST_PID") == "true":
+    manifest["spec"]["hostPID"] = True
 print(json.dumps(manifest, separators=(",", ":")))
 ' | ${KUBECTL} apply -f - >/dev/null
 
@@ -8664,38 +8667,107 @@ print(str(pod["name"]) + "\t" + str(pod["uid"]))
   return 1
 }
 
-node_local_dns_observed_update_revision() {
+node_local_dns_current_controller_revision() {
   local expected_mode="$1"
+  local expected_targets="${2:-${NODE_LOCAL_DNS_TARGET_NODES}}"
   local daemonset_json=""
+  local controller_revisions_json=""
   local live_targets=""
   local state=""
   local mode=""
   local generation=""
   local observed_generation=""
-  local update_revision=""
+  local controller_revision=""
 
   daemonset_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${NODE_LOCAL_DNS_ACTIVE_DAEMONSET_NAME}" -o json)" || return 1
   live_targets="$(node_local_dns_daemonset_target_nodes "${daemonset_json}")" || return 1
-  [[ "${live_targets}" == "${NODE_LOCAL_DNS_TARGET_NODES}" ]] || return 1
-  state="$(printf '%s' "${daemonset_json}" | python3 -c '
+  [[ "${live_targets}" == "${expected_targets}" ]] || return 1
+  controller_revisions_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get controllerrevisions.apps \
+    -l "$(node_local_dns_active_pod_selector)" -o json)" || return 1
+  state="$({
+    printf '%s\n' "${daemonset_json}"
+    printf '%s\n' "${controller_revisions_json}"
+  } | python3 -c '
+import copy
 import json
 import sys
 
-doc = json.load(sys.stdin)
-metadata = doc.get("metadata") or {}
-status = doc.get("status") or {}
-template = ((doc.get("spec") or {}).get("template") or {})
+decoder = json.JSONDecoder()
+raw = sys.stdin.read()
+documents = []
+offset = 0
+while offset < len(raw):
+    while offset < len(raw) and raw[offset].isspace():
+        offset += 1
+    if offset >= len(raw):
+        break
+    document, offset = decoder.raw_decode(raw, offset)
+    documents.append(document)
+if len(documents) != 2:
+    raise SystemExit(1)
+
+daemonset, revision_list = documents
+metadata = daemonset.get("metadata") or {}
+status = daemonset.get("status") or {}
+template = ((daemonset.get("spec") or {}).get("template") or {})
 labels = (template.get("metadata") or {}).get("labels") or {}
+daemonset_name = str(metadata.get("name") or "")
+daemonset_uid = str(metadata.get("uid") or "")
+daemonset_namespace = str(metadata.get("namespace") or "")
+if not daemonset_name or not daemonset_uid or not daemonset_namespace or not isinstance(template, dict) or not template:
+    raise SystemExit(1)
+if not isinstance(revision_list, dict) or not isinstance(revision_list.get("items"), list):
+    raise SystemExit(1)
+
+matches = []
+for revision in revision_list["items"]:
+    if not isinstance(revision, dict):
+        raise SystemExit(1)
+    revision_metadata = revision.get("metadata") or {}
+    if (
+        str(revision.get("apiVersion") or "") != "apps/v1"
+        or str(revision.get("kind") or "") != "ControllerRevision"
+        or str(revision_metadata.get("namespace") or "") != daemonset_namespace
+    ):
+        continue
+    controllers = [
+        owner
+        for owner in revision_metadata.get("ownerReferences") or []
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    if len(controllers) != 1:
+        continue
+    controller = controllers[0]
+    if (
+        str(controller.get("apiVersion") or "") != "apps/v1"
+        or str(controller.get("kind") or "") != "DaemonSet"
+        or str(controller.get("name") or "") != daemonset_name
+        or str(controller.get("uid") or "") != daemonset_uid
+    ):
+        continue
+    revision_template = copy.deepcopy((((revision.get("data") or {}).get("spec") or {}).get("template")))
+    if not isinstance(revision_template, dict) or revision_template.pop("$patch", None) != "replace":
+        continue
+    if revision_template == template:
+        matches.append(revision)
+
+if len(matches) != 1:
+    raise SystemExit(1)
+revision_metadata = matches[0].get("metadata") or {}
+revision_name = str(revision_metadata.get("name") or "")
+revision_hash = str((revision_metadata.get("labels") or {}).get("controller-revision-hash") or "")
+if not revision_hash or revision_name != daemonset_name + "-" + revision_hash:
+    raise SystemExit(1)
 print("\t".join([
     str(labels.get("fugue.io/node-local-dns-mode") or ""),
     str(metadata.get("generation") or ""),
     str(status.get("observedGeneration") or ""),
-    str(status.get("updateRevision") or ""),
+    revision_hash,
 ]))
 ')" || return 1
-  IFS=$'\t' read -r mode generation observed_generation update_revision <<<"${state}"
-  [[ "${mode}" == "${expected_mode}" && -n "${generation}" && "${generation}" == "${observed_generation}" && -n "${update_revision}" ]] || return 1
-  printf '%s\n' "${update_revision}"
+  IFS=$'\t' read -r mode generation observed_generation controller_revision <<<"${state}"
+  [[ "${mode}" == "${expected_mode}" && -n "${generation}" && "${generation}" == "${observed_generation}" && -n "${controller_revision}" ]] || return 1
+  printf '%s\n' "${controller_revision}"
 }
 
 node_local_dns_verify_authoritative_coexistence() {
@@ -8817,7 +8889,7 @@ node_local_dns_replace_one_node() {
 
   node_local_dns_node_safe_for_replacement "${node_name}" || return 1
   node_local_dns_verify_artifact "${expected_mode}" "${service_ip}" true || return 1
-  live_revision="$(node_local_dns_observed_update_revision "${expected_mode}")" || return 1
+  live_revision="$(node_local_dns_current_controller_revision "${expected_mode}")" || return 1
   [[ "${live_revision}" == "${expected_revision}" ]] || return 1
   node_local_dns_verify_authoritative_coexistence "${node_name}" || return 1
   pods_json="$(node_local_dns_capture_pods_json)" || return 1
@@ -8842,7 +8914,7 @@ print(str(matches[0]["name"]) + "\t" + str(matches[0]["uid"]))
   [[ -n "${old_name}" && -n "${old_uid}" ]] || return 1
   node_local_dns_verify_one_node "${old_name}" "${node_name}" "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${service_ip}" || return 1
   node_local_dns_node_safe_for_replacement "${node_name}" || return 1
-  live_revision="$(node_local_dns_observed_update_revision "${expected_mode}")" || return 1
+  live_revision="$(node_local_dns_current_controller_revision "${expected_mode}")" || return 1
   [[ "${live_revision}" == "${expected_revision}" ]] || return 1
   node_local_dns_verify_preserved_state_unchanged || return 1
 
@@ -8889,12 +8961,12 @@ node_local_dns_reconcile_after_helm() {
     return 1
   }
   while (( SECONDS < deadline )); do
-    expected_revision="$(node_local_dns_observed_update_revision "${desired_mode}" 2>/dev/null || true)"
+    expected_revision="$(node_local_dns_current_controller_revision "${desired_mode}" 2>/dev/null || true)"
     [[ -n "${expected_revision}" ]] && break
     sleep 2
   done
   [[ -n "${expected_revision}" ]] || {
-    log "NodeLocal DNSCache DaemonSet did not expose an observed updateRevision for the verified ${desired_mode} template"
+    log "NodeLocal DNSCache DaemonSet did not expose one exact current ControllerRevision for the verified ${desired_mode} template"
     return 1
   }
   node_local_dns_verify_central_coredns_ready || return 1
@@ -9010,44 +9082,145 @@ node_local_dns_recover_exact_residue() {
   }
   local_hex="$(node_local_dns_proc_ipv4_hex "${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}")"
   service_hex="$(node_local_dns_proc_ipv4_hex "${service_ip}")"
-  rules_script="$(cat <<EOF
+  read -r -d '' rules_script <<'EOF' || true
 set -eu
 command -v iptables >/dev/null 2>&1
 command -v iptables-save >/dev/null 2>&1
+iptables_version=unavailable
+iptables_save_version=unavailable
+iptables --version > /tmp/fugue-nld-iptables.version 2>&1 || true
+iptables-save --version > /tmp/fugue-nld-iptables-save.version 2>&1 || true
+IFS= read -r iptables_version < /tmp/fugue-nld-iptables.version || iptables_version=unavailable
+IFS= read -r iptables_save_version < /tmp/fugue-nld-iptables-save.version || iptables_save_version=unavailable
+iptables_backend=unknown
+iptables_save_backend=unknown
+if printf '%s\n' "${iptables_version}" | grep -Fq nf_tables; then
+  iptables_backend=nf_tables
+elif printf '%s\n' "${iptables_version}" | grep -Fq legacy; then
+  iptables_backend=legacy
+fi
+if printf '%s\n' "${iptables_save_version}" | grep -Fq nf_tables; then
+  iptables_save_backend=nf_tables
+elif printf '%s\n' "${iptables_save_version}" | grep -Fq legacy; then
+  iptables_save_backend=legacy
+fi
+printf 'fugue-nld-residue tool=iptables version=%s backend=%s\n' "${iptables_version:-unavailable}" "${iptables_backend}"
+printf 'fugue-nld-residue tool=iptables-save version=%s backend=%s\n' "${iptables_save_version:-unavailable}" "${iptables_save_backend}"
+
+node_cache_count=0
+node_cache_shown=0
+node_cache_limit=32
+for comm_file in /proc/[0-9]*/comm; do
+  [ -r "${comm_file}" ] || continue
+  comm=''
+  IFS= read -r comm < "${comm_file}" || true
+  [ "${comm}" = 'node-cache' ] || continue
+  node_cache_count=$((node_cache_count + 1))
+  if [ "${node_cache_shown}" -lt "${node_cache_limit}" ]; then
+    pid="${comm_file#/proc/}"
+    pid="${pid%/comm}"
+    printf 'fugue-nld-residue node-cache-comm pid=%s comm=node-cache\n' "${pid}"
+    node_cache_shown=$((node_cache_shown + 1))
+  fi
+done
+node_cache_truncated=false
+if [ "${node_cache_count}" -gt "${node_cache_shown}" ]; then
+  node_cache_truncated=true
+fi
+printf 'fugue-nld-residue node-cache-comm-count total=%s shown=%s limit=%s truncated=%s\n' \
+  "${node_cache_count}" "${node_cache_shown}" "${node_cache_limit}" "${node_cache_truncated}"
+
 for table_file in /proc/net/tcp /proc/net/udp /proc/net/tcp6 /proc/net/udp6; do
-  [ -r "\${table_file}" ] || continue
+  [ -r "${table_file}" ] || continue
   while read -r slot endpoint remainder; do
-    [ "\${slot}" = 'sl' ] && continue
-    address="\${endpoint%:*}"
-    port="\${endpoint##*:}"
-    if [ "\${port}" = '0035' ]; then
-      case "\${address}" in
-        00000000|00000000000000000000000000000000|${local_hex}|${service_hex})
-          echo "refusing residue cleanup while DNS listener \${endpoint} remains" >&2
+    [ "${slot}" = 'sl' ] && continue
+    address="${endpoint%:*}"
+    port="${endpoint##*:}"
+    if [ "${port}" = '0035' ]; then
+      case "${address}" in
+        00000000|00000000000000000000000000000000|__FUGUE_LOCAL_HEX__|__FUGUE_SERVICE_HEX__)
+          echo "refusing residue cleanup while DNS listener ${endpoint} remains" >&2
           exit 1
           ;;
       esac
     fi
-  done <"\${table_file}"
+  done <"${table_file}"
 done
+rule_diagnostic_limit=64
+rule_diagnostic_shown=0
+rule_match_total=0
 for table in raw filter; do
-  iptables-save -t "\${table}" > "/tmp/fugue-nld-\${table}.rules" 2>/dev/null || exit 1
+  iptables-save -t "${table}" > "/tmp/fugue-nld-${table}.rules" 2>/dev/null || exit 1
   while IFS= read -r line; do
-    case "\${line}" in
+    case "${line}" in
       -A\ *"NodeLocal DNS Cache:"*)
-        delete_args="\${line#-A }"
-        eval "iptables -t \${table} -D \${delete_args}"
+        rule_match_total=$((rule_match_total + 1))
+        diagnose_rule=false
+        if [ "${rule_diagnostic_shown}" -lt "${rule_diagnostic_limit}" ]; then
+          diagnose_rule=true
+          rule_diagnostic_shown=$((rule_diagnostic_shown + 1))
+          before_count=unavailable
+          if iptables-save -t "${table}" > /tmp/fugue-nld-rule-before.rules 2>/dev/null; then
+            grep -Fxc -- "${line}" /tmp/fugue-nld-rule-before.rules > /tmp/fugue-nld-rule-before.count 2>/dev/null || true
+            IFS= read -r before_count < /tmp/fugue-nld-rule-before.count || before_count=unavailable
+          fi
+          printf 'fugue-nld-residue rule-before table=%s index=%s exact-count=%s rule=%s\n' \
+            "${table}" "${rule_match_total}" "${before_count:-unavailable}" "${line}"
+        fi
+        delete_args="${line#-A }"
+        set +e
+        eval "iptables -t ${table} -D ${delete_args}"
+        delete_rc=$?
+        set -e
+        if [ "${diagnose_rule}" = true ]; then
+          printf 'fugue-nld-residue rule-delete table=%s index=%s rc=%s\n' \
+            "${table}" "${rule_match_total}" "${delete_rc}"
+          after_count=unavailable
+          if iptables-save -t "${table}" > /tmp/fugue-nld-rule-after.rules 2>/dev/null; then
+            grep -Fxc -- "${line}" /tmp/fugue-nld-rule-after.rules > /tmp/fugue-nld-rule-after.count 2>/dev/null || true
+            IFS= read -r after_count < /tmp/fugue-nld-rule-after.count || after_count=unavailable
+          fi
+          printf 'fugue-nld-residue rule-after table=%s index=%s exact-count=%s rule=%s\n' \
+            "${table}" "${rule_match_total}" "${after_count:-unavailable}" "${line}"
+        fi
+        [ "${delete_rc}" -eq 0 ] || exit "${delete_rc}"
         ;;
     esac
-  done < "/tmp/fugue-nld-\${table}.rules"
+  done < "/tmp/fugue-nld-${table}.rules"
 done
+rule_diagnostics_truncated=false
+if [ "${rule_match_total}" -gt "${rule_diagnostic_shown}" ]; then
+  rule_diagnostics_truncated=true
+fi
+printf 'fugue-nld-residue rule-diagnostics matches=%s shown=%s limit=%s truncated=%s\n' \
+  "${rule_match_total}" "${rule_diagnostic_shown}" "${rule_diagnostic_limit}" "${rule_diagnostics_truncated}"
 iptables-save > /tmp/fugue-nld-remaining.rules 2>/dev/null || exit 1
-if grep -F 'NodeLocal DNS Cache:' /tmp/fugue-nld-remaining.rules; then
+if grep -Fq 'NodeLocal DNS Cache:' /tmp/fugue-nld-remaining.rules; then
+  remaining_count=unavailable
+  grep -Fc 'NodeLocal DNS Cache:' /tmp/fugue-nld-remaining.rules > /tmp/fugue-nld-remaining.count 2>/dev/null || true
+  IFS= read -r remaining_count < /tmp/fugue-nld-remaining.count || remaining_count=unavailable
+  printf 'fugue-nld-residue rule-observation sample=0 exact-comment-count=%s\n' "${remaining_count:-unavailable}"
+  observation_sample=1
+  observation_limit=4
+  while [ "${observation_sample}" -lt "${observation_limit}" ]; do
+    sleep 1
+    if iptables-save > /tmp/fugue-nld-observation.rules 2>/dev/null; then
+      observed_count=unavailable
+      grep -Fc 'NodeLocal DNS Cache:' /tmp/fugue-nld-observation.rules > /tmp/fugue-nld-observation.count 2>/dev/null || true
+      IFS= read -r observed_count < /tmp/fugue-nld-observation.count || observed_count=unavailable
+    else
+      observed_count=unavailable
+    fi
+    printf 'fugue-nld-residue rule-observation sample=%s exact-comment-count=%s\n' \
+      "${observation_sample}" "${observed_count:-unavailable}"
+    observation_sample=$((observation_sample + 1))
+  done
   echo 'exact NodeLocal DNSCache rules remain after controlled cleanup' >&2
   exit 1
 fi
 EOF
-)"
+  rules_script="${rules_script//__FUGUE_LOCAL_HEX__/${local_hex}}"
+  rules_script="${rules_script//__FUGUE_SERVICE_HEX__/${service_hex}}"
   interface_script="$(cat <<'EOF'
 set -eu
 command -v ip >/dev/null 2>&1
@@ -9059,7 +9232,7 @@ EOF
 )"
   while IFS= read -r node_name; do
     [[ -n "${node_name}" ]] || continue
-    node_local_dns_run_probe_pod "${node_name}" rule-cleanup "${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}" true true "${rules_script}" || return 1
+    node_local_dns_run_probe_pod "${node_name}" rule-cleanup "${FUGUE_NODE_LOCAL_DNS_IMAGE_REPOSITORY}@${FUGUE_NODE_LOCAL_DNS_IMAGE_DIGEST}" true true "${rules_script}" true || return 1
     node_local_dns_run_probe_pod "${node_name}" interface-cleanup "${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE}" true true "${interface_script}" || return 1
   done <<<"${NODE_LOCAL_DNS_TARGET_NODES}"
   node_local_dns_verify_teardown "${service_ip}"
@@ -9415,7 +9588,7 @@ node_local_dns_restore_previous_after_helm_rollback() {
   while (( SECONDS < deadline )); do
     daemonset_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${NODE_LOCAL_DNS_ACTIVE_DAEMONSET_NAME}" -o json 2>/dev/null || true)"
     if [[ -n "${daemonset_json}" ]]; then
-      IFS=$'\t' read -r template_mode generation observed_generation restored_revision < <(
+      IFS=$'\t' read -r template_mode generation observed_generation < <(
         printf '%s' "${daemonset_json}" | python3 -c '
 import json
 import sys
@@ -9429,15 +9602,16 @@ print("\t".join([
     str(labels.get("fugue.io/node-local-dns-mode") or ""),
     str(metadata.get("generation") or ""),
     str(status.get("observedGeneration") or ""),
-    str(status.get("updateRevision") or ""),
 ]))
 '
       )
       live_targets="$(node_local_dns_daemonset_target_nodes "${daemonset_json}" 2>/dev/null || true)"
       if [[ "${template_mode}" == "${NODE_LOCAL_DNS_PREVIOUS_MODE}" &&
             -n "${generation}" && "${generation}" == "${observed_generation}" &&
-            -n "${restored_revision}" && "${live_targets}" == "${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}" ]]; then
-        break
+            "${live_targets}" == "${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}" ]]; then
+        restored_revision="$(node_local_dns_current_controller_revision \
+          "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}" 2>/dev/null || true)"
+        [[ -z "${restored_revision}" ]] || break
       fi
     fi
     sleep 2

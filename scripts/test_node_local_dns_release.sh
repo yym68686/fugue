@@ -216,6 +216,7 @@ chmod +x "${MOCK_STATE_CTL}"
 
 cat >"${MOCK_KUBECTL}" <<'PY'
 #!/usr/bin/env python3
+import copy
 import json
 import os
 import shlex
@@ -524,9 +525,55 @@ def daemonset_json(state):
             "desiredNumberScheduled": len(targets),
             "numberReady": ready,
             "numberUnavailable": len(targets) - ready,
-            "updateRevision": ds["revision"],
         },
     }
+
+
+def controller_revision_list_json(state):
+    ds = state["ds"]
+    daemonset = daemonset_json(state)
+    revision_hash = ds["revision"]
+    template = copy.deepcopy(daemonset["spec"]["template"])
+    template["$patch"] = "replace"
+    item = {
+        "apiVersion": "apps/v1",
+        "kind": "ControllerRevision",
+        "metadata": {
+            "name": daemonset["metadata"]["name"] + "-" + revision_hash,
+            "namespace": "kube-system",
+            "labels": {
+                "app.kubernetes.io/name": "fugue",
+                "app.kubernetes.io/instance": "fugue",
+                "app.kubernetes.io/component": "node-local-dns",
+                "controller-revision-hash": revision_hash,
+            },
+            "ownerReferences": [{
+                "apiVersion": "apps/v1",
+                "kind": "DaemonSet",
+                "name": daemonset["metadata"]["name"],
+                "uid": daemonset["metadata"]["uid"],
+                "controller": True,
+            }],
+        },
+        "revision": 1,
+        "data": {"spec": {"template": template}},
+    }
+    drift = os.environ.get("MOCK_CONTROLLER_REVISION_DRIFT", "")
+    if drift == "owner":
+        item["metadata"]["ownerReferences"][0]["uid"] = "uid-other-ds"
+    elif drift == "template":
+        item["data"]["spec"]["template"]["metadata"].setdefault("annotations", {})["test.fugue.io/drift"] = "true"
+    elif drift == "hash":
+        item["metadata"]["labels"]["controller-revision-hash"] = revision_hash + "-mismatch"
+    elif drift == "ambiguous":
+        duplicate = copy.deepcopy(item)
+        duplicate_hash = revision_hash + "-duplicate"
+        duplicate["metadata"]["name"] = daemonset["metadata"]["name"] + "-" + duplicate_hash
+        duplicate["metadata"]["labels"]["controller-revision-hash"] = duplicate_hash
+        return {"apiVersion": "apps/v1", "kind": "ControllerRevisionList", "items": [item, duplicate]}
+    elif drift:
+        raise SystemExit(f"unsupported ControllerRevision drift: {drift}")
+    return {"apiVersion": "apps/v1", "kind": "ControllerRevisionList", "items": [item]}
 
 
 state = load_state()
@@ -607,6 +654,13 @@ if command == "get" and "configmap" in argv:
             data["Corefile"] = data["Corefile"].replace("force_tcp", "prefer_udp", 1)
         print(json.dumps({"data": data}, separators=(",", ":")))
         raise SystemExit(0)
+
+if command == "get" and "controllerrevisions.apps" in argv:
+    if not state["ds"]["exists"]:
+        print('{"apiVersion":"apps/v1","kind":"ControllerRevisionList","items":[]}')
+    else:
+        print(json.dumps(controller_revision_list_json(state), separators=(",", ":")))
+    raise SystemExit(0)
 
 if command == "get" and ("daemonset" in argv or any(item.startswith("ds/") for item in argv)):
     ds = state["ds"]
@@ -870,6 +924,7 @@ set_common_values() {
   NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP=""
   NODE_LOCAL_DNS_HELM_SET_ARGS=()
   MOCK_ARTIFACT_DRIFT=""
+  MOCK_CONTROLLER_REVISION_DRIFT=""
   MOCK_COREFILE_DRIFT=false
   MOCK_EXEC_FAIL=false
   MOCK_PROBE_FAIL_PURPOSE=""
@@ -877,7 +932,7 @@ set_common_values() {
   MOCK_DNS_NODE_NOT_READY=false
   MOCK_DNS_EXTERNAL_IP_DRIFT=false
   MOCK_DNS_MULTIPLE_NODES=false
-  export MOCK_ARTIFACT_DRIFT MOCK_COREFILE_DRIFT MOCK_EXEC_FAIL MOCK_PROBE_FAIL_PURPOSE MOCK_SMOKE_FAIL
+  export MOCK_ARTIFACT_DRIFT MOCK_CONTROLLER_REVISION_DRIFT MOCK_COREFILE_DRIFT MOCK_EXEC_FAIL MOCK_PROBE_FAIL_PURPOSE MOCK_SMOKE_FAIL
   export MOCK_DNS_NODE_NOT_READY MOCK_DNS_EXTERNAL_IP_DRIFT MOCK_DNS_MULTIPLE_NODES
 }
 
@@ -897,6 +952,72 @@ if not eval(os.environ["STATE_EXPRESSION"], {"__builtins__": {}, "all": all, "le
 '
 }
 
+echo "[test_node_local_dns_release] exact-residue rollback diagnostics are bounded and hostPID-scoped"
+"${MOCK_STATE_CTL}" "${MOCK_STATE}" reset
+set_common_values
+NODE_LOCAL_DNS_TARGET_NODES=node-a
+: >"${MOCK_PROBE_SCRIPTS}"
+MOCK_PROBE_FAIL_PURPOSE=rule-cleanup
+export MOCK_PROBE_FAIL_PURPOSE
+if node_local_dns_recover_exact_residue 10.43.0.10 >/dev/null 2>&1; then
+  echo "a failed rule-cleanup probe must fail exact-residue recovery" >&2
+  exit 1
+fi
+MOCK_PROBE_FAIL_PURPOSE=""
+export MOCK_PROBE_FAIL_PURPOSE
+APPLIED_MANIFEST="${MOCK_APPLY}" python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["APPLIED_MANIFEST"], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+spec = manifest["spec"]
+container = spec["containers"][0]
+assert manifest["metadata"]["name"].startswith("fugue-nld-rule-cleanup-")
+assert spec.get("hostPID") is True
+assert spec.get("hostNetwork") is True
+assert spec.get("automountServiceAccountToken") is False
+assert container.get("securityContext") == {"capabilities": {"add": ["NET_ADMIN"]}}
+script = container["command"][-1]
+required = [
+    "iptables --version > /tmp/fugue-nld-iptables.version",
+    "iptables-save --version > /tmp/fugue-nld-iptables-save.version",
+    "backend=%s",
+    "for comm_file in /proc/[0-9]*/comm",
+    "[ \"${comm}\" = 'node-cache' ]",
+    "node-cache-comm-count total=%s shown=%s limit=%s truncated=%s",
+    "node_cache_limit=32",
+    "rule_diagnostic_limit=64",
+    "rule-before table=%s index=%s exact-count=%s rule=%s",
+    "rule-delete table=%s index=%s rc=%s",
+    "rule-after table=%s index=%s exact-count=%s rule=%s",
+    "rule-observation sample=0 exact-comment-count=%s",
+    "observation_limit=4",
+]
+missing = [item for item in required if item not in script]
+assert not missing, (missing, repr(script))
+assert "/cmdline" not in script
+assert "/environ" not in script
+PY
+
+# The optional host PID namespace is diagnostic-only. Every existing six-arg
+# probe call must retain the safer default and must not gain another capability.
+node_local_dns_run_probe_pod node-a default-hostpid \
+  "${FUGUE_NODE_LOCAL_DNS_PROBE_IMAGE}" false false true
+APPLIED_MANIFEST="${MOCK_APPLY}" python3 - <<'PY'
+import json
+import os
+
+with open(os.environ["APPLIED_MANIFEST"], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+spec = manifest["spec"]
+container = spec["containers"][0]
+assert not spec.get("hostPID", False)
+assert spec.get("automountServiceAccountToken") is False
+assert "securityContext" not in container
+PY
+: >"${MOCK_PROBE_SCRIPTS}"
+
 echo "[test_node_local_dns_release] initial single-node shadow and current artifact"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" reset
 set_common_values
@@ -909,6 +1030,13 @@ grep -Fq 'nodeLocalDNS.targetNodes=["node-a"]' <<<"${helm_args}"
 grep -Fq 'nodeLocalDNS.updateStrategy.type=OnDelete' <<<"${helm_args}"
 [[ "${NODE_LOCAL_DNS_ADDED_NODES}" == "node-a" ]]
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" template current shadow node-a rev-shadow-1
+"${MOCK_KUBECTL}" -n kube-system get daemonset fugue-fugue-node-local-dns -o json | python3 -c '
+import json
+import sys
+
+if "updateRevision" in (json.load(sys.stdin).get("status") or {}):
+    raise SystemExit("the DaemonSet mock must use the real apps/v1 status schema")
+'
 node_local_dns_reconcile_after_helm
 assert_state 'len(state["pods"]) == 1 and state["pods"][0]["ready"] and state["pods"][0]["config_key"] == "Corefile.shadow"'
 grep -Fq 'metric_total coredns_dns_requests_total' "${MOCK_PROBE_SCRIPTS}"
@@ -932,6 +1060,25 @@ missing = [item for item in required if item not in scripts]
 if missing:
     raise SystemExit("NodeLocal DNS probe omitted zero-value panic/reload gates: " + repr(missing))
 PY
+
+echo "[test_node_local_dns_release] current ControllerRevision identity fails closed"
+set_common_values
+node_local_dns_configure_cohort_names
+NODE_LOCAL_DNS_TARGET_NODES=node-a
+[[ "$(node_local_dns_current_controller_revision shadow)" == "rev-shadow-1" ]]
+for controller_revision_drift in owner template hash ambiguous; do
+  if (
+    set_common_values
+    node_local_dns_configure_cohort_names
+    NODE_LOCAL_DNS_TARGET_NODES=node-a
+    MOCK_CONTROLLER_REVISION_DRIFT="${controller_revision_drift}"
+    export MOCK_CONTROLLER_REVISION_DRIFT
+    node_local_dns_current_controller_revision shadow
+  ) >/dev/null 2>&1; then
+    echo "NodeLocal DNSCache accepted ${controller_revision_drift} ControllerRevision drift" >&2
+    exit 1
+  fi
+done
 
 echo "[test_node_local_dns_release] first release and legacy layout transition guards"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" reset
@@ -1536,6 +1683,7 @@ chmod +x "${DUAL_MOCK_STATE_CTL}"
 
 cat >"${DUAL_MOCK_KUBECTL}" <<'PY'
 #!/usr/bin/env python3
+import copy
 import json
 import os
 import shlex
@@ -1801,8 +1949,41 @@ def daemonset_json(kind, state):
             "desiredNumberScheduled": len(targets),
             "numberReady": ready,
             "numberUnavailable": len(targets) - ready,
-            "updateRevision": record["revision"],
         },
+    }
+
+
+def controller_revision_list_json(state):
+    daemonset = daemonset_json("active", state)
+    revision_hash = state["active"]["revision"]
+    template = copy.deepcopy(daemonset["spec"]["template"])
+    template["$patch"] = "replace"
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "ControllerRevisionList",
+        "items": [{
+            "apiVersion": "apps/v1",
+            "kind": "ControllerRevision",
+            "metadata": {
+                "name": daemonset["metadata"]["name"] + "-" + revision_hash,
+                "namespace": "kube-system",
+                "labels": {
+                    "app.kubernetes.io/name": "fugue",
+                    "app.kubernetes.io/instance": "fugue",
+                    "app.kubernetes.io/component": "node-local-dns-active",
+                    "controller-revision-hash": revision_hash,
+                },
+                "ownerReferences": [{
+                    "apiVersion": "apps/v1",
+                    "kind": "DaemonSet",
+                    "name": daemonset["metadata"]["name"],
+                    "uid": daemonset["metadata"]["uid"],
+                    "controller": True,
+                }],
+            },
+            "revision": 1,
+            "data": {"spec": {"template": template}},
+        }],
     }
 
 
@@ -1830,6 +2011,13 @@ if command == "get" and "configmap" in argv:
             "Corefile.shadow": corefile("169.254.20.10"),
             "Corefile.iptables": corefile("169.254.20.10 10.43.0.10"),
         }}, separators=(",", ":")))
+    raise SystemExit(0)
+
+if command == "get" and "controllerrevisions.apps" in argv:
+    if not state["active"]["exists"]:
+        print('{"apiVersion":"apps/v1","kind":"ControllerRevisionList","items":[]}')
+    else:
+        print(json.dumps(controller_revision_list_json(state), separators=(",", ":")))
     raise SystemExit(0)
 
 if command == "get" and ("daemonset" in argv or any(item.startswith("ds/") for item in argv)):
