@@ -1881,7 +1881,15 @@ if command == "get" and "node" in argv:
     raise SystemExit(0)
 
 if command == "get" and "pods" in argv and "--all-namespaces" in argv:
-    print('{"items":[]}')
+    padding_bytes = int(os.environ.get("DUAL_MOCK_POD_PADDING_BYTES", "0") or "0")
+    items = []
+    if padding_bytes > 0:
+        items.append({
+            "metadata": {"annotations": {"test.fugue.io/padding": "x" * padding_bytes}},
+            "spec": {"containers": []},
+            "status": {"phase": "Running"},
+        })
+    print(json.dumps({"items": items}, separators=(",", ":")))
     raise SystemExit(0)
 
 if command == "get" and "pods" in argv:
@@ -1980,6 +1988,15 @@ export DUAL_MOCK_NODE_PADDING_BYTES=140000
 node_local_dns_verify_preserved_nodes_isolated
 [[ "$(node_local_dns_replacement_order node-a)" == "node-a" ]]
 unset DUAL_MOCK_NODE_PADDING_BYTES
+
+# A busy node can also return more than 128 KiB of Pod inventory before the
+# first Helm mutation. Keep both documents on stdin so the host-port gate
+# remains exact without depending on the per-environment-entry size limit.
+export DUAL_MOCK_POD_PADDING_BYTES=1450000
+pod_inventory_bytes="$(${KUBECTL} get pods --all-namespaces --field-selector spec.nodeName=node-a -o json | wc -c)"
+(( pod_inventory_bytes > 131072 ))
+[[ -z "$(node_local_dns_pod_dns_host_port_conflicts node-a)" ]]
+unset DUAL_MOCK_POD_PADDING_BYTES
 
 [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" ]]
 [[ "${NODE_LOCAL_DNS_PRESERVED_DAEMONSET_NAME}" == "fugue-fugue-node-local-dns" ]]

@@ -7543,20 +7543,32 @@ print(json.dumps(values, separators=(",", ":")))
 node_local_dns_pod_dns_host_port_inventory() {
   local node_name="$1"
   local output_mode="$2"
-  local pod_inventory=""
-  local node_inventory=""
 
-  pod_inventory="$(${KUBECTL} get pods --all-namespaces --field-selector "spec.nodeName=${node_name}" -o json)" || return 1
-  node_inventory="$(${KUBECTL} get node "${node_name}" -o json)" || return 1
-  POD_INVENTORY="${pod_inventory}" NODE_INVENTORY="${node_inventory}" OUTPUT_MODE="${output_mode}" \
-    LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" SERVICE_IP="${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" python3 -c '
+  {
+    ${KUBECTL} get pods --all-namespaces --field-selector "spec.nodeName=${node_name}" -o json &&
+      printf '\n' &&
+      ${KUBECTL} get node "${node_name}" -o json
+  } | OUTPUT_MODE="${output_mode}" LOCAL_IP="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}" \
+    SERVICE_IP="${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" python3 -c '
 import ipaddress
 import json
 import os
 import sys
 
-payload = json.loads(os.environ["POD_INVENTORY"])
-node = json.loads(os.environ["NODE_INVENTORY"])
+document = sys.stdin.read()
+decoder = json.JSONDecoder()
+
+def decode_next(offset):
+    while offset < len(document) and document[offset].isspace():
+        offset += 1
+    if offset >= len(document):
+        raise ValueError("missing JSON inventory document")
+    return decoder.raw_decode(document, offset)
+
+payload, offset = decode_next(0)
+node, offset = decode_next(offset)
+if document[offset:].strip():
+    raise ValueError("unexpected trailing JSON inventory data")
 external_ipv4 = set()
 for address in (node.get("status") or {}).get("addresses") or []:
     if address.get("type") != "ExternalIP":
