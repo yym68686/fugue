@@ -1216,7 +1216,10 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
       *"get daemonset fugue-fugue-image-cache -o json"*) printf '%s' "${IMAGE_CACHE_TEST_DS}" ;;
       *"get controllerrevisions.apps "*) printf '%s' "${IMAGE_CACHE_TEST_REVISIONS}" ;;
       *"get pods "*"component=image-cache"*) printf '%s' "${IMAGE_CACHE_TEST_PODS}" ;;
-      *"get nodes -o json"*) printf '%s' "${IMAGE_CACHE_TEST_NODES}" ;;
+      *"get nodes -o json"*)
+        printf '%s' "${IMAGE_CACHE_TEST_NODES}"
+        [[ "${IMAGE_CACHE_TEST_FAIL_NODES_AFTER_OUTPUT:-false}" != "true" ]]
+        ;;
       *) return 1 ;;
     esac
   }
@@ -1266,6 +1269,42 @@ print(json.dumps(doc, separators=(",", ":")))
   if image_cache_rollout_plan_json fugue-fugue-image-cache rev-new >/dev/null 2>&1; then
     fail "image-cache plan must reject an active Pod without kubelet container status"
   fi
+  IMAGE_CACHE_TEST_PODS="${valid_pods}"
+
+  image_cache_arg_max="$(getconf ARG_MAX)"
+  image_cache_large_inventory_tmpdir="$(mktemp -d)"
+  IMAGE_CACHE_TEST_NODES="$(python3 -c '
+import json
+import sys
+
+doc = json.loads(sys.argv[1])
+doc["items"][0].setdefault("metadata", {}).setdefault("annotations", {})["large-inventory-fixture"] = "x" * int(sys.argv[2])
+print(json.dumps(doc, separators=(",", ":")))
+' "${valid_nodes}" "$((image_cache_arg_max + 65536))")"
+  if (( ${#IMAGE_CACHE_TEST_NODES} <= image_cache_arg_max )); then
+    fail "image-cache large inventory fixture must exceed the process argument and environment limit"
+  fi
+  export TMPDIR="${image_cache_large_inventory_tmpdir}"
+  image_cache_large_plan="$(image_cache_rollout_plan_json fugue-fugue-image-cache rev-new)"
+  assert_eq "$(image_cache_plan_field "${image_cache_large_plan}" daemonset_uid)" "ds-uid" "image-cache plan reads large cluster inventory without environment arguments"
+  if find "${image_cache_large_inventory_tmpdir}" -mindepth 1 -print -quit | grep -q .; then
+    fail "image-cache plan must remove its private inventory directory"
+  fi
+  rm -rf "${image_cache_large_inventory_tmpdir}"
+  IMAGE_CACHE_TEST_NODES="${valid_nodes}"
+
+  unset TMPDIR
+  image_cache_failed_inventory_tmpdir="$(mktemp -d)"
+  export TMPDIR="${image_cache_failed_inventory_tmpdir}"
+  IMAGE_CACHE_TEST_FAIL_NODES_AFTER_OUTPUT=true
+  if image_cache_rollout_plan_json fugue-fugue-image-cache rev-new >/dev/null 2>&1; then
+    fail "image-cache plan must fail when kubectl returns nonzero after partial inventory output"
+  fi
+  if find "${image_cache_failed_inventory_tmpdir}" -mindepth 1 -print -quit | grep -q .; then
+    fail "image-cache plan must remove partial inventory files after kubectl failure"
+  fi
+  rm -rf "${image_cache_failed_inventory_tmpdir}"
+  unset IMAGE_CACHE_TEST_FAIL_NODES_AFTER_OUTPUT IMAGE_CACHE_TEST_NODES TMPDIR
 )
 
 (
@@ -1348,6 +1387,25 @@ assert operations == [
   if image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid rev-stable >/dev/null 2>&1; then
     fail "rollback freeze must reject ControllerRevision data that differs from the live Pod template"
   fi
+  image_cache_freeze_arg_max="$(getconf ARG_MAX)"
+  image_cache_freeze_tmpdir="$(mktemp -d)"
+  IMAGE_CACHE_FREEZE_REVISIONS="$(python3 -c '
+import json
+import sys
+
+doc = json.loads(sys.argv[1])
+doc["items"][0].setdefault("metadata", {}).setdefault("annotations", {})["large-inventory-fixture"] = "x" * int(sys.argv[2])
+print(json.dumps(doc, separators=(",", ":")))
+' "${valid_freeze_revisions}" "$((image_cache_freeze_arg_max + 65536))")"
+  export TMPDIR="${image_cache_freeze_tmpdir}"
+  large_freeze_snapshot="$(image_cache_rollback_freeze_snapshot_json fugue-fugue-image-cache ds-uid rev-stable)"
+  assert_eq "$(image_cache_plan_field "${large_freeze_snapshot}" target_revision)" "rev-stable" "rollback freeze reads a large ControllerRevision inventory without environment arguments"
+  if find "${image_cache_freeze_tmpdir}" -mindepth 1 -print -quit | grep -q .; then
+    fail "rollback freeze must remove its private inventory directory"
+  fi
+  rm -rf "${image_cache_freeze_tmpdir}"
+  unset TMPDIR
+
   IMAGE_CACHE_FREEZE_REVISIONS="$(REVISIONS_JSON="${valid_freeze_revisions}" python3 -c '
 import json
 import os

@@ -4047,42 +4047,54 @@ print(revision_hash)
 '
 }
 
-image_cache_rollout_plan_json() {
+image_cache_rollout_plan_json() (
   local daemonset_name="$1"
   local target_revision="$2"
-  local daemonset_json=""
-  local controller_revisions_json=""
-  local pods_json=""
-  local nodes_json=""
+  local inventory_dir=""
 
-  daemonset_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" -o json)" || return 1
-  controller_revisions_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
-    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
-  pods_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
-    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
-  nodes_json="$(${KUBECTL} get nodes -o json)" || return 1
-  DS_JSON="${daemonset_json}" REVISIONS_JSON="${controller_revisions_json}" PODS_JSON="${pods_json}" NODES_JSON="${nodes_json}" \
-    EXPECTED_DS="${daemonset_name}" TARGET_REVISION="${target_revision}" \
-    PRESERVED_NODES="${NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES}" python3 -c '
+  umask 077
+  inventory_dir="$(mktemp -d)" || return 1
+  trap 'rm -rf -- "${inventory_dir}"' EXIT
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" \
+    -o json >"${inventory_dir}/daemonset.json" || return 1
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" \
+    -o json >"${inventory_dir}/controller-revisions.json" || return 1
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" \
+    -o json >"${inventory_dir}/pods.json" || return 1
+  ${KUBECTL} get nodes -o json >"${inventory_dir}/nodes.json" || return 1
+  printf '%s\n' "${NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES}" >"${inventory_dir}/preserved-nodes.txt" || return 1
+  python3 - \
+    "${inventory_dir}/daemonset.json" \
+    "${inventory_dir}/controller-revisions.json" \
+    "${inventory_dir}/pods.json" \
+    "${inventory_dir}/nodes.json" \
+    "${inventory_dir}/preserved-nodes.txt" \
+    "${daemonset_name}" \
+    "${target_revision}" <<'PY'
 import json
-import os
+import sys
+from pathlib import Path
 
 def reject(reason):
     raise SystemExit("image-cache offline rollout rejected: " + reason)
 
 try:
-    daemonset = json.loads(os.environ["DS_JSON"])
-    revision_list = json.loads(os.environ["REVISIONS_JSON"])
-    pod_list = json.loads(os.environ["PODS_JSON"])
-    node_list = json.loads(os.environ["NODES_JSON"])
-except json.JSONDecodeError:
+    daemonset = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    revision_list = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+    pod_list = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+    node_list = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+    preserved_raw = Path(sys.argv[5]).read_text(encoding="utf-8")
+except (OSError, UnicodeError, json.JSONDecodeError):
     reject("cluster inventory JSON is invalid")
 
-preserved = [item.strip() for item in os.environ["PRESERVED_NODES"].splitlines() if item.strip()]
+expected_daemonset = sys.argv[6]
+preserved = [item.strip() for item in preserved_raw.splitlines() if item.strip()]
 if not preserved or len(preserved) != len(set(preserved)):
     reject("preserved node cohort is empty or duplicated")
 preserved_set = set(preserved)
-target_revision = os.environ["TARGET_REVISION"].strip()
+target_revision = sys.argv[7].strip()
 if not target_revision:
     reject("target ControllerRevision is empty")
 
@@ -4095,7 +4107,7 @@ annotations = metadata.get("annotations")
 if (
     str(daemonset.get("apiVersion") or "") != "apps/v1"
     or str(daemonset.get("kind") or "") != "DaemonSet"
-    or str(metadata.get("name") or "") != os.environ["EXPECTED_DS"]
+    or str(metadata.get("name") or "") != expected_daemonset
     or not str(metadata.get("uid") or "")
     or not str(metadata.get("resourceVersion") or "")
     or str(metadata.get("generation") or "") != str(status.get("observedGeneration") or "")
@@ -4138,12 +4150,12 @@ for revision in revision_list["items"]:
         or revision.get("kind") != "ControllerRevision"
         or owner.get("apiVersion") != "apps/v1"
         or owner.get("kind") != "DaemonSet"
-        or owner.get("name") != os.environ["EXPECTED_DS"]
+        or owner.get("name") != expected_daemonset
         or str(owner.get("uid") or "") != daemonset_uid
     ):
         continue
     revision_hash = str((revision_metadata.get("labels") or {}).get("controller-revision-hash") or "")
-    if not revision_hash or str(revision_metadata.get("name") or "") != os.environ["EXPECTED_DS"] + "-" + revision_hash:
+    if not revision_hash or str(revision_metadata.get("name") or "") != expected_daemonset + "-" + revision_hash:
         reject("owned ControllerRevision hash identity is invalid")
     known_revisions.add(revision_hash)
 if target_revision not in known_revisions:
@@ -4189,7 +4201,7 @@ for pod in pod_list.get("items") or []:
     if (
         owner.get("apiVersion") != "apps/v1"
         or owner.get("kind") != "DaemonSet"
-        or owner.get("name") != os.environ["EXPECTED_DS"]
+        or owner.get("name") != expected_daemonset
         or str(owner.get("uid") or "") != daemonset_uid
     ):
         continue
@@ -4324,8 +4336,8 @@ print(json.dumps({
     "active_pods": sorted(active_pods, key=lambda item: item["node"]),
     "pods": sorted(pods, key=lambda item: item["node"]),
 }, sort_keys=True, separators=(",", ":")))
-'
-}
+PY
+)
 
 image_cache_plan_field() {
   local plan_json="$1"
@@ -4478,33 +4490,46 @@ print(json.dumps([
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" patch daemonset "${daemonset_name}" --type=json --patch "${patch}" >/dev/null
 }
 
-image_cache_rollback_freeze_snapshot_json() {
+image_cache_rollback_freeze_snapshot_json() (
   local daemonset_name="$1"
   local expected_daemonset_uid="$2"
   local expected_target_revision="$3"
-  local daemonset_json=""
-  local controller_revisions_json=""
+  local inventory_dir=""
 
   [[ -n "${expected_daemonset_uid}" && -n "${expected_target_revision}" ]] || return 1
-  daemonset_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" -o json)" || return 1
-  controller_revisions_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
-    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" -o json)" || return 1
-  DS_JSON="${daemonset_json}" REVISIONS_JSON="${controller_revisions_json}" \
-    EXPECTED_DS="${daemonset_name}" EXPECTED_NAMESPACE="${FUGUE_NAMESPACE}" \
-    EXPECTED_UID="${expected_daemonset_uid}" EXPECTED_TARGET_REVISION="${expected_target_revision}" python3 -c '
+  umask 077
+  inventory_dir="$(mktemp -d)" || return 1
+  trap 'rm -rf -- "${inventory_dir}"' EXIT
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonset "${daemonset_name}" \
+    -o json >"${inventory_dir}/daemonset.json" || return 1
+  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get controllerrevisions.apps \
+    -l "app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=image-cache" \
+    -o json >"${inventory_dir}/controller-revisions.json" || return 1
+  python3 - \
+    "${inventory_dir}/daemonset.json" \
+    "${inventory_dir}/controller-revisions.json" \
+    "${daemonset_name}" \
+    "${FUGUE_NAMESPACE}" \
+    "${expected_daemonset_uid}" \
+    "${expected_target_revision}" <<'PY'
 import copy
 import json
-import os
+import sys
+from pathlib import Path
 
 def reject(reason):
     raise SystemExit("image-cache rollback freeze rejected: " + reason)
 
 try:
-    daemonset = json.loads(os.environ["DS_JSON"])
-    revision_list = json.loads(os.environ["REVISIONS_JSON"])
-except json.JSONDecodeError:
+    daemonset = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    revision_list = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
     reject("cluster inventory JSON is invalid")
 
+expected_daemonset = sys.argv[3]
+expected_namespace = sys.argv[4]
+expected_uid = sys.argv[5]
+expected_target_revision = sys.argv[6]
 metadata = daemonset.get("metadata") or {}
 spec = daemonset.get("spec") or {}
 template = spec.get("template") or {}
@@ -4512,9 +4537,9 @@ annotations = metadata.get("annotations")
 if (
     daemonset.get("apiVersion") != "apps/v1"
     or daemonset.get("kind") != "DaemonSet"
-    or str(metadata.get("name") or "") != os.environ["EXPECTED_DS"]
-    or str(metadata.get("namespace") or "") != os.environ["EXPECTED_NAMESPACE"]
-    or str(metadata.get("uid") or "") != os.environ["EXPECTED_UID"]
+    or str(metadata.get("name") or "") != expected_daemonset
+    or str(metadata.get("namespace") or "") != expected_namespace
+    or str(metadata.get("uid") or "") != expected_uid
     or not str(metadata.get("resourceVersion") or "")
     or not str(metadata.get("generation") or "")
     or not isinstance(template, dict)
@@ -4557,9 +4582,9 @@ for revision in revision_list["items"]:
     if (
         revision.get("apiVersion") != "apps/v1"
         or revision.get("kind") != "ControllerRevision"
-        or str(revision_metadata.get("namespace") or "") != os.environ["EXPECTED_NAMESPACE"]
-        or revision_hash != os.environ["EXPECTED_TARGET_REVISION"]
-        or str(revision_metadata.get("name") or "") != os.environ["EXPECTED_DS"] + "-" + revision_hash
+        or str(revision_metadata.get("namespace") or "") != expected_namespace
+        or revision_hash != expected_target_revision
+        or str(revision_metadata.get("name") or "") != expected_daemonset + "-" + revision_hash
         or len(owners) != 1
     ):
         continue
@@ -4567,8 +4592,8 @@ for revision in revision_list["items"]:
     if (
         owner.get("apiVersion") != "apps/v1"
         or owner.get("kind") != "DaemonSet"
-        or owner.get("name") != os.environ["EXPECTED_DS"]
-        or str(owner.get("uid") or "") != os.environ["EXPECTED_UID"]
+        or owner.get("name") != expected_daemonset
+        or str(owner.get("uid") or "") != expected_uid
     ):
         continue
     revision_template = copy.deepcopy((((revision.get("data") or {}).get("spec") or {}).get("template")))
@@ -4582,10 +4607,10 @@ print(json.dumps({
     "generation": str(metadata["generation"]),
     "resource_version": str(metadata["resourceVersion"]),
     "strategy": strategy_type,
-    "target_revision": os.environ["EXPECTED_TARGET_REVISION"],
+    "target_revision": expected_target_revision,
 }, sort_keys=True, separators=(",", ":")))
-'
-}
+PY
+)
 
 image_cache_freeze_ondelete_after_helm_rollback() {
   local daemonset_name="$1"
