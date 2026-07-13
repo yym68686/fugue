@@ -64,10 +64,12 @@ spec:
             {{- if .Values.dns.publicHostPorts.enabled }}
             - name: dns-udp
               containerPort: 53
+              hostIP: {{ required "dns.publicHostPorts.hostIP is required when public DNS host ports are enabled" .Values.dns.publicHostPorts.hostIP | quote }}
               hostPort: {{ .Values.dns.publicHostPorts.udp }}
               protocol: UDP
             - name: dns-tcp
               containerPort: 53
+              hostIP: {{ .Values.dns.publicHostPorts.hostIP | quote }}
               hostPort: {{ .Values.dns.publicHostPorts.tcp }}
               protocol: TCP
             {{- end }}

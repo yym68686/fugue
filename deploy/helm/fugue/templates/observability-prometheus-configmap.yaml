@@ -71,13 +71,17 @@ data:
             regex: {{ .Release.Name | quote }}
             action: keep
           - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
-            regex: node-local-dns
+            regex: "node-local-dns|node-local-dns-active"
             action: keep
           - source_labels: [__meta_kubernetes_endpoint_port_name]
             regex: "metrics|setup-metrics"
             action: keep
           - source_labels: [__meta_kubernetes_pod_node_name]
             target_label: node
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+            target_label: component
+          - source_labels: [__meta_kubernetes_service_label_fugue_io_node_local_dns_cohort]
+            target_label: cohort
           - source_labels: [__meta_kubernetes_endpoint_port_name]
             target_label: endpoint
           - source_labels: [__meta_kubernetes_namespace]
@@ -230,7 +234,7 @@ data:
               summary: "NodeLocal DNSCache network setup failed"
               description: "A NodeLocal DNSCache instance reported an interface or iptables setup error. Stop the rollout and inspect the affected node."
           - alert: FugueNodeLocalDNSMetricsMissing
-            expr: up{job="fugue-node-local-dns"} == 0 or absent(up{job="fugue-node-local-dns"})
+            expr: up{job="fugue-node-local-dns",cohort="active"} == 0 or absent(up{job="fugue-node-local-dns",cohort="active"})
             for: 5m
             labels:
               severity: warning

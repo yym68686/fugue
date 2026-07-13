@@ -42,7 +42,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fugue-public-data-plane-production-v1
+  group: fugue-production-cluster-mutation-v1
   cancel-in-progress: false
 
 jobs:

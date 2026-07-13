@@ -570,6 +570,9 @@ nodeLocalDNS:
   # shadow only listens on localIP for explicit validation queries. iptables
   # additionally owns kubeDNSServiceIP so existing Pod DNS traffic is cached.
   mode: shadow
+  # Compatibility Corefile mode for Pods created before mode-specific key
+  # projection. Empty defaults to mode; phased rollouts pin the prior mode.
+  legacyMode: ""
   namespace: kube-system
   localIP: 169.254.20.10
   # Required when enabled. Production entrypoints discover this from the live
@@ -583,6 +586,9 @@ nodeLocalDNS:
     digest: sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739
     pullPolicy: IfNotPresent
   updateStrategy:
+    # OnDelete is fail-closed for DNS interception changes: the release
+    # workflow replaces and verifies one node-local cache Pod at a time.
+    type: OnDelete
     maxUnavailable: 1
   minReadySeconds: 10
   terminationGracePeriodSeconds: 30
@@ -590,6 +596,13 @@ nodeLocalDNS:
     k8s-app: kube-dns
   nodeSelector:
     kubernetes.io/os: linux
+  # Required when enabled. Each entry is an exact kubernetes.io/hostname value;
+  # the chart renders the cohort as required node affinity.
+  targetNodes: []
+  # Explicitly quarantined nodes that must retain their previous NodeLocal mode
+  # while the online targetNodes cohort rolls out independently. When non-empty,
+  # legacyMode is required and the two hostname lists must be disjoint.
+  preservedOfflineNodes: []
   tolerations:
     - key: CriticalAddonsOnly
       operator: Exists
@@ -641,6 +654,7 @@ dns:
     mountPath: /var/lib/fugue/dns
   publicHostPorts:
     enabled: false
+    hostIP: ""
     udp: 53
     tcp: 53
   nodeSelector:

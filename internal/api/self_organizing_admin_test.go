@@ -616,3 +616,79 @@ func TestActiveInventoryFiltersNodesAbsentFromNodePolicyInventory(t *testing.T) 
 		t.Fatalf("expected rejoined DNS node to be admitted, got %#v", activeDNS)
 	}
 }
+
+func TestAutonomyActiveInventoryUsesHeartbeatFreshnessAndFailsClosedWhenEmpty(t *testing.T) {
+	now := time.Now().UTC()
+	stale := now.Add(-platformNodeHeartbeatStaleAfter - time.Second)
+	policies := []model.ClusterNodePolicyStatus{
+		{
+			NodeName: "fresh-node",
+			Policy: &model.ClusterNodePolicy{
+				EffectiveEdge: true,
+				EffectiveDNS:  true,
+			},
+		},
+		{
+			NodeName: "stale-node",
+			Policy: &model.ClusterNodePolicy{
+				EffectiveEdge: true,
+				EffectiveDNS:  true,
+			},
+		},
+	}
+	edgeNodes := []model.EdgeNode{
+		{
+			ID:                 "fresh-node",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_fresh",
+			ServingGeneration:  "routegen_fresh",
+			CaddyRouteCount:    1,
+			LastHeartbeatAt:    &now,
+		},
+		{
+			ID:                 "stale-node",
+			Status:             model.EdgeHealthHealthy,
+			Healthy:            true,
+			RouteBundleVersion: "routegen_stale",
+			ServingGeneration:  "routegen_stale",
+			CaddyRouteCount:    1,
+			LastHeartbeatAt:    &stale,
+		},
+	}
+	dnsNodes := []model.DNSNode{
+		{
+			ID:                "fresh-node",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			DNSBundleVersion:  "dnsgen_fresh",
+			ServingGeneration: "dnsgen_fresh",
+			LastHeartbeatAt:   &now,
+		},
+		{
+			ID:                "stale-node",
+			Status:            model.EdgeHealthHealthy,
+			Healthy:           true,
+			DNSBundleVersion:  "dnsgen_stale",
+			ServingGeneration: "dnsgen_stale",
+			LastHeartbeatAt:   &stale,
+		},
+	}
+
+	activeEdges := activeEdgeNodesForAutonomy(edgeNodes, policies, now)
+	if len(activeEdges) != 1 || activeEdges[0].ID != "fresh-node" {
+		t.Fatalf("expected autonomy edge inventory to exclude stale heartbeat, got %#v", activeEdges)
+	}
+	activeDNS := activeDNSNodesForAutonomy(dnsNodes, policies, now)
+	if len(activeDNS) != 1 || activeDNS[0].ID != "fresh-node" {
+		t.Fatalf("expected autonomy DNS inventory to exclude stale heartbeat, got %#v", activeDNS)
+	}
+
+	onlyStalePolicies := policies[1:]
+	if got := activeEdgeNodesForAutonomy(edgeNodes[1:], onlyStalePolicies, now); len(got) != 0 || edgeInventoryHealthy(got) {
+		t.Fatalf("expected all-stale edge inventory to be empty and fail closed, got %#v", got)
+	}
+	if got := activeDNSNodesForAutonomy(dnsNodes[1:], onlyStalePolicies, now); len(got) != 0 || dnsInventoryHealthy(got) {
+		t.Fatalf("expected all-stale DNS inventory to be empty and fail closed, got %#v", got)
+	}
+}

@@ -1202,18 +1202,25 @@ authoritative_dns_query_with_retry() {
   local record_type="$2"
   local name="$3"
   local server="$4"
+  local transport="${5:-udp}"
   local attempts="${FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS:-6}"
   local delay_seconds="${FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS:-2}"
   local timeout_seconds="${FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_TIMEOUT_SECONDS:-3}"
   local attempt=1
   local output_file
+  local host_args=()
 
   [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS must be a positive integer"
   [[ "${delay_seconds}" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS must be a non-negative number"
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_TIMEOUT_SECONDS must be a positive integer"
+  case "${transport}" in
+    udp) host_args=(-W "${timeout_seconds}") ;;
+    tcp) host_args=(-W "${timeout_seconds}" -T) ;;
+    *) fail "authoritative DNS transport must be udp or tcp" ;;
+  esac
   output_file="$(mktemp "${TMPDIR:-/tmp}/fugue-authoritative-dns.XXXXXX")"
   while (( attempt <= attempts )); do
-    if host -W "${timeout_seconds}" -t "${record_type}" "${name}" "${server}" >"${output_file}" 2>&1 &&
+    if host "${host_args[@]}" -t "${record_type}" "${name}" "${server}" >"${output_file}" 2>&1 &&
       grep -Eiq ' has (IPv6 )?address | has SOA record | is an alias for ' "${output_file}"; then
       rm -f "${output_file}"
       return 0
@@ -1237,6 +1244,8 @@ check_authoritative_dns_on_nodes() {
   local hostname
   local checked_nodes=0
   local checked_hosts=0
+  local transport
+  local transport_label
 
   if ! zone="$(dns_zone_for_daemonset "${daemonset_name}")"; then
     error "could not read DNS zone from ${daemonset_name}"
@@ -1251,24 +1260,27 @@ check_authoritative_dns_on_nodes() {
     host_ip="$(trim_field "${host_ip}")"
     [[ -n "${host_ip}" ]] || continue
     checked_nodes=$((checked_nodes + 1))
-    log "checking authoritative DNS SOA server=${host_ip} zone=${zone}"
-    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
-      authoritative_dns_query_with_retry "${daemonset_name} server=${host_ip} zone=${zone} type=SOA" SOA "${zone}" "${host_ip}" || return $?
-    fi
-    checked_hosts=0
-    while IFS= read -r hostname; do
-      hostname="$(trim_field "${hostname}")"
-      [[ -n "${hostname}" ]] || continue
-      checked_hosts=$((checked_hosts + 1))
-      log "checking authoritative DNS A server=${host_ip} hostname=${hostname}"
+    for transport in udp tcp; do
+      transport_label="$(printf '%s' "${transport}" | tr '[:lower:]' '[:upper:]')"
+      log "checking authoritative DNS ${transport_label} SOA server=${host_ip} zone=${zone}"
       if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
-        authoritative_dns_query_with_retry "${daemonset_name} server=${host_ip} hostname=${hostname} type=A" A "${hostname}" "${host_ip}" || return $?
+        authoritative_dns_query_with_retry "${daemonset_name} server=${host_ip} zone=${zone} transport=${transport} type=SOA" SOA "${zone}" "${host_ip}" "${transport}" || return $?
       fi
-    done < <(authoritative_dns_hostnames)
-    if (( checked_hosts == 0 )); then
-      error "DNS authoritative validation requires at least one representative hostname"
-      return 1
-    fi
+      checked_hosts=0
+      while IFS= read -r hostname; do
+        hostname="$(trim_field "${hostname}")"
+        [[ -n "${hostname}" ]] || continue
+        checked_hosts=$((checked_hosts + 1))
+        log "checking authoritative DNS ${transport_label} A server=${host_ip} hostname=${hostname}"
+        if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
+          authoritative_dns_query_with_retry "${daemonset_name} server=${host_ip} hostname=${hostname} transport=${transport} type=A" A "${hostname}" "${host_ip}" "${transport}" || return $?
+        fi
+      done < <(authoritative_dns_hostnames)
+      if (( checked_hosts == 0 )); then
+        error "DNS authoritative validation requires at least one representative hostname"
+        return 1
+      fi
+    done
   done < <(node_ips_for_daemonset "${daemonset_name}")
   if (( checked_nodes == 0 )); then
     error "DNS daemonset ${daemonset_name} has no node IPs to validate"
@@ -1449,6 +1461,616 @@ patch_dns_template() {
   fi
   kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=strategic -p "${patch}" >/dev/null || return $?
   wait_daemonset_observed "${daemonset_name}" || return $?
+}
+
+dns_manifest_snapshot_query() {
+  local snapshot_file="$1"
+  local action="$2"
+  local daemonset_name="${3:-}"
+
+  python3 -c '
+import json
+import re
+import sys
+
+path, action, requested_name = sys.argv[1:4]
+try:
+    with open(path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+except Exception as exc:
+    raise SystemExit(f"could not read DNS manifest snapshot {path}: {exc}")
+
+if doc.get("apiVersion") != "fugue.io/v1alpha1":
+    raise SystemExit("DNS manifest snapshot apiVersion must be fugue.io/v1alpha1")
+if doc.get("kind") != "DNSManifestOnDeleteSnapshot":
+    raise SystemExit("DNS manifest snapshot kind must be DNSManifestOnDeleteSnapshot")
+namespace = doc.get("namespace")
+if not isinstance(namespace, str) or not namespace.strip():
+    raise SystemExit("DNS manifest snapshot namespace is required")
+items = doc.get("daemonSets")
+if not isinstance(items, list) or not items:
+    raise SystemExit("DNS manifest snapshot must contain at least one daemonSet")
+
+by_name = {}
+for item in items:
+    if not isinstance(item, dict):
+        raise SystemExit("DNS manifest snapshot daemonSet entry must be an object")
+    name = item.get("name")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", name):
+        raise SystemExit(f"invalid DNS manifest snapshot daemonSet name: {name!r}")
+    if name in by_name:
+        raise SystemExit(f"duplicate DNS manifest snapshot daemonSet: {name}")
+    daemonset_uid = item.get("uid")
+    if not isinstance(daemonset_uid, str) or not daemonset_uid:
+        raise SystemExit(f"DNS manifest snapshot daemonSet {name} has no UID")
+    update_strategy = item.get("updateStrategy")
+    update_revision = item.get("updateRevision")
+    template = item.get("template")
+    pods = item.get("pods")
+    if not isinstance(update_strategy, dict):
+        raise SystemExit(f"DNS manifest snapshot daemonSet {name} has no updateStrategy object")
+    if not isinstance(update_revision, str) or not update_revision:
+        raise SystemExit(f"DNS manifest snapshot daemonSet {name} has no updateRevision")
+    if not isinstance(template, dict) or not isinstance(template.get("spec"), dict):
+        raise SystemExit(f"DNS manifest snapshot daemonSet {name} has no pod template")
+    if not isinstance(pods, list) or not pods:
+        raise SystemExit(f"DNS manifest snapshot daemonSet {name} has no pods")
+    seen_pod_names = set()
+    seen_pod_uids = set()
+    for pod in pods:
+        if not isinstance(pod, dict):
+            raise SystemExit(f"DNS manifest snapshot daemonSet {name} has an invalid pod entry")
+        pod_name = pod.get("name")
+        pod_uid = pod.get("uid")
+        pod_revision = pod.get("revision")
+        if (
+            not isinstance(pod_name, str)
+            or not pod_name
+            or not isinstance(pod_uid, str)
+            or not pod_uid
+            or pod_revision != update_revision
+        ):
+            raise SystemExit(f"DNS manifest snapshot daemonSet {name} has a pod without matching name/UID/revision")
+        if pod_name in seen_pod_names or pod_uid in seen_pod_uids:
+            raise SystemExit(f"DNS manifest snapshot daemonSet {name} has duplicate pod identity")
+        seen_pod_names.add(pod_name)
+        seen_pod_uids.add(pod_uid)
+    by_name[name] = item
+
+if action == "validate":
+    raise SystemExit(0)
+if action == "namespace":
+    print(namespace)
+    raise SystemExit(0)
+if action == "names":
+    for name in sorted(by_name):
+        print(name)
+    raise SystemExit(0)
+if requested_name not in by_name:
+    raise SystemExit(f"DNS manifest snapshot has no daemonSet {requested_name}")
+item = by_name[requested_name]
+if action == "uids":
+    for pod in sorted(item["pods"], key=lambda value: value["name"]):
+        print(pod["uid"])
+elif action == "update-revision":
+    print(item["updateRevision"])
+elif action == "restore-ondelete-patch":
+    patch = [
+        {"op": "replace", "path": "/spec/updateStrategy", "value": {"type": "OnDelete"}},
+        {"op": "replace", "path": "/spec/template", "value": item["template"]},
+    ]
+    print(json.dumps(patch, separators=(",", ":")))
+elif action == "restore-strategy-patch":
+    patch = [{"op": "replace", "path": "/spec/updateStrategy", "value": item["updateStrategy"]}]
+    print(json.dumps(patch, separators=(",", ":")))
+else:
+    raise SystemExit(f"unsupported DNS manifest snapshot query: {action}")
+' "${snapshot_file}" "${action}" "${daemonset_name}"
+}
+
+capture_dns_manifest_snapshot() {
+  local snapshot_file="$1"
+  local snapshot_dir
+  local work_dir
+  local output_file
+  local daemonset_name
+
+  snapshot_file="$(trim_field "${snapshot_file}")"
+  [[ -n "${snapshot_file}" ]] || {
+    error "DNS manifest snapshot path is required"
+    return 1
+  }
+  snapshot_dir="$(dirname "${snapshot_file}")"
+  mkdir -p "${snapshot_dir}" || return $?
+  work_dir="$(mktemp -d "${snapshot_dir}/.fugue-dns-manifest-snapshot.XXXXXX")" || return $?
+  output_file="${work_dir}/snapshot.json"
+
+  if ! kubectl_cmd -n "${FUGUE_NAMESPACE}" get ds -o json >"${work_dir}/daemonsets.json"; then
+    rm -rf "${work_dir}"
+    return 1
+  fi
+  if ! kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -o json >"${work_dir}/pods.json"; then
+    rm -rf "${work_dir}"
+    return 1
+  fi
+  if ! python3 - "${FUGUE_NAMESPACE}" "${work_dir}/daemonsets.json" "${work_dir}/pods.json" >"${output_file}" <<'PY'
+import datetime
+import json
+import sys
+
+namespace, daemonsets_path, pods_path = sys.argv[1:4]
+with open(daemonsets_path, encoding="utf-8") as handle:
+    daemonsets_doc = json.load(handle)
+with open(pods_path, encoding="utf-8") as handle:
+    pods_doc = json.load(handle)
+
+def is_dns_daemonset(item):
+    labels = item.get("metadata", {}).get("labels") or {}
+    component = (labels.get("app.kubernetes.io/component") or "").strip()
+    return (
+        labels.get("fugue.io/rollout-subsystem") == "public-data-plane"
+        and (component == "dns" or component.startswith("dns-"))
+    )
+
+def pod_ready(pod):
+    status = pod.get("status") or {}
+    if status.get("phase") != "Running" or pod.get("metadata", {}).get("deletionTimestamp"):
+        return False
+    return any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in status.get("conditions") or []
+    )
+
+daemonsets = []
+all_pods = pods_doc.get("items") or []
+for item in sorted(
+    (value for value in daemonsets_doc.get("items") or [] if is_dns_daemonset(value)),
+    key=lambda value: value.get("metadata", {}).get("name", ""),
+):
+    metadata = item.get("metadata") or {}
+    spec = item.get("spec") or {}
+    status = item.get("status") or {}
+    name = metadata.get("name") or ""
+    uid = metadata.get("uid") or ""
+    selector = (spec.get("selector") or {}).get("matchLabels") or {}
+    template = spec.get("template")
+    update_strategy = spec.get("updateStrategy") or {"type": "RollingUpdate"}
+    if not name or not uid or not selector or not isinstance(template, dict):
+        raise SystemExit(f"DNS daemonSet {name or '<unknown>'} is missing UID, selector, or template")
+    generation = metadata.get("generation")
+    observed = status.get("observedGeneration")
+    desired = status.get("desiredNumberScheduled") or 0
+    updated = status.get("updatedNumberScheduled") or 0
+    ready = status.get("numberReady") or 0
+    available = status.get("numberAvailable") or 0
+    unavailable = status.get("numberUnavailable") or 0
+    misscheduled = status.get("numberMisscheduled") or 0
+    update_revision = status.get("updateRevision") or ""
+    if (
+        generation != observed
+        or desired <= 0
+        or updated != desired
+        or ready != desired
+        or available != desired
+        or unavailable != 0
+        or misscheduled != 0
+        or not update_revision
+    ):
+        raise SystemExit(
+            f"DNS daemonSet {name} is not stable: generation={generation} observed={observed} "
+            f"desired={desired} updated={updated} ready={ready} available={available} "
+            f"unavailable={unavailable} misscheduled={misscheduled} updateRevision={update_revision or '<empty>'}"
+        )
+    matching_pods = []
+    for pod in all_pods:
+        labels = pod.get("metadata", {}).get("labels") or {}
+        if all(labels.get(key) == value for key, value in selector.items()):
+            matching_pods.append(pod)
+    if len(matching_pods) != desired:
+        raise SystemExit(f"DNS daemonSet {name} has {len(matching_pods)} pods; expected {desired}")
+    pod_entries = []
+    for pod in sorted(matching_pods, key=lambda value: value.get("metadata", {}).get("name", "")):
+        pod_metadata = pod.get("metadata") or {}
+        pod_name = pod_metadata.get("name") or ""
+        pod_uid = pod_metadata.get("uid") or ""
+        pod_labels = pod_metadata.get("labels") or {}
+        pod_revision = pod_labels.get("controller-revision-hash") or ""
+        owner_matches = any(
+            owner.get("apiVersion") == "apps/v1"
+            and owner.get("kind") == "DaemonSet"
+            and owner.get("name") == name
+            and owner.get("uid") == uid
+            and owner.get("controller") is True
+            for owner in pod_metadata.get("ownerReferences") or []
+        )
+        if (
+            not pod_name
+            or not pod_uid
+            or not pod_ready(pod)
+            or not owner_matches
+            or pod_revision != update_revision
+        ):
+            raise SystemExit(
+                f"DNS daemonSet {name} has a pod that is not owned, Ready, and pinned to updateRevision {update_revision}"
+            )
+        pod_entries.append({
+            "name": pod_name,
+            "uid": pod_uid,
+            "nodeName": (pod.get("spec") or {}).get("nodeName") or "",
+            "revision": pod_revision,
+        })
+    daemonsets.append({
+        "name": name,
+        "uid": uid,
+        "updateStrategy": update_strategy,
+        "updateRevision": update_revision,
+        "template": template,
+        "pods": pod_entries,
+    })
+
+if not daemonsets:
+    raise SystemExit(f"no DNS public data-plane daemonSets found in namespace {namespace}")
+snapshot = {
+    "apiVersion": "fugue.io/v1alpha1",
+    "kind": "DNSManifestOnDeleteSnapshot",
+    "namespace": namespace,
+    "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    "daemonSets": daemonsets,
+}
+json.dump(snapshot, sys.stdout, separators=(",", ":"), sort_keys=True)
+sys.stdout.write("\n")
+PY
+  then
+    rm -rf "${work_dir}"
+    return 1
+  fi
+
+  chmod 600 "${output_file}" || {
+    rm -rf "${work_dir}"
+    return 1
+  }
+  if ! dns_manifest_snapshot_query "${output_file}" validate; then
+    rm -rf "${work_dir}"
+    return 1
+  fi
+  for daemonset_name in $(dns_manifest_snapshot_query "${output_file}" names); do
+    if ! dns_manifest_daemonset_matches_snapshot "${output_file}" "${daemonset_name}"; then
+      error "DNS daemonset ${daemonset_name} changed while its pre-Helm snapshot was being captured"
+      rm -rf "${work_dir}"
+      return 1
+    fi
+    if ! dns_manifest_daemonset_update_revision_matches_snapshot "${output_file}" "${daemonset_name}"; then
+      error "DNS daemonset ${daemonset_name} updateRevision changed while its pre-Helm snapshot was being captured"
+      rm -rf "${work_dir}"
+      return 1
+    fi
+    if [[ "$(daemonset_pod_uids "${daemonset_name}")" != "$(dns_manifest_snapshot_query "${output_file}" uids "${daemonset_name}")" ]]; then
+      error "DNS daemonset ${daemonset_name} pod UID set changed while its pre-Helm snapshot was being captured"
+      rm -rf "${work_dir}"
+      return 1
+    fi
+  done
+  if ! mv "${output_file}" "${snapshot_file}"; then
+    rm -rf "${work_dir}"
+    return 1
+  fi
+  rm -rf "${work_dir}"
+  log "captured pre-Helm DNS manifest snapshot at ${snapshot_file}"
+}
+
+dns_manifest_daemonset_state() {
+  local snapshot_file="$1"
+  local daemonset_name="$2"
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import json
+import sys
+
+snapshot_path, name = sys.argv[1:3]
+with open(snapshot_path, encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+live = json.load(sys.stdin)
+entry = next((item for item in snapshot.get("daemonSets") or [] if item.get("name") == name), None)
+if entry is None:
+    raise SystemExit(f"snapshot has no DNS daemonSet {name}")
+if live.get("metadata", {}).get("uid") != entry.get("uid"):
+    raise SystemExit(f"DNS daemonSet {name} UID changed after the pre-Helm snapshot")
+spec = live.get("spec") or {}
+template_changed = spec.get("template") != entry.get("template")
+strategy_changed = (spec.get("updateStrategy") or {"type": "RollingUpdate"}) != entry.get("updateStrategy")
+if template_changed:
+    print("template-changed")
+elif strategy_changed:
+    print("strategy-only")
+else:
+    print("unchanged")
+' "${snapshot_file}" "${daemonset_name}"
+}
+
+dns_manifest_daemonset_matches_snapshot() {
+  local snapshot_file="$1"
+  local daemonset_name="$2"
+  [[ "$(dns_manifest_daemonset_state "${snapshot_file}" "${daemonset_name}")" == "unchanged" ]]
+}
+
+dns_manifest_daemonset_update_revision_matches_snapshot() {
+  local snapshot_file="$1"
+  local daemonset_name="$2"
+  local snapshot_revision
+  local live_revision
+
+  snapshot_revision="$(dns_manifest_snapshot_query "${snapshot_file}" update-revision "${daemonset_name}")" || return $?
+  live_revision="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.updateRevision}')" || return $?
+  [[ -n "${snapshot_revision}" && "${live_revision}" == "${snapshot_revision}" ]]
+}
+
+dns_manifest_daemonset_target_identity() {
+  local daemonset_name="$1"
+
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+metadata = doc.get("metadata") or {}
+spec = doc.get("spec") or {}
+uid = metadata.get("uid")
+generation = metadata.get("generation")
+template = spec.get("template")
+strategy = spec.get("updateStrategy") or {"type": "RollingUpdate"}
+if not isinstance(uid, str) or not uid:
+    raise SystemExit("DNS daemonSet target identity has no UID")
+if not isinstance(generation, int):
+    raise SystemExit("DNS daemonSet target identity has no generation")
+if not isinstance(template, dict) or not isinstance(strategy, dict):
+    raise SystemExit("DNS daemonSet target identity has no template/updateStrategy")
+identity = {
+    "generation": generation,
+    "template": template,
+    "uid": uid,
+    "updateStrategy": strategy,
+}
+print(json.dumps(identity, separators=(",", ":"), sort_keys=True))
+'
+}
+
+dns_manifest_daemonset_matches_target_identity() {
+  local daemonset_name="$1"
+  local expected_identity="$2"
+  local live_identity
+
+  live_identity="$(dns_manifest_daemonset_target_identity "${daemonset_name}")" || return $?
+  if [[ "${live_identity}" != "${expected_identity}" ]]; then
+    error "DNS daemonset ${daemonset_name} target template/updateStrategy identity drifted during the transaction"
+    return 1
+  fi
+}
+
+dns_manifest_daemonset_uses_ondelete() {
+  local daemonset_name="$1"
+  local strategy
+  strategy="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
+  [[ "${strategy:-RollingUpdate}" == "OnDelete" ]]
+}
+
+verify_daemonset_pods_at_update_revision() {
+  local daemonset_name="$1"
+  local selector
+  local update_revision
+  local desired
+
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    return 0
+  fi
+  selector="$(daemonset_selector "${daemonset_name}")" || return $?
+  update_revision="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.updateRevision}')" || return $?
+  desired="$(daemonset_desired_count "${daemonset_name}")"
+  [[ -n "${update_revision}" && "${desired}" != "0" ]] || {
+    error "DNS daemonset ${daemonset_name} has no update revision or desired pods"
+    return 1
+  }
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json | python3 -c '
+import json
+import sys
+
+revision, expected_text, name = sys.argv[1:4]
+expected = int(expected_text)
+doc = json.load(sys.stdin)
+pods = doc.get("items") or []
+if len(pods) != expected:
+    raise SystemExit(f"DNS daemonSet {name} has {len(pods)} pods; expected {expected}")
+for pod in pods:
+    metadata = pod.get("metadata") or {}
+    status = pod.get("status") or {}
+    pod_name = metadata.get("name") or "<unknown>"
+    pod_revision = (metadata.get("labels") or {}).get("controller-revision-hash")
+    ready = any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in status.get("conditions") or []
+    )
+    if status.get("phase") != "Running" or not ready or pod_revision != revision:
+        raise SystemExit(
+            f"DNS daemonSet {name} pod {pod_name} is not Ready at updateRevision {revision}: "
+            f"phase={status.get('phase')} ready={ready} revision={pod_revision}"
+        )
+' "${update_revision}" "${desired}" "${daemonset_name}"
+}
+
+replace_dns_manifest_daemonset() {
+  local snapshot_file="$1"
+  local daemonset_name="$2"
+  local target_identity="$3"
+  local original_uids
+  local rows
+  local ds pod uid created phase restarts
+
+  [[ -n "${target_identity}" ]] || {
+    error "DNS daemonset ${daemonset_name} has no pinned post-Helm target identity"
+    return 1
+  }
+  dns_manifest_daemonset_matches_target_identity "${daemonset_name}" "${target_identity}" || return $?
+  original_uids="$(dns_manifest_snapshot_query "${snapshot_file}" uids "${daemonset_name}")" || return $?
+  rows="$(capture_daemonset_pods "${daemonset_name}")" || return $?
+  [[ -n "$(trim_field "${rows}")" ]] || {
+    error "DNS daemonset ${daemonset_name} has no pods to replace"
+    return 1
+  }
+  while IFS='|' read -r ds pod uid created phase restarts; do
+    pod="$(trim_field "${pod}")"
+    uid="$(trim_field "${uid}")"
+    [[ -n "${pod}" && -n "${uid}" ]] || continue
+    if ! printf '%s\n' "${original_uids}" | grep -Fxq "${uid}"; then
+      error "DNS daemonset ${daemonset_name} pod ${pod} no longer has its pre-Helm UID"
+      return 1
+    fi
+    dns_manifest_daemonset_matches_target_identity "${daemonset_name}" "${target_identity}" || return $?
+    log "deleting DNS manifest pod for ${daemonset_name}: ${pod}"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" != "true" ]]; then
+      kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pod}" --wait=false >/dev/null || return $?
+      wait_daemonset_replaced_and_ready "${daemonset_name}" "${uid}" || return $?
+    fi
+    check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+    run_smoke_urls || return $?
+  done <<<"${rows}"
+  dns_manifest_daemonset_matches_target_identity "${daemonset_name}" "${target_identity}" || return $?
+  verify_daemonset_pods_at_update_revision "${daemonset_name}" || return $?
+}
+
+restore_dns_manifest_daemonset() {
+  local snapshot_file="$1"
+  local daemonset_name="$2"
+  local original_uids
+  local ondelete_patch
+  local strategy_patch
+  local snapshot_revision
+  local restored_revision
+  local rows
+  local ds pod uid created phase restarts
+  local pod_revision
+
+  original_uids="$(dns_manifest_snapshot_query "${snapshot_file}" uids "${daemonset_name}")" || return $?
+  snapshot_revision="$(dns_manifest_snapshot_query "${snapshot_file}" update-revision "${daemonset_name}")" || return $?
+  if dns_manifest_daemonset_matches_snapshot "${snapshot_file}" "${daemonset_name}" &&
+    dns_manifest_daemonset_update_revision_matches_snapshot "${snapshot_file}" "${daemonset_name}" &&
+    verify_daemonset_pods_at_update_revision "${daemonset_name}"; then
+    log "DNS daemonset ${daemonset_name} already matches its pre-Helm snapshot"
+    wait_daemonset_ready "${daemonset_name}" || return $?
+    check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+    return 0
+  fi
+
+  ondelete_patch="$(dns_manifest_snapshot_query "${snapshot_file}" restore-ondelete-patch "${daemonset_name}")" || return $?
+  strategy_patch="$(dns_manifest_snapshot_query "${snapshot_file}" restore-strategy-patch "${daemonset_name}")" || return $?
+  log "restoring DNS daemonset ${daemonset_name} pre-Helm template under OnDelete"
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+    return 0
+  fi
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=json -p "${ondelete_patch}" >/dev/null || return $?
+  wait_daemonset_observed "${daemonset_name}" || return $?
+  restored_revision="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o jsonpath='{.status.updateRevision}')" || return $?
+  [[ -n "${restored_revision}" && "${restored_revision}" == "${snapshot_revision}" ]] || {
+    error "DNS daemonset ${daemonset_name} restored updateRevision ${restored_revision:-<empty>} does not match snapshot ${snapshot_revision}"
+    return 1
+  }
+
+  rows="$(capture_daemonset_pods "${daemonset_name}")" || return $?
+  while IFS='|' read -r ds pod uid created phase restarts; do
+    pod="$(trim_field "${pod}")"
+    uid="$(trim_field "${uid}")"
+    [[ -n "${pod}" && -n "${uid}" ]] || continue
+    pod_revision="$(kubectl_cmd -n "${FUGUE_NAMESPACE}" get "pod/${pod}" -o jsonpath='{.metadata.labels.controller-revision-hash}' 2>/dev/null || true)"
+    if printf '%s\n' "${original_uids}" | grep -Fxq "${uid}"; then
+      if [[ "${pod_revision}" != "${restored_revision}" ]]; then
+        error "pre-Helm DNS pod ${pod} has unexpected revision ${pod_revision}; refusing to replace its original UID"
+        return 1
+      fi
+      continue
+    fi
+    if [[ "${pod_revision}" == "${restored_revision}" ]]; then
+      log "preserving already-restored DNS pod ${pod} uid=${uid}"
+      continue
+    fi
+    log "replacing changed DNS pod during rollback for ${daemonset_name}: ${pod} uid=${uid}"
+    kubectl_cmd -n "${FUGUE_NAMESPACE}" delete pod "${pod}" --wait=false >/dev/null || return $?
+    wait_daemonset_replaced_and_ready "${daemonset_name}" "${uid}" || return $?
+  done <<<"${rows}"
+
+  wait_daemonset_ready "${daemonset_name}" || return $?
+  verify_daemonset_pods_at_update_revision "${daemonset_name}" || return $?
+  kubectl_cmd -n "${FUGUE_NAMESPACE}" patch "ds/${daemonset_name}" --type=json -p "${strategy_patch}" >/dev/null || return $?
+  wait_daemonset_observed "${daemonset_name}" || return $?
+  dns_manifest_daemonset_matches_snapshot "${snapshot_file}" "${daemonset_name}" || {
+    error "DNS daemonset ${daemonset_name} does not match its pre-Helm snapshot after restore"
+    return 1
+  }
+  dns_manifest_daemonset_update_revision_matches_snapshot "${snapshot_file}" "${daemonset_name}" || {
+    error "DNS daemonset ${daemonset_name} updateRevision does not match its pre-Helm snapshot after restore"
+    return 1
+  }
+  wait_daemonset_ready "${daemonset_name}" || return $?
+  check_authoritative_dns_on_nodes "${daemonset_name}" || return $?
+}
+
+validate_dns_manifest_snapshot_live_set() {
+  local snapshot_file="$1"
+  local snapshot_names
+  local live_names
+
+  snapshot_names="$(dns_manifest_snapshot_query "${snapshot_file}" names)" || return $?
+  live_names="$(dns_daemonset_names)" || return $?
+  if [[ "${snapshot_names}" != "${live_names}" ]]; then
+    error "live DNS daemonset set does not match the pre-Helm snapshot"
+    error "snapshot daemonsets: $(printf '%s' "${snapshot_names}" | tr '\n' ' ')"
+    error "live daemonsets: $(printf '%s' "${live_names}" | tr '\n' ' ')"
+    return 1
+  fi
+}
+
+restore_dns_manifest_snapshot() {
+  local snapshot_file="$1"
+  local snapshot_namespace
+  local snapshot_names=()
+  local daemonset_name
+  local index
+  local restore_failed=false
+
+  dns_manifest_snapshot_query "${snapshot_file}" validate || return $?
+  snapshot_namespace="$(dns_manifest_snapshot_query "${snapshot_file}" namespace)" || return $?
+  if [[ "${snapshot_namespace}" != "${FUGUE_NAMESPACE}" ]]; then
+    error "DNS manifest snapshot namespace ${snapshot_namespace} does not match ${FUGUE_NAMESPACE}"
+    return 1
+  fi
+  validate_dns_manifest_snapshot_live_set "${snapshot_file}" || return $?
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    snapshot_names+=("${daemonset_name}")
+  done < <(dns_manifest_snapshot_query "${snapshot_file}" names)
+  for (( index=${#snapshot_names[@]} - 1; index >= 0; index-=1 )); do
+    daemonset_name="${snapshot_names[${index}]}"
+    if ! restore_dns_manifest_daemonset "${snapshot_file}" "${daemonset_name}"; then
+      error "failed to restore DNS daemonset ${daemonset_name} from the pre-Helm snapshot"
+      restore_failed=true
+    fi
+  done
+  if ! run_smoke_urls; then
+    error "public smoke failed after restoring the pre-Helm DNS manifest snapshot"
+    restore_failed=true
+  fi
+  [[ "${restore_failed}" == "false" ]] || return 1
+  log "pre-Helm DNS manifest snapshot restored and verified"
+}
+
+abort_dns_manifest_release() {
+  local reason="$1"
+  local snapshot_file="$2"
+
+  error "${reason}; restoring the complete pre-Helm DNS manifest snapshot"
+  if ! restore_dns_manifest_snapshot "${snapshot_file}"; then
+    error "DNS manifest rollback verification failed; release requires operator review"
+    return 1
+  fi
+  error "DNS manifest release aborted; old templates, authoritative answers, and public smoke were restored"
+  return 1
 }
 
 dns_rollback_patch_for_daemonset() {
@@ -1831,6 +2453,121 @@ run_dns_ondelete_release() {
   fi
 }
 
+run_dns_manifest_ondelete_release() {
+  local snapshot_file="${1:-${FUGUE_PUBLIC_DATA_PLANE_DNS_SNAPSHOT_FILE:-}}"
+  local snapshot_namespace
+  local daemonsets=()
+  local daemonset_states=()
+  local daemonset_target_identities=()
+  local replacement_daemonsets=()
+  local replacement_target_identities=()
+  local daemonset_name
+  local state
+  local target_identity
+  local original_uids
+  local current_uids
+
+  snapshot_file="$(trim_field "${snapshot_file}")"
+  [[ -n "${snapshot_file}" ]] || {
+    error "FUGUE_PUBLIC_DATA_PLANE_DNS_SNAPSHOT_FILE is required for dns-manifest-ondelete"
+    return 1
+  }
+  dns_manifest_snapshot_query "${snapshot_file}" validate || return $?
+  snapshot_namespace="$(dns_manifest_snapshot_query "${snapshot_file}" namespace)" || return $?
+  if [[ "${snapshot_namespace}" != "${FUGUE_NAMESPACE}" ]]; then
+    error "DNS manifest snapshot namespace ${snapshot_namespace} does not match ${FUGUE_NAMESPACE}"
+    return 1
+  fi
+  validate_dns_manifest_snapshot_live_set "${snapshot_file}" || return $?
+  while IFS= read -r daemonset_name; do
+    daemonset_name="$(trim_field "${daemonset_name}")"
+    [[ -n "${daemonset_name}" ]] || continue
+    daemonsets+=("${daemonset_name}")
+  done < <(dns_manifest_snapshot_query "${snapshot_file}" names)
+
+  log "dns-manifest-ondelete release_id=${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID} namespace=${FUGUE_NAMESPACE} daemonsets=${daemonsets[*]}"
+  for daemonset_name in "${daemonsets[@]}"; do
+    if ! target_identity="$(dns_manifest_daemonset_target_identity "${daemonset_name}")"; then
+      error "could not pin DNS daemonset ${daemonset_name} post-Helm target identity"
+      return 1
+    fi
+    if ! state="$(dns_manifest_daemonset_state "${snapshot_file}" "${daemonset_name}")"; then
+      error "could not compare DNS daemonset ${daemonset_name} with its pre-Helm snapshot"
+      return 1
+    fi
+    if ! dns_manifest_daemonset_matches_target_identity "${daemonset_name}" "${target_identity}"; then
+      error "DNS daemonset ${daemonset_name} changed while its post-Helm target identity was being pinned"
+      return 1
+    fi
+    case "${state}" in
+      unchanged)
+        log "DNS daemonset ${daemonset_name} is unchanged by Helm; its pods will not be replaced"
+        ;;
+      strategy-only)
+        log "DNS daemonset ${daemonset_name} changed only updateStrategy; its pods will not be replaced"
+        ;;
+      template-changed)
+        replacement_daemonsets+=("${daemonset_name}")
+        replacement_target_identities+=("${target_identity}")
+        ;;
+      *)
+        error "invalid DNS daemonset manifest comparison state for ${daemonset_name}: ${state}"
+        return 1
+        ;;
+    esac
+    daemonset_states+=("${state}")
+    daemonset_target_identities+=("${target_identity}")
+  done
+
+  local index
+  for index in "${!daemonsets[@]}"; do
+    daemonset_name="${daemonsets[${index}]}"
+    if ! wait_daemonset_ready "${daemonset_name}"; then
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} failed post-Helm readiness" "${snapshot_file}" || return 1
+    fi
+    if ! dns_manifest_daemonset_matches_target_identity "${daemonset_name}" "${daemonset_target_identities[${index}]}"; then
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} post-Helm target identity drifted during transaction preflight" "${snapshot_file}" || return 1
+    fi
+    state="$(dns_manifest_daemonset_state "${snapshot_file}" "${daemonset_name}")" || {
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} changed during transaction preflight" "${snapshot_file}" || return 1
+    }
+    if [[ "${state}" != "${daemonset_states[${index}]}" ]]; then
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} manifest changed during transaction preflight" "${snapshot_file}" || return 1
+    fi
+    if ! dns_manifest_daemonset_matches_target_identity "${daemonset_name}" "${daemonset_target_identities[${index}]}"; then
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} post-Helm target identity drifted during transaction preflight" "${snapshot_file}" || return 1
+    fi
+    if [[ "${state}" != "unchanged" ]] && ! dns_manifest_daemonset_uses_ondelete "${daemonset_name}"; then
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} is not OnDelete after Helm" "${snapshot_file}" || return 1
+    fi
+    original_uids="$(dns_manifest_snapshot_query "${snapshot_file}" uids "${daemonset_name}")" || {
+      abort_dns_manifest_release "could not read pre-Helm pod UIDs for ${daemonset_name}" "${snapshot_file}" || return 1
+    }
+    current_uids="$(daemonset_pod_uids "${daemonset_name}")" || {
+      abort_dns_manifest_release "could not read live pod UIDs for ${daemonset_name}" "${snapshot_file}" || return 1
+    }
+    if [[ "${current_uids}" != "${original_uids}" ]]; then
+      abort_dns_manifest_release "DNS daemonset ${daemonset_name} pods changed before the controlled OnDelete replacement" "${snapshot_file}" || return 1
+    fi
+  done
+
+  for index in "${!replacement_daemonsets[@]}"; do
+    daemonset_name="${replacement_daemonsets[${index}]}"
+    if ! replace_dns_manifest_daemonset "${snapshot_file}" "${daemonset_name}" "${replacement_target_identities[${index}]}"; then
+      abort_dns_manifest_release "DNS manifest replacement or verification failed for ${daemonset_name}" "${snapshot_file}" || return 1
+    fi
+  done
+  for daemonset_name in "${daemonsets[@]}"; do
+    if ! check_authoritative_dns_on_nodes "${daemonset_name}"; then
+      abort_dns_manifest_release "final authoritative DNS validation failed for ${daemonset_name}" "${snapshot_file}" || return 1
+    fi
+  done
+  if ! run_smoke_urls; then
+    abort_dns_manifest_release "final public smoke failed after DNS manifest reconcile" "${snapshot_file}" || return 1
+  fi
+  log "DNS manifest OnDelete transaction completed; replaced_daemonsets=${#replacement_daemonsets[@]}"
+}
+
 write_release_record() {
   local daemonsets_csv="$1"
   local release_record_name="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_RECORD_NAME:-${FUGUE_RELEASE_FULLNAME}-public-data-plane-release}"
@@ -1917,8 +2654,8 @@ main() {
     *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN must be true or false" ;;
   esac
   case "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" in
-    blue-green|front-ondelete|dns-ondelete|legacy-template-ondelete) ;;
-    *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY must be blue-green, front-ondelete, dns-ondelete, or legacy-template-ondelete" ;;
+    blue-green|front-ondelete|dns-ondelete|dns-manifest-ondelete|legacy-template-ondelete) ;;
+    *) fail "FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY must be blue-green, front-ondelete, dns-ondelete, dns-manifest-ondelete, or legacy-template-ondelete" ;;
   esac
   case "${FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN}" in
     true|false) ;;
@@ -1935,7 +2672,7 @@ main() {
 
   command_exists python3 || fail "python3 is required"
   command_exists curl || fail "curl is required"
-  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" ]]; then
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" || "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-manifest-ondelete" ]]; then
     command_exists host || fail "host is required for authoritative DNS release validation"
   fi
   detect_kubectl
@@ -1979,6 +2716,20 @@ main() {
       return 0
     fi
     log "public DNS release complete; DNS DaemonSets were replaced one at a time"
+    return 0
+  fi
+
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-manifest-ondelete" ]]; then
+    FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE="dns-manifest-ondelete"
+    validate_representative_smoke_configuration
+    run_dns_manifest_ondelete_release "${FUGUE_PUBLIC_DATA_PLANE_DNS_SNAPSHOT_FILE:-}"
+    daemonsets_csv="$(dns_manifest_snapshot_query "${FUGUE_PUBLIC_DATA_PLANE_DNS_SNAPSHOT_FILE:-}" names | paste -sd, -)"
+    write_release_record "${daemonsets_csv}"
+    if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
+      log "dry-run complete; only DNS daemonsets whose Helm template changed would be replaced"
+      return 0
+    fi
+    log "public DNS manifest release complete; changed DNS DaemonSets were reconciled one at a time"
     return 0
   fi
 

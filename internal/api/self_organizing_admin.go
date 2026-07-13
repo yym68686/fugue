@@ -467,8 +467,9 @@ func (s *Server) platformAutonomyStatus(r *http.Request) (model.PlatformAutonomy
 	if err != nil {
 		return model.PlatformAutonomyStatus{}, err
 	}
-	edgeNodesForAutonomy := activeEdgeNodesForPolicy(edgeNodes, nodePolicies)
-	dnsNodesForAutonomy := activeDNSNodesForPolicy(dnsNodes, nodePolicies)
+	now := time.Now().UTC()
+	edgeNodesForAutonomy := activeEdgeNodesForAutonomy(edgeNodes, nodePolicies, now)
+	dnsNodesForAutonomy := activeDNSNodesForAutonomy(dnsNodes, nodePolicies, now)
 	registryPass, registryMessage := s.registryReachabilityCheck(r.Context())
 	headscalePass, headscaleMessage := s.headscaleReachabilityCheck(r.Context())
 	checks := []model.StoreInvariantCheck{
@@ -1089,6 +1090,14 @@ func activeDNSNodesForPolicy(nodes []model.DNSNode, statuses []model.ClusterNode
 	return out
 }
 
+func activeEdgeNodesForAutonomy(nodes []model.EdgeNode, statuses []model.ClusterNodePolicyStatus, now time.Time) []model.EdgeNode {
+	return freshEdgeNodes(activeEdgeNodesForPolicy(nodes, statuses), now)
+}
+
+func activeDNSNodesForAutonomy(nodes []model.DNSNode, statuses []model.ClusterNodePolicyStatus, now time.Time) []model.DNSNode {
+	return freshDNSNodes(activeDNSNodesForPolicy(nodes, statuses), now)
+}
+
 func activeEdgeGroupsForInventory(groups []model.EdgeGroup, edgeNodes []model.EdgeNode, dnsNodes []model.DNSNode) []model.EdgeGroup {
 	if len(groups) == 0 {
 		return groups
@@ -1130,7 +1139,7 @@ func activeInventoryMessage(activeCount, totalCount int) string {
 	if activeCount == totalCount {
 		return ""
 	}
-	return fmt.Sprintf("active=%d total=%d; retired or absent nodes excluded by node policy", activeCount, totalCount)
+	return fmt.Sprintf("active=%d total=%d; retired, absent, or stale nodes excluded by node policy and heartbeat freshness", activeCount, totalCount)
 }
 
 func edgeInventoryHealthy(nodes []model.EdgeNode) bool {

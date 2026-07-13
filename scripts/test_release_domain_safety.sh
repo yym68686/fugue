@@ -52,13 +52,70 @@ if "run_smoke_urls" in blue_branch:
     raise SystemExit("blue-green final smoke belongs inside the rollback-capable transaction")
 
 dns_start = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" ]]', blue_end)
-dns_end = source.index("\n  while IFS= read -r daemonset_name", dns_start)
+dns_end = source.index('if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-manifest-ondelete" ]]', dns_start)
 dns_branch = source[dns_start:dns_end]
 if dns_branch.index("run_dns_ondelete_release") > dns_branch.index("write_release_record"):
     raise SystemExit("DNS release record must be written only after the transaction succeeds")
 if "run_smoke_urls" in dns_branch:
     raise SystemExit("DNS final smoke belongs inside the rollback-capable transaction")
+
+manifest_start = dns_end
+manifest_end = source.index("\n  while IFS= read -r daemonset_name", manifest_start)
+manifest_branch = source[manifest_start:manifest_end]
+if manifest_branch.index("run_dns_manifest_ondelete_release") > manifest_branch.index("write_release_record"):
+    raise SystemExit("DNS manifest release record must be written only after the transaction succeeds")
+if "run_smoke_urls" in manifest_branch:
+    raise SystemExit("DNS manifest final smoke belongs inside the rollback-capable transaction")
 PY
+
+python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+main_start = source.index("\nmain() {")
+main = source[main_start:]
+prepare = main.index("prepare_dns_manifest_transaction")
+helm = main.index('helm upgrade "${FUGUE_RELEASE_NAME}"')
+transaction = main.index("run_dns_manifest_transaction_after_helm")
+nodelocal = main.index("node_local_dns_reconcile_after_helm")
+public_release = main.index("release_public_data_plane_if_needed")
+finalize = main.index("finalize_dns_manifest_transaction")
+if not prepare < helm < transaction < nodelocal < public_release < finalize:
+    raise SystemExit("DNS manifest snapshot/transaction/finalization ordering is unsafe")
+
+transaction_start = source.index("\nrun_dns_manifest_transaction_after_helm() {")
+transaction_end = source.index("\nrestore_dns_manifest_transaction_after_helm_rollback()", transaction_start)
+transaction_body = source[transaction_start:transaction_end]
+transaction_completed = transaction_body.index('DNS_MANIFEST_TRANSACTION_COMPLETED="true"')
+transaction_refresh = transaction_body.index("node_local_dns_refresh_authoritative_hostport_snapshot")
+if not transaction_completed < transaction_refresh:
+    raise SystemExit("DNS manifest transaction must arm rollback before refreshing the NodeLocal authoritative UID baseline")
+
+restore_start = transaction_end
+restore_end = source.index("\nfinalize_dns_manifest_transaction()", restore_start)
+restore_body = source[restore_start:restore_end]
+manifest_restore = restore_body.index("run_dns_manifest_library_action restore")
+rollback_refresh = restore_body.index("node_local_dns_refresh_authoritative_hostport_snapshot")
+rollback_restored = restore_body.index('DNS_MANIFEST_ROLLBACK_RESTORED="true"')
+if not manifest_restore < rollback_refresh < rollback_restored:
+    raise SystemExit("DNS rollback must refresh the restored authoritative UID baseline before NodeLocal rollback can proceed")
+
+rollback_start = source.index("\nrollback_release() {")
+rollback_end = source.index("\nprepare_release_domains()", rollback_start)
+rollback = source[rollback_start:rollback_end]
+dns_restore = rollback.index("restore_dns_manifest_transaction_after_helm_rollback")
+nodelocal_restore = rollback.index("node_local_dns_restore_previous_after_helm_rollback")
+deployment_wait = rollback.index('rollout_status "${rollback_api_deployment}"')
+final_smoke = rollback.index("smoke_test")
+if not dns_restore < nodelocal_restore < deployment_wait < final_smoke:
+    raise SystemExit("rollback must restore DNS data planes before dependency rollout waits and final smoke")
+PY
+
+deploy_concurrency="$(sed -n '/^concurrency:/,/^[^[:space:]]/p' "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" | sed -n 's/^[[:space:]]*group:[[:space:]]*//p')"
+public_concurrency="$(sed -n '/^concurrency:/,/^[^[:space:]]/p' "${REPO_ROOT}/.github/workflows/release-public-data-plane.yml" | sed -n 's/^[[:space:]]*group:[[:space:]]*//p')"
+assert_eq "${deploy_concurrency}" "fugue-production-cluster-mutation-v1" "control-plane production mutation concurrency group"
+assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-plane releases must share one production mutation lock"
 
 (
   export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
@@ -111,7 +168,7 @@ PY
   }
 
   check_authoritative_dns_on_nodes test-dns
-  assert_eq "$(cat "${dns_queries}")" $'-W 3 -t SOA example.test 192.0.2.10\n-W 3 -t A api.example.test 192.0.2.10\n-W 3 -t A app.example.test 192.0.2.10\n-W 3 -t SOA example.test 192.0.2.11\n-W 3 -t A api.example.test 192.0.2.11\n-W 3 -t A app.example.test 192.0.2.11' "authoritative DNS validation must cover SOA and every distinct representative hostname on every node"
+  assert_eq "$(cat "${dns_queries}")" $'-W 3 -t SOA example.test 192.0.2.10\n-W 3 -t A api.example.test 192.0.2.10\n-W 3 -t A app.example.test 192.0.2.10\n-W 3 -T -t SOA example.test 192.0.2.10\n-W 3 -T -t A api.example.test 192.0.2.10\n-W 3 -T -t A app.example.test 192.0.2.10\n-W 3 -t SOA example.test 192.0.2.11\n-W 3 -t A api.example.test 192.0.2.11\n-W 3 -t A app.example.test 192.0.2.11\n-W 3 -T -t SOA example.test 192.0.2.11\n-W 3 -T -t A api.example.test 192.0.2.11\n-W 3 -T -t A app.example.test 192.0.2.11' "authoritative DNS validation must cover UDP/TCP SOA and every distinct representative hostname on every node"
   rm -f "${dns_queries}"
 )
 
@@ -138,6 +195,304 @@ PY
     fail "authoritative DNS validation must fail closed after an exhausted query"
   fi
   assert_eq "${host_calls}" "2" "authoritative DNS validation must stop before querying later hostnames or nodes"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  snapshot_file="$(mktemp)"
+  kubectl_cmd() {
+    case "$*" in
+      *"get ds/dns-us -o jsonpath={.status.updateRevision}"*)
+        printf 'dns-us-revision'
+        ;;
+      *"get ds -o json")
+        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":7,"labels":{"app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"},"annotations":{"checksum/config":"old"}},"spec":{"containers":[{"name":"dns","image":"registry.example/dns:old"}]} }},"status":{"observedGeneration":7,"desiredNumberScheduled":1,"updatedNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0,"updateRevision":"dns-us-revision"}}]}'
+        ;;
+      *"get pods -o json")
+        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-old","uid":"pod-old","labels":{"app":"dns-us","controller-revision-hash":"dns-us-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-us"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        ;;
+      *) return 91 ;;
+    esac
+  }
+  dns_manifest_daemonset_matches_snapshot() { :; }
+  daemonset_pod_uids() { printf 'pod-old\n'; }
+
+  capture_dns_manifest_snapshot "${snapshot_file}"
+  python3 - "${snapshot_file}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+assert snapshot["apiVersion"] == "fugue.io/v1alpha1"
+assert snapshot["kind"] == "DNSManifestOnDeleteSnapshot"
+assert snapshot["namespace"] == "fugue-system"
+assert len(snapshot["daemonSets"]) == 1
+entry = snapshot["daemonSets"][0]
+assert entry["name"] == "dns-us"
+assert entry["uid"] == "ds-uid"
+assert entry["updateStrategy"] == {"type": "OnDelete"}
+assert entry["updateRevision"] == "dns-us-revision"
+assert entry["template"]["metadata"]["annotations"]["checksum/config"] == "old"
+assert entry["pods"] == [{"name": "dns-us-old", "nodeName": "node-us", "revision": "dns-us-revision", "uid": "pod-old"}]
+PY
+  rm -f "${snapshot_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  snapshot_file="$(mktemp)"
+  fixture=stale-revision
+  kubectl_cmd() {
+    case "$*" in
+      *"get ds -o json")
+        if [[ "${fixture}" == "stale-revision" ]]; then
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":1,"updatedNumberScheduled":0,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0,"updateRevision":"new-revision"}}]}'
+        else
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":1,"updatedNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0,"updateRevision":"new-revision"}}]}'
+        fi
+        ;;
+      *"get pods -o json")
+        if [[ "${fixture}" == "stale-revision" ]]; then
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-old","uid":"pod-old","labels":{"app":"dns-us","controller-revision-hash":"old-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        else
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-new","uid":"pod-new","labels":{"app":"dns-us","controller-revision-hash":"new-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"other-ds-uid","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        fi
+        ;;
+      *) return 90 ;;
+    esac
+  }
+
+  if capture_dns_manifest_snapshot "${snapshot_file}"; then
+    fail "DNS manifest snapshot must reject an OnDelete daemonset whose Ready pods are not updated"
+  fi
+  fixture=wrong-owner
+  if capture_dns_manifest_snapshot "${snapshot_file}"; then
+    fail "DNS manifest snapshot must reject a selector-matching pod not owned by the daemonset UID"
+  fi
+  rm -f "${snapshot_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-dns-manifest
+  events=""
+  dns_manifest_snapshot_query() {
+    case "$2" in
+      validate) : ;;
+      namespace) printf 'fugue-system\n' ;;
+      names) printf 'dns-changed\ndns-same\ndns-strategy\n' ;;
+      uids) printf '%s-uid\n' "$3" ;;
+      *) return 92 ;;
+    esac
+  }
+  validate_dns_manifest_snapshot_live_set() { :; }
+  dns_manifest_daemonset_state() {
+    case "$2" in
+      dns-changed) printf 'template-changed\n' ;;
+      dns-same) printf 'unchanged\n' ;;
+      dns-strategy) printf 'strategy-only\n' ;;
+    esac
+  }
+  dns_manifest_daemonset_target_identity() { printf 'target-%s\n' "$1"; }
+  wait_daemonset_ready() { events="${events}ready:$1;"; }
+  dns_manifest_daemonset_uses_ondelete() { events="${events}ondelete:$1;"; }
+  daemonset_pod_uids() { printf '%s-uid\n' "$1"; }
+  replace_dns_manifest_daemonset() { events="${events}replace:$2;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative:$1;"; }
+  run_smoke_urls() { events="${events}public-smoke;"; }
+  patch_dns_template() { fail "DNS manifest reconcile must not patch an image/template itself"; }
+
+  run_dns_manifest_ondelete_release /tmp/pre-helm-dns.json
+  assert_eq "${events}" "ready:dns-changed;ondelete:dns-changed;ready:dns-same;ready:dns-strategy;ondelete:dns-strategy;replace:dns-changed;authoritative:dns-changed;authoritative:dns-same;authoritative:dns-strategy;public-smoke;" "DNS manifest transaction must replace only template-changed daemonsets and require no image patch"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-dns-manifest
+  events=""
+  dns_manifest_snapshot_query() {
+    case "$2" in
+      validate) : ;;
+      namespace) printf 'fugue-system\n' ;;
+      names) printf 'dns-de\ndns-us\n' ;;
+      uids) printf '%s-uid\n' "$3" ;;
+      *) return 93 ;;
+    esac
+  }
+  validate_dns_manifest_snapshot_live_set() { :; }
+  dns_manifest_daemonset_state() { printf 'template-changed\n'; }
+  dns_manifest_daemonset_target_identity() { printf 'target-%s\n' "$1"; }
+  wait_daemonset_ready() { :; }
+  dns_manifest_daemonset_uses_ondelete() { :; }
+  daemonset_pod_uids() { printf '%s-uid\n' "$1"; }
+  replace_dns_manifest_daemonset() {
+    events="${events}replace:$2;"
+    [[ "$2" != "dns-us" ]]
+  }
+  restore_dns_manifest_snapshot() { events="${events}restore-snapshot:$1;"; }
+
+  if run_dns_manifest_ondelete_release /tmp/pre-helm-dns.json; then
+    fail "DNS manifest transaction must fail after a replacement failure"
+  fi
+  assert_eq "${events}" "replace:dns-de;replace:dns-us;restore-snapshot:/tmp/pre-helm-dns.json;" "DNS manifest failure must restore the complete pre-Helm snapshot"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  events=""
+  dns_manifest_snapshot_query() {
+    case "$2" in
+      uids) printf 'original-uid\n' ;;
+      update-revision) printf 'old-revision\n' ;;
+      *) return 94 ;;
+    esac
+  }
+  dns_manifest_daemonset_matches_snapshot() { :; }
+  dns_manifest_daemonset_update_revision_matches_snapshot() { :; }
+  verify_daemonset_pods_at_update_revision() { events="${events}verify;"; }
+  wait_daemonset_ready() { events="${events}ready;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
+  kubectl_cmd() { fail "idempotent DNS snapshot restore must not patch or delete live objects"; }
+
+  restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us
+  restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us
+  assert_eq "${events}" "verify;ready;authoritative;verify;ready;authoritative;" "DNS snapshot restore must be idempotent when template, strategy, and pod revision already match"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  events=""
+  match_calls=0
+  dns_manifest_snapshot_query() {
+    case "$2" in
+      uids) printf 'original-uid\n' ;;
+      update-revision) printf 'old-revision\n' ;;
+      restore-ondelete-patch) printf '[{"op":"replace","path":"/spec/template","value":{"marker":"old"}}]\n' ;;
+      restore-strategy-patch) printf '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]\n' ;;
+      *) return 95 ;;
+    esac
+  }
+  dns_manifest_daemonset_matches_snapshot() {
+    match_calls=$((match_calls + 1))
+    (( match_calls > 1 ))
+  }
+  capture_daemonset_pods() {
+    printf '%s\n' 'dns-us|dns-original|original-uid|created|Running|dns:0'
+    printf '%s\n' 'dns-us|dns-candidate|candidate-uid|created|Running|dns:0'
+  }
+  kubectl_cmd() {
+    case "$*" in
+      *" patch ds/dns-us "*"marker"*) events="${events}patch:ondelete;" ;;
+      *" patch ds/dns-us "*) events="${events}patch:strategy;" ;;
+      *"get ds/dns-us -o jsonpath={.status.updateRevision}"*) printf 'old-revision' ;;
+      *"get pod/dns-original"*) printf 'old-revision' ;;
+      *"get pod/dns-candidate"*) printf 'new-revision' ;;
+      *"delete pod dns-candidate"*) events="${events}delete:candidate;" ;;
+      *"delete pod dns-original"*) fail "rollback must preserve an unchanged original pod UID" ;;
+      *) return 96 ;;
+    esac
+  }
+  wait_daemonset_observed() { events="${events}observed;"; }
+  wait_daemonset_replaced_and_ready() { events="${events}replaced:$2;"; }
+  wait_daemonset_ready() { events="${events}ready;"; }
+  verify_daemonset_pods_at_update_revision() { events="${events}verify;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
+
+  restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us
+  assert_eq "${events}" "patch:ondelete;observed;delete:candidate;replaced:candidate-uid;ready;verify;patch:strategy;observed;ready;authoritative;" "DNS snapshot rollback must preserve original pods and recreate only changed-revision pods"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  identity_calls_file="$(mktemp)"
+  printf '0\n' >"${identity_calls_file}"
+  dns_manifest_daemonset_target_identity() {
+    local calls
+    calls="$(cat "${identity_calls_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${identity_calls_file}"
+    if (( calls == 1 )); then
+      printf 'pinned-target\n'
+    else
+      printf 'drifted-target\n'
+    fi
+  }
+  dns_manifest_snapshot_query() {
+    [[ "$2" == "uids" ]] || return 89
+    printf 'original-uid\n'
+  }
+  capture_daemonset_pods() {
+    printf '%s\n' 'dns-us|dns-original|original-uid|created|Running|dns:0'
+  }
+  kubectl_cmd() { fail "target drift must be detected before deleting a DNS pod"; }
+  check_authoritative_dns_on_nodes() { fail "target drift must be detected before authoritative checks"; }
+  run_smoke_urls() { fail "target drift must be detected before public smoke"; }
+
+  if replace_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us pinned-target; then
+    fail "DNS manifest replacement must fail closed when the pinned post-Helm target drifts before deletion"
+  fi
+  assert_eq "$(cat "${identity_calls_file}")" "2" "DNS manifest replacement must recheck the target identity immediately before deletion"
+  rm -f "${identity_calls_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  events=""
+  dns_manifest_snapshot_query() {
+    case "$2" in
+      validate) : ;;
+      namespace) printf 'fugue-system\n' ;;
+      names) printf 'dns-de\ndns-us\n' ;;
+      *) return 97 ;;
+    esac
+  }
+  validate_dns_manifest_snapshot_live_set() { :; }
+  restore_dns_manifest_daemonset() { events="${events}restore:$2;"; }
+  run_smoke_urls() { events="${events}public-smoke;"; }
+
+  restore_dns_manifest_snapshot /tmp/pre-helm-dns.json
+  assert_eq "${events}" "restore:dns-us;restore:dns-de;public-smoke;" "complete DNS snapshot restore must run in reverse order and verify public smoke"
 )
 
 (
@@ -809,6 +1164,313 @@ rm -f "${RESOLVE_TEST_OUTPUT}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+(
+  OFFLINE_GATE_DIR="$(mktemp -d)"
+  trap 'rm -rf "${OFFLINE_GATE_DIR}"' EXIT
+  OFFLINE_AUTONOMY_FILE="${OFFLINE_GATE_DIR}/autonomy.json"
+  OFFLINE_POLICY_BASE_FILE="${OFFLINE_GATE_DIR}/node-policies-base.json"
+  OFFLINE_POLICY_FILE="${OFFLINE_GATE_DIR}/node-policies.json"
+
+  cat >"${OFFLINE_AUTONOMY_FILE}" <<'JSON'
+{
+  "status": {
+    "pass": false,
+    "block_rollout": false,
+    "control_plane_store": {
+      "permission_verification_status": "passed",
+      "block_rollout": false
+    },
+    "checks": [
+      {"name": "node_policy", "pass": false, "count": 2}
+    ]
+  }
+}
+JSON
+  cat >"${OFFLINE_POLICY_BASE_FILE}" <<'JSON'
+{
+  "summary": {
+    "total": 2,
+    "reconciled": 2,
+    "drifted": 0,
+    "ready": 1,
+    "disk_pressure": 0,
+    "filesystem_pressure": 0,
+    "blocked_by_health": 1
+  },
+  "node_policies": [
+    {
+      "node_name": "dmit",
+      "ready": false,
+      "disk_pressure": false,
+      "filesystem_pressure": false,
+      "node_schedulable": false,
+      "reconciled": true,
+      "block_rollout": true,
+      "gate_reason": "node is not ready",
+      "labels": {"fugue.io/schedulable": "false"},
+      "taints": [
+        {"key": "node.kubernetes.io/unreachable", "effect": "NoSchedule"},
+        {"key": "fugue.io/node-unhealthy", "value": "true", "effect": "NoSchedule"}
+      ],
+      "policy": {
+        "allow_app_runtime": false,
+        "allow_builds": false,
+        "allow_shared_pool": false,
+        "allow_edge": false,
+        "allow_dns": false,
+        "allow_internal_maintenance": false,
+        "dedicated_mode": "none",
+        "desired_control_plane_role": "none",
+        "effective_app_runtime": false,
+        "effective_builds": false,
+        "effective_shared_pool": false,
+        "effective_edge": false,
+        "effective_dns": false,
+        "effective_internal_maintenance": false,
+        "effective_dedicated_mode": "none",
+        "effective_schedulable": false,
+        "effective_control_plane_role": "none"
+      }
+    },
+    {
+      "node_name": "node-a",
+      "ready": true,
+      "disk_pressure": false,
+      "filesystem_pressure": false,
+      "node_schedulable": true,
+      "reconciled": true,
+      "block_rollout": false,
+      "policy": {"effective_schedulable": true}
+    }
+  ]
+}
+JSON
+
+  reset_offline_policy_fixture() {
+    cp "${OFFLINE_POLICY_BASE_FILE}" "${OFFLINE_POLICY_FILE}"
+  }
+
+  mutate_offline_policy_fixture() {
+    local mutation="$1"
+    python3 - "${OFFLINE_POLICY_BASE_FILE}" "${OFFLINE_POLICY_FILE}" "${mutation}" <<'PY'
+import copy
+import json
+import sys
+
+source, output, mutation = sys.argv[1:4]
+with open(source, encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+by_name = {item["node_name"]: item for item in payload.get("node_policies") or []}
+if mutation == "extra_blocker":
+    extra = copy.deepcopy(by_name["node-a"])
+    extra.update({
+        "node_name": "node-b",
+        "ready": False,
+        "node_schedulable": False,
+        "block_rollout": True,
+        "gate_reason": "node is not ready",
+    })
+    extra["policy"]["effective_schedulable"] = False
+    payload["node_policies"].append(extra)
+elif mutation == "preserved_ready":
+    by_name["dmit"]["ready"] = True
+elif mutation == "preserved_missing":
+    payload["node_policies"] = [item for item in payload["node_policies"] if item["node_name"] != "dmit"]
+elif mutation == "role_drift":
+    by_name["dmit"]["policy"]["allow_edge"] = True
+elif mutation == "schedulable_drift":
+    by_name["dmit"]["node_schedulable"] = True
+elif mutation == "taint_drift":
+    by_name["dmit"]["taints"] = []
+elif mutation == "pressure_drift":
+    by_name["dmit"]["filesystem_pressure"] = True
+elif mutation == "active_not_ready":
+    by_name["node-a"]["ready"] = False
+elif mutation == "duplicate":
+    payload["node_policies"].append(copy.deepcopy(by_name["dmit"]))
+elif mutation == "missing_list":
+    payload.pop("node_policies", None)
+else:
+    raise SystemExit(f"unsupported fixture mutation: {mutation}")
+
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+  }
+
+  expect_offline_policy_gate_rejects() {
+    local label="$1"
+    if node_local_dns_offline_preserve_policy_gate \
+      "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test >/dev/null 2>&1; then
+      fail "offline-preserve policy gate accepted ${label}"
+    fi
+  }
+
+  FUGUE_NODE_LOCAL_DNS_ENABLED=true
+  NODE_LOCAL_DNS_SPLIT_COHORT=true
+  NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES=dmit
+  NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES=node-a
+
+  reset_offline_policy_fixture
+  assert_eq \
+    "$(node_local_dns_offline_preserve_policy_gate "${OFFLINE_AUTONOMY_FILE}" "${OFFLINE_POLICY_FILE}" test)" \
+    "NodeLocal offline-preserve policy gate passed phase=test preserved=dmit active=node-a" \
+    "offline-preserve policy gate accepts the exact isolated blocker"
+
+  for mutation in \
+    extra_blocker \
+    preserved_ready \
+    preserved_missing \
+    role_drift \
+    schedulable_drift \
+    taint_drift \
+    pressure_drift \
+    active_not_ready \
+    duplicate \
+    missing_list; do
+    mutate_offline_policy_fixture "${mutation}"
+    expect_offline_policy_gate_rejects "${mutation}"
+  done
+
+  reset_offline_policy_fixture
+  NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES=$'dmit\nnode-a'
+  expect_offline_policy_gate_rejects "an active/preserved overlap"
+  NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES=node-a
+
+  printf '{' >"${OFFLINE_POLICY_FILE}"
+  expect_offline_policy_gate_rejects "invalid node-policy JSON"
+
+  reset_offline_policy_fixture
+  FUGUE_API_URL=https://api.example.test
+  FUGUE_API_KEY=test-token
+  release_status_request() {
+    local url="$1"
+    local output_file="$3"
+    case "${url}" in
+      */v1/admin/platform/autonomy/status)
+        cp "${OFFLINE_AUTONOMY_FILE}" "${output_file}"
+        ;;
+      */v1/cluster/node-policies/status)
+        cp "${OFFLINE_POLICY_FILE}" "${output_file}"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  }
+  TEST_PRESERVED_STATE_VALID=true
+  node_local_dns_verify_preserved_state_unchanged() {
+    [[ "${TEST_PRESERVED_STATE_VALID}" == "true" ]]
+  }
+  assert_eq \
+    "$(platform_autonomy_status_summary)" \
+    "NodeLocal offline-preserve policy gate passed phase=post-deploy preserved=dmit active=node-a" \
+    "split post-deploy autonomy gate accepts only the exact preserved blocker"
+  TEST_PRESERVED_STATE_VALID=false
+  if platform_autonomy_status_summary >/dev/null 2>&1; then
+    fail "split post-deploy autonomy gate accepted preserved DaemonSet or Pod drift"
+  fi
+
+  TEST_PRESERVED_STATE_VALID=true
+  unset FUGUE_API_URL FUGUE_BASE_URL FUGUE_DISCOVERY_BUNDLE_FILE FUGUE_DISCOVERY_BUNDLE_URL
+  DISCOVERY_BUNDLE_FILE=
+  FUGUE_RELEASE_PREFLIGHT_API_URL=https://api.example.test
+  FUGUE_SMOKE_URL=https://api.example.test/healthz
+  FUGUE_REGISTRY_PULL_BASE=registry.example.test:5000
+  FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT=http://127.0.0.1:5000
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_NODE_LOCAL_DNS_NODE_NAME=node-a
+  FUGUE_NODE_LOCAL_DNS_NODE_NAMES=
+  FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES=false
+  FUGUE_IMAGE_STORE_MIN_REPLICAS=1
+  KUBECTL=
+  PREFLIGHT_CURL_CALLS="${OFFLINE_GATE_DIR}/preflight-curl-calls"
+  OLD_IMAGE_CACHE_OVERRIDE_MARKER="${OFFLINE_GATE_DIR}/old-image-cache-override-called"
+  : >"${PREFLIGHT_CURL_CALLS}"
+  rm -f "${OLD_IMAGE_CACHE_OVERRIDE_MARKER}"
+  curl() {
+    local headers=""
+    local output_file=""
+    local writeout=""
+    local url=""
+    local body=""
+    local status=200
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        -D)
+          headers="$2"
+          shift 2
+          ;;
+        -o)
+          output_file="$2"
+          shift 2
+          ;;
+        -w)
+          writeout="$2"
+          shift 2
+          ;;
+        -H|--header|--connect-timeout|--max-time)
+          shift 2
+          ;;
+        http://*|https://*)
+          url="$1"
+          shift
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\n' "${url}" >>"${PREFLIGHT_CURL_CALLS}"
+    case "${url}" in
+      */v1/discovery/bundle)
+        status=404
+        [[ -z "${headers}" ]] || : >"${headers}"
+        ;;
+      */v1/admin/platform/autonomy/status)
+        body="$(cat "${OFFLINE_AUTONOMY_FILE}")"
+        ;;
+      */v1/cluster/node-policies/status)
+        body="$(cat "${OFFLINE_POLICY_FILE}")"
+        ;;
+      */v1/edge/nodes|*/v1/dns/nodes)
+        body='{"nodes":[]}'
+        ;;
+      *)
+        return 22
+        ;;
+    esac
+    if [[ -n "${output_file}" ]]; then
+      printf '%s' "${body}" >"${output_file}"
+    else
+      printf '%s' "${body}"
+    fi
+    [[ -z "${writeout}" ]] || printf '%s' "${status}"
+  }
+  node_local_build_plane_preflight_override_allowed() {
+    : >"${OLD_IMAGE_CACHE_OVERRIDE_MARKER}"
+    return 0
+  }
+
+  run_release_preflight || fail "split preflight must continue through exact NodePolicy validation when DiscoveryBundle is missing"
+  grep -Fqx 'https://api.example.test/v1/admin/platform/autonomy/status' "${PREFLIGHT_CURL_CALLS}" ||
+    fail "DiscoveryBundle fallback returned before querying platform autonomy"
+  grep -Fqx 'https://api.example.test/v1/cluster/node-policies/status' "${PREFLIGHT_CURL_CALLS}" ||
+    fail "DiscoveryBundle fallback returned before querying NodePolicy status"
+  [[ ! -e "${OLD_IMAGE_CACHE_OVERRIDE_MARKER}" ]] ||
+    fail "split preflight evaluated the legacy image-cache override"
+
+  mutate_offline_policy_fixture role_drift
+  rm -f "${OLD_IMAGE_CACHE_OVERRIDE_MARKER}"
+  if (run_release_preflight >/dev/null 2>&1); then
+    fail "invalid split policy state fell through to the legacy image-cache override"
+  fi
+  [[ ! -e "${OLD_IMAGE_CACHE_OVERRIDE_MARKER}" ]] ||
+    fail "invalid split policy state invoked the legacy image-cache override"
+)
 
 (
   FUGUE_NAMESPACE=fugue-system

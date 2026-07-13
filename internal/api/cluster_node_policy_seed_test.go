@@ -626,6 +626,138 @@ func TestSetClusterNodePolicyRemovesStaleRuntimeAppRoleLabel(t *testing.T) {
 	}
 }
 
+func TestSetClusterNodePolicyDisablingEdgeRemovesDynamicSchedulingLabels(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Mixed Role Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, nodeSecret, err := stateStore.CreateNodeKey(tenant.ID, "mixed-role")
+	if err != nil {
+		t.Fatalf("create node key: %v", err)
+	}
+	labels := map[string]string{
+		runtimepkg.AppRuntimeRoleLabelKey:      runtimepkg.NodeRoleLabelValue,
+		runtimepkg.EdgeRoleLabelKey:            runtimepkg.NodeRoleLabelValue,
+		runtimepkg.EdgeGroupIDLabelKey:         "edge-group-country-us",
+		runtimepkg.EdgeWorkloadLabelKey:        runtimepkg.EdgeWorkloadDynamicValue,
+		runtimepkg.EdgeLocationStatusLabelKey:  runtimepkg.EdgeLocationStatusReady,
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+		runtimepkg.PublicIPLabelKey:            "203.0.113.10",
+	}
+	if _, _, err := stateStore.BootstrapClusterNode(nodeSecret, "gcp1", "https://node.example", labels, "mixed-node", "mixed-fingerprint"); err != nil {
+		t.Fatalf("bootstrap cluster node: %v", err)
+	}
+
+	kubeServer := newBootstrapControlPlaneKubeServerWithLabels(t, labels)
+	defer kubeServer.Close()
+
+	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.newClusterNodeClient = func() (*clusterNodeClient, error) {
+		return &clusterNodeClient{
+			client:      kubeServer.Client(),
+			baseURL:     kubeServer.URL,
+			bearerToken: "test-token",
+		}, nil
+	}
+
+	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/cluster/nodes/gcp1/policy", "bootstrap-secret", map[string]any{
+		"allow_app_runtime": true,
+		"allow_edge":        false,
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+	}
+
+	statusRecorder := performJSONRequest(t, server, http.MethodGet, "/v1/cluster/node-policies/gcp1", "bootstrap-secret", nil)
+	if statusRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, statusRecorder.Code, statusRecorder.Body.String())
+	}
+	var statusResponse struct {
+		NodePolicy model.ClusterNodePolicyStatus `json:"node_policy"`
+	}
+	mustDecodeJSON(t, statusRecorder, &statusResponse)
+
+	for _, key := range []string{
+		runtimepkg.EdgeRoleLabelKey,
+		runtimepkg.EdgeGroupIDLabelKey,
+		runtimepkg.EdgeWorkloadLabelKey,
+		runtimepkg.EdgeLocationStatusLabelKey,
+	} {
+		if got := strings.TrimSpace(statusResponse.NodePolicy.Labels[key]); got != "" {
+			t.Fatalf("expected edge-only scheduling label %s removed, got %q in %+v", key, got, statusResponse.NodePolicy)
+		}
+	}
+	for key, want := range map[string]string{
+		runtimepkg.AppRuntimeRoleLabelKey:      runtimepkg.NodeRoleLabelValue,
+		runtimepkg.LocationCountryCodeLabelKey: "us",
+		runtimepkg.PublicIPLabelKey:            "203.0.113.10",
+	} {
+		if got := statusResponse.NodePolicy.Labels[key]; got != want {
+			t.Fatalf("expected cross-role label %s=%q preserved, got %q in %+v", key, want, got, statusResponse.NodePolicy)
+		}
+	}
+
+	dynamicSelector := map[string]string{
+		runtimepkg.EdgeRoleLabelKey:        runtimepkg.NodeRoleLabelValue,
+		runtimepkg.NodeSchedulableLabelKey: "true",
+		runtimepkg.EdgeWorkloadLabelKey:    runtimepkg.EdgeWorkloadDynamicValue,
+	}
+	dynamicMatches := true
+	for key, want := range dynamicSelector {
+		if statusResponse.NodePolicy.Labels[key] != want {
+			dynamicMatches = false
+			break
+		}
+	}
+	if dynamicMatches {
+		t.Fatalf("expected disabled edge node not to match dynamic edge DaemonSet selector, labels=%+v", statusResponse.NodePolicy.Labels)
+	}
+	if statusResponse.NodePolicy.Policy == nil || statusResponse.NodePolicy.Policy.EffectiveEdge {
+		t.Fatalf("expected effective edge policy disabled after label reconcile, got %+v", statusResponse.NodePolicy)
+	}
+	if !statusResponse.NodePolicy.Reconciled || len(statusResponse.NodePolicy.ReconcileReasons) != 0 {
+		t.Fatalf("expected disabled edge policy to be reconciled, got %+v", statusResponse.NodePolicy)
+	}
+}
+
+func TestBuildMachineNodeLabelsPatchPreservesLocationMetadataForDNSOnlyNode(t *testing.T) {
+	t.Parallel()
+
+	labels := map[string]string{
+		runtimepkg.DNSRoleLabelKey:            runtimepkg.NodeRoleLabelValue,
+		runtimepkg.EdgeGroupIDLabelKey:        "edge-group-country-us",
+		runtimepkg.EdgeWorkloadLabelKey:       runtimepkg.EdgeWorkloadStaticValue,
+		runtimepkg.EdgeLocationStatusLabelKey: runtimepkg.EdgeLocationStatusReady,
+	}
+	node := kubeNode{}
+	node.Metadata.Labels = labels
+	node.Status.Conditions = []kubeNodeCondition{
+		{Type: clusterNodeConditionReady, Status: "True"},
+		{Type: clusterNodeConditionDisk, Status: "False"},
+	}
+	machine := model.Machine{
+		Labels: labels,
+		Policy: model.MachinePolicy{AllowDNS: true},
+	}
+
+	patch, _ := buildMachineNodeLabelsPatch(node, machine, nil)
+	for _, key := range []string{
+		runtimepkg.EdgeGroupIDLabelKey,
+		runtimepkg.EdgeWorkloadLabelKey,
+		runtimepkg.EdgeLocationStatusLabelKey,
+	} {
+		if value, ok := patch[key]; ok && value == nil {
+			t.Fatalf("expected DNS-only location label %s to be preserved, patch=%#v", key, patch)
+		}
+	}
+}
+
 func TestSharedPoolDriftReconcileHonorsEdgeOnlyMachinePolicy(t *testing.T) {
 	t.Parallel()
 

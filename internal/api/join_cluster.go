@@ -508,6 +508,9 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 		runtime.MachineScopeLabelKey: model.NormalizeMachineScope(machine.Scope),
 	}
 	for key, value := range machineJoinMetadataLabels(machine.Labels) {
+		if !machine.Policy.AllowEdge && !machine.Policy.AllowDNS && machineEdgeDNSMetadataLabel(key) {
+			continue
+		}
 		labels[key] = value
 	}
 	if machine.Policy.AllowBuilds {
@@ -538,6 +541,15 @@ func machineJoinLabelMap(machine model.Machine) map[string]string {
 		}
 	}
 	return labels
+}
+
+func machineEdgeDNSMetadataLabel(key string) bool {
+	switch strings.TrimSpace(key) {
+	case runtime.EdgeGroupIDLabelKey, runtime.EdgeWorkloadLabelKey, runtime.EdgeLocationStatusLabelKey:
+		return true
+	default:
+		return false
+	}
 }
 
 func machineJoinMetadataLabels(source map[string]string) map[string]string {

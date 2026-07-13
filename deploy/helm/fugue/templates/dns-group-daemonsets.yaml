@@ -22,6 +22,8 @@
 {{- $dnsImagePullPolicy := default (default $.Values.edge.image.pullPolicy $.Values.dns.image.pullPolicy) $image.pullPolicy -}}
 {{- $publicHostPortsEnabled := $.Values.dns.publicHostPorts.enabled -}}
 {{- if hasKey $publicHostPorts "enabled" }}{{- $publicHostPortsEnabled = $publicHostPorts.enabled -}}{{- end -}}
+{{- $publicHostIP := "" -}}
+{{- if $publicHostPortsEnabled }}{{- $publicHostIP = required (printf "dns.groups[%s].publicHostPorts.hostIP is required when public DNS host ports are enabled" $name) $publicHostPorts.hostIP -}}{{- end -}}
 {{- $publicUDP := default $.Values.dns.publicHostPorts.udp $publicHostPorts.udp -}}
 {{- $publicTCP := default $.Values.dns.publicHostPorts.tcp $publicHostPorts.tcp -}}
 {{- $extraZones := default $.Values.dns.extraZones $group.extraZones -}}
@@ -82,10 +84,12 @@ spec:
             {{- if $publicHostPortsEnabled }}
             - name: dns-udp
               containerPort: 53
+              hostIP: {{ $publicHostIP | quote }}
               hostPort: {{ $publicUDP }}
               protocol: UDP
             - name: dns-tcp
               containerPort: 53
+              hostIP: {{ $publicHostIP | quote }}
               hostPort: {{ $publicTCP }}
               protocol: TCP
             {{- end }}

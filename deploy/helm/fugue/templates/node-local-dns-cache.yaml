@@ -4,11 +4,65 @@ DNSCache manifest (Apache-2.0):
 cluster/addons/dns/nodelocaldns/nodelocaldns.yaml at
 fc1c3faf47e46f9c257a17f9aae5abc6dd28c118.
 */}}
+{{- define "fugue.nodeLocalDNSCorefile" -}}
+{{ .clusterDomain }}:53 {
+    errors
+    cache {
+        success 9984 30
+        denial 9984 5
+    }
+    reload
+    loop
+    bind {{ .bindIPs }}
+    forward . __PILLAR__CLUSTER__DNS__ {
+        force_tcp
+    }
+    prometheus :9253
+    health {{ .localIP }}:8080
+}
+in-addr.arpa:53 {
+    errors
+    cache 30
+    reload
+    loop
+    bind {{ .bindIPs }}
+    forward . __PILLAR__CLUSTER__DNS__ {
+        force_tcp
+    }
+    prometheus :9253
+}
+ip6.arpa:53 {
+    errors
+    cache 30
+    reload
+    loop
+    bind {{ .bindIPs }}
+    forward . __PILLAR__CLUSTER__DNS__ {
+        force_tcp
+    }
+    prometheus :9253
+}
+.:53 {
+    errors
+    cache 30
+    reload
+    loop
+    bind {{ .bindIPs }}
+    forward . __PILLAR__CLUSTER__DNS__ {
+        force_tcp
+    }
+    prometheus :9253
+}
+{{- end -}}
 {{- if .Values.nodeLocalDNS.enabled }}
 {{- $config := .Values.nodeLocalDNS -}}
 {{- $mode := required "nodeLocalDNS.mode is required" $config.mode -}}
 {{- if not (has $mode (list "shadow" "iptables")) -}}
 {{- fail "nodeLocalDNS.mode must be shadow or iptables" -}}
+{{- end -}}
+{{- $legacyMode := default $mode $config.legacyMode -}}
+{{- if not (has $legacyMode (list "shadow" "iptables")) -}}
+{{- fail "nodeLocalDNS.legacyMode must be shadow or iptables" -}}
 {{- end -}}
 {{- $namespace := required "nodeLocalDNS.namespace is required" $config.namespace -}}
 {{- $localIP := required "nodeLocalDNS.localIP is required" $config.localIP -}}
@@ -33,10 +87,64 @@ fc1c3faf47e46f9c257a17f9aae5abc6dd28c118.
 {{- if not $config.upstreamSelector -}}
 {{- fail "nodeLocalDNS.upstreamSelector must select the central CoreDNS pods" -}}
 {{- end -}}
+{{- $targetNodes := $config.targetNodes | default (list) -}}
+{{- if not (kindIs "slice" $targetNodes) -}}
+{{- fail "nodeLocalDNS.targetNodes must be a non-empty hostname list" -}}
+{{- end -}}
+{{- if eq (len $targetNodes) 0 -}}
+{{- fail "nodeLocalDNS.targetNodes must be a non-empty hostname list" -}}
+{{- end -}}
+{{- $seenTargetNodes := dict -}}
+{{- range $targetNode := $targetNodes -}}
+{{- if not (kindIs "string" $targetNode) -}}
+{{- fail "nodeLocalDNS.targetNodes must contain only non-empty hostnames" -}}
+{{- end -}}
+{{- if eq (trim $targetNode) "" -}}
+{{- fail "nodeLocalDNS.targetNodes must contain only non-empty hostnames" -}}
+{{- end -}}
+{{- if hasKey $seenTargetNodes $targetNode -}}
+{{- fail "nodeLocalDNS.targetNodes must not contain duplicate hostnames" -}}
+{{- end -}}
+{{- $_ := set $seenTargetNodes $targetNode true -}}
+{{- end -}}
+{{- $preservedOfflineNodes := $config.preservedOfflineNodes | default (list) -}}
+{{- if not (kindIs "slice" $preservedOfflineNodes) -}}
+{{- fail "nodeLocalDNS.preservedOfflineNodes must be a hostname list" -}}
+{{- end -}}
+{{- $seenPreservedNodes := dict -}}
+{{- range $preservedNode := $preservedOfflineNodes -}}
+{{- if not (kindIs "string" $preservedNode) -}}
+{{- fail "nodeLocalDNS.preservedOfflineNodes must contain only non-empty hostnames" -}}
+{{- end -}}
+{{- if eq (trim $preservedNode) "" -}}
+{{- fail "nodeLocalDNS.preservedOfflineNodes must contain only non-empty hostnames" -}}
+{{- end -}}
+{{- if hasKey $seenPreservedNodes $preservedNode -}}
+{{- fail "nodeLocalDNS.preservedOfflineNodes must not contain duplicate hostnames" -}}
+{{- end -}}
+{{- if hasKey $seenTargetNodes $preservedNode -}}
+{{- fail "nodeLocalDNS.targetNodes and nodeLocalDNS.preservedOfflineNodes must be disjoint" -}}
+{{- end -}}
+{{- $_ := set $seenPreservedNodes $preservedNode true -}}
+{{- end -}}
+{{- $splitCohort := gt (len $preservedOfflineNodes) 0 -}}
+{{- if and $splitCohort (eq (trim (default "" $config.legacyMode)) "") -}}
+{{- fail "nodeLocalDNS.legacyMode must be explicit when preservedOfflineNodes is non-empty" -}}
+{{- end -}}
 {{- if ne (get $config.nodeSelector "kubernetes.io/os") "linux" -}}
 {{- fail "nodeLocalDNS.nodeSelector must require kubernetes.io/os=linux" -}}
 {{- end -}}
-{{- if lt (int $config.updateStrategy.maxUnavailable) 1 -}}
+{{- if hasKey $config.nodeSelector "kubernetes.io/hostname" -}}
+{{- fail "nodeLocalDNS.nodeSelector must not set kubernetes.io/hostname; use nodeLocalDNS.targetNodes" -}}
+{{- end -}}
+{{- $updateStrategyType := required "nodeLocalDNS.updateStrategy.type is required" $config.updateStrategy.type -}}
+{{- if not (has $updateStrategyType (list "OnDelete" "RollingUpdate")) -}}
+{{- fail "nodeLocalDNS.updateStrategy.type must be OnDelete or RollingUpdate" -}}
+{{- end -}}
+{{- if and $splitCohort (ne $updateStrategyType "OnDelete") -}}
+{{- fail "nodeLocalDNS.updateStrategy.type must be OnDelete when preservedOfflineNodes is non-empty" -}}
+{{- end -}}
+{{- if and (eq $updateStrategyType "RollingUpdate") (lt (int $config.updateStrategy.maxUnavailable) 1) -}}
 {{- fail "nodeLocalDNS.updateStrategy.maxUnavailable must be an integer >= 1" -}}
 {{- end -}}
 {{- if lt (int $config.minReadySeconds) 0 -}}
@@ -52,6 +160,26 @@ fc1c3faf47e46f9c257a17f9aae5abc6dd28c118.
 {{- if eq $mode "iptables" -}}
 {{- $listenIPs = printf "%s,%s" $localIP $kubeDNSServiceIP -}}
 {{- end -}}
+{{- $shadowCorefile := include "fugue.nodeLocalDNSCorefile" (dict "bindIPs" $localIP "clusterDomain" $clusterDomain "localIP" $localIP) -}}
+{{- $iptablesCorefile := include "fugue.nodeLocalDNSCorefile" (dict "bindIPs" (printf "%s %s" $localIP $kubeDNSServiceIP) "clusterDomain" $clusterDomain "localIP" $localIP) -}}
+{{- $legacyCorefile := $shadowCorefile -}}
+{{- if eq $legacyMode "iptables" -}}
+{{- $legacyCorefile = $iptablesCorefile -}}
+{{- end -}}
+{{- $selectedCorefile := $shadowCorefile -}}
+{{- $selectedCorefileKey := "Corefile.shadow" -}}
+{{- if eq $mode "iptables" -}}
+{{- $selectedCorefile = $iptablesCorefile -}}
+{{- $selectedCorefileKey = "Corefile.iptables" -}}
+{{- end -}}
+{{- $legacyListenIPs := $localIP -}}
+{{- $legacyCorefileKey := "Corefile.shadow" -}}
+{{- if eq $legacyMode "iptables" -}}
+{{- $legacyListenIPs = printf "%s,%s" $localIP $kubeDNSServiceIP -}}
+{{- $legacyCorefileKey = "Corefile.iptables" -}}
+{{- end -}}
+{{- $activeStem := $name | trunc 56 | trimSuffix "-" -}}
+{{- $activeName := printf "%s-active" $activeStem -}}
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
@@ -104,55 +232,17 @@ metadata:
     {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
     fugue.io/rollout-subsystem: cluster-dns
 data:
+  # Keep both mode-specific inputs stable while an OnDelete rollout contains
+  # old and new Pods. Each Pod projects only the key matching its own mode.
+  Corefile.shadow: |
+    {{- $shadowCorefile | nindent 4 }}
+  Corefile.iptables: |
+    {{- $iptablesCorefile | nindent 4 }}
+  # Compatibility key for Pods created before mode-specific projection was
+  # introduced. legacyMode keeps those Pods on their existing behavior while
+  # new Pods mount the mode-specific key below.
   Corefile: |
-    {{ $clusterDomain }}:53 {
-        errors
-        cache {
-            success 9984 30
-            denial 9984 5
-        }
-        reload
-        loop
-        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
-        forward . __PILLAR__CLUSTER__DNS__ {
-            force_tcp
-        }
-        prometheus :9253
-        health {{ $localIP }}:8080
-    }
-    in-addr.arpa:53 {
-        errors
-        cache 30
-        reload
-        loop
-        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
-        forward . __PILLAR__CLUSTER__DNS__ {
-            force_tcp
-        }
-        prometheus :9253
-    }
-    ip6.arpa:53 {
-        errors
-        cache 30
-        reload
-        loop
-        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
-        forward . __PILLAR__CLUSTER__DNS__ {
-            force_tcp
-        }
-        prometheus :9253
-    }
-    .:53 {
-        errors
-        cache 30
-        reload
-        loop
-        bind {{ $localIP }}{{ if eq $mode "iptables" }} {{ $kubeDNSServiceIP }}{{ end }}
-        forward . __PILLAR__CLUSTER__DNS__ {
-            force_tcp
-        }
-        prometheus :9253
-    }
+    {{- $legacyCorefile | nindent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -165,6 +255,7 @@ metadata:
   labels:
     {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
     fugue.io/rollout-subsystem: cluster-dns
+    fugue.io/node-local-dns-cohort: {{ ternary "preserved" "active" $splitCohort | quote }}
 spec:
   clusterIP: None
   ports:
@@ -178,34 +269,76 @@ spec:
       targetPort: 9353
   selector:
     {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+{{- if $splitCohort }}
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $activeName }}
+  namespace: {{ $namespace }}
+  annotations:
+    prometheus.io/port: "9253"
+    prometheus.io/scrape: "true"
+  labels:
+    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns-active") | nindent 4 }}
+    fugue.io/rollout-subsystem: cluster-dns
+    fugue.io/node-local-dns-cohort: "active"
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9253
+      protocol: TCP
+      targetPort: 9253
+    - name: setup-metrics
+      port: 9353
+      protocol: TCP
+      targetPort: 9353
+  selector:
+    {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns-active") | nindent 4 }}
+{{- end }}
+---
+{{- $daemonSets := list (dict "name" $name "component" "node-local-dns" "mode" $mode "corefile" $selectedCorefile "corefileKey" $selectedCorefileKey "listenIPs" $listenIPs "targetNodes" $targetNodes) -}}
+{{- if $splitCohort -}}
+{{- $daemonSets = list
+      (dict "name" $name "component" "node-local-dns" "mode" $legacyMode "corefile" $legacyCorefile "corefileKey" $legacyCorefileKey "listenIPs" $legacyListenIPs "targetNodes" $preservedOfflineNodes)
+      (dict "name" $activeName "component" "node-local-dns-active" "mode" $mode "corefile" $selectedCorefile "corefileKey" $selectedCorefileKey "listenIPs" $listenIPs "targetNodes" $targetNodes) -}}
+{{- end -}}
+{{- range $cohortIndex, $cohort := $daemonSets }}
+{{- if gt $cohortIndex 0 }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ $name }}
+  name: {{ get $cohort "name" }}
   namespace: {{ $namespace }}
   labels:
-    {{- include "fugue.componentLabels" (dict "root" . "component" "node-local-dns") | nindent 4 }}
+    {{- include "fugue.componentLabels" (dict "root" $ "component" (get $cohort "component")) | nindent 4 }}
     fugue.io/rollout-subsystem: cluster-dns
     fugue.io/rollout-mode: node-local-rolling
+    fugue.io/node-local-dns-cohort: {{ ternary "preserved" "active" (and $splitCohort (eq $cohortIndex 0)) | quote }}
 spec:
   revisionHistoryLimit: 2
   minReadySeconds: {{ $config.minReadySeconds }}
   updateStrategy:
-    type: RollingUpdate
+    type: {{ $updateStrategyType }}
+    {{- if eq $updateStrategyType "RollingUpdate" }}
     rollingUpdate:
       maxUnavailable: {{ $config.updateStrategy.maxUnavailable }}
+    {{- end }}
   selector:
     matchLabels:
-      {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 6 }}
+      {{- include "fugue.componentSelectorLabels" (dict "root" $ "component" (get $cohort "component")) | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "fugue.componentSelectorLabels" (dict "root" . "component" "node-local-dns") | nindent 8 }}
+        {{- include "fugue.componentSelectorLabels" (dict "root" $ "component" (get $cohort "component")) | nindent 8 }}
         fugue.io/rollout-subsystem: cluster-dns
-        fugue.io/node-local-dns-mode: {{ $mode | quote }}
+        fugue.io/node-local-dns-mode: {{ get $cohort "mode" | quote }}
+        fugue.io/node-local-dns-cohort: {{ ternary "preserved" "active" (and $splitCohort (eq $cohortIndex 0)) | quote }}
       annotations:
-        checksum/node-local-dns-config: {{ toJson (dict "clusterDomain" $clusterDomain "kubeDNSServiceIP" $kubeDNSServiceIP "localIP" $localIP "mode" $mode "upstreamService" $upstreamServiceName) | sha256sum }}
+        checksum/node-local-dns-config: {{ get $cohort "corefile" | sha256sum }}
         prometheus.io/port: "9253"
         prometheus.io/scrape: "true"
     spec:
@@ -221,7 +354,7 @@ spec:
           imagePullPolicy: {{ $config.image.pullPolicy }}
           args:
             - -localip
-            - {{ $listenIPs | quote }}
+            - {{ get $cohort "listenIPs" | quote }}
             - -conf
             - /etc/Corefile
             - -upstreamsvc
@@ -265,10 +398,22 @@ spec:
           configMap:
             name: {{ $name }}
             items:
-              - key: Corefile
+              - key: {{ get $cohort "corefileKey" }}
                 path: Corefile.base
       nodeSelector:
         {{- toYaml $config.nodeSelector | nindent 8 }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      {{- range $targetNode := (get $cohort "targetNodes") }}
+                      - {{ $targetNode | quote }}
+                      {{- end }}
       tolerations:
         {{- toYaml $config.tolerations | nindent 8 }}
+{{- end }}
 {{- end }}

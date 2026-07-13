@@ -326,6 +326,16 @@ func buildMachineNodeLabelsPatch(node kubeNode, machine model.Machine, runtimeOb
 			keys = append(keys, key)
 		}
 	}
+	if !machine.Policy.AllowEdge && !machine.Policy.AllowDNS {
+		// These labels describe the shared edge/DNS location. They must be
+		// removed once both roles are disabled, even when retained as machine
+		// metadata, so a retired location cannot match either data plane.
+		keys = append(keys,
+			runtimepkg.EdgeGroupIDLabelKey,
+			runtimepkg.EdgeWorkloadLabelKey,
+			runtimepkg.EdgeLocationStatusLabelKey,
+		)
+	}
 	if runtimeObj == nil {
 		keys = append(keys, runtimepkg.SharedPoolLabelKey)
 	}

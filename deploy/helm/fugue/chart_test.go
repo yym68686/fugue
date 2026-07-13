@@ -3108,7 +3108,8 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		"helm", "template", "fugue", chartDir,
 		"--set", "nodeLocalDNS.enabled=true",
 		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
-		"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=vps-84c8f0a9`,
+		"--set-string", `nodeLocalDNS.targetNodes[0]=vps-84c8f0a9`,
+		"--set-string", `nodeLocalDNS.targetNodes[1]=vps-d6d20fa1`,
 		"--set", "observability.metrics.enabled=true",
 	)
 	cmd.Dir = chartDir
@@ -3145,6 +3146,15 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 	}
 
 	config := manifestDocumentForKindAndName(manifest, "ConfigMap", name)
+	shadowStart := strings.Index(config, "  Corefile.shadow: |")
+	ipTablesStart := strings.Index(config, "  Corefile.iptables: |")
+	legacyStart := strings.Index(config, "  Corefile: |")
+	if shadowStart < 0 || ipTablesStart <= shadowStart || legacyStart <= ipTablesStart {
+		t.Fatalf("node-local DNS config must contain stable shadow, iptables, and compatibility Corefiles:\n%s", config)
+	}
+	shadowCorefile := config[shadowStart:ipTablesStart]
+	ipTablesCorefile := config[ipTablesStart:legacyStart]
+	legacyCorefile := config[legacyStart:]
 	for _, want := range []string{
 		"cluster.local:53 {",
 		"bind 169.254.20.10",
@@ -3152,21 +3162,30 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		"force_tcp",
 		"health 169.254.20.10:8080",
 	} {
-		if !strings.Contains(config, want) {
-			t.Fatalf("node-local DNS config missing %q:\n%s", want, config)
+		if !strings.Contains(shadowCorefile, want) {
+			t.Fatalf("shadow node-local DNS config missing %q:\n%s", want, shadowCorefile)
 		}
 	}
-	if got := strings.Count(config, "forward . __PILLAR__CLUSTER__DNS__ {"); got != 4 {
-		t.Fatalf("every node-local DNS zone must retain central CoreDNS as its fallback; got %d forwards:\n%s", got, config)
+	for entryName, corefile := range map[string]string{
+		"shadow":        shadowCorefile,
+		"iptables":      ipTablesCorefile,
+		"compatibility": legacyCorefile,
+	} {
+		if got := strings.Count(corefile, "forward . __PILLAR__CLUSTER__DNS__ {"); got != 4 {
+			t.Fatalf("every %s node-local DNS zone must retain central CoreDNS as its fallback; got %d forwards:\n%s", entryName, got, corefile)
+		}
 	}
 	for _, unwanted := range []string{
 		"bind 169.254.20.10 10.43.0.10",
 		"__PILLAR__UPSTREAM__SERVERS__",
 		"/etc/resolv.conf",
 	} {
-		if strings.Contains(config, unwanted) {
-			t.Fatalf("shadow node-local DNS must not contain %q:\n%s", unwanted, config)
+		if strings.Contains(shadowCorefile, unwanted) || strings.Contains(legacyCorefile, unwanted) {
+			t.Fatalf("shadow and selected compatibility Corefiles must not contain %q:\n%s", unwanted, config)
 		}
+	}
+	if got := strings.Count(ipTablesCorefile, "bind 169.254.20.10 10.43.0.10"); got != 4 {
+		t.Fatalf("stable iptables Corefile must bind both addresses in every zone; got %d:\n%s", got, ipTablesCorefile)
 	}
 
 	upstream := manifestDocumentForKindAndName(manifest, "Service", "fugue-fugue-dns-upstream")
@@ -3180,9 +3199,9 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		}
 	}
 	metricsService := manifestDocumentForKindAndName(manifest, "Service", name)
-	for _, want := range []string{"targetPort: 9253", "targetPort: 9353"} {
+	for _, want := range []string{`fugue.io/node-local-dns-cohort: "active"`, "targetPort: 9253", "targetPort: 9353"} {
 		if !strings.Contains(metricsService, want) {
-			t.Fatalf("node-local DNS metrics service missing numeric %q after removing host-network container ports:\n%s", want, metricsService)
+			t.Fatalf("node-local DNS metrics Service missing %q:\n%s", want, metricsService)
 		}
 	}
 	prometheusConfig := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-prometheus")
@@ -3211,14 +3230,18 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 		"automountServiceAccountToken: false",
 		"hostNetwork: true",
 		"dnsPolicy: Default",
-		"maxUnavailable: 1",
+		"type: OnDelete",
 		`image: "registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc6e64e2c85956af2fcc0aa720086410d41b4f31f378c9a92646fecc85cd4739"`,
 		`- "169.254.20.10"`,
 		`- "fugue-fugue-dns-upstream"`,
 		"- NET_ADMIN",
 		"path: /run/xtables.lock",
+		"key: Corefile.shadow",
 		"kubernetes.io/os: linux",
-		"kubernetes.io/hostname: vps-84c8f0a9",
+		"key: kubernetes.io/hostname",
+		"operator: In",
+		`- "vps-84c8f0a9"`,
+		`- "vps-d6d20fa1"`,
 		"effect: NoSchedule",
 		"effect: NoExecute",
 	} {
@@ -3226,7 +3249,7 @@ func TestNodeLocalDNSShadowModeIsObservableWithoutInterceptingPodDNS(t *testing.
 			t.Fatalf("node-local DNS daemonset missing %q:\n%s", want, daemonSet)
 		}
 	}
-	for _, unwanted := range []string{"containerPort:", "hostPort:", `- "169.254.20.10,10.43.0.10"`} {
+	for _, unwanted := range []string{"containerPort:", "hostPort:", "rollingUpdate:", "maxUnavailable:", `- "169.254.20.10,10.43.0.10"`} {
 		if strings.Contains(daemonSet, unwanted) {
 			t.Fatalf("shadow node-local DNS daemonset must not contain %q:\n%s", unwanted, daemonSet)
 		}
@@ -3247,6 +3270,7 @@ func TestNodeLocalDNSIPTablesModeInterceptsTheExistingKubeDNSServiceIP(t *testin
 		"--set", "nodeLocalDNS.enabled=true",
 		"--set", "nodeLocalDNS.mode=iptables",
 		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.0.10",
+		"--set-string", `nodeLocalDNS.targetNodes[0]=node-a`,
 	)
 	cmd.Dir = chartDir
 	output, err := cmd.CombinedOutput()
@@ -3256,14 +3280,23 @@ func TestNodeLocalDNSIPTablesModeInterceptsTheExistingKubeDNSServiceIP(t *testin
 
 	manifest := string(output)
 	config := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-node-local-dns")
-	if got := strings.Count(config, "bind 169.254.20.10 10.44.0.10"); got != 4 {
-		t.Fatalf("iptables mode must bind the local and existing kube-dns service IP in every zone; got %d:\n%s", got, config)
+	ipTablesStart := strings.Index(config, "  Corefile.iptables: |")
+	legacyStart := strings.Index(config, "  Corefile: |")
+	if ipTablesStart < 0 || legacyStart <= ipTablesStart {
+		t.Fatalf("iptables node-local DNS config must contain stable and compatibility Corefiles:\n%s", config)
+	}
+	if got := strings.Count(config[ipTablesStart:legacyStart], "bind 169.254.20.10 10.44.0.10"); got != 4 {
+		t.Fatalf("stable iptables Corefile must bind the local and existing kube-dns service IP in every zone; got %d:\n%s", got, config)
+	}
+	if got := strings.Count(config[legacyStart:], "bind 169.254.20.10 10.44.0.10"); got != 4 {
+		t.Fatalf("selected compatibility Corefile must match iptables mode in every zone; got %d:\n%s", got, config)
 	}
 	daemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-local-dns")
 	for _, want := range []string{
 		`fugue.io/node-local-dns-mode: "iptables"`,
 		`- "169.254.20.10,10.44.0.10"`,
-		"maxUnavailable: 1",
+		"type: OnDelete",
+		"key: Corefile.iptables",
 		"minReadySeconds: 10",
 	} {
 		if !strings.Contains(daemonSet, want) {
@@ -3272,7 +3305,285 @@ func TestNodeLocalDNSIPTablesModeInterceptsTheExistingKubeDNSServiceIP(t *testin
 	}
 }
 
-func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
+func TestNodeLocalDNSLegacyCorefileCanRemainIPTablesWhileNewPodsUseShadow(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set", "nodeLocalDNS.mode=shadow",
+		"--set", "nodeLocalDNS.legacyMode=iptables",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.0.10",
+		"--set-string", `nodeLocalDNS.targetNodes[0]=node-a`,
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	config := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-node-local-dns")
+	ipTablesStart := strings.Index(config, "  Corefile.iptables: |")
+	legacyStart := strings.Index(config, "  Corefile: |")
+	if ipTablesStart < 0 || legacyStart <= ipTablesStart {
+		t.Fatalf("node-local DNS config must contain stable iptables and compatibility Corefiles:\n%s", config)
+	}
+	if got := strings.Count(config[legacyStart:], "bind 169.254.20.10 10.44.0.10"); got != 4 {
+		t.Fatalf("legacy Corefile must stay in iptables mode for every zone; got %d:\n%s", got, config)
+	}
+
+	daemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-local-dns")
+	for _, want := range []string{
+		`fugue.io/node-local-dns-mode: "shadow"`,
+		`- "169.254.20.10"`,
+		"key: Corefile.shadow",
+	} {
+		if !strings.Contains(daemonSet, want) {
+			t.Fatalf("new shadow Pod template missing %q:\n%s", want, daemonSet)
+		}
+	}
+	for _, unwanted := range []string{`- "169.254.20.10,10.44.0.10"`, "key: Corefile.iptables"} {
+		if strings.Contains(daemonSet, unwanted) {
+			t.Fatalf("new shadow Pod template must not contain %q:\n%s", unwanted, daemonSet)
+		}
+	}
+}
+
+func TestNodeLocalDNSSplitCohortsPreserveIPTablesWhileActiveUsesShadow(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set", "nodeLocalDNS.mode=shadow",
+		"--set", "nodeLocalDNS.legacyMode=iptables",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.0.10",
+		"--set-string", `nodeLocalDNS.targetNodes[0]=online-a`,
+		"--set-string", `nodeLocalDNS.targetNodes[1]=online-b`,
+		"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=dmit`,
+		"--set", "observability.metrics.enabled=true",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	const preservedName = "fugue-fugue-node-local-dns"
+	const activeName = "fugue-fugue-node-local-dns-active"
+	preservedDaemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", preservedName)
+	activeDaemonSet := manifestDocumentForKindAndName(manifest, "DaemonSet", activeName)
+	if preservedDaemonSet == "" || activeDaemonSet == "" {
+		t.Fatalf("split node-local DNS render must contain distinct preserved and active DaemonSets:\npreserved:\n%s\nactive:\n%s\nmanifest:\n%s", preservedDaemonSet, activeDaemonSet, manifest)
+	}
+	nodeLocalDaemonSetCount := 0
+	for _, document := range strings.Split(manifest, "\n---") {
+		if !strings.Contains(document, "\nkind: DaemonSet\n") && !strings.Contains(document, "kind: DaemonSet\n") {
+			continue
+		}
+		if strings.Contains(document, "app.kubernetes.io/component: node-local-dns\n") || strings.Contains(document, "app.kubernetes.io/component: node-local-dns-active\n") {
+			nodeLocalDaemonSetCount++
+		}
+	}
+	if nodeLocalDaemonSetCount != 2 {
+		t.Fatalf("split node-local DNS render must contain exactly two cohort DaemonSets, got %d", nodeLocalDaemonSetCount)
+	}
+	if got := strings.Count(preservedDaemonSet, "app.kubernetes.io/component: node-local-dns\n"); got != 3 {
+		t.Fatalf("preserved DaemonSet metadata, selector, and Pod template must share one component source; got %d occurrences:\n%s", got, preservedDaemonSet)
+	}
+	if got := strings.Count(activeDaemonSet, "app.kubernetes.io/component: node-local-dns-active\n"); got != 3 {
+		t.Fatalf("active DaemonSet metadata, selector, and Pod template must share one component source; got %d occurrences:\n%s", got, activeDaemonSet)
+	}
+	for _, want := range []string{
+		"app.kubernetes.io/component: node-local-dns",
+		`fugue.io/node-local-dns-cohort: "preserved"`,
+		`fugue.io/node-local-dns-mode: "iptables"`,
+		"type: OnDelete",
+		`- "169.254.20.10,10.44.0.10"`,
+		"key: Corefile.iptables",
+		"key: kubernetes.io/hostname",
+		"operator: In",
+		`- "dmit"`,
+	} {
+		if !strings.Contains(preservedDaemonSet, want) {
+			t.Fatalf("preserved node-local DNS DaemonSet missing %q:\n%s", want, preservedDaemonSet)
+		}
+	}
+	for _, unwanted := range []string{
+		"app.kubernetes.io/component: node-local-dns-active",
+		`fugue.io/node-local-dns-mode: "shadow"`,
+		"key: Corefile.shadow",
+		`- "online-a"`,
+		`- "online-b"`,
+	} {
+		if strings.Contains(preservedDaemonSet, unwanted) {
+			t.Fatalf("preserved node-local DNS DaemonSet must not contain %q:\n%s", unwanted, preservedDaemonSet)
+		}
+	}
+	for _, want := range []string{
+		"app.kubernetes.io/component: node-local-dns-active",
+		`fugue.io/node-local-dns-cohort: "active"`,
+		`fugue.io/node-local-dns-mode: "shadow"`,
+		"type: OnDelete",
+		`- "169.254.20.10"`,
+		"key: Corefile.shadow",
+		"key: kubernetes.io/hostname",
+		"operator: In",
+		`- "online-a"`,
+		`- "online-b"`,
+	} {
+		if !strings.Contains(activeDaemonSet, want) {
+			t.Fatalf("active node-local DNS DaemonSet missing %q:\n%s", want, activeDaemonSet)
+		}
+	}
+	for _, unwanted := range []string{
+		`fugue.io/node-local-dns-cohort: "preserved"`,
+		`fugue.io/node-local-dns-mode: "iptables"`,
+		`- "169.254.20.10,10.44.0.10"`,
+		"key: Corefile.iptables",
+		`- "dmit"`,
+	} {
+		if strings.Contains(activeDaemonSet, unwanted) {
+			t.Fatalf("active node-local DNS DaemonSet must not contain %q:\n%s", unwanted, activeDaemonSet)
+		}
+	}
+
+	preservedService := manifestDocumentForKindAndName(manifest, "Service", preservedName)
+	activeService := manifestDocumentForKindAndName(manifest, "Service", activeName)
+	if preservedService == "" || activeService == "" {
+		t.Fatalf("split node-local DNS render must contain distinct preserved and active metrics Services:\npreserved:\n%s\nactive:\n%s", preservedService, activeService)
+	}
+	for _, test := range []struct {
+		name      string
+		document  string
+		component string
+		cohort    string
+	}{
+		{name: "preserved", document: preservedService, component: "node-local-dns", cohort: "preserved"},
+		{name: "active", document: activeService, component: "node-local-dns-active", cohort: "active"},
+	} {
+		if got := strings.Count(test.document, "app.kubernetes.io/component: "+test.component); got != 2 {
+			t.Fatalf("%s metrics Service metadata and selector must share one component source; got %d occurrences:\n%s", test.name, got, test.document)
+		}
+		for _, want := range []string{
+			"app.kubernetes.io/component: " + test.component,
+			`fugue.io/node-local-dns-cohort: "` + test.cohort + `"`,
+			"targetPort: 9253",
+			"targetPort: 9353",
+		} {
+			if !strings.Contains(test.document, want) {
+				t.Fatalf("%s node-local DNS metrics Service missing %q:\n%s", test.name, want, test.document)
+			}
+		}
+	}
+
+	config := manifestDocumentForKindAndName(manifest, "ConfigMap", preservedName)
+	shadowStart := strings.Index(config, "  Corefile.shadow: |")
+	ipTablesStart := strings.Index(config, "  Corefile.iptables: |")
+	legacyStart := strings.Index(config, "  Corefile: |")
+	if shadowStart < 0 || ipTablesStart <= shadowStart || legacyStart <= ipTablesStart {
+		t.Fatalf("split node-local DNS config must contain stable shadow, iptables, and compatibility Corefiles:\n%s", config)
+	}
+	if got := strings.Count(config[shadowStart:ipTablesStart], "bind 169.254.20.10"); got != 4 {
+		t.Fatalf("active stable shadow Corefile must bind only the local address in every zone; got %d:\n%s", got, config[shadowStart:ipTablesStart])
+	}
+	if strings.Contains(config[shadowStart:ipTablesStart], "10.44.0.10") {
+		t.Fatalf("active stable shadow Corefile must not bind the kube-dns ServiceIP:\n%s", config[shadowStart:ipTablesStart])
+	}
+	for entryName, corefile := range map[string]string{
+		"stable iptables": config[ipTablesStart:legacyStart],
+		"legacy":          config[legacyStart:],
+	} {
+		if got := strings.Count(corefile, "bind 169.254.20.10 10.44.0.10"); got != 4 {
+			t.Fatalf("%s Corefile must preserve iptables binding in every zone; got %d:\n%s", entryName, got, corefile)
+		}
+	}
+
+	prometheusConfig := manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-observability-prometheus")
+	for _, want := range []string{
+		`regex: "node-local-dns|node-local-dns-active"`,
+		"__meta_kubernetes_service_label_fugue_io_node_local_dns_cohort",
+		`expr: up{job="fugue-node-local-dns",cohort="active"} == 0 or absent(up{job="fugue-node-local-dns",cohort="active"})`,
+	} {
+		if !strings.Contains(prometheusConfig, want) {
+			t.Fatalf("split node-local DNS Prometheus config missing %q:\n%s", want, prometheusConfig)
+		}
+	}
+}
+
+func TestNodeLocalDNSSplitCohortNamesRemainDistinctForLongReleaseNames(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	releaseName := strings.Repeat("r", 53)
+	cmd := exec.Command(
+		"helm", "template", releaseName, chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set", "nodeLocalDNS.mode=shadow",
+		"--set", "nodeLocalDNS.legacyMode=iptables",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.0.10",
+		"--set-string", `nodeLocalDNS.targetNodes[0]=online-a`,
+		"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=dmit`,
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	// This intentionally mirrors both Helm's fugue.fullname/name derivation and
+	// node_local_dns_configure_cohort_names in the release script. The active
+	// suffix is reserved before it is appended, so it cannot truncate back to
+	// the preserved name at Kubernetes' 63-character DNS-label boundary.
+	truncateAndTrim := func(value string, limit int) string {
+		if len(value) > limit {
+			value = value[:limit]
+		}
+		return strings.TrimSuffix(value, "-")
+	}
+	fullName := truncateAndTrim(releaseName+"-fugue", 63)
+	preservedName := truncateAndTrim(fullName+"-node-local-dns", 63)
+	activeName := truncateAndTrim(preservedName, 56) + "-active"
+	if preservedName == activeName || len(preservedName) > 63 || len(activeName) > 63 {
+		t.Fatalf("test name derivation is not a valid split cohort: preserved=%q active=%q", preservedName, activeName)
+	}
+
+	manifest := string(output)
+	for _, resource := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "DaemonSet", name: preservedName},
+		{kind: "DaemonSet", name: activeName},
+		{kind: "Service", name: preservedName},
+		{kind: "Service", name: activeName},
+	} {
+		if doc := manifestDocumentForKindAndName(manifest, resource.kind, resource.name); doc == "" {
+			t.Fatalf("long release name render missing %s %q; expected script/Helm split names preserved=%q active=%q:\n%s", resource.kind, resource.name, preservedName, activeName, manifest)
+		}
+	}
+}
+
+func TestNodeLocalDNSSplitCohortsRejectUnsafeMembershipAndStrategy(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
 	}
@@ -3287,9 +3598,194 @@ func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
 		want string
 	}{
 		{
+			name: "overlapping active and preserved membership",
+			args: []string{
+				"--set", "nodeLocalDNS.legacyMode=iptables",
+				"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=online-a`,
+			},
+			want: "nodeLocalDNS.targetNodes and nodeLocalDNS.preservedOfflineNodes must be disjoint",
+		},
+		{
+			name: "duplicate active membership",
+			args: []string{
+				"--set-string", `nodeLocalDNS.targetNodes[1]=online-a`,
+			},
+			want: "nodeLocalDNS.targetNodes must not contain duplicate hostnames",
+		},
+		{
+			name: "duplicate preserved membership",
+			args: []string{
+				"--set", "nodeLocalDNS.legacyMode=iptables",
+				"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=dmit`,
+				"--set-string", `nodeLocalDNS.preservedOfflineNodes[1]=dmit`,
+			},
+			want: "nodeLocalDNS.preservedOfflineNodes must not contain duplicate hostnames",
+		},
+		{
+			name: "missing explicit legacy mode",
+			args: []string{
+				"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=dmit`,
+			},
+			want: "nodeLocalDNS.legacyMode must be explicit when preservedOfflineNodes is non-empty",
+		},
+		{
+			name: "rolling update with preserved cohort",
+			args: []string{
+				"--set", "nodeLocalDNS.legacyMode=iptables",
+				"--set-string", `nodeLocalDNS.preservedOfflineNodes[0]=dmit`,
+				"--set", "nodeLocalDNS.updateStrategy.type=RollingUpdate",
+				"--set", "nodeLocalDNS.updateStrategy.maxUnavailable=1",
+			},
+			want: "nodeLocalDNS.updateStrategy.type must be OnDelete when preservedOfflineNodes is non-empty",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			args := []string{
+				"template", "fugue", chartDir,
+				"--set", "nodeLocalDNS.enabled=true",
+				"--set", "nodeLocalDNS.mode=shadow",
+				"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.44.0.10",
+				"--set-string", `nodeLocalDNS.targetNodes[0]=online-a`,
+			}
+			args = append(args, test.args...)
+			cmd := exec.Command("helm", args...)
+			cmd.Dir = chartDir
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected helm template to reject unsafe split node-local DNS values:\n%s", output)
+			}
+			if !strings.Contains(string(output), test.want) {
+				t.Fatalf("unexpected helm error; want %q:\n%s", test.want, output)
+			}
+		})
+	}
+}
+
+func TestNodeLocalDNSRollingUpdateMustBeExplicit(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
+		"--set-string", `nodeLocalDNS.targetNodes[0]=node-a`,
+		"--set", "nodeLocalDNS.updateStrategy.type=RollingUpdate",
+		"--set", "nodeLocalDNS.updateStrategy.maxUnavailable=1",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	daemonSet := manifestDocumentForKindAndName(string(output), "DaemonSet", "fugue-fugue-node-local-dns")
+	for _, want := range []string{"type: RollingUpdate", "rollingUpdate:", "maxUnavailable: 1"} {
+		if !strings.Contains(daemonSet, want) {
+			t.Fatalf("explicit rolling update strategy missing %q:\n%s", want, daemonSet)
+		}
+	}
+}
+
+func TestNodeLocalDNSChecksumTracksOnlyTheSelectedCorefile(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	render := func(t *testing.T, mode string, serviceIP string) (string, string) {
+		t.Helper()
+		cmd := exec.Command(
+			"helm", "template", "fugue", chartDir,
+			"--set", "nodeLocalDNS.enabled=true",
+			"--set", "nodeLocalDNS.mode="+mode,
+			"--set-string", "nodeLocalDNS.kubeDNSServiceIP="+serviceIP,
+			"--set-string", `nodeLocalDNS.targetNodes[0]=node-a`,
+		)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template failed: %v\n%s", err, output)
+		}
+		manifest := string(output)
+		return manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-node-local-dns"),
+			manifestDocumentForKindAndName(manifest, "ConfigMap", "fugue-fugue-node-local-dns")
+	}
+	checksum := func(t *testing.T, daemonSet string) string {
+		t.Helper()
+		const prefix = "checksum/node-local-dns-config:"
+		for _, line := range strings.Split(daemonSet, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
+		}
+		t.Fatalf("node-local DNS daemonset is missing the selected Corefile checksum:\n%s", daemonSet)
+		return ""
+	}
+
+	shadowA, configA := render(t, "shadow", "10.43.0.10")
+	shadowB, configB := render(t, "shadow", "10.44.0.10")
+	if configA == configB {
+		t.Fatal("test setup did not change the unselected stable iptables Corefile")
+	}
+	if gotA, gotB := checksum(t, shadowA), checksum(t, shadowB); gotA != gotB {
+		t.Fatalf("shadow rollout checksum changed with only the unselected iptables Corefile: %s != %s", gotA, gotB)
+	}
+
+	ipTablesA, _ := render(t, "iptables", "10.43.0.10")
+	ipTablesB, _ := render(t, "iptables", "10.44.0.10")
+	if gotA, gotB := checksum(t, ipTablesA), checksum(t, ipTablesB); gotA == gotB {
+		t.Fatalf("iptables rollout checksum did not change with its selected Corefile: %s", gotA)
+	}
+}
+
+func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	missingTargets := exec.Command(
+		"helm", "template", "fugue", chartDir,
+		"--set", "nodeLocalDNS.enabled=true",
+		"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
+	)
+	missingTargets.Dir = chartDir
+	missingTargetOutput, missingTargetErr := missingTargets.CombinedOutput()
+	if missingTargetErr == nil {
+		t.Fatalf("expected helm template to reject an empty node-local DNS target cohort:\n%s", missingTargetOutput)
+	}
+	if want := "nodeLocalDNS.targetNodes must be a non-empty hostname list"; !strings.Contains(string(missingTargetOutput), want) {
+		t.Fatalf("unexpected empty target cohort error; want %q:\n%s", want, missingTargetOutput)
+	}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
 			name: "unknown mode",
 			args: []string{"--set", "nodeLocalDNS.mode=active"},
 			want: "nodeLocalDNS.mode must be shadow or iptables",
+		},
+		{
+			name: "unknown legacy mode",
+			args: []string{"--set", "nodeLocalDNS.legacyMode=active"},
+			want: "nodeLocalDNS.legacyMode must be shadow or iptables",
 		},
 		{
 			name: "non link-local cache address",
@@ -3309,6 +3805,24 @@ func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
 			},
 			want: "nodeLocalDNS.localIP and nodeLocalDNS.kubeDNSServiceIP must be different",
 		},
+		{
+			name: "unknown update strategy",
+			args: []string{"--set", "nodeLocalDNS.updateStrategy.type=Recreate"},
+			want: "nodeLocalDNS.updateStrategy.type must be OnDelete or RollingUpdate",
+		},
+		{
+			name: "invalid rolling update availability",
+			args: []string{
+				"--set", "nodeLocalDNS.updateStrategy.type=RollingUpdate",
+				"--set", "nodeLocalDNS.updateStrategy.maxUnavailable=0",
+			},
+			want: "nodeLocalDNS.updateStrategy.maxUnavailable must be an integer >= 1",
+		},
+		{
+			name: "legacy hostname node selector",
+			args: []string{"--set-string", `nodeLocalDNS.nodeSelector.kubernetes\.io/hostname=node-a`},
+			want: "nodeLocalDNS.nodeSelector must not set kubernetes.io/hostname; use nodeLocalDNS.targetNodes",
+		},
 	}
 
 	for _, test := range tests {
@@ -3317,6 +3831,7 @@ func TestNodeLocalDNSRejectsUnsafeAddressingAndModes(t *testing.T) {
 				"template", "fugue", chartDir,
 				"--set", "nodeLocalDNS.enabled=true",
 				"--set-string", "nodeLocalDNS.kubeDNSServiceIP=10.43.0.10",
+				"--set-string", `nodeLocalDNS.targetNodes[0]=node-a`,
 			}
 			args = append(args, test.args...)
 			cmd := exec.Command("helm", args...)
@@ -3353,6 +3868,8 @@ func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
 		"--set",
 		"dns.publicHostPorts.enabled=true",
 		"--set-string",
+		"dns.publicHostPorts.hostIP=203.0.113.10",
+		"--set-string",
 		"dns.udpAddr=:53",
 		"--set-string",
 		"dns.tcpAddr=:53",
@@ -3371,6 +3888,7 @@ func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	for _, want := range []string{
 		`name: dns-udp`,
 		`containerPort: 53`,
+		`hostIP: "203.0.113.10"`,
 		`hostPort: 53`,
 		`protocol: UDP`,
 		`name: dns-tcp`,
@@ -3386,6 +3904,72 @@ func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	}
 	if strings.Contains(doc, "hostNetwork: true") {
 		t.Fatalf("public-hostport dns daemonset should not use hostNetwork:\n%s", doc)
+	}
+}
+
+func TestDNSPublicHostPortsRequirePerDaemonSetHostIP(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tests := []struct {
+		name   string
+		values string
+		want   string
+	}{
+		{
+			name: "primary",
+			values: `
+dns:
+  enabled: true
+  answerIPs: [203.0.113.10]
+  publicHostPorts:
+    enabled: true
+`,
+			want: "dns.publicHostPorts.hostIP is required when public DNS host ports are enabled",
+		},
+		{
+			name: "regional group",
+			values: `
+dns:
+  enabled: true
+  answerIPs: [203.0.113.10]
+  publicHostPorts:
+    enabled: true
+    hostIP: 203.0.113.10
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      answerIPs: [198.51.100.20]
+      nodeSelector:
+        fugue.io/role.dns: "true"
+      publicHostPorts:
+        enabled: true
+`,
+			want: "dns.groups[country-de].publicHostPorts.hostIP is required when public DNS host ports are enabled",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			valuesPath := t.TempDir() + "/values.yaml"
+			if err := os.WriteFile(valuesPath, []byte(test.values), 0o600); err != nil {
+				t.Fatalf("write values: %v", err)
+			}
+			cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+			cmd.Dir = chartDir
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected Helm template to reject missing hostIP:\n%s", output)
+			}
+			if !strings.Contains(string(output), test.want) {
+				t.Fatalf("unexpected Helm error; want %q:\n%s", test.want, output)
+			}
+		})
 	}
 }
 
@@ -3437,6 +4021,7 @@ dns:
     - 136.112.185.40
   publicHostPorts:
     enabled: true
+    hostIP: 15.204.94.71
   udpAddr: :53
   tcpAddr: :53
   groups:
@@ -3444,6 +4029,8 @@ dns:
       edgeGroupID: edge-group-country-us
       answerIPs:
         - 15.204.94.71
+      publicHostPorts:
+        hostIP: 15.204.94.71
       tokenSecret:
         name: fugue-edge-us-scoped-token
         key: FUGUE_EDGE_TOKEN
@@ -3455,6 +4042,8 @@ dns:
       edgeGroupID: edge-group-country-de
       answerIPs:
         - 51.38.126.103
+      publicHostPorts:
+        hostIP: 51.38.126.103
       tokenSecret:
         name: fugue-edge-de-scoped-token
         key: FUGUE_EDGE_TOKEN
@@ -3526,6 +4115,7 @@ dns:
 		`name: FUGUE_DNS_ROUTE_A_ANSWER_IPS`,
 		`value: "136.112.185.40"`,
 		`name: dns-udp`,
+		`hostIP: "51.38.126.103"`,
 		`hostPort: 53`,
 	} {
 		if !strings.Contains(dnsDoc, want) {
@@ -3566,11 +4156,14 @@ dns:
     - 15.204.94.71
   publicHostPorts:
     enabled: true
+    hostIP: 15.204.94.71
   groups:
     - name: country-de
       edgeGroupID: edge-group-country-de
       answerIPs:
         - 51.38.126.103
+      publicHostPorts:
+        hostIP: 51.38.126.103
       nodeSelector:
         fugue.io/role.dns: "true"
         fugue.io/schedulable: "true"
