@@ -9126,14 +9126,47 @@ restore_local_control_plane_automation_bundle_from_secret() {
   return 0
 }
 
+control_plane_automation_bootstrap_inventory_error() {
+  local env_name=""
+  local value=""
+
+  for env_name in FUGUE_NODE1 FUGUE_NODE2 FUGUE_NODE3; do
+    value="${!env_name:-}"
+    if [[ -z "$(trim_field "${value}")" ]]; then
+      printf '%s is not configured' "${env_name}"
+      return
+    fi
+    if [[ "${value}" =~ [[:space:]] ]]; then
+      printf '%s contains whitespace' "${env_name}"
+      return
+    fi
+  done
+  if [[ "${FUGUE_NODE1}" == "${FUGUE_NODE2}" ||
+    "${FUGUE_NODE1}" == "${FUGUE_NODE3}" ||
+    "${FUGUE_NODE2}" == "${FUGUE_NODE3}" ]]; then
+    printf '%s' "FUGUE_NODE1, FUGUE_NODE2, and FUGUE_NODE3 must identify three distinct hosts"
+  fi
+}
+
 bootstrap_local_control_plane_automation_bundle() {
+  local inventory_error=""
+
   if [[ ! -x "./scripts/bootstrap_control_plane_automation.sh" ]]; then
+    return 1
+  fi
+  inventory_error="$(control_plane_automation_bootstrap_inventory_error)"
+  if [[ -n "${inventory_error}" ]]; then
+    log_stderr "skipping control-plane automation bundle bootstrap: ${inventory_error}"
     return 1
   fi
 
   log_stderr "bootstrapping control-plane automation SSH bundle on this server"
   run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS:-1200}" \
-    "control-plane automation bundle bootstrap" bash ./scripts/bootstrap_control_plane_automation.sh
+    "control-plane automation bundle bootstrap" env \
+    FUGUE_NODE1="${FUGUE_NODE1}" \
+    FUGUE_NODE2="${FUGUE_NODE2}" \
+    FUGUE_NODE3="${FUGUE_NODE3}" \
+    bash ./scripts/bootstrap_control_plane_automation.sh
 }
 
 prepare_control_plane_automation_ssh() {

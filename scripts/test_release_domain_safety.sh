@@ -28,6 +28,27 @@ bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
 bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
+bash -n "${REPO_ROOT}/scripts/bootstrap_control_plane_automation.sh"
+if bootstrap_inventory_error="$(env -u FUGUE_NODE1 -u FUGUE_NODE2 -u FUGUE_NODE3 \
+  bash "${REPO_ROOT}/scripts/bootstrap_control_plane_automation.sh" 2>&1)"; then
+  fail "standalone automation bootstrap must reject missing host inventory"
+fi
+[[ "${bootstrap_inventory_error}" == *"FUGUE_NODE1 is required to bootstrap the control-plane automation bundle"* ]] ||
+  fail "standalone automation bootstrap must identify the missing primary host"
+[[ "${bootstrap_inventory_error}" != *"checking SSH and root privileges on"* ]] ||
+  fail "standalone automation bootstrap must fail before attempting an empty SSH host"
+if bootstrap_inventory_error="$(FUGUE_NODE1='primary a' FUGUE_NODE2=secondary-a FUGUE_NODE3=secondary-b \
+  bash "${REPO_ROOT}/scripts/bootstrap_control_plane_automation.sh" 2>&1)"; then
+  fail "standalone automation bootstrap must reject whitespace in a host alias"
+fi
+[[ "${bootstrap_inventory_error}" == *"FUGUE_NODE1 must not contain whitespace"* ]] ||
+  fail "standalone automation bootstrap must identify a whitespace-bearing host alias"
+if bootstrap_inventory_error="$(FUGUE_NODE1=primary-a FUGUE_NODE2=primary-a FUGUE_NODE3=secondary-b \
+  bash "${REPO_ROOT}/scripts/bootstrap_control_plane_automation.sh" 2>&1)"; then
+  fail "standalone automation bootstrap must reject duplicate hosts"
+fi
+[[ "${bootstrap_inventory_error}" == *"must identify three distinct hosts"* ]] ||
+  fail "standalone automation bootstrap must identify duplicate hosts"
 python3 -m py_compile "${REPO_ROOT}/scripts/verify_registry_image.py" "${REPO_ROOT}/scripts/test_verify_registry_image.py"
 python3 "${REPO_ROOT}/scripts/test_verify_registry_image.py"
 grep -Fq 'FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}' \
@@ -5103,17 +5124,50 @@ PY
 
 (
   FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS=17
+  FUGUE_NODE1=primary-a
+  FUGUE_NODE2=secondary-a
+  FUGUE_NODE3=secondary-b
   bootstrap_guard_args="$(mktemp)"
+  bootstrap_guard_calls=0
   run_release_long_command() {
+    bootstrap_guard_calls=$((bootstrap_guard_calls + 1))
     printf '%s\n' "$*" >"${bootstrap_guard_args}"
     return 42
   }
   if bootstrap_local_control_plane_automation_bundle; then
     fail "automation bundle bootstrap failure must propagate through the host guard"
   fi
-  grep -Fq '17 control-plane automation bundle bootstrap bash ./scripts/bootstrap_control_plane_automation.sh' "${bootstrap_guard_args}" ||
+  grep -Fq '17 control-plane automation bundle bootstrap env FUGUE_NODE1=primary-a FUGUE_NODE2=secondary-a FUGUE_NODE3=secondary-b bash ./scripts/bootstrap_control_plane_automation.sh' "${bootstrap_guard_args}" ||
     fail "automation bundle bootstrap must use the configured whole-host-operation bound"
+  if bootstrap_local_control_plane_automation_bundle; then
+    fail "a real automation bootstrap failure must remain retryable"
+  fi
+  assert_eq "${bootstrap_guard_calls}" "2" "a configured bootstrap failure must not be negatively cached"
   rm -f "${bootstrap_guard_args}"
+)
+
+(
+  unset FUGUE_NODE1 FUGUE_NODE2 FUGUE_NODE3
+  first_inventory_error="$(mktemp)"
+  second_inventory_error="$(mktemp)"
+  bootstrap_calls=0
+  run_release_long_command() {
+    bootstrap_calls=$((bootstrap_calls + 1))
+    return 0
+  }
+  if bootstrap_local_control_plane_automation_bundle 2>"${first_inventory_error}"; then
+    fail "automation bundle bootstrap must reject missing host inventory"
+  fi
+  assert_eq "${bootstrap_calls}" "0" "missing host inventory must fail before launching the legacy bootstrap"
+  grep -Fq 'skipping control-plane automation bundle bootstrap: FUGUE_NODE1 is not configured' "${first_inventory_error}" ||
+    fail "missing host inventory must produce a stable first-attempt diagnostic"
+  if bootstrap_local_control_plane_automation_bundle 2>"${second_inventory_error}"; then
+    fail "repeated unavailable automation bootstrap must remain unavailable"
+  fi
+  assert_eq "${bootstrap_calls}" "0" "repeated missing inventory must not launch the legacy bootstrap"
+  grep -Fq 'skipping control-plane automation bundle bootstrap: FUGUE_NODE1 is not configured' "${second_inventory_error}" ||
+    fail "missing host inventory must preserve its diagnostic on later attempts"
+  rm -f "${first_inventory_error}" "${second_inventory_error}"
 )
 
 (
