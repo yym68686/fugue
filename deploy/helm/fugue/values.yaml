@@ -620,6 +620,7 @@ nodeLocalDNS:
 
 dns:
   enabled: false
+  containerName: dns
   image:
     # fugue-dns is packaged in the same image as fugue-edge by default.
     repository: ""
@@ -660,6 +661,8 @@ dns:
     hostIP: ""
     udp: 53
     tcp: 53
+    udpContainerPort: 53
+    tcpContainerPort: 53
   nodeSelector:
     fugue.io/role.dns: "true"
     fugue.io/schedulable: "true"

@@ -22,6 +22,609 @@ assert_eq() {
   fi
 }
 
+print_dig_response() {
+  local flags="$1"
+  local question_name="$2"
+  local question_type="$3"
+  local answer_name="$4"
+  local answer_type="$5"
+  local answer_rdata="$6"
+  local edns_mode="${7:-valid}"
+  local additional=1
+  local edns_version=0
+  local edns_flags=""
+  local ecs_scope="0.0.0.0/0/0"
+  local emit_opt=true
+  local extra_edns=""
+
+  case "${edns_mode}" in
+    valid) ;;
+    wrong-version) edns_version=1 ;;
+    wrong-flags) edns_flags=" do" ;;
+    wrong-ecs) ecs_scope="192.0.2.0/24/0" ;;
+    wrong-additional) additional=2 ;;
+    missing-opt)
+      additional=0
+      emit_opt=false
+      ;;
+    extra-edns) extra_edns='; COOKIE: 0123456789abcdef (echoed)' ;;
+    *) fail "unknown DiG EDNS fixture mode: ${edns_mode}" ;;
+  esac
+
+  cat <<EOF
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 4242
+;; flags: ${flags}; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: ${additional}
+
+EOF
+  if [[ "${emit_opt}" == "true" ]]; then
+    cat <<EOF
+;; OPT PSEUDOSECTION:
+; EDNS: version: ${edns_version}, flags:${edns_flags}; udp: 1232
+; CLIENT-SUBNET: ${ecs_scope}
+${extra_edns}
+
+;; QUESTION SECTION:
+;${question_name} IN ${question_type}
+
+;; ANSWER SECTION:
+${answer_name} 60 IN ${answer_type} ${answer_rdata}
+EOF
+  else
+    cat <<EOF
+;; QUESTION SECTION:
+;${question_name} IN ${question_type}
+
+;; ANSWER SECTION:
+${answer_name} 60 IN ${answer_type} ${answer_rdata}
+EOF
+  fi
+}
+
+run_e4_edns_parser_regressions() {
+  (
+    export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+    # shellcheck source=scripts/release_fugue_public_data_plane.sh
+    source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+    local response_file
+    local expected_config
+    local transport
+    local mode
+    response_file="$(mktemp)"
+    expected_config='{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"}],"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}'
+    for transport in udp tcp; do
+      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${response_file}"
+      validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A ||
+        fail "main authoritative parser must accept a real-shape ${transport} OPT/EDNS/ECS response"
+      for mode in wrong-version wrong-flags wrong-ecs wrong-additional missing-opt extra-edns; do
+        print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' "${mode}" >"${response_file}"
+        if validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A; then
+          fail "main authoritative parser must reject ${transport} EDNS fixture ${mode}"
+        fi
+      done
+    done
+    rm -f "${response_file}"
+  )
+
+  (
+    export FUGUE_UPGRADE_LIB_ONLY=true
+    # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+    source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+    local response_file
+    local expected_config
+    local transport
+    local mode
+    FUGUE_DNS_ZONE=example.test
+    FUGUE_DNS_NAMESERVERS='ns1.example.test'
+    FUGUE_DNS_TTL=60
+    response_file="$(mktemp)"
+    expected_config="$(node_local_dns_authoritative_soa_config)"
+    for transport in udp tcp; do
+      print_dig_response 'qr aa' 'example.test.' SOA 'example.test.' SOA \
+        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${response_file}"
+      node_local_dns_validate_authoritative_soa_response "${response_file}" "${expected_config}" ||
+        fail "NodeLocal SOA parser must accept a real-shape ${transport} OPT/EDNS/ECS response"
+      for mode in wrong-version wrong-flags wrong-ecs wrong-additional missing-opt extra-edns; do
+        print_dig_response 'qr aa' 'example.test.' SOA 'example.test.' SOA \
+          'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' "${mode}" >"${response_file}"
+        if node_local_dns_validate_authoritative_soa_response "${response_file}" "${expected_config}"; then
+          fail "NodeLocal SOA parser must reject ${transport} EDNS fixture ${mode}"
+        fi
+      done
+    done
+    rm -f "${response_file}"
+  )
+  printf '[test_release_domain_safety] E4 strict DiG EDNS/ECS parser regressions ok\n'
+}
+
+run_e4_real_dig_smokes() (
+  set -euo pipefail
+  command -v dig >/dev/null 2>&1 || fail "E4 real-dig smoke requires dig"
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+  local work_dir
+  local port_file
+  local server_pid
+  local port
+  local response_file
+  local expected_config
+  local attempt
+  work_dir="$(mktemp -d)"
+  port_file="${work_dir}/port"
+  python3 - "${port_file}" <<'PY' &
+import select
+import socket
+import struct
+import sys
+import time
+
+port_file = sys.argv[1]
+udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp.bind(("127.0.0.1", 0))
+port = udp.getsockname()[1]
+tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp.bind(("127.0.0.1", port))
+tcp.listen(2)
+with open(port_file, "w", encoding="ascii") as handle:
+    handle.write(str(port))
+    handle.flush()
+
+def read_exact(connection, length):
+    chunks = []
+    remaining = length
+    while remaining:
+        chunk = connection.recv(remaining)
+        if not chunk:
+            raise RuntimeError("truncated DNS-over-TCP request")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+def wire_name(value):
+    return b"".join(bytes([len(label)]) + label.encode("ascii") for label in value.rstrip(".").split(".")) + b"\x00"
+
+def response_for(query):
+    if len(query) < 12:
+        raise RuntimeError("short DNS query")
+    identifier, _, qdcount, _, _, arcount = struct.unpack("!HHHHHH", query[:12])
+    if qdcount != 1 or arcount != 1:
+        raise RuntimeError("real-dig query did not contain exactly one question and one OPT record")
+    offset = 12
+    labels = []
+    while True:
+        length = query[offset]
+        offset += 1
+        if length == 0:
+            break
+        labels.append(query[offset:offset + length].decode("ascii"))
+        offset += length
+    question_end = offset + 4
+    qtype, qclass = struct.unpack("!HH", query[offset:question_end])
+    if qclass != 1:
+        raise RuntimeError("real-dig query class drifted")
+    qname = ".".join(labels).lower() + "."
+    question = query[12:question_end]
+    opt = query[question_end:]
+    if not opt or opt[0] != 0 or len(opt) < 11 or struct.unpack("!H", opt[1:3])[0] != 41:
+        raise RuntimeError("real-dig query OPT record is missing")
+    if qtype == 1 and qname == "api.example.test.":
+        rdata = bytes([192, 0, 2, 20])
+    elif qtype == 6 and qname == "example.test.":
+        rdata = wire_name("ns1.example.test.") + wire_name("hostmaster.example.test.") + struct.pack(
+            "!IIIII", 1, 300, 60, 3600, 60
+        )
+    else:
+        raise RuntimeError(f"unexpected real-dig question {qname} type={qtype}")
+    answer = b"\xc0\x0c" + struct.pack("!HHIH", qtype, 1, 60, len(rdata)) + rdata
+    return struct.pack("!HHHHHH", identifier, 0x8400, 1, 1, 0, 1) + question + answer + opt
+
+handled = 0
+deadline = time.monotonic() + 10
+while handled < 2:
+    timeout = deadline - time.monotonic()
+    if timeout <= 0:
+        raise RuntimeError("timed out waiting for loopback dig queries")
+    readable, _, _ = select.select([udp, tcp], [], [], timeout)
+    if not readable:
+        continue
+    for listener in readable:
+        if listener is udp:
+            query, address = udp.recvfrom(65535)
+            udp.sendto(response_for(query), address)
+        else:
+            connection, _ = tcp.accept()
+            with connection:
+                length = struct.unpack("!H", read_exact(connection, 2))[0]
+                response = response_for(read_exact(connection, length))
+                connection.sendall(struct.pack("!H", len(response)) + response)
+        handled += 1
+        if handled == 2:
+            break
+udp.close()
+tcp.close()
+PY
+  server_pid=$!
+  trap 'kill "${server_pid}" >/dev/null 2>&1 || true; rm -rf "${work_dir}"' EXIT
+  port=""
+  for attempt in {1..100}; do
+    if [[ -s "${port_file}" ]]; then
+      port="$(cat "${port_file}")"
+      break
+    fi
+    kill -0 "${server_pid}" >/dev/null 2>&1 || fail "loopback DNS server exited before publishing its port"
+    sleep 0.02
+  done
+  [[ "${port}" =~ ^[1-9][0-9]*$ ]] || fail "loopback DNS server did not publish a port"
+
+  response_file="${work_dir}/authoritative.txt"
+  dig @127.0.0.1 -p "${port}" +time=1 +tries=1 +norecurse +subnet=0.0.0.0/0 \
+    +noall +comments +question +answer api.example.test A >"${response_file}"
+  expected_config='{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"}],"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}'
+  validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A ||
+    fail "main authoritative parser rejected local real-dig UDP output"
+
+  FUGUE_DNS_ZONE=example.test
+  FUGUE_DNS_NAMESERVERS='ns1.example.test'
+  FUGUE_DNS_TTL=60
+  response_file="${work_dir}/nodelocal-soa.txt"
+  dig @127.0.0.1 -p "${port}" +time=1 +tries=1 +norecurse +subnet=0.0.0.0/0 \
+    +noall +comments +question +answer +tcp example.test SOA >"${response_file}"
+  expected_config="$(node_local_dns_authoritative_soa_config)"
+  node_local_dns_validate_authoritative_soa_response "${response_file}" "${expected_config}" ||
+    fail "NodeLocal SOA parser rejected local real-dig TCP output"
+  wait "${server_pid}"
+  trap - EXIT
+  rm -rf "${work_dir}"
+  printf '[test_release_domain_safety] E4 loopback real-dig authoritative/NodeLocal smokes ok\n'
+)
+
+run_e4_public_hostport_regressions() (
+  set -euo pipefail
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS=1
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS=0
+  fixture_mode=valid
+  fixture_dir="$(mktemp -d)"
+  cache_file="${fixture_dir}/cache.json"
+  trap 'rm -rf "${fixture_dir}"' EXIT
+  python3 - "${cache_file}" <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import sys
+
+key = b"test-signing-key"
+bundle = {
+    "schema_version": "1.0",
+    "version": "dnsgen_e4",
+    "generation": "dnsgen_e4",
+    "generated_at": "2026-07-15T00:00:00Z",
+    "valid_until": "2099-07-15T00:00:00Z",
+    "issuer": "fugue",
+    "key_id": "key-1",
+    "dns_node_id": "node-a",
+    "edge_group_id": "edge-global",
+    "zone": "example.test",
+    "records": [{
+        "name": "api.example.test",
+        "type": "A",
+        "values": ["192.0.2.20"],
+        "ttl": 60,
+        "record_kind": "platform",
+        "status": "active",
+        "record_generation": "dnsgen_e4_record",
+    }],
+}
+signing_payload = {
+    "schema_version": bundle["schema_version"],
+    "version": bundle["version"],
+    "generation": bundle["generation"],
+    "generated_at": bundle["generated_at"],
+    "valid_until": bundle["valid_until"],
+    "issuer": bundle["issuer"],
+    "key_id": bundle["key_id"],
+    "edge_id": bundle["dns_node_id"],
+    "edge_group_id": bundle["edge_group_id"],
+    "records": bundle["records"],
+}
+bundle["signature"] = base64.urlsafe_b64encode(hmac.new(
+    key,
+    json.dumps(signing_payload, separators=(",", ":")).encode(),
+    hashlib.sha256,
+).digest()).rstrip(b"=").decode()
+payload = {
+    "version": 1,
+    "etag": "dnsgen_e4",
+    "cached_at": "2026-07-15T00:00:00Z",
+    "bundle": bundle,
+}
+content_hash = "sha256:" + hashlib.sha256(
+    json.dumps(payload, separators=(",", ":")).encode()
+).hexdigest()
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump({
+        "schema_version": "1.0",
+        "kind": "dns_answer_bundle",
+        "generation": "dnsgen_e4",
+        "content_hash": content_hash,
+        "expires_at": "2099-07-15T00:00:00Z",
+        "created_at": "2026-07-15T00:00:00Z",
+        "payload": payload,
+    }, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+
+  render_e4_daemonset() {
+    python3 - "${fixture_mode}" <<'PY'
+import json
+import sys
+
+mode = sys.argv[1]
+udp_host_ip = "203.0.113.10"
+tcp_host_ip = "203.0.113.11" if mode == "transport-address-mismatch" else udp_host_ip
+udp_host_port = 5302 if mode == "daemonset-port-drift" else 5300
+print(json.dumps({
+    "apiVersion": "apps/v1",
+    "kind": "DaemonSet",
+    "metadata": {"name": "dns-us", "namespace": "fugue-system", "uid": "ds-uid", "generation": 4},
+    "spec": {
+        "selector": {"matchLabels": {"app": "dns-us"}},
+        "template": {"metadata": {"labels": {"app": "dns-us"}}, "spec": {"containers": [{
+            "name": "dns",
+            "command": ["/usr/local/bin/fugue-dns"],
+            "ports": [
+                {"name": "http", "containerPort": 7834, "protocol": "TCP"},
+                {"name": "dns-udp", "containerPort": 1053, "hostIP": udp_host_ip, "hostPort": udp_host_port, "protocol": "UDP"},
+                {"name": "dns-tcp", "containerPort": 1054, "hostIP": tcp_host_ip, "hostPort": 5301, "protocol": "TCP"},
+            ],
+            "env": [{"name": "FUGUE_DNS_ZONE", "value": "example.test"}],
+        }]}},
+        "updateStrategy": {"type": "OnDelete"},
+    },
+    "status": {
+        "observedGeneration": 4,
+        "desiredNumberScheduled": 1,
+        "numberReady": 1,
+        "numberAvailable": 1,
+        "numberUnavailable": 0,
+        "numberMisscheduled": 0,
+    },
+}, separators=(",", ":")))
+PY
+  }
+
+  render_e4_node() {
+    python3 - "${fixture_mode}" <<'PY'
+import json
+import sys
+
+mode = sys.argv[1]
+addresses = [{"type": "ExternalIP", "address": "203.0.113.10"}]
+if mode == "node-address-mismatch":
+    addresses = [{"type": "ExternalIP", "address": "203.0.113.12"}]
+elif mode == "node-address-ambiguous":
+    addresses.append({"type": "ExternalIP", "address": "203.0.113.12"})
+node = {
+    "apiVersion": "v1",
+    "kind": "Node",
+    "metadata": {
+        "name": "node-a",
+        "uid": "node-a-replaced" if mode == "node-uid-drift" else "node-a-uid",
+        "generation": 2,
+    },
+    "spec": {"podCIDR": "10.42.1.0/24"},
+    "status": {"addresses": addresses},
+}
+print(json.dumps(node, separators=(",", ":")))
+PY
+  }
+
+  render_e4_nodes() {
+    printf '{"items":[%s]}\n' "$(render_e4_node)"
+  }
+
+  render_e4_pod() {
+    python3 - "${fixture_mode}" <<'PY'
+import json
+import sys
+
+mode = sys.argv[1]
+node_name = "node-missing" if mode in {"pod-node-missing", "pod-node-drift"} else "node-a"
+pod = {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+        "name": "dns-a",
+        "namespace": "fugue-system",
+        "uid": "dns-a-replaced" if mode == "pod-uid-drift" else "dns-a-uid",
+        "labels": {"app": "dns-us", "controller-revision-hash": "rev-a"},
+        "ownerReferences": [{
+            "apiVersion": "apps/v1", "kind": "DaemonSet", "name": "dns-us", "uid": "ds-uid", "controller": True,
+        }],
+    },
+    "spec": {"nodeName": node_name, "containers": [{
+        "name": "dns",
+        "command": ["/usr/local/bin/fugue-dns"],
+        "ports": [
+            {"name": "http", "containerPort": 7834, "protocol": "TCP"},
+            {"name": "dns-udp", "containerPort": 1053, "hostIP": "203.0.113.10", "hostPort": 5300, "protocol": "UDP"},
+            {"name": "dns-tcp", "containerPort": 1054, "hostIP": "203.0.113.10", "hostPort": 5301, "protocol": "TCP"},
+        ],
+        "env": [
+            {"name": "FUGUE_DNS_ZONE", "value": "example.test"},
+            {"name": "FUGUE_DNS_CACHE_PATH", "value": "/var/lib/fugue/dns/cache.json"},
+            {"name": "FUGUE_DNS_NAMESERVERS", "value": "ns1.example.test"},
+            {"name": "FUGUE_DNS_TTL", "value": "60"},
+            {"name": "FUGUE_BUNDLE_SIGNING_KEY", "value": "test-signing-key"},
+            {"name": "FUGUE_BUNDLE_SIGNING_KEY_ID", "value": "key-1"},
+        ],
+    }]},
+    "status": {
+        "phase": "Running",
+        "hostIP": "10.42.1.26" if mode == "pod-host-ip-drift" else "10.42.1.25",
+        "conditions": [{"type": "Ready", "status": "True"}],
+    },
+}
+print(json.dumps(pod, separators=(",", ":")))
+PY
+  }
+
+  render_e4_pods() {
+    printf '{"items":[%s]}\n' "$(render_e4_pod)"
+  }
+
+  daemonset_selector() { printf 'app=dns-us\n'; }
+  kubectl_cmd() {
+    case "$*" in
+      *"get ds/dns-us -o json") render_e4_daemonset ;;
+      *"get nodes -o json") render_e4_nodes ;;
+      *"get node/node-a -o json") render_e4_node ;;
+      *"get pods -l app=dns-us -o json") render_e4_pods ;;
+      *"get pod/dns-a -o json") render_e4_pod ;;
+      *"get --raw="*) printf '%s\n' '{"healthy":true,"zone":"example.test","bundle_version":"dnsgen_e4","serving_generation":"dnsgen_e4","cache_path":"/var/lib/fugue/dns/cache.json","record_count":1}' ;;
+      *"exec dns-a -c dns -- cat /var/lib/fugue/dns/cache.json") cat "${cache_file}" ;;
+      *) return 91 ;;
+    esac
+  }
+
+  target_row="$(authoritative_dns_targets_for_daemonset dns-us)"
+  IFS=$'\t' read -r target_external_ip target_udp_host_port target_udp_container_port target_tcp_host_port target_tcp_container_port target_pod target_pod_uid target_pod_host_ip target_pod_identity target_node target_node_uid target_node_identity target_revision target_ds_uid target_ds_identity <<<"${target_row}"
+  [[ "${target_external_ip}" == "203.0.113.10" && "${target_pod_host_ip}" == "10.42.1.25" && "${target_udp_host_port}" == "5300" && "${target_udp_container_port}" == "1053" && "${target_tcp_host_port}" == "5301" && "${target_tcp_container_port}" == "1054" && "${target_node}" == "node-a" && "${target_node_uid}" == "node-a-uid" && "${target_pod_identity}" == sha256:* && "${target_node_identity}" == sha256:* && "${target_ds_identity}" == sha256:* ]] ||
+    fail "authoritative target must bind Node ExternalIPv4/public ports while preserving the distinct Pod hostIP"
+
+  for fixture_mode in transport-address-mismatch node-address-mismatch node-address-ambiguous pod-node-missing; do
+    if authoritative_dns_targets_for_daemonset dns-us >/dev/null 2>&1; then
+      fail "authoritative target enumeration must reject ${fixture_mode}"
+    fi
+  done
+  fixture_mode=valid
+
+  actual_publication="$(authoritative_dns_publication_snapshot_for_pod \
+    "${target_pod}" example.test api.example.test "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" udp \
+    "${target_pod_uid}" "${target_pod_host_ip}" "${target_pod_identity}" "${target_node}" "${target_node_uid}" "${target_node_identity}" \
+    "${target_revision}" dns-us "${target_ds_uid}" "${target_ds_identity}")" ||
+    fail "authoritative publication must accept the pinned DS/Node/Pod/public-port source"
+  python3 - "${actual_publication}" <<'PY'
+import json
+import sys
+
+publication = json.loads(sys.argv[1])
+assert publication["identity"]["queryServer"] == "203.0.113.10"
+assert publication["identity"]["queryHostPort"] == 5300
+assert publication["identity"]["queryContainerPort"] == 1053
+assert publication["identity"]["podHostIP"] == "10.42.1.25"
+assert publication["identity"]["nodeUID"] == "node-a-uid"
+PY
+  for fixture_mode in daemonset-port-drift node-uid-drift node-address-mismatch pod-uid-drift pod-node-drift pod-host-ip-drift; do
+    if authoritative_dns_publication_snapshot_for_pod \
+      "${target_pod}" example.test api.example.test "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" udp \
+      "${target_pod_uid}" "${target_pod_host_ip}" "${target_pod_identity}" "${target_node}" "${target_node_uid}" "${target_node_identity}" \
+      "${target_revision}" dns-us "${target_ds_uid}" "${target_ds_identity}" >/dev/null 2>&1; then
+      fail "authoritative publication must reject pinned source drift: ${fixture_mode}"
+    fi
+  done
+  fixture_mode=valid
+
+  snapshot_counter="$(mktemp)"
+  dig_log="$(mktemp)"
+  printf '0\n' >"${snapshot_counter}"
+  snapshot_drift=none
+  authoritative_dns_publication_snapshot_for_pod() {
+    local calls
+    local drift_value="stable"
+    [[ "$1" == "dns-a" && "$2" == "example.test" && "$3" == "api.example.test" && "$4" == "203.0.113.10" ]] || return 81
+    [[ "$8" == "dns-a-uid" && "$9" == "10.42.1.25" && "${10}" == "${target_pod_identity}" ]] || return 82
+    [[ "${11}" == "node-a" && "${12}" == "node-a-uid" && "${13}" == "${target_node_identity}" && "${14}" == "rev-a" ]] || return 83
+    [[ "${15}" == "dns-us" && "${16}" == "ds-uid" && "${17}" == "${target_ds_identity}" ]] || return 84
+    if [[ "$7" == "udp" ]]; then
+      [[ "$5" == "5300" && "$6" == "1053" ]] || return 85
+    else
+      [[ "$7" == "tcp" && "$5" == "5301" && "$6" == "1054" ]] || return 86
+    fi
+    calls="$(cat "${snapshot_counter}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${snapshot_counter}"
+    if (( calls >= 2 )); then
+      drift_value="${snapshot_drift}"
+    fi
+    printf '{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"}],"identity":{"address":"%s","daemonSetIdentity":"%s","nodeIdentity":"%s","podIdentity":"%s","queryHostPort":"%s"},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' \
+      "$([[ "${snapshot_drift}" == "address" ]] && printf '%s' "${drift_value}" || printf stable)" \
+      "$([[ "${snapshot_drift}" == "daemonset" ]] && printf '%s' "${drift_value}" || printf stable)" \
+      "$([[ "${snapshot_drift}" == "node" ]] && printf '%s' "${drift_value}" || printf stable)" \
+      "$([[ "${snapshot_drift}" == "pod" ]] && printf '%s' "${drift_value}" || printf stable)" \
+      "$([[ "${snapshot_drift}" == "port" ]] && printf '%s' "${drift_value}" || printf stable)"
+  }
+  dig() {
+    local arg
+    local query_name=""
+    local query_type=""
+    printf '%s\n' "$*" >>"${dig_log}"
+    for arg in "$@"; do
+      query_name="${query_type}"
+      query_type="${arg}"
+    done
+    if [[ "${query_type}" == "SOA" ]]; then
+      print_dig_response 'qr aa' "${query_name}." SOA "${query_name}." SOA \
+        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+    else
+      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20'
+    fi
+  }
+  sleep() { :; }
+
+  for transport in udp tcp; do
+    printf '0\n' >"${snapshot_counter}"
+    if [[ "${transport}" == "udp" ]]; then
+      host_port="${target_udp_host_port}"
+      container_port="${target_udp_container_port}"
+    else
+      host_port="${target_tcp_host_port}"
+      container_port="${target_tcp_container_port}"
+    fi
+    authoritative_dns_query_batch_with_retry dns-us dns-a "${target_external_ip}" "${host_port}" "${container_port}" \
+      example.test api.example.test "${transport}" "${target_pod_uid}" "${target_pod_host_ip}" "${target_pod_identity}" \
+      "${target_node}" "${target_node_uid}" "${target_node_identity}" "${target_revision}" "${target_ds_uid}" "${target_ds_identity}" ||
+      fail "authoritative ${transport} query must use the pinned Node ExternalIPv4/public hostPort"
+  done
+  grep -Fq '@203.0.113.10 -p 5300 ' "${dig_log}" || fail "UDP query did not use the public ExternalIPv4/hostPort"
+  grep -Fq '@203.0.113.10 -p 5301 ' "${dig_log}" || fail "TCP query did not use the public ExternalIPv4/hostPort"
+  if grep -Fq '@10.42.1.25' "${dig_log}"; then
+    fail "authoritative query used Pod status.hostIP instead of Node ExternalIPv4"
+  fi
+
+  for snapshot_drift in daemonset node pod address port; do
+    printf '0\n' >"${snapshot_counter}"
+    if authoritative_dns_query_batch_with_retry dns-us dns-a "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" \
+      example.test api.example.test udp "${target_pod_uid}" "${target_pod_host_ip}" "${target_pod_identity}" \
+      "${target_node}" "${target_node_uid}" "${target_node_identity}" "${target_revision}" "${target_ds_uid}" "${target_ds_identity}" >/dev/null 2>&1; then
+      fail "authoritative query must reject ${snapshot_drift} identity drift across its publication snapshots"
+    fi
+  done
+  rm -f "${snapshot_counter}" "${dig_log}"
+  printf '[test_release_domain_safety] E4 ExternalIPv4/public-hostPort source binding regressions ok\n'
+)
+
+run_e4_edns_parser_regressions
+run_e4_real_dig_smokes
+run_e4_public_hostport_regressions
+if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ]]; then
+  printf '[test_release_domain_safety] E4 DNS targeted regressions ok\n'
+  exit 0
+fi
+
 bash -n "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 bash -n "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
@@ -144,6 +747,8 @@ manifest_end = source.index("\n  while IFS= read -r daemonset_name", manifest_st
 manifest_branch = source[manifest_start:manifest_end]
 if manifest_branch.index("run_dns_manifest_ondelete_release") > manifest_branch.index("write_release_record"):
     raise SystemExit("DNS manifest release record must be written only after the transaction succeeds")
+if "deferring the DNS manifest release record until the outer control-plane transaction commits" not in manifest_branch:
+    raise SystemExit("transactional DNS manifest releases must defer metadata publication to the outer commit")
 if "run_smoke_urls" in manifest_branch:
     raise SystemExit("DNS manifest final smoke belongs inside the rollback-capable transaction")
 PY
@@ -165,6 +770,16 @@ public_release = main.index("release_public_data_plane_if_needed")
 finalize = main.index("finalize_dns_manifest_transaction")
 if not prepare < helm < transaction < nodelocal < public_release < finalize:
     raise SystemExit("DNS manifest snapshot/transaction/finalization ordering is unsafe")
+helm_revision = main.index('current_revision="$(helm_current_revision)"', public_release)
+dns_final = main.index("verify_dns_manifest_transaction_before_commit", helm_revision)
+nodelocal_final = main.index('"final NodeLocal DNSCache target verification"', dns_final)
+dns_handoff = main.index("verify_dns_manifest_transaction_snapshot_before_commit", nodelocal_final)
+nodelocal_handoff = main.index('"final NodeLocal DNSCache exact cohort handoff"', dns_handoff)
+commit = main.index('CONTROL_PLANE_RELEASE_COMMITTED="true"', nodelocal_handoff)
+record = main.index("write_dns_manifest_release_record_after_commit", commit)
+cleanup = main.index("cleanup_finalized_dns_manifest_snapshot", record)
+if not public_release < helm_revision < dns_final < nodelocal_final < dns_handoff < nodelocal_handoff < finalize < commit < record < cleanup:
+    raise SystemExit("final DNS/NodeLocal verification, commit, record, and cleanup handoff ordering is unsafe")
 if not image_cache_prepare < helm < image_cache_verify:
     raise SystemExit("offline-safe image-cache mutation must finish before Helm and post-Helm must be verification-only")
 image_guard_start = source.index("\nimage_cache_prepare_offline_safe_rollout() {")
@@ -263,18 +878,34 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
   FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS=1
   dns_queries="$(mktemp)"
   dns_zone_for_daemonset() { printf 'example.test\n'; }
-  node_ips_for_daemonset() { printf '192.0.2.10\n192.0.2.11\n'; }
-  host() {
+  authoritative_dns_targets_for_daemonset() {
+    printf '203.0.113.10\t53\t53\t53\t5353\tdns-a\tdns-a-uid\t192.0.2.10\tsha256:pod-a\tnode-a\tnode-a-uid\tsha256:node-a\trev-a\tds-uid\tsha256:ds-identity\n'
+    printf '203.0.113.11\t53\t53\t53\t5353\tdns-b\tdns-b-uid\t192.0.2.11\tsha256:pod-b\tnode-b\tnode-b-uid\tsha256:node-b\trev-b\tds-uid\tsha256:ds-identity\n'
+  }
+  authoritative_dns_publication_snapshot_for_pod() {
+    printf '{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"},{"name":"app.example.test.","type":"A","value":"192.0.2.21"}],"identity":{"bundleVersion":"bundle-1","containerName":"dns","healthPort":7834,"podName":"%s","podUID":"%s-uid","servingGeneration":"generation-1","zone":"example.test."},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' "$1" "$1"
+  }
+  dig() {
+    local arg=""
+    local query_name=""
+    local query_type=""
     printf '%s\n' "$*" >>"${dns_queries}"
-    if [[ "$*" == *" -t SOA "* ]]; then
-      printf 'example.test has SOA record ns1.example.test. hostmaster.example.test. 1 300 60 3600 60\n'
+    for arg in "$@"; do
+      query_name="${query_type}"
+      query_type="${arg}"
+    done
+    if [[ "${query_type}" == "SOA" ]]; then
+      print_dig_response 'qr aa' "${query_name}." SOA "${query_name}." SOA \
+        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+    elif [[ "${query_name}" == "api.example.test" ]]; then
+      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20'
     else
-      printf 'api.example.test has address 192.0.2.20\n'
+      print_dig_response 'qr aa' 'app.example.test.' A 'app.example.test.' A '192.0.2.21'
     fi
   }
 
   check_authoritative_dns_on_nodes test-dns
-  assert_eq "$(cat "${dns_queries}")" $'-W 3 -t SOA example.test 192.0.2.10\n-W 3 -t A api.example.test 192.0.2.10\n-W 3 -t A app.example.test 192.0.2.10\n-W 3 -T -t SOA example.test 192.0.2.10\n-W 3 -T -t A api.example.test 192.0.2.10\n-W 3 -T -t A app.example.test 192.0.2.10\n-W 3 -t SOA example.test 192.0.2.11\n-W 3 -t A api.example.test 192.0.2.11\n-W 3 -t A app.example.test 192.0.2.11\n-W 3 -T -t SOA example.test 192.0.2.11\n-W 3 -T -t A api.example.test 192.0.2.11\n-W 3 -T -t A app.example.test 192.0.2.11' "authoritative DNS validation must cover UDP/TCP SOA and every distinct representative hostname on every node"
+  assert_eq "$(cat "${dns_queries}")" $'@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer api.example.test A\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer app.example.test A\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp api.example.test A\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp app.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer api.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer app.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp api.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp app.example.test A' "authoritative DNS validation must query each exact Node ExternalIPv4/public hostPort and never the Pod hostIP"
   rm -f "${dns_queries}"
 )
 
@@ -289,11 +920,17 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
   FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS=0
   host_calls=0
   dns_zone_for_daemonset() { printf 'example.test\n'; }
-  node_ips_for_daemonset() { printf '192.0.2.10\n192.0.2.11\n'; }
-  host() {
+  authoritative_dns_targets_for_daemonset() {
+    printf '203.0.113.10\t53\t53\t53\t5353\tdns-a\tdns-a-uid\t192.0.2.10\tsha256:pod-a\tnode-a\tnode-a-uid\tsha256:node-a\trev-a\tds-uid\tsha256:ds-identity\n'
+    printf '203.0.113.11\t53\t53\t53\t5353\tdns-b\tdns-b-uid\t192.0.2.11\tsha256:pod-b\tnode-b\tnode-b-uid\tsha256:node-b\trev-b\tds-uid\tsha256:ds-identity\n'
+  }
+  authoritative_dns_publication_snapshot_for_pod() {
+    printf '{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"},{"name":"app.example.test.","type":"A","value":"192.0.2.21"}],"identity":{"bundleVersion":"bundle-1","containerName":"dns","healthPort":7834,"podName":"%s","podUID":"%s-uid","servingGeneration":"generation-1","zone":"example.test."},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' "$1" "$1"
+  }
+  dig() {
     host_calls=$((host_calls + 1))
-    printf 'timed out\n'
-    return 1
+    print_dig_response 'qr' 'example.test.' SOA 'example.test.' SOA \
+      'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
   }
   sleep() { :; }
 
@@ -308,25 +945,450 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  dns_zone_for_daemonset() { printf 'example.test\n'; }
+  authoritative_dns_targets_for_daemonset() {
+    printf '203.0.113.10\t53\t53\t53\t5353\tdns-a\tdns-a-uid\t192.0.2.10\tsha256:pod-a\tnode-a\tnode-a-uid\tsha256:node-a\trev-a\tds-uid\tsha256:ds-identity\n'
+    return 42
+  }
+  dig() { fail "authoritative DNS validation must not query a partially enumerated node cohort"; }
+
+  if check_authoritative_dns_on_nodes test-dns; then
+    fail "authoritative DNS validation must reject partial node output followed by producer failure"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  dns_zone_for_daemonset() { printf 'example.test\n'; }
+  authoritative_dns_targets_for_daemonset() {
+    printf '203.0.113.10\t53\t53\t53\t5353\tdns-a\tdns-a-uid\t192.0.2.10\tsha256:pod-a\tnode-a\tnode-a-uid\tsha256:node-a\trev-a\tds-uid\tsha256:ds-identity\n'
+  }
+  authoritative_dns_hostnames() {
+    printf 'api.example.test\n'
+    return 42
+  }
+  dig() { fail "authoritative DNS validation must not query a partially derived hostname cohort"; }
+
+  if check_authoritative_dns_on_nodes test-dns; then
+    fail "authoritative DNS validation must reject partial hostname output followed by producer failure"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  response_file="$(mktemp)"
+  expected_config='{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"},{"name":"api.example.test.","type":"AAAA","value":"2001:db8::20"},{"name":"alias.example.test.","type":"CNAME","value":"api.example.test."}],"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}'
+
+  print_dig_response 'qr aa' 'example.test.' SOA 'example.test.' SOA \
+    'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${response_file}"
+  validate_authoritative_dns_response "${response_file}" "${expected_config}" example.test SOA
+  print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${response_file}"
+  validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A
+  print_dig_response 'qr aa' 'api.example.test.' AAAA 'api.example.test.' AAAA '2001:db8::20' >"${response_file}"
+  validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test AAAA
+  print_dig_response 'qr aa' 'alias.example.test.' CNAME 'alias.example.test.' CNAME 'api.example.test.' >"${response_file}"
+  validate_authoritative_dns_response "${response_file}" "${expected_config}" alias.example.test CNAME
+
+  print_dig_response 'qr' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${response_file}"
+  if validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A; then
+    fail "authoritative DNS validation must reject a non-AA cached answer"
+  fi
+  print_dig_response 'qr aa' 'other.example.test.' A 'api.example.test.' A '192.0.2.20' >"${response_file}"
+  if validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A; then
+    fail "authoritative DNS validation must reject a wrong question"
+  fi
+  print_dig_response 'qr aa' 'example.test.' SOA 'wrong.example.test.' SOA \
+    'ns.attacker.invalid. hostmaster.attacker.invalid. 1 300 60 3600 60' >"${response_file}"
+  if validate_authoritative_dns_response "${response_file}" "${expected_config}" example.test SOA; then
+    fail "authoritative DNS validation must bind SOA owner and RDATA to the expected zone"
+  fi
+  print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '198.51.100.254' >"${response_file}"
+  if validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A; then
+    fail "authoritative DNS validation must reject an A answer outside the pinned publication"
+  fi
+  print_dig_response 'qr aa' 'api.example.test.' AAAA 'api.example.test.' AAAA '2001:db8::254' >"${response_file}"
+  if validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test AAAA; then
+    fail "authoritative DNS validation must reject an AAAA answer outside the pinned publication"
+  fi
+  print_dig_response 'qr aa' 'alias.example.test.' CNAME 'alias.example.test.' CNAME 'attacker.invalid.' >"${response_file}"
+  if validate_authoritative_dns_response "${response_file}" "${expected_config}" alias.example.test CNAME; then
+    fail "authoritative DNS validation must reject a CNAME answer outside the pinned publication"
+  fi
+  rm -f "${response_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS=1
+  FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_RETRY_DELAY_SECONDS=0
+  publication_counter="$(mktemp)"
+  printf '0\n' >"${publication_counter}"
+  publication_mode=stable
+  authoritative_dns_publication_snapshot_for_pod() {
+    local calls
+    local answer=192.0.2.20
+    calls="$(sed -n '1p' "${publication_counter}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${publication_counter}"
+    if [[ "${publication_mode}" == "drift" && "${calls}" -ge 2 ]]; then
+      answer=192.0.2.21
+    fi
+    printf '{"answers":[{"name":"api.example.test.","type":"A","value":"%s"}],"identity":{"bundleVersion":"bundle-1","cacheContentHash":"sha256:%s","containerName":"dns","healthPort":7834,"podName":"dns-a","podUID":"dns-a-uid","servingGeneration":"generation-1","zone":"example.test."},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' "${answer}" "${answer}"
+  }
+  dig() {
+    local arg=""
+    local query_name=""
+    local query_type=""
+    local flags='qr aa'
+    for arg in "$@"; do
+      query_name="${query_type}"
+      query_type="${arg}"
+    done
+    if [[ "${dns_case}" == "non-aa" ]]; then
+      flags='qr'
+    fi
+    if [[ "${query_type}" == "SOA" ]]; then
+      if [[ "${dns_case}" == "wrong-zone" ]]; then
+        print_dig_response "${flags}" "${query_name}." SOA 'wrong.example.test.' SOA \
+          'ns.attacker.invalid. hostmaster.attacker.invalid. 1 300 60 3600 60'
+      else
+        print_dig_response "${flags}" "${query_name}." SOA "${query_name}." SOA \
+          'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+      fi
+    elif [[ "${dns_case}" == "wrong-answer" ]]; then
+      print_dig_response "${flags}" 'api.example.test.' A 'api.example.test.' A '198.51.100.254'
+    else
+      print_dig_response "${flags}" 'api.example.test.' A 'api.example.test.' A '192.0.2.20'
+    fi
+  }
+  sleep() { :; }
+
+  for transport in udp tcp; do
+    container_port=53
+    [[ "${transport}" != "tcp" ]] || container_port=5353
+    for dns_case in non-aa wrong-zone wrong-answer correct-aa; do
+      if [[ "${dns_case}" == "correct-aa" ]]; then
+        authoritative_dns_query_batch_with_retry test-dns dns-a 203.0.113.10 53 "${container_port}" example.test api.example.test "${transport}" \
+          dns-a-uid 192.0.2.10 sha256:pod-a node-a node-a-uid sha256:node-a rev-a ds-uid sha256:ds-identity ||
+          fail "authoritative DNS ${transport} correct AA fixture must pass"
+      elif authoritative_dns_query_batch_with_retry test-dns dns-a 203.0.113.10 53 "${container_port}" example.test api.example.test "${transport}" \
+        dns-a-uid 192.0.2.10 sha256:pod-a node-a node-a-uid sha256:node-a rev-a ds-uid sha256:ds-identity; then
+        fail "authoritative DNS ${transport} ${dns_case} fixture must fail"
+      fi
+    done
+  done
+  publication_mode=drift
+  printf '0\n' >"${publication_counter}"
+  dns_case=correct-aa
+  if authoritative_dns_query_batch_with_retry test-dns dns-a 203.0.113.10 53 53 example.test api.example.test udp \
+    dns-a-uid 192.0.2.10 sha256:pod-a node-a node-a-uid sha256:node-a rev-a ds-uid sha256:ds-identity; then
+    fail "authoritative DNS query batch must reject canonical publication drift across the query"
+  fi
+  rm -f "${publication_counter}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
   FUGUE_NAMESPACE=fugue-system
+  fixture_dir="$(mktemp -d)"
+  cache_file="${fixture_dir}/cache.json"
+  fixture_mode=valid
+  owner_uid=ds-uid
+  pod_uid=dns-a-uid
+  pod_host_ip=192.0.2.10
+  pod_node_name=node-a
+  daemonset_json='{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"dns-us","namespace":"fugue-system","uid":"ds-uid","generation":4},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"hostIP":"203.0.113.10","hostPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"hostIP":"203.0.113.10","hostPort":53,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"}]}]}},"updateStrategy":{"type":"OnDelete"}},"status":{"observedGeneration":4,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0}}'
+  node_json='{"apiVersion":"v1","kind":"Node","metadata":{"name":"node-a","uid":"node-a-uid","generation":2},"spec":{"podCIDR":"10.42.1.0/24"},"status":{"addresses":[{"type":"InternalIP","address":"192.0.2.1"},{"type":"ExternalIP","address":"203.0.113.10"}]}}'
+  health_json='{"healthy":true,"zone":"example.test","bundle_version":"dnsgen_fixture","serving_generation":"dnsgen_fixture","cache_path":"/var/lib/fugue/dns/cache.json","record_count":1}'
+  secret_json='{"data":{"FUGUE_BUNDLE_SIGNING_KEY":"dGVzdC1zaWduaW5nLWtleQ=="}}'
+
+  render_pod_json() {
+    python3 - "${owner_uid}" "${pod_uid}" "${pod_host_ip}" "${pod_node_name}" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+        "name": "dns-a",
+        "namespace": "fugue-system",
+        "uid": sys.argv[2],
+        "labels": {"app": "dns-us", "controller-revision-hash": "rev-a"},
+        "ownerReferences": [{
+            "apiVersion": "apps/v1", "kind": "DaemonSet", "name": "dns-us",
+            "uid": sys.argv[1], "controller": True,
+        }],
+    },
+    "spec": {
+        "nodeName": sys.argv[4],
+        "containers": [{
+            "name": "dns",
+            "command": ["/usr/local/bin/fugue-dns"],
+            "ports": [{"name": "http", "containerPort": 7834}],
+            "env": [
+                {"name": "FUGUE_DNS_ZONE", "value": "example.test"},
+                {"name": "FUGUE_DNS_CACHE_PATH", "value": "/var/lib/fugue/dns/cache.json"},
+                {"name": "FUGUE_DNS_NAMESERVERS", "value": "ns1.example.test\n\tns2.example.test"},
+                {"name": "FUGUE_DNS_TTL", "value": "60"},
+                {"name": "FUGUE_BUNDLE_SIGNING_KEY", "valueFrom": {"secretKeyRef": {"name": "fugue-config", "key": "FUGUE_BUNDLE_SIGNING_KEY"}}},
+                {"name": "FUGUE_BUNDLE_SIGNING_KEY_ID", "value": "key-1"},
+                {"name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY", "valueFrom": {"secretKeyRef": {"name": "fugue-config", "key": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY", "optional": True}}},
+                {"name": "FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID", "value": ""},
+                {"name": "FUGUE_BUNDLE_REVOKED_KEY_IDS", "value": "old-key revoked-key"},
+            ],
+        }],
+    },
+    "status": {
+        "phase": "Running",
+        "hostIP": sys.argv[3],
+        "conditions": [{"type": "Ready", "status": "True"}],
+    },
+}, separators=(",", ":")))
+PY
+  }
+
+  render_publication_cache() {
+    python3 - "${cache_file}" "${fixture_mode}" <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import sys
+
+path, mode = sys.argv[1:3]
+key = b"test-signing-key"
+records = [{
+    "name": "api.example.test",
+    "type": "A",
+    "values": ["198.51.100.99"],
+    "ttl": 60,
+    "record_kind": "platform",
+    "status": "active",
+    "record_generation": "dnsgen_record",
+    "answer_policy": {
+        "policy_kind": "global",
+        "health_required": True,
+        "route_ready_required": True,
+    },
+    "candidates": [
+        {"ip": "192.0.2.20", "healthy": True, "route_ready": True, "tls_ready": True},
+        {"ip": "192.0.2.21", "healthy": False, "route_ready": True, "tls_ready": True},
+    ],
+    "scoped_candidates": [{
+        "scope_key": "country:de",
+        "country": "DE",
+        "policy_kind": "global",
+        "candidates": [{"ip": "203.0.113.50", "healthy": True, "route_ready": True, "tls_ready": True}],
+    }],
+}]
+bundle = {
+    "schema_version": "1.0",
+    "version": "dnsgen_fixture",
+    "generation": "dnsgen_fixture",
+    "generated_at": "2026-07-15T00:00:00Z",
+    "valid_until": "2099-07-15T00:00:00Z",
+    "issuer": "fugue",
+    "key_id": "key-1",
+    "dns_node_id": "node-a",
+    "edge_group_id": "edge-global",
+    "zone": "example.test",
+    "records": records,
+}
+signing_payload = {
+    "schema_version": bundle["schema_version"],
+    "version": bundle["version"],
+    "generation": bundle["generation"],
+    "generated_at": bundle["generated_at"],
+    "valid_until": bundle["valid_until"],
+    "issuer": bundle["issuer"],
+    "key_id": bundle["key_id"],
+    "edge_id": bundle["dns_node_id"],
+    "edge_group_id": bundle["edge_group_id"],
+    "records": bundle["records"],
+}
+signature = base64.urlsafe_b64encode(hmac.new(
+    key,
+    json.dumps(signing_payload, separators=(",", ":")).encode(),
+    hashlib.sha256,
+).digest()).rstrip(b"=").decode()
+bundle["signature"] = signature
+payload = {
+    "version": 1,
+    "etag": "dnsgen_fixture",
+    "cached_at": "2026-07-15T00:00:00Z",
+    "bundle": bundle,
+}
+content_hash = "sha256:" + hashlib.sha256(
+    json.dumps(payload, separators=(",", ":")).encode()
+).hexdigest()
+if mode in {"hash-tamper", "signature-tamper"}:
+    payload["bundle"]["records"][0]["candidates"][0]["ip"] = "198.51.100.254"
+if mode == "signature-tamper":
+    content_hash = "sha256:" + hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).hexdigest()
+envelope = {
+    "schema_version": "1.0",
+    "kind": "dns_answer_bundle",
+    "generation": "dnsgen_fixture",
+    "content_hash": content_hash,
+    "expires_at": "2099-07-15T00:00:00Z",
+    "created_at": "2026-07-15T00:00:00Z",
+    "payload": payload,
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(envelope, handle, separators=(",", ":"))
+    handle.write("\n")
+PY
+  }
+
+  daemonset_selector() { printf 'app=dns-us\n'; }
+  kubectl_cmd() {
+    case "$*" in
+      *"get ds/dns-us -o json") printf '%s\n' "${daemonset_json}" ;;
+      *"get nodes -o json") printf '{"items":[%s]}\n' "${node_json}" ;;
+      *"get node/node-a -o json") printf '%s\n' "${node_json}" ;;
+      *"get pods -l app=dns-us -o json") printf '{"items":[%s]}\n' "$(render_pod_json)" ;;
+      *"get pod/dns-a -o json") render_pod_json ;;
+      *"get secret/fugue-config -o json") printf '%s\n' "${secret_json}" ;;
+      *"get --raw="*) printf '%s\n' "${health_json}" ;;
+      *"exec dns-a -c dns -- cat /var/lib/fugue/dns/cache.json") cat "${cache_file}" ;;
+      *) return 91 ;;
+    esac
+  }
+
+  render_publication_cache
+  target_row="$(authoritative_dns_targets_for_daemonset dns-us)"
+  IFS=$'\t' read -r target_external_ip target_udp_host_port target_udp_container_port target_tcp_host_port target_tcp_container_port target_pod target_uid target_pod_host_ip target_pod_identity target_node target_node_uid target_node_identity target_revision target_ds_uid target_ds_identity <<<"${target_row}"
+  [[ "${target_external_ip}" == "203.0.113.10" && "${target_pod_host_ip}" == "192.0.2.10" && "${target_udp_host_port}" == "53" && "${target_udp_container_port}" == "53" && "${target_tcp_host_port}" == "53" && "${target_tcp_container_port}" == "5353" && "${target_pod}" == "dns-a" && "${target_uid}" == "dns-a-uid" && "${target_pod_identity}" == sha256:* && "${target_node}" == "node-a" && "${target_node_uid}" == "node-a-uid" && "${target_node_identity}" == sha256:* && "${target_revision}" == "rev-a" && "${target_ds_uid}" == "ds-uid" && "${target_ds_identity}" == sha256:* ]] ||
+    fail "authoritative DNS target enumeration must bind ExternalIPv4/public ports separately from Pod hostIP and full DS/Node/Pod identity"
+  publication="$(authoritative_dns_publication_snapshot_for_pod \
+    "${target_pod}" example.test api.example.test "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" udp \
+    "${target_uid}" "${target_pod_host_ip}" "${target_pod_identity}" "${target_node}" "${target_node_uid}" "${target_node_identity}" \
+    "${target_revision}" dns-us "${target_ds_uid}" "${target_ds_identity}")"
+  python3 - "${publication}" <<'PY'
+import json
+import sys
+publication = json.loads(sys.argv[1])
+assert publication["answers"] == [{"name": "api.example.test.", "type": "A", "value": "192.0.2.20"}]
+assert publication["identity"]["clientScope"] == "ecs-unmapped-global-fallback"
+assert publication["identity"]["cacheContentHash"].startswith("sha256:")
+assert publication["identity"]["podUID"] == "dns-a-uid"
+assert publication["identity"]["daemonSetUID"] == "ds-uid"
+assert publication["identity"]["queryServer"] == "203.0.113.10"
+assert publication["identity"]["podHostIP"] == "192.0.2.10"
+assert publication["identity"]["queryHostPort"] == 53
+assert publication["identity"]["queryContainerPort"] == 53
+assert publication["identity"]["nodeUID"] == "node-a-uid"
+assert publication["soa"]["mname"] == "ns1.example.test."
+PY
+
+  assert_publication_source_drift_rejected() {
+    local label="$1"
+    if authoritative_dns_publication_snapshot_for_pod \
+      "${target_pod}" example.test api.example.test "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" udp \
+      "${target_uid}" "${target_pod_host_ip}" "${target_pod_identity}" "${target_node}" "${target_node_uid}" "${target_node_identity}" \
+      "${target_revision}" dns-us "${target_ds_uid}" "${target_ds_identity}" >/dev/null 2>&1; then
+      fail "authoritative publication must reject ${label} drift from its pinned query source"
+    fi
+  }
+  stable_daemonset_json="${daemonset_json}"
+  daemonset_json="${daemonset_json/\"hostPort\":53/\"hostPort\":54}"
+  assert_publication_source_drift_rejected "DaemonSet port"
+  daemonset_json="${stable_daemonset_json}"
+  stable_node_json="${node_json}"
+  node_json="${node_json/\"uid\":\"node-a-uid\"/\"uid\":\"node-a-replaced\"}"
+  assert_publication_source_drift_rejected "Node UID"
+  node_json="${stable_node_json/203.0.113.10/203.0.113.11}"
+  assert_publication_source_drift_rejected "Node ExternalIPv4"
+  node_json="${stable_node_json}"
+  pod_uid=dns-a-replaced
+  assert_publication_source_drift_rejected "Pod UID"
+  pod_uid=dns-a-uid
+  pod_node_name=node-b
+  assert_publication_source_drift_rejected "Pod nodeName"
+  pod_node_name=node-a
+  pod_host_ip=192.0.2.11
+  assert_publication_source_drift_rejected "Pod status.hostIP"
+  pod_host_ip=192.0.2.10
+
+  owner_uid=other-ds-uid
+  if authoritative_dns_targets_for_daemonset dns-us >/dev/null 2>&1; then
+    fail "authoritative DNS target enumeration must reject a selector-matching stray Pod"
+  fi
+  owner_uid=ds-uid
+
+  fixture_mode=hash-tamper
+  render_publication_cache
+  if authoritative_dns_publication_snapshot_for_pod \
+    "${target_pod}" example.test api.example.test "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" udp \
+    "${target_uid}" "${target_pod_host_ip}" "${target_pod_identity}" "${target_node}" "${target_node_uid}" "${target_node_identity}" \
+    "${target_revision}" dns-us "${target_ds_uid}" "${target_ds_identity}" >/dev/null 2>&1; then
+    fail "authoritative DNS publication must reject an envelope content_hash mismatch"
+  fi
+  fixture_mode=signature-tamper
+  render_publication_cache
+  if authoritative_dns_publication_snapshot_for_pod \
+    "${target_pod}" example.test api.example.test "${target_external_ip}" "${target_udp_host_port}" "${target_udp_container_port}" udp \
+    "${target_uid}" "${target_pod_host_ip}" "${target_pod_identity}" "${target_node}" "${target_node_uid}" "${target_node_identity}" \
+    "${target_revision}" dns-us "${target_ds_uid}" "${target_ds_identity}" >/dev/null 2>&1; then
+    fail "authoritative DNS publication must reject a bundle HMAC mismatch"
+  fi
+  rm -rf "${fixture_dir}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_INSTANCE=fugue
+  kubectl_cmd() {
+    printf '%s\n' '{"items":[{"metadata":{"name":"fugue-dns","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}}},{"metadata":{"name":"other-dns","labels":{"app.kubernetes.io/instance":"other","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}}}]}'
+  }
+  assert_eq "$(dns_daemonset_names)" "fugue-dns" "DNS transaction selection must be isolated to the configured Helm release instance"
+  assert_eq "$(public_daemonset_names)" "fugue-dns" "legacy public transaction selection must be isolated to the configured Helm release instance"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_INSTANCE=fugue
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
   snapshot_file="$(mktemp)"
   kubectl_cmd() {
     case "$*" in
-      *"get ds/dns-us -o jsonpath={.status.updateRevision}"*)
-        printf 'dns-us-revision'
-        ;;
       *"get ds -o json")
-        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":7,"labels":{"app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"},"annotations":{"checksum/config":"old"}},"spec":{"containers":[{"name":"dns","image":"registry.example/dns:old"}]} }},"status":{"observedGeneration":7,"desiredNumberScheduled":1,"updatedNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0,"updateRevision":"dns-us-revision"}}]}'
+        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"},"annotations":{"checksum/config":"desired"}},"spec":{"containers":[{"name":"dns","image":"registry.example/dns:desired"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0}},{"metadata":{"name":"other-dns","labels":{"app.kubernetes.io/instance":"other","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}}}]}'
         ;;
       *"get pods -o json")
-        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-old","uid":"pod-old","labels":{"app":"dns-us","controller-revision-hash":"dns-us-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-us"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-old","uid":"pod-old","labels":{"app":"dns-us","controller-revision-hash":"serving-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-us"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"dns","restartCount":0}]}}]}'
+        ;;
+      *"get controllerrevisions -o json")
+        printf '%s\n' '{"items":[{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"dns-us-serving-revision","namespace":"fugue-system","uid":"serving-uid","labels":{"controller-revision-hash":"serving-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"revision":7,"data":{"spec":{"template":{"$patch":"replace","metadata":{"labels":{"app":"dns-us"},"annotations":{"checksum/config":"serving"}},"spec":{"containers":[{"name":"dns","image":"registry.example/dns:serving"}]}}}}},{"apiVersion":"apps/v1","kind":"ControllerRevision","metadata":{"name":"dns-us-desired-revision","namespace":"fugue-system","uid":"desired-uid","labels":{"controller-revision-hash":"desired-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"revision":8,"data":{"spec":{"template":{"$patch":"replace","metadata":{"labels":{"app":"dns-us"},"annotations":{"checksum/config":"desired"}},"spec":{"containers":[{"name":"dns","image":"registry.example/dns:desired"}]}}}}}]}'
         ;;
       *) return 91 ;;
     esac
   }
   dns_manifest_daemonset_matches_snapshot() { :; }
-  daemonset_pod_uids() { printf 'pod-old\n'; }
 
   capture_dns_manifest_snapshot "${snapshot_file}"
   python3 - "${snapshot_file}" <<'PY'
@@ -343,9 +1405,27 @@ entry = snapshot["daemonSets"][0]
 assert entry["name"] == "dns-us"
 assert entry["uid"] == "ds-uid"
 assert entry["updateStrategy"] == {"type": "OnDelete"}
-assert entry["updateRevision"] == "dns-us-revision"
-assert entry["template"]["metadata"]["annotations"]["checksum/config"] == "old"
-assert entry["pods"] == [{"name": "dns-us-old", "nodeName": "node-us", "revision": "dns-us-revision", "uid": "pod-old"}]
+assert entry["desiredSpec"]["template"]["metadata"]["annotations"]["checksum/config"] == "desired"
+assert entry["servingRevision"] == "serving-revision"
+assert entry["servingControllerRevision"] == {"name": "dns-us-serving-revision", "revision": 7, "uid": "serving-uid"}
+assert entry["desiredTemplate"]["metadata"]["annotations"]["checksum/config"] == "desired"
+assert entry["servingTemplate"]["metadata"]["annotations"]["checksum/config"] == "serving"
+assert entry["pods"] == [{"name": "dns-us-old", "nodeName": "node-us", "restartCounts": [{"name": "dns", "restartCount": 0}], "revision": "serving-revision", "uid": "pod-old"}]
+PY
+  serving_patch="$(dns_manifest_snapshot_query "${snapshot_file}" restore-serving-ondelete-patch dns-us)"
+  desired_patch="$(dns_manifest_snapshot_query "${snapshot_file}" restore-desired-patch dns-us)"
+  python3 - "${serving_patch}" "${desired_patch}" <<'PY'
+import json
+import sys
+serving = json.loads(sys.argv[1])
+desired = json.loads(sys.argv[2])
+assert serving[0] == {"op": "test", "path": "/metadata/uid", "value": "ds-uid"}
+assert serving[1]["op"] == "replace" and serving[1]["path"] == "/spec"
+assert serving[1]["value"]["updateStrategy"] == {"type": "OnDelete"}
+assert serving[1]["value"]["template"]["metadata"]["annotations"]["checksum/config"] == "serving"
+assert desired[0] == {"op": "test", "path": "/metadata/uid", "value": "ds-uid"}
+assert desired[1]["op"] == "replace" and desired[1]["path"] == "/spec"
+assert desired[1]["value"]["template"]["metadata"]["annotations"]["checksum/config"] == "desired"
 PY
   rm -f "${snapshot_file}"
 )
@@ -356,31 +1436,341 @@ PY
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 
   FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_INSTANCE=fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  pod_calls="$(mktemp)"
+  revision_calls="$(mktemp)"
+  snapshot_file="$(mktemp)"
+  dns_manifest_daemonset_matches_snapshot() { :; }
+  kubectl_cmd() {
+    local count=0
+    case "$*" in
+      *"get ds -o json")
+        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":2,"numberReady":2,"numberAvailable":2,"numberUnavailable":0,"numberMisscheduled":0}}]}'
+        ;;
+      *"get pods -o json")
+        count="$(cat "${pod_calls}")"
+        count=$((count + 1))
+        printf '%s\n' "${count}" >"${pod_calls}"
+        python3 - "${fixture}" "${count}" <<'PY'
+import json
+import sys
+
+fixture, call_text = sys.argv[1:3]
+live = int(call_text) > 1
+pods = [
+    {"name": "dns-us-a", "uid": "pod-a", "node": "node-a", "owner": "ds-uid", "revision": "serving-revision", "restarts": 0},
+    {"name": "dns-us-b", "uid": "pod-b", "node": "node-b", "owner": "ds-uid", "revision": "serving-revision", "restarts": 0},
+]
+if live:
+    if fixture == "restart-count":
+        pods[0]["restarts"] = 1
+    elif fixture == "pod-name":
+        pods[0]["name"] = "dns-us-a-recreated"
+    elif fixture == "uid-node-map":
+        pods[0]["uid"], pods[1]["uid"] = pods[1]["uid"], pods[0]["uid"]
+    elif fixture == "pod-owner":
+        pods[0]["owner"] = "other-ds-uid"
+    elif fixture == "pod-revision":
+        pods[0]["revision"] = "other-revision"
+items = []
+for pod in pods:
+    items.append({
+        "metadata": {
+            "name": pod["name"],
+            "uid": pod["uid"],
+            "labels": {"app": "dns-us", "controller-revision-hash": pod["revision"]},
+            "ownerReferences": [{
+                "apiVersion": "apps/v1", "kind": "DaemonSet", "name": "dns-us",
+                "uid": pod["owner"], "controller": True,
+            }],
+        },
+        "spec": {"nodeName": pod["node"]},
+        "status": {
+            "phase": "Running",
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "containerStatuses": [{"name": "dns", "restartCount": pod["restarts"]}],
+        },
+    })
+print(json.dumps({"items": items}, separators=(",", ":")))
+PY
+        ;;
+      *"get controllerrevisions -o json")
+        count="$(cat "${revision_calls}")"
+        count=$((count + 1))
+        printf '%s\n' "${count}" >"${revision_calls}"
+        python3 - "${fixture}" "${count}" <<'PY'
+import json
+import sys
+
+fixture, call_text = sys.argv[1:3]
+live = int(call_text) > 1
+owner_uid = "other-ds-uid" if live and fixture == "controller-owner" else "ds-uid"
+revision_hash = "other-revision" if live and fixture == "controller-hash" else "serving-revision"
+revision_number = 8 if live and fixture == "controller-revision" else 7
+doc = {"items": [{
+    "apiVersion": "apps/v1",
+    "kind": "ControllerRevision",
+    "metadata": {
+        "name": "dns-us-serving-revision",
+        "namespace": "fugue-system",
+        "uid": "serving-uid",
+        "labels": {"controller-revision-hash": revision_hash},
+        "ownerReferences": [{
+            "apiVersion": "apps/v1", "kind": "DaemonSet", "name": "dns-us",
+            "uid": owner_uid, "controller": True,
+        }],
+    },
+    "revision": revision_number,
+    "data": {"spec": {"template": {
+        "$patch": "replace",
+        "metadata": {"labels": {"app": "dns-us"}},
+        "spec": {"containers": [{"name": "dns"}]},
+    }}},
+}]}
+print(json.dumps(doc, separators=(",", ":")))
+PY
+        ;;
+      *) return 91 ;;
+    esac
+  }
+
+  for fixture in restart-count pod-name uid-node-map pod-owner pod-revision controller-owner controller-hash controller-revision; do
+    printf '0\n' >"${pod_calls}"
+    printf '0\n' >"${revision_calls}"
+    printf 'preexisting-snapshot\n' >"${snapshot_file}"
+    if capture_dns_manifest_snapshot "${snapshot_file}"; then
+      fail "DNS snapshot capture must reject post-capture ${fixture} drift"
+    fi
+    assert_eq "$(cat "${snapshot_file}")" "preexisting-snapshot" \
+      "failed DNS snapshot capture must not replace the atomically sealed snapshot after ${fixture} drift"
+  done
+  rm -f "${pod_calls}" "${revision_calls}" "${snapshot_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  snapshot_file="$(mktemp)"
+  printf '%s\n' '{"apiVersion":"fugue.io/v1alpha1","kind":"DNSManifestOnDeleteSnapshot","namespace":"fugue-system","daemonSets":[{"name":"dns-us","uid":"ds-uid","updateStrategy":{"type":"OnDelete"},"desiredSpec":{"revisionHistoryLimit":2,"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"servingRevision":"serving-revision","servingControllerRevision":{"name":"dns-us-serving-revision","uid":"serving-uid","revision":7},"desiredTemplate":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]}},"servingTemplate":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]}},"pods":[{"name":"dns-us-old","uid":"pod-old","nodeName":"node-us","revision":"serving-revision","restartCounts":[{"name":"dns","restartCount":0}]}]}]}' >"${snapshot_file}"
+  kubectl_cmd() {
+    printf '%s\n' '{"metadata":{"uid":"ds-uid"},"spec":{"revisionHistoryLimit":3,"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]}}}}'
+  }
+  assert_eq "$(dns_manifest_daemonset_state "${snapshot_file}" dns-us)" "unsupported-spec-changed" "DNS manifest state must detect non-template DaemonSet spec drift"
+  rm -f "${snapshot_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  snapshot_file="$(mktemp)"
+  printf '%s\n' '{"apiVersion":"fugue.io/v1alpha1","kind":"DNSManifestOnDeleteSnapshot","namespace":"fugue-system","daemonSets":[{"name":"dns-us","uid":"ds-uid","updateStrategy":{"type":"RollingUpdate"},"desiredSpec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"RollingUpdate"},"template":{"metadata":{"annotations":{"revision":"desired"}},"spec":{"containers":[{"name":"dns"}]}}},"servingRevision":"serving-revision","servingControllerRevision":{"name":"dns-us-serving-revision","uid":"serving-uid","revision":7},"desiredTemplate":{"metadata":{"annotations":{"revision":"desired"}},"spec":{"containers":[{"name":"dns"}]}},"servingTemplate":{"metadata":{"annotations":{"revision":"desired"}},"spec":{"containers":[{"name":"dns"}]}},"pods":[{"name":"dns-us-old","uid":"pod-old","nodeName":"node-us","revision":"serving-revision","restartCounts":[{"name":"dns","restartCount":0}]}]}]}' >"${snapshot_file}"
+  if dns_manifest_snapshot_query "${snapshot_file}" validate; then
+    fail "DNS manifest snapshot must reject even a clean RollingUpdate cohort"
+  fi
+  rm -f "${snapshot_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_INSTANCE=fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  dns_manifest_snapshot_query() {
+    case "$2" in
+      uids) printf 'pod-old\n' ;;
+      uid) printf 'snapshot-ds-uid\n' ;;
+      nodes) printf 'node-us\n' ;;
+      serving-revision) printf 'serving-revision\n' ;;
+      *) return 88 ;;
+    esac
+  }
+  dns_manifest_daemonset_uid_matches_snapshot() { return 1; }
+  kubectl_cmd() { fail "UID mismatch must stop rollback before any Kubernetes mutation"; }
+  if restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us; then
+    fail "DNS snapshot rollback must reject a recreated DaemonSet UID before patching"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  daemonset_selector() { printf 'app=dns-us\n'; }
+  kubectl_cmd() {
+    case "$*" in
+      *"get ds/dns-us -o json")
+        printf '%s\n' '{"metadata":{"uid":"ds-uid","generation":4},"status":{"observedGeneration":4,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0}}'
+        ;;
+      *"get pods -l app=dns-us -o json")
+        printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-a","uid":"pod-a","labels":{"controller-revision-hash":"serving-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        ;;
+      *) return 87 ;;
+    esac
+  }
+  if verify_daemonset_pods_at_revision dns-us serving-revision ds-uid $'node-a\nnode-b'; then
+    fail "DNS cohort verification must reject a live desired count smaller than the snapshot node set"
+  fi
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  delete_body="$(mktemp)"
+  delete_args="$(mktemp)"
+  kubectl_cmd() {
+    printf '%s\n' "$*" >"${delete_args}"
+    cat >"${delete_body}"
+  }
+  delete_pod_by_uid_no_wait dns-us-old 12345678-abcd
+  assert_eq "$(cat "${delete_args}")" 'delete --raw=/api/v1/namespaces/fugue-system/pods/dns-us-old -f -' "DNS Pod delete must use the raw API with a UID precondition body"
+  python3 - "${delete_body}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    body = json.load(handle)
+assert body["kind"] == "DeleteOptions"
+assert body["preconditions"] == {"uid": "12345678-abcd"}
+PY
+  rm -f "${delete_body}" "${delete_args}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  attempts_file="$(mktemp)"
+  printf '0\n' >"${attempts_file}"
+  wait_daemonset_observed() { :; }
+  sleep() { :; }
+  dns_manifest_daemonset_target_identity() {
+    local attempts
+    attempts="$(cat "${attempts_file}")"
+    attempts=$((attempts + 1))
+    printf '%s\n' "${attempts}" >"${attempts_file}"
+    if (( attempts == 1 )); then
+      return 1
+    fi
+    printf '{"uid":"ds-uid","revision":"target-revision"}\n'
+  }
+  assert_eq "$(wait_dns_manifest_daemonset_target_identity dns-us)" '{"uid":"ds-uid","revision":"target-revision"}' "DNS target identity wait must tolerate a delayed ControllerRevision"
+  assert_eq "$(cat "${attempts_file}")" "2" "DNS target identity wait must retry after an initially absent ControllerRevision"
+  rm -f "${attempts_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_DNS_CONTAINER_NAME=dns-server
+  FUGUE_DNS_UDP_CONTAINER_PORT=53
+  FUGUE_DNS_TCP_CONTAINER_PORT=5353
+  FUGUE_DNS_UDP_ADDR=:53
+  FUGUE_DNS_TCP_ADDR=:5353
+  transport_fixture=missing-tcp-host-ip
+  dns_manifest_snapshot_query() {
+    [[ "$2" == "nodes" ]] || return 86
+    printf 'node-us\n'
+  }
+  kubectl_cmd() {
+    case "$*" in
+      *"get ds/dns-us -o json")
+        if [[ "${transport_fixture}" == "valid" ]]; then
+          tcp_host_ip=',"hostIP":"203.0.113.10"'
+        else
+          tcp_host_ip=''
+        fi
+        printf '%s\n' "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"dns-server\",\"command\":[\"/usr/local/bin/fugue-dns\"],\"ports\":[{\"name\":\"http\",\"containerPort\":7834,\"protocol\":\"TCP\"},{\"name\":\"dns-udp\",\"containerPort\":53,\"hostIP\":\"203.0.113.10\",\"hostPort\":53,\"protocol\":\"UDP\"},{\"name\":\"dns-tcp\",\"containerPort\":5353${tcp_host_ip},\"hostPort\":53,\"protocol\":\"TCP\"}],\"env\":[{\"name\":\"FUGUE_DNS_ZONE\",\"value\":\"example.test\"},{\"name\":\"FUGUE_DNS_UDP_ADDR\",\"value\":\":53\"},{\"name\":\"FUGUE_DNS_TCP_ADDR\",\"value\":\":5353\"}] }]}}}}"
+        ;;
+      *"get node/node-us -o json")
+        printf '%s\n' '{"status":{"addresses":[{"type":"ExternalIP","address":"203.0.113.10"}]}}'
+        ;;
+      *) return 85 ;;
+    esac
+  }
+  if validate_dns_manifest_target_transport /tmp/pre-helm-dns.json dns-us; then
+    fail "DNS target transport validation must reject a merged template that lost TCP hostIP"
+  fi
+  transport_fixture=valid
+  validate_dns_manifest_target_transport /tmp/pre-helm-dns.json dns-us ||
+    fail "DNS target transport validation must accept the exact renamed UDP/TCP mapping"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=test-release
+  export FUGUE_EDGE_RESOURCES_JSON='{"requests":{"memory":"edge"}}'
+  export FUGUE_EDGE_CADDY_RESOURCES_JSON='{"requests":{"memory":"caddy"}}'
+  export FUGUE_DNS_RESOURCES_JSON='{"requests":{"memory":"dns"}}'
+  kubectl_cmd() {
+    printf '%s\n' '{"spec":{"template":{"spec":{"containers":[{"name":"edge","command":["/usr/local/bin/fugue-dns"],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"}]}]}}}}'
+  }
+  resource_patch="$(resource_patch_for_daemonset dns-us)"
+  python3 - "${resource_patch}" <<'PY'
+import json
+import sys
+patch = json.loads(sys.argv[1])
+containers = patch["spec"]["template"]["spec"]["containers"]
+assert containers == [{"name": "edge", "resources": {"requests": {"memory": "dns"}}}]
+PY
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_INSTANCE=fugue
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
   snapshot_file="$(mktemp)"
-  fixture=stale-revision
+  fixture=mixed-serving-revisions
   kubectl_cmd() {
     case "$*" in
       *"get ds -o json")
-        if [[ "${fixture}" == "stale-revision" ]]; then
-          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":1,"updatedNumberScheduled":0,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0,"updateRevision":"new-revision"}}]}'
+        if [[ "${fixture}" == "mixed-serving-revisions" ]]; then
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":2,"numberReady":2,"numberAvailable":2,"numberUnavailable":0,"numberMisscheduled":0}}]}'
         else
-          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":1,"updatedNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0,"updateRevision":"new-revision"}}]}'
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us","uid":"ds-uid","generation":8,"labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"selector":{"matchLabels":{"app":"dns-us"}},"updateStrategy":{"type":"OnDelete"},"template":{"metadata":{"labels":{"app":"dns-us"}},"spec":{"containers":[{"name":"dns"}]} }},"status":{"observedGeneration":8,"desiredNumberScheduled":1,"numberReady":1,"numberAvailable":1,"numberUnavailable":0,"numberMisscheduled":0}}]}'
         fi
         ;;
       *"get pods -o json")
-        if [[ "${fixture}" == "stale-revision" ]]; then
-          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-old","uid":"pod-old","labels":{"app":"dns-us","controller-revision-hash":"old-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+        if [[ "${fixture}" == "mixed-serving-revisions" ]]; then
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-old-a","uid":"pod-old-a","labels":{"app":"dns-us","controller-revision-hash":"old-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-a"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"dns","restartCount":0}]}},{"metadata":{"name":"dns-us-old-b","uid":"pod-old-b","labels":{"app":"dns-us","controller-revision-hash":"new-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"ds-uid","controller":true}]},"spec":{"nodeName":"node-b"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"dns","restartCount":0}]}}]}'
         else
-          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-new","uid":"pod-new","labels":{"app":"dns-us","controller-revision-hash":"new-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"other-ds-uid","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}}]}'
+          printf '%s\n' '{"items":[{"metadata":{"name":"dns-us-new","uid":"pod-new","labels":{"app":"dns-us","controller-revision-hash":"new-revision"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"dns-us","uid":"other-ds-uid","controller":true}]},"spec":{"nodeName":"node-us"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"dns","restartCount":0}]}}]}'
         fi
+        ;;
+      *"get controllerrevisions -o json")
+        printf '%s\n' '{"items":[]}'
         ;;
       *) return 90 ;;
     esac
   }
 
   if capture_dns_manifest_snapshot "${snapshot_file}"; then
-    fail "DNS manifest snapshot must reject an OnDelete daemonset whose Ready pods are not updated"
+    fail "DNS manifest snapshot must reject a mixed serving revision cohort"
   fi
   fixture=wrong-owner
   if capture_dns_manifest_snapshot "${snapshot_file}"; then
@@ -404,6 +1794,11 @@ PY
       namespace) printf 'fugue-system\n' ;;
       names) printf 'dns-changed\ndns-same\ndns-strategy\n' ;;
       uids) printf '%s-uid\n' "$3" ;;
+      nodes) printf 'node-%s\n' "$3" ;;
+      serving-revision) printf 'old-revision\n' ;;
+      pod-cohort)
+        printf '[{"name":"%s-pod","nodeName":"node-%s","restartCounts":[{"name":"dns","restartCount":0}],"revision":"old-revision","uid":"%s-uid"}]\n' "$3" "$3" "$3"
+        ;;
       *) return 92 ;;
     esac
   }
@@ -415,17 +1810,24 @@ PY
       dns-strategy) printf 'strategy-only\n' ;;
     esac
   }
-  dns_manifest_daemonset_target_identity() { printf 'target-%s\n' "$1"; }
+  dns_manifest_daemonset_target_identity() { printf '{"name":"%s","revision":"target-revision","uid":"ds-uid"}\n' "$1"; }
+  wait_dns_manifest_daemonset_target_identity() { dns_manifest_daemonset_target_identity "$1"; }
+  validate_dns_manifest_target_transport() { events="${events}transport:$2;"; }
+  verify_dns_manifest_daemonset_target_state() { events="${events}final:$2;"; }
   wait_daemonset_ready() { events="${events}ready:$1;"; }
   dns_manifest_daemonset_uses_ondelete() { events="${events}ondelete:$1;"; }
   daemonset_pod_uids() { printf '%s-uid\n' "$1"; }
-  replace_dns_manifest_daemonset() { events="${events}replace:$2;"; }
+  replace_dns_manifest_daemonset() {
+    events="${events}replace:$2;"
+    DNS_MANIFEST_LAST_CONTROLLED_POD_COHORT="cohort-$2"
+  }
+  capture_dns_manifest_daemonset_pod_cohort() { printf 'cohort-%s\n' "$2"; }
   check_authoritative_dns_on_nodes() { events="${events}authoritative:$1;"; }
   run_smoke_urls() { events="${events}public-smoke;"; }
   patch_dns_template() { fail "DNS manifest reconcile must not patch an image/template itself"; }
 
   run_dns_manifest_ondelete_release /tmp/pre-helm-dns.json
-  assert_eq "${events}" "ready:dns-changed;ondelete:dns-changed;ready:dns-same;ready:dns-strategy;ondelete:dns-strategy;replace:dns-changed;authoritative:dns-changed;authoritative:dns-same;authoritative:dns-strategy;public-smoke;" "DNS manifest transaction must replace only template-changed daemonsets and require no image patch"
+  assert_eq "${events}" "transport:dns-changed;transport:dns-same;transport:dns-strategy;ready:dns-changed;ondelete:dns-changed;ready:dns-same;ready:dns-strategy;ondelete:dns-strategy;replace:dns-changed;final:dns-changed;authoritative:dns-changed;final:dns-same;authoritative:dns-same;final:dns-strategy;authoritative:dns-strategy;public-smoke;final:dns-changed;final:dns-same;final:dns-strategy;" "DNS manifest transaction must validate every final transport before replacement and revalidate every pinned target before success"
 )
 
 (
@@ -448,13 +1850,20 @@ PY
   }
   validate_dns_manifest_snapshot_live_set() { :; }
   dns_manifest_daemonset_state() { printf 'template-changed\n'; }
-  dns_manifest_daemonset_target_identity() { printf 'target-%s\n' "$1"; }
+  dns_manifest_daemonset_target_identity() { printf '{"name":"%s","revision":"target-revision","uid":"ds-uid"}\n' "$1"; }
+  wait_dns_manifest_daemonset_target_identity() { dns_manifest_daemonset_target_identity "$1"; }
+  validate_dns_manifest_target_transport() { :; }
+  verify_dns_manifest_daemonset_target_state() { :; }
   wait_daemonset_ready() { :; }
   dns_manifest_daemonset_uses_ondelete() { :; }
   daemonset_pod_uids() { printf '%s-uid\n' "$1"; }
+  capture_dns_manifest_daemonset_pod_cohort() { printf 'cohort-%s\n' "$2"; }
   replace_dns_manifest_daemonset() {
     events="${events}replace:$2;"
-    [[ "$2" != "dns-us" ]]
+    if [[ "$2" == "dns-us" ]]; then
+      return 1
+    fi
+    DNS_MANIFEST_LAST_CONTROLLED_POD_COHORT="cohort-$2"
   }
   restore_dns_manifest_snapshot() { events="${events}restore-snapshot:$1;"; }
 
@@ -475,20 +1884,23 @@ PY
   dns_manifest_snapshot_query() {
     case "$2" in
       uids) printf 'original-uid\n' ;;
-      update-revision) printf 'old-revision\n' ;;
+      uid) printf 'ds-uid\n' ;;
+      nodes) printf 'node-us\n' ;;
+      serving-revision) printf 'old-revision\n' ;;
+      pod-cohort) printf '%s\n' '[{"name":"dns-original","nodeName":"node-us","restartCounts":[{"name":"dns","restartCount":0}],"revision":"old-revision","uid":"original-uid"}]' ;;
       *) return 94 ;;
     esac
   }
+  dns_manifest_daemonset_uid_matches_snapshot() { :; }
   dns_manifest_daemonset_matches_snapshot() { :; }
-  dns_manifest_daemonset_update_revision_matches_snapshot() { :; }
-  verify_daemonset_pods_at_update_revision() { events="${events}verify;"; }
+  verify_dns_manifest_daemonset_pod_cohort() { events="${events}verify;"; }
   wait_daemonset_ready() { events="${events}ready;"; }
   check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
   kubectl_cmd() { fail "idempotent DNS snapshot restore must not patch or delete live objects"; }
 
   restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us
   restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us
-  assert_eq "${events}" "verify;ready;authoritative;verify;ready;authoritative;" "DNS snapshot restore must be idempotent when template, strategy, and pod revision already match"
+  assert_eq "${events}" "verify;ready;authoritative;verify;verify;ready;authoritative;verify;" "DNS snapshot restore must be idempotent only when the exact original Pod cohort still matches"
 )
 
 (
@@ -500,15 +1912,20 @@ PY
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
   events=""
   match_calls=0
+  rollback_identity_calls_file="$(mktemp)"
+  printf '0\n' >"${rollback_identity_calls_file}"
   dns_manifest_snapshot_query() {
     case "$2" in
-      uids) printf 'original-uid\n' ;;
-      update-revision) printf 'old-revision\n' ;;
-      restore-ondelete-patch) printf '[{"op":"replace","path":"/spec/template","value":{"marker":"old"}}]\n' ;;
-      restore-strategy-patch) printf '[{"op":"replace","path":"/spec/updateStrategy","value":{"type":"OnDelete"}}]\n' ;;
+      uids) printf 'original-uid\noriginal-candidate-old-uid\n' ;;
+      uid) printf 'ds-uid\n' ;;
+      nodes) printf 'node-candidate\nnode-original\n' ;;
+      serving-revision) printf 'old-revision\n' ;;
+      restore-serving-ondelete-patch) printf '[{"op":"replace","path":"/spec/template","value":{"marker":"serving"}}]\n' ;;
+      restore-desired-patch) printf '[{"op":"replace","path":"/spec/template","value":{"marker":"desired"}}]\n' ;;
       *) return 95 ;;
     esac
   }
+  dns_manifest_daemonset_uid_matches_snapshot() { :; }
   dns_manifest_daemonset_matches_snapshot() {
     match_calls=$((match_calls + 1))
     (( match_calls > 1 ))
@@ -519,24 +1936,48 @@ PY
   }
   kubectl_cmd() {
     case "$*" in
-      *" patch ds/dns-us "*"marker"*) events="${events}patch:ondelete;" ;;
-      *" patch ds/dns-us "*) events="${events}patch:strategy;" ;;
-      *"get ds/dns-us -o jsonpath={.status.updateRevision}"*) printf 'old-revision' ;;
-      *"get pod/dns-original"*) printf 'old-revision' ;;
-      *"get pod/dns-candidate"*) printf 'new-revision' ;;
-      *"delete pod dns-candidate"*) events="${events}delete:candidate;" ;;
-      *"delete pod dns-original"*) fail "rollback must preserve an unchanged original pod UID" ;;
+      *" patch ds/dns-us "*"serving"*) events="${events}patch:serving;" ;;
+      *" patch ds/dns-us "*"desired"*) events="${events}patch:desired;" ;;
+      *"get pod/dns-original -o jsonpath={.spec.nodeName}"*) printf 'node-original' ;;
+      *"get pod/dns-candidate -o jsonpath={.spec.nodeName}"*) printf 'node-candidate' ;;
       *) return 96 ;;
     esac
   }
+  delete_pod_by_uid_no_wait() {
+    [[ "$1" != "dns-original" ]] || fail "rollback must preserve an unchanged original pod UID"
+    events="${events}delete:candidate;"
+  }
+  dns_manifest_daemonset_target_identity() {
+    local calls
+    calls="$(cat "${rollback_identity_calls_file}")"
+    calls=$((calls + 1))
+    printf '%s\n' "${calls}" >"${rollback_identity_calls_file}"
+    (( calls > 1 )) || return 1
+    printf '{"revision":"old-revision","uid":"ds-uid"}\n'
+  }
+  sleep() { :; }
   wait_daemonset_observed() { events="${events}observed;"; }
   wait_daemonset_replaced_and_ready() { events="${events}replaced:$2;"; }
   wait_daemonset_ready() { events="${events}ready;"; }
-  verify_daemonset_pods_at_update_revision() { events="${events}verify;"; }
+  daemonset_pod_uid_on_node_at_revision() { printf 'replacement-uid\n'; }
+  daemonset_pod_record_on_node_at_revision() {
+    case "$2" in
+      node-original)
+        printf '%s\n' '{"name":"dns-original","nodeName":"node-original","restartCounts":[{"name":"dns","restartCount":0}],"revision":"old-revision","uid":"original-uid"}'
+        ;;
+      node-candidate)
+        printf '%s\n' '{"name":"dns-replacement","nodeName":"node-candidate","restartCounts":[{"name":"dns","restartCount":0}],"revision":"old-revision","uid":"replacement-uid"}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  verify_dns_manifest_daemonset_pod_cohort() { events="${events}verify-cohort;"; }
   check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
 
   restore_dns_manifest_daemonset /tmp/pre-helm-dns.json dns-us
-  assert_eq "${events}" "patch:ondelete;observed;delete:candidate;replaced:candidate-uid;ready;verify;patch:strategy;observed;ready;authoritative;" "DNS snapshot rollback must preserve original pods and recreate only changed-revision pods"
+  [[ "$(cat "${rollback_identity_calls_file}")" -gt 1 ]] || fail "DNS rollback must retry a delayed ControllerRevision"
+  assert_eq "${events}" "patch:serving;observed;delete:candidate;replaced:candidate-uid;authoritative;ready;verify-cohort;patch:desired;observed;verify-cohort;ready;verify-cohort;authoritative;verify-cohort;" "DNS snapshot rollback must preserve exact original Pods, replace every unproven UID, and restore desired drift"
+  rm -f "${rollback_identity_calls_file}"
 )
 
 (
@@ -560,9 +2001,15 @@ PY
     fi
   }
   dns_manifest_snapshot_query() {
-    [[ "$2" == "uids" ]] || return 89
-    printf 'original-uid\n'
+    case "$2" in
+      uids) printf 'original-uid\n' ;;
+      uid) printf 'ds-uid\n' ;;
+      nodes) printf 'node-us\n' ;;
+      *) return 89 ;;
+    esac
   }
+  dns_manifest_target_identity_revision() { printf 'target-revision\n'; }
+  dns_manifest_target_identity_uid() { printf 'ds-uid\n'; }
   capture_daemonset_pods() {
     printf '%s\n' 'dns-us|dns-original|original-uid|created|Running|dns:0'
   }
@@ -582,6 +2029,244 @@ PY
   # shellcheck source=scripts/release_fugue_public_data_plane.sh
   source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
 
+  controlled='[{"name":"dns-new","nodeName":"node-us","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"controlled-uid"}]'
+  capture_dns_manifest_daemonset_pod_cohort() {
+    printf '%s\n' '[{"name":"dns-uncontrolled","nodeName":"node-us","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uncontrolled-uid"}]'
+  }
+  if verify_dns_manifest_daemonset_pod_cohort /tmp/pre-helm-dns.json dns-us target-revision "${controlled}"; then
+    fail "DNS final verification must reject an uncontrolled Pod UID even at the correct revision with zero restarts"
+  fi
+  capture_dns_manifest_daemonset_pod_cohort() { printf '%s\n' "${controlled}"; }
+  verify_dns_manifest_daemonset_pod_cohort /tmp/pre-helm-dns.json dns-us target-revision "${controlled}" ||
+    fail "DNS final verification must accept only the exact controlled zero-restart Pod cohort"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  record_a='{"name":"pod-a","nodeName":"node-a","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-a"}'
+  record_b='{"name":"pod-b","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-b"}'
+  canonical="$(printf '%s\n%s\n' "${record_b}" "${record_a}" | canonicalize_dns_manifest_pod_records \
+    dns-us target-revision $'node-a\nnode-b')"
+  assert_eq "${canonical}" '[{"name":"pod-a","nodeName":"node-a","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-a"},{"name":"pod-b","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-b"}]' \
+    "DNS controlled cohort canonicalization"
+
+  invalid_cohorts=(
+    "${record_a}"
+    "${record_a}"$'\n''{"name":"pod-c","nodeName":"node-c","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-c"}'
+    "${record_a}"$'\n''{"name":"pod-a","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-b"}'
+    "${record_a}"$'\n''{"name":"pod-b","nodeName":"node-a","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-b"}'
+    "${record_a}"$'\n''{"name":"pod-b","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-a"}'
+    "${record_a}"$'\n''{"name":"pod-b","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"wrong-revision","uid":"uid-b"}'
+    "${record_a}"$'\n''{"name":"pod-b","nodeName":"node-b","restartCounts":[],"revision":"target-revision","uid":"uid-b"}'
+    "${record_a}"$'\n''{"name":"pod-b","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":0},{"name":"dns-server","restartCount":0}],"revision":"target-revision","uid":"uid-b"}'
+    "${record_a}"$'\n''{"name":"pod-b","nodeName":"node-b","restartCounts":[{"name":"dns-server","restartCount":1}],"revision":"target-revision","uid":"uid-b"}'
+  )
+  for invalid_cohort in "${invalid_cohorts[@]}"; do
+    if printf '%s\n' "${invalid_cohort}" | canonicalize_dns_manifest_pod_records \
+      dns-us target-revision $'node-a\nnode-b' >/dev/null 2>&1; then
+      fail "DNS controlled cohort builder must reject missing/extra/duplicate/wrong-revision/nonzero evidence"
+    fi
+  done
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_INSTANCE=fugue
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=dns-test-release
+  transaction_dir="$(mktemp -d)"
+  snapshot_file="${transaction_dir}/snapshot.json"
+  target_file="${transaction_dir}/target.json"
+  printf '%s\n' '{"apiVersion":"fugue.io/v1alpha1","kind":"DNSManifestOnDeleteSnapshot","namespace":"fugue-system","daemonSets":[{"name":"dns-us"}]}' >"${snapshot_file}"
+  chmod 600 "${snapshot_file}"
+  write_dns_manifest_target_state "${snapshot_file}" "${target_file}" \
+    dns-us unchanged '{"revision":"serving-revision","uid":"ds-uid"}' \
+    '[{"name":"dns-us-old","nodeName":"node-us","restartCounts":[{"name":"dns-server","restartCount":0}],"revision":"serving-revision","uid":"pod-old"}]'
+  [[ "$(python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "${target_file}")" == "0o600" ]] ||
+    fail "DNS target-state handoff must be owner-only"
+  [[ -n "$(dns_manifest_target_state_rows "${snapshot_file}" "${target_file}")" ]] ||
+    fail "DNS target-state writer must produce a scope-bound, snapshot-bound daemonset record"
+  handoff_identity="$(dns_manifest_handoff_identity "${snapshot_file}" "${target_file}")"
+  [[ "${handoff_identity}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9a-f]{64}\|[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9a-f]{64}$ ]] ||
+    fail "DNS handoff identity must bind both regular files by metadata and SHA256"
+  chmod 644 "${target_file}"
+  if dns_manifest_target_state_rows "${snapshot_file}" "${target_file}" >/dev/null 2>&1; then
+    fail "DNS target-state consumer must reject a non-owner-only handoff"
+  fi
+  chmod 600 "${target_file}"
+  ln -s "${target_file}" "${transaction_dir}/target-link.json"
+  if dns_manifest_target_state_rows "${snapshot_file}" "${transaction_dir}/target-link.json" >/dev/null 2>&1; then
+    fail "DNS target-state consumer must reject a symlink handoff"
+  fi
+  rm -rf "${transaction_dir}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  transaction_dir="$(mktemp -d)"
+  snapshot_file="${transaction_dir}/snapshot.json"
+  target_file="${transaction_dir}/target.json"
+  printf 'snapshot\n' >"${snapshot_file}"
+  printf 'target\n' >"${target_file}"
+  chmod 600 "${snapshot_file}" "${target_file}"
+  events=""
+  dns_manifest_target_state_rows() { printf '%s\n' 'dns-us|unchanged|e30=|W10='; }
+  validate_dns_manifest_snapshot_live_set() { events="${events}live-set;"; }
+  validate_dns_manifest_target_transport() { events="${events}transport;"; }
+  verify_dns_manifest_daemonset_target_state() { events="${events}exact;"; }
+  check_authoritative_dns_on_nodes() { events="${events}authoritative;"; }
+  run_smoke_urls() { events="${events}public-smoke;"; }
+
+  verify_dns_manifest_target_state_file "${snapshot_file}" "${target_file}"
+  assert_eq "${events}" "live-set;transport;exact;live-set;authoritative;public-smoke;live-set;transport;exact;live-set;" \
+    "DNS commit verifier must finish authoritative checks, then public smoke, then final transport and exact cohort verification"
+  rm -rf "${transaction_dir}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  transaction_dir="$(mktemp -d)"
+  snapshot_file="${transaction_dir}/snapshot.json"
+  target_file="${transaction_dir}/target.json"
+  identity_file="${transaction_dir}/identity.txt"
+  printf 'snapshot\n' >"${snapshot_file}"
+  printf 'target-before\n' >"${target_file}"
+  : >"${identity_file}"
+  chmod 600 "${snapshot_file}" "${target_file}" "${identity_file}"
+  dns_manifest_target_state_rows() { printf '%s\n' 'dns-us|unchanged|e30=|W10='; }
+  validate_dns_manifest_snapshot_live_set() { :; }
+  validate_dns_manifest_target_transport() { :; }
+  verify_dns_manifest_daemonset_target_state() { :; }
+  run_smoke_urls() {
+    replacement="${transaction_dir}/replacement.json"
+    printf 'target-after\n' >"${replacement}"
+    chmod 600 "${replacement}"
+    mv "${replacement}" "${target_file}"
+  }
+
+  if verify_dns_manifest_target_state_snapshot_with_smoke \
+    "${snapshot_file}" "${target_file}" "${identity_file}"; then
+    fail "DNS quick handoff must reject an atomic target-state replacement during public smoke"
+  fi
+  [[ ! -s "${identity_file}" ]] || fail "failed DNS quick handoff must not publish a verified file identity"
+  rm -rf "${transaction_dir}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  transaction_dir="$(mktemp -d)"
+  snapshot_file="${transaction_dir}/snapshot.json"
+  target_file="${transaction_dir}/target.json"
+  printf 'snapshot\n' >"${snapshot_file}"
+  printf 'target\n' >"${target_file}"
+  chmod 600 "${snapshot_file}" "${target_file}"
+  transport_valid=true
+  transport_calls=0
+  dns_manifest_target_state_rows() { printf '%s\n' 'dns-us|unchanged|e30=|W10='; }
+  validate_dns_manifest_snapshot_live_set() { :; }
+  validate_dns_manifest_target_transport() {
+    transport_calls=$((transport_calls + 1))
+    [[ "${transport_valid}" == "true" ]]
+  }
+  verify_dns_manifest_daemonset_target_state() { :; }
+  check_authoritative_dns_on_nodes() { :; }
+  run_smoke_urls() { transport_valid=false; }
+
+  if verify_dns_manifest_target_state_file "${snapshot_file}" "${target_file}"; then
+    fail "DNS commit verifier must reject transport drift that occurs during authoritative/public validation"
+  fi
+  assert_eq "${transport_calls}" "2" "DNS commit verifier must re-read transport after final public smoke"
+  rm -rf "${transaction_dir}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_RELEASE_INSTANCE=fugue
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=dns-test-release
+  FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE=dns-manifest-ondelete
+  FUGUE_PUBLIC_DATA_PLANE_ACTIVE_SLOTS_JSON='{}'
+  FUGUE_EDGE_RESOURCES_JSON='{}'
+  FUGUE_EDGE_CADDY_RESOURCES_JSON='{}'
+  FUGUE_DNS_RESOURCES_JSON='{}'
+  record_file="$(mktemp)"
+  apply_calls=0
+  kubectl_cmd() {
+    case "$*" in
+      *" create configmap "*" --dry-run=client -o json")
+        printf '%s\n' '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"fugue-fugue-public-data-plane-release","namespace":"fugue-system"},"data":{"release_id":"dns-test-release"}}'
+        ;;
+      "apply -f -")
+        apply_calls=$((apply_calls + 1))
+        cat >"${record_file}"
+        ;;
+      *) fail "release record must be rendered and applied in one labeled object, got kubectl $*" ;;
+    esac
+  }
+
+  write_release_record dns-us
+  assert_eq "${apply_calls}" "1" "release record must use one atomic Kubernetes apply"
+  python3 - "${record_file}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    record = json.load(handle)
+assert record["metadata"]["labels"] == {
+    "app.kubernetes.io/component": "public-data-plane-release",
+    "app.kubernetes.io/instance": "fugue",
+    "fugue.io/rollout-subsystem": "public-data-plane",
+}
+PY
+  rm -f "${record_file}"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  kubectl_cmd() { return 42; }
+  if release_record_active_slots_json >/dev/null; then
+    fail "release record active-slot preservation must distinguish API failure from NotFound"
+  fi
+  kubectl_cmd() { :; }
+  assert_eq "$(release_record_active_slots_json)" "{}" "missing release record may initialize an empty active-slot map"
+  kubectl_cmd() {
+    printf '%s\n' '{"data":{"active_slots":"{\"edge-b\":\"b\",\"edge-a\":\"a\"}"}}'
+  }
+  assert_eq "$(release_record_active_slots_json)" '{"edge-a":"a","edge-b":"b"}' \
+    "DNS metadata publication must preserve and canonicalize the existing shared active-slot map"
+)
+
+(
+  export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+  # shellcheck source=scripts/release_fugue_public_data_plane.sh
+  source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
   FUGUE_NAMESPACE=fugue-system
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
   events=""
@@ -590,11 +2275,18 @@ PY
       validate) : ;;
       namespace) printf 'fugue-system\n' ;;
       names) printf 'dns-de\ndns-us\n' ;;
+      serving-revision) printf 'restored-revision\n' ;;
       *) return 97 ;;
     esac
   }
   validate_dns_manifest_snapshot_live_set() { :; }
-  restore_dns_manifest_daemonset() { events="${events}restore:$2;"; }
+  restore_dns_manifest_daemonset() {
+    events="${events}restore:$2;"
+    DNS_MANIFEST_LAST_RESTORED_POD_COHORT="cohort-$2"
+  }
+  dns_manifest_daemonset_matches_snapshot() { :; }
+  dns_manifest_daemonset_serving_revision_matches_snapshot() { :; }
+  verify_dns_manifest_daemonset_pod_cohort() { :; }
   run_smoke_urls() { events="${events}public-smoke;"; }
 
   restore_dns_manifest_snapshot /tmp/pre-helm-dns.json
@@ -1270,6 +2962,166 @@ rm -f "${RESOLVE_TEST_OUTPUT}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+(
+  FUGUE_DNS_ZONE=example.test
+  FUGUE_DNS_NAMESERVERS=$'ns1.example.test\n\tns2.example.test'
+  FUGUE_DNS_TTL=60
+  NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT=$'node-edge\t192.0.2.10\tTCP\tfugue-system/dns-a:TCP/53\tdns-a-uid\t0\ttrue\nnode-edge\t192.0.2.10\tUDP\tfugue-system/dns-a:UDP/53\tdns-a-uid\t0\ttrue'
+  dns_queries="$(mktemp)"
+  node_local_dns_pod_dns_host_port_inventory() {
+    printf '192.0.2.10\tTCP\tfugue-system/dns-a:TCP/53\tdns-a-uid\t0\ttrue\n'
+    printf '192.0.2.10\tUDP\tfugue-system/dns-a:UDP/53\tdns-a-uid\t0\ttrue\n'
+  }
+  node_local_dns_verify_scoped_hostport_rules() { :; }
+  require_release_forward_budget() { :; }
+  sleep() { :; }
+  dig() {
+    local flags='qr aa'
+    local owner='example.test.'
+    local rdata='ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+    local current_transport=udp
+    printf '%s\n' "$*" >>"${dns_queries}"
+    [[ " $* " != *' +tcp '* ]] || current_transport=tcp
+    if [[ "${current_transport}" == "${node_local_dns_inject_transport:-none}" ]]; then
+      case "${node_local_dns_case:-correct-aa}" in
+        non-aa) flags='qr' ;;
+        wrong-zone) owner='wrong.example.test.' ;;
+        wrong-answer) rdata='ns.attacker.invalid. hostmaster.attacker.invalid. 1 300 60 3600 60' ;;
+      esac
+    fi
+    print_dig_response "${flags}" 'example.test.' SOA "${owner}" SOA "${rdata}"
+  }
+
+  for node_local_dns_inject_transport in udp tcp; do
+    for node_local_dns_case in non-aa wrong-zone wrong-answer correct-aa; do
+      if [[ "${node_local_dns_case}" == "correct-aa" ]]; then
+        node_local_dns_verify_authoritative_coexistence node-edge ||
+          fail "NodeLocal ${node_local_dns_inject_transport} correct-AA fixture must pass"
+      elif node_local_dns_verify_authoritative_coexistence node-edge; then
+        fail "NodeLocal ${node_local_dns_inject_transport} ${node_local_dns_case} fixture must fail"
+      fi
+    done
+  done
+  grep -Fq '@192.0.2.10 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA' "${dns_queries}" ||
+    fail "NodeLocal authoritative coexistence must issue a non-recursive UDP dig query"
+  grep -Fq '@192.0.2.10 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${dns_queries}" ||
+    fail "NodeLocal authoritative coexistence must issue a non-recursive TCP dig query"
+  rm -f "${dns_queries}"
+)
+
+(
+  transaction_dir="$(mktemp -d)"
+  DNS_MANIFEST_TRANSACTION_REQUIRED=true
+  DNS_MANIFEST_TRANSACTION_COMPLETED=true
+  DNS_MANIFEST_SNAPSHOT_FILE="${transaction_dir}/snapshot.json"
+  DNS_MANIFEST_TARGET_STATE_FILE="${transaction_dir}/target.json"
+  DNS_MANIFEST_HANDOFF_IDENTITY_FILE="${transaction_dir}/identity.txt"
+  printf 'snapshot\n' >"${DNS_MANIFEST_SNAPSHOT_FILE}"
+  printf 'target\n' >"${DNS_MANIFEST_TARGET_STATE_FILE}"
+  : >"${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}"
+  chmod 600 "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}" "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}"
+  identity_value="1:2:3:4:5:$(printf 'a%.0s' {1..64})|6:7:8:9:10:$(printf 'b%.0s' {1..64})"
+  run_release_long_command() {
+    shift 2
+    "$@"
+  }
+  run_dns_manifest_library_action() {
+    [[ "$1" == "verify-target-snapshot" ]] || return 1
+    printf '%s\n' "${identity_value}" >"$4"
+    chmod 600 "$4"
+  }
+
+  verify_dns_manifest_transaction_snapshot_before_commit
+  assert_eq "${DNS_MANIFEST_FINAL_TARGET_VERIFIED}" "true" "outer DNS quick handoff must publish verification only after the child succeeds"
+  assert_eq "${DNS_MANIFEST_FINAL_HANDOFF_IDENTITY}" "${identity_value}" "outer DNS quick handoff must import the child-verified file identity"
+  run_dns_manifest_library_action() {
+    printf 'malformed\n' >"$4"
+    chmod 600 "$4"
+  }
+  if verify_dns_manifest_transaction_snapshot_before_commit; then
+    fail "outer DNS quick handoff must reject a malformed child identity"
+  fi
+  assert_eq "${DNS_MANIFEST_FINAL_TARGET_VERIFIED}" "false" "failed DNS quick handoff must leave the final commit flag false"
+  [[ -z "${DNS_MANIFEST_FINAL_HANDOFF_IDENTITY}" ]] || fail "failed DNS quick handoff must clear the imported identity"
+  rm -rf "${transaction_dir}"
+)
+
+(
+  transaction_dir="$(mktemp -d)"
+  DNS_MANIFEST_TRANSACTION_REQUIRED=true
+  DNS_MANIFEST_TRANSACTION_COMPLETED=true
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED=true
+  DNS_MANIFEST_SNAPSHOT_FILE="${transaction_dir}/snapshot.json"
+  DNS_MANIFEST_TARGET_STATE_FILE="${transaction_dir}/target.json"
+  printf 'snapshot\n' >"${DNS_MANIFEST_SNAPSHOT_FILE}"
+  printf 'target\n' >"${DNS_MANIFEST_TARGET_STATE_FILE}"
+  chmod 600 "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}"
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  DNS_MANIFEST_RELEASE_ID=dns-test-release
+  FUGUE_DNS_CONTAINER_NAME=dns-server
+  FUGUE_DNS_UDP_CONTAINER_PORT=53
+  FUGUE_DNS_TCP_CONTAINER_PORT=5353
+  FUGUE_DNS_UDP_ADDR=:53
+  FUGUE_DNS_TCP_ADDR=:5353
+  DNS_MANIFEST_FINAL_HANDOFF_IDENTITY="$(run_dns_manifest_library_action handoff-identity \
+    "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}")"
+  finalize_dns_manifest_transaction
+  assert_eq "${DNS_MANIFEST_TRANSACTION_FINALIZED}" "true" "DNS finalize must accept the exact child-verified handoff identity"
+  printf 'target-replaced-but-nonempty\n' >"${DNS_MANIFEST_TARGET_STATE_FILE}"
+  DNS_MANIFEST_TRANSACTION_FINALIZED=false
+  DNS_MANIFEST_SNAPSHOT_KEEP=false
+  if finalize_dns_manifest_transaction; then
+    fail "DNS finalize must reject a nonempty target file changed after the last NodeLocal handoff"
+  fi
+  assert_eq "${DNS_MANIFEST_SNAPSHOT_KEEP}" "true" "DNS finalize identity mismatch must retain the rollback snapshot"
+  rm -rf "${transaction_dir}"
+)
+
+(
+  transaction_dir="$(mktemp -d)"
+  DNS_MANIFEST_TRANSACTION_REQUIRED=true
+  DNS_MANIFEST_TRANSACTION_FINALIZED=true
+  DNS_MANIFEST_SNAPSHOT_FILE="${transaction_dir}/snapshot.json"
+  DNS_MANIFEST_TARGET_STATE_FILE="${transaction_dir}/target.json"
+  printf 'snapshot\n' >"${DNS_MANIFEST_SNAPSHOT_FILE}"
+  printf 'target\n' >"${DNS_MANIFEST_TARGET_STATE_FILE}"
+  record_calls=0
+  run_release_long_command() { record_calls=$((record_calls + 1)); }
+
+  CONTROL_PLANE_RELEASE_COMMITTED=false
+  if write_dns_manifest_release_record_after_commit; then
+    fail "DNS release record must not be written before the outer transaction commits"
+  fi
+  assert_eq "${record_calls}" "0" "pre-commit DNS release record guard"
+  CONTROL_PLANE_RELEASE_COMMITTED=true
+  write_dns_manifest_release_record_after_commit
+  assert_eq "${record_calls}" "1" "committed DNS release record must be attempted exactly once"
+  rm -rf "${transaction_dir}"
+)
+
+(
+  CONTROL_PLANE_RELEASE_COMMITTED=true
+  CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS=false
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+  require_control_plane_backup_coordination_lease() { :; }
+  control_plane_backup_coordination_health_state() { printf 'lost'; }
+  write_control_plane_backup_coordination_health() { :; }
+  handle_control_plane_backup_coordination_abort() {
+    fail "post-commit best-effort guard must never invoke the exiting rollback abort handler"
+  }
+  postcommit_guard_status=0
+  if run_with_control_plane_backup_coordination_guard 5 "post-commit release record" bash -c 'sleep 10'; then
+    fail "post-commit best-effort mutation must stop when Lease health is lost"
+  else
+    postcommit_guard_status=$?
+  fi
+  assert_eq "${postcommit_guard_status}" "125" "post-commit Lease loss must return to the warning caller instead of exiting"
+  printf 'continued\n' >/dev/null
+)
 
 (
   ENDPOINT_SLICE_FIXTURE='{}'
@@ -4560,6 +6412,73 @@ done
     fail "control-plane preserve mode must retain the live Helm base image tag"
   [[ "${FUGUE_EDGE_IMAGE_TAG}" == "unreleased-target" ]] ||
     fail "control-plane preserve mode must not overwrite the edge release target"
+)
+
+(
+  FUGUE_DNS_EXTRA_GROUPS='Country_US|edge-us|us|203.0.113.10|token-us|203.0.113.10;abcdefghijklmnopqrstuvwxyzABCDE|edge-long|de|203.0.113.20|token-long|203.0.113.20'
+  assert_eq "$(dns_group_names_from_config)" $'abcdefghijklmnopqrstuvwxyzabcd\ncountry-us' "DNS preserve names must use the exact Helm lower/underscore/trunc canonicalization"
+  assert_eq "$(dns_group_index_from_config country-us)" "0" "DNS preserve must map a canonical live group name back to its configured index"
+  assert_eq "$(dns_group_index_from_config abcdefghijklmnopqrstuvwxyzabcd)" "1" "DNS preserve must map a truncated live group name back to its configured index"
+  FUGUE_DNS_EXTRA_GROUPS='Foo.Bar|edge-dot|us|203.0.113.10|token-dot|203.0.113.10;aaaaaaaaaaaaaaaaaaaaaaaaaaaaa--tail|edge-tail|de|203.0.113.20|token-tail|203.0.113.20'
+  assert_eq "$(dns_group_names_from_config)" $'aaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nfoo.bar' "DNS preserve names must accept Helm-valid dots and match trunc-before-single-trimSuffix boundaries"
+  assert_eq "$(dns_group_index_from_config foo.bar)" "0" "DNS preserve must map a dotted Helm-rendered group name to its configured index"
+  assert_eq "$(dns_group_index_from_config aaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" "1" "DNS preserve must map the exact 30-byte trunc and trimSuffix result"
+  FUGUE_DNS_EXTRA_GROUPS='foo--|edge-invalid|us|203.0.113.10|token-invalid|203.0.113.10'
+  if dns_group_names_from_config >/dev/null; then
+    fail "DNS preserve must reject the invalid trailing hyphen left by Helm single trimSuffix"
+  fi
+  FUGUE_DNS_EXTRA_GROUPS='country_us|edge-a|us|203.0.113.10|token-a|203.0.113.10;country-us|edge-b|us|203.0.113.20|token-b|203.0.113.20'
+  if dns_group_names_from_config >/dev/null; then
+    fail "DNS preserve must reject group names that collide after Helm canonicalization"
+  fi
+)
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_FULLNAME=fugue-fugue
+  FUGUE_EDGE_ENABLED=false
+  FUGUE_DNS_ENABLED=true
+  FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED=true
+  FUGUE_DNS_CONTAINER_NAME=dns
+  FUGUE_DNS_UDP_CONTAINER_PORT=53
+  FUGUE_DNS_TCP_CONTAINER_PORT=53
+  FUGUE_DNS_UDP_ADDR=:53
+  FUGUE_DNS_TCP_ADDR=:53
+  FUGUE_DNS_EXTRA_GROUPS='zeta|edge-zeta|zz|203.0.113.30|token-zeta|203.0.113.30;alpha|edge-alpha|aa|203.0.113.20|token-alpha|203.0.113.20'
+  live_daemonsets_json_snapshot() {
+    printf '%s\n' '{"apiVersion":"apps/v1","items":[{"metadata":{"name":"fugue-fugue-dns"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:primary-stable","resources":{},"command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}},{"metadata":{"name":"fugue-fugue-dns-alpha"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:alpha-stable","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}},{"metadata":{"name":"fugue-fugue-dns-zeta"},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","image":"ghcr.io/acme/fugue-edge:zeta-stable","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"http","containerPort":7834,"protocol":"TCP"},{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"},{"name":"FUGUE_DNS_UDP_ADDR","value":":53"},{"name":"FUGUE_DNS_TCP_ADDR","value":":5353"}]}]}}}}]}'
+  }
+  preserve_public_data_plane_from_live || fail "public preserve must retain the complete migrated DNS transport contract"
+  assert_eq "${FUGUE_DNS_CONTAINER_NAME}|${FUGUE_DNS_UDP_CONTAINER_PORT}|${FUGUE_DNS_TCP_CONTAINER_PORT}|${FUGUE_DNS_UDP_ADDR}|${FUGUE_DNS_TCP_ADDR}" 'dns-server|53|5353|:53|:5353' "public preserve must publish the exact live DNS transport globals"
+  joined_args="$(printf '%s\n' "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}")"
+  [[ "${joined_args}" == *"dns.publicHostPorts.tcpContainerPort=5353"* ]] ||
+    fail "public preserve must retain the live DNS TCP containerPort"
+  [[ "${joined_args}" == *"dns.tcpAddr=:5353"* ]] ||
+    fail "public preserve must retain the live DNS TCP bind address"
+  [[ "${joined_args}" == *"dns.groups[0].image.tag=zeta-stable"* ]] ||
+    fail "public preserve must map the zeta image to its configured group index"
+  [[ "${joined_args}" == *"dns.groups[1].image.tag=alpha-stable"* ]] ||
+    fail "public preserve must map the alpha image to its configured group index"
+  [[ "${joined_args}" != *"dns.groups[0].name="* && "${joined_args}" != *"dns.groups[1].name="* ]] ||
+    fail "public preserve must not cross-wire DNS group identities through sorted live indexes"
+)
+
+(
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_DNS_CONTAINER_NAME=dns-server
+  FUGUE_DNS_UDP_CONTAINER_PORT=53
+  FUGUE_DNS_TCP_CONTAINER_PORT=53
+  fake_dns_migration_kubectl() {
+    printf '%s\n' '{"items":[{"metadata":{"name":"fugue-fugue-dns","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"template":{"spec":{"containers":[{"name":"dns-server","command":["/usr/local/bin/fugue-dns"],"ports":[{"name":"dns-udp","containerPort":53,"protocol":"UDP"},{"name":"dns-tcp","containerPort":5353,"protocol":"TCP"}],"env":[{"name":"FUGUE_DNS_ZONE","value":"example.test"}]}]}}}},{"metadata":{"name":"other-dns","labels":{"app.kubernetes.io/instance":"other","app.kubernetes.io/component":"dns","fugue.io/rollout-subsystem":"public-data-plane"}},"spec":{"template":{"spec":{"containers":[]}}}}]}'
+  }
+  KUBECTL=fake_dns_migration_kubectl
+  if validate_dns_container_migration_against_live; then
+    fail "DNS migration validation must reject containerPort changes under the existing container name"
+  fi
+  FUGUE_DNS_CONTAINER_NAME=dns-next
+  validate_dns_container_migration_against_live ||
+    fail "DNS migration validation must accept a renamed container and ignore another Helm release"
 )
 
 for maintenance_preserve_failure_mode in inventory missing-required invalid-optional; do

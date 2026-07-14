@@ -9,6 +9,9 @@
 {{- $dnsImageTag := default .Values.edge.image.tag .Values.dns.image.tag -}}
 {{- $dnsImageDigest := default .Values.edge.image.digest .Values.dns.image.digest -}}
 {{- $dnsImagePullPolicy := default .Values.edge.image.pullPolicy .Values.dns.image.pullPolicy -}}
+{{- $dnsContainerName := required "dns.containerName is required" .Values.dns.containerName -}}
+{{- $dnsChecksumValues := omit .Values.dns "containerName" -}}
+{{- $_ := set $dnsChecksumValues "publicHostPorts" (omit .Values.dns.publicHostPorts "udpContainerPort" "tcpContainerPort") -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -37,7 +40,7 @@ spec:
         {{- end }}
       annotations:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
-        checksum/dns-config: {{ toJson .Values.dns | sha256sum }}
+        checksum/dns-config: {{ toJson $dnsChecksumValues | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -48,7 +51,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: dns
+        - name: {{ $dnsContainerName | quote }}
           image: {{ include "fugue.imageRef" (dict "repository" $dnsImageRepository "tag" $dnsImageTag "digest" $dnsImageDigest) | quote }}
           imagePullPolicy: {{ $dnsImagePullPolicy }}
           command:
@@ -63,12 +66,12 @@ spec:
               protocol: TCP
             {{- if .Values.dns.publicHostPorts.enabled }}
             - name: dns-udp
-              containerPort: 53
+              containerPort: {{ .Values.dns.publicHostPorts.udpContainerPort }}
               hostIP: {{ required "dns.publicHostPorts.hostIP is required when public DNS host ports are enabled" .Values.dns.publicHostPorts.hostIP | quote }}
               hostPort: {{ .Values.dns.publicHostPorts.udp }}
               protocol: UDP
             - name: dns-tcp
-              containerPort: 53
+              containerPort: {{ .Values.dns.publicHostPorts.tcpContainerPort }}
               hostIP: {{ .Values.dns.publicHostPorts.hostIP | quote }}
               hostPort: {{ .Values.dns.publicHostPorts.tcp }}
               protocol: TCP

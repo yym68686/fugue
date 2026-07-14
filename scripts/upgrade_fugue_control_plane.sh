@@ -324,14 +324,22 @@ RELEASE_CHANGED_FILES_EFFECTIVE=""
 STRICT_DRAIN_AGENT_IMAGE_PRESERVED=false
 ROBUSTNESS_HEALTH_GATE_BASELINE_FILE=""
 DNS_MANIFEST_SNAPSHOT_FILE=""
+DNS_MANIFEST_TARGET_STATE_FILE=""
+DNS_MANIFEST_HANDOFF_IDENTITY_FILE=""
+DNS_MANIFEST_FINAL_HANDOFF_IDENTITY=""
+DNS_MANIFEST_TRANSACTION_DIR=""
+DNS_MANIFEST_RELEASE_ID=""
 DNS_MANIFEST_TRANSACTION_REQUIRED="false"
 DNS_MANIFEST_TRANSACTION_COMPLETED="false"
 DNS_MANIFEST_ROLLBACK_RESTORED="false"
+DNS_MANIFEST_TRANSACTION_FINALIZED="false"
+DNS_MANIFEST_FINAL_TARGET_VERIFIED="false"
 DNS_MANIFEST_SNAPSHOT_KEEP="false"
 NODE_LOCAL_DNS_PREVIOUS_ENABLED="false"
 NODE_LOCAL_DNS_PREVIOUS_MODE=""
 NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES=""
 NODE_LOCAL_DNS_PREVIOUS_PODS_JSON=""
+NODE_LOCAL_DNS_TARGET_PODS_JSON=""
 NODE_LOCAL_DNS_ADDED_NODES=""
 NODE_LOCAL_DNS_REPLACED_NODES=""
 NODE_LOCAL_DNS_FAILED_NODE=""
@@ -369,6 +377,7 @@ CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
+CONTROL_PLANE_RELEASE_COMMITTED="false"
 CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="false"
 CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
 CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
@@ -729,7 +738,14 @@ run_with_control_plane_backup_coordination_guard() {
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || return 2
   (( $# > 0 )) || return 2
   if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" ]]; then
-    require_control_plane_backup_coordination_or_abort "${phase}"
+    if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
+      if ! require_control_plane_backup_coordination_lease "${phase}"; then
+        log_stderr "skipping post-commit best-effort mutation because shared backup/release Lease health is unsafe: ${phase}"
+        return 125
+      fi
+    else
+      require_control_plane_backup_coordination_or_abort "${phase}"
+    fi
   fi
 
   if [[ "${CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID:-}" =~ ^[1-9][0-9]*$ ]]; then
@@ -749,7 +765,9 @@ run_with_control_plane_backup_coordination_guard() {
     CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
     CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
     write_control_plane_backup_coordination_health lost "guarded-start:${phase}" || true
-    handle_control_plane_backup_coordination_abort true
+    if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" ]]; then
+      handle_control_plane_backup_coordination_abort true
+    fi
     return 125
   fi
   if release_prepared_release_command "${pid}" "${pgid}" "${gate_dir}" "${deadline_millis}"; then
@@ -796,7 +814,8 @@ run_with_control_plane_backup_coordination_guard() {
         rm -rf "${gate_dir}"
         CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
         CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
-        if [[ "${BASHPID:-$$}" == "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID:-}" ]]; then
+        if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" &&
+          "${BASHPID:-$$}" == "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID:-}" ]]; then
           handle_control_plane_backup_coordination_abort true
         fi
         return 125
@@ -885,6 +904,7 @@ node_local_dns_state_scalar_names() {
     NODE_LOCAL_DNS_PREVIOUS_MODE \
     NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES \
     NODE_LOCAL_DNS_PREVIOUS_PODS_JSON \
+    NODE_LOCAL_DNS_TARGET_PODS_JSON \
     NODE_LOCAL_DNS_ADDED_NODES \
     NODE_LOCAL_DNS_REPLACED_NODES \
     NODE_LOCAL_DNS_FAILED_NODE \
@@ -2333,8 +2353,8 @@ image_cache_strategy_target_fingerprints_match() {
     "75fdaa91fff878ca633d25671c3a2ae4c06753cb58e3ed9b9804176c4de145f7" || return 1
   file_sha256_matches \
     "${REPO_ROOT}/deploy/helm/fugue/values.yaml" \
-    "c84f9f1c4296090347b4484202be36194cb2f6887b7f71767333476b6d05afea" || return 1
-  CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" EXPECTED_SHA256="2c26789ecc7568a759895930bd8a8c3bbf443d8042e0e6a49396c2bc4bad0fd8" python3 -c '
+    "dc0d5b196391bfee05b32d8d230823ea0bf10bb7e14983c1c614926644ebde68" || return 1
+  CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" EXPECTED_SHA256="b6db348037a5507718ed94a06f311f1610c3039a62aa201bf9098cccf9db534a" python3 -c '
 import hashlib
 import os
 from pathlib import Path
@@ -3620,6 +3640,10 @@ handle_control_plane_backup_coordination_abort() {
   if [[ "${forced}" != "true" && -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" ]]; then
     # The foreground guard owns termination of the protected process tree and
     # will call this handler synchronously after the command is fully stopped.
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
+    log_stderr "shared backup/release Lease became unsafe after commit; skipping remaining best-effort metadata work without rollback"
     return 0
   fi
   if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]]; then
@@ -4996,6 +5020,30 @@ if matches:
 ' "${daemonset_name}"
 }
 
+dns_container_name_from_json() {
+  local workload_json="$1"
+
+  printf '%s' "${workload_json}" | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+containers = (doc.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+matches = []
+for container in containers:
+    command = container.get("command") or []
+    env_names = {entry.get("name") for entry in container.get("env") or []}
+    if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
+        matches.append(container)
+if len(matches) != 1:
+    raise SystemExit(1)
+name = str(matches[0].get("name") or "").strip()
+if not name or any(ch.isspace() for ch in name):
+    raise SystemExit(1)
+print(name)
+'
+}
+
 workload_container_image_from_json() {
   local workload_json="$1"
   local container_name="$2"
@@ -5068,6 +5116,74 @@ print(value)
 ' "${container_name}" "${env_name}"
 }
 
+dns_public_transport_record_from_daemonset_snapshot() {
+  local daemonsets_json="$1"
+  local primary_name="${FUGUE_RELEASE_FULLNAME}-dns"
+  local group_prefix="${FUGUE_RELEASE_FULLNAME}-dns-"
+
+  printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import sys
+
+primary_name, group_prefix = sys.argv[1:3]
+doc = json.load(sys.stdin)
+records = []
+names = []
+for item in doc.get("items") or []:
+    metadata = item.get("metadata") or {}
+    name = str(metadata.get("name") or "").strip()
+    if name != primary_name and not name.startswith(group_prefix):
+        continue
+    containers = ((item.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers") or []
+    semantic = []
+    for container in containers:
+        command = container.get("command") or []
+        env_names = {entry.get("name") for entry in container.get("env") or []}
+        if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
+            semantic.append(container)
+    if len(semantic) != 1:
+        raise SystemExit(f"live DNS daemonSet {name} must have exactly one semantic fugue-dns container")
+    container = semantic[0]
+    container_name = str(container.get("name") or "").strip()
+    ports = container.get("ports") or []
+    udp = [entry for entry in ports if entry.get("name") == "dns-udp" and entry.get("protocol") == "UDP"]
+    tcp = [entry for entry in ports if entry.get("name") == "dns-tcp" and entry.get("protocol") == "TCP"]
+    if len(udp) != 1 or len(tcp) != 1:
+        raise SystemExit(f"live DNS daemonSet {name} has an invalid public UDP/TCP port model")
+    udp_port = udp[0].get("containerPort")
+    tcp_port = tcp[0].get("containerPort")
+    if not isinstance(udp_port, int) or not isinstance(tcp_port, int):
+        raise SystemExit(f"live DNS daemonSet {name} has non-integer UDP/TCP container ports")
+    env = {}
+    for entry in container.get("env") or []:
+        env_name = entry.get("name")
+        if env_name not in {"FUGUE_DNS_UDP_ADDR", "FUGUE_DNS_TCP_ADDR"}:
+            continue
+        if env_name in env or not isinstance(entry.get("value"), str):
+            raise SystemExit(f"live DNS daemonSet {name} has duplicate or non-literal {env_name}")
+        env[env_name] = entry["value"]
+    if set(env) != {"FUGUE_DNS_UDP_ADDR", "FUGUE_DNS_TCP_ADDR"}:
+        raise SystemExit(f"live DNS daemonSet {name} is missing its UDP/TCP bind addresses")
+    record = (
+        container_name,
+        udp_port,
+        tcp_port,
+        env["FUGUE_DNS_UDP_ADDR"],
+        env["FUGUE_DNS_TCP_ADDR"],
+    )
+    if not container_name or any("|" in str(value) or "\n" in str(value) or "\r" in str(value) for value in record):
+        raise SystemExit(f"live DNS daemonSet {name} has an invalid transport value")
+    names.append(name)
+    records.append(record)
+if primary_name not in names or not records:
+    raise SystemExit(f"live primary DNS daemonSet {primary_name} is absent")
+if len(set(records)) != 1:
+    rendered = {name: record for name, record in zip(names, records)}
+    raise SystemExit(f"live DNS daemonSets do not share one transport contract: {rendered}")
+print("|".join(str(value) for value in records[0]))
+' "${primary_name}" "${group_prefix}"
+}
+
 tagged_image_record_from_ref() {
   local image_ref="$1"
   local repository=""
@@ -5104,7 +5220,12 @@ for item in doc.get("items") or []:
         continue
     suffix = name[len(prefix):]
     containers = (item.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
-    matches = [container for container in containers if container.get("name") == "dns"]
+    matches = []
+    for container in containers:
+        command = container.get("command") or []
+        env_names = {entry.get("name") for entry in container.get("env") or []}
+        if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
+            matches.append(container)
     if len(matches) != 1:
         raise SystemExit(1)
     image = str(matches[0].get("image") or "").strip()
@@ -5114,6 +5235,64 @@ for item in doc.get("items") or []:
 for suffix, image in sorted(records):
     print(suffix + "\t" + image)
 ' "${dns_prefix}"
+}
+
+dns_group_config_rows() {
+  local raw="${FUGUE_DNS_EXTRA_GROUPS:-}"
+
+  printf '%s' "${raw}" | python3 -c '
+import re
+import sys
+
+raw = sys.stdin.read().replace(";", "\n")
+names = []
+def canonical_name(value):
+    # Match the chart pipeline exactly for every Kubernetes-valid rendered
+    # name: lower | replace "_" "-" | trunc 30 | trimSuffix "-". Sprig
+    # truncates UTF-8 bytes and trimSuffix removes one suffix, not a run.
+    encoded = value.lower().replace("_", "-").encode("utf-8")[:30]
+    if encoded.endswith(b"-"):
+        encoded = encoded[:-1]
+    try:
+        result = encoded.decode("ascii")
+    except UnicodeDecodeError:
+        raise SystemExit(f"invalid DNS group name after Helm canonicalization: {value!r}")
+    label = r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?"
+    if not re.fullmatch(label + r"(?:\." + label + r")*", result):
+        raise SystemExit(f"invalid DNS group name after Helm canonicalization: {value!r}")
+    return result
+for line in raw.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    name = canonical_name(line.split("|", 1)[0].strip())
+    if not name or name in names:
+        raise SystemExit("DNS group names must remain unique after Helm canonicalization")
+    names.append(name)
+for index, name in enumerate(names):
+    print(str(index) + "\t" + name)
+'
+}
+
+dns_group_names_from_config() {
+  local rows
+
+  rows="$(dns_group_config_rows)" || return $?
+  printf '%s\n' "${rows}" | awk -F $'\t' 'NF {print $2}' | sort
+}
+
+dns_group_index_from_config() {
+  local requested_name="$1"
+  local rows
+
+  rows="$(dns_group_config_rows)" || return $?
+  printf '%s\n' "${rows}" | awk -F $'\t' -v requested="${requested_name}" '
+    $2 == requested { match_count++; match_index = $1 }
+    END {
+      if (match_count != 1) exit 1
+      print match_index
+    }
+  '
 }
 
 duration_to_seconds() {
@@ -5451,6 +5630,8 @@ preserve_edge_base_image_from_live_release() {
 append_dns_group_image_args_from_live() {
   local dns_prefix="${FUGUE_RELEASE_FULLNAME}-dns-"
   local daemonset_name
+  local daemonset_json
+  local container_name
   local suffix
   local image_ref
   local repository
@@ -5464,7 +5645,9 @@ append_dns_group_image_args_from_live() {
     if [[ "${suffix}" == "${daemonset_name}" || -z "${suffix}" ]]; then
       continue
     fi
-    image_ref="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "dns")")"
+    daemonset_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null)" || continue
+    container_name="$(dns_container_name_from_json "${daemonset_json}")" || continue
+    image_ref="$(trim_field "$(workload_container_image_from_json "${daemonset_json}" "${container_name}")")"
     [[ -n "${image_ref}" ]] || continue
     repository="$(image_ref_repository "${image_ref}")"
     tag="$(image_ref_tag "${image_ref}")"
@@ -5474,7 +5657,7 @@ append_dns_group_image_args_from_live() {
       --set-string "dns.groups[${index}].image.repository=${repository}"
       --set-string "dns.groups[${index}].image.tag=${tag}"
     )
-    log "public data-plane dns group ${suffix} image preserved from live ${daemonset_name}/dns: ${repository}:${tag}"
+    log "public data-plane dns group ${suffix} image preserved from live ${daemonset_name}/${container_name}: ${repository}:${tag}"
     index=$((index + 1))
   done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
 }
@@ -5490,11 +5673,18 @@ preserve_public_data_plane_from_live() {
   local edge_json="" edge_front_json="" edge_worker_a_json="" edge_worker_b_json="" ssh_front_json="" dns_json=""
   local image_ref="" image_record="" repository="" tag=""
   local edge_resources="" caddy_resources="" dns_resources=""
+  local dns_container_name=""
+  local dns_transport_record=""
+  local dns_udp_container_port=""
+  local dns_tcp_container_port=""
+  local dns_udp_addr=""
+  local dns_tcp_addr=""
   local probe_enabled="" probe_port="" probe_timeout=""
   local base_repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY:-}}"
   local base_tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG:-}}"
   local blue_count=0
-  local group_records="" group_name="" group_image="" group_index=0
+  local group_records="" group_name="" group_image="" group_index=""
+  local configured_group_names="" live_group_names=""
   local snapshot_spec="" snapshot_var="" snapshot_name="" snapshot_value=""
   local -a pending_args=()
 
@@ -5580,36 +5770,71 @@ preserve_public_data_plane_from_live() {
       log "public data-plane preserve failed; required live DNS DaemonSet ${dns_ds} is absent"
       return 1
     }
-    image_ref="$(workload_container_image_from_json "${dns_json}" dns)" || return 1
+    dns_container_name="$(dns_container_name_from_json "${dns_json}")" || return 1
+    if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}" == "true" ]]; then
+      dns_transport_record="$(dns_public_transport_record_from_daemonset_snapshot "${daemonsets_json}")" || return 1
+      IFS='|' read -r dns_container_name dns_udp_container_port dns_tcp_container_port dns_udp_addr dns_tcp_addr <<<"${dns_transport_record}"
+      [[ -n "${dns_container_name}" && -n "${dns_udp_container_port}" && -n "${dns_tcp_container_port}" && -n "${dns_udp_addr}" && -n "${dns_tcp_addr}" ]] || return 1
+      pending_args+=(
+        --set-string "dns.containerName=${dns_container_name}"
+        --set "dns.publicHostPorts.udpContainerPort=${dns_udp_container_port}"
+        --set "dns.publicHostPorts.tcpContainerPort=${dns_tcp_container_port}"
+        --set-string "dns.udpAddr=${dns_udp_addr}"
+        --set-string "dns.tcpAddr=${dns_tcp_addr}"
+      )
+    else
+      pending_args+=(--set-string "dns.containerName=${dns_container_name}")
+    fi
+    image_ref="$(workload_container_image_from_json "${dns_json}" "${dns_container_name}")" || return 1
     image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
     IFS='|' read -r repository tag <<<"${image_record}"
     pending_args+=(--set-string "dns.image.repository=${repository}" --set-string "dns.image.tag=${tag}")
-    dns_resources="$(workload_container_resources_from_json "${dns_json}" dns)" || return 1
+    dns_resources="$(workload_container_resources_from_json "${dns_json}" "${dns_container_name}")" || return 1
     pending_args+=(--set-json "dns.resources=${dns_resources}")
-    probe_enabled="$(workload_container_env_from_json "${dns_json}" dns FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED)" || return 1
-    probe_port="$(workload_container_env_from_json "${dns_json}" dns FUGUE_DNS_EDGE_HEALTH_PROBE_PORT)" || return 1
-    probe_timeout="$(workload_container_env_from_json "${dns_json}" dns FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT)" || return 1
+    probe_enabled="$(workload_container_env_from_json "${dns_json}" "${dns_container_name}" FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED)" || return 1
+    probe_port="$(workload_container_env_from_json "${dns_json}" "${dns_container_name}" FUGUE_DNS_EDGE_HEALTH_PROBE_PORT)" || return 1
+    probe_timeout="$(workload_container_env_from_json "${dns_json}" "${dns_container_name}" FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT)" || return 1
     [[ -z "${probe_enabled}" ]] || pending_args+=(--set "dns.edgeHealthProbe.enabled=${probe_enabled}")
     [[ -z "${probe_port}" ]] || pending_args+=(--set "dns.edgeHealthProbe.port=${probe_port}")
     [[ -z "${probe_timeout}" ]] || pending_args+=(--set-string "dns.edgeHealthProbe.timeout=${probe_timeout}")
 
     group_records="$(dns_group_image_records_from_daemonset_snapshot "${daemonsets_json}")" || return 1
+    configured_group_names="$(dns_group_names_from_config)" || return 1
+    live_group_names="$(printf '%s\n' "${group_records}" | awk -F $'\t' 'NF {print $1}' | sort)"
+    if [[ "${live_group_names}" != "${configured_group_names}" ]]; then
+      log "public data-plane preserve failed; live DNS group identities do not match FUGUE_DNS_EXTRA_GROUPS"
+      return 1
+    fi
     while IFS=$'\t' read -r group_name group_image; do
       [[ -n "${group_name}" ]] || continue
+      group_index="$(dns_group_index_from_config "${group_name}")" || return 1
       image_record="$(tagged_image_record_from_ref "${group_image}")" || return 1
       IFS='|' read -r repository tag <<<"${image_record}"
       pending_args+=(
-        --set-string "dns.groups[${group_index}].name=${group_name}"
         --set-string "dns.groups[${group_index}].image.repository=${repository}"
         --set-string "dns.groups[${group_index}].image.tag=${tag}"
       )
-      group_index=$((group_index + 1))
     done <<<"${group_records}"
     log "public data-plane DNS topology preserved from the same live DaemonSet inventory snapshot"
   fi
 
   FUGUE_EDGE_HELM_IMAGE_REPOSITORY="${base_repository}"
   FUGUE_EDGE_HELM_IMAGE_TAG="${base_tag}"
+  if [[ "${FUGUE_DNS_ENABLED:-false}" == "true" && "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}" == "true" ]]; then
+    (
+      FUGUE_DNS_CONTAINER_NAME="${dns_container_name}"
+      FUGUE_DNS_UDP_CONTAINER_PORT="${dns_udp_container_port}"
+      FUGUE_DNS_TCP_CONTAINER_PORT="${dns_tcp_container_port}"
+      FUGUE_DNS_UDP_ADDR="${dns_udp_addr}"
+      FUGUE_DNS_TCP_ADDR="${dns_tcp_addr}"
+      validate_dns_container_transport_config
+    ) || return 1
+    FUGUE_DNS_CONTAINER_NAME="${dns_container_name}"
+    FUGUE_DNS_UDP_CONTAINER_PORT="${dns_udp_container_port}"
+    FUGUE_DNS_TCP_CONTAINER_PORT="${dns_tcp_container_port}"
+    FUGUE_DNS_UDP_ADDR="${dns_udp_addr}"
+    FUGUE_DNS_TCP_ADDR="${dns_tcp_addr}"
+  fi
   PUBLIC_DATA_PLANE_HELM_SET_ARGS=("${pending_args[@]}")
   PUBLIC_DATA_PLANE_PRESERVED=true
 }
@@ -6705,10 +6930,13 @@ image_cache_restore_ondelete_after_helm_rollback() {
 
 daemonset_names_by_component_prefix() {
   local component_prefix="$1"
+  : "${FUGUE_RELEASE_NAME:?FUGUE_RELEASE_NAME is required to select release daemonsets}"
   release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
     "daemonset component inventory ${component_prefix}" -n "${FUGUE_NAMESPACE}" get ds \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\n"}{end}' 2>/dev/null |
-    awk -v prefix="${component_prefix}" '($2 == prefix || index($2, prefix "-") == 1) { print $1 }' |
+    -l "app.kubernetes.io/instance=${FUGUE_RELEASE_NAME}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/instance}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\n"}{end}' 2>/dev/null |
+    awk -v instance="${FUGUE_RELEASE_NAME}" -v prefix="${component_prefix}" \
+      '$2 == instance && ($3 == prefix || index($3, prefix "-") == 1) { print $1 }' |
     sort
 }
 
@@ -6971,6 +7199,16 @@ cleanup_upgrade_override_values() {
       rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"
     fi
   fi
+  if [[ -n "${DNS_MANIFEST_TARGET_STATE_FILE}" && -f "${DNS_MANIFEST_TARGET_STATE_FILE}" ]]; then
+    rm -f "${DNS_MANIFEST_TARGET_STATE_FILE}"
+  fi
+  if [[ -n "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" && -f "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" ]]; then
+    rm -f "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}"
+  fi
+  if [[ -n "${DNS_MANIFEST_TRANSACTION_DIR}" && -d "${DNS_MANIFEST_TRANSACTION_DIR}" &&
+    "${DNS_MANIFEST_SNAPSHOT_KEEP:-false}" != "true" ]]; then
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+  fi
 }
 
 terminate_active_control_plane_release_command() {
@@ -6997,7 +7235,10 @@ handle_control_plane_release_signal() {
   esac
   log_stderr "received ${signal_name}; terminating the active release process group before rollback"
   terminate_active_control_plane_release_command
-  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" ]]; then
+  if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+    CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+  elif [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" ]]; then
     if ! rollback_release_transaction; then
       log_stderr "rollback after ${signal_name} did not complete; preserving the Lease recovery fence"
     fi
@@ -7011,6 +7252,10 @@ cleanup_tmp_artifacts() {
 
   trap - HUP INT TERM
   terminate_active_control_plane_release_command
+  if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+    CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+  fi
   if [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" &&
     "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" != "true" ]]; then
     log_stderr "abnormal exit after Helm mutation; attempting the reserved synchronous rollback"
@@ -7020,7 +7265,8 @@ cleanup_tmp_artifacts() {
     "${CONTROL_PLANE_RELEASE_ROLLBACK_FAILED:-false}" == "true" ]]; then
     release_lease="false"
   fi
-  if [[ "${exit_status}" != "0" && "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" && "${DNS_MANIFEST_ROLLBACK_RESTORED:-false}" != "true" ]]; then
+  if [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" &&
+    "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" && "${DNS_MANIFEST_ROLLBACK_RESTORED:-false}" != "true" ]]; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
   fi
   if [[ "${release_lease}" == "true" ]]; then
@@ -8776,6 +9022,107 @@ validate_dns_public_host_port_targets() {
     selected_targets+=$'\n'"DNS group ${name}|${target_key}"
     log "public DNS host-port target validated: group=${name} node=${node_name} host_ip=${host_ip}"
   done <<<"${raw}"
+  validate_dns_container_migration_against_live
+}
+
+validate_dns_container_migration_against_live() {
+  local daemonsets_json
+
+  daemonsets_json="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get daemonsets -o json)" || return $?
+  printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import sys
+
+target_name, target_udp_text, target_tcp_text, release_name = sys.argv[1:5]
+target_udp = int(target_udp_text)
+target_tcp = int(target_tcp_text)
+doc = json.load(sys.stdin)
+for item in doc.get("items") or []:
+    metadata = item.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    component = str(labels.get("app.kubernetes.io/component") or "")
+    if (
+        labels.get("fugue.io/rollout-subsystem") != "public-data-plane"
+        or labels.get("app.kubernetes.io/instance") != release_name
+        or (component != "dns" and not component.startswith("dns-"))
+    ):
+        continue
+    name = str(metadata.get("name") or "<unknown>")
+    containers = (item.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+    semantic = []
+    for container in containers:
+        command = container.get("command") or []
+        env_names = {entry.get("name") for entry in container.get("env") or []}
+        if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
+            semantic.append(container)
+    if len(semantic) != 1:
+        raise SystemExit(f"live DNS daemonSet {name} must have exactly one semantic fugue-dns container")
+    container = semantic[0]
+    current_name = str(container.get("name") or "")
+    ports = container.get("ports") or []
+    udp = [entry.get("containerPort") for entry in ports if entry.get("name") == "dns-udp" and entry.get("protocol") == "UDP"]
+    tcp = [entry.get("containerPort") for entry in ports if entry.get("name") == "dns-tcp" and entry.get("protocol") == "TCP"]
+    if len(udp) != 1 or len(tcp) != 1 or not isinstance(udp[0], int) or not isinstance(tcp[0], int):
+        raise SystemExit(f"live DNS daemonSet {name} has an invalid UDP/TCP container port model")
+    if current_name == target_name and (udp[0], tcp[0]) != (target_udp, target_tcp):
+        raise SystemExit(
+            f"live DNS daemonSet {name} cannot change container ports under the existing container name {current_name}; "
+            "Helm strategic merge would corrupt the UDP/TCP port list, so use a new DNS container name"
+        )
+' "${FUGUE_DNS_CONTAINER_NAME}" "${FUGUE_DNS_UDP_CONTAINER_PORT}" "${FUGUE_DNS_TCP_CONTAINER_PORT}" "${FUGUE_RELEASE_NAME}"
+}
+
+validate_dns_container_transport_config() {
+  python3 - "${FUGUE_DNS_CONTAINER_NAME}" "${FUGUE_DNS_UDP_CONTAINER_PORT}" \
+    "${FUGUE_DNS_TCP_CONTAINER_PORT}" "${FUGUE_DNS_UDP_ADDR}" "${FUGUE_DNS_TCP_ADDR}" \
+    "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" <<'PY'
+import re
+import sys
+
+name, udp_port_text, tcp_port_text, udp_addr, tcp_addr, public_text = sys.argv[1:7]
+if not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", name):
+    raise SystemExit("FUGUE_DNS_CONTAINER_NAME must be a Kubernetes DNS label of at most 63 characters")
+
+def parse_port(label, value):
+    try:
+        port = int(value)
+    except ValueError:
+        raise SystemExit(f"{label} must be an integer")
+    if port < 1 or port > 65535:
+        raise SystemExit(f"{label} must be between 1 and 65535")
+    return port
+
+def parse_addr(label, value):
+    if value.startswith("["):
+        match = re.fullmatch(r"\[([^]]+)\]:(\d+)", value)
+        if not match:
+            raise SystemExit(f"{label} must be a valid host:port address")
+        host, port_text = match.groups()
+    else:
+        if value.count(":") != 1:
+            raise SystemExit(f"{label} must be a valid host:port address")
+        host, port_text = value.rsplit(":", 1)
+    return host, parse_port(label, port_text)
+
+udp_port = parse_port("FUGUE_DNS_UDP_CONTAINER_PORT", udp_port_text)
+tcp_port = parse_port("FUGUE_DNS_TCP_CONTAINER_PORT", tcp_port_text)
+if public_text != "true":
+    raise SystemExit(0)
+udp_host, udp_bind_port = parse_addr("FUGUE_DNS_UDP_ADDR", udp_addr)
+tcp_host, tcp_bind_port = parse_addr("FUGUE_DNS_TCP_ADDR", tcp_addr)
+if udp_host not in {"", "0.0.0.0", "::"} or tcp_host not in {"", "0.0.0.0", "::"}:
+    raise SystemExit("public DNS hostPort mode requires wildcard UDP/TCP listen addresses")
+if udp_bind_port != udp_port:
+    raise SystemExit("FUGUE_DNS_UDP_ADDR port must equal FUGUE_DNS_UDP_CONTAINER_PORT")
+if tcp_bind_port != tcp_port:
+    raise SystemExit("FUGUE_DNS_TCP_ADDR port must equal FUGUE_DNS_TCP_CONTAINER_PORT")
+if 7834 in {udp_port, tcp_port}:
+    raise SystemExit("DNS UDP/TCP container ports must not collide with health port 7834")
+if udp_port == tcp_port and not (name == "dns" and udp_port == 53):
+    raise SystemExit(
+        "DNS UDP/TCP container ports must be unique; only the exact legacy dns/53 capability baseline is accepted"
+    )
+PY
 }
 
 append_upgrade_edge_dynamic_values() {
@@ -8946,11 +9293,14 @@ EOF
     printf '      effect: NoSchedule\n'
     printf '  publicHostPorts:\n'
     printf '    enabled: %s\n' "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}"
+    printf '    udpContainerPort: %s\n' "${FUGUE_DNS_UDP_CONTAINER_PORT}"
+    printf '    tcpContainerPort: %s\n' "${FUGUE_DNS_TCP_CONTAINER_PORT}"
     if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" == "true" ]]; then
       printf '    hostIP: %s\n' "$(yaml_quote "${FUGUE_DNS_PUBLIC_HOST_IP}")"
     fi
     printf '  udpAddr: %s\n' "$(yaml_quote "${FUGUE_DNS_UDP_ADDR}")"
     printf '  tcpAddr: %s\n' "$(yaml_quote "${FUGUE_DNS_TCP_ADDR}")"
+    printf '  containerName: %s\n' "$(yaml_quote "${FUGUE_DNS_CONTAINER_NAME}")"
     printf '  zone: %s\n' "$(yaml_quote "${FUGUE_DNS_ZONE}")"
     printf '  ttl: %s\n' "${FUGUE_DNS_TTL}"
   } >>"${UPGRADE_OVERRIDE_VALUES_FILE}"
@@ -9023,6 +9373,9 @@ build_dns_helm_set_args() {
 
   DNS_HELM_SET_ARGS+=(
     --set "dns.publicHostPorts.enabled=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}"
+    --set-string "dns.containerName=${FUGUE_DNS_CONTAINER_NAME}"
+    --set "dns.publicHostPorts.udpContainerPort=${FUGUE_DNS_UDP_CONTAINER_PORT}"
+    --set "dns.publicHostPorts.tcpContainerPort=${FUGUE_DNS_TCP_CONTAINER_PORT}"
     --set-string "dns.udpAddr=${FUGUE_DNS_UDP_ADDR}"
     --set-string "dns.tcpAddr=${FUGUE_DNS_TCP_ADDR}"
     --set-string "dns.zone=${FUGUE_DNS_ZONE}"
@@ -12280,7 +12633,205 @@ print("\t".join([
   printf '%s\n' "${controller_revision}"
 }
 
-node_local_dns_verify_authoritative_coexistence() {
+node_local_dns_authoritative_soa_config() {
+  python3 -c '
+import json
+import re
+import sys
+
+zone, nameservers_text, ttl_text = sys.argv[1:4]
+
+def fqdn(value):
+    value = str(value or "").strip().rstrip(".").lower()
+    return value + "." if value else ""
+
+zone = fqdn(zone)
+if not zone:
+    raise SystemExit("authoritative DNS zone is required")
+nameservers = [
+    fqdn(value)
+    for value in re.split(r"[\s,;]+", nameservers_text)
+    if fqdn(value)
+]
+try:
+    minimum = int(ttl_text or "60")
+except ValueError:
+    raise SystemExit("authoritative DNS TTL is invalid")
+if minimum <= 0:
+    raise SystemExit("authoritative DNS TTL must be positive")
+print(json.dumps({
+    "soa": {
+        "expire": 3600,
+        "minimum": minimum,
+        "mname": nameservers[0] if nameservers else fqdn("ns1." + zone.rstrip(".")),
+        "owner": zone,
+        "refresh": 300,
+        "retry": 60,
+        "rname": fqdn("hostmaster." + zone.rstrip(".")),
+    },
+    "zone": zone,
+}, separators=(",", ":"), sort_keys=True))
+' "${FUGUE_DNS_ZONE}" "${FUGUE_DNS_NAMESERVERS:-}" "${FUGUE_DNS_TTL:-60}"
+}
+
+node_local_dns_validate_authoritative_soa_response() {
+  local response_file="$1"
+  local expected_config="$2"
+
+  python3 - "${response_file}" "${expected_config}" <<'PY'
+import json
+import re
+import sys
+
+path, config_text = sys.argv[1:3]
+config = json.loads(config_text)
+
+def fqdn(value):
+    value = str(value or "").strip().rstrip(".").lower()
+    return value + "." if value else ""
+
+soa = config.get("soa") or {}
+zone = fqdn(config.get("zone"))
+with open(path, encoding="utf-8", errors="replace") as handle:
+    lines = [line.rstrip("\n") for line in handle]
+headers = []
+flag_rows = []
+questions = []
+answers = []
+got_answer_rows = 0
+opt_sections = 0
+question_sections = 0
+answer_sections = 0
+edns_rows = []
+ecs_rows = []
+section = ""
+for line in lines:
+    stripped = line.strip()
+    if not stripped:
+        continue
+    if stripped == ";; Got answer:":
+        if section or got_answer_rows:
+            raise SystemExit("authoritative DNS answer preamble is duplicated or out of order")
+        got_answer_rows += 1
+        section = "metadata"
+        continue
+    header = re.fullmatch(r";; ->>HEADER<<- opcode: QUERY, status: ([A-Z]+), id: [0-9]+", stripped)
+    if header:
+        if section != "metadata" or got_answer_rows != 1 or headers or flag_rows:
+            raise SystemExit("authoritative DNS header is duplicated or out of order")
+        headers.append(header.group(1))
+        continue
+    flags = re.fullmatch(
+        r";; flags: ([^;]*); QUERY: ([0-9]+), ANSWER: ([0-9]+), AUTHORITY: ([0-9]+), ADDITIONAL: ([0-9]+)",
+        stripped,
+    )
+    if flags:
+        if section != "metadata" or len(headers) != 1 or flag_rows:
+            raise SystemExit("authoritative DNS flags/count row is duplicated or out of order")
+        flag_rows.append((set(flags.group(1).split()), *(int(flags.group(index)) for index in range(2, 6))))
+        continue
+    if stripped == ";; OPT PSEUDOSECTION:":
+        if section != "metadata" or len(flag_rows) != 1 or opt_sections:
+            raise SystemExit("authoritative DNS OPT PSEUDOSECTION is duplicated or out of order")
+        opt_sections += 1
+        section = "opt"
+        continue
+    edns = re.fullmatch(r"; EDNS: version: ([0-9]+), flags:([^;]*); udp: ([0-9]+)", stripped)
+    if edns:
+        if section != "opt" or edns_rows or ecs_rows:
+            raise SystemExit("authoritative DNS EDNS metadata is duplicated or out of order")
+        edns_rows.append((int(edns.group(1)), edns.group(2).strip(), int(edns.group(3))))
+        continue
+    ecs = re.fullmatch(r"; CLIENT-SUBNET: (.+)", stripped)
+    if ecs:
+        if section != "opt" or len(edns_rows) != 1 or ecs_rows:
+            raise SystemExit("authoritative DNS ECS metadata is duplicated or out of order")
+        ecs_rows.append(ecs.group(1).strip())
+        continue
+    if stripped == ";; QUESTION SECTION:":
+        if section != "opt" or len(edns_rows) != 1 or len(ecs_rows) != 1 or question_sections:
+            raise SystemExit("authoritative DNS question section is duplicated or out of order")
+        question_sections += 1
+        section = "question"
+        continue
+    if stripped == ";; ANSWER SECTION:":
+        if section != "question" or len(questions) != 1 or answer_sections:
+            raise SystemExit("authoritative DNS answer section is duplicated or out of order")
+        answer_sections += 1
+        section = "answer"
+        continue
+    if section == "question" and stripped.startswith(";"):
+        fields = stripped[1:].split()
+        if len(fields) != 3:
+            raise SystemExit("malformed authoritative DNS question")
+        questions.append((fqdn(fields[0]), fields[1].upper(), fields[2].upper()))
+    elif section == "answer":
+        fields = stripped.split(None, 4)
+        if len(fields) != 5:
+            raise SystemExit("malformed authoritative DNS answer")
+        try:
+            ttl = int(fields[1])
+        except ValueError:
+            raise SystemExit("authoritative DNS answer TTL is invalid")
+        if ttl < 0:
+            raise SystemExit("authoritative DNS answer TTL is negative")
+        answers.append((fqdn(fields[0]), fields[2].upper(), fields[3].upper(), fields[4].strip()))
+    else:
+        raise SystemExit(f"unexpected authoritative DNS output line: {stripped}")
+
+if len(headers) != 1 or headers[0] != "NOERROR":
+    raise SystemExit("authoritative DNS response status is not exactly NOERROR")
+if got_answer_rows != 1 or len(flag_rows) != 1:
+    raise SystemExit("authoritative DNS response has no unique flags/count row")
+flags, query_count, answer_count, authority_count, additional_count = flag_rows[0]
+if (
+    flags != {"qr", "aa"}
+    or query_count != 1
+    or answer_count != len(answers)
+    or authority_count != 0
+    or additional_count != 1
+    or additional_count != opt_sections
+):
+    raise SystemExit("authoritative DNS response is non-authoritative or has inconsistent counts")
+if (
+    opt_sections != 1
+    or question_sections != 1
+    or answer_sections != 1
+    or len(edns_rows) != 1
+    or edns_rows[0][0] != 0
+    or edns_rows[0][1] != ""
+    or not 512 <= edns_rows[0][2] <= 65535
+    or ecs_rows != ["0.0.0.0/0/0"]
+):
+    raise SystemExit("authoritative DNS OPT/EDNS/ECS metadata is not the exact unmapped IPv4 scope")
+if questions != [(zone, "IN", "SOA")] or len(answers) != 1:
+    raise SystemExit("authoritative DNS SOA question or answer cardinality drifted")
+owner, answer_class, answer_type, rdata = answers[0]
+fields = rdata.split()
+if len(fields) != 7:
+    raise SystemExit("authoritative SOA RDATA is malformed")
+try:
+    serial, refresh, retry, expire, minimum = (int(value) for value in fields[2:])
+except ValueError:
+    raise SystemExit("authoritative SOA numeric RDATA is malformed")
+if (
+    owner != zone
+    or owner != fqdn(soa.get("owner"))
+    or answer_class != "IN"
+    or answer_type != "SOA"
+    or fqdn(fields[0]) != fqdn(soa.get("mname"))
+    or fqdn(fields[1]) != fqdn(soa.get("rname"))
+    or not 0 <= serial <= 4294967295
+    or refresh != soa.get("refresh")
+    or retry != soa.get("retry")
+    or expire != soa.get("expire")
+    or minimum != soa.get("minimum")
+):
+    raise SystemExit("authoritative SOA owner or RDATA is not bound to the expected zone config")
+PY
+}
+
+node_local_dns_verify_authoritative_coexistence() (
   local node_name="$1"
   local current_rows=""
   local expected_rows=""
@@ -12292,8 +12843,10 @@ node_local_dns_verify_authoritative_coexistence() {
   local ready=""
   local transport=""
   local attempt=0
-  local transport_args=()
+  local dig_args=()
   local output=""
+  local output_file=""
+  local expected_config=""
 
   current_rows="$(node_local_dns_pod_dns_host_port_inventory "${node_name}" scoped)" || return 1
   expected_rows="$(awk -F $'\t' -v node="${node_name}" '$1 == node {sub(/^[^\t]*\t/, "", $0); print $0}' <<<"${NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT}" | sort)"
@@ -12303,23 +12856,28 @@ node_local_dns_verify_authoritative_coexistence() {
     return 1
   }
   [[ -n "${current_rows}" ]] || return 0
-  command_exists host || {
-    log "host is required to verify authoritative DNS coexistence on ${node_name}"
+  command_exists dig || {
+    log "dig is required to verify authoritative DNS coexistence on ${node_name}"
     return 1
   }
+  expected_config="$(node_local_dns_authoritative_soa_config)" || return 1
+  output_file="$(mktemp "${TMPDIR:-/tmp}/fugue-node-local-authoritative.XXXXXX")" || return 1
+  trap 'rm -f "${output_file}"' EXIT
   while IFS=$'\t' read -r host_ip protocol owner uid restarts ready; do
     [[ -n "${host_ip}" ]] || continue
     node_local_dns_verify_scoped_hostport_rules "${node_name}" "${host_ip}" || return 1
     for transport in udp tcp; do
-      transport_args=(-W 3)
-      [[ "${transport}" != "tcp" ]] || transport_args+=(-T)
+      dig_args=("@${host_ip}" "+time=3" "+tries=1" "+norecurse" "+subnet=0.0.0.0/0" "+noall" "+comments" "+question" "+answer")
+      [[ "${transport}" != "tcp" ]] || dig_args+=(+tcp)
       attempt=1
       while (( attempt <= 3 )); do
         require_release_forward_budget 3 \
           "authoritative DNS ${transport} SOA probe ${node_name}/${host_ip} attempt ${attempt}/3" || return 1
-        if output="$(host "${transport_args[@]}" -t SOA "${FUGUE_DNS_ZONE}" "${host_ip}" 2>&1)" && grep -Fq ' has SOA record ' <<<"${output}"; then
+        if dig "${dig_args[@]}" "${FUGUE_DNS_ZONE}" SOA >"${output_file}" 2>&1 &&
+          node_local_dns_validate_authoritative_soa_response "${output_file}" "${expected_config}"; then
           break
         fi
+        output="$(sed -n '1,12p' "${output_file}" 2>/dev/null || true)"
         if (( attempt == 3 )); then
           log "authoritative DNS ${transport} SOA probe failed on ${node_name} hostIP=${host_ip}: ${output}"
           return 1
@@ -12330,7 +12888,7 @@ node_local_dns_verify_authoritative_coexistence() {
       done
     done
   done < <(awk -F $'\t' '!seen[$1]++' <<<"${current_rows}")
-}
+)
 
 node_local_dns_verify_authoritative_cohort() {
   local target_nodes="$1"
@@ -12458,6 +13016,7 @@ node_local_dns_reconcile_after_helm() {
   local deadline=$((SECONDS + FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS))
 
   [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" ]] || return 0
+  NODE_LOCAL_DNS_TARGET_PODS_JSON=""
   NODE_LOCAL_DNS_REPLACED_NODES=""
   NODE_LOCAL_DNS_FAILED_NODE=""
   if ! node_local_dns_verify_artifact "${desired_mode}" "${service_ip}" true; then
@@ -12508,6 +13067,50 @@ node_local_dns_reconcile_after_helm() {
   fi
 
   node_local_dns_verify_running "${desired_mode}" "${service_ip}" || return 1
+  node_local_dns_verify_preserved_state_unchanged || return 1
+  NODE_LOCAL_DNS_TARGET_PODS_JSON="$(node_local_dns_capture_pods_json)" || return 1
+  node_local_dns_validate_pure_pod_snapshot \
+    "${NODE_LOCAL_DNS_TARGET_PODS_JSON}" "${NODE_LOCAL_DNS_TARGET_NODES}" "${desired_mode}" || return 1
+  node_local_dns_validate_active_pod_runtime \
+    "${NODE_LOCAL_DNS_TARGET_PODS_JSON}" "${NODE_LOCAL_DNS_TARGET_NODES}" "${desired_mode}" "${service_ip}" true
+}
+
+node_local_dns_verify_target_before_commit() {
+  local current_pods=""
+  local target_nodes=""
+
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
+    [[ -n "$(trim_field "${NODE_LOCAL_DNS_TARGET_PODS_JSON:-}")" ]] || return 1
+    node_local_dns_verify_running "${FUGUE_NODE_LOCAL_DNS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" || return 1
+    node_local_dns_verify_preserved_state_unchanged || return 1
+    current_pods="$(node_local_dns_capture_pods_json)" || return 1
+    [[ "${current_pods}" == "${NODE_LOCAL_DNS_TARGET_PODS_JSON}" ]] || {
+      log "NodeLocal DNSCache exact target Pod UID/runtime cohort drifted before commit"
+      return 1
+    }
+    node_local_dns_verify_authoritative_cohort "${NODE_LOCAL_DNS_TARGET_NODES}" || return 1
+    current_pods="$(node_local_dns_capture_pods_json)" || return 1
+    [[ "${current_pods}" == "${NODE_LOCAL_DNS_TARGET_PODS_JSON}" ]] || {
+      log "NodeLocal DNSCache exact target Pod cohort drifted during final authoritative verification"
+      return 1
+    }
+    return 0
+  fi
+
+  [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]] || return 0
+  target_nodes="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES:-}"
+  node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" || return 1
+  node_local_dns_verify_preserved_state_unchanged || return 1
+  node_local_dns_verify_authoritative_cohort "${target_nodes}"
+}
+
+node_local_dns_verify_target_snapshot_unchanged() {
+  local current_pods=""
+
+  [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]] || return 0
+  [[ -n "$(trim_field "${NODE_LOCAL_DNS_TARGET_PODS_JSON:-}")" ]] || return 1
+  current_pods="$(node_local_dns_capture_pods_json)" || return 1
+  [[ "${current_pods}" == "${NODE_LOCAL_DNS_TARGET_PODS_JSON}" ]] || return 1
   node_local_dns_verify_preserved_state_unchanged
 }
 
@@ -13347,6 +13950,8 @@ dns_manifest_transaction_smoke_urls() {
 run_dns_manifest_library_action() {
   local action="$1"
   local snapshot_file="$2"
+  local target_state_file="${3:-}"
+  local identity_file="${4:-}"
   local smoke_urls
 
   smoke_urls="$(dns_manifest_transaction_smoke_urls)"
@@ -13354,6 +13959,16 @@ run_dns_manifest_library_action() {
     FUGUE_NAMESPACE="${FUGUE_NAMESPACE}" \
     FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME}" \
     FUGUE_RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME}" \
+    FUGUE_RELEASE_INSTANCE="${FUGUE_RELEASE_NAME}" \
+    FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${DNS_MANIFEST_RELEASE_ID}" \
+    FUGUE_EDGE_RESOURCES_JSON="${FUGUE_EDGE_RESOURCES_JSON:-}" \
+    FUGUE_EDGE_CADDY_RESOURCES_JSON="${FUGUE_EDGE_CADDY_RESOURCES_JSON:-}" \
+    FUGUE_DNS_RESOURCES_JSON="${FUGUE_DNS_RESOURCES_JSON:-}" \
+    FUGUE_DNS_CONTAINER_NAME="${FUGUE_DNS_CONTAINER_NAME}" \
+    FUGUE_DNS_UDP_CONTAINER_PORT="${FUGUE_DNS_UDP_CONTAINER_PORT}" \
+    FUGUE_DNS_TCP_CONTAINER_PORT="${FUGUE_DNS_TCP_CONTAINER_PORT}" \
+    FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR}" \
+    FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR}" \
     FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false \
     FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS="${smoke_urls}" \
     KUBECTL="${KUBECTL:-}" \
@@ -13362,22 +13977,49 @@ set -euo pipefail
 script_path="$1"
 action="$2"
 snapshot_file="$3"
+target_state_file="$4"
+identity_file="$5"
 source "${script_path}"
-detect_kubectl
-command_exists host || fail "host is required for authoritative DNS transaction validation"
 case "${action}" in
   capture)
+    detect_kubectl
+    command_exists dig || fail "dig is required for authoritative DNS transaction validation"
     validate_representative_smoke_configuration
     capture_dns_manifest_snapshot "${snapshot_file}"
     ;;
   restore)
+    detect_kubectl
+    command_exists dig || fail "dig is required for authoritative DNS transaction validation"
     restore_dns_manifest_snapshot "${snapshot_file}"
+    ;;
+  verify-target)
+    detect_kubectl
+    command_exists dig || fail "dig is required for authoritative DNS transaction validation"
+    validate_representative_smoke_configuration
+    verify_dns_manifest_target_state_file "${snapshot_file}" "${target_state_file}"
+    ;;
+  verify-target-snapshot)
+    detect_kubectl
+    validate_representative_smoke_configuration
+    verify_dns_manifest_target_state_snapshot_with_smoke \
+      "${snapshot_file}" "${target_state_file}" "${identity_file}"
+    ;;
+  handoff-identity)
+    dns_manifest_handoff_identity "${snapshot_file}" "${target_state_file}"
+    ;;
+  write-record)
+    detect_kubectl
+    FUGUE_PUBLIC_DATA_PLANE_RECORD_MODE=dns-manifest-ondelete
+    daemonset_names="$(dns_manifest_snapshot_query "${snapshot_file}" names)" || exit $?
+    [[ -n "$(trim_field "${daemonset_names}")" ]] || fail "DNS manifest release record has no daemonsets"
+    daemonsets_csv="$(paste -sd, <<<"${daemonset_names}")" || exit $?
+    write_release_record "${daemonsets_csv}"
     ;;
   *)
     fail "unsupported DNS manifest library action: ${action}"
     ;;
 esac
-' bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" "${action}" "${snapshot_file}"
+' bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" "${action}" "${snapshot_file}" "${target_state_file}" "${identity_file}"
 }
 
 prepare_dns_manifest_transaction() {
@@ -13387,19 +14029,76 @@ prepare_dns_manifest_transaction() {
   DNS_MANIFEST_TRANSACTION_REQUIRED="false"
   DNS_MANIFEST_TRANSACTION_COMPLETED="false"
   DNS_MANIFEST_ROLLBACK_RESTORED="false"
+  DNS_MANIFEST_TRANSACTION_FINALIZED="false"
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED="false"
+  DNS_MANIFEST_FINAL_HANDOFF_IDENTITY=""
+  DNS_MANIFEST_HANDOFF_IDENTITY_FILE=""
   DNS_MANIFEST_SNAPSHOT_KEEP="false"
+  DNS_MANIFEST_RELEASE_ID="dns-manifest-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_SHA:-local}"
   if [[ "${public_mode}" != "allow" || "${FUGUE_DNS_ENABLED}" != "true" ]]; then
     return 0
   fi
 
   snapshot_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
   mkdir -p "${snapshot_dir}" || return $?
-  DNS_MANIFEST_SNAPSHOT_FILE="$(mktemp "${snapshot_dir%/}/fugue-dns-manifest-snapshot.XXXXXX.json")" || return $?
-  chmod 600 "${DNS_MANIFEST_SNAPSHOT_FILE}" || return $?
+  DNS_MANIFEST_TRANSACTION_DIR="$(mktemp -d "${snapshot_dir%/}/fugue-dns-manifest.XXXXXX")" || return $?
+  chmod 700 "${DNS_MANIFEST_TRANSACTION_DIR}" || {
+    rm -rf "${DNS_MANIFEST_TRANSACTION_DIR}"
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
+  DNS_MANIFEST_SNAPSHOT_FILE="$(mktemp "${DNS_MANIFEST_TRANSACTION_DIR}/snapshot.XXXXXX.json")" || {
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
+  chmod 600 "${DNS_MANIFEST_SNAPSHOT_FILE}" || {
+    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_SNAPSHOT_FILE=""
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
+  DNS_MANIFEST_TARGET_STATE_FILE="$(mktemp "${DNS_MANIFEST_TRANSACTION_DIR}/target.XXXXXX.json")" || {
+    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_SNAPSHOT_FILE=""
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
+  chmod 600 "${DNS_MANIFEST_TARGET_STATE_FILE}" || {
+    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}"
+    DNS_MANIFEST_SNAPSHOT_FILE=""
+    DNS_MANIFEST_TARGET_STATE_FILE=""
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
+  DNS_MANIFEST_HANDOFF_IDENTITY_FILE="$(mktemp "${DNS_MANIFEST_TRANSACTION_DIR}/identity.XXXXXX.txt")" || {
+    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}"
+    DNS_MANIFEST_SNAPSHOT_FILE=""
+    DNS_MANIFEST_TARGET_STATE_FILE=""
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
+  chmod 600 "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" || {
+    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}" "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}"
+    DNS_MANIFEST_SNAPSHOT_FILE=""
+    DNS_MANIFEST_TARGET_STATE_FILE=""
+    DNS_MANIFEST_HANDOFF_IDENTITY_FILE=""
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_TRANSACTION_DIR=""
+    return 1
+  }
   if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
     "DNS manifest snapshot capture" run_dns_manifest_library_action capture "${DNS_MANIFEST_SNAPSHOT_FILE}"; then
-    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"
+    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}" "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}"
     DNS_MANIFEST_SNAPSHOT_FILE=""
+    DNS_MANIFEST_TARGET_STATE_FILE=""
+    DNS_MANIFEST_HANDOFF_IDENTITY_FILE=""
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+    DNS_MANIFEST_TRANSACTION_DIR=""
     return 1
   fi
   DNS_MANIFEST_TRANSACTION_REQUIRED="true"
@@ -13419,17 +14118,30 @@ run_dns_manifest_transaction_after_helm() {
   smoke_urls="$(dns_manifest_transaction_smoke_urls)"
   if ! FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=dns-manifest-ondelete \
     FUGUE_PUBLIC_DATA_PLANE_DNS_SNAPSHOT_FILE="${DNS_MANIFEST_SNAPSHOT_FILE}" \
+    FUGUE_PUBLIC_DATA_PLANE_DNS_TARGET_STATE_FILE="${DNS_MANIFEST_TARGET_STATE_FILE}" \
+    FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${DNS_MANIFEST_RELEASE_ID}" \
     FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false \
     FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS="${smoke_urls}" \
     FUGUE_NAMESPACE="${FUGUE_NAMESPACE}" \
     FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME}" \
     FUGUE_RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME}" \
+    FUGUE_RELEASE_INSTANCE="${FUGUE_RELEASE_NAME}" \
+    FUGUE_DNS_CONTAINER_NAME="${FUGUE_DNS_CONTAINER_NAME}" \
+    FUGUE_DNS_UDP_CONTAINER_PORT="${FUGUE_DNS_UDP_CONTAINER_PORT}" \
+    FUGUE_DNS_TCP_CONTAINER_PORT="${FUGUE_DNS_TCP_CONTAINER_PORT}" \
+    FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR}" \
+    FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR}" \
     KUBECTL="${KUBECTL:-}" \
     run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
       "DNS manifest transaction" bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi
+  [[ -n "${DNS_MANIFEST_TARGET_STATE_FILE:-}" && -s "${DNS_MANIFEST_TARGET_STATE_FILE}" ]] || {
+    log_stderr "DNS manifest transaction completed without an exact target-state handoff"
+    DNS_MANIFEST_SNAPSHOT_KEEP="true"
+    return 1
+  }
   DNS_MANIFEST_TRANSACTION_COMPLETED="true"
   PUBLIC_DATA_PLANE_RELEASED="true"
   if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
@@ -13443,6 +14155,100 @@ run_dns_manifest_transaction_after_helm() {
     return 1
   fi
   log "DNS public manifest transaction completed and remains rollback-pinned until all release gates pass"
+}
+
+verify_dns_manifest_transaction_before_commit() {
+  local authoritative_target_nodes=""
+
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED="false"
+  [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" ]] || {
+    DNS_MANIFEST_FINAL_TARGET_VERIFIED="true"
+    return 0
+  }
+  [[ "${DNS_MANIFEST_TRANSACTION_COMPLETED:-false}" == "true" ]] || return 1
+  [[ -n "${DNS_MANIFEST_SNAPSHOT_FILE:-}" && -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ]] || return 1
+  [[ -n "${DNS_MANIFEST_TARGET_STATE_FILE:-}" && -s "${DNS_MANIFEST_TARGET_STATE_FILE}" ]] || return 1
+  if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+    "final DNS manifest target verification" run_dns_manifest_library_action verify-target \
+    "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}"; then
+    DNS_MANIFEST_SNAPSHOT_KEEP="true"
+    return 1
+  fi
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
+    authoritative_target_nodes="${NODE_LOCAL_DNS_TARGET_NODES:-}"
+  elif [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
+    authoritative_target_nodes="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES:-}"
+  fi
+  if ! run_node_local_dns_whole_phase \
+    "final authoritative hostPort cohort verification" \
+    node_local_dns_verify_authoritative_cohort "${authoritative_target_nodes}"; then
+    DNS_MANIFEST_SNAPSHOT_KEEP="true"
+    return 1
+  fi
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED="true"
+}
+
+verify_dns_manifest_transaction_snapshot_before_commit() {
+  local verified_identity=""
+
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED="false"
+  DNS_MANIFEST_FINAL_HANDOFF_IDENTITY=""
+  [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" ]] || {
+    DNS_MANIFEST_FINAL_TARGET_VERIFIED="true"
+    return 0
+  }
+  [[ "${DNS_MANIFEST_TRANSACTION_COMPLETED:-false}" == "true" ]] || return 1
+  [[ -n "${DNS_MANIFEST_SNAPSHOT_FILE:-}" && -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ]] || return 1
+  [[ -n "${DNS_MANIFEST_TARGET_STATE_FILE:-}" && -s "${DNS_MANIFEST_TARGET_STATE_FILE}" ]] || return 1
+  [[ -n "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE:-}" && -f "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" ]] || return 1
+  : >"${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" || return 1
+  chmod 600 "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" || return 1
+  if ! run_release_long_command "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}" \
+    "final DNS manifest exact snapshot handoff" run_dns_manifest_library_action verify-target-snapshot \
+    "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}" \
+    "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}"; then
+    DNS_MANIFEST_SNAPSHOT_KEEP="true"
+    return 1
+  fi
+  verified_identity="$(python3 - "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" <<'PY'
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+path_metadata = os.lstat(path)
+if not stat.S_ISREG(path_metadata.st_mode) or stat.S_ISLNK(path_metadata.st_mode):
+    raise SystemExit(1)
+with open(path, encoding="ascii") as handle:
+    metadata = os.fstat(handle.fileno())
+    if (metadata.st_dev, metadata.st_ino) != (path_metadata.st_dev, path_metadata.st_ino):
+        raise SystemExit(1)
+    if stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_uid != os.geteuid() or metadata.st_size > 1024:
+        raise SystemExit(1)
+    value = handle.read().strip()
+part = r"[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9a-f]{64}"
+if not re.fullmatch(part + r"\|" + part, value):
+    raise SystemExit(1)
+print(value)
+PY
+)" || {
+    DNS_MANIFEST_SNAPSHOT_KEEP="true"
+    return 1
+  }
+  [[ -n "${verified_identity}" ]] || return 1
+  DNS_MANIFEST_FINAL_HANDOFF_IDENTITY="${verified_identity}"
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED="true"
+}
+
+write_dns_manifest_release_record_after_commit() {
+  [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" ]] || return 0
+  [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]] || return 1
+  [[ "${DNS_MANIFEST_TRANSACTION_FINALIZED:-false}" == "true" ]] || return 1
+  [[ -n "${DNS_MANIFEST_SNAPSHOT_FILE:-}" && -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ]] || return 1
+  run_release_long_command 120 "committed DNS manifest release record" \
+    run_dns_manifest_library_action write-record \
+    "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE:-}"
 }
 
 restore_dns_manifest_transaction_after_helm_rollback() {
@@ -13469,23 +14275,78 @@ restore_dns_manifest_transaction_after_helm_rollback() {
   fi
   DNS_MANIFEST_TRANSACTION_COMPLETED="false"
   DNS_MANIFEST_ROLLBACK_RESTORED="true"
+  DNS_MANIFEST_TRANSACTION_FINALIZED="false"
+  DNS_MANIFEST_FINAL_TARGET_VERIFIED="false"
+  DNS_MANIFEST_FINAL_HANDOFF_IDENTITY=""
   DNS_MANIFEST_SNAPSHOT_KEEP="false"
   log "DNS public manifest transaction restored to the verified pre-Helm template and Pod revisions"
 }
 
 finalize_dns_manifest_transaction() {
+  local current_handoff_identity=""
+
+  DNS_MANIFEST_TRANSACTION_FINALIZED="false"
+  if [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" ]]; then
+    [[ "${DNS_MANIFEST_TRANSACTION_COMPLETED:-false}" == "true" ]] || {
+      log_stderr "refusing to finalize an incomplete DNS manifest transaction"
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      return 1
+    }
+    [[ -n "${DNS_MANIFEST_SNAPSHOT_FILE:-}" && -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ]] || {
+      log_stderr "refusing to finalize the DNS manifest transaction without its rollback snapshot"
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      return 1
+    }
+    [[ "${DNS_MANIFEST_FINAL_TARGET_VERIFIED:-false}" == "true" &&
+      -n "${DNS_MANIFEST_TARGET_STATE_FILE:-}" && -s "${DNS_MANIFEST_TARGET_STATE_FILE}" &&
+      -n "${DNS_MANIFEST_FINAL_HANDOFF_IDENTITY:-}" ]] || {
+      log_stderr "refusing to finalize DNS manifest state that was not reverified at the commit boundary"
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      return 1
+    }
+    current_handoff_identity="$(run_dns_manifest_library_action handoff-identity \
+      "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}")" || {
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      return 1
+    }
+    [[ "${current_handoff_identity}" == "${DNS_MANIFEST_FINAL_HANDOFF_IDENTITY}" ]] || {
+      log_stderr "refusing to finalize DNS manifest handoff files that changed after commit-boundary verification"
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      return 1
+    }
+  fi
+  DNS_MANIFEST_TRANSACTION_FINALIZED="true"
+}
+
+cleanup_finalized_dns_manifest_snapshot() {
+  [[ "${DNS_MANIFEST_TRANSACTION_FINALIZED:-false}" == "true" ]] || return 0
   [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" ]] || return 0
-  [[ "${DNS_MANIFEST_TRANSACTION_COMPLETED:-false}" == "true" ]] || {
-    log_stderr "refusing to finalize an incomplete DNS manifest transaction"
-    DNS_MANIFEST_SNAPSHOT_KEEP="true"
-    return 1
-  }
-  DNS_MANIFEST_SNAPSHOT_KEEP="false"
   if [[ -n "${DNS_MANIFEST_SNAPSHOT_FILE:-}" && -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ]]; then
-    rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"
+    if ! rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"; then
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      log_stderr "warning: could not remove finalized DNS manifest snapshot; preserving it for later cleanup" || true
+      return 0
+    fi
   fi
   DNS_MANIFEST_SNAPSHOT_FILE=""
-  log "DNS public manifest transaction finalized after all release gates passed"
+  DNS_MANIFEST_SNAPSHOT_KEEP="false"
+  if [[ -n "${DNS_MANIFEST_TARGET_STATE_FILE:-}" && -f "${DNS_MANIFEST_TARGET_STATE_FILE}" ]]; then
+    if ! rm -f "${DNS_MANIFEST_TARGET_STATE_FILE}"; then
+      log_stderr "warning: could not remove finalized DNS manifest target-state handoff" || true
+      return 0
+    fi
+  fi
+  DNS_MANIFEST_TARGET_STATE_FILE=""
+  if [[ -n "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE:-}" && -f "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" ]]; then
+    rm -f "${DNS_MANIFEST_HANDOFF_IDENTITY_FILE}" || true
+  fi
+  DNS_MANIFEST_HANDOFF_IDENTITY_FILE=""
+  DNS_MANIFEST_FINAL_HANDOFF_IDENTITY=""
+  if [[ -n "${DNS_MANIFEST_TRANSACTION_DIR:-}" && -d "${DNS_MANIFEST_TRANSACTION_DIR}" ]]; then
+    rmdir "${DNS_MANIFEST_TRANSACTION_DIR}" 2>/dev/null || true
+  fi
+  DNS_MANIFEST_TRANSACTION_DIR=""
+  log "DNS public manifest transaction finalized after all release gates passed" || true
 }
 
 rollback_release() {
@@ -13766,6 +14627,7 @@ public_data_plane_front_daemonsets_ready() {
   local daemonsets_json="${1:-}"
   local readiness=""
 
+  : "${FUGUE_RELEASE_NAME:?FUGUE_RELEASE_NAME is required to select public front daemonsets}"
   if [[ -z "${daemonsets_json}" ]]; then
     daemonsets_json="$(live_daemonsets_json_snapshot)" || return 2
   fi
@@ -13773,11 +14635,19 @@ public_data_plane_front_daemonsets_ready() {
 import json
 import sys
 
+release_instance = sys.argv[1]
 doc = json.load(sys.stdin)
 fronts = []
 for item in doc.get("items") or []:
     metadata = item.get("metadata") or {}
-    component = str((metadata.get("labels") or {}).get("app.kubernetes.io/component") or "")
+    labels = metadata.get("labels") or {}
+    if (
+        labels.get("app.kubernetes.io/instance") != release_instance
+        or labels.get("fugue.io/rollout-subsystem") != "public-data-plane"
+        or labels.get("fugue.io/rollout-mode") != "node-local-blue-green-front"
+    ):
+        continue
+    component = str(labels.get("app.kubernetes.io/component") or "")
     if component != "edge-front" and not (component.startswith("edge-") and component.endswith("-front")):
         continue
     status = item.get("status") or {}
@@ -13798,7 +14668,7 @@ elif all(fronts):
     print("ready")
 else:
     print("not-ready")
-')" || return 2
+' "${FUGUE_RELEASE_NAME}")" || return 2
   [[ "${readiness}" == "ready" ]]
 }
 
@@ -13826,13 +14696,24 @@ for item in doc.get("items") or []:
         container_name = "edge-front"
     elif kind == "dns":
         matches = name == fullname + "-dns" or name.startswith(fullname + "-dns-country-")
-        container_name = "dns"
+        container_name = ""
     else:
         raise SystemExit(2)
     if not matches:
         continue
     containers = (item.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
-    images = [str(container.get("image") or "").strip() for container in containers if container.get("name") == container_name]
+    if kind == "dns":
+        semantic = []
+        for container in containers:
+            command = container.get("command") or []
+            env_names = {entry.get("name") for entry in container.get("env") or []}
+            if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
+                semantic.append(container)
+        if len(semantic) != 1:
+            raise SystemExit(2)
+        images = [str(semantic[0].get("image") or "").strip()]
+    else:
+        images = [str(container.get("image") or "").strip() for container in containers if container.get("name") == container_name]
     if len(images) != 1 or not images[0] or any(ch.isspace() for ch in images[0]):
         raise SystemExit(2)
     print(images[0])
@@ -15210,6 +16091,9 @@ main() {
   FUGUE_DNS_NAMESERVERS="${FUGUE_DNS_NAMESERVERS:-}"
   FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED="${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED:-false}"
   FUGUE_DNS_PUBLIC_HOST_IP="${FUGUE_DNS_PUBLIC_HOST_IP:-}"
+  FUGUE_DNS_CONTAINER_NAME="${FUGUE_DNS_CONTAINER_NAME:-dns}"
+  FUGUE_DNS_UDP_CONTAINER_PORT="${FUGUE_DNS_UDP_CONTAINER_PORT:-53}"
+  FUGUE_DNS_TCP_CONTAINER_PORT="${FUGUE_DNS_TCP_CONTAINER_PORT:-53}"
   if [[ "${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED}" == "true" ]]; then
     FUGUE_DNS_UDP_ADDR="${FUGUE_DNS_UDP_ADDR:-:53}"
     FUGUE_DNS_TCP_ADDR="${FUGUE_DNS_TCP_ADDR:-:53}"
@@ -15452,6 +16336,7 @@ main() {
 
   if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
     [[ -n "$(trim_field "${FUGUE_DNS_ZONE}")" ]] || fail "FUGUE_DNS_ZONE or FUGUE_APP_BASE_DOMAIN is required when FUGUE_DNS_ENABLED=true"
+    validate_dns_container_transport_config || fail "invalid DNS container transport configuration"
     require_env FUGUE_DNS_ANSWER_IPS
     if [[ "$(dns_answer_ip_count "${FUGUE_DNS_ANSWER_IPS}")" == "0" ]]; then
       fail "FUGUE_DNS_ANSWER_IPS must contain at least one non-empty IP when FUGUE_DNS_ENABLED=true"
@@ -15659,7 +16544,7 @@ PY
   log "cluster join mesh auth key: $([[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] && printf configured || printf '<none>')"
   log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
   log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
-  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} extra_zones=${FUGUE_DNS_EXTRA_ZONES:-<none>} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) edge_quality_ranking=${FUGUE_EDGE_QUALITY_RANKING_MODE} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} udp=${FUGUE_DNS_UDP_ADDR} tcp=${FUGUE_DNS_TCP_ADDR}"
+  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} extra_zones=${FUGUE_DNS_EXTRA_ZONES:-<none>} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) edge_quality_ranking=${FUGUE_EDGE_QUALITY_RANKING_MODE} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} container=${FUGUE_DNS_CONTAINER_NAME} udp=${FUGUE_DNS_UDP_ADDR}->${FUGUE_DNS_UDP_CONTAINER_PORT} tcp=${FUGUE_DNS_TCP_ADDR}->${FUGUE_DNS_TCP_CONTAINER_PORT}"
   log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
   log "mesh recovery: enabled=${FUGUE_MESH_RECOVERY_ENABLED} generation=${FUGUE_MESH_RECOVERY_GENERATION} mode=${FUGUE_MESH_RECOVERY_MODE} login_server=${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
@@ -15746,6 +16631,7 @@ PY
   CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
   CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
   CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
+  CONTROL_PLANE_RELEASE_COMMITTED="false"
   if ! run_release_long_command "$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))" \
     "Helm upgrade" helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
     -n "${FUGUE_NAMESPACE}" \
@@ -16146,20 +17032,55 @@ PY
     fi
   fi
 
-  if ! finalize_dns_manifest_transaction; then
-    log "DNS manifest transaction finalization failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "DNS manifest transaction finalization failed"
-  fi
-
   local current_revision
   if ! current_revision="$(helm_current_revision)"; then
     log "final Helm revision read failed; attempting rollback"
     rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "final Helm revision read failed"
   fi
-  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+
+  if ! verify_dns_manifest_transaction_before_commit; then
+    log "final DNS manifest target verification failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final DNS manifest target verification failed"
+  fi
+  if ! run_node_local_dns_whole_phase \
+    "final NodeLocal DNSCache target verification" node_local_dns_verify_target_before_commit; then
+    log "final NodeLocal DNSCache target verification failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final NodeLocal DNSCache target verification failed"
+  fi
+  if ! verify_dns_manifest_transaction_snapshot_before_commit; then
+    log "DNS manifest target changed during final NodeLocal DNSCache verification; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final DNS manifest exact snapshot handoff failed"
+  fi
+  if ! run_node_local_dns_whole_phase \
+    "final NodeLocal DNSCache exact cohort handoff" node_local_dns_verify_target_snapshot_unchanged; then
+    log "NodeLocal DNSCache target changed during the final DNS verification; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final NodeLocal DNSCache exact cohort handoff failed"
+  fi
+
+  if ! finalize_dns_manifest_transaction; then
+    if [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" &&
+      ( -z "${DNS_MANIFEST_SNAPSHOT_FILE:-}" || ! -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ) ]]; then
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="true"
+      CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"
+      fail "DNS manifest rollback snapshot disappeared before commit; no unsafe partial rollback was attempted and the recovery fence is retained"
+    fi
+    log "DNS manifest transaction finalization failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "DNS manifest transaction finalization failed"
+  fi
+  CONTROL_PLANE_RELEASE_COMMITTED="true"
   CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+  if ! write_dns_manifest_release_record_after_commit; then
+    log_stderr "warning: committed DNS manifest release record could not be written; business state remains committed and no rollback was attempted" || true
+  fi
+  cleanup_finalized_dns_manifest_snapshot
   log "upgrade complete; current Helm revision=${current_revision}"
 }
 

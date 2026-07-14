@@ -3,12 +3,16 @@ package fuguechart_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
 func TestNodeJanitorDefaultsToSystemNodeCritical(t *testing.T) {
@@ -3929,6 +3933,294 @@ func TestDNSPublicHostPortsRequireExplicitEnable(t *testing.T) {
 	}
 }
 
+func TestDNSPublicHostPortsRenderUniqueMigrationContainer(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set", "dns.enabled=true",
+		"--set", "dns.answerIPs[0]=203.0.113.10",
+		"--set", "dns.publicHostPorts.enabled=true",
+		"--set-string", "dns.publicHostPorts.hostIP=203.0.113.10",
+		"--set-string", "dns.containerName=dns-server",
+		"--set", "dns.publicHostPorts.udpContainerPort=53",
+		"--set", "dns.publicHostPorts.tcpContainerPort=5353",
+		"--set-string", "dns.udpAddr=:53",
+		"--set-string", "dns.tcpAddr=:5353",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	doc := manifestDocumentForKindAndName(string(output), "DaemonSet", "fugue-fugue-dns")
+	if doc == "" {
+		t.Fatalf("rendered manifest missing dns daemonset:\n%s", output)
+	}
+	for _, want := range []string{
+		`name: "dns-server"`,
+		`name: dns-udp`,
+		`containerPort: 53`,
+		`name: dns-tcp`,
+		`containerPort: 5353`,
+		`name: FUGUE_DNS_UDP_ADDR`,
+		`value: ":53"`,
+		`name: FUGUE_DNS_TCP_ADDR`,
+		`value: ":5353"`,
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("migration-safe dns daemonset missing %q:\n%s", want, doc)
+		}
+	}
+	if got := strings.Count(doc, `hostIP: "203.0.113.10"`); got != 2 {
+		t.Fatalf("migration-safe dns daemonset must scope both UDP and TCP hostPorts; got %d:\n%s", got, doc)
+	}
+}
+
+func TestDNSWiringMigrationPreservesConfigurationChecksums(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+dns:
+  enabled: true
+  answerIPs: [203.0.113.10]
+  publicHostPorts:
+    enabled: true
+    hostIP: 203.0.113.10
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      answerIPs: [198.51.100.20]
+      nodeSelector:
+        fugue.io/role.dns: "true"
+      publicHostPorts:
+        enabled: true
+        hostIP: 198.51.100.20
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	render := func(extra ...string) string {
+		args := []string{"template", "fugue", chartDir, "-f", valuesPath}
+		args = append(args, extra...)
+		cmd := exec.Command("helm", args...)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template failed: %v\n%s", err, output)
+		}
+		return string(output)
+	}
+	checksums := func(doc string) map[string]string {
+		result := map[string]string{}
+		for _, line := range strings.Split(doc, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "checksum/") {
+				continue
+			}
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+				t.Fatalf("invalid checksum annotation %q in:\n%s", line, doc)
+			}
+			result[parts[0]] = strings.TrimSpace(parts[1])
+		}
+		return result
+	}
+	assertChecksumMapsEqual := func(label string, left, right map[string]string) {
+		leftJSON, _ := json.Marshal(left)
+		rightJSON, _ := json.Marshal(right)
+		if string(leftJSON) != string(rightJSON) {
+			t.Fatalf("%s checksums changed across deployment-only DNS wiring: baseline=%s migrated=%s", label, leftJSON, rightJSON)
+		}
+	}
+
+	baseline := render()
+	migrated := render(
+		"--set-string", "dns.containerName=dns-server",
+		"--set", "dns.publicHostPorts.udpContainerPort=53",
+		"--set", "dns.publicHostPorts.tcpContainerPort=5353",
+	)
+	primaryBaseline := manifestDocumentForKindAndName(baseline, "DaemonSet", "fugue-fugue-dns")
+	primaryMigrated := manifestDocumentForKindAndName(migrated, "DaemonSet", "fugue-fugue-dns")
+	groupBaseline := manifestDocumentForKindAndName(baseline, "DaemonSet", "fugue-fugue-dns-country-de")
+	groupMigrated := manifestDocumentForKindAndName(migrated, "DaemonSet", "fugue-fugue-dns-country-de")
+	for label, doc := range map[string]string{
+		"primary baseline": primaryBaseline,
+		"primary migrated": primaryMigrated,
+		"group baseline":   groupBaseline,
+		"group migrated":   groupMigrated,
+	} {
+		if doc == "" {
+			t.Fatalf("rendered manifest missing %s DNS daemonset", label)
+		}
+	}
+	assertChecksumMapsEqual("primary", checksums(primaryBaseline), checksums(primaryMigrated))
+	assertChecksumMapsEqual("group", checksums(groupBaseline), checksums(groupMigrated))
+	if primaryBaseline == primaryMigrated || groupBaseline == groupMigrated {
+		t.Fatal("DNS wiring migration must change both primary and group Pod specs while preserving config checksums")
+	}
+
+	ttlChanged := render("--set", "dns.ttl=61")
+	primaryTTL := checksums(manifestDocumentForKindAndName(ttlChanged, "DaemonSet", "fugue-fugue-dns"))
+	groupTTL := checksums(manifestDocumentForKindAndName(ttlChanged, "DaemonSet", "fugue-fugue-dns-country-de"))
+	if primaryTTL["checksum/dns-config"] == checksums(primaryBaseline)["checksum/dns-config"] {
+		t.Fatal("primary DNS configuration checksum must still change for a real TTL change")
+	}
+	if groupTTL["checksum/dns-global-config"] == checksums(groupBaseline)["checksum/dns-global-config"] {
+		t.Fatal("group DNS global configuration checksum must still change for a real TTL change")
+	}
+}
+
+func TestDNSContainerNameIsAlwaysRenderedAsAString(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	cmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set", "dns.enabled=true",
+		"--set", "dns.answerIPs[0]=203.0.113.10",
+		"--set-string", "dns.containerName=true",
+	)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+	doc := manifestDocumentForKindAndName(string(output), "DaemonSet", "fugue-fugue-dns")
+	if !strings.Contains(doc, `name: "true"`) {
+		t.Fatalf("DNS container name must remain a YAML string:\n%s", doc)
+	}
+}
+
+func TestDNSContainerRenameSurvivesHelmStrategicThreeWayMerge(t *testing.T) {
+	daemonSet := func(containerName string, tcpContainerPort int, tcpHostIP bool) map[string]any {
+		tcpPort := map[string]any{
+			"name":          "dns-tcp",
+			"containerPort": tcpContainerPort,
+			"hostPort":      53,
+			"protocol":      "TCP",
+		}
+		if tcpHostIP {
+			tcpPort["hostIP"] = "203.0.113.10"
+		}
+		return map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata":   map[string]any{"name": "dns"},
+			"spec": map[string]any{
+				"selector": map[string]any{"matchLabels": map[string]any{"app": "dns"}},
+				"template": map[string]any{
+					"metadata": map[string]any{"labels": map[string]any{"app": "dns"}},
+					"spec": map[string]any{
+						"containers": []any{
+							map[string]any{
+								"name":    containerName,
+								"image":   "registry.example/dns:test",
+								"command": []any{"/usr/local/bin/fugue-dns"},
+								"ports": []any{
+									map[string]any{"name": "http", "containerPort": 7834, "protocol": "TCP"},
+									map[string]any{"name": "dns-udp", "containerPort": 53, "hostIP": "203.0.113.10", "hostPort": 53, "protocol": "UDP"},
+									tcpPort,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	original, err := json.Marshal(daemonSet("dns", 53, true))
+	if err != nil {
+		t.Fatalf("marshal original: %v", err)
+	}
+	current, err := json.Marshal(daemonSet("dns", 53, false))
+	if err != nil {
+		t.Fatalf("marshal current: %v", err)
+	}
+	target, err := json.Marshal(daemonSet("dns-server", 5353, true))
+	if err != nil {
+		t.Fatalf("marshal target: %v", err)
+	}
+	patchMeta, err := strategicpatch.NewPatchMetaFromStruct(appsv1.DaemonSet{})
+	if err != nil {
+		t.Fatalf("build daemonset strategic patch metadata: %v", err)
+	}
+	patch, err := strategicpatch.CreateThreeWayMergePatch(original, target, current, patchMeta, true)
+	if err != nil {
+		t.Fatalf("create Helm-equivalent strategic patch: %v", err)
+	}
+	merged, err := strategicpatch.StrategicMergePatch(current, patch, appsv1.DaemonSet{})
+	if err != nil {
+		t.Fatalf("apply Helm-equivalent strategic patch: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(merged, &result); err != nil {
+		t.Fatalf("decode merged daemonset: %v", err)
+	}
+	containers := result["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)
+	if len(containers) != 1 {
+		t.Fatalf("expected exactly one DNS container after strategic merge, got %d: %s", len(containers), merged)
+	}
+	container := containers[0].(map[string]any)
+	if container["name"] != "dns-server" {
+		t.Fatalf("expected renamed DNS container after strategic merge, got %v", container["name"])
+	}
+	ports := container["ports"].([]any)
+	if len(ports) != 3 {
+		t.Fatalf("expected HTTP, UDP, and TCP ports after strategic merge, got %d: %s", len(ports), merged)
+	}
+	wantPorts := map[string]struct {
+		containerPort float64
+		protocol      string
+		hostIP        string
+	}{
+		"http":    {containerPort: 7834, protocol: "TCP"},
+		"dns-udp": {containerPort: 53, protocol: "UDP", hostIP: "203.0.113.10"},
+		"dns-tcp": {containerPort: 5353, protocol: "TCP", hostIP: "203.0.113.10"},
+	}
+	for _, raw := range ports {
+		port := raw.(map[string]any)
+		name := port["name"].(string)
+		want, ok := wantPorts[name]
+		if !ok || port["containerPort"] != want.containerPort || port["protocol"] != want.protocol {
+			t.Fatalf("unexpected merged port %v", port)
+		}
+		if want.hostIP != "" && port["hostIP"] != want.hostIP {
+			t.Fatalf("merged port %s lost hostIP: %v", name, port)
+		}
+		delete(wantPorts, name)
+	}
+	if len(wantPorts) != 0 {
+		t.Fatalf("merged daemonset is missing ports: %v", wantPorts)
+	}
+}
+
 func TestDNSPublicHostPortsRequirePerDaemonSetHostIP(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
@@ -3948,6 +4240,7 @@ func TestDNSPublicHostPortsRequirePerDaemonSetHostIP(t *testing.T) {
 			values: `
 dns:
   enabled: true
+  containerName: dns-server
   answerIPs: [203.0.113.10]
   publicHostPorts:
     enabled: true
@@ -3987,6 +4280,62 @@ dns:
 			output, err := cmd.CombinedOutput()
 			if err == nil {
 				t.Fatalf("expected Helm template to reject missing hostIP:\n%s", output)
+			}
+			if !strings.Contains(string(output), test.want) {
+				t.Fatalf("unexpected Helm error; want %q:\n%s", test.want, output)
+			}
+		})
+	}
+}
+
+func TestDNSGroupsRejectPerGroupTransportOverrides(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tests := []struct {
+		name     string
+		override string
+		want     string
+	}{
+		{
+			name:     "container name",
+			override: "      containerName: dns\n",
+			want:     "containerName is unsupported; all DNS daemonsets share dns.containerName",
+		},
+		{
+			name:     "container port",
+			override: "      publicHostPorts:\n        tcpContainerPort: 53\n",
+			want:     "publicHostPorts container-port overrides are unsupported",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			values := `
+dns:
+  enabled: true
+  answerIPs: [203.0.113.10]
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      answerIPs: [198.51.100.20]
+      nodeSelector:
+        fugue.io/role.dns: "true"
+` + test.override
+			valuesPath := t.TempDir() + "/values.yaml"
+			if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+				t.Fatalf("write values: %v", err)
+			}
+			cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+			cmd.Dir = chartDir
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected Helm template to reject per-group transport override:\n%s", output)
 			}
 			if !strings.Contains(string(output), test.want) {
 				t.Fatalf("unexpected Helm error; want %q:\n%s", test.want, output)
@@ -4035,6 +4384,7 @@ edge:
         fugue.io/location-country-code: de
 dns:
   enabled: true
+  containerName: dns-server
   extraZones:
     - oaix.cc
   answerIPs:
@@ -4044,8 +4394,10 @@ dns:
   publicHostPorts:
     enabled: true
     hostIP: 15.204.94.71
+    udpContainerPort: 53
+    tcpContainerPort: 5353
   udpAddr: :53
-  tcpAddr: :53
+  tcpAddr: :5353
   groups:
     - name: country-us
       edgeGroupID: edge-group-country-us
@@ -4137,6 +4489,11 @@ dns:
 		`name: FUGUE_DNS_ROUTE_A_ANSWER_IPS`,
 		`value: "136.112.185.40"`,
 		`name: dns-udp`,
+		`name: "dns-server"`,
+		`name: dns-tcp`,
+		`containerPort: 5353`,
+		`name: FUGUE_DNS_TCP_ADDR`,
+		`value: ":5353"`,
 		`hostIP: "51.38.126.103"`,
 		`hostPort: 53`,
 	} {

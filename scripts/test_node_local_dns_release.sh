@@ -9,7 +9,7 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 export MOCK_LOG="${TMP_DIR}/kubectl.log"
 export MOCK_APPLY="${TMP_DIR}/applied.json"
 export MOCK_PROBE_SCRIPTS="${TMP_DIR}/probe-scripts.log"
-export MOCK_HOST_LOG="${TMP_DIR}/host.log"
+export MOCK_DIG_LOG="${TMP_DIR}/dig.log"
 export MOCK_STATE="${TMP_DIR}/state.json"
 MOCK_STATE_CTL="${TMP_DIR}/statectl"
 MOCK_KUBECTL="${TMP_DIR}/kubectl"
@@ -667,6 +667,10 @@ if command == "get" and "controllerrevisions.apps" in argv:
         print(json.dumps(controller_revision_list_json(state), separators=(",", ":")))
     raise SystemExit(0)
 
+if command == "get" and "daemonsets" in argv:
+    print('{"apiVersion":"apps/v1","kind":"DaemonSetList","items":[]}')
+    raise SystemExit(0)
+
 if command == "get" and ("daemonset" in argv or any(item.startswith("ds/") for item in argv)):
     ds = state["ds"]
     ignore_not_found = "--ignore-not-found" in argv
@@ -842,7 +846,7 @@ chmod +x "${MOCK_KUBECTL}"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" reset
 : >"${MOCK_LOG}"
 : >"${MOCK_PROBE_SCRIPTS}"
-: >"${MOCK_HOST_LOG}"
+: >"${MOCK_DIG_LOG}"
 
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck disable=SC1091
@@ -853,15 +857,28 @@ smoke_test() {
   [[ "${MOCK_SMOKE_FAIL:-false}" != "true" ]]
 }
 
-# Keep authoritative checks deterministic and record the exact UDP/TCP invocation.
-host() {
-  local arg=""
-  local last=""
-  for arg in "$@"; do
-    last="${arg}"
-  done
-  printf '%s\n' "$*" >>"${MOCK_HOST_LOG}"
-  printf '%s has SOA record ns1.example.test. hostmaster.example.test. 1 60 60 60 60\n' "${last}"
+# Keep authoritative checks deterministic, fully intercept dig, and emit the
+# exact OPT/EDNS/ECS shape produced by the release command.
+dig() {
+  printf '%s\n' "$*" >>"${MOCK_DIG_LOG}"
+  cat <<'EOF'
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 4242
+;; flags: qr aa; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; CLIENT-SUBNET: 0.0.0.0/0/0
+;; QUESTION SECTION:
+;example.test. IN SOA
+
+;; ANSWER SECTION:
+example.test. 60 IN SOA ns1.example.test. hostmaster.example.test. 1 300 60 3600 60
+EOF
+}
+[[ "$(type -t dig)" == "function" ]] || {
+  echo "the NodeLocal release test must intercept dig without network access" >&2
+  exit 1
 }
 
 if command -v docker >/dev/null 2>&1; then
@@ -926,6 +943,11 @@ set_common_values() {
   CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( $(date +%s) + FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
   NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=0
   FUGUE_DNS_ZONE=example.test
+  FUGUE_DNS_NAMESERVERS=ns1.example.test
+  FUGUE_DNS_TTL=60
+  FUGUE_DNS_CONTAINER_NAME=dns
+  FUGUE_DNS_UDP_CONTAINER_PORT=53
+  FUGUE_DNS_TCP_CONTAINER_PORT=53
   NODE_LOCAL_DNS_PREVIOUS_ENABLED=false
   NODE_LOCAL_DNS_PREVIOUS_MODE=""
   NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES=""
@@ -1415,15 +1437,15 @@ if node_local_dns_reconcile_after_helm >/dev/null 2>&1; then
 fi
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" clear-failures
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" template current shadow node-a rev-before
-: >"${MOCK_HOST_LOG}"
+: >"${MOCK_DIG_LOG}"
 node_local_dns_restore_previous_after_helm_rollback
-grep -Fq -- '-W 3 -t SOA example.test 198.51.100.20' "${MOCK_HOST_LOG}"
-grep -Fq -- '-W 3 -T -t SOA example.test 198.51.100.20' "${MOCK_HOST_LOG}"
+grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA' "${MOCK_DIG_LOG}"
+grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${MOCK_DIG_LOG}"
 
 echo "[test_node_local_dns_release] scoped authoritative rows retain tab fields and TCP probes"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" seed current shadow node-edge rev-edge rev-edge
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" hostports node-edge scoped
-: >"${MOCK_HOST_LOG}"
+: >"${MOCK_DIG_LOG}"
 set_common_values
 FUGUE_NODE_LOCAL_DNS_NODE_NAME=node-edge
 prepare_node_local_dns_helm_args
@@ -1433,8 +1455,8 @@ if ! awk -F $'\t' 'NF != 7 {exit 1}' <<<"${NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT}
   exit 1
 fi
 node_local_dns_verify_authoritative_coexistence node-edge
-grep -Fq -- '-W 3 -t SOA example.test 198.51.100.20' "${MOCK_HOST_LOG}"
-grep -Fq -- '-W 3 -T -t SOA example.test 198.51.100.20' "${MOCK_HOST_LOG}"
+grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA' "${MOCK_DIG_LOG}"
+grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${MOCK_DIG_LOG}"
 
 echo "[test_node_local_dns_release] verified DNS manifest transactions refresh authoritative Pod UIDs"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" hostport-drift node-edge uid auth-node-edge-forward
@@ -1504,10 +1526,10 @@ set_common_values
 FUGUE_NODE_LOCAL_DNS_ENABLED=false
 prepare_node_local_dns_helm_args
 [[ "$(printf '%s\n' "${NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT}" | sed '/^[[:space:]]*$/d' | wc -l | awk '{print $1}')" == "2" ]]
-: >"${MOCK_HOST_LOG}"
+: >"${MOCK_DIG_LOG}"
 node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"
 assert_state 'state["ds"]["exists"] is False and len(state["pods"]) == 0'
-grep -Fq -- '-W 3 -T -t SOA example.test 198.51.100.20' "${MOCK_HOST_LOG}"
+grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${MOCK_DIG_LOG}"
 
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" seed current shadow node-edge rev-edge rev-edge
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" hostports node-edge scoped
@@ -2165,7 +2187,7 @@ set_dual_cohort_values() {
 }
 
 # The dual-cohort tests keep the exact artifact and preserved snapshot checks
-# from the release library. Only live host probes are replaced with an exact
+# from the release library. Only live DNS probes are replaced with an exact
 # active-Pod runtime check because the mock has no network namespace.
 node_local_dns_verify_central_coredns_ready() {
   return 0

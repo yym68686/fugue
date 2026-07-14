@@ -10,6 +10,12 @@
 {{- $image := default dict $group.image -}}
 {{- $tokenSecret := default dict $group.tokenSecret -}}
 {{- $publicHostPorts := default dict $group.publicHostPorts -}}
+{{- if hasKey $group "containerName" -}}
+{{- fail (printf "dns.groups[%s].containerName is unsupported; all DNS daemonsets share dns.containerName" $name) -}}
+{{- end -}}
+{{- if or (hasKey $publicHostPorts "udpContainerPort") (hasKey $publicHostPorts "tcpContainerPort") -}}
+{{- fail (printf "dns.groups[%s].publicHostPorts container-port overrides are unsupported; all DNS daemonsets share dns.publicHostPorts.udpContainerPort/tcpContainerPort" $name) -}}
+{{- end -}}
 {{- $edgeHealthProbe := default dict $group.edgeHealthProbe -}}
 {{- $edgeHealthProbeEnabled := $.Values.dns.edgeHealthProbe.enabled -}}
 {{- if hasKey $edgeHealthProbe "enabled" }}{{- $edgeHealthProbeEnabled = $edgeHealthProbe.enabled -}}{{- end -}}
@@ -20,12 +26,15 @@
 {{- $dnsImageTag := default (default $.Values.edge.image.tag $.Values.dns.image.tag) $image.tag -}}
 {{- $dnsImageDigest := default (default $.Values.edge.image.digest $.Values.dns.image.digest) $image.digest -}}
 {{- $dnsImagePullPolicy := default (default $.Values.edge.image.pullPolicy $.Values.dns.image.pullPolicy) $image.pullPolicy -}}
+{{- $dnsContainerName := $.Values.dns.containerName -}}
 {{- $publicHostPortsEnabled := $.Values.dns.publicHostPorts.enabled -}}
 {{- if hasKey $publicHostPorts "enabled" }}{{- $publicHostPortsEnabled = $publicHostPorts.enabled -}}{{- end -}}
 {{- $publicHostIP := "" -}}
 {{- if $publicHostPortsEnabled }}{{- $publicHostIP = required (printf "dns.groups[%s].publicHostPorts.hostIP is required when public DNS host ports are enabled" $name) $publicHostPorts.hostIP -}}{{- end -}}
 {{- $publicUDP := default $.Values.dns.publicHostPorts.udp $publicHostPorts.udp -}}
 {{- $publicTCP := default $.Values.dns.publicHostPorts.tcp $publicHostPorts.tcp -}}
+{{- $publicUDPContainerPort := $.Values.dns.publicHostPorts.udpContainerPort -}}
+{{- $publicTCPContainerPort := $.Values.dns.publicHostPorts.tcpContainerPort -}}
 {{- $extraZones := default $.Values.dns.extraZones $group.extraZones -}}
 ---
 apiVersion: apps/v1
@@ -68,7 +77,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: dns
+        - name: {{ required "dns.containerName is required" $dnsContainerName | quote }}
           image: {{ include "fugue.imageRef" (dict "repository" $dnsImageRepository "tag" $dnsImageTag "digest" $dnsImageDigest) | quote }}
           imagePullPolicy: {{ $dnsImagePullPolicy }}
           command:
@@ -83,12 +92,12 @@ spec:
               protocol: TCP
             {{- if $publicHostPortsEnabled }}
             - name: dns-udp
-              containerPort: 53
+              containerPort: {{ $publicUDPContainerPort }}
               hostIP: {{ $publicHostIP | quote }}
               hostPort: {{ $publicUDP }}
               protocol: UDP
             - name: dns-tcp
-              containerPort: 53
+              containerPort: {{ $publicTCPContainerPort }}
               hostIP: {{ $publicHostIP | quote }}
               hostPort: {{ $publicTCP }}
               protocol: TCP
