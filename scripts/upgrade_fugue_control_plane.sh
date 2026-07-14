@@ -10193,6 +10193,72 @@ for name in sorted(selected):
 '
 }
 
+node_local_dns_service_endpoint_ips() {
+  local service_name="$1"
+  local slices_json=""
+
+  [[ -n "$(trim_field "${service_name}")" ]] || return 1
+  if ! slices_json="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" \
+    get endpointslices.discovery.k8s.io \
+    -l "kubernetes.io/service-name=${service_name}" \
+    -o json 2>/dev/null)"; then
+    return 1
+  fi
+  printf '%s' "${slices_json}" | python3 -c '
+import ipaddress
+import json
+import sys
+
+payload = json.load(sys.stdin)
+items = payload.get("items")
+if not isinstance(items, list):
+    raise SystemExit(1)
+
+addresses = set()
+for endpoint_slice in items:
+    if not isinstance(endpoint_slice, dict):
+        raise SystemExit(1)
+    address_type = endpoint_slice.get("addressType")
+    if address_type == "FQDN":
+        continue
+    if address_type not in ("IPv4", "IPv6"):
+        raise SystemExit(1)
+    endpoints = endpoint_slice.get("endpoints", [])
+    if not isinstance(endpoints, list):
+        raise SystemExit(1)
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            raise SystemExit(1)
+        conditions = endpoint.get("conditions")
+        if conditions is None:
+            conditions = {}
+        elif not isinstance(conditions, dict):
+            raise SystemExit(1)
+        ready = conditions.get("ready")
+        if ready is False:
+            continue
+        if ready is not None and ready is not True:
+            raise SystemExit(1)
+        endpoint_addresses = endpoint.get("addresses")
+        if not isinstance(endpoint_addresses, list) or not endpoint_addresses:
+            raise SystemExit(1)
+        candidate = endpoint_addresses[0]
+        if not isinstance(candidate, str):
+            raise SystemExit(1)
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            raise SystemExit(1)
+        expected_version = 4 if address_type == "IPv4" else 6
+        if address.version != expected_version:
+            raise SystemExit(1)
+        addresses.add(address)
+
+for address in sorted(addresses, key=lambda item: (item.version, int(item))):
+    print(address)
+'
+}
+
 node_local_dns_daemonset_target_nodes() {
   local daemonset_json="${1:-}"
 
@@ -11299,6 +11365,7 @@ prepare_node_local_dns_helm_args() {
   local live_daemonset_json=""
   local kube_dns_service_ip=""
   local upstream_selector_json=""
+  local endpoint_ips=""
   local endpoint_count="0"
   local coredns_corefile=""
   local node_name=""
@@ -11431,8 +11498,10 @@ print(cluster_ip + "\t" + json.dumps(selector, sort_keys=True, separators=(",", 
     fail "live kube-dns ServiceIP ${kube_dns_service_ip} differs from expected ${FUGUE_NODE_LOCAL_DNS_EXPECTED_KUBE_DNS_SERVICE_IP}"
   fi
 
-  endpoint_count="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get endpoints "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}" -o json 2>/dev/null |
-    python3 -c 'import json,sys; payload=json.load(sys.stdin); print(sum(len(s.get("addresses") or []) for s in payload.get("subsets") or []))' 2>/dev/null || printf '0')"
+  if ! endpoint_ips="$(node_local_dns_service_endpoint_ips "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}")"; then
+    fail "central CoreDNS Ready endpoint inventory is unavailable"
+  fi
+  endpoint_count="$(printf '%s\n' "${endpoint_ips}" | awk 'NF { count++ } END { print count + 0 }')"
   [[ "${endpoint_count}" =~ ^[0-9]+$ ]] && (( endpoint_count > 0 )) || fail "central CoreDNS has no Ready kube-dns endpoints"
 
   coredns_corefile="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get configmap "${FUGUE_NODE_LOCAL_DNS_COREDNS_CONFIGMAP_NAME}" -o jsonpath='{.data.Corefile}' 2>/dev/null || true)"
@@ -11904,6 +11973,7 @@ node_local_dns_verify_running() {
   local service_ip="$2"
   local query_server="${FUGUE_NODE_LOCAL_DNS_LOCAL_IP}"
   local upstream_service="${NODE_LOCAL_DNS_UPSTREAM_SERVICE_NAME}"
+  local endpoint_ips=""
   local endpoint_count="0"
   local pod_rows=""
   local pods_json=""
@@ -11919,8 +11989,8 @@ node_local_dns_verify_running() {
   if ! rollout_daemonset_status "${NODE_LOCAL_DNS_ACTIVE_DAEMONSET_NAME}" "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}"; then
     return 1
   fi
-  endpoint_count="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get endpoints "${upstream_service}" -o json 2>/dev/null |
-    python3 -c 'import json,sys; payload=json.load(sys.stdin); print(sum(len(s.get("addresses") or []) for s in payload.get("subsets") or []))' 2>/dev/null || printf '0')"
+  endpoint_ips="$(node_local_dns_service_endpoint_ips "${upstream_service}")" || return 1
+  endpoint_count="$(printf '%s\n' "${endpoint_ips}" | awk 'NF { count++ } END { print count + 0 }')"
   [[ "${endpoint_count}" =~ ^[0-9]+$ ]] && (( endpoint_count > 0 )) || return 1
   pod_rows="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pods -l "$(node_local_dns_active_pod_selector)" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeName}{"\n"}{end}' 2>/dev/null || true)"
@@ -12457,11 +12527,11 @@ node_local_dns_verify_central_coredns_ready() {
   local node_name=""
   local probe_script=""
 
-  if ! endpoint_ips="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get endpoints "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}" -o json |
-    python3 -c 'import json,sys; payload=json.load(sys.stdin); print(" ".join(address["ip"] for subset in payload.get("subsets") or [] for address in subset.get("addresses") or [] if address.get("ip")))')"; then
+  if ! endpoint_ips="$(node_local_dns_service_endpoint_ips "${FUGUE_NODE_LOCAL_DNS_KUBE_DNS_SERVICE_NAME}")"; then
     log "cannot verify central CoreDNS because its Ready endpoint inventory is unavailable"
     return 1
   fi
+  endpoint_ips="$(printf '%s\n' "${endpoint_ips}" | paste -sd' ' -)"
   [[ -n "$(trim_field "${endpoint_ips}")" ]] || {
     log "cannot remove NodeLocal DNSCache because central CoreDNS has no Ready endpoints"
     return 1

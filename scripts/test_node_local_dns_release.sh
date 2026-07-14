@@ -637,8 +637,8 @@ if command == "get" and "service" in argv:
         print('{"spec":{"clusterIP":"10.43.0.10","selector":{"k8s-app":"kube-dns"}}}')
     raise SystemExit(0)
 
-if command == "get" and "endpoints" in argv:
-    print('{"subsets":[{"addresses":[{"ip":"10.42.0.2"}]}]}')
+if command == "get" and "endpointslices.discovery.k8s.io" in argv:
+    print('{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","items":[{"addressType":"IPv4","endpoints":[{"addresses":["10.42.0.2"],"conditions":{"ready":true}}]}]}')
     raise SystemExit(0)
 
 if command == "get" and "configmap" in argv:
@@ -2023,8 +2023,8 @@ if command == "get" and "service" in argv:
         print('{"spec":{"clusterIP":"10.43.0.10","selector":{"k8s-app":"kube-dns"}}}')
     raise SystemExit(0)
 
-if command == "get" and "endpoints" in argv:
-    print('{"subsets":[{"addresses":[{"ip":"10.42.0.2"}]}]}')
+if command == "get" and "endpointslices.discovery.k8s.io" in argv:
+    print('{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","items":[{"addressType":"IPv4","endpoints":[{"addresses":["10.42.0.2"],"conditions":{"ready":true}}]}]}')
     raise SystemExit(0)
 
 if command == "get" and "configmap" in argv:

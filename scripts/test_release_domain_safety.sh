@@ -29,6 +29,17 @@ bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"
 bash -n "${REPO_ROOT}/scripts/build_control_plane_images.sh"
 bash -n "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh"
 bash -n "${REPO_ROOT}/scripts/bootstrap_control_plane_automation.sh"
+python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).read_text()
+if re.search(r"\bget\s+endpoints(?=\s|[\"'])", source):
+    raise SystemExit("NodeLocal DNS release safety must not query the legacy Endpoints API")
+if source.count("get endpointslices.discovery.k8s.io") != 1:
+    raise SystemExit("NodeLocal DNS release safety must use one shared EndpointSlice inventory helper")
+PY
 if bootstrap_inventory_error="$(env -u FUGUE_NODE1 -u FUGUE_NODE2 -u FUGUE_NODE3 \
   bash "${REPO_ROOT}/scripts/bootstrap_control_plane_automation.sh" 2>&1)"; then
   fail "standalone automation bootstrap must reject missing host inventory"
@@ -1259,6 +1270,31 @@ rm -f "${RESOLVE_TEST_OUTPUT}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+(
+  ENDPOINT_SLICE_FIXTURE='{}'
+  endpoint_slice_matrix_kubectl() {
+    [[ "$*" == *"-n kube-system get endpointslices.discovery.k8s.io -l kubernetes.io/service-name=kube-dns -o json"* ]] || return 1
+    printf '%s' "${ENDPOINT_SLICE_FIXTURE}"
+  }
+  KUBECTL=endpoint_slice_matrix_kubectl
+  FUGUE_NODE_LOCAL_DNS_NAMESPACE=kube-system
+
+  ENDPOINT_SLICE_FIXTURE='{"apiVersion":"discovery.k8s.io/v1","kind":"EndpointSliceList","items":[{"addressType":"IPv6","ports":[{"port":53}],"endpoints":[{"addresses":["2001:0db8::2","2001:db8::ffff"],"conditions":{"ready":null,"serving":false,"terminating":true}},{"addresses":["2001:db8::1"]}]},{"addressType":"IPv4","endpoints":[{"addresses":["10.0.0.10","192.0.2.10"],"conditions":{"ready":true}},{"addresses":["10.0.0.2"],"conditions":{"serving":false,"terminating":true}},{"addresses":["10.0.0.1"],"conditions":{"ready":false}}]},{"addressType":"IPv6","endpoints":[{"addresses":["2001:0db8:0:0:0:0:0:1"],"conditions":{"ready":true}}]},{"addressType":"FQDN","endpoints":[{"addresses":["ignored.example.test"],"conditions":{"ready":true}}]}]}'
+  assert_eq "$(node_local_dns_service_endpoint_ips kube-dns)" $'10.0.0.2\n10.0.0.10\n2001:db8::1\n2001:db8::2' \
+    "EndpointSlice aggregation, readiness, first-address, canonical deduplication, and stable dual-stack order"
+
+  for ENDPOINT_SLICE_FIXTURE in \
+    '{"items":[{"addressType":"IPv4","endpoints":[{"addresses":["2001:db8::1"]}]}]}' \
+    '{"items":[{"addressType":"IPv6","endpoints":[{"addresses":["not-an-ip"]}]}]}' \
+    '{"items":[{"addressType":"Unknown","endpoints":[]}]}' \
+    '{"items":[{"addressType":"IPv4","endpoints":[{"addresses":[]}]}]}'
+  do
+    if node_local_dns_service_endpoint_ips kube-dns >/dev/null 2>&1; then
+      fail "EndpointSlice inventory must fail closed for a family, address-type, or IP violation: ${ENDPOINT_SLICE_FIXTURE}"
+    fi
+  done
+)
 
 (
   FUGUE_ROLLOUT_TIMEOUT=1s
