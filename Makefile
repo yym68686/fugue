@@ -9,12 +9,14 @@ test:
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_control_plane_observability_assets.sh
+	bash ./scripts/test_prepare_authoritative_dns_dig.sh
 	bash ./scripts/test_release_domain_safety.sh
 	env GOCACHE=$(GOCACHE) go test ./...
 
 test-scripts:
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_control_plane_observability_assets.sh
+	bash ./scripts/test_prepare_authoritative_dns_dig.sh
 	bash ./scripts/test_release_domain_safety.sh
 
 generate-openapi:
