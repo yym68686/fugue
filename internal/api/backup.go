@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/backupschedule"
@@ -114,6 +115,7 @@ func (s *Server) StartBackgroundBackups(ctx context.Context) {
 func (s *Server) enqueueDueBackups(ctx context.Context) {
 	s.recoverStaleBackupRuns(ctx)
 	s.enqueueDueBackupRetries(ctx)
+	s.enqueuePendingControlPlaneBackupRuns(ctx)
 	policies, err := s.store.ListDueBackupPolicies(time.Now().UTC(), 25)
 	if err != nil {
 		if s.log != nil {
@@ -158,6 +160,12 @@ func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 		return
 	}
 	for _, run := range runs {
+		if backupRunWaitingForCoordinationLease(run) {
+			// An unclaimed control-plane run may be intentionally waiting for
+			// a release to clear the shared Kubernetes Lease. It is not a lost
+			// worker and must remain pending for the pending/due-retry scanner.
+			continue
+		}
 		updated, err := s.store.RecoverStaleBackupRun(run, now, backupRunLeaseTTL)
 		if errors.Is(err, store.ErrConflict) {
 			continue
@@ -175,6 +183,14 @@ func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 	}
 }
 
+func backupRunWaitingForCoordinationLease(run model.BackupRun) bool {
+	run = model.NormalizeBackupRun(run)
+	return run.Status == model.BackupRunStatusPending &&
+		model.NormalizeBackupTargetType(run.Target.Type) == model.BackupTargetControlPlaneDatabase &&
+		strings.TrimSpace(run.LeaseOwner) == "" &&
+		run.StartedAt == nil
+}
+
 func backupRunIsStale(run model.BackupRun, now time.Time) bool {
 	return store.BackupRunIsStale(run, now, backupRunLeaseTTL)
 }
@@ -189,6 +205,29 @@ func (s *Server) enqueueDueBackupRetries(ctx context.Context) {
 		return
 	}
 	for _, run := range runs {
+		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
+	}
+}
+
+func (s *Server) enqueuePendingControlPlaneBackupRuns(ctx context.Context) {
+	runs, err := s.store.ListBackupRuns(store.BackupRunFilter{
+		TargetType:    model.BackupTargetControlPlaneDatabase,
+		Status:        model.BackupRunStatusPending,
+		PlatformAdmin: true,
+		Limit:         500,
+	})
+	if err != nil {
+		if s.log != nil {
+			s.log.Printf("backup scheduler list pending control-plane runs failed: %v", err)
+		}
+		return
+	}
+	for _, run := range runs {
+		// Retry runs have their own due-time-aware scanner. Excluding them here
+		// prevents an early claim while preserving blocked manual/scheduled runs.
+		if run.Trigger == model.BackupRunTriggerRetry {
+			continue
+		}
 		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
 	}
 }
@@ -1513,6 +1552,70 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	}
 	ctx, cancel := context.WithTimeout(parent, backupRunTimeout)
 	defer cancel()
+	candidate, err := s.store.GetBackupRun(runID, "", true)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && s.log != nil {
+			s.log.Printf("read backup run %s before claim failed: %v", runID, err)
+		}
+		return
+	}
+	if candidate.Status != model.BackupRunStatusPending {
+		return
+	}
+
+	var (
+		coordinationLease         controlPlaneBackupCoordinationLease
+		coordinationLeaseLost     atomic.Bool
+		stopCoordinationHeartbeat func()
+	)
+	if model.NormalizeBackupTargetType(candidate.Target.Type) == model.BackupTargetControlPlaneDatabase {
+		factory := s.newBackupCoordinationLease
+		if factory == nil {
+			factory = s.newKubernetesControlPlaneBackupCoordinationLease
+		}
+		var leaseErr error
+		coordinationLease, leaseErr = factory(runID)
+		if leaseErr != nil {
+			if s.log != nil {
+				s.log.Printf("control-plane backup run %s remains pending: initialize coordination Lease: %v", runID, leaseErr)
+			}
+			return
+		}
+		if coordinationLease == nil {
+			if s.log != nil {
+				s.log.Printf("control-plane backup run %s remains pending: coordination Lease factory returned nil", runID)
+			}
+			return
+		}
+		held, leaseErr := coordinationLease.TryAcquireOrRenew(ctx, time.Now().UTC())
+		if leaseErr != nil || !held {
+			coordinationLease.Close()
+			if s.log != nil {
+				if leaseErr != nil {
+					s.log.Printf("control-plane backup run %s remains pending: acquire coordination Lease: %v", runID, leaseErr)
+				} else {
+					s.log.Printf("control-plane backup run %s remains pending: coordination Lease is held", runID)
+				}
+			}
+			return
+		}
+		defer func() {
+			if stopCoordinationHeartbeat != nil {
+				stopCoordinationHeartbeat()
+			}
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer releaseCancel()
+			released, releaseErr := coordinationLease.Release(releaseCtx, time.Now().UTC())
+			if releaseErr != nil && s.log != nil {
+				s.log.Printf("release control-plane backup coordination Lease for run %s failed: %v", runID, releaseErr)
+			} else if !released && s.log != nil {
+				s.log.Printf("control-plane backup coordination Lease for run %s was already transferred", runID)
+			}
+			coordinationLease.Close()
+		}()
+		stopCoordinationHeartbeat = s.startControlPlaneBackupCoordinationHeartbeat(ctx, cancel, coordinationLease, runID, &coordinationLeaseLost)
+	}
+
 	now := time.Now().UTC()
 	leaseOwner := backupLeaseOwner()
 	run, err := s.store.ClaimBackupRun(runID, leaseOwner, now, backupRunLeaseTTL)
@@ -1525,6 +1628,33 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 		}
 		return
 	}
+	if coordinationLease != nil {
+		// The process may have stopped between the first Kubernetes Lease acquire
+		// and the durable DB claim long enough for the same pending run to be
+		// recovered with a new fencing token. Stop the asynchronous renewer, wait
+		// for it to quiesce, and synchronously prove that this exact token still
+		// owns the Lease before any backup side effect can start.
+		stopCoordinationHeartbeat()
+		if coordinationLeaseLost.Load() {
+			return
+		}
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		held, verifyErr := coordinationLease.TryAcquireOrRenew(verifyCtx, time.Now().UTC())
+		verifyCancel()
+		if verifyErr != nil || !held {
+			coordinationLeaseLost.Store(true)
+			cancel()
+			if s.log != nil {
+				if verifyErr != nil {
+					s.log.Printf("backup run %s stopped before runner start: verify coordination Lease after DB claim: %v", run.ID, verifyErr)
+				} else {
+					s.log.Printf("backup run %s stopped before runner start: coordination Lease changed after DB claim", run.ID)
+				}
+			}
+			return
+		}
+		stopCoordinationHeartbeat = s.startControlPlaneBackupCoordinationHeartbeat(ctx, cancel, coordinationLease, runID, &coordinationLeaseLost)
+	}
 	stopHeartbeat := s.startBackupRunHeartbeat(ctx, cancel, run.ID, leaseOwner)
 	runner := s.backupRunner
 	if runner == nil {
@@ -1533,6 +1663,30 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	artifacts, err := runner(ctx, run)
 	finishedAt := time.Now().UTC()
 	stopHeartbeat()
+	if coordinationLease != nil {
+		stopCoordinationHeartbeat()
+		if coordinationLeaseLost.Load() {
+			if s.log != nil {
+				s.log.Printf("backup run %s stopped without finalizing after coordination Lease loss", run.ID)
+			}
+			return
+		}
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		held, verifyErr := coordinationLease.TryAcquireOrRenew(verifyCtx, time.Now().UTC())
+		verifyCancel()
+		if verifyErr != nil || !held {
+			coordinationLeaseLost.Store(true)
+			cancel()
+			if s.log != nil {
+				if verifyErr != nil {
+					s.log.Printf("backup run %s stopped without finalizing: verify coordination Lease: %v", run.ID, verifyErr)
+				} else {
+					s.log.Printf("backup run %s stopped without finalizing: coordination Lease is no longer held", run.ID)
+				}
+			}
+			return
+		}
+	}
 	status := model.BackupRunStatusSucceeded
 	if err != nil {
 		status = model.BackupRunStatusFailed
@@ -1569,6 +1723,72 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	})
 	if finishErr != nil && s.log != nil && !errors.Is(finishErr, store.ErrConflict) {
 		s.log.Printf("finish successful backup run %s failed: %v", run.ID, finishErr)
+	}
+}
+
+func (s *Server) startControlPlaneBackupCoordinationHeartbeat(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	lease controlPlaneBackupCoordinationLease,
+	runID string,
+	lost *atomic.Bool,
+) func() {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	period := s.backupCoordination.RenewPeriod
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		if period <= 0 {
+			if lost != nil {
+				lost.Store(true)
+			}
+			if s.log != nil {
+				s.log.Printf("control-plane backup run %s lost coordination Lease: renew period is not configured", runID)
+			}
+			if cancel != nil {
+				cancel()
+			}
+			return
+		}
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				held, err := lease.TryAcquireOrRenew(ctx, time.Now().UTC())
+				if err == nil && held {
+					continue
+				}
+				if s.log != nil {
+					if err != nil {
+						s.log.Printf("control-plane backup run %s lost coordination Lease during renew: %v", runID, err)
+					} else {
+						s.log.Printf("control-plane backup run %s lost coordination Lease during renew", runID)
+					}
+				}
+				if lost != nil {
+					lost.Store(true)
+				}
+				if cancel != nil {
+					cancel()
+				}
+				return
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-done
+		})
 	}
 }
 
@@ -1795,6 +2015,9 @@ func (s *Server) runControlPlaneDatabaseBackup(ctx context.Context, run model.Ba
 	}
 	if err := objectBackend.putObject(ctx, manifestKey, bytes.NewReader(manifestBytes), int64(len(manifestBytes))); err != nil {
 		return nil, fmt.Errorf("upload control-plane manifest: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	artifact, err := s.store.CreateBackupArtifactForRun(model.BackupArtifact{
 		RunID:             run.ID,

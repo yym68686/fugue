@@ -1778,6 +1778,13 @@ func TestRegistryMaintenanceJobsRenderByDefault(t *testing.T) {
 	for _, want := range []string{
 		"name: FUGUE_REGISTRY_GC_LEASE_NAME",
 		`value: "fugue-fugue-registry-gc"`,
+		"name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME",
+		`value: "fugue-fugue-control-plane-db-backup"`,
+		"name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE",
+		"name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS",
+		`value: "120"`,
+		"name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS",
+		`value: "30"`,
 	} {
 		if !strings.Contains(api, want) {
 			t.Fatalf("API deployment missing registry GC coordination value %q:\n%s", want, api)

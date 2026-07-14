@@ -73,6 +73,16 @@ spec:
                   fieldPath: metadata.namespace
             - name: FUGUE_CONTROL_PLANE_RELEASE_INSTANCE
               value: {{ .Release.Name | quote }}
+            - name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME
+              value: {{ printf "%s-control-plane-db-backup" (include "fugue.fullname" .) | quote }}
+            - name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS
+              value: {{ .Values.api.controlPlaneBackupCoordination.durationSeconds | quote }}
+            - name: FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS
+              value: {{ .Values.api.controlPlaneBackupCoordination.renewSeconds | quote }}
             - name: FUGUE_CONTROL_PLANE_CNPG_BACKUP_ENABLED
               value: {{ and .Values.controlPlanePostgres.enabled .Values.controlPlanePostgres.backup.enabled .Values.controlPlanePostgres.backup.scheduled.enabled | quote }}
             - name: FUGUE_CONTROL_PLANE_CNPG_BACKUP_NAME

@@ -28,9 +28,15 @@ func main() {
 	authenticator.PlatformComponentIdentityKeyring = platformComponentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
-		DatabaseURL:                      cfg.DatabaseURL,
-		ControlPlaneNamespace:            cfg.ControlPlaneNamespace,
-		ControlPlaneReleaseInstance:      cfg.ControlPlaneReleaseInstance,
+		DatabaseURL:                 cfg.DatabaseURL,
+		ControlPlaneNamespace:       cfg.ControlPlaneNamespace,
+		ControlPlaneReleaseInstance: cfg.ControlPlaneReleaseInstance,
+		BackupCoordination: api.BackupCoordinationConfig{
+			LeaseName:      cfg.BackupCoordination.LeaseName,
+			LeaseNamespace: cfg.BackupCoordination.LeaseNamespace,
+			LeaseDuration:  cfg.BackupCoordination.LeaseDuration,
+			RenewPeriod:    cfg.BackupCoordination.RenewPeriod,
+		},
 		ControlPlaneCNPGBackupEnabled:    cfg.ControlPlaneCNPGBackupEnabled,
 		ControlPlaneCNPGBackupName:       cfg.ControlPlaneCNPGBackupName,
 		RegistryGCLeaseName:              cfg.RegistryGCLeaseName,

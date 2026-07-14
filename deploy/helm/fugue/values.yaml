@@ -173,6 +173,9 @@ observability:
 
 api:
   replicaCount: 2
+  controlPlaneBackupCoordination:
+    durationSeconds: 120
+    renewSeconds: 30
   image:
     repository: fugue-api
     tag: latest

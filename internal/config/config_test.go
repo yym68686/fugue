@@ -266,3 +266,34 @@ func TestAPIFromEnvReadsRegistryGCLeaseName(t *testing.T) {
 		t.Fatalf("expected registry GC lease name from env, got %q", cfg.RegistryGCLeaseName)
 	}
 }
+
+func TestAPIFromEnvReadsControlPlaneBackupCoordinationLease(t *testing.T) {
+	t.Setenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME", "fugue-fugue-control-plane-db-backup")
+	t.Setenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE", "fugue-system")
+	t.Setenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS", "120")
+	t.Setenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS", "30")
+
+	cfg := APIFromEnv()
+	if cfg.BackupCoordination.LeaseName != "fugue-fugue-control-plane-db-backup" ||
+		cfg.BackupCoordination.LeaseNamespace != "fugue-system" ||
+		cfg.BackupCoordination.LeaseDuration != 120*time.Second ||
+		cfg.BackupCoordination.RenewPeriod != 30*time.Second {
+		t.Fatalf("unexpected backup coordination Lease config: %+v", cfg)
+	}
+}
+
+func TestAPIFromEnvDerivesBackupCoordinationLeaseForBootstrapRollout(t *testing.T) {
+	t.Setenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME", "")
+	t.Setenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE", "")
+	t.Setenv("FUGUE_CONTROL_PLANE_NAMESPACE", "fugue-system")
+	t.Setenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", "fugue")
+	t.Setenv("FUGUE_REGISTRY_GC_LEASE_NAME", "custom-fullname-registry-gc")
+
+	cfg := APIFromEnv()
+	if cfg.BackupCoordination.LeaseName != "custom-fullname-control-plane-db-backup" {
+		t.Fatalf("unexpected derived backup coordination Lease name: %q", cfg.BackupCoordination.LeaseName)
+	}
+	if cfg.BackupCoordination.LeaseNamespace != "fugue-system" {
+		t.Fatalf("unexpected derived backup coordination Lease namespace: %q", cfg.BackupCoordination.LeaseNamespace)
+	}
+}

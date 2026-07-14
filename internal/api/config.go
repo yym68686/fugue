@@ -22,6 +22,7 @@ type ServerConfig struct {
 	DatabaseURL                      string
 	ControlPlaneNamespace            string
 	ControlPlaneReleaseInstance      string
+	BackupCoordination               BackupCoordinationConfig
 	ControlPlaneCNPGBackupEnabled    bool
 	ControlPlaneCNPGBackupName       string
 	RegistryGCLeaseName              string
@@ -67,4 +68,11 @@ type ServerConfig struct {
 	BundleValidFor                   time.Duration
 	ImportWorkDir                    string
 	Observability                    observability.Config
+}
+
+type BackupCoordinationConfig struct {
+	LeaseName      string
+	LeaseNamespace string
+	LeaseDuration  time.Duration
+	RenewPeriod    time.Duration
 }

@@ -35,6 +35,7 @@ type Server struct {
 	controlPlaneDatabaseURL          string
 	controlPlaneNamespace            string
 	controlPlaneReleaseInstance      string
+	backupCoordination               BackupCoordinationConfig
 	controlPlaneCNPGBackupEnabled    bool
 	controlPlaneCNPGBackupName       string
 	registryGCLeaseName              string
@@ -108,6 +109,7 @@ type Server struct {
 	openAppDatabase                  func(driverName, dsn string) (*sql.DB, error)
 	appDatabaseImportRunner          func(context.Context, model.AppDatabaseImportJob) (string, error)
 	backupRunner                     func(context.Context, model.BackupRun) ([]model.BackupArtifact, error)
+	newBackupCoordinationLease       controlPlaneBackupCoordinationLeaseFactory
 	dialAppDatabaseTunnel            func(context.Context, string, string) (net.Conn, error)
 	dnsResolver                      appDomainDNSResolver
 	dnsDelegationProbe               dnsDelegationProbeFunc
@@ -154,13 +156,19 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
 	server := &Server{
-		store:                            store,
-		auth:                             authn,
-		log:                              logger,
-		metricsStartedAt:                 time.Now().UTC(),
-		controlPlaneDatabaseURL:          strings.TrimSpace(cfg.DatabaseURL),
-		controlPlaneNamespace:            strings.TrimSpace(cfg.ControlPlaneNamespace),
-		controlPlaneReleaseInstance:      strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		store:                       store,
+		auth:                        authn,
+		log:                         logger,
+		metricsStartedAt:            time.Now().UTC(),
+		controlPlaneDatabaseURL:     strings.TrimSpace(cfg.DatabaseURL),
+		controlPlaneNamespace:       strings.TrimSpace(cfg.ControlPlaneNamespace),
+		controlPlaneReleaseInstance: strings.TrimSpace(cfg.ControlPlaneReleaseInstance),
+		backupCoordination: BackupCoordinationConfig{
+			LeaseName:      strings.TrimSpace(cfg.BackupCoordination.LeaseName),
+			LeaseNamespace: strings.TrimSpace(cfg.BackupCoordination.LeaseNamespace),
+			LeaseDuration:  cfg.BackupCoordination.LeaseDuration,
+			RenewPeriod:    cfg.BackupCoordination.RenewPeriod,
+		},
 		controlPlaneCNPGBackupEnabled:    cfg.ControlPlaneCNPGBackupEnabled,
 		controlPlaneCNPGBackupName:       strings.TrimSpace(cfg.ControlPlaneCNPGBackupName),
 		registryGCLeaseName:              strings.TrimSpace(cfg.RegistryGCLeaseName),

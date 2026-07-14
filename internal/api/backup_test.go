@@ -1483,6 +1483,7 @@ func TestControlPlaneBackupRunCreatesRestorePlan(t *testing.T) {
 		t.Fatalf("create policy: %v", err)
 	}
 	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, nil)
 	artifactCh := make(chan model.BackupArtifact, 1)
 	server.backupRunner = func(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
 		artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
@@ -1575,6 +1576,7 @@ func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
 	}
 
 	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, nil)
 	seenRun := make(chan model.BackupRun, 1)
 	server.backupRunner = func(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
 		seenRun <- run
@@ -2024,6 +2026,7 @@ func TestReplaceRestoreRunQueuesProtectiveBackup(t *testing.T) {
 		t.Fatalf("create restore plan: %v", err)
 	}
 	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, nil)
 	protectiveCh := make(chan string, 1)
 	server.backupRunner = func(ctx context.Context, run model.BackupRun) ([]model.BackupArtifact, error) {
 		protectiveCh <- run.ID
@@ -2214,6 +2217,402 @@ func TestScheduleBackupRetryCreatesPendingRetryRun(t *testing.T) {
 	}
 }
 
+func TestExecuteControlPlaneBackupRunFailsClosedWithoutLeaseConfiguration(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "fail-closed-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "fail-closed-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backend.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending control-plane run: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	workerCalled := false
+	server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		workerCalled = true
+		return nil, nil
+	}
+
+	server.executeBackupRun(context.Background(), run.ID)
+	got, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get backup run: %v", err)
+	}
+	if got.Status != model.BackupRunStatusPending || got.LeaseOwner != "" || got.StartedAt != nil {
+		t.Fatalf("run must remain unclaimed when Lease configuration is absent: %+v", got)
+	}
+	if workerCalled {
+		t.Fatal("backup worker must not run without Kubernetes Lease configuration")
+	}
+}
+
+func TestPendingControlPlaneBackupRunRetriesAfterCoordinationLeaseBecomesAvailable(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backendRecord, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "pending-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "pending-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backendRecord.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending control-plane run: %v", err)
+	}
+	backend := &testControlPlaneBackupCoordinationBackend{blocked: true}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, backend)
+	runnerCalled := make(chan struct{}, 1)
+	server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		runnerCalled <- struct{}{}
+		return nil, nil
+	}
+
+	server.executeBackupRun(context.Background(), run.ID)
+	blocked, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get blocked run: %v", err)
+	}
+	if blocked.Status != model.BackupRunStatusPending || blocked.LeaseOwner != "" || blocked.StartedAt != nil {
+		t.Fatalf("contended run must remain pending and unclaimed: %+v", blocked)
+	}
+	select {
+	case <-runnerCalled:
+		t.Fatal("runner started while release Lease was unavailable")
+	default:
+	}
+
+	backend.setBlocked(false)
+	server.enqueuePendingControlPlaneBackupRuns(context.Background())
+	select {
+	case <-runnerCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending scanner did not retry the control-plane backup")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		finished, err := stateStore.GetBackupRun(run.ID, "", true)
+		if err != nil {
+			t.Fatalf("get retried run: %v", err)
+		}
+		if finished.Status == model.BackupRunStatusSucceeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("retried run did not finish: %+v", finished)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestControlPlaneBackupCoordinationLeaseCoversRetryCreation(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backendRecord, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "retry-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "retry-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
+		Name:      "retry-policy",
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backendRecord.ID,
+		Enabled:   true,
+		Status:    model.BackupPolicyStatusActive,
+		Schedule:  model.BackupDefaultSchedule,
+	})
+	if err != nil {
+		t.Fatalf("create backup policy: %v", err)
+	}
+	dueAt := time.Now().UTC().Add(-time.Minute)
+	policy.NextRunAt = &dueAt
+	policy, err = stateStore.UpsertBackupPolicy(policy)
+	if err != nil {
+		t.Fatalf("mark backup policy due: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		PolicyID:  policy.ID,
+		Target:    policy.Target,
+		BackendID: backendRecord.ID,
+		Trigger:   model.BackupRunTriggerScheduled,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending scheduled run: %v", err)
+	}
+	retryVisibleAtRelease := make(chan bool, 1)
+	coordinationBackend := &testControlPlaneBackupCoordinationBackend{}
+	coordinationBackend.onRelease = func() {
+		runs, listErr := stateStore.ListBackupRuns(store.BackupRunFilter{Status: model.BackupRunStatusPending, PlatformAdmin: true})
+		foundRetry := listErr == nil
+		if foundRetry {
+			foundRetry = false
+			for _, candidate := range runs {
+				if candidate.Trigger == model.BackupRunTriggerRetry {
+					foundRetry = true
+					break
+				}
+			}
+		}
+		retryVisibleAtRelease <- foundRetry
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, coordinationBackend)
+	server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		return nil, errors.New("injected backup failure")
+	}
+
+	server.executeBackupRun(context.Background(), run.ID)
+	select {
+	case visible := <-retryVisibleAtRelease:
+		if !visible {
+			t.Fatal("coordination Lease was released before retry run creation completed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("coordination Lease was not released")
+	}
+}
+
+func TestControlPlaneBackupCancelsWhenCoordinationLeaseRenewalIsLost(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backendRecord, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "renew-loss-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "renew-loss-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backendRecord.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending control-plane run: %v", err)
+	}
+	coordinationBackend := &testControlPlaneBackupCoordinationBackend{denyRenew: true}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, coordinationBackend)
+	server.backupCoordination.RenewPeriod = 5 * time.Millisecond
+	server.backupRunner = func(ctx context.Context, _ model.BackupRun) ([]model.BackupArtifact, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	server.executeBackupRun(context.Background(), run.ID)
+	finished, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get finished run: %v", err)
+	}
+	if finished.Status != model.BackupRunStatusRunning || finished.FinishedAt != nil {
+		t.Fatalf("lost coordination Lease must cancel without any terminal write: %+v", finished)
+	}
+}
+
+func TestControlPlaneBackupDoesNotFinalizeWhenFinalLeaseVerificationFails(t *testing.T) {
+	t.Parallel()
+
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backendRecord, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "final-verify-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "final-verify-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backendRecord.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending control-plane run: %v", err)
+	}
+	coordinationBackend := &testControlPlaneBackupCoordinationBackend{denyRenew: true}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, coordinationBackend)
+	server.backupCoordination.RenewPeriod = time.Hour
+	server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		return nil, nil
+	}
+
+	server.executeBackupRun(context.Background(), run.ID)
+	unfinished, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get unfinished run: %v", err)
+	}
+	if unfinished.Status != model.BackupRunStatusRunning || unfinished.FinishedAt != nil {
+		t.Fatalf("failed final Lease verification must fence terminal writes: %+v", unfinished)
+	}
+}
+
+func TestControlPlaneBackupReverifiesFencingTokenAfterClaimBeforeRunner(t *testing.T) {
+	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	backendRecord, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "claim-fence-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "claim-fence-bucket",
+		Endpoint: "https://example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{
+		Target:    model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		BackendID: backendRecord.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create pending control-plane run: %v", err)
+	}
+
+	coordinationBackend := newStaleSameRunCoordinationBackend()
+	t.Cleanup(coordinationBackend.unblock)
+	serverA := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	serverB := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	configureStaleSameRunControlPlaneBackupCoordination(serverA, coordinationBackend)
+	configureStaleSameRunControlPlaneBackupCoordination(serverB, coordinationBackend)
+	var runnerMu sync.Mutex
+	runnerCalls := 0
+	runner := func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		runnerMu.Lock()
+		runnerCalls++
+		runnerMu.Unlock()
+		return nil, nil
+	}
+	serverA.backupRunner = runner
+	serverB.backupRunner = runner
+
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		serverA.executeBackupRun(context.Background(), run.ID)
+	}()
+	select {
+	case <-coordinationBackend.firstAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker A did not acquire the initial coordination token")
+	}
+	if !coordinationBackend.expireFirstLease() {
+		t.Fatal("could not deterministically expire worker A's coordination token")
+	}
+
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		serverB.executeBackupRun(context.Background(), run.ID)
+	}()
+	select {
+	case <-coordinationBackend.secondTookOver:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker B did not take over the expired same-run coordination token")
+	}
+
+	// A now resumes with its stale successful acquire result. It wins the DB
+	// claim, but the mandatory post-claim token verification must fence it before
+	// the runner. B remains paused with the replacement token until that proof is
+	// complete, then loses the DB claim and owner-CAS releases only its own token.
+	coordinationBackend.resumeFirst()
+	select {
+	case <-aDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker A did not stop after post-claim token verification")
+	}
+	claimed, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get A-claimed backup run: %v", err)
+	}
+	if claimed.Status != model.BackupRunStatusRunning || claimed.StartedAt == nil || claimed.FinishedAt != nil {
+		t.Fatalf("worker A must leave its fenced DB claim for stale recovery without a terminal write: %+v", claimed)
+	}
+	runnerMu.Lock()
+	gotRunnerCalls := runnerCalls
+	runnerMu.Unlock()
+	if gotRunnerCalls != 0 {
+		t.Fatalf("stale worker A ran backup side effects before token verification: runner_calls=%d", gotRunnerCalls)
+	}
+	if coordinationBackend.firstReleaseSucceeded() {
+		t.Fatal("worker A's stale defer must not release worker B's replacement token")
+	}
+
+	coordinationBackend.resumeSecond()
+	select {
+	case <-bDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker B did not reject A's already-claimed DB run")
+	}
+	unfinished, err := stateStore.GetBackupRun(run.ID, "", true)
+	if err != nil {
+		t.Fatalf("get fenced backup run after B conflict: %v", err)
+	}
+	if unfinished.Status != model.BackupRunStatusRunning || unfinished.StartedAt == nil || unfinished.FinishedAt != nil {
+		t.Fatalf("same-run takeover loser must not run or finish A's stale claim: %+v", unfinished)
+	}
+	runnerMu.Lock()
+	gotRunnerCalls = runnerCalls
+	runnerMu.Unlock()
+	if gotRunnerCalls != 0 {
+		t.Fatalf("neither fenced worker may start the runner: runner_calls=%d", gotRunnerCalls)
+	}
+	if !coordinationBackend.secondReleaseSucceeded() || coordinationBackend.holder() != 0 {
+		t.Fatalf("worker B must owner-CAS release its own replacement token after DB claim conflict: holder=%d", coordinationBackend.holder())
+	}
+}
+
 func TestExecuteBackupRunClaimsPendingRunOnceAcrossReplicas(t *testing.T) {
 	t.Parallel()
 
@@ -2259,6 +2658,9 @@ func TestExecuteBackupRunClaimsPendingRunOnceAcrossReplicas(t *testing.T) {
 	}
 	serverA := NewServer(primaryStore, auth.New(primaryStore, ""), nil, ServerConfig{})
 	serverB := NewServer(replicaStore, auth.New(replicaStore, ""), nil, ServerConfig{})
+	coordinationBackend := &testControlPlaneBackupCoordinationBackend{}
+	configureTestControlPlaneBackupCoordination(serverA, coordinationBackend)
+	configureTestControlPlaneBackupCoordination(serverB, coordinationBackend)
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var callMu sync.Mutex
@@ -2371,6 +2773,7 @@ func TestExecuteBackupRunLostLeaseCannotFinalizeOrScheduleRetry(t *testing.T) {
 	}
 
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	configureTestControlPlaneBackupCoordination(server, nil)
 	server.backupRunner = func(ctx context.Context, claimed model.BackupRun) ([]model.BackupArtifact, error) {
 		status := model.BackupRunStatusFailed
 		owner := "recovery-worker"
@@ -2523,6 +2926,30 @@ func TestBackupRunIsStaleFailsPendingRetryAfterDueGrace(t *testing.T) {
 	}
 }
 
+func TestBackupRunWaitingForCoordinationLeaseIsNotAStaleWorker(t *testing.T) {
+	t.Parallel()
+
+	pending := model.BackupRun{
+		Target:     model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		Status:     model.BackupRunStatusPending,
+		LeaseOwner: "",
+		StartedAt:  nil,
+	}
+	if !backupRunWaitingForCoordinationLease(pending) {
+		t.Fatalf("expected unclaimed control-plane run to wait for coordination: %+v", pending)
+	}
+	running := pending
+	running.Status = model.BackupRunStatusRunning
+	if backupRunWaitingForCoordinationLease(running) {
+		t.Fatalf("running backup is a worker lease recovery candidate: %+v", running)
+	}
+	appBackup := pending
+	appBackup.Target.Type = model.BackupTargetAppDatabase
+	if backupRunWaitingForCoordinationLease(appBackup) {
+		t.Fatalf("app backup must not enter control-plane coordination wait: %+v", appBackup)
+	}
+}
+
 func newBackupFakeS3(t *testing.T) (string, map[string][]byte) {
 	t.Helper()
 	var mu sync.Mutex
@@ -2571,4 +2998,223 @@ func backupPostureHas(postures []model.BackupPosture, targetType, component stri
 		}
 	}
 	return false
+}
+
+type testControlPlaneBackupCoordinationBackend struct {
+	mu          sync.Mutex
+	nextToken   int
+	holderToken string
+	blocked     bool
+	denyRenew   bool
+	onRelease   func()
+}
+
+func (b *testControlPlaneBackupCoordinationBackend) factory(string) (controlPlaneBackupCoordinationLease, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.nextToken++
+	return &testControlPlaneBackupCoordinationLease{
+		backend: b,
+		token:   "test-token-" + strconv.Itoa(b.nextToken),
+	}, nil
+}
+
+func (b *testControlPlaneBackupCoordinationBackend) setBlocked(blocked bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.blocked = blocked
+}
+
+func (b *testControlPlaneBackupCoordinationBackend) setDenyRenew(deny bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.denyRenew = deny
+}
+
+type testControlPlaneBackupCoordinationLease struct {
+	backend  *testControlPlaneBackupCoordinationBackend
+	token    string
+	acquired bool
+}
+
+func (l *testControlPlaneBackupCoordinationLease) TryAcquireOrRenew(context.Context, time.Time) (bool, error) {
+	l.backend.mu.Lock()
+	defer l.backend.mu.Unlock()
+	if l.backend.blocked {
+		return false, nil
+	}
+	if l.backend.holderToken == "" {
+		l.backend.holderToken = l.token
+		l.acquired = true
+		return true, nil
+	}
+	if l.backend.holderToken != l.token {
+		return false, nil
+	}
+	if l.backend.denyRenew && l.acquired {
+		return false, nil
+	}
+	l.acquired = true
+	return true, nil
+}
+
+func (l *testControlPlaneBackupCoordinationLease) Release(context.Context, time.Time) (bool, error) {
+	l.backend.mu.Lock()
+	if l.backend.holderToken != l.token {
+		l.backend.mu.Unlock()
+		return false, nil
+	}
+	l.backend.holderToken = ""
+	onRelease := l.backend.onRelease
+	l.backend.mu.Unlock()
+	if onRelease != nil {
+		onRelease()
+	}
+	return true, nil
+}
+
+func (*testControlPlaneBackupCoordinationLease) Close() {}
+
+func configureTestControlPlaneBackupCoordination(server *Server, backend *testControlPlaneBackupCoordinationBackend) {
+	if backend == nil {
+		backend = &testControlPlaneBackupCoordinationBackend{}
+	}
+	server.backupCoordination.LeaseDuration = 120 * time.Second
+	server.backupCoordination.RenewPeriod = 30 * time.Second
+	server.newBackupCoordinationLease = backend.factory
+}
+
+type staleSameRunCoordinationBackend struct {
+	mu sync.Mutex
+
+	nextWorkerID int
+	holderID     int
+	firstExpired bool
+	tryCalls     map[int]int
+	releases     map[int]bool
+
+	firstAcquired  chan struct{}
+	secondTookOver chan struct{}
+	resumeFirstCh  chan struct{}
+	resumeSecondCh chan struct{}
+	resumeFirstMu  sync.Once
+	resumeSecondMu sync.Once
+}
+
+func newStaleSameRunCoordinationBackend() *staleSameRunCoordinationBackend {
+	return &staleSameRunCoordinationBackend{
+		tryCalls:       make(map[int]int),
+		releases:       make(map[int]bool),
+		firstAcquired:  make(chan struct{}),
+		secondTookOver: make(chan struct{}),
+		resumeFirstCh:  make(chan struct{}),
+		resumeSecondCh: make(chan struct{}),
+	}
+}
+
+func (b *staleSameRunCoordinationBackend) factory(string) (controlPlaneBackupCoordinationLease, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.nextWorkerID++
+	return &staleSameRunCoordinationLease{backend: b, workerID: b.nextWorkerID}, nil
+}
+
+func (b *staleSameRunCoordinationBackend) expireFirstLease() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.holderID != 1 {
+		return false
+	}
+	b.firstExpired = true
+	return true
+}
+
+func (b *staleSameRunCoordinationBackend) resumeFirst() {
+	b.resumeFirstMu.Do(func() { close(b.resumeFirstCh) })
+}
+
+func (b *staleSameRunCoordinationBackend) resumeSecond() {
+	b.resumeSecondMu.Do(func() { close(b.resumeSecondCh) })
+}
+
+func (b *staleSameRunCoordinationBackend) unblock() {
+	b.resumeFirst()
+	b.resumeSecond()
+}
+
+func (b *staleSameRunCoordinationBackend) firstReleaseSucceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.releases[1]
+}
+
+func (b *staleSameRunCoordinationBackend) secondReleaseSucceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.releases[2]
+}
+
+func (b *staleSameRunCoordinationBackend) holder() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.holderID
+}
+
+type staleSameRunCoordinationLease struct {
+	backend  *staleSameRunCoordinationBackend
+	workerID int
+}
+
+func (l *staleSameRunCoordinationLease) TryAcquireOrRenew(context.Context, time.Time) (bool, error) {
+	b := l.backend
+	b.mu.Lock()
+	b.tryCalls[l.workerID]++
+	call := b.tryCalls[l.workerID]
+	switch {
+	case l.workerID == 1 && call == 1:
+		b.holderID = 1
+		close(b.firstAcquired)
+		resume := b.resumeFirstCh
+		b.mu.Unlock()
+		<-resume
+		// Return the successful result obtained before the deterministic process
+		// pause, even though worker B has since replaced this token.
+		return true, nil
+	case l.workerID == 2 && call == 1:
+		if b.holderID != 1 || !b.firstExpired {
+			b.mu.Unlock()
+			return false, nil
+		}
+		b.holderID = 2
+		close(b.secondTookOver)
+		resume := b.resumeSecondCh
+		b.mu.Unlock()
+		<-resume
+		return true, nil
+	default:
+		held := b.holderID == l.workerID
+		b.mu.Unlock()
+		return held, nil
+	}
+}
+
+func (l *staleSameRunCoordinationLease) Release(context.Context, time.Time) (bool, error) {
+	b := l.backend
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.holderID != l.workerID {
+		b.releases[l.workerID] = false
+		return false, nil
+	}
+	b.holderID = 0
+	b.releases[l.workerID] = true
+	return true, nil
+}
+
+func (*staleSameRunCoordinationLease) Close() {}
+
+func configureStaleSameRunControlPlaneBackupCoordination(server *Server, backend *staleSameRunCoordinationBackend) {
+	server.backupCoordination.LeaseDuration = 120 * time.Second
+	server.backupCoordination.RenewPeriod = time.Hour
+	server.newBackupCoordinationLease = backend.factory
 }

@@ -24,6 +24,7 @@ type APIConfig struct {
 	WorkloadIdentitySigningKey       string
 	ControlPlaneNamespace            string
 	ControlPlaneReleaseInstance      string
+	BackupCoordination               BackupCoordinationConfig
 	ControlPlaneCNPGBackupEnabled    bool
 	ControlPlaneCNPGBackupName       string
 	RegistryGCLeaseName              string
@@ -74,6 +75,13 @@ type APIConfig struct {
 type TelemetryAgentConfig struct {
 	BindAddr      string
 	Observability observability.Config
+}
+
+type BackupCoordinationConfig struct {
+	LeaseName      string
+	LeaseNamespace string
+	LeaseDuration  time.Duration
+	RenewPeriod    time.Duration
 }
 
 type ControllerConfig struct {
@@ -279,14 +287,20 @@ type DNSGeoIPOverride struct {
 
 func APIFromEnv() APIConfig {
 	cfg := APIConfig{
-		BindAddr:                         getenv("FUGUE_BIND_ADDR", ":8080"),
-		MetricsBindAddr:                  strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
-		StorePath:                        getenv("FUGUE_STORE_PATH", "./data/store.json"),
-		DatabaseURL:                      getenv("FUGUE_DATABASE_URL", ""),
-		BootstrapAdminKey:                getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
-		WorkloadIdentitySigningKey:       strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
-		ControlPlaneNamespace:            getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
-		ControlPlaneReleaseInstance:      getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
+		BindAddr:                    getenv("FUGUE_BIND_ADDR", ":8080"),
+		MetricsBindAddr:             strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
+		StorePath:                   getenv("FUGUE_STORE_PATH", "./data/store.json"),
+		DatabaseURL:                 getenv("FUGUE_DATABASE_URL", ""),
+		BootstrapAdminKey:           getenv("FUGUE_BOOTSTRAP_ADMIN_KEY", "fugue_bootstrap_admin_change_me"),
+		WorkloadIdentitySigningKey:  strings.TrimSpace(os.Getenv("FUGUE_WORKLOAD_IDENTITY_SIGNING_KEY")),
+		ControlPlaneNamespace:       getenv("FUGUE_CONTROL_PLANE_NAMESPACE", ""),
+		ControlPlaneReleaseInstance: getenv("FUGUE_CONTROL_PLANE_RELEASE_INSTANCE", ""),
+		BackupCoordination: BackupCoordinationConfig{
+			LeaseName:      strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME")),
+			LeaseNamespace: strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE")),
+			LeaseDuration:  time.Duration(getenvInt("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS", 120)) * time.Second,
+			RenewPeriod:    time.Duration(getenvInt("FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS", 30)) * time.Second,
+		},
 		ControlPlaneCNPGBackupEnabled:    getenvBool("FUGUE_CONTROL_PLANE_CNPG_BACKUP_ENABLED", false),
 		ControlPlaneCNPGBackupName:       strings.TrimSpace(os.Getenv("FUGUE_CONTROL_PLANE_CNPG_BACKUP_NAME")),
 		RegistryGCLeaseName:              getenv("FUGUE_REGISTRY_GC_LEASE_NAME", "fugue-registry-gc"),
@@ -338,6 +352,21 @@ func APIFromEnv() APIConfig {
 	}
 	if cfg.ClusterJoinRegistryEndpoint == "" {
 		cfg.ClusterJoinRegistryEndpoint = cfg.RegistryPullBase
+	}
+	if cfg.BackupCoordination.LeaseName == "" {
+		// Existing installations already expose the Helm fullname through the
+		// registry-GC Lease name. Reuse that exact prefix so the first
+		// Lease-aware API rollout can participate before the chart starts
+		// injecting the dedicated backup coordination variables.
+		registryGCLeaseName := strings.TrimSpace(cfg.RegistryGCLeaseName)
+		if strings.HasSuffix(registryGCLeaseName, "-registry-gc") {
+			cfg.BackupCoordination.LeaseName = strings.TrimSuffix(registryGCLeaseName, "-registry-gc") + "-control-plane-db-backup"
+		} else if cfg.ControlPlaneReleaseInstance != "" {
+			cfg.BackupCoordination.LeaseName = strings.TrimSpace(cfg.ControlPlaneReleaseInstance) + "-fugue-control-plane-db-backup"
+		}
+	}
+	if cfg.BackupCoordination.LeaseNamespace == "" {
+		cfg.BackupCoordination.LeaseNamespace = strings.TrimSpace(cfg.ControlPlaneNamespace)
 	}
 	return cfg
 }
