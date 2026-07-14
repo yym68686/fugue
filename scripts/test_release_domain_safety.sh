@@ -3540,6 +3540,11 @@ assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "ba
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
   fail "backup schedule runtime files must have explicit release-risk ownership"
 
+FUGUE_RELEASE_CHANGED_FILES=$'internal/kubelease/lease.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "Kubernetes Lease runtime changes must propagate shared control-plane risk"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "Kubernetes Lease runtime files must have explicit release-risk ownership"
+
 FUGUE_RELEASE_CHANGED_FILES=$'internal/platformsafety/kernel.go'
 assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "platform safety kernel changes must propagate shared control-plane risk"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
