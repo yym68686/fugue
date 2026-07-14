@@ -169,7 +169,8 @@ func TestUpgradeScriptDoesNotBlockHAUpgradeOnNotReadyPrimary(t *testing.T) {
 		"skip primary mesh restore because primary node ${primary_node_name} is NotReady",
 		"skip primary disk-pressure recovery because primary node ${primary_node_name} is NotReady",
 		"skip Route A edge proxy sync because primary node ${primary_node_name} is NotReady",
-		"warning: Route A edge proxy sync failed; continuing because edge/API rollout already completed",
+		"Route A edge proxy sync failed or lost its release guard",
+		"Route A edge proxy synchronization failed; attempting rollback",
 		"operator: NotIn",
 		"- primary",
 		"maxUnavailable: 0",
@@ -183,6 +184,7 @@ func TestUpgradeScriptDoesNotBlockHAUpgradeOnNotReadyPrimary(t *testing.T) {
 	for _, unwanted := range []string{
 		"primary node ${primary_node_name} is NotReady; restarting k3s on the primary host",
 		"primary node ${primary_node_name} remained NotReady after cleanup and SSH restart fallback",
+		"warning: Route A edge proxy sync failed; continuing because edge/API rollout already completed",
 	} {
 		if strings.Contains(script, unwanted) {
 			t.Fatalf("upgrade script should not block HA deploy on %q: %s", unwanted, path)

@@ -591,6 +591,9 @@ if command == "apply" and "-f" in argv:
         script = (((payload.get("spec") or {}).get("containers") or [{}])[0].get("command") or ["", "", ""])[-1]
         with open(os.environ["MOCK_PROBE_SCRIPTS"], "a", encoding="utf-8") as handle:
             handle.write(script + "\n--- probe ---\n")
+        name = str((payload.get("metadata") or {}).get("name") or "")
+        if any("metadata.uid" in item for item in argv):
+            sys.stdout.write(f"{name}|uid-probe-{name}")
     elif payload.get("kind") == "DaemonSet":
         template = ((payload.get("spec") or {}).get("template") or {})
         pod_spec = template.get("spec") or {}
@@ -685,7 +688,7 @@ if command == "get" and ("daemonset" in argv or any(item.startswith("ds/") for i
             elif "desiredNumberScheduled" in output:
                 desired = len(ds["targets"])
                 ready = sum(1 for pod in state["pods"] if pod["node"] in ds["targets"] and pod["ready"])
-                sys.stdout.write(f"{ds['generation']}\t{ds['observed_generation']}\t{desired}\t{ready}\t{desired-ready}")
+                sys.stdout.write(f"{ds['generation']}|{ds['observed_generation']}|{desired}|{ready}|{desired-ready}")
             elif "node-local-dns-mode" in output:
                 sys.stdout.write(ds["mode"])
             elif "kubernetes\\.io/hostname" in output and ds["layout"] == "legacy":
@@ -783,7 +786,13 @@ if command == "get" and "pod" in argv:
     name = argv[argv.index("pod") + 1]
     if name.startswith("fugue-nld-") and any("status.phase" in item for item in argv):
         fail_purpose = os.environ.get("MOCK_PROBE_FAIL_PURPOSE", "")
-        sys.stdout.write("Failed" if fail_purpose and f"fugue-nld-{fail_purpose}-" in name else "Succeeded")
+        safe_fail_purpose = "".join(
+            char.lower() if char.isalnum() else "-" if char == "_" else char
+            for char in fail_purpose
+            if char.isalnum() or char in "-_"
+        )[:12].strip("-")
+        phase = "Failed" if safe_fail_purpose and f"fugue-nld-{safe_fail_purpose}-" in name else "Succeeded"
+        sys.stdout.write(f"uid-probe-{name}|{phase}")
         raise SystemExit(0)
     reconcile(state)
     save_state(state)
@@ -898,9 +907,21 @@ set_common_values() {
   FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS=2
   FUGUE_NODE_LOCAL_DNS_CRITICAL_READY_TIMEOUT_SECONDS=2
   FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS=0
+  FUGUE_HELM_TIMEOUT=2s
   FUGUE_ROLLOUT_TIMEOUT=2s
   FUGUE_SMOKE_RETRIES=1
   FUGUE_SMOKE_DELAY_SECONDS=0
+  FUGUE_SMOKE_URL=https://api.example.test/healthz
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=120
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS=5
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=15
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS=20
+  FUGUE_DEPLOY_JOB_BUDGET_SECONDS=20400
+  FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=10200
+  FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=600
+  FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS=900
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( $(date +%s) + FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
+  NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=0
   FUGUE_DNS_ZONE=example.test
   NODE_LOCAL_DNS_PREVIOUS_ENABLED=false
   NODE_LOCAL_DNS_PREVIOUS_MODE=""

@@ -239,7 +239,7 @@ jobs:
     # The staged rollout needs room for backup/release coordination, bounded
     # rollback, and attribution upload. New budget env values are intentionally
     # harmless to the previous release script during the bootstrap deployment.
-    timeout-minutes: 300
+    timeout-minutes: 360
     runs-on:
       - self-hosted
       - linux
@@ -248,6 +248,9 @@ jobs:
       - control-plane
     environment: production
     steps:
+      - name: Record deploy job budget origin
+        run: echo "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -527,6 +530,7 @@ jobs:
           FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS: ${{ vars.FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS || '180' }}
           FUGUE_ROLLOUT_TIMEOUT: ${{ vars.FUGUE_ROLLOUT_TIMEOUT || '600s' }}
           FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS: ${{ vars.FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS || '630' }}
+          FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS: ${{ vars.FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS || '900' }}
           FUGUE_MESH_RECOVERY_ENABLED: ${{ vars.FUGUE_MESH_RECOVERY_ENABLED || 'false' }}
           FUGUE_MESH_RECOVERY_LISTEN_ADDR: ${{ vars.FUGUE_MESH_RECOVERY_LISTEN_ADDR || '' }}
           FUGUE_MESH_RECOVERY_GENERATION: ${{ vars.FUGUE_MESH_RECOVERY_GENERATION || '' }}
@@ -562,8 +566,8 @@ jobs:
           FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS || '30' }}
           FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS || '15' }}
           FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS || '20' }}
-          FUGUE_DEPLOY_JOB_BUDGET_SECONDS: '16800'
-          FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS: '7200'
+          FUGUE_DEPLOY_JOB_BUDGET_SECONDS: '20400'
+          FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS: '10200'
           FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS: '600'
           FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE || 'auto' }}
           FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || ((github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '') || needs.build.outputs.build_edge == 'true') }}

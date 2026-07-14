@@ -350,9 +350,639 @@ NODE_LOCAL_DNS_PRESERVED_MODE=""
 NODE_LOCAL_DNS_PRESERVED_PODS_JSON="[]"
 NODE_LOCAL_DNS_PRESERVED_DAEMONSET_JSON=""
 NODE_LOCAL_DNS_SPLIT_COHORT="false"
+NODE_LOCAL_DNS_BUDGET_TARGET_NODES=""
+NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=0
 IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
 IMAGE_CACHE_PRE_HELM_PLAN_JSON=""
 IMAGE_CACHE_ONDELETE_STRATEGY_MIGRATION="false"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=""
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN=""
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
+CONTROL_PLANE_BACKUP_COORDINATION_WAIT_DEADLINE=0
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
+CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
+CONTROL_PLANE_BACKUP_COORDINATION_ABORTING="false"
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
+CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
+CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
+CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="false"
+CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0
+
+release_monotonic_millis() {
+  python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
+}
+
+prepare_release_command_in_dedicated_group() {
+  local output_pid_var="$1"
+  local output_pgid_var="$2"
+  local output_gate_dir_var="$3"
+  local absolute_deadline_millis="$4"
+  shift 4
+  local started_pid=""
+  local started_pgid=""
+  local actual_pgid=""
+  local process_state=""
+  local monitor_mode_was_enabled="false"
+  local attempt=0
+  local prepared_gate_dir=""
+  local gate_fifo=""
+  local deadline_file=""
+  local gate_value=""
+  local now_millis=""
+
+  (( $# > 0 )) || return 2
+  [[ "${absolute_deadline_millis}" =~ ^[1-9][0-9]*$ ]] || return 2
+  prepared_gate_dir="$(mktemp -d)" || return 126
+  gate_fifo="${prepared_gate_dir}/start"
+  deadline_file="${prepared_gate_dir}/deadline-millis"
+  if ! mkfifo "${gate_fifo}"; then
+    rm -rf "${prepared_gate_dir}"
+    return 126
+  fi
+  if { true <&19; } 2>/dev/null; then
+    rm -rf "${prepared_gate_dir}"
+    return 126
+  fi
+  if ! exec 19<>"${gate_fifo}"; then
+    rm -rf "${prepared_gate_dir}"
+    return 126
+  fi
+  if ! printf '%s\n' "${absolute_deadline_millis}" >"${deadline_file}"; then
+    exec 19>&-
+    rm -rf "${prepared_gate_dir}"
+    return 126
+  fi
+  if [[ "$-" == *m* ]]; then
+    monitor_mode_was_enabled="true"
+  else
+    set -m
+  fi
+  # The child blocks before the requested command. The parent can therefore
+  # prove the PGID and install Lease-fencing state before any mutation starts.
+  (
+    IFS= read -r -u 19 gate_value || exit 126
+    exec 19>&-
+    local gate_action=""
+    local active_pgid=""
+    local active_deadline_file=""
+    IFS='|' read -r gate_action active_pgid active_deadline_file <<<"${gate_value}"
+    [[ "${gate_action}" == "start" && "${active_pgid}" =~ ^[1-9][0-9]*$ && -r "${active_deadline_file}" ]] || exit 126
+    local CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID="${active_pgid}"
+    local CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE="${active_deadline_file}"
+    "$@"
+  ) <&0 &
+  started_pid=$!
+  started_pgid="${started_pid}"
+  if [[ "${monitor_mode_was_enabled}" != "true" ]]; then
+    set +m
+  fi
+
+  while (( attempt < 100 )); do
+    process_state="$(ps -o stat= -p "${started_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    actual_pgid="$(ps -o pgid= -p "${started_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -n "${process_state}" && -n "${actual_pgid}" ]]; then
+      break
+    fi
+    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+      wait "${started_pid}" >/dev/null 2>&1 || true
+      exec 19>&-
+      rm -rf "${prepared_gate_dir}"
+      return 126
+    fi
+    now_millis="$(release_monotonic_millis)" || now_millis=""
+    if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ ]] ||
+      (( now_millis >= absolute_deadline_millis - 500 )); then
+      kill -KILL "${started_pid}" >/dev/null 2>&1 || true
+      wait "${started_pid}" >/dev/null 2>&1 || true
+      exec 19>&-
+      rm -rf "${prepared_gate_dir}"
+      return 124
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.01
+  done
+  if [[ -z "${process_state}" || -z "${actual_pgid}" || "${actual_pgid}" != "${started_pgid}" ]]; then
+    log_stderr "refusing to start wall-bounded command without a dedicated process group: pid=${started_pid} pgid=${actual_pgid:-missing}"
+    kill -KILL "${started_pid}" >/dev/null 2>&1 || true
+    wait "${started_pid}" >/dev/null 2>&1 || true
+    exec 19>&-
+    rm -rf "${prepared_gate_dir}"
+    return 126
+  fi
+
+  printf -v "${output_pid_var}" '%s' "${started_pid}"
+  printf -v "${output_pgid_var}" '%s' "${started_pgid}"
+  printf -v "${output_gate_dir_var}" '%s' "${prepared_gate_dir}"
+}
+
+abort_prepared_release_command() {
+  local pid="$1"
+  local pgid="$2"
+  local gate_dir="$3"
+
+  if [[ "${pgid}" =~ ^[1-9][0-9]*$ ]]; then
+    kill -KILL -- "-${pgid}" >/dev/null 2>&1 || true
+  elif [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  fi
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && wait "${pid}" >/dev/null 2>&1 || true
+  exec 19>&-
+  [[ -z "${gate_dir}" ]] || rm -rf "${gate_dir}"
+}
+
+release_prepared_release_command() {
+  local pid="$1"
+  local pgid="$2"
+  local gate_dir="$3"
+  local absolute_deadline_millis="$4"
+  local now_millis=""
+  local deadline_file="${gate_dir}/deadline-millis"
+
+  now_millis="$(release_monotonic_millis)" || now_millis=""
+  if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ ]] ||
+    (( now_millis >= absolute_deadline_millis - 500 )); then
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 124
+  fi
+  if ! printf 'start|%s|%s\n' "${pgid}" "${deadline_file}" >&19; then
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 126
+  fi
+  exec 19>&-
+  rm -f "${gate_dir}/start"
+}
+
+write_active_release_deadline_millis() {
+  local deadline_file="$1"
+  local deadline_millis="$2"
+  local temporary="${deadline_file}.tmp.$$"
+
+  [[ "${deadline_millis}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! printf '%s\n' "${deadline_millis}" >"${temporary}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+  if ! mv -f "${temporary}" "${deadline_file}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+}
+
+run_with_active_release_group_timeout() {
+  local timeout_seconds="$1"
+  shift
+  local deadline_file="${CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE:-}"
+  local previous_deadline=""
+  local now_millis=""
+  local requested_deadline=0
+  local effective_deadline=0
+  local status=0
+
+  [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ && -r "${deadline_file}" ]] || return 2
+  previous_deadline="$(tr -d '[:space:]' <"${deadline_file}")" || return 126
+  now_millis="$(release_monotonic_millis)" || return 126
+  [[ "${previous_deadline}" =~ ^[1-9][0-9]*$ && "${now_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
+  requested_deadline=$((now_millis + timeout_seconds * 1000))
+  effective_deadline="${previous_deadline}"
+  if (( requested_deadline < effective_deadline )); then
+    effective_deadline="${requested_deadline}"
+  fi
+  (( now_millis < effective_deadline - 500 )) || return 124
+  write_active_release_deadline_millis "${deadline_file}" "${effective_deadline}" || return 126
+  if "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  write_active_release_deadline_millis "${deadline_file}" "${previous_deadline}" || return 126
+  return "${status}"
+}
+
+run_with_wall_timeout() {
+  local timeout_seconds="$1"
+  shift
+  local pid=""
+  local pgid=""
+  local gate_dir=""
+  local deadline_millis=0
+  local effective_deadline_millis=0
+  local now_millis=""
+  local status=0
+  local process_state=""
+
+  [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || {
+    log_stderr "invalid wall timeout: ${timeout_seconds:-<empty>}"
+    return 2
+  }
+  (( $# > 0 )) || return 2
+
+  if [[ "${CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID:-}" =~ ^[1-9][0-9]*$ ]]; then
+    run_with_active_release_group_timeout "${timeout_seconds}" "$@"
+    return
+  fi
+
+  now_millis="$(release_monotonic_millis)" || return 126
+  [[ "${now_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
+  deadline_millis=$((now_millis + timeout_seconds * 1000))
+  prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" "$@" || return $?
+  release_prepared_release_command "${pid}" "${pgid}" "${gate_dir}" "${deadline_millis}" || return $?
+  while true; do
+    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+      rm -rf "${gate_dir}"
+      if wait "${pid}"; then
+        return 0
+      else
+        status=$?
+        return "${status}"
+      fi
+    fi
+    now_millis="$(release_monotonic_millis)" || now_millis="${deadline_millis}"
+    effective_deadline_millis="$(tr -d '[:space:]' <"${gate_dir}/deadline-millis" 2>/dev/null || true)"
+    if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ || ! "${effective_deadline_millis}" =~ ^[1-9][0-9]*$ ]] ||
+      (( now_millis >= effective_deadline_millis - 500 )); then
+      terminate_release_command_tree "${pid}" "${pgid}"
+      rm -rf "${gate_dir}"
+      return 124
+    fi
+    sleep 0.1
+  done
+}
+
+bounded_kubectl() {
+  local timeout_seconds="$1"
+  shift
+  local -a kubectl_command=()
+
+  read -r -a kubectl_command <<<"${KUBECTL}"
+  (( ${#kubectl_command[@]} > 0 )) || return 2
+  case "${kubectl_command[0]}" in
+    control_plane_release_guarded_kubectl|control_plane_release_wall_bounded_kubectl)
+      # These adapters already provide the outer wall timeout. Delegate the
+      # tighter helper bound to them instead of asking GNU timeout to exec a
+      # shell function (which fails with rc=127) or nesting process groups.
+      local CONTROL_PLANE_RELEASE_KUBECTL_OUTER_TIMEOUT_SECONDS="${timeout_seconds}"
+      "${kubectl_command[@]}" "$@"
+      return
+      ;;
+  esac
+  run_with_wall_timeout "${timeout_seconds}" "${kubectl_command[@]}" "$@"
+}
+
+release_bounded_kubectl() {
+  local timeout_seconds="$1"
+  local phase="$2"
+  shift 2
+  local -a kubectl_command=()
+
+  read -r -a kubectl_command <<<"${KUBECTL}"
+  (( ${#kubectl_command[@]} > 0 )) || return 2
+  case "${kubectl_command[0]}" in
+    control_plane_release_guarded_kubectl|control_plane_release_wall_bounded_kubectl)
+      bounded_kubectl "${timeout_seconds}" "$@"
+      return
+      ;;
+  esac
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+    run_release_long_command "${timeout_seconds}" "${phase}" "${kubectl_command[@]}" "$@"
+    return
+  fi
+  bounded_kubectl "${timeout_seconds}" "$@"
+}
+
+terminate_release_command_tree() {
+  local pid="$1"
+  local pgid="${2:-}"
+  local shell_pgid=""
+  local descendants=""
+
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+  shell_pgid="$(ps -o pgid= -p "${BASHPID:-$$}" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "${pgid}" =~ ^[1-9][0-9]*$ && "${pgid}" != "${shell_pgid}" ]]; then
+    # The guarded command is started with monitor mode enabled, so its Bash
+    # job owns a dedicated process group. Signal the group twice: a TERM trap
+    # may start a new child after the first signal snapshot, while the delayed
+    # KILL still reaches every process that remains in that group.
+    kill -TERM -- "-${pgid}" >/dev/null 2>&1 || true
+    sleep 0.2
+    kill -KILL -- "-${pgid}" >/dev/null 2>&1 || true
+    wait "${pid}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  log_stderr "guarded command ${pid} has no safe dedicated process group; using descendant cleanup fallback"
+  descendants="$(ps -axo pid=,ppid= 2>/dev/null | python3 -c '
+import sys
+root = int(sys.argv[1])
+children = {}
+for line in sys.stdin:
+    fields = line.split()
+    if len(fields) != 2:
+        continue
+    try:
+        pid, ppid = map(int, fields)
+    except ValueError:
+        continue
+    children.setdefault(ppid, []).append(pid)
+ordered = []
+def visit(parent):
+    for child in children.get(parent, []):
+        visit(child)
+        ordered.append(child)
+visit(root)
+print(" ".join(str(pid) for pid in ordered))
+' "${pid}" || true)"
+  if [[ -n "$(trim_field "${descendants}")" ]]; then
+    # shellcheck disable=SC2086
+    kill -TERM ${descendants} >/dev/null 2>&1 || true
+  fi
+  kill -TERM "${pid}" >/dev/null 2>&1 || true
+  sleep 0.2
+  if [[ -n "$(trim_field "${descendants}")" ]]; then
+    # shellcheck disable=SC2086
+    kill -KILL ${descendants} >/dev/null 2>&1 || true
+  fi
+  kill -KILL "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" >/dev/null 2>&1 || true
+}
+
+run_with_control_plane_backup_coordination_guard() {
+  local timeout_seconds="$1"
+  local phase="$2"
+  shift 2
+  local pid=""
+  local pgid=""
+  local gate_dir=""
+  local deadline_millis=0
+  local effective_deadline_millis=0
+  local now_millis=""
+  local state=""
+  local process_state=""
+  local status=0
+
+  [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || return 2
+  (( $# > 0 )) || return 2
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" ]]; then
+    require_control_plane_backup_coordination_or_abort "${phase}"
+  fi
+
+  if [[ "${CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID:-}" =~ ^[1-9][0-9]*$ ]]; then
+    run_with_active_release_group_timeout "${timeout_seconds}" "$@"
+    return
+  fi
+
+  now_millis="$(release_monotonic_millis)" || return 126
+  [[ "${now_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
+  deadline_millis=$((now_millis + timeout_seconds * 1000))
+  prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" "$@" || return $?
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID="${pid}"
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID="${pgid}"
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" ]] &&
+    ! require_control_plane_backup_coordination_lease "${phase} gated start"; then
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+    write_control_plane_backup_coordination_health lost "guarded-start:${phase}" || true
+    handle_control_plane_backup_coordination_abort true
+    return 125
+  fi
+  if release_prepared_release_command "${pid}" "${pgid}" "${gate_dir}" "${deadline_millis}"; then
+    :
+  else
+    status=$?
+    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+    return "${status}"
+  fi
+  while true; do
+    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+      rm -rf "${gate_dir}"
+      if wait "${pid}"; then
+        return 0
+      else
+        status=$?
+        return "${status}"
+      fi
+    fi
+    now_millis="$(release_monotonic_millis)" || now_millis="${deadline_millis}"
+    effective_deadline_millis="$(tr -d '[:space:]' <"${gate_dir}/deadline-millis" 2>/dev/null || true)"
+    if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ || ! "${effective_deadline_millis}" =~ ^[1-9][0-9]*$ ]] ||
+      (( now_millis >= effective_deadline_millis - 500 )); then
+      log_stderr "${phase} exceeded its ${timeout_seconds}s outer wall timeout"
+      terminate_release_command_tree "${pid}" "${pgid}"
+      rm -rf "${gate_dir}"
+      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+      return 124
+    fi
+    if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" &&
+      "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+      state="$(control_plane_backup_coordination_health_state 2>/dev/null || true)"
+      if [[ "${state}" != "healthy" && "${state}" != "degraded" ]] ||
+        [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] ||
+        ! kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
+        log_stderr "terminating ${phase} because shared backup/release Lease health is unsafe: state=${state:-missing} renewer=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-missing}"
+        write_control_plane_backup_coordination_health lost "guarded-command:${phase}" || true
+        terminate_release_command_tree "${pid}" "${pgid}"
+        rm -rf "${gate_dir}"
+        CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+        CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+        if [[ "${BASHPID:-$$}" == "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID:-}" ]]; then
+          handle_control_plane_backup_coordination_abort true
+        fi
+        return 125
+      fi
+    fi
+    sleep 0.2 || true
+  done
+}
+
+run_release_long_command() {
+  local timeout_seconds="$1"
+  local phase="$2"
+  shift 2
+
+  require_release_forward_budget "${timeout_seconds}" "${phase}" || return 1
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+    run_with_control_plane_backup_coordination_guard "${timeout_seconds}" "${phase}" "$@"
+  else
+    run_with_wall_timeout "${timeout_seconds}" "$@"
+  fi
+}
+
+control_plane_release_guarded_kubectl() {
+  local -a kubectl_command=()
+
+  read -r -a kubectl_command <<<"${CONTROL_PLANE_RELEASE_RAW_KUBECTL:-}"
+  (( ${#kubectl_command[@]} > 0 )) || return 2
+  require_release_forward_budget "${CONTROL_PLANE_RELEASE_KUBECTL_OUTER_TIMEOUT_SECONDS}" \
+    "${CONTROL_PLANE_RELEASE_KUBECTL_PHASE}" || return 1
+  run_with_control_plane_backup_coordination_guard \
+    "${CONTROL_PLANE_RELEASE_KUBECTL_OUTER_TIMEOUT_SECONDS}" \
+    "${CONTROL_PLANE_RELEASE_KUBECTL_PHASE}" "${kubectl_command[@]}" "$@"
+}
+
+run_release_function_with_guarded_kubectl() {
+  local timeout_seconds="$1"
+  local phase="$2"
+  shift 2
+  local CONTROL_PLANE_RELEASE_RAW_KUBECTL="${KUBECTL}"
+  local CONTROL_PLANE_RELEASE_KUBECTL_OUTER_TIMEOUT_SECONDS="${timeout_seconds}"
+  local CONTROL_PLANE_RELEASE_KUBECTL_PHASE="${phase}"
+  local KUBECTL="control_plane_release_guarded_kubectl"
+
+  require_release_forward_budget "${timeout_seconds}" "${phase}" || return 1
+  "$@"
+}
+
+control_plane_release_wall_bounded_kubectl() {
+  local -a kubectl_command=()
+
+  read -r -a kubectl_command <<<"${CONTROL_PLANE_RELEASE_RAW_KUBECTL:-}"
+  (( ${#kubectl_command[@]} > 0 )) || return 2
+  run_with_wall_timeout "${CONTROL_PLANE_RELEASE_KUBECTL_OUTER_TIMEOUT_SECONDS}" \
+    "${kubectl_command[@]}" "$@"
+}
+
+run_release_function_with_wall_bounded_kubectl() {
+  local timeout_seconds="$1"
+  shift
+  local CONTROL_PLANE_RELEASE_RAW_KUBECTL="${KUBECTL}"
+  local CONTROL_PLANE_RELEASE_KUBECTL_OUTER_TIMEOUT_SECONDS="${timeout_seconds}"
+  local KUBECTL="control_plane_release_wall_bounded_kubectl"
+
+  require_release_forward_budget "${timeout_seconds}" "pre-mutation bounded kubectl" || return 1
+  "$@"
+}
+
+run_node_local_dns_with_bounded_kubectl() {
+  run_release_function_with_guarded_kubectl \
+    "${FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS}" \
+    "NodeLocal DNSCache kubectl" "$@"
+}
+
+run_node_local_dns_whole_phase() {
+  local phase="$1"
+  shift
+
+  run_release_long_command \
+    "${FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS:-${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}}" \
+    "NodeLocal DNSCache ${phase}" "$@"
+}
+
+node_local_dns_state_scalar_names() {
+  printf '%s\n' \
+    NODE_LOCAL_DNS_PREVIOUS_ENABLED \
+    NODE_LOCAL_DNS_PREVIOUS_MODE \
+    NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES \
+    NODE_LOCAL_DNS_PREVIOUS_PODS_JSON \
+    NODE_LOCAL_DNS_ADDED_NODES \
+    NODE_LOCAL_DNS_REPLACED_NODES \
+    NODE_LOCAL_DNS_FAILED_NODE \
+    NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT \
+    NODE_LOCAL_DNS_TARGET_NODES \
+    NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP \
+    NODE_LOCAL_DNS_PREFLIGHT_TARGET_NODES \
+    NODE_LOCAL_DNS_RELEASED \
+    NODE_LOCAL_DNS_ACTIVE_DAEMONSET_NAME \
+    NODE_LOCAL_DNS_ACTIVE_SERVICE_NAME \
+    NODE_LOCAL_DNS_ACTIVE_COMPONENT \
+    NODE_LOCAL_DNS_UPSTREAM_SERVICE_NAME \
+    NODE_LOCAL_DNS_PRESERVED_DAEMONSET_NAME \
+    NODE_LOCAL_DNS_PRESERVED_OFFLINE_NODES \
+    NODE_LOCAL_DNS_PRESERVED_MODE \
+    NODE_LOCAL_DNS_PRESERVED_PODS_JSON \
+    NODE_LOCAL_DNS_PRESERVED_DAEMONSET_JSON \
+    NODE_LOCAL_DNS_SPLIT_COHORT \
+    NODE_LOCAL_DNS_BUDGET_TARGET_NODES \
+    NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS
+}
+
+node_local_dns_write_phase_state() {
+  local state_dir="$1"
+  local variable_name=""
+
+  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] || return 1
+  while IFS= read -r variable_name; do
+    [[ -n "${variable_name}" ]] || continue
+    printf '%s' "${!variable_name-}" >"${state_dir}/${variable_name}" || return 1
+  done < <(node_local_dns_state_scalar_names)
+  : >"${state_dir}/NODE_LOCAL_DNS_HELM_SET_ARGS" || return 1
+  if (( ${#NODE_LOCAL_DNS_HELM_SET_ARGS[@]} > 0 )); then
+    printf '%s\0' "${NODE_LOCAL_DNS_HELM_SET_ARGS[@]}" >"${state_dir}/NODE_LOCAL_DNS_HELM_SET_ARGS" || return 1
+  fi
+}
+
+node_local_dns_execute_phase_and_write_state() {
+  local state_dir="$1"
+  shift
+
+  "$@" || return 1
+  node_local_dns_write_phase_state "${state_dir}"
+}
+
+node_local_dns_apply_phase_state() {
+  local state_dir="$1"
+  local variable_name=""
+  local value=""
+  local item=""
+  local file=""
+  local file_bytes=""
+  local total_bytes=0
+
+  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] || return 1
+  for file in "${state_dir}"/*; do
+    [[ -f "${file}" && ! -L "${file}" ]] || return 1
+    file_bytes="$(wc -c <"${file}" 2>/dev/null | tr -d '[:space:]')"
+    [[ "${file_bytes}" =~ ^[0-9]+$ ]] || return 1
+    total_bytes=$((total_bytes + file_bytes))
+    (( total_bytes <= 16777216 )) || return 1
+  done
+  while IFS= read -r variable_name; do
+    [[ -n "${variable_name}" ]] || continue
+    file="${state_dir}/${variable_name}"
+    [[ -f "${file}" && ! -L "${file}" ]] || return 1
+    value="$(cat "${file}")" || return 1
+    printf -v "${variable_name}" '%s' "${value}"
+  done < <(node_local_dns_state_scalar_names)
+  file="${state_dir}/NODE_LOCAL_DNS_HELM_SET_ARGS"
+  [[ -f "${file}" && ! -L "${file}" ]] || return 1
+  NODE_LOCAL_DNS_HELM_SET_ARGS=()
+  while IFS= read -r -d '' item; do
+    NODE_LOCAL_DNS_HELM_SET_ARGS+=("${item}")
+  done <"${file}"
+}
+
+run_node_local_dns_phase_with_state_handoff() {
+  local phase="$1"
+  shift
+  local handoff_dir=""
+
+  handoff_dir="$(mktemp -d "${TMPDIR:-/tmp}/fugue-node-local-dns-phase.XXXXXX")" || return 1
+  chmod 0700 "${handoff_dir}" || {
+    rm -rf "${handoff_dir}"
+    return 1
+  }
+  if ! run_node_local_dns_whole_phase "${phase}" \
+    node_local_dns_execute_phase_and_write_state "${handoff_dir}" "$@"; then
+    rm -rf "${handoff_dir}"
+    return 1
+  fi
+  if ! node_local_dns_apply_phase_state "${handoff_dir}"; then
+    rm -rf "${handoff_dir}"
+    return 1
+  fi
+  rm -rf "${handoff_dir}"
+}
 
 release_changed_files() {
   if [[ -n "${RELEASE_CHANGED_FILES_EFFECTIVE:-}" ]]; then
@@ -1028,6 +1658,7 @@ wait_for_release_safety_watch_windows() {
   write_release_safety_attribution || true
   deadline=$((SECONDS + seconds))
   while true; do
+    require_control_plane_backup_coordination_or_abort "release safety watch sample"
     if output="$(robustness_status_summary "${ROBUSTNESS_HEALTH_GATE_BASELINE_FILE:-}")" &&
       release_output="$(release_guard_status_summary 2>/dev/null)"; then
       log "release safety watch sample passed: ${output}; ${release_output}"
@@ -1039,8 +1670,128 @@ wait_for_release_safety_watch_windows() {
       log "release safety watch window completed: ${summary}"
       return 0
     fi
+    require_release_forward_budget "${delay}" "release safety watch delay" || return 1
     sleep "${delay}"
   done
+}
+
+release_status_transport_wall_budget_seconds() {
+  local attempts="${FUGUE_RELEASE_STATUS_TRANSPORT_ATTEMPTS:-3}"
+  local delay="${FUGUE_RELEASE_STATUS_TRANSPORT_RETRY_DELAY_SECONDS:-2}"
+  local request_timeout="${FUGUE_RELEASE_STATUS_REQUEST_TIMEOUT_SECONDS:-30}"
+
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || attempts=3
+  [[ "${delay}" =~ ^[0-9]+$ ]] || delay=2
+  [[ "${request_timeout}" =~ ^[1-9][0-9]*$ ]] || request_timeout=30
+  printf '%s\n' "$((attempts * request_timeout + (attempts - 1) * delay))"
+}
+
+release_safety_watch_wall_budget_seconds() {
+  local selected=""
+  local delay="${FUGUE_RELEASE_SAFETY_WATCH_DELAY_SECONDS:-30}"
+  local request_budget=""
+
+  selected="$(release_safety_watch_window_seconds)"
+  [[ "${selected}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${delay}" =~ ^[0-9]+$ ]] || return 1
+  request_budget="$(release_status_transport_wall_budget_seconds)" || return 1
+  # The loop checks its deadline only after both robustness and release-guard
+  # requests. One final sleep and one complete sample can therefore overrun the
+  # selected observation window and must be part of the deploy budget.
+  printf '%s\n' "$((selected + delay + 2 * request_budget))"
+}
+
+initialize_control_plane_release_job_deadline() {
+  local started_at="${FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH:-}"
+  local now=""
+  local deadline=""
+  local forward_deadline=""
+
+  [[ "${started_at}" =~ ^[1-9][0-9]*$ ]] || {
+    log_stderr "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH must be recorded by the deploy job before checkout"
+    return 1
+  }
+  now="$(date +%s)"
+  [[ "${now}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if (( started_at > now + 60 )); then
+    log_stderr "deploy job start epoch is implausibly in the future: started=${started_at} now=${now}"
+    return 1
+  fi
+  deadline=$((started_at + FUGUE_DEPLOY_JOB_BUDGET_SECONDS))
+  forward_deadline=$((deadline - FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS - FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS))
+  if (( now >= forward_deadline )); then
+    log_stderr "deploy job has already consumed its forward-work window: now=${now} forward_deadline=${forward_deadline} absolute_deadline=${deadline}"
+    return 1
+  fi
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH="${deadline}"
+}
+
+require_release_forward_budget() {
+  local operation_upper_seconds="$1"
+  local phase="${2:-forward release operation}"
+  local now=""
+  local remaining=""
+  local required=""
+
+  [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]] && return 0
+  [[ "${operation_upper_seconds}" =~ ^[0-9]+$ ]] || {
+    log_stderr "cannot reserve deploy budget for ${phase}: invalid operation upper bound ${operation_upper_seconds:-missing}"
+    return 1
+  }
+  (( operation_upper_seconds > 0 )) || return 0
+  if ! [[ "${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH:-0}" =~ ^[1-9][0-9]*$ ]]; then
+    # Library-only unit tests do not initialize a deploy job. A real main run
+    # always sets FUGUE_DEPLOY_JOB_BUDGET_SECONDS and must never continue once
+    # that contract exists without its absolute origin/deadline.
+    if [[ -n "${FUGUE_DEPLOY_JOB_BUDGET_SECONDS:-}" ]]; then
+      log_stderr "cannot reserve deploy budget for ${phase}: absolute deploy deadline is uninitialized"
+      return 1
+    fi
+    return 0
+  fi
+  now="$(date +%s)"
+  remaining=$((CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH - now))
+  required=$((
+    operation_upper_seconds +
+      FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS +
+      FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS
+  ))
+  if (( remaining < required )); then
+    log_stderr "refusing ${phase}: remaining deploy budget ${remaining}s cannot cover operation upper bound ${operation_upper_seconds}s plus rollback ${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS}s and artifact ${FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS}s"
+    return 1
+  fi
+}
+
+validate_control_plane_release_job_budget() {
+  local helm_seconds=""
+  local rollout_seconds=""
+  local watch_seconds=""
+  local coordination_overhead=""
+  local required_seconds=""
+
+  helm_seconds="$(duration_to_seconds "${FUGUE_HELM_TIMEOUT}")"
+  rollout_seconds="$(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")"
+  watch_seconds="$(release_safety_watch_wall_budget_seconds)" || fail "release safety watch settings are not valid bounded integers"
+  coordination_overhead=$((
+    2 * FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS +
+      FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS +
+      FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS
+  ))
+  required_seconds=$((
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS +
+      coordination_overhead +
+      helm_seconds +
+      2 * rollout_seconds +
+      watch_seconds +
+      FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS +
+      FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS
+  ))
+  validate_control_plane_release_rollback_reserve
+  if (( FUGUE_DEPLOY_JOB_BUDGET_SECONDS < required_seconds )); then
+    fail "deploy budget ${FUGUE_DEPLOY_JOB_BUDGET_SECONDS}s is smaller than the baseline phase accounting ${required_seconds}s (backup_wait=${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS}s coordination=${coordination_overhead}s helm=${helm_seconds}s rollouts=$((2 * rollout_seconds))s watch=${watch_seconds}s rollback=${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS}s artifact=${FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS}s)"
+  fi
+  initialize_control_plane_release_job_deadline || fail "cannot initialize the absolute deploy deadline"
+  log "deploy deadline initialized: job_started=${FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH} absolute_deadline=${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH} allocation=${FUGUE_DEPLOY_JOB_BUDGET_SECONDS}s baseline_accounting=${required_seconds}s rollback_reserve=${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS}s artifact_reserve=${FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS}s"
 }
 
 node_local_build_plane_changed() {
@@ -1542,6 +2293,7 @@ image_cache_strategy_chart_changes_only_between_refs() {
   local old_ref="$1"
   local new_ref="$2"
   local file=""
+  local files=""
   local saw_file="false"
 
   old_ref="$(trim_field "${old_ref}")"
@@ -1550,6 +2302,7 @@ image_cache_strategy_chart_changes_only_between_refs() {
   git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null || return 1
   git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null || return 1
 
+  files="$(git -C "${REPO_ROOT}" diff --no-renames --name-only "${old_ref}" "${new_ref}" -- deploy/helm/fugue)" || return 1
   while IFS= read -r file; do
     file="$(trim_field "${file}")"
     [[ -n "${file}" ]] || continue
@@ -1563,7 +2316,7 @@ image_cache_strategy_chart_changes_only_between_refs() {
         return 1
         ;;
     esac
-  done < <(git -C "${REPO_ROOT}" diff --no-renames --name-only "${old_ref}" "${new_ref}" -- deploy/helm/fugue)
+  done <<<"${files}"
   [[ "${saw_file}" == "true" ]]
 }
 
@@ -2553,7 +3306,7 @@ EOF
   if command_exists systemctl && systemctl is-active --quiet k3s; then
     log "restarting local k3s once so audit/metrics config takes effect"
     if command_exists timeout; then
-      timeout --kill-after=15s 120s systemctl restart k3s
+      timeout --foreground --kill-after=15s 120s systemctl restart k3s
     else
       systemctl restart k3s
     fi
@@ -2671,8 +3424,595 @@ control_plane_postgres_primary_selector() {
   printf 'cnpg.io/cluster=%s,role=primary' "$(control_plane_postgres_name)"
 }
 
+validate_live_api_backup_coordination_ready() {
+  local deployment_json=""
+  local pods_json=""
+  local pod_names=""
+  local pod_name=""
+  local values=""
+  local lease_name=""
+  local lease_namespace=""
+  local lease_duration=""
+  local renew_seconds=""
+  local selector="app.kubernetes.io/name=fugue,app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/component=api"
+
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
+  deployment_json="$(bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_NAMESPACE}" get "deployment/${FUGUE_API_DEPLOYMENT_NAME}" -o json)" || {
+    log_stderr "cannot read the live API Deployment before backup/release coordination"
+    return 1
+  }
+  pods_json="$(bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json)" || {
+    log_stderr "cannot read live API Pods before backup/release coordination"
+    return 1
+  }
+  pod_names="$(DEPLOYMENT_JSON="${deployment_json}" PODS_JSON="${pods_json}" python3 -c '
+import json
+import os
+
+deployment = json.loads(os.environ["DEPLOYMENT_JSON"])
+pods = json.loads(os.environ["PODS_JSON"])
+spec = deployment.get("spec") or {}
+status = deployment.get("status") or {}
+metadata = deployment.get("metadata") or {}
+desired = int(spec.get("replicas") or 0)
+generation = int(metadata.get("generation") or 0)
+observed = int(status.get("observedGeneration") or 0)
+if desired < 2:
+    raise SystemExit("live API Deployment must have at least two replicas")
+for field in ("updatedReplicas", "readyReplicas", "availableReplicas"):
+    if int(status.get(field) or 0) != desired:
+        raise SystemExit(f"live API Deployment is not fully rolled out: {field}")
+if int(status.get("unavailableReplicas") or 0) != 0 or observed < generation:
+    raise SystemExit("live API Deployment has unavailable or unobserved replicas")
+
+ready = []
+for pod in pods.get("items") or []:
+    pod_metadata = pod.get("metadata") or {}
+    pod_status = pod.get("status") or {}
+    if pod_metadata.get("deletionTimestamp") or pod_status.get("phase") != "Running":
+        continue
+    conditions = {str(item.get("type")): str(item.get("status")) for item in pod_status.get("conditions") or []}
+    containers = {str(item.get("name")) for item in (pod.get("spec") or {}).get("containers") or []}
+    if conditions.get("Ready") == "True" and "api" in containers:
+        ready.append(str(pod_metadata.get("name") or ""))
+ready = sorted(name for name in ready if name)
+if len(ready) != desired:
+    raise SystemExit(f"live API Ready Pod count {len(ready)} does not equal desired replicas {desired}")
+print("\n".join(ready))
+')" || {
+    log_stderr "live API replicas are not fully rolled out for the Lease-aware bootstrap"
+    return 1
+  }
+  [[ -n "$(trim_field "${pod_names}")" ]] || return 1
+  while IFS= read -r pod_name; do
+    [[ -n "${pod_name}" ]] || continue
+    values="$(bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+      -n "${FUGUE_NAMESPACE}" exec "${pod_name}" -c api -- sh -c \
+      'printf "%s|%s|%s|%s\n" "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME:-}" "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE:-}" "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS:-}" "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS:-}"')" || {
+      log_stderr "cannot read backup coordination runtime values from live API Pod ${pod_name}"
+      return 1
+    }
+    IFS='|' read -r lease_name lease_namespace lease_duration renew_seconds <<<"$(trim_field "${values}")"
+    if [[ "${lease_name}" != "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" ||
+      "${lease_namespace}" != "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" ||
+      "${lease_duration}" != "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS}" ||
+      "${renew_seconds}" != "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS}" ]]; then
+      log_stderr "live API Pod ${pod_name} is not running the exact shared backup coordination contract"
+      return 1
+    fi
+  done <<<"${pod_names}"
+  log "all live API replicas are Ready and run the exact shared backup coordination contract: replicas=$(wc -l <<<"${pod_names}" | awk '{print $1}')"
+}
+
+control_plane_backup_coordination_now() {
+  python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))'
+}
+
+initialize_control_plane_backup_coordination_health() {
+  local health_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+
+  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" ]]; then
+    return 0
+  fi
+  CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="$(mktemp "${health_dir%/}/fugue-backup-coordination-health.XXXXXX")" || return 1
+  chmod 600 "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" || return 1
+}
+
+write_control_plane_backup_coordination_health() {
+  local state="$1"
+  local detail="${2:-}"
+  local health_file="${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}"
+  local temporary=""
+
+  [[ -n "${health_file}" ]] || return 1
+  temporary="${health_file}.${BASHPID:-$$}.tmp"
+  if ! (umask 077; printf '%s|%s|%s\n' "${state}" "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER:-unknown}" "${detail}" >"${temporary}"); then
+    rm -f "${temporary}"
+    return 1
+  fi
+  mv -f "${temporary}" "${health_file}"
+}
+
+control_plane_backup_coordination_health_state() {
+  local health_file="${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}"
+  local state=""
+
+  [[ -n "${health_file}" && -r "${health_file}" ]] || return 1
+  IFS='|' read -r state _ <"${health_file}" || return 1
+  state="$(trim_field "${state}")"
+  [[ -n "${state}" ]] || return 1
+  printf '%s' "${state}"
+}
+
+require_control_plane_backup_coordination_lease() {
+  local phase="${1:-release mutation}"
+  local state=""
+  local deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS + 1))
+
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" != "true" ]]; then
+    log_stderr "shared backup/release Lease is not held before ${phase}"
+    return 1
+  fi
+  while true; do
+    state="$(control_plane_backup_coordination_health_state 2>/dev/null || true)"
+    case "${state}" in
+      healthy)
+        if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] &&
+          kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
+          return 0
+        fi
+        log_stderr "shared backup/release Lease renewer is not alive before ${phase}"
+        return 1
+        ;;
+      degraded)
+        if (( SECONDS < deadline )) &&
+          [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] &&
+          kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
+          sleep 0.1
+          continue
+        fi
+        ;;
+      lost)
+        ;;
+      *)
+        log_stderr "shared backup/release Lease health is unavailable before ${phase}: state=${state:-missing}"
+        return 1
+        ;;
+    esac
+    log_stderr "shared backup/release Lease renewal was lost before ${phase}: state=${state:-unknown}"
+    return 1
+  done
+}
+
+handle_control_plane_backup_coordination_abort() {
+  local forced="${1:-false}"
+  local state=""
+  local renewer_alive="false"
+
+  state="$(control_plane_backup_coordination_health_state 2>/dev/null || true)"
+  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] &&
+    kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
+    renewer_alive="true"
+  fi
+  if [[ "${forced}" != "true" ]]; then
+    if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" != "true" ]]; then
+      log_stderr "ignoring backup coordination abort signal because no release Lease is held"
+      return 0
+    fi
+    if [[ "${state}" == "healthy" || "${state}" == "degraded" ]] && [[ "${renewer_alive}" == "true" ]]; then
+      log_stderr "ignoring backup coordination abort signal while Lease health and renewer are still valid: state=${state}"
+      return 0
+    fi
+    write_control_plane_backup_coordination_health lost "signal-state:${state:-missing}-renewer:${renewer_alive}" || true
+  fi
+  if [[ "${forced}" != "true" && -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" ]]; then
+    # The foreground guard owns termination of the protected process tree and
+    # will call this handler synchronously after the command is fully stopped.
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]]; then
+    log_stderr "backup coordination Lease was lost during rollback; continuing the already-active synchronous rollback"
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_ABORTING:-false}" == "true" ]]; then
+    return 0
+  fi
+  CONTROL_PLANE_BACKUP_COORDINATION_ABORTING="true"
+  log_stderr "backup coordination Lease health is unsafe; stopping forward release work: state=${state:-missing} renewer_alive=${renewer_alive}"
+  if [[ "${CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED:-false}" == "true" && -n "${PREVIOUS_REVISION:-}" ]]; then
+    log_stderr "running the normal synchronous rollback before EXIT cleanup"
+    if ! rollback_release_transaction; then
+      log_stderr "synchronous rollback after backup coordination loss did not complete; preserving existing recovery evidence"
+    fi
+  fi
+  exit 1
+}
+
+require_control_plane_backup_coordination_or_abort() {
+  local phase="${1:-release mutation}"
+
+  if require_control_plane_backup_coordination_lease "${phase}"; then
+    return 0
+  fi
+  write_control_plane_backup_coordination_health lost "guard:${phase}" || true
+  handle_control_plane_backup_coordination_abort true
+}
+
+control_plane_backup_coordination_lease_json() {
+  bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+    get "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+    --ignore-not-found -o json
+}
+
+control_plane_backup_coordination_lease_state() {
+  local lease_json="$1"
+
+  LEASE_JSON="${lease_json}" python3 -c '
+import datetime
+import json
+import os
+
+doc = json.loads(os.environ["LEASE_JSON"])
+metadata = doc.get("metadata") or {}
+spec = doc.get("spec") or {}
+annotations = metadata.get("annotations") or {}
+holder = str(spec.get("holderIdentity") or "")
+token = str(annotations.get("fugue.pro/coordination-token") or "")
+resource_version = str(metadata.get("resourceVersion") or "")
+duration = int(spec.get("leaseDurationSeconds") or 0)
+transitions = int(spec.get("leaseTransitions") or 0)
+recovery_required = str(annotations.get("fugue.pro/recovery-required") or "").strip().lower() == "true"
+timestamp = str(spec.get("renewTime") or spec.get("acquireTime") or "")
+expired = False
+if holder and duration > 0 and timestamp:
+    try:
+        observed = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        expired = now >= observed + datetime.timedelta(seconds=duration)
+    except ValueError:
+        expired = False
+print("|".join([holder, token, resource_version, "true" if expired else "false", str(transitions), "true" if recovery_required else "false"]))
+'
+}
+
+control_plane_backup_coordination_create_lease() {
+  local now="$1"
+
+  LEASE_NAME="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+    LEASE_NAMESPACE="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+    LEASE_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
+    LEASE_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
+    LEASE_DURATION="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS}" \
+    LEASE_NOW="${now}" python3 -c '
+import json
+import os
+
+print(json.dumps({
+    "apiVersion": "coordination.k8s.io/v1",
+    "kind": "Lease",
+    "metadata": {
+        "name": os.environ["LEASE_NAME"],
+        "namespace": os.environ["LEASE_NAMESPACE"],
+        "annotations": {"fugue.pro/coordination-token": os.environ["LEASE_TOKEN"]},
+    },
+    "spec": {
+        "holderIdentity": os.environ["LEASE_OWNER"],
+        "leaseDurationSeconds": int(os.environ["LEASE_DURATION"]),
+        "acquireTime": os.environ["LEASE_NOW"],
+        "renewTime": os.environ["LEASE_NOW"],
+        "leaseTransitions": 0,
+    },
+}, separators=(",", ":")))
+' | bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+      -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" create -f - >/dev/null
+}
+
+control_plane_backup_coordination_patch_acquire() {
+  local lease_json="$1"
+  local now="$2"
+  local previous_token="${3:-}"
+  local patch=""
+
+  patch="$(LEASE_JSON="${lease_json}" LEASE_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
+    LEASE_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
+    LEASE_PREVIOUS_TOKEN="${previous_token}" \
+    LEASE_DURATION="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS}" \
+    LEASE_NOW="${now}" python3 -c '
+import json
+import os
+
+doc = json.loads(os.environ["LEASE_JSON"])
+metadata = doc.get("metadata") or {}
+spec = doc.get("spec") or {}
+holder = str(spec.get("holderIdentity") or "")
+resource_version = str(metadata.get("resourceVersion") or "")
+previous_token = os.environ["LEASE_PREVIOUS_TOKEN"]
+if not resource_version or "holderIdentity" not in spec:
+    raise SystemExit(1)
+annotations = dict(metadata.get("annotations") or {})
+if str(annotations.get("fugue.pro/recovery-required") or "").strip().lower() == "true":
+    raise SystemExit(1)
+if previous_token and (
+    not holder.startswith("backup/")
+    or str(annotations.get("fugue.pro/coordination-token") or "") != previous_token
+):
+    raise SystemExit(1)
+annotations["fugue.pro/coordination-token"] = os.environ["LEASE_TOKEN"]
+patch = [
+    {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
+    {"op": "test", "path": "/spec/holderIdentity", "value": holder},
+]
+if previous_token:
+    patch.append({"op": "test", "path": "/metadata/annotations/fugue.pro~1coordination-token", "value": previous_token})
+patch.extend([
+    {"op": "add", "path": "/metadata/annotations", "value": annotations},
+    {"op": "add", "path": "/spec/holderIdentity", "value": os.environ["LEASE_OWNER"]},
+    {"op": "add", "path": "/spec/leaseDurationSeconds", "value": int(os.environ["LEASE_DURATION"])},
+    {"op": "add", "path": "/spec/acquireTime", "value": os.environ["LEASE_NOW"]},
+    {"op": "add", "path": "/spec/renewTime", "value": os.environ["LEASE_NOW"]},
+    {"op": "add", "path": "/spec/leaseTransitions", "value": int(spec.get("leaseTransitions") or 0) + 1},
+])
+print(json.dumps(patch, separators=(",", ":")))
+')" || return 1
+  bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+    patch "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+    --type=json -p "${patch}" >/dev/null
+}
+
+control_plane_backup_coordination_patch_owned() {
+  local lease_json="$1"
+  local action="$2"
+  local now="$3"
+  local patch=""
+
+  patch="$(LEASE_JSON="${lease_json}" LEASE_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
+    LEASE_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
+    LEASE_DURATION="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS}" \
+    LEASE_NOW="${now}" LEASE_ACTION="${action}" python3 -c '
+import json
+import os
+
+doc = json.loads(os.environ["LEASE_JSON"])
+metadata = doc.get("metadata") or {}
+spec = doc.get("spec") or {}
+annotations = dict(metadata.get("annotations") or {})
+owner = os.environ["LEASE_OWNER"]
+token = os.environ["LEASE_TOKEN"]
+resource_version = str(metadata.get("resourceVersion") or "")
+if (
+    not resource_version
+    or str(spec.get("holderIdentity") or "") != owner
+    or str(annotations.get("fugue.pro/coordination-token") or "") != token
+):
+    raise SystemExit(1)
+patch = [
+    {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
+    {"op": "test", "path": "/spec/holderIdentity", "value": owner},
+    {"op": "test", "path": "/metadata/annotations/fugue.pro~1coordination-token", "value": token},
+]
+if os.environ["LEASE_ACTION"] == "renew":
+    patch.extend([
+        {"op": "add", "path": "/spec/leaseDurationSeconds", "value": int(os.environ["LEASE_DURATION"])},
+        {"op": "add", "path": "/spec/renewTime", "value": os.environ["LEASE_NOW"]},
+    ])
+elif os.environ["LEASE_ACTION"] == "release":
+    annotations.pop("fugue.pro/coordination-token", None)
+    patch.extend([
+        {"op": "add", "path": "/metadata/annotations", "value": annotations},
+        {"op": "add", "path": "/spec/holderIdentity", "value": ""},
+        {"op": "add", "path": "/spec/leaseDurationSeconds", "value": 0},
+        {"op": "add", "path": "/spec/renewTime", "value": os.environ["LEASE_NOW"]},
+    ])
+elif os.environ["LEASE_ACTION"] == "recovery-required":
+    annotations["fugue.pro/recovery-required"] = "true"
+    patch.extend([
+        {"op": "add", "path": "/metadata/annotations", "value": annotations},
+        {"op": "add", "path": "/spec/leaseDurationSeconds", "value": int(os.environ["LEASE_DURATION"])},
+        {"op": "add", "path": "/spec/renewTime", "value": os.environ["LEASE_NOW"]},
+    ])
+else:
+    raise SystemExit(1)
+print(json.dumps(patch, separators=(",", ":")))
+')" || return 1
+  bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+    patch "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+    --type=json -p "${patch}" >/dev/null
+}
+
+mark_control_plane_backup_coordination_recovery_required() {
+  local lease_json=""
+  local now=""
+
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]] || return 1
+  lease_json="$(control_plane_backup_coordination_lease_json)" || return 1
+  [[ -n "$(trim_field "${lease_json}")" ]] || return 1
+  now="$(control_plane_backup_coordination_now)" || return 1
+  control_plane_backup_coordination_patch_owned "${lease_json}" recovery-required "${now}"
+}
+
+renew_control_plane_backup_coordination_lease() {
+  local lease_json=""
+  local now=""
+
+  lease_json="$(control_plane_backup_coordination_lease_json)" || return 1
+  [[ -n "$(trim_field "${lease_json}")" ]] || return 1
+  now="$(control_plane_backup_coordination_now)" || return 1
+  control_plane_backup_coordination_patch_owned "${lease_json}" renew "${now}"
+}
+
+start_control_plane_backup_coordination_lease_renewer() {
+  local parent_pid="${BASHPID:-$$}"
+
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || return 1
+  [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" ]] || return 0
+  CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID="${parent_pid}"
+
+  (
+    renew_sleep_pid=""
+    trap 'if [[ -n "${renew_sleep_pid:-}" ]]; then kill -TERM "${renew_sleep_pid}" >/dev/null 2>&1 || true; wait "${renew_sleep_pid}" >/dev/null 2>&1 || true; fi; exit 0' TERM INT
+    while true; do
+      sleep "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS}" &
+      renew_sleep_pid=$!
+      wait "${renew_sleep_pid}" || exit 0
+      renew_sleep_pid=""
+      if renew_control_plane_backup_coordination_lease; then
+        if ! write_control_plane_backup_coordination_health healthy renewed; then
+          log_stderr "cannot persist successful backup coordination renewal health; aborting release"
+          write_control_plane_backup_coordination_health lost health-write-failure || true
+          kill -USR1 "${parent_pid}" >/dev/null 2>&1 || true
+          exit 1
+        fi
+        continue
+      fi
+      write_control_plane_backup_coordination_health degraded first-renew-failure || true
+      log_stderr "control-plane backup coordination Lease renewal failed; performing one immediate bounded retry"
+      if renew_control_plane_backup_coordination_lease; then
+        if ! write_control_plane_backup_coordination_health healthy immediate-retry-recovered; then
+          log_stderr "cannot persist recovered backup coordination renewal health; aborting release"
+          write_control_plane_backup_coordination_health lost health-write-failure || true
+          kill -USR1 "${parent_pid}" >/dev/null 2>&1 || true
+          exit 1
+        fi
+        continue
+      fi
+      write_control_plane_backup_coordination_health lost consecutive-renew-failures || true
+      log_stderr "control-plane backup coordination Lease renewal failed twice; signaling the parent release for synchronous rollback"
+      kill -USR1 "${parent_pid}" >/dev/null 2>&1 || true
+      exit 1
+    done
+  ) &
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=$!
+}
+
+stop_control_plane_backup_coordination_lease_renewer() {
+  local pid="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
+  [[ -n "${pid}" ]] || return 0
+  kill -TERM "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" >/dev/null 2>&1 || true
+}
+
+release_control_plane_backup_coordination_lease() {
+  local lease_json=""
+  local now=""
+
+  stop_control_plane_backup_coordination_lease_renewer
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || return 0
+  lease_json="$(control_plane_backup_coordination_lease_json)" || return 1
+  [[ -n "$(trim_field "${lease_json}")" ]] || return 1
+  now="$(control_plane_backup_coordination_now)" || return 1
+  control_plane_backup_coordination_patch_owned "${lease_json}" release "${now}" || return 1
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
+}
+
+acquire_control_plane_backup_coordination_lease() {
+  local deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS))
+  local lease_json=""
+  local state=""
+  local holder=""
+  local token=""
+  local resource_version=""
+  local expired="false"
+  local transitions="0"
+  local recovery_required="false"
+  local now=""
+
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
+  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
+  initialize_control_plane_backup_coordination_health || {
+    log_stderr "cannot initialize the backup coordination health record"
+    return 1
+  }
+  CONTROL_PLANE_BACKUP_COORDINATION_WAIT_DEADLINE="${deadline}"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER="release/${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+  if [[ ! "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" =~ ^[0-9a-f]{32}$ ]]; then
+    log_stderr "cannot generate a valid backup coordination fencing token"
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN=""
+    return 1
+  fi
+
+  while true; do
+    lease_json="$(control_plane_backup_coordination_lease_json)" || {
+      log_stderr "cannot read the control-plane backup coordination Lease within ${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}s"
+      return 1
+    }
+    now="$(control_plane_backup_coordination_now)" || return 1
+    if [[ -z "$(trim_field "${lease_json}")" ]]; then
+      if control_plane_backup_coordination_create_lease "${now}"; then
+        CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="true"
+        write_control_plane_backup_coordination_health healthy acquired || return 1
+        start_control_plane_backup_coordination_lease_renewer || return 1
+        log "acquired control-plane backup coordination Lease owner=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}"
+        return 0
+      fi
+    else
+      state="$(control_plane_backup_coordination_lease_state "${lease_json}")" || return 1
+      IFS='|' read -r holder token resource_version expired transitions recovery_required <<<"${state}"
+      if [[ "${recovery_required}" == "true" ]]; then
+        log_stderr "control-plane backup coordination Lease is fenced for incomplete release recovery; clear fugue.pro/recovery-required only after operator verification"
+        return 1
+      fi
+      if [[ -z "${holder}" ]]; then
+        if control_plane_backup_coordination_patch_acquire "${lease_json}" "${now}"; then
+          CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="true"
+          write_control_plane_backup_coordination_health healthy acquired || return 1
+          start_control_plane_backup_coordination_lease_renewer
+          log "acquired released control-plane backup coordination Lease owner=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}"
+          return 0
+        fi
+      elif [[ "${holder}" == "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" && "${token}" == "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" ]]; then
+        CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="true"
+        renew_control_plane_backup_coordination_lease || return 1
+        write_control_plane_backup_coordination_health healthy renewed || return 1
+        start_control_plane_backup_coordination_lease_renewer || return 1
+        return 0
+      elif [[ "${holder}" == backup/* ]]; then
+        if [[ "${expired}" == "true" ]] && control_plane_terminal_backup_run_allows_stale_takeover "${holder#backup/}"; then
+          if [[ -z "${token}" ]]; then
+            log_stderr "expired control-plane backup Lease ${holder} has no fencing token; refusing stale takeover"
+          elif control_plane_backup_coordination_patch_acquire "${lease_json}" "${now}" "${token}"; then
+            CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="true"
+            write_control_plane_backup_coordination_health healthy stale-takeover || return 1
+            start_control_plane_backup_coordination_lease_renewer
+            log "acquired expired terminal backup Lease with holder/token/resourceVersion CAS: previous_holder=${holder} owner=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}"
+            return 0
+          else
+            log "expired terminal backup Lease changed after database proof; retrying from a fresh Lease snapshot"
+          fi
+        else
+          log "control-plane backup Lease is held by ${holder} backup_run_id=${holder#backup/} expired=${expired}; waiting for explicit release or terminal-run proof"
+        fi
+      elif [[ "${holder}" == release/* ]]; then
+        log "control-plane backup Lease is held by another release ${holder} expired=${expired}; refusing concurrent release takeover"
+      else
+        log_stderr "control-plane backup Lease has unsupported holder ${holder}; refusing takeover"
+        return 1
+      fi
+    fi
+    if (( SECONDS >= deadline )); then
+      if [[ "${holder}" == backup/* ]]; then
+        log_stderr "control-plane backup coordination Lease was not explicitly released within ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS}s: holder=${holder} backup_run_id=${holder#backup/} expired=${expired}; inspect the persisted backup run/retry scanner before retrying the release"
+      else
+        log_stderr "control-plane backup coordination Lease was not explicitly released within ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS}s: holder=${holder:-<unknown>} expired=${expired}"
+      fi
+      return 1
+    fi
+    sleep "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS}"
+  done
+}
+
 control_plane_postgres_primary_pod_name() {
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+  bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    -n "${FUGUE_NAMESPACE}" get pods \
     -l "$(control_plane_postgres_primary_selector)" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
@@ -2680,11 +4020,18 @@ control_plane_postgres_primary_pod_name() {
 control_plane_postgres_query() {
   local pod_name="$1"
   local sql="$2"
+  shift 2
+  local statement_timeout_ms="500"
 
   [[ -n "$(trim_field "${pod_name}")" ]] || return 1
+  if (( FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS > 1 )); then
+    statement_timeout_ms=$(((FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS - 1) * 1000))
+  fi
   printf '%s\n' "${sql}" |
-    ${KUBECTL} -n "${FUGUE_NAMESPACE}" exec -i "${pod_name}" -- \
-      psql -d "${FUGUE_CONTROL_PLANE_POSTGRES_DATABASE}" -Atq -v ON_ERROR_STOP=1
+    bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS}" \
+      -n "${FUGUE_NAMESPACE}" exec -i "${pod_name}" -- \
+      env "PGOPTIONS=-c statement_timeout=${statement_timeout_ms}" \
+      psql -d "${FUGUE_CONTROL_PLANE_POSTGRES_DATABASE}" -Atq -v ON_ERROR_STOP=1 "$@"
 }
 
 control_plane_active_pg_dump_pids() {
@@ -2694,43 +4041,61 @@ control_plane_active_pg_dump_pids() {
     "SELECT COALESCE(string_agg(pid::text, ',' ORDER BY pid), '') FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'pg_dump';"
 }
 
-control_plane_backup_runs_table_exists() {
-  local pod_name="$1"
-  local result=""
+control_plane_terminal_backup_run_allows_stale_takeover() {
+  local run_id="$1"
+  local pod_name=""
+  local proof=""
+  local held_status=""
+  local held_target=""
+  local active_count=""
+  local decision=""
 
-  result="$(control_plane_postgres_query "${pod_name}" "SELECT CASE WHEN to_regclass('public.fugue_backup_runs') IS NULL THEN 'false' ELSE 'true' END;" 2>/dev/null || true)"
-  [[ "$(trim_field "${result}")" == "true" ]]
-}
-
-control_plane_running_backup_count() {
-  local pod_name="$1"
-
-  if ! control_plane_backup_runs_table_exists "${pod_name}"; then
-    printf '0'
-    return 0
-  fi
-  control_plane_postgres_query "${pod_name}" \
-    "SELECT count(*) FROM fugue_backup_runs WHERE target_type = 'control-plane-db' AND status = 'running';" 2>/dev/null ||
-    printf '0'
-}
-
-control_plane_recent_backup_success_exists() {
-  local pod_name="$1"
-  local result=""
-
-  if ! control_plane_backup_runs_table_exists "${pod_name}"; then
+  run_id="$(trim_field "${run_id}")"
+  [[ -n "${run_id}" ]] || return 1
+  pod_name="$(trim_field "$(control_plane_postgres_primary_pod_name)")"
+  if [[ -z "${pod_name}" ]]; then
+    log_stderr "cannot prove stale backup Lease safety because the CNPG primary pod is unavailable: backup_run_id=${run_id}"
     return 1
   fi
-  result="$(control_plane_postgres_query "${pod_name}" \
-    "SELECT CASE WHEN EXISTS (SELECT 1 FROM fugue_backup_runs WHERE target_type = 'control-plane-db' AND status = 'succeeded' AND finished_at > now() - make_interval(secs => ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS})) THEN 'true' ELSE 'false' END;" 2>/dev/null || true)"
-  [[ "$(trim_field "${result}")" == "true" ]]
-}
-
-control_plane_terminate_pg_dump_backends() {
-  local pod_name="$1"
-
-  control_plane_postgres_query "${pod_name}" \
-    "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) AS terminated FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'pg_dump') s WHERE terminated;"
+  if ! proof="$(control_plane_postgres_query "${pod_name}" "
+WITH held_run AS (
+  SELECT status, target_type
+  FROM fugue_backup_runs
+  WHERE id = :'fugue_backup_run_id'
+), active_control_plane AS (
+  SELECT count(*)::bigint AS active_count
+  FROM fugue_backup_runs
+  WHERE target_type = 'control-plane-db'
+    AND status IN ('pending', 'running')
+)
+SELECT
+  COALESCE((SELECT status FROM held_run), 'missing'),
+  COALESCE((SELECT target_type FROM held_run), 'missing'),
+  active_count,
+  CASE
+    WHEN (SELECT status FROM held_run) IN ('succeeded', 'failed', 'canceled', 'blocked')
+      AND (SELECT target_type FROM held_run) = 'control-plane-db'
+      AND active_count = 0
+    THEN 'safe'
+    ELSE 'deny'
+  END
+FROM active_control_plane;
+" -v "fugue_backup_run_id=${run_id}")"; then
+    log_stderr "bounded database proof failed for expired backup Lease: backup_run_id=${run_id}"
+    return 1
+  fi
+  proof="$(trim_field "${proof}")"
+  IFS='|' read -r held_status held_target active_count decision <<<"${proof}"
+  if [[ "${decision}" == "safe" && "${held_target}" == "control-plane-db" && "${active_count}" == "0" ]]; then
+    case "${held_status}" in
+      succeeded|failed|canceled|blocked)
+        log "stale backup Lease database proof passed: backup_run_id=${run_id} status=${held_status} active_control_plane_runs=0"
+        return 0
+        ;;
+    esac
+  fi
+  log_stderr "stale backup Lease database proof denied takeover: backup_run_id=${run_id} status=${held_status:-unknown} target=${held_target:-unknown} active_control_plane_runs=${active_count:-unknown}"
+  return 1
 }
 
 drain_control_plane_backup_before_schema_rollout() {
@@ -2738,8 +4103,6 @@ drain_control_plane_backup_before_schema_rollout() {
   local pod_name=""
   local deadline
   local pids=""
-  local running_count=""
-  local terminated=""
 
   [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
   [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
@@ -2755,40 +4118,31 @@ drain_control_plane_backup_before_schema_rollout() {
 
   pod_name="$(trim_field "$(control_plane_postgres_primary_pod_name)")"
   if [[ -z "${pod_name}" ]]; then
-    log "control-plane backup drain skipped; no CNPG primary pod found for $(control_plane_postgres_name)"
-    return 0
+    log_stderr "control-plane backup drain cannot inspect the CNPG primary pod for $(control_plane_postgres_name)"
+    return 1
   fi
 
-  deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS))
+  deadline="${CONTROL_PLANE_BACKUP_COORDINATION_WAIT_DEADLINE:-0}"
+  if (( deadline <= 0 )); then
+    deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS))
+  fi
   while true; do
-    pids="$(trim_field "$(control_plane_active_pg_dump_pids "${pod_name}" 2>/dev/null || true)")"
-    running_count="$(trim_field "$(control_plane_running_backup_count "${pod_name}" 2>/dev/null || true)")"
-    running_count="${running_count:-0}"
+    if ! pids="$(control_plane_active_pg_dump_pids "${pod_name}")"; then
+      log_stderr "bounded control-plane pg_dump inspection failed; refusing schema rollout"
+      return 1
+    fi
+    pids="$(trim_field "${pids}")"
     if [[ -z "${pids}" ]]; then
-      if [[ "${running_count}" != "0" ]]; then
-        log "control-plane backup run is marked running but no active pg_dump backend is holding database locks; continuing"
-      fi
       return 0
     fi
     if ((SECONDS >= deadline)); then
       break
     fi
-    log "control-plane backup pg_dump active before schema rollout: pids=${pids} running_backup_runs=${running_count}; waiting"
+    log "legacy control-plane backup pg_dump is active before schema rollout: pids=${pids}; waiting without terminating it"
     sleep "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS}"
   done
 
-  if [[ "${mode}" == "wait" ]]; then
-    fail "control-plane backup pg_dump is still active after ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS}s; set FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE=terminate or retry after the backup finishes"
-  fi
-
-  if ! control_plane_recent_backup_success_exists "${pod_name}"; then
-    fail "refusing to terminate active control-plane backup pg_dump because no recent successful control-plane-db backup was found in the last ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS}s"
-  fi
-
-  terminated="$(trim_field "$(control_plane_terminate_pg_dump_backends "${pod_name}" 2>/dev/null || true)")"
-  terminated="${terminated:-0}"
-  log "terminated ${terminated} active control-plane backup pg_dump backend(s) before schema rollout; backup runner will retry"
-  sleep "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS}"
+  fail "control-plane backup pg_dump is still active after ${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS}s; retry only after the complete backup releases the shared Lease"
 }
 
 detect_existing_api_database_url() {
@@ -2883,7 +4237,7 @@ EOF
     if systemctl is-active --quiet k3s; then
       log "restarting local k3s so containerd reloads registry mirror configuration"
       if command_exists timeout; then
-        timeout --kill-after=15s 120s systemctl restart k3s
+        timeout --foreground --kill-after=15s 120s systemctl restart k3s
       else
         systemctl restart k3s
       fi
@@ -2891,7 +4245,7 @@ EOF
     elif systemctl is-active --quiet k3s-agent; then
       log "restarting local k3s-agent so containerd reloads registry mirror configuration"
       if command_exists timeout; then
-        timeout --kill-after=15s 120s systemctl restart k3s-agent
+        timeout --foreground --kill-after=15s 120s systemctl restart k3s-agent
       else
         systemctl restart k3s-agent
       fi
@@ -2922,23 +4276,56 @@ retry() {
 
   local i
   for ((i=1; i<=attempts; i++)); do
+    if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+      require_control_plane_backup_coordination_or_abort "retry attempt ${i}/${attempts}"
+    fi
     if "$@"; then
       return 0
     fi
     if (( i == attempts )); then
       return 1
     fi
+    require_release_forward_budget "${delay_seconds}" "retry delay ${i}/${attempts}" || return 1
     sleep "${delay_seconds}"
   done
 }
 
 helm_current_revision() {
-  helm history "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --max 1 | awk 'NR==2 {print $1}'
+  run_release_long_command "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    "Helm revision read" helm history "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --max 1 |
+    awk 'NR==2 {print $1}'
 }
 
 rollout_status() {
   local deployment_name="$1"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "deploy/${deployment_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+  local outer_timeout=$(( $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}") + 30 ))
+  run_release_long_command "${outer_timeout}" "deployment rollout ${deployment_name}" \
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" rollout status "deploy/${deployment_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+}
+
+rollout_singleton_deployment_if_required_or_present() {
+  local deployment_name="$1"
+  local required="$2"
+  local presence=""
+
+  if ! presence="$(deployment_presence "${deployment_name}")"; then
+    log "could not read singleton deployment presence for ${deployment_name}"
+    return 1
+  fi
+  if [[ "${presence}" == "absent" ]]; then
+    if [[ "${required}" == "true" ]]; then
+      log "required singleton deployment ${deployment_name} is absent after Helm upgrade"
+      return 1
+    fi
+    log "optional singleton deployment ${deployment_name} is absent; skipping rollout wait"
+    return 0
+  fi
+  if skip_singleton_rollout_wait_for_node_local_override "${deployment_name}"; then
+    log "skipping registry singleton rollout wait because node-local build-plane preflight override accepted the pre-existing registry/node_policy degradation"
+    return 0
+  fi
+  log "waiting for isolated singleton dependency ${deployment_name}"
+  rollout_status "${deployment_name}"
 }
 
 deployment_canary_ready() {
@@ -2966,10 +4353,19 @@ wait_for_deployment_canary_ready() {
   local timeout="${FUGUE_CONTROL_PLANE_CANARY_TIMEOUT_SECONDS:-120}"
   local delay="${FUGUE_CONTROL_PLANE_CANARY_DELAY_SECONDS:-5}"
   local deadline
+  local presence=""
 
-  deployment_exists "${deployment_name}" || return 0
+  if ! presence="$(deployment_presence "${deployment_name}")"; then
+    log "control-plane canary deployment presence could not be read: ${deployment_name}"
+    return 1
+  fi
+  if [[ "${presence}" != "present" ]]; then
+    log "required control-plane canary deployment is absent: ${deployment_name}"
+    return 1
+  fi
   deadline=$((SECONDS + timeout))
   while true; do
+    require_control_plane_backup_coordination_or_abort "control-plane canary readiness"
     if deployment_canary_ready "${deployment_name}"; then
       log "control-plane canary ready: deployment=${deployment_name} updated_ready_replicas>=1"
       return 0
@@ -2979,15 +4375,20 @@ wait_for_deployment_canary_ready() {
       return 1
     fi
     log "waiting for control-plane canary: deployment=${deployment_name}"
+    require_release_forward_budget "${delay}" "control-plane canary readiness retry delay" || return 1
     sleep "${delay}"
   done
 }
 
 control_plane_readyz_probe() {
   local api_base
+  local request_timeout="${FUGUE_RELEASE_STATUS_REQUEST_TIMEOUT_SECONDS:-30}"
 
   api_base="$(release_api_base_url)"
-  curl -fsS "${api_base}/readyz" >/dev/null
+  require_release_forward_budget "${request_timeout}" "control-plane canary readyz request" || return 1
+  curl -fsS --connect-timeout "${FUGUE_RELEASE_STATUS_CONNECT_TIMEOUT_SECONDS:-5}" \
+    --max-time "${request_timeout}" \
+    "${api_base}/readyz" >/dev/null || return 1
 }
 
 control_plane_canary_readiness_gate() {
@@ -3022,16 +4423,60 @@ control_plane_canary_readiness_gate() {
   fi
 }
 
+kubernetes_resource_presence() {
+  local resource_kind="$1"
+  local resource_name="$2"
+  local namespace="${3:-${FUGUE_NAMESPACE}}"
+  local output=""
+
+  if ! output="$(release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "${resource_kind} presence read ${namespace}/${resource_name}" -n "${namespace}" \
+    get "${resource_kind}/${resource_name}" --ignore-not-found=true -o name 2>/dev/null)"; then
+    return 1
+  fi
+  output="$(trim_field "${output}")"
+  if [[ -n "${output}" ]]; then
+    printf 'present'
+  else
+    printf 'absent'
+  fi
+}
+
+daemonset_presence() {
+  kubernetes_resource_presence daemonset "$1" "${2:-${FUGUE_NAMESPACE}}"
+}
+
+deployment_presence() {
+  kubernetes_resource_presence deployment "$1" "${2:-${FUGUE_NAMESPACE}}"
+}
+
 daemonset_exists() {
+  local presence=""
+  presence="$(daemonset_presence "$1")" || return 1
+  [[ "${presence}" == "present" ]]
+}
+
+require_daemonset_present() {
   local daemonset_name="$1"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" >/dev/null 2>&1
+  local presence=""
+
+  if ! presence="$(daemonset_presence "${daemonset_name}")"; then
+    log "required DaemonSet presence could not be read: ${daemonset_name}"
+    return 1
+  fi
+  if [[ "${presence}" != "present" ]]; then
+    log "required DaemonSet is absent: ${daemonset_name}"
+    return 1
+  fi
 }
 
 live_deployment_container_image() {
   local deployment_name="$1"
   local container_name="$2"
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" \
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "live deployment image read ${deployment_name}/${container_name}" \
+    -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" \
     -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
 }
 
@@ -3040,7 +4485,9 @@ live_deployment_container_digest_ref() {
   local container_name="$2"
   local selector=""
 
-  selector="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" -o json 2>/dev/null | python3 -c '
+  selector="$(release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "rollback deployment selector read ${deployment_name}" \
+    -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" -o json 2>/dev/null | python3 -c '
 import json
 import sys
 
@@ -3057,7 +4504,9 @@ print(",".join(f"{key}={labels[key]}" for key in sorted(labels)))
   selector="$(trim_field "${selector}")"
   [[ -n "${selector}" ]] || return 1
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json 2>/dev/null | python3 -c '
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "rollback ready Pod digest read ${deployment_name}/${container_name}" \
+    -n "${FUGUE_NAMESPACE}" get pods -l "${selector}" -o json 2>/dev/null | python3 -c '
 import json
 import re
 import sys
@@ -3182,6 +4631,8 @@ verify_rollback_deployment_image() {
   local image_ref digest_ref image_repository digest_repository
   local attempts="${FUGUE_ROLLBACK_IMAGE_PULL_ATTEMPTS:-3}"
   local delay_seconds="${FUGUE_ROLLBACK_IMAGE_PULL_RETRY_DELAY_SECONDS:-2}"
+  local pull_timeout="${FUGUE_ROLLBACK_IMAGE_PULL_TIMEOUT_SECONDS:-120}"
+  local pull_outer_timeout=0
 
   image_ref="$(trim_field "$(live_deployment_container_image "${deployment_name}" "${container_name}")")"
   [[ -n "${image_ref}" ]] || {
@@ -3203,11 +4654,15 @@ verify_rollback_deployment_image() {
     log "rollback image preflight repository mismatch for ${deployment_name}/${container_name}: live=${image_repository:-<empty>} digest=${digest_repository:-<empty>}"
     return 1
   fi
-  [[ "${attempts}" =~ ^[1-9][0-9]*$ && "${delay_seconds}" =~ ^[0-9]+$ ]] || {
-    log "rollback image pull retry settings are invalid: attempts=${attempts} delay_seconds=${delay_seconds}"
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ && "${delay_seconds}" =~ ^[0-9]+$ && "${pull_timeout}" =~ ^[1-9][0-9]*$ ]] || {
+    log "rollback image pull retry settings are invalid: attempts=${attempts} delay_seconds=${delay_seconds} timeout=${pull_timeout}"
     return 1
   }
-  if ! retry "${attempts}" "${delay_seconds}" pull_rollback_image_by_digest "${digest_ref}"; then
+  pull_outer_timeout=$((pull_timeout + 15))
+  if ! retry "${attempts}" "${delay_seconds}" \
+    run_release_long_command "${pull_outer_timeout}" \
+    "rollback image digest verification ${deployment_name}/${container_name}" \
+    pull_rollback_image_by_digest "${digest_ref}"; then
     log "rollback image digest is not pullable for ${deployment_name}/${container_name}: ${digest_ref}"
     return 1
   fi
@@ -3267,7 +4722,7 @@ container_name, env_name = sys.argv[1], sys.argv[2]
 try:
     doc = json.load(sys.stdin)
 except Exception:
-    raise SystemExit(0)
+    raise SystemExit(1)
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
     if container.get("name") != container_name:
         continue
@@ -3275,7 +4730,7 @@ for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("co
         if item.get("name") == env_name and item.get("value") is not None:
             print(str(item.get("value")))
             raise SystemExit(0)
-' "${container_name}" "${env_name}" 2>/dev/null || true
+' "${container_name}" "${env_name}" 2>/dev/null
 }
 
 live_daemonset_container_image() {
@@ -3283,7 +4738,7 @@ live_daemonset_container_image() {
   local container_name="$2"
 
   ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" \
-    -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null || true
+    -o jsonpath="{.spec.template.spec.containers[?(@.name==\"${container_name}\")].image}" 2>/dev/null
 }
 
 live_bluegreen_front_pod_image() {
@@ -3294,7 +4749,7 @@ import sys
 try:
     doc = json.load(sys.stdin)
 except Exception:
-    raise SystemExit(0)
+    raise SystemExit(1)
 fallback = ""
 for pod in sorted(doc.get("items", []), key=lambda item: item.get("metadata", {}).get("name", "")):
     image = ""
@@ -3320,6 +4775,190 @@ for pod in sorted(doc.get("items", []), key=lambda item: item.get("metadata", {}
 if fallback:
     print(fallback)
 '
+}
+
+live_daemonsets_json_snapshot() {
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "live DaemonSet inventory snapshot" -n "${FUGUE_NAMESPACE}" get daemonsets -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+items = doc.get("items")
+if not isinstance(items, list):
+    raise SystemExit(1)
+names = []
+for item in items:
+    if not isinstance(item, dict):
+        raise SystemExit(1)
+    name = str((item.get("metadata") or {}).get("name") or "").strip()
+    if not name or name in names:
+        raise SystemExit(1)
+    names.append(name)
+json.dump(doc, sys.stdout, separators=(",", ":"))
+'
+}
+
+live_deployment_json_snapshot() {
+  local deployment_name="$1"
+
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "live Deployment snapshot ${deployment_name}" -n "${FUGUE_NAMESPACE}" \
+    get "deployment/${deployment_name}" --ignore-not-found=true -o json 2>/dev/null | python3 -c '
+import json
+import sys
+
+expected_name = sys.argv[1]
+raw = sys.stdin.read()
+if not raw.strip():
+    raise SystemExit(0)
+doc = json.loads(raw)
+name = str((doc.get("metadata") or {}).get("name") or "").strip()
+if name != expected_name:
+    raise SystemExit(1)
+json.dump(doc, sys.stdout, separators=(",", ":"))
+' "${deployment_name}"
+}
+
+daemonset_json_from_list_snapshot() {
+  local daemonsets_json="$1"
+  local daemonset_name="$2"
+
+  printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import sys
+
+expected_name = sys.argv[1]
+doc = json.load(sys.stdin)
+matches = [
+    item for item in doc.get("items") or []
+    if str((item.get("metadata") or {}).get("name") or "").strip() == expected_name
+]
+if len(matches) > 1:
+    raise SystemExit(1)
+if matches:
+    json.dump(matches[0], sys.stdout, separators=(",", ":"))
+' "${daemonset_name}"
+}
+
+workload_container_image_from_json() {
+  local workload_json="$1"
+  local container_name="$2"
+
+  printf '%s' "${workload_json}" | python3 -c '
+import json
+import sys
+
+container_name = sys.argv[1]
+doc = json.load(sys.stdin)
+containers = (doc.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+matches = [item for item in containers if item.get("name") == container_name]
+if len(matches) != 1:
+    raise SystemExit(1)
+image = str(matches[0].get("image") or "").strip()
+if not image or any(ch.isspace() for ch in image):
+    raise SystemExit(1)
+print(image)
+' "${container_name}"
+}
+
+workload_container_resources_from_json() {
+  local workload_json="$1"
+  local container_name="$2"
+
+  printf '%s' "${workload_json}" | python3 -c '
+import json
+import sys
+
+container_name = sys.argv[1]
+doc = json.load(sys.stdin)
+containers = (doc.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+matches = [item for item in containers if item.get("name") == container_name]
+if len(matches) != 1:
+    raise SystemExit(1)
+resources = matches[0].get("resources") or {}
+if not isinstance(resources, dict):
+    raise SystemExit(1)
+json.dump(resources, sys.stdout, separators=(",", ":"))
+' "${container_name}"
+}
+
+workload_container_env_from_json() {
+  local workload_json="$1"
+  local container_name="$2"
+  local env_name="$3"
+
+  printf '%s' "${workload_json}" | python3 -c '
+import json
+import sys
+
+container_name, env_name = sys.argv[1:3]
+doc = json.load(sys.stdin)
+containers = (doc.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+matches = [item for item in containers if item.get("name") == container_name]
+if len(matches) != 1:
+    raise SystemExit(1)
+env_matches = [item for item in (matches[0].get("env") or []) if item.get("name") == env_name]
+if len(env_matches) > 1:
+    raise SystemExit(1)
+if not env_matches:
+    raise SystemExit(0)
+value = env_matches[0].get("value")
+if value is None:
+    raise SystemExit(0)
+value = str(value)
+if "\x00" in value or "\n" in value or "\r" in value:
+    raise SystemExit(1)
+print(value)
+' "${container_name}" "${env_name}"
+}
+
+tagged_image_record_from_ref() {
+  local image_ref="$1"
+  local repository=""
+  local tag=""
+  local no_digest=""
+  local last=""
+
+  image_ref="$(trim_field "${image_ref}")"
+  [[ -n "${image_ref}" && "${image_ref}" != *@* ]] || return 1
+  no_digest="$(image_ref_without_digest "${image_ref}")"
+  last="${no_digest##*/}"
+  [[ "${last}" == *:* ]] || return 1
+  repository="$(image_ref_repository "${image_ref}")"
+  tag="$(image_ref_tag "${image_ref}")"
+  release_image_repository_valid "${repository}" || return 1
+  release_image_tag_valid "${tag}" || return 1
+  printf '%s|%s' "${repository}" "${tag}"
+}
+
+dns_group_image_records_from_daemonset_snapshot() {
+  local daemonsets_json="$1"
+  local dns_prefix="${FUGUE_RELEASE_FULLNAME}-dns-"
+
+  printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import sys
+
+prefix = sys.argv[1]
+doc = json.load(sys.stdin)
+records = []
+for item in doc.get("items") or []:
+    name = str((item.get("metadata") or {}).get("name") or "").strip()
+    if not name.startswith(prefix) or name == prefix:
+        continue
+    suffix = name[len(prefix):]
+    containers = (item.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+    matches = [container for container in containers if container.get("name") == "dns"]
+    if len(matches) != 1:
+        raise SystemExit(1)
+    image = str(matches[0].get("image") or "").strip()
+    if not suffix or not image or any(ch.isspace() for ch in image):
+        raise SystemExit(1)
+    records.append((suffix, image))
+for suffix, image in sorted(records):
+    print(suffix + "\t" + image)
+' "${dns_prefix}"
 }
 
 duration_to_seconds() {
@@ -3517,7 +5156,9 @@ live_daemonset_container_resources_json() {
   local daemonset_name="$1"
   local container_name="$2"
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null | python3 -c '
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "live DaemonSet resources read ${daemonset_name}/${container_name}" \
+    -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null | python3 -c '
 import json
 import sys
 
@@ -3525,14 +5166,14 @@ container_name = sys.argv[1]
 try:
     doc = json.load(sys.stdin)
 except Exception:
-    raise SystemExit(0)
+    raise SystemExit(1)
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
     if container.get("name") == container_name:
         resources = container.get("resources") or {}
         if resources:
             print(json.dumps(resources, separators=(",", ":")))
         raise SystemExit(0)
-' "${container_name}" 2>/dev/null || true
+' "${container_name}" 2>/dev/null
 }
 
 live_daemonset_container_env_value() {
@@ -3540,7 +5181,9 @@ live_daemonset_container_env_value() {
   local container_name="$2"
   local env_name="$3"
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null | python3 -c '
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "live DaemonSet env read ${daemonset_name}/${container_name}/${env_name}" \
+    -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json 2>/dev/null | python3 -c '
 import json
 import sys
 
@@ -3548,7 +5191,7 @@ container_name, env_name = sys.argv[1], sys.argv[2]
 try:
     doc = json.load(sys.stdin)
 except Exception:
-    raise SystemExit(0)
+    raise SystemExit(1)
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
     if container.get("name") != container_name:
         continue
@@ -3556,7 +5199,7 @@ for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("co
         if item.get("name") == env_name and item.get("value") is not None:
             print(str(item.get("value")))
             raise SystemExit(0)
-' "${container_name}" "${env_name}" 2>/dev/null || true
+' "${container_name}" "${env_name}" 2>/dev/null
 }
 
 append_live_daemonset_image_helm_args() {
@@ -3684,97 +5327,136 @@ append_dns_group_image_args_from_live() {
 preserve_public_data_plane_from_live() {
   local edge_ds="${FUGUE_RELEASE_FULLNAME}-edge"
   local edge_front_ds="${FUGUE_RELEASE_FULLNAME}-edge-front"
+  local edge_worker_a_ds="${FUGUE_RELEASE_FULLNAME}-edge-worker-a"
+  local edge_worker_b_ds="${FUGUE_RELEASE_FULLNAME}-edge-worker-b"
+  local ssh_front_ds="${FUGUE_RELEASE_FULLNAME}-edge-ssh-front"
   local dns_ds="${FUGUE_RELEASE_FULLNAME}-dns"
-  local edge_resources caddy_resources probe_enabled probe_port probe_timeout front_image_ref
-  local dns_resources
+  local daemonsets_json=""
+  local edge_json="" edge_front_json="" edge_worker_a_json="" edge_worker_b_json="" ssh_front_json="" dns_json=""
+  local image_ref="" image_record="" repository="" tag=""
+  local edge_resources="" caddy_resources="" dns_resources=""
+  local probe_enabled="" probe_port="" probe_timeout=""
+  local base_repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY:-}}"
+  local base_tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG:-}}"
+  local blue_count=0
+  local group_records="" group_name="" group_image="" group_index=0
+  local snapshot_spec="" snapshot_var="" snapshot_name="" snapshot_value=""
+  local -a pending_args=()
 
-  PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
-  PUBLIC_DATA_PLANE_PRESERVED=true
-  append_live_daemonset_image_helm_args \
-    "public data-plane ssh front" \
-    "${FUGUE_RELEASE_FULLNAME}-edge-ssh-front" \
-    "ssh-front" \
-    "edge.sshFront.image" || true
-
-  if daemonset_exists "${edge_front_ds}" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"; then
-    log "public data-plane blue/green DaemonSets detected; preserving front and per-slot worker templates from live state"
-    preserve_edge_base_image_from_live_release || true
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(
-      --set edge.blueGreen.enabled=true
-      --set edge.caddy.publicHostPorts.enabled=false
-    )
-    front_image_ref="$(live_bluegreen_front_pod_image)"
-    append_image_ref_helm_args "public data-plane front" "${front_image_ref}" "edge.blueGreen.front.image" ||
-      append_live_daemonset_image_helm_args "public data-plane front" "${edge_front_ds}" "edge-front" "edge.blueGreen.front.image" || true
-    append_live_daemonset_image_helm_args "public data-plane worker-a" "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge" "edge.blueGreen.slots.a.image" || true
-    append_live_daemonset_image_helm_args "public data-plane worker-b" "${FUGUE_RELEASE_FULLNAME}-edge-worker-b" "edge" "edge.blueGreen.slots.b.image" || true
-    edge_resources="$(trim_field "$(live_daemonset_container_resources_json "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "edge")")"
-    if [[ -n "${edge_resources}" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.resources=${edge_resources}")
-      log "public data-plane edge resources preserved from live ${FUGUE_RELEASE_FULLNAME}-edge-worker-a/edge"
-    fi
-    caddy_resources="$(trim_field "$(live_daemonset_container_resources_json "${FUGUE_RELEASE_FULLNAME}-edge-worker-a" "caddy")")"
-    if [[ -n "${caddy_resources}" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
-      log "public data-plane caddy resources preserved from live ${FUGUE_RELEASE_FULLNAME}-edge-worker-a/caddy"
-    fi
-    append_live_daemonset_image_helm_args "public data-plane dns" "${dns_ds}" "dns" "dns.image" || true
-    append_dns_group_image_args_from_live
-    dns_resources="$(trim_field "$(live_daemonset_container_resources_json "${dns_ds}" "dns")")"
-    if [[ -n "${dns_resources}" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "dns.resources=${dns_resources}")
-      log "public data-plane dns resources preserved from live ${dns_ds}/dns"
-    fi
-    probe_enabled="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED")")"
-    probe_port="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_PORT")")"
-    probe_timeout="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT")")"
-    if [[ -n "${probe_enabled}" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.enabled=${probe_enabled}")
-      log "public data-plane dns edge health probe enabled flag preserved from live ${dns_ds}/dns: ${probe_enabled}"
-    fi
-    if [[ -n "${probe_port}" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.port=${probe_port}")
-    fi
-    if [[ -n "${probe_timeout}" ]]; then
-      PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-string "dns.edgeHealthProbe.timeout=${probe_timeout}")
-    fi
+  PUBLIC_DATA_PLANE_PRESERVED=false
+  if [[ "${FUGUE_EDGE_ENABLED:-true}" != "true" && "${FUGUE_DNS_ENABLED:-false}" != "true" ]]; then
+    PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+    PUBLIC_DATA_PLANE_PRESERVED=true
     return 0
   fi
+  daemonsets_json="$(live_daemonsets_json_snapshot)" || {
+    log "public data-plane preserve failed; live DaemonSet inventory is unreadable"
+    return 1
+  }
+  for snapshot_spec in \
+    "edge_json|${edge_ds}" \
+    "edge_front_json|${edge_front_ds}" \
+    "edge_worker_a_json|${edge_worker_a_ds}" \
+    "edge_worker_b_json|${edge_worker_b_ds}" \
+    "ssh_front_json|${ssh_front_ds}" \
+    "dns_json|${dns_ds}"; do
+    IFS='|' read -r snapshot_var snapshot_name <<<"${snapshot_spec}"
+    snapshot_value="$(daemonset_json_from_list_snapshot "${daemonsets_json}" "${snapshot_name}")" || return 1
+    printf -v "${snapshot_var}" '%s' "${snapshot_value}"
+  done
 
-  preserve_image_from_live_daemonset "public data-plane" "${edge_ds}" "edge" FUGUE_EDGE_HELM_IMAGE_REPOSITORY FUGUE_EDGE_HELM_IMAGE_TAG || true
-  append_live_daemonset_image_helm_args "public data-plane" "${edge_ds}" "caddy" "edge.caddy.image" || true
-  append_live_daemonset_image_helm_args "public data-plane dns" "${dns_ds}" "dns" "dns.image" || true
-  append_dns_group_image_args_from_live
+  if [[ "${FUGUE_EDGE_ENABLED:-true}" == "true" ]]; then
+    [[ -n "${edge_front_json}" ]] && blue_count=$((blue_count + 1))
+    [[ -n "${edge_worker_a_json}" ]] && blue_count=$((blue_count + 1))
+    [[ -n "${edge_worker_b_json}" ]] && blue_count=$((blue_count + 1))
+    if (( blue_count != 0 && blue_count != 3 )); then
+      log "public data-plane preserve failed; live blue/green edge topology is partial (${blue_count}/3 DaemonSets)"
+      return 1
+    fi
 
-  edge_resources="$(trim_field "$(live_daemonset_container_resources_json "${edge_ds}" "edge")")"
-  if [[ -n "${edge_resources}" ]]; then
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.resources=${edge_resources}")
-    log "public data-plane edge resources preserved from live ${edge_ds}/edge"
-  fi
-  caddy_resources="$(trim_field "$(live_daemonset_container_resources_json "${edge_ds}" "caddy")")"
-  if [[ -n "${caddy_resources}" ]]; then
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "edge.caddy.resources=${caddy_resources}")
-    log "public data-plane caddy resources preserved from live ${edge_ds}/caddy"
-  fi
-  dns_resources="$(trim_field "$(live_daemonset_container_resources_json "${dns_ds}" "dns")")"
-  if [[ -n "${dns_resources}" ]]; then
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-json "dns.resources=${dns_resources}")
-    log "public data-plane dns resources preserved from live ${dns_ds}/dns"
+    if (( blue_count == 3 )); then
+      pending_args+=(--set edge.blueGreen.enabled=true --set edge.caddy.publicHostPorts.enabled=false)
+      image_ref="$(workload_container_image_from_json "${edge_worker_a_json}" edge)" || return 1
+      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+      IFS='|' read -r base_repository base_tag <<<"${image_record}"
+      pending_args+=(--set-string "edge.blueGreen.slots.a.image.repository=${base_repository}" --set-string "edge.blueGreen.slots.a.image.tag=${base_tag}")
+
+      image_ref="$(workload_container_image_from_json "${edge_worker_b_json}" edge)" || return 1
+      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+      IFS='|' read -r repository tag <<<"${image_record}"
+      pending_args+=(--set-string "edge.blueGreen.slots.b.image.repository=${repository}" --set-string "edge.blueGreen.slots.b.image.tag=${tag}")
+
+      image_ref="$(workload_container_image_from_json "${edge_front_json}" edge-front)" || return 1
+      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+      IFS='|' read -r repository tag <<<"${image_record}"
+      pending_args+=(--set-string "edge.blueGreen.front.image.repository=${repository}" --set-string "edge.blueGreen.front.image.tag=${tag}")
+
+      edge_resources="$(workload_container_resources_from_json "${edge_worker_a_json}" edge)" || return 1
+      caddy_resources="$(workload_container_resources_from_json "${edge_worker_a_json}" caddy)" || return 1
+      log "public data-plane blue/green topology preserved from one live DaemonSet snapshot"
+    else
+      [[ -n "${edge_json}" ]] || {
+        log "public data-plane preserve failed; neither complete blue/green nor legacy edge DaemonSet exists"
+        return 1
+      }
+      image_ref="$(workload_container_image_from_json "${edge_json}" edge)" || return 1
+      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+      IFS='|' read -r base_repository base_tag <<<"${image_record}"
+      image_ref="$(workload_container_image_from_json "${edge_json}" caddy)" || return 1
+      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+      IFS='|' read -r repository tag <<<"${image_record}"
+      pending_args+=(--set-string "edge.caddy.image.repository=${repository}" --set-string "edge.caddy.image.tag=${tag}")
+      edge_resources="$(workload_container_resources_from_json "${edge_json}" edge)" || return 1
+      caddy_resources="$(workload_container_resources_from_json "${edge_json}" caddy)" || return 1
+      log "public data-plane legacy edge topology preserved from one live DaemonSet snapshot"
+    fi
+    pending_args+=(--set-json "edge.resources=${edge_resources}" --set-json "edge.caddy.resources=${caddy_resources}")
+
+    if [[ -n "${ssh_front_json}" ]]; then
+      image_ref="$(workload_container_image_from_json "${ssh_front_json}" ssh-front)" || return 1
+      image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+      IFS='|' read -r repository tag <<<"${image_record}"
+      pending_args+=(--set-string "edge.sshFront.image.repository=${repository}" --set-string "edge.sshFront.image.tag=${tag}")
+    fi
   fi
 
-  probe_enabled="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED")")"
-  probe_port="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_PORT")")"
-  probe_timeout="$(trim_field "$(live_daemonset_container_env_value "${dns_ds}" "dns" "FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT")")"
-  if [[ -n "${probe_enabled}" ]]; then
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.enabled=${probe_enabled}")
-    log "public data-plane dns edge health probe enabled flag preserved from live ${dns_ds}/dns: ${probe_enabled}"
+  if [[ "${FUGUE_DNS_ENABLED:-false}" == "true" ]]; then
+    [[ -n "${dns_json}" ]] || {
+      log "public data-plane preserve failed; required live DNS DaemonSet ${dns_ds} is absent"
+      return 1
+    }
+    image_ref="$(workload_container_image_from_json "${dns_json}" dns)" || return 1
+    image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+    IFS='|' read -r repository tag <<<"${image_record}"
+    pending_args+=(--set-string "dns.image.repository=${repository}" --set-string "dns.image.tag=${tag}")
+    dns_resources="$(workload_container_resources_from_json "${dns_json}" dns)" || return 1
+    pending_args+=(--set-json "dns.resources=${dns_resources}")
+    probe_enabled="$(workload_container_env_from_json "${dns_json}" dns FUGUE_DNS_EDGE_HEALTH_PROBE_ENABLED)" || return 1
+    probe_port="$(workload_container_env_from_json "${dns_json}" dns FUGUE_DNS_EDGE_HEALTH_PROBE_PORT)" || return 1
+    probe_timeout="$(workload_container_env_from_json "${dns_json}" dns FUGUE_DNS_EDGE_HEALTH_PROBE_TIMEOUT)" || return 1
+    [[ -z "${probe_enabled}" ]] || pending_args+=(--set "dns.edgeHealthProbe.enabled=${probe_enabled}")
+    [[ -z "${probe_port}" ]] || pending_args+=(--set "dns.edgeHealthProbe.port=${probe_port}")
+    [[ -z "${probe_timeout}" ]] || pending_args+=(--set-string "dns.edgeHealthProbe.timeout=${probe_timeout}")
+
+    group_records="$(dns_group_image_records_from_daemonset_snapshot "${daemonsets_json}")" || return 1
+    while IFS=$'\t' read -r group_name group_image; do
+      [[ -n "${group_name}" ]] || continue
+      image_record="$(tagged_image_record_from_ref "${group_image}")" || return 1
+      IFS='|' read -r repository tag <<<"${image_record}"
+      pending_args+=(
+        --set-string "dns.groups[${group_index}].name=${group_name}"
+        --set-string "dns.groups[${group_index}].image.repository=${repository}"
+        --set-string "dns.groups[${group_index}].image.tag=${tag}"
+      )
+      group_index=$((group_index + 1))
+    done <<<"${group_records}"
+    log "public data-plane DNS topology preserved from the same live DaemonSet inventory snapshot"
   fi
-  if [[ -n "${probe_port}" ]]; then
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set "dns.edgeHealthProbe.port=${probe_port}")
-  fi
-  if [[ -n "${probe_timeout}" ]]; then
-    PUBLIC_DATA_PLANE_HELM_SET_ARGS+=(--set-string "dns.edgeHealthProbe.timeout=${probe_timeout}")
-  fi
+
+  FUGUE_EDGE_HELM_IMAGE_REPOSITORY="${base_repository}"
+  FUGUE_EDGE_HELM_IMAGE_TAG="${base_tag}"
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS=("${pending_args[@]}")
+  PUBLIC_DATA_PLANE_PRESERVED=true
 }
 
 preserve_node_local_build_plane_from_live() {
@@ -3782,32 +5464,64 @@ preserve_node_local_build_plane_from_live() {
   local preserve_resources="${2:-true}"
   local strict="${3:-false}"
   local image_cache_ds="${FUGUE_RELEASE_FULLNAME}-image-cache"
-  local image_cache_resources
+  local daemonsets_json=""
+  local image_cache_json=""
+  local image_ref=""
+  local image_record=""
+  local repository=""
+  local tag=""
+  local image_cache_resources=""
+  local -a pending_args=()
 
-  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
+  if ! daemonsets_json="$(live_daemonsets_json_snapshot)"; then
+    log "node-local build-plane preserve failed; live DaemonSet inventory is unreadable"
+    return 1
+  fi
+  if ! image_cache_json="$(daemonset_json_from_list_snapshot "${daemonsets_json}" "${image_cache_ds}")"; then
+    log "node-local build-plane preserve failed; live ${image_cache_ds} snapshot is invalid"
+    return 1
+  fi
+  if [[ -z "${image_cache_json}" ]]; then
+    if [[ "${FUGUE_IMAGE_CACHE_ENABLED:-true}" == "true" || "${strict}" == "true" ]]; then
+      log "node-local build-plane preserve failed; required live DaemonSet ${image_cache_ds} is absent"
+      return 1
+    fi
+    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
+    return 0
+  fi
 
   if [[ "${preserve_image}" == "true" ]]; then
-    if ! preserve_image_from_live_daemonset "node-local build-plane" "${image_cache_ds}" "image-cache" FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY FUGUE_IMAGE_CACHE_IMAGE_TAG; then
-      [[ "${strict}" == "true" ]] && return 1
-    fi
+    image_ref="$(workload_container_image_from_json "${image_cache_json}" "image-cache")" || return 1
+    image_record="$(tagged_image_record_from_ref "${image_ref}")" || {
+      log "node-local build-plane preserve failed; live image-cache image is not an exact tagged reference"
+      return 1
+    }
+    IFS='|' read -r repository tag <<<"${image_record}"
+    [[ -n "${repository}" && -n "${tag}" ]] || return 1
   fi
 
   if [[ "${preserve_resources}" == "true" ]]; then
-    image_cache_resources="$(trim_field "$(live_daemonset_container_resources_json "${image_cache_ds}" "image-cache")")"
-    if [[ -n "${image_cache_resources}" ]]; then
-      NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-json "imageCache.resources=${image_cache_resources}")
-      log "node-local build-plane image-cache resources preserved from live ${image_cache_ds}/image-cache"
-    elif [[ "${strict}" == "true" ]]; then
-      log "node-local build-plane strict preserve failed; live ${image_cache_ds}/image-cache resources are empty or unreadable"
-      return 1
-    fi
+    image_cache_resources="$(workload_container_resources_from_json "${image_cache_json}" "image-cache")" || return 1
+    [[ -n "${image_cache_resources}" ]] || return 1
+    pending_args+=(--set-json "imageCache.resources=${image_cache_resources}")
+  fi
+
+  if [[ "${preserve_image}" == "true" ]]; then
+    FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="${repository}"
+    FUGUE_IMAGE_CACHE_IMAGE_TAG="${tag}"
+    log "node-local build-plane image preserved from one live snapshot: ${repository}:${tag}"
+  fi
+  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=("${pending_args[@]}")
+  if [[ "${preserve_resources}" == "true" ]]; then
+    log "node-local build-plane image-cache resources preserved from the same live ${image_cache_ds} snapshot"
   fi
 }
 
 preserve_strict_drain_agent_image_from_live() {
   local mode
   local controller_deployment
-  local repository tag digest pull_policy
+  local deployment_json=""
+  local repository="" tag="" digest="" pull_policy=""
 
   STRICT_DRAIN_AGENT_IMAGE_PRESERVED=false
   mode="$(trim_field "${FUGUE_STRICT_DRAIN_MODE:-}")"
@@ -3820,19 +5534,30 @@ preserve_strict_drain_agent_image_from_live() {
   fi
 
   controller_deployment="${FUGUE_CONTROLLER_DEPLOYMENT_NAME:-${FUGUE_RELEASE_FULLNAME}-controller}"
-  if ! deployment_exists "${controller_deployment}"; then
-    log "strict drain-agent image preserve skipped; live controller deployment ${controller_deployment} was not found"
-    return 0
+  deployment_json="$(live_deployment_json_snapshot "${controller_deployment}")" || {
+    log "strict drain-agent image preserve failed; live controller Deployment is unreadable"
+    return 1
+  }
+  if [[ -z "${deployment_json}" ]]; then
+    log "strict drain-agent image preserve failed; required live controller Deployment ${controller_deployment} is absent"
+    return 1
   fi
 
-  repository="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY")")"
-  tag="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_TAG")")"
-  digest="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_DIGEST")")"
-  pull_policy="$(trim_field "$(live_deployment_container_env_value "${controller_deployment}" "controller" "FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY")")"
+  repository="$(workload_container_env_from_json "${deployment_json}" controller FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY)" || return 1
+  tag="$(workload_container_env_from_json "${deployment_json}" controller FUGUE_DRAIN_AGENT_IMAGE_TAG)" || return 1
+  digest="$(workload_container_env_from_json "${deployment_json}" controller FUGUE_DRAIN_AGENT_IMAGE_DIGEST)" || return 1
+  pull_policy="$(workload_container_env_from_json "${deployment_json}" controller FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY)" || return 1
   if [[ -z "${repository}" || ( -z "${tag}" && -z "${digest}" ) ]]; then
-    log "strict drain-agent image preserve skipped; live controller env does not contain a usable drain-agent image"
-    return 0
+    log "strict drain-agent image preserve failed; live controller snapshot does not contain a usable drain-agent image"
+    return 1
   fi
+  release_image_repository_valid "${repository}" || return 1
+  [[ -z "${tag}" ]] || release_image_tag_valid "${tag}" || return 1
+  [[ -z "${digest}" ]] || release_image_digest_valid "${digest}" || return 1
+  case "${pull_policy}" in
+    Always|IfNotPresent|Never) ;;
+    *) return 1 ;;
+  esac
 
   FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY="${repository}"
   FUGUE_DRAIN_AGENT_IMAGE_TAG="${tag}"
@@ -3892,28 +5617,62 @@ preserve_maintenance_agents_from_live() {
   local node_janitor_ds="${FUGUE_RELEASE_FULLNAME}-node-janitor"
   local topology_labeler_ds="${FUGUE_RELEASE_FULLNAME}-topology-labeler"
   local image_prepull_ds="${FUGUE_RELEASE_FULLNAME}-image-prepull"
+  local daemonsets_json=""
+  local daemonset_json=""
+  local spec="" daemonset_name="" container_name="" values_prefix="" required="false"
+  local image_ref="" image_record="" repository="" tag="" resources=""
+  local -a pending_args=()
 
-  MAINTENANCE_AGENT_HELM_SET_ARGS=()
-
-  append_maintenance_daemonset_image_helm_args "maintenance agents" "${node_janitor_ds}" "node-janitor" "nodeJanitor.image" || true
-  append_maintenance_daemonset_resources_helm_args "maintenance agents" "${node_janitor_ds}" "node-janitor" "nodeJanitor.resources"
-
-  append_maintenance_daemonset_image_helm_args "maintenance agents" "${topology_labeler_ds}" "topology-labeler" "topologyLabeler.image" || true
-  append_maintenance_daemonset_resources_helm_args "maintenance agents" "${topology_labeler_ds}" "topology-labeler" "topologyLabeler.resources"
-
-  append_maintenance_daemonset_image_helm_args "maintenance agents" "${image_prepull_ds}" "image-prepull" "imagePrePull.image" || true
-  append_maintenance_daemonset_resources_helm_args "maintenance agents" "${image_prepull_ds}" "image-prepull" "imagePrePull.resources"
+  daemonsets_json="$(live_daemonsets_json_snapshot)" || {
+    log "maintenance-agent preserve failed; live DaemonSet inventory is unreadable"
+    return 1
+  }
+  for spec in \
+    "${node_janitor_ds}|node-janitor|nodeJanitor|true" \
+    "${topology_labeler_ds}|topology-labeler|topologyLabeler|false" \
+    "${image_prepull_ds}|image-prepull|imagePrePull|false"; do
+    IFS='|' read -r daemonset_name container_name values_prefix required <<<"${spec}"
+    daemonset_json="$(daemonset_json_from_list_snapshot "${daemonsets_json}" "${daemonset_name}")" || return 1
+    if [[ -z "${daemonset_json}" ]]; then
+      if [[ "${required}" == "true" ]]; then
+        log "maintenance-agent preserve failed; required live DaemonSet ${daemonset_name} is absent"
+        return 1
+      fi
+      log "optional maintenance-agent DaemonSet ${daemonset_name} is proven absent; skipping preserve"
+      continue
+    fi
+    image_ref="$(workload_container_image_from_json "${daemonset_json}" "${container_name}")" || return 1
+    image_record="$(tagged_image_record_from_ref "${image_ref}")" || return 1
+    IFS='|' read -r repository tag <<<"${image_record}"
+    resources="$(workload_container_resources_from_json "${daemonset_json}" "${container_name}")" || return 1
+    pending_args+=(
+      --set-string "${values_prefix}.image.repository=${repository}"
+      --set-string "${values_prefix}.image.tag=${tag}"
+      --set-json "${values_prefix}.resources=${resources}"
+    )
+  done
+  MAINTENANCE_AGENT_HELM_SET_ARGS=("${pending_args[@]}")
+  log "maintenance-agent images and resources preserved atomically from one live DaemonSet snapshot"
 }
 
 rollout_daemonset_status() {
   local daemonset_name="$1"
   local namespace="${2:-${FUGUE_NAMESPACE}}"
+  local allow_zero_desired="${3:-false}"
+  local command_timeout="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
   local strategy
-  strategy="$(${KUBECTL} -n "${namespace}" get "ds/${daemonset_name}" -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || true)"
-  strategy="${strategy:-RollingUpdate}"
+  if ! strategy="$(run_release_long_command "${command_timeout}" \
+    "daemonset strategy read ${daemonset_name}" ${KUBECTL} -n "${namespace}" get "ds/${daemonset_name}" \
+    -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null)"; then
+    return 1
+  fi
+  strategy="$(trim_field "${strategy}")"
+  [[ -n "${strategy}" ]] || return 1
 
   if [[ "${strategy}" == "RollingUpdate" ]]; then
-    ${KUBECTL} -n "${namespace}" rollout status "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
+    run_release_long_command "$(( $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}") + 30 ))" \
+      "daemonset rollout ${daemonset_name}" ${KUBECTL} -n "${namespace}" rollout status \
+      "ds/${daemonset_name}" --timeout="${FUGUE_ROLLOUT_TIMEOUT}"
     return
   fi
 
@@ -3935,15 +5694,24 @@ rollout_daemonset_status() {
   deadline=$((SECONDS + timeout_seconds))
 
   while true; do
-    status="$(${KUBECTL} -n "${namespace}" get "ds/${daemonset_name}" -o jsonpath='{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}' 2>/dev/null || true)"
-    IFS=$'\t' read -r generation observed_generation desired ready unavailable <<<"${status}"
-    generation="${generation:-0}"
-    observed_generation="${observed_generation:-0}"
-    desired="${desired:-0}"
-    ready="${ready:-0}"
-    unavailable="${unavailable:-0}"
+    if ! status="$(run_release_long_command "${command_timeout}" \
+      "daemonset readiness read ${daemonset_name}" ${KUBECTL} -n "${namespace}" get "ds/${daemonset_name}" \
+      -o jsonpath='{.metadata.generation}{"|"}{.status.observedGeneration}{"|"}{.status.desiredNumberScheduled}{"|"}{.status.numberReady}{"|"}{.status.numberUnavailable}' 2>/dev/null)"; then
+      return 1
+    fi
+    [[ -n "${status}" ]] || return 1
+    IFS='|' read -r generation observed_generation desired ready unavailable <<<"${status}"
+    if [[ ! "${generation}" =~ ^[1-9][0-9]*$ ||
+      ! "${observed_generation}" =~ ^[0-9]+$ ||
+      ! "${desired}" =~ ^[0-9]+$ ||
+      ! "${ready}" =~ ^[0-9]+$ ||
+      ! "${unavailable}" =~ ^[0-9]+$ ]]; then
+      return 1
+    fi
 
-    if [[ "${generation}" == "${observed_generation}" && "${desired}" == "${ready}" && "${unavailable}" == "0" ]]; then
+    if (( observed_generation > 0 )) &&
+      [[ "${generation}" == "${observed_generation}" && "${desired}" == "${ready}" && "${unavailable}" == "0" ]] &&
+      { (( desired > 0 )) || [[ "${allow_zero_desired}" == "true" ]]; }; then
       log "daemonset ${daemonset_name} ready: generation=${generation} desired=${desired} ready=${ready}"
       return 0
     fi
@@ -3953,6 +5721,7 @@ rollout_daemonset_status() {
       return 1
     fi
 
+    require_release_forward_budget 2 "daemonset readiness poll delay ${daemonset_name}" || return 1
     sleep 2
   done
 }
@@ -4401,13 +6170,17 @@ image_cache_probe_endpoint() {
 
   command_exists curl || return 1
   while (( attempt <= 3 )); do
+    require_release_forward_budget 10 "image-cache endpoint probe ${pod_ip}:${port} attempt ${attempt}/3" || return 1
     response="$(curl --noproxy '*' -sS --connect-timeout 5 --max-time 10 -D - -o /dev/null \
       -w $'\n__FUGUE_STATUS__:%{http_code}\n' "http://${pod_ip}:${port}/v2/" 2>/dev/null || true)"
     status="$(sed -n 's/^__FUGUE_STATUS__://p' <<<"${response}" | tail -n 1 | tr -d '\r')"
     if [[ "${status}" == "200" ]] && tr -d '\r' <<<"${response}" | grep -Eiq '^Docker-Distribution-API-Version:[[:space:]]*registry/2\.0[[:space:]]*$'; then
       return 0
     fi
-    sleep 2
+    if (( attempt < 3 )); then
+      require_release_forward_budget 2 "image-cache endpoint probe retry delay" || return 1
+      sleep 2
+    fi
     attempt=$((attempt + 1))
   done
   return 1
@@ -4770,7 +6543,8 @@ image_cache_restore_ondelete_after_helm_rollback() {
 
 daemonset_names_by_component_prefix() {
   local component_prefix="$1"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds \
+  release_bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "daemonset component inventory ${component_prefix}" -n "${FUGUE_NAMESPACE}" get ds \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\n"}{end}' 2>/dev/null |
     awk -v prefix="${component_prefix}" '($2 == prefix || index($2, prefix "-") == 1) { print $1 }' |
     sort
@@ -4780,7 +6554,9 @@ rollout_daemonsets_by_component_prefix() {
   local component_prefix="$1"
   local display_name="$2"
   local daemonsets
-  daemonsets="$(daemonset_names_by_component_prefix "${component_prefix}")"
+  if ! daemonsets="$(daemonset_names_by_component_prefix "${component_prefix}")"; then
+    return 1
+  fi
   if [[ -z "${daemonsets}" ]]; then
     log "${display_name} rollout check skipped; no matching daemonsets"
     return 0
@@ -4802,7 +6578,12 @@ cleanup_orphaned_regional_daemonsets() {
   local daemonset_name=""
   local component=""
   local release_name=""
+  local daemonset_rows=""
   local selector="app.kubernetes.io/instance=${FUGUE_RELEASE_NAME},app.kubernetes.io/name=fugue"
+
+  if ! daemonset_rows="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -l "${selector}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}')"; then
+    return 1
+  fi
 
   while IFS=$'\t' read -r daemonset_name component release_name; do
     if [[ -z "$(trim_field "${daemonset_name}")" ]]; then
@@ -4819,8 +6600,8 @@ cleanup_orphaned_regional_daemonsets() {
       continue
     fi
     log "deleting orphaned legacy regional DaemonSet ${daemonset_name} (${component})"
-    ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete "ds/${daemonset_name}" --wait=true
-  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -l "${selector}" -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\t"}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}')
+    ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete "ds/${daemonset_name}" --wait=true || return 1
+  done <<<"${daemonset_rows}"
 }
 
 apply_chart_crds() {
@@ -4858,12 +6639,14 @@ apply_chart_crds() {
 verify_chart_crds_in_sync() {
   local crd_dir="$1"
   local diff_output=""
+  local status=0
 
   if diff_output="$(${KUBECTL} diff -f "${crd_dir}" 2>&1)"; then
     return 0
+  else
+    status=$?
   fi
 
-  local status=$?
   if (( status == 1 )); then
     log_stderr "Helm CRD drift detected after apply:"
     printf '%s\n' "${diff_output}" >&2
@@ -4876,8 +6659,9 @@ verify_chart_crds_in_sync() {
 }
 
 deployment_exists() {
-  local deployment_name="$1"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" >/dev/null 2>&1
+  local presence=""
+  presence="$(deployment_presence "$1")" || return 1
+  [[ "${presence}" == "present" ]]
 }
 
 smoke_test() {
@@ -4888,7 +6672,7 @@ smoke_test() {
       continue
     fi
     saw_url="true"
-    smoke_test_url "${url}"
+    smoke_test_url "${url}" || return 1
   done < <(smoke_test_urls)
   if [[ "${saw_url}" != "true" ]]; then
     fail "missing required smoke URLs; set FUGUE_SMOKE_URL or FUGUE_SMOKE_URLS"
@@ -4897,8 +6681,9 @@ smoke_test() {
 
 smoke_test_url() {
   local url="$1"
-  curl -fsS --max-time 10 "${url}" >/dev/null
-  smoke_test_resolve_edges "${url}"
+  require_release_forward_budget 10 "public smoke request" || return 1
+  curl -fsS --max-time 10 "${url}" >/dev/null || return 1
+  smoke_test_resolve_edges "${url}" || return 1
 }
 
 smoke_test_urls() {
@@ -4918,6 +6703,7 @@ smoke_test_resolve_edges() {
   local host=""
   local port=""
   local ip=""
+  local ip_lines=""
   local -a ips=()
 
   if [[ -z "$(trim_field "${url}")" ]]; then
@@ -4945,7 +6731,11 @@ smoke_test_resolve_edges() {
     esac
   fi
 
-  mapfile -t ips < <(smoke_resolve_edge_ips)
+  ip_lines="$(smoke_resolve_edge_ips)" || return 1
+  while IFS= read -r ip; do
+    [[ -n "${ip}" ]] || continue
+    ips+=("${ip}")
+  done <<<"${ip_lines}"
   if (( ${#ips[@]} == 0 )); then
     log "smoke resolve check skipped because no edge IPs were discovered from DNS/env inputs"
     return 0
@@ -4953,38 +6743,33 @@ smoke_test_resolve_edges() {
 
   for ip in "${ips[@]}"; do
     log "smoke resolve check host=${host} port=${port} ip=${ip}"
-    curl -fsS --max-time 10 --resolve "${host}:${port}:${ip}" "${url}" >/dev/null
+    require_release_forward_budget 10 "edge-pinned public smoke request" || return 1
+    curl -fsS --max-time 10 --resolve "${host}:${port}:${ip}" "${url}" >/dev/null || return 1
   done
 }
 
 smoke_resolve_edge_ips() {
-  declare -A seen=()
-  local ip=""
-
-  smoke_resolve_ips_from_value "${FUGUE_DNS_ANSWER_IPS:-}" seen
-  if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS:-}")" ]]; then
-    while IFS= read -r entry; do
-      local answer_ips=""
-      IFS='|' read -r _ _ _ answer_ips _ _ <<<"${entry}"
-      smoke_resolve_ips_from_value "${answer_ips}" seen
-    done < <(csv_lines "${FUGUE_DNS_EXTRA_GROUPS}")
-  fi
-  smoke_resolve_ips_from_value "${FUGUE_EDGE_PUBLIC_IPV4:-}" seen
-  smoke_resolve_ips_from_value "${FUGUE_EDGE_PUBLIC_IPV6:-}" seen
-
-  for ip in "${!seen[@]}"; do
-    printf '%s\n' "${ip}"
-  done | sort -V
+  {
+    smoke_resolve_ips_from_value "${FUGUE_DNS_ANSWER_IPS:-}"
+    if [[ -n "$(trim_field "${FUGUE_DNS_EXTRA_GROUPS:-}")" ]]; then
+      while IFS= read -r entry; do
+        local answer_ips=""
+        IFS='|' read -r _ _ _ answer_ips _ _ <<<"${entry}"
+        smoke_resolve_ips_from_value "${answer_ips}"
+      done < <(csv_lines "${FUGUE_DNS_EXTRA_GROUPS}")
+    fi
+    smoke_resolve_ips_from_value "${FUGUE_EDGE_PUBLIC_IPV4:-}"
+    smoke_resolve_ips_from_value "${FUGUE_EDGE_PUBLIC_IPV6:-}"
+  } | awk 'NF > 0 && !seen[$0]++' | sort
 }
 
 smoke_resolve_ips_from_value() {
   local raw="$1"
-  local -n seen_ref="$2"
   local value=""
   while IFS= read -r value; do
     value="$(trim_field "${value}")"
     if [[ -n "${value}" ]]; then
-      seen_ref["${value}"]=1
+      printf '%s\n' "${value}"
     fi
   done < <(dns_answer_ips_lines "${raw}")
 }
@@ -5026,13 +6811,73 @@ cleanup_upgrade_override_values() {
   fi
 }
 
+terminate_active_control_plane_release_command() {
+  local pid="${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}"
+  local pgid="${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID:-}"
+
+  if [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+    terminate_release_command_tree "${pid}" "${pgid}"
+  fi
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+}
+
+handle_control_plane_release_signal() {
+  local signal_name="$1"
+  local exit_status=1
+
+  [[ "${CONTROL_PLANE_RELEASE_SIGNAL_HANDLING:-false}" != "true" ]] || return 0
+  CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="true"
+  case "${signal_name}" in
+    HUP) exit_status=129 ;;
+    INT) exit_status=130 ;;
+    TERM) exit_status=143 ;;
+  esac
+  log_stderr "received ${signal_name}; terminating the active release process group before rollback"
+  terminate_active_control_plane_release_command
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" ]]; then
+    if ! rollback_release_transaction; then
+      log_stderr "rollback after ${signal_name} did not complete; preserving the Lease recovery fence"
+    fi
+  fi
+  exit "${exit_status}"
+}
+
 cleanup_tmp_artifacts() {
   local exit_status=$?
+  local release_lease="true"
+
+  trap - HUP INT TERM
+  terminate_active_control_plane_release_command
+  if [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" &&
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" != "true" ]]; then
+    log_stderr "abnormal exit after Helm mutation; attempting the reserved synchronous rollback"
+    rollback_release_transaction || true
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" ||
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_FAILED:-false}" == "true" ]]; then
+    release_lease="false"
+  fi
   if [[ "${exit_status}" != "0" && "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" && "${DNS_MANIFEST_ROLLBACK_RESTORED:-false}" != "true" ]]; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
   fi
+  if [[ "${release_lease}" == "true" ]]; then
+    if ! release_control_plane_backup_coordination_lease; then
+      log_stderr "owner-CAS release of the control-plane backup coordination Lease failed; holder was not overwritten"
+    fi
+  else
+    if ! mark_control_plane_backup_coordination_recovery_required; then
+      log_stderr "could not persist the incomplete-release recovery annotation; the owner Lease remains unreleased"
+    fi
+    stop_control_plane_backup_coordination_lease_renewer
+    log_stderr "control-plane release rollback is incomplete; refusing to CAS-release the shared Lease"
+  fi
   cleanup_control_plane_automation_tmp
   cleanup_upgrade_override_values
+  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}" ]]; then
+    rm -f "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".*.tmp
+    CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
+  fi
   return "${exit_status}"
 }
 
@@ -5627,12 +7472,8 @@ PY
   fi
   image_cache_status_file="$(mktemp)"
   if [[ -n "${KUBECTL:-}" ]]; then
-    if command_exists timeout; then
-      if ! timeout "${FUGUE_RELEASE_PREFLIGHT_KUBECTL_TIMEOUT_SECONDS:-15}s" \
-        ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
-        : >"${image_cache_status_file}"
-      fi
-    elif ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
+    if ! bounded_kubectl "${FUGUE_RELEASE_PREFLIGHT_KUBECTL_TIMEOUT_SECONDS:-15}" \
+      -n "${FUGUE_NAMESPACE}" get "ds/${FUGUE_RELEASE_FULLNAME}-image-cache" -o json >"${image_cache_status_file}" 2>/dev/null; then
       : >"${image_cache_status_file}"
     fi
   fi
@@ -5981,16 +7822,21 @@ fetch_discovery_bundle() {
   local source_url="${FUGUE_DISCOVERY_BUNDLE_URL:-}"
   local base_url=""
   local auth_args=()
+  local downloaded_file=""
 
   if [[ -n "${DISCOVERY_BUNDLE_FILE}" && -r "${DISCOVERY_BUNDLE_FILE}" ]]; then
+    verify_discovery_bundle_file "${DISCOVERY_BUNDLE_FILE}" || return 1
     return 0
   fi
 
   if [[ -n "$(trim_field "${source_file}")" ]]; then
-    [[ -r "${source_file}" ]] || fail "FUGUE_DISCOVERY_BUNDLE_FILE is not readable: ${source_file}"
+    if [[ ! -r "${source_file}" ]]; then
+      log_stderr "FUGUE_DISCOVERY_BUNDLE_FILE is not readable: ${source_file}"
+      return 1
+    fi
+    verify_discovery_bundle_file "${source_file}" || return 1
     DISCOVERY_BUNDLE_FILE="${source_file}"
     DISCOVERY_BUNDLE_FILE_TEMP=""
-    verify_discovery_bundle_file "${DISCOVERY_BUNDLE_FILE}"
     log "using DiscoveryBundle from ${DISCOVERY_BUNDLE_FILE}"
     return 0
   fi
@@ -6005,21 +7851,39 @@ fetch_discovery_bundle() {
     return 1
   fi
 
-  DISCOVERY_BUNDLE_FILE="$(mktemp -t fugue-discovery-bundle.XXXXXX.json)"
-  DISCOVERY_BUNDLE_FILE_TEMP="${DISCOVERY_BUNDLE_FILE}"
+  downloaded_file="$(mktemp -t fugue-discovery-bundle.XXXXXX.json)" || return 1
   if [[ -n "$(trim_field "${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}")" ]]; then
     auth_args=(-H "Authorization: Bearer ${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}")
   fi
-  curl -fsS "${auth_args[@]}" "${source_url}" -o "${DISCOVERY_BUNDLE_FILE}"
-  verify_discovery_bundle_file "${DISCOVERY_BUNDLE_FILE}"
+  if (( ${#auth_args[@]} > 0 )); then
+    if ! curl -fsS "${auth_args[@]}" "${source_url}" -o "${downloaded_file}"; then
+      rm -f "${downloaded_file}"
+      return 1
+    fi
+  elif ! curl -fsS "${source_url}" -o "${downloaded_file}"; then
+    rm -f "${downloaded_file}"
+    return 1
+  fi
+  if ! verify_discovery_bundle_file "${downloaded_file}"; then
+    rm -f "${downloaded_file}"
+    return 1
+  fi
+  DISCOVERY_BUNDLE_FILE="${downloaded_file}"
+  DISCOVERY_BUNDLE_FILE_TEMP="${downloaded_file}"
   log "fetched DiscoveryBundle from ${source_url}"
   return 0
 }
 
 verify_discovery_bundle_file() {
   local bundle_file="$1"
-  [[ -r "${bundle_file}" ]] || fail "DiscoveryBundle is not readable: ${bundle_file}"
-  command_exists python3 || fail "python3 is required to verify DiscoveryBundle"
+  if [[ ! -r "${bundle_file}" ]]; then
+    log_stderr "DiscoveryBundle is not readable: ${bundle_file}"
+    return 1
+  fi
+  if ! command_exists python3; then
+    log_stderr "python3 is required to verify DiscoveryBundle"
+    return 1
+  fi
   python3 - "${bundle_file}" <<'PY'
 import base64
 import hashlib
@@ -6239,11 +8103,14 @@ EOF
 live_deployment_replicas() {
   local deployment_name="$1"
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true
+  release_bounded_kubectl 15 "live deployment replica read ${deployment_name}" \
+    -n "${FUGUE_NAMESPACE}" get "deploy/${deployment_name}" --ignore-not-found=true \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null
 }
 
 prepare_helm_post_renderer() {
   local registry_replicas=""
+  local renderer_file=""
 
   HELM_POST_RENDERER_FILE=""
   HELM_POST_RENDERER_ARGS=()
@@ -6251,7 +8118,10 @@ prepare_helm_post_renderer() {
   if [[ "${NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED}" != "true" ]]; then
     return 0
   fi
-  registry_replicas="$(trim_field "$(live_deployment_replicas "${FUGUE_REGISTRY_DEPLOYMENT_NAME}")")"
+  if ! registry_replicas="$(live_deployment_replicas "${FUGUE_REGISTRY_DEPLOYMENT_NAME}")"; then
+    return 1
+  fi
+  registry_replicas="$(trim_field "${registry_replicas}")"
   if [[ "${registry_replicas}" != "0" ]]; then
     return 0
   fi
@@ -6259,8 +8129,8 @@ prepare_helm_post_renderer() {
     return 0
   fi
 
-  HELM_POST_RENDERER_FILE="$(mktemp -t fugue-helm-post-renderer.XXXXXX.py)"
-  cat >"${HELM_POST_RENDERER_FILE}" <<'PY'
+  renderer_file="$(mktemp -t fugue-helm-post-renderer.XXXXXX.py)" || return 1
+  if ! cat >"${renderer_file}" <<'PY'
 #!/usr/bin/env python3
 import os
 import sys
@@ -6328,7 +8198,15 @@ sys.stdout.write("\n".join(out))
 if lines:
     sys.stdout.write("\n")
 PY
-  chmod 0700 "${HELM_POST_RENDERER_FILE}"
+  then
+    rm -f "${renderer_file}"
+    return 1
+  fi
+  if ! chmod 0700 "${renderer_file}"; then
+    rm -f "${renderer_file}"
+    return 1
+  fi
+  HELM_POST_RENDERER_FILE="${renderer_file}"
   export FUGUE_HELM_POST_RENDERER_REGISTRY_DEPLOYMENT="${FUGUE_REGISTRY_DEPLOYMENT_NAME}"
   HELM_POST_RENDERER_ARGS=(--post-renderer "${HELM_POST_RENDERER_FILE}")
   PRESERVE_REGISTRY_ZERO_REPLICAS="true"
@@ -6463,8 +8341,12 @@ patch_singleton_deployment_node_selector() {
   local deployment_name="$1"
   local selector_json_value="${2}"
   local patch
+  local presence=""
 
-  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${deployment_name}" >/dev/null 2>&1; then
+  if ! presence="$(deployment_presence "${deployment_name}")"; then
+    return 1
+  fi
+  if [[ "${presence}" == "absent" ]]; then
     return 0
   fi
 
@@ -6475,7 +8357,9 @@ patch_singleton_deployment_node_selector() {
   fi
 
   patch="$(printf '[{"op":"add","path":"/spec/template/spec/nodeSelector","value":%s}]' "${selector_json_value}")"
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" patch deploy "${deployment_name}" --type=json -p "${patch}" >/dev/null
+  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" patch deploy "${deployment_name}" --type=json -p "${patch}" >/dev/null; then
+    return 1
+  fi
   log "added ${deployment_name} singleton nodeSelector"
 }
 
@@ -6487,7 +8371,7 @@ patch_control_plane_singleton_deployments() {
   local selector_json_value deployment_name
   selector_json_value="$(selector_json "${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR}")"
   for deployment_name in "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}" "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}"; do
-    patch_singleton_deployment_node_selector "${deployment_name}" "${selector_json_value}"
+    patch_singleton_deployment_node_selector "${deployment_name}" "${selector_json_value}" || return 1
   done
 }
 
@@ -7088,7 +8972,8 @@ bootstrap_local_control_plane_automation_bundle() {
   fi
 
   log_stderr "bootstrapping control-plane automation SSH bundle on this server"
-  bash ./scripts/bootstrap_control_plane_automation.sh
+  run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS:-1200}" \
+    "control-plane automation bundle bootstrap" bash ./scripts/bootstrap_control_plane_automation.sh
 }
 
 prepare_control_plane_automation_ssh() {
@@ -7163,21 +9048,29 @@ primary_node_address_candidates() {
   local primary_node_name="$1"
   local label_public_ip=""
   local gcp_public_ip=""
+  local discovery_timeout="${FUGUE_PRIMARY_ADDRESS_DISCOVERY_TIMEOUT_SECONDS:-15}"
 
   [[ -n "${primary_node_name}" ]] || return 0
-  label_public_ip="$(${KUBECTL} get node "${primary_node_name}" -o jsonpath='{.metadata.labels.fugue\.io/public-ip}' 2>/dev/null || true)"
+  [[ "${discovery_timeout}" =~ ^[1-9][0-9]*$ ]] || discovery_timeout=15
+  label_public_ip="$(release_bounded_kubectl "${discovery_timeout}" \
+    "primary node public-IP label discovery" get node "${primary_node_name}" \
+    -o jsonpath='{.metadata.labels.fugue\.io/public-ip}' 2>/dev/null || true)"
   if [[ -n "${label_public_ip}" ]]; then
     printf '%s\n' "${label_public_ip}"
   fi
   if command_exists gcloud; then
-    gcp_public_ip="$(gcloud compute instances list \
-      --filter="name=${primary_node_name}" \
-      --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null | awk 'NF > 0 {print; exit}' || true)"
+    gcp_public_ip="$(run_release_long_command "${discovery_timeout}" \
+      "primary node gcloud address discovery" \
+      gcloud compute instances list \
+        --filter="name=${primary_node_name}" \
+        --format='value(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null | awk 'NF > 0 {print; exit}' || true)"
     if [[ -n "${gcp_public_ip}" ]]; then
       printf '%s\n' "${gcp_public_ip}"
     fi
   fi
-  ${KUBECTL} get node "${primary_node_name}" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null
+  release_bounded_kubectl "${discovery_timeout}" \
+    "primary node Kubernetes address discovery" get node "${primary_node_name}" \
+    -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{range .status.addresses[?(@.type=="Hostname")]}{.address}{"\n"}{end}' 2>/dev/null
 }
 
 resolve_primary_control_plane_ssh_target() {
@@ -7256,22 +9149,16 @@ primary_node_is_ready() {
   local node_name="$1"
   local status=""
 
-  if command_exists timeout; then
-    status="$(timeout 15s ${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true)"
-  else
-    status="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true)"
-  fi
+  status="$(bounded_kubectl 15 get node "${node_name}" \
+    -o jsonpath='{range .status.conditions[?(@.type=="Ready")]}{.status}{end}' 2>/dev/null || true)"
   [[ "${status}" == "True" ]]
 }
 
 primary_node_has_disk_pressure() {
   local node_name="$1"
   local status=""
-  if command_exists timeout; then
-    status="$(timeout 15s ${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
-  else
-    status="$(${KUBECTL} get node "${node_name}" -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
-  fi
+  status="$(bounded_kubectl 15 get node "${node_name}" \
+    -o jsonpath='{range .status.conditions[?(@.type=="DiskPressure")]}{.status}{end}' 2>/dev/null || true)"
   [[ "${status}" == "True" ]]
 }
 
@@ -7285,11 +9172,13 @@ try_primary_host_root_command() {
   local_hostname_short="$(hostname -s 2>/dev/null || true)"
   if [[ "${local_hostname}" == "${primary_node_name}" || "${local_hostname_short}" == "${primary_node_name}" ]]; then
     if [[ "$(id -u)" == "0" ]]; then
-      bash -lc "${cmd}"
+      run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+        "primary host root command" bash -lc "${cmd}"
       return
     fi
     if sudo -n true >/dev/null 2>&1; then
-      sudo -n bash -lc "${cmd}"
+      run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+        "primary host sudo command" sudo -n bash -lc "${cmd}"
       return
     fi
     log_stderr "local primary host ${primary_node_name} requires interactive sudo; falling back to automation SSH"
@@ -7299,8 +9188,9 @@ try_primary_host_root_command() {
     return 1
   fi
   build_primary_control_plane_ssh_opts "${primary_node_name}"
-  ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
-    "sudo -n bash -lc $(printf '%q' "${cmd}")"
+  run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "primary host SSH command" ssh -n "${PRIMARY_CONTROL_PLANE_SSH_OPTS[@]}" "$(primary_control_plane_ssh_login)" \
+      "sudo -n bash -lc $(printf '%q' "${cmd}")"
 }
 
 run_primary_host_root_command() {
@@ -7339,11 +9229,7 @@ wait_for_primary_node_ready() {
 local_kube_api_is_ready() {
   local readyz=""
 
-  if command_exists timeout; then
-    readyz="$(timeout 10s ${KUBECTL} get --raw='/readyz' 2>/dev/null || true)"
-  else
-    readyz="$(${KUBECTL} get --raw='/readyz' 2>/dev/null || true)"
-  fi
+  readyz="$(bounded_kubectl 10 get --raw='/readyz' 2>/dev/null || true)"
   [[ "${readyz}" == *"ok"* ]]
 }
 
@@ -7441,17 +9327,10 @@ release_pod_names_by_phase() {
   local phase="$1"
   local output=""
 
-  if command_exists timeout; then
-    output="$(timeout 30s ${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
-      -l "$(release_pod_selector)" \
-      --field-selector "status.phase=${phase}" \
-      -o name 2>/dev/null || true)"
-  else
-    output="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
-      -l "$(release_pod_selector)" \
-      --field-selector "status.phase=${phase}" \
-      -o name 2>/dev/null || true)"
-  fi
+  output="$(bounded_kubectl 30 -n "${FUGUE_NAMESPACE}" get pods \
+    -l "$(release_pod_selector)" \
+    --field-selector "status.phase=${phase}" \
+    -o name 2>/dev/null || true)"
 
   printf '%s\n' "${output}" | awk 'NF > 0'
 }
@@ -7461,21 +9340,12 @@ delete_release_pod_batch() {
   shift
   [[ "$#" -gt 0 ]] || return 0
 
-  if command_exists timeout; then
-    if timeout 60s ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete \
-      --ignore-not-found \
-      --wait=false "$@" >/dev/null 2>&1; then
-      return 0
-    fi
-    log "warning: failed to delete a batch of ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
-    return 0
-  fi
-
-  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" delete \
+  if bounded_kubectl 60 -n "${FUGUE_NAMESPACE}" delete \
     --ignore-not-found \
     --wait=false "$@" >/dev/null 2>&1; then
-    log "warning: failed to delete a batch of ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
+    return 0
   fi
+  log "warning: failed to delete a batch of ${phase} Fugue release pods from ${FUGUE_NAMESPACE}"
 }
 
 prune_release_pods_by_phase() {
@@ -7546,14 +9416,17 @@ stateless_release_pod_names_on_node() {
 
 force_delete_release_pods_on_unhealthy_nodes() {
   local node_name=""
+  local unhealthy_nodes=""
   local names=""
   local count=""
   local pod=""
   local -a batch=()
 
+  unhealthy_nodes="$(unhealthy_node_names)" || return 1
+
   while IFS= read -r node_name; do
     [[ -n "${node_name}" ]] || continue
-    names="$(stateless_release_pod_names_on_node "${node_name}")"
+    names="$(stateless_release_pod_names_on_node "${node_name}")" || return 1
     count="$(printf '%s\n' "${names}" | awk 'NF > 0 {count++} END {print count + 0}')"
     [[ "${count}" != "0" ]] || continue
 
@@ -7567,7 +9440,7 @@ force_delete_release_pods_on_unhealthy_nodes() {
           --ignore-not-found \
           --force \
           --grace-period=0 \
-          --wait=false "${batch[@]}" >/dev/null 2>&1 || true
+          --wait=false "${batch[@]}" >/dev/null 2>&1 || return 1
         batch=()
       fi
     done <<< "${names}"
@@ -7576,9 +9449,9 @@ force_delete_release_pods_on_unhealthy_nodes() {
         --ignore-not-found \
         --force \
         --grace-period=0 \
-        --wait=false "${batch[@]}" >/dev/null 2>&1 || true
+        --wait=false "${batch[@]}" >/dev/null 2>&1 || return 1
     fi
-  done < <(unhealthy_node_names)
+  done <<<"${unhealthy_nodes}"
 }
 
 recover_primary_node_if_needed() {
@@ -7591,7 +9464,7 @@ recover_primary_node_if_needed() {
   fi
 
   prune_terminated_release_pods
-  force_delete_release_pods_on_unhealthy_nodes
+  force_delete_release_pods_on_unhealthy_nodes || return 1
 
   if primary_node_is_ready "${primary_node_name}"; then
     return 0
@@ -7635,17 +9508,11 @@ control_plane_postgres_logs() {
   local logs=""
 
   [[ -n "${pod_name}" ]] || return 0
-  if command_exists timeout; then
-    logs="$(timeout 15s ${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --previous --tail=200 2>/dev/null || true)"
-  else
-    logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --previous --tail=200 2>/dev/null || true)"
-  fi
+  logs="$(bounded_kubectl 15 -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" \
+    --previous --tail=200 2>/dev/null || true)"
   if [[ -z "${logs}" ]]; then
-    if command_exists timeout; then
-      logs="$(timeout 15s ${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --tail=200 2>/dev/null || true)"
-    else
-      logs="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" --tail=200 2>/dev/null || true)"
-    fi
+    logs="$(bounded_kubectl 15 -n "${FUGUE_NAMESPACE}" logs "pod/${pod_name}" \
+      --tail=200 2>/dev/null || true)"
   fi
   printf '%s' "${logs}"
 }
@@ -7699,12 +9566,15 @@ wait_for_control_plane_postgres_pods_gone() {
   local names=""
 
   for attempt in $(seq 1 24); do
-    names="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
+    if ! names="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get pods \
       -l "$(control_plane_postgres_selector)" \
-      -o go-template='{{range .items}}{{if eq .status.phase "Running"}}{{.metadata.name}} {{end}}{{end}}' 2>/dev/null || true)"
+      -o go-template='{{range .items}}{{if eq .status.phase "Running"}}{{.metadata.name}} {{end}}{{end}}' 2>/dev/null)"; then
+      return 1
+    fi
     if [[ -z "${names}" ]]; then
       return 0
     fi
+    require_release_forward_budget 5 "control-plane postgres Pod termination poll delay" || return 1
     sleep 5
   done
   return 1
@@ -7748,10 +9618,15 @@ recover_primary_postgres_if_needed() {
   fi
 
   log "detected invalid checkpoint in control-plane postgres pod ${postgres_pod_name}; resetting WAL on the primary host"
-  original_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  [[ -n "${original_replicas}" ]] || original_replicas="1"
+  if ! original_replicas="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null)"; then
+    fail "cannot read the exact control-plane postgres replica count before WAL recovery"
+  fi
+  [[ "${original_replicas}" =~ ^[1-9][0-9]*$ ]] ||
+    fail "control-plane postgres replica count is not a positive observed value before WAL recovery: ${original_replicas:-<empty>}"
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas=0 >/dev/null
+  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas=0 >/dev/null; then
+    fail "cannot scale control-plane postgres to zero before WAL recovery"
+  fi
   if ! wait_for_control_plane_postgres_pods_gone; then
     ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null || true
     fail "control-plane postgres pods did not terminate before WAL recovery"
@@ -7806,7 +9681,9 @@ EOF
     fail "control-plane postgres WAL recovery failed"
   fi
 
-  ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null
+  if ! ${KUBECTL} -n "${FUGUE_NAMESPACE}" scale deploy "${FUGUE_POSTGRES_DEPLOYMENT_NAME}" --replicas="${original_replicas}" >/dev/null; then
+    fail "control-plane postgres WAL recovery completed but the exact observed replica count could not be restored"
+  fi
 }
 
 restore_primary_mesh_network_if_needed() {
@@ -7932,8 +9809,10 @@ EOF
 
 ready_nodes_matching_selector() {
   local selector="$1"
-  ${KUBECTL} get nodes -l "${selector}" --no-headers 2>/dev/null | \
-    awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count + 0}'
+  local rows=""
+
+  rows="$(${KUBECTL} get nodes -l "${selector}" --no-headers 2>/dev/null)" || return 1
+  awk '$2 == "Ready" || $2 ~ /^Ready,/ {count++} END {print count + 0}' <<<"${rows}"
 }
 
 ensure_coredns_multinode_scheduling() {
@@ -7946,22 +9825,30 @@ ensure_coredns_multinode_scheduling() {
   local current_control_plane_selector=""
   local current_os_selector=""
   local patch_payload=""
+  local presence=""
 
   if ! [[ "${desired_replicas}" =~ ^[0-9]+$ ]] || (( desired_replicas <= 0 )); then
     fail "FUGUE_COREDNS_TARGET_REPLICAS must be a positive integer"
   fi
 
-  if ! ${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" >/dev/null 2>&1; then
+  if ! presence="$(deployment_presence "${FUGUE_COREDNS_DEPLOYMENT_NAME}" "${FUGUE_COREDNS_NAMESPACE}")"; then
+    return 1
+  fi
+  if [[ "${presence}" == "absent" ]]; then
     log "skip CoreDNS HA normalization because deploy/${FUGUE_COREDNS_DEPLOYMENT_NAME} is absent from ${FUGUE_COREDNS_NAMESPACE}"
     return 0
   fi
 
   # Keep CoreDNS off worker nodes so pod DNS does not vary with worker host resolvers.
-  ready_coredns_nodes="$(ready_nodes_matching_selector "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"
+  if ! ready_coredns_nodes="$(ready_nodes_matching_selector "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"; then
+    return 1
+  fi
   if ! [[ "${ready_coredns_nodes}" =~ ^[0-9]+$ ]] || (( ready_coredns_nodes == 0 )); then
     coredns_selector_key="node-role.kubernetes.io/control-plane"
     coredns_selector_value="true"
-    ready_coredns_nodes="$(ready_nodes_matching_selector "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"
+    if ! ready_coredns_nodes="$(ready_nodes_matching_selector "kubernetes.io/os=linux,${coredns_selector_key}=${coredns_selector_value}")"; then
+      return 1
+    fi
   fi
   if ! [[ "${ready_coredns_nodes}" =~ ^[0-9]+$ ]] || (( ready_coredns_nodes == 0 )); then
     fail "no Ready linux control-plane nodes available for CoreDNS scheduling"
@@ -7973,10 +9860,11 @@ ensure_coredns_multinode_scheduling() {
     desired_replicas=1
   fi
 
-  current_replicas="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
-  current_profile_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/profile}' 2>/dev/null || true)"
-  current_control_plane_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)"
-  current_os_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/os}' 2>/dev/null || true)"
+  current_replicas="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.replicas}' 2>/dev/null)" || return 1
+  current_profile_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.fugue\.install/profile}' 2>/dev/null)" || return 1
+  current_control_plane_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.node-role\.kubernetes\.io/control-plane}' 2>/dev/null)" || return 1
+  current_os_selector="$(${KUBECTL} -n "${FUGUE_COREDNS_NAMESPACE}" get deploy "${FUGUE_COREDNS_DEPLOYMENT_NAME}" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/os}' 2>/dev/null)" || return 1
+  [[ "${current_replicas}" =~ ^[0-9]+$ ]] || return 1
 
   if [[ "${current_replicas}" == "${desired_replicas}" ]] && [[ "${current_os_selector}" == "linux" ]]; then
     if [[ "${coredns_selector_key}" == "fugue.install/profile" ]] && [[ "${current_profile_selector}" == "${coredns_selector_value}" ]]; then
@@ -9006,6 +10894,210 @@ node_local_dns_refresh_authoritative_hostport_snapshot() {
   log "refreshed the authoritative DNS hostPort baseline after the verified ${phase} transaction"
 }
 
+node_local_dns_refresh_authoritative_hostport_snapshot_to_file() {
+  local target_nodes="$1"
+  local phase="$2"
+  local state_file="$3"
+  local next_file="${state_file}.next"
+
+  node_local_dns_refresh_authoritative_hostport_snapshot "${target_nodes}" "${phase}" || return 1
+  umask 077
+  if ! printf '%s' "${NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT:-}" >"${next_file}"; then
+    rm -f "${next_file}"
+    return 1
+  fi
+  if ! mv -f "${next_file}" "${state_file}"; then
+    rm -f "${next_file}"
+    return 1
+  fi
+}
+
+node_local_dns_refresh_authoritative_hostport_snapshot_bounded() {
+  local target_nodes="$1"
+  local phase="$2"
+  local handoff_dir=""
+  local state_file=""
+  local state_bytes=""
+  local snapshot=""
+
+  handoff_dir="$(mktemp -d "${TMPDIR:-/tmp}/fugue-node-local-dns-state.XXXXXX")" || return 1
+  state_file="${handoff_dir}/hostport-snapshot"
+  if ! run_node_local_dns_whole_phase \
+    "${phase} authoritative hostPort refresh" \
+    node_local_dns_refresh_authoritative_hostport_snapshot_to_file \
+    "${target_nodes}" "${phase}" "${state_file}"; then
+    rm -rf "${handoff_dir}"
+    return 1
+  fi
+  if [[ ! -f "${state_file}" || -L "${state_file}" ]]; then
+    rm -rf "${handoff_dir}"
+    return 1
+  fi
+  state_bytes="$(wc -c <"${state_file}" 2>/dev/null | tr -d '[:space:]')"
+  if [[ ! "${state_bytes}" =~ ^[0-9]+$ ]] || (( state_bytes > 1048576 )); then
+    rm -rf "${handoff_dir}"
+    return 1
+  fi
+  if [[ -s "${state_file}" ]] && ! awk -F '\t' 'NF != 7 {exit 1}' "${state_file}"; then
+    rm -rf "${handoff_dir}"
+    return 1
+  fi
+  snapshot="$(cat "${state_file}")" || {
+    rm -rf "${handoff_dir}"
+    return 1
+  }
+  NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT="${snapshot}"
+  rm -rf "${handoff_dir}"
+}
+
+node_local_dns_smoke_retry_wall_budget_seconds() {
+  local url_count="0"
+  local edge_ip_count="0"
+  local attempts="${FUGUE_SMOKE_RETRIES:-12}"
+  local delay="${FUGUE_SMOKE_DELAY_SECONDS:-5}"
+  local one_attempt="0"
+
+  url_count="$(smoke_test_urls | sed '/^[[:space:]]*$/d' | wc -l | awk '{print $1}')"
+  edge_ip_count="$(smoke_resolve_edge_ips | sed '/^[[:space:]]*$/d' | wc -l | awk '{print $1}')"
+  [[ "${url_count}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${edge_ip_count}" =~ ^[0-9]+$ ]] || return 1
+  [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${delay}" =~ ^[0-9]+$ ]] || return 1
+  one_attempt=$((url_count * (edge_ip_count + 1) * 10))
+  printf '%s\n' "$((attempts * one_attempt + (attempts - 1) * delay))"
+}
+
+control_plane_release_rollback_required_seconds() {
+  local helm_outer=""
+  local rollout_outer=""
+  local smoke_seconds=""
+  local command_timeout="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
+  local node_local_outer="${FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS:-${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}}"
+  local base_required=""
+  local node_local_required=0
+  local required=""
+
+  helm_outer=$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))
+  rollout_outer=$(( $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}") + 30 ))
+  smoke_seconds="$(node_local_dns_smoke_retry_wall_budget_seconds)" || return 1
+  base_required=$((helm_outer + 2 * rollout_outer + smoke_seconds + 3 * command_timeout))
+
+  if (( NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS > 0 )); then
+    node_local_required="${NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS}"
+  elif [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ||
+    "${FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT:-false}" == "true" ||
+    "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
+    # Before the exact target cardinality is pinned, reserve four complete
+    # whole-process NodeLocal rollback phases. Common Helm, API/controller
+    # rollout, smoke, and presence-read bounds are added separately below.
+    node_local_required=$((4 * node_local_outer))
+  fi
+  required=$((base_required + node_local_required))
+  if node_local_dns_split_release_enabled; then
+    required=$((required + ${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}))
+  fi
+  if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}" == "allow" &&
+    "${FUGUE_DNS_ENABLED:-false}" == "true" ]]; then
+    required=$((required + ${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600} + node_local_outer))
+  fi
+  printf '%s\n' "${required}"
+}
+
+validate_control_plane_release_rollback_reserve() {
+  local required=""
+
+  required="$(control_plane_release_rollback_required_seconds)" ||
+    fail "cannot calculate the selected rollback path upper-bound reserve"
+  if (( FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS < required )); then
+    fail "rollback reserve ${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS}s cannot cover the selected rollback path upper bound ${required}s (node_local=${FUGUE_NODE_LOCAL_DNS_ENABLED:-false} split=$(node_local_dns_split_release_enabled && printf true || printf false) dns_manifest=$([[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE:-auto}" == "allow" && "${FUGUE_DNS_ENABLED:-false}" == "true" ]] && printf true || printf false))"
+  fi
+  log "rollback reserve validated: selected_path_upper_bound=${required}s reserve=${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS}s"
+}
+
+validate_node_local_dns_iptables_release_budget() {
+  local target_count="$1"
+  local probe="${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS}"
+  local critical="${FUGUE_NODE_LOCAL_DNS_CRITICAL_READY_TIMEOUT_SECONDS}"
+  local watch="${FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS}"
+  local helm_seconds=""
+  local rollout_seconds=""
+  local release_watch_seconds=""
+  local smoke_seconds=""
+  local verify_one=""
+  local forward_seconds=""
+  local rollback_seconds=""
+  local rollback_node_seconds=""
+  local rollback_reserve=""
+  local coordination_overhead=""
+  local required_seconds=""
+  local phase_outer="${FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS:-${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}}"
+
+  [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "iptables" ]] || return 0
+  [[ "${target_count}" =~ ^[1-9][0-9]*$ ]] || fail "NodeLocal DNSCache iptables budget requires a positive target count"
+  helm_seconds="$(duration_to_seconds "${FUGUE_HELM_TIMEOUT}")"
+  rollout_seconds="$(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}")"
+  release_watch_seconds="$(release_safety_watch_wall_budget_seconds)" || fail "cannot bound the release safety watch for NodeLocal DNSCache"
+  smoke_seconds="$(node_local_dns_smoke_retry_wall_budget_seconds)" || fail "cannot bound the NodeLocal DNSCache smoke retry plan"
+  verify_one=$((probe + 100))
+
+  # This cardinality admission estimate rejects a plan that is impossible even
+  # before optional authoritative hostPort probes are counted. It is not used
+  # as a total-duration proof: the absolute deadline guard independently checks
+  # remaining time before each bounded forward operation.
+  forward_seconds=$((
+    helm_seconds + probe + 2 * rollout_seconds +
+      target_count * (4 * verify_one + critical + watch + 10 + smoke_seconds)
+  ))
+  rollback_seconds=$((
+    helm_seconds + probe + target_count * (probe + 2 * verify_one) +
+      3 * rollout_seconds + smoke_seconds
+  ))
+  rollback_node_seconds=$((
+    probe + target_count * (probe + 2 * verify_one) + rollout_seconds
+  ))
+  rollback_reserve="${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS}"
+  coordination_overhead=$((
+    2 * FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS +
+      FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS +
+      FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS
+  ))
+  NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=$((
+    rollback_node_seconds + 4 * 30 + 2 * FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS
+  ))
+  if (( NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS < 4 * phase_outer )); then
+    NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=$((4 * phase_outer))
+  fi
+  validate_control_plane_release_rollback_reserve
+  required_seconds=$((
+    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS + coordination_overhead + forward_seconds +
+      2 * rollout_seconds + release_watch_seconds + rollback_reserve +
+      FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS
+  ))
+  if (( required_seconds > FUGUE_DEPLOY_JOB_BUDGET_SECONDS )); then
+    fail "NodeLocal DNSCache iptables single-run plan needs at least ${required_seconds}s for ${target_count} nodes, exceeding the ${FUGUE_DEPLOY_JOB_BUDGET_SECONDS}s deploy budget (condition: backup_wait=${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS} + coordination=${coordination_overhead} + forward=${forward_seconds} + core_rollouts=$((2 * rollout_seconds)) + watch=${release_watch_seconds} + rollback_reserve=${rollback_reserve} + artifact=${FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS} <= job_budget=${FUGUE_DEPLOY_JOB_BUDGET_SECONDS}; current knobs: probe=${probe} rollout=${rollout_seconds} critical_ready=${critical} node_watch=${watch} smoke=${smoke_seconds}); use a dedicated bounded split transition or evidence-backed smaller outer timeouts"
+  fi
+  log "NodeLocal DNSCache iptables cardinality admission passed: nodes=${target_count} estimate=${required_seconds}s rollback_estimate=${rollback_seconds}s allocation=${FUGUE_DEPLOY_JOB_BUDGET_SECONDS}s; absolute remaining-time checks guard every bounded forward operation"
+}
+
+validate_node_local_dns_release_budget_pre_mutation() {
+  local desired_nodes=""
+  local desired_node_count="0"
+
+  NODE_LOCAL_DNS_BUDGET_TARGET_NODES=""
+  [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" ]] || return 0
+  [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "iptables" ]] || return 0
+  desired_nodes="$(run_release_function_with_wall_bounded_kubectl \
+    "${FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS}" node_local_dns_candidate_nodes)" ||
+    fail "cannot determine the read-only NodeLocal DNSCache target cardinality before release mutation"
+  desired_nodes="$(printf '%s\n' "${desired_nodes}" | sed '/^[[:space:]]*$/d' | sort -u)"
+  [[ -n "${desired_nodes}" ]] || fail "NodeLocal DNSCache selector has no Ready linux nodes before release mutation"
+  desired_node_count="$(printf '%s\n' "${desired_nodes}" | wc -l | awk '{print $1}')"
+  [[ "${desired_node_count}" =~ ^[1-9][0-9]*$ ]] || fail "NodeLocal DNSCache pre-mutation target cardinality is invalid"
+  validate_node_local_dns_iptables_release_budget "${desired_node_count}"
+  NODE_LOCAL_DNS_BUDGET_TARGET_NODES="${desired_nodes}"
+  log "pinned read-only NodeLocal DNSCache budget cohort before release mutation: nodes=${desired_node_count}"
+}
+
 prepare_node_local_dns_helm_args() {
   local service_data=""
   local live_daemonset_ref=""
@@ -9185,6 +11277,11 @@ print(cluster_ip + "\t" + json.dumps(selector, sort_keys=True, separators=(",", 
   if [[ "${FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES}" != "true" && "${desired_node_count}" != "1" ]]; then
     fail "multi-node NodeLocal DNSCache cohorts require FUGUE_NODE_LOCAL_DNS_ALLOW_ALL_NODES=true"
   fi
+  if [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "iptables" && -n "$(trim_field "${NODE_LOCAL_DNS_BUDGET_TARGET_NODES:-}")" ]] &&
+    ! node_local_dns_same_node_set "${desired_nodes}" "${NODE_LOCAL_DNS_BUDGET_TARGET_NODES}"; then
+    fail "NodeLocal DNSCache target cohort changed after the pre-mutation cardinality budget was pinned"
+  fi
+  validate_node_local_dns_iptables_release_budget "${desired_node_count}"
   if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" != "true" ]]; then
     [[ "${FUGUE_NODE_LOCAL_DNS_MODE}" == "shadow" && "${desired_node_count}" == "1" ]] || fail "the first NodeLocal DNSCache release must be a single-node shadow canary"
     NODE_LOCAL_DNS_ADDED_NODES="${desired_nodes}"
@@ -9270,15 +11367,26 @@ node_local_dns_run_probe_pod() {
   local script="$6"
   local host_pid="${7:-false}"
   local safe_node=""
+  local safe_purpose=""
   local pod_name=""
+  local probe_nonce=""
+  local applied_identity=""
+  local created_name=""
+  local created_uid=""
+  local observed_state=""
+  local observed_uid=""
   local phase=""
   local deadline=0
   local result=1
+  local cleanup_allowed="true"
 
-  safe_node="$(printf '%s' "${node_name}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9.-' | cut -c1-32 | sed 's/^[^a-z0-9]*//; s/[^a-z0-9]*$//')"
-  pod_name="fugue-nld-${purpose}-${safe_node}-$$"
-  pod_name="${pod_name:0:63}"
-  POD_NAME="${pod_name}" NODE_NAME="${node_name}" POD_IMAGE="${image_ref}" POD_SCRIPT="${script}" \
+  safe_node="$(printf '%s' "${node_name}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9.-' | cut -c1-24 | sed 's/^[^a-z0-9]*//; s/[^a-z0-9]*$//')"
+  safe_purpose="$(printf '%s' "${purpose}" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-12 | sed 's/^[^a-z0-9]*//; s/[^a-z0-9]*$//')"
+  [[ -n "${safe_node}" && -n "${safe_purpose}" ]] || return 1
+  probe_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(5))')" || return 1
+  [[ "${probe_nonce}" =~ ^[0-9a-f]{10}$ ]] || return 1
+  pod_name="fugue-nld-${safe_purpose}-${safe_node}-${probe_nonce}"
+  if ! applied_identity="$(POD_NAME="${pod_name}" NODE_NAME="${node_name}" POD_IMAGE="${image_ref}" POD_SCRIPT="${script}" \
     POD_HOST_NETWORK="${host_network}" POD_NET_ADMIN="${net_admin}" POD_TIMEOUT="${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS}" \
     POD_HOST_PID="${host_pid}" POD_NAMESPACE="${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" \
     python3 -c '
@@ -9313,11 +11421,27 @@ manifest = {
 if os.environ.get("POD_HOST_PID") == "true":
     manifest["spec"]["hostPID"] = True
 print(json.dumps(manifest, separators=(",", ":")))
-' | ${KUBECTL} apply -f - >/dev/null
+' | ${KUBECTL} apply -f - -o jsonpath='{.metadata.name}{"|"}{.metadata.uid}')"; then
+    ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" delete pod "${pod_name}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    log "NodeLocal DNSCache ${purpose} probe could not create a uniquely identified Pod on ${node_name}"
+    return 1
+  fi
+  IFS='|' read -r created_name created_uid <<<"${applied_identity}"
+  if [[ "${created_name}" != "${pod_name}" || ! "${created_uid}" =~ ^[A-Za-z0-9-]+$ ]]; then
+    ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" delete pod "${pod_name}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    log "NodeLocal DNSCache ${purpose} probe create returned an invalid Pod identity on ${node_name}"
+    return 1
+  fi
 
   deadline=$((SECONDS + FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    phase="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pod "${pod_name}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    observed_state="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get pod "${pod_name}" -o jsonpath='{.metadata.uid}{"|"}{.status.phase}' 2>/dev/null || true)"
+    IFS='|' read -r observed_uid phase <<<"${observed_state}"
+    if [[ -n "${observed_uid}" && "${observed_uid}" != "${created_uid}" ]]; then
+      phase="uid-mismatch"
+      cleanup_allowed="false"
+      break
+    fi
     case "${phase}" in
       Succeeded)
         result=0
@@ -9329,6 +11453,10 @@ print(json.dumps(manifest, separators=(",", ":")))
     esac
     sleep 2
   done
+  if [[ "${cleanup_allowed}" != "true" ]]; then
+    log "NodeLocal DNSCache ${purpose} probe identity changed on ${node_name}; refusing to inspect or delete the replacement Pod"
+    return 1
+  fi
   ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" logs "${pod_name}" 2>/dev/null || true
   if (( result != 0 )); then
     ${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" describe pod "${pod_name}" 2>/dev/null || true
@@ -9910,6 +12038,8 @@ node_local_dns_verify_authoritative_coexistence() {
       [[ "${transport}" != "tcp" ]] || transport_args+=(-T)
       attempt=1
       while (( attempt <= 3 )); do
+        require_release_forward_budget 3 \
+          "authoritative DNS ${transport} SOA probe ${node_name}/${host_ip} attempt ${attempt}/3" || return 1
         if output="$(host "${transport_args[@]}" -t SOA "${FUGUE_DNS_ZONE}" "${host_ip}" 2>&1)" && grep -Fq ' has SOA record ' <<<"${output}"; then
           break
         fi
@@ -9917,6 +12047,7 @@ node_local_dns_verify_authoritative_coexistence() {
           log "authoritative DNS ${transport} SOA probe failed on ${node_name} hostIP=${host_ip}: ${output}"
           return 1
         fi
+        require_release_forward_budget 2 "authoritative DNS SOA probe retry delay" || return 1
         sleep 2
         attempt=$((attempt + 1))
       done
@@ -10613,8 +12744,12 @@ sync_route_a_edge_proxy() {
   fi
   export FUGUE_DOMAIN="${FUGUE_API_PUBLIC_DOMAIN}"
   log "syncing Route A edge proxy through scripts/sync_fugue_edge_proxy.sh"
-  if ! bash ./scripts/sync_fugue_edge_proxy.sh; then
-    log "warning: Route A edge proxy sync failed; continuing because edge/API rollout already completed"
+  if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+    "Route A edge proxy synchronization" env \
+    KUBECTL="${CONTROL_PLANE_RELEASE_RAW_KUBECTL:-${KUBECTL:-}}" \
+    bash ./scripts/sync_fugue_edge_proxy.sh; then
+    log "Route A edge proxy sync failed or lost its release guard"
+    return 1
   fi
 }
 
@@ -10624,13 +12759,13 @@ label_default_builder_nodes() {
     fugue.io/shared-pool- \
     fugue.io/build- \
     fugue.io/build-tier- \
-    --overwrite >/dev/null || true
+    --overwrite >/dev/null || return 1
 
   log "labeling non-primary combined nodes as builder candidates"
   ${KUBECTL} label node -l 'fugue.install/profile=combined,fugue.install/role!=primary' \
     fugue.io/build=true \
     fugue.io/build-tier- \
-    --overwrite >/dev/null
+    --overwrite >/dev/null || return 1
 }
 
 validate_control_plane_singleton_anchor() {
@@ -10984,7 +13119,8 @@ prepare_dns_manifest_transaction() {
   mkdir -p "${snapshot_dir}" || return $?
   DNS_MANIFEST_SNAPSHOT_FILE="$(mktemp "${snapshot_dir%/}/fugue-dns-manifest-snapshot.XXXXXX.json")" || return $?
   chmod 600 "${DNS_MANIFEST_SNAPSHOT_FILE}" || return $?
-  if ! run_dns_manifest_library_action capture "${DNS_MANIFEST_SNAPSHOT_FILE}"; then
+  if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+    "DNS manifest snapshot capture" run_dns_manifest_library_action capture "${DNS_MANIFEST_SNAPSHOT_FILE}"; then
     rm -f "${DNS_MANIFEST_SNAPSHOT_FILE}"
     DNS_MANIFEST_SNAPSHOT_FILE=""
     return 1
@@ -11012,7 +13148,8 @@ run_dns_manifest_transaction_after_helm() {
     FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME}" \
     FUGUE_RELEASE_FULLNAME="${FUGUE_RELEASE_FULLNAME}" \
     KUBECTL="${KUBECTL:-}" \
-    bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"; then
+    run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+      "DNS manifest transaction" bash "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi
@@ -11023,7 +13160,8 @@ run_dns_manifest_transaction_after_helm() {
   elif [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
     node_local_dns_snapshot_targets="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES:-}"
   fi
-  if ! node_local_dns_refresh_authoritative_hostport_snapshot "${node_local_dns_snapshot_targets}" "DNS manifest"; then
+  if ! node_local_dns_refresh_authoritative_hostport_snapshot_bounded \
+    "${node_local_dns_snapshot_targets}" "DNS manifest"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi
@@ -11039,14 +13177,16 @@ restore_dns_manifest_transaction_after_helm_rollback() {
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   }
-  if ! run_dns_manifest_library_action restore "${DNS_MANIFEST_SNAPSHOT_FILE}"; then
+  if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+    "DNS manifest rollback" run_dns_manifest_library_action restore "${DNS_MANIFEST_SNAPSHOT_FILE}"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi
   if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
     node_local_dns_snapshot_targets="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES:-}"
   fi
-  if ! node_local_dns_refresh_authoritative_hostport_snapshot "${node_local_dns_snapshot_targets}" "DNS manifest rollback"; then
+  if ! node_local_dns_refresh_authoritative_hostport_snapshot_bounded \
+    "${node_local_dns_snapshot_targets}" "DNS manifest rollback"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi
@@ -11073,31 +13213,44 @@ finalize_dns_manifest_transaction() {
 
 rollback_release() {
   local rollback_api_deployment="${FUGUE_API_DEPLOYMENT_NAME}"
+  local rollback_api_presence=""
+  local rollback_legacy_api_presence=""
+  local rollback_controller_presence=""
   local helm_rollback_failed="false"
   local dns_restore_failed="false"
   local image_cache_restore_failed="false"
 
+  CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="true"
+
   if [[ -z "${PREVIOUS_REVISION:-}" ]]; then
     log "skip rollback because no previous revision was captured"
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
     return 1
   fi
 
   if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" != "true" && "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
-    if ! node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+    if ! run_node_local_dns_whole_phase \
+      "rollback pre-Helm interception removal" \
+      node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
       log "refusing Helm rollback until NodeLocal DNSCache interception is safely removed"
+      CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
       return 1
     fi
   fi
 
   log "rolling back release ${FUGUE_RELEASE_NAME} to revision ${PREVIOUS_REVISION}"
-  if ! helm rollback "${FUGUE_RELEASE_NAME}" "${PREVIOUS_REVISION}" \
+  if ! run_release_long_command "$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))" \
+    "Helm rollback" helm rollback "${FUGUE_RELEASE_NAME}" "${PREVIOUS_REVISION}" \
     -n "${FUGUE_NAMESPACE}" \
     --timeout "${FUGUE_HELM_TIMEOUT}"; then
     log "Helm rollback failed; still attempting exact DNS manifest restoration"
     helm_rollback_failed="true"
   fi
 
-  if ! image_cache_restore_ondelete_after_helm_rollback; then
+  if ! run_release_long_command \
+    "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "rollback image-cache OnDelete restoration" \
+    image_cache_restore_ondelete_after_helm_rollback; then
     log "image-cache OnDelete guard could not be restored after Helm rollback"
     image_cache_restore_failed="true"
   fi
@@ -11107,40 +13260,107 @@ rollback_release() {
     dns_restore_failed="true"
   fi
   if [[ "${helm_rollback_failed}" == "true" || "${dns_restore_failed}" == "true" || "${image_cache_restore_failed}" == "true" ]]; then
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
     return 1
   fi
-  if ! node_local_dns_verify_preserved_snapshot_after_helm_rollback; then
+  if ! run_node_local_dns_whole_phase \
+    "rollback pre-reconcile preserved snapshot verification" \
+    node_local_dns_verify_preserved_snapshot_after_helm_rollback; then
     log "preserved offline NodeLocal DNSCache DaemonSet or Pod changed before active rollback reconciliation"
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
     return 1
   fi
 
   if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
-    if ! node_local_dns_restore_previous_after_helm_rollback; then
+    if ! run_node_local_dns_whole_phase \
+      "rollback previous cohort restoration" \
+      node_local_dns_restore_previous_after_helm_rollback; then
       log "NodeLocal DNSCache rollback could not restore the exact previous cohort; refusing broad teardown or further Pod deletion"
+      CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
       return 1
     fi
   elif [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" && -n "$(trim_field "${NODE_LOCAL_DNS_TARGET_NODES:-}")" ]]; then
-    if ! node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+    if ! run_node_local_dns_whole_phase \
+      "rollback central DNS fallback verification" \
+      node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
       log "NodeLocal DNSCache rollback left network state or failed central DNS fallback verification"
+      CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
       return 1
     fi
   fi
-  if ! node_local_dns_verify_preserved_snapshot_after_helm_rollback; then
+  if ! run_node_local_dns_whole_phase \
+    "rollback final preserved snapshot verification" \
+    node_local_dns_verify_preserved_snapshot_after_helm_rollback; then
     log "preserved offline NodeLocal DNSCache DaemonSet or Pod changed across Helm rollback"
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
     return 1
   fi
 
-  if ! deployment_exists "${rollback_api_deployment}" && deployment_exists "${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"; then
+  if ! rollback_api_presence="$(deployment_presence "${rollback_api_deployment}")"; then
+    log "rollback API deployment presence could not be read"
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+    return 1
+  fi
+  if [[ "${rollback_api_presence}" == "absent" ]]; then
+    if ! rollback_legacy_api_presence="$(deployment_presence "${FUGUE_LEGACY_API_DEPLOYMENT_NAME}")"; then
+      log "rollback legacy API deployment presence could not be read"
+      CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+      return 1
+    fi
+    if [[ "${rollback_legacy_api_presence}" != "present" ]]; then
+      log "rollback target includes neither ${rollback_api_deployment} nor ${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"
+      CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+      return 1
+    fi
     rollback_api_deployment="${FUGUE_LEGACY_API_DEPLOYMENT_NAME}"
   fi
 
-  rollout_status "${rollback_api_deployment}"
-  if deployment_exists "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"; then
-    rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"
+  if ! rollout_status "${rollback_api_deployment}"; then
+    log "rollback API deployment did not become ready"
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+    return 1
+  fi
+  if ! rollback_controller_presence="$(deployment_presence "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}")"; then
+    log "rollback controller deployment presence could not be read"
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+    return 1
+  fi
+  if [[ "${rollback_controller_presence}" == "present" ]]; then
+    if ! rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"; then
+      log "rollback controller deployment did not become ready"
+      CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+      return 1
+    fi
   else
     log "rollback target does not include ${FUGUE_CONTROLLER_DEPLOYMENT_NAME}; skipping controller rollout check"
   fi
-  retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test
+  if retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test; then
+    CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+    return 0
+  fi
+  CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+  return 1
+}
+
+rollback_release_transaction() {
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED:-false}" == "true" ]]; then
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" == "true" ]]; then
+    return 1
+  fi
+
+  CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="true"
+  if rollback_release; then
+    CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="true"
+    CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+    CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+    return 0
+  fi
+  CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
+  return 1
 }
 
 prepare_release_domains() {
@@ -11192,6 +13412,13 @@ prepare_release_domains() {
       fail "FUGUE_MAINTENANCE_AGENT_RELEASE_MODE must be preserve or allow"
       ;;
   esac
+  case "${FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE:-true}" in
+    true|false)
+      ;;
+    *)
+      fail "FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE must be true or false"
+      ;;
+  esac
 
   if node_local_dns_split_release_enabled && [[ "${build_mode}" == "allow" ]]; then
     fail "node-local build-plane release cannot be forced while a preserved offline node exists; restore or remove that node before changing the image-cache Pod template"
@@ -11208,7 +13435,7 @@ prepare_release_domains() {
     if public_data_plane_changed; then
       log "public data-plane files changed; preserving live edge/DNS DaemonSet spec for this control-plane release"
     fi
-    preserve_public_data_plane_from_live
+    preserve_public_data_plane_from_live || fail "failed to atomically preserve the live public data-plane snapshot"
   else
     log "public data-plane release explicitly allowed"
   fi
@@ -11230,136 +13457,159 @@ prepare_release_domains() {
       preserve_node_local_build_plane_from_live true true true || fail "failed to strictly preserve the live image-cache image and resources"
     elif node_local_build_plane_image_rollout_allowed; then
       log "node-local build-plane image-cache source changed since the live tag; allowing image-cache image rollout to ${FUGUE_IMAGE_CACHE_IMAGE_TAG} while preserving live non-image settings"
-      preserve_node_local_build_plane_from_live false
+      preserve_node_local_build_plane_from_live false || fail "failed to preserve live image-cache non-image settings"
     elif node_local_build_plane_resource_values_changed; then
       log "node-local build-plane image-cache resources changed in values; preserving live image while applying rendered resources"
-      preserve_node_local_build_plane_from_live true false
+      preserve_node_local_build_plane_from_live true false || fail "failed to preserve the live image-cache image"
       append_node_local_build_plane_desired_resource_args || fail "failed to apply desired image-cache resources"
     elif image_cache_resource_values_drifted; then
       log "node-local build-plane image-cache resources drift from chart values; preserving live image while reconciling resources"
-      preserve_node_local_build_plane_from_live true false
+      preserve_node_local_build_plane_from_live true false || fail "failed to preserve the live image-cache image"
       append_node_local_build_plane_desired_resource_args || fail "failed to apply desired image-cache resources"
     else
       if node_local_build_plane_changed; then
         log "node-local build-plane files changed without a safe image-only rollout target; preserving live image-cache DaemonSet spec for this control-plane release"
       fi
-      preserve_node_local_build_plane_from_live true
+      preserve_node_local_build_plane_from_live true || fail "failed to atomically preserve the live image-cache snapshot"
     fi
   else
     log "node-local build-plane release explicitly allowed"
   fi
 
   if [[ "${maintenance_mode}" != "allow" ]]; then
-    preserve_maintenance_agents_from_live
+    preserve_maintenance_agents_from_live || fail "failed to atomically preserve live maintenance-agent snapshots"
   else
     log "maintenance agent release explicitly allowed"
   fi
 
-  preserve_strict_drain_agent_image_from_live
+  preserve_strict_drain_agent_image_from_live || fail "failed to atomically preserve the live strict drain-agent image"
 }
 
 public_data_plane_front_daemonsets_ready() {
-  local rows=""
-  local name component generation observed desired ready unavailable
-  local found=0
+  local daemonsets_json="${1:-}"
+  local readiness=""
 
-  rows="$(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/component}{"\t"}{.metadata.generation}{"\t"}{.status.observedGeneration}{"\t"}{.status.desiredNumberScheduled}{"\t"}{.status.numberReady}{"\t"}{.status.numberUnavailable}{"\n"}{end}' 2>/dev/null || true)"
-  while IFS=$'\t' read -r name component generation observed desired ready unavailable; do
-    name="$(trim_field "${name}")"
-    component="$(trim_field "${component}")"
-    [[ -n "${name}" ]] || continue
-    case "${component}" in
-      edge-front|edge-*-front)
+  if [[ -z "${daemonsets_json}" ]]; then
+    daemonsets_json="$(live_daemonsets_json_snapshot)" || return 2
+  fi
+  readiness="$(printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+fronts = []
+for item in doc.get("items") or []:
+    metadata = item.get("metadata") or {}
+    component = str((metadata.get("labels") or {}).get("app.kubernetes.io/component") or "")
+    if component != "edge-front" and not (component.startswith("edge-") and component.endswith("-front")):
+        continue
+    status = item.get("status") or {}
+    fields = (
+        metadata.get("generation"),
+        status.get("observedGeneration"),
+        status.get("desiredNumberScheduled"),
+        status.get("numberReady"),
+        status.get("numberUnavailable", 0),
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in fields):
+        raise SystemExit(2)
+    generation, observed, desired, ready, unavailable = fields
+    fronts.append(generation == observed and desired > 0 and ready == desired and unavailable == 0)
+if not fronts:
+    print("absent")
+elif all(fronts):
+    print("ready")
+else:
+    print("not-ready")
+')" || return 2
+  [[ "${readiness}" == "ready" ]]
+}
+
+public_data_plane_component_image_refs_from_snapshot() {
+  local daemonsets_json="$1"
+  local component_kind="$2"
+
+  printf '%s' "${daemonsets_json}" | python3 -c '
+import json
+import sys
+
+kind, fullname = sys.argv[1:3]
+doc = json.load(sys.stdin)
+for item in doc.get("items") or []:
+    name = str((item.get("metadata") or {}).get("name") or "")
+    if kind == "worker":
+        matches = name in {fullname + "-edge-worker-a", fullname + "-edge-worker-b"} or (
+            name.startswith(fullname + "-edge-country-") and name.endswith(("-worker-a", "-worker-b"))
+        )
+        container_name = "edge"
+    elif kind == "front":
+        matches = name == fullname + "-edge-front" or (
+            name.startswith(fullname + "-edge-country-") and name.endswith("-front")
+        )
+        container_name = "edge-front"
+    elif kind == "dns":
+        matches = name == fullname + "-dns" or name.startswith(fullname + "-dns-country-")
+        container_name = "dns"
+    else:
+        raise SystemExit(2)
+    if not matches:
+        continue
+    containers = (item.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+    images = [str(container.get("image") or "").strip() for container in containers if container.get("name") == container_name]
+    if len(images) != 1 or not images[0] or any(ch.isspace() for ch in images[0]):
+        raise SystemExit(2)
+    print(images[0])
+' "${component_kind}" "${FUGUE_RELEASE_FULLNAME}"
+}
+
+public_data_plane_live_component_image_changed() {
+  local component_kind="$1"
+  local daemonsets_json="${2:-}"
+  local target_tag=""
+  local image_refs=""
+  local live_image=""
+  local image_record=""
+  local live_repository=""
+  local live_tag=""
+
+  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
+  [[ -n "${target_tag}" ]] || return 1
+  if [[ -z "${daemonsets_json}" ]]; then
+    daemonsets_json="$(live_daemonsets_json_snapshot)" || return 2
+  fi
+  image_refs="$(public_data_plane_component_image_refs_from_snapshot "${daemonsets_json}" "${component_kind}")" || return 2
+  while IFS= read -r live_image; do
+    [[ -n "${live_image}" ]] || continue
+    image_record="$(tagged_image_record_from_ref "${live_image}")" || return 2
+    IFS='|' read -r live_repository live_tag <<<"${image_record}"
+    case "${component_kind}" in
+      worker)
+        public_data_plane_worker_source_changed_between_refs "${live_tag}" "${target_tag}" && return 0
+        ;;
+      front)
+        public_data_plane_front_source_changed_between_refs "${live_tag}" "${target_tag}" && return 0
+        ;;
+      dns)
+        public_data_plane_dns_source_changed_between_refs "${live_tag}" "${target_tag}" && return 0
         ;;
       *)
-        continue
+        return 2
         ;;
     esac
-    found=1
-    generation="${generation:-0}"
-    observed="${observed:-0}"
-    desired="${desired:-0}"
-    ready="${ready:-0}"
-    unavailable="${unavailable:-0}"
-    if [[ "${generation}" != "${observed}" || "${desired}" != "${ready}" || "${unavailable}" != "0" ]]; then
-      log "public data-plane front ${name} is not fully ready: generation=${generation} observed=${observed} desired=${desired} ready=${ready} unavailable=${unavailable}"
-      return 1
-    fi
-  done <<<"${rows}"
-
-  if [[ "${found}" == "0" ]]; then
-    log "public data-plane front readiness check skipped; no front DaemonSets found"
-  fi
-  return 0
+  done <<<"${image_refs}"
+  return 1
 }
 
 public_data_plane_live_worker_image_changed() {
-  local target_tag live_image live_tag daemonset_name
-
-  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
-  [[ -n "${target_tag}" ]] || return 1
-  while IFS= read -r daemonset_name; do
-    daemonset_name="$(trim_field "${daemonset_name}")"
-    [[ -n "${daemonset_name}" ]] || continue
-    case "${daemonset_name}" in
-      "${FUGUE_RELEASE_FULLNAME}-edge-worker-a"|\
-      "${FUGUE_RELEASE_FULLNAME}-edge-worker-b"|\
-      "${FUGUE_RELEASE_FULLNAME}-edge-country-"*"-worker-a"|\
-      "${FUGUE_RELEASE_FULLNAME}-edge-country-"*"-worker-b")
-        live_image="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "edge")")"
-        live_tag="$(image_ref_tag "${live_image}")"
-        if public_data_plane_worker_source_changed_between_refs "${live_tag}" "${target_tag}"; then
-          return 0
-        fi
-        ;;
-    esac
-  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-  return 1
+  public_data_plane_live_component_image_changed worker "${1:-}"
 }
 
 public_data_plane_live_front_image_changed() {
-  local target_tag live_image live_tag daemonset_name
-
-  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
-  [[ -n "${target_tag}" ]] || return 1
-  while IFS= read -r daemonset_name; do
-    daemonset_name="$(trim_field "${daemonset_name}")"
-    [[ -n "${daemonset_name}" ]] || continue
-    case "${daemonset_name}" in
-      "${FUGUE_RELEASE_FULLNAME}-edge-front"|\
-      "${FUGUE_RELEASE_FULLNAME}-edge-country-"*"-front")
-        live_image="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "edge-front")")"
-        live_tag="$(image_ref_tag "${live_image}")"
-        if public_data_plane_front_source_changed_between_refs "${live_tag}" "${target_tag}"; then
-          return 0
-        fi
-        ;;
-    esac
-  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-  return 1
+  public_data_plane_live_component_image_changed front "${1:-}"
 }
 
 public_data_plane_live_dns_image_changed() {
-  local target_tag live_image live_tag daemonset_name
-
-  target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
-  [[ -n "${target_tag}" ]] || return 1
-  while IFS= read -r daemonset_name; do
-    daemonset_name="$(trim_field "${daemonset_name}")"
-    [[ -n "${daemonset_name}" ]] || continue
-    case "${daemonset_name}" in
-      "${FUGUE_RELEASE_FULLNAME}-dns"|\
-      "${FUGUE_RELEASE_FULLNAME}-dns-country-"*)
-        live_image="$(trim_field "$(live_daemonset_container_image "${daemonset_name}" "dns")")"
-        live_tag="$(image_ref_tag "${live_image}")"
-        if public_data_plane_dns_source_changed_between_refs "${live_tag}" "${target_tag}"; then
-          return 0
-        fi
-        ;;
-    esac
-  done < <(${KUBECTL} -n "${FUGUE_NAMESPACE}" get ds -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
-  return 1
+  public_data_plane_live_component_image_changed dns "${1:-}"
 }
 
 public_data_plane_auto_front_release_enabled() {
@@ -11372,6 +13622,8 @@ release_public_data_plane_if_needed() {
   local worker_changed="false"
   local front_changed="false"
   local dns_changed="false"
+  local daemonsets_json=""
+  local live_check_status=0
   PUBLIC_DATA_PLANE_RELEASED="${DNS_MANIFEST_TRANSACTION_COMPLETED:-false}"
 
   if [[ "${FUGUE_EDGE_ENABLED}" != "true" ]]; then
@@ -11393,7 +13645,8 @@ release_public_data_plane_if_needed() {
       return 0
       ;;
     *)
-      fail "FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE must be true or false"
+      log "FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE must be true or false"
+      return 1
       ;;
   esac
   if public_data_plane_worker_image_changed; then
@@ -11405,18 +13658,34 @@ release_public_data_plane_if_needed() {
 	if public_data_plane_dns_image_changed; then
 		dns_changed="true"
 	fi
-	if [[ "${worker_changed}" != "true" ]] && public_data_plane_live_worker_image_changed; then
-		worker_changed="true"
-		log "public data-plane worker image is behind target and worker source changed since the live tag"
-	fi
-	if [[ "${front_changed}" != "true" ]] && public_data_plane_live_front_image_changed; then
-		front_changed="true"
-		log "public data-plane front image is behind target and front source changed since the live tag"
-	fi
-	if [[ "${dns_changed}" != "true" ]] && public_data_plane_live_dns_image_changed; then
-		dns_changed="true"
-		log "public data-plane DNS image is behind target and DNS source changed since the live tag"
-	fi
+  daemonsets_json="$(live_daemonsets_json_snapshot)" || return 1
+  if [[ "${worker_changed}" != "true" ]]; then
+    if public_data_plane_live_worker_image_changed "${daemonsets_json}"; then
+      worker_changed="true"
+      log "public data-plane worker image is behind target and worker source changed since the live tag"
+    else
+      live_check_status=$?
+      (( live_check_status == 1 )) || return 1
+    fi
+  fi
+  if [[ "${front_changed}" != "true" ]]; then
+    if public_data_plane_live_front_image_changed "${daemonsets_json}"; then
+      front_changed="true"
+      log "public data-plane front image is behind target and front source changed since the live tag"
+    else
+      live_check_status=$?
+      (( live_check_status == 1 )) || return 1
+    fi
+  fi
+  if [[ "${dns_changed}" != "true" ]]; then
+    if public_data_plane_live_dns_image_changed "${daemonsets_json}"; then
+      dns_changed="true"
+      log "public data-plane DNS image is behind target and DNS source changed since the live tag"
+    else
+      live_check_status=$?
+      (( live_check_status == 1 )) || return 1
+    fi
+  fi
 	if [[ "${worker_changed}" != "true" && "${front_changed}" != "true" && "${dns_changed}" != "true" ]]; then
 		return 0
 	fi
@@ -11424,16 +13693,30 @@ release_public_data_plane_if_needed() {
     log "skip public data-plane auto release because manifest files changed; use scripts/release_fugue_public_data_plane.sh explicitly"
     return 0
   fi
-  if [[ "${worker_changed}" == "true" || "${front_changed}" == "true" ]] && ! public_data_plane_front_daemonsets_ready; then
-    log "skip public data-plane auto release because one or more front DaemonSets are not fully ready; repair bootstrap nodes and run scripts/release_fugue_public_data_plane.sh explicitly"
-    return 0
+  if [[ "${worker_changed}" == "true" || "${front_changed}" == "true" ]]; then
+    if public_data_plane_front_daemonsets_ready "${daemonsets_json}"; then
+      :
+    else
+      live_check_status=$?
+      if (( live_check_status == 2 )); then
+        return 1
+      fi
+      log "skip public data-plane auto release because one or more front DaemonSets are absent or not fully ready; repair bootstrap nodes and run scripts/release_fugue_public_data_plane.sh explicitly"
+      return 0
+    fi
   fi
 
   export FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS="${FUGUE_PUBLIC_DATA_PLANE_SMOKE_URLS:-${FUGUE_SMOKE_URLS:-${FUGUE_SMOKE_URL:-}}}"
   if [[ "${worker_changed}" == "true" ]]; then
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="blue-green"
     log "public data-plane worker image changed; starting isolated blue-green release"
-    bash ./scripts/release_fugue_public_data_plane.sh
+    if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+      "public data-plane blue-green release" env \
+      KUBECTL="${CONTROL_PLANE_RELEASE_RAW_KUBECTL:-${KUBECTL:-}}" \
+      bash ./scripts/release_fugue_public_data_plane.sh; then
+      PUBLIC_DATA_PLANE_RELEASED="false"
+      return 1
+    fi
     PUBLIC_DATA_PLANE_RELEASED="true"
   fi
   if [[ "${front_changed}" == "true" ]]; then
@@ -11441,7 +13724,13 @@ release_public_data_plane_if_needed() {
       export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="front-ondelete"
       export FUGUE_PUBLIC_DATA_PLANE_FRONT_RESTART_CONFIRM="true"
       log "public data-plane front image changed; starting isolated front-ondelete release after worker readiness checks"
-      bash ./scripts/release_fugue_public_data_plane.sh
+      if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+        "public data-plane front release" env \
+        KUBECTL="${CONTROL_PLANE_RELEASE_RAW_KUBECTL:-${KUBECTL:-}}" \
+        bash ./scripts/release_fugue_public_data_plane.sh; then
+        PUBLIC_DATA_PLANE_RELEASED="false"
+        return 1
+      fi
       PUBLIC_DATA_PLANE_RELEASED="true"
     else
       log "skip public data-plane auto front release because front pods own public 80/443; run scripts/release_fugue_public_data_plane.sh with FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=front-ondelete during an explicit maintenance window"
@@ -11450,7 +13739,13 @@ release_public_data_plane_if_needed() {
   if [[ "${dns_changed}" == "true" ]]; then
     export FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY="dns-ondelete"
     log "public data-plane DNS image changed; starting isolated dns-ondelete release"
-    bash ./scripts/release_fugue_public_data_plane.sh
+    if ! run_release_long_command "${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}" \
+      "public data-plane DNS release" env \
+      KUBECTL="${CONTROL_PLANE_RELEASE_RAW_KUBECTL:-${KUBECTL:-}}" \
+      bash ./scripts/release_fugue_public_data_plane.sh; then
+      PUBLIC_DATA_PLANE_RELEASED="false"
+      return 1
+    fi
     PUBLIC_DATA_PLANE_RELEASED="true"
   fi
 }
@@ -11471,6 +13766,8 @@ release_status_request() {
   [[ "${request_timeout}" =~ ^[1-9][0-9]*$ ]] || request_timeout=30
 
   while (( attempt <= attempts )); do
+    require_release_forward_budget "${request_timeout}" \
+      "release status request ${attempt}/${attempts}" || return 1
     : >"${output_file}"
     if curl --http1.1 -fsS \
       --connect-timeout "${connect_timeout}" \
@@ -11485,6 +13782,7 @@ release_status_request() {
       return 1
     fi
     log_stderr "release status transport request failed; retrying attempt $((attempt + 1))/${attempts}"
+    require_release_forward_budget "${delay}" "release status retry delay" || return 1
     sleep "${delay}"
     attempt=$((attempt + 1))
   done
@@ -11514,7 +13812,8 @@ platform_autonomy_status_summary() {
       printf 'NodeLocal offline-preserve policy gate failed'
       return 1
     fi
-    if ! node_local_dns_verify_preserved_state_unchanged; then
+    if ! run_node_local_dns_whole_phase \
+      "post-release preserved state verification" node_local_dns_verify_preserved_state_unchanged; then
       rm -f "${status_file}" "${node_policies_file}"
       printf 'preserved offline NodeLocal DNSCache state changed'
       return 1
@@ -12300,14 +14599,17 @@ wait_for_platform_autonomy_after_public_data_plane_release() {
 
   deadline=$((SECONDS + timeout))
   while true; do
+    require_control_plane_backup_coordination_or_abort "post-deploy robustness gate"
     if output="$(platform_autonomy_status_summary)"; then
       log "platform autonomy passed after public data-plane release: ${output}"
       return 0
     fi
     if (( SECONDS >= deadline )); then
-      fail "platform autonomy did not recover after public data-plane release: ${output}"
+      log "platform autonomy did not recover after public data-plane release: ${output}"
+      return 1
     fi
     log "waiting for platform autonomy after public data-plane release: ${output}"
+    require_release_forward_budget "${delay}" "platform autonomy retry delay" || return 1
     sleep "${delay}"
   done
 }
@@ -12342,6 +14644,7 @@ wait_for_post_deploy_robustness() {
       return 1
     fi
     log "waiting for post-deploy robustness gate: ${output}"
+    require_release_forward_budget "${delay}" "post-deploy robustness retry delay" || return 1
     sleep "${delay}"
   done
 }
@@ -12471,6 +14774,10 @@ main() {
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
   trap cleanup_tmp_artifacts EXIT
+  trap handle_control_plane_backup_coordination_abort USR1
+  trap 'handle_control_plane_release_signal HUP' HUP
+  trap 'handle_control_plane_release_signal INT' INT
+  trap 'handle_control_plane_release_signal TERM' TERM
   apply_discovery_bundle_defaults || log "DiscoveryBundle not configured; release will require explicit runtime values"
   if ! ensure_kube_api_access; then
     log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"
@@ -12517,12 +14824,22 @@ main() {
   FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME:-}"
   FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL="${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL:-}"
   FUGUE_CONTROL_PLANE_POSTGRES_DATABASE="${FUGUE_CONTROL_PLANE_POSTGRES_DATABASE:-fugue}"
-  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE:-terminate}"
+  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE:-wait}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED:-auto}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS:-120}"
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS:-5}"
-  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS:-90000}"
-  FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS:-5}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME:-${FUGUE_RELEASE_FULLNAME}-control-plane-db-backup}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE:-${FUGUE_NAMESPACE}}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS:-120}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS:-30}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS:-20}"
+  FUGUE_DEPLOY_JOB_BUDGET_SECONDS="${FUGUE_DEPLOY_JOB_BUDGET_SECONDS:-0}"
+  FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS="${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS:-10200}"
+  FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS="${FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS:-600}"
+  FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS="${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS:-1200}"
+  FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS="${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS:-900}"
+  FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS="${FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS:-3600}"
   FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED="${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED:-false}"
   FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR="${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR:-}"
   FUGUE_REGISTRY_NODEPORT="${FUGUE_REGISTRY_NODEPORT:-30500}"
@@ -12554,6 +14871,8 @@ main() {
   FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS="${FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS:-180}"
   FUGUE_NODE_LOCAL_DNS_CRITICAL_READY_TIMEOUT_SECONDS="${FUGUE_NODE_LOCAL_DNS_CRITICAL_READY_TIMEOUT_SECONDS:-45}"
   FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS="${FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS:-30}"
+  FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS="${FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS:-$(( $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}") + 30 ))}"
+  FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS="${FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS:-${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}}"
   node_local_dns_configure_cohort_names
   if [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" && "${FUGUE_NODE_LOCAL_DNS_ENABLED}" != "true" ]]; then
     fail "FUGUE_NODE_LOCAL_DNS_ENABLED must be true when preserved offline NodeLocal DNSCache nodes are configured"
@@ -12695,8 +15014,8 @@ main() {
     fail "FUGUE_CONTROL_PLANE_POSTGRES_ENABLED must be true when FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true"
   fi
   case "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE}" in
-    skip|wait|terminate) ;;
-    *) fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE must be skip, wait, or terminate" ;;
+    skip|wait) ;;
+    *) fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_MODE must be skip or wait; releases never terminate backup backends" ;;
   esac
   case "${FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED}" in
     auto|true|false) ;;
@@ -12705,19 +15024,39 @@ main() {
   for numeric_var in \
     FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS \
     FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS \
-    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_RECENT_SUCCESS_SECONDS \
-    FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS; do
+    FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS \
+    FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS \
+    FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS \
+    FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS \
+    FUGUE_DEPLOY_JOB_BUDGET_SECONDS \
+    FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS \
+    FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS \
+    FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS \
+    FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS \
+    FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS \
+    FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS; do
     numeric_value="${!numeric_var}"
-    if ! [[ "${numeric_value}" =~ ^[0-9]+$ ]]; then
-      fail "${numeric_var} must be an integer"
-    fi
-    if [[ "${numeric_var}" == "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POST_TERMINATE_SLEEP_SECONDS" ]]; then
-      continue
-    fi
-    if (( numeric_value < 1 )); then
+    if ! [[ "${numeric_value}" =~ ^[0-9]+$ ]] || (( numeric_value < 1 )); then
       fail "${numeric_var} must be an integer >= 1"
     fi
   done
+  if (( FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS * 3 > FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS )); then
+    fail "control-plane backup coordination Lease duration must cover at least three renew intervals"
+  fi
+  if (( FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS >= FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS )); then
+    fail "control-plane backup coordination kubectl timeout must be shorter than the Lease duration"
+  fi
+  if (( FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS + 2 * FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS >= FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS )); then
+    fail "control-plane backup coordination Lease duration must leave time after one scheduled renewal and two bounded attempts"
+  fi
+  if ! [[ "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+    (( ${#FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME} > 253 )); then
+    fail "FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME must be a Kubernetes DNS subdomain name"
+  fi
+  if ! [[ "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+    (( ${#FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE} > 63 )); then
+    fail "FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE must be a Kubernetes namespace name"
+  fi
   if [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] &&
     ! api_database_already_uses_control_plane_postgres &&
     [[ -z "$(trim_field "${FUGUE_CONTROL_PLANE_POSTGRES_BOOTSTRAP_SOURCE_URL}")" ]]; then
@@ -12757,6 +15096,13 @@ main() {
   fi
   if ! [[ "${FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS}" =~ ^[0-9]+$ ]] || (( FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS < 10 )); then
     fail "FUGUE_NODE_LOCAL_DNS_NODE_WATCH_SECONDS must be an integer >= 10"
+  fi
+  if ! [[ "${FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] ||
+    (( FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS <= $(duration_to_seconds "${FUGUE_ROLLOUT_TIMEOUT}") )); then
+    fail "FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS must exceed FUGUE_ROLLOUT_TIMEOUT so every NodeLocal kubectl command has a usable outer wall timeout"
+  fi
+  if (( FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS < FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS )); then
+    fail "FUGUE_NODE_LOCAL_DNS_PHASE_OUTER_TIMEOUT_SECONDS must be at least FUGUE_NODE_LOCAL_DNS_KUBECTL_OUTER_TIMEOUT_SECONDS so one bounded Kubernetes request can complete inside a whole NodeLocal phase"
   fi
   case "${FUGUE_EDGE_DYNAMIC_ENABLED}" in
     true|false) ;;
@@ -12950,8 +15296,6 @@ PY
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
   fi
   require_env FUGUE_SMOKE_URL
-  ensure_host_time_sync
-  ensure_control_plane_observability
   run_release_preflight
 
   command_exists helm || fail "helm is not installed"
@@ -12959,16 +15303,39 @@ PY
   if [[ -z "${effective_cluster_join_registry_endpoint}" && "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
     effective_cluster_join_registry_endpoint="http://127.0.0.1:5000"
   fi
-  ensure_local_registry_mirror_config "${FUGUE_REGISTRY_PULL_BASE}" "${effective_cluster_join_registry_endpoint}"
   wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
   validate_control_plane_singleton_anchor
+  if ! validate_live_api_backup_coordination_ready; then
+    fail "live API replicas are not yet Lease-aware; complete the coordination bootstrap release before running this release script"
+  fi
   prepare_release_domains
+  validate_control_plane_release_job_budget
+  validate_node_local_dns_release_budget_pre_mutation
+  if ! acquire_control_plane_backup_coordination_lease; then
+    fail "control-plane backup coordination Lease acquisition failed before release mutation"
+  fi
+  if ! drain_control_plane_backup_before_schema_rollout; then
+    fail "control-plane backup did not reach a complete release point before release mutation"
+  fi
+  require_control_plane_backup_coordination_or_abort "first release mutation"
+
+  # Everything below may mutate a host, a Kubernetes object, or a release
+  # artifact. The shared backup/release Lease is renewed until EXIT, including
+  # all forward gates, rollback paths, and release safety watch windows.
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "host time synchronization kubectl" ensure_host_time_sync
+  run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "control-plane observability host mutation" ensure_control_plane_observability
+  run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "registry mirror host mutation" ensure_local_registry_mirror_config \
+    "${FUGUE_REGISTRY_PULL_BASE}" "${effective_cluster_join_registry_endpoint}"
   if node_local_dns_split_release_enabled; then
     [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] || fail "image-cache cannot be disabled while a preserved offline node exists"
     daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache" || fail "live image-cache DaemonSet is required while a preserved offline node exists"
   fi
+  require_control_plane_backup_coordination_or_abort "pre-deploy robustness baseline"
   capture_pre_deploy_robustness_baseline
 
   PREVIOUS_REVISION="$(helm_current_revision)"
@@ -13010,28 +15377,45 @@ PY
   log "mesh recovery: enabled=${FUGUE_MESH_RECOVERY_ENABLED} generation=${FUGUE_MESH_RECOVERY_GENERATION} mode=${FUGUE_MESH_RECOVERY_MODE} login_server=${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-<none>}"
   log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
 
-  recover_primary_node_if_needed
-  relieve_primary_disk_pressure
-  recover_primary_postgres_if_needed
-  restore_primary_mesh_network_if_needed
-  ensure_coredns_multinode_scheduling
-  validate_dns_public_host_port_targets
-  prepare_node_local_dns_helm_args
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "primary node recovery kubectl" recover_primary_node_if_needed
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "primary disk-pressure recovery kubectl" relieve_primary_disk_pressure
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "primary PostgreSQL recovery kubectl" recover_primary_postgres_if_needed
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "primary mesh recovery kubectl" restore_primary_mesh_network_if_needed
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "CoreDNS scheduling kubectl" ensure_coredns_multinode_scheduling
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "DNS public hostPort validation kubectl" validate_dns_public_host_port_targets
+  if ! run_node_local_dns_phase_with_state_handoff \
+    "pre-Helm preparation" prepare_node_local_dns_helm_args; then
+    fail "NodeLocal DNSCache pre-Helm preparation failed"
+  fi
+  # The initial reserve check runs before the exact live NodeLocal state is
+  # decoded. Revalidate after that read-only handoff and before a teardown can
+  # mutate the previous cohort, including desired-disabled/live-enabled paths.
+  validate_control_plane_release_rollback_reserve
   if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" && "${FUGUE_NODE_LOCAL_DNS_MODE}" == "shadow" ]]; then
-    if ! node_local_dns_shadow_host_preflight "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+    if ! run_node_local_dns_whole_phase \
+      "shadow host preflight" node_local_dns_shadow_host_preflight "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
       fail "NodeLocal DNSCache shadow host preflight failed before Helm mutation"
     fi
   elif [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" != "true" && "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
-    if ! node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+    if ! run_node_local_dns_whole_phase \
+      "pre-Helm safe removal" node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
       fail "NodeLocal DNSCache could not be safely removed before deleting its upstream resources"
     fi
   fi
 
-  apply_chart_crds
+  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "chart CRD kubectl" apply_chart_crds
 
   if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" ]]; then
     log "checking edge static TLS secret ${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME} for the 7-day release safety horizon"
-    if ! bash ./scripts/issue_fugue_app_wildcard_tls.sh \
+    if ! run_release_long_command "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+      "edge static TLS preflight" bash ./scripts/issue_fugue_app_wildcard_tls.sh \
       --namespace "${FUGUE_NAMESPACE}" \
       --secret-name "${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}" \
       --domain "${FUGUE_APP_BASE_DOMAIN}" \
@@ -13044,15 +15428,17 @@ PY
   write_upgrade_override_values
   upgrade_override_values_file="${UPGRADE_OVERRIDE_VALUES_FILE}"
   build_dns_helm_set_args
-  prepare_helm_post_renderer
-  drain_control_plane_backup_before_schema_rollout
+  if ! prepare_helm_post_renderer; then
+    fail "cannot prepare the Helm post-renderer from bounded live deployment state"
+  fi
   if ! prepare_dns_manifest_transaction; then
     fail "DNS manifest transaction preflight failed before Helm mutation"
   fi
   if node_local_dns_split_release_enabled; then
     [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] || fail "image-cache cannot be disabled while a preserved offline node exists"
     daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache" || fail "live image-cache DaemonSet is required while a preserved offline node exists"
-    if ! image_cache_prepare_offline_safe_rollout "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+    if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+      "image-cache offline guard kubectl" image_cache_prepare_offline_safe_rollout "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
       fail "image-cache offline-node guard failed before Helm mutation"
     fi
     NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-string imageCache.updateStrategy.type=OnDelete)
@@ -13068,7 +15454,13 @@ PY
   # can deadlock control-plane upgrades exactly when the new API needs to clean
   # up those stale nodes. We gate success on targeted API/controller rollout
   # checks plus the smoke test below instead.
-  if ! helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
+  CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
+  CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
+  CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
+  if ! run_release_long_command "$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))" \
+    "Helm upgrade" helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
     -n "${FUGUE_NAMESPACE}" \
     --reset-then-reuse-values \
     --history-max 20 \
@@ -13246,77 +15638,93 @@ PY
     --set-string sharedWorkspaceStorage.storageClassName="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}" \
     --set-string sharedWorkspaceStorage.server.clusterIP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP}"; then
     log "helm upgrade failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "helm upgrade failed"
   fi
 
   if ! run_dns_manifest_transaction_after_helm; then
     log "DNS manifest OnDelete transaction failed; attempting complete rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "DNS manifest OnDelete transaction failed"
   fi
 
   if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" ]]; then
-    if ! node_local_dns_reconcile_after_helm; then
+    if ! run_node_local_dns_phase_with_state_handoff \
+      "post-Helm reconciliation" node_local_dns_reconcile_after_helm; then
       log "NodeLocal DNSCache rollout verification failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "NodeLocal DNSCache rollout verification failed"
     fi
     NODE_LOCAL_DNS_RELEASED="true"
     if node_local_dns_split_release_enabled; then
       if ! platform_autonomy_status_summary >/dev/null; then
         log "NodeLocal DNSCache post-reconcile offline-preserve policy gate failed; attempting rollback"
-        rollback_release || true
+        rollback_release_transaction || fail "rollback failed; recovery fence retained"
         fail "NodeLocal DNSCache post-reconcile offline-preserve policy gate failed"
       fi
     fi
   elif [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
-    if ! node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+    if ! run_node_local_dns_whole_phase \
+      "post-Helm teardown verification" node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
       log "NodeLocal DNSCache teardown verification failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "NodeLocal DNSCache teardown verification failed"
     fi
   fi
 
-  patch_control_plane_singleton_deployments
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "singleton deployment patch kubectl" patch_control_plane_singleton_deployments; then
+    log "singleton deployment patch failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "singleton deployment patch failed"
+  fi
 
-  force_delete_release_pods_on_unhealthy_nodes
-  cleanup_orphaned_regional_daemonsets
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "unhealthy release pod cleanup kubectl" force_delete_release_pods_on_unhealthy_nodes; then
+    log "unhealthy release pod cleanup failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "unhealthy release pod cleanup failed"
+  fi
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "regional daemonset cleanup kubectl" cleanup_orphaned_regional_daemonsets; then
+    log "regional daemonset cleanup failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "regional daemonset cleanup failed"
+  fi
 
-  if ! control_plane_canary_readiness_gate; then
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "control-plane canary kubectl" control_plane_canary_readiness_gate; then
     log "control-plane canary gate failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "control-plane canary gate failed"
   fi
 
   if ! rollout_status "${FUGUE_API_DEPLOYMENT_NAME}"; then
     log "api rollout check failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "api rollout failed"
   fi
 
   if ! rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"; then
     log "controller rollout check failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "controller rollout failed"
   fi
 
-  for singleton in \
-    "${FUGUE_REGISTRY_DEPLOYMENT_NAME}" \
-    "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}" \
-    "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}" \
-    "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}"; do
-    if deployment_exists "${singleton}"; then
-      if skip_singleton_rollout_wait_for_node_local_override "${singleton}"; then
-        log "skipping registry singleton rollout wait because node-local build-plane preflight override accepted the pre-existing registry/node_policy degradation"
-        continue
-      fi
-      log "waiting for isolated singleton dependency ${singleton}"
-      if ! rollout_status "${singleton}"; then
-        log "${singleton} rollout check failed; attempting rollback"
-        rollback_release || true
-        fail "${singleton} rollout failed"
-      fi
+  local singleton_spec=""
+  local singleton_name=""
+  local singleton_required="false"
+  for singleton_spec in \
+    "${FUGUE_REGISTRY_DEPLOYMENT_NAME}|${FUGUE_REGISTRY_ENABLED}" \
+    "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}|false" \
+    "${FUGUE_POSTGRES_DEPLOYMENT_NAME}|${FUGUE_POSTGRES_ENABLED}" \
+    "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}|${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}" \
+    "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}|${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}"; do
+    IFS='|' read -r singleton_name singleton_required <<<"${singleton_spec}"
+    if ! rollout_singleton_deployment_if_required_or_present "${singleton_name}" "${singleton_required}"; then
+      log "${singleton_name} singleton rollout check failed; attempting rollback"
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
+      fail "${singleton_name} singleton rollout failed"
     fi
   done
 
@@ -13325,7 +15733,7 @@ PY
       log "skipping edge daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
     elif ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
       log "edge rollout check failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "edge rollout failed"
     fi
   fi
@@ -13335,86 +15743,136 @@ PY
       log "skipping dns daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
     elif ! rollout_daemonsets_by_component_prefix "dns" "dns"; then
       log "dns rollout check failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "dns rollout failed"
     fi
   fi
 
-  if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
-    if ! image_cache_rollout_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+  if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
+    if ! require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+      log "required image-cache DaemonSet is absent or unreadable after Helm upgrade; attempting rollback"
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
+      fail "required image-cache DaemonSet is unavailable"
+    fi
+    local image_cache_rollout_failed="false"
+    if node_local_dns_split_release_enabled; then
+      if ! run_release_long_command \
+        "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+        "split image-cache rollout verification" \
+        image_cache_rollout_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+        image_cache_rollout_failed="true"
+      fi
+    elif ! image_cache_rollout_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
+      image_cache_rollout_failed="true"
+    fi
+    if [[ "${image_cache_rollout_failed}" == "true" ]]; then
       log "image cache rollout check failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "image cache rollout failed"
     fi
   fi
 
-  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" == "true" ]] && daemonset_exists "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
+  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" == "true" ]]; then
+    if ! require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
+      log "required mesh-recovery DaemonSet is absent or unreadable after Helm upgrade; attempting rollback"
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
+      fail "required mesh-recovery DaemonSet is unavailable"
+    fi
     if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
       log "mesh recovery rollout check failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "mesh recovery rollout failed"
     fi
   fi
 
-  if daemonset_exists "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
-    if rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
-      ensure_host_time_sync
-    else
-      log "warning: node-janitor rollout check failed; control-plane host time sync hardening may remain pending"
-    fi
+  if ! require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
+    log "required node-janitor DaemonSet is absent or unreadable after Helm upgrade; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "required node-janitor DaemonSet is unavailable"
+  fi
+  if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
+    log "node-janitor rollout check failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "node-janitor rollout failed"
+  fi
+  if ! run_release_function_with_guarded_kubectl \
+    "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "post-node-janitor host time synchronization kubectl" ensure_host_time_sync; then
+    log "warning: host time synchronization hardening failed after the node-janitor rollout"
   fi
 
-  label_default_builder_nodes
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "builder node labeling kubectl" label_default_builder_nodes; then
+    log "builder node labeling failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "builder node labeling failed"
+  fi
 
-  sync_route_a_edge_proxy
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "Route A edge proxy synchronization kubectl" sync_route_a_edge_proxy; then
+    log "Route A edge proxy synchronization failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "Route A edge proxy synchronization failed"
+  fi
 
   if ! retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test; then
     log "smoke test failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "smoke test failed"
   fi
 
   if ! wait_for_post_deploy_robustness; then
     log "post-deploy robustness gate failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "post-deploy robustness gate failed"
   fi
 
   if ! wait_for_release_safety_watch_windows; then
     log "release safety watch window failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "release safety watch window failed"
   fi
 
-  release_public_data_plane_if_needed
+  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
+    "public data-plane release inspection kubectl" release_public_data_plane_if_needed; then
+    log "public data-plane release inspection failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "public data-plane release inspection failed"
+  fi
   if node_local_dns_split_release_enabled && [[ "${PUBLIC_DATA_PLANE_RELEASED:-false}" != "true" ]]; then
     if ! wait_for_platform_autonomy_after_public_data_plane_release; then
       log "post-NodeLocal-DNS offline-preserve autonomy gate failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "post-NodeLocal-DNS offline-preserve autonomy gate failed"
     fi
   fi
   if [[ "${PUBLIC_DATA_PLANE_RELEASED:-false}" == "true" ]]; then
     if ! wait_for_platform_autonomy_after_public_data_plane_release; then
       log "post-public-data-plane autonomy gate failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "post-public-data-plane autonomy gate failed"
     fi
     if ! wait_for_post_deploy_robustness; then
       log "post-public-data-plane robustness gate failed; attempting rollback"
-      rollback_release || true
+      rollback_release_transaction || fail "rollback failed; recovery fence retained"
       fail "post-public-data-plane robustness gate failed"
     fi
   fi
 
   if ! finalize_dns_manifest_transaction; then
     log "DNS manifest transaction finalization failed; attempting rollback"
-    rollback_release || true
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "DNS manifest transaction finalization failed"
   fi
 
   local current_revision
-  current_revision="$(helm_current_revision)"
+  if ! current_revision="$(helm_current_revision)"; then
+    log "final Helm revision read failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final Helm revision read failed"
+  fi
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
   log "upgrade complete; current Helm revision=${current_revision}"
 }
 
