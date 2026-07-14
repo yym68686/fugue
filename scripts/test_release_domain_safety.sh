@@ -81,6 +81,8 @@ grep -Fq "actions: read" "${REPO_ROOT}/.github/workflows/deploy-control-plane.ym
   fail "stale release recovery proof requires read-only Actions evidence access"
 grep -Fq "scripts/verify_stale_release_recovery.py" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must generate the stale release recovery proof before upgrade"
+grep -Fq -- "- 'scripts/bootstrap_control_plane_automation.sh'" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane automation bootstrap changes must trigger the formal control-plane deploy workflow"
 grep -Fq 'FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE: ${{ runner.temp }}/fugue-stale-release-recovery-proof.json' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must bind the recovery proof to a private runner-local file"
@@ -3684,6 +3686,14 @@ FUGUE_RELEASE_CHANGED_FILES=$'scripts/verify_stale_release_recovery.py'
 assert_eq "$(release_safety_changed_file_subsystems)" "deploy_script" "stale release recovery verifier must be owned by the deploy safety domain"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
   fail "stale release recovery verifier must not be classified as unknown high risk"
+FUGUE_RELEASE_CHANGED_FILES=$'scripts/bootstrap_control_plane_automation.sh'
+automation_bootstrap_subsystems="$(release_safety_changed_file_subsystems)"
+assert_eq "${automation_bootstrap_subsystems}" $'cluster_bootstrap\ndeploy_script' "control-plane automation bootstrap release-risk ownership"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "control-plane automation bootstrap must not be classified as unknown high risk"
+automation_bootstrap_gates="$(release_safety_required_gates)"
+assert_eq "${automation_bootstrap_gates}" "platform_autonomy,release_guard,rollback_path_smoke" "control-plane automation bootstrap safety gates"
+assert_eq "$(release_safety_watch_window_seconds)" "120" "control-plane automation bootstrap watch window"
 FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/release-public-data-plane.yml'
 public_data_plane_changed || fail "public data-plane release workflow must be owned by the public data-plane domain"
 public_workflow_subsystems="$(release_safety_changed_file_subsystems)"

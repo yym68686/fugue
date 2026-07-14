@@ -1345,6 +1345,7 @@ release_safety_changed_file_subsystems() {
       cmd/fugue-mesh-agent/*|\
       cmd/fugue-mesh-recovery/*|\
       internal/mesh*|\
+      scripts/bootstrap_control_plane_automation.sh|\
       scripts/install_fugue_ha.sh|\
       scripts/render_fugue_mesh_agent_systemd_unit.sh|\
       scripts/render_fugue_mesh_recovery_systemd_unit.sh)
@@ -1390,6 +1391,7 @@ release_safety_changed_file_subsystems() {
       scripts/compute_control_plane_image_build_plan.sh|\
       scripts/compute_release_changed_files_from_live.sh|\
       scripts/resolve_control_plane_live_images.sh|\
+      scripts/bootstrap_control_plane_automation.sh|\
       scripts/verify_stale_release_recovery.py|\
       scripts/verify_registry_image.py|\
       .github/workflows/deploy-control-plane.yml|\

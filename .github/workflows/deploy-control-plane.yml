@@ -37,6 +37,7 @@ on:
       - 'Makefile'
       - 'go.mod'
       - 'go.sum'
+      - 'scripts/bootstrap_control_plane_automation.sh'
       - 'scripts/build_control_plane_images.sh'
       - 'scripts/compute_control_plane_image_build_plan.sh'
       - 'scripts/compute_release_changed_files_from_live.sh'
