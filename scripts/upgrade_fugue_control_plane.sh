@@ -1390,6 +1390,7 @@ release_safety_changed_file_subsystems() {
       scripts/compute_control_plane_image_build_plan.sh|\
       scripts/compute_release_changed_files_from_live.sh|\
       scripts/resolve_control_plane_live_images.sh|\
+      scripts/verify_stale_release_recovery.py|\
       scripts/verify_registry_image.py|\
       .github/workflows/deploy-control-plane.yml|\
       .github/workflows/release-public-data-plane.yml)

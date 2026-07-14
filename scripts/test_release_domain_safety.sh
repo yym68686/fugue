@@ -3659,6 +3659,10 @@ FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/te
 if control_plane_backup_drain_required; then
   fail "deploy tooling changes must not require control-plane backup drain in auto mode"
 fi
+FUGUE_RELEASE_CHANGED_FILES=$'scripts/verify_stale_release_recovery.py'
+assert_eq "$(release_safety_changed_file_subsystems)" "deploy_script" "stale release recovery verifier must be owned by the deploy safety domain"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "stale release recovery verifier must not be classified as unknown high risk"
 FUGUE_RELEASE_CHANGED_FILES=$'.github/workflows/release-public-data-plane.yml'
 public_data_plane_changed || fail "public data-plane release workflow must be owned by the public data-plane domain"
 public_workflow_subsystems="$(release_safety_changed_file_subsystems)"
