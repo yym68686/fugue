@@ -3717,11 +3717,13 @@ control_plane_backup_coordination_patch_acquire() {
   local lease_json="$1"
   local now="$2"
   local previous_token="${3:-}"
+  local previous_holder="${4:-}"
   local patch=""
 
   patch="$(LEASE_JSON="${lease_json}" LEASE_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
     LEASE_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
     LEASE_PREVIOUS_TOKEN="${previous_token}" \
+    LEASE_PREVIOUS_HOLDER="${previous_holder}" \
     LEASE_DURATION="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS}" \
     LEASE_NOW="${now}" python3 -c '
 import json
@@ -3733,16 +3735,20 @@ spec = doc.get("spec") or {}
 holder = str(spec.get("holderIdentity") or "")
 resource_version = str(metadata.get("resourceVersion") or "")
 previous_token = os.environ["LEASE_PREVIOUS_TOKEN"]
+previous_holder = os.environ["LEASE_PREVIOUS_HOLDER"]
 if not resource_version or "holderIdentity" not in spec:
     raise SystemExit(1)
 annotations = dict(metadata.get("annotations") or {})
 if str(annotations.get("fugue.pro/recovery-required") or "").strip().lower() == "true":
     raise SystemExit(1)
-if previous_token and (
-    not holder.startswith("backup/")
-    or str(annotations.get("fugue.pro/coordination-token") or "") != previous_token
-):
-    raise SystemExit(1)
+if previous_token:
+    if previous_holder:
+        if holder != previous_holder:
+            raise SystemExit(1)
+    elif not holder.startswith("backup/"):
+        raise SystemExit(1)
+    if str(annotations.get("fugue.pro/coordination-token") or "") != previous_token:
+        raise SystemExit(1)
 annotations["fugue.pro/coordination-token"] = os.environ["LEASE_TOKEN"]
 patch = [
     {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
@@ -3807,7 +3813,10 @@ elif os.environ["LEASE_ACTION"] == "release":
     patch.extend([
         {"op": "add", "path": "/metadata/annotations", "value": annotations},
         {"op": "add", "path": "/spec/holderIdentity", "value": ""},
-        {"op": "add", "path": "/spec/leaseDurationSeconds", "value": 0},
+        # coordination.k8s.io/v1 requires a positive duration even when the
+        # holder is empty. Keep the configured duration while owner-CAS clears
+        # the holder and fencing token.
+        {"op": "add", "path": "/spec/leaseDurationSeconds", "value": int(os.environ["LEASE_DURATION"])},
         {"op": "add", "path": "/spec/renewTime", "value": os.environ["LEASE_NOW"]},
     ])
 elif os.environ["LEASE_ACTION"] == "recovery-required":
@@ -3913,6 +3922,131 @@ release_control_plane_backup_coordination_lease() {
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
 }
 
+control_plane_stale_release_old_process_absent() {
+  local old_run_id="$1"
+
+  OLD_RUN_ID="${old_run_id}" python3 -c '
+import glob
+import os
+
+needle = ("GITHUB_RUN_ID=" + os.environ["OLD_RUN_ID"]).encode()
+uid = os.geteuid()
+for path in glob.glob("/proc/[0-9]*"):
+    try:
+        if os.stat(path).st_uid != uid:
+            continue
+        with open(path + "/environ", "rb") as stream:
+            environment = stream.read().split(b"\\0")
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    except PermissionError:
+        raise SystemExit(1)
+    except OSError:
+        raise SystemExit(1)
+    if needle in environment:
+        raise SystemExit(1)
+'
+}
+
+control_plane_stale_release_recovery_proof_allows_takeover() {
+  local holder="$1"
+  local proof_file="${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE:-}"
+  local expected_revision=""
+  local history_json=""
+  local old_run_id=""
+
+  [[ "${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE:-}" == "legacy-pre-helm" ]] || return 1
+  [[ -n "$(trim_field "${proof_file}")" ]] || return 1
+  expected_revision="$(PROOF_FILE="${proof_file}" EXPECTED_HOLDER="${holder}" \
+    EXPECTED_MODE="${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE}" \
+    EXPECTED_REPOSITORY="${GITHUB_REPOSITORY:-}" \
+    EXPECTED_RUN_ID="${GITHUB_RUN_ID:-}" \
+    EXPECTED_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-}" \
+    EXPECTED_HEAD_SHA="${GITHUB_SHA:-}" \
+    EXPECTED_RUNNER_NAME="${RUNNER_NAME:-}" python3 -c '
+import json
+import os
+import re
+import stat
+import time
+
+path = os.environ["PROOF_FILE"]
+metadata = os.lstat(path)
+if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit(1)
+if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit(1)
+with open(path, "r", encoding="utf-8") as stream:
+    proof = json.load(stream)
+holder = os.environ["EXPECTED_HOLDER"]
+match = re.fullmatch(r"release/([1-9][0-9]*)-([1-9][0-9]*)", holder)
+if match is None:
+    raise SystemExit(1)
+required = {
+    "version": 1,
+    "mode": os.environ["EXPECTED_MODE"],
+    "repository": os.environ["EXPECTED_REPOSITORY"],
+    "workflow_path": ".github/workflows/deploy-control-plane.yml",
+    "old_holder": holder,
+    "old_run_id": int(match.group(1)),
+    "old_run_attempt": int(match.group(2)),
+    "runner_name": os.environ["EXPECTED_RUNNER_NAME"],
+    "authorized_run_id": int(os.environ["EXPECTED_RUN_ID"]),
+    "authorized_run_attempt": int(os.environ["EXPECTED_RUN_ATTEMPT"]),
+    "authorized_head_sha": os.environ["EXPECTED_HEAD_SHA"],
+}
+if any(proof.get(key) != value for key, value in required.items()):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}", str(proof.get("old_head_sha") or "")):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}", str(proof.get("old_script_blob") or "")):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("expected_failure_sha256") or "")):
+    raise SystemExit(1)
+if int(proof.get("old_job_id") or 0) < 1:
+    raise SystemExit(1)
+revision = int(proof.get("expected_helm_revision") or 0)
+generated_at = int(proof.get("generated_at_epoch") or 0)
+age = int(time.time()) - generated_at
+if revision < 1 or age < 0 or age > 600:
+    raise SystemExit(1)
+print(revision)
+')" || {
+    log_stderr "stale release recovery proof does not match the exact current Actions execution"
+    return 1
+  }
+  [[ "${expected_revision}" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  history_json="$(run_release_long_command "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    "stale release recovery Helm history" helm history "${FUGUE_RELEASE_NAME}" \
+    -n "${FUGUE_NAMESPACE}" --max 256 -o json)" || return 1
+  if ! HISTORY_JSON="${history_json}" EXPECTED_REVISION="${expected_revision}" python3 -c '
+import json
+import os
+
+history = json.loads(os.environ["HISTORY_JSON"])
+if not isinstance(history, list) or not history:
+    raise SystemExit(1)
+entries = [(int(item.get("revision")), str(item.get("status") or "")) for item in history]
+expected = int(os.environ["EXPECTED_REVISION"])
+if max(revision for revision, _ in entries) != expected:
+    raise SystemExit(1)
+if [status for revision, status in entries if revision == expected] != ["deployed"]:
+    raise SystemExit(1)
+'; then
+    log_stderr "stale release recovery proof no longer matches the live Helm history"
+    return 1
+  fi
+
+  old_run_id="${holder#release/}"
+  old_run_id="${old_run_id%-*}"
+  if ! control_plane_stale_release_old_process_absent "${old_run_id}"; then
+    log_stderr "stale release recovery refused because the old Actions run may still have a live process"
+    return 1
+  fi
+  return 0
+}
+
 acquire_control_plane_backup_coordination_lease() {
   local deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS))
   local lease_json=""
@@ -3992,7 +4126,21 @@ acquire_control_plane_backup_coordination_lease() {
           log "control-plane backup Lease is held by ${holder} backup_run_id=${holder#backup/} expired=${expired}; waiting for explicit release or terminal-run proof"
         fi
       elif [[ "${holder}" == release/* ]]; then
-        log "control-plane backup Lease is held by another release ${holder} expired=${expired}; refusing concurrent release takeover"
+        if [[ "${expired}" == "true" ]] && control_plane_stale_release_recovery_proof_allows_takeover "${holder}"; then
+          if [[ -z "${token}" ]]; then
+            log_stderr "operator-proven stale release Lease ${holder} has no fencing token; refusing takeover"
+          elif control_plane_backup_coordination_patch_acquire "${lease_json}" "${now}" "${token}" "${holder}"; then
+            CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="true"
+            write_control_plane_backup_coordination_health healthy stale-release-takeover || return 1
+            start_control_plane_backup_coordination_lease_renewer || return 1
+            log "atomically acquired explicitly proven expired pre-Helm release Lease: previous_holder=${holder} owner=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}"
+            return 0
+          else
+            log "operator-proven stale release Lease changed before owner/token/resourceVersion CAS; retrying from a fresh snapshot"
+          fi
+        else
+          log "control-plane backup Lease is held by another release ${holder} expired=${expired}; refusing takeover without an exact pre-Helm recovery proof"
+        fi
       else
         log_stderr "control-plane backup Lease has unsupported holder ${holder}; refusing takeover"
         return 1
@@ -5685,6 +5833,7 @@ rollout_daemonset_status() {
   local timeout_seconds
   local deadline
   local status
+  local status_without_delimiters
   local generation
   local observed_generation
   local desired
@@ -5700,7 +5849,13 @@ rollout_daemonset_status() {
       return 1
     fi
     [[ -n "${status}" ]] || return 1
+    status_without_delimiters="${status//|/}"
+    (( ${#status} - ${#status_without_delimiters} == 4 )) || return 1
     IFS='|' read -r generation observed_generation desired ready unavailable <<<"${status}"
+    # numberUnavailable is the one zero-valued DaemonSet status counter that
+    # Kubernetes declares omitempty. A fully available cohort therefore has an
+    # empty final jsonpath field. Required status fields remain fail-closed.
+    unavailable="${unavailable:-0}"
     if [[ ! "${generation}" =~ ^[1-9][0-9]*$ ||
       ! "${observed_generation}" =~ ^[0-9]+$ ||
       ! "${desired}" =~ ^[0-9]+$ ||
@@ -14834,6 +14989,8 @@ main() {
   FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS:-30}"
   FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
   FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS:-20}"
+  FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE="${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE:-}"
+  FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE="${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE:-}"
   FUGUE_DEPLOY_JOB_BUDGET_SECONDS="${FUGUE_DEPLOY_JOB_BUDGET_SECONDS:-0}"
   FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS="${FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS:-10200}"
   FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS="${FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS:-600}"
@@ -15021,6 +15178,14 @@ main() {
     auto|true|false) ;;
     *) fail "FUGUE_CONTROL_PLANE_BACKUP_DRAIN_REQUIRED must be auto, true, or false" ;;
   esac
+  case "${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE}" in
+    ''|legacy-pre-helm) ;;
+    *) fail "FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE must be empty or legacy-pre-helm" ;;
+  esac
+  if [[ "${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE}" == "legacy-pre-helm" &&
+    -z "$(trim_field "${FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE}")" ]]; then
+    fail "FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE is required for legacy-pre-helm recovery"
+  fi
   for numeric_var in \
     FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS \
     FUGUE_CONTROL_PLANE_BACKUP_DRAIN_POLL_SECONDS \

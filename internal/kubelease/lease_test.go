@@ -19,6 +19,34 @@ type memoryLeaseClient struct {
 	revision int
 }
 
+type releaseRaceClient struct {
+	*memoryLeaseClient
+	once sync.Once
+}
+
+func (c *releaseRaceClient) Update(ctx context.Context, namespace string, lease coordinationv1.Lease) error {
+	if leaseHolder(lease) == "" {
+		raced := false
+		c.once.Do(func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			holder := "backup/replacement"
+			c.revision++
+			c.lease.ResourceVersion = strconv.Itoa(c.revision)
+			c.lease.Spec.HolderIdentity = &holder
+			if c.lease.Annotations == nil {
+				c.lease.Annotations = make(map[string]string)
+			}
+			c.lease.Annotations["fugue.pro/coordination-token"] = "replacement-token"
+			raced = true
+		})
+		if raced {
+			return ErrConflict
+		}
+	}
+	return c.memoryLeaseClient.Update(ctx, namespace, lease)
+}
+
 func (c *memoryLeaseClient) Get(context.Context, string, string) (coordinationv1.Lease, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -31,6 +59,9 @@ func (c *memoryLeaseClient) Get(context.Context, string, string) (coordinationv1
 func (c *memoryLeaseClient) Create(_ context.Context, _ string, lease coordinationv1.Lease) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds <= 0 {
+		return errors.New("lease duration must be positive")
+	}
 	if c.present {
 		return ErrConflict
 	}
@@ -44,6 +75,9 @@ func (c *memoryLeaseClient) Create(_ context.Context, _ string, lease coordinati
 func (c *memoryLeaseClient) Update(_ context.Context, _ string, lease coordinationv1.Lease) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds <= 0 {
+		return errors.New("lease duration must be positive")
+	}
 	if !c.present {
 		return ErrNotFound
 	}
@@ -106,11 +140,43 @@ func TestManagerFencesSameHolderExecutionsAndReclaimsExpiredBackup(t *testing.T)
 	if holder := leaseHolder(lease); holder != "" {
 		t.Fatalf("expected an empty holder after release, got %q", holder)
 	}
-	if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds != 0 {
-		t.Fatalf("expected zero duration after release, got %+v", lease.Spec.LeaseDurationSeconds)
+	if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds != 120 {
+		t.Fatalf("expected schema-valid duration after release, got %+v", lease.Spec.LeaseDurationSeconds)
 	}
 	if got := lease.Annotations["fugue.pro/coordination-token"]; got != "" {
 		t.Fatalf("expected release to clear fencing token, got %q", got)
+	}
+	third := newTestManager(client, "backup/run-2", "token-third")
+	held, err = third.TryAcquireOrRenew(context.Background(), now.Add(2*time.Minute))
+	if err != nil || !held {
+		t.Fatalf("empty released Lease must be immediately reusable: held=%v err=%v", held, err)
+	}
+}
+
+func TestManagerReleaseDoesNotOverwriteReplacementOwnerAfterConflict(t *testing.T) {
+	t.Parallel()
+
+	base := &memoryLeaseClient{}
+	client := &releaseRaceClient{memoryLeaseClient: base}
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(client, "backup/original", "original-token")
+	held, err := manager.TryAcquireOrRenew(context.Background(), now)
+	if err != nil || !held {
+		t.Fatalf("acquire original Lease: held=%v err=%v", held, err)
+	}
+	released, err := manager.Release(context.Background(), now.Add(time.Second))
+	if err != nil || released {
+		t.Fatalf("release must observe replacement owner after conflict: released=%v err=%v", released, err)
+	}
+	lease, found, err := base.Get(context.Background(), "control-plane", "backup")
+	if err != nil || !found {
+		t.Fatalf("read replacement Lease: found=%v err=%v", found, err)
+	}
+	if holder := leaseHolder(lease); holder != "backup/replacement" {
+		t.Fatalf("replacement holder was overwritten: %q", holder)
+	}
+	if got := lease.Annotations["fugue.pro/coordination-token"]; got != "replacement-token" {
+		t.Fatalf("replacement token was overwritten: %q", got)
 	}
 }
 

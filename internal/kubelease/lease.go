@@ -103,10 +103,13 @@ func (m *Manager) Release(ctx context.Context, now time.Time) (bool, error) {
 			return false, nil
 		}
 		empty := ""
-		zero := int32(0)
+		durationSeconds := int32(m.Duration / time.Second)
 		renewTime := metav1.NewMicroTime(now.UTC())
 		current.Spec.HolderIdentity = &empty
-		current.Spec.LeaseDurationSeconds = &zero
+		// coordination.k8s.io/v1 rejects non-positive Lease durations. An empty
+		// holder is immediately reusable regardless of RenewTime, so retain the
+		// configured positive duration while clearing ownership.
+		current.Spec.LeaseDurationSeconds = &durationSeconds
 		current.Spec.RenewTime = &renewTime
 		if current.Annotations != nil && m.TokenAnnotationKey != "" {
 			delete(current.Annotations, m.TokenAnnotationKey)

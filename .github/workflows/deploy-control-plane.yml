@@ -53,7 +53,9 @@ on:
       - 'scripts/test_release_domain_safety.sh'
       - 'scripts/test_node_local_dns_release.sh'
       - 'scripts/test_verify_registry_image.py'
+      - 'scripts/test_verify_stale_release_recovery.py'
       - 'scripts/upgrade_fugue_control_plane.sh'
+      - 'scripts/verify_stale_release_recovery.py'
       - 'scripts/verify_registry_image.py'
   workflow_dispatch:
     inputs:
@@ -63,6 +65,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   packages: write
 
@@ -130,6 +133,7 @@ jobs:
         run: |
           bash scripts/test_release_domain_safety.sh
           bash scripts/test_node_local_dns_release.sh
+          python3 scripts/test_verify_stale_release_recovery.py
 
       - name: Run Go tests
         run: go test ./...
@@ -341,6 +345,38 @@ jobs:
           FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY: ${{ needs.build.outputs.image_cache_image_repository || format('ghcr.io/{0}/fugue-image-cache', github.repository_owner) }}
           FUGUE_EDGE_IMAGE_REPOSITORY: ${{ needs.build.outputs.edge_image_repository || format('ghcr.io/{0}/fugue-edge', github.repository_owner) }}
         run: ./scripts/resolve_control_plane_live_images.sh
+
+      - name: Prove explicitly authorized stale pre-Helm release recovery
+        if: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE != '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECOVERY_MODE: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE }}
+          RECOVERY_EXPECTED_HOLDER: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_EXPECTED_HOLDER }}
+          RECOVERY_EXPECTED_HEAD_SHA: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_EXPECTED_HEAD_SHA }}
+          RECOVERY_EXPECTED_SCRIPT_BLOB: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_EXPECTED_SCRIPT_BLOB }}
+          RECOVERY_EXPECTED_HELM_REVISION: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_EXPECTED_HELM_REVISION }}
+          RECOVERY_EXPECTED_FAILURE: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_EXPECTED_FAILURE }}
+          FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
+          FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
+        run: |
+          set -euo pipefail
+          python3 ./scripts/verify_stale_release_recovery.py \
+            --mode "${RECOVERY_MODE}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --api-url "${GITHUB_API_URL}" \
+            --workflow-path ".github/workflows/deploy-control-plane.yml" \
+            --runner-name "${RUNNER_NAME}" \
+            --current-run-id "${GITHUB_RUN_ID}" \
+            --current-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --current-head-sha "${GITHUB_SHA}" \
+            --expected-holder "${RECOVERY_EXPECTED_HOLDER}" \
+            --expected-head-sha "${RECOVERY_EXPECTED_HEAD_SHA}" \
+            --expected-script-blob "${RECOVERY_EXPECTED_SCRIPT_BLOB}" \
+            --expected-helm-revision "${RECOVERY_EXPECTED_HELM_REVISION}" \
+            --expected-failure "${RECOVERY_EXPECTED_FAILURE}" \
+            --release-name "${FUGUE_RELEASE_NAME}" \
+            --namespace "${FUGUE_NAMESPACE}" \
+            --output "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"
 
       - name: Upgrade Fugue control plane
         # Edge fan-out now happens inside the upgrade script using the
@@ -566,6 +602,8 @@ jobs:
           FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS || '30' }}
           FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS || '15' }}
           FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS: ${{ vars.FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_DB_QUERY_TIMEOUT_SECONDS || '20' }}
+          FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE || '' }}
+          FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE: ${{ runner.temp }}/fugue-stale-release-recovery-proof.json
           FUGUE_DEPLOY_JOB_BUDGET_SECONDS: '20400'
           FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS: '10200'
           FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS: '600'
@@ -574,6 +612,10 @@ jobs:
           FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE: ${{ vars.FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE || 'auto' }}
           FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE: ${{ vars.FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE || 'guard' }}
         run: ./scripts/upgrade_fugue_control_plane.sh
+
+      - name: Remove stale release recovery proof
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"
 
       - name: Upload release attribution
         if: always()

@@ -57,6 +57,10 @@ func TestKubernetesControlPlaneBackupCoordinationLeaseLifecycle(t *testing.T) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			if lease.Spec.LeaseDurationSeconds == nil || *lease.Spec.LeaseDurationSeconds <= 0 {
+				http.Error(w, "lease duration must be positive", http.StatusUnprocessableEntity)
+				return
+			}
 			revision++
 			lease.ResourceVersion = "1"
 			present = true
@@ -65,6 +69,10 @@ func TestKubernetesControlPlaneBackupCoordinationLeaseLifecycle(t *testing.T) {
 			var update coordinationv1.Lease
 			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if update.Spec.LeaseDurationSeconds == nil || *update.Spec.LeaseDurationSeconds <= 0 {
+				http.Error(w, "lease duration must be positive", http.StatusUnprocessableEntity)
 				return
 			}
 			if !present {
@@ -142,8 +150,8 @@ func TestKubernetesControlPlaneBackupCoordinationLeaseLifecycle(t *testing.T) {
 	if releasedLease.Spec.HolderIdentity == nil || *releasedLease.Spec.HolderIdentity != "" {
 		t.Fatalf("expected empty holder after release: %+v", releasedLease.Spec.HolderIdentity)
 	}
-	if releasedLease.Spec.LeaseDurationSeconds == nil || *releasedLease.Spec.LeaseDurationSeconds != 0 {
-		t.Fatalf("expected zero duration after release: %+v", releasedLease.Spec.LeaseDurationSeconds)
+	if releasedLease.Spec.LeaseDurationSeconds == nil || *releasedLease.Spec.LeaseDurationSeconds != 120 {
+		t.Fatalf("expected schema-valid duration after release: %+v", releasedLease.Spec.LeaseDurationSeconds)
 	}
 	if got := releasedLease.Annotations[controlPlaneBackupCoordinationTokenAnnotation]; got != "" {
 		t.Fatalf("expected fencing token to be cleared, got %q", got)

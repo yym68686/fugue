@@ -511,6 +511,13 @@ def daemonset_json(state):
     elif drift == "dns-policy":
         pod_spec["dnsPolicy"] = "ClusterFirst"
     ready = sum(1 for pod in state["pods"] if pod["node"] in targets and pod["ready"])
+    status = {
+        "observedGeneration": ds["observed_generation"],
+        "desiredNumberScheduled": len(targets),
+        "numberReady": ready,
+    }
+    if len(targets) - ready:
+        status["numberUnavailable"] = len(targets) - ready
     return {
         "apiVersion": "apps/v1",
         "kind": "DaemonSet",
@@ -520,12 +527,7 @@ def daemonset_json(state):
             "fugue.io/node-local-dns-mode": mode_label,
             "fugue.io/node-local-dns-cohort": "active",
         }}, "spec": pod_spec}},
-        "status": {
-            "observedGeneration": ds["observed_generation"],
-            "desiredNumberScheduled": len(targets),
-            "numberReady": ready,
-            "numberUnavailable": len(targets) - ready,
-        },
+        "status": status,
     }
 
 
@@ -688,7 +690,8 @@ if command == "get" and ("daemonset" in argv or any(item.startswith("ds/") for i
             elif "desiredNumberScheduled" in output:
                 desired = len(ds["targets"])
                 ready = sum(1 for pod in state["pods"] if pod["node"] in ds["targets"] and pod["ready"])
-                sys.stdout.write(f"{ds['generation']}|{ds['observed_generation']}|{desired}|{ready}|{desired-ready}")
+                unavailable = "" if desired == ready else str(desired - ready)
+                sys.stdout.write(f"{ds['generation']}|{ds['observed_generation']}|{desired}|{ready}|{unavailable}")
             elif "node-local-dns-mode" in output:
                 sys.stdout.write(ds["mode"])
             elif "kubernetes\\.io/hostname" in output and ds["layout"] == "legacy":
@@ -1950,6 +1953,13 @@ def daemonset_json(kind, state):
     else:
         pods = [pod_json(item, state) for item in record["pods"]]
     ready = sum(1 for pod in pods if any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod["status"]["conditions"]))
+    status = {
+        "observedGeneration": record["observed_generation"],
+        "desiredNumberScheduled": len(targets),
+        "numberReady": ready,
+    }
+    if len(targets) - ready:
+        status["numberUnavailable"] = len(targets) - ready
     return {
         "apiVersion": "apps/v1",
         "kind": "DaemonSet",
@@ -1965,12 +1975,7 @@ def daemonset_json(kind, state):
             "updateStrategy": update_strategy,
             "template": {"metadata": {"labels": template_labels}, "spec": pod_spec},
         },
-        "status": {
-            "observedGeneration": record["observed_generation"],
-            "desiredNumberScheduled": len(targets),
-            "numberReady": ready,
-            "numberUnavailable": len(targets) - ready,
-        },
+        "status": status,
     }
 
 

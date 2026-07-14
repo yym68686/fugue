@@ -56,6 +56,16 @@ grep -Fq 'echo "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(date +%s)" >> "${GITHUB_ENV}
   fail "control-plane deploy must record an absolute budget origin before checkout"
 grep -Fq "FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS:" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must configure the shared backup/release Lease"
+grep -Fq "actions: read" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "stale release recovery proof requires read-only Actions evidence access"
+grep -Fq "scripts/verify_stale_release_recovery.py" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must generate the stale release recovery proof before upgrade"
+grep -Fq 'FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE: ${{ runner.temp }}/fugue-stale-release-recovery-proof.json' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must bind the recovery proof to a private runner-local file"
+grep -Fq 'rm -f "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must remove the one-shot recovery proof"
 grep -Fq "FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS: \${{ vars.FUGUE_NODE_LOCAL_DNS_PROBE_TIMEOUT_SECONDS || '180' }}" \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must pass the evidence-tunable NodeLocal probe timeout"
@@ -1226,6 +1236,37 @@ rm -f "${RESOLVE_TEST_OUTPUT}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck source=scripts/upgrade_fugue_control_plane.sh
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+(
+  FUGUE_ROLLOUT_TIMEOUT=1s
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=1
+  KUBECTL=fake-daemonset-kubectl
+  DAEMONSET_STATUS='3|3|1|1|'
+  run_release_long_command() {
+    local _timeout="$1"
+    local phase="$2"
+    shift 2
+    case "${phase}" in
+      'daemonset strategy read '*) printf 'OnDelete' ;;
+      'daemonset readiness read '*) printf '%s' "${DAEMONSET_STATUS}" ;;
+      *) return 1 ;;
+    esac
+  }
+  rollout_daemonset_status fugue-node-local-dns kube-system ||
+    fail "OnDelete readiness must treat an omitted zero numberUnavailable as zero"
+  DAEMONSET_STATUS='3|3|1|1|invalid'
+  if rollout_daemonset_status fugue-node-local-dns kube-system; then
+    fail "OnDelete readiness must reject a non-numeric numberUnavailable"
+  fi
+  DAEMONSET_STATUS='3|3|1|1'
+  if rollout_daemonset_status fugue-node-local-dns kube-system; then
+    fail "OnDelete readiness must reject a truncated status record without the optional-field delimiter"
+  fi
+  DAEMONSET_STATUS='3|3|||'
+  if rollout_daemonset_status fugue-node-local-dns kube-system true; then
+    fail "OnDelete readiness must not normalize missing required status counters"
+  fi
+)
 
 (
   fake_crd_diff_kubectl() {
@@ -5641,6 +5682,7 @@ BACKUP_LEASE_STATE="$(mktemp)"
 BACKUP_PGDUMP_STATE="$(mktemp)"
 BACKUP_DB_PROOF_STATE="$(mktemp)"
 BACKUP_DB_QUERY_ARGS="$(mktemp)"
+BACKUP_LAST_PATCH="$(mktemp)"
 cat >"${BACKUP_LEASE_STATE}" <<'JSON'
 {"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"name":"fugue-fugue-control-plane-db-backup","namespace":"fugue-system","resourceVersion":"1","annotations":{"fugue.pro/coordination-token":"backup-token"}},"spec":{"holderIdentity":"backup/run-active","leaseDurationSeconds":120,"acquireTime":"2026-01-01T00:00:00Z","renewTime":"2026-01-01T00:00:00Z","leaseTransitions":0}}
 JSON
@@ -5676,6 +5718,7 @@ PY
       fi
       shift
     done
+    printf '%s' "${patch}" >"${BACKUP_LAST_PATCH}"
     PATCH="${patch}" python3 - "${BACKUP_LEASE_STATE}" <<'PY'
 import json
 import os
@@ -5790,11 +5833,106 @@ python3 - "${BACKUP_LEASE_STATE}" <<'PY'
 import json
 import sys
 doc = json.load(open(sys.argv[1]))
-if doc["spec"].get("holderIdentity") != "" or doc["spec"].get("leaseDurationSeconds") != 0:
-    raise SystemExit("release must clear its holder with owner CAS")
+if doc["spec"].get("holderIdentity") != "" or doc["spec"].get("leaseDurationSeconds") != 120:
+    raise SystemExit("release must clear its holder while retaining a schema-valid duration")
 if "fugue.pro/coordination-token" in (doc.get("metadata", {}).get("annotations", {}) or {}):
     raise SystemExit("release must clear its fencing token")
 PY
+
+(
+  proof_file="$(mktemp)"
+  trap 'rm -f "${proof_file}"' EXIT
+  chmod 600 "${proof_file}"
+  FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE=legacy-pre-helm
+  FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE="${proof_file}"
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=2
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_NAMESPACE=fugue-system
+  GITHUB_REPOSITORY=owner/fugue
+  GITHUB_RUN_ID=123
+  GITHUB_RUN_ATTEMPT=2
+  GITHUB_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  RUNNER_NAME=control-plane-runner
+  GENERATED_AT="$(date +%s)" python3 - "${proof_file}" <<'PY'
+import json
+import os
+import sys
+with open(sys.argv[1], "w") as stream:
+    json.dump({
+        "version": 1,
+        "mode": "legacy-pre-helm",
+        "repository": "owner/fugue",
+        "workflow_path": ".github/workflows/deploy-control-plane.yml",
+        "old_holder": "release/77-1",
+        "old_run_id": 77,
+        "old_run_attempt": 1,
+        "old_head_sha": "b" * 40,
+        "old_script_blob": "c" * 40,
+        "old_job_id": 88,
+        "expected_helm_revision": 706,
+        "expected_failure_sha256": "d" * 64,
+        "runner_name": "control-plane-runner",
+        "authorized_run_id": 123,
+        "authorized_run_attempt": 2,
+        "authorized_head_sha": "a" * 40,
+        "generated_at_epoch": int(os.environ["GENERATED_AT"]),
+    }, stream, separators=(",", ":"))
+PY
+  run_release_long_command() { printf '%s' '[{"revision":"706","status":"deployed"}]'; }
+  control_plane_stale_release_old_process_absent() { [[ "$1" == "77" ]]; }
+  control_plane_stale_release_recovery_proof_allows_takeover release/77-1 ||
+    fail "exact current-run recovery proof must authorize the old holder"
+  chmod 644 "${proof_file}"
+  if control_plane_stale_release_recovery_proof_allows_takeover release/77-1; then
+    fail "non-private recovery proof must fail closed"
+  fi
+)
+
+python3 - "${BACKUP_LEASE_STATE}" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+doc = json.load(open(path))
+doc["metadata"]["resourceVersion"] = str(int(doc["metadata"]["resourceVersion"]) + 1)
+doc.setdefault("metadata", {}).setdefault("annotations", {})["fugue.pro/coordination-token"] = "stale-release-token"
+doc["spec"]["holderIdentity"] = "release/77-1"
+doc["spec"]["leaseDurationSeconds"] = 120
+doc["spec"]["renewTime"] = "2026-01-01T00:00:00Z"
+with open(path, "w") as stream:
+    json.dump(doc, stream, separators=(",", ":"))
+PY
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=false
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=0
+FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE=legacy-pre-helm
+FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE=/tmp/test-proof
+control_plane_stale_release_recovery_proof_allows_takeover() { return 1; }
+if acquire_control_plane_backup_coordination_lease; then
+  fail "expired release Lease must remain fenced when exact recovery proof fails"
+fi
+assert_eq "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["spec"]["holderIdentity"])' "${BACKUP_LEASE_STATE}")" "release/77-1" "unproven release holder remains unchanged"
+
+control_plane_stale_release_recovery_proof_allows_takeover() { [[ "$1" == "release/77-1" ]]; }
+acquire_control_plane_backup_coordination_lease
+assert_eq "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["spec"]["holderIdentity"])' "${BACKUP_LEASE_STATE}")" "release/123-2" "proven stale release holder is atomically replaced"
+python3 - "${BACKUP_LAST_PATCH}" <<'PY'
+import json
+import sys
+patch = json.load(open(sys.argv[1]))
+tests = {(item["path"], item.get("value")) for item in patch if item["op"] == "test"}
+required = {
+    ("/spec/holderIdentity", "release/77-1"),
+    ("/metadata/annotations/fugue.pro~1coordination-token", "stale-release-token"),
+}
+if not required.issubset(tests) or not any(path == "/metadata/resourceVersion" for path, _ in tests):
+    raise SystemExit("stale release takeover is missing holder/token/resourceVersion CAS")
+holders = [item.get("value") for item in patch if item["op"] == "add" and item["path"] == "/spec/holderIdentity"]
+if holders != ["release/123-2"]:
+    raise SystemExit("stale release takeover introduced an empty-holder window")
+PY
+release_control_plane_backup_coordination_lease
+FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE=
+FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE=
+FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=1
 
 acquire_control_plane_backup_coordination_lease
 python3 - "${BACKUP_LEASE_STATE}" <<'PY'
@@ -5822,6 +5960,6 @@ assert_eq "$(cat "${BACKUP_PGDUMP_STATE}")" "12345" "release must not alter acti
 CONTROL_PLANE_BACKUP_COORDINATION_WAIT_DEADLINE=$((SECONDS + 1))
 drain_control_plane_backup_before_schema_rollout
 
-rm -f "${BACKUP_LEASE_STATE}" "${BACKUP_PGDUMP_STATE}" "${BACKUP_DB_PROOF_STATE}" "${BACKUP_DB_QUERY_ARGS}"
+rm -f "${BACKUP_LEASE_STATE}" "${BACKUP_PGDUMP_STATE}" "${BACKUP_DB_PROOF_STATE}" "${BACKUP_DB_QUERY_ARGS}" "${BACKUP_LAST_PATCH}"
 
 printf '[test_release_domain_safety] ok\n'
