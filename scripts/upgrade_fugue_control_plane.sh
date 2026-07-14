@@ -1418,13 +1418,17 @@ release_safety_changed_file_subsystems() {
 
 release_safety_unknown_high_risk_files() {
   local file=""
+  local subsystems=""
 
   while IFS= read -r file; do
     file="$(trim_field "${file}")"
     [[ -n "${file}" ]] || continue
     release_safety_file_is_non_runtime "${file}" && continue
-    if FUGUE_RELEASE_CHANGED_FILES="${file}" RELEASE_CHANGED_FILES_EFFECTIVE="" \
-      release_safety_changed_file_subsystems | grep -Fqx unknown_high_risk; then
+    if ! subsystems="$(FUGUE_RELEASE_CHANGED_FILES="${file}" RELEASE_CHANGED_FILES_EFFECTIVE="" \
+      release_safety_changed_file_subsystems)"; then
+      return 1
+    fi
+    if grep -Fqx unknown_high_risk <<<"${subsystems}"; then
       printf '%s\n' "${file}"
     fi
   done < <(release_changed_files)

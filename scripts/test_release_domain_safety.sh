@@ -3842,6 +3842,12 @@ assert_eq "$(release_safety_changed_file_subsystems)" "shared_control_plane" "Op
 FUGUE_RELEASE_CHANGED_FILES=$'internal/unattributed/runtime.go'
 assert_eq "$(release_safety_changed_file_subsystems)" "unknown_high_risk" "unattributed runtime changes must be classified high risk"
 assert_eq "$(release_safety_unknown_high_risk_files)" "internal/unattributed/runtime.go" "unknown high-risk file list"
+unknown_risk_stderr="$(mktemp)"
+FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT=true
+assert_eq "$(release_safety_unknown_high_risk_files 2>"${unknown_risk_stderr}")" "internal/unattributed/runtime.go" "unknown high-risk scan with an additional runtime intent"
+[[ ! -s "${unknown_risk_stderr}" ]] || fail "unknown high-risk scan must not emit broken-pipe diagnostics"
+rm -f "${unknown_risk_stderr}"
+unset FUGUE_RELEASE_NODE_LOCAL_DNS_INTENT
 if require_release_safety_attribution; then
   fail "unknown high-risk runtime changes must hold without explicit approval"
 fi
