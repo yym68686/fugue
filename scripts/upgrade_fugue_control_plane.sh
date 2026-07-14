@@ -9172,6 +9172,8 @@ bootstrap_local_control_plane_automation_bundle() {
 }
 
 prepare_control_plane_automation_ssh() {
+  local bootstrap_inventory_error=""
+
   if [[ -n "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE}" ]] && \
      [[ -n "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KEY_FILE}" ]] && \
      [[ -n "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE:-}" && -r "${FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE}" ]]; then
@@ -9195,9 +9197,15 @@ prepare_control_plane_automation_ssh() {
      use_local_control_plane_automation_bundle_from_dir "${LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR}"; then
     return
   fi
+  if [[ -x "./scripts/bootstrap_control_plane_automation.sh" ]]; then
+    bootstrap_inventory_error="$(control_plane_automation_bootstrap_inventory_error)"
+  fi
   if bootstrap_local_control_plane_automation_bundle && \
      use_local_control_plane_automation_bundle_from_dir "${LOCAL_CONTROL_PLANE_AUTOMATION_DIR}"; then
     return
+  fi
+  if [[ -n "${bootstrap_inventory_error}" ]]; then
+    return 1
   fi
   log_stderr "missing local control-plane automation bundle on this server; run scripts/bootstrap_control_plane_automation.sh or scripts/install_fugue_ha.sh to install it"
   return 1
@@ -9895,6 +9903,10 @@ restore_primary_mesh_network_if_needed() {
   local patched_config=""
   local restore_cmd=""
   local backup_path=""
+
+  if [[ "${FUGUE_MESH_RECOVERY_ENABLED:-false}" != "true" ]]; then
+    return 0
+  fi
 
   primary_node_name="$(detect_primary_node_name)"
   if [[ -z "${primary_node_name}" ]]; then

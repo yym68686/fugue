@@ -5217,6 +5217,39 @@ PY
 )
 
 (
+  cd "${REPO_ROOT}"
+  unset FUGUE_NODE1 FUGUE_NODE2 FUGUE_NODE3
+  FUGUE_CONTROL_PLANE_HOSTS_ENV_FILE=""
+  FUGUE_CONTROL_PLANE_SSH_KEY_FILE=""
+  FUGUE_CONTROL_PLANE_SSH_KNOWN_HOSTS_FILE=""
+  LOCAL_CONTROL_PLANE_AUTOMATION_DIR=/missing/automation-bundle
+  LOCAL_ROOT_CONTROL_PLANE_AUTOMATION_DIR=/missing/automation-bundle
+  prepare_automation_error="$(mktemp)"
+  use_local_control_plane_automation_bundle_from_dir() { return 1; }
+  restore_local_control_plane_automation_bundle_from_secret() { return 1; }
+  if prepare_control_plane_automation_ssh 2>"${prepare_automation_error}"; then
+    fail "automation SSH preparation must fail when host inventory and the local bundle are absent"
+  fi
+  assert_eq "$(grep -Fc 'skipping control-plane automation bundle bootstrap: FUGUE_NODE1 is not configured' "${prepare_automation_error}")" "1" \
+    "automation SSH preparation emits the specific missing-inventory diagnostic once"
+  if grep -Fq 'missing local control-plane automation bundle on this server' "${prepare_automation_error}"; then
+    fail "automation SSH preparation must not append a generic bundle error after the exact inventory diagnostic"
+  fi
+  rm -f "${prepare_automation_error}"
+)
+
+(
+  FUGUE_MESH_RECOVERY_ENABLED=false
+  mesh_disabled_host_probe_calls=0
+  detect_primary_node_name() {
+    mesh_disabled_host_probe_calls=$((mesh_disabled_host_probe_calls + 1))
+    return 42
+  }
+  restore_primary_mesh_network_if_needed || fail "disabled mesh recovery must be a successful no-op"
+  assert_eq "${mesh_disabled_host_probe_calls}" "0" "disabled mesh recovery performs no primary-host discovery"
+)
+
+(
   daemonset_presence() { printf 'absent'; }
   if require_daemonset_present required-ds; then
     fail "a required absent DaemonSet must fail closed"
