@@ -3,6 +3,8 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck source=scripts/lib/authoritative_dns_dig.sh
+source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
 
 log() {
   printf '[fugue-upgrade] %s\n' "$*"
@@ -12843,7 +12845,6 @@ node_local_dns_verify_authoritative_coexistence() (
   local ready=""
   local transport=""
   local attempt=0
-  local dig_args=()
   local output=""
   local output_file=""
   local expected_config=""
@@ -12856,8 +12857,8 @@ node_local_dns_verify_authoritative_coexistence() (
     return 1
   }
   [[ -n "${current_rows}" ]] || return 0
-  command_exists dig || {
-    log "dig is required to verify authoritative DNS coexistence on ${node_name}"
+  authoritative_dns_dig_require_attested || {
+    log "wire-attested DiG is required to verify authoritative DNS coexistence on ${node_name}"
     return 1
   }
   expected_config="$(node_local_dns_authoritative_soa_config)" || return 1
@@ -12867,13 +12868,12 @@ node_local_dns_verify_authoritative_coexistence() (
     [[ -n "${host_ip}" ]] || continue
     node_local_dns_verify_scoped_hostport_rules "${node_name}" "${host_ip}" || return 1
     for transport in udp tcp; do
-      dig_args=("@${host_ip}" "+time=3" "+tries=1" "+norecurse" "+subnet=0.0.0.0/0" "+noall" "+comments" "+question" "+answer")
-      [[ "${transport}" != "tcp" ]] || dig_args+=(+tcp)
       attempt=1
       while (( attempt <= 3 )); do
         require_release_forward_budget 3 \
           "authoritative DNS ${transport} SOA probe ${node_name}/${host_ip} attempt ${attempt}/3" || return 1
-        if dig "${dig_args[@]}" "${FUGUE_DNS_ZONE}" SOA >"${output_file}" 2>&1 &&
+        if authoritative_dns_dig_query "${output_file}" "${transport}" "${host_ip}" 53 3 \
+          "${FUGUE_DNS_ZONE}" SOA &&
           node_local_dns_validate_authoritative_soa_response "${output_file}" "${expected_config}"; then
           break
         fi
@@ -13980,21 +13980,19 @@ snapshot_file="$3"
 target_state_file="$4"
 identity_file="$5"
 source "${script_path}"
+authoritative_dns_dig_require_attested || fail "authoritative DNS DiG attestation is missing or drifted in the DNS manifest child"
 case "${action}" in
   capture)
     detect_kubectl
-    command_exists dig || fail "dig is required for authoritative DNS transaction validation"
     validate_representative_smoke_configuration
     capture_dns_manifest_snapshot "${snapshot_file}"
     ;;
   restore)
     detect_kubectl
-    command_exists dig || fail "dig is required for authoritative DNS transaction validation"
     restore_dns_manifest_snapshot "${snapshot_file}"
     ;;
   verify-target)
     detect_kubectl
-    command_exists dig || fail "dig is required for authoritative DNS transaction validation"
     validate_representative_smoke_configuration
     verify_dns_manifest_target_state_file "${snapshot_file}" "${target_state_file}"
     ;;
@@ -16485,6 +16483,7 @@ PY
   prepare_release_domains
   validate_control_plane_release_job_budget
   validate_node_local_dns_release_budget_pre_mutation
+  authoritative_dns_dig_preflight || fail "authoritative DNS DiG wire attestation failed before release mutation"
   if ! acquire_control_plane_backup_coordination_lease; then
     fail "control-plane backup coordination Lease acquisition failed before release mutation"
   fi
