@@ -33,8 +33,9 @@ func (n *workflowNeeds) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type releaseWorkflow struct {
-	On   releaseWorkflowTriggers       `yaml:"on"`
-	Jobs map[string]releaseWorkflowJob `yaml:"jobs"`
+	On          releaseWorkflowTriggers       `yaml:"on"`
+	Permissions map[string]string             `yaml:"permissions"`
+	Jobs        map[string]releaseWorkflowJob `yaml:"jobs"`
 }
 
 type releaseWorkflowTriggers struct {
@@ -54,18 +55,20 @@ type releaseWorkflowJob struct {
 	Needs           workflowNeeds         `yaml:"needs"`
 	If              string                `yaml:"if"`
 	Outputs         map[string]string     `yaml:"outputs"`
+	Permissions     map[string]string     `yaml:"permissions"`
 	ContinueOnError bool                  `yaml:"continue-on-error"`
 	Steps           []releaseWorkflowStep `yaml:"steps"`
 }
 
 type releaseWorkflowStep struct {
-	ID   string            `yaml:"id"`
-	Name string            `yaml:"name"`
-	If   string            `yaml:"if"`
-	Uses string            `yaml:"uses"`
-	Env  map[string]string `yaml:"env"`
-	With map[string]string `yaml:"with"`
-	Run  string            `yaml:"run"`
+	ID              string            `yaml:"id"`
+	Name            string            `yaml:"name"`
+	If              string            `yaml:"if"`
+	Uses            string            `yaml:"uses"`
+	Env             map[string]string `yaml:"env"`
+	With            map[string]string `yaml:"with"`
+	Run             string            `yaml:"run"`
+	ContinueOnError bool              `yaml:"continue-on-error"`
 }
 
 func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
@@ -298,6 +301,94 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	if got, want := upgrade.Env["FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE"], "${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || needs.build.outputs.build_edge == 'true' }}"; got != want {
 		t.Fatalf("public data-plane auto release must depend only on explicit policy or an edge build: got %q want %q", got, want)
+	}
+
+	attributionUpload := workflowStepByName(t, deploy, "Upload release attribution")
+	if got, want := attributionUpload.With["if-no-files-found"], "error"; got != want {
+		t.Fatalf("release attribution must fail when evidence is absent: got %q want %q", got, want)
+	}
+
+	freeze, ok := workflow.Jobs["freeze-release-lane-on-failure"]
+	if !ok {
+		t.Fatal("control-plane workflow must define the automatic release-lane freeze finalizer")
+	}
+	for _, required := range []string{"release-baseline", "release-gate", "build", "deploy"} {
+		if !containsWorkflowNeed(freeze.Needs, required) {
+			t.Fatalf("release-lane freeze finalizer must wait for %s", required)
+		}
+	}
+	if len(freeze.Needs) != 4 {
+		t.Fatalf("release-lane freeze finalizer has unexpected dependencies: %v", freeze.Needs)
+	}
+	const freezeCondition = "${{ always() && (needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success') }}"
+	if freeze.If != freezeCondition {
+		t.Fatalf("release-lane freeze condition drifted: got %q want %q", freeze.If, freezeCondition)
+	}
+	if got, want := freeze.Permissions["actions"], "write"; got != want {
+		t.Fatalf("release-lane freeze finalizer needs actions:write: got %q want %q", got, want)
+	}
+	if got, want := freeze.Permissions["contents"], "read"; got != want {
+		t.Fatalf("release-lane freeze finalizer needs contents:read: got %q want %q", got, want)
+	}
+	if len(freeze.Permissions) != 2 {
+		t.Fatalf("release-lane freeze finalizer has unexpected permissions: %v", freeze.Permissions)
+	}
+	if got, want := workflow.Permissions["actions"], "read"; got != want {
+		t.Fatalf("workflow default actions permission must remain read-only: got %q want %q", got, want)
+	}
+	for jobName, job := range workflow.Jobs {
+		if jobName != "freeze-release-lane-on-failure" && job.Permissions["actions"] == "write" {
+			t.Fatalf("job %s must not receive actions:write", jobName)
+		}
+	}
+
+	freezeRecord := workflowStepByName(t, freeze, "Record release lane freeze evidence")
+	for key, want := range map[string]string{
+		"RELEASE_BASELINE_RESULT": "${{ needs.release-baseline.result }}",
+		"RELEASE_GATE_RESULT":     "${{ needs.release-gate.result }}",
+		"BUILD_RESULT":            "${{ needs.build.result }}",
+		"DEPLOY_RESULT":           "${{ needs.deploy.result }}",
+	} {
+		if got := freezeRecord.Env[key]; got != want {
+			t.Fatalf("release-lane freeze evidence env %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{"lane-freeze.json", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "job_results", "os.replace"} {
+		if !strings.Contains(freezeRecord.Run, required) {
+			t.Fatalf("release-lane freeze evidence must contain %q", required)
+		}
+	}
+
+	freezeUpload := workflowStepByName(t, freeze, "Upload release lane freeze evidence")
+	const uploadArtifactAction = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+	if freezeUpload.ID != "freeze_evidence_upload" || strings.TrimSpace(freezeUpload.If) != "always()" || freezeUpload.Uses != uploadArtifactAction || !freezeUpload.ContinueOnError {
+		t.Fatalf("release-lane freeze evidence upload must be pinned and non-blocking: %#v", freezeUpload)
+	}
+	if got, want := freezeUpload.With["if-no-files-found"], "error"; got != want {
+		t.Fatalf("release-lane freeze evidence upload must reject an absent file: got %q want %q", got, want)
+	}
+
+	freezeLane := workflowStepByName(t, freeze, "Disable release lane and cancel queued runs")
+	if freezeLane.ID != "freeze_lane" || strings.TrimSpace(freezeLane.If) != "always()" {
+		t.Fatalf("release-lane disable step must always run after evidence generation: %#v", freezeLane)
+	}
+	for _, required := range []string{
+		"actions/workflows/${workflow_id}/disable",
+		"disabled_manually",
+		"for status in queued in_progress requested waiting pending",
+		"status=${status}",
+		"actions/runs/${run_id}/cancel",
+		"CURRENT_RUN_ID",
+		"pending_other_runs",
+	} {
+		if !strings.Contains(freezeLane.Run, required) {
+			t.Fatalf("release-lane disable step must contain %q", required)
+		}
+	}
+
+	requireFreezeEvidence := workflowStepByName(t, freeze, "Require release lane freeze evidence")
+	if got, want := requireFreezeEvidence.If, "${{ always() && steps.freeze_evidence_upload.outcome != 'success' }}"; got != want {
+		t.Fatalf("release-lane evidence failure condition drifted: got %q want %q", got, want)
 	}
 }
 

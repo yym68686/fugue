@@ -634,4 +634,144 @@ jobs:
         with:
           name: fugue-control-plane-release-attribution-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/fugue-release
-          if-no-files-found: ignore
+          if-no-files-found: error
+
+  freeze-release-lane-on-failure:
+    needs:
+      - release-baseline
+      - release-gate
+      - build
+      - deploy
+    if: ${{ always() && (needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Record release lane freeze evidence
+        env:
+          RELEASE_BASELINE_RESULT: ${{ needs.release-baseline.result }}
+          RELEASE_GATE_RESULT: ${{ needs.release-gate.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/fugue-release-lane-freeze"
+          evidence_file="${evidence_dir}/lane-freeze.json"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          python3 - "${evidence_file}" <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+
+          results = {
+              "release_baseline": os.environ["RELEASE_BASELINE_RESULT"],
+              "release_gate": os.environ["RELEASE_GATE_RESULT"],
+              "build": os.environ["BUILD_RESULT"],
+              "deploy": os.environ["DEPLOY_RESULT"],
+          }
+          payload = {
+              "schema_version": 1,
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "head_sha": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF"],
+              "job_results": results,
+              "reason": "release prerequisite or deploy job did not succeed",
+              "requested_action": "disable workflow and cancel every other non-terminal run",
+              "recorded_at": datetime.now(timezone.utc).isoformat(),
+          }
+          temporary = sys.argv[1] + ".tmp"
+          with open(temporary, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          os.chmod(temporary, 0o600)
+          os.replace(temporary, sys.argv[1])
+          PY
+
+      - name: Upload release lane freeze evidence
+        id: freeze_evidence_upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-control-plane-lane-freeze-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-release-lane-freeze/lane-freeze.json
+          if-no-files-found: error
+
+      - name: Disable release lane and cancel queued runs
+        id: freeze_lane
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          workflow_id="deploy-control-plane.yml"
+
+          state=""
+          for attempt in 1 2 3 4 5; do
+            if gh api --method PUT \
+              "repos/${REPOSITORY}/actions/workflows/${workflow_id}/disable" \
+              >/dev/null 2>&1; then
+              state="$(gh api \
+                "repos/${REPOSITORY}/actions/workflows/${workflow_id}" \
+                --jq '.state' 2>/dev/null || true)"
+            fi
+            [[ "${state}" == "disabled_manually" ]] && break
+            if (( attempt < 5 )); then
+              echo "release lane disable is not confirmed; retrying attempt $((attempt + 1))/5" >&2
+              sleep 2
+            fi
+          done
+          if [[ "${state}" != "disabled_manually" ]]; then
+            echo "release lane disable was not confirmed: state=${state}" >&2
+            exit 1
+          fi
+
+          pending_other_runs() {
+            local status=""
+            for status in queued in_progress requested waiting pending; do
+              gh api --paginate \
+                "repos/${REPOSITORY}/actions/workflows/${workflow_id}/runs?status=${status}&per_page=100" \
+                --jq '.workflow_runs[].id'
+            done | awk -v current="${CURRENT_RUN_ID}" '$0 != current' | sort -u
+          }
+
+          cancel_pending_runs() {
+            local run_id=""
+            while IFS= read -r run_id; do
+              [[ -n "${run_id}" ]] || continue
+              echo "cancelling frozen release-lane run ${run_id}"
+              gh api --method POST \
+                "repos/${REPOSITORY}/actions/runs/${run_id}/cancel" \
+                >/dev/null 2>&1 || true
+            done < <(pending_other_runs)
+          }
+
+          cancel_pending_runs
+          remaining=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            remaining="$(pending_other_runs)"
+            [[ -z "${remaining}" ]] && break
+            cancel_pending_runs
+            sleep 2
+          done
+          if [[ -n "${remaining}" ]]; then
+            echo "release lane is disabled but other runs remain active:" >&2
+            printf '%s\n' "${remaining}" >&2
+            exit 1
+          fi
+          echo "release lane disabled and all other non-terminal runs cancelled"
+
+      - name: Require release lane freeze evidence
+        if: ${{ always() && steps.freeze_evidence_upload.outcome != 'success' }}
+        run: |
+          echo "release lane was frozen but its evidence artifact was not uploaded" >&2
+          exit 1
