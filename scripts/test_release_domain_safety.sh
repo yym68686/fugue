@@ -1639,6 +1639,8 @@ fi
   fail "standalone automation bootstrap must identify duplicate hosts"
 python3 -m py_compile "${REPO_ROOT}/scripts/verify_registry_image.py" "${REPO_ROOT}/scripts/test_verify_registry_image.py"
 python3 "${REPO_ROOT}/scripts/test_verify_registry_image.py"
+python3 -m py_compile "${REPO_ROOT}/scripts/build_release_image_lock.py" "${REPO_ROOT}/scripts/test_build_release_image_lock.py"
+python3 "${REPO_ROOT}/scripts/test_build_release_image_lock.py"
 grep -Fq 'FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must pass the trusted live baseline refs to the release guard"
