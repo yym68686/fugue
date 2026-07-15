@@ -100,7 +100,9 @@ import stat
 import sys
 import tempfile
 
-destination = Path(sys.argv[1]).absolute()
+destination = Path(sys.argv[1])
+if not destination.is_absolute():
+    raise SystemExit("GITHUB_OUTPUT must be an absolute path")
 payload_path = Path(sys.argv[2])
 payload = payload_path.read_bytes()
 if not payload or not payload.endswith(b"\n"):
@@ -108,12 +110,52 @@ if not payload or not payload.endswith(b"\n"):
 
 previous = b""
 mode = 0o600
-if destination.exists():
-    destination_stat = destination.stat()
-    if not stat.S_ISREG(destination_stat.st_mode):
-        raise SystemExit("GITHUB_OUTPUT must be a regular file")
-    previous = destination.read_bytes()
-    mode = stat.S_IMODE(destination_stat.st_mode)
+destination_existed = False
+destination_identity = None
+
+def file_identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+try:
+    destination_stat = destination.lstat()
+except FileNotFoundError:
+    pass
+else:
+    destination_existed = True
+    if (
+        not stat.S_ISREG(destination_stat.st_mode)
+        or destination_stat.st_uid != os.geteuid()
+        or destination_stat.st_nlink != 1
+    ):
+        raise SystemExit(
+            "GITHUB_OUTPUT must be a current-user regular file with one link"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    existing_fd = os.open(destination, flags)
+    try:
+        opened_stat = os.fstat(existing_fd)
+        if file_identity(opened_stat) != file_identity(destination_stat):
+            raise SystemExit("GITHUB_OUTPUT changed before it was opened")
+        with os.fdopen(existing_fd, "rb", closefd=False) as existing:
+            previous = existing.read()
+        final_stat = os.fstat(existing_fd)
+        if file_identity(final_stat) != file_identity(opened_stat):
+            raise SystemExit("GITHUB_OUTPUT changed while it was read")
+    finally:
+        os.close(existing_fd)
+    destination_identity = file_identity(final_stat)
+    mode = stat.S_IMODE(final_stat.st_mode)
+    if previous and not previous.endswith(b"\n"):
+        raise SystemExit("existing GITHUB_OUTPUT must be newline-terminated")
 
 destination.parent.mkdir(parents=False, exist_ok=True)
 fd, temporary_name = tempfile.mkstemp(prefix=".fugue-build-output.", dir=str(destination.parent))
@@ -124,6 +166,14 @@ try:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
+    try:
+        current_stat = destination.lstat()
+    except FileNotFoundError:
+        if destination_existed:
+            raise SystemExit("GITHUB_OUTPUT disappeared before publication")
+    else:
+        if not destination_existed or file_identity(current_stat) != destination_identity:
+            raise SystemExit("GITHUB_OUTPUT changed before publication")
     os.replace(temporary_name, destination)
 except BaseException:
     try:
@@ -140,7 +190,16 @@ PY
 
 targets="$(trim_field "${FUGUE_CONTROL_PLANE_IMAGE_TARGETS:-}")"
 if [[ -z "${targets}" ]]; then
+  metadata_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+  metadata_dir="$(mktemp -d "${metadata_root%/}/fugue-build-metadata.XXXXXX")"
+  trap 'rm -rf "${metadata_dir}"' EXIT
+  staged_output="${metadata_dir}/outputs"
+  : >"${staged_output}"
+  printf 'verified_image_artifacts_json=[]\n' >>"${staged_output}"
+  printf 'verified_image_artifacts_digest=sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\n' >>"${staged_output}"
   printf 'no control-plane images selected for build\n'
+  trap '' INT TERM
+  publish_outputs "${staged_output}"
   exit 0
 fi
 

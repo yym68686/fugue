@@ -233,9 +233,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push selected control-plane images
+      - name: Publish verified control-plane image provenance
         id: build_images
-        if: steps.plan.outputs.target_count != '0'
         env:
           FUGUE_CONTROL_PLANE_IMAGE_TARGETS: ${{ steps.plan.outputs.targets }}
           FUGUE_IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}

@@ -3748,6 +3748,104 @@ assert_build_digest_output_unchanged() {
     fail "$1 changed GITHUB_OUTPUT after a failed build transaction"
 }
 reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" sentinel)" "kept" "zero-build provenance preserves existing output"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" verified_image_artifacts_json)" '[]' "zero-build provenance is a canonical empty array"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" verified_image_artifacts_digest)" \
+  "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" \
+  "zero-build provenance digest binds the canonical empty array"
+assert_eq "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f | wc -l | tr -d ' ')" "0" \
+  "zero-build provenance must not call Docker or the registry verifier"
+grep -Fq 'no control-plane images selected for build' "${BUILD_DIGEST_LOG}" ||
+  fail "zero-build provenance must explain that no image build was selected"
+reset_build_digest_output
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" 1>&- 2>"${BUILD_DIGEST_LOG}"; then
+  fail "zero-build provenance must fail before publication when its explanatory output is unavailable"
+fi
+assert_build_digest_output_unchanged "zero-build closed stdout"
+
+BUILD_OUTPUT_UNTERMINATED="${BUILD_DIGEST_FIXTURE_DIR}/unterminated-output"
+printf 'sentinel=unterminated' >"${BUILD_OUTPUT_UNTERMINATED}"
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_OUTPUT_UNTERMINATED}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "zero-build provenance must reject an unterminated existing GITHUB_OUTPUT"
+fi
+assert_eq "$(cat "${BUILD_OUTPUT_UNTERMINATED}")" "sentinel=unterminated" \
+  "rejected unterminated GITHUB_OUTPUT remains unchanged"
+
+BUILD_OUTPUT_SYMLINK_TARGET="${BUILD_DIGEST_FIXTURE_DIR}/symlink-target"
+BUILD_OUTPUT_SYMLINK="${BUILD_DIGEST_FIXTURE_DIR}/symlink-output"
+printf 'target=unchanged\n' >"${BUILD_OUTPUT_SYMLINK_TARGET}"
+ln -s "${BUILD_OUTPUT_SYMLINK_TARGET}" "${BUILD_OUTPUT_SYMLINK}"
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_OUTPUT_SYMLINK}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "zero-build provenance must reject a symlink GITHUB_OUTPUT"
+fi
+[[ -L "${BUILD_OUTPUT_SYMLINK}" ]] || fail "rejected GITHUB_OUTPUT symlink must not be replaced"
+assert_eq "$(cat "${BUILD_OUTPUT_SYMLINK_TARGET}")" "target=unchanged" \
+  "rejected GITHUB_OUTPUT symlink target remains unchanged"
+
+BUILD_OUTPUT_HARDLINK_TARGET="${BUILD_DIGEST_FIXTURE_DIR}/hardlink-target"
+BUILD_OUTPUT_HARDLINK="${BUILD_DIGEST_FIXTURE_DIR}/hardlink-output"
+printf 'target=unchanged\n' >"${BUILD_OUTPUT_HARDLINK_TARGET}"
+ln "${BUILD_OUTPUT_HARDLINK_TARGET}" "${BUILD_OUTPUT_HARDLINK}"
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_OUTPUT_HARDLINK}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "zero-build provenance must reject a multiply-linked GITHUB_OUTPUT"
+fi
+assert_eq "$(cat "${BUILD_OUTPUT_HARDLINK_TARGET}")" "target=unchanged" \
+  "rejected hardlink GITHUB_OUTPUT target remains unchanged"
+
+BUILD_OUTPUT_FIFO="${BUILD_DIGEST_FIXTURE_DIR}/fifo-output"
+mkfifo "${BUILD_OUTPUT_FIFO}"
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_OUTPUT_FIFO}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "zero-build provenance must reject a FIFO GITHUB_OUTPUT"
+fi
+[[ -p "${BUILD_OUTPUT_FIFO}" ]] || fail "rejected FIFO GITHUB_OUTPUT must remain a FIFO"
+
+reset_build_digest_output
+PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_PUBLISH_SIGNAL=true \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS= \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" sentinel)" "kept" \
+  "zero-build commit-point signal preserves existing output"
+assert_eq "$(grep -c '^verified_image_artifacts_json=\[\]$' "${BUILD_DIGEST_OUTPUT}")" "1" \
+  "zero-build commit-point signal publishes canonical artifacts exactly once"
+assert_eq "$(grep -c '^verified_image_artifacts_digest=sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945$' "${BUILD_DIGEST_OUTPUT}")" "1" \
+  "zero-build commit-point signal publishes the digest exactly once"
+reset_build_digest_output
 PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
   GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
   FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
@@ -4119,6 +4217,9 @@ rm -rf "${BUILD_DIGEST_FIXTURE_DIR}"
 
 WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/deploy-control-plane.yml"
 grep -Fq 'id: build_images' "${WORKFLOW_FILE}" || fail "control-plane build step must expose digest outputs"
+if grep -F 'id: build_images' -A1 "${WORKFLOW_FILE}" | grep -Fq 'if:'; then
+  fail "verified image provenance must be published even when the build plan selects zero images"
+fi
 for target in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
   grep -Fq "${target}_image_digest: \${{ steps.build_images.outputs.${target}_image_digest }}" "${WORKFLOW_FILE}" ||
     fail "control-plane build job must expose ${target} digest"
