@@ -1408,6 +1408,9 @@ release_safety_changed_file_subsystems() {
     esac
     case "${file}" in
       Makefile|\
+      cmd/fugue-release-domain-plan/*|\
+      deploy/release-domains/*|\
+      internal/releasedomain/*|\
       scripts/lib/authoritative_dns_dig.sh|\
       scripts/prepare_authoritative_dns_dig.sh|\
       scripts/upgrade_fugue_control_plane.sh|\

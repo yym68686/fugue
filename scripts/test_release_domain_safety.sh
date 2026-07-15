@@ -6389,6 +6389,21 @@ assert_eq "$(release_safety_watch_window_seconds)" "60" "authoritative DNS relea
 if control_plane_backup_drain_required; then
   fail "authoritative DNS release tooling must not require control-plane backup drain in auto mode"
 fi
+FUGUE_RELEASE_CHANGED_FILES=$'cmd/fugue-release-domain-plan/main.go\ndeploy/release-domains/ownership-v1.yaml\ninternal/releasedomain/planner.go'
+assert_eq "$(release_safety_changed_file_subsystems)" "deploy_script" "release-domain planner tooling risk ownership"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "release-domain planner tooling must not be classified as unknown high risk"
+unset FUGUE_UNKNOWN_RELEASE_RISK_APPROVED
+require_release_safety_attribution ||
+  fail "release-domain planner tooling must pass attribution without an unknown-risk approval"
+assert_eq "$(release_safety_required_gates)" "release_guard,rollback_path_smoke" "release-domain planner tooling safety gates"
+assert_eq "$(release_safety_watch_window_seconds)" "60" "release-domain planner tooling watch window"
+if control_plane_backup_drain_required; then
+  fail "release-domain planner tooling must not require control-plane backup drain in auto mode"
+fi
+if public_data_plane_changed || node_local_build_plane_changed || stateful_dependency_changed; then
+  fail "release-domain planner tooling must not select a business or stateful release path"
+fi
 FUGUE_RELEASE_CHANGED_FILES=$'scripts/verify_stale_release_recovery.py'
 assert_eq "$(release_safety_changed_file_subsystems)" "deploy_script" "stale release recovery verifier must be owned by the deploy safety domain"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
