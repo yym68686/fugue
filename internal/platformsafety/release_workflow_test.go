@@ -234,15 +234,18 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := buildPlan.Env["FUGUE_RELEASE_TARGET_REF"], "${{ needs.release-baseline.outputs.target_ref }}"; got != want {
 		t.Fatalf("image build plan must use the baseline target ref: got %q want %q", got, want)
 	}
-	buildPush := workflowStepByName(t, build, "Build and push selected control-plane images")
-	if buildPush.ID != "build_images" {
-		t.Fatalf("image build-push step id drifted: %q", buildPush.ID)
+	buildProvenance := workflowStepByName(t, build, "Publish verified control-plane image provenance")
+	if buildProvenance.ID != "build_images" {
+		t.Fatalf("image provenance step id drifted: %q", buildProvenance.ID)
 	}
-	if got, want := buildPush.Env["FUGUE_IMAGE_TAG"], "${{ steps.meta.outputs.image_tag }}"; got != want {
-		t.Fatalf("image build-push tag source drifted: got %q want %q", got, want)
+	if strings.TrimSpace(buildProvenance.If) != "" {
+		t.Fatalf("image provenance must be published for empty and non-empty build plans: %q", buildProvenance.If)
 	}
-	if got, want := buildPush.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"], "${{ steps.plan.outputs.targets }}"; got != want {
-		t.Fatalf("image build-push target source drifted: got %q want %q", got, want)
+	if got, want := buildProvenance.Env["FUGUE_IMAGE_TAG"], "${{ steps.meta.outputs.image_tag }}"; got != want {
+		t.Fatalf("image provenance tag source drifted: got %q want %q", got, want)
+	}
+	if got, want := buildProvenance.Env["FUGUE_CONTROL_PLANE_IMAGE_TARGETS"], "${{ steps.plan.outputs.targets }}"; got != want {
+		t.Fatalf("image provenance target source drifted: got %q want %q", got, want)
 	}
 
 	deploy, ok := workflow.Jobs["deploy"]
