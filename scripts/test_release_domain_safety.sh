@@ -4012,6 +4012,19 @@ RESOLVE_TEST_DIR="$(mktemp -d)"
 RESOLVE_TEST_OUTPUT="$(mktemp)"
 cat >"${RESOLVE_TEST_DIR}/kubectl" <<'SH'
 #!/usr/bin/env bash
+target=""
+previous=""
+for argument in "$@"; do
+  if [[ "${previous}" == "get" ]]; then
+    target="${argument}"
+    break
+  fi
+  previous="${argument}"
+done
+if [[ "${target}" == "ds" ]]; then
+  printf '{"items":[]}\n'
+  exit 0
+fi
 cat <<'JSON'
 {"spec":{"template":{"spec":{"containers":[
   {"name":"api","image":"ghcr.io/acme/fugue-api:api-live"},
@@ -4031,9 +4044,9 @@ PATH="${RESOLVE_TEST_DIR}:${PATH}" \
   FUGUE_IMAGE_TAG=fallback-target \
   "${REPO_ROOT}/scripts/resolve_control_plane_live_images.sh" >/dev/null
 release_baseline_tags="$(
-  awk '
-    $0 == "release_baseline_tags<<EOF" { capture = 1; next }
-    capture && $0 == "EOF" { exit }
+  awk -v key="release_baseline_tags" '
+    index($0, key "<<") == 1 { delimiter = substr($0, length(key) + 3); capture = 1; next }
+    capture && $0 == delimiter { exit }
     capture { print }
   ' "${RESOLVE_TEST_OUTPUT}"
 )"
