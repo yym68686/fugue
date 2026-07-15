@@ -1423,6 +1423,183 @@ if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
 fi
 
 bash -n "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+run_public_edge_digest_plumbing_regressions() {
+  (
+    export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+    # shellcheck source=scripts/release_fugue_public_data_plane.sh
+    source "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh"
+
+    export FUGUE_NAMESPACE=fugue-system
+    export FUGUE_RELEASE_NAME=fugue
+    export FUGUE_RELEASE_INSTANCE=fugue
+    export FUGUE_HELM_CHART_PATH=./deploy/helm/fugue
+    export FUGUE_HELM_TIMEOUT=10m
+    export FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID=digest-fixture
+    export FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=true
+    export FUGUE_EDGE_RESOURCES_JSON='{}'
+    export FUGUE_EDGE_CADDY_RESOURCES_JSON='{}'
+    export FUGUE_DNS_RESOURCES_JSON='{}'
+    export FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge
+    export FUGUE_EDGE_IMAGE_TAG=source-tag
+    export FUGUE_EDGE_CADDY_IMAGE_REPOSITORY=ghcr.io/acme/caddy
+    export FUGUE_EDGE_CADDY_IMAGE_TAG=caddy-tag
+
+    kubectl_cmd() {
+      case "$*" in
+        *ds/test-worker*)
+          printf '%s' '{"spec":{"template":{"spec":{"containers":[{"name":"edge"},{"name":"caddy"}]}}}}'
+          ;;
+        *ds/test-front*)
+          printf '%s' '{"spec":{"template":{"spec":{"containers":[{"name":"edge-front"}]}}}}'
+          ;;
+        *ds/test-dns*)
+          printf '%s' '{"spec":{"template":{"spec":{"containers":[{"name":"dns","command":["/usr/local/bin/fugue-dns"],"env":[{"name":"FUGUE_DNS_ZONE"}]}]}}}}'
+          ;;
+        *)
+          return 91
+          ;;
+      esac
+    }
+    patch_image() {
+      local renderer="$1"
+      local daemonset_name="$2"
+      local container_name="$3"
+      "${renderer}" "${daemonset_name}" | python3 -c '
+import json
+import sys
+
+doc = json.load(sys.stdin)
+wanted = sys.argv[1]
+matches = [
+    item.get("image", "")
+    for item in doc["spec"]["template"]["spec"]["containers"]
+    if item.get("name") == wanted
+]
+if len(matches) != 1:
+    raise SystemExit(f"expected one {wanted} patch image")
+print(matches[0])
+' "${container_name}"
+    }
+    assert_three_patch_images() {
+      local expected="$1"
+      assert_eq "$(patch_image container_patch_for_worker test-worker edge)" "${expected}" "worker edge image identity"
+      assert_eq "$(patch_image container_patch_for_front test-front edge-front)" "${expected}" "front edge image identity"
+      assert_eq "$(patch_image container_patch_for_dns test-dns dns)" "${expected}" "DNS edge image identity"
+    }
+
+    unset FUGUE_EDGE_IMAGE_DIGEST
+    assert_three_patch_images 'ghcr.io/acme/fugue-edge:source-tag'
+
+    export FUGUE_EDGE_IMAGE_DIGEST=
+    assert_three_patch_images 'ghcr.io/acme/fugue-edge:source-tag'
+
+    export FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    assert_three_patch_images 'ghcr.io/acme/fugue-edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+    command_exists() { return 0; }
+    live_front_pod_image() { printf '%s' "${PUBLIC_DIGEST_LIVE_FRONT_REF}"; }
+    helm_argv() {
+      helm_bluegreen_upgrade digest-fixture true false true | tail -n 1
+    }
+
+    unset FUGUE_EDGE_IMAGE_DIGEST
+    PUBLIC_DIGEST_LIVE_FRONT_REF=ghcr.io/acme/fugue-edge:live-tag
+    legacy_argv="$(helm_argv)"
+    assert_eq "${legacy_argv}" \
+      'helm upgrade fugue ./deploy/helm/fugue -n fugue-system --reuse-values --history-max 20 --timeout 10m --set edge.blueGreen.enabled=true --set edge.blueGreen.migration.keepLegacyDirect=true --set edge.blueGreen.front.publicHostPorts.enabled=false --set edge.caddy.enabled=true --set edge.caddy.publicHostPorts.enabled=true --set-string edge.image.repository=ghcr.io/acme/fugue-edge --set-string edge.image.tag=source-tag --set-string edge.blueGreen.front.image.repository=ghcr.io/acme/fugue-edge --set-string edge.blueGreen.front.image.tag=live-tag' \
+      "unset digest must preserve the legacy Helm argv exactly"
+
+    export FUGUE_EDGE_IMAGE_DIGEST=
+    PUBLIC_DIGEST_LIVE_FRONT_REF=ghcr.io/acme/fugue-edge:live-tag
+    empty_argv="$(helm_argv)"
+    [[ "${empty_argv}" == *'--set-string edge.image.digest='* ]] || fail "explicit empty digest must clear the root edge digest"
+    [[ "${empty_argv}" == *'--set-string edge.blueGreen.front.image.digest='* ]] || fail "tag-only live front must clear a stale front digest"
+
+    export FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    PUBLIC_DIGEST_LIVE_FRONT_REF=ghcr.io/acme/fugue-edge:live-tag@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    tagged_digest_argv="$(helm_argv)"
+    [[ "${tagged_digest_argv}" == *'--set-string edge.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'* ]] ||
+      fail "Helm must receive the requested root edge digest"
+    [[ "${tagged_digest_argv}" == *'--set-string edge.blueGreen.front.image.tag=live-tag'* ]] ||
+      fail "tag@digest live front must preserve its source tag"
+    [[ "${tagged_digest_argv}" == *'--set-string edge.blueGreen.front.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'* ]] ||
+      fail "tag@digest live front must preserve its digest"
+
+    PUBLIC_DIGEST_LIVE_FRONT_REF=ghcr.io/acme/fugue-edge@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    digest_only_argv="$(helm_argv)"
+    [[ "${digest_only_argv}" == *'--set-string edge.blueGreen.front.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'* ]] ||
+      fail "digest-only live front must preserve its digest"
+    [[ "${digest_only_argv}" != *'edge.blueGreen.front.image.tag='* ]] ||
+      fail "digest-only live front must not synthesize a latest source tag"
+
+    PUBLIC_DIGEST_LIVE_FRONT_REF=
+    prewarm_argv="$(helm_argv)"
+    [[ "${prewarm_argv}" == *'--set-string edge.blueGreen.front.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'* ]] ||
+      fail "initial front prewarm must use the requested edge digest"
+
+    helm_call_log="$(mktemp)"
+    helm_cmd() { printf '%s\n' "$*" >>"${helm_call_log}"; }
+    if (
+      FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=false
+      PUBLIC_DIGEST_LIVE_FRONT_REF='ghcr.io/acme/fugue-edge@bad@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+      helm_bluegreen_upgrade malformed-live-front true false true
+    ) >/dev/null 2>&1; then
+      fail "malformed live front reference must fail closed"
+    fi
+    [[ ! -s "${helm_call_log}" ]] || fail "malformed live front reference must fail before helm_cmd"
+    rm -f "${helm_call_log}"
+  )
+
+  (
+    fixture_dir="$(mktemp -d)"
+    trap 'rm -rf "${fixture_dir}"' EXIT
+    mutation_log="${fixture_dir}/mutations"
+    : >"${mutation_log}"
+    cat >"${fixture_dir}/mutation-command" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${PUBLIC_DIGEST_MUTATION_LOG}"
+exit 97
+SH
+    chmod +x "${fixture_dir}/mutation-command"
+
+    if PUBLIC_DIGEST_MUTATION_LOG="${mutation_log}" \
+      KUBECTL="${fixture_dir}/mutation-command" HELM="${fixture_dir}/mutation-command" \
+      FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge FUGUE_EDGE_IMAGE_TAG=source-tag \
+      FUGUE_EDGE_IMAGE_DIGEST=sha256:ABCDEF \
+      FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=legacy-template-ondelete \
+      "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" >/dev/null 2>&1; then
+      fail "malformed edge digest must fail closed"
+    fi
+    for invalid_repository in \
+      'ghcr.io/acme/fugue-edge@bad' \
+      'ghcr.io/acme/fugue-edge:old-tag' \
+      'ghcr.io/acme/fugue edge'; do
+      if PUBLIC_DIGEST_MUTATION_LOG="${mutation_log}" \
+        KUBECTL="${fixture_dir}/mutation-command" HELM="${fixture_dir}/mutation-command" \
+        FUGUE_EDGE_IMAGE_REPOSITORY="${invalid_repository}" FUGUE_EDGE_IMAGE_TAG=source-tag \
+        FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=legacy-template-ondelete \
+        "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" >/dev/null 2>&1; then
+        fail "digest release with malformed repository must fail closed: ${invalid_repository}"
+      fi
+    done
+    if PUBLIC_DIGEST_MUTATION_LOG="${mutation_log}" \
+      KUBECTL="${fixture_dir}/mutation-command" HELM="${fixture_dir}/mutation-command" \
+      FUGUE_EDGE_IMAGE_REPOSITORY=ghcr.io/acme/fugue-edge FUGUE_EDGE_IMAGE_TAG='invalid/tag' \
+      FUGUE_EDGE_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+      FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=legacy-template-ondelete \
+      "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" >/dev/null 2>&1; then
+      fail "digest release with malformed source tag must fail closed"
+    fi
+    [[ ! -s "${mutation_log}" ]] || fail "malformed image identity must fail before any kubectl or Helm mutation"
+  )
+
+  printf '[test_release_domain_safety] public edge digest plumbing regressions ok\n'
+}
+
+run_public_edge_digest_plumbing_regressions
 bash -n "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 bash -n "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh"
 bash -n "${REPO_ROOT}/scripts/compute_release_changed_files_from_live.sh"

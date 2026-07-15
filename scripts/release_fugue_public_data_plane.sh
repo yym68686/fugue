@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=scripts/lib/authoritative_dns_dig.sh
 source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
+# shellcheck source=scripts/lib/release_image_ref.sh
+source "${REPO_ROOT}/scripts/lib/release_image_ref.sh"
 
 log() {
   printf '[fugue-public-data-plane] %s\n' "$*"
@@ -451,6 +453,38 @@ image_ref_tag() {
   fi
 }
 
+valid_image_source_tag() {
+  release_image_ref_valid_tag "$1"
+}
+
+valid_lowercase_sha256_digest() {
+  local digest="$1"
+  local hex=""
+  [[ ${#digest} -eq 71 && "${digest}" == sha256:* ]] || return 1
+  hex="${digest#sha256:}"
+  [[ -n "${hex}" && "${hex}" != *[!0-9a-f]* ]]
+}
+
+validate_requested_edge_image_identity() {
+  local repository=""
+  local source_tag=""
+  local digest=""
+
+  [[ "${FUGUE_EDGE_IMAGE_DIGEST+x}" == x ]] || return 0
+  repository="${FUGUE_EDGE_IMAGE_REPOSITORY:-}"
+  source_tag="${FUGUE_EDGE_IMAGE_TAG:-}"
+  digest="${FUGUE_EDGE_IMAGE_DIGEST:-}"
+  release_image_ref_valid_repository "${repository}" ||
+    fail "FUGUE_EDGE_IMAGE_REPOSITORY must be a canonical repository without a tag or digest when FUGUE_EDGE_IMAGE_DIGEST is set"
+  valid_image_source_tag "${source_tag}" ||
+    fail "FUGUE_EDGE_IMAGE_TAG must be a valid source tag when FUGUE_EDGE_IMAGE_DIGEST is set"
+  if [[ -n "${digest}" ]]; then
+    valid_lowercase_sha256_digest "${digest}" ||
+      fail "FUGUE_EDGE_IMAGE_DIGEST must be empty or a lowercase sha256: digest with 64 hexadecimal characters"
+  fi
+  export FUGUE_EDGE_IMAGE_DIGEST
+}
+
 patch_daemonset_ondelete() {
   local daemonset_name="$1"
   log "setting ${daemonset_name} updateStrategy=OnDelete before template patch"
@@ -547,6 +581,7 @@ helm_bluegreen_upgrade() {
   local front_image_ref
   local front_image_repository
   local front_image_tag
+  local front_image_digest
 
   command_exists helm || [[ -n "${HELM:-}" ]] || fail "helm is required when FUGUE_PUBLIC_DATA_PLANE_ENABLE_BLUE_GREEN=true"
 
@@ -568,21 +603,48 @@ helm_bluegreen_upgrade() {
   if [[ -n "$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")" ]]; then
     args+=(--set-string "edge.image.tag=${FUGUE_EDGE_IMAGE_TAG}")
   fi
+  if [[ "${FUGUE_EDGE_IMAGE_DIGEST+x}" == x ]]; then
+    args+=(--set-string "edge.image.digest=${FUGUE_EDGE_IMAGE_DIGEST}")
+  fi
   if ! front_image_ref="$(live_front_pod_image)"; then
     fail "could not read the live front Pod image for release instance ${FUGUE_RELEASE_INSTANCE}"
   fi
   front_image_ref="$(trim_field "${front_image_ref}")"
   if [[ -n "${front_image_ref}" ]]; then
     front_image_repository="$(image_ref_repository "${front_image_ref}")"
-    front_image_tag="$(image_ref_tag "${front_image_ref}")"
-    if [[ -n "${front_image_repository}" && -n "${front_image_tag}" ]]; then
+    if [[ "${FUGUE_EDGE_IMAGE_DIGEST+x}" == x ]]; then
+      if ! release_image_ref_parse "${front_image_ref}"; then
+        fail "live front image is not a strict release image reference: ${front_image_ref}"
+      fi
+      front_image_repository="${RELEASE_IMAGE_REF_REPOSITORY}"
+      front_image_tag="${RELEASE_IMAGE_REF_SOURCE_TAG}"
+      front_image_digest="${RELEASE_IMAGE_REF_DIGEST}"
+      if [[ -n "${front_image_tag}" ]]; then
+        args+=(--set-string "edge.blueGreen.front.image.tag=${front_image_tag}")
+      fi
+      if [[ -n "${front_image_digest}" ]]; then
+        args+=(--set-string "edge.blueGreen.front.image.digest=${front_image_digest}")
+      elif [[ -n "${front_image_tag}" ]]; then
+        args+=(--set-string "edge.blueGreen.front.image.digest=")
+      else
+        fail "live front image must include a source tag or digest: ${front_image_ref}"
+      fi
       args+=(--set-string "edge.blueGreen.front.image.repository=${front_image_repository}")
-      args+=(--set-string "edge.blueGreen.front.image.tag=${front_image_tag}")
-      log "preserving live front image during worker release: ${front_image_repository}:${front_image_tag}"
+      log "preserving live front image during worker release: ${front_image_ref}"
+    else
+      front_image_tag="$(image_ref_tag "${front_image_ref}")"
+      if [[ -n "${front_image_repository}" && -n "${front_image_tag}" ]]; then
+        args+=(--set-string "edge.blueGreen.front.image.repository=${front_image_repository}")
+        args+=(--set-string "edge.blueGreen.front.image.tag=${front_image_tag}")
+        log "preserving live front image during worker release: ${front_image_repository}:${front_image_tag}"
+      fi
     fi
   elif [[ -n "$(trim_field "${FUGUE_EDGE_IMAGE_REPOSITORY:-}")" && -n "$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")" ]]; then
     args+=(--set-string "edge.blueGreen.front.image.repository=${FUGUE_EDGE_IMAGE_REPOSITORY}")
     args+=(--set-string "edge.blueGreen.front.image.tag=${FUGUE_EDGE_IMAGE_TAG}")
+    if [[ "${FUGUE_EDGE_IMAGE_DIGEST+x}" == x ]]; then
+      args+=(--set-string "edge.blueGreen.front.image.digest=${FUGUE_EDGE_IMAGE_DIGEST}")
+    fi
     log "no live front pods found; using requested edge image for initial front prewarm"
   fi
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN}" == "true" ]]; then
@@ -807,9 +869,11 @@ enable_bluegreen_chart_mode() {
 
 container_patch_for_worker() {
   local daemonset_name="$1"
+  validate_requested_edge_image_identity
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
 import json
 import os
+import re
 import sys
 
 doc = json.load(sys.stdin)
@@ -818,15 +882,26 @@ edge_resources = json.loads(os.environ["FUGUE_EDGE_RESOURCES_JSON"])
 caddy_resources = json.loads(os.environ["FUGUE_EDGE_CADDY_RESOURCES_JSON"])
 edge_repo = os.environ.get("FUGUE_EDGE_IMAGE_REPOSITORY", "").strip()
 edge_tag = os.environ.get("FUGUE_EDGE_IMAGE_TAG", "").strip()
+edge_digest_present = "FUGUE_EDGE_IMAGE_DIGEST" in os.environ
+edge_digest = os.environ.get("FUGUE_EDGE_IMAGE_DIGEST", "")
 caddy_repo = os.environ.get("FUGUE_EDGE_CADDY_IMAGE_REPOSITORY", "").strip()
 caddy_tag = os.environ.get("FUGUE_EDGE_CADDY_IMAGE_TAG", "").strip()
+edge_ref = ""
+if edge_digest_present:
+    if not edge_repo or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", edge_tag):
+        raise SystemExit("digest-aware worker patch requires an edge repository and valid source tag")
+    if edge_digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", edge_digest):
+        raise SystemExit("FUGUE_EDGE_IMAGE_DIGEST must be empty or a lowercase sha256 digest")
+    edge_ref = f"{edge_repo}@{edge_digest}" if edge_digest else f"{edge_repo}:{edge_tag}"
+elif edge_repo and edge_tag:
+    edge_ref = f"{edge_repo}:{edge_tag}"
 containers = []
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
     name = container.get("name")
     patch = {"name": name}
     if name == "edge":
-        if edge_repo and edge_tag:
-            patch["image"] = f"{edge_repo}:{edge_tag}"
+        if edge_ref:
+            patch["image"] = edge_ref
         patch["resources"] = edge_resources
     elif name == "caddy":
         if caddy_repo and caddy_tag:
@@ -2853,9 +2928,11 @@ check_worker_https_smoke() {
 
 container_patch_for_front() {
   local daemonset_name="$1"
+  validate_requested_edge_image_identity
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
 import json
 import os
+import re
 import sys
 
 doc = json.load(sys.stdin)
@@ -2864,6 +2941,14 @@ edge_repo = os.environ.get("FUGUE_EDGE_IMAGE_REPOSITORY", "").strip()
 edge_tag = os.environ.get("FUGUE_EDGE_IMAGE_TAG", "").strip()
 if not edge_repo or not edge_tag:
     raise SystemExit("FUGUE_EDGE_IMAGE_REPOSITORY and FUGUE_EDGE_IMAGE_TAG are required for front-ondelete")
+edge_digest_present = "FUGUE_EDGE_IMAGE_DIGEST" in os.environ
+edge_digest = os.environ.get("FUGUE_EDGE_IMAGE_DIGEST", "")
+if edge_digest_present:
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", edge_tag):
+        raise SystemExit("digest-aware front patch requires a valid edge source tag")
+    if edge_digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", edge_digest):
+        raise SystemExit("FUGUE_EDGE_IMAGE_DIGEST must be empty or a lowercase sha256 digest")
+edge_ref = f"{edge_repo}@{edge_digest}" if edge_digest else f"{edge_repo}:{edge_tag}"
 
 containers = []
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
@@ -2871,7 +2956,7 @@ for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("co
         continue
     containers.append({
         "name": "edge-front",
-        "image": f"{edge_repo}:{edge_tag}",
+        "image": edge_ref,
     })
 if not containers:
     raise SystemExit("front daemonset has no edge-front container")
@@ -2914,9 +2999,11 @@ patch_front_template() {
 
 container_patch_for_dns() {
   local daemonset_name="$1"
+  validate_requested_edge_image_identity
   kubectl_cmd -n "${FUGUE_NAMESPACE}" get "ds/${daemonset_name}" -o json | python3 -c '
 import json
 import os
+import re
 import sys
 
 doc = json.load(sys.stdin)
@@ -2926,6 +3013,14 @@ edge_repo = os.environ.get("FUGUE_EDGE_IMAGE_REPOSITORY", "").strip()
 edge_tag = os.environ.get("FUGUE_EDGE_IMAGE_TAG", "").strip()
 if not edge_repo or not edge_tag:
     raise SystemExit("FUGUE_EDGE_IMAGE_REPOSITORY and FUGUE_EDGE_IMAGE_TAG are required for dns-ondelete")
+edge_digest_present = "FUGUE_EDGE_IMAGE_DIGEST" in os.environ
+edge_digest = os.environ.get("FUGUE_EDGE_IMAGE_DIGEST", "")
+if edge_digest_present:
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", edge_tag):
+        raise SystemExit("digest-aware DNS patch requires a valid edge source tag")
+    if edge_digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", edge_digest):
+        raise SystemExit("FUGUE_EDGE_IMAGE_DIGEST must be empty or a lowercase sha256 digest")
+edge_ref = f"{edge_repo}@{edge_digest}" if edge_digest else f"{edge_repo}:{edge_tag}"
 
 containers = []
 for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
@@ -2935,7 +3030,7 @@ for container in doc.get("spec", {}).get("template", {}).get("spec", {}).get("co
         continue
     containers.append({
         "name": container.get("name"),
-        "image": f"{edge_repo}:{edge_tag}",
+        "image": edge_ref,
         "resources": dns_resources,
     })
 if len(containers) != 1 or not containers[0].get("name"):
@@ -5819,6 +5914,7 @@ main() {
   FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID="${FUGUE_PUBLIC_DATA_PLANE_RELEASE_ID:-pdp-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA:-local}}"
   FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT="${FUGUE_EDGE_BLUE_GREEN_DEFAULT_ACTIVE_SLOT:-a}"
   FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE="${FUGUE_EDGE_BLUE_GREEN_ACTIVE_SLOT_FILE:-/var/lib/fugue/edge-blue-green/active-slot}"
+  validate_requested_edge_image_identity
   FUGUE_EDGE_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_RESOURCES_JSON "${FUGUE_EDGE_RESOURCES_JSON:-${default_edge_resources}}")"
   FUGUE_EDGE_CADDY_RESOURCES_JSON="$(compact_json_object FUGUE_EDGE_CADDY_RESOURCES_JSON "${FUGUE_EDGE_CADDY_RESOURCES_JSON:-${default_caddy_resources}}")"
   FUGUE_DNS_RESOURCES_JSON="$(compact_json_object FUGUE_DNS_RESOURCES_JSON "${FUGUE_DNS_RESOURCES_JSON:-${default_dns_resources}}")"
