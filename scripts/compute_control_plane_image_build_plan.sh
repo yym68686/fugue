@@ -66,6 +66,42 @@ image_baseline_ref() {
   esac
 }
 
+grep_membership() {
+  local mode="$1"
+  local pattern="$2"
+  local path="$3"
+  local context="$4"
+  local rc=0
+
+  case "${mode}" in
+    exact)
+      if grep -Fx -- "${pattern}" "${path}" >/dev/null; then
+        return 0
+      else
+        rc=$?
+      fi
+      ;;
+    extended)
+      if grep -Eq -- "${pattern}" "${path}" >/dev/null; then
+        return 0
+      else
+        rc=$?
+      fi
+      ;;
+    *)
+      printf 'unknown grep membership mode for %s: %s\n' "${context}" "${mode}" >&2
+      exit 1
+      ;;
+  esac
+
+  if [[ "${rc}" -eq 1 ]]; then
+    return 1
+  fi
+  printf 'grep membership check failed for %s with status %s: %s\n' \
+    "${context}" "${rc}" "${path}" >&2
+  exit 1
+}
+
 image_reason_matches_component_baseline() {
   local image="$1"
   local reason="$2"
@@ -74,7 +110,7 @@ image_reason_matches_component_baseline() {
 
   [[ "${reason}" == "unknown-change-set" ]] && return 0
   [[ -e "${marker}" ]] || return 0
-  grep -Fx -- "${reason}" "${changed}" >/dev/null 2>&1
+  grep_membership exact "${reason}" "${changed}" "${image} component baseline"
 }
 
 mark_image() {
@@ -221,12 +257,46 @@ go_fixture_package_dir() {
 
 go_package_is_valid() {
   local package_dir="$1"
+  local expected_dir=""
   local listed_dir=""
+  local listed_physical_dir=""
+  local source=""
+  local has_runtime_source=false
 
-  if ! listed_dir="$(go -C "${REPO_ROOT}" list -f '{{.Dir}}' "./${package_dir}" 2>/dev/null)"; then
-    return 1
+  [[ -d "${REPO_ROOT}/${package_dir}" ]] || return 1
+  for source in "${REPO_ROOT}/${package_dir}"/*.go; do
+    [[ -f "${source}" && "${source}" != *_test.go ]] || continue
+    has_runtime_source=true
+    break
+  done
+  [[ "${has_runtime_source}" == "true" ]] || return 1
+  if ! expected_dir="$(cd "${REPO_ROOT}/${package_dir}" && pwd -P)"; then
+    printf 'could not resolve the physical Go package directory: %s\n' "${package_dir}" >&2
+    exit 1
   fi
-  [[ "${listed_dir}" == "${REPO_ROOT}/${package_dir}" ]]
+
+  # Keep stderr separate from the machine-readable directory. A successful
+  # Go command may legitimately emit a toolchain or module warning there.
+  if ! listed_dir="$(PWD="${REPO_ROOT}" go -C "${REPO_ROOT}" list -f '{{.Dir}}' "./${package_dir}")"; then
+    printf 'go package metadata failed for existing path: %s\n' "${package_dir}" >&2
+    exit 1
+  fi
+  if [[ -z "${listed_dir}" ]]; then
+    printf 'go package metadata returned an empty directory for %s\n' "${package_dir}" >&2
+    exit 1
+  fi
+  if [[ "${listed_dir}" != /* ]] ||
+    ! listed_physical_dir="$(cd "${listed_dir}" 2>/dev/null && pwd -P)"; then
+    printf 'go package metadata returned an unusable directory for %s: %s\n' \
+      "${package_dir}" "${listed_dir}" >&2
+    exit 1
+  fi
+  if [[ "${listed_physical_dir}" != "${expected_dir}" ]]; then
+    printf 'go package metadata returned an unexpected directory for %s: %s\n' \
+      "${package_dir}" "${listed_dir}" >&2
+    exit 1
+  fi
+  return 0
 }
 
 go_package_has_runtime_embed_directive() {
@@ -236,7 +306,8 @@ go_package_has_runtime_embed_directive() {
   for source in "${REPO_ROOT}/${package_dir}"/*.go; do
     [[ -f "${source}" ]] || continue
     [[ "${source}" != *_test.go ]] || continue
-    if grep -Eq '^[[:space:]]*//go:embed[[:space:]]' "${source}"; then
+    if grep_membership extended '^[[:space:]]*//go:embed[[:space:]]' "${source}" \
+      "${package_dir} runtime embed directive"; then
       return 0
     fi
   done
@@ -259,10 +330,12 @@ go_fixture_is_runtime_asset() {
   fi
 
   # EmbedFiles excludes TestEmbedFiles and expands Go's embed patterns using
-  # the same rules as the compiler. A metadata error is runtime-affecting by
-  # default so malformed or ambiguous packages fail safe.
-  if ! embed_files="$(go -C "${REPO_ROOT}" list -f '{{range .EmbedFiles}}{{println .}}{{end}}' "./${package_dir}" 2>/dev/null)"; then
-    return 0
+  # the same rules as the compiler. Metadata errors cannot be distinguished
+  # safely from an incomplete asset inventory, so abort without publishing a
+  # build plan.
+  if ! embed_files="$(PWD="${REPO_ROOT}" go -C "${REPO_ROOT}" list -f '{{range .EmbedFiles}}{{println .}}{{end}}' "./${package_dir}")"; then
+    printf 'go embed metadata failed for existing package: %s\n' "${package_dir}" >&2
+    exit 1
   fi
   while IFS= read -r embedded_file; do
     if [[ "${embedded_file}" == "${relative_file}" ]]; then
@@ -279,7 +352,8 @@ mark_go_package_images() {
   local matched=false
 
   for image in api controller drain_agent telemetry_agent image_cache edge; do
-    if grep -Fx -- "${package_dir}" "${tmp_dir}/deps-${image}" >/dev/null; then
+    if grep_membership exact "${package_dir}" "${tmp_dir}/deps-${image}" \
+      "${image} dependency graph"; then
       matched=true
       mark_image "${image}" "${reason}"
     fi
@@ -336,7 +410,7 @@ else
     deps_file="${tmp_dir}/deps-${image}"
     : >"${deps_file}"
     while IFS= read -r command_path; do
-      go -C "${REPO_ROOT}" list -deps -f '{{if not .Standard}}{{.Dir}}{{end}}' "${command_path}" |
+      PWD="${REPO_ROOT}" go -C "${REPO_ROOT}" list -deps -f '{{if not .Standard}}{{.Dir}}{{end}}' "${command_path}" |
         while IFS= read -r package_dir; do
           package_dir="$(trim_field "${package_dir}")"
           [[ -n "${package_dir}" ]] || continue

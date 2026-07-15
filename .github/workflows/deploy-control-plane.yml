@@ -39,11 +39,13 @@ on:
       - 'go.sum'
       - 'scripts/bootstrap_control_plane_automation.sh'
       - 'scripts/build_control_plane_images.sh'
+      - 'scripts/build_release_image_lock.py'
       - 'scripts/compute_control_plane_image_build_plan.sh'
       - 'scripts/compute_release_changed_files_from_live.sh'
       - 'scripts/export_cloudflare_zone_static_records.sh'
       - 'scripts/install_fugue_ha.sh'
       - 'scripts/issue_fugue_app_wildcard_tls.sh'
+      - 'scripts/lib/release_image_ref.sh'
       - 'scripts/prepare_authoritative_dns_dig.sh'
       - 'scripts/render_fugue_edge_systemd_unit.sh'
       - 'scripts/render_fugue_dns_systemd_unit.sh'
@@ -53,6 +55,7 @@ on:
       - 'scripts/release_fugue_public_data_plane.sh'
       - 'scripts/sync_fugue_edge_proxy.sh'
       - 'scripts/test_release_domain_safety.sh'
+      - 'scripts/test_build_release_image_lock.py'
       - 'scripts/test_node_local_dns_release.sh'
       - 'scripts/test_prepare_authoritative_dns_dig.sh'
       - 'scripts/test_verify_registry_image.py'
@@ -161,6 +164,8 @@ jobs:
       image_cache_image_digest: ${{ steps.build_images.outputs.image_cache_image_digest }}
       edge_image_digest: ${{ steps.build_images.outputs.edge_image_digest }}
       app_ssh_image_digest: ${{ steps.build_images.outputs.app_ssh_image_digest }}
+      verified_image_artifacts_json: ${{ steps.build_images.outputs.verified_image_artifacts_json }}
+      verified_image_artifacts_digest: ${{ steps.build_images.outputs.verified_image_artifacts_digest }}
       build_api: ${{ steps.plan.outputs.build_api }}
       build_controller: ${{ steps.plan.outputs.build_controller }}
       build_drain_agent: ${{ steps.plan.outputs.build_drain_agent }}

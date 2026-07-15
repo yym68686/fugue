@@ -3603,6 +3603,32 @@ case "${tag}" in
   *) exit 92 ;;
 esac
 printf '%s\n' "${tag}" >"${FUGUE_BUILD_TEST_CALL_DIR}/${target}"
+mark_build_peer_finished=false
+mark_fast_finished=false
+case "${FUGUE_BUILD_TEST_DOCKER_MODE:-normal}" in
+  normal) ;;
+  mixed_speed)
+    if [[ "${target}" == "api" ]]; then
+      trap 'printf "terminated\n" >"${FUGUE_BUILD_TEST_CALL_DIR}/fast-terminated"; exit 143' TERM INT
+      mark_fast_finished=true
+    else
+      trap 'printf "terminating\n" >"${FUGUE_BUILD_TEST_CALL_DIR}/slow-terminating"; sleep 0.2; printf "terminated\n" >"${FUGUE_BUILD_TEST_CALL_DIR}/slow-terminated"; exit 143' TERM INT
+      printf 'started\n' >"${FUGUE_BUILD_TEST_CALL_DIR}/slow-started"
+      while :; do
+        sleep 1
+      done
+    fi
+    ;;
+  second_build_fail)
+    if [[ "${target}" == "controller" ]]; then
+      printf 'synthetic image build failure\n' >&2
+      exit 99
+    fi
+    sleep 0.1
+    mark_build_peer_finished=true
+    ;;
+  *) exit 98 ;;
+esac
 case "${FUGUE_BUILD_TEST_METADATA_MODE:-valid}" in
   valid)
     printf '{"containerimage.digest":"sha256:%064d"}\n' 0 | tr '0' "${hex}" >"${metadata_file}"
@@ -3621,16 +3647,111 @@ case "${FUGUE_BUILD_TEST_METADATA_MODE:-valid}" in
     ;;
   *) exit 93 ;;
 esac
+if [[ "${mark_build_peer_finished}" == "true" ]]; then
+  printf 'finished\n' >"${FUGUE_BUILD_TEST_CALL_DIR}/build-peer-finished"
+fi
+if [[ "${mark_fast_finished}" == "true" ]]; then
+  printf '%s\n' "${$}" >"${FUGUE_BUILD_TEST_CALL_DIR}/fast-pid"
+  printf 'finished\n' >"${FUGUE_BUILD_TEST_CALL_DIR}/fast-finished"
+fi
 SH
 chmod +x "${BUILD_DIGEST_FIXTURE_DIR}/bin/docker"
 
+BUILD_DIGEST_REAL_PYTHON="$(command -v python3)"
+cat >"${BUILD_DIGEST_FIXTURE_DIR}/bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != */scripts/verify_registry_image.py ]]; then
+  if [[ "${FUGUE_BUILD_TEST_PUBLISH_SIGNAL:-false}" == "true" && "$#" -eq 3 && "${1:-}" == "-" && "${2:-}" == "${GITHUB_OUTPUT:-}" && "${3:-}" == */outputs ]]; then
+    "${FUGUE_BUILD_TEST_REAL_PYTHON}" "$@"
+    status=$?
+    kill -TERM "${PPID}"
+    sleep 0.1
+    exit "${status}"
+  fi
+  exec "${FUGUE_BUILD_TEST_REAL_PYTHON}" "$@"
+fi
+shift
+
+image=
+platform=
+revision=
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --image)
+      image="${2:-}"
+      shift 2
+      ;;
+    --platform)
+      platform="${2:-}"
+      shift 2
+      ;;
+    --expected-revision)
+      revision="${2:-}"
+      shift 2
+      ;;
+    *) exit 94 ;;
+  esac
+done
+
+case "${image}" in
+  */fugue-api@*) target=api; manifest_hex=2; config_hex=3 ;;
+  */fugue-controller@*) target=controller; manifest_hex=4; config_hex=5 ;;
+  */fugue-drain-agent@*) target=drain_agent; manifest_hex=6; config_hex=7 ;;
+  */fugue-telemetry-agent@*) target=telemetry_agent; manifest_hex=8; config_hex=9 ;;
+  */fugue-image-cache@*) target=image_cache; manifest_hex=1; config_hex=2 ;;
+  */fugue-edge@*) target=edge; manifest_hex=3; config_hex=4 ;;
+  */fugue-app-ssh@*) target=app_ssh; manifest_hex=5; config_hex=6 ;;
+  *) exit 95 ;;
+esac
+printf '%s|%s|%s\n' "${image}" "${platform}" "${revision}" >"${FUGUE_BUILD_TEST_CALL_DIR}/verify-${target}"
+
+if [[ "${FUGUE_BUILD_TEST_VERIFIER_MODE:-valid}" == "second_fail" && "${target}" == "controller" ]]; then
+  printf 'synthetic registry verification failure\n' >&2
+  exit 96
+fi
+if [[ "${FUGUE_BUILD_TEST_VERIFIER_MODE:-valid}" == "malformed" ]]; then
+  printf '{"image":\n'
+  exit 0
+fi
+case "${FUGUE_BUILD_TEST_VERIFIER_MODE:-valid}" in
+  valid|second_fail|wrong_index_type) ;;
+  *) exit 97 ;;
+esac
+
+top_digest="${image##*@}"
+manifest_digest="sha256:$(printf '%064d' 0 | tr '0' "${manifest_hex}")"
+config_digest="sha256:$(printf '%064d' 0 | tr '0' "${config_hex}")"
+if [[ "${FUGUE_BUILD_TEST_VERIFIER_MODE:-valid}" == "wrong_index_type" ]]; then
+  printf '{"blob_count":2,"config_digest":"%s","image":"%s","index_digest":%s,"layer_get_probe_count":1,"manifest_digest":"%s","oci_revision":"%s","platform":"%s","request_count":6,"total_layer_bytes":10,"verification":"registry_manifest_config_and_layer_get"}\n' \
+    "${config_digest}" "${image}" "${FUGUE_BUILD_TEST_INDEX_DIGEST_JSON}" "${top_digest}" "${revision}" "${platform}"
+else
+  printf '{"blob_count":2,"config_digest":"%s","image":"%s","index_digest":"%s","layer_get_probe_count":1,"manifest_digest":"%s","oci_revision":"%s","platform":"%s","request_count":6,"total_layer_bytes":10,"verification":"registry_manifest_config_and_layer_get"}\n' \
+    "${config_digest}" "${image}" "${top_digest}" "${manifest_digest}" "${revision}" "${platform}"
+fi
+SH
+chmod +x "${BUILD_DIGEST_FIXTURE_DIR}/bin/python3"
+
 BUILD_DIGEST_OUTPUT="${BUILD_DIGEST_FIXTURE_DIR}/outputs"
 BUILD_DIGEST_LOG="${BUILD_DIGEST_FIXTURE_DIR}/build.log"
+BUILD_DIGEST_REVISION=2222222222222222222222222222222222222222
+BUILD_DIGEST_SENTINEL="${BUILD_DIGEST_FIXTURE_DIR}/output-sentinel"
+printf 'sentinel=kept\nunrelated_output={"value":1}\n' >"${BUILD_DIGEST_SENTINEL}"
+reset_build_digest_output() {
+  cp "${BUILD_DIGEST_SENTINEL}" "${BUILD_DIGEST_OUTPUT}"
+}
+assert_build_digest_output_unchanged() {
+  cmp -s "${BUILD_DIGEST_SENTINEL}" "${BUILD_DIGEST_OUTPUT}" ||
+    fail "$1 changed GITHUB_OUTPUT after a failed build transaction"
+}
+reset_build_digest_output
 PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
   GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
   FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
   FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller drain_agent telemetry_agent image_cache edge app_ssh' \
-  FUGUE_IMAGE_TAG=test-build-digest \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
   FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
   FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
   FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY=ghcr.io/acme/fugue-drain-agent \
@@ -3646,36 +3767,351 @@ assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" telemetry_agent_image_digest)" 
 assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" image_cache_image_digest)" "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "image-cache build digest output"
 assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" edge_image_digest)" "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" "edge build digest output"
 assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" app_ssh_image_digest)" "sha256:1111111111111111111111111111111111111111111111111111111111111111" "app-ssh build digest output"
-assert_eq "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f | wc -l | tr -d ' ')" "7" "every selected image target must run exactly once"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" sentinel)" "kept" "atomic build output preserves existing content"
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" unrelated_output)" '{"value":1}' "atomic build output preserves unrelated existing content"
+assert_eq "$(grep -c '^sentinel=kept$' "${BUILD_DIGEST_OUTPUT}")" "1" "atomic build output appends to existing content exactly once"
+assert_eq "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f -name 'verify-*' | wc -l | tr -d ' ')" "7" "every selected image target must be registry verified exactly once"
+assert_eq "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f ! -name 'verify-*' | wc -l | tr -d ' ')" "7" "every selected image target must build exactly once"
+for target in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
+  grep -Fq "|linux/amd64|${BUILD_DIGEST_REVISION}" "${BUILD_DIGEST_FIXTURE_DIR}/calls/verify-${target}" ||
+    fail "${target} registry verification must bind linux/amd64 and the exact build revision"
+done
 
-for metadata_mode in missing malformed; do
-  : >"${BUILD_DIGEST_OUTPUT}"
+BUILD_VERIFIED_ARTIFACTS_JSON="$(plan_value "${BUILD_DIGEST_OUTPUT}" verified_image_artifacts_json)"
+BUILD_VERIFIED_ARTIFACTS_DIGEST="$(plan_value "${BUILD_DIGEST_OUTPUT}" verified_image_artifacts_digest)"
+python3 - "${BUILD_VERIFIED_ARTIFACTS_JSON}" "${BUILD_VERIFIED_ARTIFACTS_DIGEST}" "${BUILD_DIGEST_REVISION}" <<'PY'
+import hashlib
+import json
+import sys
+
+raw, observed_digest, revision = sys.argv[1:]
+document = json.loads(raw)
+canonical = json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+if raw != canonical:
+    raise SystemExit("verified image artifacts output is not canonical JSON")
+expected_digest = "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+if observed_digest != expected_digest:
+    raise SystemExit("verified image artifacts digest does not match canonical JSON")
+expected_components = [
+    "api",
+    "app_ssh",
+    "controller",
+    "drain_agent",
+    "edge",
+    "image_cache",
+    "telemetry_agent",
+]
+if [artifact.get("component") for artifact in document] != expected_components:
+    raise SystemExit("verified image artifacts are not sorted by component")
+expected_fields = {
+    "component",
+    "config_digest",
+    "immutable_ref",
+    "oci_revision",
+    "platform_manifest_digest",
+    "repository",
+    "source_tag",
+    "top_digest",
+    "verification",
+}
+for artifact in document:
+    if set(artifact) != expected_fields:
+        raise SystemExit("verified image artifact has an unexpected schema")
+    if artifact["source_tag"] != revision or artifact["oci_revision"] != revision:
+        raise SystemExit("verified image artifact is not bound to the build revision")
+    if artifact["immutable_ref"] != f'{artifact["repository"]}@{artifact["top_digest"]}':
+        raise SystemExit("verified image artifact immutable ref is inconsistent")
+PY
+
+for preflight_mode in unknown duplicate missing_late_repository malformed_revision; do
+  rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+  reset_build_digest_output
+  preflight_targets='api controller'
+  preflight_revision="${BUILD_DIGEST_REVISION}"
+  controller_repository=ghcr.io/acme/fugue-controller
+  case "${preflight_mode}" in
+    unknown) preflight_targets='api unknown' ;;
+    duplicate) preflight_targets='api api' ;;
+    missing_late_repository) controller_repository= ;;
+    malformed_revision) preflight_revision=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ;;
+  esac
   if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
     GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
     FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+    FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+    FUGUE_CONTROL_PLANE_IMAGE_TARGETS="${preflight_targets}" \
+    FUGUE_IMAGE_TAG="${preflight_revision}" \
+    FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+    FUGUE_CONTROLLER_IMAGE_REPOSITORY="${controller_repository}" \
+    "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+    fail "${preflight_mode} build preflight must fail closed"
+  fi
+  assert_build_digest_output_unchanged "${preflight_mode} build preflight"
+  [[ -z "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f -print -quit)" ]] ||
+    fail "${preflight_mode} build preflight must fail before starting docker or registry verification"
+done
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_DOCKER_MODE=mixed_speed \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller' \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1 &
+BUILD_DIGEST_SIGNAL_PID=$!
+for _ in $(seq 1 100); do
+  if [[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/fast-finished" && -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/slow-started" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ ! -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/fast-finished" || ! -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/slow-started" ]]; then
+  kill -TERM "${BUILD_DIGEST_SIGNAL_PID}" 2>/dev/null || true
+  wait "${BUILD_DIGEST_SIGNAL_PID}" 2>/dev/null || true
+  fail "signal cleanup fixture did not finish its first child and start its second child"
+fi
+BUILD_DIGEST_FAST_PID="$(cat "${BUILD_DIGEST_FIXTURE_DIR}/calls/fast-pid")"
+for _ in $(seq 1 100); do
+  if ! kill -0 "${BUILD_DIGEST_FAST_PID}" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "${BUILD_DIGEST_FAST_PID}" 2>/dev/null; then
+  kill -TERM "${BUILD_DIGEST_SIGNAL_PID}" 2>/dev/null || true
+  wait "${BUILD_DIGEST_SIGNAL_PID}" 2>/dev/null || true
+  fail "signal cleanup fixture did not observe the completed child exit"
+fi
+kill -TERM "${BUILD_DIGEST_SIGNAL_PID}"
+for _ in $(seq 1 100); do
+  [[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/slow-terminating" ]] && break
+  sleep 0.01
+done
+if [[ ! -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/slow-terminating" ]]; then
+  wait "${BUILD_DIGEST_SIGNAL_PID}" 2>/dev/null || true
+  fail "signal cleanup fixture did not enter active-child termination"
+fi
+kill -TERM "${BUILD_DIGEST_SIGNAL_PID}"
+set +e
+wait "${BUILD_DIGEST_SIGNAL_PID}"
+BUILD_DIGEST_SIGNAL_STATUS=$?
+set -e
+assert_eq "${BUILD_DIGEST_SIGNAL_STATUS}" "143" "TERM preserves the conventional signal exit status"
+[[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/slow-terminated" ]] ||
+  fail "TERM must reach and stop the active docker child before cleanup"
+[[ ! -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/fast-terminated" ]] ||
+  fail "TERM must not be sent again to a completed docker child"
+assert_build_digest_output_unchanged "interrupted image build"
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+python3 - \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" \
+  "${BUILD_DIGEST_FIXTURE_DIR}" \
+  "${BUILD_DIGEST_OUTPUT}" \
+  "${BUILD_DIGEST_LOG}" \
+  "${BUILD_DIGEST_REAL_PYTHON}" \
+  "${BUILD_DIGEST_REVISION}" \
+  "${BUILD_DIGEST_SENTINEL}" <<'PY'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+script, fixture_dir, output_path, log_path, real_python, revision, sentinel_path = sys.argv[1:]
+fixture = Path(fixture_dir)
+calls = fixture / "calls"
+environment = os.environ.copy()
+environment.update(
+    {
+        "PATH": f'{fixture / "bin"}:{environment["PATH"]}',
+        "GITHUB_OUTPUT": output_path,
+        "FUGUE_BUILD_TEST_CALL_DIR": str(calls),
+        "FUGUE_BUILD_TEST_REAL_PYTHON": real_python,
+        "FUGUE_BUILD_TEST_DOCKER_MODE": "mixed_speed",
+        "FUGUE_CONTROL_PLANE_IMAGE_TARGETS": "api controller",
+        "FUGUE_IMAGE_TAG": revision,
+        "FUGUE_API_IMAGE_REPOSITORY": "ghcr.io/acme/fugue-api",
+        "FUGUE_CONTROLLER_IMAGE_REPOSITORY": "ghcr.io/acme/fugue-controller",
+    }
+)
+
+
+def wait_for(predicate, label, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {label}")
+
+
+with open(log_path, "ab") as log:
+    process = subprocess.Popen([script], stdout=log, stderr=subprocess.STDOUT, env=environment)
+    try:
+        wait_for(
+            lambda: (calls / "fast-finished").is_file()
+            and (calls / "slow-started").is_file(),
+            "mixed-speed children",
+        )
+        fast_pid = int((calls / "fast-pid").read_text().strip())
+
+        def fast_exited():
+            try:
+                os.kill(fast_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        wait_for(fast_exited, "completed fast child exit")
+        os.kill(process.pid, signal.SIGINT)
+        wait_for(lambda: (calls / "slow-terminating").is_file(), "INT cleanup entry")
+        os.kill(process.pid, signal.SIGTERM)
+        status = process.wait(timeout=5)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        raise
+
+if status != 130:
+    raise SystemExit(f"INT followed by TERM returned {status}, expected 130")
+if not (calls / "slow-terminated").is_file():
+    raise SystemExit("INT cleanup did not wait for the active child to terminate")
+if (calls / "fast-terminated").exists():
+    raise SystemExit("INT cleanup signaled the completed child")
+if Path(output_path).read_bytes() != Path(sentinel_path).read_bytes():
+    raise SystemExit("INT cleanup changed GITHUB_OUTPUT")
+PY
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_DOCKER_MODE=second_build_fail \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller' \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "a second-target image build failure must fail the complete build transaction"
+fi
+assert_build_digest_output_unchanged "second-target image build failure"
+[[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/build-peer-finished" ]] ||
+  fail "a failed parallel image build must wait for its still-running peer"
+[[ -z "$(find "${BUILD_DIGEST_FIXTURE_DIR}/calls" -type f -name 'verify-*' -print -quit)" ]] ||
+  fail "registry verification must not start after an image build failure"
+
+for metadata_mode in missing malformed; do
+  reset_build_digest_output
+  rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+  if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+    GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+    FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+    FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
     FUGUE_BUILD_TEST_METADATA_MODE="${metadata_mode}" \
     FUGUE_CONTROL_PLANE_IMAGE_TARGETS=api \
-    FUGUE_IMAGE_TAG=test-build-digest \
+    FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
     FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
     "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
     fail "${metadata_mode} build metadata must fail closed"
   fi
-  [[ ! -s "${BUILD_DIGEST_OUTPUT}" ]] || fail "${metadata_mode} build metadata must not emit a partial digest output"
+  assert_build_digest_output_unchanged "${metadata_mode} build metadata"
 done
 
-: >"${BUILD_DIGEST_OUTPUT}"
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
 if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
   GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
   FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
   FUGUE_BUILD_TEST_METADATA_MODE=mixed \
   FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller' \
-  FUGUE_IMAGE_TAG=test-build-digest \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
   FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
   FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
   "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
   fail "one invalid digest must fail the entire parallel image build"
 fi
-[[ ! -s "${BUILD_DIGEST_OUTPUT}" ]] || fail "parallel image digest validation must be atomic"
+assert_build_digest_output_unchanged "parallel image digest validation"
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_VERIFIER_MODE=second_fail \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS='api controller' \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  FUGUE_CONTROLLER_IMAGE_REPOSITORY=ghcr.io/acme/fugue-controller \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "a second-target registry verification failure must fail the complete build attestation"
+fi
+assert_build_digest_output_unchanged "registry verification failure"
+[[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/verify-api" && -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/verify-controller" ]] ||
+  fail "second-target registry verification failure must occur after the first target was verified"
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_VERIFIER_MODE=malformed \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS=api \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+  fail "malformed registry verifier output must fail closed"
+fi
+assert_build_digest_output_unchanged "malformed verifier output"
+
+for wrong_index_type in false null 0 '[]'; do
+  reset_build_digest_output
+  rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+  if PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+    GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+    FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+    FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+    FUGUE_BUILD_TEST_VERIFIER_MODE=wrong_index_type \
+    FUGUE_BUILD_TEST_INDEX_DIGEST_JSON="${wrong_index_type}" \
+    FUGUE_CONTROL_PLANE_IMAGE_TARGETS=api \
+    FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+    FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+    "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1; then
+    fail "non-string verifier index_digest must fail closed: ${wrong_index_type}"
+  fi
+  [[ -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/verify-api" ]] ||
+    fail "wrong-type verifier fixture did not reach artifact aggregation: ${wrong_index_type}"
+  assert_build_digest_output_unchanged "non-string verifier index_digest ${wrong_index_type}"
+done
+
+reset_build_digest_output
+rm -f "${BUILD_DIGEST_FIXTURE_DIR}/calls/"*
+PATH="${BUILD_DIGEST_FIXTURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_DIGEST_OUTPUT}" \
+  FUGUE_BUILD_TEST_CALL_DIR="${BUILD_DIGEST_FIXTURE_DIR}/calls" \
+  FUGUE_BUILD_TEST_REAL_PYTHON="${BUILD_DIGEST_REAL_PYTHON}" \
+  FUGUE_BUILD_TEST_PUBLISH_SIGNAL=true \
+  FUGUE_CONTROL_PLANE_IMAGE_TARGETS=api \
+  FUGUE_IMAGE_TAG="${BUILD_DIGEST_REVISION}" \
+  FUGUE_API_IMAGE_REPOSITORY=ghcr.io/acme/fugue-api \
+  "${REPO_ROOT}/scripts/build_control_plane_images.sh" >"${BUILD_DIGEST_LOG}" 2>&1
+assert_eq "$(plan_value "${BUILD_DIGEST_OUTPUT}" sentinel)" "kept" "commit-point signal preserves existing output"
+assert_eq "$(grep -c '^api_image_digest=' "${BUILD_DIGEST_OUTPUT}")" "1" "commit-point signal publishes a complete digest exactly once"
+assert_eq "$(grep -c '^verified_image_artifacts_json=' "${BUILD_DIGEST_OUTPUT}")" "1" "commit-point signal publishes complete artifacts exactly once"
+assert_eq "$(grep -c '^verified_image_artifacts_digest=' "${BUILD_DIGEST_OUTPUT}")" "1" "commit-point signal publishes the artifacts digest exactly once"
 
 rm -rf "${BUILD_DIGEST_FIXTURE_DIR}"
 
@@ -3684,6 +4120,14 @@ grep -Fq 'id: build_images' "${WORKFLOW_FILE}" || fail "control-plane build step
 for target in api controller drain_agent telemetry_agent image_cache edge app_ssh; do
   grep -Fq "${target}_image_digest: \${{ steps.build_images.outputs.${target}_image_digest }}" "${WORKFLOW_FILE}" ||
     fail "control-plane build job must expose ${target} digest"
+done
+grep -Fq 'verified_image_artifacts_json: ${{ steps.build_images.outputs.verified_image_artifacts_json }}' "${WORKFLOW_FILE}" ||
+  fail "control-plane build job must expose canonical verified image artifacts"
+grep -Fq 'verified_image_artifacts_digest: ${{ steps.build_images.outputs.verified_image_artifacts_digest }}' "${WORKFLOW_FILE}" ||
+  fail "control-plane build job must expose the verified image artifacts digest"
+for workflow_path in scripts/build_release_image_lock.py scripts/test_build_release_image_lock.py scripts/lib/release_image_ref.sh; do
+  grep -Fq -- "- '${workflow_path}'" "${WORKFLOW_FILE}" ||
+    fail "${workflow_path} changes must trigger the formal control-plane workflow"
 done
 
 assert_build_plan() {
@@ -3695,8 +4139,17 @@ assert_build_plan() {
   output_file="$(mktemp)"
   log_file="$(mktemp)"
   GITHUB_OUTPUT="${output_file}" \
+    FUGUE_RELEASE_REPO_ROOT="${REPO_ROOT}" \
     FUGUE_RELEASE_CHANGED_FILES="${changed_files}" \
     FUGUE_RELEASE_CHANGED_FILES_SET=true \
+    FUGUE_RELEASE_TARGET_REF= \
+    FUGUE_API_IMAGE_BASE_REF= \
+    FUGUE_CONTROLLER_IMAGE_BASE_REF= \
+    FUGUE_DRAIN_AGENT_IMAGE_BASE_REF= \
+    FUGUE_TELEMETRY_AGENT_IMAGE_BASE_REF= \
+    FUGUE_IMAGE_CACHE_IMAGE_BASE_REF= \
+    FUGUE_EDGE_IMAGE_BASE_REF= \
+    FUGUE_APP_SSH_IMAGE_BASE_REF= \
     "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${log_file}"
   while [[ "$#" -gt 0 ]]; do
     assert_eq "$(plan_value "${output_file}" "$1")" "$2" "${label} $1"
@@ -3715,6 +4168,222 @@ assert_build_plan \
   build_image_cache false \
   build_edge false \
   build_app_ssh false
+
+BUILD_PLAN_PATH_ALIAS_DIR="$(mktemp -d)"
+BUILD_PLAN_PATH_ALIAS_ROOT="${BUILD_PLAN_PATH_ALIAS_DIR}/repo-alias"
+BUILD_PLAN_PATH_ALIAS_OUTPUT="${BUILD_PLAN_PATH_ALIAS_DIR}/output"
+BUILD_PLAN_PATH_ALIAS_LOG="${BUILD_PLAN_PATH_ALIAS_DIR}/plan.log"
+ln -s "${REPO_ROOT}" "${BUILD_PLAN_PATH_ALIAS_ROOT}"
+: >"${BUILD_PLAN_PATH_ALIAS_OUTPUT}"
+(
+  cd "${BUILD_PLAN_PATH_ALIAS_ROOT}"
+  GITHUB_OUTPUT="${BUILD_PLAN_PATH_ALIAS_OUTPUT}" \
+    FUGUE_RELEASE_REPO_ROOT="${BUILD_PLAN_PATH_ALIAS_ROOT}" \
+    FUGUE_RELEASE_CHANGED_FILES=internal/controller/safe_rollout.go \
+    FUGUE_RELEASE_CHANGED_FILES_SET=true \
+    FUGUE_RELEASE_TARGET_REF= \
+    FUGUE_API_IMAGE_BASE_REF= \
+    FUGUE_CONTROLLER_IMAGE_BASE_REF= \
+    FUGUE_DRAIN_AGENT_IMAGE_BASE_REF= \
+    FUGUE_TELEMETRY_AGENT_IMAGE_BASE_REF= \
+    FUGUE_IMAGE_CACHE_IMAGE_BASE_REF= \
+    FUGUE_EDGE_IMAGE_BASE_REF= \
+    FUGUE_APP_SSH_IMAGE_BASE_REF= \
+    "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" \
+    >"${BUILD_PLAN_PATH_ALIAS_LOG}"
+)
+assert_eq "$(plan_value "${BUILD_PLAN_PATH_ALIAS_OUTPUT}" build_api)" "false" \
+  "logical/physical repository alias API build flag"
+assert_eq "$(plan_value "${BUILD_PLAN_PATH_ALIAS_OUTPUT}" build_controller)" "true" \
+  "logical/physical repository alias controller build flag"
+assert_eq "$(plan_value "${BUILD_PLAN_PATH_ALIAS_OUTPUT}" target_count)" "1" \
+  "logical/physical repository alias build count"
+rm -rf "${BUILD_PLAN_PATH_ALIAS_DIR}"
+
+assert_build_plan \
+  $'internal/api/data/import/testdata/deleted-config.yaml' \
+  "non-Go fixture directory fail-safe build plan" \
+  build_api true \
+  build_controller true \
+  build_drain_agent true \
+  build_telemetry_agent true \
+  build_image_cache true \
+  build_edge true \
+  build_app_ssh false
+
+BUILD_PLAN_TOOL_FAILURE_DIR="$(mktemp -d)"
+BUILD_PLAN_TOOL_FAILURE_OUTPUT="${BUILD_PLAN_TOOL_FAILURE_DIR}/output"
+BUILD_PLAN_TOOL_FAILURE_SENTINEL="${BUILD_PLAN_TOOL_FAILURE_DIR}/output-sentinel"
+BUILD_PLAN_TOOL_FAILURE_LOG="${BUILD_PLAN_TOOL_FAILURE_DIR}/failure.log"
+BUILD_PLAN_TOOL_FAILURE_REAL_GREP="$(command -v grep)"
+BUILD_PLAN_TOOL_FAILURE_REAL_GO="$(command -v go)"
+mkdir -p "${BUILD_PLAN_TOOL_FAILURE_DIR}/bin"
+printf 'sentinel=kept\nunrelated={"value":"a=b"}\n' >"${BUILD_PLAN_TOOL_FAILURE_SENTINEL}"
+cat >"${BUILD_PLAN_TOOL_FAILURE_DIR}/bin/grep" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+last_argument="${!#}"
+fail_membership=false
+case "${FUGUE_BUILD_PLAN_TEST_GREP_MODE:-none}" in
+  none) ;;
+  baseline)
+    [[ "${last_argument}" == */component-changed-files-controller ]] && fail_membership=true
+    ;;
+  dependency)
+    [[ "${last_argument}" == */deps-controller ]] && fail_membership=true
+    ;;
+  embed)
+    [[ "$*" == *'//go:embed'* ]] && fail_membership=true
+    ;;
+  *) exit 90 ;;
+esac
+if [[ "${fail_membership}" == "true" ]]; then
+  printf 'synthetic grep membership failure\n' >&2
+  exit "${FUGUE_BUILD_PLAN_TEST_GREP_STATUS:?}"
+fi
+exec "${FUGUE_BUILD_PLAN_TEST_REAL_GREP:?}" "$@"
+SH
+cat >"${BUILD_PLAN_TOOL_FAILURE_DIR}/bin/go" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+last_argument="${!#}"
+case "${FUGUE_BUILD_PLAN_TEST_GO_MODE:-none}" in
+  none) ;;
+  package_metadata)
+    if [[ "${last_argument}" == "./cmd/fugue-release-domain-plan" ]]; then
+      printf 'synthetic go package metadata failure\n' >&2
+      exit 1
+    fi
+    ;;
+  package_metadata_stderr_success)
+    if [[ "${last_argument}" == "./cmd/fugue-release-domain-plan" && "$*" == *'{{.Dir}}'* ]]; then
+      printf 'synthetic successful go metadata warning\n' >&2
+    fi
+    ;;
+  package_directory_mismatch)
+    if [[ "${last_argument}" == "./cmd/fugue-release-domain-plan" && "$*" == *'{{.Dir}}'* ]]; then
+      printf '/\n'
+      exit 0
+    fi
+    ;;
+  embed_metadata)
+    if [[ "${last_argument}" == "./internal/releasedomain" && "$*" == *'.EmbedFiles'* ]]; then
+      printf 'synthetic go embed metadata failure\n' >&2
+      exit 1
+    fi
+    ;;
+  *) exit 91 ;;
+esac
+exec "${FUGUE_BUILD_PLAN_TEST_REAL_GO:?}" "$@"
+SH
+chmod +x "${BUILD_PLAN_TOOL_FAILURE_DIR}/bin/grep" "${BUILD_PLAN_TOOL_FAILURE_DIR}/bin/go"
+
+assert_build_plan_tool_failure() {
+  local grep_mode="$1"
+  local grep_status="$2"
+  local go_mode="$3"
+  local changed_files="$4"
+  local expected_error="$5"
+  local label="$6"
+  local target_ref="${7:-}"
+  local controller_base_ref="${8:-}"
+
+  cp "${BUILD_PLAN_TOOL_FAILURE_SENTINEL}" "${BUILD_PLAN_TOOL_FAILURE_OUTPUT}"
+  : >"${BUILD_PLAN_TOOL_FAILURE_LOG}"
+  if PATH="${BUILD_PLAN_TOOL_FAILURE_DIR}/bin:${PATH}" \
+    GITHUB_OUTPUT="${BUILD_PLAN_TOOL_FAILURE_OUTPUT}" \
+    FUGUE_BUILD_PLAN_TEST_GREP_MODE="${grep_mode}" \
+    FUGUE_BUILD_PLAN_TEST_GREP_STATUS="${grep_status}" \
+    FUGUE_BUILD_PLAN_TEST_GO_MODE="${go_mode}" \
+    FUGUE_BUILD_PLAN_TEST_REAL_GREP="${BUILD_PLAN_TOOL_FAILURE_REAL_GREP}" \
+    FUGUE_BUILD_PLAN_TEST_REAL_GO="${BUILD_PLAN_TOOL_FAILURE_REAL_GO}" \
+    FUGUE_RELEASE_REPO_ROOT="${REPO_ROOT}" \
+    FUGUE_RELEASE_CHANGED_FILES="${changed_files}" \
+    FUGUE_RELEASE_CHANGED_FILES_SET=true \
+    FUGUE_RELEASE_TARGET_REF="${target_ref}" \
+    FUGUE_API_IMAGE_BASE_REF= \
+    FUGUE_CONTROLLER_IMAGE_BASE_REF="${controller_base_ref}" \
+    FUGUE_DRAIN_AGENT_IMAGE_BASE_REF= \
+    FUGUE_TELEMETRY_AGENT_IMAGE_BASE_REF= \
+    FUGUE_IMAGE_CACHE_IMAGE_BASE_REF= \
+    FUGUE_EDGE_IMAGE_BASE_REF= \
+    FUGUE_APP_SSH_IMAGE_BASE_REF= \
+    "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" \
+    >"${BUILD_PLAN_TOOL_FAILURE_LOG}" 2>&1; then
+    fail "${label} must fail closed"
+  fi
+  cmp -s "${BUILD_PLAN_TOOL_FAILURE_SENTINEL}" "${BUILD_PLAN_TOOL_FAILURE_OUTPUT}" ||
+    fail "${label} changed GITHUB_OUTPUT"
+  grep -Fq -- "${expected_error}" "${BUILD_PLAN_TOOL_FAILURE_LOG}" ||
+    fail "${label} did not report the expected failure"
+}
+
+BUILD_PLAN_TOOL_FAILURE_HEAD="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+for grep_status in 2 126; do
+  assert_build_plan_tool_failure \
+    dependency "${grep_status}" none \
+    internal/controller/safe_rollout.go \
+    'grep membership check failed for controller dependency graph' \
+    "dependency membership grep status ${grep_status}"
+  assert_build_plan_tool_failure \
+    baseline "${grep_status}" none \
+    internal/controller/safe_rollout.go \
+    'grep membership check failed for controller component baseline' \
+    "component baseline grep status ${grep_status}" \
+    "${BUILD_PLAN_TOOL_FAILURE_HEAD}" "${BUILD_PLAN_TOOL_FAILURE_HEAD}"
+  assert_build_plan_tool_failure \
+    embed "${grep_status}" none \
+    internal/controller/fixtures/deleted-runtime-asset.txt \
+    'grep membership check failed for internal/controller runtime embed directive' \
+    "runtime embed grep status ${grep_status}"
+done
+assert_build_plan_tool_failure \
+  none 2 package_metadata \
+  cmd/fugue-release-domain-plan/main.go \
+  'go package metadata failed for existing path: cmd/fugue-release-domain-plan' \
+  "existing Go package metadata failure"
+assert_build_plan_tool_failure \
+  none 2 package_directory_mismatch \
+  cmd/fugue-release-domain-plan/main.go \
+  'go package metadata returned an unexpected directory for cmd/fugue-release-domain-plan' \
+  "Go package metadata directory mismatch"
+assert_build_plan_tool_failure \
+  none 2 embed_metadata \
+  internal/releasedomain/testdata/zero/base.yaml \
+  'go embed metadata failed for existing package: internal/releasedomain' \
+  "Go embed metadata failure"
+
+cp "${BUILD_PLAN_TOOL_FAILURE_SENTINEL}" "${BUILD_PLAN_TOOL_FAILURE_OUTPUT}"
+: >"${BUILD_PLAN_TOOL_FAILURE_LOG}"
+PATH="${BUILD_PLAN_TOOL_FAILURE_DIR}/bin:${PATH}" \
+  GITHUB_OUTPUT="${BUILD_PLAN_TOOL_FAILURE_OUTPUT}" \
+  FUGUE_BUILD_PLAN_TEST_GREP_MODE=none \
+  FUGUE_BUILD_PLAN_TEST_GREP_STATUS=2 \
+  FUGUE_BUILD_PLAN_TEST_GO_MODE=package_metadata_stderr_success \
+  FUGUE_BUILD_PLAN_TEST_REAL_GREP="${BUILD_PLAN_TOOL_FAILURE_REAL_GREP}" \
+  FUGUE_BUILD_PLAN_TEST_REAL_GO="${BUILD_PLAN_TOOL_FAILURE_REAL_GO}" \
+  FUGUE_RELEASE_REPO_ROOT="${REPO_ROOT}" \
+  FUGUE_RELEASE_CHANGED_FILES=cmd/fugue-release-domain-plan/main.go \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF= \
+  FUGUE_API_IMAGE_BASE_REF= \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF= \
+  FUGUE_DRAIN_AGENT_IMAGE_BASE_REF= \
+  FUGUE_TELEMETRY_AGENT_IMAGE_BASE_REF= \
+  FUGUE_IMAGE_CACHE_IMAGE_BASE_REF= \
+  FUGUE_EDGE_IMAGE_BASE_REF= \
+  FUGUE_APP_SSH_IMAGE_BASE_REF= \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" \
+  >"${BUILD_PLAN_TOOL_FAILURE_LOG}" 2>&1
+assert_eq "$(plan_value "${BUILD_PLAN_TOOL_FAILURE_OUTPUT}" target_count)" "0" \
+  "successful Go metadata warning build plan"
+assert_eq "$(plan_value "${BUILD_PLAN_TOOL_FAILURE_OUTPUT}" sentinel)" "kept" \
+  "successful Go metadata warning preserves existing output"
+grep -Fq -- 'synthetic successful go metadata warning' "${BUILD_PLAN_TOOL_FAILURE_LOG}" ||
+  fail "successful Go metadata warning was not kept separate from the package directory"
+rm -rf "${BUILD_PLAN_TOOL_FAILURE_DIR}"
 
 assert_build_plan \
   $'Dockerfile.edge' \
@@ -3869,6 +4538,21 @@ COMPONENT_PLAN_LOG="$(mktemp)"
 git clone -q --shared "${REPO_ROOT}" "${COMPONENT_PLAN_REPO}"
 git -C "${COMPONENT_PLAN_REPO}" config user.email test@fugue.invalid
 git -C "${COMPONENT_PLAN_REPO}" config user.name fugue-test
+cat >"${COMPONENT_PLAN_REPO}/release_tool.go" <<'GO'
+package main
+
+func main() {}
+GO
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES=release_tool.go \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF= \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" \
+  "root Go package outside image dependency graphs"
+rm -f "${COMPONENT_PLAN_REPO}/release_tool.go"
 COMPONENT_PLAN_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
 printf '\n// component baseline edge fixture\n' >>"${COMPONENT_PLAN_REPO}/cmd/fugue-edge/main.go"
 git -C "${COMPONENT_PLAN_REPO}" add cmd/fugue-edge/main.go
