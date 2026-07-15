@@ -60,12 +60,7 @@ on:
       - 'scripts/upgrade_fugue_control_plane.sh'
       - 'scripts/verify_stale_release_recovery.py'
       - 'scripts/verify_registry_image.py'
-  workflow_dispatch:
-    inputs:
-      existing_image_tag:
-        description: Existing image tag to deploy without rebuilding images.
-        required: false
-        type: string
+  workflow_dispatch: {}
 
 permissions:
   actions: read
@@ -99,6 +94,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Resolve live image metadata
@@ -107,13 +103,13 @@ jobs:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
-          FUGUE_IMAGE_TAG: ${{ inputs.existing_image_tag || github.sha }}
+          FUGUE_IMAGE_TAG: ${{ github.sha }}
         run: ./scripts/resolve_control_plane_live_images.sh
 
       - name: Compute live-to-target release changed files
         id: release_changes
         env:
-          FUGUE_RELEASE_TARGET_REF: ${{ inputs.existing_image_tag || github.sha }}
+          FUGUE_RELEASE_TARGET_REF: ${{ github.sha }}
           FUGUE_RELEASE_BASE_REFS: ${{ steps.live_images.outputs.release_baseline_tags }}
           FUGUE_RELEASE_REQUIRE_BASELINE: "true"
         run: ./scripts/compute_release_changed_files_from_live.sh
@@ -123,6 +119,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -146,7 +144,6 @@ jobs:
     needs:
       - release-baseline
       - release-gate
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.existing_image_tag == '' }}
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
@@ -177,6 +174,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Setup Go
@@ -243,7 +241,7 @@ jobs:
       - release-baseline
       - release-gate
       - build
-    if: ${{ always() && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && (needs.build.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '')) }}
+    if: ${{ always() && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' }}
     # The staged rollout needs room for backup/release coordination, bounded
     # rollback, and attribution upload. New budget env values are intentionally
     # harmless to the previous release script during the bootstrap deployment.
@@ -262,10 +260,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Guard stateful component files
-        if: github.event_name == 'push'
         env:
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
@@ -273,7 +271,7 @@ jobs:
           if printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES}" | grep -E "${forbidden_pattern}" >/dev/null; then
             echo "stateful component manifests changed since the live release:"
             printf '%s\n' "${FUGUE_RELEASE_CHANGED_FILES}" | grep -E "${forbidden_pattern}" || true
-            echo "control-plane auto deploy refuses postgres/registry/headscale changes; ship those with a manual release"
+            echo "control-plane auto deploy refuses postgres/registry/headscale changes; use an independent controlled release window"
             exit 1
           fi
 
@@ -297,7 +295,7 @@ jobs:
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
-          FUGUE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag || github.sha }}
+          FUGUE_IMAGE_TAG: ${{ needs.build.outputs.image_tag || github.sha }}
           FUGUE_IMAGE_TARGETS: ${{ needs.build.outputs.image_targets || '' }}
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
@@ -347,7 +345,7 @@ jobs:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
           FUGUE_RELEASE_FULLNAME: ${{ vars.FUGUE_RELEASE_FULLNAME || 'fugue-fugue' }}
-          FUGUE_IMAGE_TAG: ${{ inputs.existing_image_tag || needs.build.outputs.image_tag || github.sha }}
+          FUGUE_IMAGE_TAG: ${{ needs.build.outputs.image_tag || github.sha }}
           FUGUE_API_IMAGE_REPOSITORY: ${{ needs.build.outputs.api_image_repository || format('ghcr.io/{0}/fugue-api', github.repository_owner) }}
           FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.build.outputs.controller_image_repository || format('ghcr.io/{0}/fugue-controller', github.repository_owner) }}
           FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY: ${{ needs.build.outputs.drain_agent_image_repository || format('ghcr.io/{0}/fugue-drain-agent', github.repository_owner) }}
@@ -459,14 +457,14 @@ jobs:
           FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_TIMEOUT_SECONDS: ${{ vars.FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_TIMEOUT_SECONDS || '20' }}
           FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_ATTEMPTS: ${{ vars.FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_ATTEMPTS || '1' }}
           FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_RETRY_DELAY_SECONDS: ${{ vars.FUGUE_ROLLBACK_IMAGE_SHADOW_PULL_RETRY_DELAY_SECONDS || '0' }}
-          FUGUE_API_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.api_image_repository || (needs.build.outputs.build_api == 'true' && needs.build.outputs.api_image_repository || steps.live_images.outputs.api_image_repository) }}
-          FUGUE_API_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_api == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.api_image_tag) }}
-          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.controller_image_repository || (needs.build.outputs.build_controller == 'true' && needs.build.outputs.controller_image_repository || steps.live_images.outputs.controller_image_repository) }}
-          FUGUE_CONTROLLER_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_controller == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.controller_image_tag) }}
-          FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.drain_agent_image_repository || (needs.build.outputs.build_drain_agent == 'true' && needs.build.outputs.drain_agent_image_repository || steps.live_images.outputs.drain_agent_image_repository) }}
-          FUGUE_DRAIN_AGENT_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_drain_agent == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.drain_agent_image_tag) }}
-          FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.telemetry_agent_image_repository || (needs.build.outputs.build_telemetry_agent == 'true' && needs.build.outputs.telemetry_agent_image_repository || steps.live_images.outputs.telemetry_agent_image_repository) }}
-          FUGUE_TELEMETRY_AGENT_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_telemetry_agent == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.telemetry_agent_image_tag) }}
+          FUGUE_API_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_api == 'true' && needs.build.outputs.api_image_repository || steps.live_images.outputs.api_image_repository }}
+          FUGUE_API_IMAGE_TAG: ${{ needs.build.outputs.build_api == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.api_image_tag }}
+          FUGUE_CONTROLLER_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_controller == 'true' && needs.build.outputs.controller_image_repository || steps.live_images.outputs.controller_image_repository }}
+          FUGUE_CONTROLLER_IMAGE_TAG: ${{ needs.build.outputs.build_controller == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.controller_image_tag }}
+          FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_drain_agent == 'true' && needs.build.outputs.drain_agent_image_repository || steps.live_images.outputs.drain_agent_image_repository }}
+          FUGUE_DRAIN_AGENT_IMAGE_TAG: ${{ needs.build.outputs.build_drain_agent == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.drain_agent_image_tag }}
+          FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_telemetry_agent == 'true' && needs.build.outputs.telemetry_agent_image_repository || steps.live_images.outputs.telemetry_agent_image_repository }}
+          FUGUE_TELEMETRY_AGENT_IMAGE_TAG: ${{ needs.build.outputs.build_telemetry_agent == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.telemetry_agent_image_tag }}
           FUGUE_OBSERVABILITY_ENABLED: ${{ vars.FUGUE_OBSERVABILITY_ENABLED || 'true' }}
           FUGUE_OBSERVABILITY_RETENTION: ${{ vars.FUGUE_OBSERVABILITY_RETENTION || '24h' }}
           FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME: ${{ vars.FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME || '' }}
@@ -510,10 +508,10 @@ jobs:
           FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_TAG: ${{ vars.FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_TAG || 'latest' }}
           FUGUE_OBSERVABILITY_ANALYTICS_RETENTION: ${{ vars.FUGUE_OBSERVABILITY_ANALYTICS_RETENTION || '24h' }}
           FUGUE_TELEMETRY_AGENT_ENABLED: ${{ vars.FUGUE_TELEMETRY_AGENT_ENABLED || 'true' }}
-          FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.image_cache_image_repository || (needs.build.outputs.build_image_cache == 'true' && needs.build.outputs.image_cache_image_repository || steps.live_images.outputs.image_cache_image_repository) }}
-          FUGUE_IMAGE_CACHE_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_image_cache == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.image_cache_image_tag) }}
-          FUGUE_EDGE_IMAGE_REPOSITORY: ${{ inputs.existing_image_tag && needs.build.outputs.edge_image_repository || (needs.build.outputs.build_edge == 'true' && needs.build.outputs.edge_image_repository || steps.live_images.outputs.edge_image_repository) }}
-          FUGUE_EDGE_IMAGE_TAG: ${{ inputs.existing_image_tag || (needs.build.outputs.build_edge == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.edge_image_tag) }}
+          FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_image_cache == 'true' && needs.build.outputs.image_cache_image_repository || steps.live_images.outputs.image_cache_image_repository }}
+          FUGUE_IMAGE_CACHE_IMAGE_TAG: ${{ needs.build.outputs.build_image_cache == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.image_cache_image_tag }}
+          FUGUE_EDGE_IMAGE_REPOSITORY: ${{ needs.build.outputs.build_edge == 'true' && needs.build.outputs.edge_image_repository || steps.live_images.outputs.edge_image_repository }}
+          FUGUE_EDGE_IMAGE_TAG: ${{ needs.build.outputs.build_edge == 'true' && needs.build.outputs.image_tag || steps.live_images.outputs.edge_image_tag }}
           FUGUE_EDGE_GROUP_ID: ${{ vars.FUGUE_EDGE_GROUP_ID || '' }}
           FUGUE_EDGE_REGION: ${{ vars.FUGUE_EDGE_REGION || '' }}
           FUGUE_EDGE_COUNTRY: ${{ vars.FUGUE_EDGE_COUNTRY || '' }}
@@ -621,7 +619,7 @@ jobs:
           FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS: '10200'
           FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS: '600'
           FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE || 'auto' }}
-          FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || ((github.event_name == 'workflow_dispatch' && inputs.existing_image_tag != '') || needs.build.outputs.build_edge == 'true') }}
+          FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE: ${{ vars.FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE || needs.build.outputs.build_edge == 'true' }}
           FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE: ${{ vars.FUGUE_NODE_LOCAL_BUILD_PLANE_RELEASE_MODE || 'auto' }}
           FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE: ${{ vars.FUGUE_STATEFUL_DEPENDENCY_RELEASE_MODE || 'guard' }}
         run: ./scripts/upgrade_fugue_control_plane.sh
