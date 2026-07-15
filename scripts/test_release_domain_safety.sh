@@ -6377,6 +6377,18 @@ FUGUE_RELEASE_CHANGED_FILES=$'scripts/upgrade_fugue_control_plane.sh\nscripts/te
 if control_plane_backup_drain_required; then
   fail "deploy tooling changes must not require control-plane backup drain in auto mode"
 fi
+FUGUE_RELEASE_CHANGED_FILES=$'Makefile\nscripts/lib/authoritative_dns_dig.sh\nscripts/prepare_authoritative_dns_dig.sh'
+assert_eq "$(release_safety_changed_file_subsystems)" "deploy_script" "authoritative DNS release tooling risk ownership"
+[[ -z "$(release_safety_unknown_high_risk_files)" ]] ||
+  fail "authoritative DNS release tooling must not be classified as unknown high risk"
+unset FUGUE_UNKNOWN_RELEASE_RISK_APPROVED
+require_release_safety_attribution ||
+  fail "authoritative DNS release tooling must pass attribution without an unknown-risk approval"
+assert_eq "$(release_safety_required_gates)" "release_guard,rollback_path_smoke" "authoritative DNS release tooling safety gates"
+assert_eq "$(release_safety_watch_window_seconds)" "60" "authoritative DNS release tooling watch window"
+if control_plane_backup_drain_required; then
+  fail "authoritative DNS release tooling must not require control-plane backup drain in auto mode"
+fi
 FUGUE_RELEASE_CHANGED_FILES=$'scripts/verify_stale_release_recovery.py'
 assert_eq "$(release_safety_changed_file_subsystems)" "deploy_script" "stale release recovery verifier must be owned by the deploy safety domain"
 [[ -z "$(release_safety_unknown_high_risk_files)" ]] ||

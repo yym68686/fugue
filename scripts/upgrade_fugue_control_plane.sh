@@ -1407,6 +1407,9 @@ release_safety_changed_file_subsystems() {
         ;;
     esac
     case "${file}" in
+      Makefile|\
+      scripts/lib/authoritative_dns_dig.sh|\
+      scripts/prepare_authoritative_dns_dig.sh|\
       scripts/upgrade_fugue_control_plane.sh|\
       scripts/release_fugue_public_data_plane.sh|\
       scripts/build_control_plane_images.sh|\
