@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	PlanAPIVersion = "release-domain-plan.fugue.dev/v1"
-	PlanKind       = "ReleaseDomainPlan"
+	PlanAPIVersion        = "release-domain-plan.fugue.dev/v1"
+	PlanKind              = "ReleaseDomainPlan"
+	maxPersistedPlanBytes = 8 << 20
 )
 
 // BuildPlan applies the dual-evidence conjunction. It never guesses or unions
@@ -363,10 +364,16 @@ func DecodeAndVerifyPlan(reader io.Reader, expectedPlanDigest string) (Plan, err
 	if strings.TrimSpace(expectedPlanDigest) == "" {
 		return Plan{}, fmt.Errorf("expected plan digest is empty")
 	}
+	if isNilReader(reader) {
+		return Plan{}, fmt.Errorf("release domain plan reader is nil")
+	}
 
-	data, err := io.ReadAll(reader)
+	data, err := io.ReadAll(io.LimitReader(reader, maxPersistedPlanBytes+1))
 	if err != nil {
 		return Plan{}, fmt.Errorf("read release domain plan: %w", err)
+	}
+	if len(data) > maxPersistedPlanBytes {
+		return Plan{}, fmt.Errorf("release domain plan exceeds %d-byte limit", maxPersistedPlanBytes)
 	}
 	if !utf8.Valid(data) {
 		return Plan{}, fmt.Errorf("decode release domain plan: input contains invalid UTF-8")
@@ -397,6 +404,19 @@ func DecodeAndVerifyPlan(reader io.Reader, expectedPlanDigest string) (Plan, err
 		return Plan{}, err
 	}
 	return plan, nil
+}
+
+func isNilReader(reader io.Reader) bool {
+	if reader == nil {
+		return true
+	}
+	value := reflect.ValueOf(reader)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func validateStrictPlanJSON(data []byte) error {

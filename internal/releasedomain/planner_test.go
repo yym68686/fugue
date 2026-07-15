@@ -3,6 +3,8 @@ package releasedomain
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -449,6 +451,82 @@ func TestDecodeAndVerifyPlanRejectsMutatedOrUnsupportedPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeAndVerifyPlanReaderBoundary(t *testing.T) {
+	t.Run("nil reader", func(t *testing.T) {
+		if _, err := DecodeAndVerifyPlan(nil, "sha256:expected"); err == nil || !strings.Contains(err.Error(), "reader is nil") {
+			t.Fatalf("nil reader error = %v", err)
+		}
+	})
+
+	t.Run("typed nil reader", func(t *testing.T) {
+		var reader *bytes.Reader
+		if _, err := DecodeAndVerifyPlan(reader, "sha256:expected"); err == nil || !strings.Contains(err.Error(), "reader is nil") {
+			t.Fatalf("typed nil reader error = %v", err)
+		}
+	})
+
+	plan, encoded := releaseDomainPlanWithEncodedSize(t, maxPersistedPlanBytes)
+	t.Run("exact limit", func(t *testing.T) {
+		decoded, err := DecodeAndVerifyPlan(bytes.NewReader(encoded), plan.PlanDigest)
+		if err != nil {
+			t.Fatalf("decode exact-limit plan: %v", err)
+		}
+		if decoded.PlanDigest != plan.PlanDigest || decoded.Digests.Target != plan.Digests.Target {
+			t.Fatalf("exact-limit plan changed during decode: %#v", decoded)
+		}
+	})
+
+	t.Run("over limit", func(t *testing.T) {
+		overLimit := append(append([]byte(nil), encoded...), '\n')
+		if _, err := DecodeAndVerifyPlan(bytes.NewReader(overLimit), plan.PlanDigest); err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("over-limit plan error = %v", err)
+		}
+	})
+
+	t.Run("reader error", func(t *testing.T) {
+		readErr := errors.New("fixture read failure")
+		if _, err := DecodeAndVerifyPlan(errorReader{err: readErr}, "sha256:expected"); !errors.Is(err, readErr) {
+			t.Fatalf("reader error = %v, want wrapped %v", err, readErr)
+		}
+	})
+}
+
+func releaseDomainPlanWithEncodedSize(t *testing.T, size int) (Plan, []byte) {
+	t.Helper()
+	input := PlanInput{
+		Files: fileDomains(DomainNodeLocal), Rendered: renderedDomains(DomainNodeLocal), Digests: stableDigestEvidence(),
+	}
+	input.Digests.Target = "x"
+	baseline := BuildPlan(input)
+	baselineJSON, err := json.Marshal(baseline)
+	if err != nil {
+		t.Fatalf("marshal baseline sized plan: %v", err)
+	}
+	if len(baselineJSON) > size {
+		t.Fatalf("baseline plan size %d exceeds requested size %d", len(baselineJSON), size)
+	}
+	input.Digests.Target = strings.Repeat("x", 1+size-len(baselineJSON))
+	plan := BuildPlan(input)
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal sized plan: %v", err)
+	}
+	if len(encoded) != size {
+		t.Fatalf("sized plan length = %d, want %d", len(encoded), size)
+	}
+	return plan, encoded
+}
+
+type errorReader struct {
+	err error
+}
+
+func (reader errorReader) Read([]byte) (int, error) {
+	return 0, reader.err
+}
+
+var _ io.Reader = errorReader{}
 
 func TestVerifyPlanDigestRejectsInvalidUTF8BeforeHashing(t *testing.T) {
 	plan := BuildPlan(PlanInput{
