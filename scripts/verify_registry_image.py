@@ -14,6 +14,8 @@ import urllib.parse
 
 
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+GIT_REVISION_RE = re.compile(r"[0-9a-f]{40}")
+OCI_REVISION_LABEL = "org.opencontainers.image.revision"
 MANIFEST_ACCEPT = ", ".join(
     (
         "application/vnd.oci.image.index.v1+json",
@@ -360,7 +362,26 @@ def select_platform_manifest(manifests, os_name, architecture, variant):
     return matches[0]
 
 
-def verify_image(client, top_digest, platform):
+def image_revision(image_config):
+    runtime_config = image_config.get("config")
+    if runtime_config is None:
+        return ""
+    if not isinstance(runtime_config, dict):
+        raise VerificationError("image config config field must be a JSON object")
+    labels = runtime_config.get("Labels")
+    if labels is None:
+        return ""
+    if not isinstance(labels, dict):
+        raise VerificationError("image config Labels field must be a JSON object")
+    revision = labels.get(OCI_REVISION_LABEL)
+    if revision is None:
+        return ""
+    if not isinstance(revision, str):
+        raise VerificationError(f"image config {OCI_REVISION_LABEL} label must be a string")
+    return revision
+
+
+def verify_image(client, top_digest, platform, expected_revision=None):
     os_name, architecture, variant = platform
     top_document, media_type, _ = client.manifest(top_digest)
     index_digest = ""
@@ -405,6 +426,12 @@ def verify_image(client, top_digest, platform):
         observed = "/".join(str(item) for item in observed_platform if item)
         raise VerificationError(f"image config platform mismatch: expected {expected}, got {observed or '<missing>'}")
 
+    oci_revision = image_revision(image_config)
+    if expected_revision is not None and oci_revision != expected_revision:
+        if not oci_revision:
+            raise VerificationError(f"image config {OCI_REVISION_LABEL} is missing")
+        raise VerificationError(f"image config {OCI_REVISION_LABEL} does not match the expected revision")
+
     total_layer_bytes = 0
     layer_digests = set()
     for index, descriptor in enumerate(layers):
@@ -418,8 +445,10 @@ def verify_image(client, top_digest, platform):
 
     return {
         "blob_count": len(layers) + 1,
+        "config_digest": config_digest,
         "index_digest": index_digest,
         "manifest_digest": manifest_digest,
+        "oci_revision": oci_revision,
         "layer_get_probe_count": len(layers),
         "platform": "/".join(item for item in platform if item),
         "request_count": client.request_count,
@@ -432,6 +461,11 @@ def main():
     parser = argparse.ArgumentParser(description="Verify an immutable OCI registry image and all pull-critical blobs.")
     parser.add_argument("--image", required=True, help="Immutable registry/repository@sha256:digest reference")
     parser.add_argument("--platform", default="linux/amd64", help="Required image platform")
+    parser.add_argument(
+        "--expected-revision",
+        default=None,
+        help="Require an exact lowercase 40-character Git revision in the OCI revision label",
+    )
     parser.add_argument("--timeout-seconds", type=float, default=20.0, help="Total registry verification timeout")
     parser.add_argument("--insecure", action="store_true", help="Allow HTTP and unverified TLS for local tests only")
     args = parser.parse_args()
@@ -439,10 +473,12 @@ def main():
     try:
         if args.timeout_seconds <= 0:
             raise VerificationError("timeout must be greater than zero")
+        if args.expected_revision is not None and GIT_REVISION_RE.fullmatch(args.expected_revision) is None:
+            raise VerificationError("expected revision must be a complete lowercase 40-character Git revision")
         registry, repository, digest = parse_image_ref(args.image)
         platform = parse_platform(args.platform)
         client = RegistryClient(registry, repository, args.timeout_seconds, args.insecure)
-        result = verify_image(client, digest, platform)
+        result = verify_image(client, digest, platform, args.expected_revision)
         result["image"] = args.image
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     except VerificationError as exc:

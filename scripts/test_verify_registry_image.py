@@ -12,6 +12,7 @@ import urllib.parse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERIFIER = REPO_ROOT / "scripts" / "verify_registry_image.py"
+FIXTURE_REVISION = "a" * 40
 
 
 def encoded(document):
@@ -24,10 +25,11 @@ def digest(data):
 
 class RegistryFixture:
     def __init__(self):
+        self.revision = FIXTURE_REVISION
         config_body = encoded(
             {
                 "architecture": "amd64",
-                "config": {},
+                "config": {"Labels": {"org.opencontainers.image.revision": self.revision}},
                 "os": "linux",
                 "rootfs": {"diff_ids": [], "type": "layers"},
             }
@@ -199,7 +201,7 @@ def fixture_handler(fixture):
     return Handler
 
 
-def run_verifier(fixture, image_digest=None, platform="linux/amd64"):
+def run_verifier(fixture, image_digest=None, platform="linux/amd64", expected_revision=None):
     server = ThreadingHTTPServer(("127.0.0.1", 0), fixture_handler(fixture))
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -207,18 +209,21 @@ def run_verifier(fixture, image_digest=None, platform="linux/amd64"):
     try:
         host, port = server.server_address
         selected_digest = image_digest or fixture.index_digest
+        command = [
+            "python3",
+            str(VERIFIER),
+            "--image",
+            f"{host}:{port}/acme/image@{selected_digest}",
+            "--platform",
+            platform,
+            "--timeout-seconds",
+            "5",
+            "--insecure",
+        ]
+        if expected_revision is not None:
+            command.extend(("--expected-revision", expected_revision))
         return subprocess.run(
-            [
-                "python3",
-                str(VERIFIER),
-                "--image",
-                f"{host}:{port}/acme/image@{selected_digest}",
-                "--platform",
-                platform,
-                "--timeout-seconds",
-                "5",
-                "--insecure",
-            ],
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -238,6 +243,8 @@ class RegistryImageVerificationTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["index_digest"], fixture.index_digest)
         self.assertEqual(payload["manifest_digest"], fixture.manifest_digest)
+        self.assertEqual(payload["config_digest"], fixture.config_digest)
+        self.assertEqual(payload["oci_revision"], fixture.revision)
         self.assertEqual(payload["platform"], "linux/amd64")
         self.assertEqual(payload["blob_count"], 2)
         self.assertEqual(payload["layer_get_probe_count"], 1)
@@ -246,6 +253,82 @@ class RegistryImageVerificationTests(unittest.TestCase):
         self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.config_digest}"), fixture.requests)
         self.assertIn(("HEAD", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
         self.assertIn(("GET", f"/v2/acme/image/blobs/{fixture.layer_digest}"), fixture.requests)
+
+    def test_expected_oci_revision_passes(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, expected_revision=fixture.revision)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wrong_expected_oci_revision_fails(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, expected_revision="b" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match the expected revision", result.stderr)
+
+    def test_missing_oci_revision_fails_only_when_required(self):
+        fixture = RegistryFixture()
+        config = json.loads(fixture.blobs[fixture.config_digest])
+        config["config"] = {}
+        self._replace_fixture_config(fixture, config)
+
+        result = run_verifier(fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["oci_revision"], "")
+
+        result = run_verifier(fixture, expected_revision=FIXTURE_REVISION)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("org.opencontainers.image.revision is missing", result.stderr)
+
+    def test_malformed_expected_revision_fails_before_network(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, expected_revision="A" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("complete lowercase 40-character Git revision", result.stderr)
+        self.assertEqual(fixture.requests, [])
+
+    def test_explicit_empty_expected_revision_fails_before_network(self):
+        fixture = RegistryFixture()
+        result = run_verifier(fixture, expected_revision="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("complete lowercase 40-character Git revision", result.stderr)
+        self.assertEqual(fixture.requests, [])
+
+    def test_malformed_oci_labels_fail(self):
+        fixture = RegistryFixture()
+        config = json.loads(fixture.blobs[fixture.config_digest])
+        config["config"]["Labels"] = ["not", "an", "object"]
+        self._replace_fixture_config(fixture, config)
+
+        result = run_verifier(fixture)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Labels field must be a JSON object", result.stderr)
+
+    @staticmethod
+    def _replace_fixture_config(fixture, config):
+        config_body = encoded(config)
+        new_config_digest = digest(config_body)
+        del fixture.blobs[fixture.config_digest]
+        fixture.blobs[new_config_digest] = config_body
+
+        manifest = json.loads(fixture.manifests[fixture.manifest_digest])
+        manifest["config"]["digest"] = new_config_digest
+        manifest["config"]["size"] = len(config_body)
+        manifest_body = encoded(manifest)
+        new_manifest_digest = digest(manifest_body)
+        del fixture.manifests[fixture.manifest_digest]
+        fixture.manifests[new_manifest_digest] = manifest_body
+
+        index = json.loads(fixture.manifests[fixture.index_digest])
+        index["manifests"][0]["digest"] = new_manifest_digest
+        index["manifests"][0]["size"] = len(manifest_body)
+        index_body = encoded(index)
+        new_index_digest = digest(index_body)
+        del fixture.manifests[fixture.index_digest]
+        fixture.manifests[new_index_digest] = index_body
+
+        fixture.config_digest = new_config_digest
+        fixture.manifest_digest = new_manifest_digest
+        fixture.index_digest = new_index_digest
 
     def test_missing_layer_fails(self):
         fixture = RegistryFixture()
