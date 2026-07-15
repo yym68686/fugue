@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,173 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+func TestOperationReadSecurityConfinesProjectsAndDeepRedactsDesiredState(t *testing.T) {
+	t.Parallel()
+
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("Operation Security Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	raiseManagedTestCap(t, s, tenant.ID)
+	projectA, err := s.CreateProject(tenant.ID, "project-a", "")
+	if err != nil {
+		t.Fatalf("create project A: %v", err)
+	}
+	projectB, err := s.CreateProject(tenant.ID, "project-b", "")
+	if err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	_, apiKey, err := s.CreateAPIKey(tenant.ID, "reader", []string{"app.read"})
+	if err != nil {
+		t.Fatalf("create API key: %v", err)
+	}
+	appA, err := s.CreateApp(tenant.ID, projectA.ID, "app-a", "", model.AppSpec{Image: "ghcr.io/example/a", Replicas: 1, RuntimeID: "runtime_managed_shared"})
+	if err != nil {
+		t.Fatalf("create app A: %v", err)
+	}
+	appB, err := s.CreateApp(tenant.ID, projectB.ID, "app-b", "", model.AppSpec{
+		Image:     "ghcr.io/example/b",
+		Replicas:  1,
+		RuntimeID: "runtime_managed_shared",
+		Postgres: &model.AppPostgresSpec{
+			Database:    "appb",
+			User:        "appb",
+			Password:    "cross-project-postgres-secret",
+			StorageSize: "1Gi",
+			Resources: &model.ResourceSpec{
+				CPUMilliCores:   750,
+				MemoryMebibytes: 1024,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app B: %v", err)
+	}
+	if len(appB.BackingServices) != 1 {
+		t.Fatalf("expected app B managed postgres, got %+v", appB.BackingServices)
+	}
+	zero := 0
+	scaleB, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, Type: model.OperationTypeScale, AppID: appB.ID, DesiredReplicas: &zero})
+	if err != nil {
+		t.Fatalf("queue app B disable: %v", err)
+	}
+	if _, err := s.CompleteManagedOperation(scaleB.ID, "", "disabled for lifecycle operation access test"); err != nil {
+		t.Fatalf("complete app B disable: %v", err)
+	}
+	appB, err = s.GetApp(appB.ID)
+	if err != nil {
+		t.Fatalf("reload disabled app B: %v", err)
+	}
+	serviceB, err := s.GetBackingService(appB.BackingServices[0].ID)
+	if err != nil {
+		t.Fatalf("reload app B managed postgres service: %v", err)
+	}
+	if serviceB.Spec.Postgres == nil {
+		t.Fatalf("app B managed postgres service is missing postgres spec: %+v", serviceB)
+	}
+
+	const (
+		envSecret        = "operation-env-secret-sentinel"
+		fileSecret       = "operation-file-secret-sentinel"
+		mountSecret      = "operation-mount-secret-sentinel"
+		postgresSecret   = "operation-postgres-secret-sentinel"
+		repositorySecret = "operation-repository-secret-sentinel"
+		repoQuerySecret  = "operation-repo-query-secret-sentinel"
+		originSecret     = "operation-origin-secret-sentinel"
+		restartSecret    = "operation-restart-secret-sentinel"
+	)
+	desiredSpec := appA.Spec
+	desiredSpec.Env = map[string]string{"API_TOKEN": envSecret, "LOG_LEVEL": "info"}
+	desiredSpec.Files = []model.AppFile{
+		{Path: "/app/public.txt", Content: "public-content"},
+		{Path: "/run/secret.txt", Content: fileSecret, Secret: true},
+	}
+	desiredSpec.PersistentStorage = &model.AppPersistentStorageSpec{
+		StorageSize: "1Gi",
+		ResetToken:  "persistent-reset-secret-sentinel",
+		Mounts: []model.AppPersistentStorageMount{{
+			Path:        "/data/seed.txt",
+			SeedContent: mountSecret,
+			Secret:      true,
+		}},
+	}
+	desiredSpec.Postgres = &model.AppPostgresSpec{Database: "app", User: "app", Password: postgresSecret, RuntimeID: "runtime_managed_shared"}
+	desiredSpec.RestartToken = restartSecret
+	desiredSource := &model.AppSource{
+		Type:          model.AppSourceTypeGitHubPrivate,
+		RepoURL:       "https://embedded-user:embedded-password@example.com/private.git?token=" + repoQuerySecret,
+		RepoAuthToken: repositorySecret,
+	}
+	opA, err := s.CreateOperation(model.Operation{
+		TenantID:      tenant.ID,
+		Type:          model.OperationTypeDeploy,
+		AppID:         appA.ID,
+		DesiredSpec:   &desiredSpec,
+		DesiredSource: desiredSource,
+		DesiredOriginSource: &model.AppSource{
+			Type:          model.AppSourceTypeGitHubPrivate,
+			RepoURL:       "https://origin-user:origin-password@origin.example.com/private.git?token=" + originSecret,
+			RepoAuthToken: originSecret,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create operation A: %v", err)
+	}
+	specB := appB.Spec
+	postgresB := *serviceB.Spec.Postgres
+	postgresB.Suspended = true
+	specB.Postgres = &postgresB
+	opB, err := s.CreateOperation(model.Operation{
+		TenantID:    tenant.ID,
+		Type:        model.OperationTypeDatabaseSuspend,
+		AppID:       appB.ID,
+		ServiceID:   serviceB.ID,
+		DesiredSpec: &specB,
+	})
+	if err != nil {
+		t.Fatalf("create operation B: %v", err)
+	}
+
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	projectPrincipal := model.Principal{TenantID: tenant.ID, ProjectID: projectA.ID}
+	if _, err := server.loadAuthorizedOperation(projectPrincipal, opA.ID); err != nil {
+		t.Fatalf("same-project operation unexpectedly denied: %v", err)
+	}
+	if _, err := server.loadAuthorizedOperation(projectPrincipal, opB.ID); !errors.Is(err, errOperationNotVisible) {
+		t.Fatalf("cross-project operation must be denied, got %v", err)
+	}
+	if effective, err := operationListProjectForPrincipal(projectPrincipal, ""); err != nil || effective != projectA.ID {
+		t.Fatalf("expected list project confinement to %s, got %q err=%v", projectA.ID, effective, err)
+	}
+	if _, err := operationListProjectForPrincipal(projectPrincipal, projectB.ID); !errors.Is(err, errOperationNotVisible) {
+		t.Fatalf("cross-project list filter must be denied, got %v", err)
+	}
+
+	for _, path := range []string{
+		"/v1/operations/" + opA.ID,
+		"/v1/operations?app_id=" + appA.ID + "&include_desired=true",
+	} {
+		recorder := performJSONRequest(t, server, http.MethodGet, path, apiKey, nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected operation read %s status 200, got %d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+		for _, secret := range []string{envSecret, fileSecret, mountSecret, postgresSecret, repositorySecret, repoQuerySecret, originSecret, restartSecret, "embedded-user", "embedded-password", "origin-user", "origin-password", "persistent-reset-secret-sentinel"} {
+			if strings.Contains(recorder.Body.String(), secret) {
+				t.Fatalf("operation read %s leaked %q: %s", path, secret, recorder.Body.String())
+			}
+		}
+		if !strings.Contains(recorder.Body.String(), "public-content") ||
+			!strings.Contains(recorder.Body.String(), "example.com/private.git") ||
+			!strings.Contains(recorder.Body.String(), apiRedactedSecretValue) {
+			t.Fatalf("operation read must preserve non-sensitive structure and include redaction markers: %s", recorder.Body.String())
+		}
+	}
+}
 
 func TestListOperationsReturnsSummariesAndGetOperationReturnsDesiredState(t *testing.T) {
 	t.Parallel()

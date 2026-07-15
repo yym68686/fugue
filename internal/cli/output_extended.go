@@ -182,6 +182,49 @@ func writeServiceTableWithContext(w io.Writer, services []model.BackingService, 
 	return tw.Flush()
 }
 
+func writeOrphanManagedAppTable(w io.Writer, orphans []orphanManagedApp) error {
+	sorted := append([]orphanManagedApp(nil), orphans...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Name == sorted[j].Name {
+			return sorted[i].AppID < sorted[j].AppID
+		}
+		return sorted[i].Name < sorted[j].Name
+	})
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "APP_ID\tNAME\tTENANT\tPROJECT\tNAMESPACE\tMANAGED_APP\tPHASE\tPOSTGRES\tSUSPENDED\tMESSAGE"); err != nil {
+		return err
+	}
+	for _, orphan := range sorted {
+		serviceNames := make([]string, 0, len(orphan.BackingServices))
+		suspended := 0
+		for _, service := range orphan.BackingServices {
+			serviceNames = append(serviceNames, firstNonEmptyTrimmed(service.Name, service.ID))
+			if service.Suspended {
+				suspended++
+			}
+		}
+		sort.Strings(serviceNames)
+		if _, err := fmt.Fprintf(
+			tw,
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\n",
+			orphan.AppID,
+			orphan.Name,
+			orphan.TenantID,
+			orphan.ProjectID,
+			orphan.Namespace,
+			orphan.ManagedAppName,
+			orphan.Phase,
+			strings.Join(serviceNames, ","),
+			suspended,
+			len(orphan.BackingServices),
+			formatAppListDetail(orphan.Message),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 func writeBindingTable(w io.Writer, bindings []model.ServiceBinding, services []model.BackingService) error {
 	serviceNames := make(map[string]string, len(services))
 	serviceTypes := make(map[string]string, len(services))

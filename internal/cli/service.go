@@ -45,6 +45,8 @@ Use "fugue app binding" to attach or detach a backing service from an app.
 		c.newServicePostgresCommand(),
 		hideCompatCommand(c.newServiceCreateCommand(), "fugue service postgres create"),
 		c.newServiceShowCommand(),
+		c.newServiceSuspendCommand(),
+		c.newServiceResumeCommand(),
 		c.newServiceMoveCommand(),
 		c.newServiceMoveProjectCommand(),
 		c.newServiceLocalizeCommand(),
@@ -138,9 +140,12 @@ func (c *CLI) newServicePostgresCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "postgres",
 		Aliases: []string{"pg"},
-		Short:   "Create postgres backing services",
+		Short:   "Manage postgres backing services",
 	}
-	cmd.AddCommand(c.newServicePostgresCreateCommand())
+	cmd.AddCommand(
+		c.newServicePostgresCreateCommand(),
+		c.newServicePostgresOrphanCommand(),
+	)
 	return cmd
 }
 

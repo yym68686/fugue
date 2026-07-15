@@ -72,6 +72,14 @@ func writeAppDatabaseImportError(w http.ResponseWriter, err error) {
 	httpx.WriteError(w, status, message)
 }
 
+func (s *Server) writeAppDatabaseImportStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrManagedPostgresDatabaseImportConflict) {
+		httpx.WriteError(w, http.StatusConflict, store.ManagedPostgresDatabaseImportConflictMessage)
+		return
+	}
+	s.writeStoreError(w, err)
+}
+
 func (s *Server) handleGetAppDatabaseImport(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.read") && !principal.HasScope("app.write") && !principal.HasScope("app.migrate") {
@@ -112,6 +120,13 @@ func (s *Server) handleImportAppDatabase(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusBadRequest, "managed postgres is not configured for this app")
 		return
 	}
+	// Avoid reading and persisting a potentially large dump when the database is
+	// already known to be unavailable. CreateAppDatabaseImportJob repeats this
+	// validation atomically with the job write to close the suspend race.
+	if err := s.store.ValidateAppDatabaseImportRunnable(app.ID); err != nil {
+		s.writeAppDatabaseImportStoreError(w, err)
+		return
+	}
 
 	req, dumpFilename, dumpContentType, dumpBytes, err := decodeAppDatabaseImportMultipart(w, r)
 	if err != nil {
@@ -130,7 +145,7 @@ func (s *Server) handleImportAppDatabase(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
-	job, err := s.store.CreateAppDatabaseImportJob(model.AppDatabaseImportJob{
+	job, err := s.createAppDatabaseImportJobWithNewUpload(upload, model.AppDatabaseImportJob{
 		AppID:                app.ID,
 		TenantID:             app.TenantID,
 		SourceUploadID:       upload.ID,
@@ -144,7 +159,7 @@ func (s *Server) handleImportAppDatabase(w http.ResponseWriter, r *http.Request)
 		RequestedByID:        principal.ActorID,
 	})
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeAppDatabaseImportStoreError(w, err)
 		return
 	}
 	s.appendAudit(principal, "app.database.import", "app", app.ID, app.TenantID, map[string]string{
@@ -159,6 +174,20 @@ func (s *Server) handleImportAppDatabase(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (s *Server) createAppDatabaseImportJobWithNewUpload(upload model.SourceUpload, candidate model.AppDatabaseImportJob) (model.AppDatabaseImportJob, error) {
+	job, err := s.store.CreateAppDatabaseImportJob(candidate)
+	if err == nil {
+		return job, nil
+	}
+	// The upload has not been published to the caller yet. Discard requires the
+	// exact ID, tenant, and one-time download capability and independently refuses
+	// any durable reference, which keeps ambiguous commit failures safe.
+	if cleanupErr := s.store.DiscardNewSourceUpload(upload); cleanupErr != nil && s.log != nil {
+		s.log.Printf("discard unreferenced database import source upload %s failed: %v", upload.ID, cleanupErr)
+	}
+	return model.AppDatabaseImportJob{}, err
+}
+
 func (s *Server) handleRetryAppDatabaseImport(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("app.migrate") {
@@ -167,6 +196,10 @@ func (s *Server) handleRetryAppDatabaseImport(w http.ResponseWriter, r *http.Req
 	}
 	app, allowed := s.loadAuthorizedApp(w, r, principal)
 	if !allowed {
+		return
+	}
+	if err := s.store.ValidateAppDatabaseImportRunnable(app.ID); err != nil {
+		s.writeAppDatabaseImportStoreError(w, err)
 		return
 	}
 	var req model.AppDatabaseImportRetryRequest
@@ -221,7 +254,7 @@ func (s *Server) handleRetryAppDatabaseImport(w http.ResponseWriter, r *http.Req
 		RequestedByID:        principal.ActorID,
 	})
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeAppDatabaseImportStoreError(w, err)
 		return
 	}
 	s.appendAudit(principal, "app.database.import.retry", "app", app.ID, app.TenantID, map[string]string{
@@ -456,6 +489,12 @@ func (s *Server) processPendingAppDatabaseImportJobs(ctx context.Context) {
 }
 
 func (s *Server) runAppDatabaseImportJob(ctx context.Context, job model.AppDatabaseImportJob) (string, error) {
+	// Claim applies the same check under the app serialization lock. Keep this
+	// final guard immediately before resolving credentials/opening PostgreSQL so
+	// alternate runners cannot bypass the lifecycle invariant.
+	if err := s.store.ValidateAppDatabaseImportRunnable(job.AppID); err != nil {
+		return "", err
+	}
 	app, err := s.store.GetApp(job.AppID)
 	if err != nil {
 		return "", err

@@ -1541,6 +1541,129 @@ func TestBuildManagedBackingServiceStatusTracksCurrentRuntime(t *testing.T) {
 	}
 }
 
+func TestBuildManagedBackingServiceClusterStatusTracksHibernationLifecycle(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	previous := runtime.ManagedAppStatus{BackingServices: []runtime.ManagedBackingServiceStatus{{
+		ServiceID:               "service_demo",
+		RuntimeKey:              "runtime_same",
+		CurrentRuntimeStartedAt: startedAt,
+		CurrentRuntimeReadyAt:   time.Date(2026, time.July, 15, 12, 1, 0, 0, time.UTC).Format(time.RFC3339Nano),
+	}}}
+	deployment := runtime.ManagedBackingServiceDeployment{
+		ServiceID:        "service_demo",
+		ResourceName:     "demo-postgres",
+		RuntimeKey:       "runtime_same",
+		DesiredInstances: 1,
+		Suspended:        true,
+	}
+	cluster := kubeCloudNativePGCluster{}
+	cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOn}
+	cluster.Spec.Instances = 1
+	cluster.Status.ReadyInstances = 1
+	cluster.Status.Conditions = []runtime.ManagedAppCondition{{
+		Type:    runtime.CloudNativePGHibernationAnno,
+		Status:  "True",
+		Reason:  "Hibernated",
+		Message: "Cluster has been hibernated",
+	}}
+
+	progressing := buildManagedBackingServiceClusterStatus(previous, deployment, cluster, true)
+	if progressing.Phase != model.ManagedPostgresRuntimePhaseSuspending {
+		t.Fatalf("expected suspending while a ready instance remains, got %q", progressing.Phase)
+	}
+	if progressing.CurrentRuntimeStartedAt != startedAt {
+		t.Fatalf("expected existing runtime start time to be preserved, got %q", progressing.CurrentRuntimeStartedAt)
+	}
+	if progressing.CurrentRuntimeReadyAt != "" {
+		t.Fatalf("expected ready time cleared until suspension fully completes, got %q", progressing.CurrentRuntimeReadyAt)
+	}
+
+	cluster.Status.ReadyInstances = 0
+	suspended := buildManagedBackingServiceClusterStatus(previous, deployment, cluster, true)
+	if suspended.Phase != model.ManagedPostgresRuntimePhaseSuspended {
+		t.Fatalf("expected suspended phase, got %q", suspended.Phase)
+	}
+	if suspended.ReadyInstances != 0 || suspended.DesiredInstances != 1 {
+		t.Fatalf("unexpected suspended capacity status: ready=%d desired=%d", suspended.ReadyInstances, suspended.DesiredInstances)
+	}
+	if suspended.CurrentRuntimeReadyAt == "" {
+		t.Fatal("expected completed suspension to record runtime readiness")
+	}
+}
+
+func TestManagedBackingServiceClusterHibernationReadinessRequiresAllEvidence(t *testing.T) {
+	t.Parallel()
+
+	suspendedDeployment := runtime.ManagedBackingServiceDeployment{DesiredInstances: 1, Suspended: true}
+	cluster := kubeCloudNativePGCluster{}
+	cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOn}
+	cluster.Spec.Instances = 1
+	cluster.Status.Conditions = []runtime.ManagedAppCondition{{
+		Type:   runtime.CloudNativePGHibernationAnno,
+		Status: "True",
+		Reason: "Hibernated",
+	}}
+	if !managedBackingServiceClusterDeploymentReady(suspendedDeployment, cluster, true) {
+		t.Fatal("expected annotation on, hibernation True, and zero ready instances to complete suspension")
+	}
+
+	cluster.Status.ReadyInstances = 1
+	if managedBackingServiceClusterDeploymentReady(suspendedDeployment, cluster, true) {
+		t.Fatal("expected a remaining ready instance to keep suspension incomplete")
+	}
+	cluster.Status.ReadyInstances = 0
+	cluster.Status.Conditions[0].Status = "False"
+	if managedBackingServiceClusterDeploymentReady(suspendedDeployment, cluster, true) {
+		t.Fatal("expected hibernation False condition to keep suspension incomplete")
+	}
+	cluster.Status.Conditions[0].Status = "True"
+	cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno] = runtime.CloudNativePGHibernationOff
+	if managedBackingServiceClusterDeploymentReady(suspendedDeployment, cluster, true) {
+		t.Fatal("expected annotation off to keep requested suspension incomplete")
+	}
+
+	activeDeployment := runtime.ManagedBackingServiceDeployment{DesiredInstances: 1}
+	cluster.Status.Conditions = nil
+	cluster.Status.ReadyInstances = 1
+	cluster.Status.CurrentPrimary = "demo-postgres-1"
+	if !managedBackingServiceClusterDeploymentReady(activeDeployment, cluster, true) {
+		t.Fatal("expected an active, non-hibernated primary to be ready")
+	}
+	delete(cluster.Metadata.Annotations, runtime.CloudNativePGHibernationAnno)
+	if !managedBackingServiceClusterDeploymentReady(activeDeployment, cluster, true) {
+		t.Fatal("expected CNPG's supported absent annotation form to remain non-hibernated")
+	}
+	cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno] = runtime.CloudNativePGHibernationOn
+	cluster.Status.Conditions = []runtime.ManagedAppCondition{{Type: runtime.CloudNativePGHibernationAnno, Status: "True"}}
+	if managedBackingServiceClusterDeploymentReady(activeDeployment, cluster, true) {
+		t.Fatal("expected a hibernated cluster to keep resume incomplete")
+	}
+}
+
+func TestManagedBackingServiceClusterRuntimeStatusReportsInvalidHibernation(t *testing.T) {
+	t.Parallel()
+
+	deployment := runtime.ManagedBackingServiceDeployment{ResourceName: "demo-postgres", DesiredInstances: 1, Suspended: true}
+	cluster := kubeCloudNativePGCluster{}
+	cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: "invalid"}
+	cluster.Status.Conditions = []runtime.ManagedAppCondition{{
+		Type:    runtime.CloudNativePGHibernationAnno,
+		Status:  "False",
+		Reason:  "WrongAnnotationValue",
+		Message: "invalid annotation value",
+	}}
+
+	phase, message := managedBackingServiceClusterRuntimeStatus(deployment, cluster, true)
+	if phase != model.ManagedPostgresRuntimePhaseError {
+		t.Fatalf("expected invalid annotation to report error, got %q", phase)
+	}
+	if !strings.Contains(message, "WrongAnnotationValue") || !strings.Contains(message, "invalid annotation value") {
+		t.Fatalf("expected condition reason and message, got %q", message)
+	}
+}
+
 func TestDeleteManagedAppResourcesDeletesExpectedNamesWhenLabelsAreMissing(t *testing.T) {
 	t.Parallel()
 
@@ -1756,6 +1879,28 @@ func TestSelectManagedAppDesiredAppRefreshesStoredBackingServicesDuringBaselineR
 	}
 	if got.Bindings[0].Env["DB_HOST"] != "demo-postgres-rw" {
 		t.Fatalf("expected binding copy to be isolated, got %+v", got.Bindings[0].Env)
+	}
+}
+
+func TestComparableManagedAppBackingServicesIgnoreObservedRuntimeStatus(t *testing.T) {
+	t.Parallel()
+
+	services := []model.BackingService{{
+		ID: "service_demo",
+		RuntimeStatus: &model.BackingServiceRuntimeStatus{
+			Phase:            model.ManagedPostgresRuntimePhaseSuspended,
+			Message:          "observed hibernation",
+			ReadyInstances:   0,
+			DesiredInstances: 1,
+		},
+	}}
+
+	comparable := comparableManagedAppBackingServices(services)
+	if len(comparable) != 1 {
+		t.Fatalf("expected one comparable backing service, got %d", len(comparable))
+	}
+	if comparable[0].RuntimeStatus != nil {
+		t.Fatalf("expected observed runtime status excluded from desired-state comparison, got %#v", comparable[0].RuntimeStatus)
 	}
 }
 
@@ -3506,6 +3651,13 @@ func TestManagedAppCloudNativePGApplyContextSkipsExistingForOnlineIntent(t *test
 	if skipExistingCloudNativePGWrites(forcedCtx) {
 		t.Fatal("expected forced CloudNativePG write to override online rollout skip")
 	}
+	lifecycleCtx := managedAppCloudNativePGApplyContext(withForceExistingCloudNativePGWrites(context.Background()), app, false)
+	if skipExistingCloudNativePGWrites(lifecycleCtx) {
+		t.Fatal("expected lifecycle-forced CloudNativePG write to override online rollout skip")
+	}
+	if !forceExistingCloudNativePGWrites(lifecycleCtx) {
+		t.Fatal("expected lifecycle force marker to survive apply context normalization")
+	}
 	app.Spec.RolloutIntent = ""
 	plainCtx := managedAppCloudNativePGApplyContext(context.Background(), app, false)
 	if skipExistingCloudNativePGWrites(plainCtx) {
@@ -3698,6 +3850,7 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	namespace := runtime.NamespaceForTenant("tenant_demo")
 	managedName := "app-demo"
 	var patchedStatus runtime.ManagedAppStatus
+	var patchedStatuses []runtime.ManagedAppStatus
 	patches := 0
 	var deleted []string
 	var scaled []string
@@ -3713,6 +3866,7 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 				t.Fatalf("decode managed app status patch: %v", err)
 			}
 			patchedStatus = body.Status
+			patchedStatuses = append(patchedStatuses, body.Status)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(`{}`)),
@@ -3803,24 +3957,327 @@ func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	if !strings.Contains(patchedStatus.Message, "app not found in store") || !strings.Contains(patchedStatus.Message, "retained storage") {
 		t.Fatalf("expected orphan status message to mention missing store app, got %q", patchedStatus.Message)
 	}
+	if len(patchedStatuses) != 2 {
+		t.Fatalf("expected transitional and verified disabled status patches, got %+v", patchedStatuses)
+	}
+	if patchedStatuses[0].Phase != runtime.ManagedAppPhaseProgressing || strings.Contains(strings.ToLower(patchedStatuses[0].Message), "retained storage") {
+		t.Fatalf("expected first status to be non-adoptable shutdown progress, got %+v", patchedStatuses[0])
+	}
+	if !managedAppOrphanWorkloadZeroVerified(patchedStatuses[1]) {
+		t.Fatalf("expected final disabled status to carry zero-workload proof, got %+v", patchedStatuses[1])
+	}
 	if len(scaled) != 1 || scaled[0] != deploymentAPIPath(namespace, managedName)+"=0" {
 		t.Fatalf("expected orphan reconcile to scale deployment to zero, got %v", scaled)
 	}
 	if len(deleted) != 1 || deleted[0] != "DELETE /api/v1/namespaces/fg-tenant-demo/services/app-demo" {
 		t.Fatalf("expected orphan reconcile to delete only app service, got deletes %v", deleted)
 	}
-	if patches != 1 {
-		t.Fatalf("expected one disabled status patch, got %d", patches)
+	if patches != 2 {
+		t.Fatalf("expected transitional and disabled status patches, got %d", patches)
 	}
 
 	managed.Status = patchedStatus
 	if err := svc.reconcileManagedAppObject(context.Background(), client, managed); err != nil {
 		t.Fatalf("reconcile unchanged disabled orphan managed app: %v", err)
 	}
-	if patches != 1 {
+	if patches != 2 {
 		t.Fatalf("expected unchanged disabled orphan status to skip patch, got %d patches", patches)
 	}
 	if strings.Contains(logs.String(), "disabled orphan managed app") {
 		t.Fatalf("expected unchanged disabled orphan status to skip repeated log, got %q", logs.String())
+	}
+}
+
+func TestDisableMissingStoreManagedAppScaleFailureNeverPublishesAdoptableMarker(t *testing.T) {
+	t.Parallel()
+
+	const reason = "orphaned managed app: app not found in store; disabled workload and retained storage for audit"
+	namespace := runtime.NamespaceForTenant("tenant_demo")
+	managedName := "app-demo"
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Name: managedName, Namespace: namespace, Generation: 3},
+		Status: runtime.ManagedAppStatus{
+			Phase:              runtime.ManagedAppPhaseDisabled,
+			Message:            reason,
+			ReadyReplicas:      0,
+			ObservedGeneration: 3,
+		},
+	}
+	var statuses []runtime.ManagedAppStatus
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && req.URL.Path == managedAppAPIPath(namespace, managedName)+"/status":
+			var body struct {
+				Status runtime.ManagedAppStatus `json:"status"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode managed app status patch: %v", err)
+			}
+			statuses = append(statuses, body.Status)
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch && req.URL.Path == deploymentAPIPath(namespace, managedName):
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader(`{"kind":"Status","message":"scale failed","code":500}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+
+	err := (&Service{}).disableMissingStoreManagedApp(context.Background(), client, namespace, managed, app, reason)
+	if err == nil || !strings.Contains(err.Error(), "scale orphan managed app deployment") {
+		t.Fatalf("expected scale failure, got %v", err)
+	}
+	if len(statuses) != 2 {
+		t.Fatalf("expected transitional then error status, got %+v", statuses)
+	}
+	if statuses[0].Phase != runtime.ManagedAppPhaseProgressing || statuses[1].Phase != runtime.ManagedAppPhaseError {
+		t.Fatalf("expected progressing/error phases, got %+v", statuses)
+	}
+	for _, status := range statuses {
+		if managedAppDisabledOrphanStatusCurrent(status, reason) {
+			t.Fatalf("scale failure must not publish adoptable marker: %+v", status)
+		}
+	}
+}
+
+func TestDisableMissingStoreManagedAppRemainingPodNeverPublishesAdoptableMarker(t *testing.T) {
+	t.Parallel()
+
+	const reason = "orphaned managed app: app not found in store; disabled workload and retained storage for audit"
+	namespace := runtime.NamespaceForTenant("tenant_demo")
+	managedName := "app-demo"
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+	managed := runtime.ManagedAppObject{
+		Metadata: runtime.ManagedAppMeta{Name: managedName, Namespace: namespace, Generation: 4},
+		Status: runtime.ManagedAppStatus{
+			Phase:              runtime.ManagedAppPhaseDisabled,
+			Message:            reason,
+			ReadyReplicas:      0,
+			ObservedGeneration: 4,
+		},
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Name = managedName
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 2
+	var statuses []runtime.ManagedAppStatus
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPatch && req.URL.Path == managedAppAPIPath(namespace, managedName)+"/status":
+			var body struct {
+				Status runtime.ManagedAppStatus `json:"status"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Fatalf("decode managed app status patch: %v", err)
+			}
+			statuses = append(statuses, body.Status)
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodPatch && req.URL.Path == deploymentAPIPath(namespace, managedName):
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/"+namespace+"/services/"+managedName:
+			return okJSONResponse(`{}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, managedName):
+			payload, err := json.Marshal(deployment)
+			if err != nil {
+				t.Fatalf("marshal deployment: %v", err)
+			}
+			return okJSONResponse(string(payload)), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+			pod := kubePod{}
+			pod.Metadata.Name = "app-demo-live"
+			payload, err := json.Marshal(kubePodList{Items: []kubePod{pod}})
+			if err != nil {
+				t.Fatalf("marshal pod list: %v", err)
+			}
+			return okJSONResponse(string(payload)), nil
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+	client := &kubeClient{
+		client:      &http.Client{Transport: transport},
+		baseURL:     "http://kube.test",
+		bearerToken: "token",
+		namespace:   namespace,
+	}
+
+	if err := (&Service{}).disableMissingStoreManagedApp(context.Background(), client, namespace, managed, app, reason); err != nil {
+		t.Fatalf("disable orphan with remaining pod: %v", err)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("expected only non-adoptable transition status while pod remains, got %+v", statuses)
+	}
+	if statuses[0].Phase != runtime.ManagedAppPhaseProgressing || strings.Contains(strings.ToLower(statuses[0].Message), "retained storage") {
+		t.Fatalf("remaining pod must not publish adoptable marker: %+v", statuses[0])
+	}
+	if managedAppOrphanWorkloadZeroVerified(statuses[0]) {
+		t.Fatalf("remaining pod must not publish zero-workload proof: %+v", statuses[0])
+	}
+}
+
+func TestDisableMissingStoreManagedAppRevalidatesExistingAdoptableMarker(t *testing.T) {
+	t.Parallel()
+
+	const reason = "orphaned managed app: app not found in store; disabled workload and retained storage for audit"
+	namespace := runtime.NamespaceForTenant("tenant_demo")
+	managedName := "app-demo"
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{Replicas: 1}}
+
+	zeroDeployment := kubeDeployment{}
+	zeroDeployment.Metadata.Name = managedName
+	zeroDeployment.Metadata.Generation = 7
+	zeroDeployment.Status.ObservedGeneration = 7
+	recreatedDeployment := zeroDeployment
+	recreatedDeployment.Status.Replicas = 1
+	recreatedDeployment.Status.UpdatedReplicas = 1
+	recreatedDeployment.Status.ReadyReplicas = 1
+	recreatedDeployment.Status.AvailableReplicas = 1
+
+	terminatingPod := kubePod{}
+	terminatingPod.Metadata.Name = "app-demo-terminating"
+	terminatingPod.Metadata.DeletionTimestamp = "2026-07-15T12:00:00Z"
+	terminatingPod.Status.Phase = "Running"
+
+	tests := []struct {
+		name             string
+		deployment       kubeDeployment
+		pods             []kubePod
+		wantPodListCalls int
+	}{
+		{
+			name:       "deployment recreated at one replica",
+			deployment: recreatedDeployment,
+		},
+		{
+			name:             "terminating pod remains after deployment reaches zero",
+			deployment:       zeroDeployment,
+			pods:             []kubePod{terminatingPod},
+			wantPodListCalls: 2,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			managed := runtime.ManagedAppObject{
+				Metadata: runtime.ManagedAppMeta{Name: managedName, Namespace: namespace, Generation: 9},
+				Status: runtime.ManagedAppStatus{
+					Phase:              runtime.ManagedAppPhaseDisabled,
+					Message:            reason,
+					ReadyReplicas:      0,
+					ObservedGeneration: 9,
+					Conditions: []runtime.ManagedAppCondition{{
+						Type:   managedAppOrphanWorkloadZeroConditionType,
+						Status: "True",
+						Reason: "Verified",
+					}},
+				},
+			}
+
+			var statuses []runtime.ManagedAppStatus
+			deploymentGets := 0
+			podListGets := 0
+			scalePatches := 0
+			serviceDeletes := 0
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch {
+				case req.Method == http.MethodPatch && req.URL.Path == managedAppAPIPath(namespace, managedName)+"/status":
+					var body struct {
+						Status runtime.ManagedAppStatus `json:"status"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+						t.Fatalf("decode managed app status patch: %v", err)
+					}
+					statuses = append(statuses, body.Status)
+					return okJSONResponse(`{}`), nil
+				case req.Method == http.MethodGet && req.URL.Path == deploymentAPIPath(namespace, managedName):
+					deploymentGets++
+					payload, err := json.Marshal(test.deployment)
+					if err != nil {
+						t.Fatalf("marshal deployment: %v", err)
+					}
+					return okJSONResponse(string(payload)), nil
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/namespaces/"+namespace+"/pods":
+					podListGets++
+					payload, err := json.Marshal(kubePodList{Items: test.pods})
+					if err != nil {
+						t.Fatalf("marshal pod list: %v", err)
+					}
+					return okJSONResponse(string(payload)), nil
+				case req.Method == http.MethodPatch && req.URL.Path == deploymentAPIPath(namespace, managedName):
+					scalePatches++
+					return okJSONResponse(`{}`), nil
+				case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/namespaces/"+namespace+"/services/"+managedName:
+					serviceDeletes++
+					return okJSONResponse(`{}`), nil
+				default:
+					t.Fatalf("unexpected request %s %s", req.Method, req.URL.String())
+					return nil, nil
+				}
+			})
+			client := &kubeClient{
+				client:      &http.Client{Transport: transport},
+				baseURL:     "http://kube.test",
+				bearerToken: "token",
+				namespace:   namespace,
+			}
+
+			if err := (&Service{}).disableMissingStoreManagedApp(context.Background(), client, namespace, managed, app, reason); err != nil {
+				t.Fatalf("revalidate existing orphan marker: %v", err)
+			}
+			if len(statuses) != 1 {
+				t.Fatalf("expected stale proof to be revoked without a new terminal marker, got %+v", statuses)
+			}
+			status := statuses[0]
+			if status.Phase != runtime.ManagedAppPhaseProgressing || managedAppOrphanWorkloadZeroVerified(status) {
+				t.Fatalf("expected non-adoptable progressing status after stale proof, got %+v", status)
+			}
+			if managedAppDisabledOrphanStatusCurrent(status, reason) {
+				t.Fatalf("stale proof must not remain adoptable: %+v", status)
+			}
+			if deploymentGets != 2 {
+				t.Fatalf("expected workload proof before and after shutdown retry, got %d deployment reads", deploymentGets)
+			}
+			if podListGets != test.wantPodListCalls {
+				t.Fatalf("expected %d pod-list reads, got %d", test.wantPodListCalls, podListGets)
+			}
+			if scalePatches != 1 || serviceDeletes != 1 {
+				t.Fatalf("expected shutdown retry after stale proof, got scale=%d service-delete=%d", scalePatches, serviceDeletes)
+			}
+		})
+	}
+}
+
+func TestManagedAppOrphanDeploymentAtZeroRequiresObservedZeroStatus(t *testing.T) {
+	t.Parallel()
+
+	if !managedAppOrphanDeploymentAtZero(kubeDeployment{}, false) {
+		t.Fatal("expected a missing deployment to count as zero")
+	}
+	deployment := kubeDeployment{}
+	deployment.Metadata.Generation = 2
+	deployment.Status.ObservedGeneration = 1
+	if managedAppOrphanDeploymentAtZero(deployment, true) {
+		t.Fatal("expected stale deployment status to remain transitional")
+	}
+	deployment.Status.ObservedGeneration = 2
+	if !managedAppOrphanDeploymentAtZero(deployment, true) {
+		t.Fatal("expected fully observed zero deployment status")
+	}
+	deployment.Status.ReadyReplicas = 1
+	if managedAppOrphanDeploymentAtZero(deployment, true) {
+		t.Fatal("expected any ready replica to block orphan adoption marker")
 	}
 }

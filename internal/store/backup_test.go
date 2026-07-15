@@ -582,6 +582,220 @@ func TestClaimBackupRunIsAtomicAndHonorsRetryDueTime(t *testing.T) {
 	})
 }
 
+func TestManagedPostgresSuspendAndBackupRunAreMutuallyExclusive(t *testing.T) {
+	t.Run("pending and running database backups block suspend without cancellation", func(t *testing.T) {
+		for _, claim := range []bool{false, true} {
+			name := "pending"
+			if claim {
+				name = "running"
+			}
+			t.Run(name, func(t *testing.T) {
+				stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
+				run, err := stateStore.CreateBackupRun(managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerManual))
+				if err != nil {
+					t.Fatalf("create app database backup run: %v", err)
+				}
+				if claim {
+					if _, err := stateStore.ClaimBackupRun(run.ID, "backup-worker", time.Now().UTC(), 2*time.Minute); err != nil {
+						t.Fatalf("claim app database backup run: %v", err)
+					}
+				}
+				if _, err := stateStore.CreateOperation(model.Operation{
+					TenantID:  app.TenantID,
+					Type:      model.OperationTypeDatabaseSuspend,
+					AppID:     app.ID,
+					ServiceID: service.ID,
+				}); !errors.Is(err, ErrManagedPostgresBackupInProgressConflict) {
+					t.Fatalf("expected %s database backup to block suspend, got %v", name, err)
+				}
+				stored, err := stateStore.GetBackupRun(run.ID, app.TenantID, false)
+				if err != nil {
+					t.Fatalf("get backup run after rejected suspend: %v", err)
+				}
+				wantStatus := model.BackupRunStatusPending
+				if claim {
+					wantStatus = model.BackupRunStatusRunning
+				}
+				if stored.Status != wantStatus {
+					t.Fatalf("suspend must not cancel or mutate backup run: %+v", stored)
+				}
+				operations, err := stateStore.ListOperationsByApp(app.TenantID, false, app.ID)
+				if err != nil {
+					t.Fatalf("list app operations: %v", err)
+				}
+				for _, op := range operations {
+					if op.Type == model.OperationTypeDatabaseSuspend && isActiveOperationStatus(op.Status) {
+						t.Fatalf("rejected suspend leaked an active operation: %+v", op)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("active suspend rejects a new database backup", func(t *testing.T) {
+		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
+		if _, err := stateStore.CreateOperation(model.Operation{
+			TenantID:  app.TenantID,
+			Type:      model.OperationTypeDatabaseSuspend,
+			AppID:     app.ID,
+			ServiceID: service.ID,
+		}); err != nil {
+			t.Fatalf("create database suspend operation: %v", err)
+		}
+		if _, err := stateStore.CreateBackupRun(managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerManual)); !errors.Is(err, ErrManagedPostgresSuspendBackupConflict) {
+			t.Fatalf("expected active suspend to reject database backup create, got %v", err)
+		}
+		runs, err := stateStore.ListBackupRuns(BackupRunFilter{TenantID: app.TenantID, PlatformAdmin: false})
+		if err != nil {
+			t.Fatalf("list backup runs: %v", err)
+		}
+		if len(runs) != 0 {
+			t.Fatalf("rejected backup create leaked a run: %+v", runs)
+		}
+	})
+
+	t.Run("claim atomically fails a legacy pending run during suspend", func(t *testing.T) {
+		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
+		if _, err := stateStore.CreateOperation(model.Operation{
+			TenantID:  app.TenantID,
+			Type:      model.OperationTypeDatabaseSuspend,
+			AppID:     app.ID,
+			ServiceID: service.ID,
+		}); err != nil {
+			t.Fatalf("create database suspend operation: %v", err)
+		}
+		run := managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerScheduled)
+		run.ID = model.NewID("backup_run")
+		run.CreatedAt = time.Now().UTC().Add(-time.Minute)
+		run.UpdatedAt = run.CreatedAt
+		if err := stateStore.withLockedState(true, func(state *model.State) error {
+			state.BackupRuns = append(state.BackupRuns, model.NormalizeBackupRun(run))
+			return nil
+		}); err != nil {
+			t.Fatalf("seed legacy pending backup run: %v", err)
+		}
+
+		failed, err := stateStore.ClaimBackupRun(run.ID, "scheduled-worker", time.Now().UTC(), 2*time.Minute)
+		if !errors.Is(err, ErrManagedPostgresSuspendBackupConflict) {
+			t.Fatalf("expected claim to fail deterministically during suspend, got run=%+v err=%v", failed, err)
+		}
+		if failed.Status != model.BackupRunStatusFailed ||
+			failed.ErrorCode != ManagedPostgresSuspendBackupConflictCode ||
+			failed.ErrorMessage != ManagedPostgresSuspendBackupConflictMessage ||
+			failed.FinishedAt == nil {
+			t.Fatalf("unexpected terminal suspended backup run: %+v", failed)
+		}
+		stored, err := stateStore.GetBackupRun(run.ID, app.TenantID, false)
+		if err != nil {
+			t.Fatalf("reread failed backup run: %v", err)
+		}
+		if stored.Status != model.BackupRunStatusFailed || stored.ErrorCode != ManagedPostgresSuspendBackupConflictCode {
+			t.Fatalf("terminal failure was not persisted: %+v", stored)
+		}
+		if _, err := stateStore.ClaimBackupRun(run.ID, "second-worker", time.Now().UTC(), 2*time.Minute); !errors.Is(err, ErrConflict) {
+			t.Fatalf("terminal failed backup run must not be claimable again, got %v", err)
+		}
+	})
+
+	t.Run("other backup targets remain available during suspend", func(t *testing.T) {
+		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
+		if _, err := stateStore.CreateOperation(model.Operation{
+			TenantID:  app.TenantID,
+			Type:      model.OperationTypeDatabaseSuspend,
+			AppID:     app.ID,
+			ServiceID: service.ID,
+		}); err != nil {
+			t.Fatalf("create database suspend operation: %v", err)
+		}
+		run, err := stateStore.CreateBackupRun(model.BackupRun{
+			TenantID:  app.TenantID,
+			ProjectID: app.ProjectID,
+			AppID:     app.ID,
+			Target: model.BackupTarget{
+				Type:      model.BackupTargetPersistentStorage,
+				TenantID:  app.TenantID,
+				ProjectID: app.ProjectID,
+				AppID:     app.ID,
+				RuntimeID: app.Spec.RuntimeID,
+			},
+			BackendID: backend.ID,
+			Trigger:   model.BackupRunTriggerScheduled,
+			Status:    model.BackupRunStatusPending,
+		})
+		if err != nil {
+			t.Fatalf("create non-database backup during suspend: %v", err)
+		}
+		claimed, err := stateStore.ClaimBackupRun(run.ID, "storage-worker", time.Now().UTC(), 2*time.Minute)
+		if err != nil || claimed.Status != model.BackupRunStatusRunning {
+			t.Fatalf("non-database backup was blocked by postgres suspend: run=%+v err=%v", claimed, err)
+		}
+	})
+
+	t.Run("concurrent create admits exactly one side", func(t *testing.T) {
+		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		go func() {
+			<-start
+			_, err := stateStore.CreateOperation(model.Operation{
+				TenantID:  app.TenantID,
+				Type:      model.OperationTypeDatabaseSuspend,
+				AppID:     app.ID,
+				ServiceID: service.ID,
+			})
+			results <- err
+		}()
+		go func() {
+			<-start
+			_, err := stateStore.CreateBackupRun(managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerScheduled))
+			results <- err
+		}()
+		close(start)
+
+		succeeded := 0
+		conflicted := 0
+		for range 2 {
+			err := <-results
+			switch {
+			case err == nil:
+				succeeded++
+			case errors.Is(err, ErrManagedPostgresSuspendBackupConflict), errors.Is(err, ErrManagedPostgresBackupInProgressConflict):
+				conflicted++
+			default:
+				t.Fatalf("unexpected concurrent create result: %v", err)
+			}
+		}
+		if succeeded != 1 || conflicted != 1 {
+			t.Fatalf("expected one winner and one interlock conflict, got succeeded=%d conflicted=%d", succeeded, conflicted)
+		}
+
+		operations, err := stateStore.ListOperationsByApp(app.TenantID, false, app.ID)
+		if err != nil {
+			t.Fatalf("list operations after race: %v", err)
+		}
+		activeSuspend := false
+		for _, op := range operations {
+			if op.Type == model.OperationTypeDatabaseSuspend && isActiveOperationStatus(op.Status) {
+				activeSuspend = true
+			}
+		}
+		runs, err := stateStore.ListBackupRuns(BackupRunFilter{TenantID: app.TenantID})
+		if err != nil {
+			t.Fatalf("list backup runs after race: %v", err)
+		}
+		activeBackup := false
+		for _, run := range runs {
+			if run.Target.Type == model.BackupTargetAppDatabase &&
+				(run.Status == model.BackupRunStatusPending || run.Status == model.BackupRunStatusRunning) {
+				activeBackup = true
+			}
+		}
+		if activeSuspend == activeBackup {
+			t.Fatalf("interlock invariant violated: active_suspend=%t active_backup=%t", activeSuspend, activeBackup)
+		}
+	})
+}
+
 func TestRecoverStaleBackupRunUsesObservedLeaseCAS(t *testing.T) {
 	t.Parallel()
 
@@ -893,6 +1107,102 @@ func newBackupClaimTestStore(t *testing.T) (*Store, model.BackupBackend, model.B
 		t.Fatalf("create backup policy: %v", err)
 	}
 	return stateStore, backend, policy
+}
+
+func newManagedPostgresBackupInterlockTestStore(t *testing.T) (*Store, model.App, model.BackingService, model.BackupBackend) {
+	t.Helper()
+
+	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Backup Suspend Interlock")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "apps", "")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := stateStore.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
+		CPUMilliCores:    4000,
+		MemoryMebibytes:  8192,
+		StorageGibibytes: 20,
+	}); err != nil {
+		t.Fatalf("raise tenant capacity: %v", err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "postgres-app", "", model.AppSpec{
+		Image:     "ghcr.io/example/app:latest",
+		RuntimeID: model.DefaultManagedRuntimeID,
+		Replicas:  1,
+		Postgres: &model.AppPostgresSpec{
+			Database:    "appdb",
+			User:        "appuser",
+			Password:    "secret",
+			StorageSize: "1Gi",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create app with managed postgres: %v", err)
+	}
+	zero := 0
+	scale, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        tenant.ID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &zero,
+	})
+	if err != nil {
+		t.Fatalf("create scale-to-zero operation: %v", err)
+	}
+	if _, err := stateStore.CompleteManagedOperation(scale.ID, "", "app disabled"); err != nil {
+		t.Fatalf("complete scale-to-zero operation: %v", err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get disabled app: %v", err)
+	}
+	var service model.BackingService
+	for idx := range app.BackingServices {
+		candidate := app.BackingServices[idx]
+		if candidate.Type == model.BackingServiceTypePostgres && candidate.Spec.Postgres != nil {
+			service = candidate
+			break
+		}
+	}
+	if service.ID == "" {
+		t.Fatal("managed postgres backing service not found")
+	}
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{
+		TenantID: tenant.ID,
+		Name:     "tenant-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "tenant-bucket",
+		Endpoint: "https://tenant.example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create backup backend: %v", err)
+	}
+	return stateStore, app, service, backend
+}
+
+func managedPostgresInterlockBackupRun(app model.App, service model.BackingService, backend model.BackupBackend, trigger string) model.BackupRun {
+	return model.BackupRun{
+		TenantID:  app.TenantID,
+		ProjectID: app.ProjectID,
+		AppID:     app.ID,
+		Target: model.BackupTarget{
+			Type:        model.BackupTargetAppDatabase,
+			TenantID:    app.TenantID,
+			ProjectID:   app.ProjectID,
+			AppID:       app.ID,
+			ServiceName: service.Spec.Postgres.ServiceName,
+			Database:    service.Spec.Postgres.Database,
+		},
+		BackendID: backend.ID,
+		Trigger:   trigger,
+		Status:    model.BackupRunStatusPending,
+	}
 }
 
 func TestBackupUsageCountsBillableR2BytesWithMarkup(t *testing.T) {

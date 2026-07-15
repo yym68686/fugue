@@ -2723,6 +2723,13 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
+	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, app.ID, "")
+	if err != nil {
+		return model.App{}, err
+	}
+	if activeLifecycle {
+		return model.App{}, ErrConflict
+	}
 
 	spec := cloneAppSpec(&desiredSpec)
 	if spec == nil {
@@ -2730,6 +2737,12 @@ func (s *Store) pgSyncObservedManagedPostgresSpec(id string, desiredSpec model.A
 	}
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
+	}
+	if err := validateManagedPostgresSuspensionTransition(spec.Postgres, ManagedPostgresSpecForOperation(app, "")); err != nil {
+		return model.App{}, err
+	}
+	if spec.Replicas > 0 && appHasSuspendedManagedPostgres(app) {
+		return model.App{}, ErrConflict
 	}
 	if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, spec); err != nil {
 		return model.App{}, err
@@ -2766,6 +2779,13 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
+	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, app.ID, "")
+	if err != nil {
+		return model.App{}, err
+	}
+	if activeLifecycle {
+		return model.App{}, ErrConflict
+	}
 
 	spec := cloneAppSpec(&desiredSpec)
 	if spec == nil {
@@ -2773,6 +2793,12 @@ func (s *Store) pgSyncObservedManagedAppBaseline(id string, desiredSpec model.Ap
 	}
 	if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
 		return model.App{}, err
+	}
+	if err := validateManagedPostgresSuspensionTransition(spec.Postgres, ManagedPostgresSpecForOperation(app, "")); err != nil {
+		return model.App{}, err
+	}
+	if spec.Replicas > 0 && appHasSuspendedManagedPostgres(app) {
+		return model.App{}, ErrConflict
 	}
 	if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, spec); err != nil {
 		return model.App{}, err
@@ -2990,7 +3016,10 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	}
 	defer tx.Rollback()
 
-	lockApp := op.Type == model.OperationTypeDeploy || policy.RejectActiveDeployForApp || policy.RejectNoopDeploy
+	// Every app operation creation serializes on the app row. This closes the
+	// race where a scale/deploy could be queued after suspend was accepted but
+	// before the suspended desired state was persisted.
+	lockApp := true
 	app, err := s.pgGetAppTx(ctx, tx, op.AppID, lockApp)
 	if err != nil {
 		return model.Operation{}, operationCreateOutcome{}, mapDBErr(err)
@@ -3008,6 +3037,25 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 		if err := ensureManagedPostgresPasswordWithExisting(op.DesiredSpec.Postgres, OwnedManagedPostgresSpec(app)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
+		if err := validateManagedPostgresSuspensionForOperation(
+			op.Type,
+			op.DesiredSpec.Postgres,
+			ManagedPostgresSpecForOperation(app, op.ServiceID),
+		); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+	}
+	if !isManagedPostgresLifecycleOperationType(op.Type) {
+		activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, app.ID, "")
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if activeLifecycle {
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+	}
+	if err := validateManagedPostgresActiveForOperation(app, op); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
 	}
 
 	switch op.Type {
@@ -3469,8 +3517,50 @@ WHERE app_id = $1
 		}
 		op.SourceRuntimeID = sourceRuntimeID
 		op.TargetRuntimeID = targetRuntimeID
+	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
+		if err := s.pgValidateManagedPostgresLifecycleTargetTx(ctx, tx, &app, op.ServiceID); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if err := prepareManagedPostgresLifecycleOperation(app, &op, op.Type == model.OperationTypeDatabaseSuspend); err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		active, err := s.pgActiveOperationsForLifecycleTargetTx(ctx, tx, app.ID, op.ServiceID)
+		if err != nil {
+			return model.Operation{}, operationCreateOutcome{}, err
+		}
+		if len(active) > 0 {
+			if len(active) == 1 && managedPostgresLifecycleRetryMatches(active[0], op) {
+				return active[0], operationCreateOutcome{
+					ExistingOperationID:     active[0].ID,
+					ReusedExistingOperation: true,
+				}, nil
+			}
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+		if op.Type == model.OperationTypeDatabaseSuspend && appHasDesiredOrCurrentReplicas(app) {
+			return model.Operation{}, operationCreateOutcome{}, ErrConflict
+		}
+		if op.Type == model.OperationTypeDatabaseSuspend {
+			activeBackup, err := s.pgHasActiveAppDatabaseBackupRunForManagedPostgresTx(ctx, tx, app, op.ServiceID)
+			if err != nil {
+				return model.Operation{}, operationCreateOutcome{}, err
+			}
+			if activeBackup {
+				return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresBackupInProgressConflict
+			}
+			activeImport, err := s.pgHasActiveAppDatabaseImportJobForManagedPostgresTx(ctx, tx, app, op.ServiceID)
+			if err != nil {
+				return model.Operation{}, operationCreateOutcome{}, err
+			}
+			if activeImport {
+				return model.Operation{}, operationCreateOutcome{}, ErrManagedPostgresImportInProgressConflict
+			}
+		}
 	default:
 		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
+	}
+	if operationWouldRunApp(app, op) && appHasSuspendedManagedPostgres(app) {
+		return model.Operation{}, operationCreateOutcome{}, ErrConflict
 	}
 	if err := pgValidateOperationRuntimeReservationsTx(ctx, tx, app.ProjectID, op); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
@@ -3535,6 +3625,38 @@ INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode, reque
 		return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("commit create operation transaction: %w", err)
 	}
 	return op, operationCreateOutcome{Decision: AutoscalingDeployDecisionQueued}, nil
+}
+
+func (s *Store) pgActiveOperationsForLifecycleTargetTx(ctx context.Context, tx *sql.Tx, appID, serviceID string) ([]model.Operation, error) {
+	appID = strings.TrimSpace(appID)
+	serviceID = strings.TrimSpace(serviceID)
+	if appID == "" || serviceID == "" {
+		return nil, ErrInvalidInput
+	}
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested_by_id, app_id, service_id, source_runtime_id, target_runtime_id, desired_replicas, desired_spec_json, desired_source_json, result_message, manifest_path, assigned_runtime_id, error_message, created_at, updated_at, started_at, completed_at
+FROM fugue_operations
+WHERE (app_id = $1 OR service_id = $2)
+  AND status IN ($3, $4, $5)
+ORDER BY created_at ASC, id ASC
+`, appID, serviceID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent)
+	if err != nil {
+		return nil, fmt.Errorf("list in-flight app operations: %w", err)
+	}
+	defer rows.Close()
+
+	active := make([]model.Operation, 0, 1)
+	for rows.Next() {
+		op, err := scanOperation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan in-flight app operation: %w", err)
+		}
+		active = append(active, op)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate in-flight app operations: %w", err)
+	}
+	return active, nil
 }
 
 func (s *Store) pgListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
@@ -4048,7 +4170,7 @@ FOR UPDATE SKIP LOCKED
 	}
 
 	now := time.Now().UTC()
-	if op.Type == model.OperationTypeImport {
+	if operationRequiresManagedController(op.Type) {
 		op.Status = model.OperationStatusRunning
 		op.ExecutionMode = model.ExecutionModeManaged
 		op.StartedAt = &now
@@ -4144,7 +4266,7 @@ JOIN next_op n ON n.id = o.id
 	}
 
 	now := time.Now().UTC()
-	if op.Type == model.OperationTypeImport {
+	if operationRequiresManagedController(op.Type) {
 		op.Status = model.OperationStatusRunning
 		op.ExecutionMode = model.ExecutionModeManaged
 		op.StartedAt = &now
@@ -4257,13 +4379,14 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 	if !operationCanTransitionToCompleted(op) {
 		return model.Operation{}, ErrConflict
 	}
-	if desiredSpec != nil {
+	lifecycleOperation := isManagedPostgresLifecycleOperationType(op.Type)
+	if desiredSpec != nil && !lifecycleOperation {
 		op.DesiredSpec = cloneAppSpec(desiredSpec)
 	}
-	if desiredSource != nil {
+	if desiredSource != nil && !lifecycleOperation {
 		op.DesiredSource = cloneAppSource(desiredSource)
 	}
-	if desiredOriginSource != nil {
+	if desiredOriginSource != nil && !lifecycleOperation {
 		op.DesiredOriginSource = cloneAppSource(desiredOriginSource)
 	}
 
@@ -4287,7 +4410,13 @@ func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string,
 		}
 	}
 	if operationAppliesDesiredSpecBackingServices(op) {
-		if err := s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec); err != nil {
+		var err error
+		if op.Type == model.OperationTypeDatabaseSuspend || op.Type == model.OperationTypeDatabaseResume {
+			err = s.pgApplyManagedPostgresLifecycleTx(ctx, tx, &app, &op)
+		} else {
+			err = s.pgApplyDesiredSpecBackingServicesTx(ctx, tx, &app, op.DesiredSpec)
+		}
+		if err != nil {
 			return model.Operation{}, err
 		}
 	}
@@ -5691,15 +5820,19 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		if err := applyCompletedFailoverToAppModel(app, op); err != nil {
 			return err
 		}
-	case model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize:
+	case model.OperationTypeDatabaseSwitchover,
+		model.OperationTypeDatabaseLocalize:
 		if op.DesiredSpec == nil {
 			return ErrInvalidInput
 		}
 		app.Spec = *op.DesiredSpec
+	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
+		// The exact backing service lifecycle intent is applied transactionally
+		// before this model update. AppSpec must remain untouched.
 	default:
 		return ErrInvalidInput
 	}
-	if op.Type != model.OperationTypeDatabaseSwitchover && op.Type != model.OperationTypeDatabaseLocalize {
+	if !isManagedPostgresServiceOperation(op.Type) {
 		app.Status.LastOperationID = op.ID
 		app.Status.LastMessage = op.ResultMessage
 	}
@@ -5709,7 +5842,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 }
 
 func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error {
-	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
+	if isManagedPostgresServiceOperation(op.Type) {
 		return nil
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -5729,7 +5862,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 }
 
 func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
-	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
+	if isManagedPostgresServiceOperation(op.Type) {
 		return
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {

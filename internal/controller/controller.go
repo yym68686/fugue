@@ -736,6 +736,14 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				}
 				return err
 			}
+			if errors.Is(err, errManagedPostgresLifecycleOwnershipUnknown) {
+				if _, requeueErr := s.Store.RequeueManagedOperation(op.ID, "operation requeued because managed postgres lifecycle ownership could not be verified"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) && !errors.Is(requeueErr, store.ErrNotFound) {
+					// Keep the operation running when the Store is unavailable. Startup
+					// recovery will requeue managed operations once persistence returns.
+					s.Logger.Printf("operation %s requeue after lifecycle ownership check failed: %v", op.ID, requeueErr)
+				}
+				return nil
+			}
 			if errors.Is(err, errOperationNoLongerActive) {
 				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
 				return nil
@@ -791,6 +799,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executeManagedDatabaseSwitchoverOperation(ctx, op, app)
 	case model.OperationTypeDatabaseLocalize:
 		return s.executeManagedDatabaseLocalizeOperation(ctx, op, app)
+	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
+		return s.executeManagedDatabaseLifecycleOperation(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

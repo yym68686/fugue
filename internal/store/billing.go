@@ -1090,6 +1090,10 @@ func postgresEffectiveResources(spec model.AppPostgresSpec) model.BillingResourc
 	if spec.Resources != nil {
 		compute = *spec.Resources
 	}
+	if spec.Suspended {
+		compute.CPUMilliCores = 0
+		compute.MemoryMebibytes = 0
+	}
 	return model.BillingResourceSpec{
 		CPUMilliCores:    compute.CPUMilliCores,
 		MemoryMebibytes:  compute.MemoryMebibytes,

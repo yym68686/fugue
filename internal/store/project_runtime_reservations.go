@@ -255,6 +255,20 @@ func validateOperationRuntimeReservationsState(state *model.State, projectID str
 		if op.Type == model.OperationTypeDatabaseLocalize && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
 			return validateRuntimeReservedForProjectState(state, projectID, op.DesiredSpec.Postgres.RuntimeID)
 		}
+	case model.OperationTypeDatabaseSuspend:
+		// Suspending is a capacity-reducing safety operation. It must remain
+		// available even if a stale reservation no longer describes the live
+		// database placement.
+		return nil
+	case model.OperationTypeDatabaseResume:
+		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+			return ErrInvalidInput
+		}
+		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, *op.DesiredSpec.Postgres) {
+			if err := validateRuntimeReservedForProjectState(state, projectID, runtimeID); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

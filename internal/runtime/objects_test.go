@@ -577,8 +577,12 @@ func TestBuildPostgresClusterUsesFailoverPlacementsAndAntiAffinity(t *testing.T)
 		t.Fatalf("expected deduplicated postgres tolerations, got %d", len(tolerations))
 	}
 	metadata := objects[3]["metadata"].(map[string]any)
-	if _, ok := metadata["annotations"]; ok {
-		t.Fatalf("expected failover cluster without pending rebalance to omit annotations, got %#v", metadata["annotations"])
+	annotations, ok := metadata["annotations"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected failover cluster annotations, got %#v", metadata["annotations"])
+	}
+	if got := annotations[CloudNativePGHibernationAnno]; got != CloudNativePGHibernationOff {
+		t.Fatalf("expected active postgres hibernation annotation %q, got %#v", CloudNativePGHibernationOff, got)
 	}
 }
 
@@ -2541,6 +2545,99 @@ func TestManagedBackingServiceDeploymentsUseCNPGCluster(t *testing.T) {
 	}
 	if deployments[0].RuntimeKey == "" {
 		t.Fatal("expected runtime key for CNPG cluster")
+	}
+	if deployments[0].Suspended {
+		t.Fatal("expected active managed postgres deployment")
+	}
+	if deployments[0].DesiredInstances != 1 {
+		t.Fatalf("expected desired instances 1, got %d", deployments[0].DesiredInstances)
+	}
+}
+
+func TestBuildPostgresClusterAnnotationsDeclareHibernationState(t *testing.T) {
+	t.Parallel()
+
+	active := buildPostgresClusterAnnotations(model.AppPostgresSpec{})
+	if got := active[CloudNativePGHibernationAnno]; got != CloudNativePGHibernationOff {
+		t.Fatalf("expected active postgres annotation %q, got %q", CloudNativePGHibernationOff, got)
+	}
+
+	suspended := buildPostgresClusterAnnotations(model.AppPostgresSpec{Suspended: true})
+	if got := suspended[CloudNativePGHibernationAnno]; got != CloudNativePGHibernationOn {
+		t.Fatalf("expected suspended postgres annotation %q, got %q", CloudNativePGHibernationOn, got)
+	}
+
+	withRebalanceHold := buildPostgresClusterAnnotations(model.AppPostgresSpec{
+		Suspended:                        true,
+		PrimaryPlacementPendingRebalance: true,
+	})
+	if got := withRebalanceHold[CloudNativePGHibernationAnno]; got != CloudNativePGHibernationOn {
+		t.Fatalf("expected hibernation annotation to survive placement hold, got %q", got)
+	}
+	if got := withRebalanceHold[CloudNativePGReconcilePodSpecAnno]; got != CloudNativePGReconcilePodSpecHold {
+		t.Fatalf("expected placement reconciliation hold %q, got %q", CloudNativePGReconcilePodSpecHold, got)
+	}
+
+	activeObject := buildPostgresClusterObject("tenant-demo", "demo-secret", "demo-postgres", nil, model.AppPostgresSpec{
+		Database:    "demo",
+		User:        "demo",
+		ServiceName: "demo-postgres",
+		Instances:   1,
+	}, nil)
+	legacyObject := buildPostgresClusterObject("tenant-demo", "demo-secret", "demo-postgres", nil, model.AppPostgresSpec{
+		Database:    "demo",
+		User:        "demo",
+		ServiceName: "demo-postgres",
+		Instances:   1,
+	}, nil)
+	delete(legacyObject["metadata"].(map[string]any), "annotations")
+	if activeKey, legacyKey := managedDeploymentRuntimeKey(activeObject), managedDeploymentRuntimeKey(legacyObject); activeKey != legacyKey {
+		t.Fatalf("expected explicit active off state to preserve historical runtime key, active=%q legacy=%q", activeKey, legacyKey)
+	}
+}
+
+func TestManagedBackingServiceDeploymentsCarrySuspendedDesiredState(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_suspended",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		BackingServices: []model.BackingService{{
+			ID:          "service_postgres",
+			Name:        "demo-postgres",
+			Type:        model.BackingServiceTypePostgres,
+			Provisioner: model.BackingServiceProvisionerManaged,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				ServiceName: "demo-postgres",
+				Instances:   3,
+				Suspended:   true,
+			}},
+		}},
+		Bindings: []model.ServiceBinding{{
+			AppID:     "app_suspended",
+			ServiceID: "service_postgres",
+		}},
+	}
+
+	deployments := ManagedBackingServiceDeployments(app, SchedulingConstraints{})
+	if len(deployments) != 1 {
+		t.Fatalf("expected one managed postgres deployment, got %d", len(deployments))
+	}
+	if !deployments[0].Suspended {
+		t.Fatal("expected suspended desired state on rollout target")
+	}
+	if deployments[0].DesiredInstances != 3 {
+		t.Fatalf("expected desired instances 3, got %d", deployments[0].DesiredInstances)
+	}
+	suspendedRuntimeKey := deployments[0].RuntimeKey
+	app.BackingServices[0].Spec.Postgres.Suspended = false
+	activeDeployments := ManagedBackingServiceDeployments(app, SchedulingConstraints{})
+	if len(activeDeployments) != 1 {
+		t.Fatalf("expected one active managed postgres deployment, got %d", len(activeDeployments))
+	}
+	if activeDeployments[0].RuntimeKey == suspendedRuntimeKey {
+		t.Fatal("expected hibernation lifecycle transition to change the backing service runtime key")
 	}
 }
 

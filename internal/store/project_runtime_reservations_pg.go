@@ -279,6 +279,20 @@ func pgValidateOperationRuntimeReservationsTx(ctx context.Context, tx *sql.Tx, p
 			runtimeIDs = append(runtimeIDs, op.DesiredSpec.Postgres.RuntimeID)
 		}
 		return pgValidateRuntimesReservedForProjectTx(ctx, tx, projectID, runtimeIDs)
+	case model.OperationTypeDatabaseSuspend:
+		// Keep suspension available as a capacity-reducing safety operation
+		// even when the reservation record has drifted from the live cluster.
+		return nil
+	case model.OperationTypeDatabaseResume:
+		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+			return ErrInvalidInput
+		}
+		return pgValidateRuntimesReservedForProjectTx(
+			ctx,
+			tx,
+			projectID,
+			managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, *op.DesiredSpec.Postgres),
+		)
 	}
 	return nil
 }

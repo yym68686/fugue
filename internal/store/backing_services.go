@@ -61,6 +61,9 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 	if tenantID == "" || projectID == "" || strings.TrimSpace(name) == "" {
 		return model.BackingService{}, ErrInvalidInput
 	}
+	if spec.Postgres != nil && spec.Postgres.Suspended {
+		return model.BackingService{}, ErrInvalidInput
+	}
 	if s.usingDatabase() {
 		return s.pgCreateBackingService(tenantID, projectID, name, description, spec)
 	}
@@ -129,6 +132,9 @@ func (s *Store) DeleteBackingService(id string) (model.BackingService, error) {
 		if isDeletedBackingService(service) {
 			return ErrNotFound
 		}
+		if hasInFlightManagedPostgresLifecycleForService(state.Operations, id) {
+			return ErrConflict
+		}
 		if hasServiceBindings(state, id) {
 			return ErrConflict
 		}
@@ -156,7 +162,13 @@ func (s *Store) UpdateBackingServiceSpec(id string, spec model.BackingServiceSpe
 		if isDeletedBackingService(next) {
 			return ErrNotFound
 		}
+		if hasInFlightManagedPostgresLifecycleForService(state.Operations, id) {
+			return ErrConflict
+		}
 		beforeRuntimeID := backingServiceSpecRuntimeID(next)
+		if err := validateManagedPostgresSuspensionTransition(spec.Postgres, next.Spec.Postgres); err != nil {
+			return err
+		}
 		next.Spec = cloneBackingServiceSpec(spec)
 		next.UpdatedAt = time.Now().UTC()
 		if err := normalizeBackingServiceForPersist(&next, nil); err != nil {
@@ -225,6 +237,13 @@ func (s *Store) BindBackingService(tenantID, appID, serviceID, alias string, env
 		if isDeletedBackingService(service) || service.TenantID != tenantID {
 			return ErrNotFound
 		}
+		if managedPostgresServiceIsSuspended(service) {
+			return ErrConflict
+		}
+		if hasInFlightManagedPostgresLifecycleForService(state.Operations, serviceID) ||
+			hasInFlightManagedPostgresLifecycleForApp(state.Operations, appID) {
+			return ErrConflict
+		}
 		if findServiceBindingByAppAndService(state, appID, serviceID) >= 0 {
 			return ErrConflict
 		}
@@ -274,6 +293,13 @@ func (s *Store) UnbindBackingService(bindingID string) (model.ServiceBinding, er
 			return ErrNotFound
 		}
 		binding = cloneServiceBinding(state.ServiceBindings[index])
+		if hasInFlightManagedPostgresLifecycleForService(state.Operations, binding.ServiceID) {
+			return ErrConflict
+		}
+		serviceIndex := findBackingService(state, binding.ServiceID)
+		if serviceIndex >= 0 && managedPostgresServiceIsSuspended(state.BackingServices[serviceIndex]) {
+			return ErrConflict
+		}
 		state.ServiceBindings = append(state.ServiceBindings[:index], state.ServiceBindings[index+1:]...)
 		return nil
 	})
@@ -292,6 +318,9 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 		now := time.Now().UTC()
 		service := cloneBackingService(state.BackingServices[serviceIndex])
 		if err := ensureManagedPostgresPasswordWithExisting(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
+			return err
+		}
+		if err := validateManagedPostgresSuspensionTransition(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
 			return err
 		}
 		if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
@@ -317,6 +346,9 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
 		return err
 	}
+	if desiredSpec.Postgres.Suspended {
+		return ErrInvalidInput
+	}
 	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
 		return err
 	}
@@ -330,6 +362,47 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	state.BackingServices = append(state.BackingServices, service)
 	state.ServiceBindings = append(state.ServiceBindings, binding)
 	desiredSpec.Postgres = nil
+	return nil
+}
+
+func applyManagedPostgresLifecycleState(state *model.State, app *model.App, op *model.Operation) error {
+	if state == nil || app == nil || op == nil || op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		return ErrInvalidInput
+	}
+	serviceID := strings.TrimSpace(op.ServiceID)
+	serviceIndex := findBackingService(state, serviceID)
+	if serviceID == "" || serviceIndex < 0 {
+		return ErrInvalidInput
+	}
+	service := cloneBackingService(state.BackingServices[serviceIndex])
+	if service.TenantID != app.TenantID || service.ProjectID != app.ProjectID || !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+		return ErrInvalidInput
+	}
+	ownerAppID := strings.TrimSpace(service.OwnerAppID)
+	if ownerAppID != strings.TrimSpace(app.ID) {
+		if ownerAppID != "" || findServiceBindingByAppAndService(state, app.ID, service.ID) < 0 {
+			return ErrInvalidInput
+		}
+	}
+	wantSuspended := op.Type == model.OperationTypeDatabaseSuspend
+	if op.Type != model.OperationTypeDatabaseSuspend && op.Type != model.OperationTypeDatabaseResume {
+		return ErrInvalidInput
+	}
+	if op.DesiredSpec.Postgres.Suspended != wantSuspended {
+		return ErrInvalidInput
+	}
+	postgres := *service.Spec.Postgres
+	if service.Spec.Postgres.Resources != nil {
+		resources := *service.Spec.Postgres.Resources
+		postgres.Resources = &resources
+	}
+	postgres.Suspended = wantSuspended
+	service.Spec.Postgres = &postgres
+	service.UpdatedAt = time.Now().UTC()
+	state.BackingServices[serviceIndex] = service
+	// PostgreSQL remains externalized from AppSpec. Only the exact backing
+	// service selected by ServiceID is changed by this operation.
+	op.DesiredSpec.Postgres = nil
 	return nil
 }
 
@@ -381,6 +454,10 @@ func isDeletedBackingService(service model.BackingService) bool {
 func cloneBackingService(service model.BackingService) model.BackingService {
 	out := service
 	out.Spec = cloneBackingServiceSpec(service.Spec)
+	if service.RuntimeStatus != nil {
+		status := *service.RuntimeStatus
+		out.RuntimeStatus = &status
+	}
 	return out
 }
 
@@ -709,6 +786,153 @@ func OwnedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 		return &normalized
 	}
 
+	return nil
+}
+
+func prepareManagedPostgresLifecycleOperation(app model.App, op *model.Operation, suspended bool) error {
+	if op == nil {
+		return ErrInvalidInput
+	}
+	target, err := ManagedPostgresOperationTargetForApp(app, op.ServiceID)
+	if err != nil || target == nil || target.Service == nil || strings.TrimSpace(target.ServiceID) == "" {
+		return ErrInvalidInput
+	}
+	ownerAppID := strings.TrimSpace(target.Service.OwnerAppID)
+	if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
+		return ErrInvalidInput
+	}
+	// Lifecycle operations are deliberately narrow. Ignore a caller-supplied
+	// app spec so suspend/resume cannot smuggle unrelated workload changes into
+	// the completion transaction.
+	op.DesiredSpec = cloneAppSpec(&app.Spec)
+	if op.DesiredSpec == nil {
+		return ErrInvalidInput
+	}
+	postgresCopy := target.Postgres
+	if target.Postgres.Resources != nil {
+		resources := *target.Postgres.Resources
+		postgresCopy.Resources = &resources
+	}
+	postgresCopy.Suspended = suspended
+	op.DesiredSpec.Postgres = &postgresCopy
+	op.ServiceID = strings.TrimSpace(target.ServiceID)
+	runtimeID := strings.TrimSpace(postgresCopy.RuntimeID)
+	if runtimeID == "" {
+		runtimeID = strings.TrimSpace(app.Spec.RuntimeID)
+	}
+	op.SourceRuntimeID = runtimeID
+	op.TargetRuntimeID = runtimeID
+	if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateManagedPostgresSuspensionTransition(desired, current *model.AppPostgresSpec) error {
+	if desired == nil {
+		return nil
+	}
+	if current == nil {
+		if desired.Suspended {
+			return ErrInvalidInput
+		}
+		return nil
+	}
+	if desired.Suspended != current.Suspended {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func validateManagedPostgresSuspensionForOperation(operationType string, desired, current *model.AppPostgresSpec) error {
+	if operationType == model.OperationTypeDatabaseSuspend || operationType == model.OperationTypeDatabaseResume {
+		return nil
+	}
+	return validateManagedPostgresSuspensionTransition(desired, current)
+}
+
+func validateManagedPostgresLifecycleTargetState(state *model.State, app model.App, serviceID string) error {
+	if state == nil {
+		return ErrInvalidInput
+	}
+	serviceID = strings.TrimSpace(serviceID)
+	serviceIndex := findBackingService(state, serviceID)
+	if serviceID == "" || serviceIndex < 0 {
+		return ErrInvalidInput
+	}
+	service := state.BackingServices[serviceIndex]
+	if service.TenantID != app.TenantID || service.ProjectID != app.ProjectID || !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+		return ErrInvalidInput
+	}
+	ownerAppID := strings.TrimSpace(service.OwnerAppID)
+	if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
+		return ErrConflict
+	}
+	bindingCount := 0
+	for _, binding := range state.ServiceBindings {
+		if strings.TrimSpace(binding.ServiceID) != serviceID {
+			continue
+		}
+		bindingCount++
+		if strings.TrimSpace(binding.AppID) != strings.TrimSpace(app.ID) || binding.TenantID != app.TenantID {
+			return ErrConflict
+		}
+	}
+	if bindingCount != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func managedPostgresServiceIsSuspended(service model.BackingService) bool {
+	return isManagedPostgresService(service) && service.Spec.Postgres != nil && service.Spec.Postgres.Suspended
+}
+
+func appHasSuspendedManagedPostgres(app model.App) bool {
+	if app.Spec.Postgres != nil && app.Spec.Postgres.Suspended {
+		return true
+	}
+	for _, service := range app.BackingServices {
+		if managedPostgresServiceIsSuspended(service) {
+			return true
+		}
+	}
+	return false
+}
+
+func appHasDesiredOrCurrentReplicas(app model.App) bool {
+	return app.Spec.Replicas > 0 || app.Status.CurrentReplicas > 0
+}
+
+func operationWouldRunApp(app model.App, op model.Operation) bool {
+	switch op.Type {
+	case model.OperationTypeImport, model.OperationTypeDeploy:
+		return op.DesiredSpec != nil && op.DesiredSpec.Replicas > 0
+	case model.OperationTypeScale:
+		return op.DesiredReplicas != nil && *op.DesiredReplicas > 0
+	case model.OperationTypeMigrate, model.OperationTypeFailover:
+		if op.DesiredSpec != nil {
+			return op.DesiredSpec.Replicas > 0
+		}
+		return app.Spec.Replicas > 0 || app.Status.CurrentReplicas > 0
+	default:
+		return false
+	}
+}
+
+func validateManagedPostgresActiveForOperation(app model.App, op model.Operation) error {
+	switch op.Type {
+	case model.OperationTypeMigrate,
+		model.OperationTypeFailover,
+		model.OperationTypeDatabaseSwitchover,
+		model.OperationTypeDatabaseLocalize:
+	default:
+		return nil
+	}
+	postgres := ManagedPostgresSpecForOperation(app, op.ServiceID)
+	if postgres != nil && postgres.Suspended {
+		return ErrConflict
+	}
 	return nil
 }
 

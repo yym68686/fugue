@@ -57,6 +57,91 @@ func (s *Store) CreateSourceUpload(tenantID, filename, contentType string, archi
 	return upload, nil
 }
 
+// DiscardNewSourceUpload is intentionally narrow: it only accepts the complete
+// capability returned by CreateSourceUpload, and refuses to remove an upload
+// once any durable product object references it. It exists for compensating a
+// failed create immediately after an upload; it is not a general delete API.
+func (s *Store) DiscardNewSourceUpload(upload model.SourceUpload) error {
+	if upload.ID == "" || upload.TenantID == "" || strings.TrimSpace(upload.DownloadToken) == "" ||
+		upload.ID != strings.TrimSpace(upload.ID) || upload.TenantID != strings.TrimSpace(upload.TenantID) ||
+		filepath.Base(upload.ID) != upload.ID || strings.ContainsAny(upload.ID, `/\`) {
+		return ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgDiscardNewSourceUpload(upload)
+	}
+
+	// withFileLockedState uses an exclusive process/file lock even for read-only
+	// state access. Holding it across reference validation and deletion prevents
+	// a job/operation writer from publishing this upload between the two steps.
+	return s.withLockedState(false, func(state *model.State) error {
+		metadataPath := s.sourceUploadMetadataPath(upload.ID)
+		metadataBytes, err := os.ReadFile(metadataPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("read new source upload metadata for discard: %w", err)
+		}
+		var envelope sourceUploadFileEnvelope
+		if err := json.Unmarshal(metadataBytes, &envelope); err != nil {
+			return fmt.Errorf("unmarshal new source upload metadata for discard: %w", err)
+		}
+		storedTokenHash := sha256.Sum256([]byte(envelope.DownloadToken))
+		providedTokenHash := sha256.Sum256([]byte(upload.DownloadToken))
+		tokenMatches := subtle.ConstantTimeCompare(storedTokenHash[:], providedTokenHash[:])
+		if envelope.Upload.ID != upload.ID ||
+			envelope.Upload.TenantID != upload.TenantID ||
+			tokenMatches != 1 {
+			return ErrNotFound
+		}
+		if sourceUploadReferencedInState(state, upload.ID) {
+			return ErrConflict
+		}
+
+		// Remove the sensitive archive first. If metadata removal then fails, the
+		// remaining record contains no dump and the error makes the partial cleanup
+		// observable for a later repair.
+		if err := os.Remove(s.sourceUploadArchivePath(upload.ID)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove new source upload archive: %w", err)
+		}
+		if err := os.Remove(metadataPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove new source upload metadata after archive removal: %w", err)
+		}
+		return nil
+	})
+}
+
+func sourceUploadReferencedInState(state *model.State, uploadID string) bool {
+	if state == nil || strings.TrimSpace(uploadID) == "" {
+		return false
+	}
+	uploadID = strings.TrimSpace(uploadID)
+	for _, job := range state.AppDatabaseImportJobs {
+		if strings.TrimSpace(job.SourceUploadID) == uploadID {
+			return true
+		}
+	}
+	for _, app := range state.Apps {
+		if appSourceReferencesUpload(app.Source, uploadID) ||
+			appSourceReferencesUpload(app.OriginSource, uploadID) ||
+			appSourceReferencesUpload(app.BuildSource, uploadID) {
+			return true
+		}
+	}
+	for _, operation := range state.Operations {
+		if appSourceReferencesUpload(operation.DesiredSource, uploadID) ||
+			appSourceReferencesUpload(operation.DesiredOriginSource, uploadID) {
+			return true
+		}
+	}
+	return false
+}
+
+func appSourceReferencesUpload(source *model.AppSource, uploadID string) bool {
+	return source != nil && strings.TrimSpace(source.UploadID) == strings.TrimSpace(uploadID)
+}
+
 func (s *Store) GetSourceUpload(id string) (model.SourceUpload, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -197,6 +282,80 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		return model.SourceUpload{}, mapDBErr(err)
 	}
 	return upload, nil
+}
+
+func (s *Store) pgDiscardNewSourceUpload(upload model.SourceUpload) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin new source upload discard transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var lockedID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT id
+FROM fugue_source_uploads
+WHERE id = $1 AND tenant_id = $2 AND download_token = $3
+FOR UPDATE
+`, upload.ID, upload.TenantID, upload.DownloadToken).Scan(&lockedID); err != nil {
+		return mapDBErr(err)
+	}
+	var referenced bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_app_database_import_jobs
+	WHERE source_upload_id = $1 AND tenant_id = $2
+	UNION ALL
+	SELECT 1
+	FROM fugue_apps
+	WHERE tenant_id = $2
+	  AND (
+		source_json->>'upload_id' = $1
+		OR source_json->'origin_source'->>'upload_id' = $1
+		OR source_json->'build_source'->>'upload_id' = $1
+	  )
+	UNION ALL
+	SELECT 1
+	FROM fugue_operations
+	WHERE tenant_id = $2
+	  AND (
+		desired_source_json->>'upload_id' = $1
+		OR desired_source_json->'desired_source'->>'upload_id' = $1
+		OR desired_source_json->'desired_origin_source'->>'upload_id' = $1
+	  )
+)
+`, upload.ID, upload.TenantID).Scan(&referenced); err != nil {
+		return fmt.Errorf("check new source upload references before discard: %w", err)
+	}
+	if referenced {
+		return ErrConflict
+	}
+
+	var deletedID string
+	if err := tx.QueryRowContext(ctx, `
+DELETE FROM fugue_source_uploads AS upload
+WHERE upload.id = $1
+  AND upload.tenant_id = $2
+  AND upload.download_token = $3
+  AND NOT EXISTS (
+	SELECT 1
+	FROM fugue_app_database_import_jobs AS import_job
+	WHERE import_job.source_upload_id = upload.id
+	)
+RETURNING upload.id
+`, upload.ID, upload.TenantID, upload.DownloadToken).Scan(&deletedID); err != nil {
+		if mapped := mapDBErr(err); mapped == ErrNotFound {
+			return ErrConflict
+		}
+		return mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit new source upload discard transaction: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) pgGetSourceUpload(id string) (model.SourceUpload, error) {

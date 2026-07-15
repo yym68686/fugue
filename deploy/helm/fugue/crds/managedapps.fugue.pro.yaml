@@ -109,6 +109,37 @@ spec:
                   type: string
                 lastAppliedTime:
                   type: string
+                currentReleaseKey:
+                  type: string
+                currentReleaseStartedAt:
+                  type: string
+                currentReleaseReadyAt:
+                  type: string
+                pendingReleaseKey:
+                  type: string
+                pendingReleaseStartedAt:
+                  type: string
+                backingServices:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      serviceID:
+                        type: string
+                      runtimeKey:
+                        type: string
+                      phase:
+                        type: string
+                      message:
+                        type: string
+                      readyInstances:
+                        type: integer
+                      desiredInstances:
+                        type: integer
+                      currentRuntimeStartedAt:
+                        type: string
+                      currentRuntimeReadyAt:
+                        type: string
                 conditions:
                   type: array
                   items:

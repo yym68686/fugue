@@ -372,6 +372,10 @@ func TestOverlayAppStatusFromManagedAppOverlaysRuntimeTimestamps(t *testing.T) {
 			BackingServices: []ManagedBackingServiceStatus{
 				{
 					ServiceID:               "service_demo",
+					Phase:                   model.ManagedPostgresRuntimePhaseSuspended,
+					Message:                 "cluster hibernated",
+					ReadyInstances:          0,
+					DesiredInstances:        1,
 					CurrentRuntimeStartedAt: serviceStartedAt.Format(time.RFC3339Nano),
 					CurrentRuntimeReadyAt:   serviceReadyAt.Format(time.RFC3339Nano),
 				},
@@ -390,5 +394,33 @@ func TestOverlayAppStatusFromManagedAppOverlaysRuntimeTimestamps(t *testing.T) {
 	}
 	if updated.BackingServices[0].CurrentRuntimeReadyAt == nil || !updated.BackingServices[0].CurrentRuntimeReadyAt.Equal(serviceReadyAt) {
 		t.Fatalf("expected service ready at %s, got %#v", serviceReadyAt.Format(time.RFC3339Nano), updated.BackingServices[0].CurrentRuntimeReadyAt)
+	}
+	if updated.BackingServices[0].RuntimeStatus == nil {
+		t.Fatal("expected observed backing service runtime status")
+	}
+	if got := updated.BackingServices[0].RuntimeStatus.Phase; got != model.ManagedPostgresRuntimePhaseSuspended {
+		t.Fatalf("expected suspended runtime phase, got %q", got)
+	}
+	if got := updated.BackingServices[0].RuntimeStatus.Message; got != "cluster hibernated" {
+		t.Fatalf("expected runtime message to be overlaid, got %q", got)
+	}
+	if got := updated.BackingServices[0].RuntimeStatus.DesiredInstances; got != 1 {
+		t.Fatalf("expected desired instances 1, got %d", got)
+	}
+}
+
+func TestOverlayAppStatusFromManagedAppNormalizesLegacyBackingServicePhase(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{BackingServices: []model.BackingService{{ID: "service_demo"}}}
+	updated := OverlayAppStatusFromManagedApp(app, ManagedAppObject{Status: ManagedAppStatus{
+		BackingServices: []ManagedBackingServiceStatus{{ServiceID: "service_demo"}},
+	}})
+
+	if updated.BackingServices[0].RuntimeStatus == nil {
+		t.Fatal("expected legacy managed status to produce an observed runtime status")
+	}
+	if got := updated.BackingServices[0].RuntimeStatus.Phase; got != model.ManagedPostgresRuntimePhaseUnknown {
+		t.Fatalf("expected legacy empty phase to normalize to unknown, got %q", got)
 	}
 }

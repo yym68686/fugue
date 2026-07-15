@@ -206,6 +206,44 @@ type backingServiceMigrateResponse struct {
 	AlreadyCurrent bool                 `json:"already_current,omitempty"`
 }
 
+type backingServiceLifecycleResponse struct {
+	BackingService model.BackingService `json:"backing_service"`
+	Operation      *model.Operation     `json:"operation,omitempty"`
+	AlreadyCurrent bool                 `json:"already_current"`
+}
+
+type orphanBackingServiceSummary struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	RuntimeID   string `json:"runtime_id,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
+	StorageSize string `json:"storage_size,omitempty"`
+	Suspended   bool   `json:"suspended"`
+}
+
+type orphanManagedApp struct {
+	AppID           string                        `json:"app_id"`
+	TenantID        string                        `json:"tenant_id"`
+	ProjectID       string                        `json:"project_id"`
+	Name            string                        `json:"name"`
+	Namespace       string                        `json:"namespace"`
+	ManagedAppName  string                        `json:"managed_app_name"`
+	Phase           string                        `json:"phase"`
+	Message         string                        `json:"message,omitempty"`
+	BackingServices []orphanBackingServiceSummary `json:"backing_services"`
+}
+
+type orphanManagedAppListResponse struct {
+	Orphans []orphanManagedApp `json:"orphans"`
+}
+
+type orphanManagedAppAdoptResponse struct {
+	App             model.App              `json:"app"`
+	BackingServices []model.BackingService `json:"backing_services"`
+	AlreadyAdopted  bool                   `json:"already_adopted"`
+}
+
 type createBackingServiceRequest struct {
 	TenantID    string                   `json:"tenant_id,omitempty"`
 	ProjectID   string                   `json:"project_id,omitempty"`
@@ -1123,6 +1161,42 @@ func (c *Client) MigrateBackingService(id, targetRuntimeID string) (backingServi
 	request := map[string]string{"target_runtime_id": strings.TrimSpace(targetRuntimeID)}
 	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "migrate"), request, &response); err != nil {
 		return backingServiceMigrateResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) SuspendBackingService(id string) (backingServiceLifecycleResponse, error) {
+	return c.setBackingServiceSuspended(id, true)
+}
+
+func (c *Client) ResumeBackingService(id string) (backingServiceLifecycleResponse, error) {
+	return c.setBackingServiceSuspended(id, false)
+}
+
+func (c *Client) setBackingServiceSuspended(id string, suspended bool) (backingServiceLifecycleResponse, error) {
+	action := "resume"
+	if suspended {
+		action = "suspend"
+	}
+	var response backingServiceLifecycleResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, action), nil, &response); err != nil {
+		return backingServiceLifecycleResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ListOrphanManagedApps() ([]orphanManagedApp, error) {
+	var response orphanManagedAppListResponse
+	if err := c.doJSON(http.MethodGet, "/v1/backing-services/orphans", nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Orphans, nil
+}
+
+func (c *Client) AdoptOrphanManagedApp(appID string) (orphanManagedAppAdoptResponse, error) {
+	var response orphanManagedAppAdoptResponse
+	if err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services/orphans", appID, "adopt"), nil, &response); err != nil {
+		return orphanManagedAppAdoptResponse{}, err
 	}
 	return response, nil
 }

@@ -101,6 +101,7 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 	t.Parallel()
 
 	stateStore, server, apiKey, app, op := setupOperationEvidenceAPITest(t)
+	const evidencePayloadSecret = "operation-evidence-payload-secret-sentinel"
 	recorded, err := stateStore.RecordOperationEvidence(model.OperationEvidence{
 		TenantID:        app.TenantID,
 		ProjectID:       app.ProjectID,
@@ -111,9 +112,22 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 		Severity:        model.OperationEvidenceSeverityError,
 		Confidence:      model.OperationEvidenceConfidenceConfirmed,
 		Summary:         "captured previous logs",
-		Message:         "startup failed",
+		Message:         "startup failed; DATABASE_URL=postgres://api:" + evidencePayloadSecret + "@database:5432/app",
 		RedactionStatus: model.OperationEvidenceRedactionRedacted,
-		Payload:         map[string]any{"log_tail": "startup failed: apply schema"},
+		Payload: map[string]any{
+			"log_tail": "startup failed: apply schema",
+			"snapshot": map[string]any{
+				"spec": map[string]any{
+					"env":      map[string]any{"API_TOKEN": evidencePayloadSecret, "LOG_LEVEL": "debug"},
+					"postgres": map[string]any{"password": evidencePayloadSecret},
+					"files": []any{map[string]any{
+						"path":    "/run/secret",
+						"content": evidencePayloadSecret,
+						"secret":  true,
+					}},
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("record evidence: %v", err)
@@ -142,6 +156,9 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 	if evidenceResponse.Evidence[0].Payload["log_tail"] != "startup failed: apply schema" {
 		t.Fatalf("expected payload when requested, got %+v", evidenceResponse.Evidence[0].Payload)
 	}
+	if strings.Contains(recorder.Body.String(), evidencePayloadSecret) || !strings.Contains(recorder.Body.String(), apiRedactedSecretValue) {
+		t.Fatalf("operation evidence payload was not deeply redacted: %s", recorder.Body.String())
+	}
 
 	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/timeline", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -150,6 +167,10 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 	if !strings.Contains(recorder.Body.String(), model.OperationEvidenceTypeOperationCreated) || !strings.Contains(recorder.Body.String(), recorded.ID) {
 		t.Fatalf("expected timeline to include operation and evidence, got %s", recorder.Body.String())
 	}
+	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/timeline?include_payload=true", apiKey, nil)
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), evidencePayloadSecret) || !strings.Contains(recorder.Body.String(), apiRedactedSecretValue) {
+		t.Fatalf("operation timeline payload was not deeply redacted: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 
 	recorder = performJSONRequest(t, server, http.MethodGet, "/v1/operations/"+op.ID+"/debug-bundle", apiKey, nil)
 	if recorder.Code != http.StatusOK {
@@ -157,6 +178,9 @@ func TestOperationEvidenceAPIListsTimelineBundleAndEnforcesTenant(t *testing.T) 
 	}
 	if !strings.Contains(recorder.Body.String(), "operation_debug_bundle") || !strings.Contains(recorder.Body.String(), recorded.ID) {
 		t.Fatalf("expected debug bundle metadata/evidence, got %s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), evidencePayloadSecret) {
+		t.Fatalf("operation debug bundle leaked evidence payload secret: %s", recorder.Body.String())
 	}
 	assertDebugBundleSecretsRedacted(t, recorder.Body.String())
 

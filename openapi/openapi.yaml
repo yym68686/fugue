@@ -4214,6 +4214,79 @@ paths:
                 additionalProperties: true
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/orphans:
+    get:
+      operationId: listManagedPostgresOrphans
+      summary: List Adoptable Managed Postgres Orphans
+      description: >-
+        Platform-administrator inventory of retained managed PostgreSQL resources
+        whose app record is missing. Only ManagedApps with a current controller
+        proof that the app Deployment and all matching Pods are at zero are listed.
+      tags: [Backing Services]
+      x-fugue-handler: handleListManagedPostgresOrphans
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanListResponse"
+        '503':
+          description: A fresh ManagedApp inventory cannot be obtained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/orphans/{app_id}/adopt:
+    post:
+      operationId: adoptManagedPostgresOrphan
+      summary: Adopt A Retained Managed Postgres Orphan
+      description: >-
+        Recreates missing Fugue app, backing-service, and binding records without
+        deleting or rewriting the retained runtime resources. Before the first
+        adoption, Fugue revalidates ManagedApp identity, zero app workload, CNPG
+        cluster ownership, and at least one non-deleting Bound PVC per cluster.
+      tags: [Backing Services]
+      x-fugue-handler: handleAdoptManagedPostgresOrphan
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: app_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Orphan already adopted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanAdoptResponse"
+        '201':
+          description: Orphan adopted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedPostgresOrphanAdoptResponse"
+        '409':
+          description: The resource is not an exact, current, zero-workload orphan with live retained PostgreSQL storage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: Fresh Kubernetes identity, workload, cluster, or PVC evidence cannot be obtained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backing-services/{id}:
     get:
       operationId: getBackingService
@@ -4259,6 +4332,98 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/suspend:
+    post:
+      operationId: suspendBackingService
+      summary: Suspend Managed Postgres Backing Service
+      description: >-
+        Hibernates an existing managed PostgreSQL service with its PVCs retained.
+        Every bound app must be stopped; Fugue verifies fresh zero replica status
+        and then, immediately before changing CNPG, verifies that no matching app
+        Pod remains, including terminating Pods. Active app-database backups or
+        imports block suspension. Hibernation disconnects PostgreSQL clients and
+        does not revoke existing database access grants or replace a backup.
+      tags: [Backing Services]
+      x-fugue-handler: handleSuspendBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Backing service is already suspended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceLifecycleResponse"
+        '202':
+          description: Suspend operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceLifecycleResponse"
+        '409':
+          description: A bound app, conflicting operation, backup, import, binding change, or lifecycle topology precondition blocks suspension.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: Fresh ManagedApp or managed PostgreSQL runtime evidence cannot be obtained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/resume:
+    post:
+      operationId: resumeBackingService
+      summary: Resume Managed Postgres Backing Service
+      description: >-
+        Rehydrates a suspended managed PostgreSQL service from its retained PVCs.
+        Completion requires the hibernation condition to clear and a settled,
+        ready primary; remaining replicas may continue recovering. Resume does
+        not start a bound app automatically.
+      tags: [Backing Services]
+      x-fugue-handler: handleResumeBackingService
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Backing service is already active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceLifecycleResponse"
+        '202':
+          description: Resume operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceLifecycleResponse"
+        '402':
+          description: Resuming billable compute is blocked because the tenant balance is depleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '409':
+          description: An opposite lifecycle operation, topology conflict, runtime reservation, billing limit, or managed-capacity limit blocks resume.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: Fresh managed PostgreSQL runtime evidence cannot be obtained.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps:
@@ -6213,6 +6378,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        '409':
+          description: The managed PostgreSQL service is suspended or a database suspend operation is in flight.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         '413':
           description: The JSON request field, dump file, or complete multipart request exceeds its byte limit.
           content:
@@ -6250,6 +6421,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AppDatabaseImportResponse"
+        '409':
+          description: The managed PostgreSQL service is suspended, a database suspend operation is in flight, or the selected job cannot be retried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/database/access:
@@ -8596,6 +8773,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackupRunResponse"
+        '409':
+          description: Managed PostgreSQL target is suspended; resume it before starting an app-database backup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/backups/runs/{id}:
@@ -8896,6 +9079,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackupRunResponse"
+        '409':
+          description: Managed PostgreSQL target is suspended; resume it before starting an app-database backup.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/data/backends:
@@ -15313,6 +15502,10 @@ components:
         synchronous_replicas:
           type: integer
           format: int32
+        suspended:
+          type: boolean
+          readOnly: true
+          description: Whether the managed Postgres service is configured to hibernate with its PVCs retained. Change this state only through the backing-service suspend and resume endpoints.
         resources:
           $ref: "#/components/schemas/ResourceSpec"
     BackingServiceSpec:
@@ -15346,6 +15539,8 @@ components:
           type: string
         spec:
           $ref: "#/components/schemas/BackingServiceSpec"
+        runtime_status:
+          $ref: "#/components/schemas/BackingServiceRuntimeStatus"
         current_resource_usage:
           $ref: "#/components/schemas/ResourceUsage"
         current_runtime_started_at:
@@ -15360,6 +15555,24 @@ components:
         updated_at:
           type: string
           format: date-time
+    BackingServiceRuntimeStatus:
+      type: object
+      additionalProperties: false
+      required: [phase, ready_instances, desired_instances]
+      properties:
+        phase:
+          type: string
+          enum: [active, suspending, suspended, resuming, error, unknown]
+        message:
+          type: string
+        ready_instances:
+          type: integer
+          format: int32
+          minimum: 0
+        desired_instances:
+          type: integer
+          format: int32
+          minimum: 0
     ServiceBinding:
       type: object
       additionalProperties: false
@@ -21152,6 +21365,83 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/BackingService"
+    BackingServiceLifecycleResponse:
+      type: object
+      additionalProperties: false
+      required: [backing_service, already_current]
+      properties:
+        backing_service:
+          $ref: "#/components/schemas/BackingService"
+        operation:
+          $ref: "#/components/schemas/Operation"
+        already_current:
+          type: boolean
+    ManagedPostgresOrphanBackingServiceSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, suspended]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        runtime_id:
+          type: string
+        service_name:
+          type: string
+        storage_size:
+          type: string
+        suspended:
+          type: boolean
+    ManagedPostgresOrphanSummary:
+      type: object
+      additionalProperties: false
+      required: [app_id, tenant_id, project_id, name, namespace, managed_app_name, phase, backing_services]
+      properties:
+        app_id:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
+          type: string
+        name:
+          type: string
+        namespace:
+          type: string
+        managed_app_name:
+          type: string
+        phase:
+          type: string
+        message:
+          type: string
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagedPostgresOrphanBackingServiceSummary"
+    ManagedPostgresOrphanListResponse:
+      type: object
+      additionalProperties: false
+      required: [orphans]
+      properties:
+        orphans:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManagedPostgresOrphanSummary"
+    ManagedPostgresOrphanAdoptResponse:
+      type: object
+      additionalProperties: false
+      required: [app, backing_services, already_adopted]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        backing_services:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackingService"
+        already_adopted:
+          type: boolean
     BackingServiceMigrateResponse:
       type: object
       additionalProperties: false

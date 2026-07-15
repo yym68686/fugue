@@ -140,6 +140,7 @@ func renderBackingServiceWithContext(w io.Writer, service model.BackingService, 
 			kvPair{Key: "user", Value: service.Spec.Postgres.User},
 			kvPair{Key: "service_name", Value: service.Spec.Postgres.ServiceName},
 			kvPair{Key: "storage_size", Value: service.Spec.Postgres.StorageSize},
+			kvPair{Key: "desired_suspended", Value: strconv.FormatBool(service.Spec.Postgres.Suspended)},
 		)
 		if service.Spec.Postgres.Instances > 0 {
 			pairs = append(pairs, kvPair{Key: "instances", Value: formatInt(service.Spec.Postgres.Instances)})
@@ -147,6 +148,19 @@ func renderBackingServiceWithContext(w io.Writer, service model.BackingService, 
 		if service.Spec.Postgres.SynchronousReplicas > 0 {
 			pairs = append(pairs, kvPair{Key: "sync_replicas", Value: formatInt(service.Spec.Postgres.SynchronousReplicas)})
 		}
+		runtimePhase := "unknown"
+		runtimeInstances := "unknown"
+		runtimeMessage := ""
+		if service.RuntimeStatus != nil {
+			runtimePhase = firstNonEmptyTrimmed(service.RuntimeStatus.Phase, runtimePhase)
+			runtimeInstances = strconv.Itoa(service.RuntimeStatus.ReadyInstances) + "/" + strconv.Itoa(service.RuntimeStatus.DesiredInstances)
+			runtimeMessage = service.RuntimeStatus.Message
+		}
+		pairs = append(pairs,
+			kvPair{Key: "runtime_status_phase", Value: runtimePhase},
+			kvPair{Key: "runtime_status_instances", Value: runtimeInstances},
+			kvPair{Key: "runtime_status_message", Value: runtimeMessage},
+		)
 	}
 	return writeKeyValues(w, pairs...)
 }

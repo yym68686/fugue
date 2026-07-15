@@ -84,6 +84,13 @@ const (
 	BackingServiceStatusActive  = "active"
 	BackingServiceStatusDeleted = "deleted"
 
+	ManagedPostgresRuntimePhaseActive     = "active"
+	ManagedPostgresRuntimePhaseSuspending = "suspending"
+	ManagedPostgresRuntimePhaseSuspended  = "suspended"
+	ManagedPostgresRuntimePhaseResuming   = "resuming"
+	ManagedPostgresRuntimePhaseError      = "error"
+	ManagedPostgresRuntimePhaseUnknown    = "unknown"
+
 	RuntimeStatusPending = "pending"
 	RuntimeStatusActive  = "active"
 	RuntimeStatusOffline = "offline"
@@ -146,6 +153,8 @@ const (
 	OperationTypeFailover           = "failover"
 	OperationTypeDatabaseSwitchover = "database-switchover"
 	OperationTypeDatabaseLocalize   = "database-localize"
+	OperationTypeDatabaseSuspend    = "database-suspend"
+	OperationTypeDatabaseResume     = "database-resume"
 	OperationTypeDataPrewarm        = "data-prewarm"
 	OperationTypeDelete             = "delete"
 
@@ -2048,6 +2057,7 @@ type AppPostgresSpec struct {
 	StorageClassName                 string        `json:"storage_class_name,omitempty"`
 	Instances                        int           `json:"instances,omitempty"`
 	SynchronousReplicas              int           `json:"synchronous_replicas,omitempty"`
+	Suspended                        bool          `json:"suspended,omitempty"`
 	Resources                        *ResourceSpec `json:"resources,omitempty"`
 }
 
@@ -2064,21 +2074,32 @@ type BackingServiceSpec struct {
 }
 
 type BackingService struct {
-	ID                      string             `json:"id"`
-	TenantID                string             `json:"tenant_id"`
-	ProjectID               string             `json:"project_id"`
-	OwnerAppID              string             `json:"owner_app_id,omitempty"`
-	Name                    string             `json:"name"`
-	Description             string             `json:"description,omitempty"`
-	Type                    string             `json:"type"`
-	Provisioner             string             `json:"provisioner"`
-	Status                  string             `json:"status"`
-	Spec                    BackingServiceSpec `json:"spec"`
-	CurrentResourceUsage    *ResourceUsage     `json:"current_resource_usage,omitempty"`
-	CurrentRuntimeStartedAt *time.Time         `json:"current_runtime_started_at,omitempty"`
-	CurrentRuntimeReadyAt   *time.Time         `json:"current_runtime_ready_at,omitempty"`
-	CreatedAt               time.Time          `json:"created_at"`
-	UpdatedAt               time.Time          `json:"updated_at"`
+	ID                      string                       `json:"id"`
+	TenantID                string                       `json:"tenant_id"`
+	ProjectID               string                       `json:"project_id"`
+	OwnerAppID              string                       `json:"owner_app_id,omitempty"`
+	Name                    string                       `json:"name"`
+	Description             string                       `json:"description,omitempty"`
+	Type                    string                       `json:"type"`
+	Provisioner             string                       `json:"provisioner"`
+	Status                  string                       `json:"status"`
+	Spec                    BackingServiceSpec           `json:"spec"`
+	RuntimeStatus           *BackingServiceRuntimeStatus `json:"runtime_status,omitempty"`
+	CurrentResourceUsage    *ResourceUsage               `json:"current_resource_usage,omitempty"`
+	CurrentRuntimeStartedAt *time.Time                   `json:"current_runtime_started_at,omitempty"`
+	CurrentRuntimeReadyAt   *time.Time                   `json:"current_runtime_ready_at,omitempty"`
+	CreatedAt               time.Time                    `json:"created_at"`
+	UpdatedAt               time.Time                    `json:"updated_at"`
+}
+
+// BackingServiceRuntimeStatus reports the observed lifecycle state of a
+// managed backing service. It is derived from the runtime controller and is
+// intentionally not part of the persisted desired spec.
+type BackingServiceRuntimeStatus struct {
+	Phase            string `json:"phase"`
+	Message          string `json:"message,omitempty"`
+	ReadyInstances   int    `json:"ready_instances"`
+	DesiredInstances int    `json:"desired_instances"`
 }
 
 type ServiceBinding struct {

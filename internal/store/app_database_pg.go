@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,22 @@ import (
 func (s *Store) pgCreateAppDatabaseImportJob(job model.AppDatabaseImportJob) (model.AppDatabaseImportJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.AppDatabaseImportJob{}, fmt.Errorf("begin database import create transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	app, err := s.pgGetAppTx(ctx, tx, job.AppID, true)
+	if err != nil {
+		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) || strings.TrimSpace(app.TenantID) != job.TenantID {
+		return model.AppDatabaseImportJob{}, ErrNotFound
+	}
+	if err := s.pgValidateAppDatabaseImportRunnableTx(ctx, tx, app); err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
 
 	now := time.Now().UTC()
 	if strings.TrimSpace(job.ID) == "" {
@@ -27,7 +44,7 @@ func (s *Store) pgCreateAppDatabaseImportJob(job model.AppDatabaseImportJob) (mo
 		return model.AppDatabaseImportJob{}, err
 	}
 
-	created, err := scanAppDatabaseImportJob(s.db.QueryRowContext(ctx, `
+	created, err := scanAppDatabaseImportJob(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_app_database_import_jobs (
 	id, tenant_id, app_id, source_upload_id, source_upload_filename, source_upload_sha256,
 	label, format, clean, status, result_message, error_message, retry_count, retry_of_job_id,
@@ -44,6 +61,9 @@ RETURNING id, tenant_id, app_id, source_upload_id, source_upload_filename, sourc
 `, job.ID, job.AppID, job.TenantID, job.SourceUploadID, job.SourceUploadFilename, job.SourceUploadSHA256, job.Label, job.Format, job.Clean, job.Status, strings.TrimSpace(job.ResultMessage), strings.TrimSpace(job.ErrorMessage), job.RetryCount, job.RetryOfJobID, logsJSON, job.RequestedByType, job.RequestedByID, job.CreatedAt, job.UpdatedAt, job.StartedAt, job.CompletedAt))
 	if err != nil {
 		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return model.AppDatabaseImportJob{}, fmt.Errorf("commit database import create transaction: %w", err)
 	}
 	return redactAppDatabaseImportJob(created), nil
 }
@@ -132,6 +152,21 @@ func (s *Store) pgClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImpo
 		return model.AppDatabaseImportJob{}, fmt.Errorf("begin database import claim transaction: %w", err)
 	}
 	defer tx.Rollback()
+	var appID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT app_id
+FROM fugue_app_database_import_jobs
+WHERE id = $1
+`, strings.TrimSpace(jobID)).Scan(&appID); err != nil {
+		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	app, err := s.pgGetAppTx(ctx, tx, strings.TrimSpace(appID), true)
+	if err != nil {
+		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return model.AppDatabaseImportJob{}, ErrNotFound
+	}
 
 	current, err := scanAppDatabaseImportJob(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, app_id, source_upload_id, source_upload_filename, source_upload_sha256, label, format, clean, status, result_message, error_message, retry_count, retry_of_job_id, logs_json, requested_by_type, requested_by_id, created_at, updated_at, started_at, completed_at
@@ -147,6 +182,27 @@ FOR UPDATE
 	}
 
 	now := time.Now().UTC()
+	if err := s.pgValidateAppDatabaseImportRunnableTx(ctx, tx, app); err != nil {
+		if !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
+			return model.AppDatabaseImportJob{}, err
+		}
+		if _, updateErr := tx.ExecContext(ctx, `
+UPDATE fugue_app_database_import_jobs
+SET status = $2,
+	result_message = '',
+	error_message = $3,
+	started_at = NULL,
+	completed_at = $4,
+	updated_at = $4
+WHERE id = $1 AND status = $5
+`, strings.TrimSpace(jobID), model.OperationStatusFailed, ManagedPostgresDatabaseImportConflictMessage, now, model.OperationStatusPending); updateErr != nil {
+			return model.AppDatabaseImportJob{}, mapDBErr(updateErr)
+		}
+		if err := tx.Commit(); err != nil {
+			return model.AppDatabaseImportJob{}, fmt.Errorf("commit blocked database import claim transaction: %w", err)
+		}
+		return model.AppDatabaseImportJob{}, ErrManagedPostgresDatabaseImportConflict
+	}
 	claimed, err := scanAppDatabaseImportJob(tx.QueryRowContext(ctx, `
 UPDATE fugue_app_database_import_jobs
 SET status = $2, started_at = $3, updated_at = $3
@@ -160,6 +216,89 @@ RETURNING id, tenant_id, app_id, source_upload_id, source_upload_filename, sourc
 		return model.AppDatabaseImportJob{}, fmt.Errorf("commit database import claim transaction: %w", err)
 	}
 	return redactAppDatabaseImportJob(claimed), nil
+}
+
+func (s *Store) pgValidateAppDatabaseImportRunnable(appID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin database import validation transaction: %w", err)
+	}
+	defer tx.Rollback()
+	app, err := s.pgGetAppTx(ctx, tx, strings.TrimSpace(appID), true)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	if isDeletedApp(app) {
+		return ErrNotFound
+	}
+	if err := s.pgValidateAppDatabaseImportRunnableTx(ctx, tx, app); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit database import validation transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) pgValidateAppDatabaseImportRunnableTx(ctx context.Context, tx *sql.Tx, app model.App) error {
+	if appHasSuspendedManagedPostgres(app) {
+		return ErrManagedPostgresDatabaseImportConflict
+	}
+	active, err := s.pgHasActiveManagedPostgresSuspendForAppTx(ctx, tx, app.ID)
+	if err != nil {
+		return err
+	}
+	if active {
+		return ErrManagedPostgresDatabaseImportConflict
+	}
+	return nil
+}
+
+func (s *Store) pgHasActiveManagedPostgresSuspendForAppTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
+	var active bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_operations
+	WHERE app_id = $1
+	  AND type = $2
+	  AND status IN ($3, $4, $5)
+)
+`,
+		strings.TrimSpace(appID),
+		model.OperationTypeDatabaseSuspend,
+		model.OperationStatusPending,
+		model.OperationStatusRunning,
+		model.OperationStatusWaitingAgent,
+	).Scan(&active); err != nil {
+		return false, fmt.Errorf("check active managed postgres suspend for database import: %w", err)
+	}
+	return active, nil
+}
+
+// pgHasActiveAppDatabaseImportJobForManagedPostgresTx uses the shared app row
+// lock as its serialization fence. AppDatabaseImportJob has no service ID, so
+// any pending/running import for the app blocks suspension of its managed DB.
+func (s *Store) pgHasActiveAppDatabaseImportJobForManagedPostgresTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	app model.App,
+	_ string,
+) (bool, error) {
+	var active bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_app_database_import_jobs
+	WHERE app_id = $1
+	  AND status IN ($2, $3)
+)
+`, strings.TrimSpace(app.ID), model.OperationStatusPending, model.OperationStatusRunning).Scan(&active); err != nil {
+		return false, fmt.Errorf("check active app database import for managed postgres: %w", err)
+	}
+	return active, nil
 }
 
 func (s *Store) pgAppendAppDatabaseImportJobLog(jobID, message string) (model.AppDatabaseImportJob, error) {

@@ -1178,6 +1178,7 @@ func TestWaitForManagedAppRolloutWaitsForManagedPostgresClusterHealth(t *testing
 		case cloudNativePGClusterAPIPath(namespace, clusterName):
 			cluster := kubeCloudNativePGCluster{}
 			cluster.Metadata.Name = clusterName
+			cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOff}
 			cluster.Spec.Instances = 2
 			if atomic.AddInt32(&clusterGets, 1) >= 2 {
 				cluster.Status.CurrentPrimary = clusterName + "-1"
@@ -1337,6 +1338,7 @@ func TestManagedBackingServiceClusterRolloutReady(t *testing.T) {
 	t.Parallel()
 
 	cluster := kubeCloudNativePGCluster{}
+	cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOff}
 	cluster.Spec.Instances = 1
 	cluster.Status.ReadyInstances = 1
 	cluster.Status.CurrentPrimary = "demo-postgres-1"
@@ -1364,6 +1366,209 @@ func TestManagedBackingServiceClusterRolloutReady(t *testing.T) {
 	}
 	if !strings.Contains(message, "to settle") {
 		t.Fatalf("expected settle message when cluster still has extra ready instances, got %q", message)
+	}
+}
+
+func TestManagedBackingServiceClusterRolloutReadyHandlesSuspendAndResume(t *testing.T) {
+	t.Parallel()
+
+	deployment := runtime.ManagedBackingServiceDeployment{
+		ResourceName:     "demo-postgres",
+		DesiredInstances: 1,
+		Suspended:        true,
+	}
+	cluster := kubeCloudNativePGCluster{}
+	cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOn}
+	cluster.Spec.Instances = 1
+	cluster.Status.Conditions = []runtime.ManagedAppCondition{{
+		Type:    runtime.CloudNativePGHibernationAnno,
+		Status:  "True",
+		Reason:  "Hibernated",
+		Message: "Cluster has been hibernated",
+	}}
+
+	ready, message := managedBackingServiceClusterRolloutReadyForDeployment(deployment, cluster, true)
+	if !ready || !strings.Contains(message, "suspended") {
+		t.Fatalf("expected fully hibernated cluster to complete suspension, ready=%v message=%q", ready, message)
+	}
+
+	cluster.Status.ReadyInstances = 1
+	ready, _ = managedBackingServiceClusterRolloutReadyForDeployment(deployment, cluster, true)
+	if ready {
+		t.Fatal("expected remaining ready instance to keep suspend rollout pending")
+	}
+
+	deployment.Suspended = false
+	cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno] = runtime.CloudNativePGHibernationOn
+	cluster.Status.ReadyInstances = 0
+	ready, message = managedBackingServiceClusterRolloutReadyForDeployment(deployment, cluster, true)
+	if ready || !strings.Contains(message, "disabled") {
+		t.Fatalf("expected resume to wait for annotation off, ready=%v message=%q", ready, message)
+	}
+
+	cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno] = runtime.CloudNativePGHibernationOff
+	cluster.Status.Conditions = nil
+	cluster.Status.ReadyInstances = 1
+	cluster.Status.CurrentPrimary = "demo-postgres-1"
+	ready, message = managedBackingServiceClusterRolloutReadyForDeployment(deployment, cluster, true)
+	if !ready || !strings.Contains(message, "ready") {
+		t.Fatalf("expected non-hibernated primary to complete resume, ready=%v message=%q", ready, message)
+	}
+}
+
+func TestManagedBackingServicesRolloutRequiresZeroObservedPodsForSuspension(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace   = "tenant-demo"
+		clusterName = "demo-postgres"
+	)
+	var remainingPods atomic.Int32
+	var denyPodObservation atomic.Bool
+	remainingPods.Store(1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case cloudNativePGClusterAPIPath(namespace, clusterName):
+			cluster := kubeCloudNativePGCluster{}
+			cluster.Metadata.Name = clusterName
+			cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOn}
+			cluster.Spec.Instances = 1
+			cluster.Status.Conditions = []runtime.ManagedAppCondition{{
+				Type:   runtime.CloudNativePGHibernationAnno,
+				Status: "True",
+				Reason: "Hibernated",
+			}}
+			if err := json.NewEncoder(w).Encode(cluster); err != nil {
+				t.Fatalf("encode cluster: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods":
+			if denyPodObservation.Load() {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"message":"forbidden"}`))
+				return
+			}
+			pods := kubePodList{}
+			if remainingPods.Load() > 0 {
+				pod := kubePod{}
+				pod.Metadata.Name = "demo-postgres-1"
+				pods.Items = []kubePod{pod}
+			}
+			if err := json.NewEncoder(w).Encode(pods); err != nil {
+				t.Fatalf("encode pods: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := &kubeClient{
+		client:      server.Client(),
+		baseURL:     server.URL,
+		bearerToken: "test",
+		namespace:   namespace,
+	}
+	service := &Service{Logger: log.New(io.Discard, "", 0)}
+	deployments := []runtime.ManagedBackingServiceDeployment{{
+		ResourceName:     clusterName,
+		ResourceKind:     runtime.CloudNativePGClusterKind,
+		DesiredInstances: 1,
+		Suspended:        true,
+	}}
+
+	ready, message, _, err := service.managedBackingServicesRolloutReady(context.Background(), client, namespace, deployments)
+	if err != nil {
+		t.Fatalf("check suspension rollout: %v", err)
+	}
+	if ready || !strings.Contains(message, "1 remaining") {
+		t.Fatalf("expected observed pod to keep suspension pending, ready=%v message=%q", ready, message)
+	}
+
+	remainingPods.Store(0)
+	ready, message, _, err = service.managedBackingServicesRolloutReady(context.Background(), client, namespace, deployments)
+	if err != nil {
+		t.Fatalf("check completed suspension rollout: %v", err)
+	}
+	if !ready || message != "" {
+		t.Fatalf("expected zero observed pods to complete suspension, ready=%v message=%q", ready, message)
+	}
+
+	denyPodObservation.Store(true)
+	ready, _, _, err = service.managedBackingServicesRolloutReady(context.Background(), client, namespace, deployments, true)
+	if err == nil || !strings.Contains(err.Error(), "cannot verify zero database pods") {
+		t.Fatalf("expected strict suspension verification to reject unavailable pod evidence, ready=%v err=%v", ready, err)
+	}
+}
+
+func TestWaitForManagedBackingServiceLifecycleChecksSuspendedDatabaseWhenAppIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	app := model.App{
+		ID:       "app_demo",
+		TenantID: "tenant_demo",
+		Name:     "demo",
+		Spec:     model.AppSpec{Replicas: 0},
+		BackingServices: []model.BackingService{{
+			ID:          "service_postgres",
+			Name:        "demo-postgres",
+			Type:        model.BackingServiceTypePostgres,
+			Provisioner: model.BackingServiceProvisionerManaged,
+			Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{
+				ServiceName: "demo-postgres",
+				Instances:   1,
+				Suspended:   true,
+			}},
+		}},
+		Bindings: []model.ServiceBinding{{
+			AppID:     "app_demo",
+			ServiceID: "service_postgres",
+		}},
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case cloudNativePGClusterAPIPath(namespace, "demo-postgres"):
+			cluster := kubeCloudNativePGCluster{}
+			cluster.Metadata.Name = "demo-postgres"
+			cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOn}
+			cluster.Spec.Instances = 1
+			cluster.Status.Conditions = []runtime.ManagedAppCondition{{
+				Type:   runtime.CloudNativePGHibernationAnno,
+				Status: "True",
+				Reason: "Hibernated",
+			}}
+			if err := json.NewEncoder(w).Encode(cluster); err != nil {
+				t.Fatalf("encode cluster: %v", err)
+			}
+		case "/api/v1/namespaces/" + namespace + "/pods":
+			if err := json.NewEncoder(w).Encode(kubePodList{}); err != nil {
+				t.Fatalf("encode pods: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := &Service{
+		Config: config.ControllerConfig{
+			ManagedAppRolloutTimeout: time.Second,
+			PollInterval:             10 * time.Millisecond,
+		},
+		Logger: log.New(io.Discard, "", 0),
+		newKubeClient: func(namespace string) (*kubeClient, error) {
+			return &kubeClient{
+				client:      server.Client(),
+				baseURL:     server.URL,
+				bearerToken: "test",
+				namespace:   namespace,
+			}, nil
+		},
+	}
+	if err := service.waitForManagedBackingServiceLifecycle(context.Background(), app, "", "service_postgres"); err != nil {
+		t.Fatalf("expected disabled owner app database suspension to be verified, got %v", err)
 	}
 }
 
@@ -1465,6 +1670,7 @@ func TestWaitForManagedAppRolloutAllowsManagedPostgresPrimaryRecoveryAndCleansUp
 		case r.Method == http.MethodGet && r.URL.Path == cloudNativePGClusterAPIPath(namespace, clusterName):
 			cluster := kubeCloudNativePGCluster{}
 			cluster.Metadata.Name = clusterName
+			cluster.Metadata.Annotations = map[string]string{runtime.CloudNativePGHibernationAnno: runtime.CloudNativePGHibernationOff}
 			cluster.Spec.Instances = 2
 			cluster.Status.ReadyInstances = 1
 			cluster.Status.CurrentPrimary = "demo-postgres-4"

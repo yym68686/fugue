@@ -2,12 +2,24 @@ package store
 
 import (
 	"crypto/subtle"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 )
+
+const (
+	ManagedPostgresDatabaseImportConflictCode      = "managed_postgres_unavailable_for_database_import"
+	ManagedPostgresDatabaseImportConflictMessage   = "managed_postgres_unavailable_for_database_import: resume the database or wait for suspend to finish before importing"
+	ManagedPostgresImportInProgressConflictCode    = "managed_postgres_import_in_progress"
+	ManagedPostgresImportInProgressConflictMessage = "managed_postgres_import_in_progress: wait for app-database import to finish before suspending"
+)
+
+var ErrManagedPostgresDatabaseImportConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresDatabaseImportConflictMessage)
+var ErrManagedPostgresImportInProgressConflict = fmt.Errorf("%w: %s", ErrConflict, ManagedPostgresImportInProgressConflictMessage)
 
 func (s *Store) CreateAppDatabaseImportJob(job model.AppDatabaseImportJob) (model.AppDatabaseImportJob, error) {
 	job.AppID = strings.TrimSpace(job.AppID)
@@ -41,6 +53,9 @@ func (s *Store) CreateAppDatabaseImportJob(job model.AppDatabaseImportJob) (mode
 		}
 		if strings.TrimSpace(state.Apps[appIndex].TenantID) != job.TenantID {
 			return ErrNotFound
+		}
+		if err := validateAppDatabaseImportRunnableState(state, job.AppID); err != nil {
+			return err
 		}
 		now := time.Now().UTC()
 		if strings.TrimSpace(job.ID) == "" {
@@ -159,7 +174,10 @@ func (s *Store) ClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImport
 		return s.pgClaimAppDatabaseImportJob(jobID)
 	}
 
-	var job model.AppDatabaseImportJob
+	var (
+		job     model.AppDatabaseImportJob
+		blocked bool
+	)
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findAppDatabaseImportJob(state, jobID)
 		if index < 0 {
@@ -169,6 +187,18 @@ func (s *Store) ClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImport
 			return ErrConflict
 		}
 		now := time.Now().UTC()
+		if err := validateAppDatabaseImportRunnableState(state, state.AppDatabaseImportJobs[index].AppID); err != nil {
+			if !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
+				return err
+			}
+			state.AppDatabaseImportJobs[index].Status = model.OperationStatusFailed
+			state.AppDatabaseImportJobs[index].ErrorMessage = ManagedPostgresDatabaseImportConflictMessage
+			state.AppDatabaseImportJobs[index].CompletedAt = &now
+			state.AppDatabaseImportJobs[index].UpdatedAt = now
+			job = state.AppDatabaseImportJobs[index]
+			blocked = true
+			return nil
+		}
 		state.AppDatabaseImportJobs[index].Status = model.OperationStatusRunning
 		state.AppDatabaseImportJobs[index].StartedAt = &now
 		state.AppDatabaseImportJobs[index].UpdatedAt = now
@@ -178,7 +208,73 @@ func (s *Store) ClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImport
 	if err != nil {
 		return model.AppDatabaseImportJob{}, err
 	}
+	if blocked {
+		return model.AppDatabaseImportJob{}, ErrManagedPostgresDatabaseImportConflict
+	}
 	return redactAppDatabaseImportJob(job), nil
+}
+
+// ValidateAppDatabaseImportRunnable is a defense-in-depth check used immediately
+// before an import runner opens a PostgreSQL connection. Create and Claim apply
+// the same invariant atomically with their writes.
+func (s *Store) ValidateAppDatabaseImportRunnable(appID string) error {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return ErrInvalidInput
+	}
+	if s.usingDatabase() {
+		return s.pgValidateAppDatabaseImportRunnable(appID)
+	}
+	return s.withLockedState(false, func(state *model.State) error {
+		return validateAppDatabaseImportRunnableState(state, appID)
+	})
+}
+
+func validateAppDatabaseImportRunnableState(state *model.State, appID string) error {
+	if state == nil {
+		return ErrInvalidInput
+	}
+	appID = strings.TrimSpace(appID)
+	appIndex := findApp(state, appID)
+	if appID == "" || appIndex < 0 || isDeletedApp(state.Apps[appIndex]) {
+		return ErrNotFound
+	}
+	app := state.Apps[appIndex]
+	hydrateAppBackingServices(state, &app)
+	if appHasSuspendedManagedPostgres(app) || hasActiveManagedPostgresSuspendForApp(state.Operations, appID) {
+		return ErrManagedPostgresDatabaseImportConflict
+	}
+	return nil
+}
+
+func hasActiveManagedPostgresSuspendForApp(operations []model.Operation, appID string) bool {
+	appID = strings.TrimSpace(appID)
+	for _, operation := range operations {
+		if strings.TrimSpace(operation.AppID) == appID &&
+			operation.Type == model.OperationTypeDatabaseSuspend &&
+			isActiveOperationStatus(operation.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasActiveAppDatabaseImportJobForManagedPostgres deliberately uses app-level
+// matching. AppDatabaseImportJob predates backing-service IDs and stores only
+// AppID, so narrowing by service would create a false safety proof.
+func hasActiveAppDatabaseImportJobForManagedPostgres(state *model.State, app model.App, _ string) bool {
+	if state == nil || strings.TrimSpace(app.ID) == "" {
+		return false
+	}
+	for _, job := range state.AppDatabaseImportJobs {
+		if strings.TrimSpace(job.AppID) != strings.TrimSpace(app.ID) {
+			continue
+		}
+		if job.Status == model.OperationStatusPending || job.Status == model.OperationStatusRunning {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) AppendAppDatabaseImportJobLog(jobID, message string) (model.AppDatabaseImportJob, error) {

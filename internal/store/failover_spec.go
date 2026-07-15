@@ -54,7 +54,36 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 		return false
 	}
 	switch op.Type {
-	case model.OperationTypeDeploy, model.OperationTypeMigrate, model.OperationTypeDatabaseSwitchover, model.OperationTypeDatabaseLocalize, model.OperationTypeFailover:
+	case model.OperationTypeDeploy,
+		model.OperationTypeMigrate,
+		model.OperationTypeDatabaseSwitchover,
+		model.OperationTypeDatabaseLocalize,
+		model.OperationTypeDatabaseSuspend,
+		model.OperationTypeDatabaseResume,
+		model.OperationTypeFailover:
+		return true
+	default:
+		return false
+	}
+}
+
+func isManagedPostgresServiceOperation(operationType string) bool {
+	switch operationType {
+	case model.OperationTypeDatabaseSwitchover,
+		model.OperationTypeDatabaseLocalize,
+		model.OperationTypeDatabaseSuspend,
+		model.OperationTypeDatabaseResume:
+		return true
+	default:
+		return false
+	}
+}
+
+func operationRequiresManagedController(operationType string) bool {
+	switch operationType {
+	case model.OperationTypeImport,
+		model.OperationTypeDatabaseSuspend,
+		model.OperationTypeDatabaseResume:
 		return true
 	default:
 		return false

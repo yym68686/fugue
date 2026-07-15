@@ -16,7 +16,9 @@ func (s *Server) handleListBackingServices(w http.ResponseWriter, r *http.Reques
 		s.writeStoreError(w, err)
 		return
 	}
+	services = filterBackingServicesForPrincipal(principal, services)
 	services = s.overlayCurrentResourceUsageOnServices(r.Context(), services)
+	services = s.overlayBackingServiceRuntimeStatuses(r.Context(), services)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"backing_services": cloneBackingServices(services),
 	})
@@ -45,6 +47,10 @@ func (s *Server) handleCreateBackingService(w http.ResponseWriter, r *http.Reque
 		httpx.WriteError(w, http.StatusForbidden, "cannot create backing service for another tenant")
 		return
 	}
+	if !principal.IsPlatformAdmin() && !principal.AllowsProject(req.ProjectID) {
+		httpx.WriteError(w, http.StatusForbidden, "backing service project is not visible to this principal")
+		return
+	}
 	service, err := s.store.CreateBackingService(tenantID, req.ProjectID, req.Name, req.Description, req.Spec)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -63,11 +69,12 @@ func (s *Server) handleGetBackingService(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return
 	}
-	if !principal.IsPlatformAdmin() && service.TenantID != principal.TenantID {
+	if !principal.IsPlatformAdmin() && (service.TenantID != principal.TenantID || !principal.AllowsProject(service.ProjectID)) {
 		httpx.WriteError(w, http.StatusForbidden, "backing service is not visible to this tenant")
 		return
 	}
 	service = firstBackingServiceOrDefault(s.overlayCurrentResourceUsageOnServices(r.Context(), []model.BackingService{service}), service)
+	service = firstBackingServiceOrDefault(s.overlayBackingServiceRuntimeStatuses(r.Context(), []model.BackingService{service}), service)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"backing_service": cloneBackingService(service),
 	})
@@ -355,11 +362,24 @@ func (s *Server) loadAuthorizedBackingService(w http.ResponseWriter, r *http.Req
 		s.writeStoreError(w, err)
 		return model.BackingService{}, false
 	}
-	if !principal.IsPlatformAdmin() && service.TenantID != principal.TenantID {
+	if !principal.IsPlatformAdmin() && (service.TenantID != principal.TenantID || !principal.AllowsProject(service.ProjectID)) {
 		httpx.WriteError(w, http.StatusForbidden, "backing service is not visible to this tenant")
 		return model.BackingService{}, false
 	}
 	return service, true
+}
+
+func filterBackingServicesForPrincipal(principal model.Principal, services []model.BackingService) []model.BackingService {
+	if principal.IsPlatformAdmin() || strings.TrimSpace(principal.ProjectID) == "" {
+		return services
+	}
+	filtered := make([]model.BackingService, 0, len(services))
+	for _, service := range services {
+		if principal.AllowsProject(service.ProjectID) {
+			filtered = append(filtered, service)
+		}
+	}
+	return filtered
 }
 
 func (s *Server) backingServiceSwitchoverApp(service model.BackingService) (model.App, error) {

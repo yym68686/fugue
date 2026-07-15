@@ -16,7 +16,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-const managedPostgresExistingServiceInitGracePeriod = 15 * time.Minute
+const (
+	managedPostgresExistingServiceInitGracePeriod = 15 * time.Minute
+	managedAppOrphanWorkloadZeroConditionType     = "OrphanWorkloadZero"
+)
 
 func (s *Service) applyManagedAppDesiredState(ctx context.Context, app model.App, scheduling runtime.SchedulingConstraints) error {
 	client, err := s.kubeClient()
@@ -365,7 +368,7 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 }
 
 func managedAppCloudNativePGApplyContext(ctx context.Context, app model.App, forceWrite bool) context.Context {
-	if forceWrite {
+	if forceWrite || forceExistingCloudNativePGWrites(ctx) {
 		return withoutSkipExistingCloudNativePGWrites(ctx)
 	}
 	if appHasOnlineRolloutIntent(app) {
@@ -571,6 +574,7 @@ func comparableManagedAppBackingServices(services []model.BackingService) []mode
 	}
 	out := cloneControllerBackingServices(services)
 	for index := range out {
+		out[index].RuntimeStatus = nil
 		out[index].CurrentResourceUsage = nil
 		out[index].CurrentRuntimeStartedAt = nil
 		out[index].CurrentRuntimeReadyAt = nil
@@ -764,34 +768,144 @@ func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kub
 		return nil
 	}
 	reason = strings.TrimSpace(reason)
-	statusChanged := false
-	if !managedAppDisabledOrphanStatusCurrent(managed.Status, reason) {
-		status := managedAppBaseStatus(managed, app)
-		status.Phase = runtime.ManagedAppPhaseDisabled
-		status.Message = reason
-		status.ReadyReplicas = 0
-		if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
-			return fmt.Errorf("patch disabled orphan managed app status %s/%s: %w", namespace, managedName, err)
+	transitionStatus := managedAppOrphanShutdownTransitionStatus(managed, app)
+	if managedAppDisabledOrphanStatusCurrent(managed.Status, reason) &&
+		managed.Status.ObservedGeneration == managed.Metadata.Generation &&
+		managedAppOrphanWorkloadZeroVerified(managed.Status) {
+		stillZero, err := managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
+		if err == nil && stillZero {
+			return nil
 		}
-		statusChanged = true
+		// The proof condition is a cached observation, not a permanent lease.
+		// Revoke the adoptable marker before attempting shutdown again so an
+		// out-of-band Deployment scale-up or terminating pod cannot be adopted.
+		if err := client.patchManagedAppStatus(ctx, namespace, managedName, transitionStatus); err != nil && !isKubernetesResourceNotFound(err) {
+			return fmt.Errorf("revoke stale orphan zero-workload proof %s/%s: %w", namespace, managedName, err)
+		}
+		managed.Status = transitionStatus
+		if err != nil {
+			return fmt.Errorf("reverify orphan managed app workload %s/%s: %w", namespace, managedName, err)
+		}
+	}
+
+	if !managedAppOrphanShutdownTransitionStatusCurrent(managed.Status) {
+		if err := client.patchManagedAppStatus(ctx, namespace, managedName, transitionStatus); err != nil && !isKubernetesResourceNotFound(err) {
+			return fmt.Errorf("patch orphan shutdown status %s/%s: %w", namespace, managedName, err)
+		}
 	}
 
 	resourceName := runtime.RuntimeAppResourceName(app)
 	if resourceName != "" {
 		if err := client.scaleDeployment(ctx, namespace, resourceName, 0); err != nil && !isKubernetesResourceNotFound(err) {
-			return fmt.Errorf("scale orphan managed app deployment %s/%s to zero: %w", namespace, resourceName, err)
+			cause := fmt.Errorf("scale orphan managed app deployment %s/%s to zero: %w", namespace, resourceName, err)
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, cause)
 		}
 	}
 	serviceName := runtime.RuntimeAppServiceName(app)
 	if serviceName != "" {
 		if err := client.deleteService(ctx, namespace, serviceName); err != nil && !isKubernetesResourceNotFound(err) {
-			return fmt.Errorf("delete orphan managed app service %s/%s: %w", namespace, serviceName, err)
+			cause := fmt.Errorf("delete orphan managed app service %s/%s: %w", namespace, serviceName, err)
+			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, cause)
 		}
 	}
-	if statusChanged && s.Logger != nil {
+
+	workloadZero, err := managedAppOrphanWorkloadAtZero(ctx, client, namespace, app)
+	if err != nil {
+		cause := fmt.Errorf("verify orphan managed app workload %s/%s at zero: %w", namespace, resourceName, err)
+		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, cause)
+	}
+	if !workloadZero {
+		return nil
+	}
+
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseDisabled
+	status.Message = reason
+	status.ReadyReplicas = 0
+	status.Conditions = []runtime.ManagedAppCondition{{
+		Type:               managedAppOrphanWorkloadZeroConditionType,
+		Status:             "True",
+		Reason:             "Verified",
+		Message:            "deployment and matching app pods are at zero",
+		LastTransitionTime: time.Now().UTC().Format(time.RFC3339Nano),
+	}}
+	if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
+		return fmt.Errorf("patch disabled orphan managed app status %s/%s: %w", namespace, managedName, err)
+	}
+	if s.Logger != nil {
 		s.Logger.Printf("disabled orphan managed app %s/%s: %s", namespace, managedName, reason)
 	}
 	return nil
+}
+
+func managedAppOrphanWorkloadAtZero(
+	ctx context.Context,
+	client *kubeClient,
+	namespace string,
+	app model.App,
+) (bool, error) {
+	resourceName := runtime.RuntimeAppResourceName(app)
+	deployment, found, err := client.getDeployment(ctx, namespace, resourceName)
+	if err != nil {
+		return false, fmt.Errorf("read deployment %s/%s: %w", namespace, resourceName, err)
+	}
+	if !managedAppOrphanDeploymentAtZero(deployment, found) {
+		return false, nil
+	}
+	pods, err := client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
+	if err != nil {
+		if isKubernetesResourceNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("list matching app pods %s/%s: %w", namespace, resourceName, err)
+	}
+	return len(pods) == 0, nil
+}
+
+func managedAppOrphanDeploymentAtZero(deployment kubeDeployment, found bool) bool {
+	if !found {
+		return true
+	}
+	if deployment.Status.ObservedGeneration < deployment.Metadata.Generation {
+		return false
+	}
+	return deployment.Status.Replicas == 0 &&
+		deployment.Status.UpdatedReplicas == 0 &&
+		deployment.Status.ReadyReplicas == 0 &&
+		deployment.Status.AvailableReplicas == 0 &&
+		deployment.Status.UnavailableReplicas == 0
+}
+
+func managedAppOrphanShutdownTransitionStatus(managed runtime.ManagedAppObject, app model.App) runtime.ManagedAppStatus {
+	status := managedAppBaseStatus(managed, app)
+	status.Phase = runtime.ManagedAppPhaseProgressing
+	status.Message = "orphaned managed app shutdown in progress; store app is missing"
+	status.ReadyReplicas = managed.Status.ReadyReplicas
+	status.Conditions = []runtime.ManagedAppCondition{{
+		Type:               managedAppOrphanWorkloadZeroConditionType,
+		Status:             "False",
+		Reason:             "ShuttingDown",
+		Message:            "waiting for deployment and matching app pods to reach zero",
+		LastTransitionTime: time.Now().UTC().Format(time.RFC3339Nano),
+	}}
+	return status
+}
+
+func managedAppOrphanShutdownTransitionStatusCurrent(status runtime.ManagedAppStatus) bool {
+	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseProgressing) &&
+		strings.Contains(strings.ToLower(strings.TrimSpace(status.Message)), "orphaned managed app shutdown in progress") &&
+		!managedAppOrphanWorkloadZeroVerified(status)
+}
+
+func managedAppOrphanWorkloadZeroVerified(status runtime.ManagedAppStatus) bool {
+	for _, condition := range status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), managedAppOrphanWorkloadZeroConditionType) &&
+			strings.EqualFold(strings.TrimSpace(condition.Status), "True") &&
+			strings.EqualFold(strings.TrimSpace(condition.Reason), "Verified") {
+			return true
+		}
+	}
+	return false
 }
 
 func managedAppObservedOnlyStatusCurrent(status runtime.ManagedAppStatus, reason string) bool {
@@ -1413,11 +1527,25 @@ func applyManagedAppReleaseStatus(status *runtime.ManagedAppStatus, previous run
 
 func buildManagedBackingServiceStatus(previous runtime.ManagedAppStatus, deployment runtime.ManagedBackingServiceDeployment, status kubeDeployment, found bool) runtime.ManagedBackingServiceStatus {
 	out := runtime.ManagedBackingServiceStatus{
-		ServiceID:  deployment.ServiceID,
-		RuntimeKey: deployment.RuntimeKey,
+		ServiceID:        deployment.ServiceID,
+		RuntimeKey:       deployment.RuntimeKey,
+		Phase:            model.ManagedPostgresRuntimePhaseUnknown,
+		DesiredInstances: 1,
 	}
 	if !found {
+		out.Message = fmt.Sprintf("waiting for backing service deployment %s to be created", strings.TrimSpace(deployment.ResourceName))
 		return out
+	}
+	out.ReadyInstances = maxInt(status.Status.ReadyReplicas, status.Status.AvailableReplicas)
+	switch {
+	case hasDeploymentFailureCondition(status.Status.Conditions):
+		out.Phase = model.ManagedPostgresRuntimePhaseError
+		out.Message = deploymentFailureMessage(status.Status.Conditions)
+	case managedBackingServiceReady(status, found):
+		out.Phase = model.ManagedPostgresRuntimePhaseActive
+		out.Message = fmt.Sprintf("backing service deployment %s ready", strings.TrimSpace(deployment.ResourceName))
+	default:
+		out.Message = managedDeploymentProgressMessage(status, 1, deployment.ResourceName)
 	}
 
 	prev := managedBackingServiceStatusByID(previous.BackingServices, deployment.ServiceID)
@@ -1440,12 +1568,15 @@ func buildManagedBackingServiceStatus(previous runtime.ManagedAppStatus, deploym
 
 func buildManagedBackingServiceClusterStatus(previous runtime.ManagedAppStatus, deployment runtime.ManagedBackingServiceDeployment, status kubeCloudNativePGCluster, found bool) runtime.ManagedBackingServiceStatus {
 	out := runtime.ManagedBackingServiceStatus{
-		ServiceID:  deployment.ServiceID,
-		RuntimeKey: deployment.RuntimeKey,
+		ServiceID:        deployment.ServiceID,
+		RuntimeKey:       deployment.RuntimeKey,
+		DesiredInstances: managedBackingServiceDesiredInstances(deployment, status),
 	}
+	out.Phase, out.Message = managedBackingServiceClusterRuntimeStatus(deployment, status, found)
 	if !found {
 		return out
 	}
+	out.ReadyInstances = status.Status.ReadyInstances
 
 	prev := managedBackingServiceStatusByID(previous.BackingServices, deployment.ServiceID)
 	if strings.TrimSpace(prev.RuntimeKey) == strings.TrimSpace(deployment.RuntimeKey) {
@@ -1455,7 +1586,7 @@ func buildManagedBackingServiceClusterStatus(previous runtime.ManagedAppStatus, 
 	if out.CurrentRuntimeStartedAt == "" {
 		out.CurrentRuntimeStartedAt = formatKubeTimestamp(time.Now().UTC())
 	}
-	if managedBackingServiceClusterReady(status, found) {
+	if managedBackingServiceClusterDeploymentReady(deployment, status, found) {
 		if out.CurrentRuntimeReadyAt == "" {
 			out.CurrentRuntimeReadyAt = formatKubeTimestamp(time.Now().UTC())
 		}
@@ -1498,13 +1629,22 @@ func managedBackingServiceReady(deployment kubeDeployment, found bool) bool {
 }
 
 func managedBackingServiceClusterReady(cluster kubeCloudNativePGCluster, found bool) bool {
+	return managedBackingServiceClusterDeploymentReady(runtime.ManagedBackingServiceDeployment{
+		DesiredInstances: cluster.Spec.Instances,
+	}, cluster, found)
+}
+
+func managedBackingServiceClusterDeploymentReady(deployment runtime.ManagedBackingServiceDeployment, cluster kubeCloudNativePGCluster, found bool) bool {
 	if !found {
 		return false
 	}
-	desiredInstances := cluster.Spec.Instances
-	if desiredInstances <= 0 {
-		desiredInstances = 1
+	if deployment.Suspended {
+		return cloudNativePGClusterHibernated(cluster)
 	}
+	if !cloudNativePGClusterNonHibernated(cluster) {
+		return false
+	}
+	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
 	if cluster.Status.ReadyInstances < desiredInstances {
 		return false
 	}
@@ -1516,6 +1656,153 @@ func managedBackingServiceClusterReady(cluster kubeCloudNativePGCluster, found b
 		return false
 	}
 	return true
+}
+
+func managedBackingServiceDesiredInstances(deployment runtime.ManagedBackingServiceDeployment, cluster kubeCloudNativePGCluster) int {
+	desiredInstances := deployment.DesiredInstances
+	if desiredInstances <= 0 {
+		desiredInstances = cluster.Spec.Instances
+	}
+	if desiredInstances <= 0 {
+		desiredInstances = 1
+	}
+	return desiredInstances
+}
+
+func managedBackingServiceClusterRuntimeStatus(deployment runtime.ManagedBackingServiceDeployment, cluster kubeCloudNativePGCluster, found bool) (string, string) {
+	clusterName := strings.TrimSpace(deployment.ResourceName)
+	if clusterName == "" {
+		clusterName = "cluster"
+	}
+	if !found {
+		return model.ManagedPostgresRuntimePhaseUnknown, fmt.Sprintf("waiting for backing service cluster %s to be created", clusterName)
+	}
+	if failureMessage := cloudNativePGHibernationFailureMessage(cluster); failureMessage != "" {
+		return model.ManagedPostgresRuntimePhaseError, failureMessage
+	}
+
+	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
+	if deployment.Suspended {
+		if cloudNativePGClusterHibernated(cluster) {
+			return model.ManagedPostgresRuntimePhaseSuspended, fmt.Sprintf("backing service cluster %s suspended (0/%d ready instances)", clusterName, desiredInstances)
+		}
+		if !strings.EqualFold(cloudNativePGHibernationAnnotation(cluster), runtime.CloudNativePGHibernationOn) {
+			return model.ManagedPostgresRuntimePhaseSuspending, fmt.Sprintf("waiting for backing service cluster %s hibernation annotation to be applied", clusterName)
+		}
+		if condition, ok := cloudNativePGHibernationCondition(cluster); ok &&
+			!strings.EqualFold(strings.TrimSpace(condition.Status), "True") &&
+			strings.TrimSpace(condition.Message) != "" {
+			return model.ManagedPostgresRuntimePhaseSuspending, strings.TrimSpace(condition.Message)
+		}
+		return model.ManagedPostgresRuntimePhaseSuspending, fmt.Sprintf(
+			"waiting for backing service cluster %s to suspend (%d/%d ready instances)",
+			clusterName,
+			cluster.Status.ReadyInstances,
+			desiredInstances,
+		)
+	}
+
+	if managedBackingServiceClusterPrimaryAvailable(deployment, cluster) {
+		if cluster.Status.ReadyInstances < desiredInstances {
+			return model.ManagedPostgresRuntimePhaseActive, fmt.Sprintf(
+				"backing service cluster %s primary ready (%d/%d instances); remaining replicas recovering",
+				clusterName,
+				cluster.Status.ReadyInstances,
+				desiredInstances,
+			)
+		}
+		return model.ManagedPostgresRuntimePhaseActive, fmt.Sprintf("backing service cluster %s ready", clusterName)
+	}
+	if annotation := cloudNativePGHibernationAnnotation(cluster); annotation != "" &&
+		!strings.EqualFold(annotation, runtime.CloudNativePGHibernationOff) {
+		return model.ManagedPostgresRuntimePhaseResuming, fmt.Sprintf("waiting for backing service cluster %s hibernation annotation to be disabled", clusterName)
+	}
+	if condition, ok := cloudNativePGHibernationCondition(cluster); ok && strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
+		return model.ManagedPostgresRuntimePhaseResuming, fmt.Sprintf("waiting for backing service cluster %s to exit hibernation", clusterName)
+	}
+	return model.ManagedPostgresRuntimePhaseResuming, managedBackingServiceClusterProgressMessage(clusterName, cluster, desiredInstances)
+}
+
+func managedBackingServiceClusterPrimaryAvailable(deployment runtime.ManagedBackingServiceDeployment, cluster kubeCloudNativePGCluster) bool {
+	if !cloudNativePGClusterNonHibernated(cluster) {
+		return false
+	}
+	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
+	if cluster.Status.ReadyInstances < 1 || cluster.Status.ReadyInstances > desiredInstances {
+		return false
+	}
+	currentPrimary := strings.TrimSpace(cluster.Status.CurrentPrimary)
+	if currentPrimary == "" {
+		return false
+	}
+	targetPrimary := strings.TrimSpace(cluster.Status.TargetPrimary)
+	return targetPrimary == "" || targetPrimary == currentPrimary
+}
+
+func managedBackingServiceClusterProgressMessage(clusterName string, cluster kubeCloudNativePGCluster, desiredInstances int) string {
+	if cluster.Status.ReadyInstances < 1 {
+		return fmt.Sprintf(
+			"waiting for backing service cluster %s primary readiness (%d/%d ready instances)",
+			clusterName,
+			cluster.Status.ReadyInstances,
+			desiredInstances,
+		)
+	}
+	currentPrimary := strings.TrimSpace(cluster.Status.CurrentPrimary)
+	if currentPrimary == "" {
+		return fmt.Sprintf("waiting for backing service cluster %s current primary", clusterName)
+	}
+	targetPrimary := strings.TrimSpace(cluster.Status.TargetPrimary)
+	if targetPrimary != "" && targetPrimary != currentPrimary {
+		return fmt.Sprintf("waiting for backing service cluster %s switchover to settle (%s -> %s)", clusterName, currentPrimary, targetPrimary)
+	}
+	return fmt.Sprintf(
+		"waiting for backing service cluster %s to settle (%d/%d ready instances)",
+		clusterName,
+		cluster.Status.ReadyInstances,
+		desiredInstances,
+	)
+}
+
+func cloudNativePGHibernationAnnotation(cluster kubeCloudNativePGCluster) string {
+	return strings.TrimSpace(cluster.Metadata.Annotations[runtime.CloudNativePGHibernationAnno])
+}
+
+func cloudNativePGHibernationCondition(cluster kubeCloudNativePGCluster) (runtime.ManagedAppCondition, bool) {
+	for _, condition := range cluster.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), runtime.CloudNativePGHibernationAnno) {
+			return condition, true
+		}
+	}
+	return runtime.ManagedAppCondition{}, false
+}
+
+func cloudNativePGClusterHibernated(cluster kubeCloudNativePGCluster) bool {
+	if !strings.EqualFold(cloudNativePGHibernationAnnotation(cluster), runtime.CloudNativePGHibernationOn) || cluster.Status.ReadyInstances != 0 {
+		return false
+	}
+	condition, ok := cloudNativePGHibernationCondition(cluster)
+	return ok && strings.EqualFold(strings.TrimSpace(condition.Status), "True")
+}
+
+func cloudNativePGClusterNonHibernated(cluster kubeCloudNativePGCluster) bool {
+	annotation := cloudNativePGHibernationAnnotation(cluster)
+	// CNPG officially supports both "off" and an absent annotation for a
+	// rehydrated cluster. Fugue renders "off" explicitly, while accepting the
+	// absent form keeps pre-feature active clusters observable during upgrade.
+	if annotation != "" && !strings.EqualFold(annotation, runtime.CloudNativePGHibernationOff) {
+		return false
+	}
+	condition, ok := cloudNativePGHibernationCondition(cluster)
+	return !ok || !strings.EqualFold(strings.TrimSpace(condition.Status), "True")
+}
+
+func cloudNativePGHibernationFailureMessage(cluster kubeCloudNativePGCluster) string {
+	condition, ok := cloudNativePGHibernationCondition(cluster)
+	if !ok || !strings.EqualFold(strings.TrimSpace(condition.Reason), "WrongAnnotationValue") {
+		return ""
+	}
+	return managedAppConditionMessage(condition, "managed postgres cluster reported an invalid hibernation annotation")
 }
 
 func managedStatusTimePointer(value string) *time.Time {

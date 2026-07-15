@@ -43,6 +43,9 @@ const (
 
 	CloudNativePGAPIVersion           = "postgresql.cnpg.io/v1"
 	CloudNativePGClusterKind          = "Cluster"
+	CloudNativePGHibernationAnno      = "cnpg.io/hibernation"
+	CloudNativePGHibernationOn        = "on"
+	CloudNativePGHibernationOff       = "off"
 	CloudNativePGReconcilePodSpecAnno = "cnpg.io/reconcilePodSpec"
 	CloudNativePGReconcilePodSpecHold = "disabled"
 	CloudNativePGReloadLabel          = "cnpg.io/reload"
@@ -443,14 +446,19 @@ func buildPostgresManagedRole(secretName string, spec model.AppPostgresSpec) map
 }
 
 func buildPostgresClusterAnnotations(spec model.AppPostgresSpec) map[string]string {
+	annotations := map[string]string{
+		CloudNativePGHibernationAnno: CloudNativePGHibernationOff,
+	}
+	if spec.Suspended {
+		annotations[CloudNativePGHibernationAnno] = CloudNativePGHibernationOn
+	}
 	if !spec.PrimaryPlacementPendingRebalance {
-		return nil
+		return annotations
 	}
 	// Hold pod-spec reconciliation during two-phase failover changes so the
 	// current primary is not restarted just because placement changes.
-	return map[string]string{
-		CloudNativePGReconcilePodSpecAnno: CloudNativePGReconcilePodSpecHold,
-	}
+	annotations[CloudNativePGReconcilePodSpecAnno] = CloudNativePGReconcilePodSpecHold
+	return annotations
 }
 
 func buildPostgresServiceObject(namespace, resourceName string, labels map[string]string, spec model.AppPostgresSpec) map[string]any {
@@ -1095,10 +1103,12 @@ type postgresRuntimeResource struct {
 }
 
 type ManagedBackingServiceDeployment struct {
-	ServiceID    string
-	ResourceName string
-	ResourceKind string
-	RuntimeKey   string
+	ServiceID        string
+	ResourceName     string
+	ResourceKind     string
+	RuntimeKey       string
+	DesiredInstances int
+	Suspended        bool
 }
 
 func ManagedAppReleaseKey(app model.App, scheduling SchedulingConstraints) string {
@@ -1126,10 +1136,12 @@ func ManagedBackingServiceDeploymentsWithPlacements(app model.App, scheduling Sc
 		}
 		object := buildPostgresClusterObject(namespace, resource.secretName, resource.resourceName, postgresLabels(resource), resource.spec, resource.placements)
 		deployments = append(deployments, ManagedBackingServiceDeployment{
-			ServiceID:    resource.serviceID,
-			ResourceName: resource.resourceName,
-			ResourceKind: CloudNativePGClusterKind,
-			RuntimeKey:   managedDeploymentRuntimeKey(object),
+			ServiceID:        resource.serviceID,
+			ResourceName:     resource.resourceName,
+			ResourceKind:     CloudNativePGClusterKind,
+			RuntimeKey:       managedDeploymentRuntimeKey(object),
+			DesiredInstances: resource.spec.Instances,
+			Suspended:        resource.spec.Suspended,
 		})
 	}
 	return deployments
@@ -1201,14 +1213,25 @@ func managedDeploymentRuntimeKey(obj map[string]any) string {
 			specPayload = spec
 		}
 	}
+	runtimeMetadata := map[string]any{
+		"name":      metadata["name"],
+		"namespace": metadata["namespace"],
+	}
+	// Most metadata annotations are reconciliation details and intentionally do
+	// not create a new runtime identity. Hibernation is different: it is an
+	// operator-observed desired lifecycle state, so entering hibernation must
+	// start a new backing-service runtime interval. The active "off" state keeps
+	// the historical key shape for backwards compatibility.
+	if strings.EqualFold(objectStringMapValue(metadata["annotations"], CloudNativePGHibernationAnno), CloudNativePGHibernationOn) {
+		runtimeMetadata["annotations"] = map[string]string{
+			CloudNativePGHibernationAnno: CloudNativePGHibernationOn,
+		}
+	}
 	payload := map[string]any{
 		"apiVersion": obj["apiVersion"],
 		"kind":       obj["kind"],
-		"metadata": map[string]any{
-			"name":      metadata["name"],
-			"namespace": metadata["namespace"],
-		},
-		"spec": specPayload,
+		"metadata":   runtimeMetadata,
+		"spec":       specPayload,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -1216,6 +1239,17 @@ func managedDeploymentRuntimeKey(obj map[string]any) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func objectStringMapValue(value any, key string) string {
+	switch values := value.(type) {
+	case map[string]string:
+		return strings.TrimSpace(values[key])
+	case map[string]any:
+		return strings.TrimSpace(fmt.Sprint(values[key]))
+	default:
+		return ""
+	}
 }
 
 func deploymentTemplateForRuntimeKey(template any) any {

@@ -13,18 +13,13 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
-	fuguestore "fugue/internal/store"
 )
 
 func (s *Server) handleGetOperationEvidence(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	op, err := s.store.GetOperation(r.PathValue("id"))
+	op, err := s.loadAuthorizedOperation(principal, r.PathValue("id"))
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if !principal.IsPlatformAdmin() && op.TenantID != principal.TenantID {
-		httpx.WriteError(w, http.StatusForbidden, "operation is not visible to this tenant")
+		s.writeOperationReadError(w, err)
 		return
 	}
 	filter := model.OperationEvidenceFilter{
@@ -48,21 +43,24 @@ func (s *Server) handleGetOperationEvidence(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
-	if !queryBool(r, "include_payload") {
-		for idx := range evidence {
-			evidence[idx].Payload = nil
-		}
-	}
+	evidence = redactOperationEvidenceForAPI(evidence, queryBool(r, "include_payload"))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"evidence": evidence})
 }
 
 func (s *Server) handleGetOperationTimeline(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	timeline, err := s.store.ListOperationTimeline(principal.TenantID, principal.IsPlatformAdmin(), r.PathValue("id"), queryBool(r, "include_payload"))
+	op, err := s.loadAuthorizedOperation(principal, r.PathValue("id"))
+	if err != nil {
+		s.writeOperationReadError(w, err)
+		return
+	}
+	includePayload := queryBool(r, "include_payload")
+	timeline, err := s.store.ListOperationTimeline(op.TenantID, principal.IsPlatformAdmin(), op.ID, includePayload)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
+	timeline = redactOperationTimelineForAPI(timeline, includePayload)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"timeline": timeline})
 }
 
@@ -70,7 +68,7 @@ func (s *Server) handleGetOperationDebugBundle(w http.ResponseWriter, r *http.Re
 	principal := mustPrincipal(r)
 	bundle, err := s.operationDebugBundle(r, principal, r.PathValue("id"))
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.writeOperationReadError(w, err)
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "zip") {
@@ -81,15 +79,12 @@ func (s *Server) handleGetOperationDebugBundle(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal, operationID string) (model.OperationDebugBundle, error) {
-	op, err := s.store.GetOperation(operationID)
+	op, err := s.loadAuthorizedOperation(principal, operationID)
 	if err != nil {
 		return model.OperationDebugBundle{}, err
 	}
-	if !principal.IsPlatformAdmin() && op.TenantID != principal.TenantID {
-		return model.OperationDebugBundle{}, fuguestore.ErrNotFound
-	}
 	evidence, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{
-		TenantID:      principal.TenantID,
+		TenantID:      op.TenantID,
 		PlatformAdmin: principal.IsPlatformAdmin(),
 		OperationID:   op.ID,
 		Limit:         1000,
@@ -97,7 +92,7 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 	if err != nil {
 		return model.OperationDebugBundle{}, err
 	}
-	timeline, err := s.store.ListOperationTimeline(principal.TenantID, principal.IsPlatformAdmin(), op.ID, true)
+	timeline, err := s.store.ListOperationTimeline(op.TenantID, principal.IsPlatformAdmin(), op.ID, true)
 	if err != nil {
 		return model.OperationDebugBundle{}, err
 	}
@@ -105,7 +100,8 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 	_ = s.attachOperationEvidenceDiagnosis(r.Context(), op, &diagnosis)
 	var diagnosisPtr *model.OperationDiagnosis
 	if strings.TrimSpace(diagnosis.Category) != "" {
-		diagnosisPtr = &diagnosis
+		redactedDiagnosis := redactOperationDiagnosisForAPI(diagnosis)
+		diagnosisPtr = &redactedDiagnosis
 	}
 	app, appFound, _ := s.getDiagnosisApp(op.AppID)
 	var appPtr *model.App
@@ -129,8 +125,8 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		ImageTrackingChecks: trackingChecks,
 		MetricsSummary:      metricsSummary,
 		Diagnosis:           diagnosisPtr,
-		Timeline:            timeline,
-		Evidence:            evidence,
+		Timeline:            redactOperationTimelineForAPI(timeline, true),
+		Evidence:            redactOperationEvidenceForAPI(evidence, true),
 	}
 	for _, item := range evidence {
 		if strings.TrimSpace(item.ReleaseAttemptID) == "" {
@@ -147,7 +143,7 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		break
 	}
 	bundle := releaseflow.ReleaseEvidenceViewBuilder{}.OperationBundle(view)
-	return bundle, nil
+	return redactOperationDebugBundleForAPI(bundle), nil
 }
 
 func (s *Server) handleListAppReleaseAttempts(w http.ResponseWriter, r *http.Request) {

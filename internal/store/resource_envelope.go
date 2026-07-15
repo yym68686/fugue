@@ -43,6 +43,9 @@ func (s *Store) GetTenantResourceCommitment(tenantID string) (model.BillingResou
 		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
 			continue
 		}
+		if service.Spec.Postgres.Suspended {
+			continue
+		}
 		resources := model.DefaultManagedPostgresResources()
 		if service.Spec.Postgres.Resources != nil {
 			resources = *service.Spec.Postgres.Resources

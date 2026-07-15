@@ -611,6 +611,213 @@ func TestGenericBackupRunCanonicalizesAuthorizedPolicyAlias(t *testing.T) {
 	}
 }
 
+func TestManualAppDatabaseBackupRejectsSuspendedManagedPostgresBeforeCreatingRun(t *testing.T) {
+	fixture := newBackupAuthorizationFixture(t)
+	policy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "suspended-postgres")
+	suspendManagedPostgresForBackupTest(t, fixture.stateStore, fixture.attackerApp)
+
+	workerCalled := false
+	fixture.server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		workerCalled = true
+		return nil, nil
+	}
+	tests := []struct {
+		name string
+		path string
+		body map[string]any
+	}{
+		{
+			name: "generic backup route",
+			path: "/v1/backups/runs",
+			body: map[string]any{"policy_id": policy.ID, "wait": true},
+		},
+		{
+			name: "app backup route",
+			path: "/v1/apps/" + fixture.attackerApp.ID + "/backups/runs",
+			body: map[string]any{"policy_id": policy.ID},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := performJSONRequest(t, fixture.server, http.MethodPost, test.path, fixture.attackerKey, test.body)
+			if recorder.Code != http.StatusConflict {
+				t.Fatalf("expected status %d, got %d body=%s", http.StatusConflict, recorder.Code, recorder.Body.String())
+			}
+			var response struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			mustDecodeJSON(t, recorder, &response)
+			if response.Error != managedPostgresSuspendedBackupMessage || response.Code != "conflict" {
+				t.Fatalf("expected actionable suspended postgres conflict, got %+v", response)
+			}
+		})
+	}
+	if workerCalled {
+		t.Fatal("manual suspended postgres rejection must not invoke the backup worker")
+	}
+	runs, err := fixture.stateStore.ListBackupRuns(store.BackupRunFilter{PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list backup runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("manual suspended postgres rejection must not create backup runs, got %+v", runs)
+	}
+}
+
+func TestManualAppDatabaseBackupRejectsActiveSuspendOperation(t *testing.T) {
+	fixture := newBackupAuthorizationFixture(t)
+	policy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "suspending-postgres")
+	_, suspend := beginManagedPostgresSuspendForBackupTest(t, fixture.stateStore, fixture.attackerApp)
+
+	workerCalled := false
+	fixture.server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		workerCalled = true
+		return nil, nil
+	}
+	for _, request := range []struct {
+		path string
+		body map[string]any
+	}{
+		{path: "/v1/backups/runs", body: map[string]any{"policy_id": policy.ID, "wait": true}},
+		{path: "/v1/apps/" + fixture.attackerApp.ID + "/backups/runs", body: map[string]any{"policy_id": policy.ID}},
+	} {
+		recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("expected active suspend conflict from %s, code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Error string `json:"error"`
+		}
+		mustDecodeJSON(t, recorder, &response)
+		if response.Error != store.ManagedPostgresSuspendBackupConflictMessage {
+			t.Fatalf("expected deterministic suspend-in-progress message, got %+v", response)
+		}
+	}
+	if workerCalled {
+		t.Fatal("active suspend rejection must not invoke backup worker")
+	}
+	runs, err := fixture.stateStore.ListBackupRuns(store.BackupRunFilter{PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list backup runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("active suspend rejection must not create backup runs, got %+v", runs)
+	}
+	storedSuspend, err := fixture.stateStore.GetOperation(suspend.ID)
+	if err != nil {
+		t.Fatalf("get suspend operation after rejected backup: %v", err)
+	}
+	if storedSuspend.Status != model.OperationStatusPending {
+		t.Fatalf("backup rejection changed suspend operation: %+v", storedSuspend)
+	}
+}
+
+func TestBackupWorkerGuardsSuspendedManagedPostgresWithoutBlockingOtherTargets(t *testing.T) {
+	fixture := newBackupAuthorizationFixture(t)
+	runnerCalls := 0
+	fixture.server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		runnerCalls++
+		return nil, nil
+	}
+
+	activeRun, err := fixture.stateStore.CreateBackupRun(model.BackupRun{
+		TenantID:  fixture.attacker.ID,
+		ProjectID: fixture.attackerApp.ProjectID,
+		AppID:     fixture.attackerApp.ID,
+		Target: model.BackupTarget{
+			Type:      model.BackupTargetAppDatabase,
+			TenantID:  fixture.attacker.ID,
+			ProjectID: fixture.attackerApp.ProjectID,
+			AppID:     fixture.attackerApp.ID,
+		},
+		BackendID: fixture.attackerBackend.ID,
+		Trigger:   model.BackupRunTriggerManual,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create active database backup run: %v", err)
+	}
+	fixture.server.executeBackupRun(context.Background(), activeRun.ID)
+	activeRun, err = fixture.stateStore.GetBackupRun(activeRun.ID, fixture.attacker.ID, false)
+	if err != nil {
+		t.Fatalf("get active database backup run: %v", err)
+	}
+	if activeRun.Status != model.BackupRunStatusSucceeded || runnerCalls != 1 {
+		t.Fatalf("active database backup behavior changed: run=%+v runner_calls=%d", activeRun, runnerCalls)
+	}
+
+	suspendedApp := suspendManagedPostgresForBackupTest(t, fixture.stateStore, fixture.attackerApp)
+	if managedPostgresBackupTargetSuspended(suspendedApp, model.BackupTarget{Type: model.BackupTargetPersistentStorage}) {
+		t.Fatal("suspended postgres must not block a non-database backup target")
+	}
+	suspendedRun, err := fixture.stateStore.CreateBackupRun(model.BackupRun{
+		TenantID:  fixture.attacker.ID,
+		ProjectID: fixture.attackerApp.ProjectID,
+		AppID:     fixture.attackerApp.ID,
+		Target: model.BackupTarget{
+			Type:      model.BackupTargetAppDatabase,
+			TenantID:  fixture.attacker.ID,
+			ProjectID: fixture.attackerApp.ProjectID,
+			AppID:     fixture.attackerApp.ID,
+		},
+		BackendID: fixture.attackerBackend.ID,
+		Trigger:   model.BackupRunTriggerScheduled,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create scheduled suspended database backup run: %v", err)
+	}
+	fixture.server.executeBackupRun(context.Background(), suspendedRun.ID)
+	suspendedRun, err = fixture.stateStore.GetBackupRun(suspendedRun.ID, fixture.attacker.ID, false)
+	if err != nil {
+		t.Fatalf("get suspended database backup run: %v", err)
+	}
+	if suspendedRun.Status != model.BackupRunStatusFailed ||
+		suspendedRun.ErrorCode != "managed_postgres_suspended" ||
+		suspendedRun.ErrorMessage != managedPostgresSuspendedBackupMessage {
+		t.Fatalf("expected deterministic suspended database failure, got %+v", suspendedRun)
+	}
+	if runnerCalls != 1 {
+		t.Fatalf("suspended database backup invoked runner: runner_calls=%d", runnerCalls)
+	}
+
+	persistentRun, err := fixture.stateStore.CreateBackupRun(model.BackupRun{
+		TenantID:  fixture.attacker.ID,
+		ProjectID: fixture.attackerApp.ProjectID,
+		AppID:     fixture.attackerApp.ID,
+		Target: model.BackupTarget{
+			Type:      model.BackupTargetPersistentStorage,
+			TenantID:  fixture.attacker.ID,
+			ProjectID: fixture.attackerApp.ProjectID,
+			AppID:     fixture.attackerApp.ID,
+			RuntimeID: fixture.attackerApp.Spec.RuntimeID,
+		},
+		BackendID: fixture.attackerBackend.ID,
+		Trigger:   model.BackupRunTriggerScheduled,
+		Status:    model.BackupRunStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create persistent storage backup run: %v", err)
+	}
+	fixture.server.executeBackupRun(context.Background(), persistentRun.ID)
+	persistentRun, err = fixture.stateStore.GetBackupRun(persistentRun.ID, fixture.attacker.ID, false)
+	if err != nil {
+		t.Fatalf("get persistent storage backup run: %v", err)
+	}
+	if persistentRun.Status != model.BackupRunStatusSucceeded || runnerCalls != 2 {
+		t.Fatalf("suspended postgres guard affected persistent storage backup: run=%+v runner_calls=%d", persistentRun, runnerCalls)
+	}
+
+	runs, err := fixture.stateStore.ListBackupRuns(store.BackupRunFilter{PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list final backup runs: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("suspended postgres failure must not enqueue retry runs, got %+v", runs)
+	}
+}
+
 func TestAppBackupRunRejectsPolicyForAnotherAppOrTenant(t *testing.T) {
 	t.Parallel()
 
@@ -1151,6 +1358,71 @@ type backupAuthorizationFixture struct {
 	victimApp       model.App
 	victimWorkspace model.DataWorkspace
 	victimBackend   model.BackupBackend
+}
+
+func suspendManagedPostgresForBackupTest(t *testing.T, stateStore *store.Store, app model.App) model.App {
+	t.Helper()
+	app, suspend := beginManagedPostgresSuspendForBackupTest(t, stateStore, app)
+	if _, err := stateStore.CompleteManagedOperation(suspend.ID, "", "database suspended"); err != nil {
+		t.Fatalf("complete postgres suspend operation: %v", err)
+	}
+	app, err := stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get app after postgres suspend: %v", err)
+	}
+	for idx := range app.BackingServices {
+		service := app.BackingServices[idx]
+		if service.ID == suspend.ServiceID && service.Spec.Postgres != nil && service.Spec.Postgres.Suspended {
+			return app
+		}
+	}
+	t.Fatalf("postgres backing service %s was not persisted as suspended", suspend.ServiceID)
+	return model.App{}
+}
+
+func beginManagedPostgresSuspendForBackupTest(t *testing.T, stateStore *store.Store, app model.App) (model.App, model.Operation) {
+	t.Helper()
+
+	zero := 0
+	scale, err := stateStore.CreateOperation(model.Operation{
+		TenantID:        app.TenantID,
+		Type:            model.OperationTypeScale,
+		AppID:           app.ID,
+		DesiredReplicas: &zero,
+	})
+	if err != nil {
+		t.Fatalf("create scale-to-zero operation before postgres suspend: %v", err)
+	}
+	if _, err := stateStore.CompleteManagedOperation(scale.ID, "", "app disabled for postgres suspend"); err != nil {
+		t.Fatalf("complete scale-to-zero operation before postgres suspend: %v", err)
+	}
+	app, err = stateStore.GetApp(app.ID)
+	if err != nil {
+		t.Fatalf("get disabled app before postgres suspend: %v", err)
+	}
+	serviceID := ""
+	for idx := range app.BackingServices {
+		service := app.BackingServices[idx]
+		if service.Type == model.BackingServiceTypePostgres &&
+			service.Provisioner == model.BackingServiceProvisionerManaged &&
+			service.Spec.Postgres != nil {
+			serviceID = service.ID
+			break
+		}
+	}
+	if serviceID == "" {
+		t.Fatal("managed postgres backing service not found")
+	}
+	suspend, err := stateStore.CreateOperation(model.Operation{
+		TenantID:  app.TenantID,
+		Type:      model.OperationTypeDatabaseSuspend,
+		AppID:     app.ID,
+		ServiceID: serviceID,
+	})
+	if err != nil {
+		t.Fatalf("create postgres suspend operation: %v", err)
+	}
+	return app, suspend
 }
 
 func newBackupAuthorizationFixture(t *testing.T) backupAuthorizationFixture {

@@ -287,6 +287,9 @@ func (c *managedAppStatusClient) listManagedAppsByAppID(ctx context.Context) (ma
 		if appID == "" {
 			continue
 		}
+		if _, exists := items[appID]; exists {
+			return nil, fmt.Errorf("managed app inventory contains duplicate appID %q", appID)
+		}
 		items[appID] = managed
 	}
 	return items, nil

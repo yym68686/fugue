@@ -38,11 +38,14 @@ const (
 	backupRunHeartbeatPeriod = 30 * time.Second
 	backupBackendProbeTTL    = 30 * time.Second
 	backupRunMaxRetries      = 3
+
+	managedPostgresSuspendedBackupMessage = "managed_postgres_suspended: resume before backup"
 )
 
 var (
 	errBackupTargetNotAuthorized  = errors.New("tenant-scoped backup target does not belong to tenant")
 	errBackupBackendNotAuthorized = errors.New("tenant-scoped backup backend does not belong to tenant")
+	errManagedPostgresSuspended   = errors.New(managedPostgresSuspendedBackupMessage)
 )
 
 type backupBackendRequest struct {
@@ -612,6 +615,10 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if suspended, err := s.backupRunTargetsSuspendedManagedPostgres(run); err == nil && suspended {
+		httpx.WriteError(w, http.StatusConflict, managedPostgresSuspendedBackupMessage)
+		return
+	}
 	if run.BackendID != "" {
 		backendID, ok := s.backupBackendIDForScope(w, principal, firstNonEmptyString(run.TenantID, run.Target.TenantID), run.BackendID)
 		if !ok {
@@ -621,6 +628,10 @@ func (s *Server) handleCreateBackupRun(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.store.CreateBackupRun(run)
 	if err != nil {
+		if errors.Is(err, store.ErrManagedPostgresSuspendBackupConflict) {
+			httpx.WriteError(w, http.StatusConflict, store.ManagedPostgresSuspendBackupConflictMessage)
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -1136,6 +1147,10 @@ func (s *Server) handleCreateAppBackupRun(w http.ResponseWriter, r *http.Request
 		httpx.WriteError(w, http.StatusForbidden, "backup policy is not available to this tenant")
 		return
 	}
+	if managedPostgresBackupTargetSuspended(app, policy.Target) {
+		httpx.WriteError(w, http.StatusConflict, managedPostgresSuspendedBackupMessage)
+		return
+	}
 	backendID := strings.TrimSpace(req.BackendID)
 	if backendID == "" {
 		backendID = policy.BackendID
@@ -1161,6 +1176,10 @@ func (s *Server) handleCreateAppBackupRun(w http.ResponseWriter, r *http.Request
 		RequestedByID:   principal.ActorID,
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrManagedPostgresSuspendBackupConflict) {
+			httpx.WriteError(w, http.StatusConflict, store.ManagedPostgresSuspendBackupConflictMessage)
+			return
+		}
 		s.writeStoreError(w, err)
 		return
 	}
@@ -1546,6 +1565,75 @@ func backupTargetRuntimeMatchesApp(app model.App, target model.BackupTarget) boo
 	}
 }
 
+func (s *Server) backupRunTargetsSuspendedManagedPostgres(run model.BackupRun) (bool, error) {
+	target := model.NormalizeBackupTarget(run.Target)
+	if target.Type != model.BackupTargetAppDatabase {
+		return false, nil
+	}
+	appID := firstNonEmptyString(run.AppID, target.AppID)
+	if appID == "" {
+		return false, nil
+	}
+	app, err := s.store.GetApp(appID)
+	if err != nil {
+		return false, err
+	}
+	return managedPostgresBackupTargetSuspended(app, target), nil
+}
+
+func managedPostgresBackupTargetSuspended(app model.App, target model.BackupTarget) bool {
+	target = model.NormalizeBackupTarget(target)
+	if target.Type != model.BackupTargetAppDatabase {
+		return false
+	}
+	targetServiceName := strings.TrimSpace(target.ServiceName)
+	matchedService := false
+	for idx := range app.BackingServices {
+		service := app.BackingServices[idx]
+		if service.Type != model.BackingServiceTypePostgres ||
+			service.Provisioner != model.BackingServiceProvisionerManaged ||
+			service.Status == model.BackingServiceStatusDeleted ||
+			service.Spec.Postgres == nil {
+			continue
+		}
+		if targetServiceName != "" {
+			if targetServiceName != strings.TrimSpace(service.Name) &&
+				targetServiceName != strings.TrimSpace(service.Spec.Postgres.ServiceName) {
+				continue
+			}
+		} else if !appReferencesManagedPostgresService(app, service) {
+			continue
+		}
+		matchedService = true
+		if service.Spec.Postgres.Suspended {
+			return true
+		}
+		if service.RuntimeStatus != nil {
+			switch strings.TrimSpace(strings.ToLower(service.RuntimeStatus.Phase)) {
+			case model.ManagedPostgresRuntimePhaseSuspending, model.ManagedPostgresRuntimePhaseSuspended:
+				return true
+			}
+		}
+	}
+	if matchedService {
+		return false
+	}
+	return app.Spec.Postgres != nil && app.Spec.Postgres.Suspended
+}
+
+func appReferencesManagedPostgresService(app model.App, service model.BackingService) bool {
+	if strings.TrimSpace(service.OwnerAppID) == strings.TrimSpace(app.ID) {
+		return true
+	}
+	for _, binding := range app.Bindings {
+		if strings.TrimSpace(binding.AppID) == strings.TrimSpace(app.ID) &&
+			strings.TrimSpace(binding.ServiceID) == strings.TrimSpace(service.ID) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	if parent == nil {
 		parent = context.Background()
@@ -1660,7 +1748,14 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 	if runner == nil {
 		runner = s.runBackup
 	}
-	artifacts, err := runner(ctx, run)
+	var artifacts []model.BackupArtifact
+	if suspended, guardErr := s.backupRunTargetsSuspendedManagedPostgres(run); guardErr != nil {
+		err = guardErr
+	} else if suspended {
+		err = errManagedPostgresSuspended
+	} else {
+		artifacts, err = runner(ctx, run)
+	}
 	finishedAt := time.Now().UTC()
 	stopHeartbeat()
 	if coordinationLease != nil {
@@ -1707,7 +1802,9 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 			}
 			return
 		}
-		s.scheduleBackupRetry(contextWithoutCancel(parent), finished)
+		if !errors.Is(err, errManagedPostgresSuspended) {
+			s.scheduleBackupRetry(contextWithoutCancel(parent), finished)
+		}
 		return
 	}
 	var bytesWritten int64
@@ -2056,6 +2153,9 @@ func (s *Server) runAppDatabaseBackup(ctx context.Context, run model.BackupRun) 
 	app, err := s.store.GetApp(appID)
 	if err != nil {
 		return nil, err
+	}
+	if managedPostgresBackupTargetSuspended(app, run.Target) {
+		return nil, errManagedPostgresSuspended
 	}
 	postgres := store.OwnedManagedPostgresSpec(app)
 	if postgres == nil {

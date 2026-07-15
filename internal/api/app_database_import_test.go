@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"mime/multipart"
@@ -58,6 +59,198 @@ func TestImportAppDatabaseCreatesPendingJob(t *testing.T) {
 	}
 	if upload.Filename != "dump.sql" || string(dumpBytes) != "select 1;" {
 		t.Fatalf("unexpected stored dump upload=%+v data=%q", upload, string(dumpBytes))
+	}
+}
+
+func TestImportAppDatabaseReturnsStableConflictBeforeReadingDumpWhenManagedPostgresUnavailable(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		prepare func(*testing.T, *store.Store, model.App, model.BackingService)
+	}{
+		{
+			name: "suspending",
+			prepare: func(t *testing.T, stateStore *store.Store, app model.App, service model.BackingService) {
+				t.Helper()
+				if _, err := stateStore.CreateOperation(model.Operation{
+					TenantID:  app.TenantID,
+					Type:      model.OperationTypeDatabaseSuspend,
+					AppID:     app.ID,
+					ServiceID: service.ID,
+				}); err != nil {
+					t.Fatalf("create active suspend: %v", err)
+				}
+			},
+		},
+		{
+			name: "suspended",
+			prepare: func(t *testing.T, stateStore *store.Store, app model.App, service model.BackingService) {
+				t.Helper()
+				completeManagedPostgresLifecycleForTest(t, stateStore, app, service, model.OperationTypeDatabaseSuspend)
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			stateStore, server, apiKey, app, service := managedPostgresLifecycleFixture(t, 0)
+			testCase.prepare(t, stateStore, app, service)
+			// An invalid body proves the lifecycle preflight runs before multipart
+			// parsing or dump persistence.
+			req := httptest.NewRequest(http.MethodPost, "/v1/apps/"+app.ID+"/database/import", strings.NewReader("sensitive-dump-marker"))
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("Content-Type", "application/octet-stream")
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusConflict {
+				t.Fatalf("status = %d body=%s, want 409", recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), store.ManagedPostgresDatabaseImportConflictMessage) {
+				t.Fatalf("conflict body = %s, want stable message %q", recorder.Body.String(), store.ManagedPostgresDatabaseImportConflictMessage)
+			}
+			if strings.Contains(recorder.Body.String(), "sensitive-dump-marker") || strings.Contains(recorder.Body.String(), "lifecycle-secret") {
+				t.Fatalf("conflict leaked dump or database secret: %s", recorder.Body.String())
+			}
+			jobs, err := stateStore.ListAppDatabaseImportJobs(app.ID)
+			if err != nil {
+				t.Fatalf("list database import jobs: %v", err)
+			}
+			if len(jobs) != 0 {
+				t.Fatalf("blocked request created jobs: %+v", jobs)
+			}
+		})
+	}
+}
+
+func TestRetryAppDatabaseImportReturnsStableConflictWhenManagedPostgresSuspended(t *testing.T) {
+	stateStore, server, apiKey, app, service := managedPostgresLifecycleFixture(t, 0)
+	upload, err := stateStore.CreateSourceUpload(app.TenantID, "dump.sql", "application/sql", []byte("select 1;"))
+	if err != nil {
+		t.Fatalf("create source upload: %v", err)
+	}
+	job, err := stateStore.CreateAppDatabaseImportJob(model.AppDatabaseImportJob{
+		AppID:                app.ID,
+		TenantID:             app.TenantID,
+		SourceUploadID:       upload.ID,
+		SourceUploadFilename: upload.Filename,
+		SourceUploadSHA256:   upload.SHA256,
+		Format:               model.AppDatabaseImportFormatSQL,
+		Status:               model.OperationStatusPending,
+	})
+	if err != nil {
+		t.Fatalf("create source database import job: %v", err)
+	}
+	if _, err := stateStore.ClaimAppDatabaseImportJob(job.ID); err != nil {
+		t.Fatalf("claim source database import job: %v", err)
+	}
+	if _, err := stateStore.CompleteAppDatabaseImportJob(job.ID, model.OperationStatusFailed, "", "test failure"); err != nil {
+		t.Fatalf("fail source database import job: %v", err)
+	}
+	completeManagedPostgresLifecycleForTest(t, stateStore, app, service, model.OperationTypeDatabaseSuspend)
+
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/import/retry", apiKey, map[string]any{"job_id": job.ID})
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), store.ManagedPostgresDatabaseImportConflictMessage) {
+		t.Fatalf("retry status=%d body=%s, want stable 409", recorder.Code, recorder.Body.String())
+	}
+	jobs, err := stateStore.ListAppDatabaseImportJobs(app.ID)
+	if err != nil {
+		t.Fatalf("list database import jobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("blocked retry created another job: %+v", jobs)
+	}
+}
+
+func TestRunAppDatabaseImportJobDefendsAgainstSuspendedManagedPostgres(t *testing.T) {
+	stateStore, server, _, app, service := managedPostgresLifecycleFixture(t, 0)
+	completeManagedPostgresLifecycleForTest(t, stateStore, app, service, model.OperationTypeDatabaseSuspend)
+
+	_, err := server.runAppDatabaseImportJob(context.Background(), model.AppDatabaseImportJob{
+		ID:             "dbimport_defense",
+		AppID:          app.ID,
+		SourceUploadID: "upload_must_not_be_read",
+	})
+	if !errors.Is(err, store.ErrManagedPostgresDatabaseImportConflict) {
+		t.Fatalf("runAppDatabaseImportJob error = %v, want managed postgres import conflict", err)
+	}
+}
+
+func TestCreateAppDatabaseImportJobRaceDiscardsUnpublishedUpload(t *testing.T) {
+	stateStore, server, _, app, service := managedPostgresLifecycleFixture(t, 0)
+	if _, err := stateStore.CreateOperation(model.Operation{
+		TenantID:  app.TenantID,
+		Type:      model.OperationTypeDatabaseSuspend,
+		AppID:     app.ID,
+		ServiceID: service.ID,
+	}); err != nil {
+		t.Fatalf("create suspend that wins post-preflight race: %v", err)
+	}
+	upload, err := stateStore.CreateSourceUpload(app.TenantID, "race.sql", "application/sql", []byte("sensitive-race-dump"))
+	if err != nil {
+		t.Fatalf("create unpublished source upload: %v", err)
+	}
+
+	_, err = server.createAppDatabaseImportJobWithNewUpload(upload, model.AppDatabaseImportJob{
+		AppID:                app.ID,
+		TenantID:             app.TenantID,
+		SourceUploadID:       upload.ID,
+		SourceUploadFilename: upload.Filename,
+		SourceUploadSHA256:   upload.SHA256,
+		Format:               model.AppDatabaseImportFormatSQL,
+		Status:               model.OperationStatusPending,
+	})
+	if !errors.Is(err, store.ErrManagedPostgresDatabaseImportConflict) {
+		t.Fatalf("create job race error = %v, want managed postgres import conflict", err)
+	}
+	if _, _, err := stateStore.GetSourceUploadArchive(upload.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unpublished race upload was not discarded: %v", err)
+	}
+	jobs, err := stateStore.ListAppDatabaseImportJobs(app.ID)
+	if err != nil {
+		t.Fatalf("list database import jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("failed create race published a job: %+v", jobs)
+	}
+}
+
+func TestBackingServiceLifecycleBusyConflictsReturnDirectionSpecificMessages(t *testing.T) {
+	t.Parallel()
+
+	for _, testCase := range []struct {
+		name        string
+		err         error
+		wantMessage string
+		wantAudit   string
+	}{
+		{
+			name:        "backup in progress blocks suspend",
+			err:         store.ErrManagedPostgresBackupInProgressConflict,
+			wantMessage: store.ManagedPostgresBackupInProgressConflictMessage,
+			wantAudit:   "rejected_backup_in_progress",
+		},
+		{
+			name:        "import in progress blocks suspend",
+			err:         store.ErrManagedPostgresImportInProgressConflict,
+			wantMessage: store.ManagedPostgresImportInProgressConflictMessage,
+			wantAudit:   "rejected_import_in_progress",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			(&Server{}).writeBackingServiceLifecycleStoreError(recorder, testCase.err)
+			if recorder.Code != http.StatusConflict {
+				t.Fatalf("status = %d body=%s, want 409", recorder.Code, recorder.Body.String())
+			}
+			var response struct {
+				Error string `json:"error"`
+			}
+			mustDecodeJSON(t, recorder, &response)
+			if response.Error != testCase.wantMessage {
+				t.Fatalf("error = %q, want %q", response.Error, testCase.wantMessage)
+			}
+			if got := lifecycleStoreErrorResult(testCase.err); got != testCase.wantAudit {
+				t.Fatalf("audit result = %q, want %q", got, testCase.wantAudit)
+			}
+		})
 	}
 }
 

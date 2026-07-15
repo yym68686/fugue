@@ -684,10 +684,72 @@ fugue auth logout
 fugue service ls
 fugue service postgres create app-db --runtime shared
 fugue service show app-db
+fugue service suspend app-db
 `),
 	},
 	"fugue service postgres": {
-		Example: "fugue service postgres create app-db --runtime shared --database app --user app",
+		Example: strings.TrimSpace(`
+fugue service postgres create app-db --runtime shared --database app --user app
+fugue service postgres orphan ls
+fugue service postgres orphan adopt app_123
+`),
+	},
+	"fugue service suspend": {
+		Long: strings.TrimSpace(`
+Suspend a managed Postgres backing service using the runtime's durable hibernation mechanism.
+
+Every app bound to the service must be stopped, and Fugue must freshly confirm both zero replicas and zero remaining app Pods before it changes the database. Active database backups or imports block suspension. The database workload then scales to zero while Fugue retains its service record and persistent storage. A suspended database prevents its bound app from starting until resume succeeds.
+
+Hibernation is disruptive and is not a backup: PostgreSQL clients are disconnected, existing database access grants are not revoked, and external writers must be quiesced before suspension. By default the CLI waits for the lifecycle operation and then reports both the desired suspended value and the observed runtime phase, ready/desired instances, and message. Pass --wait=false to return after the operation is queued.
+`),
+		Example: strings.TrimSpace(`
+fugue service suspend app-db
+fugue service suspend app-db --wait=false
+`),
+	},
+	"fugue service resume": {
+		Long: strings.TrimSpace(`
+Resume a hibernated managed Postgres backing service from its retained persistent storage. Resume does not start any bound app automatically.
+
+Wait for resume to report an active primary before starting a bound app. By default the CLI waits for the lifecycle operation and then reports both the desired suspended value and the observed runtime phase, ready/desired instances, and message. Pass --wait=false to return after the operation is queued.
+`),
+		Example: strings.TrimSpace(`
+fugue service resume app-db
+fugue service resume app-db --wait=false
+`),
+	},
+	"fugue service postgres orphan": {
+		Long: strings.TrimSpace(`
+Inspect or adopt managed Postgres resources retained after their owner app disappeared from the Fugue store.
+
+These platform-administrator commands do not delete persistent storage. Adoption recreates the missing Fugue records so normal service lifecycle commands can manage the retained database again.
+`),
+		Example: strings.TrimSpace(`
+fugue service postgres orphan ls
+fugue service postgres orphan adopt app_123
+`),
+	},
+	"fugue service postgres orphan ls": {
+		Long: strings.TrimSpace(`
+List managed app resources whose owner app no longer exists in the Fugue store but whose Postgres storage was retained.
+
+This endpoint requires a platform-admin or bootstrap key.
+`),
+		Example: strings.TrimSpace(`
+fugue service postgres orphan ls
+fugue service postgres orphan ls --json
+`),
+	},
+	"fugue service postgres orphan adopt": {
+		Long: strings.TrimSpace(`
+Adopt one retained orphan managed app and its Postgres backing services into the Fugue store.
+
+The app ID must come from "fugue service postgres orphan ls". This endpoint requires a platform-admin or bootstrap key. JSON output redacts app and database secrets.
+`),
+		Example: strings.TrimSpace(`
+fugue service postgres orphan adopt app_123
+fugue service postgres orphan adopt app_123 --json
+`),
 	},
 	"fugue admin": {
 		Example: strings.TrimSpace(`

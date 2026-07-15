@@ -44,6 +44,8 @@ func redactOperationForDebugBundle(op model.Operation) model.Operation {
 	}
 	out.DesiredSource = redactAppSourceForDebugBundle(op.DesiredSource)
 	out.DesiredOriginSource = redactAppSourceForDebugBundle(op.DesiredOriginSource)
+	out.ResultMessage = redactOperationDiagnosticString(op.ResultMessage)
+	out.ErrorMessage = redactOperationDiagnosticString(op.ErrorMessage)
 	return out
 }
 
@@ -52,8 +54,13 @@ func redactAppSourceForDebugBundle(source *model.AppSource) *model.AppSource {
 		return nil
 	}
 	out := sanitizeAppSourceForAPI(source)
-	if out != nil && strings.TrimSpace(out.RepoAuthToken) != "" {
+	if out != nil && strings.TrimSpace(source.RepoAuthToken) != "" {
 		out.RepoAuthToken = apiRedactedSecretValue
+	}
+	if out != nil {
+		out.RepoURL = redactOperationDiagnosticString(out.RepoURL)
+		out.ImageRef = redactOperationDiagnosticString(out.ImageRef)
+		out.ResolvedImageRef = redactOperationDiagnosticString(out.ResolvedImageRef)
 	}
 	return out
 }
@@ -62,9 +69,17 @@ func redactAppSpecForDebugBundle(spec model.AppSpec) model.AppSpec {
 	out := cloneAppSpec(spec)
 	out.Env = redactStringMapValues(out.Env)
 	out.Files = redactAppFilesForDebugBundle(out.Files)
+	if out.Workspace != nil && strings.TrimSpace(out.Workspace.ResetToken) != "" {
+		workspace := *out.Workspace
+		workspace.ResetToken = apiRedactedSecretValue
+		out.Workspace = &workspace
+	}
 	if out.PersistentStorage != nil {
 		storage := *out.PersistentStorage
 		storage.Mounts = redactStorageMountsForDebugBundle(storage.Mounts)
+		if strings.TrimSpace(storage.ResetToken) != "" {
+			storage.ResetToken = apiRedactedSecretValue
+		}
 		out.PersistentStorage = &storage
 	}
 	if out.Postgres != nil && strings.TrimSpace(out.Postgres.Password) != "" {
@@ -145,20 +160,7 @@ func sanitizeAppsForAPI(apps []model.App) []model.App {
 }
 
 func sanitizeOperationForAPI(op model.Operation) model.Operation {
-	out := op
-	if op.DesiredSpec != nil {
-		spec := cloneAppSpec(*op.DesiredSpec)
-		spec = redactSecretFilesInSpec(spec)
-		spec, _ = model.StripFugueInjectedAppEnvFromSpec(spec)
-		out.DesiredSpec = &spec
-	}
-	if op.DesiredSource != nil {
-		out.DesiredSource = sanitizeAppSourceForAPI(op.DesiredSource)
-	}
-	if op.DesiredOriginSource != nil {
-		out.DesiredOriginSource = sanitizeAppSourceForAPI(op.DesiredOriginSource)
-	}
-	return out
+	return redactOperationForDebugBundle(op)
 }
 
 func sanitizeOperationsForAPI(ops []model.Operation) []model.Operation {
@@ -404,6 +406,10 @@ func cloneBackingServices(services []model.BackingService) []model.BackingServic
 func cloneBackingService(service model.BackingService) model.BackingService {
 	out := service
 	out.Spec = cloneBackingServiceSpec(service.Spec)
+	if service.RuntimeStatus != nil {
+		status := *service.RuntimeStatus
+		out.RuntimeStatus = &status
+	}
 	out.CurrentResourceUsage = cloneResourceUsage(service.CurrentResourceUsage)
 	return out
 }

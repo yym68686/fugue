@@ -31,13 +31,9 @@ type builderPlacementInspector func(
 
 func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	op, err := s.store.GetOperation(r.PathValue("id"))
+	op, err := s.loadAuthorizedOperation(principal, r.PathValue("id"))
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if !principal.IsPlatformAdmin() && op.TenantID != principal.TenantID {
-		httpx.WriteError(w, http.StatusForbidden, "operation is not visible to this tenant")
+		s.writeOperationReadError(w, err)
 		return
 	}
 	diagnosis, err := s.diagnoseOperation(r.Context(), op)
@@ -49,12 +45,12 @@ func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, err)
 		return
 	}
-	if err := s.attachOperationControllerLaneDiagnosis(op, &diagnosis); err != nil {
+	if err := s.attachOperationControllerLaneDiagnosis(principal, op, &diagnosis); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	s.attachOperationBackupDiagnosis(op, &diagnosis)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": diagnosis})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": redactOperationDiagnosisForAPI(diagnosis)})
 }
 
 func (s *Server) attachOperationEvidenceDiagnosis(ctx context.Context, op model.Operation, diagnosis *model.OperationDiagnosis) error {
@@ -779,7 +775,7 @@ func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, app
 	return diagnosis, nil
 }
 
-func (s *Server) attachOperationControllerLaneDiagnosis(op model.Operation, diagnosis *model.OperationDiagnosis) error {
+func (s *Server) attachOperationControllerLaneDiagnosis(principal model.Principal, op model.Operation, diagnosis *model.OperationDiagnosis) error {
 	if diagnosis == nil {
 		return nil
 	}
@@ -806,8 +802,19 @@ func (s *Server) attachOperationControllerLaneDiagnosis(op model.Operation, diag
 	if err != nil {
 		return err
 	}
+	if !principal.IsPlatformAdmin() && strings.TrimSpace(principal.ProjectID) != "" {
+		visible := sameLane[:0]
+		for _, active := range sameLane {
+			app, found := appsByID[strings.TrimSpace(active.AppID)]
+			if !found || !principalAllowsApp(principal, app) {
+				continue
+			}
+			visible = append(visible, active)
+		}
+		sameLane = visible
+	}
 
-	medianSeconds, sampleSize, err := s.operationLaneMedianCompletedSeconds(op, lane)
+	medianSeconds, sampleSize, err := s.operationLaneMedianCompletedSeconds(op, lane, operationDiagnosisProjectForPrincipal(principal))
 	if err != nil {
 		return err
 	}
@@ -937,11 +944,19 @@ func (s *Server) diagnosisAppsByID(appIDs []string) (map[string]model.App, error
 	return out, nil
 }
 
-func (s *Server) operationLaneMedianCompletedSeconds(op model.Operation, lane string) (*int, int, error) {
+func operationDiagnosisProjectForPrincipal(principal model.Principal) string {
+	if principal.IsPlatformAdmin() {
+		return ""
+	}
+	return strings.TrimSpace(principal.ProjectID)
+}
+
+func (s *Server) operationLaneMedianCompletedSeconds(op model.Operation, lane, projectID string) (*int, int, error) {
 	ops, err := s.store.ListOperationSummariesFiltered(op.TenantID, false, store.OperationListFilter{
-		Types:    []string{op.Type},
-		Statuses: []string{model.OperationStatusCompleted},
-		Limit:    100,
+		ProjectID: projectID,
+		Types:     []string{op.Type},
+		Statuses:  []string{model.OperationStatusCompleted},
+		Limit:     100,
 	})
 	if err != nil {
 		return nil, 0, err

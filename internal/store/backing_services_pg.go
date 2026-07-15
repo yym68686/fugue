@@ -163,6 +163,13 @@ func (s *Store) pgDeleteBackingService(id string) (model.BackingService, error) 
 	if isDeletedBackingService(service) {
 		return model.BackingService{}, ErrNotFound
 	}
+	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, "", service.ID)
+	if err != nil {
+		return model.BackingService{}, err
+	}
+	if activeLifecycle {
+		return model.BackingService{}, ErrConflict
+	}
 	bindingCount, err := s.pgCountBindingsForServiceTx(ctx, tx, id)
 	if err != nil {
 		return model.BackingService{}, err
@@ -198,6 +205,16 @@ func (s *Store) pgUpdateBackingServiceSpec(id string, spec model.BackingServiceS
 	}
 	if isDeletedBackingService(service) {
 		return model.BackingService{}, ErrNotFound
+	}
+	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, "", service.ID)
+	if err != nil {
+		return model.BackingService{}, err
+	}
+	if activeLifecycle {
+		return model.BackingService{}, ErrConflict
+	}
+	if err := validateManagedPostgresSuspensionTransition(spec.Postgres, service.Spec.Postgres); err != nil {
+		return model.BackingService{}, err
 	}
 	beforeRuntimeID := backingServiceSpecRuntimeID(service)
 	service.Spec = cloneBackingServiceSpec(spec)
@@ -275,6 +292,23 @@ func (s *Store) pgBindBackingService(tenantID, appID, serviceID, alias string, e
 	if isDeletedBackingService(service) || service.TenantID != tenantID {
 		return model.ServiceBinding{}, ErrNotFound
 	}
+	if managedPostgresServiceIsSuspended(service) {
+		return model.ServiceBinding{}, ErrConflict
+	}
+	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, "", serviceID)
+	if err != nil {
+		return model.ServiceBinding{}, err
+	}
+	if activeLifecycle {
+		return model.ServiceBinding{}, ErrConflict
+	}
+	activeLifecycle, err = s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, appID, "")
+	if err != nil {
+		return model.ServiceBinding{}, err
+	}
+	if activeLifecycle {
+		return model.ServiceBinding{}, ErrConflict
+	}
 
 	if _, exists, err := s.pgGetServiceBindingByAppAndServiceTx(ctx, tx, appID, serviceID); err != nil {
 		return model.ServiceBinding{}, err
@@ -334,10 +368,35 @@ func (s *Store) pgUnbindBackingService(bindingID string) (model.ServiceBinding, 
 	}
 	defer tx.Rollback()
 
-	binding, err := s.pgGetServiceBindingTx(ctx, tx, bindingID, true)
+	binding, err := s.pgGetServiceBindingTx(ctx, tx, bindingID, false)
 	if err != nil {
 		return model.ServiceBinding{}, mapDBErr(err)
 	}
+	if _, err := s.pgGetAppTx(ctx, tx, binding.AppID, true); err != nil {
+		return model.ServiceBinding{}, mapDBErr(err)
+	}
+	service, err := s.pgGetBackingServiceTx(ctx, tx, binding.ServiceID, true)
+	if err != nil {
+		return model.ServiceBinding{}, mapDBErr(err)
+	}
+	if managedPostgresServiceIsSuspended(service) {
+		return model.ServiceBinding{}, ErrConflict
+	}
+	activeLifecycle, err := s.pgHasInFlightManagedPostgresLifecycleTx(ctx, tx, binding.AppID, binding.ServiceID)
+	if err != nil {
+		return model.ServiceBinding{}, err
+	}
+	if activeLifecycle {
+		return model.ServiceBinding{}, ErrConflict
+	}
+	lockedBinding, err := s.pgGetServiceBindingTx(ctx, tx, bindingID, true)
+	if err != nil {
+		return model.ServiceBinding{}, mapDBErr(err)
+	}
+	if lockedBinding.AppID != binding.AppID || lockedBinding.ServiceID != binding.ServiceID {
+		return model.ServiceBinding{}, ErrConflict
+	}
+	binding = lockedBinding
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_service_bindings WHERE id = $1`, bindingID); err != nil {
 		return model.ServiceBinding{}, fmt.Errorf("delete service binding %s: %w", bindingID, err)
 	}
@@ -345,6 +404,42 @@ func (s *Store) pgUnbindBackingService(bindingID string) (model.ServiceBinding, 
 		return model.ServiceBinding{}, fmt.Errorf("commit unbind backing service transaction: %w", err)
 	}
 	return binding, nil
+}
+
+func (s *Store) pgHasInFlightManagedPostgresLifecycleTx(ctx context.Context, tx *sql.Tx, appID, serviceID string) (bool, error) {
+	appID = strings.TrimSpace(appID)
+	serviceID = strings.TrimSpace(serviceID)
+	if appID == "" && serviceID == "" {
+		return false, ErrInvalidInput
+	}
+	query := `
+SELECT EXISTS (
+	SELECT 1
+	FROM fugue_operations
+	WHERE type IN ($1, $2)
+	  AND status IN ($3, $4, $5)
+`
+	args := []any{
+		model.OperationTypeDatabaseSuspend,
+		model.OperationTypeDatabaseResume,
+		model.OperationStatusPending,
+		model.OperationStatusRunning,
+		model.OperationStatusWaitingAgent,
+	}
+	if appID != "" {
+		query += fmt.Sprintf("\t  AND app_id = $%d\n", len(args)+1)
+		args = append(args, appID)
+	}
+	if serviceID != "" {
+		query += fmt.Sprintf("\t  AND service_id = $%d\n", len(args)+1)
+		args = append(args, serviceID)
+	}
+	query += ")\n"
+	var active bool
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&active); err != nil {
+		return false, fmt.Errorf("check active managed postgres lifecycle: %w", err)
+	}
+	return active, nil
 }
 
 func (s *Store) pgHydrateAppBackingServices(ctx context.Context, app *model.App) error {
@@ -501,6 +596,9 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		if err := ensureManagedPostgresPasswordWithExisting(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
 			return err
 		}
+		if err := validateManagedPostgresSuspensionTransition(desiredSpec.Postgres, service.Spec.Postgres); err != nil {
+			return err
+		}
 		if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
 			return err
 		}
@@ -530,6 +628,9 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 	if err := ensureManagedPostgresPassword(desiredSpec.Postgres); err != nil {
 		return err
 	}
+	if desiredSpec.Postgres.Suspended {
+		return ErrInvalidInput
+	}
 	if err := validateManagedPostgresSpecForAppName(app.Name, desiredSpec.Postgres); err != nil {
 		return err
 	}
@@ -547,6 +648,117 @@ func (s *Store) pgApplyDesiredSpecBackingServicesTx(ctx context.Context, tx *sql
 		return err
 	}
 	desiredSpec.Postgres = nil
+	return nil
+}
+
+func (s *Store) pgApplyManagedPostgresLifecycleTx(ctx context.Context, tx *sql.Tx, app *model.App, op *model.Operation) error {
+	if app == nil || op == nil || op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		return ErrInvalidInput
+	}
+	serviceID := strings.TrimSpace(op.ServiceID)
+	if serviceID == "" {
+		return ErrInvalidInput
+	}
+	service, err := s.pgGetBackingServiceTx(ctx, tx, serviceID, true)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	if service.TenantID != app.TenantID || service.ProjectID != app.ProjectID || !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+		return ErrInvalidInput
+	}
+	ownerAppID := strings.TrimSpace(service.OwnerAppID)
+	if ownerAppID != strings.TrimSpace(app.ID) {
+		if ownerAppID != "" {
+			return ErrInvalidInput
+		}
+		binding, found, err := s.pgGetServiceBindingByAppAndServiceTx(ctx, tx, app.ID, service.ID)
+		if err != nil {
+			return err
+		}
+		if !found || binding.TenantID != app.TenantID {
+			return ErrInvalidInput
+		}
+	}
+	wantSuspended := op.Type == model.OperationTypeDatabaseSuspend
+	if op.Type != model.OperationTypeDatabaseSuspend && op.Type != model.OperationTypeDatabaseResume {
+		return ErrInvalidInput
+	}
+	if op.DesiredSpec.Postgres.Suspended != wantSuspended {
+		return ErrInvalidInput
+	}
+	postgres := *service.Spec.Postgres
+	if service.Spec.Postgres.Resources != nil {
+		resources := *service.Spec.Postgres.Resources
+		postgres.Resources = &resources
+	}
+	postgres.Suspended = wantSuspended
+	service.Spec.Postgres = &postgres
+	service.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateBackingServiceTx(ctx, tx, service); err != nil {
+		return err
+	}
+	op.DesiredSpec.Postgres = nil
+	return nil
+}
+
+func (s *Store) pgValidateManagedPostgresLifecycleTargetTx(ctx context.Context, tx *sql.Tx, app *model.App, serviceID string) error {
+	if app == nil {
+		return ErrInvalidInput
+	}
+	serviceID = strings.TrimSpace(serviceID)
+	if serviceID == "" {
+		return ErrInvalidInput
+	}
+	service, err := s.pgGetBackingServiceTx(ctx, tx, serviceID, true)
+	if err != nil {
+		return mapDBErr(err)
+	}
+	if service.TenantID != app.TenantID || service.ProjectID != app.ProjectID || !isManagedPostgresService(service) || service.Spec.Postgres == nil {
+		return ErrInvalidInput
+	}
+	ownerAppID := strings.TrimSpace(service.OwnerAppID)
+	if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
+		return ErrConflict
+	}
+	rows, err := tx.QueryContext(ctx, `
+SELECT tenant_id, app_id
+FROM fugue_service_bindings
+WHERE service_id = $1
+FOR UPDATE
+`, serviceID)
+	if err != nil {
+		return fmt.Errorf("list lifecycle target bindings: %w", err)
+	}
+	defer rows.Close()
+	bindingCount := 0
+	for rows.Next() {
+		var tenantID, appID string
+		if err := rows.Scan(&tenantID, &appID); err != nil {
+			return fmt.Errorf("scan lifecycle target binding: %w", err)
+		}
+		bindingCount++
+		if tenantID != app.TenantID || strings.TrimSpace(appID) != strings.TrimSpace(app.ID) {
+			return ErrConflict
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate lifecycle target bindings: %w", err)
+	}
+	if bindingCount != 1 {
+		return ErrConflict
+	}
+	serviceFound := false
+	for index := range app.BackingServices {
+		if strings.TrimSpace(app.BackingServices[index].ID) != serviceID {
+			continue
+		}
+		app.BackingServices[index] = cloneBackingService(service)
+		serviceFound = true
+		break
+	}
+	if !serviceFound {
+		return ErrConflict
+	}
 	return nil
 }
 

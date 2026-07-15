@@ -1631,6 +1631,11 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "tenant_id is not visible to this tenant")
 		return
 	}
+	projectID, err = operationListProjectForPrincipal(principal, projectID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusForbidden, "project_id is not visible to this principal")
+		return
+	}
 
 	filter := store.OperationListFilter{
 		TenantID:  tenantID,
@@ -1658,13 +1663,9 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	op, err := s.store.GetOperation(r.PathValue("id"))
+	op, err := s.loadAuthorizedOperation(principal, r.PathValue("id"))
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if !principal.IsPlatformAdmin() && op.TenantID != principal.TenantID {
-		httpx.WriteError(w, http.StatusForbidden, "operation is not visible to this tenant")
+		s.writeOperationReadError(w, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})

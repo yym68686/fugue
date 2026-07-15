@@ -86,6 +86,10 @@ type ManagedAppStatus struct {
 type ManagedBackingServiceStatus struct {
 	ServiceID               string `json:"serviceID,omitempty"`
 	RuntimeKey              string `json:"runtimeKey,omitempty"`
+	Phase                   string `json:"phase,omitempty"`
+	Message                 string `json:"message,omitempty"`
+	ReadyInstances          int    `json:"readyInstances"`
+	DesiredInstances        int    `json:"desiredInstances"`
 	CurrentRuntimeStartedAt string `json:"currentRuntimeStartedAt,omitempty"`
 	CurrentRuntimeReadyAt   string `json:"currentRuntimeReadyAt,omitempty"`
 }
@@ -395,6 +399,7 @@ func cloneManagedBackingServices(services []model.BackingService) []model.Backin
 	out := make([]model.BackingService, len(services))
 	for index, service := range services {
 		out[index] = service
+		out[index].RuntimeStatus = nil
 		out[index].CurrentRuntimeStartedAt = nil
 		out[index].CurrentRuntimeReadyAt = nil
 		if service.Spec.Postgres == nil {
@@ -434,6 +439,16 @@ func overlayManagedBackingServiceStatus(app *model.App, statuses []ManagedBackin
 		status, ok := statusByID[strings.TrimSpace(app.BackingServices[index].ID)]
 		if !ok {
 			continue
+		}
+		phase := strings.TrimSpace(status.Phase)
+		if phase == "" {
+			phase = model.ManagedPostgresRuntimePhaseUnknown
+		}
+		app.BackingServices[index].RuntimeStatus = &model.BackingServiceRuntimeStatus{
+			Phase:            phase,
+			Message:          strings.TrimSpace(status.Message),
+			ReadyInstances:   status.ReadyInstances,
+			DesiredInstances: status.DesiredInstances,
 		}
 		if startedAt, ok := parseManagedAppStatusTime(status.CurrentRuntimeStartedAt); ok {
 			app.BackingServices[index].CurrentRuntimeStartedAt = &startedAt

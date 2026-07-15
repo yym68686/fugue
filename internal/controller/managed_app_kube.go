@@ -134,12 +134,13 @@ type kubeCloudNativePGCluster struct {
 		} `json:"storage,omitempty"`
 	} `json:"spec"`
 	Status struct {
-		Phase                  string `json:"phase,omitempty"`
-		PhaseReason            string `json:"phaseReason,omitempty"`
-		ReadyInstances         int    `json:"readyInstances,omitempty"`
-		CurrentPrimary         string `json:"currentPrimary,omitempty"`
-		TargetPrimary          string `json:"targetPrimary,omitempty"`
-		TargetPrimaryTimestamp string `json:"targetPrimaryTimestamp,omitempty"`
+		Phase                  string                        `json:"phase,omitempty"`
+		PhaseReason            string                        `json:"phaseReason,omitempty"`
+		ReadyInstances         int                           `json:"readyInstances,omitempty"`
+		CurrentPrimary         string                        `json:"currentPrimary,omitempty"`
+		TargetPrimary          string                        `json:"targetPrimary,omitempty"`
+		TargetPrimaryTimestamp string                        `json:"targetPrimaryTimestamp,omitempty"`
+		Conditions             []runtime.ManagedAppCondition `json:"conditions,omitempty"`
 	} `json:"status"`
 }
 
@@ -187,6 +188,7 @@ type kubeWriteStats struct {
 }
 
 type skipExistingCloudNativePGWritesContextKey struct{}
+type forceExistingCloudNativePGWritesContextKey struct{}
 
 func withSkipExistingCloudNativePGWrites(ctx context.Context) context.Context {
 	return context.WithValue(ctx, skipExistingCloudNativePGWritesContextKey{}, true)
@@ -198,6 +200,16 @@ func withoutSkipExistingCloudNativePGWrites(ctx context.Context) context.Context
 
 func skipExistingCloudNativePGWrites(ctx context.Context) bool {
 	value, _ := ctx.Value(skipExistingCloudNativePGWritesContextKey{}).(bool)
+	return value
+}
+
+func withForceExistingCloudNativePGWrites(ctx context.Context) context.Context {
+	ctx = withoutSkipExistingCloudNativePGWrites(ctx)
+	return context.WithValue(ctx, forceExistingCloudNativePGWritesContextKey{}, true)
+}
+
+func forceExistingCloudNativePGWrites(ctx context.Context) bool {
+	value, _ := ctx.Value(forceExistingCloudNativePGWritesContextKey{}).(bool)
 	return value
 }
 

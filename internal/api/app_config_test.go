@@ -145,8 +145,8 @@ func TestPatchAppEnvAndRestartCreateDeployOperations(t *testing.T) {
 	if patchResponse.Operation.DesiredSpec == nil {
 		t.Fatal("expected desired spec in deploy operation")
 	}
-	if got := patchResponse.Operation.DesiredSpec.Env["NEW"]; got != "2" {
-		t.Fatalf("expected NEW env in desired spec, got %q", got)
+	if got := patchResponse.Operation.DesiredSpec.Env["NEW"]; got != apiRedactedSecretValue {
+		t.Fatalf("expected operation desired env to be redacted, got %q", got)
 	}
 	if got := patchResponse.Env["OLD"]; got != "3" {
 		t.Fatalf("expected OLD env to be updated, got %q", got)
@@ -371,7 +371,7 @@ func TestStripFugueInjectedAppEnvDetailsOmitsLegacyEntries(t *testing.T) {
 func TestPatchAppEnvAndRestartRecoverFailedImportedAppDesiredState(t *testing.T) {
 	t.Parallel()
 
-	_, server, apiKey, app, recoveredImage, recoveredSource := setupFailedImportedAppRecoveryServer(t)
+	stateStore, server, apiKey, app, recoveredImage, recoveredSource := setupFailedImportedAppRecoveryServer(t)
 
 	recorder := performJSONRequest(t, server, http.MethodPatch, "/v1/apps/"+app.ID+"/env", apiKey, map[string]any{
 		"set": map[string]string{
@@ -392,17 +392,24 @@ func TestPatchAppEnvAndRestartRecoverFailedImportedAppDesiredState(t *testing.T)
 	if got := patchResponse.Operation.DesiredSpec.Image; got != recoveredImage {
 		t.Fatalf("expected recovered image %q, got %q", recoveredImage, got)
 	}
-	if got := patchResponse.Operation.DesiredSpec.Env["BROKEN"]; got != "1" {
-		t.Fatalf("expected recovered env BROKEN=1, got %q", got)
+	if got := patchResponse.Operation.DesiredSpec.Env["BROKEN"]; got != apiRedactedSecretValue {
+		t.Fatalf("expected recovered operation env BROKEN to be redacted, got %q", got)
 	}
-	if got := patchResponse.Operation.DesiredSpec.Env["FIXED"]; got != "1" {
-		t.Fatalf("expected patched env FIXED=1, got %q", got)
+	if got := patchResponse.Operation.DesiredSpec.Env["FIXED"]; got != apiRedactedSecretValue {
+		t.Fatalf("expected patched operation env FIXED to be redacted, got %q", got)
 	}
 	if patchResponse.Operation.DesiredSource == nil {
 		t.Fatal("expected desired source in recovered deploy operation")
 	}
 	if got := patchResponse.Operation.DesiredSource.ResolvedImageRef; got != recoveredSource.ResolvedImageRef {
 		t.Fatalf("expected recovered resolved image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
+	}
+	persistedPatch, err := stateStore.GetOperation(patchResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get persisted patch operation: %v", err)
+	}
+	if persistedPatch.DesiredSpec == nil || persistedPatch.DesiredSpec.Env["BROKEN"] != "1" || persistedPatch.DesiredSpec.Env["FIXED"] != "1" {
+		t.Fatalf("persisted patch operation lost recovered desired env: %+v", persistedPatch.DesiredSpec)
 	}
 
 	recorder = performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/restart", apiKey, map[string]any{})
@@ -420,17 +427,24 @@ func TestPatchAppEnvAndRestartRecoverFailedImportedAppDesiredState(t *testing.T)
 	if got := restartResponse.Operation.DesiredSpec.Image; got != recoveredImage {
 		t.Fatalf("expected restart image %q, got %q", recoveredImage, got)
 	}
-	if got := restartResponse.Operation.DesiredSpec.Env["FIXED"]; got != "1" {
-		t.Fatalf("expected restart to preserve recovered env FIXED=1, got %q", got)
+	if got := restartResponse.Operation.DesiredSpec.Env["FIXED"]; got != apiRedactedSecretValue {
+		t.Fatalf("expected restart operation env to be redacted, got %q", got)
 	}
-	if restartResponse.Operation.DesiredSpec.RestartToken == "" {
-		t.Fatal("expected restart token in desired spec")
+	if restartResponse.Operation.DesiredSpec.RestartToken != apiRedactedSecretValue {
+		t.Fatalf("expected restart token to be redacted, got %q", restartResponse.Operation.DesiredSpec.RestartToken)
 	}
 	if restartResponse.Operation.DesiredSource == nil {
 		t.Fatal("expected desired source on restart operation")
 	}
 	if got := restartResponse.Operation.DesiredSource.ResolvedImageRef; got != recoveredSource.ResolvedImageRef {
 		t.Fatalf("expected restart resolved image ref %q, got %q", recoveredSource.ResolvedImageRef, got)
+	}
+	persistedRestart, err := stateStore.GetOperation(restartResponse.Operation.ID)
+	if err != nil {
+		t.Fatalf("get persisted restart operation: %v", err)
+	}
+	if persistedRestart.DesiredSpec == nil || persistedRestart.DesiredSpec.Env["FIXED"] != "1" || persistedRestart.DesiredSpec.RestartToken == "" {
+		t.Fatalf("persisted restart operation lost recovered desired state: %+v", persistedRestart.DesiredSpec)
 	}
 }
 

@@ -13,8 +13,16 @@ type operationCreatePolicy struct {
 }
 
 type operationCreateOutcome struct {
-	Decision            AutoscalingDeployDecision `json:"decision"`
-	ExistingOperationID string                    `json:"existing_operation_id,omitempty"`
+	Decision                AutoscalingDeployDecision `json:"decision"`
+	ExistingOperationID     string                    `json:"existing_operation_id,omitempty"`
+	ReusedExistingOperation bool
+}
+
+// OperationCreateResult reports whether an operation was inserted by the
+// current call. A false Created value with a non-empty returned operation is
+// an idempotent reuse of an existing operation.
+type OperationCreateResult struct {
+	Created bool `json:"created"`
 }
 
 type AutoscalingDeployDecision string

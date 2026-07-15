@@ -380,6 +380,60 @@ func (s *Service) managedBackingServiceRolloutTargets(ctx context.Context, app m
 	return runtime.ManagedBackingServiceDeploymentsWithPlacements(app, scheduling, postgresPlacements), nil
 }
 
+func (s *Service) waitForManagedBackingServiceLifecycle(ctx context.Context, app model.App, operationID, serviceID string) error {
+	client, err := s.kubeClient()
+	if err != nil {
+		return fmt.Errorf("initialize kubernetes backing service lifecycle client: %w", err)
+	}
+	app = s.Renderer.PrepareApp(app)
+	deployments, err := s.managedBackingServiceRolloutTargets(ctx, app)
+	if err != nil {
+		return fmt.Errorf("resolve backing service lifecycle target: %w", err)
+	}
+	serviceID = strings.TrimSpace(serviceID)
+	matching := make([]runtime.ManagedBackingServiceDeployment, 0, 1)
+	for _, deployment := range deployments {
+		if strings.TrimSpace(deployment.ServiceID) == serviceID {
+			matching = append(matching, deployment)
+		}
+	}
+	if len(matching) != 1 {
+		return fmt.Errorf("expected one managed backing service lifecycle target for service %s, got %d", serviceID, len(matching))
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, s.Config.ManagedAppRolloutTimeout)
+	defer cancel()
+	interval := 2 * time.Second
+	if s.Config.PollInterval > interval {
+		interval = s.Config.PollInterval
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	lastMessage := ""
+	for {
+		if operationID = strings.TrimSpace(operationID); operationID != "" {
+			if err := s.ensureOperationStillActive(operationID); err != nil {
+				return err
+			}
+		}
+		ready, message, watchTargets, err := s.managedBackingServicesRolloutReady(waitCtx, client, namespace, matching, true)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
+		}
+		if strings.TrimSpace(message) != "" {
+			lastMessage = strings.TrimSpace(message)
+		}
+		if err := client.waitForAnyObjectEvent(waitCtx, watchTargets, interval); err != nil {
+			if lastMessage != "" {
+				return fmt.Errorf("wait for managed backing service %s lifecycle: %w (%s)", serviceID, err, lastMessage)
+			}
+			return fmt.Errorf("wait for managed backing service %s lifecycle: %w", serviceID, err)
+		}
+	}
+}
+
 func rolloutWatchTargets(namespace, name string, deployment kubeDeployment, found bool) []kubeWatchTarget {
 	if strings.TrimSpace(name) == "" {
 		return nil
@@ -463,7 +517,9 @@ func (s *Service) managedBackingServicesRolloutReady(
 	client *kubeClient,
 	namespace string,
 	deployments []runtime.ManagedBackingServiceDeployment,
+	strictSuspensionPodObservation ...bool,
 ) (bool, string, []kubeWatchTarget, error) {
+	requireObservedZeroPods := len(strictSuspensionPodObservation) > 0 && strictSuspensionPodObservation[0]
 	watchTargets := make([]kubeWatchTarget, 0, len(deployments))
 	for _, deployment := range deployments {
 		switch deployment.ResourceKind {
@@ -473,11 +529,21 @@ func (s *Service) managedBackingServicesRolloutReady(
 				return false, "", watchTargets, fmt.Errorf("read backing service cluster %s/%s: %w", namespace, deployment.ResourceName, err)
 			}
 			watchTargets = append(watchTargets, cloudNativePGClusterRolloutWatchTargets(namespace, deployment.ResourceName, cluster, found)...)
+			podsListed := true
 			pods, err := client.listPodsBySelector(ctx, namespace, fmt.Sprintf(managedPostgresPodSelectorTemplate, deployment.ResourceName))
 			if err != nil {
 				if !isKubernetesResourceNotFound(err) && !strings.Contains(strings.ToLower(err.Error()), "status=403") {
 					return false, "", watchTargets, fmt.Errorf("list backing service pods %s/%s: %w", namespace, deployment.ResourceName, err)
 				}
+				if deployment.Suspended && requireObservedZeroPods {
+					return false, "", watchTargets, fmt.Errorf(
+						"cannot verify zero database pods for suspended backing service cluster %s/%s: %w",
+						namespace,
+						deployment.ResourceName,
+						err,
+					)
+				}
+				podsListed = false
 				pods = nil
 			}
 			if len(pods) > 0 {
@@ -489,7 +555,17 @@ func (s *Service) managedBackingServicesRolloutReady(
 			if err := s.cleanupStrandedManagedPostgresPods(ctx, client, namespace, deployment.ResourceName); err != nil && s.Logger != nil {
 				s.Logger.Printf("cleanup stranded managed postgres pods for %s/%s failed: %v", namespace, deployment.ResourceName, err)
 			}
-			ready, message := managedBackingServiceClusterRolloutReady(deployment.ResourceName, cluster, found)
+			if deployment.Suspended && podsListed && len(pods) > 0 {
+				return false, fmt.Sprintf(
+					"waiting for backing service cluster %s to remove all database pods (%d remaining)",
+					deployment.ResourceName,
+					len(pods),
+				), watchTargets, nil
+			}
+			if failureMessage := cloudNativePGHibernationFailureMessage(cluster); failureMessage != "" {
+				return false, "", watchTargets, fmt.Errorf("backing service cluster %s/%s rollout failed: %s", namespace, deployment.ResourceName, failureMessage)
+			}
+			ready, message := managedBackingServiceClusterRolloutReadyForDeployment(deployment, cluster, found)
 			if !ready {
 				return false, message, watchTargets, nil
 			}
@@ -512,7 +588,14 @@ func (s *Service) managedBackingServicesRolloutReady(
 }
 
 func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCloudNativePGCluster, found bool) (bool, string) {
-	clusterName = strings.TrimSpace(clusterName)
+	return managedBackingServiceClusterRolloutReadyForDeployment(runtime.ManagedBackingServiceDeployment{
+		ResourceName:     clusterName,
+		DesiredInstances: cluster.Spec.Instances,
+	}, cluster, found)
+}
+
+func managedBackingServiceClusterRolloutReadyForDeployment(deployment runtime.ManagedBackingServiceDeployment, cluster kubeCloudNativePGCluster, found bool) (bool, string) {
+	clusterName := strings.TrimSpace(deployment.ResourceName)
 	if clusterName == "" {
 		clusterName = "cluster"
 	}
@@ -520,9 +603,32 @@ func managedBackingServiceClusterRolloutReady(clusterName string, cluster kubeCl
 		return false, fmt.Sprintf("waiting for backing service cluster %s to be created", clusterName)
 	}
 
-	desiredInstances := cluster.Spec.Instances
-	if desiredInstances <= 0 {
-		desiredInstances = 1
+	desiredInstances := managedBackingServiceDesiredInstances(deployment, cluster)
+	if deployment.Suspended {
+		if cloudNativePGClusterHibernated(cluster) {
+			return true, fmt.Sprintf("backing service cluster %s suspended", clusterName)
+		}
+		if !strings.EqualFold(cloudNativePGHibernationAnnotation(cluster), runtime.CloudNativePGHibernationOn) {
+			return false, fmt.Sprintf("waiting for backing service cluster %s hibernation annotation to be applied", clusterName)
+		}
+		if condition, ok := cloudNativePGHibernationCondition(cluster); ok &&
+			!strings.EqualFold(strings.TrimSpace(condition.Status), "True") &&
+			strings.TrimSpace(condition.Message) != "" {
+			return false, strings.TrimSpace(condition.Message)
+		}
+		return false, fmt.Sprintf(
+			"waiting for backing service cluster %s to suspend (%d/%d ready instances)",
+			clusterName,
+			cluster.Status.ReadyInstances,
+			desiredInstances,
+		)
+	}
+	if !cloudNativePGClusterNonHibernated(cluster) {
+		if annotation := cloudNativePGHibernationAnnotation(cluster); annotation != "" &&
+			!strings.EqualFold(annotation, runtime.CloudNativePGHibernationOff) {
+			return false, fmt.Sprintf("waiting for backing service cluster %s hibernation annotation to be disabled", clusterName)
+		}
+		return false, fmt.Sprintf("waiting for backing service cluster %s to exit hibernation", clusterName)
 	}
 	if cluster.Status.ReadyInstances < 1 {
 		return false, fmt.Sprintf(
