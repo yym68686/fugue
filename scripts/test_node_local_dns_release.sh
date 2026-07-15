@@ -3,6 +3,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/authoritative_dns_dig.sh
+source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
@@ -851,17 +853,20 @@ chmod +x "${MOCK_KUBECTL}"
 export FUGUE_UPGRADE_LIB_ONLY=true
 # shellcheck disable=SC1091
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+authoritative_dns_dig_preflight >/dev/null
 
 # Unit tests exercise the release state machine, not external public smoke endpoints.
 smoke_test() {
   [[ "${MOCK_SMOKE_FAIL:-false}" != "true" ]]
 }
 
-# Keep authoritative checks deterministic, fully intercept dig, and emit the
-# exact OPT/EDNS/ECS shape produced by the release command.
-dig() {
+# Keep authoritative checks deterministic, fully intercept the shared helper's
+# final execution seam, and emit the exact OPT/EDNS/ECS response contract.
+authoritative_dns_dig_execute_argv_to_file() {
+  local output_file="$1"
+  shift
   printf '%s\n' "$*" >>"${MOCK_DIG_LOG}"
-  cat <<'EOF'
+  cat >"${output_file}" <<'EOF'
 ;; Got answer:
 ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 4242
 ;; flags: qr aa; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
@@ -876,9 +881,19 @@ dig() {
 example.test. 60 IN SOA ns1.example.test. hostmaster.example.test. 1 300 60 3600 60
 EOF
 }
-[[ "$(type -t dig)" == "function" ]] || {
-  echo "the NodeLocal release test must intercept dig without network access" >&2
+[[ "$(type -t authoritative_dns_dig_execute_argv_to_file)" == "function" ]] || {
+  echo "the NodeLocal release test must intercept the shared DiG execution seam without network access" >&2
   exit 1
+}
+
+assert_mock_dns_query() {
+  local server="$1"
+  local transport="$2"
+
+  authoritative_dns_dig_build_query_argv \
+    "${AUTHORITATIVE_DNS_DIG_BIN}" "${AUTHORITATIVE_DNS_DIG_MODE}" \
+    "${server}" 53 3 "${transport}" example.test SOA
+  grep -Fxq -- "${AUTHORITATIVE_DNS_DIG_QUERY_ARGV[*]}" "${MOCK_DIG_LOG}"
 }
 
 if command -v docker >/dev/null 2>&1; then
@@ -1439,8 +1454,8 @@ fi
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" template current shadow node-a rev-before
 : >"${MOCK_DIG_LOG}"
 node_local_dns_restore_previous_after_helm_rollback
-grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA' "${MOCK_DIG_LOG}"
-grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${MOCK_DIG_LOG}"
+assert_mock_dns_query 198.51.100.20 udp
+assert_mock_dns_query 198.51.100.20 tcp
 
 echo "[test_node_local_dns_release] scoped authoritative rows retain tab fields and TCP probes"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" seed current shadow node-edge rev-edge rev-edge
@@ -1455,8 +1470,8 @@ if ! awk -F $'\t' 'NF != 7 {exit 1}' <<<"${NODE_LOCAL_DNS_HOSTPORT_POD_SNAPSHOT}
   exit 1
 fi
 node_local_dns_verify_authoritative_coexistence node-edge
-grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA' "${MOCK_DIG_LOG}"
-grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${MOCK_DIG_LOG}"
+assert_mock_dns_query 198.51.100.20 udp
+assert_mock_dns_query 198.51.100.20 tcp
 
 echo "[test_node_local_dns_release] verified DNS manifest transactions refresh authoritative Pod UIDs"
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" hostport-drift node-edge uid auth-node-edge-forward
@@ -1529,7 +1544,7 @@ prepare_node_local_dns_helm_args
 : >"${MOCK_DIG_LOG}"
 node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"
 assert_state 'state["ds"]["exists"] is False and len(state["pods"]) == 0'
-grep -Fq -- '@198.51.100.20 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${MOCK_DIG_LOG}"
+assert_mock_dns_query 198.51.100.20 tcp
 
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" seed current shadow node-edge rev-edge rev-edge
 "${MOCK_STATE_CTL}" "${MOCK_STATE}" hostports node-edge scoped

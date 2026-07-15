@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# shellcheck source=scripts/lib/authoritative_dns_dig.sh
+source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
+
 log() {
   printf '[fugue-public-data-plane] %s\n' "$*"
 }
@@ -2618,7 +2622,6 @@ authoritative_dns_query_batch_with_retry() {
   local work_dir=""
   local output_file=""
   local failed="false"
-  local dig_args=()
   local label="${daemonset_name} pod=${pod_name} server=${server}:${server_port} transport=${transport}"
 
   [[ "${attempts}" =~ ^[1-9][0-9]*$ ]] || fail "FUGUE_PUBLIC_DATA_PLANE_DNS_QUERY_ATTEMPTS must be a positive integer"
@@ -2628,10 +2631,9 @@ authoritative_dns_query_batch_with_retry() {
   [[ "${container_port}" =~ ^[1-9][0-9]*$ && "${container_port}" -le 65535 ]] || fail "authoritative DNS query containerPort is invalid"
   [[ -n "${expected_pod_uid}" && -n "${expected_pod_host_ip}" && -n "${expected_pod_identity}" && -n "${expected_node_name}" && -n "${expected_node_uid}" && -n "${expected_node_identity}" && -n "${expected_revision}" && -n "${expected_daemonset_uid}" && -n "${expected_daemonset_identity}" ]] ||
     fail "authoritative DNS query target identity is incomplete"
-  dig_args=("@${server}" -p "${server_port}" "+time=${timeout_seconds}" "+tries=1" "+norecurse" "+subnet=0.0.0.0/0" "+noall" "+comments" "+question" "+answer")
   case "${transport}" in
     udp) ;;
-    tcp) dig_args+=(+tcp) ;;
+    tcp) ;;
     *) fail "authoritative DNS transport must be udp or tcp" ;;
   esac
 
@@ -2645,7 +2647,8 @@ authoritative_dns_query_batch_with_retry() {
       "${expected_daemonset_uid}" "${expected_daemonset_identity}")" || failed="true"
     output_file="${work_dir}/soa-${attempt}.txt"
     if [[ "${failed}" == "false" ]]; then
-      if ! dig "${dig_args[@]}" "${zone}" SOA >"${output_file}" 2>&1; then
+      if ! authoritative_dns_dig_query "${output_file}" "${transport}" "${server}" "${server_port}" \
+        "${timeout_seconds}" "${zone}" SOA; then
         failed="true"
       elif ! validate_authoritative_dns_response "${output_file}" "${publication_snapshot}" "${zone}" SOA; then
         failed="true"
@@ -2656,7 +2659,8 @@ authoritative_dns_query_batch_with_retry() {
         hostname="$(trim_field "${hostname}")"
         [[ -n "${hostname}" ]] || continue
         output_file="${work_dir}/a-${attempt}-$(printf '%s' "${hostname}" | tr -c '[:alnum:].-' '_').txt"
-        if ! dig "${dig_args[@]}" "${hostname}" A >"${output_file}" 2>&1 ||
+        if ! authoritative_dns_dig_query "${output_file}" "${transport}" "${server}" "${server_port}" \
+          "${timeout_seconds}" "${hostname}" A ||
           ! validate_authoritative_dns_response "${output_file}" "${publication_snapshot}" "${hostname}" A; then
           failed="true"
           break
@@ -5845,7 +5849,11 @@ main() {
   command_exists python3 || fail "python3 is required"
   command_exists curl || fail "curl is required"
   if [[ "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-ondelete" || "${FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY}" == "dns-manifest-ondelete" ]]; then
-    command_exists dig || fail "dig is required for authoritative DNS release validation"
+    if authoritative_dns_dig_state_present; then
+      authoritative_dns_dig_require_attested || fail "inherited authoritative DNS DiG attestation is missing or drifted before public data-plane mutation"
+    else
+      authoritative_dns_dig_preflight || fail "authoritative DNS DiG wire attestation failed before public data-plane mutation"
+    fi
   fi
   detect_kubectl
 

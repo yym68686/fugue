@@ -3,6 +3,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/authoritative_dns_dig.sh
+source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
 
 # GitHub Actions injects this into every step; individual output-protocol tests
 # set their own file explicitly and all other fixtures must observe CLI output.
@@ -22,6 +24,760 @@ assert_eq() {
   fi
 }
 
+e5b_mock_query_name_and_type() {
+  local argument=""
+  local previous=""
+
+  E5B_MOCK_QUERY_NAME=""
+  E5B_MOCK_QUERY_TYPE=""
+  for argument in "$@"; do
+    case "${argument}" in
+      A|AAAA|CNAME|SOA)
+        E5B_MOCK_QUERY_NAME="${previous}"
+        E5B_MOCK_QUERY_TYPE="${argument}"
+        return 0
+        ;;
+    esac
+    previous="${argument}"
+  done
+  fail "shared DiG argv did not contain a supported query type"
+}
+
+e5b_expected_query_line() {
+  local server="$1"
+  local port="$2"
+  local timeout_seconds="$3"
+  local transport="$4"
+  local query_name="$5"
+  local query_type="$6"
+
+  authoritative_dns_dig_build_query_argv \
+    "${AUTHORITATIVE_DNS_DIG_BIN}" "${AUTHORITATIVE_DNS_DIG_MODE}" \
+    "${server}" "${port}" "${timeout_seconds}" "${transport}" "${query_name}" "${query_type}" || return 1
+  printf '%s\n' "${AUTHORITATIVE_DNS_DIG_QUERY_ARGV[*]}"
+}
+
+write_e5b_fake_dig() {
+  local fixture_dir="$1"
+
+  mkdir -p "${fixture_dir}"
+  cat >"${fixture_dir}/dig.py" <<'PY'
+#!/usr/bin/python3 -B
+import json
+import os
+from pathlib import Path
+import socket
+import struct
+import sys
+import time
+
+root = Path(__file__).resolve().parent
+scenario = (root / "scenario").read_text(encoding="utf-8").strip()
+argv = sys.argv[1:]
+with (root / "observed.jsonl").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "argv": argv,
+        "digrc": (Path(os.environ.get("HOME", "")) / ".digrc").exists(),
+        "home": os.environ.get("HOME", ""),
+        "lc_all": os.environ.get("LC_ALL", ""),
+        "scenario": scenario,
+    }, sort_keys=True) + "\n")
+
+legacy_scenarios = {
+    "legacy-valid",
+    "legacy-help-cookie",
+    "legacy-help-sit",
+    "unsupported-default-cookie",
+}
+if argv == ["-v"]:
+    if scenario == "unknown-version":
+        print("DiG 9.11.0")
+    elif scenario in legacy_scenarios:
+        print("DiG 9.10.6")
+    else:
+        print("DiG 9.18.0")
+    raise SystemExit(0)
+if argv == ["-h"]:
+    if scenario == "legacy-help-cookie":
+        print("Usage: dig +[no]cookie")
+    elif scenario == "legacy-help-sit":
+        print("Usage: dig +[no]sit")
+    elif scenario in legacy_scenarios or scenario == "unknown-version":
+        print("Usage: dig +subnet")
+    else:
+        print("Usage: dig +[no]cookie +subnet")
+    raise SystemExit(0)
+
+modern_supported = scenario not in legacy_scenarios | {"unknown-version"}
+has_nocookie = "+nocookie" in argv
+if has_nocookie and not modern_supported:
+    print("Invalid option: +nocookie", file=sys.stderr)
+    raise SystemExit(1)
+if modern_supported and (not has_nocookie or argv[-1] != "+nocookie"):
+    print("modern query requires +nocookie as the final argv item", file=sys.stderr)
+    raise SystemExit(2)
+
+required = {
+    "+time=1",
+    "+tries=1",
+    "+norecurse",
+    "+adflag",
+    "+nocdflag",
+    "+nosearch",
+    "+edns=0",
+    "+bufsize=1232",
+    "+subnet=0.0.0.0/0",
+    "+noall",
+    "+comments",
+    "+question",
+    "+answer",
+}
+if not required.issubset(argv):
+    print("query argv is not the canonical production shape", file=sys.stderr)
+    raise SystemExit(3)
+
+server = next((item[1:] for item in argv if item.startswith("@")), "")
+try:
+    port = int(argv[argv.index("-p") + 1])
+except (ValueError, IndexError):
+    raise SystemExit(4)
+transport = "tcp" if "+tcp" in argv else "udp"
+qtype_index = next((index for index, item in enumerate(argv) if item in {"A", "SOA"}), -1)
+if not server or qtype_index < 1:
+    raise SystemExit(5)
+qname = argv[qtype_index - 1].rstrip(".") + "."
+qtype = 1 if argv[qtype_index] == "A" else 6
+qclass = 1
+
+if scenario == "modern-no-packet-zero":
+    raise SystemExit(0)
+if scenario == "modern-timeout":
+    time.sleep(10)
+    raise SystemExit(0)
+
+def wire_name(value):
+    return b"".join(bytes([len(label)]) + label.encode("ascii") for label in value.rstrip(".").split(".")) + b"\x00"
+
+def option(code, payload):
+    return struct.pack("!HH", code, len(payload)) + payload
+
+ecs = option(8, b"\x00\x01\x00\x00")
+cookie = option(10, b"01234567")
+
+def packet_for(variant):
+    identifier = 4242
+    local_qname = qname
+    local_qtype = qtype
+    local_qclass = qclass
+    flags = 0x0020
+    options = ecs
+    opt_count = 1
+    answer_count = 0
+    answer = b""
+    malformed = False
+    if variant in {"modern-cookie-before", "bad"}:
+        options = cookie + ecs
+    elif variant == "modern-cookie-after":
+        options = ecs + cookie
+    elif variant in {"modern-cookie-only", "unsupported-default-cookie", "modern-cookie-despite-nocookie"}:
+        options = cookie
+    elif variant == "modern-nsid":
+        options = ecs + option(3, b"test")
+    elif variant == "modern-padding":
+        options = ecs + option(12, b"\x00\x00\x00\x00")
+    elif variant == "modern-unknown-option":
+        options = ecs + option(65001, b"\x00")
+    elif variant == "modern-missing-ecs":
+        options = b""
+    elif variant == "modern-duplicate-ecs":
+        options = ecs + ecs
+    elif variant == "modern-wrong-ecs":
+        options = option(8, b"\x00\x01\x18\x00\xc0\x00\x02")
+    elif variant == "modern-malformed-option":
+        options = struct.pack("!HH", 8, 9) + b"\x00\x01"
+        malformed = True
+    elif variant == "modern-missing-opt":
+        options = b""
+        opt_count = 0
+    elif variant == "modern-duplicate-opt":
+        opt_count = 2
+    elif variant == "modern-extra-rr":
+        answer_count = 1
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + b"\xc0\x00\x02\x01"
+    elif variant == "modern-wrong-flags":
+        flags = 0x0120
+    elif variant == "modern-wrong-question":
+        local_qname = "wrong.invalid."
+    elif variant == "modern-wrong-type":
+        local_qtype = 1
+    elif variant == "modern-wrong-class":
+        local_qclass = 3
+    elif variant == "modern-wrong-udp-size":
+        pass
+    elif variant == "modern-changing-id":
+        counter_path = root / "transaction-id-counter"
+        counter = int(counter_path.read_text(encoding="ascii")) if counter_path.exists() else 1000
+        identifier = (counter + 1) % 65536
+        counter_path.write_text(str(identifier), encoding="ascii")
+    question = wire_name(local_qname) + struct.pack("!HH", local_qtype, local_qclass)
+    opt = b""
+    if opt_count:
+        udp_size = 4096 if variant == "modern-wrong-udp-size" else 1232
+        opt = b"\x00" + struct.pack("!HHIH", 41, udp_size, 0, len(options)) + options
+        if opt_count == 2:
+            opt += b"\x00" + struct.pack("!HHIH", 41, 1232, 0, len(ecs)) + ecs
+    header = struct.pack("!HHHHHH", identifier, flags, 1, answer_count, 0, opt_count)
+    packet = header + question + answer + opt
+    if variant == "modern-truncated":
+        packet = packet[:8]
+    if malformed:
+        return packet
+    return packet
+
+variant = scenario
+if scenario == "digrc-cookie" and (Path(os.environ.get("HOME", "")) / ".digrc").exists():
+    variant = "modern-cookie-after"
+if scenario == "modern-multi-second-cookie":
+    variant = "modern-cookie-after" if transport == "tcp" else "modern-valid"
+
+if scenario == "binary-drift" and not (root / "drifted").exists():
+    (root / "drifted").write_text("1", encoding="ascii")
+    with (root / "dig").open("ab") as handle:
+        handle.write(b"\n# identity drift\n")
+
+multi_variants = None
+if scenario == "modern-multi-good-bad":
+    multi_variants = ["modern-valid", "bad"]
+elif scenario == "modern-multi-bad-good":
+    multi_variants = ["bad", "modern-valid"]
+elif scenario == "modern-multi-good-good":
+    multi_variants = ["modern-valid", "modern-valid"]
+packets = [packet_for(item) for item in (multi_variants or [variant])]
+
+expect_response = variant in {"modern-valid", "modern-changing-id", "digrc-cookie", "binary-drift"} and multi_variants is None
+try:
+    if transport == "udp":
+        connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        connection.settimeout(2)
+        for packet in packets:
+            connection.sendto(packet, (server, port))
+        if expect_response:
+            connection.recvfrom(65535)
+        connection.close()
+    else:
+        connections = []
+        for packet in packets:
+            connection = socket.create_connection((server, port), timeout=2)
+            connection.sendall(struct.pack("!H", len(packet)) + packet)
+            connections.append(connection)
+        if expect_response:
+            length = struct.unpack("!H", connections[0].recv(2))[0]
+            remaining = length
+            while remaining:
+                chunk = connections[0].recv(remaining)
+                if not chunk:
+                    raise RuntimeError("truncated response")
+                remaining -= len(chunk)
+        for connection in connections:
+            connection.close()
+except Exception as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(7)
+
+if scenario == "modern-nonzero-after-valid":
+    raise SystemExit(9)
+if expect_response:
+    raise SystemExit(0)
+raise SystemExit(8)
+PY
+  cat >"${fixture_dir}/dig" <<'SH'
+#!/bin/sh
+script_dir=${0%/*}
+PYTHONDONTWRITEBYTECODE=1
+PYTHONPYCACHEPREFIX="${script_dir}/pycache"
+export PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX
+exec /usr/bin/python3 -B "${script_dir}/dig.py" "$@"
+SH
+  chmod +x "${fixture_dir}/dig"
+}
+
+clear_e5b_attestation_state() {
+  unset AUTHORITATIVE_DNS_DIG_ATTESTED AUTHORITATIVE_DNS_DIG_BIN AUTHORITATIVE_DNS_DIG_IDENTITY
+  unset AUTHORITATIVE_DNS_DIG_HELPER_IDENTITY AUTHORITATIVE_DNS_DIG_BUILDER_IDENTITY
+  unset AUTHORITATIVE_DNS_DIG_VERSION AUTHORITATIVE_DNS_DIG_HELP_SHA256 AUTHORITATIVE_DNS_DIG_MODE
+  unset AUTHORITATIVE_DNS_DIG_UDP_WIRE_SHA256 AUTHORITATIVE_DNS_DIG_TCP_WIRE_SHA256
+  unset AUTHORITATIVE_DNS_DIG_ATTESTATION_SHA256
+}
+
+run_e5b_fake_case() (
+  set -euo pipefail
+  local scenario="$1"
+  local expectation="$2"
+  local fixture_dir=""
+  local original_path="${PATH}"
+  local case_log=""
+  local rc=0
+
+  fixture_dir="$(mktemp -d)"
+  case_log="${fixture_dir}/case.log"
+  trap 'rm -rf "${fixture_dir}"' EXIT
+  write_e5b_fake_dig "${fixture_dir}"
+  printf '%s\n' "${scenario}" >"${fixture_dir}/scenario"
+  clear_e5b_attestation_state
+  PATH="${fixture_dir}:${original_path}"
+  export PATH
+  if [[ "${scenario}" == "digrc-cookie" ]]; then
+    HOME="${fixture_dir}/caller-home"
+    mkdir -p "${HOME}"
+    printf '+cookie\n' >"${HOME}/.digrc"
+    export HOME
+  fi
+  authoritative_dns_dig_preflight >"${case_log}" 2>&1 || rc=$?
+  if [[ "${expectation}" == "pass" ]]; then
+    if (( rc != 0 )); then
+      sed -n '1,120p' "${case_log}" >&2
+      fail "E5B fake DiG scenario ${scenario} must pass"
+    fi
+    [[ "${AUTHORITATIVE_DNS_DIG_MODE}" == "modern" ]] ||
+      fail "E5B fake DiG scenario ${scenario} must select modern mode"
+    python3 - "${fixture_dir}/observed.jsonl" "${HOME}" <<'PY'
+import json
+import sys
+
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+queries = [row for row in rows if row["argv"] not in (["-v"], ["-h"])]
+if len(queries) != 2:
+    raise SystemExit("modern attestation must execute exactly UDP and TCP query commands")
+for row in queries:
+    argv = row["argv"]
+    if argv[-1] != "+nocookie" or argv.count("+nocookie") != 1:
+        raise SystemExit("modern +nocookie must appear exactly once at the end of the complete argv")
+    if row["lc_all"] != "C" or row["home"] == sys.argv[2] or row["digrc"]:
+        raise SystemExit("helper did not isolate LC_ALL/HOME/.digrc")
+if not any("+tcp" in row["argv"] for row in queries) or not any("+tcp" not in row["argv"] for row in queries):
+    raise SystemExit("modern attestation did not prove both UDP and TCP")
+PY
+  elif (( rc == 0 )); then
+    fail "E5B fake DiG scenario ${scenario} must fail closed"
+  fi
+)
+
+run_e5b_wire_attestation_regressions() {
+  local scenario=""
+  local no_dig_path=""
+  local first_real_attestation=""
+  local first_real_tcp_sha256=""
+  local first_real_udp_sha256=""
+  local first_real_tcp_id=""
+  local first_real_udp_id=""
+
+  run_e5b_fake_case modern-valid pass
+  run_e5b_fake_case digrc-cookie pass
+  for scenario in \
+    modern-cookie-before modern-cookie-after modern-cookie-only \
+    modern-cookie-despite-nocookie modern-nsid modern-padding modern-unknown-option \
+    modern-missing-opt modern-duplicate-opt modern-missing-ecs modern-duplicate-ecs modern-extra-rr \
+    modern-wrong-ecs modern-malformed-option modern-truncated modern-wrong-flags \
+    modern-wrong-question modern-wrong-type modern-wrong-class modern-wrong-udp-size \
+    modern-multi-second-cookie modern-multi-good-bad modern-multi-bad-good modern-multi-good-good \
+    modern-no-packet-zero modern-nonzero-after-valid modern-timeout \
+    unsupported-default-cookie unknown-version legacy-help-cookie legacy-help-sit binary-drift; do
+    run_e5b_fake_case "${scenario}" fail
+  done
+
+  (
+    set -euo pipefail
+    local fixture_dir=""
+    fixture_dir="$(mktemp -d)"
+    trap 'rm -rf "${fixture_dir}"' EXIT
+    write_e5b_fake_dig "${fixture_dir}"
+    printf 'modern-valid\n' >"${fixture_dir}/scenario"
+    clear_e5b_attestation_state
+    PATH="${fixture_dir}:${PATH}"
+    export PATH
+    authoritative_dns_dig_preflight >/dev/null
+    authoritative_dns_dig_build_query_argv() { AUTHORITATIVE_DNS_DIG_QUERY_ARGV=(drifted); }
+    if authoritative_dns_dig_require_attested >/dev/null 2>&1; then
+      fail "E5B attestation must reject argv builder drift"
+    fi
+  )
+
+  (
+    set -euo pipefail
+    local fixture_dir=""
+    local first_attestation=""
+    local first_tcp_sha256=""
+    local first_udp_sha256=""
+    local first_tcp_id=""
+    local first_udp_id=""
+
+    fixture_dir="$(mktemp -d)"
+    trap 'rm -rf "${fixture_dir}"' EXIT
+    write_e5b_fake_dig "${fixture_dir}"
+    printf 'modern-changing-id\n' >"${fixture_dir}/scenario"
+    clear_e5b_attestation_state
+    PATH="${fixture_dir}:${PATH}"
+    export PATH
+    authoritative_dns_dig_preflight >/dev/null
+    first_attestation="${AUTHORITATIVE_DNS_DIG_ATTESTATION_SHA256}"
+    first_udp_sha256="${AUTHORITATIVE_DNS_DIG_UDP_WIRE_SHA256}"
+    first_tcp_sha256="${AUTHORITATIVE_DNS_DIG_TCP_WIRE_SHA256}"
+    first_udp_id="${AUTHORITATIVE_DNS_DIG_PROBE_UDP_TRANSACTION_ID}"
+    first_tcp_id="${AUTHORITATIVE_DNS_DIG_PROBE_TCP_TRANSACTION_ID}"
+    authoritative_dns_dig_preflight >/dev/null
+    [[ "${AUTHORITATIVE_DNS_DIG_ATTESTATION_SHA256}" == "${first_attestation}" &&
+        "${AUTHORITATIVE_DNS_DIG_UDP_WIRE_SHA256}" == "${first_udp_sha256}" &&
+        "${AUTHORITATIVE_DNS_DIG_TCP_WIRE_SHA256}" == "${first_tcp_sha256}" ]] ||
+      fail "transaction-ID-only changes must preserve canonical wire attestation digests"
+    [[ "${AUTHORITATIVE_DNS_DIG_PROBE_UDP_TRANSACTION_ID}" != "${first_udp_id}" ||
+        "${AUTHORITATIVE_DNS_DIG_PROBE_TCP_TRANSACTION_ID}" != "${first_tcp_id}" ]] ||
+      fail "the changing-ID fixture did not exercise distinct DNS transaction IDs"
+  )
+
+  no_dig_path="$(mktemp -d)"
+  if (
+    clear_e5b_attestation_state
+    PATH="${no_dig_path}"
+    authoritative_dns_dig_preflight >/dev/null 2>&1
+  ); then
+    rm -rf "${no_dig_path}"
+    fail "E5B preflight must reject a missing DiG executable"
+  fi
+  rm -rf "${no_dig_path}"
+
+  clear_e5b_attestation_state
+  authoritative_dns_dig_preflight
+  first_real_attestation="${AUTHORITATIVE_DNS_DIG_ATTESTATION_SHA256}"
+  first_real_udp_sha256="${AUTHORITATIVE_DNS_DIG_UDP_WIRE_SHA256}"
+  first_real_tcp_sha256="${AUTHORITATIVE_DNS_DIG_TCP_WIRE_SHA256}"
+  first_real_udp_id="${AUTHORITATIVE_DNS_DIG_PROBE_UDP_TRANSACTION_ID}"
+  first_real_tcp_id="${AUTHORITATIVE_DNS_DIG_PROBE_TCP_TRANSACTION_ID}"
+  authoritative_dns_dig_preflight
+  [[ "${AUTHORITATIVE_DNS_DIG_ATTESTATION_SHA256}" == "${first_real_attestation}" &&
+      "${AUTHORITATIVE_DNS_DIG_UDP_WIRE_SHA256}" == "${first_real_udp_sha256}" &&
+      "${AUTHORITATIVE_DNS_DIG_TCP_WIRE_SHA256}" == "${first_real_tcp_sha256}" ]] ||
+    fail "two real-DiG preflights must produce stable canonical wire attestation digests"
+  [[ "${first_real_udp_id}" =~ ^[0-9]+$ && "${first_real_tcp_id}" =~ ^[0-9]+$ &&
+      "${AUTHORITATIVE_DNS_DIG_PROBE_UDP_TRANSACTION_ID}" =~ ^[0-9]+$ &&
+      "${AUTHORITATIVE_DNS_DIG_PROBE_TCP_TRANSACTION_ID}" =~ ^[0-9]+$ ]] ||
+    fail "real-DiG wire probes did not expose valid randomized transaction IDs"
+  if [[ "${AUTHORITATIVE_DNS_DIG_VERSION}" == "DiG 9.10.6" &&
+        "${AUTHORITATIVE_DNS_DIG_MODE}" != "legacy" ]]; then
+    fail "real DiG 9.10.6 must select only the wire-proven legacy mode"
+  fi
+  authoritative_dns_dig_require_attested
+  printf '[test_release_domain_safety] E5B raw-wire DiG attestation matrix ok mode=%s version=%s\n' \
+    "${AUTHORITATIVE_DNS_DIG_MODE}" "${AUTHORITATIVE_DNS_DIG_VERSION}"
+}
+
+run_e5b_shared_helper_integration_regressions() {
+  python3 - \
+    "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" \
+    "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
+    "${REPO_ROOT}/scripts/test_release_domain_safety.sh" \
+    "${REPO_ROOT}/scripts/test_node_local_dns_release.sh" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+release_path, upgrade_path, release_test_path, nodelocal_test_path = map(Path, sys.argv[1:])
+release = release_path.read_text(encoding="utf-8")
+upgrade = upgrade_path.read_text(encoding="utf-8")
+release_test = release_test_path.read_text(encoding="utf-8")
+nodelocal_test = nodelocal_test_path.read_text(encoding="utf-8")
+shared_source = "source " + '"${REPO_ROOT}/scripts/lib/' + 'authoritative_dns_dig.sh"'
+
+for label, source in (
+    ("public release", release),
+    ("control-plane upgrade", upgrade),
+    ("release safety test", release_test),
+    ("NodeLocal test", nodelocal_test),
+):
+    if source.count(shared_source) != 1:
+        raise SystemExit(f"{label} must consume exactly one shared authoritative DiG helper")
+
+direct_dig = re.compile(r"(?m)^[ \t]*(?:command[ \t]+)?dig(?:[ \t]|$)")
+for label, source in (("public release", release), ("control-plane upgrade", upgrade)):
+    if direct_dig.search(source) or re.search(r"\bdig_args\b|command_exists[ \t]+dig\b", source):
+        raise SystemExit(f"{label} bypasses the shared authoritative DiG helper")
+
+def function_body(source, name, next_name):
+    start = source.index(f"\n{name}()")
+    end = source.index(f"\n{next_name}()", start)
+    return source[start:end]
+
+public_query = function_body(
+    release,
+    "authoritative_dns_query_batch_with_retry",
+    "check_authoritative_dns_on_nodes",
+)
+if public_query.count("authoritative_dns_dig_query") != 2 or "authoritative_dns_dig_build_query_argv" in public_query:
+    raise SystemExit("public authoritative queries must use only the shared query API")
+
+nodelocal_query = function_body(
+    upgrade,
+    "node_local_dns_verify_authoritative_coexistence",
+    "node_local_dns_verify_authoritative_cohort",
+)
+if nodelocal_query.count("authoritative_dns_dig_query") != 1 or "authoritative_dns_dig_build_query_argv" in nodelocal_query:
+    raise SystemExit("NodeLocal authoritative queries must use only the shared query API")
+
+public_main = release[release.index("\nmain()") :]
+public_detect = public_main.index("detect_kubectl")
+public_gate = public_main[:public_detect]
+public_gate_order = [
+    public_gate.index("authoritative_dns_dig_state_present"),
+    public_gate.index("authoritative_dns_dig_require_attested"),
+    public_gate.index("authoritative_dns_dig_preflight"),
+]
+if public_gate_order != sorted(public_gate_order) or any(
+    public_gate.count(name) != 1
+    for name in (
+        "authoritative_dns_dig_state_present",
+        "authoritative_dns_dig_require_attested",
+        "authoritative_dns_dig_preflight",
+    )
+):
+    raise SystemExit("public DNS entry must require inherited attestation or fresh-preflight exactly once")
+if not public_detect < public_main.index("run_dns_ondelete_release") < public_main.index("run_dns_manifest_ondelete_release"):
+    raise SystemExit("public DNS attestation gate must precede Kubernetes discovery and every DNS mutation strategy")
+
+upgrade_main = upgrade[upgrade.index("\nmain()") :]
+order = [
+    upgrade_main.index("validate_node_local_dns_release_budget_pre_mutation"),
+    upgrade_main.index("authoritative_dns_dig_preflight"),
+    upgrade_main.index("acquire_control_plane_backup_coordination_lease"),
+    upgrade_main.index("ensure_host_time_sync"),
+    upgrade_main.index("apply_chart_crds"),
+    upgrade_main.index('"Helm upgrade" helm upgrade'),
+]
+if order != sorted(order) or len(order) != len(set(order)):
+    raise SystemExit("control-plane wire attestation must complete after read-only budget validation and before Lease/host/CRD/Helm mutation")
+
+manifest_child = function_body(upgrade, "run_dns_manifest_library_action", "prepare_dns_manifest_transaction")
+if manifest_child.index("authoritative_dns_dig_require_attested") > manifest_child.index("case \"${action}\""):
+    raise SystemExit("DNS manifest child must verify inherited attestation before action dispatch")
+
+auto_release = function_body(upgrade, "release_public_data_plane_if_needed", "release_status_request")
+if auto_release.count("bash ./scripts/release_fugue_public_data_plane.sh") != 3:
+    raise SystemExit("control-plane auto-release children must continue through the public release entrypoint")
+if "authoritative_dns_dig_preflight" in auto_release:
+    raise SystemExit("control-plane auto-release must not run a second wire preflight before its child")
+
+real_smoke = function_body(release_test, "run_e4_real_dig_smokes", "run_e4_public_hostport_regressions")
+if real_smoke.count("authoritative_dns_dig_query") != 2:
+    raise SystemExit("both loopback real-DiG smokes must use the shared query API")
+PY
+  printf '[test_release_domain_safety] E5B shared-helper and pre-mutation integration regressions ok\n'
+}
+
+run_e5c_upgrade_dns_child_inherited_attestation_regression() (
+  set -euo pipefail
+  local child_harness=""
+  local fixture_dir=""
+  local original_path="${PATH}"
+  local poison_dir=""
+
+  fixture_dir="$(mktemp -d)"
+  poison_dir="${fixture_dir}/poison"
+  child_harness="${fixture_dir}/child-harness.sh"
+  trap 'rm -rf "${fixture_dir}"' EXIT
+  mkdir -p "${poison_dir}"
+  write_e5b_fake_dig "${fixture_dir}"
+  printf 'modern-valid\n' >"${fixture_dir}/scenario"
+  cat >"${poison_dir}/dig" <<'SH'
+#!/bin/sh
+: >"${E5C_PATH_DIG_MARKER:?}"
+exit 97
+SH
+  chmod +x "${poison_dir}/dig"
+  cat >"${child_harness}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$1"
+export FUGUE_PUBLIC_DATA_PLANE_LIB_ONLY=true
+source "${script_path}"
+require_definition="$(declare -f authoritative_dns_dig_require_attested)"
+eval "${require_definition/authoritative_dns_dig_require_attested/authoritative_dns_dig_require_attested_real}"
+authoritative_dns_dig_require_attested() {
+  printf 'require\n' >>"${E5C_REQUIRE_MARKER:?}"
+  authoritative_dns_dig_require_attested_real "$@"
+}
+authoritative_dns_dig_preflight() {
+  : >"${E5C_FRESH_PREFLIGHT_MARKER:?}"
+  return 98
+}
+authoritative_dns_dig_resolve_binary() {
+  : >"${E5C_RESOLVE_MARKER:?}"
+  return 99
+}
+detect_kubectl() { :; }
+validate_representative_smoke_configuration() { :; }
+run_dns_ondelete_release() { : >"${E5C_DNS_RELEASE_MARKER:?}"; }
+dns_daemonset_names() { printf 'dns-a\n'; }
+write_release_record() { :; }
+
+PATH="${E5C_POISON_PATH:?}:${PATH}"
+export PATH
+FUGUE_PUBLIC_DATA_PLANE_RELEASE_STRATEGY=dns-ondelete
+FUGUE_PUBLIC_DATA_PLANE_RELEASE_DRY_RUN=true
+main
+SH
+  chmod +x "${child_harness}"
+  cat >"${fixture_dir}/bash" <<'SH'
+#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "./scripts/release_fugue_public_data_plane.sh" ]; then
+  exec /bin/bash "${E5C_CHILD_HARNESS:?}" "$1"
+fi
+exec /bin/bash "$@"
+SH
+  chmod +x "${fixture_dir}/bash"
+
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck disable=SC1091
+  source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  clear_e5b_attestation_state
+  PATH="${fixture_dir}:${original_path}"
+  export PATH
+  authoritative_dns_dig_preflight >/dev/null
+  authoritative_dns_dig_require_attested
+
+  E5C_CHILD_HARNESS="${child_harness}"
+  E5C_REQUIRE_MARKER="${fixture_dir}/require.marker"
+  E5C_FRESH_PREFLIGHT_MARKER="${fixture_dir}/fresh.marker"
+  E5C_RESOLVE_MARKER="${fixture_dir}/resolve.marker"
+  E5C_PATH_DIG_MARKER="${fixture_dir}/path-dig.marker"
+  E5C_DNS_RELEASE_MARKER="${fixture_dir}/dns-release.marker"
+  E5C_POISON_PATH="${poison_dir}"
+  export E5C_CHILD_HARNESS E5C_REQUIRE_MARKER E5C_FRESH_PREFLIGHT_MARKER E5C_RESOLVE_MARKER
+  export E5C_PATH_DIG_MARKER E5C_DNS_RELEASE_MARKER E5C_POISON_PATH
+
+  FUGUE_EDGE_ENABLED=true
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE=auto
+  FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE=true
+  FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS=60
+  DNS_MANIFEST_TRANSACTION_COMPLETED=false
+  CONTROL_PLANE_RELEASE_RAW_KUBECTL=/bin/true
+  KUBECTL=/bin/true
+  export FUGUE_EDGE_ENABLED FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE
+  export FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE
+  export FUGUE_RELEASE_DATA_PLANE_OPERATION_OUTER_TIMEOUT_SECONDS
+  export DNS_MANIFEST_TRANSACTION_COMPLETED CONTROL_PLANE_RELEASE_RAW_KUBECTL KUBECTL
+
+  public_data_plane_worker_image_changed() { return 1; }
+  public_data_plane_front_image_changed() { return 1; }
+  public_data_plane_dns_image_changed() { return 0; }
+  public_data_plane_live_worker_image_changed() { return 1; }
+  public_data_plane_live_front_image_changed() { return 1; }
+  public_data_plane_live_dns_image_changed() { return 1; }
+  live_daemonsets_json_snapshot() { printf '{"items":[]}\n'; }
+  public_data_plane_manifest_changed() { return 1; }
+  run_release_long_command() {
+    [[ "$1" == "60" && "$2" == "public data-plane DNS release" ]] ||
+      fail "upgrade DNS auto-release changed its bounded command envelope"
+    shift 2
+    [[ "$#" == "4" && "$1" == "env" && "$2" == "KUBECTL=/bin/true" &&
+        "$3" == "bash" && "$4" == "./scripts/release_fugue_public_data_plane.sh" ]] ||
+      fail "upgrade DNS auto-release changed its env-to-public-child argv"
+    "$@"
+  }
+
+  cd "${REPO_ROOT}"
+  release_public_data_plane_if_needed
+  [[ "${PUBLIC_DATA_PLANE_RELEASED}" == "true" ]] ||
+    fail "upgrade parent did not observe its inherited-attestation DNS child as successful"
+  [[ "$(wc -l <"${E5C_REQUIRE_MARKER}" | tr -d '[:space:]')" == "1" ]] ||
+    fail "public DNS child must require inherited attestation exactly once"
+  [[ -f "${E5C_DNS_RELEASE_MARKER}" ]] ||
+    fail "public DNS child did not reach the mocked post-attestation release seam"
+  [[ ! -e "${E5C_FRESH_PREFLIGHT_MARKER}" && ! -e "${E5C_RESOLVE_MARKER}" &&
+      ! -e "${E5C_PATH_DIG_MARKER}" ]] ||
+    fail "public DNS child reran a wire probe or resolved/executed DiG through PATH"
+  printf '[test_release_domain_safety] E5C upgrade-parent to DNS-child inherited attestation regression ok\n'
+)
+
+run_e5b_query_timeout_regressions() (
+  set -euo pipefail
+  local invalid_timeout=""
+  local label=""
+  local marker_child=""
+  local marker_file=""
+  local output_file=""
+  local temp_dir=""
+
+  temp_dir="$(mktemp -d)"
+  marker_child="${temp_dir}/marker-child"
+  marker_file="${temp_dir}/child-executed"
+  output_file="${temp_dir}/output"
+  trap 'rm -rf "${temp_dir}"' EXIT
+  cat >"${marker_child}" <<'SH'
+#!/bin/sh
+: >"$1"
+printf 'executed\n'
+SH
+  chmod +x "${marker_child}"
+
+  [[ "${AUTHORITATIVE_DNS_DIG_MAX_TIMEOUT_SECONDS}" == "86400" ]] ||
+    fail "the authoritative DiG timeout ceiling must remain the explicit cross-Bash-safe 86400 seconds"
+  authoritative_dns_dig_build_query_argv \
+    /bin/sh modern 127.0.0.1 53 "${AUTHORITATIVE_DNS_DIG_MAX_TIMEOUT_SECONDS}" \
+    udp example.test SOA
+  [[ " ${AUTHORITATIVE_DNS_DIG_QUERY_ARGV[*]} " == *" +time=86400 "* ]] ||
+    fail "the canonical argv builder did not accept and preserve the maximum legal timeout"
+
+  rm -f "${marker_file}"
+  authoritative_dns_dig_execute_argv_to_file "${output_file}" \
+    "${marker_child}" "${marker_file}" "+time=${AUTHORITATIVE_DNS_DIG_MAX_TIMEOUT_SECONDS}" ||
+    fail "the executor must accept the maximum legal timeout"
+  [[ -f "${marker_file}" && "$(cat "${output_file}")" == "executed" ]] ||
+    fail "the maximum legal timeout did not launch the controlled child"
+
+  assert_timeout_rejected_before_child() {
+    local case_label="$1"
+    shift
+
+    rm -f "${marker_file}"
+    printf 'untouched\n' >"${output_file}"
+    if authoritative_dns_dig_execute_argv_to_file "${output_file}" \
+      "${marker_child}" "${marker_file}" "$@"; then
+      fail "the helper executor must reject ${case_label}"
+    fi
+    [[ ! -e "${marker_file}" ]] ||
+      fail "the helper executor launched its child for ${case_label}"
+    [[ "$(cat "${output_file}")" == "untouched" ]] ||
+      fail "the helper executor opened its output before rejecting ${case_label}"
+  }
+
+  assert_timeout_rejected_before_child "a missing +time value"
+  assert_timeout_rejected_before_child "duplicate +time values" +time=1 +time=2
+  for label in \
+    "an empty value|" \
+    "zero|0" \
+    "a leading-zero value|01" \
+    "a signed value|+1" \
+    "a non-integer value|invalid" \
+    "the maximum plus one|86401" \
+    "the signed 64-bit maximum|9223372036854775807" \
+    "an overlong decimal|9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"; do
+    invalid_timeout="${label#*|}"
+    label="${label%%|*}"
+    if authoritative_dns_dig_build_query_argv \
+      /bin/sh modern 127.0.0.1 53 "${invalid_timeout}" udp example.test SOA >/dev/null 2>&1; then
+      fail "the canonical argv builder must reject ${label}"
+    fi
+    assert_timeout_rejected_before_child "${label}" "+time=${invalid_timeout}"
+  done
+
+  authoritative_dns_dig_execute_argv_to_file "${output_file}" \
+    /bin/sh -c 'sleep 5.25; printf "timeout-derived\n"' +time=6 ||
+    fail "a +time value above five seconds must not be truncated by the helper process deadline"
+  assert_eq "$(cat "${output_file}")" "timeout-derived" \
+    "the timeout-derived helper execution must complete after the former five-second boundary"
+
+  printf '[test_release_domain_safety] E5C bounded query timeout regressions ok\n'
+)
+
 print_dig_response() {
   local flags="$1"
   local question_name="$2"
@@ -35,7 +791,9 @@ print_dig_response() {
   local edns_flags=""
   local ecs_scope="0.0.0.0/0/0"
   local emit_opt=true
-  local extra_edns=""
+  local emit_ecs=true
+  local before_ecs=""
+  local after_ecs=""
 
   case "${edns_mode}" in
     valid) ;;
@@ -47,7 +805,15 @@ print_dig_response() {
       additional=0
       emit_opt=false
       ;;
-    extra-edns) extra_edns='; COOKIE: 0123456789abcdef (echoed)' ;;
+    extra-edns|cookie-after) after_ecs='; COOKIE: 0123456789abcdef (echoed)' ;;
+    cookie-before) before_ecs='; COOKIE: 0123456789abcdef (echoed)' ;;
+    cookie-only)
+      emit_ecs=false
+      before_ecs='; COOKIE: 0123456789abcdef (echoed)'
+      ;;
+    nsid) after_ecs='; NSID: 74657374 (test)' ;;
+    padding) after_ecs='; PADDING: 00000000' ;;
+    unknown-edns) after_ecs='; UNKNOWN-EDNS: 65001 0001' ;;
     *) fail "unknown DiG EDNS fixture mode: ${edns_mode}" ;;
   esac
 
@@ -61,8 +827,15 @@ EOF
     cat <<EOF
 ;; OPT PSEUDOSECTION:
 ; EDNS: version: ${edns_version}, flags:${edns_flags}; udp: 1232
+${before_ecs}
+EOF
+    if [[ "${emit_ecs}" == "true" ]]; then
+      cat <<EOF
 ; CLIENT-SUBNET: ${ecs_scope}
-${extra_edns}
+EOF
+    fi
+    cat <<EOF
+${after_ecs}
 
 ;; QUESTION SECTION:
 ;${question_name} IN ${question_type}
@@ -97,7 +870,8 @@ run_e4_edns_parser_regressions() {
       print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${response_file}"
       validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A ||
         fail "main authoritative parser must accept a real-shape ${transport} OPT/EDNS/ECS response"
-      for mode in wrong-version wrong-flags wrong-ecs wrong-additional missing-opt extra-edns; do
+      for mode in wrong-version wrong-flags wrong-ecs wrong-additional missing-opt \
+        cookie-before cookie-after cookie-only nsid padding unknown-edns; do
         print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' "${mode}" >"${response_file}"
         if validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A; then
           fail "main authoritative parser must reject ${transport} EDNS fixture ${mode}"
@@ -126,7 +900,8 @@ run_e4_edns_parser_regressions() {
         'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${response_file}"
       node_local_dns_validate_authoritative_soa_response "${response_file}" "${expected_config}" ||
         fail "NodeLocal SOA parser must accept a real-shape ${transport} OPT/EDNS/ECS response"
-      for mode in wrong-version wrong-flags wrong-ecs wrong-additional missing-opt extra-edns; do
+      for mode in wrong-version wrong-flags wrong-ecs wrong-additional missing-opt \
+        cookie-before cookie-after cookie-only nsid padding unknown-edns; do
         print_dig_response 'qr aa' 'example.test.' SOA 'example.test.' SOA \
           'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' "${mode}" >"${response_file}"
         if node_local_dns_validate_authoritative_soa_response "${response_file}" "${expected_config}"; then
@@ -194,9 +969,9 @@ def wire_name(value):
 def response_for(query):
     if len(query) < 12:
         raise RuntimeError("short DNS query")
-    identifier, _, qdcount, _, _, arcount = struct.unpack("!HHHHHH", query[:12])
-    if qdcount != 1 or arcount != 1:
-        raise RuntimeError("real-dig query did not contain exactly one question and one OPT record")
+    identifier, flags, qdcount, ancount, nscount, arcount = struct.unpack("!HHHHHH", query[:12])
+    if flags != 0x0020 or (qdcount, ancount, nscount, arcount) != (1, 0, 0, 1):
+        raise RuntimeError("real-dig query flags or section counts drifted")
     offset = 12
     labels = []
     while True:
@@ -206,15 +981,33 @@ def response_for(query):
             break
         labels.append(query[offset:offset + length].decode("ascii"))
         offset += length
-    question_end = offset + 4
-    qtype, qclass = struct.unpack("!HH", query[offset:question_end])
+    if offset + 4 > len(query):
+        raise RuntimeError("real-dig question is truncated")
+    qtype, qclass = struct.unpack("!HH", query[offset:offset + 4])
+    offset += 4
     if qclass != 1:
         raise RuntimeError("real-dig query class drifted")
     qname = ".".join(labels).lower() + "."
-    question = query[12:question_end]
-    opt = query[question_end:]
-    if not opt or opt[0] != 0 or len(opt) < 11 or struct.unpack("!H", opt[1:3])[0] != 41:
+    opt = query[offset:]
+    if not opt or opt[0] != 0 or len(opt) < 11:
         raise RuntimeError("real-dig query OPT record is missing")
+    opt_type, udp_size, opt_ttl, rdlength = struct.unpack("!HHIH", opt[1:11])
+    if opt_type != 41 or udp_size != 1232 or opt_ttl != 0 or len(opt) != 11 + rdlength:
+        raise RuntimeError("real-dig query OPT envelope drifted")
+    option_offset = 11
+    options = []
+    while option_offset < len(opt):
+        if option_offset + 4 > len(opt):
+            raise RuntimeError("real-dig query contains a truncated EDNS option")
+        option_code, option_length = struct.unpack("!HH", opt[option_offset:option_offset + 4])
+        option_offset += 4
+        option_end = option_offset + option_length
+        if option_end > len(opt):
+            raise RuntimeError("real-dig query contains a malformed EDNS option length")
+        options.append((option_code, opt[option_offset:option_end]))
+        option_offset = option_end
+    if options != [(8, b"\x00\x01\x00\x00")]:
+        raise RuntimeError("real-dig request must contain exact ECS and no COOKIE/extra EDNS")
     if qtype == 1 and qname == "api.example.test.":
         rdata = bytes([192, 0, 2, 20])
     elif qtype == 6 and qname == "example.test.":
@@ -223,8 +1016,11 @@ def response_for(query):
         )
     else:
         raise RuntimeError(f"unexpected real-dig question {qname} type={qtype}")
+    question = wire_name(qname) + struct.pack("!HH", qtype, 1)
     answer = b"\xc0\x0c" + struct.pack("!HHIH", qtype, 1, 60, len(rdata)) + rdata
-    return struct.pack("!HHHHHH", identifier, 0x8400, 1, 1, 0, 1) + question + answer + opt
+    ecs = struct.pack("!HH", 8, 4) + b"\x00\x01\x00\x00"
+    controlled_opt = b"\x00" + struct.pack("!HHIH", 41, 1232, 0, len(ecs)) + ecs
+    return struct.pack("!HHHHHH", identifier, 0x8400, 1, 1, 0, 1) + question + answer + controlled_opt
 
 handled = 0
 deadline = time.monotonic() + 10
@@ -265,8 +1061,8 @@ PY
   [[ "${port}" =~ ^[1-9][0-9]*$ ]] || fail "loopback DNS server did not publish a port"
 
   response_file="${work_dir}/authoritative.txt"
-  dig @127.0.0.1 -p "${port}" +time=1 +tries=1 +norecurse +subnet=0.0.0.0/0 \
-    +noall +comments +question +answer api.example.test A >"${response_file}"
+  authoritative_dns_dig_query "${response_file}" udp 127.0.0.1 "${port}" 1 api.example.test A ||
+    fail "shared helper rejected the local real-dig UDP query"
   expected_config='{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"}],"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}'
   validate_authoritative_dns_response "${response_file}" "${expected_config}" api.example.test A ||
     fail "main authoritative parser rejected local real-dig UDP output"
@@ -275,15 +1071,15 @@ PY
   FUGUE_DNS_NAMESERVERS='ns1.example.test'
   FUGUE_DNS_TTL=60
   response_file="${work_dir}/nodelocal-soa.txt"
-  dig @127.0.0.1 -p "${port}" +time=1 +tries=1 +norecurse +subnet=0.0.0.0/0 \
-    +noall +comments +question +answer +tcp example.test SOA >"${response_file}"
+  authoritative_dns_dig_query "${response_file}" tcp 127.0.0.1 "${port}" 1 example.test SOA ||
+    fail "shared helper rejected the local real-dig TCP query"
   expected_config="$(node_local_dns_authoritative_soa_config)"
   node_local_dns_validate_authoritative_soa_response "${response_file}" "${expected_config}" ||
     fail "NodeLocal SOA parser rejected local real-dig TCP output"
   wait "${server_pid}"
   trap - EXIT
   rm -rf "${work_dir}"
-  printf '[test_release_domain_safety] E4 loopback real-dig authoritative/NodeLocal smokes ok\n'
+  printf '[test_release_domain_safety] E5B shared-helper loopback real-dig authoritative/NodeLocal smokes ok\n'
 )
 
 run_e4_public_hostport_regressions() (
@@ -567,20 +1363,16 @@ PY
       "$([[ "${snapshot_drift}" == "pod" ]] && printf '%s' "${drift_value}" || printf stable)" \
       "$([[ "${snapshot_drift}" == "port" ]] && printf '%s' "${drift_value}" || printf stable)"
   }
-  dig() {
-    local arg
-    local query_name=""
-    local query_type=""
+  authoritative_dns_dig_execute_argv_to_file() {
+    local output_file="$1"
+    shift
     printf '%s\n' "$*" >>"${dig_log}"
-    for arg in "$@"; do
-      query_name="${query_type}"
-      query_type="${arg}"
-    done
-    if [[ "${query_type}" == "SOA" ]]; then
-      print_dig_response 'qr aa' "${query_name}." SOA "${query_name}." SOA \
-        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+    e5b_mock_query_name_and_type "$@"
+    if [[ "${E5B_MOCK_QUERY_TYPE}" == "SOA" ]]; then
+      print_dig_response 'qr aa' "${E5B_MOCK_QUERY_NAME}." SOA "${E5B_MOCK_QUERY_NAME}." SOA \
+        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${output_file}"
     else
-      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20'
+      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${output_file}"
     fi
   }
   sleep() { :; }
@@ -618,10 +1410,15 @@ PY
 )
 
 run_e4_edns_parser_regressions
+run_e5b_wire_attestation_regressions
+run_e5b_shared_helper_integration_regressions
+run_e5c_upgrade_dns_child_inherited_attestation_regression
+run_e5b_query_timeout_regressions
 run_e4_real_dig_smokes
 run_e4_public_hostport_regressions
-if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ]]; then
-  printf '[test_release_domain_safety] E4 DNS targeted regressions ok\n'
+if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
+      "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e5b-dig" ]]; then
+  printf '[test_release_domain_safety] E5B DNS targeted regressions ok\n'
   exit 0
 fi
 
@@ -885,27 +1682,32 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
   authoritative_dns_publication_snapshot_for_pod() {
     printf '{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"},{"name":"app.example.test.","type":"A","value":"192.0.2.21"}],"identity":{"bundleVersion":"bundle-1","containerName":"dns","healthPort":7834,"podName":"%s","podUID":"%s-uid","servingGeneration":"generation-1","zone":"example.test."},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' "$1" "$1"
   }
-  dig() {
-    local arg=""
-    local query_name=""
-    local query_type=""
+  authoritative_dns_dig_execute_argv_to_file() {
+    local output_file="$1"
+    shift
     printf '%s\n' "$*" >>"${dns_queries}"
-    for arg in "$@"; do
-      query_name="${query_type}"
-      query_type="${arg}"
-    done
-    if [[ "${query_type}" == "SOA" ]]; then
-      print_dig_response 'qr aa' "${query_name}." SOA "${query_name}." SOA \
-        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
-    elif [[ "${query_name}" == "api.example.test" ]]; then
-      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20'
+    e5b_mock_query_name_and_type "$@"
+    if [[ "${E5B_MOCK_QUERY_TYPE}" == "SOA" ]]; then
+      print_dig_response 'qr aa' "${E5B_MOCK_QUERY_NAME}." SOA "${E5B_MOCK_QUERY_NAME}." SOA \
+        'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${output_file}"
+    elif [[ "${E5B_MOCK_QUERY_NAME}" == "api.example.test" ]]; then
+      print_dig_response 'qr aa' 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${output_file}"
     else
-      print_dig_response 'qr aa' 'app.example.test.' A 'app.example.test.' A '192.0.2.21'
+      print_dig_response 'qr aa' 'app.example.test.' A 'app.example.test.' A '192.0.2.21' >"${output_file}"
     fi
   }
 
   check_authoritative_dns_on_nodes test-dns
-  assert_eq "$(cat "${dns_queries}")" $'@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer api.example.test A\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer app.example.test A\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp api.example.test A\n@203.0.113.10 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp app.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer api.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer app.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp api.example.test A\n@203.0.113.11 -p 53 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp app.example.test A' "authoritative DNS validation must query each exact Node ExternalIPv4/public hostPort and never the Pod hostIP"
+  expected_dns_queries="$({
+    for server in 203.0.113.10 203.0.113.11; do
+      for transport in udp tcp; do
+        e5b_expected_query_line "${server}" 53 3 "${transport}" example.test SOA
+        e5b_expected_query_line "${server}" 53 3 "${transport}" api.example.test A
+        e5b_expected_query_line "${server}" 53 3 "${transport}" app.example.test A
+      done
+    done
+  })"
+  assert_eq "$(cat "${dns_queries}")" "${expected_dns_queries}" "authoritative DNS validation must use the shared canonical argv for every Node ExternalIPv4/public hostPort"
   rm -f "${dns_queries}"
 )
 
@@ -927,10 +1729,11 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
   authoritative_dns_publication_snapshot_for_pod() {
     printf '{"answers":[{"name":"api.example.test.","type":"A","value":"192.0.2.20"},{"name":"app.example.test.","type":"A","value":"192.0.2.21"}],"identity":{"bundleVersion":"bundle-1","containerName":"dns","healthPort":7834,"podName":"%s","podUID":"%s-uid","servingGeneration":"generation-1","zone":"example.test."},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' "$1" "$1"
   }
-  dig() {
+  authoritative_dns_dig_execute_argv_to_file() {
+    local output_file="$1"
     host_calls=$((host_calls + 1))
     print_dig_response 'qr' 'example.test.' SOA 'example.test.' SOA \
-      'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+      'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${output_file}"
   }
   sleep() { :; }
 
@@ -951,7 +1754,9 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
     printf '203.0.113.10\t53\t53\t53\t5353\tdns-a\tdns-a-uid\t192.0.2.10\tsha256:pod-a\tnode-a\tnode-a-uid\tsha256:node-a\trev-a\tds-uid\tsha256:ds-identity\n'
     return 42
   }
-  dig() { fail "authoritative DNS validation must not query a partially enumerated node cohort"; }
+  authoritative_dns_dig_execute_argv_to_file() {
+    fail "authoritative DNS validation must not query a partially enumerated node cohort"
+  }
 
   if check_authoritative_dns_on_nodes test-dns; then
     fail "authoritative DNS validation must reject partial node output followed by producer failure"
@@ -972,7 +1777,9 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
     printf 'api.example.test\n'
     return 42
   }
-  dig() { fail "authoritative DNS validation must not query a partially derived hostname cohort"; }
+  authoritative_dns_dig_execute_argv_to_file() {
+    fail "authoritative DNS validation must not query a partially derived hostname cohort"
+  }
 
   if check_authoritative_dns_on_nodes test-dns; then
     fail "authoritative DNS validation must reject partial hostname output followed by producer failure"
@@ -1046,30 +1853,26 @@ assert_eq "${public_concurrency}" "${deploy_concurrency}" "public and control-pl
     fi
     printf '{"answers":[{"name":"api.example.test.","type":"A","value":"%s"}],"identity":{"bundleVersion":"bundle-1","cacheContentHash":"sha256:%s","containerName":"dns","healthPort":7834,"podName":"dns-a","podUID":"dns-a-uid","servingGeneration":"generation-1","zone":"example.test."},"soa":{"expire":3600,"minimum":60,"mname":"ns1.example.test.","owner":"example.test.","refresh":300,"retry":60,"rname":"hostmaster.example.test."},"zone":"example.test."}\n' "${answer}" "${answer}"
   }
-  dig() {
-    local arg=""
-    local query_name=""
-    local query_type=""
+  authoritative_dns_dig_execute_argv_to_file() {
+    local output_file="$1"
     local flags='qr aa'
-    for arg in "$@"; do
-      query_name="${query_type}"
-      query_type="${arg}"
-    done
+    shift
+    e5b_mock_query_name_and_type "$@"
     if [[ "${dns_case}" == "non-aa" ]]; then
       flags='qr'
     fi
-    if [[ "${query_type}" == "SOA" ]]; then
+    if [[ "${E5B_MOCK_QUERY_TYPE}" == "SOA" ]]; then
       if [[ "${dns_case}" == "wrong-zone" ]]; then
-        print_dig_response "${flags}" "${query_name}." SOA 'wrong.example.test.' SOA \
-          'ns.attacker.invalid. hostmaster.attacker.invalid. 1 300 60 3600 60'
+        print_dig_response "${flags}" "${E5B_MOCK_QUERY_NAME}." SOA 'wrong.example.test.' SOA \
+          'ns.attacker.invalid. hostmaster.attacker.invalid. 1 300 60 3600 60' >"${output_file}"
       else
-        print_dig_response "${flags}" "${query_name}." SOA "${query_name}." SOA \
-          'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
+        print_dig_response "${flags}" "${E5B_MOCK_QUERY_NAME}." SOA "${E5B_MOCK_QUERY_NAME}." SOA \
+          'ns1.example.test. hostmaster.example.test. 1 300 60 3600 60' >"${output_file}"
       fi
     elif [[ "${dns_case}" == "wrong-answer" ]]; then
-      print_dig_response "${flags}" 'api.example.test.' A 'api.example.test.' A '198.51.100.254'
+      print_dig_response "${flags}" 'api.example.test.' A 'api.example.test.' A '198.51.100.254' >"${output_file}"
     else
-      print_dig_response "${flags}" 'api.example.test.' A 'api.example.test.' A '192.0.2.20'
+      print_dig_response "${flags}" 'api.example.test.' A 'api.example.test.' A '192.0.2.20' >"${output_file}"
     fi
   }
   sleep() { :; }
@@ -2976,11 +3779,13 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
   node_local_dns_verify_scoped_hostport_rules() { :; }
   require_release_forward_budget() { :; }
   sleep() { :; }
-  dig() {
+  authoritative_dns_dig_execute_argv_to_file() {
+    local output_file="$1"
     local flags='qr aa'
     local owner='example.test.'
     local rdata='ns1.example.test. hostmaster.example.test. 1 300 60 3600 60'
     local current_transport=udp
+    shift
     printf '%s\n' "$*" >>"${dns_queries}"
     [[ " $* " != *' +tcp '* ]] || current_transport=tcp
     if [[ "${current_transport}" == "${node_local_dns_inject_transport:-none}" ]]; then
@@ -2990,7 +3795,7 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
         wrong-answer) rdata='ns.attacker.invalid. hostmaster.attacker.invalid. 1 300 60 3600 60' ;;
       esac
     fi
-    print_dig_response "${flags}" 'example.test.' SOA "${owner}" SOA "${rdata}"
+    print_dig_response "${flags}" 'example.test.' SOA "${owner}" SOA "${rdata}" >"${output_file}"
   }
 
   for node_local_dns_inject_transport in udp tcp; do
@@ -3003,9 +3808,11 @@ source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
       fi
     done
   done
-  grep -Fq '@192.0.2.10 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer example.test SOA' "${dns_queries}" ||
+  expected_udp_query="$(e5b_expected_query_line 192.0.2.10 53 3 udp example.test SOA)"
+  expected_tcp_query="$(e5b_expected_query_line 192.0.2.10 53 3 tcp example.test SOA)"
+  grep -Fxq -- "${expected_udp_query}" "${dns_queries}" ||
     fail "NodeLocal authoritative coexistence must issue a non-recursive UDP dig query"
-  grep -Fq '@192.0.2.10 +time=3 +tries=1 +norecurse +subnet=0.0.0.0/0 +noall +comments +question +answer +tcp example.test SOA' "${dns_queries}" ||
+  grep -Fxq -- "${expected_tcp_query}" "${dns_queries}" ||
     fail "NodeLocal authoritative coexistence must issue a non-recursive TCP dig query"
   rm -f "${dns_queries}"
 )
