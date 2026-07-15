@@ -9124,6 +9124,200 @@ helm_set_string_value() {
   printf '%s' "${value}"
 }
 
+with_frozen_control_plane_helm_upgrade_argv() {
+  (( $# >= 2 )) || return 2
+  local override_values_file="$1"
+  local consumer="$2"
+  local -a CONTROL_PLANE_HELM_UPGRADE_ARGV=()
+  shift 2
+
+  [[ -n "${override_values_file}" ]] || return 2
+  [[ -n "${consumer}" ]] || return 2
+  CONTROL_PLANE_HELM_UPGRADE_ARGV=(
+    helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}"
+    -n "${FUGUE_NAMESPACE}"
+    --reset-then-reuse-values
+    --history-max 20
+    --timeout "${FUGUE_HELM_TIMEOUT}"
+    "${HELM_POST_RENDERER_ARGS[@]+"${HELM_POST_RENDERER_ARGS[@]}"}"
+    -f "${override_values_file}"
+    "${HEADSCALE_HELM_SET_ARGS[@]+"${HEADSCALE_HELM_SET_ARGS[@]}"}"
+    "${DNS_HELM_SET_ARGS[@]+"${DNS_HELM_SET_ARGS[@]}"}"
+    "${NODE_LOCAL_DNS_HELM_SET_ARGS[@]+"${NODE_LOCAL_DNS_HELM_SET_ARGS[@]}"}"
+    "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]+"${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}"}"
+    "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]+"${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}"}"
+    "${MAINTENANCE_AGENT_HELM_SET_ARGS[@]+"${MAINTENANCE_AGENT_HELM_SET_ARGS[@]}"}"
+    "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"
+    --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}"
+    --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}"
+    --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}"
+    --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}"
+    --set-string runtime.strictDrain.mode="${FUGUE_STRICT_DRAIN_MODE}"
+    --set runtime.strictDrain.timeoutSeconds="${FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS}"
+    --set runtime.strictDrain.terminationGraceBufferSeconds="${FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS}"
+    --set runtime.strictDrain.minReadySeconds="${FUGUE_STRICT_DRAIN_MIN_READY_SECONDS}"
+    --set runtime.strictDrain.quietPeriodSeconds="${FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS}"
+    --set runtime.strictDrain.pollIntervalMilliseconds="${FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS}"
+    --set runtime.strictDrain.nativeSidecarEnabled="${FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED}"
+    --set runtime.strictDrain.agent.port="${FUGUE_DRAIN_AGENT_PORT}"
+    --set-string runtime.strictDrain.agent.image.repository="${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}"
+    --set-string runtime.strictDrain.agent.image.tag="${FUGUE_DRAIN_AGENT_IMAGE_TAG}"
+    --set-string runtime.strictDrain.agent.image.digest="${FUGUE_DRAIN_AGENT_IMAGE_DIGEST}"
+    --set-string runtime.strictDrain.agent.image.pullPolicy="${FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY}"
+    --set observability.enabled="${FUGUE_OBSERVABILITY_ENABLED}"
+    --set-string observability.retention="${FUGUE_OBSERVABILITY_RETENTION}"
+    --set-string observability.exporterSecret.existingSecretName="${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}"
+    --set-string observability.identity.tenantID="${FUGUE_OBSERVABILITY_TENANT_ID}"
+    --set-string observability.identity.projectID="${FUGUE_OBSERVABILITY_PROJECT_ID}"
+    --set-string observability.identity.appID="${FUGUE_OBSERVABILITY_APP_ID}"
+    --set-string observability.identity.runtimeID="${FUGUE_OBSERVABILITY_RUNTIME_ID}"
+    --set-string observability.identity.component="${FUGUE_OBSERVABILITY_COMPONENT}"
+    --set observability.metrics.enabled="${FUGUE_OBSERVABILITY_METRICS_ENABLED}"
+    --set-string observability.metrics.image.repository="${FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY}"
+    --set-string observability.metrics.image.tag="${FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG}"
+    --set-string observability.metrics.retention="${FUGUE_OBSERVABILITY_METRICS_RETENTION}"
+    --set-string observability.metrics.scrapeInterval="${FUGUE_OBSERVABILITY_METRICS_SCRAPE_INTERVAL}"
+    --set-string observability.metrics.evaluationInterval="${FUGUE_OBSERVABILITY_METRICS_EVALUATION_INTERVAL}"
+    --set observability.alerts.enabled="${FUGUE_OBSERVABILITY_ALERTS_ENABLED}"
+    --set-string observability.alerts.image.repository="${FUGUE_OBSERVABILITY_ALERTS_IMAGE_REPOSITORY}"
+    --set-string observability.alerts.image.tag="${FUGUE_OBSERVABILITY_ALERTS_IMAGE_TAG}"
+    --set-string observability.alerts.webhookURL="${FUGUE_OBSERVABILITY_ALERTS_WEBHOOK_URL}"
+    --set observability.logs.enabled="${FUGUE_OBSERVABILITY_LOGS_ENABLED}"
+    --set-string observability.logs.image.repository="${FUGUE_OBSERVABILITY_LOGS_IMAGE_REPOSITORY}"
+    --set-string observability.logs.image.tag="${FUGUE_OBSERVABILITY_LOGS_IMAGE_TAG}"
+    --set-string observability.logs.retention="${FUGUE_OBSERVABILITY_LOGS_RETENTION}"
+    --set observability.analytics.enabled="${FUGUE_OBSERVABILITY_ANALYTICS_ENABLED}"
+    --set-string observability.analytics.image.repository="${FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_REPOSITORY}"
+    --set-string observability.analytics.image.tag="${FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_TAG}"
+    --set-string observability.analytics.retention="${FUGUE_OBSERVABILITY_ANALYTICS_RETENTION}"
+    --set observability.agent.enabled="${FUGUE_TELEMETRY_AGENT_ENABLED}"
+    --set-string observability.agent.image.repository="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}"
+    --set-string observability.agent.image.tag="${FUGUE_TELEMETRY_AGENT_IMAGE_TAG}"
+    --set-string observability.agent.runtimeLogPaths="${FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS}"
+    --set-string observability.agent.prometheusScrapeURLs="${FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS}"
+    --set-string observability.agent.scrapeInterval="${FUGUE_OBSERVABILITY_SCRAPE_INTERVAL}"
+    --set observability.agent.kubernetesLogs.enabled="${FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED}"
+    --set-string observability.agent.kubernetesLogs.namespaces="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES}")"
+    --set-string observability.agent.kubernetesLogs.namespacePrefixes="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES}")"
+    --set-string observability.agent.kubernetesLogs.labelSelector="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR}")"
+    --set-string observability.agent.kubernetesLogs.pollInterval="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL}"
+    --set-string observability.agent.kubernetesLogs.tailLines="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES}"
+    --set-string observability.agent.kubernetesLogs.maxPods="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS}"
+    --set-string observability.agent.kubernetesLogs.maxLinesPerCycle="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE}"
+    --set-string observability.agent.queueSize="${FUGUE_OBSERVABILITY_QUEUE_SIZE}"
+    --set-string observability.agent.batchSize="${FUGUE_OBSERVABILITY_BATCH_SIZE}"
+    --set-string observability.agent.maxPayloadBytes="${FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES}"
+    --set-string observability.agent.memoryLimitBytes="${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES}"
+    --set-string observability.agent.retryMaxAttempts="${FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS}"
+    --set-string imageStore.mode="${FUGUE_IMAGE_STORE_MODE}"
+    --set imageStore.minReplicas="${FUGUE_IMAGE_STORE_MIN_REPLICAS}"
+    --set imageStore.targetReplicas="${FUGUE_IMAGE_STORE_TARGET_REPLICAS}"
+    --set-string imageStore.schedulerInterval="${FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL}"
+    --set-string imageStore.replicaLeaseTTL="${FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL}"
+    --set-string imageStore.verifyInterval="${FUGUE_IMAGE_STORE_VERIFY_INTERVAL}"
+    --set imageStore.prune.enabled="${FUGUE_IMAGE_STORE_PRUNE_ENABLED}"
+    --set-string imageStore.prune.maxDeleteBytesPerRun="${FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN}"
+    --set imageStore.imageCacheInventory.enabled="${FUGUE_IMAGE_CACHE_INVENTORY_ENABLED}"
+    --set-string imageStore.imageCacheInventory.interval="${FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL}"
+    --set-string imageStore.imageCacheInventory.ttl="${FUGUE_IMAGE_CACHE_INVENTORY_TTL}"
+    --set-string imageStore.orphanPrune.mode="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE}"
+    --set-string imageStore.orphanPrune.gracePeriod="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD}"
+    --set imageStore.orphanPrune.maxTargetsPerNode="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE}"
+    --set-string imageStore.orphanPrune.maxDeleteBytesPerNode="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE}"
+    --set imageStore.orphanPrune.minReplicaCount="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT}"
+    --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}"
+    --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}"
+    --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}"
+    --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}"
+    --set-string imageCache.registryBase="${FUGUE_REGISTRY_PULL_BASE}"
+    --set-string imageCache.upstreamBase="$(helm_set_string_value "${FUGUE_IMAGE_CACHE_UPSTREAM_BASE:-}")"
+    --set registry.enabled="${FUGUE_REGISTRY_ENABLED}"
+    --set registryJanitor.enabled="${FUGUE_REGISTRY_JANITOR_ENABLED}"
+    --set registryGC.enabled="${FUGUE_REGISTRY_GC_ENABLED}"
+    --set edge.enabled="${FUGUE_EDGE_ENABLED}"
+    --set-string edge.image.repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY}}"
+    --set-string edge.image.tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG}}"
+    --set-string edge.edgeGroupID="${FUGUE_EDGE_GROUP_ID}"
+    --set-string edge.region="${FUGUE_EDGE_REGION}"
+    --set-string edge.country="${FUGUE_EDGE_COUNTRY}"
+    --set-string edge.publicHostname="${FUGUE_EDGE_PUBLIC_HOSTNAME}"
+    --set-string edge.publicIPv4="${FUGUE_EDGE_PUBLIC_IPV4}"
+    --set-string edge.publicIPv6="${FUGUE_EDGE_PUBLIC_IPV6}"
+    --set-string edge.meshIP="${FUGUE_EDGE_MESH_IP}"
+    --set edge.caddy.enabled="${FUGUE_EDGE_CADDY_ENABLED}"
+    --set-string edge.caddy.listenAddr="${FUGUE_EDGE_CADDY_LISTEN_ADDR}"
+    --set-string edge.caddy.tlsMode="${FUGUE_EDGE_CADDY_TLS_MODE}"
+    --set edge.caddy.publicHostPorts.enabled="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}"
+    --set edge.caddy.publicHostPorts.http="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}"
+    --set edge.caddy.publicHostPorts.https="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}"
+    --set edge.caddy.staticTLS.enabled="${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}"
+    --set-string edge.caddy.staticTLS.secretName="${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}"
+    --set-string edge.caddy.staticTLS.mountPath="${FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH}"
+    --set-string edge.caddy.staticTLS.certificateKey="${FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY}"
+    --set-string edge.caddy.staticTLS.privateKeyKey="${FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY}"
+    --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}"
+    --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}"
+    --set-string api.databaseURL="${FUGUE_API_DATABASE_URL}"
+    --set-string api.edgeQualityRankingMode="${FUGUE_EDGE_QUALITY_RANKING_MODE}"
+    --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}"
+    --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}"
+    --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
+    --set-string api.clusterJoinServerFallbacks="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}")"
+    --set-string api.clusterJoinK3SVersion="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_K3S_VERSION:-}")"
+    --set-string api.clusterJoinMeshProvider="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}")"
+    --set-string api.clusterJoinMeshLoginServer="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}")"
+    --set-string api.clusterJoinMeshAuthKey="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")"
+    --set-string api.dataBackend.provider="${FUGUE_DATA_BACKEND_PROVIDER}"
+    --set-string api.dataBackend.bucket="${FUGUE_DATA_BACKEND_BUCKET}"
+    --set-string api.dataBackend.region="${FUGUE_DATA_BACKEND_REGION}"
+    --set-string api.dataBackend.endpoint="${FUGUE_DATA_BACKEND_ENDPOINT}"
+    --set-string api.dataBackend.accountID="${FUGUE_DATA_R2_ACCOUNT_ID}"
+    --set-string api.dataBackend.prefix="${FUGUE_DATA_BACKEND_PREFIX}"
+    --set-string api.dataBackend.accessKeyID="${FUGUE_DATA_BACKEND_ACCESS_KEY_ID}"
+    --set-string api.dataBackend.secretAccessKey="${FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY}"
+    --set-string api.dataBackend.sessionToken="${FUGUE_DATA_BACKEND_SESSION_TOKEN}"
+    --set-string api.dataBackend.credentialEncryptionKey="${FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY}"
+    --set-string api.dataBackend.presignTTL="${FUGUE_DATA_PRESIGN_TTL}"
+    --set api.replicaCount="${FUGUE_API_REPLICA_COUNT}"
+    --set api.hostNetwork=false
+    --set api.minReadySeconds=5
+    --set api.terminationGracePeriodSeconds=40
+    --set api.podDisruptionBudget.enabled=true
+    --set api.podDisruptionBudget.minAvailable=2
+    --set-string api.shutdownDrainDelay=5s
+    --set-string api.shutdownTimeout=25s
+    --set controller.replicaCount="${FUGUE_CONTROLLER_REPLICA_COUNT}"
+    --set-string controller.pollInterval=15s
+    --set-string controller.fallbackPollInterval=30s
+    --set controller.terminationGracePeriodSeconds=30
+    --set controller.podDisruptionBudget.enabled=true
+    --set controller.podDisruptionBudget.minAvailable=1
+    --set controller.leaderElection.enabled=true
+    --set-string controller.leaderElection.leaseName="${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"
+    --set-string controller.leaderElection.leaseNamespace="${FUGUE_NAMESPACE}"
+    --set-string controller.leaderElection.leaseDuration=15s
+    --set-string controller.leaderElection.renewDeadline=10s
+    --set-string controller.leaderElection.retryPeriod=2s
+    --set-string controller.migrationGuard.legacyControllerContainerName=controller
+    --set-string controller.migrationGuard.checkInterval=2s
+    --set postgres.enabled="${FUGUE_POSTGRES_ENABLED}"
+    --set controlPlanePostgres.enabled="${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}"
+    --set controlPlanePostgres.useForAPI="${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}"
+    --set-string controlPlanePostgres.name="${FUGUE_CONTROL_PLANE_POSTGRES_NAME}"
+    --set-string controlPlanePostgres.imageName="${FUGUE_CONTROL_PLANE_POSTGRES_IMAGE_NAME}"
+    --set controlPlanePostgres.instances="${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}"
+    --set-string controlPlanePostgres.storage.size="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE}"
+    --set-string controlPlanePostgres.storage.storageClassName="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS}"
+    --set-string controlPlanePostgres.existingSecretName="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME}"
+    --set sharedWorkspaceStorage.enabled="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}"
+    --set-string sharedWorkspaceStorage.storageClassName="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
+    --set-string sharedWorkspaceStorage.server.clusterIP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP}"
+  )
+
+  readonly -a CONTROL_PLANE_HELM_UPGRADE_ARGV
+  "${consumer}" "$@" "${CONTROL_PLANE_HELM_UPGRADE_ARGV[@]}"
+}
+
 trim_field() {
   printf '%s' "$1" | awk '{$1=$1; print}'
 }
@@ -18394,7 +18588,6 @@ PY
   fi
 
   write_upgrade_override_values
-  upgrade_override_values_file="${UPGRADE_OVERRIDE_VALUES_FILE}"
   build_dns_helm_set_args
   if ! prepare_helm_post_renderer; then
     fail "cannot prepare the Helm post-renderer from bounded live deployment state"
@@ -18432,185 +18625,11 @@ PY
   CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
   CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
   CONTROL_PLANE_RELEASE_COMMITTED="false"
-  if ! run_release_long_command "$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))" \
-    "Helm upgrade" helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}" \
-    -n "${FUGUE_NAMESPACE}" \
-    --reset-then-reuse-values \
-    --history-max 20 \
-    --timeout "${FUGUE_HELM_TIMEOUT}" \
-    "${HELM_POST_RENDERER_ARGS[@]}" \
-    -f "${upgrade_override_values_file}" \
-    "${HEADSCALE_HELM_SET_ARGS[@]}" \
-    "${DNS_HELM_SET_ARGS[@]}" \
-    "${NODE_LOCAL_DNS_HELM_SET_ARGS[@]}" \
-    "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}" \
-    "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}" \
-    "${MAINTENANCE_AGENT_HELM_SET_ARGS[@]}" \
-    "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}" \
-    --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
-    --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
-    --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
-    --set-string controller.image.tag="${FUGUE_CONTROLLER_IMAGE_TAG}" \
-    --set-string runtime.strictDrain.mode="${FUGUE_STRICT_DRAIN_MODE}" \
-    --set runtime.strictDrain.timeoutSeconds="${FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS}" \
-    --set runtime.strictDrain.terminationGraceBufferSeconds="${FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS}" \
-    --set runtime.strictDrain.minReadySeconds="${FUGUE_STRICT_DRAIN_MIN_READY_SECONDS}" \
-    --set runtime.strictDrain.quietPeriodSeconds="${FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS}" \
-    --set runtime.strictDrain.pollIntervalMilliseconds="${FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS}" \
-    --set runtime.strictDrain.nativeSidecarEnabled="${FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED}" \
-    --set runtime.strictDrain.agent.port="${FUGUE_DRAIN_AGENT_PORT}" \
-    --set-string runtime.strictDrain.agent.image.repository="${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}" \
-    --set-string runtime.strictDrain.agent.image.tag="${FUGUE_DRAIN_AGENT_IMAGE_TAG}" \
-    --set-string runtime.strictDrain.agent.image.digest="${FUGUE_DRAIN_AGENT_IMAGE_DIGEST}" \
-    --set-string runtime.strictDrain.agent.image.pullPolicy="${FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY}" \
-    --set observability.enabled="${FUGUE_OBSERVABILITY_ENABLED}" \
-    --set-string observability.retention="${FUGUE_OBSERVABILITY_RETENTION}" \
-    --set-string observability.exporterSecret.existingSecretName="${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}" \
-    --set-string observability.identity.tenantID="${FUGUE_OBSERVABILITY_TENANT_ID}" \
-    --set-string observability.identity.projectID="${FUGUE_OBSERVABILITY_PROJECT_ID}" \
-    --set-string observability.identity.appID="${FUGUE_OBSERVABILITY_APP_ID}" \
-    --set-string observability.identity.runtimeID="${FUGUE_OBSERVABILITY_RUNTIME_ID}" \
-    --set-string observability.identity.component="${FUGUE_OBSERVABILITY_COMPONENT}" \
-    --set observability.metrics.enabled="${FUGUE_OBSERVABILITY_METRICS_ENABLED}" \
-    --set-string observability.metrics.image.repository="${FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY}" \
-    --set-string observability.metrics.image.tag="${FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG}" \
-    --set-string observability.metrics.retention="${FUGUE_OBSERVABILITY_METRICS_RETENTION}" \
-    --set-string observability.metrics.scrapeInterval="${FUGUE_OBSERVABILITY_METRICS_SCRAPE_INTERVAL}" \
-    --set-string observability.metrics.evaluationInterval="${FUGUE_OBSERVABILITY_METRICS_EVALUATION_INTERVAL}" \
-    --set observability.alerts.enabled="${FUGUE_OBSERVABILITY_ALERTS_ENABLED}" \
-    --set-string observability.alerts.image.repository="${FUGUE_OBSERVABILITY_ALERTS_IMAGE_REPOSITORY}" \
-    --set-string observability.alerts.image.tag="${FUGUE_OBSERVABILITY_ALERTS_IMAGE_TAG}" \
-    --set-string observability.alerts.webhookURL="${FUGUE_OBSERVABILITY_ALERTS_WEBHOOK_URL}" \
-    --set observability.logs.enabled="${FUGUE_OBSERVABILITY_LOGS_ENABLED}" \
-    --set-string observability.logs.image.repository="${FUGUE_OBSERVABILITY_LOGS_IMAGE_REPOSITORY}" \
-    --set-string observability.logs.image.tag="${FUGUE_OBSERVABILITY_LOGS_IMAGE_TAG}" \
-    --set-string observability.logs.retention="${FUGUE_OBSERVABILITY_LOGS_RETENTION}" \
-    --set observability.analytics.enabled="${FUGUE_OBSERVABILITY_ANALYTICS_ENABLED}" \
-    --set-string observability.analytics.image.repository="${FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_REPOSITORY}" \
-    --set-string observability.analytics.image.tag="${FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_TAG}" \
-    --set-string observability.analytics.retention="${FUGUE_OBSERVABILITY_ANALYTICS_RETENTION}" \
-    --set observability.agent.enabled="${FUGUE_TELEMETRY_AGENT_ENABLED}" \
-    --set-string observability.agent.image.repository="${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}" \
-    --set-string observability.agent.image.tag="${FUGUE_TELEMETRY_AGENT_IMAGE_TAG}" \
-    --set-string observability.agent.runtimeLogPaths="${FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS}" \
-    --set-string observability.agent.prometheusScrapeURLs="${FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS}" \
-    --set-string observability.agent.scrapeInterval="${FUGUE_OBSERVABILITY_SCRAPE_INTERVAL}" \
-    --set observability.agent.kubernetesLogs.enabled="${FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED}" \
-    --set-string observability.agent.kubernetesLogs.namespaces="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES}")" \
-    --set-string observability.agent.kubernetesLogs.namespacePrefixes="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES}")" \
-    --set-string observability.agent.kubernetesLogs.labelSelector="$(helm_set_string_value "${FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR}")" \
-    --set-string observability.agent.kubernetesLogs.pollInterval="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL}" \
-    --set-string observability.agent.kubernetesLogs.tailLines="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES}" \
-    --set-string observability.agent.kubernetesLogs.maxPods="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS}" \
-    --set-string observability.agent.kubernetesLogs.maxLinesPerCycle="${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE}" \
-    --set-string observability.agent.queueSize="${FUGUE_OBSERVABILITY_QUEUE_SIZE}" \
-    --set-string observability.agent.batchSize="${FUGUE_OBSERVABILITY_BATCH_SIZE}" \
-    --set-string observability.agent.maxPayloadBytes="${FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES}" \
-    --set-string observability.agent.memoryLimitBytes="${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES}" \
-    --set-string observability.agent.retryMaxAttempts="${FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS}" \
-    --set-string imageStore.mode="${FUGUE_IMAGE_STORE_MODE}" \
-    --set imageStore.minReplicas="${FUGUE_IMAGE_STORE_MIN_REPLICAS}" \
-    --set imageStore.targetReplicas="${FUGUE_IMAGE_STORE_TARGET_REPLICAS}" \
-    --set-string imageStore.schedulerInterval="${FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL}" \
-    --set-string imageStore.replicaLeaseTTL="${FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL}" \
-    --set-string imageStore.verifyInterval="${FUGUE_IMAGE_STORE_VERIFY_INTERVAL}" \
-    --set imageStore.prune.enabled="${FUGUE_IMAGE_STORE_PRUNE_ENABLED}" \
-    --set-string imageStore.prune.maxDeleteBytesPerRun="${FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN}" \
-    --set imageStore.imageCacheInventory.enabled="${FUGUE_IMAGE_CACHE_INVENTORY_ENABLED}" \
-    --set-string imageStore.imageCacheInventory.interval="${FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL}" \
-    --set-string imageStore.imageCacheInventory.ttl="${FUGUE_IMAGE_CACHE_INVENTORY_TTL}" \
-    --set-string imageStore.orphanPrune.mode="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE}" \
-    --set-string imageStore.orphanPrune.gracePeriod="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD}" \
-    --set imageStore.orphanPrune.maxTargetsPerNode="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE}" \
-    --set-string imageStore.orphanPrune.maxDeleteBytesPerNode="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE}" \
-    --set imageStore.orphanPrune.minReplicaCount="${FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT}" \
-    --set imageCache.enabled="${FUGUE_IMAGE_CACHE_ENABLED}" \
-    --set imageCache.port="${FUGUE_IMAGE_CACHE_PORT}" \
-    --set-string imageCache.image.repository="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}" \
-    --set-string imageCache.image.tag="${FUGUE_IMAGE_CACHE_IMAGE_TAG}" \
-    --set-string imageCache.registryBase="${FUGUE_REGISTRY_PULL_BASE}" \
-    --set-string imageCache.upstreamBase="$(helm_set_string_value "${FUGUE_IMAGE_CACHE_UPSTREAM_BASE:-}")" \
-    --set registry.enabled="${FUGUE_REGISTRY_ENABLED}" \
-    --set registryJanitor.enabled="${FUGUE_REGISTRY_JANITOR_ENABLED}" \
-    --set registryGC.enabled="${FUGUE_REGISTRY_GC_ENABLED}" \
-    --set edge.enabled="${FUGUE_EDGE_ENABLED}" \
-    --set-string edge.image.repository="${FUGUE_EDGE_HELM_IMAGE_REPOSITORY:-${FUGUE_EDGE_IMAGE_REPOSITORY}}" \
-    --set-string edge.image.tag="${FUGUE_EDGE_HELM_IMAGE_TAG:-${FUGUE_EDGE_IMAGE_TAG}}" \
-    --set-string edge.edgeGroupID="${FUGUE_EDGE_GROUP_ID}" \
-    --set-string edge.region="${FUGUE_EDGE_REGION}" \
-    --set-string edge.country="${FUGUE_EDGE_COUNTRY}" \
-    --set-string edge.publicHostname="${FUGUE_EDGE_PUBLIC_HOSTNAME}" \
-    --set-string edge.publicIPv4="${FUGUE_EDGE_PUBLIC_IPV4}" \
-    --set-string edge.publicIPv6="${FUGUE_EDGE_PUBLIC_IPV6}" \
-    --set-string edge.meshIP="${FUGUE_EDGE_MESH_IP}" \
-    --set edge.caddy.enabled="${FUGUE_EDGE_CADDY_ENABLED}" \
-    --set-string edge.caddy.listenAddr="${FUGUE_EDGE_CADDY_LISTEN_ADDR}" \
-    --set-string edge.caddy.tlsMode="${FUGUE_EDGE_CADDY_TLS_MODE}" \
-    --set edge.caddy.publicHostPorts.enabled="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED}" \
-    --set edge.caddy.publicHostPorts.http="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP}" \
-    --set edge.caddy.publicHostPorts.https="${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS}" \
-    --set edge.caddy.staticTLS.enabled="${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" \
-    --set-string edge.caddy.staticTLS.secretName="${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}" \
-    --set-string edge.caddy.staticTLS.mountPath="${FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH}" \
-    --set-string edge.caddy.staticTLS.certificateKey="${FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY}" \
-    --set-string edge.caddy.staticTLS.privateKeyKey="${FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY}" \
-    --set-string api.appBaseDomain="${FUGUE_APP_BASE_DOMAIN}" \
-    --set-string api.apiPublicDomain="${FUGUE_API_PUBLIC_DOMAIN}" \
-    --set-string api.databaseURL="${FUGUE_API_DATABASE_URL}" \
-    --set-string api.edgeQualityRankingMode="${FUGUE_EDGE_QUALITY_RANKING_MODE}" \
-    --set-string api.registryPushBase="${FUGUE_REGISTRY_PUSH_BASE}" \
-    --set-string api.registryPullBase="${FUGUE_REGISTRY_PULL_BASE}" \
-    --set-string api.clusterJoinRegistryEndpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}" \
-    --set-string api.clusterJoinServerFallbacks="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS}")" \
-    --set-string api.clusterJoinK3SVersion="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_K3S_VERSION:-}")" \
-    --set-string api.clusterJoinMeshProvider="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-}")" \
-    --set-string api.clusterJoinMeshLoginServer="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-}")" \
-    --set-string api.clusterJoinMeshAuthKey="$(helm_set_string_value "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" \
-    --set-string api.dataBackend.provider="${FUGUE_DATA_BACKEND_PROVIDER}" \
-    --set-string api.dataBackend.bucket="${FUGUE_DATA_BACKEND_BUCKET}" \
-    --set-string api.dataBackend.region="${FUGUE_DATA_BACKEND_REGION}" \
-    --set-string api.dataBackend.endpoint="${FUGUE_DATA_BACKEND_ENDPOINT}" \
-    --set-string api.dataBackend.accountID="${FUGUE_DATA_R2_ACCOUNT_ID}" \
-    --set-string api.dataBackend.prefix="${FUGUE_DATA_BACKEND_PREFIX}" \
-    --set-string api.dataBackend.accessKeyID="${FUGUE_DATA_BACKEND_ACCESS_KEY_ID}" \
-    --set-string api.dataBackend.secretAccessKey="${FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY}" \
-    --set-string api.dataBackend.sessionToken="${FUGUE_DATA_BACKEND_SESSION_TOKEN}" \
-    --set-string api.dataBackend.credentialEncryptionKey="${FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY}" \
-    --set-string api.dataBackend.presignTTL="${FUGUE_DATA_PRESIGN_TTL}" \
-    --set api.replicaCount="${FUGUE_API_REPLICA_COUNT}" \
-    --set api.hostNetwork=false \
-    --set api.minReadySeconds=5 \
-    --set api.terminationGracePeriodSeconds=40 \
-    --set api.podDisruptionBudget.enabled=true \
-    --set api.podDisruptionBudget.minAvailable=2 \
-    --set-string api.shutdownDrainDelay=5s \
-    --set-string api.shutdownTimeout=25s \
-    --set controller.replicaCount="${FUGUE_CONTROLLER_REPLICA_COUNT}" \
-    --set-string controller.pollInterval=15s \
-    --set-string controller.fallbackPollInterval=30s \
-    --set controller.terminationGracePeriodSeconds=30 \
-    --set controller.podDisruptionBudget.enabled=true \
-    --set controller.podDisruptionBudget.minAvailable=1 \
-    --set controller.leaderElection.enabled=true \
-    --set-string controller.leaderElection.leaseName="${FUGUE_CONTROLLER_DEPLOYMENT_NAME}" \
-    --set-string controller.leaderElection.leaseNamespace="${FUGUE_NAMESPACE}" \
-    --set-string controller.leaderElection.leaseDuration=15s \
-    --set-string controller.leaderElection.renewDeadline=10s \
-    --set-string controller.leaderElection.retryPeriod=2s \
-    --set-string controller.migrationGuard.legacyControllerContainerName=controller \
-    --set-string controller.migrationGuard.checkInterval=2s \
-    --set postgres.enabled="${FUGUE_POSTGRES_ENABLED}" \
-    --set controlPlanePostgres.enabled="${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" \
-    --set controlPlanePostgres.useForAPI="${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" \
-    --set-string controlPlanePostgres.name="${FUGUE_CONTROL_PLANE_POSTGRES_NAME}" \
-    --set-string controlPlanePostgres.imageName="${FUGUE_CONTROL_PLANE_POSTGRES_IMAGE_NAME}" \
-    --set controlPlanePostgres.instances="${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}" \
-    --set-string controlPlanePostgres.storage.size="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE}" \
-    --set-string controlPlanePostgres.storage.storageClassName="${FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS}" \
-    --set-string controlPlanePostgres.existingSecretName="${FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME}" \
-    --set sharedWorkspaceStorage.enabled="${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}" \
-    --set-string sharedWorkspaceStorage.storageClassName="${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}" \
-    --set-string sharedWorkspaceStorage.server.clusterIP="${FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP}"; then
+  if ! with_frozen_control_plane_helm_upgrade_argv \
+    "${UPGRADE_OVERRIDE_VALUES_FILE}" \
+    run_release_long_command \
+    "$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))" \
+    "Helm upgrade"; then
     log "helm upgrade failed; attempting rollback"
     rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "helm upgrade failed"

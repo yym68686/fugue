@@ -24,6 +24,378 @@ assert_eq() {
   fi
 }
 
+run_helm_upgrade_argv_builder_regressions() (
+  set -euo pipefail
+
+  local argv_file=""
+  local empty_argv_file=""
+  local frozen_after_file=""
+  local frozen_before_file=""
+  local hostile_argv_file=""
+  local hostile_command=""
+  local hostile_newline=""
+  local hostile_side_effect=""
+  local passed_argv_file=""
+  local status=0
+  local temp_dir=""
+  local upgrade_override_values_file=""
+
+  temp_dir="$(mktemp -d)"
+  argv_file="${temp_dir}/argv.nul"
+  empty_argv_file="${temp_dir}/empty-argv.nul"
+  frozen_after_file="${temp_dir}/frozen-after.nul"
+  frozen_before_file="${temp_dir}/frozen-before.nul"
+  hostile_argv_file="${temp_dir}/hostile-argv.nul"
+  hostile_side_effect="${temp_dir}/unexpected-side-effect"
+  passed_argv_file="${temp_dir}/passed-argv.nul"
+  trap 'rm -rf "${temp_dir}"' EXIT
+
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    printf -v "${name}" '%s' "value ${name},comma\\slash"
+  done <<'EOF'
+FUGUE_RELEASE_NAME
+FUGUE_HELM_CHART_PATH
+FUGUE_NAMESPACE
+FUGUE_HELM_TIMEOUT
+upgrade_override_values_file
+FUGUE_API_IMAGE_REPOSITORY
+FUGUE_API_IMAGE_TAG
+FUGUE_CONTROLLER_IMAGE_REPOSITORY
+FUGUE_CONTROLLER_IMAGE_TAG
+FUGUE_STRICT_DRAIN_MODE
+FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS
+FUGUE_STRICT_DRAIN_TERMINATION_GRACE_BUFFER_SECONDS
+FUGUE_STRICT_DRAIN_MIN_READY_SECONDS
+FUGUE_STRICT_DRAIN_QUIET_PERIOD_SECONDS
+FUGUE_STRICT_DRAIN_POLL_INTERVAL_MS
+FUGUE_STRICT_DRAIN_NATIVE_SIDECAR_ENABLED
+FUGUE_DRAIN_AGENT_PORT
+FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY
+FUGUE_DRAIN_AGENT_IMAGE_TAG
+FUGUE_DRAIN_AGENT_IMAGE_DIGEST
+FUGUE_DRAIN_AGENT_IMAGE_PULL_POLICY
+FUGUE_OBSERVABILITY_ENABLED
+FUGUE_OBSERVABILITY_RETENTION
+FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME
+FUGUE_OBSERVABILITY_TENANT_ID
+FUGUE_OBSERVABILITY_PROJECT_ID
+FUGUE_OBSERVABILITY_APP_ID
+FUGUE_OBSERVABILITY_RUNTIME_ID
+FUGUE_OBSERVABILITY_COMPONENT
+FUGUE_OBSERVABILITY_METRICS_ENABLED
+FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY
+FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG
+FUGUE_OBSERVABILITY_METRICS_RETENTION
+FUGUE_OBSERVABILITY_METRICS_SCRAPE_INTERVAL
+FUGUE_OBSERVABILITY_METRICS_EVALUATION_INTERVAL
+FUGUE_OBSERVABILITY_ALERTS_ENABLED
+FUGUE_OBSERVABILITY_ALERTS_IMAGE_REPOSITORY
+FUGUE_OBSERVABILITY_ALERTS_IMAGE_TAG
+FUGUE_OBSERVABILITY_ALERTS_WEBHOOK_URL
+FUGUE_OBSERVABILITY_LOGS_ENABLED
+FUGUE_OBSERVABILITY_LOGS_IMAGE_REPOSITORY
+FUGUE_OBSERVABILITY_LOGS_IMAGE_TAG
+FUGUE_OBSERVABILITY_LOGS_RETENTION
+FUGUE_OBSERVABILITY_ANALYTICS_ENABLED
+FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_REPOSITORY
+FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_TAG
+FUGUE_OBSERVABILITY_ANALYTICS_RETENTION
+FUGUE_TELEMETRY_AGENT_ENABLED
+FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY
+FUGUE_TELEMETRY_AGENT_IMAGE_TAG
+FUGUE_OBSERVABILITY_RUNTIME_LOG_PATHS
+FUGUE_OBSERVABILITY_PROMETHEUS_SCRAPE_URLS
+FUGUE_OBSERVABILITY_SCRAPE_INTERVAL
+FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_LABEL_SELECTOR
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_PODS
+FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE
+FUGUE_OBSERVABILITY_QUEUE_SIZE
+FUGUE_OBSERVABILITY_BATCH_SIZE
+FUGUE_OBSERVABILITY_MAX_PAYLOAD_BYTES
+FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES
+FUGUE_OBSERVABILITY_RETRY_MAX_ATTEMPTS
+FUGUE_IMAGE_STORE_MODE
+FUGUE_IMAGE_STORE_MIN_REPLICAS
+FUGUE_IMAGE_STORE_TARGET_REPLICAS
+FUGUE_IMAGE_STORE_SCHEDULER_INTERVAL
+FUGUE_IMAGE_STORE_REPLICA_LEASE_TTL
+FUGUE_IMAGE_STORE_VERIFY_INTERVAL
+FUGUE_IMAGE_STORE_PRUNE_ENABLED
+FUGUE_IMAGE_STORE_PRUNE_MAX_DELETE_BYTES_PER_RUN
+FUGUE_IMAGE_CACHE_INVENTORY_ENABLED
+FUGUE_IMAGE_CACHE_INVENTORY_INTERVAL
+FUGUE_IMAGE_CACHE_INVENTORY_TTL
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MODE
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_GRACE_PERIOD
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_TARGETS_PER_NODE
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MAX_DELETE_BYTES_PER_NODE
+FUGUE_IMAGE_STORE_ORPHAN_PRUNE_MIN_REPLICA_COUNT
+FUGUE_IMAGE_CACHE_ENABLED
+FUGUE_IMAGE_CACHE_PORT
+FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY
+FUGUE_IMAGE_CACHE_IMAGE_TAG
+FUGUE_REGISTRY_PULL_BASE
+FUGUE_IMAGE_CACHE_UPSTREAM_BASE
+FUGUE_REGISTRY_ENABLED
+FUGUE_REGISTRY_JANITOR_ENABLED
+FUGUE_REGISTRY_GC_ENABLED
+FUGUE_EDGE_ENABLED
+FUGUE_EDGE_HELM_IMAGE_REPOSITORY
+FUGUE_EDGE_IMAGE_REPOSITORY
+FUGUE_EDGE_HELM_IMAGE_TAG
+FUGUE_EDGE_IMAGE_TAG
+FUGUE_EDGE_GROUP_ID
+FUGUE_EDGE_REGION
+FUGUE_EDGE_COUNTRY
+FUGUE_EDGE_PUBLIC_HOSTNAME
+FUGUE_EDGE_PUBLIC_IPV4
+FUGUE_EDGE_PUBLIC_IPV6
+FUGUE_EDGE_MESH_IP
+FUGUE_EDGE_CADDY_ENABLED
+FUGUE_EDGE_CADDY_LISTEN_ADDR
+FUGUE_EDGE_CADDY_TLS_MODE
+FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED
+FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP
+FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS
+FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED
+FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME
+FUGUE_EDGE_CADDY_STATIC_TLS_MOUNT_PATH
+FUGUE_EDGE_CADDY_STATIC_TLS_CERTIFICATE_KEY
+FUGUE_EDGE_CADDY_STATIC_TLS_PRIVATE_KEY_KEY
+FUGUE_APP_BASE_DOMAIN
+FUGUE_API_PUBLIC_DOMAIN
+FUGUE_API_DATABASE_URL
+FUGUE_EDGE_QUALITY_RANKING_MODE
+FUGUE_REGISTRY_PUSH_BASE
+FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT
+FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS
+FUGUE_CLUSTER_JOIN_K3S_VERSION
+FUGUE_CLUSTER_JOIN_MESH_PROVIDER
+FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER
+FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY
+FUGUE_DATA_BACKEND_PROVIDER
+FUGUE_DATA_BACKEND_BUCKET
+FUGUE_DATA_BACKEND_REGION
+FUGUE_DATA_BACKEND_ENDPOINT
+FUGUE_DATA_R2_ACCOUNT_ID
+FUGUE_DATA_BACKEND_PREFIX
+FUGUE_DATA_BACKEND_ACCESS_KEY_ID
+FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY
+FUGUE_DATA_BACKEND_SESSION_TOKEN
+FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY
+FUGUE_DATA_PRESIGN_TTL
+FUGUE_API_REPLICA_COUNT
+FUGUE_CONTROLLER_REPLICA_COUNT
+FUGUE_CONTROLLER_DEPLOYMENT_NAME
+FUGUE_POSTGRES_ENABLED
+FUGUE_CONTROL_PLANE_POSTGRES_ENABLED
+FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API
+FUGUE_CONTROL_PLANE_POSTGRES_NAME
+FUGUE_CONTROL_PLANE_POSTGRES_IMAGE_NAME
+FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES
+FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_SIZE
+FUGUE_CONTROL_PLANE_POSTGRES_STORAGE_CLASS
+FUGUE_CONTROL_PLANE_POSTGRES_EXISTING_SECRET_NAME
+FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED
+FUGUE_SHARED_WORKSPACE_STORAGE_CLASS
+FUGUE_SHARED_WORKSPACE_NFS_CLUSTER_IP
+EOF
+
+  HELM_POST_RENDERER_ARGS=("--post-renderer" "/tmp/post renderer.py")
+  HEADSCALE_HELM_SET_ARGS=("--set-string" "headscale.test=value with space")
+  DNS_HELM_SET_ARGS=("--set" "dns.enabled=true" "--set-string" "dns.zone=example.test")
+  NODE_LOCAL_DNS_HELM_SET_ARGS=("--set" "nodeLocalDNS.enabled=true")
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS=("--set-string" "edge.test=public")
+  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=("--set-string" "imageCache.test=build")
+  MAINTENANCE_AGENT_HELM_SET_ARGS=("--set-string" "nodeJanitor.test=maintenance")
+  CORE_IMAGE_DIGEST_HELM_SET_ARGS=(
+    "--set-string"
+    "api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  )
+
+  capture_frozen_helm_upgrade_argv() {
+    [[ "$1" == "synthetic-timeout" && "$2" == "Helm upgrade" ]] ||
+      return 71
+    shift 2
+    printf '%s\0' "$@" >"${passed_argv_file}"
+    printf '%s\0' "${CONTROL_PLANE_HELM_UPGRADE_ARGV[@]}" >"${frozen_before_file}"
+    cmp -s "${passed_argv_file}" "${frozen_before_file}" || return 72
+    if (CONTROL_PLANE_HELM_UPGRADE_ARGV+=(tampered)) 2>/dev/null; then
+      return 73
+    fi
+
+    FUGUE_RELEASE_NAME=mutated-after-freeze
+    HELM_POST_RENDERER_ARGS=(--post-renderer /tmp/mutated)
+    HEADSCALE_HELM_SET_ARGS=(--set-string mutated=true)
+    printf '%s\0' "${CONTROL_PLANE_HELM_UPGRADE_ARGV[@]}" >"${frozen_after_file}"
+    cmp -s "${frozen_before_file}" "${frozen_after_file}" || return 74
+    cp "${passed_argv_file}" "${argv_file}"
+  }
+
+  with_frozen_control_plane_helm_upgrade_argv \
+    "${upgrade_override_values_file}" \
+    capture_frozen_helm_upgrade_argv \
+    synthetic-timeout \
+    "Helm upgrade"
+
+  python3 - "${argv_file}" <<'PY'
+import hashlib
+import sys
+
+payload = open(sys.argv[1], "rb").read()
+if not payload.endswith(b"\0"):
+    raise SystemExit("frozen Helm argv is not NUL terminated")
+items = payload.split(b"\0")[:-1]
+if len(items) != 359:
+    raise SystemExit(f"frozen Helm argv count drifted: {len(items)}")
+if any(item == b"" for item in items):
+    raise SystemExit("frozen non-empty fixture contains a phantom empty argv item")
+digest = hashlib.sha256(payload).hexdigest()
+if digest != "b9c13a777197c739e53e8ae2bafd957979e4e057af97c27a606664d7211efa29":
+    raise SystemExit(f"frozen Helm argv byte stream drifted: {digest}")
+PY
+  if declare -p CONTROL_PLANE_HELM_UPGRADE_ARGV >/dev/null 2>&1; then
+    fail "frozen Helm argv leaked outside its callback scope"
+  fi
+
+  FUGUE_RELEASE_NAME="value FUGUE_RELEASE_NAME,comma\slash"
+  HELM_POST_RENDERER_ARGS=()
+  HEADSCALE_HELM_SET_ARGS=()
+  DNS_HELM_SET_ARGS=()
+  NODE_LOCAL_DNS_HELM_SET_ARGS=()
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
+  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
+  MAINTENANCE_AGENT_HELM_SET_ARGS=()
+  CORE_IMAGE_DIGEST_HELM_SET_ARGS=()
+
+  capture_empty_helm_upgrade_argv() {
+    [[ "$1" == "empty-timeout" && "$2" == "Helm upgrade" ]] || return 75
+    shift 2
+    printf '%s\0' "$@" >"${empty_argv_file}"
+  }
+  with_frozen_control_plane_helm_upgrade_argv \
+    "${upgrade_override_values_file}" \
+    capture_empty_helm_upgrade_argv \
+    empty-timeout \
+    "Helm upgrade"
+
+  python3 - "${empty_argv_file}" <<'PY'
+import sys
+
+payload = open(sys.argv[1], "rb").read()
+if not payload.endswith(b"\0"):
+    raise SystemExit("empty-array Helm argv is not NUL terminated")
+items = payload.split(b"\0")[:-1]
+if len(items) != 341:
+    raise SystemExit(f"empty-array Helm argv count drifted: {len(items)}")
+if any(item == b"" for item in items):
+    raise SystemExit("empty optional arrays emitted a phantom argv item")
+PY
+
+  hostile_newline=$'renderer\nline * ? [x] $(not-executed)'
+  hostile_command='$(touch '"${hostile_side_effect}"') literal * ? [abc]'
+  HELM_POST_RENDERER_ARGS=(--post-renderer "${hostile_newline}")
+  HEADSCALE_HELM_SET_ARGS=(--set-string "")
+  DNS_HELM_SET_ARGS=(--set-string "${hostile_command}")
+  NODE_LOCAL_DNS_HELM_SET_ARGS=(--set-string 'nodelocal=value\,comma\\slash')
+  PUBLIC_DATA_PLANE_HELM_SET_ARGS=(--set-string 'public=$HOME')
+  NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=(--set-string 'build={a,b}')
+  MAINTENANCE_AGENT_HELM_SET_ARGS=(--set-string 'maintenance=[*]')
+  CORE_IMAGE_DIGEST_HELM_SET_ARGS=(--set-string 'core.digest=sha256:literal')
+
+  capture_hostile_helm_upgrade_argv() {
+    [[ "$1" == "hostile-timeout" && "$2" == "Helm upgrade" ]] || return 77
+    shift 2
+    printf '%s\0' "$@" >"${hostile_argv_file}"
+  }
+  with_frozen_control_plane_helm_upgrade_argv \
+    "${upgrade_override_values_file}" \
+    capture_hostile_helm_upgrade_argv \
+    hostile-timeout \
+    "Helm upgrade"
+
+  python3 - "${hostile_argv_file}" "${hostile_newline}" "${hostile_command}" <<'PY'
+import sys
+
+payload = open(sys.argv[1], "rb").read()
+items = payload.split(b"\0")[:-1]
+if len(items) != 357:
+    raise SystemExit(f"hostile Helm argv count drifted: {len(items)}")
+if items.count(b"") != 1:
+    raise SystemExit("an intentional empty array member was not preserved exactly once")
+for expected in (sys.argv[2].encode(), sys.argv[3].encode()):
+    if items.count(expected) != 1:
+        raise SystemExit("hostile Helm argv member was expanded, split, or lost")
+PY
+  [[ ! -e "${hostile_side_effect}" ]] ||
+    fail "literal command-substitution text in Helm argv was executed"
+
+  failing_helm_upgrade_consumer() {
+    return 76
+  }
+  status=0
+  with_frozen_control_plane_helm_upgrade_argv \
+    "${upgrade_override_values_file}" \
+    failing_helm_upgrade_consumer || status=$?
+  [[ "${status}" == "76" ]] || fail "Helm argv builder did not preserve consumer failure status"
+  status=0
+  with_frozen_control_plane_helm_upgrade_argv "" capture_empty_helm_upgrade_argv || status=$?
+  [[ "${status}" == "2" ]] || fail "Helm argv builder accepted an empty override values path"
+
+  python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+function_start = source.index("\nwith_frozen_control_plane_helm_upgrade_argv() {")
+function_end = source.index("\n}\n", function_start) + 3
+builder = source[function_start:function_end]
+main = source[source.index("\nmain() {"):]
+
+arrays = (
+    "HELM_POST_RENDERER_ARGS",
+    "HEADSCALE_HELM_SET_ARGS",
+    "DNS_HELM_SET_ARGS",
+    "NODE_LOCAL_DNS_HELM_SET_ARGS",
+    "PUBLIC_DATA_PLANE_HELM_SET_ARGS",
+    "NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS",
+    "MAINTENANCE_AGENT_HELM_SET_ARGS",
+    "CORE_IMAGE_DIGEST_HELM_SET_ARGS",
+)
+for name in arrays:
+    expansion = f'"${{{name}[@]+"${{{name}[@]}}"}}"'
+    if builder.count(expansion) != 1:
+        raise SystemExit(f"Helm argv builder must nounset-safely consume {name} exactly once")
+if builder.count("readonly -a CONTROL_PLANE_HELM_UPGRADE_ARGV") != 1:
+    raise SystemExit("Helm argv builder must freeze its local argv exactly once")
+if builder.count('"${consumer}" "$@" "${CONTROL_PLANE_HELM_UPGRADE_ARGV[@]}"') != 1:
+    raise SystemExit("Helm argv builder must have exactly one callback consumer")
+if '"Helm upgrade" helm upgrade' in main:
+    raise SystemExit("main still assembles a second inline Helm upgrade command")
+if main.count("with_frozen_control_plane_helm_upgrade_argv") != 1:
+    raise SystemExit("main must invoke the unique Helm argv builder exactly once")
+
+update_strategy = main.index("imageCache.updateStrategy.type=RollingUpdate")
+revision_fence = main.index('CONTROL_PLANE_RELEASE_PHASE="pre-helm-final-revision-fence"')
+mutation_flag = main.index('CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"')
+consume = main.index("with_frozen_control_plane_helm_upgrade_argv")
+if not update_strategy < revision_fence < mutation_flag < consume:
+    raise SystemExit("Helm argv construction moved away from the original final invocation boundary")
+PY
+
+  printf '[test_release_domain_safety] Helm argv builder regressions ok\n'
+)
+
 e5b_mock_query_name_and_type() {
   local argument=""
   local previous=""
@@ -549,7 +921,7 @@ order = [
     upgrade_main.index("acquire_control_plane_backup_coordination_lease"),
     upgrade_main.index("ensure_host_time_sync"),
     upgrade_main.index("apply_chart_crds"),
-    upgrade_main.index('"Helm upgrade" helm upgrade'),
+    upgrade_main.index("with_frozen_control_plane_helm_upgrade_argv"),
 ]
 if order != sorted(order) or len(order) != len(set(order)):
     raise SystemExit("control-plane wire attestation must complete after read-only budget validation and before Lease/host/CRD/Helm mutation")
@@ -1416,6 +1788,7 @@ run_e5c_upgrade_dns_child_inherited_attestation_regression
 run_e5b_query_timeout_regressions
 run_e4_real_dig_smokes
 run_e4_public_hostport_regressions
+run_helm_upgrade_argv_builder_regressions
 if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
       "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e5b-dig" ]]; then
   printf '[test_release_domain_safety] E5B DNS targeted regressions ok\n'
@@ -1739,7 +2112,7 @@ source = Path(sys.argv[1]).read_text()
 main_start = source.index("\nmain() {")
 main = source[main_start:]
 prepare = main.index("prepare_dns_manifest_transaction")
-helm = main.index('helm upgrade "${FUGUE_RELEASE_NAME}"')
+helm = main.index("with_frozen_control_plane_helm_upgrade_argv")
 transaction = main.index("run_dns_manifest_transaction_after_helm")
 nodelocal = main.index("node_local_dns_reconcile_after_helm")
 image_cache_prepare = main.index("image_cache_prepare_offline_safe_rollout")
@@ -5084,13 +5457,15 @@ import sys
 
 source = Path(sys.argv[1]).read_text()
 main = source[source.index("\nmain() {"):]
+builder_start = source.index("\nwith_frozen_control_plane_helm_upgrade_argv() {")
+builder_end = source.index("\n}\n", builder_start) + 3
+builder = source[builder_start:builder_end]
 digest_build = main.index("build_core_image_digest_helm_set_args")
 preflight = main.index("run_release_preflight")
 first_mutation = main.index('CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="true"')
-helm = main[main.index('"Helm upgrade" helm upgrade'):main.index('; then', main.index('"Helm upgrade" helm upgrade'))]
 if not digest_build < preflight < first_mutation:
     raise SystemExit("core image digest validation must finish during configuration before release mutation")
-if helm.count('"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"') != 1:
+if builder.count('"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"') != 1:
     raise SystemExit("Helm upgrade must consume the atomic core image digest argument array exactly once")
 PY
 
@@ -9046,7 +9421,7 @@ ordered = [
     "drain_control_plane_backup_before_schema_rollout",
     "ensure_host_time_sync",
     "apply_chart_crds",
-    "helm upgrade",
+    "with_frozen_control_plane_helm_upgrade_argv",
 ]
 positions = [main.index(item) for item in ordered]
 if positions != sorted(positions):
