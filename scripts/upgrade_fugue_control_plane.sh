@@ -2445,7 +2445,7 @@ image_cache_strategy_target_fingerprints_match() {
   file_sha256_matches \
     "${REPO_ROOT}/deploy/helm/fugue/values.yaml" \
     "6620c80f69c264055942c1e5e933ccfa99b25f851056cd8447df8342f0d1de23" || return 1
-  CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" EXPECTED_SHA256="c7db813cef55bca679b11dd02f6c53e12ef46934867899b94e44da13de49180a" python3 -c '
+  CHART_ROOT="${REPO_ROOT}/deploy/helm/fugue" EXPECTED_SHA256="8c6f0185c00055588341f741dd5a26b1c928865fb9550ec422238b9c5a18e25b" python3 -c '
 import hashlib
 import os
 from pathlib import Path
