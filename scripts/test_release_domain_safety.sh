@@ -1641,6 +1641,8 @@ python3 -m py_compile "${REPO_ROOT}/scripts/verify_registry_image.py" "${REPO_RO
 python3 "${REPO_ROOT}/scripts/test_verify_registry_image.py"
 python3 -m py_compile "${REPO_ROOT}/scripts/build_release_image_lock.py" "${REPO_ROOT}/scripts/test_build_release_image_lock.py"
 python3 "${REPO_ROOT}/scripts/test_build_release_image_lock.py"
+python3 -m py_compile "${REPO_ROOT}/scripts/assemble_release_image_lock_input.py" "${REPO_ROOT}/scripts/test_assemble_release_image_lock_input.py"
+python3 "${REPO_ROOT}/scripts/test_assemble_release_image_lock_input.py"
 grep -Fq 'FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must pass the trusted live baseline refs to the release guard"
@@ -4125,7 +4127,7 @@ grep -Fq 'verified_image_artifacts_json: ${{ steps.build_images.outputs.verified
   fail "control-plane build job must expose canonical verified image artifacts"
 grep -Fq 'verified_image_artifacts_digest: ${{ steps.build_images.outputs.verified_image_artifacts_digest }}' "${WORKFLOW_FILE}" ||
   fail "control-plane build job must expose the verified image artifacts digest"
-for workflow_path in scripts/build_release_image_lock.py scripts/test_build_release_image_lock.py scripts/lib/release_image_ref.sh; do
+for workflow_path in scripts/assemble_release_image_lock_input.py scripts/build_release_image_lock.py scripts/test_assemble_release_image_lock_input.py scripts/test_build_release_image_lock.py scripts/lib/release_image_ref.sh; do
   grep -Fq -- "- '${workflow_path}'" "${WORKFLOW_FILE}" ||
     fail "${workflow_path} changes must trigger the formal control-plane workflow"
 done
