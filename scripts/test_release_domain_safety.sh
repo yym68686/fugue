@@ -7420,7 +7420,19 @@ public_data_plane_dns_source_changed_between_refs "${EDGE_SHARED_BUNDLEAUTH_REF}
 if public_data_plane_front_source_changed_between_refs "${EDGE_SHARED_BUNDLEAUTH_REF}" "${EDGE_ROUTE_MODEL_REF}"; then
   fail "edge route model source changes must not mark front image changed between live and target tags"
 fi
+mkdir -p "${TMP_REPO_ROOT}/cmd/fugue-edge-front"
+printf 'package main\nfunc main() {}\n' >"${TMP_REPO_ROOT}/cmd/fugue-edge-front/main.go"
+git -C "${TMP_REPO_ROOT}" add cmd/fugue-edge-front/main.go
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-front-base
+EDGE_FRONT_BASE_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+printf 'func servePublicFront() {}\n' >>"${TMP_REPO_ROOT}/cmd/fugue-edge-front/main.go"
+git -C "${TMP_REPO_ROOT}" add cmd/fugue-edge-front/main.go
+git -C "${TMP_REPO_ROOT}" commit -q -m edge-front-change
+EDGE_FRONT_TARGET_REF="$(git -C "${TMP_REPO_ROOT}" rev-parse HEAD)"
+public_data_plane_front_source_changed_between_refs "${EDGE_FRONT_BASE_REF}" "${EDGE_FRONT_TARGET_REF}" ||
+  fail "edge front source changes must be detected between live and target tags"
 FUGUE_NAMESPACE=fugue-system
+FUGUE_RELEASE_NAME=fugue
 FUGUE_RELEASE_FULLNAME=fugue-fugue
 FUGUE_EDGE_IMAGE_TAG="${EDGE_WORKER_REF}"
 PUBLIC_WORKER_SNAPSHOT="$(printf '%s' '{"apiVersion":"apps/v1","items":[{"metadata":{"name":"fugue-fugue-edge-worker-a"},"spec":{"template":{"spec":{"containers":[{"name":"edge","image":"ghcr.io/acme/fugue-edge:'"${EDGE_BASE_REF}"'"}]}}}}]}')"
@@ -7445,6 +7457,141 @@ else
   public_live_inventory_status=$?
 fi
 assert_eq "${public_live_inventory_status}" "1" "absent public live worker inventory is unchanged"
+
+PUBLIC_FRONT_MIXED_SNAPSHOT="$(cat <<JSON
+{"apiVersion":"apps/v1","items":[
+  {"metadata":{"name":"fugue-fugue-edge-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"edge-front","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-front"}},"spec":{"template":{"spec":{"containers":[{"name":"edge-front","image":"ghcr.io/acme/fugue-edge:${EDGE_BASE_REF}"}]}}}},
+  {"metadata":{"name":"fugue-fugue-edge-country-de-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"edge-country-de-front","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-front"}},"spec":{"template":{"spec":{"containers":[{"name":"edge-front","image":"ghcr.io/acme/fugue-edge:${EDGE_BASE_REF}"}]}}}},
+  {"metadata":{"name":"fugue-fugue-edge-dynamic-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"edge-dynamic-front","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-front"}},"spec":{"template":{"spec":{"containers":[{"name":"edge-front","image":"ghcr.io/acme/fugue-edge:${EDGE_BASE_REF}"}]}}}},
+  {"metadata":{"name":"fugue-fugue-edge-country-de-ssh-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"fugue-ssh-front-country-de","fugue.io/rollout-subsystem":"public-ssh-data-plane","fugue.io/rollout-mode":"direct-ondelete-protected"}},"spec":{"template":{"spec":{"containers":[{"name":"ssh-front","image":"ghcr.io/acme/fugue-edge:ssh-only"}]}}}},
+  {"metadata":{"name":"fugue-fugue-edge-country-fr-front"},"spec":{"template":{"spec":{"containers":[{"name":"ssh-front","image":"ghcr.io/acme/fugue-edge:unlabeled-name-match"}]}}}}
+]}
+JSON
+)"
+PUBLIC_FRONT_IMAGE_REFS="$(public_data_plane_component_image_refs_from_snapshot "${PUBLIC_FRONT_MIXED_SNAPSHOT}" front)" ||
+  fail "authoritative public front inventory must exclude SSH and unlabeled name matches"
+assert_eq \
+  "$(printf '%s\n' "${PUBLIC_FRONT_IMAGE_REFS}" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')" \
+  "3" \
+  "base, country, and dynamic public front image count"
+if grep -Eq 'ssh-only|unlabeled-name-match' <<<"${PUBLIC_FRONT_IMAGE_REFS}"; then
+  fail "public front image classification must not consume SSH or unlabeled name-only DaemonSets"
+fi
+public_live_front_status=0
+if public_data_plane_live_front_image_changed "${PUBLIC_FRONT_MIXED_SNAPSHOT}"; then
+  fail "worker-only source changes must not mark the authoritative public front cohort changed"
+else
+  public_live_front_status=$?
+fi
+assert_eq "${public_live_front_status}" "1" "mixed public and SSH front inventory is unchanged"
+
+PUBLIC_FRONT_MALFORMED_SNAPSHOT="$(cat <<JSON
+{"apiVersion":"apps/v1","items":[
+  {"metadata":{"name":"fugue-fugue-edge-dynamic-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"edge-dynamic-front","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-front"}},"spec":{"template":{"spec":{"containers":[{"name":"ssh-front","image":"ghcr.io/acme/fugue-edge:${EDGE_BASE_REF}"}]}}}}
+]}
+JSON
+)"
+PUBLIC_FRONT_DIAGNOSTIC="${TMP_REPO_ROOT}/public-front-diagnostic.txt"
+public_live_front_status=0
+if public_data_plane_live_front_image_changed "${PUBLIC_FRONT_MALFORMED_SNAPSHOT}" 2>"${PUBLIC_FRONT_DIAGNOSTIC}"; then
+  fail "malformed authoritative dynamic front must fail closed"
+else
+  public_live_front_status=$?
+fi
+assert_eq "${public_live_front_status}" "2" "malformed authoritative dynamic front status"
+grep -Fq \
+  'public data-plane front daemonSet fugue-fugue-edge-dynamic-front must have exactly one valid edge-front image' \
+  "${PUBLIC_FRONT_DIAGNOSTIC}" || fail "malformed authoritative dynamic front must emit a bounded DaemonSet diagnostic"
+
+SOURCE_DIFF_DIAGNOSTIC="${TMP_REPO_ROOT}/source-diff-diagnostic.txt"
+source_diff_status=0
+if public_data_plane_front_source_changed_between_refs missing-live-ref "${EDGE_WORKER_REF}" 2>"${SOURCE_DIFF_DIAGNOSTIC}"; then
+  fail "missing live source history must not be reported as a changed or unchanged comparison"
+else
+  source_diff_status=$?
+fi
+assert_eq "${source_diff_status}" "2" "missing live source history status"
+grep -Fq \
+  'source diff is unavailable because the live image ref is not a local commit: missing-live-ref' \
+  "${SOURCE_DIFF_DIAGNOSTIC}" || fail "missing live source history must emit a bounded diagnostic"
+
+: >"${SOURCE_DIFF_DIAGNOSTIC}"
+source_diff_status=0
+if public_data_plane_front_source_changed_between_refs "${EDGE_BASE_REF}" missing-target-ref 2>"${SOURCE_DIFF_DIAGNOSTIC}"; then
+  fail "missing target source history must not be reported as a changed or unchanged comparison"
+else
+  source_diff_status=$?
+fi
+assert_eq "${source_diff_status}" "2" "missing target source history status"
+grep -Fq \
+  'source diff is unavailable because the target image ref is not a local commit: missing-target-ref' \
+  "${SOURCE_DIFF_DIAGNOSTIC}" || fail "missing target source history must emit a bounded diagnostic"
+
+: >"${SOURCE_DIFF_DIAGNOSTIC}"
+source_diff_status=0
+if public_data_plane_front_source_changed_between_refs missing-live-ref missing-live-ref 2>"${SOURCE_DIFF_DIAGNOSTIC}"; then
+  fail "the same missing source ref must not be reported as unchanged"
+else
+  source_diff_status=$?
+fi
+assert_eq "${source_diff_status}" "2" "same missing source ref status"
+grep -Fq \
+  'source diff is unavailable because the live image ref is not a local commit: missing-live-ref' \
+  "${SOURCE_DIFF_DIAGNOSTIC}" || fail "the same missing source ref must emit a bounded diagnostic"
+
+source_diff_status=0
+if public_data_plane_front_source_changed_between_refs "${EDGE_FRONT_TARGET_REF}" "${EDGE_FRONT_TARGET_REF}"; then
+  fail "the same valid source commit must be reported as unchanged"
+else
+  source_diff_status=$?
+fi
+assert_eq "${source_diff_status}" "1" "same valid source commit status"
+
+FUGUE_EDGE_IMAGE_TAG="${EDGE_FRONT_TARGET_REF}"
+PUBLIC_FRONT_CHANGED_THEN_UNAVAILABLE_SNAPSHOT="$(cat <<JSON
+{"apiVersion":"apps/v1","items":[
+  {"metadata":{"name":"fugue-fugue-edge-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"edge-front","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-front"}},"spec":{"template":{"spec":{"containers":[{"name":"edge-front","image":"ghcr.io/acme/fugue-edge:${EDGE_FRONT_BASE_REF}"}]}}}},
+  {"metadata":{"name":"fugue-fugue-edge-dynamic-front","labels":{"app.kubernetes.io/instance":"fugue","app.kubernetes.io/component":"edge-dynamic-front","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-front"}},"spec":{"template":{"spec":{"containers":[{"name":"edge-front","image":"ghcr.io/acme/fugue-edge:missing-live-ref"}]}}}}
+]}
+JSON
+)"
+: >"${SOURCE_DIFF_DIAGNOSTIC}"
+public_live_front_status=0
+if public_data_plane_live_front_image_changed "${PUBLIC_FRONT_CHANGED_THEN_UNAVAILABLE_SNAPSHOT}" 2>"${SOURCE_DIFF_DIAGNOSTIC}"; then
+  fail "a changed first front ref must not hide unavailable source history in a later dynamic front"
+else
+  public_live_front_status=$?
+fi
+assert_eq "${public_live_front_status}" "2" "changed-first unavailable-later public front cohort status"
+grep -Fq \
+  'public data-plane front source diff is unavailable: live_ref=missing-live-ref' \
+  "${SOURCE_DIFF_DIAGNOSTIC}" || fail "unavailable later public front source history must emit a bounded diagnostic"
+
+(
+  FUGUE_EDGE_ENABLED=true
+  FUGUE_PUBLIC_DATA_PLANE_RELEASE_MODE=auto
+  FUGUE_PUBLIC_DATA_PLANE_AUTO_RELEASE_ELIGIBLE=true
+  FUGUE_PUBLIC_DATA_PLANE_AUTO_FRONT_RELEASE=true
+  DNS_MANIFEST_TRANSACTION_COMPLETED=false
+  release_called=false
+  public_data_plane_worker_image_changed() { return 1; }
+  public_data_plane_front_image_changed() { return 1; }
+  public_data_plane_dns_image_changed() { return 1; }
+  live_daemonsets_json_snapshot() { printf '%s' "${PUBLIC_FRONT_CHANGED_THEN_UNAVAILABLE_SNAPSHOT}"; }
+  public_data_plane_manifest_changed() { return 1; }
+  public_data_plane_front_daemonsets_ready() { return 0; }
+  run_release_long_command() { release_called=true; }
+  public_release_status=0
+  if release_public_data_plane_if_needed; then
+    fail "public release must fail closed when a later front source ref is unavailable"
+  else
+    public_release_status=$?
+  fi
+  assert_eq "${public_release_status}" "1" "unavailable later public front source release status"
+  [[ "${release_called}" == "false" ]] || fail "public release must not mutate after any cohort source ref is unavailable"
+  [[ "${PUBLIC_DATA_PLANE_RELEASED}" == "false" ]] || fail "public release must not publish released state after cohort source failure"
+)
+FUGUE_EDGE_IMAGE_TAG="${EDGE_WORKER_REF}"
 
 (
   FUGUE_EDGE_ENABLED=true

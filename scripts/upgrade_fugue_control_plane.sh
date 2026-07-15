@@ -2598,14 +2598,33 @@ source_changed_between_refs() {
 	shift 2 || true
 	old_ref="$(trim_field "${old_ref}")"
 	new_ref="$(trim_field "${new_ref}")"
-	[[ -n "${old_ref}" && -n "${new_ref}" ]] || return 1
+	if [[ -z "${old_ref}" || -z "${new_ref}" ]]; then
+		log_stderr "source diff is unavailable because a release ref is empty: old=${old_ref:-<empty>} new=${new_ref:-<empty>}"
+		return 2
+	fi
+	if ! git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null; then
+		log_stderr "source diff is unavailable because the live image ref is not a local commit: ${old_ref}"
+		return 2
+	fi
+	if ! git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null; then
+		log_stderr "source diff is unavailable because the target image ref is not a local commit: ${new_ref}"
+		return 2
+	fi
 	[[ "${old_ref}" != "${new_ref}" ]] || return 1
-	git -C "${REPO_ROOT}" cat-file -e "${old_ref}^{commit}" 2>/dev/null || return 1
-	git -C "${REPO_ROOT}" cat-file -e "${new_ref}^{commit}" 2>/dev/null || return 1
-	[[ "$#" -gt 0 ]] || return 1
-	git -C "${REPO_ROOT}" diff --quiet "${old_ref}" "${new_ref}" -- "$@" && return 1
-	rc=$?
-	[[ "${rc}" -eq 1 ]]
+	if [[ "$#" -eq 0 ]]; then
+		log_stderr "source diff is unavailable because no source paths were provided: old=${old_ref} new=${new_ref}"
+		return 2
+	fi
+	if git -C "${REPO_ROOT}" diff --quiet "${old_ref}" "${new_ref}" -- "$@"; then
+		return 1
+	else
+		rc=$?
+	fi
+	if [[ "${rc}" -eq 1 ]]; then
+		return 0
+	fi
+	log_stderr "source diff command failed: old=${old_ref} new=${new_ref} status=${rc}"
+	return 2
 }
 
 public_data_plane_worker_source_changed_between_refs() {
@@ -14684,44 +14703,84 @@ public_data_plane_component_image_refs_from_snapshot() {
 import json
 import sys
 
-kind, fullname = sys.argv[1:3]
-doc = json.load(sys.stdin)
+kind, fullname, release_name = sys.argv[1:4]
+try:
+    doc = json.load(sys.stdin)
+except (TypeError, ValueError) as exc:
+    print(f"public data-plane {kind} inventory is not valid JSON: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+if not isinstance(doc, dict) or not isinstance(doc.get("items"), list):
+    print(f"public data-plane {kind} inventory must contain an items array", file=sys.stderr)
+    raise SystemExit(2)
 for item in doc.get("items") or []:
-    name = str((item.get("metadata") or {}).get("name") or "")
+    if not isinstance(item, dict):
+        print(f"public data-plane {kind} inventory contains a non-object item", file=sys.stderr)
+        raise SystemExit(2)
+    metadata = item.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    name = str(metadata.get("name") or "")
+    display_name = name or "<unnamed>"
     if kind == "worker":
         matches = name in {fullname + "-edge-worker-a", fullname + "-edge-worker-b"} or (
             name.startswith(fullname + "-edge-country-") and name.endswith(("-worker-a", "-worker-b"))
         )
         container_name = "edge"
     elif kind == "front":
-        matches = name == fullname + "-edge-front" or (
-            name.startswith(fullname + "-edge-country-") and name.endswith("-front")
+        component = str(labels.get("app.kubernetes.io/component") or "")
+        matches = (
+            labels.get("app.kubernetes.io/instance") == release_name
+            and labels.get("fugue.io/rollout-subsystem") == "public-data-plane"
+            and labels.get("fugue.io/rollout-mode") == "node-local-blue-green-front"
+            and (component == "edge-front" or (component.startswith("edge-") and component.endswith("-front")))
         )
         container_name = "edge-front"
     elif kind == "dns":
         matches = name == fullname + "-dns" or name.startswith(fullname + "-dns-country-")
         container_name = ""
     else:
+        print(f"unknown public data-plane component kind: {kind}", file=sys.stderr)
         raise SystemExit(2)
     if not matches:
         continue
     containers = (item.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or []
+    if not isinstance(containers, list):
+        print(f"public data-plane {kind} daemonSet {display_name} has an invalid containers field", file=sys.stderr)
+        raise SystemExit(2)
     if kind == "dns":
         semantic = []
         for container in containers:
+            if not isinstance(container, dict):
+                print(f"public data-plane DNS daemonSet {display_name} has a non-object container", file=sys.stderr)
+                raise SystemExit(2)
             command = container.get("command") or []
-            env_names = {entry.get("name") for entry in container.get("env") or []}
+            env = container.get("env") or []
+            if not isinstance(env, list) or any(not isinstance(entry, dict) for entry in env):
+                print(f"public data-plane DNS daemonSet {display_name} has an invalid env field", file=sys.stderr)
+                raise SystemExit(2)
+            env_names = {entry.get("name") for entry in env}
             if command == ["/usr/local/bin/fugue-dns"] and "FUGUE_DNS_ZONE" in env_names:
                 semantic.append(container)
         if len(semantic) != 1:
+            print(
+                f"public data-plane DNS daemonSet {display_name} must have exactly one semantic fugue-dns container; found {len(semantic)}",
+                file=sys.stderr,
+            )
             raise SystemExit(2)
         images = [str(semantic[0].get("image") or "").strip()]
     else:
+        if any(not isinstance(container, dict) for container in containers):
+            print(f"public data-plane {kind} daemonSet {display_name} has a non-object container", file=sys.stderr)
+            raise SystemExit(2)
         images = [str(container.get("image") or "").strip() for container in containers if container.get("name") == container_name]
     if len(images) != 1 or not images[0] or any(ch.isspace() for ch in images[0]):
+        image_role = container_name or "semantic DNS"
+        print(
+            f"public data-plane {kind} daemonSet {display_name} must have exactly one valid {image_role} image; found {len(images)}",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     print(images[0])
-' "${component_kind}" "${FUGUE_RELEASE_FULLNAME}"
+' "${component_kind}" "${FUGUE_RELEASE_FULLNAME}" "${FUGUE_RELEASE_NAME}"
 }
 
 public_data_plane_live_component_image_changed() {
@@ -14733,32 +14792,73 @@ public_data_plane_live_component_image_changed() {
   local image_record=""
   local live_repository=""
   local live_tag=""
+  local source_status=0
+  local saw_changed=false
 
   target_tag="$(trim_field "${FUGUE_EDGE_IMAGE_TAG:-}")"
-  [[ -n "${target_tag}" ]] || return 1
-  if [[ -z "${daemonsets_json}" ]]; then
-    daemonsets_json="$(live_daemonsets_json_snapshot)" || return 2
+  if [[ -z "${target_tag}" ]]; then
+    log_stderr "public data-plane ${component_kind} source inspection has no target image tag"
+    return 2
   fi
-  image_refs="$(public_data_plane_component_image_refs_from_snapshot "${daemonsets_json}" "${component_kind}")" || return 2
+  if [[ -z "${daemonsets_json}" ]]; then
+    if ! daemonsets_json="$(live_daemonsets_json_snapshot)"; then
+      log_stderr "public data-plane ${component_kind} source inspection could not read the live DaemonSet inventory"
+      return 2
+    fi
+  fi
+  if ! image_refs="$(public_data_plane_component_image_refs_from_snapshot "${daemonsets_json}" "${component_kind}")"; then
+    log_stderr "public data-plane ${component_kind} source inspection could not classify the live component images"
+    return 2
+  fi
   while IFS= read -r live_image; do
     [[ -n "${live_image}" ]] || continue
-    image_record="$(tagged_image_record_from_ref "${live_image}")" || return 2
+    if ! image_record="$(tagged_image_record_from_ref "${live_image}")"; then
+      log_stderr "public data-plane ${component_kind} source inspection found an invalid tagged image ref: ${live_image}"
+      return 2
+    fi
     IFS='|' read -r live_repository live_tag <<<"${image_record}"
     case "${component_kind}" in
       worker)
-        public_data_plane_worker_source_changed_between_refs "${live_tag}" "${target_tag}" && return 0
+        if public_data_plane_worker_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+          source_status=0
+        else
+          source_status=$?
+        fi
         ;;
       front)
-        public_data_plane_front_source_changed_between_refs "${live_tag}" "${target_tag}" && return 0
+        if public_data_plane_front_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+          source_status=0
+        else
+          source_status=$?
+        fi
         ;;
       dns)
-        public_data_plane_dns_source_changed_between_refs "${live_tag}" "${target_tag}" && return 0
+        if public_data_plane_dns_source_changed_between_refs "${live_tag}" "${target_tag}"; then
+          source_status=0
+        else
+          source_status=$?
+        fi
         ;;
       *)
+        log_stderr "public data-plane source inspection received an unknown component kind: ${component_kind}"
+        return 2
+        ;;
+    esac
+    case "${source_status}" in
+      0)
+        saw_changed=true
+        ;;
+      1)
+        ;;
+      *)
+        log_stderr "public data-plane ${component_kind} source diff is unavailable: live_ref=${live_tag} target_ref=${target_tag} status=${source_status}"
         return 2
         ;;
     esac
   done <<<"${image_refs}"
+  if [[ "${saw_changed}" == "true" ]]; then
+    return 0
+  fi
   return 1
 }
 
