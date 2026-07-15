@@ -8459,6 +8459,589 @@ PY
   fi
 )
 
+python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+main = source[source.index("\nmain() {"):]
+exit_trap = main.index("trap cleanup_tmp_artifacts EXIT")
+hup_trap = main.index("trap 'handle_control_plane_release_signal HUP' HUP")
+int_trap = main.index("trap 'handle_control_plane_release_signal INT' INT")
+term_trap = main.index("trap 'handle_control_plane_release_signal TERM' TERM")
+evidence_init = main.index("initialize_control_plane_release_evidence", exit_trap)
+first_required_env = main.index("require_env FUGUE_API_IMAGE_REPOSITORY")
+previous = main.index('PREVIOUS_REVISION="$(helm_current_revision)"')
+pre_state = main.index("write_control_plane_release_pre_state_evidence", previous)
+lease_mutation = main.index("acquire_control_plane_backup_coordination_lease", pre_state)
+backup_drain = main.index("drain_control_plane_backup_before_schema_rollout", lease_mutation)
+fenced_state = main.index("CONTROL_PLANE_RELEASE_FENCED_STATE_FILE", backup_drain)
+fenced_compare = main.index("control_plane_release_fenced_checkpoint_matches", fenced_state)
+recovery_fence_arm = main.index("arm_control_plane_release_recovery_fence", fenced_compare)
+host_mutation = main.index('"host time synchronization kubectl" ensure_host_time_sync', fenced_compare)
+helm_mutation = main.index('CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"', host_mutation)
+final_revision_fence = main.index("control_plane_release_pre_helm_revision_unchanged", host_mutation)
+commit_ready = main.index("commit-ready 0 commit-ready", helm_mutation)
+committed = main.index('CONTROL_PLANE_RELEASE_COMMITTED="true"', commit_ready)
+lease_release = main.index("release_control_plane_backup_coordination_lease", committed)
+success_evidence = main.index("success 0 complete", committed)
+if not max(exit_trap, hup_trap, int_trap, term_trap) < evidence_init < first_required_env:
+    raise SystemExit("release evidence EXIT and signal traps must exist before configuration can fail")
+if not previous < pre_state < lease_mutation < backup_drain < fenced_state < fenced_compare < recovery_fence_arm < host_mutation < helm_mutation:
+    raise SystemExit("release-pre-state.json must be durable before every host or workload mutation")
+if not helm_mutation < commit_ready < committed < lease_release < success_evidence:
+    raise SystemExit("success evidence must follow commit-ready, commit, and a proven owner-CAS Lease release")
+if not host_mutation < final_revision_fence < helm_mutation:
+    raise SystemExit("the final Helm revision fence must run after all pre-Helm work and before mutation flags")
+pre_state_guard = main[pre_state:lease_mutation]
+if 'fail "failed to atomically persist release-pre-state.json before the first release mutation"' not in pre_state_guard:
+    raise SystemExit("pre-state evidence write failure must fail closed before Lease mutation")
+fenced_guard = main[fenced_state:host_mutation]
+for unsafe in ('CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"', 'CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"', "rollback_release_transaction"):
+    if unsafe in fenced_guard:
+        raise SystemExit("fenced pre-mutation drift must release the coordination Lease without an unsafe Helm rollback")
+PY
+
+(
+  PREVIOUS_REVISION=718
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=true
+  helm_current_revision() { printf '719\n'; }
+  if control_plane_release_pre_helm_revision_unchanged; then
+    fail "final pre-Helm revision fence must reject drift after long-running pre-Helm work"
+  fi
+  [[ "${CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED}" == "false" ]] || fail "revision drift armed Helm mutation"
+  [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED}" == "false" ]] || fail "revision drift armed an unsafe Helm rollback"
+  [[ "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" == "true" ]] || fail "revision drift cleared the pre-Helm recovery fence"
+)
+
+early_evidence_tmp="$(mktemp -d)"
+early_evidence_status=0
+if env -i \
+  HOME="${HOME}" \
+  PATH="${PATH}" \
+  TMPDIR="${TMPDIR:-/tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${early_evidence_tmp}/evidence" \
+  bash "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" >"${early_evidence_tmp}/output" 2>&1; then
+  fail "missing required configuration must fail after installing the release evidence EXIT trap"
+else
+  early_evidence_status=$?
+fi
+assert_eq "${early_evidence_status}" "1" "early release configuration failure status"
+python3 - "${early_evidence_tmp}/evidence/release-result.json" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["outcome"] == "failure"
+assert payload["committed"] is False
+assert payload["phase"] == "configuration"
+assert payload["rollback"] == {
+    "attempted": False,
+    "completed": False,
+    "failed": False,
+    "required": False,
+}
+assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+PY
+lib_only_evidence_dir="${early_evidence_tmp}/lib-only"
+FUGUE_UPGRADE_LIB_ONLY=true FUGUE_RELEASE_ATTRIBUTION_DIR="${lib_only_evidence_dir}" \
+  bash -c 'source "$1"' _ "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+[[ ! -e "${lib_only_evidence_dir}" ]] || fail "library-only sourcing must not initialize release evidence or install EXIT work"
+rm -rf "${early_evidence_tmp}"
+
+evidence_path_security_tmp="$(mktemp -d)"
+mkdir -p "${evidence_path_security_tmp}/real" "${evidence_path_security_tmp}/world-writable"
+ln -s "${evidence_path_security_tmp}/real" "${evidence_path_security_tmp}/linked-parent"
+chmod 0777 "${evidence_path_security_tmp}/world-writable"
+if FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_path_security_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_path_security_tmp}/linked-parent/evidence" \
+  bash -c 'source "$1"; initialize_control_plane_release_evidence' _ \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
+  fail "release evidence initialization must reject a user-owned symlink ancestor"
+fi
+if FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_path_security_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_path_security_tmp}/world-writable" \
+  bash -c 'source "$1"; initialize_control_plane_release_evidence' _ \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
+  fail "release evidence initialization must reject an existing world-writable evidence directory"
+fi
+chmod 0700 "${evidence_path_security_tmp}/world-writable"
+
+stale_evidence_dir="${evidence_path_security_tmp}/stale-owned"
+FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_path_security_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${stale_evidence_dir}" \
+  bash -c '
+set -e
+source "$1"
+initialize_control_plane_release_evidence
+printf "{\"stale\":true}\n" >"${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/rollback-result.json"
+chmod 600 "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/rollback-result.json"
+printf keep >"${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/user-note.txt"
+' _ "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_path_security_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${stale_evidence_dir}" \
+  bash -c 'source "$1"; initialize_control_plane_release_evidence' _ \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "a trusted prior run marker must permit safe stale evidence cleanup"
+[[ ! -e "${stale_evidence_dir}/rollback-result.json" ]] || fail "trusted stale rollback-result leaked into the next run"
+[[ "$(cat "${stale_evidence_dir}/user-note.txt")" == "keep" ]] || fail "stale cleanup deleted an unknown user file"
+interrupted_cleanup_nonce="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_nonce"])' \
+  "${stale_evidence_dir}/release-evidence-run.json")"
+# Marker-only is the crash state after known outputs were removed+fsynced but
+# before the next run marker replace. It must remain retryable.
+FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_path_security_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${stale_evidence_dir}" \
+  bash -c 'source "$1"; initialize_control_plane_release_evidence' _ \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "marker-only interrupted stale cleanup must be retryable"
+retried_cleanup_nonce="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_nonce"])' \
+  "${stale_evidence_dir}/release-evidence-run.json")"
+[[ "${retried_cleanup_nonce}" != "${interrupted_cleanup_nonce}" ]] || fail "retry did not atomically replace the prior run marker nonce"
+[[ "$(cat "${stale_evidence_dir}/user-note.txt")" == "keep" ]] || fail "marker-only retry deleted an unknown user file"
+
+unowned_stale_dir="${evidence_path_security_tmp}/stale-unowned"
+mkdir -m 0700 "${unowned_stale_dir}"
+printf '{"unowned":true}\n' >"${unowned_stale_dir}/rollback-result.json"
+chmod 0600 "${unowned_stale_dir}/rollback-result.json"
+if FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_path_security_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${unowned_stale_dir}" \
+  bash -c 'source "$1"; initialize_control_plane_release_evidence' _ \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"; then
+  fail "same-name stale evidence without a trusted run marker must fail closed"
+fi
+[[ -f "${unowned_stale_dir}/rollback-result.json" ]] || fail "untrusted stale evidence must never be deleted"
+rm -rf "${evidence_path_security_tmp}"
+
+evidence_identity_tmp="$(mktemp -d)"
+FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_identity_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_identity_tmp}/evidence" \
+  bash -c '
+set -euo pipefail
+source "$1"
+initialize_control_plane_release_evidence
+printf "{\"test\":true}\n" >"${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/payload.json"
+chmod 600 "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/payload.json"
+mv "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}" "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}.parked"
+mkdir -m 0700 "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}"
+if control_plane_release_atomic_publish_json \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/payload.json" \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/replacement.json"; then
+  exit 91
+fi
+[[ ! -e "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/replacement.json" ]]
+cp "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}.parked/release-evidence-run.json" \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/release-evidence-run.json"
+printf "{\"forged\":true}\n" >"${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/forged.json"
+chmod 600 "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/release-evidence-run.json" \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/forged.json"
+if control_plane_release_secure_read_json \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/forged.json" >/dev/null; then
+  exit 93
+fi
+mv "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}.parked"
+mkdir -m 0700 "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}"
+printf keep >"${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/unknown-user-file"
+if cleanup_control_plane_release_evidence_work_dir; then
+  exit 92
+fi
+[[ "$(cat "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/unknown-user-file")" == keep ]]
+' _ "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "evidence publisher/cleanup must reject directory rename-and-replacement identities"
+rm -rf "${evidence_identity_tmp}"
+
+evidence_nested_cleanup_tmp="$(mktemp -d)"
+FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_nested_cleanup_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_nested_cleanup_tmp}/evidence" \
+  bash -c '
+set -euo pipefail
+source "$1"
+initialize_control_plane_release_evidence
+mkdir -p "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/nested/child" \
+  "${RUNNER_TEMP}/external"
+printf keep >"${RUNNER_TEMP}/external/unknown-user-file"
+ln -s "${RUNNER_TEMP}/external" \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/nested/external-link"
+printf owned >"${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/nested/child/owned"
+cleanup_control_plane_release_evidence_work_dir
+[[ ! -e "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" ]]
+[[ "$(cat "${RUNNER_TEMP}/external/unknown-user-file")" == keep ]]
+' _ "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "nested dirfd cleanup must quarantine children and never follow replacement/symlink targets"
+rm -rf "${evidence_nested_cleanup_tmp}"
+
+evidence_stdin_publish_tmp="$(mktemp -d)"
+FUGUE_UPGRADE_LIB_ONLY=true RUNNER_TEMP="${evidence_stdin_publish_tmp}" \
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_stdin_publish_tmp}/evidence" \
+  bash -c '
+set -euo pipefail
+source "$1"
+initialize_control_plane_release_evidence
+mv "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}.parked"
+mkdir -m 0700 "${RUNNER_TEMP}/replacement-target"
+ln -s "${RUNNER_TEMP}/replacement-target" \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}"
+printf "{\"stdin\":true}\n" | control_plane_release_atomic_publish_json - \
+  "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/stdin-result.json"
+[[ -f "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}/stdin-result.json" ]]
+[[ -z "$(find "${RUNNER_TEMP}/replacement-target" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+' _ "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "stdin atomic evidence publication must create no payload file through a replaced work path"
+rm -rf "${evidence_stdin_publish_tmp}"
+
+(
+  evidence_tmp="$(mktemp -d)"
+  trap 'rm -rf "${evidence_tmp}"' EXIT
+  FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_tmp}/evidence"
+  RUNNER_TEMP="${evidence_tmp}"
+  GITHUB_RUN_ID=123
+  GITHUB_RUN_ATTEMPT=4
+  GITHUB_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FUGUE_RELEASE_NAME=fugue
+  FUGUE_NAMESPACE=fugue-system
+  FUGUE_HELM_CHART_PATH="${REPO_ROOT}/deploy/helm/fugue"
+  PREVIOUS_REVISION=718
+  CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED=false
+  CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED=false
+  secret_marker=rollback-secret-must-not-leak
+  checkpoint_drift=false
+  evidence_log="${evidence_tmp}/capture.log"
+  EVIDENCE_CURRENT_REVISION=718
+  helm_current_revision() { printf '%s\n' "${EVIDENCE_CURRENT_REVISION}"; }
+  control_plane_release_helm_content_for_evidence() {
+    if [[ "${checkpoint_drift}" == "true" && "$1" == "manifest" ]]; then
+      printf '%s\n' "$1 revision=$2 drifted ${secret_marker}"
+    else
+      printf '%s\n' "$1 revision=$2 ${secret_marker}"
+    fi
+  }
+  control_plane_release_workload_templates_for_evidence() {
+    printf '%s' '{"items":[{"kind":"Deployment","metadata":{"name":"fugue-api","labels":{"app.kubernetes.io/component":"api"}},"spec":{"template":{"spec":{"containers":[{"name":"api","image":"ghcr.io/acme/fugue-api:stable"}]}}}}]}'
+  }
+  control_plane_release_ready_pods_for_evidence() {
+    printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"api","pod-template-hash":"abc123"},"ownerReferences":[{"kind":"ReplicaSet","name":"fugue-api-abc123","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","imageID":"docker-pullable://ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}]}'
+  }
+  production_evidence_render="${evidence_tmp}/production-render.yaml"
+  helm template fugue "${REPO_ROOT}/deploy/helm/fugue" -n fugue-system \
+    -f "${REPO_ROOT}/deploy/helm/fugue/values-production-ha.yaml" >"${production_evidence_render}" ||
+    fail "production chart render for release evidence regression"
+  componentless_workloads="$(awk 'BEGIN { RS="---" } /kind: (Deployment|DaemonSet)/ { name=""; component=0; n=split($0, lines, "\n"); for (i=1; i<=n; i++) { if (lines[i] ~ /^  name:/ && name == "") { name=lines[i]; sub(/^  name:[[:space:]]*/, "", name) } if (lines[i] ~ /app.kubernetes.io\/component:/) component=1 } if (!component && name != "") print name }' "${production_evidence_render}")"
+  for componentless_workload in fugue-alloy fugue-cloudnative-pg fugue-volsync; do
+    grep -Fxq "${componentless_workload}" <<<"${componentless_workloads}" ||
+      fail "production render no longer exercises component-less workload ${componentless_workload}"
+  done
+  printf '%s' '{"items":[{"kind":"DaemonSet","metadata":{"name":"fugue-alloy","labels":{}},"spec":{"template":{"spec":{"containers":[{"name":"alloy","image":"grafana/alloy:v1"}]}}}},{"kind":"Deployment","metadata":{"name":"fugue-cloudnative-pg","labels":{}},"spec":{"template":{"spec":{"containers":[{"name":"manager","image":"cloudnative-pg/operator:v1"}]}}}},{"kind":"Deployment","metadata":{"name":"fugue-volsync","labels":{}},"spec":{"template":{"spec":{"containers":[{"name":"manager","image":"backube/volsync:v1"}]}}}}]}' |
+    control_plane_release_workload_template_images_hash >/dev/null ||
+    fail "production-style alloy/volsync workloads without optional component labels must hash"
+  printf '%s' '{"items":[{"metadata":{"labels":{"pod-template-hash":"abc123"},"ownerReferences":[{"kind":"ReplicaSet","name":"fugue-alloy-abc123","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"alloy","imageID":"containerd://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},{"metadata":{"labels":{},"ownerReferences":[{"kind":"StatefulSet","name":"fugue-cloudnative-pg-1","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"postgres","imageID":"containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}]}' |
+    control_plane_release_ready_pod_image_ids_hash >/dev/null ||
+    fail "component-less production-style Ready Pods must hash while CNPG operator Pods remain outside the cohort"
+  write_control_plane_release_pre_state_evidence >"${evidence_log}" 2>&1 ||
+    fail "release pre-state evidence capture must succeed for canonical fixtures"
+  [[ "${CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED}" == "true" ]] || fail "pre-state capture flag"
+  [[ -f "${FUGUE_RELEASE_ATTRIBUTION_DIR}/release-pre-state.json" ]] || fail "release-pre-state.json missing"
+  if grep -Fq "${secret_marker}" "${FUGUE_RELEASE_ATTRIBUTION_DIR}/release-pre-state.json" "${evidence_log}"; then
+    fail "release evidence must not contain raw Helm values, manifests, hooks, or secrets"
+  fi
+  python3 - "${FUGUE_RELEASE_ATTRIBUTION_DIR}/release-pre-state.json" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["helm"]["revision"] == "718"
+assert payload["identity"]["head_sha"] == "a" * 40
+assert payload["identity"]["run_attempt"] == "4"
+assert payload["identity"]["run_id"] == "123"
+assert payload["identity"]["release_name"] == "fugue"
+assert payload["identity"]["namespace"] == "fugue-system"
+assert payload["identity"]["chart_path"].endswith("/deploy/helm/fugue")
+assert re.fullmatch(r"[0-9a-f]{64}", payload["identity"]["chart_yaml_sha256"])
+serialized = json.dumps(payload, sort_keys=True)
+assert "rollback-secret-must-not-leak" not in serialized
+for value in (
+    payload["helm"]["manifest_sha256"],
+    payload["helm"]["values_all_sha256"],
+    payload["helm"]["hooks_sha256"],
+    payload["kubernetes"]["workload_template_images_sha256"],
+    payload["kubernetes"]["ready_pod_component_container_image_ids_sha256"],
+    payload["content_state_sha256"],
+):
+    assert re.fullmatch(r"[0-9a-f]{64}", value)
+assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+PY
+
+  capture_control_plane_release_state "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}" fenced 718 ||
+    fail "fenced state capture"
+  control_plane_release_fenced_checkpoint_matches \
+    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}" ||
+    fail "an unchanged fenced checkpoint must match pre-state"
+  checkpoint_drift=true
+  capture_control_plane_release_state "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}" fenced 718 ||
+    fail "drifted fenced state capture"
+  if control_plane_release_fenced_checkpoint_matches \
+    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}"; then
+    fail "fenced checkpoint content drift must fail closed"
+  fi
+  checkpoint_drift=false
+  FUGUE_NAMESPACE=other-system
+  capture_control_plane_release_state "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}" fenced 718 ||
+    fail "identity-drifted fenced state capture"
+  if control_plane_release_fenced_checkpoint_matches \
+    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}"; then
+    fail "fenced checkpoint release identity drift must fail closed"
+  fi
+  FUGUE_NAMESPACE=fugue-system
+
+  revision_read_count_file="${evidence_tmp}/revision-reads"
+  printf '0\n' >"${revision_read_count_file}"
+  helm_current_revision() {
+    local count
+    count="$(cat "${revision_read_count_file}")"
+    count=$((count + 1))
+    printf '%s\n' "${count}" >"${revision_read_count_file}"
+    if (( count >= 2 )); then
+      printf '719\n'
+    else
+      printf '718\n'
+    fi
+  }
+  mid_capture_state="${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/mid-capture-revision-drift.json"
+  if capture_control_plane_release_state "${mid_capture_state}" fenced; then
+    fail "fenced state capture must reject a live Helm revision change during workload/Pod reads"
+  fi
+  [[ ! -e "${mid_capture_state}" ]] || fail "revision-drifted state must not be published"
+  helm_current_revision() { printf '%s\n' "${EVIDENCE_CURRENT_REVISION}"; }
+  EVIDENCE_CURRENT_REVISION=719
+  if capture_control_plane_release_state \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}/historical-pre-live-mismatch.json" pre 718; then
+    fail "pre-state must not combine historical Helm content with a different live workload revision"
+  fi
+  EVIDENCE_CURRENT_REVISION=718
+
+  capture_control_plane_release_state "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" final 718 ||
+    fail "successful final state capture"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=true
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE=pre-helm-test
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION=armed-pre-helm
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+  write_control_plane_release_result_evidence \
+    commit-ready 0 commit-ready "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" ||
+    fail "commit-ready release-result.json write"
+  python3 - "${FUGUE_RELEASE_ATTRIBUTION_DIR}/release-result.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["outcome"] == "commit-ready"
+assert payload["recovery_fence"]["required"] is True
+assert payload["rollback"]["required"] is True
+PY
+  # A SIGKILL at this point leaves the conservative commit-ready record and
+  # the durable Lease fence; success is published only after COMMITTED=true.
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=false
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION=committed
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=false
+  write_control_plane_release_result_evidence success 0 complete "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" ||
+    fail "successful release-result.json write"
+  python3 - "${FUGUE_RELEASE_ATTRIBUTION_DIR}/release-result.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["outcome"] == "success"
+assert payload["committed"] is True
+assert payload["phase"] == "complete"
+assert payload["source"]["revision"] == "718"
+assert payload["final"]["revision"] == "718"
+assert payload["rollback"] == {
+    "attempted": False,
+    "completed": False,
+    "failed": False,
+    "required": False,
+}
+PY
+
+  printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"api"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-api","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","imageID":"docker-pullable://ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},{"metadata":{"labels":{"app.kubernetes.io/component":"api"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-api","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","imageID":"containerd://ghcr.io/acme/fugue-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}]}' |
+    control_plane_release_ready_pod_image_ids_hash >/dev/null ||
+    fail "equivalent Ready imageID schemes must canonicalize to one digest"
+  if printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"api"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-api","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","imageID":"containerd://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},{"metadata":{"labels":{"app.kubernetes.io/component":"api"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-api","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","imageID":"containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}]}' |
+    control_plane_release_ready_pod_image_ids_hash >/dev/null; then
+    fail "one stable component/container with mixed Ready image digests must be rejected"
+  fi
+  if printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"api"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-api","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"api","imageID":"unknown://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}]}' |
+    control_plane_release_ready_pod_image_ids_hash >/dev/null; then
+    fail "unknown Ready imageID schemes must be rejected"
+  fi
+  printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"edge-worker-a","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-worker","fugue.io/edge-slot":"a"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-edge-worker-a","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"edge","imageID":"containerd://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},{"metadata":{"labels":{"app.kubernetes.io/component":"edge-worker-b","fugue.io/rollout-subsystem":"public-data-plane","fugue.io/rollout-mode":"node-local-blue-green-worker","fugue.io/edge-slot":"b"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-edge-worker-b","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"edge","imageID":"containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}]}' |
+    control_plane_release_ready_pod_image_ids_hash >/dev/null ||
+    fail "distinct edge slots may have distinct unique Ready imageIDs"
+
+  mutation_marker="${evidence_tmp}/mutation"
+  CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED=false
+  control_plane_release_atomic_publish_json() { return 42; }
+  if write_control_plane_release_pre_state_evidence; then
+    printf mutation >"${mutation_marker}"
+    fail "a failed pre-state evidence write must not permit mutation"
+  fi
+  [[ ! -e "${mutation_marker}" ]] || fail "pre-state evidence failure reached mutation"
+)
+
+for rollback_evidence_mode in exact content-mismatch runtime-mismatch; do
+  (
+    evidence_tmp="$(mktemp -d)"
+    trap 'rm -rf "${evidence_tmp}"' EXIT
+    FUGUE_RELEASE_ATTRIBUTION_DIR="${evidence_tmp}/evidence"
+    RUNNER_TEMP="${evidence_tmp}"
+    GITHUB_RUN_ID=456
+    GITHUB_RUN_ATTEMPT=2
+    GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    FUGUE_RELEASE_NAME=fugue
+    FUGUE_NAMESPACE=fugue-system
+    FUGUE_HELM_CHART_PATH="${REPO_ROOT}/deploy/helm/fugue"
+    PREVIOUS_REVISION=718
+    CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED=false
+    CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED=false
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+    CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED=false
+    CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED=false
+    CONTROL_PLANE_RELEASE_ROLLBACK_FAILED=false
+    CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=true
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE=pre-helm-non-revertible-mutation
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION=armed-pre-helm
+    CONTROL_PLANE_RELEASE_PHASE=post-helm-validation
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE=""
+    EVIDENCE_CURRENT_REVISION=718
+    control_plane_release_helm_content_for_evidence() {
+      local value="$1-stable"
+      if [[ "${EVIDENCE_CURRENT_REVISION}" == "719" &&
+        "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED}" == "true" ]]; then
+        value="$1-failed"
+      elif [[ "${rollback_evidence_mode}" == "content-mismatch" && "${EVIDENCE_CURRENT_REVISION}" == "720" && "$1" == "manifest" ]]; then
+        value="$1-mismatched-result"
+      fi
+      printf '%s\n' "${value}"
+    }
+    control_plane_release_workload_templates_for_evidence() {
+      printf '%s' '{"items":[{"kind":"DaemonSet","metadata":{"name":"fugue-node-janitor","labels":{"app.kubernetes.io/component":"node-janitor"}},"spec":{"template":{"spec":{"containers":[{"name":"node-janitor","image":"ghcr.io/acme/fugue-janitor:stable"}]}}}}]}'
+    }
+    control_plane_release_ready_pods_for_evidence() {
+      local image_id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      if [[ "${EVIDENCE_CURRENT_REVISION}" == "719" &&
+        "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED}" == "true" ]]; then
+        printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"node-janitor"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-node-janitor","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"node-janitor","imageID":"containerd://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}},{"metadata":{"labels":{"app.kubernetes.io/component":"node-janitor"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-node-janitor","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"node-janitor","imageID":"containerd://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}}]}'
+        return
+      fi
+      if [[ "${rollback_evidence_mode}" == "runtime-mismatch" && "${EVIDENCE_CURRENT_REVISION}" == "720" ]]; then
+        image_id=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      fi
+      printf '%s' '{"items":[{"metadata":{"labels":{"app.kubernetes.io/component":"node-janitor"},"ownerReferences":[{"kind":"DaemonSet","name":"fugue-node-janitor","controller":true}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"node-janitor","imageID":"containerd://sha256:'"${image_id}"'"}]}}]}'
+    }
+    helm_current_revision() { printf '%s\n' "${EVIDENCE_CURRENT_REVISION}"; }
+    rollback_release() {
+      [[ "${EVIDENCE_CURRENT_REVISION}" == "719" ]] || return 91
+      [[ -s "${CONTROL_PLANE_RELEASE_FAILED_STATE_FILE}" ]] || return 92
+      EVIDENCE_CURRENT_REVISION=720
+      return 0
+    }
+    write_control_plane_release_pre_state_evidence || fail "${rollback_evidence_mode} pre-state capture"
+    EVIDENCE_CURRENT_REVISION=719
+    capture_control_plane_release_state "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" final 719 ||
+      fail "${rollback_evidence_mode} stale forward final-state fixture"
+    rollback_status=0
+    if rollback_release_transaction; then
+      rollback_status=0
+    else
+      rollback_status=$?
+    fi
+    case "${rollback_evidence_mode}" in
+      exact)
+        assert_eq "${rollback_status}" "0" "718 to 719 to 720 exact rollback status"
+        [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED}" == "true" ]] || fail "exact rollback completion flag"
+        [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED}" == "false" ]] || fail "exact rollback must clear fence"
+        [[ "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" == "true" ]] || fail "exact Helm rollback must not clear the independent pre-Helm recovery fence"
+        FUGUE_UPGRADE_LIB_ONLY=false
+        write_control_plane_release_result_on_exit 1 || fail "exact rollback release-result write"
+        FUGUE_UPGRADE_LIB_ONLY=true
+        python3 - "${FUGUE_RELEASE_ATTRIBUTION_DIR}/release-result.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["outcome"] == "failure"
+assert payload["final"]["revision"] == "720"
+assert payload["rollback"]["completed"] is True
+assert payload["recovery_fence"]["required"] is True
+PY
+        ;;
+      *)
+        assert_eq "${rollback_status}" "1" "${rollback_evidence_mode} rollback rejection status"
+        [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_FAILED}" == "true" ]] || fail "${rollback_evidence_mode} failed flag"
+        [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED}" == "true" ]] || fail "${rollback_evidence_mode} must retain fence"
+        ;;
+    esac
+    python3 - "${FUGUE_RELEASE_ATTRIBUTION_DIR}/rollback-result.json" "${rollback_evidence_mode}" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path, mode = sys.argv[1:3]
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["source"]["revision"] == "718"
+assert payload["failed"]["revision"] == "719"
+assert payload["failed"]["ready_pod_mixed"] is True
+assert payload["failed"]["ready_pod_mixed_container_count"] == 1
+assert payload["result"]["revision"] == "720"
+assert payload["gates"] == {
+    "failed_state_captured": True,
+    "result_state_captured": True,
+    "rollback_execution_readiness_smoke_passed": True,
+}
+if mode == "exact":
+    assert payload["outcome"] == "success"
+    assert payload["exact_state_match"] is True
+    assert all(payload["comparisons"].values())
+elif mode == "content-mismatch":
+    assert payload["outcome"] == "failure"
+    assert payload["comparisons"]["manifest_sha256"] is False
+elif mode == "runtime-mismatch":
+    assert payload["outcome"] == "failure"
+    assert payload["comparisons"]["ready_pod_component_container_image_ids_sha256"] is False
+assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+PY
+    python3 - "${CONTROL_PLANE_RELEASE_FAILED_STATE_FILE}" "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}" <<'PY'
+import json
+import os
+import stat
+import sys
+
+for path, role in zip(sys.argv[1:], ("failed", "rollback-result")):
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["role"] == role
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+PY
+  )
+done
+
 for rollback_failure_mode in api-rollout controller-rollout controller-presence; do
   (
     FUGUE_API_DEPLOYMENT_NAME=fugue-api
@@ -8545,6 +9128,8 @@ done
   FUGUE_CONTROL_PLANE_POSTGRES_ENABLED=false
   FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=false
   FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=1
+  require_control_plane_backup_coordination_or_abort() { return 0; }
+  require_control_plane_backup_coordination_lease() { return 0; }
   guarded_status=0
   if run_with_control_plane_backup_coordination_guard 5 "exact child status" bash -c 'exit 42'; then
     fail "guarded command with exit 42 must not report success"
@@ -8552,6 +9137,20 @@ done
     guarded_status=$?
   fi
   assert_eq "${guarded_status}" "42" "guarded command must preserve the exact child exit status"
+)
+
+(
+  FUGUE_CONTROL_PLANE_POSTGRES_ENABLED=false
+  FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=false
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=1
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="${BASHPID:-$$}"
+  CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="$(mktemp)"
+  trap 'rm -f "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}"' EXIT
+  printf 'lost|release/test|non-cnpg-renewal-loss\n' >"${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}"
+  if require_control_plane_backup_coordination_lease "non-CNPG release mutation"; then
+    fail "non-CNPG releases must not bypass a lost universal release-fence Lease"
+  fi
 )
 
 (
@@ -8621,6 +9220,8 @@ done
   FUGUE_CONTROL_PLANE_POSTGRES_ENABLED=false
   FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=false
   FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=1
+  require_control_plane_backup_coordination_or_abort() { return 0; }
+  require_control_plane_backup_coordination_lease() { return 0; }
   escaped_child_file="$(mktemp)"
   rm -f "${escaped_child_file}"
   guarded_status=0
@@ -8692,6 +9293,65 @@ assert_eq "${signal_transaction_status}" "143" "TERM release handler exit status
 assert_eq "$(cat "${signal_transaction_tmp}/order")" $'terminate\nrollback' "TERM release handler must stop the active group before rollback"
 rm -rf "${signal_transaction_tmp}"
 
+signal_recovery_tmp="$(mktemp -d)"
+signal_recovery_status=0
+if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" SIGNAL_RECOVERY_TMP="${signal_recovery_tmp}" \
+  bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED=true
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED=false
+CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED=false
+CONTROL_PLANE_RELEASE_ROLLBACK_FAILED=false
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED=true
+CONTROL_PLANE_RELEASE_PHASE=post-helm-validation
+CONTROL_PLANE_RELEASE_PRE_STATE_FILE="${SIGNAL_RECOVERY_TMP}/pre.json"
+CONTROL_PLANE_RELEASE_FAILED_STATE_FILE="${SIGNAL_RECOVERY_TMP}/failed.json"
+CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE="${SIGNAL_RECOVERY_TMP}/rollback.json"
+printf "%s\n" '\''{"helm":{"revision":"718"}}'\'' >"${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}"
+capture_control_plane_release_state() {
+  local destination="$1" role="$2"
+  if [[ "${role}" == "failed" ]]; then
+    printf "failed-capture-start\n" >>"${SIGNAL_RECOVERY_TMP}/order"
+    handle_control_plane_release_signal TERM
+    printf "%s\n" '\''{"helm":{"revision":"719"}}'\'' >"${destination}"
+    printf "failed-capture-published\n" >>"${SIGNAL_RECOVERY_TMP}/order"
+  else
+    printf "%s\n" '\''{"helm":{"revision":"720"}}'\'' >"${destination}"
+    printf "rollback-state-published\n" >>"${SIGNAL_RECOVERY_TMP}/order"
+  fi
+}
+rollback_release() { printf "rollback-executed\n" >>"${SIGNAL_RECOVERY_TMP}/order"; }
+control_plane_release_states_match() { return 0; }
+control_plane_release_state_revision() { printf "720\n"; }
+write_control_plane_release_rollback_result_evidence() {
+  printf "rollback-evidence-published\n" >>"${SIGNAL_RECOVERY_TMP}/order"
+}
+write_control_plane_release_result_evidence() {
+  printf "generic-evidence:%s:%s\n" "$1" "$2" >>"${SIGNAL_RECOVERY_TMP}/order"
+}
+rollback_release_transaction
+'; then
+  fail "TERM during failed-state capture must exit with the original signal status"
+else
+  signal_recovery_status=$?
+fi
+assert_eq "${signal_recovery_status}" "143" "deferred recovery TERM exit status"
+assert_eq "$(cat "${signal_recovery_tmp}/order")" $'failed-capture-start\nfailed-capture-published\nrollback-executed\nrollback-state-published\nrollback-evidence-published\ngeneric-evidence:failure:143' "TERM during failed capture must finish rollback and evidence before exit"
+rm -rf "${signal_recovery_tmp}"
+
+(
+  FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=10200
+  FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=600
+  CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS=true
+  CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS=false
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( $(date +%s) + FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS + FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS ))
+  require_release_forward_budget 15 "recovery evidence capture" ||
+    fail "recovery evidence and rollback must consume the reserved budget without a forward-work rejection"
+)
+
 (
   cleanup_transaction_tmp="$(mktemp -d)"
   trap 'rm -rf "${cleanup_transaction_tmp}"' EXIT
@@ -8759,6 +9419,67 @@ rm -rf "${signal_transaction_tmp}"
 )
 
 (
+  pre_helm_cleanup_tmp="$(mktemp -d)"
+  trap 'rm -rf "${pre_helm_cleanup_tmp}"' EXIT
+  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+  CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED=false
+  CONTROL_PLANE_RELEASE_ROLLBACK_FAILED=false
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=true
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE=pre-helm-non-revertible-mutation
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION=armed-pre-helm
+  CONTROL_PLANE_RELEASE_COMMITTED=false
+  terminate_active_control_plane_release_command() { return 0; }
+  rollback_release_transaction() { printf rollback >>"${pre_helm_cleanup_tmp}/order"; }
+  mark_control_plane_backup_coordination_recovery_required() { printf fence >>"${pre_helm_cleanup_tmp}/order"; }
+  release_control_plane_backup_coordination_lease() { printf release >>"${pre_helm_cleanup_tmp}/order"; }
+  stop_control_plane_backup_coordination_lease_renewer() { return 0; }
+  cleanup_control_plane_automation_tmp() { return 0; }
+  cleanup_upgrade_override_values() { return 0; }
+  set +e
+  false
+  cleanup_tmp_artifacts
+  pre_helm_cleanup_status=$?
+  set -e
+  assert_eq "${pre_helm_cleanup_status}" "1" "pre-Helm fenced cleanup status"
+  assert_eq "$(cat "${pre_helm_cleanup_tmp}/order")" "fence" "pre-Helm failure must retain the durable Lease fence without pretending Helm rollback"
+  [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED}" == "false" ]] || fail "pre-Helm recovery fence must not set Helm rollback attempted"
+)
+
+release_evidence_exit_tmp="$(mktemp -d)"
+release_evidence_exit_status=0
+if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" RELEASE_EVIDENCE_EXIT_TMP="${release_evidence_exit_tmp}" \
+  bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+FUGUE_UPGRADE_LIB_ONLY=false
+CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED=true
+CONTROL_PLANE_RELEASE_EVIDENCE_EXIT_WRITING=false
+CONTROL_PLANE_RELEASE_MUTATION_OCCURRED=false
+CONTROL_PLANE_RELEASE_COMMITTED=false
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=false
+CONTROL_PLANE_RELEASE_ROLLBACK_FAILED=false
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
+CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR=""
+terminate_active_control_plane_release_command() { return 0; }
+release_control_plane_backup_coordination_lease() { return 0; }
+cleanup_control_plane_automation_tmp() { return 0; }
+cleanup_upgrade_override_values() { return 0; }
+write_control_plane_release_result_evidence() {
+  printf called >"${RELEASE_EVIDENCE_EXIT_TMP}/writer-called"
+  return 42
+}
+trap cleanup_tmp_artifacts EXIT
+exit 37
+'; then
+  fail "release evidence EXIT trap must preserve a nonzero original status"
+else
+  release_evidence_exit_status=$?
+fi
+assert_eq "${release_evidence_exit_status}" "37" "release evidence EXIT trap preserves original exit status"
+[[ -f "${release_evidence_exit_tmp}/writer-called" ]] || fail "release evidence EXIT trap did not run"
+rm -rf "${release_evidence_exit_tmp}"
+
+(
   FUGUE_CONTROL_PLANE_POSTGRES_ENABLED=true
   FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=true
   FUGUE_CONTROL_PLANE_BACKUP_DRAIN_WAIT_SECONDS=0
@@ -8779,6 +9500,45 @@ rm -rf "${signal_transaction_tmp}"
     fail "recovery-required Lease must refuse acquisition before any takeover mutation"
   fi
   [[ ! -e "${lease_recovery_mutation}" ]] || fail "recovery-required Lease acquisition attempted a mutation"
+)
+
+(
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=release/123-2
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=false
+  recovery_arm_attempts=0
+  mark_control_plane_backup_coordination_recovery_required() {
+    recovery_arm_attempts=$((recovery_arm_attempts + 1))
+    (( recovery_arm_attempts >= 2 ))
+  }
+  control_plane_backup_coordination_lease_json() {
+    printf '%s' '{"metadata":{"resourceVersion":"12","annotations":{"fugue.pro/coordination-token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/recovery-required":"true"}},"spec":{"holderIdentity":"release/123-2","leaseDurationSeconds":120,"renewTime":"2999-01-01T00:00:00Z","leaseTransitions":3}}'
+  }
+  arm_control_plane_release_recovery_fence pre-helm-test ||
+    fail "durable pre-Helm recovery fence must retry a renewer resourceVersion race and verify readback"
+  assert_eq "${recovery_arm_attempts}" "2" "durable recovery fence bounded CAS retry"
+  [[ "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" == "true" ]] || fail "durable recovery fence local state"
+  assert_eq "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE}" "pre-helm-test" "durable recovery fence phase"
+)
+
+(
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=release/123-2
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS=120
+  stop_control_plane_backup_coordination_lease_renewer() { return 0; }
+  control_plane_backup_coordination_lease_json() {
+    printf '%s' '{"metadata":{"resourceVersion":"12","annotations":{"fugue.pro/coordination-token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","fugue.pro/recovery-required":"true"}},"spec":{"holderIdentity":"release/123-2","leaseDurationSeconds":120}}'
+  }
+  control_plane_backup_coordination_now() { printf '2026-07-15T00:00:00Z'; }
+  control_plane_backup_coordination_patch_owned() {
+    printf '%s' '{"metadata":{"annotations":{"fugue.pro/recovery-required":"true"}},"spec":{"holderIdentity":"release/123-2","leaseDurationSeconds":120}}'
+  }
+  if release_control_plane_backup_coordination_lease; then
+    fail "Lease release must reject a patch response that did not clear holder/token/recovery state"
+  fi
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || fail "unproven Lease release cleared local ownership"
 )
 
 (
@@ -9082,6 +9842,9 @@ with open(temporary, "w") as fh:
     json.dump(doc, fh, separators=(",", ":"))
 os.replace(temporary, path)
 PY
+    if [[ "${args}" == *" -o json"* ]]; then
+      cat "${BACKUP_LEASE_STATE}"
+    fi
     return
   fi
   if [[ "${args}" == *" get pods "* ]]; then
@@ -9153,6 +9916,7 @@ if not re.fullmatch(r"[0-9a-f]{32}", token):
     raise SystemExit("release fencing token is not 128-bit hex")
 PY
 renew_control_plane_backup_coordination_lease
+mark_control_plane_backup_coordination_recovery_required
 release_control_plane_backup_coordination_lease
 python3 - "${BACKUP_LEASE_STATE}" <<'PY'
 import json
@@ -9162,6 +9926,8 @@ if doc["spec"].get("holderIdentity") != "" or doc["spec"].get("leaseDurationSeco
     raise SystemExit("release must clear its holder while retaining a schema-valid duration")
 if "fugue.pro/coordination-token" in (doc.get("metadata", {}).get("annotations", {}) or {}):
     raise SystemExit("release must clear its fencing token")
+if "fugue.pro/recovery-required" in (doc.get("metadata", {}).get("annotations", {}) or {}):
+    raise SystemExit("successful owner-CAS release must clear its durable recovery fence")
 PY
 
 (

@@ -375,18 +375,53 @@ CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
 CONTROL_PLANE_BACKUP_COORDINATION_ABORTING="false"
 CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
+CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
 CONTROL_PLANE_RELEASE_COMMITTED="false"
 CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="false"
+CONTROL_PLANE_RELEASE_PENDING_SIGNAL=""
+CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS="0"
 CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
 CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
 CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0
+CONTROL_PLANE_RELEASE_PHASE="initialization"
+CONTROL_PLANE_RELEASE_FAILURE_PHASE=""
+CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="false"
+CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="false"
+CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE=""
+CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="not-armed"
+CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED="false"
+CONTROL_PLANE_RELEASE_EVIDENCE_EXIT_WRITING="false"
+CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="false"
+CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED="false"
+CONTROL_PLANE_RELEASE_ROLLBACK_RESULT_WRITTEN="false"
+CONTROL_PLANE_RELEASE_EVIDENCE_DIR=""
+CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR=""
+CONTROL_PLANE_RELEASE_EVIDENCE_DIR_DEVICE=""
+CONTROL_PLANE_RELEASE_EVIDENCE_DIR_INODE=""
+CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE=""
+CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE=""
+CONTROL_PLANE_RELEASE_EVIDENCE_RUN_NONCE=""
+CONTROL_PLANE_RELEASE_PRE_STATE_FILE=""
+CONTROL_PLANE_RELEASE_FENCED_STATE_FILE=""
+CONTROL_PLANE_RELEASE_FAILED_STATE_FILE=""
+CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE=""
+CONTROL_PLANE_RELEASE_FINAL_STATE_FILE=""
+CONTROL_PLANE_RELEASE_ROLLBACK_RESULT_FILE=""
+CONTROL_PLANE_RELEASE_RESULT_FILE=""
+CONTROL_PLANE_RELEASE_RUN_MARKER_FILE=""
+CONTROL_PLANE_RELEASE_FINAL_REVISION=""
 
 release_monotonic_millis() {
   python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
+}
+
+control_plane_release_recovery_active() {
+  [[ "${CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS:-false}" == "true" ||
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]]
 }
 
 prepare_release_command_in_dedicated_group() {
@@ -739,7 +774,7 @@ run_with_control_plane_backup_coordination_guard() {
 
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || return 2
   (( $# > 0 )) || return 2
-  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" ]]; then
+  if ! control_plane_release_recovery_active; then
     if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
       if ! require_control_plane_backup_coordination_lease "${phase}"; then
         log_stderr "skipping post-commit best-effort mutation because shared backup/release Lease health is unsafe: ${phase}"
@@ -761,7 +796,7 @@ run_with_control_plane_backup_coordination_guard() {
   prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" "$@" || return $?
   CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID="${pid}"
   CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID="${pgid}"
-  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" ]] &&
+  if ! control_plane_release_recovery_active &&
     ! require_control_plane_backup_coordination_lease "${phase} gated start"; then
     abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
     CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
@@ -804,8 +839,8 @@ run_with_control_plane_backup_coordination_guard() {
       CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
       return 124
     fi
-    if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" != "true" &&
-      "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+    if ! control_plane_release_recovery_active &&
+      [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
       state="$(control_plane_backup_coordination_health_state 2>/dev/null || true)"
       if [[ "${state}" != "healthy" && "${state}" != "degraded" ]] ||
         [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] ||
@@ -1768,7 +1803,7 @@ require_release_forward_budget() {
   local remaining=""
   local required=""
 
-  [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]] && return 0
+  control_plane_release_recovery_active && return 0
   [[ "${operation_upper_seconds}" =~ ^[0-9]+$ ]] || {
     log_stderr "cannot reserve deploy budget for ${phase}: invalid operation upper bound ${operation_upper_seconds:-missing}"
     return 1
@@ -3606,8 +3641,6 @@ require_control_plane_backup_coordination_lease() {
   local state=""
   local deadline=$((SECONDS + FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS + 1))
 
-  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
-  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
   if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" != "true" ]]; then
     log_stderr "shared backup/release Lease is not held before ${phase}"
     return 1
@@ -3673,8 +3706,8 @@ handle_control_plane_backup_coordination_abort() {
     log_stderr "shared backup/release Lease became unsafe after commit; skipping remaining best-effort metadata work without rollback"
     return 0
   fi
-  if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]]; then
-    log_stderr "backup coordination Lease was lost during rollback; continuing the already-active synchronous rollback"
+  if control_plane_release_recovery_active; then
+    log_stderr "backup coordination Lease was lost during recovery; continuing the already-active bounded evidence and rollback transaction"
     return 0
   fi
   if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_ABORTING:-false}" == "true" ]]; then
@@ -3834,7 +3867,10 @@ control_plane_backup_coordination_patch_owned() {
   local lease_json="$1"
   local action="$2"
   local now="$3"
+  local output_mode="${4:-discard}"
   local patch=""
+
+  [[ "${output_mode}" == "discard" || "${output_mode}" == "json" ]] || return 2
 
   patch="$(LEASE_JSON="${lease_json}" LEASE_OWNER="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" \
     LEASE_TOKEN="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" \
@@ -3868,6 +3904,7 @@ if os.environ["LEASE_ACTION"] == "renew":
     ])
 elif os.environ["LEASE_ACTION"] == "release":
     annotations.pop("fugue.pro/coordination-token", None)
+    annotations.pop("fugue.pro/recovery-required", None)
     patch.extend([
         {"op": "add", "path": "/metadata/annotations", "value": annotations},
         {"op": "add", "path": "/spec/holderIdentity", "value": ""},
@@ -3888,10 +3925,17 @@ else:
     raise SystemExit(1)
 print(json.dumps(patch, separators=(",", ":")))
 ')" || return 1
-  bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
-    -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
-    patch "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
-    --type=json -p "${patch}" >/dev/null
+  if [[ "${output_mode}" == "json" ]]; then
+    bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+      -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+      patch "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+      --type=json -p "${patch}" -o json
+  else
+    bounded_kubectl "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+      -n "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAMESPACE}" \
+      patch "lease/${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_NAME}" \
+      --type=json -p "${patch}" >/dev/null
+  fi
 }
 
 mark_control_plane_backup_coordination_recovery_required() {
@@ -3903,6 +3947,53 @@ mark_control_plane_backup_coordination_recovery_required() {
   [[ -n "$(trim_field "${lease_json}")" ]] || return 1
   now="$(control_plane_backup_coordination_now)" || return 1
   control_plane_backup_coordination_patch_owned "${lease_json}" recovery-required "${now}"
+}
+
+arm_control_plane_release_recovery_fence() {
+  local armed_phase="${1:-pre-helm-non-revertible-mutation}"
+  local lease_json=""
+  local state=""
+  local holder=""
+  local token=""
+  local resource_version=""
+  local expired="false"
+  local transitions="0"
+  local recovery_required="false"
+  local attempt=0
+
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]] || {
+    log_stderr "cannot durably arm the pre-Helm recovery fence without the owned coordination Lease"
+    return 1
+  }
+  for attempt in 1 2 3; do
+    if mark_control_plane_backup_coordination_recovery_required; then
+      lease_json="$(control_plane_backup_coordination_lease_json)" || lease_json=""
+      if [[ -n "$(trim_field "${lease_json}")" ]]; then
+        state="$(control_plane_backup_coordination_lease_state "${lease_json}")" || state=""
+        IFS='|' read -r holder token resource_version expired transitions recovery_required <<<"${state}"
+        if [[ "${holder}" == "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" &&
+          "${token}" == "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" &&
+          "${recovery_required}" == "true" ]]; then
+          break
+        fi
+      fi
+    fi
+    if (( attempt < 3 )); then
+      # A concurrent renewer may legitimately win the resourceVersion CAS.
+      # Re-read and retry a bounded number of times before any business write.
+      sleep 0.1
+    fi
+  done
+  if [[ "${holder}" != "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER}" ||
+    "${token}" != "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_TOKEN}" ||
+    "${recovery_required}" != "true" ]]; then
+    log_stderr "could not owner-CAS and read back fugue.pro/recovery-required before the first non-Helm mutation"
+    return 1
+  fi
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE="${armed_phase}"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="armed-pre-helm"
+  log "durably armed the pre-Helm recovery fence before non-Helm host or Kubernetes mutation"
 }
 
 renew_control_plane_backup_coordination_lease() {
@@ -3970,13 +4061,35 @@ stop_control_plane_backup_coordination_lease_renewer() {
 release_control_plane_backup_coordination_lease() {
   local lease_json=""
   local now=""
+  local released_json=""
 
   stop_control_plane_backup_coordination_lease_renewer
   [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || return 0
   lease_json="$(control_plane_backup_coordination_lease_json)" || return 1
   [[ -n "$(trim_field "${lease_json}")" ]] || return 1
   now="$(control_plane_backup_coordination_now)" || return 1
-  control_plane_backup_coordination_patch_owned "${lease_json}" release "${now}" || return 1
+  released_json="$(control_plane_backup_coordination_patch_owned \
+    "${lease_json}" release "${now}" json)" || return 1
+  if ! RELEASED_LEASE_JSON="${released_json}" python3 -c '
+import json
+import os
+
+doc = json.loads(os.environ["RELEASED_LEASE_JSON"])
+metadata = doc.get("metadata") or {}
+annotations = metadata.get("annotations") or {}
+spec = doc.get("spec") or {}
+if str(spec.get("holderIdentity") or ""):
+    raise SystemExit(1)
+if "fugue.pro/coordination-token" in annotations:
+    raise SystemExit(1)
+if "fugue.pro/recovery-required" in annotations:
+    raise SystemExit(1)
+if int(spec.get("leaseDurationSeconds") or 0) < 1:
+    raise SystemExit(1)
+'; then
+    log_stderr "owner-CAS Lease release response did not prove an empty holder with both recovery annotations cleared"
+    return 1
+  fi
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD="false"
 }
 
@@ -4117,8 +4230,9 @@ acquire_control_plane_backup_coordination_lease() {
   local recovery_required="false"
   local now=""
 
-  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED}" == "true" ]] || return 0
-  [[ "${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API}" == "true" ]] || return 0
+  # The Lease is also the durable pre-Helm recovery fence. Acquire it for
+  # every control-plane release, even when database-backup draining is not
+  # configured for the selected PostgreSQL mode.
   initialize_control_plane_backup_coordination_health || {
     log_stderr "cannot initialize the backup coordination health record"
     return 1
@@ -4482,7 +4596,8 @@ retry() {
 
   local i
   for ((i=1; i<=attempts; i++)); do
-    if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+    if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]] &&
+      ! control_plane_release_recovery_active; then
       require_control_plane_backup_coordination_or_abort "retry attempt ${i}/${attempts}"
     fi
     if "$@"; then
@@ -4500,6 +4615,1393 @@ helm_current_revision() {
   run_release_long_command "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
     "Helm revision read" helm history "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --max 1 |
     awk 'NR==2 {print $1}'
+}
+
+control_plane_release_pre_helm_revision_unchanged() {
+  local current_revision=""
+
+  [[ "${PREVIOUS_REVISION:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+  current_revision="$(helm_current_revision)" || return 1
+  [[ "${current_revision}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "${current_revision}" != "${PREVIOUS_REVISION}" ]]; then
+    log_stderr "Helm revision drifted after the fenced checkpoint: expected=${PREVIOUS_REVISION} actual=${current_revision}"
+    return 1
+  fi
+}
+
+control_plane_release_sha256_stream() {
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+
+initialize_control_plane_release_evidence() {
+  local evidence_dir="${FUGUE_RELEASE_ATTRIBUTION_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fugue-release}"
+  local work_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+  local prepared=""
+  local prepared_evidence_dir=""
+  local prepared_work_dir=""
+  local prepared_evidence_device=""
+  local prepared_evidence_inode=""
+  local prepared_work_device=""
+  local prepared_work_inode=""
+  local prepared_run_nonce=""
+
+  if [[ "${CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED:-false}" == "true" ]]; then
+    return 0
+  fi
+  [[ "${evidence_dir}" == /* && "${work_root}" == /* ]] || return 1
+  [[ "${evidence_dir}" != *$'\n'* && "${evidence_dir}" != *$'\t'* &&
+    "${work_root}" != *$'\n'* && "${work_root}" != *$'\t'* ]] || return 1
+prepared="$(python3 - \
+    "${evidence_dir}" "${work_root}" \
+    "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-0}" \
+    "${GITHUB_SHA:-${FUGUE_RELEASE_AFTER_SHA:-}}" <<'PY'
+import json
+import os
+import secrets
+import stat
+import sys
+from datetime import datetime, timezone
+
+evidence_input, work_input, run_id, run_attempt, head_sha = sys.argv[1:]
+uid = os.geteuid()
+
+def reject_untrusted_lexical_symlinks(path):
+    current = os.sep
+    for component in [part for part in path.split(os.sep) if part]:
+        current = os.path.join(current, component)
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISLNK(metadata.st_mode):
+            continue
+        # macOS exposes only these two root-owned compatibility aliases. Every
+        # other symlink ancestor is rejected, including one created by a root
+        # runner in an otherwise writable artifact tree.
+        trusted_aliases = {"/tmp": "/private/tmp", "/var": "/private/var"}
+        if (
+            current not in trusted_aliases
+            or metadata.st_uid != 0
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or os.path.realpath(current) != trusted_aliases[current]
+        ):
+            raise SystemExit(2)
+
+def canonical(path):
+    if not os.path.isabs(path):
+        raise SystemExit(2)
+    reject_untrusted_lexical_symlinks(path)
+    resolved = os.path.realpath(path)
+    if not os.path.isabs(resolved):
+        raise SystemExit(2)
+    return resolved
+
+def open_secure_directory(path, require_final_owner, create):
+    components = [part for part in path.split(os.sep) if part]
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(os.sep, flags)
+    try:
+        for index, component in enumerate(components):
+            final = index == len(components) - 1
+            try:
+                metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                if not create:
+                    raise SystemExit(2)
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise SystemExit(2)
+            mode = stat.S_IMODE(metadata.st_mode)
+            trusted_sticky_root = metadata.st_uid == 0 and bool(mode & stat.S_ISVTX)
+            if mode & 0o022 and not trusted_sticky_root:
+                raise SystemExit(2)
+            if metadata.st_uid not in {0, uid}:
+                raise SystemExit(2)
+            if final and require_final_owner and metadata.st_uid != uid:
+                raise SystemExit(2)
+            next_descriptor = os.open(component, flags | nofollow, dir_fd=descriptor)
+            opened = os.fstat(next_descriptor)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                os.close(next_descriptor)
+                raise SystemExit(2)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+def read_json_at(directory_fd, name):
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != uid or stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise SystemExit(2)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            payload = json.load(stream)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return payload
+
+def atomic_json_at(directory_fd, name, payload):
+    temporary = ".fugue-release-evidence-" + secrets.token_hex(16) + ".tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(payload, stream, indent=2, sort_keys=True, separators=(",", ": "))
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+evidence_dir = canonical(evidence_input)
+work_root = canonical(work_input)
+if work_root == os.sep or evidence_dir == work_root or os.path.commonpath((evidence_dir, work_root)) != work_root:
+    raise SystemExit(2)
+evidence_fd = open_secure_directory(evidence_dir, True, True)
+work_root_fd = open_secure_directory(work_root, False, True)
+expected = (
+    "release-evidence-run.json",
+    "release-pre-state.json",
+    "release-failed-state.json",
+    "release-rollback-state.json",
+    "rollback-result.json",
+    "release-result.json",
+)
+try:
+    entries = set(os.listdir(evidence_fd))
+    trusted_marker = False
+    if expected[0] in entries:
+        marker = read_json_at(evidence_fd, expected[0])
+        trusted_marker = (
+            isinstance(marker, dict)
+            and marker.get("schema_version") == 1
+            and marker.get("producer") == "fugue-control-plane-release-evidence"
+        )
+        if not trusted_marker:
+            raise SystemExit(2)
+    stale = [name for name in expected if name in entries]
+    if stale and not trusted_marker:
+        # Never delete an unowned same-name file merely because it sits in the
+        # configured artifact directory.
+        raise SystemExit(2)
+    # Keep the trusted old marker until all other known outputs are gone. A
+    # crash can then be retried safely instead of leaving unmarked stale files
+    # that permanently block the fixed artifact directory.
+    for name in (item for item in stale if item != expected[0]):
+        metadata = os.stat(name, dir_fd=evidence_fd, follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != uid:
+            raise SystemExit(2)
+        os.unlink(name, dir_fd=evidence_fd)
+    if any(item != expected[0] for item in stale):
+        os.fsync(evidence_fd)
+
+    work_name = "fugue-release-state." + secrets.token_hex(16)
+    os.mkdir(work_name, 0o700, dir_fd=work_root_fd)
+    work_dir = os.path.join(work_root, work_name)
+    work_fd = open_secure_directory(work_dir, True, False)
+    work_metadata = os.fstat(work_fd)
+    os.close(work_fd)
+    run_nonce = secrets.token_hex(16)
+    marker = {
+        "schema_version": 1,
+        "producer": "fugue-control-plane-release-evidence",
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        "run_id": str(run_id)[:128],
+        "run_attempt": str(run_attempt)[:32],
+        "head_sha": str(head_sha)[:128],
+        "run_nonce": run_nonce,
+    }
+    atomic_json_at(evidence_fd, expected[0], marker)
+    evidence_metadata = os.fstat(evidence_fd)
+finally:
+    os.close(work_root_fd)
+    os.close(evidence_fd)
+
+print("\t".join((
+    evidence_dir,
+    work_dir,
+    str(evidence_metadata.st_dev),
+    str(evidence_metadata.st_ino),
+    str(work_metadata.st_dev),
+    str(work_metadata.st_ino),
+    run_nonce,
+)))
+PY
+)" || return 1
+  IFS=$'\t' read -r prepared_evidence_dir prepared_work_dir \
+    prepared_evidence_device prepared_evidence_inode \
+    prepared_work_device prepared_work_inode prepared_run_nonce <<<"${prepared}"
+  [[ -n "${prepared_evidence_dir}" && -n "${prepared_work_dir}" &&
+    "${prepared_evidence_device}" =~ ^[0-9]+$ && "${prepared_evidence_inode}" =~ ^[0-9]+$ &&
+    "${prepared_work_device}" =~ ^[0-9]+$ && "${prepared_work_inode}" =~ ^[0-9]+$ &&
+    "${prepared_run_nonce}" =~ ^[0-9a-f]{32}$ ]] || return 1
+  CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR="${prepared_work_dir}"
+  CONTROL_PLANE_RELEASE_EVIDENCE_DIR="${prepared_evidence_dir}"
+  CONTROL_PLANE_RELEASE_EVIDENCE_DIR_DEVICE="${prepared_evidence_device}"
+  CONTROL_PLANE_RELEASE_EVIDENCE_DIR_INODE="${prepared_evidence_inode}"
+  CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE="${prepared_work_device}"
+  CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE="${prepared_work_inode}"
+  CONTROL_PLANE_RELEASE_EVIDENCE_RUN_NONCE="${prepared_run_nonce}"
+  CONTROL_PLANE_RELEASE_RUN_MARKER_FILE="${prepared_evidence_dir}/release-evidence-run.json"
+  CONTROL_PLANE_RELEASE_PRE_STATE_FILE="${prepared_evidence_dir}/release-pre-state.json"
+  CONTROL_PLANE_RELEASE_FENCED_STATE_FILE="${prepared_work_dir}/fenced-state.json"
+  CONTROL_PLANE_RELEASE_FAILED_STATE_FILE="${prepared_evidence_dir}/release-failed-state.json"
+  CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE="${prepared_evidence_dir}/release-rollback-state.json"
+  CONTROL_PLANE_RELEASE_FINAL_STATE_FILE="${prepared_work_dir}/final-state.json"
+  CONTROL_PLANE_RELEASE_ROLLBACK_RESULT_FILE="${prepared_evidence_dir}/rollback-result.json"
+  CONTROL_PLANE_RELEASE_RESULT_FILE="${prepared_evidence_dir}/release-result.json"
+  CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED="true"
+}
+
+control_plane_release_atomic_publish_json() {
+  local source_file="$1"
+  local destination_file="$2"
+
+  python3 /dev/fd/3 "${source_file}" "${destination_file}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR_DEVICE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR_INODE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_RUN_NONCE}" 3<<'PY'
+import json
+import os
+import secrets
+import stat
+import sys
+
+(
+    source_path,
+    destination_path,
+    evidence_path,
+    evidence_device,
+    evidence_inode,
+    work_path,
+    work_device,
+    work_inode,
+    run_nonce,
+) = sys.argv[1:]
+if (source_path != "-" and not os.path.isabs(source_path)) or not os.path.isabs(destination_path):
+    raise SystemExit(2)
+parent = os.path.dirname(destination_path)
+name = os.path.basename(destination_path)
+if not parent or not name or name in {".", ".."}:
+    raise SystemExit(2)
+uid = os.geteuid()
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+expected_directories = {
+    evidence_path: (int(evidence_device), int(evidence_inode)),
+    work_path: (int(work_device), int(work_inode)),
+}
+if parent not in expected_directories or (source_path != "-" and os.path.dirname(source_path) != work_path):
+    raise SystemExit(2)
+directory_fd = os.open(parent, flags)
+try:
+    directory = os.fstat(directory_fd)
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or directory.st_uid != uid
+        or stat.S_IMODE(directory.st_mode) & 0o022
+        or (directory.st_dev, directory.st_ino) != expected_directories[parent]
+    ):
+        raise SystemExit(2)
+    evidence_fd = os.open(evidence_path, flags)
+    try:
+        evidence_metadata = os.fstat(evidence_fd)
+        if (evidence_metadata.st_dev, evidence_metadata.st_ino) != expected_directories[evidence_path]:
+            raise SystemExit(2)
+        marker_fd = os.open(
+            "release-evidence-run.json",
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=evidence_fd,
+        )
+        try:
+            marker_metadata = os.fstat(marker_fd)
+            if (
+                not stat.S_ISREG(marker_metadata.st_mode)
+                or marker_metadata.st_uid != uid
+                or stat.S_IMODE(marker_metadata.st_mode) != 0o600
+                or marker_metadata.st_size > 65536
+            ):
+                raise SystemExit(2)
+            with os.fdopen(marker_fd, "r", encoding="utf-8") as marker_stream:
+                marker_fd = -1
+                marker = json.load(marker_stream)
+        finally:
+            if marker_fd >= 0:
+                os.close(marker_fd)
+        if marker.get("producer") != "fugue-control-plane-release-evidence" or marker.get("run_nonce") != run_nonce:
+            raise SystemExit(2)
+    finally:
+        os.close(evidence_fd)
+    try:
+        existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and (not stat.S_ISREG(existing.st_mode) or existing.st_uid != uid):
+        raise SystemExit(2)
+    if source_path == "-":
+        payload = json.load(sys.stdin)
+    else:
+        work_fd = os.open(work_path, flags)
+        work_metadata = os.fstat(work_fd)
+        if (work_metadata.st_dev, work_metadata.st_ino) != expected_directories[work_path]:
+            os.close(work_fd)
+            raise SystemExit(2)
+        source_fd = os.open(
+            os.path.basename(source_path),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=work_fd,
+        )
+        try:
+            source_metadata = os.fstat(source_fd)
+            if not stat.S_ISREG(source_metadata.st_mode) or source_metadata.st_uid != uid:
+                raise SystemExit(2)
+            with os.fdopen(source_fd, "r", encoding="utf-8") as source:
+                source_fd = -1
+                payload = json.load(source)
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
+            os.close(work_fd)
+    temporary = ".fugue-release-evidence-" + secrets.token_hex(16) + ".tmp"
+    target_fd = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        os.fchmod(target_fd, 0o600)
+        with os.fdopen(target_fd, "w", encoding="utf-8") as target:
+            target_fd = -1
+            json.dump(payload, target, indent=2, sort_keys=True, separators=(",", ": "))
+            target.write("\n")
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        if target_fd >= 0:
+            os.close(target_fd)
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+finally:
+    os.close(directory_fd)
+PY
+}
+
+control_plane_release_secure_read_json() {
+  local source_file="$1"
+
+  python3 - "${source_file}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR_DEVICE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_DIR_INODE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_RUN_NONCE}" <<'PY'
+import json
+import os
+import stat
+import sys
+
+(
+    source_path,
+    evidence_path,
+    evidence_device,
+    evidence_inode,
+    work_path,
+    work_device,
+    work_inode,
+    run_nonce,
+) = sys.argv[1:]
+uid = os.geteuid()
+parent = os.path.dirname(source_path)
+name = os.path.basename(source_path)
+expected = {
+    evidence_path: (int(evidence_device), int(evidence_inode)),
+    work_path: (int(work_device), int(work_inode)),
+}
+if parent not in expected or not name or name in {".", ".."}:
+    raise SystemExit(2)
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+def open_bound_directory(path):
+    descriptor = os.open(path, directory_flags)
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != uid
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+        or (metadata.st_dev, metadata.st_ino) != expected[path]
+    ):
+        os.close(descriptor)
+        raise SystemExit(2)
+    return descriptor
+
+evidence_fd = open_bound_directory(evidence_path)
+try:
+    marker_fd = os.open(
+        "release-evidence-run.json",
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=evidence_fd,
+    )
+    try:
+        marker_metadata = os.fstat(marker_fd)
+        if not stat.S_ISREG(marker_metadata.st_mode) or marker_metadata.st_uid != uid or marker_metadata.st_size > 65536:
+            raise SystemExit(2)
+        with os.fdopen(marker_fd, "r", encoding="utf-8") as marker_stream:
+            marker_fd = -1
+            marker = json.load(marker_stream)
+    finally:
+        if marker_fd >= 0:
+            os.close(marker_fd)
+    if marker.get("producer") != "fugue-control-plane-release-evidence" or marker.get("run_nonce") != run_nonce:
+        raise SystemExit(2)
+finally:
+    os.close(evidence_fd)
+
+directory_fd = open_bound_directory(parent)
+try:
+    source_fd = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:
+        metadata = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != uid
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 8 * 1024 * 1024
+        ):
+            raise SystemExit(2)
+        with os.fdopen(source_fd, "r", encoding="utf-8") as stream:
+            source_fd = -1
+            payload = json.load(stream)
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+finally:
+    os.close(directory_fd)
+json.dump(payload, sys.stdout, sort_keys=True, separators=(",", ":"))
+sys.stdout.write("\n")
+PY
+}
+
+cleanup_control_plane_release_evidence_work_dir() {
+  local work_dir="${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR:-}"
+
+  [[ -n "${work_dir}" ]] || return 0
+  python3 - "${work_dir}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE}" \
+    "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE}" <<'PY'
+import os
+import secrets
+import stat
+import sys
+
+path, expected_device, expected_inode = sys.argv[1:]
+expected = (int(expected_device), int(expected_inode))
+parent = os.path.dirname(path)
+name = os.path.basename(path)
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+parent_fd = os.open(parent, directory_flags)
+
+def quarantine_name(directory_fd):
+    for _ in range(16):
+        candidate = ".fugue-cleanup-" + secrets.token_hex(16)
+        try:
+            os.stat(candidate, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return candidate
+    raise SystemExit(2)
+
+def quarantine_entry(directory_fd, entry, expected_metadata):
+    quarantined = quarantine_name(directory_fd)
+    os.rename(entry, quarantined, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    observed = os.stat(quarantined, dir_fd=directory_fd, follow_symlinks=False)
+    if (observed.st_dev, observed.st_ino) != (expected_metadata.st_dev, expected_metadata.st_ino):
+        raise SystemExit(2)
+    return quarantined
+
+def remove_contents(directory_fd):
+    for entry in os.listdir(directory_fd):
+        metadata = os.stat(entry, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode):
+            child_fd = os.open(entry, directory_flags, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise SystemExit(2)
+                quarantined = quarantine_entry(directory_fd, entry, opened)
+                remove_contents(child_fd)
+                final = os.stat(quarantined, dir_fd=directory_fd, follow_symlinks=False)
+                if (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise SystemExit(2)
+            finally:
+                os.close(child_fd)
+            os.rmdir(quarantined, dir_fd=directory_fd)
+        else:
+            quarantined = quarantine_entry(directory_fd, entry, metadata)
+            os.unlink(quarantined, dir_fd=directory_fd)
+
+try:
+    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != expected:
+        raise SystemExit(2)
+    work_fd = os.open(name, directory_flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(work_fd)
+        if (opened.st_dev, opened.st_ino) != expected or opened.st_uid != os.geteuid():
+            raise SystemExit(2)
+        quarantined_work = quarantine_entry(parent_fd, name, opened)
+        remove_contents(work_fd)
+        final = os.stat(quarantined_work, dir_fd=parent_fd, follow_symlinks=False)
+        if (final.st_dev, final.st_ino) != expected:
+            raise SystemExit(2)
+    finally:
+        os.close(work_fd)
+    os.rmdir(quarantined_work, dir_fd=parent_fd)
+finally:
+    os.close(parent_fd)
+PY
+}
+
+control_plane_release_helm_content_for_evidence() {
+  local content_kind="$1"
+  local revision="$2"
+  local timeout_seconds="${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}"
+
+  case "${content_kind}" in
+    manifest)
+      run_release_long_command "${timeout_seconds}" "release evidence Helm manifest revision ${revision}" \
+        helm get manifest "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}"
+      ;;
+    values_all)
+      run_release_long_command "${timeout_seconds}" "release evidence Helm values revision ${revision}" \
+        helm get values "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --all --revision "${revision}"
+      ;;
+    hooks)
+      run_release_long_command "${timeout_seconds}" "release evidence Helm hooks revision ${revision}" \
+        helm get hooks "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" --revision "${revision}"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+control_plane_release_workload_templates_for_evidence() {
+  release_bounded_kubectl \
+    "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "release evidence workload templates" \
+    -n "${FUGUE_NAMESPACE}" get deployment,daemonset \
+    -l "app.kubernetes.io/instance=${FUGUE_RELEASE_NAME}" -o json
+}
+
+control_plane_release_ready_pods_for_evidence() {
+  release_bounded_kubectl \
+    "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS:-15}" \
+    "release evidence Ready Pod image IDs" \
+    -n "${FUGUE_NAMESPACE}" get pods \
+    -l "app.kubernetes.io/instance=${FUGUE_RELEASE_NAME}" -o json
+}
+
+control_plane_release_workload_template_images_hash() {
+  python3 -c '
+import hashlib
+import json
+import sys
+
+doc = json.load(sys.stdin)
+items = doc.get("items") if isinstance(doc, dict) else None
+if not isinstance(items, list) or not items:
+    raise SystemExit(2)
+records = set()
+for item in items:
+    if not isinstance(item, dict) or item.get("kind") not in {"Deployment", "DaemonSet"}:
+        raise SystemExit(2)
+    metadata = item.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    name = metadata.get("name")
+    if not isinstance(labels, dict):
+        raise SystemExit(2)
+    component = labels.get("app.kubernetes.io/component")
+    if component is None:
+        component = ""
+    if not isinstance(component, str) or not isinstance(name, str) or not name:
+        raise SystemExit(2)
+    pod_spec = (((item.get("spec") or {}).get("template") or {}).get("spec") or {})
+    found = False
+    for field, prefix in (("initContainers", "init"), ("containers", "container")):
+        containers = pod_spec.get(field) or []
+        if not isinstance(containers, list):
+            raise SystemExit(2)
+        for container in containers:
+            if not isinstance(container, dict):
+                raise SystemExit(2)
+            container_name = container.get("name")
+            image = container.get("image")
+            if not isinstance(container_name, str) or not container_name or not isinstance(image, str) or not image:
+                raise SystemExit(2)
+            # Stable workload kind/name and container identity are authoritative;
+            # the optional component label is retained as an additional drift
+            # signal and canonicalizes to an empty string when absent.
+            records.add((item["kind"], name, component, prefix, container_name, image))
+            found = True
+    if not found:
+        raise SystemExit(2)
+canonical = json.dumps(sorted(records), ensure_ascii=True, separators=(",", ":"))
+print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+'
+}
+
+control_plane_release_ready_pod_image_ids_summary() {
+  local state_role="${1:-final}"
+
+  RELEASE_EVIDENCE_STATE_ROLE="${state_role}" python3 -c '
+import hashlib
+import json
+import os
+import re
+import sys
+
+role = os.environ.get("RELEASE_EVIDENCE_STATE_ROLE", "")
+if role not in {"pre", "fenced", "failed", "rollback-result", "final"}:
+    raise SystemExit(2)
+doc = json.load(sys.stdin)
+items = doc.get("items") if isinstance(doc, dict) else None
+if not isinstance(items, list):
+    raise SystemExit(2)
+image_digests_by_container = {}
+ready_pods = 0
+for item in items:
+    if not isinstance(item, dict):
+        raise SystemExit(2)
+    metadata = item.get("metadata") or {}
+    labels = metadata.get("labels") or {}
+    status = item.get("status") or {}
+    if not isinstance(labels, dict):
+        raise SystemExit(2)
+    component = labels.get("app.kubernetes.io/component")
+    if component is None:
+        component = ""
+    if not isinstance(component, str):
+        raise SystemExit(2)
+    conditions = status.get("conditions") or []
+    if not isinstance(conditions, list):
+        raise SystemExit(2)
+    ready = status.get("phase") == "Running" and any(
+        isinstance(condition, dict)
+        and condition.get("type") == "Ready"
+        and condition.get("status") == "True"
+        for condition in conditions
+    )
+    if not ready:
+        continue
+    owner_references = metadata.get("ownerReferences") or []
+    if not isinstance(owner_references, list):
+        raise SystemExit(2)
+    controllers = [
+        owner
+        for owner in owner_references
+        if isinstance(owner, dict) and owner.get("controller") is True
+    ]
+    if len(controllers) != 1:
+        raise SystemExit(2)
+    owner = controllers[0]
+    owner_kind = owner.get("kind")
+    owner_name = owner.get("name")
+    if not isinstance(owner_name, str) or not owner_name:
+        raise SystemExit(2)
+    if owner_kind == "DaemonSet":
+        stable_owner = ("DaemonSet", owner_name)
+    elif owner_kind == "ReplicaSet":
+        template_hash = labels.get("pod-template-hash")
+        if (
+            not isinstance(template_hash, str)
+            or not template_hash
+            or not owner_name.endswith("-" + template_hash)
+        ):
+            raise SystemExit(2)
+        stable_owner = ("Deployment", owner_name[: -(len(template_hash) + 1)])
+    else:
+        # Stateful and operator-managed Pods (for example CNPG) are not part
+        # of the Deployment/DaemonSet release image cohort.
+        continue
+    stable_workload = (
+        stable_owner[0],
+        stable_owner[1],
+        component,
+        str(labels.get("fugue.io/rollout-subsystem") or ""),
+        str(labels.get("fugue.io/rollout-mode") or ""),
+        str(labels.get("fugue.io/edge-slot") or ""),
+    )
+    ready_pods += 1
+    found = False
+    for field, prefix in (("initContainerStatuses", "init"), ("containerStatuses", "container")):
+        statuses = status.get(field) or []
+        if not isinstance(statuses, list):
+            raise SystemExit(2)
+        for container_status in statuses:
+            if not isinstance(container_status, dict):
+                raise SystemExit(2)
+            container_name = container_status.get("name")
+            image_id = container_status.get("imageID")
+            if not isinstance(container_name, str) or not container_name or not isinstance(image_id, str) or not image_id:
+                raise SystemExit(2)
+            scheme_match = re.fullmatch(
+                r"(?:docker-pullable|docker|containerd|cri-o)://(.+)",
+                image_id,
+            )
+            if scheme_match is None:
+                raise SystemExit(2)
+            image_identity = scheme_match.group(1)
+            digest_markers = list(re.finditer(r"sha256:", image_identity, flags=re.IGNORECASE))
+            digest_match = re.search(r"sha256:[0-9a-f]{64}$", image_identity)
+            if (
+                len(digest_markers) != 1
+                or digest_match is None
+                or digest_match.start() != digest_markers[0].start()
+            ):
+                raise SystemExit(2)
+            canonical_digest = digest_match.group(0).lower()
+            key = stable_workload + (prefix, container_name)
+            image_digests_by_container.setdefault(key, set()).add(canonical_digest)
+            found = True
+    if not found:
+        raise SystemExit(2)
+if ready_pods == 0 or not image_digests_by_container:
+    raise SystemExit(2)
+mixed_count = sum(1 for image_digests in image_digests_by_container.values() if len(image_digests) != 1)
+if role != "failed" and mixed_count:
+    raise SystemExit(2)
+records = [
+    key + (tuple(sorted(image_digests)),)
+    for key, image_digests in image_digests_by_container.items()
+]
+canonical = json.dumps(sorted(records), ensure_ascii=True, separators=(",", ":"))
+print(hashlib.sha256(canonical.encode("utf-8")).hexdigest() + "|" + str(mixed_count))
+'
+}
+
+control_plane_release_ready_pod_image_ids_hash() {
+  local state_role="${1:-final}"
+  local summary=""
+
+  summary="$(control_plane_release_ready_pod_image_ids_summary "${state_role}")" || return 1
+  [[ "${summary}" =~ ^[0-9a-f]{64}\|[0-9]+$ ]] || return 1
+  printf '%s\n' "${summary%%|*}"
+}
+
+
+control_plane_release_chart_identity_hash() {
+  local chart_file="${FUGUE_HELM_CHART_PATH%/}/Chart.yaml"
+
+  [[ -f "${chart_file}" ]] || return 1
+  python3 - "${chart_file}" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.sha256(handle.read()).hexdigest())
+PY
+}
+
+write_control_plane_release_state_file() {
+  local destination_file="$1"
+  local state_role="$2"
+  local revision="$3"
+  local live_revision="$4"
+  local manifest_hash="$5"
+  local values_hash="$6"
+  local hooks_hash="$7"
+  local template_images_hash="$8"
+  local runtime_image_ids_hash="$9"
+  local runtime_mixed_container_count="${10}"
+  local chart_identity_hash="${11}"
+
+  if ! python3 - "${state_role}" "${revision}" "${live_revision}" \
+    "${manifest_hash}" "${values_hash}" "${hooks_hash}" \
+    "${template_images_hash}" "${runtime_image_ids_hash}" "${runtime_mixed_container_count}" \
+    "${chart_identity_hash}" \
+    "${FUGUE_RELEASE_NAME:-}" "${FUGUE_NAMESPACE:-}" "${FUGUE_HELM_CHART_PATH:-}" \
+    "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-0}" \
+    "${GITHUB_SHA:-${FUGUE_RELEASE_AFTER_SHA:-}}" <<'PY' | \
+    control_plane_release_atomic_publish_json - "${destination_file}"; then
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+
+(
+    role,
+    revision,
+    live_revision,
+    manifest_hash,
+    values_hash,
+    hooks_hash,
+    template_hash,
+    runtime_hash,
+    runtime_mixed_count,
+    chart_hash,
+    release_name,
+    namespace,
+    chart_path,
+    run_id,
+    run_attempt,
+    head_sha,
+) = sys.argv[1:]
+if (
+    role not in {"pre", "fenced", "failed", "rollback-result", "final"}
+    or not re.fullmatch(r"[1-9][0-9]*", revision)
+    or not re.fullmatch(r"[1-9][0-9]*", live_revision)
+    or not re.fullmatch(r"[0-9]+", runtime_mixed_count)
+):
+    raise SystemExit(2)
+runtime_mixed_count = int(runtime_mixed_count)
+if role != "failed" and runtime_mixed_count != 0:
+    raise SystemExit(2)
+hashes = (manifest_hash, values_hash, hooks_hash, template_hash, runtime_hash, chart_hash)
+if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes):
+    raise SystemExit(2)
+if not release_name or not namespace or not chart_path:
+    raise SystemExit(2)
+content = {
+    "helm_hooks_sha256": hooks_hash,
+    "helm_manifest_sha256": manifest_hash,
+    "helm_values_all_sha256": values_hash,
+    "ready_pod_component_container_image_ids_sha256": runtime_hash,
+    "ready_pod_mixed_container_count": runtime_mixed_count,
+    "workload_template_images_sha256": template_hash,
+}
+canonical = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+payload = {
+    "schema_version": 1,
+    "role": role,
+    "captured_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    "identity": {
+        "run_id": run_id[:128],
+        "run_attempt": run_attempt[:32],
+        "head_sha": head_sha[:128],
+        "release_name": release_name[:128],
+        "namespace": namespace[:128],
+        "chart_path": chart_path[:512],
+        "chart_yaml_sha256": chart_hash,
+    },
+    "helm": {
+        "revision": revision,
+        "live_revision": live_revision,
+        "manifest_sha256": manifest_hash,
+        "values_all_sha256": values_hash,
+        "hooks_sha256": hooks_hash,
+    },
+    "kubernetes": {
+        "workload_template_images_sha256": template_hash,
+        "ready_pod_component_container_image_ids_sha256": runtime_hash,
+        "ready_pod_mixed_container_count": runtime_mixed_count,
+        "ready_pod_mixed": runtime_mixed_count > 0,
+    },
+    "content_state_sha256": hashlib.sha256(canonical).hexdigest(),
+}
+json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PY
+    return 1
+  fi
+}
+
+capture_control_plane_release_state() {
+  local destination_file="$1"
+  local state_role="$2"
+  local revision="${3:-}"
+  local current_revision_before=""
+  local current_revision_after=""
+  local manifest_hash=""
+  local values_hash=""
+  local hooks_hash=""
+  local template_images_hash=""
+  local runtime_image_ids_hash=""
+  local runtime_image_ids_summary=""
+  local runtime_mixed_container_count=""
+  local chart_identity_hash=""
+
+  initialize_control_plane_release_evidence || return 1
+  case "${state_role}" in
+    pre|fenced|failed|rollback-result|final) ;;
+    *) return 2 ;;
+  esac
+  current_revision_before="$(helm_current_revision)" || return 1
+  [[ "${current_revision_before}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ -z "${revision}" ]]; then
+    revision="${current_revision_before}"
+  fi
+  [[ "${revision}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "${revision}" != "${current_revision_before}" ]]; then
+    return 1
+  fi
+  manifest_hash="$(control_plane_release_helm_content_for_evidence manifest "${revision}" | control_plane_release_sha256_stream)" || return 1
+  values_hash="$(control_plane_release_helm_content_for_evidence values_all "${revision}" | control_plane_release_sha256_stream)" || return 1
+  hooks_hash="$(control_plane_release_helm_content_for_evidence hooks "${revision}" | control_plane_release_sha256_stream)" || return 1
+  template_images_hash="$(control_plane_release_workload_templates_for_evidence | control_plane_release_workload_template_images_hash)" || return 1
+  runtime_image_ids_summary="$(control_plane_release_ready_pods_for_evidence | \
+    control_plane_release_ready_pod_image_ids_summary "${state_role}")" || return 1
+  [[ "${runtime_image_ids_summary}" =~ ^[0-9a-f]{64}\|[0-9]+$ ]] || return 1
+  runtime_image_ids_hash="${runtime_image_ids_summary%%|*}"
+  runtime_mixed_container_count="${runtime_image_ids_summary##*|}"
+  chart_identity_hash="$(control_plane_release_chart_identity_hash)" || return 1
+  current_revision_after="$(helm_current_revision)" || return 1
+  [[ "${current_revision_after}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${current_revision_before}" == "${current_revision_after}" ]] || return 1
+  if [[ "${revision}" != "${current_revision_after}" ]]; then
+    return 1
+  fi
+  write_control_plane_release_state_file "${destination_file}" "${state_role}" \
+    "${revision}" "${current_revision_before}" \
+    "${manifest_hash}" "${values_hash}" "${hooks_hash}" "${template_images_hash}" \
+    "${runtime_image_ids_hash}" "${runtime_mixed_container_count}" "${chart_identity_hash}"
+}
+
+control_plane_release_state_revision() {
+  local state_json=""
+
+  state_json="$(control_plane_release_secure_read_json "$1")" || return 1
+  STATE_JSON="${state_json}" python3 - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ["STATE_JSON"])
+revision = str((payload.get("helm") or {}).get("revision") or "")
+if not revision.isdigit() or revision.startswith("0"):
+    raise SystemExit(2)
+print(revision)
+PY
+}
+
+control_plane_release_states_match() {
+  local source_json=""
+  local result_json=""
+
+  source_json="$(control_plane_release_secure_read_json "$1")" || return 1
+  result_json="$(control_plane_release_secure_read_json "$2")" || return 1
+  SOURCE_STATE_JSON="${source_json}" RESULT_STATE_JSON="${result_json}" python3 - <<'PY'
+import json
+import os
+import sys
+
+source = json.loads(os.environ["SOURCE_STATE_JSON"])
+result = json.loads(os.environ["RESULT_STATE_JSON"])
+source_helm = source.get("helm") or {}
+result_helm = result.get("helm") or {}
+source_kube = source.get("kubernetes") or {}
+result_kube = result.get("kubernetes") or {}
+comparisons = (
+    source.get("identity") == result.get("identity"),
+    source_helm.get("manifest_sha256") == result_helm.get("manifest_sha256"),
+    source_helm.get("values_all_sha256") == result_helm.get("values_all_sha256"),
+    source_helm.get("hooks_sha256") == result_helm.get("hooks_sha256"),
+    source_kube.get("workload_template_images_sha256") == result_kube.get("workload_template_images_sha256"),
+    source_kube.get("ready_pod_component_container_image_ids_sha256")
+    == result_kube.get("ready_pod_component_container_image_ids_sha256"),
+)
+raise SystemExit(0 if all(comparisons) else 1)
+PY
+}
+
+control_plane_release_fenced_checkpoint_matches() {
+  local source_file="$1"
+  local checkpoint_file="$2"
+  local source_revision=""
+  local checkpoint_revision=""
+
+  control_plane_release_states_match "${source_file}" "${checkpoint_file}" || return 1
+  source_revision="$(control_plane_release_state_revision "${source_file}")" || return 1
+  checkpoint_revision="$(control_plane_release_state_revision "${checkpoint_file}")" || return 1
+  [[ "${source_revision}" == "${checkpoint_revision}" ]]
+}
+
+write_control_plane_release_pre_state_evidence() {
+  initialize_control_plane_release_evidence || return 1
+  [[ "${PREVIOUS_REVISION:-}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if ! capture_control_plane_release_state \
+    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" pre "${PREVIOUS_REVISION}"; then
+    return 1
+  fi
+  CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED="true"
+}
+
+write_control_plane_release_rollback_result_evidence() {
+  local failed_state_captured="$1"
+  local rollback_execution_passed="$2"
+  local result_state_captured="$3"
+  local outcome="$4"
+  local pre_state_json=""
+  local failed_state_json=""
+  local result_state_json=""
+
+  pre_state_json="$(control_plane_release_secure_read_json \
+    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}")" || return 1
+  if [[ "${failed_state_captured}" == "true" ]]; then
+    failed_state_json="$(control_plane_release_secure_read_json \
+      "${CONTROL_PLANE_RELEASE_FAILED_STATE_FILE}")" || return 1
+  fi
+  if [[ "${result_state_captured}" == "true" ]]; then
+    result_state_json="$(control_plane_release_secure_read_json \
+      "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}")" || return 1
+  fi
+
+  if ! PRE_STATE_JSON="${pre_state_json}" \
+    FAILED_STATE_JSON="${failed_state_json}" RESULT_STATE_JSON="${result_state_json}" \
+    python3 - "${failed_state_captured}" "${rollback_execution_passed}" \
+    "${result_state_captured}" "${outcome}" \
+    <<'PY' | control_plane_release_atomic_publish_json - \
+      "${CONTROL_PLANE_RELEASE_ROLLBACK_RESULT_FILE}"; then
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+failed_captured, rollback_passed, result_captured, outcome = sys.argv[1:]
+
+def boolean(value):
+    if value not in {"true", "false"}:
+        raise SystemExit(2)
+    return value == "true"
+
+def load(raw):
+    if not raw:
+        return None
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise SystemExit(2)
+    return payload
+
+def summary(payload):
+    if payload is None:
+        return None
+    helm = payload.get("helm") or {}
+    kube = payload.get("kubernetes") or {}
+    return {
+        "revision": str(helm.get("revision") or ""),
+        "manifest_sha256": str(helm.get("manifest_sha256") or ""),
+        "values_all_sha256": str(helm.get("values_all_sha256") or ""),
+        "hooks_sha256": str(helm.get("hooks_sha256") or ""),
+        "workload_template_images_sha256": str(kube.get("workload_template_images_sha256") or ""),
+        "ready_pod_component_container_image_ids_sha256": str(
+            kube.get("ready_pod_component_container_image_ids_sha256") or ""
+        ),
+        "ready_pod_mixed_container_count": int(kube.get("ready_pod_mixed_container_count") or 0),
+        "ready_pod_mixed": bool(kube.get("ready_pod_mixed") is True),
+        "content_state_sha256": str(payload.get("content_state_sha256") or ""),
+    }
+
+pre = load(os.environ["PRE_STATE_JSON"])
+failed = load(os.environ["FAILED_STATE_JSON"])
+result = load(os.environ["RESULT_STATE_JSON"])
+pre_summary = summary(pre)
+result_summary = summary(result)
+comparison_names = (
+    "manifest_sha256",
+    "values_all_sha256",
+    "hooks_sha256",
+    "workload_template_images_sha256",
+    "ready_pod_component_container_image_ids_sha256",
+)
+comparisons = {
+    name: bool(pre_summary is not None and result_summary is not None and pre_summary[name] == result_summary[name])
+    for name in comparison_names
+}
+comparisons["identity"] = bool(pre is not None and result is not None and pre.get("identity") == result.get("identity"))
+failed_gate = boolean(failed_captured)
+rollback_gate = boolean(rollback_passed)
+result_gate = boolean(result_captured)
+exact_match = all(comparisons.values())
+expected_outcome = "success" if failed_gate and rollback_gate and result_gate and exact_match else "failure"
+if outcome != expected_outcome:
+    raise SystemExit(2)
+payload = {
+    "schema_version": 1,
+    "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    "identity": dict((pre or {}).get("identity") or {}),
+    "source": summary(pre),
+    "failed": summary(failed),
+    "result": summary(result),
+    "gates": {
+        "failed_state_captured": failed_gate,
+        "rollback_execution_readiness_smoke_passed": rollback_gate,
+        "result_state_captured": result_gate,
+    },
+    "comparisons": comparisons,
+    "exact_state_match": exact_match,
+    "outcome": outcome,
+}
+json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PY
+    return 1
+  fi
+}
+
+write_control_plane_release_result_evidence() {
+  local outcome="$1"
+  local exit_status="$2"
+  local phase="$3"
+  local final_state_file="${4:-}"
+  local evidence_rollback_required="${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}"
+  local evidence_rollback_attempted="${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}"
+  local evidence_rollback_completed="${CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED:-false}"
+  local evidence_rollback_failed="${CONTROL_PLANE_RELEASE_ROLLBACK_FAILED:-false}"
+  local evidence_recovery_fence_required="${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED:-false}"
+  local evidence_recovery_fence_armed_phase="${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE:-}"
+  local evidence_recovery_fence_disposition="${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION:-not-armed}"
+  local evidence_helm_mutation_started="${CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED:-false}"
+  local evidence_committed="${CONTROL_PLANE_RELEASE_COMMITTED:-false}"
+  local pre_state_json=""
+  local final_state_json=""
+
+  initialize_control_plane_release_evidence || return 1
+  if [[ "${CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED:-false}" == "true" ]]; then
+    pre_state_json="$(control_plane_release_secure_read_json \
+      "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}")" || return 1
+  fi
+  if [[ -n "${final_state_file}" ]]; then
+    final_state_json="$(control_plane_release_secure_read_json \
+      "${final_state_file}")" || return 1
+  fi
+  if [[ "${outcome}" == "success" ]]; then
+    evidence_rollback_required="false"
+    evidence_rollback_attempted="false"
+    evidence_rollback_completed="false"
+    evidence_rollback_failed="false"
+    evidence_recovery_fence_required="false"
+    evidence_recovery_fence_disposition="committed"
+    evidence_committed="true"
+  fi
+  if ! PRE_STATE_JSON="${pre_state_json}" FINAL_STATE_JSON="${final_state_json}" python3 - \
+    "${outcome}" "${exit_status}" "${phase}" \
+    "${evidence_rollback_required}" \
+    "${evidence_rollback_attempted}" \
+    "${evidence_rollback_completed}" \
+    "${evidence_rollback_failed}" \
+    "${evidence_recovery_fence_required}" \
+    "${evidence_recovery_fence_armed_phase}" \
+    "${evidence_recovery_fence_disposition}" \
+    "${evidence_helm_mutation_started}" \
+    "${evidence_committed}" \
+    "${FUGUE_RELEASE_NAME:-}" "${FUGUE_NAMESPACE:-}" "${FUGUE_HELM_CHART_PATH:-}" \
+    "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-0}" \
+    "${GITHUB_SHA:-${FUGUE_RELEASE_AFTER_SHA:-}}" \
+    <<'PY' | control_plane_release_atomic_publish_json - \
+      "${CONTROL_PLANE_RELEASE_RESULT_FILE}"; then
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+(
+    outcome,
+    exit_status,
+    phase,
+    rollback_required,
+    rollback_attempted,
+    rollback_completed,
+    rollback_failed,
+    recovery_fence_required,
+    recovery_fence_armed_phase,
+    recovery_fence_disposition,
+    helm_mutation_started,
+    committed,
+    release_name,
+    namespace,
+    chart_path,
+    run_id,
+    run_attempt,
+    head_sha,
+) = sys.argv[1:]
+if outcome not in {"success", "failure", "commit-ready"} or not exit_status.isdigit():
+    raise SystemExit(2)
+
+def boolean(value):
+    if value not in {"true", "false"}:
+        raise SystemExit(2)
+    return value == "true"
+
+def load_state(raw):
+    if not raw:
+        return None
+    state = json.loads(raw)
+    if not isinstance(state, dict):
+        raise SystemExit(2)
+    return state
+
+def summary(state):
+    if state is None:
+        return None
+    helm = state.get("helm") or {}
+    kube = state.get("kubernetes") or {}
+    return {
+        "revision": str(helm.get("revision") or ""),
+        "manifest_sha256": str(helm.get("manifest_sha256") or ""),
+        "values_all_sha256": str(helm.get("values_all_sha256") or ""),
+        "hooks_sha256": str(helm.get("hooks_sha256") or ""),
+        "workload_template_images_sha256": str(kube.get("workload_template_images_sha256") or ""),
+        "ready_pod_component_container_image_ids_sha256": str(
+            kube.get("ready_pod_component_container_image_ids_sha256") or ""
+        ),
+        "ready_pod_mixed_container_count": int(kube.get("ready_pod_mixed_container_count") or 0),
+        "ready_pod_mixed": bool(kube.get("ready_pod_mixed") is True),
+        "content_state_sha256": str(state.get("content_state_sha256") or ""),
+    }
+
+def load_identity(state):
+    if state is None:
+        return None
+    identity = state.get("identity")
+    return dict(identity) if isinstance(identity, dict) else None
+
+pre_state = load_state(os.environ["PRE_STATE_JSON"])
+final_state = load_state(os.environ["FINAL_STATE_JSON"])
+identity = load_identity(pre_state) or {
+    "run_id": run_id[:128],
+    "run_attempt": run_attempt[:32],
+    "head_sha": head_sha[:128],
+    "release_name": release_name[:128],
+    "namespace": namespace[:128],
+    "chart_path": chart_path[:512],
+}
+
+payload = {
+    "schema_version": 1,
+    "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    "identity": identity,
+    "outcome": outcome,
+    "committed": boolean(committed),
+    "exit_status": int(exit_status),
+    "phase": str(phase or "unknown")[:160],
+    "source": summary(pre_state),
+    "final": summary(final_state),
+    "rollback": {
+        "required": boolean(rollback_required),
+        "attempted": boolean(rollback_attempted),
+        "completed": boolean(rollback_completed),
+        "failed": boolean(rollback_failed),
+    },
+    "recovery_fence": {
+        "required": boolean(recovery_fence_required),
+        "armed_phase": str(recovery_fence_armed_phase or "")[:160],
+        "helm_mutation_started": boolean(helm_mutation_started),
+        "disposition": str(recovery_fence_disposition or "unknown")[:160],
+    },
+}
+json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+sys.stdout.write("\n")
+PY
+    return 1
+  fi
+}
+
+write_control_plane_release_result_on_exit() {
+  local exit_status="$1"
+  local outcome="failure"
+  local phase="${CONTROL_PLANE_RELEASE_FAILURE_PHASE:-${CONTROL_PLANE_RELEASE_PHASE:-unknown}}"
+  local final_state_file=""
+
+  [[ "${FUGUE_UPGRADE_LIB_ONLY:-false}" != "true" ]] || return 0
+  [[ "${CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED:-false}" == "true" ]] || return 0
+  [[ "${CONTROL_PLANE_RELEASE_EVIDENCE_EXIT_WRITING:-false}" != "true" ]] || return 0
+  CONTROL_PLANE_RELEASE_EVIDENCE_EXIT_WRITING="true"
+  if [[ "${exit_status}" == "0" && "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
+    outcome="success"
+    phase="complete"
+  fi
+  if [[ -n "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE:-}" ]] &&
+    control_plane_release_secure_read_json \
+      "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}" >/dev/null 2>&1; then
+    final_state_file="${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}"
+  elif [[ -n "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE:-}" ]] &&
+    control_plane_release_secure_read_json \
+      "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" >/dev/null 2>&1; then
+    final_state_file="${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}"
+  fi
+  if ! write_control_plane_release_result_evidence \
+    "${outcome}" "${exit_status}" "${phase}" "${final_state_file}"; then
+    CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
+    log_stderr "could not atomically write release-result.json" || true
+    if [[ "${CONTROL_PLANE_RELEASE_MUTATION_OCCURRED:-false}" == "true" &&
+      "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" ]]; then
+      CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
+      [[ -n "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE:-}" ]] ||
+        CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE="release-result-evidence-write"
+      CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="evidence-write-failed"
+    fi
+    CONTROL_PLANE_RELEASE_EVIDENCE_EXIT_WRITING="false"
+    return 1
+  fi
+  CONTROL_PLANE_RELEASE_EVIDENCE_EXIT_WRITING="false"
+}
+
+finish_control_plane_release_recovery_transaction() {
+  local transaction_status="$1"
+  local pending_status="${CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS:-0}"
+  local phase="${CONTROL_PLANE_RELEASE_FAILURE_PHASE:-${CONTROL_PLANE_RELEASE_PHASE:-unknown}}"
+  local final_state_file=""
+
+  if [[ "${pending_status}" =~ ^(129|130|143)$ ]]; then
+    if [[ -n "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE:-}" ]] &&
+      control_plane_release_secure_read_json \
+        "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}" >/dev/null 2>&1; then
+      final_state_file="${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}"
+    elif [[ -n "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE:-}" ]] &&
+      control_plane_release_secure_read_json \
+        "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" >/dev/null 2>&1; then
+      final_state_file="${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}"
+    fi
+    if [[ "${CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED:-false}" == "true" ]]; then
+      if ! write_control_plane_release_result_evidence \
+        failure "${pending_status}" "${phase}" "${final_state_file}"; then
+        CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
+        CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
+        [[ -n "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE:-}" ]] ||
+          CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE="pending-signal-evidence-write"
+        CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="evidence-write-failed"
+        log_stderr "could not publish generic release evidence before honoring ${CONTROL_PLANE_RELEASE_PENDING_SIGNAL:-signal}"
+      fi
+    fi
+    CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS="false"
+    exit "${pending_status}"
+  fi
+  CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS="false"
+  return "${transaction_status}"
 }
 
 rollout_status() {
@@ -7253,13 +8755,28 @@ handle_control_plane_release_signal() {
   local signal_name="$1"
   local exit_status=1
 
-  [[ "${CONTROL_PLANE_RELEASE_SIGNAL_HANDLING:-false}" != "true" ]] || return 0
-  CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="true"
   case "${signal_name}" in
     HUP) exit_status=129 ;;
     INT) exit_status=130 ;;
     TERM) exit_status=143 ;;
+    *) return 2 ;;
   esac
+  if [[ ! "${CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS:-0}" =~ ^(129|130|143)$ ]]; then
+    CONTROL_PLANE_RELEASE_PENDING_SIGNAL="${signal_name}"
+    CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS="${exit_status}"
+    if [[ -z "${CONTROL_PLANE_RELEASE_FAILURE_PHASE:-}" ]]; then
+      CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE:-signal}"
+    fi
+  fi
+  if control_plane_release_recovery_active; then
+    # Recovery commands are already wall-bounded and consume only the reserved
+    # rollback/artifact budget. Defer the signal exit until failed-state,
+    # rollback-result, and generic evidence have been atomically published.
+    log_stderr "received ${signal_name} during recovery; deferring signal exit until the synchronous recovery transaction finishes"
+    return 0
+  fi
+  [[ "${CONTROL_PLANE_RELEASE_SIGNAL_HANDLING:-false}" != "true" ]] || return 0
+  CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="true"
   log_stderr "received ${signal_name}; terminating the active release process group before rollback"
   terminate_active_control_plane_release_command
   if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
@@ -7270,7 +8787,7 @@ handle_control_plane_release_signal() {
       log_stderr "rollback after ${signal_name} did not complete; preserving the Lease recovery fence"
     fi
   fi
-  exit "${exit_status}"
+  exit "${CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS:-${exit_status}}"
 }
 
 cleanup_tmp_artifacts() {
@@ -7288,8 +8805,10 @@ cleanup_tmp_artifacts() {
     log_stderr "abnormal exit after Helm mutation; attempting the reserved synchronous rollback"
     rollback_release_transaction || true
   fi
+  write_control_plane_release_result_on_exit "${exit_status}" || true
   if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" ||
-    "${CONTROL_PLANE_RELEASE_ROLLBACK_FAILED:-false}" == "true" ]]; then
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_FAILED:-false}" == "true" ||
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED:-false}" == "true" ]]; then
     release_lease="false"
   fi
   if [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" &&
@@ -7312,6 +8831,16 @@ cleanup_tmp_artifacts() {
   if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}" ]]; then
     rm -f "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".*.tmp
     CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
+  fi
+  if [[ -n "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR:-}" &&
+    -d "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" ]]; then
+    if cleanup_control_plane_release_evidence_work_dir; then
+      CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR=""
+      CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE=""
+      CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE=""
+    else
+      log_stderr "refusing to clean a replaced release-evidence work directory whose device/inode identity changed"
+    fi
   fi
   return "${exit_status}"
 }
@@ -14504,6 +16033,14 @@ rollback_release() {
 }
 
 rollback_release_transaction() {
+  local exact_evidence_required="${CONTROL_PLANE_RELEASE_PRE_STATE_CAPTURED:-false}"
+  local failed_state_captured="false"
+  local rollback_execution_passed="false"
+  local result_state_captured="false"
+  local exact_state_match="false"
+  local rollback_outcome="failure"
+  local rollback_result_written="false"
+
   if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED:-false}" == "true" ]]; then
     return 0
   fi
@@ -14511,17 +16048,86 @@ rollback_release_transaction() {
     return 1
   fi
 
+  CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS="true"
   CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="true"
+  if [[ -z "${CONTROL_PLANE_RELEASE_FAILURE_PHASE:-}" ]]; then
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE:-unknown}"
+  fi
+  if [[ "${exact_evidence_required}" == "true" ]]; then
+    CONTROL_PLANE_RELEASE_PHASE="rollback-failed-state-capture"
+    if capture_control_plane_release_state \
+      "${CONTROL_PLANE_RELEASE_FAILED_STATE_FILE}" failed; then
+      failed_state_captured="true"
+    else
+      log_stderr "could not capture the failed release state before rollback; rollback will proceed but cannot be certified"
+    fi
+  fi
+
+  CONTROL_PLANE_RELEASE_PHASE="rollback-execution"
   if rollback_release; then
+    rollback_execution_passed="true"
+  fi
+
+  if [[ "${exact_evidence_required}" != "true" ]]; then
+    if [[ "${rollback_execution_passed}" == "true" ]]; then
+      CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="true"
+      CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
+      CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
+      CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+      finish_control_plane_release_recovery_transaction 0
+      return $?
+    fi
+    CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
+    finish_control_plane_release_recovery_transaction 1
+    return $?
+  fi
+
+  CONTROL_PLANE_RELEASE_PHASE="rollback-result-state-capture"
+  if capture_control_plane_release_state \
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}" rollback-result; then
+    result_state_captured="true"
+    CONTROL_PLANE_RELEASE_FINAL_REVISION="$(control_plane_release_state_revision \
+      "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}")" || CONTROL_PLANE_RELEASE_FINAL_REVISION=""
+  else
+    log_stderr "could not capture the live result state after rollback readiness and smoke gates"
+  fi
+  if [[ "${result_state_captured}" == "true" ]] &&
+    control_plane_release_states_match \
+      "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" \
+      "${CONTROL_PLANE_RELEASE_ROLLBACK_STATE_FILE}"; then
+    exact_state_match="true"
+  fi
+  if [[ "${failed_state_captured}" == "true" &&
+    "${rollback_execution_passed}" == "true" &&
+    "${result_state_captured}" == "true" &&
+    "${exact_state_match}" == "true" ]]; then
+    rollback_outcome="success"
+  fi
+  if write_control_plane_release_rollback_result_evidence \
+    "${failed_state_captured}" "${rollback_execution_passed}" \
+    "${result_state_captured}" "${rollback_outcome}"; then
+    rollback_result_written="true"
+    CONTROL_PLANE_RELEASE_ROLLBACK_RESULT_WRITTEN="true"
+  else
+    CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
+    log_stderr "could not atomically write rollback-result.json"
+  fi
+
+  if [[ "${rollback_outcome}" == "success" && "${rollback_result_written}" == "true" ]]; then
     CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="true"
     CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
     CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
     CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
-    return 0
+    CONTROL_PLANE_RELEASE_PHASE="rollback-complete"
+    finish_control_plane_release_recovery_transaction 0
+    return $?
   fi
   CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"
   CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
-  return 1
+  CONTROL_PLANE_RELEASE_PHASE="rollback-failed"
+  finish_control_plane_release_recovery_transaction 1
+  return $?
 }
 
 prepare_release_domains() {
@@ -15912,6 +17518,18 @@ wait_for_post_deploy_robustness() {
 }
 
 main() {
+  FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
+  FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
+  FUGUE_HELM_CHART_PATH="${FUGUE_HELM_CHART_PATH:-deploy/helm/fugue}"
+  CONTROL_PLANE_RELEASE_PHASE="initializing-release-evidence"
+  trap cleanup_tmp_artifacts EXIT
+  trap 'handle_control_plane_release_signal HUP' HUP
+  trap 'handle_control_plane_release_signal INT' INT
+  trap 'handle_control_plane_release_signal TERM' TERM
+  if ! initialize_control_plane_release_evidence; then
+    fail "cannot initialize the atomic control-plane release evidence directory"
+  fi
+  CONTROL_PLANE_RELEASE_PHASE="configuration"
   require_env FUGUE_API_IMAGE_REPOSITORY
   require_env FUGUE_API_IMAGE_TAG
   require_env FUGUE_CONTROLLER_IMAGE_REPOSITORY
@@ -16035,11 +17653,7 @@ main() {
   export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
-  trap cleanup_tmp_artifacts EXIT
   trap handle_control_plane_backup_coordination_abort USR1
-  trap 'handle_control_plane_release_signal HUP' HUP
-  trap 'handle_control_plane_release_signal INT' INT
-  trap 'handle_control_plane_release_signal TERM' TERM
   apply_discovery_bundle_defaults || log "DiscoveryBundle not configured; release will require explicit runtime values"
   if ! ensure_kube_api_access; then
     log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"
@@ -16590,6 +18204,14 @@ PY
   validate_control_plane_release_job_budget
   validate_node_local_dns_release_budget_pre_mutation
   authoritative_dns_dig_preflight || fail "authoritative DNS DiG wire attestation failed before release mutation"
+  CONTROL_PLANE_RELEASE_PHASE="pre-mutation-state-capture"
+  PREVIOUS_REVISION="$(helm_current_revision)"
+  [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
+  if ! write_control_plane_release_pre_state_evidence; then
+    fail "failed to atomically persist release-pre-state.json before the first release mutation"
+  fi
+  CONTROL_PLANE_RELEASE_PHASE="coordination-acquire"
+  CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="true"
   if ! acquire_control_plane_backup_coordination_lease; then
     fail "control-plane backup coordination Lease acquisition failed before release mutation"
   fi
@@ -16597,6 +18219,25 @@ PY
     fail "control-plane backup did not reach a complete release point before release mutation"
   fi
   require_control_plane_backup_coordination_or_abort "first release mutation"
+  CONTROL_PLANE_RELEASE_PHASE="fenced-pre-mutation-state-checkpoint"
+  if ! capture_control_plane_release_state \
+    "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}" fenced; then
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE="fenced-pre-mutation-state-checkpoint"
+    fail "could not capture the fenced release state before the first host or Kubernetes workload mutation"
+  fi
+  if ! control_plane_release_fenced_checkpoint_matches \
+    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" \
+    "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}"; then
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE="fenced-pre-mutation-state-drift"
+    fail "release state drifted between pre-state capture and the fenced pre-mutation checkpoint"
+  fi
+  CONTROL_PLANE_RELEASE_PHASE="pre-helm-recovery-fence-arm"
+  if ! arm_control_plane_release_recovery_fence \
+    "pre-helm-non-revertible-mutation"; then
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE}"
+    fail "could not durably arm the recovery fence before the first non-Helm mutation"
+  fi
+  CONTROL_PLANE_RELEASE_PHASE="pre-helm-non-revertible-mutation"
 
   # Everything below may mutate a host, a Kubernetes object, or a release
   # artifact. The shared backup/release Lease is renewed until EXIT, including
@@ -16615,8 +18256,7 @@ PY
   require_control_plane_backup_coordination_or_abort "pre-deploy robustness baseline"
   capture_pre_deploy_robustness_baseline
 
-  PREVIOUS_REVISION="$(helm_current_revision)"
-  [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
+  CONTROL_PLANE_RELEASE_PHASE="pre-helm"
   if ! run_control_plane_rollback_image_preflight; then
     fail "rollback image preflight failed"
   fi
@@ -16731,6 +18371,10 @@ PY
   # can deadlock control-plane upgrades exactly when the new API needs to clean
   # up those stale nodes. We gate success on targeted API/controller rollout
   # checks plus the smoke test below instead.
+  CONTROL_PLANE_RELEASE_PHASE="pre-helm-final-revision-fence"
+  control_plane_release_pre_helm_revision_unchanged ||
+    fail "Helm revision changed or became unreadable immediately before upgrade; no Helm mutation or rollback was attempted and the pre-Helm recovery fence is retained"
+  CONTROL_PLANE_RELEASE_PHASE="helm-upgrade"
   CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"
   CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
   CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
@@ -16919,6 +18563,7 @@ PY
     rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "helm upgrade failed"
   fi
+  CONTROL_PLANE_RELEASE_PHASE="post-helm-validation"
 
   if ! run_dns_manifest_transaction_after_helm; then
     log "DNS manifest OnDelete transaction failed; attempting complete rollback"
@@ -17179,13 +18824,53 @@ PY
     rollback_release_transaction || fail "rollback failed; recovery fence retained"
     fail "DNS manifest transaction finalization failed"
   fi
+  CONTROL_PLANE_RELEASE_PHASE="final-state-capture"
+  if ! capture_control_plane_release_state \
+    "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" final; then
+    log "final release state evidence capture failed; attempting rollback"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final release state evidence capture failed"
+  fi
+  CONTROL_PLANE_RELEASE_FINAL_REVISION="$(control_plane_release_state_revision \
+    "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}")" || {
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "final release revision evidence is invalid"
+  }
+  current_revision="${CONTROL_PLANE_RELEASE_FINAL_REVISION}"
+  CONTROL_PLANE_RELEASE_PHASE="commit-ready-evidence-publication"
+  if ! write_control_plane_release_result_evidence \
+    commit-ready 0 commit-ready "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}"; then
+    CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
+    log "commit-ready release-result.json write failed; attempting rollback before commit"
+    rollback_release_transaction || fail "rollback failed; recovery fence retained"
+    fail "commit-ready release result evidence write failed"
+  fi
+  CONTROL_PLANE_RELEASE_PHASE="complete"
   CONTROL_PLANE_RELEASE_COMMITTED="true"
   CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
   CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-awaiting-lease-release"
   if ! write_dns_manifest_release_record_after_commit; then
     log_stderr "warning: committed DNS manifest release record could not be written; business state remains committed and no rollback was attempted" || true
   fi
   cleanup_finalized_dns_manifest_snapshot
+  CONTROL_PLANE_RELEASE_PHASE="post-commit-coordination-release"
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" != "true" ]] ||
+    ! release_control_plane_backup_coordination_lease; then
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-lease-release-failed"
+    fail "business state committed but the owner-CAS Lease release was not proven; success evidence was not published"
+  fi
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="false"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed"
+  CONTROL_PLANE_RELEASE_PHASE="post-commit-success-evidence-publication"
+  if ! write_control_plane_release_result_evidence \
+    success 0 complete "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}"; then
+    CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-success-evidence-write-failed"
+    fail "post-commit success evidence write failed after the Lease was safely released; no rollback was attempted"
+  fi
+  CONTROL_PLANE_RELEASE_PHASE="complete"
   log "upgrade complete; current Helm revision=${current_revision}"
 }
 
