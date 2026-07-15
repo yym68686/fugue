@@ -4062,6 +4062,73 @@ export FUGUE_UPGRADE_LIB_ONLY=true
 source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
 
 (
+  unset FUGUE_API_IMAGE_DIGEST FUGUE_CONTROLLER_IMAGE_DIGEST
+  unset FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST FUGUE_IMAGE_CACHE_IMAGE_DIGEST
+  CORE_IMAGE_DIGEST_HELM_SET_ARGS=(--set-string before=value)
+  build_core_image_digest_helm_set_args || fail "unset core image digests must be accepted"
+  assert_eq "${#CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}" "0" "unset core image digests add no Helm arguments"
+  set -- "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"
+  assert_eq "$#" "0" "unset core image digests expand to zero Helm argv entries under Bash nounset"
+)
+
+(
+  api_digest="sha256:$(printf '%064d' 0 | tr '0' 'a')"
+  controller_digest="sha256:$(printf '%064d' 0 | tr '0' 'b')"
+  telemetry_digest="sha256:$(printf '%064d' 0 | tr '0' 'c')"
+  image_cache_digest="sha256:$(printf '%064d' 0 | tr '0' 'd')"
+  FUGUE_API_IMAGE_DIGEST="${api_digest}"
+  FUGUE_CONTROLLER_IMAGE_DIGEST="${controller_digest}"
+  FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST="${telemetry_digest}"
+  FUGUE_IMAGE_CACHE_IMAGE_DIGEST="${image_cache_digest}"
+  build_core_image_digest_helm_set_args || fail "valid core image digests must be accepted"
+  expected_args="$(printf '%s\n' \
+    --set-string "api.image.digest=${api_digest}" \
+    --set-string "controller.image.digest=${controller_digest}" \
+    --set-string "observability.agent.image.digest=${telemetry_digest}" \
+    --set-string "imageCache.image.digest=${image_cache_digest}")"
+  assert_eq "$(printf '%s\n' "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}")" "${expected_args}" "valid core image digest Helm arguments"
+  set -- "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"
+  assert_eq "$#" "8" "four valid core image digests expand to eight Helm argv entries"
+)
+
+(
+  unset FUGUE_API_IMAGE_DIGEST FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST
+  unset FUGUE_IMAGE_CACHE_IMAGE_DIGEST
+  FUGUE_CONTROLLER_IMAGE_DIGEST=
+  build_core_image_digest_helm_set_args || fail "an explicitly empty core image digest must be accepted"
+  assert_eq "$(printf '%s\n' "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}")" $'--set-string\ncontroller.image.digest=' "explicit empty core image digest clears the Helm value"
+)
+
+for malformed_digest in sha256:abcd "sha256:$(printf '%064d' 0 | tr '0' 'A')" " sha256:$(printf '%064d' 0)"; do
+  (
+    unset FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST FUGUE_IMAGE_CACHE_IMAGE_DIGEST
+    FUGUE_API_IMAGE_DIGEST="sha256:$(printf '%064d' 0 | tr '0' 'a')"
+    FUGUE_CONTROLLER_IMAGE_DIGEST="${malformed_digest}"
+    CORE_IMAGE_DIGEST_HELM_SET_ARGS=(--set-string before=value)
+    if build_core_image_digest_helm_set_args; then
+      fail "malformed core image digest must fail closed: ${malformed_digest}"
+    fi
+    assert_eq "$(printf '%s\n' "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}")" $'--set-string\nbefore=value' "invalid digest preserves the complete prior Helm argument array"
+  )
+done
+
+python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+main = source[source.index("\nmain() {"):]
+digest_build = main.index("build_core_image_digest_helm_set_args")
+preflight = main.index("run_release_preflight")
+first_mutation = main.index('CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="true"')
+helm = main[main.index('"Helm upgrade" helm upgrade'):main.index('; then', main.index('"Helm upgrade" helm upgrade'))]
+if not digest_build < preflight < first_mutation:
+    raise SystemExit("core image digest validation must finish during configuration before release mutation")
+if helm.count('"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"') != 1:
+    raise SystemExit("Helm upgrade must consume the atomic core image digest argument array exactly once")
+PY
+
+(
   FUGUE_DNS_ZONE=example.test
   FUGUE_DNS_NAMESERVERS=$'ns1.example.test\n\tns2.example.test'
   FUGUE_DNS_TTL=60

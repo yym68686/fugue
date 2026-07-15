@@ -319,6 +319,7 @@ PUBLIC_DATA_PLANE_HELM_SET_ARGS=()
 PUBLIC_DATA_PLANE_PRESERVED=false
 NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS=()
 MAINTENANCE_AGENT_HELM_SET_ARGS=()
+CORE_IMAGE_DIGEST_HELM_SET_ARGS=()
 HELM_POST_RENDERER_ARGS=()
 NODE_LOCAL_BUILD_PLANE_PREFLIGHT_OVERRIDE_USED="false"
 PRESERVE_REGISTRY_ZERO_REPLICAS="false"
@@ -414,6 +415,53 @@ CONTROL_PLANE_RELEASE_ROLLBACK_RESULT_FILE=""
 CONTROL_PLANE_RELEASE_RESULT_FILE=""
 CONTROL_PLANE_RELEASE_RUN_MARKER_FILE=""
 CONTROL_PLANE_RELEASE_FINAL_REVISION=""
+
+validate_optional_core_image_digest() {
+  local env_name="$1"
+  local digest="$2"
+
+  if [[ -n "${digest}" && ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+    log_stderr "${env_name} must be empty or a lowercase sha256 digest"
+    return 1
+  fi
+}
+
+build_core_image_digest_helm_set_args() {
+  local digest=""
+  local pending_args=()
+
+  # Keep an unset variable distinct from an explicitly empty value. Omitting
+  # the argument preserves the existing Helm value; an empty argument clears
+  # a legacy digest when a later release lock deliberately selects a tag-only
+  # image. Build the complete argv off to the side so invalid input cannot
+  # partially replace a previously prepared set of arguments.
+  if [[ "${FUGUE_API_IMAGE_DIGEST+x}" == "x" ]]; then
+    digest="${FUGUE_API_IMAGE_DIGEST}"
+    validate_optional_core_image_digest FUGUE_API_IMAGE_DIGEST "${digest}" || return 1
+    pending_args+=(--set-string "api.image.digest=${digest}")
+  fi
+  if [[ "${FUGUE_CONTROLLER_IMAGE_DIGEST+x}" == "x" ]]; then
+    digest="${FUGUE_CONTROLLER_IMAGE_DIGEST}"
+    validate_optional_core_image_digest FUGUE_CONTROLLER_IMAGE_DIGEST "${digest}" || return 1
+    pending_args+=(--set-string "controller.image.digest=${digest}")
+  fi
+  if [[ "${FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST+x}" == "x" ]]; then
+    digest="${FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST}"
+    validate_optional_core_image_digest FUGUE_TELEMETRY_AGENT_IMAGE_DIGEST "${digest}" || return 1
+    pending_args+=(--set-string "observability.agent.image.digest=${digest}")
+  fi
+  if [[ "${FUGUE_IMAGE_CACHE_IMAGE_DIGEST+x}" == "x" ]]; then
+    digest="${FUGUE_IMAGE_CACHE_IMAGE_DIGEST}"
+    validate_optional_core_image_digest FUGUE_IMAGE_CACHE_IMAGE_DIGEST "${digest}" || return 1
+    pending_args+=(--set-string "imageCache.image.digest=${digest}")
+  fi
+
+  if (( ${#pending_args[@]} == 0 )); then
+    CORE_IMAGE_DIGEST_HELM_SET_ARGS=()
+  else
+    CORE_IMAGE_DIGEST_HELM_SET_ARGS=("${pending_args[@]}")
+  fi
+}
 
 release_monotonic_millis() {
   python3 -c 'import time; print(time.monotonic_ns() // 1000000)'
@@ -17634,6 +17682,9 @@ main() {
     FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY="${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY:-fugue-image-cache}"
     FUGUE_IMAGE_CACHE_IMAGE_TAG="${FUGUE_IMAGE_CACHE_IMAGE_TAG:-latest}"
   fi
+  if ! build_core_image_digest_helm_set_args; then
+    fail "invalid optional core image digest configuration"
+  fi
   if [[ "${FUGUE_IMAGE_STORE_MODE}" == "distributed" ]]; then
     FUGUE_REGISTRY_JANITOR_ENABLED="${FUGUE_REGISTRY_JANITOR_ENABLED:-false}"
     FUGUE_REGISTRY_GC_ENABLED="${FUGUE_REGISTRY_GC_ENABLED:-false}"
@@ -18395,6 +18446,7 @@ PY
     "${PUBLIC_DATA_PLANE_HELM_SET_ARGS[@]}" \
     "${NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS[@]}" \
     "${MAINTENANCE_AGENT_HELM_SET_ARGS[@]}" \
+    "${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}" \
     --set-string api.image.repository="${FUGUE_API_IMAGE_REPOSITORY}" \
     --set-string api.image.tag="${FUGUE_API_IMAGE_TAG}" \
     --set-string controller.image.repository="${FUGUE_CONTROLLER_IMAGE_REPOSITORY}" \
