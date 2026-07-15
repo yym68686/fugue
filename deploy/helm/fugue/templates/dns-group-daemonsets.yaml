@@ -22,10 +22,12 @@
 {{- $dnsAPIURL := default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.dns.apiURL) $group.apiURL -}}
 {{- $dnsTokenSecretName := default (default (include "fugue.configSecretName" $) $.Values.dns.tokenSecret.name) $tokenSecret.name -}}
 {{- $dnsTokenSecretKey := default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.dns.tokenSecret.key) $tokenSecret.key -}}
-{{- $dnsImageRepository := default (default $.Values.edge.image.repository $.Values.dns.image.repository) $image.repository -}}
-{{- $dnsImageTag := default (default $.Values.edge.image.tag $.Values.dns.image.tag) $image.tag -}}
-{{- $dnsImageDigest := default (default $.Values.edge.image.digest $.Values.dns.image.digest) $image.digest -}}
-{{- $dnsImagePullPolicy := default (default $.Values.edge.image.pullPolicy $.Values.dns.image.pullPolicy) $image.pullPolicy -}}
+{{- $rootDNSImage := include "fugue.sparseImageIdentity" (dict "fallback" $.Values.edge.image "override" $.Values.dns.image "identityKeysDefineOverride" true) | fromJson -}}
+{{- $dnsImage := include "fugue.sparseImageIdentity" (dict "fallback" $rootDNSImage "override" $image "identityKeysDefineOverride" true) | fromJson -}}
+{{- $dnsImageRepository := get $dnsImage "repository" -}}
+{{- $dnsImageTag := get $dnsImage "tag" -}}
+{{- $dnsImageDigest := get $dnsImage "digest" -}}
+{{- $dnsImagePullPolicy := get $dnsImage "pullPolicy" -}}
 {{- $dnsContainerName := $.Values.dns.containerName -}}
 {{- $publicHostPortsEnabled := $.Values.dns.publicHostPorts.enabled -}}
 {{- if hasKey $publicHostPorts "enabled" }}{{- $publicHostPortsEnabled = $publicHostPorts.enabled -}}{{- end -}}

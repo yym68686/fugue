@@ -466,6 +466,198 @@ func TestMaintenanceDaemonSetImagesCanBePreservedIndependently(t *testing.T) {
 	}
 }
 
+func TestBuiltImageSparseFallbacksDoNotReviveParentDigests(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	render := func(t *testing.T, values string) string {
+		t.Helper()
+		valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+			t.Fatalf("write values: %v", err)
+		}
+		cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template failed: %v\n%s", err, output)
+		}
+		return string(output)
+	}
+	assertDaemonSetImage := func(t *testing.T, manifest, name, image string) {
+		t.Helper()
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing daemonset %s", name)
+		}
+		if want := `image: "` + image + `"`; !strings.Contains(doc, want) {
+			t.Fatalf("daemonset %s missing image %q:\n%s", name, image, doc)
+		}
+	}
+
+	const controllerDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	const edgeDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+	t.Run("repository and tag overrides clear an omitted or empty digest", func(t *testing.T) {
+		manifest := render(t, `
+controller:
+  image:
+    repository: registry.example/controller
+    tag: controller-parent
+    digest: `+controllerDigest+`
+nodeJanitor:
+  image:
+    repository: registry.example/node-janitor
+    tag: node-janitor-child
+topologyLabeler:
+  image:
+    repository: registry.example/topology-labeler
+    tag: topology-labeler-child
+    digest: ""
+imagePrePull:
+  images:
+    - registry.example/workload:latest
+  image:
+    repository: registry.example/image-prepull
+    tag: image-prepull-child
+edge:
+  image:
+    repository: registry.example/edge
+    tag: edge-parent
+    digest: `+edgeDigest+`
+dns:
+  enabled: true
+  answerIPs:
+    - 203.0.113.10
+  image:
+    repository: registry.example/dns
+    tag: dns-child
+meshRecovery:
+  enabled: true
+  tokenSecret:
+    name: mesh-recovery-test
+  signingKeySecret:
+    name: mesh-recovery-test
+  image:
+    repository: registry.example/mesh-recovery
+    tag: mesh-recovery-child
+    digest: ""
+`)
+
+		for name, image := range map[string]string{
+			"fugue-fugue-node-janitor":     "registry.example/node-janitor:node-janitor-child",
+			"fugue-fugue-topology-labeler": "registry.example/topology-labeler:topology-labeler-child",
+			"fugue-fugue-image-prepull":    "registry.example/image-prepull:image-prepull-child",
+			"fugue-fugue-dns":              "registry.example/dns:dns-child",
+			"fugue-fugue-mesh-recovery":    "registry.example/mesh-recovery:mesh-recovery-child",
+		} {
+			assertDaemonSetImage(t, manifest, name, image)
+		}
+	})
+
+	t.Run("empty placeholders inherit while group overrides remain digest safe", func(t *testing.T) {
+		const groupDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+		manifest := render(t, `
+controller:
+  image:
+    repository: registry.example/controller
+    tag: controller-parent
+    digest: `+controllerDigest+`
+nodeJanitor:
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+topologyLabeler:
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+imagePrePull:
+  images:
+    - registry.example/workload:latest
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+edge:
+  image:
+    repository: registry.example/edge
+    tag: edge-parent
+    digest: `+edgeDigest+`
+dns:
+  enabled: true
+  answerIPs:
+    - 203.0.113.10
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+  groups:
+    - name: inherited
+      edgeGroupID: edge-group-inherited
+      nodeSelector:
+        fugue.io/test: inherited
+      answerIPs:
+        - 203.0.113.11
+      image:
+        repository: ""
+        tag: ""
+        digest: ""
+    - name: tag-override
+      edgeGroupID: edge-group-tag-override
+      nodeSelector:
+        fugue.io/test: tag-override
+      answerIPs:
+        - 203.0.113.12
+      image:
+        repository: registry.example/dns-group
+        tag: dns-group-child
+        digest: ""
+    - name: digest-only
+      edgeGroupID: edge-group-digest-only
+      nodeSelector:
+        fugue.io/test: digest-only
+      answerIPs:
+        - 203.0.113.13
+      image:
+        digest: `+groupDigest+`
+meshRecovery:
+  enabled: true
+  tokenSecret:
+    name: mesh-recovery-test
+  signingKeySecret:
+    name: mesh-recovery-test
+  image:
+    repository: ""
+    tag: ""
+    digest: ""
+`)
+
+		for _, name := range []string{
+			"fugue-fugue-node-janitor",
+			"fugue-fugue-topology-labeler",
+			"fugue-fugue-image-prepull",
+		} {
+			assertDaemonSetImage(t, manifest, name, "registry.example/controller@"+controllerDigest)
+		}
+		for _, name := range []string{
+			"fugue-fugue-dns",
+			"fugue-fugue-dns-inherited",
+			"fugue-fugue-mesh-recovery",
+		} {
+			assertDaemonSetImage(t, manifest, name, "registry.example/edge@"+edgeDigest)
+		}
+		assertDaemonSetImage(t, manifest, "fugue-fugue-dns-tag-override", "registry.example/dns-group:dns-group-child")
+		assertDaemonSetImage(t, manifest, "fugue-fugue-dns-digest-only", "registry.example/edge@"+groupDigest)
+	})
+}
+
 func TestTopologyLabelerUsesNarrowInternalTolerations(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

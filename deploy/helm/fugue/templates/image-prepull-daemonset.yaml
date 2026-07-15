@@ -5,11 +5,12 @@
 {{- end -}}
 {{- $images := (get $imagePrePull "images" | default (list)) -}}
 {{- if and $enabled (gt (len $images) 0) }}
-{{- $image := (get $imagePrePull "image" | default (dict)) -}}
-{{- $repository := default .Values.controller.image.repository (get $image "repository") -}}
-{{- $tag := default .Values.controller.image.tag (get $image "tag") -}}
-{{- $digest := default .Values.controller.image.digest (get $image "digest") -}}
-{{- $pullPolicy := default .Values.controller.image.pullPolicy (get $image "pullPolicy") -}}
+{{- $imageOverride := (get $imagePrePull "image" | default (dict)) -}}
+{{- $image := include "fugue.sparseImageIdentity" (dict "fallback" .Values.controller.image "override" $imageOverride "identityKeysDefineOverride" true) | fromJson -}}
+{{- $repository := get $image "repository" -}}
+{{- $tag := get $image "tag" -}}
+{{- $digest := get $image "digest" -}}
+{{- $pullPolicy := get $image "pullPolicy" -}}
 {{- $intervalSeconds := default 900 (get $imagePrePull "intervalSeconds") -}}
 {{- $priorityClassName := default "system-node-critical" (get $imagePrePull "priorityClassName") -}}
 {{- $nodeSelector := (get $imagePrePull "nodeSelector" | default (dict)) -}}

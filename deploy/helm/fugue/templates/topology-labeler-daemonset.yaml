@@ -15,11 +15,12 @@
 {{- if hasKey $topologyLabeler "resources" -}}
 {{- $topologyLabelerResources = (get $topologyLabeler "resources" | default (dict)) -}}
 {{- end -}}
-{{- $topologyLabelerImage := (get $topologyLabeler "image" | default (dict)) -}}
-{{- $topologyLabelerImageRepository := default .Values.controller.image.repository (get $topologyLabelerImage "repository") -}}
-{{- $topologyLabelerImageTag := default .Values.controller.image.tag (get $topologyLabelerImage "tag") -}}
-{{- $topologyLabelerImageDigest := default .Values.controller.image.digest (get $topologyLabelerImage "digest") -}}
-{{- $topologyLabelerImagePullPolicy := default .Values.controller.image.pullPolicy (get $topologyLabelerImage "pullPolicy") -}}
+{{- $topologyLabelerImageOverride := (get $topologyLabeler "image" | default (dict)) -}}
+{{- $topologyLabelerImage := include "fugue.sparseImageIdentity" (dict "fallback" .Values.controller.image "override" $topologyLabelerImageOverride "identityKeysDefineOverride" true) | fromJson -}}
+{{- $topologyLabelerImageRepository := get $topologyLabelerImage "repository" -}}
+{{- $topologyLabelerImageTag := get $topologyLabelerImage "tag" -}}
+{{- $topologyLabelerImageDigest := get $topologyLabelerImage "digest" -}}
+{{- $topologyLabelerImagePullPolicy := get $topologyLabelerImage "pullPolicy" -}}
 {{- $topologyLabelerNodeSelector := dict -}}
 {{- if hasKey $topologyLabeler "nodeSelector" -}}
 {{- $topologyLabelerNodeSelector = (get $topologyLabeler "nodeSelector" | default (dict)) -}}

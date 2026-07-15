@@ -1,10 +1,10 @@
 {{- if .Values.meshRecovery.enabled }}
 {{- $edgeImage := .Values.edge.image -}}
-{{- $meshImage := .Values.meshRecovery.image -}}
-{{- $imageRepository := default $edgeImage.repository $meshImage.repository -}}
-{{- $imageTag := default $edgeImage.tag $meshImage.tag -}}
-{{- $imageDigest := default $edgeImage.digest $meshImage.digest -}}
-{{- $imagePullPolicy := default $edgeImage.pullPolicy $meshImage.pullPolicy -}}
+{{- $meshImage := include "fugue.sparseImageIdentity" (dict "fallback" $edgeImage "override" .Values.meshRecovery.image "identityKeysDefineOverride" true) | fromJson -}}
+{{- $imageRepository := get $meshImage "repository" -}}
+{{- $imageTag := get $meshImage "tag" -}}
+{{- $imageDigest := get $meshImage "digest" -}}
+{{- $imagePullPolicy := get $meshImage "pullPolicy" -}}
 {{- $tokenSecretName := required "meshRecovery.tokenSecret.name is required when meshRecovery.enabled=true" .Values.meshRecovery.tokenSecret.name -}}
 {{- $signingKeySecretName := required "meshRecovery.signingKeySecret.name is required when meshRecovery.enabled=true" .Values.meshRecovery.signingKeySecret.name -}}
 {{- if and (ne .Values.meshRecovery.mode "normal") (ne .Values.meshRecovery.mode "reset") -}}

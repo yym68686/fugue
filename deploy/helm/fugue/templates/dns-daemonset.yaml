@@ -5,10 +5,11 @@
 {{- $dnsAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.dns.apiURL -}}
 {{- $dnsTokenSecretName := default (include "fugue.configSecretName" .) .Values.dns.tokenSecret.name -}}
 {{- $dnsTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.dns.tokenSecret.key -}}
-{{- $dnsImageRepository := default .Values.edge.image.repository .Values.dns.image.repository -}}
-{{- $dnsImageTag := default .Values.edge.image.tag .Values.dns.image.tag -}}
-{{- $dnsImageDigest := default .Values.edge.image.digest .Values.dns.image.digest -}}
-{{- $dnsImagePullPolicy := default .Values.edge.image.pullPolicy .Values.dns.image.pullPolicy -}}
+{{- $dnsImage := include "fugue.sparseImageIdentity" (dict "fallback" .Values.edge.image "override" .Values.dns.image "identityKeysDefineOverride" true) | fromJson -}}
+{{- $dnsImageRepository := get $dnsImage "repository" -}}
+{{- $dnsImageTag := get $dnsImage "tag" -}}
+{{- $dnsImageDigest := get $dnsImage "digest" -}}
+{{- $dnsImagePullPolicy := get $dnsImage "pullPolicy" -}}
 {{- $dnsContainerName := required "dns.containerName is required" .Values.dns.containerName -}}
 {{- $dnsChecksumValues := omit .Values.dns "containerName" -}}
 {{- $_ := set $dnsChecksumValues "publicHostPorts" (omit .Values.dns.publicHostPorts "udpContainerPort" "tcpContainerPort") -}}
