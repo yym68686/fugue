@@ -250,6 +250,9 @@ func VerifyClassificationContextEvidence(context ClassificationContextEvidence) 
 	if releaseNamespace := context.BindingMap()["releaseNamespace"]; releaseNamespace != context.DefaultNamespace {
 		return fmt.Errorf("classification releaseNamespace binding %q differs from default namespace %q", releaseNamespace, context.DefaultNamespace)
 	}
+	if !utf8.ValidString(context.Digest) {
+		return fmt.Errorf("classification context digest is not valid UTF-8")
+	}
 	expected := classificationContextDigest(context)
 	if context.Digest != expected {
 		return fmt.Errorf("classification context digest mismatch: got %s, want %s", context.Digest, expected)
@@ -322,7 +325,11 @@ type Plan struct {
 }
 
 func canonicalEvidence(values []Evidence) []Evidence {
-	result := append([]Evidence(nil), values...)
+	// Evidence is a required persisted array on both classification channels.
+	// Normalize an empty input to [] rather than null so strict consumers have
+	// exactly one representation for the same digest-bound value.
+	result := make([]Evidence, len(values))
+	copy(result, values)
 	for index := range result {
 		result[index].Domains = canonicalDomains(result[index].Domains)
 		result[index].Paths = append([]string(nil), result[index].Paths...)

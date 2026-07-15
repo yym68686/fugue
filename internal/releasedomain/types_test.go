@@ -105,4 +105,15 @@ func TestClassificationContextEvidenceRejectsInvalidUTF8WithoutDigestCollision(t
 	if err := VerifyClassificationContextEvidence(context); err == nil {
 		t.Fatal("verification accepted invalid UTF-8 with a matching replacement-based digest")
 	}
+
+	context, err = NewClassificationContextEvidence("fugue-system", map[string]string{
+		"releaseNamespace": "fugue-system",
+	}, false)
+	if err != nil {
+		t.Fatalf("new valid context: %v", err)
+	}
+	context.Digest = "sha256:invalid-\xff"
+	if err := VerifyClassificationContextEvidence(context); err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Fatalf("invalid context digest error = %v", err)
+	}
 }
