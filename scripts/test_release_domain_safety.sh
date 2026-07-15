@@ -3573,6 +3573,90 @@ assert_build_plan \
   build_app_ssh false
 
 assert_build_plan \
+  $'internal/releasedomain/testdata/zero/base.yaml' \
+  "Go package testdata build plan" \
+  target_count 0 \
+  build_api false \
+  build_controller false \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge false \
+  build_app_ssh false
+
+assert_build_plan \
+  $'internal/unclassified/runtime-config.yaml' \
+  "unknown internal non-Go build plan" \
+  target_count 6 \
+  build_api true \
+  build_controller true \
+  build_drain_agent true \
+  build_telemetry_agent true \
+  build_image_cache true \
+  build_edge true \
+  build_app_ssh false
+
+assert_build_plan \
+  $'internal/controller/runtime-assets/config.yaml' \
+  "runtime internal asset build plan" \
+  target_count 6 \
+  build_api true \
+  build_controller true \
+  build_drain_agent true \
+  build_telemetry_agent true \
+  build_image_cache true \
+  build_edge true \
+  build_app_ssh false
+
+assert_build_plan \
+  $'internal/retired/fixtures/runtime.go' \
+  "unmapped production Go source build plan" \
+  target_count 6 \
+  build_api true \
+  build_controller true \
+  build_drain_agent true \
+  build_telemetry_agent true \
+  build_image_cache true \
+  build_edge true \
+  build_app_ssh false
+
+assert_build_plan \
+  $'cmd/fugue-release-domain-plan/main.go\ninternal/releasedomain/planner.go\ninternal/releasedomain/testdata/zero/base.yaml' \
+  "unconnected release planner package incident build plan" \
+  target_count 0 \
+  build_api false \
+  build_controller false \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge false \
+  build_app_ssh false
+
+assert_build_plan \
+  $'/internal/controller/safe_rollout.go\n./internal/controller/safe_rollout.go\ninternal//controller/safe_rollout.go\ninternal/controller/./safe_rollout.go\ninternal/controller/../api/server.go\ninternal/controller/\ninternal\\controller\\safe_rollout.go\ninternal/releasedomain/testdata/../../releasedomain/planner.go' \
+  "non-canonical changed paths fail-safe build plan" \
+  target_count 7 \
+  build_api true \
+  build_controller true \
+  build_drain_agent true \
+  build_telemetry_agent true \
+  build_image_cache true \
+  build_edge true \
+  build_app_ssh true
+
+assert_build_plan \
+  $'assets/button.svg' \
+  "embedded API asset build plan" \
+  target_count 1 \
+  build_api true \
+  build_controller false \
+  build_drain_agent false \
+  build_telemetry_agent false \
+  build_image_cache false \
+  build_edge false \
+  build_app_ssh false
+
+assert_build_plan \
   $'scripts/upgrade_fugue_control_plane.sh' \
   "script-only build plan" \
   target_count 0 \
@@ -3652,6 +3736,204 @@ GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
   "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "stale held edge diff cannot enter an unrelated build plan"
 assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_edge)" "false" "stale held edge build flag"
+
+COMPONENT_PLAN_FIXTURE_BASE="${COMPONENT_PLAN_TARGET}"
+mkdir -p \
+  "${COMPONENT_PLAN_REPO}/internal/controller/testdata" \
+  "${COMPONENT_PLAN_REPO}/internal/controller/fixtures"
+printf 'added testdata fixture\n' >"${COMPONENT_PLAN_REPO}/internal/controller/testdata/image-plan.yaml"
+printf 'added conventional fixture\n' >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/image-plan.yaml"
+git -C "${COMPONENT_PLAN_REPO}" add \
+  internal/controller/testdata/image-plan.yaml \
+  internal/controller/fixtures/image-plan.yaml
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m fixture-add
+COMPONENT_PLAN_FIXTURE_ADD="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_FIXTURE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_FIXTURE_BASE}" "${COMPONENT_PLAN_FIXTURE_ADD}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_FIXTURE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_FIXTURE_ADD}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_FIXTURE_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "added Go package fixtures do not rebuild images"
+
+printf 'modified testdata fixture\n' >"${COMPONENT_PLAN_REPO}/internal/controller/testdata/image-plan.yaml"
+printf 'modified conventional fixture\n' >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/image-plan.yaml"
+git -C "${COMPONENT_PLAN_REPO}" add \
+  internal/controller/testdata/image-plan.yaml \
+  internal/controller/fixtures/image-plan.yaml
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m fixture-modify
+COMPONENT_PLAN_FIXTURE_MODIFY="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_FIXTURE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_FIXTURE_ADD}" "${COMPONENT_PLAN_FIXTURE_MODIFY}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_FIXTURE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_FIXTURE_MODIFY}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_FIXTURE_ADD}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "modified Go package fixtures do not rebuild images"
+
+git -C "${COMPONENT_PLAN_REPO}" rm -q \
+  internal/controller/testdata/image-plan.yaml \
+  internal/controller/fixtures/image-plan.yaml
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m fixture-delete
+COMPONENT_PLAN_FIXTURE_DELETE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_FIXTURE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_FIXTURE_MODIFY}" "${COMPONENT_PLAN_FIXTURE_DELETE}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_FIXTURE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_FIXTURE_DELETE}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_FIXTURE_MODIFY}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "deleted Go package fixtures do not rebuild images"
+
+mkdir -p "${COMPONENT_PLAN_REPO}/internal/controller/fixtures"
+cat >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/seed.go" <<'GO'
+package fixtures
+
+const Seed = "seed"
+GO
+cat >"${COMPONENT_PLAN_REPO}/cmd/fugue-controller/image_plan_fixture_import.go" <<'GO'
+package main
+
+import _ "fugue/internal/controller/fixtures"
+GO
+git -C "${COMPONENT_PLAN_REPO}" add \
+  internal/controller/fixtures/seed.go \
+  cmd/fugue-controller/image_plan_fixture_import.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m production-fixture-package-base
+COMPONENT_PLAN_PRODUCTION_FIXTURE_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+cat >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/runtime.go" <<'GO'
+package fixtures
+
+const Runtime = "added"
+GO
+git -C "${COMPONENT_PLAN_REPO}" add internal/controller/fixtures/runtime.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m production-fixture-package-add
+COMPONENT_PLAN_PRODUCTION_FIXTURE_ADD="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_PRODUCTION_FIXTURE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_PRODUCTION_FIXTURE_BASE}" "${COMPONENT_PLAN_PRODUCTION_FIXTURE_ADD}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_PRODUCTION_FIXTURE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_PRODUCTION_FIXTURE_ADD}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_PRODUCTION_FIXTURE_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "added production fixtures Go subpackage source rebuild count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "added production fixtures Go subpackage source controller flag"
+
+cat >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/runtime.go" <<'GO'
+package fixtures
+
+const Runtime = "modified"
+GO
+git -C "${COMPONENT_PLAN_REPO}" add internal/controller/fixtures/runtime.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m production-fixture-package-modify
+COMPONENT_PLAN_PRODUCTION_FIXTURE_MODIFY="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_PRODUCTION_FIXTURE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_PRODUCTION_FIXTURE_ADD}" "${COMPONENT_PLAN_PRODUCTION_FIXTURE_MODIFY}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_PRODUCTION_FIXTURE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_PRODUCTION_FIXTURE_MODIFY}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_PRODUCTION_FIXTURE_ADD}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "modified production fixtures Go subpackage source rebuild count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "modified production fixtures Go subpackage source controller flag"
+
+git -C "${COMPONENT_PLAN_REPO}" rm -q internal/controller/fixtures/runtime.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m production-fixture-package-delete
+COMPONENT_PLAN_PRODUCTION_FIXTURE_DELETE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_PRODUCTION_FIXTURE_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_PRODUCTION_FIXTURE_MODIFY}" "${COMPONENT_PLAN_PRODUCTION_FIXTURE_DELETE}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_PRODUCTION_FIXTURE_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_PRODUCTION_FIXTURE_DELETE}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_PRODUCTION_FIXTURE_MODIFY}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "deleted production fixtures Go subpackage source rebuild count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "deleted production fixtures Go subpackage source controller flag"
+
+mkdir -p "${COMPONENT_PLAN_REPO}/internal/controller/fixtures"
+printf 'runtime embed asset v1\n' >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/runtime-embed.txt"
+cat >"${COMPONENT_PLAN_REPO}/internal/controller/image_plan_runtime_embed_fixture.go" <<'GO'
+package controller
+
+import _ "embed"
+
+//go:embed fixtures/runtime-embed.txt
+var imagePlanRuntimeEmbedFixture string
+GO
+git -C "${COMPONENT_PLAN_REPO}" add \
+  internal/controller/fixtures/runtime-embed.txt \
+  internal/controller/image_plan_runtime_embed_fixture.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m runtime-embed-base
+COMPONENT_PLAN_RUNTIME_EMBED_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+printf 'runtime embed asset v2\n' >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/runtime-embed.txt"
+git -C "${COMPONENT_PLAN_REPO}" add internal/controller/fixtures/runtime-embed.txt
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m runtime-embed-modify
+COMPONENT_PLAN_RUNTIME_EMBED_TARGET="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_RUNTIME_EMBED_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_RUNTIME_EMBED_BASE}" "${COMPONENT_PLAN_RUNTIME_EMBED_TARGET}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_RUNTIME_EMBED_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_RUNTIME_EMBED_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_RUNTIME_EMBED_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "1" "runtime embedded fixture rebuild count"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "true" "runtime embedded fixture controller build flag"
+
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_RUNTIME_EMBED_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_RUNTIME_EMBED_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_RUNTIME_EMBED_TARGET}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "current runtime asset component baseline suppresses stale rebuild"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" build_controller)" "false" "current runtime asset component baseline build flag"
+
+printf 'test-only embed asset v1\n' >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/test-only-embed.txt"
+cat >"${COMPONENT_PLAN_REPO}/internal/controller/image_plan_test_embed_fixture_test.go" <<'GO'
+package controller
+
+import _ "embed"
+
+//go:embed fixtures/test-only-embed.txt
+var imagePlanTestEmbedFixture string
+GO
+git -C "${COMPONENT_PLAN_REPO}" add \
+  internal/controller/fixtures/test-only-embed.txt \
+  internal/controller/image_plan_test_embed_fixture_test.go
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m test-embed-base
+COMPONENT_PLAN_TEST_EMBED_BASE="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+printf 'test-only embed asset v2\n' >"${COMPONENT_PLAN_REPO}/internal/controller/fixtures/test-only-embed.txt"
+git -C "${COMPONENT_PLAN_REPO}" add internal/controller/fixtures/test-only-embed.txt
+git -C "${COMPONENT_PLAN_REPO}" commit -q -m test-embed-modify
+COMPONENT_PLAN_TEST_EMBED_TARGET="$(git -C "${COMPONENT_PLAN_REPO}" rev-parse HEAD)"
+COMPONENT_PLAN_TEST_EMBED_CHANGED="$(git -C "${COMPONENT_PLAN_REPO}" diff --no-renames --name-only "${COMPONENT_PLAN_TEST_EMBED_BASE}" "${COMPONENT_PLAN_TEST_EMBED_TARGET}")"
+: >"${COMPONENT_PLAN_OUTPUT}"
+GITHUB_OUTPUT="${COMPONENT_PLAN_OUTPUT}" \
+  FUGUE_RELEASE_REPO_ROOT="${COMPONENT_PLAN_REPO}" \
+  FUGUE_RELEASE_CHANGED_FILES="${COMPONENT_PLAN_TEST_EMBED_CHANGED}" \
+  FUGUE_RELEASE_CHANGED_FILES_SET=true \
+  FUGUE_RELEASE_TARGET_REF="${COMPONENT_PLAN_TEST_EMBED_TARGET}" \
+  FUGUE_CONTROLLER_IMAGE_BASE_REF="${COMPONENT_PLAN_TEST_EMBED_BASE}" \
+  "${REPO_ROOT}/scripts/compute_control_plane_image_build_plan.sh" >"${COMPONENT_PLAN_LOG}"
+assert_eq "$(plan_value "${COMPONENT_PLAN_OUTPUT}" target_count)" "0" "test-only embedded fixture does not rebuild images"
 
 mkdir -p "${COMPONENT_PLAN_REPO}/internal/releaseflow" "${COMPONENT_PLAN_REPO}/internal/weightedselector"
 cat >"${COMPONENT_PLAN_REPO}/internal/releaseflow/rename_build_plan_fixture.go" <<'GO'

@@ -127,6 +127,12 @@ mark_all_go_images() {
   mark_image edge "${reason}"
 }
 
+mark_all_images() {
+  local reason="$1"
+  mark_all_go_images "${reason}"
+  mark_image app_ssh "${reason}"
+}
+
 image_build_value() {
   case "$1" in
     api) printf '%s' "${BUILD_API}" ;;
@@ -175,6 +181,112 @@ image_commands() {
   esac
 }
 
+release_file_path_is_canonical() {
+  local file="$1"
+  local component=""
+  local -a components=()
+
+  [[ -n "${file}" ]] || return 1
+  [[ "${file}" == "$(trim_field "${file}")" ]] || return 1
+  [[ "${file}" != /* ]] || return 1
+  [[ "${file}" != *\\* ]] || return 1
+  [[ "${file}" != *//* ]] || return 1
+  [[ "${file}" != */ ]] || return 1
+
+  IFS='/' read -r -a components <<<"${file}"
+  for component in "${components[@]}"; do
+    [[ -n "${component}" && "${component}" != "." && "${component}" != ".." ]] || return 1
+  done
+}
+
+go_fixture_package_dir() {
+  local file="$1"
+  local package_dir=""
+
+  case "${file}" in
+    */testdata/*)
+      package_dir="${file%%/testdata/*}"
+      ;;
+    */fixtures/*)
+      package_dir="${file%%/fixtures/*}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  [[ -n "${package_dir}" && "${package_dir}" != "${file}" ]] || return 1
+  printf '%s' "${package_dir}"
+}
+
+go_package_is_valid() {
+  local package_dir="$1"
+  local listed_dir=""
+
+  if ! listed_dir="$(go -C "${REPO_ROOT}" list -f '{{.Dir}}' "./${package_dir}" 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "${listed_dir}" == "${REPO_ROOT}/${package_dir}" ]]
+}
+
+go_package_has_runtime_embed_directive() {
+  local package_dir="$1"
+  local source=""
+
+  for source in "${REPO_ROOT}/${package_dir}"/*.go; do
+    [[ -f "${source}" ]] || continue
+    [[ "${source}" != *_test.go ]] || continue
+    if grep -Eq '^[[:space:]]*//go:embed[[:space:]]' "${source}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+go_fixture_is_runtime_asset() {
+  local file="$1"
+  local package_dir="$2"
+  local relative_file="${file#"${package_dir}/"}"
+  local embed_files=""
+  local embedded_file=""
+
+  # A deleted fixture can no longer appear in go list's EmbedFiles. If the
+  # owning runtime package still contains any non-test embed directive, rebuild
+  # conservatively rather than treating the deletion as test-only.
+  if [[ ! -e "${REPO_ROOT}/${file}" ]]; then
+    go_package_has_runtime_embed_directive "${package_dir}"
+    return
+  fi
+
+  # EmbedFiles excludes TestEmbedFiles and expands Go's embed patterns using
+  # the same rules as the compiler. A metadata error is runtime-affecting by
+  # default so malformed or ambiguous packages fail safe.
+  if ! embed_files="$(go -C "${REPO_ROOT}" list -f '{{range .EmbedFiles}}{{println .}}{{end}}' "./${package_dir}" 2>/dev/null)"; then
+    return 0
+  fi
+  while IFS= read -r embedded_file; do
+    if [[ "${embedded_file}" == "${relative_file}" ]]; then
+      return 0
+    fi
+  done <<<"${embed_files}"
+  return 1
+}
+
+mark_go_package_images() {
+  local package_dir="$1"
+  local reason="$2"
+  local image=""
+  local matched=false
+
+  for image in api controller drain_agent telemetry_agent image_cache edge; do
+    if grep -Fx -- "${package_dir}" "${tmp_dir}/deps-${image}" >/dev/null; then
+      matched=true
+      mark_image "${image}" "${reason}"
+    fi
+  done
+  [[ "${matched}" == "true" ]]
+}
+
 tmp_dir="$(mktemp -d)"
 cleanup() {
   rm -rf "${tmp_dir}"
@@ -204,10 +316,20 @@ elif [[ -n "${target_ref}" ]]; then
   printf 'release target is not a local commit; using fail-safe union image plan: %s\n' "${target_ref}" >&2
 fi
 
-if [[ ! -s "${changed_file}" ]]; then
+INVALID_CHANGED_PATHS=false
+while IFS= read -r raw_file; do
+  [[ -n "${raw_file}" ]] || continue
+  if ! release_file_path_is_canonical "${raw_file}"; then
+    printf 'release changed path is not canonical; using fail-safe all-image plan: %s\n' "${raw_file}" >&2
+    INVALID_CHANGED_PATHS=true
+  fi
+done <"${changed_file}"
+
+if [[ "${INVALID_CHANGED_PATHS}" == "true" ]]; then
+  mark_all_images "unknown-change-set"
+elif [[ ! -s "${changed_file}" ]]; then
   if [[ "${TRUSTED_COMPONENT_BASELINE}" != "true" ]]; then
-    mark_all_go_images "unknown-change-set"
-    mark_image app_ssh "unknown-change-set"
+    mark_all_images "unknown-change-set"
   fi
 else
   for image in api controller drain_agent telemetry_agent image_cache edge; do
@@ -229,7 +351,8 @@ else
   done
 
   while IFS= read -r raw_file; do
-    file="$(trim_field "${raw_file}")"
+    file="${raw_file}"
+    fixture_package_dir=""
     [[ -n "${file}" ]] || continue
     case "${file}" in
       go.mod|go.sum)
@@ -274,13 +397,37 @@ else
       continue
     fi
 
-    if [[ "${file}" == *.go && "${file}" != *_test.go ]]; then
+    if [[ "${file}" == *.go ]]; then
       package_dir="$(dirname "${file}")"
-      for image in api controller drain_agent telemetry_agent image_cache edge; do
-        if grep -Fx -- "${package_dir}" "${tmp_dir}/deps-${image}" >/dev/null; then
-          mark_image "${image}" "${file}"
+      if ! mark_go_package_images "${package_dir}" "${file}"; then
+        # A present source in a valid package that is absent from every image
+        # dependency graph is proven not to enter a production image (for
+        # example, a standalone release-tool command). Deleted files and
+        # invalid packages cannot provide that target-tree proof, so they
+        # retain the fail-safe all-Go-image plan.
+        if [[ ! -f "${REPO_ROOT}/${file}" ]] || ! go_package_is_valid "${package_dir}"; then
+          mark_all_go_images "${file}"
         fi
-      done
+      fi
+      continue
+    fi
+
+    # Go package testdata and fixtures are not part of a production binary
+    # unless a non-test source embeds the exact target file. Only apply this
+    # convention to non-Go assets in a package that go list can validate;
+    # unknown internal files must continue through the fail-safe all-image rule
+    # below.
+    if fixture_package_dir="$(go_fixture_package_dir "${file}")" &&
+      go_package_is_valid "${fixture_package_dir}"; then
+      if go_fixture_is_runtime_asset "${file}" "${fixture_package_dir}"; then
+        if ! mark_go_package_images "${fixture_package_dir}" "${file}"; then
+          # A present embedded asset in a valid but unconsumed package cannot
+          # enter an image. A deleted embedded asset has no equivalent proof.
+          if [[ ! -e "${REPO_ROOT}/${file}" ]]; then
+            mark_all_go_images "${file}"
+          fi
+        fi
+      fi
       continue
     fi
 
