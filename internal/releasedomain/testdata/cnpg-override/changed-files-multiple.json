@@ -1,0 +1,10 @@
+[
+  {
+    "status": "M",
+    "path": "deploy/helm/fugue/values.yaml",
+    "valuePointers": [
+      "/controlPlanePostgres/instances",
+      "/controlPlanePostgres/backup/destinationPath"
+    ]
+  }
+]

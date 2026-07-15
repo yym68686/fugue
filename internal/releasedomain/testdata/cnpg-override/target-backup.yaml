@@ -1,0 +1,13 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: fugue-control-plane-postgres
+  namespace: fugue-system
+  labels:
+    app.kubernetes.io/component: control-plane-postgres
+spec:
+  instances: 3
+  imageName: postgres:v17
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://backup/new

@@ -1,0 +1,10 @@
+[
+  {
+    "status": "M",
+    "path": "deploy/helm/fugue/templates/node-local-dns-cache.yaml"
+  },
+  {
+    "status": "M",
+    "path": "deploy/helm/fugue/templates/dns-daemonset.yaml"
+  }
+]

@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-node-local-dns
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/component: node-local-dns
+    fugue.io/rollout-subsystem: cluster-dns
+spec:
+  template:
+    spec:
+      containers:
+        - name: node-cache
+          image: node-cache:v2
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-dns
+  namespace: fugue-system
+  labels:
+    app.kubernetes.io/component: dns
+    fugue.io/rollout-subsystem: public-data-plane
+    fugue.io/rollout-mode: direct-ondelete-protected
+    fugue.io/downtime-class: online-required
+spec:
+  template:
+    spec:
+      containers:
+        - name: dns
+          image: fugue-edge:v2

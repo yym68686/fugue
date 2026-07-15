@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fugue-shared-defaults
+  namespace: fugue-system
+data:
+  mode: new

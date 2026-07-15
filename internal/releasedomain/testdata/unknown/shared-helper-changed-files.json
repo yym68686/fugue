@@ -1,0 +1,6 @@
+[
+  {
+    "status": "M",
+    "path": "deploy/helm/fugue/templates/_helpers.tpl"
+  }
+]

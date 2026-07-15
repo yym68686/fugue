@@ -1,0 +1,1129 @@
+apiVersion: release-domain.fugue.dev/v1
+kind: ReleaseDomainOwnership
+
+domains:
+  - node-local
+  - authoritative-dns
+  - control-plane
+  - image-cache
+  - backup
+
+# Every value is resolved from the same Helm release/values builder that
+# produced both manifests. No matcher infers a name from a repository path.
+requiredBindings:
+  - releaseNamespace
+  - nodeLocalNamespace
+  - nodeLocalName
+  - nodeLocalUpstreamServiceName
+  - nodeLocalActiveName
+  - dnsName
+  - apiName
+  - controllerName
+  - serviceName
+  - ingressName
+  - imageCacheName
+  - controlPlanePostgresName
+  - controlPlanePostgresSecretName
+  - controlPlaneRestoreDrillName
+
+fileRules:
+  - id: non-runtime-docs
+    prefix: docs/
+    nonRuntime: true
+  - id: non-runtime-go-tests
+    suffix: _test.go
+    nonRuntime: true
+  - id: non-runtime-script-tests
+    prefix: scripts/test_
+    nonRuntime: true
+
+  - id: planner-bootstrap-package
+    prefix: internal/releasedomain/
+    unknownReason: planner implementation is bootstrap/shared and cannot authorize itself
+  - id: planner-bootstrap-command
+    prefix: cmd/fugue-release-domain-plan/
+    unknownReason: planner command is bootstrap/shared and cannot authorize itself
+  - id: planner-bootstrap-ownership
+    prefix: deploy/release-domains/
+    unknownReason: ownership policy is bootstrap/shared and cannot authorize itself
+  - id: planner-bootstrap-adapter
+    exact: scripts/lib/control_plane_release_domains.sh
+    unknownReason: release-domain adapter is bootstrap/shared and cannot authorize itself
+  - id: planner-bootstrap-test
+    exact: scripts/test_single_domain_release.sh
+    unknownReason: release-domain activation test is bootstrap/shared
+  - id: frozen-release-safety-test
+    exact: scripts/test_release_domain_safety.sh
+    unknownReason: release safety integration is outside Boundary A
+  - id: release-entrypoint
+    exact: scripts/upgrade_fugue_control_plane.sh
+    unknownReason: release entrypoint is shared across every domain
+  - id: workflow
+    prefix: .github/workflows/
+    unknownReason: workflow changes are bootstrap/shared
+  - id: makefile
+    exact: Makefile
+    unknownReason: repository orchestration is shared
+  - id: go-module
+    exact: go.mod
+    unknownReason: Go module graph is shared by multiple binaries and domains
+  - id: go-sums
+    exact: go.sum
+    unknownReason: Go module graph is shared by multiple binaries and domains
+  - id: helm-helpers
+    exact: deploy/helm/fugue/templates/_helpers.tpl
+    unknownReason: shared Helm helpers can change names, labels, selectors, and checksums across domains
+  - id: helm-chart-metadata
+    exact: deploy/helm/fugue/Chart.yaml
+    unknownReason: Helm chart metadata and dependencies are shared
+  - id: helm-chart-lock
+    exact: deploy/helm/fugue/Chart.lock
+    unknownReason: Helm dependency lock is shared
+  - id: helm-subcharts
+    prefix: deploy/helm/fugue/charts/
+    unknownReason: Helm subchart changes are not owned by a single release domain
+  - id: helm-crds
+    prefix: deploy/helm/fugue/crds/
+    unknownReason: CRD changes are outside every single-domain adapter
+  - id: helm-test-hooks
+    prefix: deploy/helm/fugue/templates/tests/
+    unknownReason: Helm hooks require explicit rendered-hook treatment
+
+  - id: node-local-template
+    exact: deploy/helm/fugue/templates/node-local-dns-cache.yaml
+    domains: [node-local]
+  - id: authoritative-dns-template
+    exact: deploy/helm/fugue/templates/dns-daemonset.yaml
+    domains: [authoritative-dns]
+  - id: authoritative-dns-groups-template
+    exact: deploy/helm/fugue/templates/dns-group-daemonsets.yaml
+    domains: [authoritative-dns]
+  - id: control-plane-api-template
+    exact: deploy/helm/fugue/templates/deployment.yaml
+    domains: [control-plane]
+  - id: control-plane-controller-template
+    exact: deploy/helm/fugue/templates/controller-deployment.yaml
+    domains: [control-plane]
+  - id: control-plane-service-template
+    exact: deploy/helm/fugue/templates/service.yaml
+    domains: [control-plane]
+  - id: control-plane-ingress-template
+    exact: deploy/helm/fugue/templates/ingress.yaml
+    domains: [control-plane]
+  - id: control-plane-pdb-template
+    exact: deploy/helm/fugue/templates/poddisruptionbudgets.yaml
+    domains: [control-plane]
+  - id: control-plane-cnpg-template
+    exact: deploy/helm/fugue/templates/control-plane-postgres-cluster.yaml
+    domains: [control-plane, backup]
+  - id: control-plane-cnpg-secret-template
+    exact: deploy/helm/fugue/templates/control-plane-postgres-secret.yaml
+    domains: [control-plane]
+  - id: backup-schedule-template
+    exact: deploy/helm/fugue/templates/control-plane-postgres-scheduled-backup.yaml
+    domains: [backup]
+  - id: backup-restore-drill-template
+    exact: deploy/helm/fugue/templates/control-plane-restore-drill-cronjob.yaml
+    domains: [backup]
+  - id: image-cache-template
+    exact: deploy/helm/fugue/templates/image-cache-daemonset.yaml
+    domains: [image-cache]
+
+  - id: control-plane-api-image
+    exact: Dockerfile.api
+    domains: [control-plane]
+  - id: control-plane-controller-image
+    exact: Dockerfile.controller
+    domains: [control-plane]
+  - id: image-cache-image
+    exact: Dockerfile.image-cache
+    domains: [image-cache]
+  - id: shared-edge-image
+    exact: Dockerfile.edge
+    unknownReason: the shared edge image reaches authoritative DNS and out-of-domain edge objects
+  - id: backup-script
+    exact: scripts/backup_fugue_postgres.sh
+    domains: [backup]
+  - id: restore-script
+    exact: scripts/restore_fugue_postgres.sh
+    domains: [backup]
+
+# These rules require changed leaf JSON Pointers. Only current value subtrees
+# whose rendered impact is confined to one release domain are allowlisted.
+# Known shared/cross-domain leaves are explicitly unknown, and every unlisted
+# value (including future children of these roots) remains fail-closed.
+valueRules:
+  - id: values-node-local-mode
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/mode
+    domain: node-local
+  - id: values-node-local-legacy-mode
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/legacyMode
+    domain: node-local
+  - id: values-node-local-local-ip
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/localIP
+    domain: node-local
+  - id: values-node-local-kube-dns-service-ip
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/kubeDNSServiceIP
+    domain: node-local
+  - id: values-node-local-cluster-domain
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/clusterDomain
+    domain: node-local
+  - id: values-node-local-upstream-service
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/upstreamServiceName
+    domain: node-local
+  - id: values-node-local-image
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/image
+    domain: node-local
+  - id: values-node-local-update-strategy
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/updateStrategy
+    domain: node-local
+  - id: values-node-local-min-ready
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/minReadySeconds
+    domain: node-local
+  - id: values-node-local-termination-grace
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/terminationGracePeriodSeconds
+    domain: node-local
+  - id: values-node-local-upstream-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/upstreamSelector
+    domain: node-local
+  - id: values-node-local-node-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/nodeSelector
+    domain: node-local
+  - id: values-node-local-target-nodes
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/targetNodes
+    domain: node-local
+  - id: values-node-local-preserved-offline-nodes
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/preservedOfflineNodes
+    domain: node-local
+  - id: values-node-local-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/tolerations
+    domain: node-local
+  - id: values-node-local-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/resources
+    domain: node-local
+  - id: values-node-local-enabled-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/enabled
+    unknownReason: nodeLocalDNS.enabled also changes observability Prometheus objects when metrics are enabled
+  - id: values-node-local-namespace-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /nodeLocalDNS/namespace
+    unknownReason: nodeLocalDNS.namespace also changes observability Prometheus configuration when metrics are enabled
+
+  - id: values-dns-enabled
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/enabled
+    domain: authoritative-dns
+  - id: values-dns-container-name
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/containerName
+    domain: authoritative-dns
+  - id: values-dns-image
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/image
+    domain: authoritative-dns
+  - id: values-dns-api-url
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/apiURL
+    domain: authoritative-dns
+  - id: values-dns-node-id
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/dnsNodeID
+    domain: authoritative-dns
+  - id: values-dns-edge-group-id
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/edgeGroupID
+    domain: authoritative-dns
+  - id: values-dns-zone
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/zone
+    domain: authoritative-dns
+  - id: values-dns-extra-zones
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/extraZones
+    domain: authoritative-dns
+  - id: values-dns-answer-ips
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/answerIPs
+    domain: authoritative-dns
+  - id: values-dns-listen-address
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/listenAddr
+    domain: authoritative-dns
+  - id: values-dns-health-port
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/healthPort
+    domain: authoritative-dns
+  - id: values-dns-udp-address
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/udpAddr
+    domain: authoritative-dns
+  - id: values-dns-tcp-address
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/tcpAddr
+    domain: authoritative-dns
+  - id: values-dns-sync-interval
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/syncInterval
+    domain: authoritative-dns
+  - id: values-dns-heartbeat-interval
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/heartbeatInterval
+    domain: authoritative-dns
+  - id: values-dns-http-timeout
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/httpTimeout
+    domain: authoritative-dns
+  - id: values-dns-cache-path
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/cachePath
+    domain: authoritative-dns
+  - id: values-dns-cache-archive-limit
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/cacheArchiveLimit
+    domain: authoritative-dns
+  - id: values-dns-max-stale
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/maxStale
+    domain: authoritative-dns
+  - id: values-dns-edge-health-probe
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/edgeHealthProbe
+    domain: authoritative-dns
+  - id: values-dns-token-secret
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/tokenSecret
+    domain: authoritative-dns
+  - id: values-dns-persistence
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/persistence
+    domain: authoritative-dns
+  - id: values-dns-public-host-ports
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/publicHostPorts
+    domain: authoritative-dns
+  - id: values-dns-node-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/nodeSelector
+    domain: authoritative-dns
+  - id: values-dns-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/tolerations
+    domain: authoritative-dns
+  - id: values-dns-affinity
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/affinity
+    domain: authoritative-dns
+  - id: values-dns-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/resources
+    domain: authoritative-dns
+  - id: values-dns-security-context
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/securityContext
+    domain: authoritative-dns
+  - id: values-dns-extra-env
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/extraEnv
+    domain: authoritative-dns
+  - id: values-dns-groups
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/groups
+    domain: authoritative-dns
+  - id: values-dns-route-answer-ips-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/routeAAnswerIPs
+    unknownReason: dns.routeAAnswerIPs changes both authoritative DNS and control-plane API objects
+  - id: values-dns-ttl-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/ttl
+    unknownReason: dns.ttl changes both authoritative DNS and control-plane API objects
+  - id: values-dns-nameservers-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /dns/nameservers
+    unknownReason: dns.nameservers changes both authoritative DNS and control-plane API objects
+
+  - id: values-image-cache-update-strategy
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/updateStrategy
+    domain: image-cache
+  - id: values-image-cache-image
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/image
+    domain: image-cache
+  - id: values-image-cache-registry-base
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/registryBase
+    domain: image-cache
+  - id: values-image-cache-upstream-base
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/upstreamBase
+    domain: image-cache
+  - id: values-image-cache-host-path
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/hostPath
+    domain: image-cache
+  - id: values-image-cache-priority-class
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/priorityClassName
+    domain: image-cache
+  - id: values-image-cache-node-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/nodeSelector
+    domain: image-cache
+  - id: values-image-cache-affinity
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/affinity
+    domain: image-cache
+  - id: values-image-cache-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/tolerations
+    domain: image-cache
+  - id: values-image-cache-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/resources
+    domain: image-cache
+  - id: values-image-cache-enabled-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/enabled
+    unknownReason: imageCache.enabled changes image-cache and control-plane registry endpoint objects
+  - id: values-image-cache-port-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /imageCache/port
+    unknownReason: imageCache.port changes image-cache and control-plane registry endpoint objects
+
+  - id: values-api-replica-count
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/replicaCount
+    domain: control-plane
+  - id: values-api-backup-coordination
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/controlPlaneBackupCoordination
+    domain: control-plane
+  - id: values-api-image
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/image
+    domain: control-plane
+  - id: values-api-app-base-domain
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/appBaseDomain
+    domain: control-plane
+  - id: values-api-public-domain
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/apiPublicDomain
+    domain: control-plane
+  - id: values-api-dns-static-records
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dnsStaticRecordsJSON
+    domain: control-plane
+  - id: values-api-platform-routes
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/platformRoutesJSON
+    domain: control-plane
+  - id: values-api-edge-ranking
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/edgeQualityRankingMode
+    domain: control-plane
+  - id: values-api-legacy-edge-token
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/allowLegacyEdgeToken
+    domain: control-plane
+  - id: values-api-cluster-join-registry
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinRegistryEndpoint
+    domain: control-plane
+  - id: values-api-cluster-join-token-ttl
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinBootstrapTokenTTL
+    domain: control-plane
+  - id: values-api-data-provider
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/provider
+    domain: control-plane
+  - id: values-api-data-bucket
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/bucket
+    domain: control-plane
+  - id: values-api-data-region
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/region
+    domain: control-plane
+  - id: values-api-data-endpoint
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/endpoint
+    domain: control-plane
+  - id: values-api-data-account
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/accountID
+    domain: control-plane
+  - id: values-api-data-prefix
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/prefix
+    domain: control-plane
+  - id: values-api-data-presign-ttl
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/presignTTL
+    domain: control-plane
+  - id: values-api-import-work-dir
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/importWorkDir
+    domain: control-plane
+  - id: values-api-metrics
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/metrics
+    domain: control-plane
+  - id: values-api-host-network
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/hostNetwork
+    domain: control-plane
+  - id: values-api-min-ready
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/minReadySeconds
+    domain: control-plane
+  - id: values-api-termination-grace
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/terminationGracePeriodSeconds
+    domain: control-plane
+  - id: values-api-strategy
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/strategy
+    domain: control-plane
+  - id: values-api-shutdown-drain-delay
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/shutdownDrainDelay
+    domain: control-plane
+  - id: values-api-shutdown-timeout
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/shutdownTimeout
+    domain: control-plane
+  - id: values-api-node-failure-toleration
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/nodeFailureTolerationSeconds
+    domain: control-plane
+  - id: values-api-topology-spread
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/topologySpread
+    domain: control-plane
+  - id: values-api-node-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/nodeSelector
+    domain: control-plane
+  - id: values-api-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/tolerations
+    domain: control-plane
+  - id: values-api-affinity
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/affinity
+    domain: control-plane
+  - id: values-api-pdb
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/podDisruptionBudget
+    domain: control-plane
+  - id: values-api-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/resources
+    domain: control-plane
+  - id: values-api-extra-env
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/extraEnv
+    domain: control-plane
+  - id: values-api-database-url-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/databaseURL
+    unknownReason: api.databaseURL mutates the chart-managed shared configuration Secret
+  - id: values-api-edge-token-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/edgeTLSAskToken
+    unknownReason: api.edgeTLSAskToken mutates the chart-managed shared configuration Secret
+  - id: values-api-registry-push-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/registryPushBase
+    unknownReason: api.registryPushBase changes control-plane and registry maintenance objects
+  - id: values-api-registry-pull-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/registryPullBase
+    unknownReason: api.registryPullBase changes control-plane and registry maintenance objects
+  - id: values-api-cluster-join-server-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinServer
+    unknownReason: api.clusterJoinServer mutates the chart-managed shared configuration Secret
+  - id: values-api-cluster-join-fallbacks-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinServerFallbacks
+    unknownReason: api.clusterJoinServerFallbacks mutates the chart-managed shared configuration Secret
+  - id: values-api-cluster-join-ca-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinCAHash
+    unknownReason: api.clusterJoinCAHash mutates the chart-managed shared configuration Secret
+  - id: values-api-cluster-join-k3s-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinK3SVersion
+    unknownReason: api.clusterJoinK3SVersion mutates the chart-managed shared configuration Secret
+  - id: values-api-cluster-join-mesh-provider-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinMeshProvider
+    unknownReason: api.clusterJoinMeshProvider mutates the chart-managed shared configuration Secret
+  - id: values-api-cluster-join-mesh-login-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinMeshLoginServer
+    unknownReason: api.clusterJoinMeshLoginServer mutates the chart-managed shared configuration Secret
+  - id: values-api-cluster-join-mesh-key-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/clusterJoinMeshAuthKey
+    unknownReason: api.clusterJoinMeshAuthKey mutates the chart-managed shared configuration Secret
+  - id: values-api-data-access-key-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/accessKeyID
+    unknownReason: api.dataBackend.accessKeyID mutates the chart-managed shared configuration Secret
+  - id: values-api-data-secret-key-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/secretAccessKey
+    unknownReason: api.dataBackend.secretAccessKey mutates the chart-managed shared configuration Secret
+  - id: values-api-data-session-token-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/sessionToken
+    unknownReason: api.dataBackend.sessionToken mutates the chart-managed shared configuration Secret
+  - id: values-api-data-encryption-key-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /api/dataBackend/credentialEncryptionKey
+    unknownReason: api.dataBackend.credentialEncryptionKey mutates the chart-managed shared configuration Secret
+
+  - id: values-controller-replica-count
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/replicaCount
+    domain: control-plane
+  - id: values-controller-foreground-workers
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/foregroundActivateWorkers
+    domain: control-plane
+  - id: values-controller-github-import-workers
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/githubSyncImportWorkers
+    domain: control-plane
+  - id: values-controller-github-activate-workers
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/githubSyncActivateWorkers
+    domain: control-plane
+  - id: values-controller-image-retention-interval
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/imageRetentionSweepInterval
+    domain: control-plane
+  - id: values-controller-image-retention-timeout
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/imageRetentionSweepTimeout
+    domain: control-plane
+  - id: values-controller-poll-interval
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/pollInterval
+    domain: control-plane
+  - id: values-controller-fallback-poll-interval
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/fallbackPollInterval
+    domain: control-plane
+  - id: values-controller-runtime-offline-after
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/runtimeOfflineAfter
+    domain: control-plane
+  - id: values-controller-kubectl-apply
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/kubectlApply
+    domain: control-plane
+  - id: values-controller-metrics
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/metrics
+    domain: control-plane
+  - id: values-controller-termination-grace
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/terminationGracePeriodSeconds
+    domain: control-plane
+  - id: values-controller-strategy
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/strategy
+    domain: control-plane
+  - id: values-controller-node-failure-toleration
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/nodeFailureTolerationSeconds
+    domain: control-plane
+  - id: values-controller-topology-spread
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/topologySpread
+    domain: control-plane
+  - id: values-controller-node-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/nodeSelector
+    domain: control-plane
+  - id: values-controller-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/tolerations
+    domain: control-plane
+  - id: values-controller-affinity
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/affinity
+    domain: control-plane
+  - id: values-controller-leader-election
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/leaderElection
+    domain: control-plane
+  - id: values-controller-migration-guard
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/migrationGuard
+    domain: control-plane
+  - id: values-controller-pdb
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/podDisruptionBudget
+    domain: control-plane
+  - id: values-controller-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/resources
+    domain: control-plane
+  - id: values-controller-extra-env
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/extraEnv
+    domain: control-plane
+  - id: values-controller-image-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controller/image
+    unknownReason: controller.image is also the default for node maintenance and registry maintenance objects
+
+  - id: values-service-type
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /service/type
+    domain: control-plane
+  - id: values-service-target-port
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /service/targetPort
+    domain: control-plane
+  - id: values-service-node-port
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /service/nodePort
+    domain: control-plane
+  - id: values-service-port-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /service/port
+    unknownReason: service.port is embedded in control-plane, DNS, edge, image-cache, and drill objects
+
+  - id: values-ingress-enabled
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /ingress/enabled
+    domain: control-plane
+  - id: values-ingress-class
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /ingress/className
+    domain: control-plane
+  - id: values-ingress-annotations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /ingress/annotations
+    domain: control-plane
+  - id: values-ingress-hosts
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /ingress/hosts
+    domain: control-plane
+  - id: values-ingress-tls
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /ingress/tls
+    domain: control-plane
+
+  - id: values-cnpg-image
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/imageName
+    domain: control-plane
+  - id: values-cnpg-instances
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/instances
+    domain: control-plane
+  - id: values-cnpg-storage
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/storage
+    domain: control-plane
+  - id: values-cnpg-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/resources
+    domain: control-plane
+  - id: values-cnpg-affinity
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/affinity
+    domain: control-plane
+  - id: values-cnpg-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/tolerations
+    domain: control-plane
+  - id: values-cnpg-enabled-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/enabled
+    unknownReason: controlPlanePostgres.enabled changes control-plane, backup, and shared configuration objects
+  - id: values-cnpg-api-selection-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/useForAPI
+    unknownReason: controlPlanePostgres.useForAPI mutates the chart-managed shared configuration Secret
+  - id: values-cnpg-name-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/name
+    unknownReason: controlPlanePostgres.name can change control-plane and backup object references
+  - id: values-cnpg-database-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/database
+    unknownReason: controlPlanePostgres.database changes CNPG and chart-managed shared configuration objects
+  - id: values-cnpg-username-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/username
+    unknownReason: controlPlanePostgres.username changes CNPG and chart-managed shared configuration objects
+  - id: values-cnpg-password-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/password
+    unknownReason: controlPlanePostgres.password changes CNPG and chart-managed shared configuration objects
+  - id: values-cnpg-secret-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/existingSecretName
+    unknownReason: controlPlanePostgres.existingSecretName changes CNPG and chart-managed shared configuration objects
+
+  - id: values-cnpg-backup-destination
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/destinationPath
+    domain: backup
+  - id: values-cnpg-backup-endpoint
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/endpointURL
+    domain: backup
+  - id: values-cnpg-backup-wal
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/wal
+    domain: backup
+  - id: values-cnpg-backup-s3-credentials
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/s3Credentials
+    domain: backup
+  - id: values-cnpg-backup-schedule
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/scheduled/schedule
+    domain: backup
+  - id: values-cnpg-backup-immediate
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/scheduled/immediate
+    domain: backup
+  - id: values-cnpg-backup-owner-reference
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/scheduled/backupOwnerReference
+    domain: backup
+  - id: values-cnpg-backup-enabled-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/enabled
+    unknownReason: backup.enabled changes backup resources and the control-plane API deployment
+  - id: values-cnpg-backup-schedule-enabled-shared
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/backup/scheduled/enabled
+    unknownReason: backup.scheduled.enabled changes backup resources and the control-plane API deployment
+
+  - id: values-cnpg-restore-drill-enabled
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/enabled
+    domain: backup
+  - id: values-cnpg-restore-drill-schedule
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/schedule
+    domain: backup
+  - id: values-cnpg-restore-drill-concurrency
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/concurrencyPolicy
+    domain: backup
+  - id: values-cnpg-restore-drill-success-history
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/successfulJobsHistoryLimit
+    domain: backup
+  - id: values-cnpg-restore-drill-failure-history
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/failedJobsHistoryLimit
+    domain: backup
+  - id: values-cnpg-restore-drill-start-deadline
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/startingDeadlineSeconds
+    domain: backup
+  - id: values-cnpg-restore-drill-active-deadline
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/activeDeadlineSeconds
+    domain: backup
+  - id: values-cnpg-restore-drill-image
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/image
+    domain: backup
+  - id: values-cnpg-restore-drill-api-url
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/apiURL
+    domain: backup
+  - id: values-cnpg-restore-drill-secret
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/existingSecretName
+    domain: backup
+  - id: values-cnpg-restore-drill-api-key
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/apiKeySecretKey
+    domain: backup
+  - id: values-cnpg-restore-drill-target-store
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/targetStore
+    domain: backup
+  - id: values-cnpg-restore-drill-manifest
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/restoreManifestJSON
+    domain: backup
+  - id: values-cnpg-restore-drill-node-selector
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/nodeSelector
+    domain: backup
+  - id: values-cnpg-restore-drill-tolerations
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/tolerations
+    domain: backup
+  - id: values-cnpg-restore-drill-resources
+    glob: deploy/helm/fugue/values*.yaml
+    pointer: /controlPlanePostgres/restoreDrill/resources
+    domain: backup
+
+objectRules:
+  - id: node-local-priority-class
+    domain: node-local
+    apiGroup: scheduling.k8s.io
+    version: v1
+    kind: PriorityClass
+    scope: Cluster
+    name: ${nodeLocalName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-service-account
+    domain: node-local
+    apiGroup: ""
+    version: v1
+    kind: ServiceAccount
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-config
+    domain: node-local
+    apiGroup: ""
+    version: v1
+    kind: ConfigMap
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-upstream-service
+    domain: node-local
+    apiGroup: ""
+    version: v1
+    kind: Service
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalUpstreamServiceName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns-upstream
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-service
+    domain: node-local
+    apiGroup: ""
+    version: v1
+    kind: Service
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-active-service
+    domain: node-local
+    apiGroup: ""
+    version: v1
+    kind: Service
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalActiveName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns-active
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-daemon-set
+    domain: node-local
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns
+      fugue.io/rollout-subsystem: cluster-dns
+  - id: node-local-active-daemon-set
+    domain: node-local
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${nodeLocalNamespace}
+    name: ${nodeLocalActiveName}
+    requiredLabels:
+      app.kubernetes.io/component: node-local-dns-active
+      fugue.io/rollout-subsystem: cluster-dns
+
+  - id: authoritative-dns-daemon-set
+    domain: authoritative-dns
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${dnsName}
+    requiredLabels:
+      app.kubernetes.io/component: dns
+      fugue.io/rollout-subsystem: public-data-plane
+      fugue.io/rollout-mode: direct-ondelete-protected
+      fugue.io/downtime-class: online-required
+  - id: authoritative-dns-group-daemon-set
+    domain: authoritative-dns
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    namePrefix: ${dnsName}-
+    requiredLabels:
+      fugue.io/rollout-subsystem: public-data-plane
+      fugue.io/rollout-mode: direct-ondelete-protected
+      fugue.io/downtime-class: online-required
+    nameSuffixLabel:
+      key: app.kubernetes.io/component
+      valuePrefix: dns-
+
+  - id: control-plane-api-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${apiName}
+    requiredLabels:
+      app.kubernetes.io/component: api
+  - id: control-plane-controller-deployment
+    domain: control-plane
+    apiGroup: apps
+    version: v1
+    kind: Deployment
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${controllerName}
+    requiredLabels:
+      app.kubernetes.io/component: controller
+  - id: control-plane-service
+    domain: control-plane
+    apiGroup: ""
+    version: v1
+    kind: Service
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${serviceName}
+    requiredLabels:
+      app.kubernetes.io/component: api
+  - id: control-plane-api-pdb
+    domain: control-plane
+    apiGroup: policy
+    version: v1
+    kind: PodDisruptionBudget
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${apiName}
+    requiredLabels:
+      app.kubernetes.io/component: api
+  - id: control-plane-controller-pdb
+    domain: control-plane
+    apiGroup: policy
+    version: v1
+    kind: PodDisruptionBudget
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${controllerName}
+    requiredLabels:
+      app.kubernetes.io/component: controller
+  - id: control-plane-ingress
+    domain: control-plane
+    apiGroup: networking.k8s.io
+    version: v1
+    kind: Ingress
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${ingressName}
+  - id: control-plane-cnpg-cluster
+    domain: control-plane
+    apiGroup: postgresql.cnpg.io
+    version: v1
+    kind: Cluster
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${controlPlanePostgresName}
+    requiredLabels:
+      app.kubernetes.io/component: control-plane-postgres
+    pathOverrides:
+      - pointer: /spec/backup
+        domain: backup
+  - id: control-plane-cnpg-secret
+    domain: control-plane
+    apiGroup: ""
+    version: v1
+    kind: Secret
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${controlPlanePostgresSecretName}
+    requiredLabels:
+      app.kubernetes.io/component: control-plane-postgres
+
+  - id: image-cache-daemon-set
+    domain: image-cache
+    apiGroup: apps
+    version: v1
+    kind: DaemonSet
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${imageCacheName}
+    requiredLabels:
+      app.kubernetes.io/component: image-cache
+      fugue.io/rollout-subsystem: node-local-build-plane
+
+  - id: backup-scheduled-backup
+    domain: backup
+    apiGroup: postgresql.cnpg.io
+    version: v1
+    kind: ScheduledBackup
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${controlPlanePostgresName}-backup
+    requiredLabels:
+      app.kubernetes.io/component: control-plane-postgres-backup
+  - id: backup-restore-drill
+    domain: backup
+    apiGroup: batch
+    version: v1
+    kind: CronJob
+    scope: Namespaced
+    namespace: ${releaseNamespace}
+    name: ${controlPlaneRestoreDrillName}
+    requiredLabels:
+      app.kubernetes.io/component: control-plane-restore-drill

@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fugue-node-local-dns
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/component: node-local-dns
+    fugue.io/rollout-subsystem: cluster-dns
+spec:
+  template:
+    spec:
+      containers:
+        - name: node-cache
+          image: node-cache:v1
