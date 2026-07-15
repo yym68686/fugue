@@ -4003,6 +4003,45 @@ func TestDNSShadowDaemonSetCanBeEnabledWithoutPublicPorts(t *testing.T) {
 	}
 }
 
+func TestDNSGroupsRespectGlobalEnabledGate(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+dns:
+  enabled: false
+  groups:
+    - name: disabled-group
+      edgeGroupID: edge-disabled
+      nodeSelector:
+        kubernetes.io/hostname: node-a
+      answerIPs:
+        - 192.0.2.1
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for _, name := range []string{"fugue-fugue-dns", "fugue-fugue-dns-disabled-group"} {
+		if doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name); doc != "" {
+			t.Fatalf("dns.enabled=false must not render DaemonSet %s:\n%s", name, doc)
+		}
+	}
+}
+
 func TestNodeLocalDNSDefaultsDisabled(t *testing.T) {
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")

@@ -1,3 +1,4 @@
+{{- if .Values.dns.enabled }}
 {{- range $group := .Values.dns.groups }}
 {{ $name := required "dns.groups[].name is required" $group.name | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
 {{- $edgeGroupID := required (printf "dns.groups[%s].edgeGroupID is required" $name) $group.edgeGroupID -}}
@@ -221,4 +222,5 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
 {{- end }}
