@@ -1,3 +1,142 @@
+{{/* Validate every edge DaemonSet name that the current values render. */}}
+{{- define "fugue.validateEdgeDaemonSetNames" -}}
+{{- $root := . -}}
+{{- if $root.Values.edge.enabled -}}
+{{- $daemonBase := include "fugue.edgeDaemonSetName" $root -}}
+{{- $blueGreenEnabled := $root.Values.edge.blueGreen.enabled -}}
+{{- $migration := default dict $root.Values.edge.blueGreen.migration -}}
+{{- $directEnabled := or (not $blueGreenEnabled) (default false $migration.keepLegacyDirect) -}}
+{{- $sshFront := default dict $root.Values.edge.sshFront -}}
+{{- $sshEnabled := true -}}
+{{- if hasKey $sshFront "enabled" }}{{- $sshEnabled = $sshFront.enabled -}}{{- end -}}
+{{- $dynamic := default dict $root.Values.edge.dynamic -}}
+{{- $dynamicBlueGreen := default dict $dynamic.blueGreen -}}
+{{- $dynamicBlueGreenEnabled := true -}}
+{{- if hasKey $dynamicBlueGreen "enabled" }}{{- $dynamicBlueGreenEnabled = $dynamicBlueGreen.enabled -}}{{- end -}}
+{{- $dynamicEnabled := and $blueGreenEnabled (default false $dynamic.enabled) $dynamicBlueGreenEnabled -}}
+{{- $resources := list -}}
+{{- if $directEnabled -}}
+{{- $resources = append $resources (dict "name" $daemonBase "owner" "edge legacy") -}}
+{{- end -}}
+{{- if $blueGreenEnabled -}}
+{{- $resources = append $resources (dict "name" (printf "%s-front" $daemonBase) "owner" "edge front") -}}
+{{- $resources = append $resources (dict "name" (printf "%s-worker-a" $daemonBase) "owner" "edge worker a") -}}
+{{- $resources = append $resources (dict "name" (printf "%s-worker-b" $daemonBase) "owner" "edge worker b") -}}
+{{- end -}}
+{{- if $sshEnabled -}}
+{{- $resources = append $resources (dict "name" (printf "%s-ssh-front" $daemonBase) "owner" "edge ssh front") -}}
+{{- end -}}
+{{- if $dynamicEnabled -}}
+{{- $resources = append $resources (dict "name" (printf "%s-dynamic-front" $daemonBase) "owner" "dynamic front") -}}
+{{- $resources = append $resources (dict "name" (printf "%s-dynamic-worker-a" $daemonBase) "owner" "dynamic worker a") -}}
+{{- $resources = append $resources (dict "name" (printf "%s-dynamic-worker-b" $daemonBase) "owner" "dynamic worker b") -}}
+{{- end -}}
+{{- $seenGroupNames := dict -}}
+{{- range $group := $root.Values.edge.groups -}}
+{{- $rawName := required "edge.groups[].name is required" $group.name -}}
+{{- $name := $rawName | lower | replace "_" "-" | trunc 30 | trimSuffix "-" -}}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $name) -}}
+{{- fail (printf "edge.groups[].name=%v does not normalize to a valid DNS label" $rawName) -}}
+{{- end -}}
+{{- if or (eq $name "dynamic") (eq $name "ssh") -}}
+{{- fail (printf "edge.groups[].name=%s is reserved" $name) -}}
+{{- end -}}
+{{- if hasKey $seenGroupNames $name -}}
+{{- fail (printf "edge.groups contains duplicate normalized name %s" $name) -}}
+{{- end -}}
+{{- $_ := set $seenGroupNames $name true -}}
+{{- if $directEnabled -}}
+{{- $resources = append $resources (dict "name" (printf "%s-%s" $daemonBase $name) "owner" (printf "group %s legacy" $name)) -}}
+{{- end -}}
+{{- if $blueGreenEnabled -}}
+{{- $resources = append $resources (dict "name" (printf "%s-%s-front" $daemonBase $name) "owner" (printf "group %s front" $name)) -}}
+{{- $resources = append $resources (dict "name" (printf "%s-%s-worker-a" $daemonBase $name) "owner" (printf "group %s worker a" $name)) -}}
+{{- $resources = append $resources (dict "name" (printf "%s-%s-worker-b" $daemonBase $name) "owner" (printf "group %s worker b" $name)) -}}
+{{- end -}}
+{{- if $sshEnabled -}}
+{{- $resources = append $resources (dict "name" (printf "%s-%s-ssh-front" $daemonBase $name) "owner" (printf "group %s ssh front" $name)) -}}
+{{- end -}}
+{{- end -}}
+{{- $seenResourceNames := dict -}}
+{{- range $resource := $resources -}}
+{{- $resourceName := get $resource "name" -}}
+{{- if hasKey $seenResourceNames $resourceName -}}
+{{- fail (printf "edge DaemonSet name collision %s between %s and %s" $resourceName (get $seenResourceNames $resourceName) (get $resource "owner")) -}}
+{{- end -}}
+{{- $_ := set $seenResourceNames $resourceName (get $resource "owner") -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Resolve one local blue/green image as an atomic repository/tag/digest identity.
+
+Group and dynamic cohort overrides are sparse maps; the presence of any
+identity key activates the complete local identity, including an explicitly
+empty digest. This prevents a tag-based local override from accidentally
+inheriting an older digest from its fallback image.
+*/}}
+{{- define "fugue.atomicImageIdentity" -}}
+{{- $fallback := default dict .fallback -}}
+{{- $override := default dict .override -}}
+{{- $identityOverride := false -}}
+{{- if .identityKeysDefineOverride -}}
+{{- $identityOverride = or (hasKey $override "repository") (hasKey $override "tag") (hasKey $override "digest") -}}
+{{- else -}}
+{{- $identityOverride = or (not (empty (get $override "repository"))) (not (empty (get $override "tag"))) (not (empty (get $override "digest"))) -}}
+{{- end -}}
+{{- $repository := get $fallback "repository" -}}
+{{- $tag := get $fallback "tag" -}}
+{{- $digest := get $fallback "digest" -}}
+{{- if $identityOverride -}}
+{{- $repository = get $override "repository" -}}
+{{- $tag = get $override "tag" -}}
+{{- $digest = get $override "digest" -}}
+{{- end -}}
+{{- dict
+  "repository" $repository
+  "tag" $tag
+  "digest" $digest
+  "pullPolicy" (default (get $fallback "pullPolicy") (get $override "pullPolicy"))
+  | toJson -}}
+{{- end -}}
+
+{{/*
+Overlay an existing image map without reviving a fallback digest. Repository
+and tag remain sparse for backwards compatibility. Once either is overridden,
+the override's digest (including empty or omitted) wins as part of the new
+identity. Sparse maps may also explicitly override or clear digest alone; a
+generated map whose complete identity tuple is empty remains an inheritance
+placeholder.
+*/}}
+{{- define "fugue.sparseImageIdentity" -}}
+{{- $fallback := default dict .fallback -}}
+{{- $override := default dict .override -}}
+{{- $repositoryOverride := false -}}
+{{- $tagOverride := false -}}
+{{- $digestOverride := false -}}
+{{- $repositoryOverride = not (empty (get $override "repository")) -}}
+{{- $tagOverride = not (empty (get $override "tag")) -}}
+{{- if .identityKeysDefineOverride -}}
+{{- $allIdentityPlaceholders := and (hasKey $override "repository") (hasKey $override "tag") (hasKey $override "digest") (empty (get $override "repository")) (empty (get $override "tag")) (empty (get $override "digest")) -}}
+{{- $digestOverride = and (hasKey $override "digest") (not $allIdentityPlaceholders) -}}
+{{- else -}}
+{{- $digestOverride = not (empty (get $override "digest")) -}}
+{{- end -}}
+{{- $repository := get $fallback "repository" -}}
+{{- $tag := get $fallback "tag" -}}
+{{- $digest := get $fallback "digest" -}}
+{{- if $repositoryOverride }}{{- $repository = get $override "repository" -}}{{- end -}}
+{{- if $tagOverride }}{{- $tag = get $override "tag" -}}{{- end -}}
+{{- if or $repositoryOverride $tagOverride $digestOverride }}{{- $digest = get $override "digest" -}}{{- end -}}
+{{- dict
+  "repository" $repository
+  "tag" $tag
+  "digest" $digest
+  "pullPolicy" (default (get $fallback "pullPolicy") (get $override "pullPolicy"))
+  | toJson -}}
+{{- end -}}
+
 {{- define "fugue.edgeBlueGreenGroup" -}}
 {{- $root := .root -}}
 {{- $daemonBase := .daemonBase -}}
@@ -43,22 +182,73 @@
 {{- $frontResources := default $root.Values.edge.blueGreen.front.resources .frontResources -}}
 {{- $workerResources := default $root.Values.edge.resources .workerResources -}}
 {{- $caddyResources := default $root.Values.edge.caddy.resources .caddyResources -}}
-{{- $frontImageRepository := default $edgeImageRepository $root.Values.edge.blueGreen.front.image.repository -}}
-{{- $frontImageTag := default $edgeImageTag $root.Values.edge.blueGreen.front.image.tag -}}
-{{- $frontImageDigest := default $edgeImageDigest $root.Values.edge.blueGreen.front.image.digest -}}
-{{- $frontImagePullPolicy := default $edgeImagePullPolicy $root.Values.edge.blueGreen.front.image.pullPolicy -}}
+{{- $edgeImage := dict "repository" $edgeImageRepository "tag" $edgeImageTag "digest" $edgeImageDigest "pullPolicy" $edgeImagePullPolicy -}}
+{{- $rootFrontImageConfig := default dict $root.Values.edge.blueGreen.front.image -}}
+{{- $rootFrontImage := include "fugue.sparseImageIdentity" (dict "fallback" $edgeImage "override" $rootFrontImageConfig "identityKeysDefineOverride" false) | fromJson -}}
+{{- $localBlueGreen := default dict .blueGreenImageOverrides -}}
+{{- $localFront := default dict $localBlueGreen.front -}}
+{{- $localFrontImageConfig := default dict $localFront.image -}}
+{{- $frontImage := include "fugue.atomicImageIdentity" (dict "fallback" $rootFrontImage "override" $localFrontImageConfig "identityKeysDefineOverride" true) | fromJson -}}
+{{- $frontImageRepository := get $frontImage "repository" -}}
+{{- $frontImageTag := get $frontImage "tag" -}}
+{{- $frontImageDigest := get $frontImage "digest" -}}
+{{- $frontImagePullPolicy := get $frontImage "pullPolicy" -}}
 {{- $frontPublicHostPorts := default dict $root.Values.edge.blueGreen.front.publicHostPorts -}}
 {{- $frontProcNet := default dict $root.Values.edge.blueGreen.front.procNet -}}
 {{- $frontProcHostPath := default "/proc" $frontProcNet.hostPath -}}
 {{- $frontProcMountPath := default "/host/proc" $frontProcNet.mountPath -}}
 {{- $slotA := default dict $root.Values.edge.blueGreen.slots.a -}}
 {{- $slotB := default dict $root.Values.edge.blueGreen.slots.b -}}
+{{- $rootSlotAImageConfig := default dict $slotA.image -}}
+{{- $rootSlotBImageConfig := default dict $slotB.image -}}
+{{- $rootSlotAImage := include "fugue.sparseImageIdentity" (dict "fallback" $edgeImage "override" $rootSlotAImageConfig "identityKeysDefineOverride" false) | fromJson -}}
+{{- $rootSlotBImage := include "fugue.sparseImageIdentity" (dict "fallback" $edgeImage "override" $rootSlotBImageConfig "identityKeysDefineOverride" false) | fromJson -}}
+{{- $localSlots := default dict $localBlueGreen.slots -}}
+{{- $localSlotA := default dict $localSlots.a -}}
+{{- $localSlotB := default dict $localSlots.b -}}
+{{- $localSlotAImageConfig := default dict $localSlotA.image -}}
+{{- $localSlotBImageConfig := default dict $localSlotB.image -}}
+{{- $slotAImage := include "fugue.atomicImageIdentity" (dict "fallback" $rootSlotAImage "override" $localSlotAImageConfig "identityKeysDefineOverride" true) | fromJson -}}
+{{- $slotBImage := include "fugue.atomicImageIdentity" (dict "fallback" $rootSlotBImage "override" $localSlotBImageConfig "identityKeysDefineOverride" true) | fromJson -}}
 {{- $slotAHTTP := default 18080 $slotA.httpPort -}}
 {{- $slotAHTTPS := default 18443 $slotA.httpsPort -}}
 {{- $slotBHTTP := default 28080 $slotB.httpPort -}}
 {{- $slotBHTTPS := default 28443 $slotB.httpsPort -}}
 {{- $stateHostPath := default "/var/lib/fugue/edge-blue-green" $root.Values.edge.blueGreen.stateHostPath -}}
-{{- $activeSlotFile := default "/var/lib/fugue/edge-blue-green/active-slot" $root.Values.edge.blueGreen.activeSlotFile }}
+{{- $activeSlotFile := default "/var/lib/fugue/edge-blue-green/active-slot" $root.Values.edge.blueGreen.activeSlotFile -}}
+{{- $frontChecksumConfig := dict
+  "component" $componentBase
+  "edgeGroupID" $edgeGroupID
+  "nodeSelector" $nodeSelector
+  "credentialHostPath" $credentialHostPath
+  "image" $frontImage
+  "resources" $frontResources
+  "front" (omit $root.Values.edge.blueGreen.front "image" "resources")
+  "httpMode" $root.Values.edge.blueGreen.httpMode
+  "activeSlot" $root.Values.edge.blueGreen.activeSlot
+  "stateHostPath" $stateHostPath
+  "activeSlotFile" $activeSlotFile
+  "slotPorts" (dict "a" (dict "http" $slotAHTTP "https" $slotAHTTPS) "b" (dict "http" $slotBHTTP "https" $slotBHTTPS))
+  "affinity" $root.Values.edge.affinity
+  "tolerations" $root.Values.edge.tolerations
+  "imagePullSecrets" $root.Values.imagePullSecrets
+  "podLabels" $root.Values.podLabels
+  "podAnnotations" $root.Values.podAnnotations
+  -}}
+{{- $workerChecksumCohort := omit . "root" "blueGreenImageOverrides" "frontResources" "edgeImageRepository" "edgeImageTag" "edgeImageDigest" "edgeImagePullPolicy" -}}
+{{- $workerChecksumShared := dict
+  "bundle" $root.Values.bundle
+  "requestBodyBuffer" $requestBodyBuffer
+  "edgeSecurityContext" $root.Values.edge.securityContext
+  "edgeAffinity" $root.Values.edge.affinity
+  "edgeTolerations" $root.Values.edge.tolerations
+  "edgeExtraEnv" $root.Values.edge.extraEnv
+  "edgePersistenceMountPath" $root.Values.edge.persistence.mountPath
+  "caddySecurityContext" $root.Values.edge.caddy.securityContext
+  "imagePullSecrets" $root.Values.imagePullSecrets
+  "podLabels" $root.Values.podLabels
+  "podAnnotations" $root.Values.podAnnotations
+  }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -90,7 +280,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/edge-blue-green-front: {{ toJson $root.Values.edge.blueGreen | sha256sum }}
+        checksum/edge-blue-green-front: {{ toJson $frontChecksumConfig | sha256sum }}
         {{- with $root.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -227,12 +417,12 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-{{ range $slot := list (dict "name" "a" "httpPort" $slotAHTTP "httpsPort" $slotAHTTPS "image" (default dict $slotA.image)) (dict "name" "b" "httpPort" $slotBHTTP "httpsPort" $slotBHTTPS "image" (default dict $slotB.image)) }}
-{{ $slotImage := default dict $slot.image -}}
-{{ $slotEdgeImageRepository := default $edgeImageRepository $slotImage.repository -}}
-{{ $slotEdgeImageTag := default $edgeImageTag $slotImage.tag -}}
-{{ $slotEdgeImageDigest := default $edgeImageDigest $slotImage.digest -}}
-{{ $slotEdgeImagePullPolicy := default $edgeImagePullPolicy $slotImage.pullPolicy }}
+{{ range $slot := list (dict "name" "a" "httpPort" $slotAHTTP "httpsPort" $slotAHTTPS "image" $slotAImage) (dict "name" "b" "httpPort" $slotBHTTP "httpsPort" $slotBHTTPS "image" $slotBImage) }}
+{{ $slotImage := $slot.image -}}
+{{ $slotEdgeImageRepository := get $slotImage "repository" -}}
+{{ $slotEdgeImageTag := get $slotImage "tag" -}}
+{{ $slotEdgeImageDigest := get $slotImage "digest" -}}
+{{ $slotEdgeImagePullPolicy := get $slotImage "pullPolicy" }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -267,7 +457,7 @@ spec:
         {{- end }}
       annotations:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" $root }}
-        checksum/edge-blue-green-worker: {{ printf "%s-%s" (toJson $root.Values.edge) $slot.name | sha256sum }}
+        checksum/edge-blue-green-worker: {{ toJson (dict "cohort" $workerChecksumCohort "shared" $workerChecksumShared "slot" $slot) | sha256sum }}
         {{- with $root.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -572,6 +762,9 @@ spec:
 {{- fail (printf "edge.groups[%s].nodeSelector is required" $name) }}
 {{- end }}
 {{- $image := default dict $group.image -}}
+{{- $rootEdgeImage := dict "repository" $.Values.edge.image.repository "tag" $.Values.edge.image.tag "digest" $.Values.edge.image.digest "pullPolicy" $.Values.edge.image.pullPolicy -}}
+{{- $groupEdgeImage := include "fugue.sparseImageIdentity" (dict "fallback" $rootEdgeImage "override" $image "identityKeysDefineOverride" true) | fromJson -}}
+{{- $groupBlueGreen := default dict $group.blueGreen -}}
 {{- $tokenSecret := default dict $group.tokenSecret -}}
 {{- $caddy := default dict $group.caddy -}}
 {{- $groupStaticTLS := default dict $caddy.staticTLS -}}
@@ -593,6 +786,8 @@ spec:
 {{- $peerFallbackEnabled := $.Values.edge.peerFallbackEnabled -}}
 {{- if hasKey $group "peerFallbackEnabled" }}{{- $peerFallbackEnabled = $group.peerFallbackEnabled -}}{{- end -}}
 {{- $caddyImage := default dict $caddy.image -}}
+{{- $rootCaddyImage := dict "repository" $.Values.edge.caddy.image.repository "tag" $.Values.edge.caddy.image.tag "digest" $.Values.edge.caddy.image.digest "pullPolicy" $.Values.edge.caddy.image.pullPolicy -}}
+{{- $groupCaddyImage := include "fugue.sparseImageIdentity" (dict "fallback" $rootCaddyImage "override" $caddyImage "identityKeysDefineOverride" true) | fromJson -}}
 {{- include "fugue.edgeBlueGreenGroup" (dict
   "root" $
   "daemonBase" (printf "%s-%s" (include "fugue.edgeDaemonSetName" $) $name)
@@ -602,15 +797,16 @@ spec:
   "apiURL" (default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.edge.apiURL) $group.apiURL)
   "tokenSecretName" (default (default (include "fugue.configSecretName" $) $.Values.edge.tokenSecret.name) $tokenSecret.name)
   "tokenSecretKey" (default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.edge.tokenSecret.key) $tokenSecret.key)
-  "edgeImageRepository" (default $.Values.edge.image.repository $image.repository)
-  "edgeImageTag" (default $.Values.edge.image.tag $image.tag)
-  "edgeImageDigest" (default $.Values.edge.image.digest $image.digest)
-  "edgeImagePullPolicy" (default $.Values.edge.image.pullPolicy $image.pullPolicy)
+  "edgeImageRepository" (get $groupEdgeImage "repository")
+  "edgeImageTag" (get $groupEdgeImage "tag")
+  "edgeImageDigest" (get $groupEdgeImage "digest")
+  "edgeImagePullPolicy" (get $groupEdgeImage "pullPolicy")
+  "blueGreenImageOverrides" $groupBlueGreen
   "caddyEnabled" $caddyEnabled
-  "caddyImageRepository" (default $.Values.edge.caddy.image.repository $caddyImage.repository)
-  "caddyImageTag" (default $.Values.edge.caddy.image.tag $caddyImage.tag)
-  "caddyImageDigest" (default $.Values.edge.caddy.image.digest $caddyImage.digest)
-  "caddyImagePullPolicy" (default $.Values.edge.caddy.image.pullPolicy $caddyImage.pullPolicy)
+  "caddyImageRepository" (get $groupCaddyImage "repository")
+  "caddyImageTag" (get $groupCaddyImage "tag")
+  "caddyImageDigest" (get $groupCaddyImage "digest")
+  "caddyImagePullPolicy" (get $groupCaddyImage "pullPolicy")
   "caddyAdminAddr" (default $.Values.edge.caddy.adminAddr $caddy.adminAddr)
   "caddyAdminURL" (default $.Values.edge.caddy.adminURL $caddy.adminURL)
   "caddyTLSMode" (default $.Values.edge.caddy.tlsMode $caddy.tlsMode)
@@ -638,7 +834,9 @@ spec:
 {{- end }}
 {{- $dynamic := default dict .Values.edge.dynamic -}}
 {{- $dynamicBlueGreen := default dict $dynamic.blueGreen -}}
-{{- if and $dynamic.enabled (default true $dynamicBlueGreen.enabled) }}
+{{- $dynamicBlueGreenEnabled := true -}}
+{{- if hasKey $dynamicBlueGreen "enabled" }}{{- $dynamicBlueGreenEnabled = $dynamicBlueGreen.enabled -}}{{- end -}}
+{{- if and $dynamic.enabled $dynamicBlueGreenEnabled }}
 {{- if not $dynamic.nodeSelector }}
 {{- fail "edge.dynamic.nodeSelector is required when edge.dynamic.enabled=true" }}
 {{- end }}
@@ -658,6 +856,7 @@ spec:
   "edgeImageTag" .Values.edge.image.tag
   "edgeImageDigest" .Values.edge.image.digest
   "edgeImagePullPolicy" .Values.edge.image.pullPolicy
+  "blueGreenImageOverrides" $dynamicBlueGreen
   "caddyEnabled" .Values.edge.caddy.enabled
   "caddyImageRepository" .Values.edge.caddy.image.repository
   "caddyImageTag" .Values.edge.caddy.image.tag

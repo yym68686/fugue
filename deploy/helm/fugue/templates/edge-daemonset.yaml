@@ -1,3 +1,4 @@
+{{- include "fugue.validateEdgeDaemonSetNames" . -}}
 {{- $edgeBlueGreenMigration := default dict .Values.edge.blueGreen.migration -}}
 {{- $keepLegacyDirect := default false $edgeBlueGreenMigration.keepLegacyDirect -}}
 {{- if and .Values.edge.enabled (or (not .Values.edge.blueGreen.enabled) $keepLegacyDirect) }}
@@ -19,6 +20,7 @@
 {{- $edgeAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL -}}
 {{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
 {{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}
+{{- $edgeChecksumConfig := omit (deepCopy .Values.edge) "blueGreen" "groups" "dynamic" "sshFront" -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -47,7 +49,7 @@ spec:
         {{- end }}
       annotations:
         checksum/config-secret: {{ include "fugue.configSecretChecksum" . }}
-        checksum/edge-config: {{ toJson (omit .Values.edge "blueGreen") | sha256sum }}
+        checksum/edge-config: {{ toJson $edgeChecksumConfig | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

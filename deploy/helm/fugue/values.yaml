@@ -347,6 +347,9 @@ edge:
     migration:
       keepLegacyDirect: false
     front:
+      # Leave the identity empty to inherit edge.image. Repository and tag may
+      # override sparsely, but either one starts a new identity and therefore
+      # clears an omitted/empty digest instead of reviving edge.image.digest.
       image:
         repository: ""
         tag: ""
@@ -475,6 +478,12 @@ edge:
     credentialHostPath: /etc/fugue/edge-node.env
     blueGreen:
       enabled: true
+      # Dynamic public-cohort images inherit edge.blueGreen by default. To
+      # override them independently, declare complete image identities at:
+      #   front.image
+      #   slots.a.image
+      #   slots.b.image
+      # An explicit digest: "" keeps a local tag-based override unpinned.
     resources:
       requests:
         cpu: 25m
@@ -564,6 +573,13 @@ edge:
     nodeSelector: {}
     tolerations: []
     affinity: {}
+  # Each group may declare blueGreen.front.image and
+  # blueGreen.slots.{a,b}.image. Omitted identities inherit the corresponding
+  # root edge.blueGreen identity; local identities are atomic and may use an
+  # explicit digest: "" without inheriting the root digest.
+  # The existing top-level group image remains a sparse repository/tag overlay;
+  # any identity override clears an omitted digest, while a complete all-empty
+  # image map remains an inheritance placeholder.
   groups: []
 
 nodeLocalDNS:

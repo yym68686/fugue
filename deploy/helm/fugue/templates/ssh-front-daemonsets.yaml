@@ -173,6 +173,8 @@ spec:
 {{- if hasKey $sshFront "enabled" }}{{- $sshFrontEnabled = $sshFront.enabled -}}{{- end -}}
 {{- if and .Values.edge.enabled $sshFrontEnabled }}
 {{- $sshImage := default dict $sshFront.image -}}
+{{- $rootEdgeImage := dict "repository" .Values.edge.image.repository "tag" .Values.edge.image.tag "digest" .Values.edge.image.digest "pullPolicy" .Values.edge.image.pullPolicy -}}
+{{- $rootSSHImage := include "fugue.sparseImageIdentity" (dict "fallback" $rootEdgeImage "override" $sshImage "identityKeysDefineOverride" false) | fromJson -}}
 {{- $edgeAPIURL := default (printf "http://%s:%v" (include "fugue.fullname" .) .Values.service.port) .Values.edge.apiURL -}}
 {{- $edgeTokenSecretName := default (include "fugue.configSecretName" .) .Values.edge.tokenSecret.name -}}
 {{- $edgeTokenSecretKey := default "FUGUE_EDGE_TLS_ASK_TOKEN" .Values.edge.tokenSecret.key -}}
@@ -184,10 +186,10 @@ spec:
   "apiURL" $edgeAPIURL
   "tokenSecretName" $edgeTokenSecretName
   "tokenSecretKey" $edgeTokenSecretKey
-  "imageRepository" (default .Values.edge.image.repository $sshImage.repository)
-  "imageTag" (default .Values.edge.image.tag $sshImage.tag)
-  "imageDigest" (default .Values.edge.image.digest $sshImage.digest)
-  "imagePullPolicy" (default .Values.edge.image.pullPolicy $sshImage.pullPolicy)
+  "imageRepository" (get $rootSSHImage "repository")
+  "imageTag" (get $rootSSHImage "tag")
+  "imageDigest" (get $rootSSHImage "digest")
+  "imagePullPolicy" (get $rootSSHImage "pullPolicy")
   "nodeSelector" (default .Values.edge.nodeSelector $sshFront.nodeSelector)
   "affinity" (default .Values.edge.affinity $sshFront.affinity)
   "tolerations" (default .Values.edge.tolerations $sshFront.tolerations)
@@ -202,6 +204,9 @@ spec:
 {{- $groupTokenSecret := default dict $group.tokenSecret -}}
 {{- $groupSSHFront := default dict $group.sshFront -}}
 {{- $groupSSHImage := default dict $groupSSHFront.image -}}
+{{- $groupBaseImage := include "fugue.sparseImageIdentity" (dict "fallback" $rootEdgeImage "override" $groupImage "identityKeysDefineOverride" true) | fromJson -}}
+{{- $groupRootSSHImage := include "fugue.sparseImageIdentity" (dict "fallback" $groupBaseImage "override" $sshImage "identityKeysDefineOverride" false) | fromJson -}}
+{{- $resolvedGroupSSHImage := include "fugue.sparseImageIdentity" (dict "fallback" $groupRootSSHImage "override" $groupSSHImage "identityKeysDefineOverride" true) | fromJson -}}
 {{- include "fugue.sshFrontDaemonSet" (dict
   "root" $
   "name" (printf "%s-%s-ssh-front" (include "fugue.edgeDaemonSetName" $) $name)
@@ -210,10 +215,10 @@ spec:
   "apiURL" (default (default (printf "http://%s:%v" (include "fugue.fullname" $) $.Values.service.port) $.Values.edge.apiURL) $group.apiURL)
   "tokenSecretName" (default (default (include "fugue.configSecretName" $) $.Values.edge.tokenSecret.name) $groupTokenSecret.name)
   "tokenSecretKey" (default (default "FUGUE_EDGE_TLS_ASK_TOKEN" $.Values.edge.tokenSecret.key) $groupTokenSecret.key)
-  "imageRepository" (default (default $.Values.edge.image.repository $groupImage.repository) (default $sshImage.repository $groupSSHImage.repository))
-  "imageTag" (default (default $.Values.edge.image.tag $groupImage.tag) (default $sshImage.tag $groupSSHImage.tag))
-  "imageDigest" (default (default $.Values.edge.image.digest $groupImage.digest) (default $sshImage.digest $groupSSHImage.digest))
-  "imagePullPolicy" (default (default $.Values.edge.image.pullPolicy $groupImage.pullPolicy) (default $sshImage.pullPolicy $groupSSHImage.pullPolicy))
+  "imageRepository" (get $resolvedGroupSSHImage "repository")
+  "imageTag" (get $resolvedGroupSSHImage "tag")
+  "imageDigest" (get $resolvedGroupSSHImage "digest")
+  "imagePullPolicy" (get $resolvedGroupSSHImage "pullPolicy")
   "nodeSelector" $group.nodeSelector
   "affinity" (default $.Values.edge.affinity $group.affinity)
   "tolerations" (default $.Values.edge.tolerations $group.tolerations)

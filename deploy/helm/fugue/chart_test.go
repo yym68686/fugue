@@ -2477,6 +2477,7 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 		t.Fatalf("rendered manifest missing edge front daemonset:\n%s", manifest)
 	}
 	for _, want := range []string{
+		`image: "fugue-edge:latest"`,
 		`- /usr/local/bin/fugue-edge-front`,
 		`fugue.io/rollout-mode: node-local-blue-green-front`,
 		`name: http-public`,
@@ -2508,6 +2509,8 @@ func TestEdgeBlueGreenRendersFrontAndWorkerSlots(t *testing.T) {
 			t.Fatalf("rendered manifest missing %s:\n%s", tc.name, manifest)
 		}
 		for _, want := range []string{
+			`image: "fugue-edge:latest"`,
+			`image: "caddy:2.10.2-alpine"`,
 			`fugue.io/rollout-mode: node-local-blue-green-worker`,
 			`fugue.io/edge-slot: ` + tc.slot,
 			`type: OnDelete`,
@@ -2649,6 +2652,726 @@ func TestEdgeBlueGreenRendersDynamicWorkload(t *testing.T) {
 	if strings.Contains(manifest, "fugue-fugue-edge-dynamic-dns") {
 		t.Fatalf("dynamic edge workload must not render a DNS daemonset:\n%s", manifest)
 	}
+
+	disabledCmd := exec.Command(
+		"helm",
+		"template",
+		"fugue",
+		chartDir,
+		"--set",
+		"edge.caddy.enabled=true",
+		"--set-string",
+		"edge.edgeGroupID=edge-group-country-us",
+		"--set",
+		"edge.blueGreen.enabled=true",
+		"--set",
+		"edge.dynamic.enabled=true",
+		"--set",
+		"edge.dynamic.blueGreen.enabled=false",
+	)
+	disabledCmd.Dir = chartDir
+	disabledOutput, err := disabledCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template with dynamic blue/green disabled failed: %v\n%s", err, disabledOutput)
+	}
+	disabledManifest := string(disabledOutput)
+	if !strings.Contains(disabledManifest, "fugue-fugue-edge-front") {
+		t.Fatalf("disabling dynamic blue/green must not disable the root cohort:\n%s", disabledManifest)
+	}
+	if strings.Contains(disabledManifest, "fugue-fugue-edge-dynamic-") {
+		t.Fatalf("edge.dynamic.blueGreen.enabled=false must suppress the dynamic cohort:\n%s", disabledManifest)
+	}
+}
+
+func TestEdgeBlueGreenImageOverridesAreCohortLocalAndDigestSafe(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+edge:
+  edgeGroupID: edge-group-root
+  image:
+    repository: registry.example/edge-base
+    tag: base-tag
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  caddy:
+    enabled: true
+    image:
+      repository: registry.example/caddy
+      tag: caddy-tag
+      digest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  blueGreen:
+    enabled: true
+    front:
+      image:
+        repository: registry.example/root-front
+        tag: root-front-tag
+        digest: ""
+    slots:
+      a:
+        image:
+          repository: registry.example/root-a
+          tag: root-a-tag
+          digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      b:
+        image:
+          repository: registry.example/root-b
+          tag: root-b-tag
+          digest: sha256:4444444444444444444444444444444444444444444444444444444444444444
+  dynamic:
+    enabled: true
+    blueGreen:
+      front:
+        image:
+          repository: registry.example/dynamic-front
+          tag: dynamic-front-tag
+          digest: ""
+      slots:
+        a:
+          image:
+            repository: registry.example/dynamic-a
+            tag: dynamic-a-tag
+            digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+        b:
+          image:
+            repository: registry.example/dynamic-b
+            tag: dynamic-b-tag
+            digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
+  sshFront:
+    enabled: true
+    image:
+      repository: registry.example/ssh-front
+      tag: ssh-front-tag
+      digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+      blueGreen:
+        front:
+          image:
+            repository: registry.example/group-front
+            tag: group-front-tag
+            digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+        slots:
+          a:
+            image:
+              repository: registry.example/group-a
+              tag: group-a-tag
+              digest: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          b:
+            image:
+              repository: registry.example/group-b
+              tag: group-b-tag
+              digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+    - name: country-fr
+      edgeGroupID: edge-group-country-fr
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: fr
+    - name: country-tag
+      edgeGroupID: edge-group-country-tag
+      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: zz
+      blueGreen:
+        slots:
+          b:
+            image:
+              repository: registry.example/group-tag-b
+              tag: group-tag-b-tag
+dns:
+  enabled: true
+  answerIPs:
+    - 203.0.113.10
+  nameservers:
+    - ns1.example.test
+  image:
+    repository: registry.example/dns
+    tag: dns-tag
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
+meshRecovery:
+  enabled: true
+  generation: meshgen-chart-test
+  loginServer: https://mesh.example.test
+  tokenSecret:
+    name: mesh-recovery-test
+  signingKeySecret:
+    name: mesh-recovery-test
+  image:
+    repository: registry.example/mesh-recovery
+    tag: mesh-tag
+    digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	assertImage := func(name, image string) string {
+		t.Helper()
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if doc == "" {
+			t.Fatalf("rendered manifest missing daemonset %s:\n%s", name, manifest)
+		}
+		want := `image: "` + image + `"`
+		if !strings.Contains(doc, want) {
+			t.Fatalf("daemonset %s missing image %q:\n%s", name, image, doc)
+		}
+		return doc
+	}
+
+	rootFront := assertImage("fugue-fugue-edge-front", "registry.example/root-front:root-front-tag")
+	rootA := assertImage("fugue-fugue-edge-worker-a", "registry.example/root-a@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	rootB := assertImage("fugue-fugue-edge-worker-b", "registry.example/root-b@sha256:4444444444444444444444444444444444444444444444444444444444444444")
+	groupFront := assertImage("fugue-fugue-edge-country-de-front", "registry.example/group-front@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	groupA := assertImage("fugue-fugue-edge-country-de-worker-a", "registry.example/group-a@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	groupB := assertImage("fugue-fugue-edge-country-de-worker-b", "registry.example/group-b@sha256:6666666666666666666666666666666666666666666666666666666666666666")
+	inheritedFront := assertImage("fugue-fugue-edge-country-fr-front", "registry.example/root-front:root-front-tag")
+	inheritedA := assertImage("fugue-fugue-edge-country-fr-worker-a", "registry.example/root-a@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	inheritedB := assertImage("fugue-fugue-edge-country-fr-worker-b", "registry.example/root-b@sha256:4444444444444444444444444444444444444444444444444444444444444444")
+	localTagB := assertImage("fugue-fugue-edge-country-tag-worker-b", "registry.example/group-tag-b:group-tag-b-tag")
+	dynamicFront := assertImage("fugue-fugue-edge-dynamic-front", "registry.example/dynamic-front:dynamic-front-tag")
+	dynamicA := assertImage("fugue-fugue-edge-dynamic-worker-a", "registry.example/dynamic-a@sha256:1111111111111111111111111111111111111111111111111111111111111111")
+	dynamicB := assertImage("fugue-fugue-edge-dynamic-worker-b", "registry.example/dynamic-b@sha256:7777777777777777777777777777777777777777777777777777777777777777")
+
+	baseDigest := "@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	for name, doc := range map[string]string{
+		"root front":      rootFront,
+		"root worker a":   rootA,
+		"root worker b":   rootB,
+		"group front":     groupFront,
+		"group worker a":  groupA,
+		"group worker b":  groupB,
+		"inherited front": inheritedFront,
+		"inherited a":     inheritedA,
+		"inherited b":     inheritedB,
+		"local tag b":     localTagB,
+		"dynamic front":   dynamicFront,
+		"dynamic a":       dynamicA,
+		"dynamic b":       dynamicB,
+	} {
+		if strings.Contains(doc, baseDigest) {
+			t.Fatalf("%s unexpectedly resurrected the edge.image digest:\n%s", name, doc)
+		}
+	}
+
+	caddyImage := `image: "registry.example/caddy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"`
+	for name, doc := range map[string]string{
+		"root worker a":  rootA,
+		"root worker b":  rootB,
+		"group worker a": groupA,
+		"group worker b": groupB,
+		"inherited a":    inheritedA,
+		"inherited b":    inheritedB,
+		"local tag b":    localTagB,
+		"dynamic a":      dynamicA,
+		"dynamic b":      dynamicB,
+	} {
+		if !strings.Contains(doc, caddyImage) {
+			t.Fatalf("%s did not preserve the independent Caddy image:\n%s", name, doc)
+		}
+	}
+
+	assertImage("fugue-fugue-edge-ssh-front", "registry.example/ssh-front@sha256:5555555555555555555555555555555555555555555555555555555555555555")
+	assertImage("fugue-fugue-dns", "registry.example/dns@sha256:2222222222222222222222222222222222222222222222222222222222222222")
+	assertImage("fugue-fugue-mesh-recovery", "registry.example/mesh-recovery@sha256:3333333333333333333333333333333333333333333333333333333333333333")
+
+	for _, tc := range []struct {
+		name      string
+		values    string
+		wantError string
+	}{
+		{
+			name:      "repository without tag",
+			values:    strings.Replace(values, "              tag: group-tag-b-tag\n", "", 1),
+			wantError: "image tag is required when image digest is not set",
+		},
+		{
+			name:      "tag without repository",
+			values:    strings.Replace(values, "              repository: registry.example/group-tag-b\n", "", 1),
+			wantError: "image repository is required",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalidValuesPath := filepath.Join(t.TempDir(), "values.yaml")
+			if err := os.WriteFile(invalidValuesPath, []byte(tc.values), 0o600); err != nil {
+				t.Fatalf("write invalid values: %v", err)
+			}
+			invalidCmd := exec.Command("helm", "template", "fugue", chartDir, "-f", invalidValuesPath)
+			invalidCmd.Dir = chartDir
+			invalidOutput, err := invalidCmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(invalidOutput), tc.wantError) {
+				t.Fatalf("expected fail-closed error %q, got err=%v\n%s", tc.wantError, err, invalidOutput)
+			}
+		})
+	}
+}
+
+func TestEdgeBlueGreenRootImageOverridesAreDigestAwareSparse(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+edge:
+  edgeGroupID: edge-group-root
+  image:
+    repository: registry.example/base
+    tag: base-tag
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  caddy:
+    enabled: true
+  blueGreen:
+    enabled: true
+    front:
+      image:
+        tag: front-tag
+    slots:
+      a:
+        image:
+          repository: registry.example/root-a
+      b:
+        image:
+          digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for name, image := range map[string]string{
+		"fugue-fugue-edge-front":    "registry.example/base:front-tag",
+		"fugue-fugue-edge-worker-a": "registry.example/root-a:base-tag",
+		"fugue-fugue-edge-worker-b": "registry.example/base@sha256:8888888888888888888888888888888888888888888888888888888888888888",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if !strings.Contains(doc, `image: "`+image+`"`) {
+			t.Fatalf("%s did not apply digest-aware sparse root image %q:\n%s", name, image, doc)
+		}
+	}
+}
+
+func TestEdgeGroupImageInheritanceMatchesLegacyAndBlueGreen(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values := `
+edge:
+  edgeGroupID: edge-group-root
+  image:
+    repository: registry.example/base
+    tag: base-tag
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  caddy:
+    enabled: true
+    image:
+      repository: registry.example/caddy-base
+      tag: caddy-base-tag
+      digest: sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  blueGreen:
+    enabled: true
+    migration:
+      keepLegacyDirect: true
+  sshFront:
+    image:
+      tag: root-ssh-tag
+  groups:
+    - name: tag-only
+      edgeGroupID: edge-group-tag-only
+      image:
+        tag: group-tag
+      caddy:
+        image:
+          repository: ""
+          tag: group-caddy-tag
+          digest: ""
+      sshFront:
+        image:
+          repository: ""
+          tag: group-ssh-tag
+          digest: ""
+      nodeSelector:
+        fugue.io/test-group: tag-only
+    - name: digest-clear
+      edgeGroupID: edge-group-digest-clear
+      image:
+        digest: ""
+      nodeSelector:
+        fugue.io/test-group: digest-clear
+    - name: placeholders
+      edgeGroupID: edge-group-placeholders
+      image:
+        repository: ""
+        tag: ""
+        digest: ""
+      nodeSelector:
+        fugue.io/test-group: placeholders
+    - name: digest-only
+      edgeGroupID: edge-group-digest-only
+      image:
+        repository: ""
+        tag: ""
+        digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
+      nodeSelector:
+        fugue.io/test-group: digest-only
+`
+	if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+		t.Fatalf("write values: %v", err)
+	}
+	cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+	cmd.Dir = chartDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, output)
+	}
+
+	manifest := string(output)
+	for group, image := range map[string]string{
+		"tag-only":     "registry.example/base:group-tag",
+		"digest-clear": "registry.example/base:base-tag",
+		"placeholders": "registry.example/base@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		"digest-only":  "registry.example/base@sha256:8888888888888888888888888888888888888888888888888888888888888888",
+	} {
+		for _, suffix := range []string{"", "-front", "-worker-a", "-worker-b"} {
+			name := "fugue-fugue-edge-" + group + suffix
+			doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+			if doc == "" {
+				t.Fatalf("rendered manifest missing daemonset %s", name)
+			}
+			if !strings.Contains(doc, `image: "`+image+`"`) {
+				t.Fatalf("%s did not preserve group image inheritance %q:\n%s", name, image, doc)
+			}
+		}
+	}
+
+	for _, name := range []string{
+		"fugue-fugue-edge-tag-only",
+		"fugue-fugue-edge-tag-only-worker-a",
+		"fugue-fugue-edge-tag-only-worker-b",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if !strings.Contains(doc, `image: "registry.example/caddy-base:group-caddy-tag"`) {
+			t.Fatalf("%s resurrected the root Caddy digest:\n%s", name, doc)
+		}
+	}
+	for name, image := range map[string]string{
+		"fugue-fugue-edge-ssh-front":              "registry.example/base:root-ssh-tag",
+		"fugue-fugue-edge-tag-only-ssh-front":     "registry.example/base:group-ssh-tag",
+		"fugue-fugue-edge-digest-clear-ssh-front": "registry.example/base:root-ssh-tag",
+		"fugue-fugue-edge-placeholders-ssh-front": "registry.example/base:root-ssh-tag",
+		"fugue-fugue-edge-digest-only-ssh-front":  "registry.example/base:root-ssh-tag",
+	} {
+		doc := manifestDocumentForKindAndName(manifest, "DaemonSet", name)
+		if !strings.Contains(doc, `image: "`+image+`"`) {
+			t.Fatalf("%s did not preserve the independent SSH image %q:\n%s", name, image, doc)
+		}
+	}
+}
+
+func TestEdgeGroupNamesFailClosedBeforeResourceCollisions(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for _, blueGreen := range []bool{false, true} {
+		mode := "direct"
+		if blueGreen {
+			mode = "blue-green"
+		}
+		for _, tc := range []struct {
+			name       string
+			groupsYAML string
+			wantError  string
+		}{
+			{name: "reserved dynamic", groupsYAML: "    - name: dynamic\n", wantError: "edge.groups[].name=dynamic is reserved"},
+			{name: "reserved ssh", groupsYAML: "    - name: ssh\n", wantError: "edge.groups[].name=ssh is reserved"},
+			{name: "invalid label", groupsYAML: "    - name: invalid.name\n", wantError: "does not normalize to a valid DNS label"},
+			{name: "normalized collision", groupsYAML: "    - name: country_de\n      edgeGroupID: first\n      nodeSelector: {fugue.io/test: first}\n    - name: country-de\n", wantError: "duplicate normalized name country-de"},
+			{name: "truncation collision", groupsYAML: "    - name: abcdefghijklmnopqrstuvwxyz1234x\n      edgeGroupID: first\n      nodeSelector: {fugue.io/test: first}\n    - name: abcdefghijklmnopqrstuvwxyz1234y\n", wantError: "duplicate normalized name abcdefghijklmnopqrstuvwxyz1234"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+				values := "edge:\n  edgeGroupID: edge-group-root\n  caddy:\n    enabled: true\n  blueGreen:\n    enabled: " + strconv.FormatBool(blueGreen) + "\n  groups:\n" + tc.groupsYAML + "      edgeGroupID: test-group\n      nodeSelector: {fugue.io/test: value}\n"
+				if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+					t.Fatalf("write values: %v", err)
+				}
+				cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+				cmd.Dir = chartDir
+				output, err := cmd.CombinedOutput()
+				if err == nil || !strings.Contains(string(output), tc.wantError) {
+					t.Fatalf("expected group-name error %q, got err=%v\n%s", tc.wantError, err, output)
+				}
+			})
+		}
+	}
+}
+
+func TestEdgeDaemonSetDerivedNamesFailClosedOnCollision(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		values string
+	}{
+		{
+			name: "migration group collides with root front",
+			values: `
+edge:
+  edgeGroupID: root
+  caddy: {enabled: true}
+  blueGreen:
+    enabled: true
+    migration: {keepLegacyDirect: true}
+  groups:
+    - name: front
+      edgeGroupID: front
+      nodeSelector: {fugue.io/test: front}
+`,
+		},
+		{
+			name: "derived group front collides with group legacy",
+			values: `
+edge:
+  edgeGroupID: root
+  caddy: {enabled: true}
+  blueGreen:
+    enabled: true
+    migration: {keepLegacyDirect: true}
+  groups:
+    - name: foo
+      edgeGroupID: foo
+      nodeSelector: {fugue.io/test: foo}
+    - name: foo-front
+      edgeGroupID: foo-front
+      nodeSelector: {fugue.io/test: foo-front}
+`,
+		},
+		{
+			name: "group ssh collides with another group front",
+			values: `
+edge:
+  edgeGroupID: root
+  caddy: {enabled: true}
+  blueGreen: {enabled: true}
+  groups:
+    - name: foo
+      edgeGroupID: foo
+      nodeSelector: {fugue.io/test: foo}
+    - name: foo-ssh
+      edgeGroupID: foo-ssh
+      nodeSelector: {fugue.io/test: foo-ssh}
+`,
+		},
+		{
+			name: "dynamic front collides with group legacy",
+			values: `
+edge:
+  edgeGroupID: root
+  caddy: {enabled: true}
+  blueGreen:
+    enabled: true
+    migration: {keepLegacyDirect: true}
+  dynamic: {enabled: true}
+  groups:
+    - name: dynamic-front
+      edgeGroupID: dynamic-front
+      nodeSelector: {fugue.io/test: dynamic-front}
+`,
+		},
+		{
+			name: "root ssh collides with direct group",
+			values: `
+edge:
+  edgeGroupID: root
+  groups:
+    - name: ssh-front
+      edgeGroupID: ssh-front
+      nodeSelector: {fugue.io/test: ssh-front}
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+			if err := os.WriteFile(valuesPath, []byte(tc.values), 0o600); err != nil {
+				t.Fatalf("write values: %v", err)
+			}
+			cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+			cmd.Dir = chartDir
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "edge DaemonSet name collision") {
+				t.Fatalf("expected derived DaemonSet name collision, got err=%v\n%s", err, output)
+			}
+		})
+	}
+}
+
+func TestEdgeBlueGreenImageOverrideOnlyChangesTargetCohortSlot(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+
+	chartDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	const marker = "      # slot-a-image-override\n"
+	baseValues := `
+edge:
+  edgeGroupID: edge-group-root
+  caddy:
+    enabled: true
+  blueGreen:
+    enabled: true
+    migration:
+      keepLegacyDirect: true
+  groups:
+    - name: country-de
+      edgeGroupID: edge-group-country-de
+` + marker + `      nodeSelector:
+        fugue.io/role.edge: "true"
+        fugue.io/schedulable: "true"
+        fugue.io/location-country-code: de
+`
+	override := `      blueGreen:
+        slots:
+          a:
+            image:
+              repository: registry.example/country-de-a
+              tag: country-de-a-tag
+              digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01
+`
+	groupImageOverride := `      image:
+        tag: country-de-tag
+`
+	groupSSHOverride := `      sshFront:
+        image:
+          repository: registry.example/country-de-ssh
+          tag: country-de-ssh-tag
+          digest: ""
+`
+	render := func(values string) string {
+		t.Helper()
+		valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+		if err := os.WriteFile(valuesPath, []byte(values), 0o600); err != nil {
+			t.Fatalf("write values: %v", err)
+		}
+		cmd := exec.Command("helm", "template", "fugue", chartDir, "-f", valuesPath)
+		cmd.Dir = chartDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("helm template failed: %v\n%s", err, output)
+		}
+		return string(output)
+	}
+
+	before := render(baseValues)
+	after := render(strings.Replace(baseValues, marker, override, 1))
+	afterGroupImage := render(strings.Replace(baseValues, marker, groupImageOverride, 1))
+	afterGroupSSH := render(strings.Replace(baseValues, marker, groupSSHOverride, 1))
+	for _, name := range []string{
+		"fugue-fugue-edge",
+		"fugue-fugue-edge-front",
+		"fugue-fugue-edge-worker-a",
+		"fugue-fugue-edge-worker-b",
+		"fugue-fugue-edge-country-de",
+		"fugue-fugue-edge-country-de-front",
+		"fugue-fugue-edge-country-de-worker-b",
+	} {
+		beforeDoc := manifestDocumentForKindAndName(before, "DaemonSet", name)
+		afterDoc := manifestDocumentForKindAndName(after, "DaemonSet", name)
+		if beforeDoc == "" || afterDoc == "" {
+			t.Fatalf("rendered manifest missing daemonset %s", name)
+		}
+		if beforeDoc != afterDoc {
+			t.Fatalf("country-de slot-a image override changed unrelated daemonset %s\nbefore:\n%s\nafter:\n%s", name, beforeDoc, afterDoc)
+		}
+	}
+
+	beforeTarget := manifestDocumentForKindAndName(before, "DaemonSet", "fugue-fugue-edge-country-de-worker-a")
+	afterTarget := manifestDocumentForKindAndName(after, "DaemonSet", "fugue-fugue-edge-country-de-worker-a")
+	if beforeTarget == afterTarget {
+		t.Fatalf("country-de slot-a image override did not change its target daemonset:\n%s", afterTarget)
+	}
+	if !strings.Contains(afterTarget, `image: "registry.example/country-de-a@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01"`) {
+		t.Fatalf("country-de slot-a target is missing its override image:\n%s", afterTarget)
+	}
+
+	for _, name := range []string{
+		"fugue-fugue-edge",
+		"fugue-fugue-edge-front",
+		"fugue-fugue-edge-worker-a",
+		"fugue-fugue-edge-worker-b",
+		"fugue-fugue-edge-ssh-front",
+	} {
+		beforeDoc := manifestDocumentForKindAndName(before, "DaemonSet", name)
+		afterDoc := manifestDocumentForKindAndName(afterGroupImage, "DaemonSet", name)
+		if beforeDoc != afterDoc {
+			t.Fatalf("group image override changed root daemonset %s\nbefore:\n%s\nafter:\n%s", name, beforeDoc, afterDoc)
+		}
+	}
+
+	for _, name := range []string{
+		"fugue-fugue-edge-country-de",
+		"fugue-fugue-edge-country-de-front",
+		"fugue-fugue-edge-country-de-worker-a",
+		"fugue-fugue-edge-country-de-worker-b",
+	} {
+		beforeDoc := manifestDocumentForKindAndName(before, "DaemonSet", name)
+		afterDoc := manifestDocumentForKindAndName(afterGroupSSH, "DaemonSet", name)
+		if beforeDoc != afterDoc {
+			t.Fatalf("group SSH override changed non-SSH daemonset %s\nbefore:\n%s\nafter:\n%s", name, beforeDoc, afterDoc)
+		}
+	}
+	sshBefore := manifestDocumentForKindAndName(before, "DaemonSet", "fugue-fugue-edge-country-de-ssh-front")
+	sshAfter := manifestDocumentForKindAndName(afterGroupSSH, "DaemonSet", "fugue-fugue-edge-country-de-ssh-front")
+	if sshBefore == sshAfter || !strings.Contains(sshAfter, `image: "registry.example/country-de-ssh:country-de-ssh-tag"`) {
+		t.Fatalf("group SSH override did not exclusively update its SSH daemonset:\n%s", sshAfter)
+	}
 }
 
 func TestEdgeBlueGreenSeparatesPrimaryAndRegionalDocuments(t *testing.T) {
@@ -2672,6 +3395,8 @@ edge:
   groups:
     - name: country-de
       edgeGroupID: edge-group-country-de
+      image:
+        tag: regional-tag
       nodeSelector:
         fugue.io/role.edge: "true"
         fugue.io/schedulable: "true"
@@ -2701,6 +3426,10 @@ edge:
 	}
 	if strings.Contains(regionalFront, "fugue-fugue-edge-worker-b") {
 		t.Fatalf("regional front must be a separate YAML document from primary worker-b:\n%s", regionalFront)
+	}
+	regionalWorkerA := manifestDocumentForKindAndName(manifest, "DaemonSet", "fugue-fugue-edge-country-de-worker-a")
+	if !strings.Contains(regionalWorkerA, `image: "fugue-edge:regional-tag"`) {
+		t.Fatalf("regional blue/green worker must preserve sparse group.image fallback compatibility:\n%s", regionalWorkerA)
 	}
 }
 
