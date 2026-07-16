@@ -101,6 +101,7 @@ type genesisEvidenceOptions struct {
 	ownershipPath       string
 	changedEvidencePath string
 	expectedChanges     stringListFlags
+	evidenceBaseSHA     string
 	output              string
 	runID               string
 	runAttempt          uint64
@@ -209,7 +210,7 @@ func runWriteGenesisPublicEvidenceCommand(args []string, stdout, stderr io.Write
 	}
 	evidence, err := releasedomain.DecodeAndVerifyChangedFileEvidence(
 		bytes.NewReader(evidenceData),
-		options.actualParentSHA,
+		options.evidenceBaseSHA,
 		options.headSHA,
 	)
 	if err != nil {
@@ -364,7 +365,8 @@ func parsePublicEvidenceFlags(args []string) (publicEvidenceOptions, bool) {
 func parseGenesisEvidenceFlags(args []string) (genesisEvidenceOptions, bool) {
 	policy := map[string]bool{
 		"ownership": false, "changed-evidence": false, "expected-change": true,
-		"output": false, "run-id": false, "run-attempt": false,
+		"evidence-base-sha": false,
+		"output":            false, "run-id": false, "run-attempt": false,
 		"expected-head-sha": false, "head-sha": false,
 		"expected-parent-sha": false, "actual-parent-sha": false,
 	}
@@ -378,6 +380,7 @@ func parseGenesisEvidenceFlags(args []string) (genesisEvidenceOptions, bool) {
 	flags.StringVar(&options.ownershipPath, "ownership", "", "")
 	flags.StringVar(&options.changedEvidencePath, "changed-evidence", "", "")
 	flags.Var(&options.expectedChanges, "expected-change", "")
+	flags.StringVar(&options.evidenceBaseSHA, "evidence-base-sha", "", "")
 	flags.StringVar(&options.output, "output", "", "")
 	flags.StringVar(&options.runID, "run-id", "", "")
 	flags.StringVar(&runAttempt, "run-attempt", "", "")
@@ -390,7 +393,7 @@ func parseGenesisEvidenceFlags(args []string) (genesisEvidenceOptions, bool) {
 	}
 	for _, value := range []string{
 		options.ownershipPath, options.changedEvidencePath, options.output, options.runID, runAttempt,
-		options.expectedHeadSHA, options.headSHA, options.expectedParentSHA, options.actualParentSHA,
+		options.evidenceBaseSHA, options.expectedHeadSHA, options.headSHA, options.expectedParentSHA, options.actualParentSHA,
 	} {
 		if !utf8.ValidString(value) || value == "" || strings.TrimSpace(value) != value || strings.ContainsRune(value, '\x00') {
 			return genesisEvidenceOptions{}, false
@@ -399,7 +402,7 @@ func parseGenesisEvidenceFlags(args []string) (genesisEvidenceOptions, bool) {
 	if len(options.expectedChanges) == 0 {
 		return genesisEvidenceOptions{}, false
 	}
-	for _, commit := range []string{options.expectedHeadSHA, options.headSHA, options.expectedParentSHA, options.actualParentSHA} {
+	for _, commit := range []string{options.evidenceBaseSHA, options.expectedHeadSHA, options.headSHA, options.expectedParentSHA, options.actualParentSHA} {
 		if validateGitCommit(commit) != nil {
 			return genesisEvidenceOptions{}, false
 		}
@@ -619,7 +622,7 @@ func buildPublicArtifact(
 
 func buildGenesisPublicArtifact(options genesisEvidenceOptions, changedDigest, ownershipDigest string) releaseevidence.PublicArtifact {
 	digest := func(label string) string {
-		return policyBoundDigest(genesisEvidencePolicy, label, options.actualParentSHA, options.headSHA, changedDigest, ownershipDigest)
+		return policyBoundDigest(genesisEvidencePolicy, label, options.evidenceBaseSHA, options.actualParentSHA, options.headSHA, changedDigest, ownershipDigest)
 	}
 	targetDigest := digest("target-repeat")
 	return releaseevidence.PublicArtifact{

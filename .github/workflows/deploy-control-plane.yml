@@ -77,7 +77,8 @@ jobs:
           readonly baseline_tag='fugue-control-plane-release-baseline'
           readonly baseline_ref="refs/tags/${baseline_tag}"
           readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
-          readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
+          readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
+          readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'
           readonly target_sha="${GITHUB_SHA}"
 
           [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]]
@@ -112,10 +113,14 @@ jobs:
               [[ "${commit}" == "${target_sha}" ]]
               [[ -z "${extra:-}" ]]
               [[ "${actual_parent}" == "${genesis_parent_sha}" ]]
-              read -r parent_commit parent_base extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
+              read -r parent_commit parent_b3 extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
               [[ "${parent_commit}" == "${genesis_parent_sha}" ]]
               [[ -z "${extra:-}" ]]
-              [[ "${parent_base}" == "${genesis_base_sha}" ]]
+              [[ "${parent_b3}" == "${genesis_b3_sha}" ]]
+              read -r b3_commit b3_base extra <<<"$(git rev-list --parents -n 1 "${genesis_b3_sha}")"
+              [[ "${b3_commit}" == "${genesis_b3_sha}" ]]
+              [[ -z "${extra:-}" ]]
+              [[ "${b3_base}" == "${genesis_base_sha}" ]]
               domain_base_sha="${genesis_base_sha}"
               baseline_ref_object_sha=''
               is_genesis='true'
@@ -458,6 +463,7 @@ jobs:
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --head-sha "${DOMAIN_TARGET_SHA}" \
             --expected-head-sha "${GENESIS_SHA}" \
+            --evidence-base-sha "${DOMAIN_BASE_SHA}" \
             --actual-parent-sha "${GENESIS_PARENT_SHA}" \
             --expected-parent-sha "${GENESIS_PARENT_SHA}"
           [[ -f "${public_evidence}" && ! -L "${public_evidence}" ]]
@@ -878,7 +884,8 @@ jobs:
           set -euo pipefail
           readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'
           readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
-          readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
+          readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
+          readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'
           [[ "${EXPECTED_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
 
@@ -897,10 +904,14 @@ jobs:
               [[ "${target_commit}" == "${TARGET_SHA}" ]]
               [[ -z "${extra:-}" ]]
               [[ "${target_parent}" == "${genesis_parent_sha}" ]]
-              read -r parent_commit parent_base extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
+              read -r parent_commit parent_b3 extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
               [[ "${parent_commit}" == "${genesis_parent_sha}" ]]
               [[ -z "${extra:-}" ]]
-              [[ "${parent_base}" == "${genesis_base_sha}" ]]
+              [[ "${parent_b3}" == "${genesis_b3_sha}" ]]
+              read -r b3_commit b3_base extra <<<"$(git rev-list --parents -n 1 "${genesis_b3_sha}")"
+              [[ "${b3_commit}" == "${genesis_b3_sha}" ]]
+              [[ -z "${extra:-}" ]]
+              [[ "${b3_base}" == "${genesis_base_sha}" ]]
               lease="${baseline_ref}:"
               ;;
             false)

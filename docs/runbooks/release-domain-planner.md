@@ -172,8 +172,8 @@ following match:
 - the dedicated baseline tag is absent;
 - repository variable `FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA` equals the
   exact dispatched head;
-- that head has exactly the pinned B3 parent, whose own parent is the pinned
-  genesis base; and
+- that head has exactly the pinned recovery parent, whose parent is the pinned
+  B3 commit, whose own parent is the pinned genesis base; and
 - changed-file evidence equals the workflow's statically enumerated exact
   cumulative genesis path list (no directory prefix or dynamically derived
   allowlist).
@@ -183,6 +183,10 @@ ARM64 command dependency graphs before building the private evidence tools.
 Evidence generation then uses that checksum-verified download cache as an
 offline file proxy; an absent or incomplete cache remains a fail-closed
 evidence error.
+
+Recovery targets bind cumulative changed-file evidence to the pinned genesis
+base independently from binding the target commit to its pinned direct parent.
+The two revisions may differ, but neither binding is caller-derived.
 
 Genesis writes and uploads public bootstrap evidence but performs no cluster
 deployment. On success it establishes the dedicated baseline tag. Subsequent

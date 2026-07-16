@@ -344,6 +344,9 @@ func TestWriteGenesisPublicEvidenceRejectsRevisionSchemaAndPathAttacks(t *testin
 		{name: "parent mismatch", mutate: func(_ *testing.T, _ commandFixture, _ string, args []string) {
 			setFlagArgument(args, "--expected-parent-sha", strings.Repeat("3", 40))
 		}},
+		{name: "evidence base mismatch", mutate: func(_ *testing.T, _ commandFixture, _ string, args []string) {
+			setFlagArgument(args, "--evidence-base-sha", strings.Repeat("3", 40))
+		}},
 		{name: "evidence target mismatch", mutate: func(t *testing.T, fixture commandFixture, evidence string, _ []string) {
 			overwritePrivateFile(t, evidence, testChangedEvidence(t, fixture.baseCommit, strings.Repeat("3", 40), []releasedomain.ChangedFile{}))
 		}},
@@ -410,6 +413,28 @@ func TestWriteGenesisPublicEvidenceRejectsRevisionSchemaAndPathAttacks(t *testin
 				t.Fatalf("tampered genesis published output: %v", err)
 			}
 		})
+	}
+}
+
+func TestWriteGenesisPublicEvidenceAllowsDistinctEvidenceBaseAndDirectParent(t *testing.T) {
+	fixture := newCommandFixture(t, []releasedomain.Domain{releasedomain.DomainNodeLocal}, releasedomain.OutcomeSingle)
+	evidencePath := flagValue(t, fixture.args, "--changed-evidence")
+	output := newPublicOutputPath(t)
+	args := genesisEvidenceArgs(t, fixture, evidencePath, output)
+	directParent := strings.Repeat("4", 40)
+	setFlagArgument(args, "--expected-parent-sha", directParent)
+	setFlagArgument(args, "--actual-parent-sha", directParent)
+
+	var stdout, stderr bytes.Buffer
+	if got := run(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("distinct genesis base/parent exit = %d, stdout = %q, stderr = %q", got, stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("distinct genesis base/parent output = %q / %q", stdout.String(), stderr.String())
+	}
+	artifact := decodePublicArtifact(t, output)
+	if artifact.Outcome != releaseevidence.OutcomeGenesisZero || artifact.HeadSHA != fixture.targetCommit {
+		t.Fatalf("distinct genesis base/parent artifact = %#v", artifact)
 	}
 }
 
@@ -633,6 +658,7 @@ func genesisEvidenceArgs(t *testing.T, fixture commandFixture, evidence, output 
 		"write-genesis-public-evidence",
 		"--ownership", flagValue(t, fixture.args, "--ownership"),
 		"--changed-evidence", evidence,
+		"--evidence-base-sha", fixture.baseCommit,
 		"--output", output,
 		"--run-id", "123456789",
 		"--run-attempt", "2",

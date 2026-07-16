@@ -91,14 +91,16 @@ assert_equal(
 for fragment in [
   "readonly baseline_tag='fugue-control-plane-release-baseline'",
   "readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
-  "readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
+  "readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
+  "readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${fetched_ref_object_sha}" == "${remote_object}"',
   '"${remote_object}" == "${domain_base_sha}"',
   'git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"',
   '"${genesis_sha}" == "${target_sha}"',
   '"${actual_parent}" == "${genesis_parent_sha}"',
-  '"${parent_base}" == "${genesis_base_sha}"',
+  '"${parent_b3}" == "${genesis_b3_sha}"',
+  '"${b3_base}" == "${genesis_base_sha}"',
   'domain_base_sha="${genesis_base_sha}"',
 ]
   fail_contract("baseline resolver is missing #{fragment.inspect}") unless resolver.fetch("run").include?(fragment)
@@ -158,6 +160,7 @@ for fragment in [
   "write-genesis-public-evidence",
   '--ownership "${GITHUB_WORKSPACE}/deploy/release-domains/ownership-v1.yaml"',
   '--expected-head-sha "${GENESIS_SHA}"',
+  '--evidence-base-sha "${DOMAIN_BASE_SHA}"',
   '--actual-parent-sha "${GENESIS_PARENT_SHA}"',
   '${RUNNER_TEMP}/fugue-release-domain-private',
   '${RUNNER_TEMP}/fugue-release-domain-public',
@@ -300,7 +303,8 @@ assert_equal(
 for fragment in [
   "readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'",
   "readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
-  "readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
+  "readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
+  "readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"',
   '"${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}"',
@@ -308,7 +312,8 @@ for fragment in [
   '"${current_base_sha}" == "${EXPECTED_BASE_SHA}"',
   '"${EXPECTED_BASE_SHA}" == "${genesis_base_sha}"',
   '"${target_parent}" == "${genesis_parent_sha}"',
-  '"${parent_base}" == "${genesis_base_sha}"',
+  '"${parent_b3}" == "${genesis_b3_sha}"',
+  '"${b3_base}" == "${genesis_base_sha}"',
   '--force-with-lease="${lease}"',
   '"${TARGET_SHA}:${baseline_ref}"',
 ]
