@@ -98,6 +98,8 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	for _, required := range []string{
 		"Makefile",
+		"scripts/lib/control_plane_release_render.sh",
+		"scripts/test_control_plane_release_render.sh",
 		"scripts/test_release_domain_safety.sh",
 	} {
 		if !containsString(workflow.On.Push.Paths, required) {

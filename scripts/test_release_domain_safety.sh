@@ -1789,6 +1789,7 @@ run_e5b_query_timeout_regressions
 run_e4_real_dig_smokes
 run_e4_public_hostport_regressions
 run_helm_upgrade_argv_builder_regressions
+bash "${REPO_ROOT}/scripts/test_control_plane_release_render.sh"
 if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
       "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e5b-dig" ]]; then
   printf '[test_release_domain_safety] E5B DNS targeted regressions ok\n'

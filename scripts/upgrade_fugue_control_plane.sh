@@ -5,6 +5,8 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=scripts/lib/authoritative_dns_dig.sh
 source "${REPO_ROOT}/scripts/lib/authoritative_dns_dig.sh"
+# shellcheck source=scripts/lib/control_plane_release_render.sh
+source "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh"
 
 log() {
   printf '[fugue-upgrade] %s\n' "$*"
