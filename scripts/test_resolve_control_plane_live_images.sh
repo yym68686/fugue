@@ -165,7 +165,8 @@ cat >"${TAG_OBJECTS}" <<JSON
   "deploy/fugue-fugue-api": {"spec":{"template":{"spec":{"containers":[{"name":"api","image":"registry.example:5000/team/api:api-live"}]}}}},
   "deploy/fugue-fugue-controller": {"spec":{"template":{"spec":{"containers":[{"name":"controller","image":"ghcr.io/acme/controller:controller-live","env":[
     {"name":"FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY","value":"ghcr.io/acme/drain"},
-    {"name":"FUGUE_DRAIN_AGENT_IMAGE_TAG","value":"drain-live"}
+    {"name":"FUGUE_DRAIN_AGENT_IMAGE_TAG","value":"drain-live"},
+    {"name":"FUGUE_DRAIN_AGENT_IMAGE_DIGEST"}
   ]}]}}}},
   "ds/fugue-fugue-image-cache": {"spec":{"template":{"spec":{"containers":[{"name":"image-cache","image":"ghcr.io/acme/cache:cache-live"}]}}}},
   "ds/fugue-fugue-edge": {"spec":{"template":{"spec":{"containers":[{"name":"edge","image":"ghcr.io/acme/edge:edge-live"}]}}}},
@@ -190,6 +191,25 @@ assert_eq "$(output_value "${TAG_OUTPUT}" public_cohort_image_count)" "1" "SSH f
 assert_eq "$(multiline_output_value "${TAG_OUTPUT}" public_cohort_image_template_refs)" "fugue-fugue-edge-front|registry.example:5000/team/front:front-live@${DIGEST_A}" "tag+digest cohort ref"
 assert_eq "$(multiline_output_value "${TAG_OUTPUT}" public_cohort_image_source_tags)" "fugue-fugue-edge-front|front-live" "tag+digest cohort source tag"
 assert_eq "$(multiline_output_value "${TAG_OUTPUT}" release_baseline_tags)" $'api-live\ncontroller-live' "legacy release baselines"
+
+EXPLICIT_EMPTY_DIGEST_OBJECTS="${TMP_ROOT}/explicit-empty-digest-objects.json"
+python3 -c '
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, "r", encoding="utf-8") as handle:
+    objects = json.load(handle)
+container = objects["deploy/fugue-fugue-controller"]["spec"]["template"]["spec"]["containers"][0]
+for item in container["env"]:
+    if item["name"] == "FUGUE_DRAIN_AGENT_IMAGE_DIGEST":
+        item["value"] = ""
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(objects, handle)
+' "${TAG_OBJECTS}" "${EXPLICIT_EMPTY_DIGEST_OBJECTS}"
+run_resolver "${EXPLICIT_EMPTY_DIGEST_OBJECTS}" "${TAG_VALUES}" "${TMP_ROOT}/explicit-empty-digest-output" "${TMP_ROOT}/explicit-empty-digest-stdout" "${TMP_ROOT}/explicit-empty-digest-stderr" "${TMP_ROOT}/explicit-empty-digest-calls"
+assert_eq "$(output_value "${TMP_ROOT}/explicit-empty-digest-output" drain_agent_image_source_tag)" "drain-live" "explicit empty drain digest equals the Kubernetes name-only representation"
+assert_eq "$(output_value "${TMP_ROOT}/explicit-empty-digest-output" drain_agent_image_digest)" "" "explicit empty drain digest remains empty"
 
 REVERSE_EDGE_RACE_OBJECTS="${TMP_ROOT}/reverse-edge-race-objects.json"
 python3 -c '
@@ -313,7 +333,7 @@ if run_resolver "${NO_COHORT_OBJECTS}" "${TAG_VALUES}" "${TMP_ROOT}/no-cohort-ou
 fi
 assert_eq "$(wc -c <"${TMP_ROOT}/no-cohort-output" | tr -d ' ')" "0" "cohort read failure must not emit partial outputs"
 
-for resource_failure in forbidden invalid_json missing_container controller_missing nul_image newline_controller tab_public pipe_controller raw_nul_resource raw_nul_public; do
+for resource_failure in forbidden invalid_json missing_container controller_missing invalid_controller_env nul_image newline_controller value_from_controller value_and_value_from_controller null_value_controller number_value_controller duplicate_digest_controller tab_public pipe_controller raw_nul_resource raw_nul_public; do
   FAILURE_OBJECTS="${TMP_ROOT}/resource-${resource_failure}-objects.json"
   python3 -c '
 import json
@@ -330,6 +350,8 @@ elif mode == "missing_container":
     objects["ds/fugue-fugue-image-cache"] = {"spec": {"template": {"spec": {"containers": []}}}}
 elif mode == "controller_missing":
     objects["deploy/fugue-fugue-controller"] = {"spec": {"template": {"spec": {"containers": [{"name": "not-controller", "image": "ghcr.io/acme/other:live"}]}}}}
+elif mode == "invalid_controller_env":
+    objects["deploy/fugue-fugue-controller"]["spec"]["template"]["spec"]["containers"][0]["env"] = {}
 elif mode == "nul_image":
     objects["deploy/fugue-fugue-telemetry-agent"]["spec"]["template"]["spec"]["containers"][0]["image"] = "ghcr.io/acme/telemetry:\u0000live"
 elif mode in {"newline_controller", "pipe_controller"}:
@@ -337,6 +359,21 @@ elif mode in {"newline_controller", "pipe_controller"}:
     for item in container["env"]:
         if item["name"] == "FUGUE_DRAIN_AGENT_IMAGE_TAG":
             item["value"] = "drain\nlive" if mode == "newline_controller" else "drain|live"
+elif mode in {"value_from_controller", "value_and_value_from_controller", "null_value_controller", "number_value_controller", "duplicate_digest_controller"}:
+    container = objects["deploy/fugue-fugue-controller"]["spec"]["template"]["spec"]["containers"][0]
+    for item in container["env"]:
+        if item["name"] == "FUGUE_DRAIN_AGENT_IMAGE_DIGEST":
+            if mode in {"value_from_controller", "value_and_value_from_controller"}:
+                item["valueFrom"] = {"secretKeyRef": {"name": "drain-image", "key": "digest"}}
+            if mode == "value_and_value_from_controller":
+                item["value"] = ""
+            elif mode == "null_value_controller":
+                item["value"] = None
+            elif mode == "number_value_controller":
+                item["value"] = 7
+            elif mode == "duplicate_digest_controller":
+                container["env"].append(dict(item))
+            break
 elif mode == "tab_public":
     objects["ds"]["items"][0]["spec"]["template"]["spec"]["containers"][0]["image"] = "ghcr.io/acme/front:\tlive"
 elif mode == "raw_nul_resource":
@@ -358,6 +395,16 @@ with open(target, "w", encoding="utf-8") as handle:
   if [[ "${resource_failure}" == "controller_missing" ]]; then
     assert_eq "$(kubectl_call_count "${FAILURE_OUTPUT}" deploy/fugue-fugue-controller)" "1" "invalid controller is not re-read or treated as absent"
   fi
+  case "${resource_failure}" in
+    value_from_controller|value_and_value_from_controller|null_value_controller|number_value_controller)
+      grep -Fq 'FUGUE_DRAIN_AGENT_IMAGE_DIGEST must use one literal string value' "${TMP_ROOT}/resource-${resource_failure}-stderr" ||
+        fail "${resource_failure} must report the rejected drain digest carrier"
+      ;;
+    duplicate_digest_controller)
+      grep -Fq 'duplicate FUGUE_DRAIN_AGENT_IMAGE_DIGEST values' "${TMP_ROOT}/resource-${resource_failure}-stderr" ||
+        fail "duplicate drain digest values must report the duplicate carrier"
+      ;;
+  esac
 done
 
 CONTROLLER_SEQUENCE_OBJECTS="${TMP_ROOT}/controller-sequence-objects.json"

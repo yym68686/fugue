@@ -171,7 +171,9 @@ image = container.get("image")
 if not isinstance(image, str) or not image:
     print("live controller image is missing", file=sys.stderr)
     raise SystemExit(1)
-env = container.get("env") or []
+env = container.get("env")
+if env is None:
+    env = []
 if not isinstance(env, list) or any(not isinstance(item, dict) for item in env):
     print("live controller Deployment has an invalid env field", file=sys.stderr)
     raise SystemExit(1)
@@ -182,7 +184,13 @@ def env_value(name):
         raise ValueError(f"live controller Deployment has duplicate {name} values")
     if not matches:
         return ""
-    value = matches[0].get("value")
+    item = matches[0]
+    if "valueFrom" in item:
+        raise ValueError(f"live controller Deployment {name} must use one literal string value")
+    # Kubernetes omits EnvVar.value from API JSON when the literal value is
+    # empty. A name-only EnvVar therefore means the same literal empty string
+    # as {"value":""}; it is not an unresolved valueFrom reference.
+    value = item.get("value", "")
     if not isinstance(value, str):
         raise ValueError(f"live controller Deployment {name} must use one literal string value")
     return value
