@@ -133,6 +133,31 @@ Changed-file JSON is an array:
 ]
 ```
 
+Boundary B provides a dormant, refs-only producer for the enriched array:
+
+```sh
+go run ./cmd/fugue-release-domain-evidence \
+  --repo . \
+  --base BASE_COMMIT \
+  --target TARGET_COMMIT \
+  --output /private/path/changed-file-evidence.json
+```
+
+The producer resolves both revisions to commit OIDs and wraps `changes` in a
+revision-bound `ChangedFileEvidence` document. Its `digest` is SHA-256 over the
+compact JSON payload containing `apiVersion`, `kind`, `policy`, `baseCommit`,
+`targetCommit`, and `changes`; the digest field itself is excluded. Go consumer
+graphs are built from exact Git tree blobs for Linux amd64 and arm64 with
+network access disabled, private temporary Go caches, and no local `go.mod`
+replacement. Incomplete enrichment writes no output. File output is an atomic
+0600 replacement and never follows a destination symlink.
+
+The Boundary A planner still consumes the embedded `changes` array. A future
+Boundary C activation must validate the envelope digest and exact base/target
+OIDs in the same immutable context as the rendered manifests before extracting
+that array. The default release path does not invoke this producer or the
+planner yet.
+
 The built binary exits `0` for `zero` or `single`, `2` for the expected blocked
 results `multiple` or `unknown`, and `1` for invalid CLI/input-file framing. A
 blocked plan is written to the requested output (or stdout) before the binary
