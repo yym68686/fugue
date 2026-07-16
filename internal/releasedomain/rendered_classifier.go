@@ -13,6 +13,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	maxRenderedManifestBytes     = 8 << 20
+	maxRenderedManifestNodes     = 500_000
+	maxRenderedManifestDepth     = 128
+	maxRenderedManifestDocuments = 100_000
+	maxRenderedManifestObjects   = 100_000
+	maxRenderedManifestLines     = 100_000
+	maxRenderedManifestSyntax    = 200_000
+	maxRenderedManifestScalars   = 16 << 20
+	maxRenderedNumberBytes       = 4 << 10
+	maxRenderedNumberExponent    = 4096
+	maxManifestDiagnosticPath    = 4096
+)
+
 // RenderedOptions supplies identities resolved by the same render builder that
 // produced base and target manifests.
 type RenderedOptions struct {
@@ -176,10 +190,27 @@ func ClassifyRendered(baseManifest, targetManifest []byte, spec *OwnershipSpec, 
 }
 
 func decodeManifest(data []byte, spec *OwnershipSpec, defaultNamespace, side string) ([]manifestObject, []Evidence) {
+	if len(data) > maxRenderedManifestBytes {
+		return nil, []Evidence{{
+			Source: "rendered-object", Subject: side + " manifest", Reason: fmt.Sprintf("manifest bytes exceed limit %d", maxRenderedManifestBytes),
+		}}
+	}
+	if err := validateManifestLexicalBudget(data); err != nil {
+		return nil, []Evidence{{
+			Source: "rendered-object", Subject: side + " manifest", Reason: err.Error(),
+		}}
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	objects := make([]manifestObject, 0)
 	unknown := make([]Evidence, 0)
+	budget := &manifestDecodeBudget{}
 	for document := 1; ; document++ {
+		if document > maxRenderedManifestDocuments {
+			unknown = append(unknown, Evidence{
+				Source: "rendered-object", Subject: side + " manifest", Reason: fmt.Sprintf("manifest document count exceeds limit %d", maxRenderedManifestDocuments),
+			})
+			break
+		}
 		var documentNode yaml.Node
 		err := decoder.Decode(&documentNode)
 		if err == io.EOF {
@@ -197,7 +228,7 @@ func decodeManifest(data []byte, spec *OwnershipSpec, defaultNamespace, side str
 		if isImplicitEmptyDocument(&documentNode) {
 			continue
 		}
-		decoded, err := strictManifestValue(&documentNode, "$")
+		decoded, err := strictManifestValueWithBudget(&documentNode, "$", 0, budget)
 		if err != nil {
 			unknown = append(unknown, Evidence{
 				Source: "rendered-object", Subject: fmt.Sprintf("%s manifest document %d", side, document), Reason: "YAML validation failed: " + err.Error(),
@@ -229,6 +260,12 @@ func decodeManifest(data []byte, spec *OwnershipSpec, defaultNamespace, side str
 			continue
 		}
 		objects = append(objects, expanded...)
+		if len(objects) > maxRenderedManifestObjects {
+			unknown = append(unknown, Evidence{
+				Source: "rendered-object", Subject: side + " manifest", Reason: fmt.Sprintf("manifest object count exceeds limit %d", maxRenderedManifestObjects),
+			})
+			break
+		}
 	}
 	return objects, unknown
 }
@@ -250,9 +287,25 @@ func isImplicitEmptyDocument(document *yaml.Node) bool {
 // must distinguish adjacent integers above 2^53.
 type manifestNumber string
 
+type manifestDecodeBudget struct {
+	nodes       int
+	scalarBytes int
+}
+
 func strictManifestValue(node *yaml.Node, path string) (any, error) {
+	return strictManifestValueWithBudget(node, path, 0, &manifestDecodeBudget{})
+}
+
+func strictManifestValueWithBudget(node *yaml.Node, path string, depth int, budget *manifestDecodeBudget) (any, error) {
 	if node == nil {
 		return nil, fmt.Errorf("%s is missing", path)
+	}
+	if depth > maxRenderedManifestDepth {
+		return nil, fmt.Errorf("%s exceeds YAML nesting limit %d", path, maxRenderedManifestDepth)
+	}
+	budget.nodes++
+	if budget.nodes > maxRenderedManifestNodes {
+		return nil, fmt.Errorf("manifest YAML node count exceeds limit %d", maxRenderedManifestNodes)
 	}
 	if node.Anchor != "" {
 		return nil, fmt.Errorf("%s uses YAML anchor %q", path, node.Anchor)
@@ -269,7 +322,7 @@ func strictManifestValue(node *yaml.Node, path string) (any, error) {
 		if len(node.Content) != 1 {
 			return nil, fmt.Errorf("%s document must contain exactly one root value", path)
 		}
-		return strictManifestValue(node.Content[0], path)
+		return strictManifestValueWithBudget(node.Content[0], path, depth+1, budget)
 	case yaml.MappingNode:
 		if node.Tag != "!!map" {
 			return nil, fmt.Errorf("%s mapping has unsupported tag %q", path, node.Tag)
@@ -285,6 +338,9 @@ func strictManifestValue(node *yaml.Node, path string) (any, error) {
 				return nil, fmt.Errorf("%s mapping key %d must be an unanchored string", path, index/2)
 			}
 			key := keyNode.Value
+			if err := budget.consumeScalarBytes(len(key)); err != nil {
+				return nil, err
+			}
 			if key == "<<" || keyNode.Tag == "!!merge" {
 				return nil, fmt.Errorf("%s uses a YAML merge key", path)
 			}
@@ -292,8 +348,8 @@ func strictManifestValue(node *yaml.Node, path string) (any, error) {
 				return nil, fmt.Errorf("%s contains duplicate mapping key %q", path, key)
 			}
 			seen[key] = struct{}{}
-			childPath := path + "/" + escapeJSONPointerToken(key)
-			value, err := strictManifestValue(node.Content[index+1], childPath)
+			childPath := boundedManifestDiagnosticPath(path, escapeJSONPointerToken(key))
+			value, err := strictManifestValueWithBudget(node.Content[index+1], childPath, depth+1, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -306,7 +362,7 @@ func strictManifestValue(node *yaml.Node, path string) (any, error) {
 		}
 		result := make([]any, 0, len(node.Content))
 		for index, child := range node.Content {
-			value, err := strictManifestValue(child, path+"/"+strconv.Itoa(index))
+			value, err := strictManifestValueWithBudget(child, boundedManifestDiagnosticPath(path, strconv.Itoa(index)), depth+1, budget)
 			if err != nil {
 				return nil, err
 			}
@@ -319,6 +375,9 @@ func strictManifestValue(node *yaml.Node, path string) (any, error) {
 		}
 		switch node.Tag {
 		case "!!str":
+			if err := budget.consumeScalarBytes(len(node.Value)); err != nil {
+				return nil, err
+			}
 			return node.Value, nil
 		case "!!null":
 			return nil, nil
@@ -332,25 +391,119 @@ func strictManifestValue(node *yaml.Node, path string) (any, error) {
 				return nil, fmt.Errorf("%s has invalid boolean %q", path, node.Value)
 			}
 		case "!!int":
+			if len(node.Value) > maxRenderedNumberBytes {
+				return nil, fmt.Errorf("%s integer bytes exceed limit %d", path, maxRenderedNumberBytes)
+			}
 			value := strings.ReplaceAll(node.Value, "_", "")
 			integer, ok := new(big.Int).SetString(value, 0)
 			if !ok {
 				return nil, fmt.Errorf("%s has invalid integer %q", path, node.Value)
 			}
-			return manifestNumber(integer.String()), nil
+			canonical := integer.String()
+			if len(canonical) > maxRenderedNumberBytes {
+				return nil, fmt.Errorf("%s canonical integer bytes exceed limit %d", path, maxRenderedNumberBytes)
+			}
+			if err := budget.consumeScalarBytes(len(canonical)); err != nil {
+				return nil, err
+			}
+			return manifestNumber(canonical), nil
 		case "!!float":
+			if len(node.Value) > maxRenderedNumberBytes {
+				return nil, fmt.Errorf("%s number bytes exceed limit %d", path, maxRenderedNumberBytes)
+			}
 			value := strings.ReplaceAll(node.Value, "_", "")
+			if err := validateManifestNumberExponent(value); err != nil {
+				return nil, fmt.Errorf("%s: %w", path, err)
+			}
 			number, ok := new(big.Rat).SetString(value)
 			if !ok {
 				return nil, fmt.Errorf("%s has non-finite or invalid number %q", path, node.Value)
 			}
-			return manifestNumber(number.RatString()), nil
+			canonical := number.RatString()
+			if len(canonical) > maxRenderedNumberBytes {
+				return nil, fmt.Errorf("%s canonical number bytes exceed limit %d", path, maxRenderedNumberBytes)
+			}
+			if err := budget.consumeScalarBytes(len(canonical)); err != nil {
+				return nil, err
+			}
+			return manifestNumber(canonical), nil
 		default:
 			return nil, fmt.Errorf("%s scalar has unsupported tag %q", path, node.Tag)
 		}
 	default:
 		return nil, fmt.Errorf("%s has unsupported YAML node kind %d", path, node.Kind)
 	}
+}
+
+func validateManifestLexicalBudget(data []byte) error {
+	lines := 1
+	syntax := 0
+	for _, value := range data {
+		switch value {
+		case '\n':
+			lines++
+		case '[', ']', '{', '}', ',':
+			syntax++
+		}
+		if lines > maxRenderedManifestLines {
+			return fmt.Errorf("manifest line count exceeds limit %d", maxRenderedManifestLines)
+		}
+		if syntax > maxRenderedManifestSyntax {
+			return fmt.Errorf("manifest flow syntax count exceeds limit %d", maxRenderedManifestSyntax)
+		}
+	}
+	return nil
+}
+
+func (budget *manifestDecodeBudget) consumeScalarBytes(count int) error {
+	if count < 0 || budget.scalarBytes > maxRenderedManifestScalars-count {
+		return fmt.Errorf("manifest scalar bytes exceed limit %d", maxRenderedManifestScalars)
+	}
+	budget.scalarBytes += count
+	return nil
+}
+
+func boundedManifestDiagnosticPath(path, token string) string {
+	const truncated = "$/<path-limit>"
+	if path == truncated {
+		return truncated
+	}
+	child := path + "/" + token
+	if len(child) > maxManifestDiagnosticPath {
+		return truncated
+	}
+	return child
+}
+
+func validateManifestNumberExponent(value string) error {
+	unsigned := strings.TrimPrefix(strings.TrimPrefix(value, "+"), "-")
+	hexadecimal := strings.HasPrefix(unsigned, "0x") || strings.HasPrefix(unsigned, "0X")
+	marker := strings.LastIndexAny(value, "pP")
+	if marker < 0 && !hexadecimal {
+		marker = strings.LastIndexAny(value, "eE")
+	}
+	if marker < 0 {
+		return nil
+	}
+	exponent := value[marker+1:]
+	exponent = strings.TrimPrefix(strings.TrimPrefix(exponent, "+"), "-")
+	if exponent == "" {
+		return nil
+	}
+	for _, digit := range exponent {
+		if digit < '0' || digit > '9' {
+			return nil
+		}
+	}
+	exponent = strings.TrimLeft(exponent, "0")
+	if exponent == "" {
+		return nil
+	}
+	limit := strconv.Itoa(maxRenderedNumberExponent)
+	if len(exponent) > len(limit) || (len(exponent) == len(limit) && exponent > limit) {
+		return fmt.Errorf("number exponent exceeds limit %d", maxRenderedNumberExponent)
+	}
+	return nil
 }
 
 func expandManifestMap(raw map[string]any, spec *OwnershipSpec, defaultNamespace string) ([]manifestObject, error) {

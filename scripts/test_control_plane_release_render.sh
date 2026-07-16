@@ -233,10 +233,586 @@ rc=0
 control_plane_release_with_private_manifest_render_argv \
   0 counting_render_consumer "${VALID_RENDER_SOURCE[@]}" || rc=$?
 assert_eq "${rc}" "2" "invalid live revision status"
+for invalid_revision in 2147483647 9223372036854775808 18446744073709551616; do
+  rc=0
+  control_plane_release_with_private_manifest_render_argv \
+    "${invalid_revision}" counting_render_consumer "${VALID_RENDER_SOURCE[@]}" || rc=$?
+  assert_eq "${rc}" "2" "overflowing live revision ${invalid_revision} status"
+done
 rc=0
 control_plane_release_with_private_manifest_render_argv \
   23 /bin/true "${VALID_RENDER_SOURCE[@]}" || rc=$?
 assert_eq "${rc}" "2" "external render consumer status"
+
+CANONICALIZER_BINARY="${TEMP_DIR}/fugue-release-domain-evidence"
+CANONICAL_OWNERSHIP="${REPO_ROOT}/deploy/release-domains/ownership-v1.yaml"
+BASE_RAW_FIXTURE="${TEMP_DIR}/base.raw.fixture"
+TARGET_JSON_FIXTURE="${TEMP_DIR}/target.json.fixture"
+REPEATED_TARGET_JSON_FIXTURE="${TEMP_DIR}/repeated-target.json.fixture"
+DRIFT_TARGET_JSON_FIXTURE="${TEMP_DIR}/drift-target.json.fixture"
+
+go build -o "${CANONICALIZER_BINARY}" "${REPO_ROOT}/cmd/fugue-release-domain-evidence"
+chmod 700 "${CANONICALIZER_BINARY}"
+python3 - \
+  "${BASE_RAW_FIXTURE}" \
+  "${TARGET_JSON_FIXTURE}" \
+  "${REPEATED_TARGET_JSON_FIXTURE}" \
+  "${DRIFT_TARGET_JSON_FIXTURE}" <<'PY'
+import json
+import os
+import sys
+
+base, target, repeated, drift = sys.argv[1:]
+base_manifest = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: release-fixture-config
+  labels:
+    app.kubernetes.io/managed-by: Helm
+data:
+  value: old
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: release-fixture-hook
+  annotations:
+    helm.sh/hook: pre-upgrade
+stringData:
+  token: sentinel-private-render-secret
+"""
+target_main = """kind: ConfigMap
+metadata: {name: release-fixture-config, labels: {app.kubernetes.io/managed-by: Helm}}
+apiVersion: v1
+data:
+  ordered: [first, second]
+  value: new
+"""
+repeated_main = """apiVersion: v1
+data:
+  value: new
+  ordered:
+    - first
+    - second
+metadata:
+  labels: {app.kubernetes.io/managed-by: Helm}
+  name: release-fixture-config
+kind: ConfigMap
+"""
+drift_main = repeated_main.replace("    - first\n    - second", "    - second\n    - first")
+target_hook = """apiVersion: v1
+kind: Secret
+metadata:
+  name: release-fixture-hook
+  annotations:
+    helm.sh/hook: pre-upgrade
+stringData:
+  token: sentinel-private-render-secret
+"""
+
+def release(manifest, hook, volatile):
+    return {
+        "apply_method": "server_side",
+        "chart": {},
+        "hooks": [{
+            "events": ["pre-upgrade"],
+            "kind": "Secret",
+            "last_run": {},
+            "manifest": hook,
+            "name": "release-fixture-hook",
+            "path": "templates/hook.yaml",
+        }],
+        "info": {"last_deployed": volatile, "status": "pending-upgrade"},
+        "manifest": manifest,
+        "name": "release-fixture",
+        "namespace": "namespace-fixture",
+        "version": 24,
+    }
+
+with open(base, "w", encoding="utf-8") as handle:
+    handle.write(base_manifest)
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(release(target_main, target_hook, "first-volatile-value"), handle, indent=2)
+with open(repeated, "w", encoding="utf-8") as handle:
+    json.dump(release(repeated_main, target_hook, "second-volatile-value"), handle, separators=(",", ":"), sort_keys=True)
+with open(drift, "w", encoding="utf-8") as handle:
+    json.dump(release(drift_main, target_hook, "third-volatile-value"), handle, sort_keys=True)
+for path in (base, target, repeated, drift):
+    os.chmod(path, 0o600)
+PY
+
+PRIVATE_RENDER_TRACE=""
+PRIVATE_RENDER_CAPTURE_PREFIX=""
+PRIVATE_RENDER_REPEAT_FIXTURE="${REPEATED_TARGET_JSON_FIXTURE}"
+PRIVATE_RENDER_CONSUMER_CALLS_FILE="${TEMP_DIR}/private-render-consumer.calls"
+
+private_render_fixture_runner() {
+  local phase="$1"
+  shift
+  local -a argv=("$@")
+  local argv_count="${#argv[@]}"
+  printf '%s\n' "${phase}" >>"${PRIVATE_RENDER_TRACE}"
+  case "${phase}" in
+    target)
+      (( argv_count >= 3 )) || return 77
+      [[ "${argv[argv_count - 3]}" == "--dry-run=server" &&
+        "${argv[argv_count - 2]}" == "--output" &&
+        "${argv[argv_count - 1]}" == "json" ]] || return 77
+      /bin/cat "${TARGET_JSON_FIXTURE}"
+      ;;
+    base)
+      [[ "$1" == "helm" && "$2" == "get" && "$3" == "all" && "$4" == "release-fixture" ]] || return 78
+      /bin/cat "${BASE_RAW_FIXTURE}"
+      ;;
+    repeated-target)
+      (( argv_count >= 3 )) || return 79
+      [[ "${argv[argv_count - 3]}" == "--dry-run=server" &&
+        "${argv[argv_count - 2]}" == "--output" &&
+        "${argv[argv_count - 1]}" == "json" ]] || return 79
+      /bin/cat "${PRIVATE_RENDER_REPEAT_FIXTURE}"
+      ;;
+    *)
+      return 80
+      ;;
+  esac
+}
+
+private_render_real_canonicalizer() {
+  local live_revision="$1"
+  local expected_version="$2"
+  local release_name="$3"
+  local release_namespace="$4"
+  local base_raw="$5"
+  local target_raw="$6"
+  local repeated_target_raw="$7"
+  local output_dir="$8"
+  [[ "${live_revision}" == "23" && "${expected_version}" == "24" ]] || return 90
+  python3 - "${base_raw}" "${target_raw}" "${repeated_target_raw}" <<'PY'
+import os
+import stat
+import sys
+for path in sys.argv[1:]:
+    if stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+        raise SystemExit(f"private raw mode drifted: {path}")
+PY
+  "${CANONICALIZER_BINARY}" canonicalize-manifest \
+    --ownership "${CANONICAL_OWNERSHIP}" \
+    --input "${base_raw}" \
+    --namespace "${release_namespace}" \
+    --output "${output_dir}/base.manifest" || return
+  "${CANONICALIZER_BINARY}" canonicalize-manifest \
+    --ownership "${CANONICAL_OWNERSHIP}" \
+    --input "${target_raw}" \
+    --input-format helm-release-json \
+    --namespace "${release_namespace}" \
+    --release-name "${release_name}" \
+    --release-version "${expected_version}" \
+    --output "${output_dir}/target.manifest" || return
+  "${CANONICALIZER_BINARY}" canonicalize-manifest \
+    --ownership "${CANONICAL_OWNERSHIP}" \
+    --input "${repeated_target_raw}" \
+    --input-format helm-release-json \
+    --namespace "${release_namespace}" \
+    --release-name "${release_name}" \
+    --release-version "${expected_version}" \
+    --output "${output_dir}/repeated-target.manifest"
+}
+
+private_render_capture_consumer() {
+  local live_revision="$1"
+  local release_name="$2"
+  local release_namespace="$3"
+  local base_manifest="$4"
+  local target_manifest="$5"
+  local repeated_target_manifest="$6"
+  [[ "${live_revision}|${release_name}|${release_namespace}" == "23|release-fixture|namespace-fixture" ]] || return 93
+  cp "${base_manifest}" "${PRIVATE_RENDER_CAPTURE_PREFIX}.base"
+  cp "${target_manifest}" "${PRIVATE_RENDER_CAPTURE_PREFIX}.target"
+  cp "${repeated_target_manifest}" "${PRIVATE_RENDER_CAPTURE_PREFIX}.repeated"
+  chmod 600 \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.base" \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.repeated"
+  printf 'called\n' >>"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+}
+
+cmp -s "${TARGET_JSON_FIXTURE}" "${REPEATED_TARGET_JSON_FIXTURE}" &&
+  fail "target Helm JSON fixtures must differ before canonicalization"
+for caller_umask in 000 022 077; do
+  PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-${caller_umask}.trace"
+  PRIVATE_RENDER_CAPTURE_PREFIX="${TEMP_DIR}/private-render-${caller_umask}"
+  : >"${PRIVATE_RENDER_TRACE}"
+  : >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+  (
+    umask "${caller_umask}"
+    control_plane_release_run_private_canonical_render_set \
+      23 private_render_fixture_runner private_render_real_canonicalizer private_render_capture_consumer \
+      "${VALID_RENDER_SOURCE[@]}"
+  ) >"${TEMP_DIR}/private-render-${caller_umask}.stdout" \
+    2>"${TEMP_DIR}/private-render-${caller_umask}.stderr" ||
+    fail "private canonical render failed under umask ${caller_umask}"
+  [[ ! -s "${TEMP_DIR}/private-render-${caller_umask}.stdout" &&
+    ! -s "${TEMP_DIR}/private-render-${caller_umask}.stderr" ]] ||
+    fail "private canonical render emitted output under umask ${caller_umask}"
+  assert_eq "$(tr '\n' ' ' <"${PRIVATE_RENDER_TRACE}" | sed 's/ $//')" \
+    "target base repeated-target" "private canonical phase order under umask ${caller_umask}"
+  cmp -s "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" "${PRIVATE_RENDER_CAPTURE_PREFIX}.repeated" ||
+    fail "canonical target drifted under umask ${caller_umask}"
+  cmp -s "${PRIVATE_RENDER_CAPTURE_PREFIX}.base" "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" &&
+    fail "base and changed target unexpectedly match under umask ${caller_umask}"
+  grep -q 'sentinel-private-render-secret' "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" ||
+    fail "canonical target dropped Secret under umask ${caller_umask}"
+  assert_eq "$(wc -l <"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" | tr -d ' ')" "1" \
+    "private canonical consumer calls under umask ${caller_umask}"
+  python3 - \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.base" \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.repeated" <<'PY'
+import os
+import stat
+import sys
+for path in sys.argv[1:]:
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if mode != 0o600:
+        raise SystemExit(f"canonical capture mode is {mode:o}, want 600: {path}")
+PY
+done
+
+PRIVATE_RENDER_CONCURRENT_PIDS=()
+for concurrent_index in 1 2 3 4; do
+  (
+    PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-concurrent-${concurrent_index}.trace"
+    PRIVATE_RENDER_CAPTURE_PREFIX="${TEMP_DIR}/private-render-concurrent-${concurrent_index}"
+    PRIVATE_RENDER_CONSUMER_CALLS_FILE="${TEMP_DIR}/private-render-concurrent-${concurrent_index}.calls"
+    : >"${PRIVATE_RENDER_TRACE}"
+    : >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+    control_plane_release_run_private_canonical_render_set \
+      23 private_render_fixture_runner private_render_real_canonicalizer private_render_capture_consumer \
+      "${VALID_RENDER_SOURCE[@]}"
+  ) >"${TEMP_DIR}/private-render-concurrent-${concurrent_index}.stdout" \
+    2>"${TEMP_DIR}/private-render-concurrent-${concurrent_index}.stderr" &
+  PRIVATE_RENDER_CONCURRENT_PIDS+=("$!")
+done
+for concurrent_index in 0 1 2 3; do
+  wait "${PRIVATE_RENDER_CONCURRENT_PIDS[concurrent_index]}" ||
+    fail "concurrent private canonical render $((concurrent_index + 1)) failed"
+  [[ ! -s "${TEMP_DIR}/private-render-concurrent-$((concurrent_index + 1)).stdout" &&
+    ! -s "${TEMP_DIR}/private-render-concurrent-$((concurrent_index + 1)).stderr" ]] ||
+    fail "concurrent private canonical render $((concurrent_index + 1)) emitted output"
+  cmp -s \
+    "${TEMP_DIR}/private-render-concurrent-$((concurrent_index + 1)).target" \
+    "${TEMP_DIR}/private-render-concurrent-$((concurrent_index + 1)).repeated" ||
+    fail "concurrent private canonical render $((concurrent_index + 1)) drifted"
+done
+
+PRIVATE_RENDER_FAIL_PHASE=""
+private_render_failing_runner() {
+  local phase="$1"
+  if [[ "${phase}" == "${PRIVATE_RENDER_FAIL_PHASE}" ]]; then
+    case "${phase}" in
+      target) return 81 ;;
+      base) return 82 ;;
+      repeated-target) return 83 ;;
+    esac
+  fi
+  private_render_fixture_runner "$@"
+}
+
+for failure in target base repeated-target; do
+  PRIVATE_RENDER_FAIL_PHASE="${failure}"
+  PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-fail-${failure}.trace"
+  PRIVATE_RENDER_CAPTURE_PREFIX="${TEMP_DIR}/private-render-fail-${failure}"
+  : >"${PRIVATE_RENDER_TRACE}"
+  : >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+  rc=0
+  control_plane_release_run_private_canonical_render_set \
+    23 private_render_failing_runner private_render_real_canonicalizer private_render_capture_consumer \
+    "${VALID_RENDER_SOURCE[@]}" \
+    >"${TEMP_DIR}/private-render-fail-${failure}.stdout" \
+    2>"${TEMP_DIR}/private-render-fail-${failure}.stderr" || rc=$?
+  case "${failure}" in
+    target) assert_eq "${rc}" "81" "private target failure status" ;;
+    base) assert_eq "${rc}" "82" "private base failure status" ;;
+    repeated-target) assert_eq "${rc}" "83" "private repeated-target failure status" ;;
+  esac
+  [[ ! -s "${TEMP_DIR}/private-render-fail-${failure}.stdout" ]] ||
+    fail "private ${failure} failure leaked stdout"
+  grep -q 'sentinel-private-render-secret' "${TEMP_DIR}/private-render-fail-${failure}.stderr" &&
+    fail "private ${failure} failure leaked Secret"
+  [[ ! -s "${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" ]] ||
+    fail "private ${failure} failure reached consumer"
+done
+
+private_render_failing_canonicalizer() { return 91; }
+PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-canonicalizer-fail.trace"
+PRIVATE_RENDER_CAPTURE_PREFIX="${TEMP_DIR}/private-render-canonicalizer-fail"
+: >"${PRIVATE_RENDER_TRACE}"
+: >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+rc=0
+control_plane_release_run_private_canonical_render_set \
+  23 private_render_fixture_runner private_render_failing_canonicalizer private_render_capture_consumer \
+  "${VALID_RENDER_SOURCE[@]}" >/dev/null 2>"${TEMP_DIR}/private-render-canonicalizer-fail.stderr" || rc=$?
+assert_eq "${rc}" "91" "private canonicalizer failure status"
+[[ ! -s "${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" ]] || fail "canonicalizer failure reached consumer"
+
+PRIVATE_RENDER_REPEAT_FIXTURE="${DRIFT_TARGET_JSON_FIXTURE}"
+PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-drift.trace"
+PRIVATE_RENDER_CAPTURE_PREFIX="${TEMP_DIR}/private-render-drift"
+: >"${PRIVATE_RENDER_TRACE}"
+: >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+rc=0
+control_plane_release_run_private_canonical_render_set \
+  23 private_render_fixture_runner private_render_real_canonicalizer private_render_capture_consumer \
+  "${VALID_RENDER_SOURCE[@]}" >/dev/null 2>"${TEMP_DIR}/private-render-drift.stderr" || rc=$?
+assert_eq "${rc}" "74" "private canonical drift status"
+[[ ! -s "${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" ]] || fail "canonical drift reached consumer"
+PRIVATE_RENDER_REPEAT_FIXTURE="${REPEATED_TARGET_JSON_FIXTURE}"
+
+private_render_failing_consumer() { return 92; }
+PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-consumer-fail.trace"
+: >"${PRIVATE_RENDER_TRACE}"
+rc=0
+control_plane_release_run_private_canonical_render_set \
+  23 private_render_fixture_runner private_render_real_canonicalizer private_render_failing_consumer \
+  "${VALID_RENDER_SOURCE[@]}" >/dev/null 2>"${TEMP_DIR}/private-render-consumer-fail.stderr" || rc=$?
+assert_eq "${rc}" "92" "private canonical consumer failure status"
+
+PRIVATE_RENDER_ADVERSARIAL_TMP="${TEMP_DIR}/private-render-adversarial-tmp"
+PRIVATE_RENDER_ADVERSARIAL_VICTIM="${TEMP_DIR}/private-render-adversarial-victim"
+mkdir -m 700 "${PRIVATE_RENDER_ADVERSARIAL_TMP}" "${PRIVATE_RENDER_ADVERSARIAL_VICTIM}"
+printf 'must-survive\n' >"${PRIVATE_RENDER_ADVERSARIAL_VICTIM}/marker"
+private_render_tampering_runner() {
+  CONTROL_PLANE_RELEASE_PRIVATE_RENDER_STAGING_DIR="${PRIVATE_RENDER_ADVERSARIAL_VICTIM}"
+  trap - EXIT
+  printf 'sentinel-private-render-secret\n'
+  return 81
+}
+rc=0
+(
+  TMPDIR="${PRIVATE_RENDER_ADVERSARIAL_TMP}"
+  control_plane_release_run_private_canonical_render_set \
+    23 private_render_tampering_runner private_render_real_canonicalizer private_render_capture_consumer \
+    "${VALID_RENDER_SOURCE[@]}"
+) >"${TEMP_DIR}/private-render-adversarial.stdout" \
+  2>"${TEMP_DIR}/private-render-adversarial.stderr" || rc=$?
+assert_eq "${rc}" "81" "adversarial callback status"
+[[ -f "${PRIVATE_RENDER_ADVERSARIAL_VICTIM}/marker" ]] || fail "callback redirected cleanup to victim"
+find "${PRIVATE_RENDER_ADVERSARIAL_TMP}" -mindepth 1 -maxdepth 1 -name 'fugue-release-render.*' -print -quit |
+  grep -q . && fail "adversarial callback left private staging"
+grep -q 'sentinel-private-render-secret' "${TEMP_DIR}/private-render-adversarial.stderr" &&
+  fail "adversarial callback leaked Secret"
+
+PRIVATE_RENDER_OVERSIZE_TMP="${TEMP_DIR}/private-render-oversize-tmp"
+mkdir -m 700 "${PRIVATE_RENDER_OVERSIZE_TMP}"
+private_render_oversize_runner() {
+  local phase="$1"
+  if [[ "${phase}" == "target" ]]; then
+    dd if=/dev/zero bs=1048576 count=20 2>/dev/null
+    return
+  fi
+  private_render_fixture_runner "$@"
+}
+: >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+rc=0
+(
+  TMPDIR="${PRIVATE_RENDER_OVERSIZE_TMP}"
+  control_plane_release_run_private_canonical_render_set \
+    23 private_render_oversize_runner private_render_real_canonicalizer private_render_capture_consumer \
+    "${VALID_RENDER_SOURCE[@]}"
+) >"${TEMP_DIR}/private-render-oversize.stdout" \
+  2>"${TEMP_DIR}/private-render-oversize.stderr" || rc=$?
+[[ "${rc}" != "0" ]] || fail "oversize private render unexpectedly succeeded"
+[[ ! -s "${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" ]] || fail "oversize private render reached consumer"
+find "${PRIVATE_RENDER_OVERSIZE_TMP}" -mindepth 1 -maxdepth 1 -name 'fugue-release-render.*' -print -quit |
+  grep -q . && fail "oversize private render left private staging"
+
+PRIVATE_RENDER_DESCENDANT_TMP="${TEMP_DIR}/private-render-descendant-tmp"
+PRIVATE_RENDER_DESCENDANT_PID_FILE="${TEMP_DIR}/private-render-descendant.pid"
+mkdir -m 700 "${PRIVATE_RENDER_DESCENDANT_TMP}"
+private_render_descendant_runner() {
+  local phase="$1"
+  if [[ "${phase}" == "target" ]]; then
+    sleep 30 &
+    printf '%s\n' "$!" >"${PRIVATE_RENDER_DESCENDANT_PID_FILE}"
+    /bin/cat "${TARGET_JSON_FIXTURE}"
+    return 0
+  fi
+  private_render_fixture_runner "$@"
+}
+: >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+rc=0
+(
+  TMPDIR="${PRIVATE_RENDER_DESCENDANT_TMP}"
+  control_plane_release_run_private_canonical_render_set \
+    23 private_render_descendant_runner private_render_real_canonicalizer private_render_capture_consumer \
+    "${VALID_RENDER_SOURCE[@]}"
+) >"${TEMP_DIR}/private-render-descendant.stdout" \
+  2>"${TEMP_DIR}/private-render-descendant.stderr" || rc=$?
+assert_eq "${rc}" "70" "background callback descendant status"
+[[ -s "${PRIVATE_RENDER_DESCENDANT_PID_FILE}" ]] || fail "background callback descendant PID was not recorded"
+PRIVATE_RENDER_DESCENDANT_PID="$(tr -d '[:space:]' <"${PRIVATE_RENDER_DESCENDANT_PID_FILE}")"
+kill -0 "${PRIVATE_RENDER_DESCENDANT_PID}" >/dev/null 2>&1 && fail "background callback descendant survived"
+[[ ! -s "${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" ]] || fail "background callback descendant reached consumer"
+find "${PRIVATE_RENDER_DESCENDANT_TMP}" -mindepth 1 -maxdepth 1 -name 'fugue-release-render.*' -print -quit |
+  grep -q . && fail "background callback descendant left private staging"
+grep -q 'sentinel-private-render-secret' "${TEMP_DIR}/private-render-descendant.stderr" &&
+  fail "background callback descendant leaked Secret"
+
+private_render_ps_failure_callback() { printf 'bounded-output\n'; }
+PRIVATE_RENDER_PS_FAILURE_PREFIX="${TEMP_DIR}/private-render-ps-failure"
+rc=0
+(
+  hash -p /usr/bin/false ps
+  CONTROL_PLANE_RELEASE_PRIVATE_RENDER_CALLER_PID="$$"
+  CONTROL_PLANE_RELEASE_PRIVATE_RENDER_ACTIVE_PID=""
+  control_plane_release_run_private_render_callback \
+    "${PRIVATE_RENDER_PS_FAILURE_PREFIX}.stdout" \
+    "${PRIVATE_RENDER_PS_FAILURE_PREFIX}.stderr" \
+    private_render_ps_failure_callback
+) || rc=$?
+assert_eq "${rc}" "2" "process inventory failure status"
+grep -q 'bounded-output' "${PRIVATE_RENDER_PS_FAILURE_PREFIX}.stdout" ||
+  fail "process inventory failure lost bounded callback output"
+
+for signal_name in HUP TERM; do
+  case "${signal_name}" in
+    HUP) signal_status=129 ;;
+    INT) signal_status=130 ;;
+    TERM) signal_status=143 ;;
+  esac
+  for signal_iteration in 1 2 3; do
+  PRIVATE_RENDER_SIGNAL_TMP="${TEMP_DIR}/private-render-signal-tmp-${signal_name}-${signal_iteration}"
+  PRIVATE_RENDER_SIGNAL_PID_FILE="${TEMP_DIR}/private-render-signal-callback-${signal_name}-${signal_iteration}.pid"
+  mkdir -m 700 "${PRIVATE_RENDER_SIGNAL_TMP}"
+  TMPDIR="${PRIVATE_RENDER_SIGNAL_TMP}" \
+    PRIVATE_RENDER_SIGNAL_PID_FILE="${PRIVATE_RENDER_SIGNAL_PID_FILE}" \
+    /bin/bash -c '
+  source "$1"
+  private_render_top_level_slow_runner() {
+    /bin/sh -c "printf \"%s\\n\" \"\$PPID\"" >"${PRIVATE_RENDER_SIGNAL_PID_FILE}"
+    printf "sentinel-private-render-secret\n"
+    sleep 30
+  }
+  private_render_top_level_noop() { return 0; }
+  control_plane_release_run_private_canonical_render_set \
+    23 private_render_top_level_slow_runner private_render_top_level_noop private_render_top_level_noop \
+    helm upgrade release-fixture chart -n namespace-fixture --reset-then-reuse-values
+  ' _ "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh" \
+    >"${TEMP_DIR}/private-render-signal-${signal_name}-${signal_iteration}.stdout" \
+    2>"${TEMP_DIR}/private-render-signal-${signal_name}-${signal_iteration}.stderr" &
+  PRIVATE_RENDER_SIGNAL_CALLER_PID=$!
+  for _ in $(seq 1 100); do
+    [[ -s "${PRIVATE_RENDER_SIGNAL_PID_FILE}" ]] && break
+    sleep 0.05
+  done
+  [[ -s "${PRIVATE_RENDER_SIGNAL_PID_FILE}" ]] || fail "${signal_name} callback ${signal_iteration} did not start"
+  PRIVATE_RENDER_SIGNAL_CALLBACK_PID="$(tr -d '[:space:]' <"${PRIVATE_RENDER_SIGNAL_PID_FILE}")"
+  kill -"${signal_name}" "${PRIVATE_RENDER_SIGNAL_CALLER_PID}"
+  rc=0
+  wait "${PRIVATE_RENDER_SIGNAL_CALLER_PID}" 2>/dev/null || rc=$?
+  assert_eq "${rc}" "${signal_status}" "direct caller ${signal_name} status iteration ${signal_iteration}"
+  for _ in $(seq 1 100); do
+    if ! kill -0 "${PRIVATE_RENDER_SIGNAL_CALLBACK_PID}" >/dev/null 2>&1 &&
+      ! find "${PRIVATE_RENDER_SIGNAL_TMP}" -mindepth 1 -maxdepth 1 -name 'fugue-release-render.*' -print -quit | grep -q .; then
+      break
+    fi
+    sleep 0.05
+  done
+  kill -0 "${PRIVATE_RENDER_SIGNAL_CALLBACK_PID}" >/dev/null 2>&1 &&
+    fail "direct caller ${signal_name} iteration ${signal_iteration} left callback alive"
+  find "${PRIVATE_RENDER_SIGNAL_TMP}" -mindepth 1 -maxdepth 1 -name 'fugue-release-render.*' -print -quit |
+    grep -q . && fail "direct caller ${signal_name} iteration ${signal_iteration} left private staging"
+  grep -q 'sentinel-private-render-secret' "${TEMP_DIR}/private-render-signal-${signal_name}-${signal_iteration}.stderr" &&
+    fail "direct caller ${signal_name} iteration ${signal_iteration} leaked Secret"
+  done
+done
+
+python3 - \
+  "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh" \
+  "${TEMP_DIR}" <<'PY'
+import glob
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+library, parent = sys.argv[1:]
+script = r'''
+source "$1"
+private_render_top_level_slow_runner() {
+  /bin/sh -c 'printf "%s\n" "$PPID"' >"${PRIVATE_RENDER_SIGNAL_PID_FILE}"
+  printf 'sentinel-private-render-secret\n'
+  sleep 30
+}
+private_render_top_level_noop() { return 0; }
+control_plane_release_run_private_canonical_render_set \
+  23 private_render_top_level_slow_runner private_render_top_level_noop private_render_top_level_noop \
+  helm upgrade release-fixture chart -n namespace-fixture --reset-then-reuse-values
+'''
+
+for iteration in range(1, 4):
+    root = os.path.join(parent, f"private-render-direct-int-{iteration}")
+    tmp = os.path.join(root, "tmp")
+    pid_file = os.path.join(root, "callback.pid")
+    stdout_file = os.path.join(root, "stdout")
+    stderr_file = os.path.join(root, "stderr")
+    os.makedirs(tmp, mode=0o700)
+    env = os.environ.copy()
+    env.update(TMPDIR=tmp, PRIVATE_RENDER_SIGNAL_PID_FILE=pid_file)
+    callback_pid = None
+    with open(stdout_file, "wb") as stdout, open(stderr_file, "wb") as stderr:
+        process = subprocess.Popen(
+            ["/bin/bash", "-c", script, "_", library],
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+        )
+        try:
+            for _ in range(200):
+                if os.path.isfile(pid_file) and os.path.getsize(pid_file):
+                    callback_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
+                    break
+                if process.poll() is not None:
+                    raise SystemExit(f"direct INT caller exited before callback: {process.returncode}")
+                time.sleep(0.025)
+            if callback_pid is None:
+                raise SystemExit("direct INT callback did not start")
+            os.kill(process.pid, signal.SIGINT)
+            if process.wait(timeout=5) != 130:
+                raise SystemExit(f"direct INT caller status is {process.returncode}, want 130")
+            for _ in range(200):
+                try:
+                    os.kill(callback_pid, 0)
+                    callback_alive = True
+                except ProcessLookupError:
+                    callback_alive = False
+                staging = glob.glob(os.path.join(tmp, "fugue-release-render.*"))
+                if not callback_alive and not staging:
+                    break
+                time.sleep(0.025)
+            if callback_alive:
+                raise SystemExit("direct INT left callback alive")
+            if staging:
+                raise SystemExit(f"direct INT left private staging: {staging}")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if callback_pid is not None:
+                try:
+                    os.killpg(os.getpgid(callback_pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    if Path(stdout_file).read_bytes():
+        raise SystemExit("direct INT leaked stdout")
+    if b"sentinel-private-render-secret" in Path(stderr_file).read_bytes():
+        raise SystemExit("direct INT leaked Secret")
+    shutil.rmtree(root)
+PY
 
 python3 - \
   "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
@@ -252,6 +828,7 @@ if upgrade.count(source_line) != 1:
     raise SystemExit("upgrade entrypoint must source the render library exactly once")
 for forbidden in (
     "control_plane_release_with_private_manifest_render_argv",
+    "control_plane_release_run_private_canonical_render_set",
     "fugue-release-domain-plan",
     "control_plane_release_run_domain_adapter_transaction",
 ):

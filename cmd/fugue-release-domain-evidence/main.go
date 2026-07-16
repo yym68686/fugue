@@ -53,7 +53,11 @@ type evidenceDocument struct {
 }
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "canonicalize-manifest" {
+		os.Exit(runCanonicalizeManifest(args[1:], os.Stdout, os.Stderr))
+	}
+	os.Exit(run(context.Background(), args, os.Stdout, os.Stderr))
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -224,7 +228,7 @@ func validateEvidenceStringBudget(result evidenceResult) error {
 	return nil
 }
 
-func writePrivateAtomicFile(filename string, data []byte) (resultErr error) {
+func writePrivateAtomicFile(filename string, data []byte, protectedPaths ...string) (resultErr error) {
 	absolute, err := filepath.Abs(filename)
 	if err != nil {
 		return fmt.Errorf("resolve output path: %w", err)
@@ -234,6 +238,30 @@ func writePrivateAtomicFile(filename string, data []byte) (resultErr error) {
 		return fmt.Errorf("resolve output directory: %w", err)
 	}
 	resolvedOutput := filepath.Join(resolvedDirectory, filepath.Base(absolute))
+	for _, protectedPath := range protectedPaths {
+		protectedAbsolute, err := filepath.Abs(protectedPath)
+		if err != nil {
+			return fmt.Errorf("resolve protected path: %w", err)
+		}
+		protectedResolved, err := filepath.EvalSymlinks(protectedAbsolute)
+		if err != nil {
+			return fmt.Errorf("resolve protected path: %w", err)
+		}
+		if filepath.Clean(protectedResolved) == filepath.Clean(resolvedOutput) {
+			return fmt.Errorf("output path aliases a protected input")
+		}
+		protectedInfo, err := os.Stat(protectedResolved)
+		if err != nil {
+			return fmt.Errorf("inspect protected path: %w", err)
+		}
+		if outputInfo, err := os.Stat(resolvedOutput); err == nil {
+			if os.SameFile(protectedInfo, outputInfo) {
+				return fmt.Errorf("output file aliases a protected input")
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect output path: %w", err)
+		}
+	}
 	if info, err := os.Lstat(resolvedOutput); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("output path must not be a symbolic link")

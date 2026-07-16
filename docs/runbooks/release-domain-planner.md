@@ -158,6 +158,45 @@ OIDs in the same immutable context as the rendered manifests before extracting
 that array. The default release path does not invoke this producer or the
 planner yet.
 
+Boundary B also provides a private canonical-manifest subcommand for the
+dormant render seam:
+
+```sh
+fugue-release-domain-evidence canonicalize-manifest \
+  --ownership deploy/release-domains/ownership-v1.yaml \
+  --input /private/path/helm-release.json \
+  --input-format helm-release-json \
+  --namespace fugue-system \
+  --release-name fugue \
+  --release-version 42 \
+  --output /private/path/target.manifest
+```
+
+Raw render input must be a regular, non-symlink file with no group or other
+permissions. Helm JSON is parsed strictly, bound to the expected release name,
+namespace, and version, and reduced to the optional main manifest plus every
+hook manifest. Canonicalization then uses the same strict YAML/object semantics as
+the planner: it expands `List`, injects the effective namespace, sorts objects
+and map keys, preserves array order, hooks, Secrets, and exact numeric values,
+and removes only the two normalized renderer fields described above. Output is
+an atomic `0600` file and is never written to stdout.
+
+`scripts/lib/control_plane_release_render.sh` contains a still-dormant executor
+that derives target, pinned-base, and repeated-target commands from the one
+frozen Helm upgrade argv. It captures every raw stream in an isolated `0700`
+temporary tree under a hard 16 MiB callback file limit; canonical inputs are
+then bounded to 8 MiB. It canonicalizes all three, requires the two target
+renders to be byte-identical after canonicalization, lends the files only to a
+synchronous consumer, and removes the tree and any callback process group on
+every return or signal. No default release entrypoint calls this executor
+before the Boundary C atomic activation gate.
+
+Runner, canonicalizer, and consumer callbacks are trusted synchronous release
+functions. Their contract forbids daemonizing, double-forking, reparenting, or
+creating a new session. The executor keeps their process-group leader anchored,
+rejects a successful callback that leaves a same-group descendant, and kills
+the anchored group before it can be reaped or its PGID reused.
+
 The built binary exits `0` for `zero` or `single`, `2` for the expected blocked
 results `multiple` or `unknown`, and `1` for invalid CLI/input-file framing. A
 blocked plan is written to the requested output (or stdout) before the binary
@@ -182,13 +221,15 @@ proves all of the following by command trace and before/after object identity:
 - although the shared Helm revision may advance once, the canonical digest of
   every non-NodeLocal rendered object remains equal to base.
 
-## Explicitly not integrated
+## Current integration boundary
 
-Boundary A adds no `scripts/lib/control_plane_release_domains.sh`, no
-`scripts/test_single_domain_release.sh`, and changes no upgrade script,
-workflow, Makefile, chart test, release-safety test, chart template, or values
-file. It does not acquire the existing global mutex or the control-plane backup
-Lease. Transaction adapters, the unique real Helm argument builder, rollback
-ownership proof, workflow evidence upload, bootstrap authorization, no-op
-release, and production validation remain Boundary B/C work gated by the P0
-release process.
+Boundary B now defines the unique real Helm argument builder, the private
+three-render executor, the canonicalizer, and revision-bound changed-file
+evidence. These seams remain unreachable from the default upgrade `main`; they
+acquire neither the existing global mutex nor the control-plane backup Lease and
+perform no production write.
+
+There is still no production domain dispatcher, real transaction adapter,
+rollback ownership proof, workflow evidence upload, bootstrap authorization,
+or no-op release integration. Those pieces must enter together behind the
+Boundary C pre-write atomic activation gate and its functional safety harness.
