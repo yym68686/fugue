@@ -23,6 +23,7 @@ func testOwnership(t *testing.T) *OwnershipSpec {
 
 func testBindings() map[string]string {
 	return map[string]string{
+		"releaseName":                    "fugue",
 		"releaseNamespace":               "fugue-system",
 		"nodeLocalNamespace":             "kube-system",
 		"nodeLocalName":                  "fugue-node-local-dns",
@@ -128,11 +129,15 @@ func TestCNPGBackupPointerOverridesControlPlane(t *testing.T) {
 }
 
 func TestValidateBindingsFailsClosed(t *testing.T) {
-	spec := testOwnership(t)
-	bindings := testBindings()
-	delete(bindings, "nodeLocalActiveName")
-	if err := spec.ValidateBindings(bindings); err == nil {
-		t.Fatal("expected missing binding error")
+	for _, missing := range []string{"releaseName", "nodeLocalActiveName"} {
+		t.Run(missing, func(t *testing.T) {
+			spec := testOwnership(t)
+			bindings := testBindings()
+			delete(bindings, missing)
+			if err := spec.ValidateBindings(bindings); err == nil {
+				t.Fatalf("expected missing %s binding error", missing)
+			}
+		})
 	}
 }
 

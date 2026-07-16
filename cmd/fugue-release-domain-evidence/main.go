@@ -22,6 +22,14 @@ const (
 	defaultEvidenceTimeout = 5 * time.Minute
 	maxEvidenceStringBytes = 8 << 20
 	maxEvidenceOutputBytes = 32 << 20
+
+	evidenceArgumentsError  = "fugue-release-domain-evidence: invalid arguments"
+	evidenceProductionError = "fugue-release-domain-evidence: evidence production failed"
+	evidenceIncompleteError = "fugue-release-domain-evidence: evidence is incomplete; refusing to publish output"
+	evidenceDeadlineError   = "fugue-release-domain-evidence: evidence deadline exceeded"
+	evidenceBindingError    = "fugue-release-domain-evidence: evidence binding failed"
+	evidenceEncodingError   = "fugue-release-domain-evidence: evidence encoding failed"
+	evidenceOutputError     = "fugue-release-domain-evidence: evidence output failed"
 )
 
 type cliOptions struct {
@@ -63,7 +71,7 @@ func main() {
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	options, err := parseFlags(args, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: %v\n", err)
+		fmt.Fprintln(stderr, evidenceArgumentsError)
 		return 1
 	}
 
@@ -72,52 +80,49 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	result, warnings, err := produceEvidence(ctx, options, execCommandRunner{})
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: %v\n", err)
+		fmt.Fprintln(stderr, evidenceProductionError)
 		return 1
-	}
-	for _, warning := range warnings {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: warning: %s\n", warning)
 	}
 	if len(warnings) != 0 {
-		fmt.Fprintln(stderr, "fugue-release-domain-evidence: evidence is incomplete; refusing to publish output")
+		fmt.Fprintln(stderr, evidenceIncompleteError)
 		return 1
 	}
-	if err := ctx.Err(); err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: evidence deadline: %v\n", err)
+	if ctx.Err() != nil {
+		fmt.Fprintln(stderr, evidenceDeadlineError)
 		return 1
 	}
 
 	document, err := newEvidenceDocument(result)
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: bind evidence: %v\n", err)
+		fmt.Fprintln(stderr, evidenceBindingError)
 		return 1
 	}
 
 	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: encode evidence: %v\n", err)
+		fmt.Fprintln(stderr, evidenceEncodingError)
 		return 1
 	}
 	if len(encoded)+1 > maxEvidenceOutputBytes {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: encoded evidence exceeds limit %d\n", maxEvidenceOutputBytes)
+		fmt.Fprintln(stderr, evidenceEncodingError)
 		return 1
 	}
 	encoded = append(encoded, '\n')
 	if options.outputPath == "-" {
 		if _, err := stdout.Write(encoded); err != nil {
-			fmt.Fprintf(stderr, "fugue-release-domain-evidence: write evidence: %v\n", err)
+			fmt.Fprintln(stderr, evidenceOutputError)
 			return 1
 		}
 		return 0
 	}
 	if err := writePrivateAtomicFile(options.outputPath, encoded); err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-evidence: write %s: %v\n", options.outputPath, err)
+		fmt.Fprintln(stderr, evidenceOutputError)
 		return 1
 	}
 	return 0
 }
 
-func parseFlags(args []string, stderr io.Writer) (cliOptions, error) {
+func parseFlags(args []string, _ io.Writer) (cliOptions, error) {
 	options := cliOptions{
 		repository: ".",
 		outputPath: "-",
@@ -125,7 +130,7 @@ func parseFlags(args []string, stderr io.Writer) (cliOptions, error) {
 		timeout:    defaultEvidenceTimeout,
 	}
 	flags := flag.NewFlagSet("fugue-release-domain-evidence", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags.SetOutput(io.Discard)
 	flags.StringVar(&options.repository, "repo", options.repository, "repository containing the compared revisions")
 	flags.StringVar(&options.baseRevision, "base", "", "base Git commit or revision")
 	flags.StringVar(&options.targetRevision, "target", "", "target Git commit or revision")

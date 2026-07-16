@@ -606,7 +606,8 @@ func TestRunRefusesIncompleteEvidenceWithoutReplacingOutput(t *testing.T) {
 	runGit(t, repository, "add", ".")
 	runGit(t, repository, "-c", "user.name=Evidence Test", "-c", "user.email=evidence@example.test", "commit", "-qm", "base")
 	base := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
-	writeTestFile(t, repository, "deploy/helm/fugue/values.yaml", "api: [unterminated\n")
+	const duplicateKeySentinel = "sentinel-private-duplicate-yaml-key"
+	writeTestFile(t, repository, "deploy/helm/fugue/values.yaml", "api:\n  "+duplicateKeySentinel+": first\n  "+duplicateKeySentinel+": second\n")
 	runGit(t, repository, "add", ".")
 	runGit(t, repository, "-c", "user.name=Evidence Test", "-c", "user.email=evidence@example.test", "commit", "-qm", "target")
 	target := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
@@ -629,8 +630,11 @@ func TestRunRefusesIncompleteEvidenceWithoutReplacingOutput(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("incomplete evidence leaked stdout: %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "evidence is incomplete") {
-		t.Fatalf("stderr = %q", stderr.String())
+	if got, want := stderr.String(), evidenceIncompleteError+"\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if strings.Contains(stderr.String(), duplicateKeySentinel) {
+		t.Fatalf("duplicate YAML key leaked to stderr: %q", stderr.String())
 	}
 	contents, err := os.ReadFile(output)
 	if err != nil {
@@ -638,6 +642,94 @@ func TestRunRefusesIncompleteEvidenceWithoutReplacingOutput(t *testing.T) {
 	}
 	if string(contents) != "preserve-me" {
 		t.Fatalf("failed production replaced output with %q", contents)
+	}
+}
+
+func TestRunRedactsFlagsProducerWarningsAndOutputFailures(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		const sentinel = "sentinel-private-unknown-flag"
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if exitCode := run(context.Background(), []string{"--" + sentinel}, &stdout, &stderr); exitCode == 0 {
+			t.Fatal("unknown flag unexpectedly succeeded")
+		}
+		assertFixedCLIError(t, &stdout, &stderr, evidenceArgumentsError, sentinel)
+	})
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	repository := t.TempDir()
+	runGit(t, repository, "init", "-q")
+	writeTestFile(t, repository, "go.mod", "module example.test/evidence\n\ngo 1.22\n")
+	const changedPathSentinel = "sentinel-private-changed-path"
+	changedPath := "internal/" + changedPathSentinel + "/change.go"
+	writeTestFile(t, repository, changedPath, "package change\n\nconst Value = 1\n")
+	runGit(t, repository, "add", ".")
+	runGit(t, repository, "-c", "user.name=Evidence Test", "-c", "user.email=evidence@example.test", "commit", "-qm", "base")
+	base := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
+	writeTestFile(t, repository, changedPath, "package change\n\nconst Value = 2\n")
+	runGit(t, repository, "add", ".")
+	runGit(t, repository, "-c", "user.name=Evidence Test", "-c", "user.email=evidence@example.test", "commit", "-qm", "target")
+	target := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
+
+	t.Run("Go runner warning", func(t *testing.T) {
+		const runnerSentinel = "sentinel-private-go-runner-error"
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if exitCode := run(context.Background(), []string{
+			"--repo", repository,
+			"--base", base,
+			"--target", target,
+			"--go", runnerSentinel,
+		}, &stdout, &stderr); exitCode == 0 {
+			t.Fatal("incomplete Go evidence unexpectedly succeeded")
+		}
+		assertFixedCLIError(t, &stdout, &stderr, evidenceIncompleteError, changedPathSentinel, runnerSentinel)
+	})
+
+	t.Run("missing output directory", func(t *testing.T) {
+		const outputSentinel = "sentinel-private-output-path"
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if exitCode := run(context.Background(), []string{
+			"--repo", repository,
+			"--base", base,
+			"--target", base,
+			"--output", filepath.Join(repository, outputSentinel, "evidence.json"),
+		}, &stdout, &stderr); exitCode == 0 {
+			t.Fatal("missing output directory unexpectedly succeeded")
+		}
+		assertFixedCLIError(t, &stdout, &stderr, evidenceOutputError, outputSentinel)
+	})
+
+	t.Run("producer failure", func(t *testing.T) {
+		const repositorySentinel = "sentinel-private-missing-repository"
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if exitCode := run(context.Background(), []string{
+			"--repo", filepath.Join(repository, repositorySentinel),
+			"--base", base,
+			"--target", target,
+		}, &stdout, &stderr); exitCode == 0 {
+			t.Fatal("missing repository unexpectedly succeeded")
+		}
+		assertFixedCLIError(t, &stdout, &stderr, evidenceProductionError, repositorySentinel)
+	})
+}
+
+func assertFixedCLIError(t *testing.T, stdout, stderr *bytes.Buffer, message string, sentinels ...string) {
+	t.Helper()
+	if stdout.Len() != 0 {
+		t.Fatalf("failed command wrote stdout: %q", stdout.String())
+	}
+	if got, want := stderr.String(), message+"\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	for _, sentinel := range sentinels {
+		if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+			t.Fatalf("failure output leaked sentinel %q: stdout=%q stderr=%q", sentinel, stdout.String(), stderr.String())
+		}
 	}
 }
 
@@ -734,12 +826,48 @@ func TestBuildOfflineGoEnvironmentIsolatesCachesAndNetwork(t *testing.T) {
 	if !strings.HasPrefix(proxy, "file://") || !strings.HasSuffix(proxy, ",off") {
 		t.Fatalf("GOPROXY = %q", proxy)
 	}
-	if environmentValue(environment, "GOSUMDB") != "off" || environmentValue(environment, "GOVCS") != "*:off" || environmentValue(environment, "GOTOOLCHAIN") != "local" {
+	if environmentValue(environment, "GOSUMDB") != "off" || environmentValue(environment, "GOVCS") != "*:off" || environmentValue(environment, "GOTOOLCHAIN") != "local" || environmentValue(environment, "GOFLAGS") != "-modcacherw" {
 		t.Fatalf("offline environment = %#v", environment)
+	}
+	moduleDirectory := filepath.Join(privateRoot, "modules", "example.test", "module@v1.0.0")
+	if err := os.MkdirAll(moduleDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readOnlyFile := filepath.Join(moduleDirectory, "go.mod")
+	if err := os.WriteFile(readOnlyFile, []byte("module example.test/module\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	externalFile := filepath.Join(t.TempDir(), "outside-cache")
+	if err := os.WriteFile(externalFile, []byte("outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	externalInfo, err := os.Stat(externalFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(externalFile, filepath.Join(moduleDirectory, "outside-hardlink")); err != nil {
+		t.Logf("hard-link boundary regression is unavailable: %v", err)
+	}
+	if err := os.Symlink(externalFile, filepath.Join(moduleDirectory, "outside-symlink")); err != nil {
+		t.Logf("symbolic-link boundary regression is unavailable: %v", err)
 	}
 	cleanup()
 	if _, err := os.Stat(privateRoot); !os.IsNotExist(err) {
 		t.Fatalf("private cache survived cleanup: %v", err)
+	}
+	externalContents, err := os.ReadFile(externalFile)
+	if err != nil {
+		t.Fatalf("external cache-link target disappeared: %v", err)
+	}
+	if string(externalContents) != "outside\n" {
+		t.Fatalf("external cache-link target changed: %q", externalContents)
+	}
+	externalInfoAfter, err := os.Stat(externalFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if externalInfoAfter.Mode() != externalInfo.Mode() {
+		t.Fatalf("external cache-link target mode changed: got %s want %s", externalInfoAfter.Mode(), externalInfo.Mode())
 	}
 }
 

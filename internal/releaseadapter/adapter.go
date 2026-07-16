@@ -35,15 +35,15 @@ var orderedPhases = [...]Phase{
 // The runner passes only a verified immutable authorization, never the raw
 // envelope bytes or a path that a phase could reopen.
 type Command interface {
-	Run(context.Context, releasedomain.TransactionAuthorization) error
+	Run(context.Context, releasedomain.ExecutionAuthorization) error
 }
 
 // CommandFunc adapts a function to Command. A nil CommandFunc is rejected
 // before Prepare is called.
-type CommandFunc func(context.Context, releasedomain.TransactionAuthorization) error
+type CommandFunc func(context.Context, releasedomain.ExecutionAuthorization) error
 
 // Run implements Command.
-func (command CommandFunc) Run(ctx context.Context, authorization releasedomain.TransactionAuthorization) error {
+func (command CommandFunc) Run(ctx context.Context, authorization releasedomain.ExecutionAuthorization) error {
 	return command(ctx, authorization)
 }
 

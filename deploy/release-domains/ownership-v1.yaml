@@ -11,6 +11,7 @@ domains:
 # Every value is resolved from the same Helm release/values builder that
 # produced both manifests. No matcher infers a name from a repository path.
 requiredBindings:
+  - releaseName
   - releaseNamespace
   - nodeLocalNamespace
   - nodeLocalName

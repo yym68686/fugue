@@ -170,7 +170,6 @@ func TestUpgradeScriptDoesNotBlockHAUpgradeOnNotReadyPrimary(t *testing.T) {
 		"skip primary disk-pressure recovery because primary node ${primary_node_name} is NotReady",
 		"skip Route A edge proxy sync because primary node ${primary_node_name} is NotReady",
 		"Route A edge proxy sync failed or lost its release guard",
-		"Route A edge proxy synchronization failed; attempting rollback",
 		"operator: NotIn",
 		"- primary",
 		"maxUnavailable: 0",

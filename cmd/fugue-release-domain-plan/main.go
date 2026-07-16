@@ -67,34 +67,41 @@ type cliOptions struct {
 	bindings            bindingFlags
 }
 
+const (
+	invalidInvocationMessage = "fugue-release-domain-plan: planner flags are invalid\n"
+	planConstructionMessage  = "fugue-release-domain-plan: plan construction failed\n"
+	planEncodingMessage      = "fugue-release-domain-plan: plan encoding failed\n"
+	planPublicationMessage   = "fugue-release-domain-plan: plan publication failed\n"
+)
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	options, err := parseFlags(args, stderr)
+	options, err := parseFlags(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-plan: %v\n", err)
+		_, _ = io.WriteString(stderr, invalidInvocationMessage)
 		return 1
 	}
 	plan, err := buildPlan(options)
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-plan: %v\n", err)
+		_, _ = io.WriteString(stderr, planConstructionMessage)
 		return 1
 	}
 	encoded, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-plan: encode plan: %v\n", err)
+		_, _ = io.WriteString(stderr, planEncodingMessage)
 		return 1
 	}
 	encoded = append(encoded, '\n')
 	if options.outputPath == "" || options.outputPath == "-" {
 		if _, err := stdout.Write(encoded); err != nil {
-			fmt.Fprintf(stderr, "fugue-release-domain-plan: write plan: %v\n", err)
+			_, _ = io.WriteString(stderr, planPublicationMessage)
 			return 1
 		}
-	} else if err := os.WriteFile(options.outputPath, encoded, 0o600); err != nil {
-		fmt.Fprintf(stderr, "fugue-release-domain-plan: write %s: %v\n", options.outputPath, err)
+	} else if err := writePrivateAtomicFile(options.outputPath, encoded, plannerInputPaths(options)...); err != nil {
+		_, _ = io.WriteString(stderr, planPublicationMessage)
 		return 1
 	}
 	if plan.Result == releasedomain.OutcomeMultiple || plan.Result == releasedomain.OutcomeUnknown {
@@ -103,10 +110,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func parseFlags(args []string, stderr io.Writer) (cliOptions, error) {
+func plannerInputPaths(options cliOptions) []string {
+	changedPath := options.changedFilesPath
+	if changedPath == "" {
+		changedPath = options.changedFilesZPath
+	}
+	return []string{
+		options.ownershipPath,
+		changedPath,
+		options.baseManifestPath,
+		options.targetManifestPath,
+		options.repeatedTargetPath,
+	}
+}
+
+func parseFlags(args []string) (cliOptions, error) {
 	var options cliOptions
 	flags := flag.NewFlagSet("fugue-release-domain-plan", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	// flag.FlagSet otherwise echoes raw flag names and values on parse errors.
+	// Planner inputs are private release evidence, so only run's fixed failure
+	// class is allowed to cross the CLI boundary.
+	flags.SetOutput(io.Discard)
 	flags.StringVar(&options.ownershipPath, "ownership", "deploy/release-domains/ownership-v1.yaml", "ownership YAML")
 	flags.StringVar(&options.changedFilesPath, "changed-files", "", "enriched changed-files JSON")
 	flags.StringVar(&options.changedFilesZPath, "changed-files-z", "", "NUL-delimited git --name-status input")

@@ -29,13 +29,15 @@ type TransactionEnvelope struct {
 	Plan           Plan   `json:"plan"`
 }
 
-// TransactionAuthorization is an opaque, immutable authorization result.
-// Callers can select the already-verified adapter, bind evidence to the plan
-// digest, and recheck the private seal immediately before entering the
-// transaction. The untrusted Plan is intentionally not exposed.
+// TransactionAuthorization is an opaque, immutable authorization of one
+// persisted single-domain plan. It is an intermediate pre-write credential:
+// callers must pass it through VerifyRollbackOwnership to obtain the stronger
+// ExecutionAuthorization accepted by the transaction runner. The untrusted
+// Plan is intentionally not exposed.
 type TransactionAuthorization struct {
 	domain     Domain
 	planDigest string
+	plan       Plan
 	seal       [sha256.Size]byte
 }
 
@@ -49,8 +51,8 @@ func (authorization TransactionAuthorization) PlanDigest() string {
 	return authorization.planDigest
 }
 
-// Verify detects a zero value or mutation of the authorization's frozen
-// fields. It is safe to call again directly before the first possible write.
+// Verify detects a zero value or mutation of the authorization's frozen plan
+// and identity. It does not by itself authorize a write.
 func (authorization TransactionAuthorization) Verify() error {
 	if err := validateCanonicalPlanDigest(authorization.planDigest, "authorization plan digest"); err != nil {
 		return err
@@ -61,6 +63,9 @@ func (authorization TransactionAuthorization) Verify() error {
 	expected := transactionAuthorizationSeal(authorization.planDigest, authorization.domain)
 	if subtle.ConstantTimeCompare(authorization.seal[:], expected[:]) != 1 {
 		return fmt.Errorf("transaction authorization seal mismatch")
+	}
+	if _, err := rebuildExecutableTransactionPlan(authorization.plan, authorization.planDigest, authorization.domain); err != nil {
+		return fmt.Errorf("transaction authorization plan: %w", err)
 	}
 	return nil
 }
@@ -146,10 +151,11 @@ func DecodeAndVerifyTransactionEnvelope(reader io.Reader, trustedPlanDigest stri
 		return TransactionAuthorization{}, fmt.Errorf("trusted expected domain mismatch")
 	}
 
-	if _, err := rebuildExecutableTransactionPlan(envelope.Plan, trustedPlanDigest, trustedExpectedDomain); err != nil {
+	rebuilt, err := rebuildExecutableTransactionPlan(envelope.Plan, trustedPlanDigest, trustedExpectedDomain)
+	if err != nil {
 		return TransactionAuthorization{}, err
 	}
-	authorization := newTransactionAuthorization(trustedPlanDigest, trustedExpectedDomain)
+	authorization := newTransactionAuthorization(rebuilt)
 	if err := authorization.Verify(); err != nil {
 		return TransactionAuthorization{}, err
 	}
@@ -244,11 +250,12 @@ func validateCanonicalPlanDigest(digest, label string) error {
 	return nil
 }
 
-func newTransactionAuthorization(planDigest string, domain Domain) TransactionAuthorization {
+func newTransactionAuthorization(plan Plan) TransactionAuthorization {
 	return TransactionAuthorization{
-		domain:     domain,
-		planDigest: planDigest,
-		seal:       transactionAuthorizationSeal(planDigest, domain),
+		domain:     plan.SelectedDomain,
+		planDigest: plan.PlanDigest,
+		plan:       plan,
+		seal:       transactionAuthorizationSeal(plan.PlanDigest, plan.SelectedDomain),
 	}
 }
 

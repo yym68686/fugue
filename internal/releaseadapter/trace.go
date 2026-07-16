@@ -66,7 +66,10 @@ type Trace interface {
 
 func newTraceEvent(
 	sequence uint64,
-	authorization releasedomain.TransactionAuthorization,
+	authorization interface {
+		Domain() releasedomain.Domain
+		PlanDigest() string
+	},
 	phase TracePhase,
 	state TraceState,
 ) TraceEvent {

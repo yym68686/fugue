@@ -1,12 +1,15 @@
-# Release domain planner
+# Release-domain gate
 
-The release-domain planner is a side-effect-free gate for the shared Fugue Helm
-release. Boundary A classifies evidence and writes an immutable
-`release-domain-plan.json`; it does not invoke Helm, Kubernetes, host mutation,
-GitHub Actions, or a domain transaction adapter.
+The release-domain gate is the production mutation boundary for the shared
+Fugue Helm release. `scripts/upgrade_fugue_control_plane.sh` enables the gate
+before it installs release cleanup and signal handling, then delegates the
+release to the fixed production dispatcher. The former cross-domain upgrade
+tail is not an alternate production path.
 
-The planner consumes SSoT values only as opaque base, target, and live digest
-strings. It does not define an SSoT document, migration, or write algorithm.
+The planner and evidence producer introduced in Boundaries A and B remain
+side-effect-free building blocks. Boundary B3 activates them as one atomic
+production path with canonical rendering, reverse ownership proof, sealed
+authorization, fixed adapters, durable trace, rollback, and public evidence.
 
 ## Fixed release domains
 
@@ -14,261 +17,190 @@ strings. It does not define an SSoT document, migration, or write algorithm.
 allowlist. It is not workload RBAC. A rendered object or field not positively
 matched by this file is unknown.
 
-| Domain | Rendered ownership | Read-only dependencies and exclusions |
+| Domain | Rendered ownership | Production boundary |
 | --- | --- | --- |
-| `node-local` | NodeLocal PriorityClass, ServiceAccount, ConfigMap, upstream/cache/active Services, and preserved/active DaemonSets | May inspect CoreDNS, Nodes, authoritative DNS, and release identity. It never owns the backup Lease, API/controller, authoritative DNS, image-cache, CRDs, or host repair. |
-| `authoritative-dns` | Main and normalized group DNS DaemonSets | May inspect API health, Nodes, NodeLocal coexistence, and transport probes. The shared edge image does not grant edge proxy, Caddy, or Ingress ownership. |
-| `control-plane` | API/controller Deployments and PDBs, API Service, optional Ingress, generated CNPG Secret, and CNPG Cluster fields outside `/spec/backup` | May inspect CNPG, release state, and all other domains for invariance. Only a later control-plane adapter may share the explicit backup coordination fence. |
-| `image-cache` | Image-cache DaemonSet | May inspect registry/API endpoints, Nodes, cache state, and preserved workloads. It does not own builder labels, registry, image-store defaults, or node maintenance. |
-| `backup` | ScheduledBackup, restore-drill CronJob, and CNPG Cluster `/spec/backup` | May inspect CNPG and object-store state. It does not roll API/controller and does not delete historical Backup objects without a separate bounded contract. |
+| `node-local` | NodeLocal PriorityClass, ServiceAccount, ConfigMap, upstream/cache/active Services, and preserved/active DaemonSets | Does not use the backup Lease and does not invoke API/controller rollout, authoritative-DNS transaction, image-cache mutation, CoreDNS repair, or generic node maintenance. |
+| `authoritative-dns` | Main and normalized group DNS DaemonSets | Owns only the bounded authoritative-DNS transaction; the shared edge image does not grant edge proxy, Caddy, or Ingress ownership. |
+| `control-plane` | API/controller Deployments and PDBs, API Service, optional Ingress, generated CNPG Secret, and CNPG Cluster fields outside `/spec/backup` | May acquire the existing backup coordination Lease before its adapter writes. |
+| `image-cache` | Image-cache DaemonSet | Does not own builder labels, registry, image-store defaults, NodeLocal, or generic node maintenance. |
+| `backup` | ScheduledBackup, restore-drill CronJob, and CNPG Cluster `/spec/backup` | May acquire the existing backup coordination Lease; it does not roll API/controller or delete historical Backup objects. |
 
-The ownership matcher requires group, version, kind, scope, namespace, resolved
-name, and the labels already emitted by the chart. DNS group names are the only
-prefix rule; their suffix must exactly equal the suffix of the
-`app.kubernetes.io/component=dns-…` label. A missing binding, label mismatch,
-overlap, duplicate identity, `generateName`, malformed YAML, or changed CRD is
-unknown.
+The matcher requires exact group, version, kind, scope, namespace, resolved
+name, and chart labels. DNS group names are the only prefix rule, and their
+suffix must equal the suffix of the
+`app.kubernetes.io/component=dns-...` label. Missing bindings, label mismatch,
+ownership overlap, duplicate identity, `generateName`, malformed YAML, or a
+changed CRD produce `unknown`.
 
-CNPG Cluster ownership uses a single object matcher with a longest-JSON-Pointer
-override. `/spec/backup` and all descendants are `backup`; every other desired
-Cluster field is `control-plane`. A diff touching both is multiple.
+CNPG Cluster ownership uses longest-JSON-Pointer matching. `/spec/backup` and
+its descendants belong to `backup`; every other desired Cluster field belongs
+to `control-plane`. A diff that touches both is `multiple`.
 
-## Dual evidence
+## Evidence and canonical render set
 
-The planner accepts two independent classifications:
+Every ordinary dispatch regenerates revision-bound changed-file evidence from
+the dedicated release baseline commit to the exact target commit. The producer
+resolves both revisions to commit OIDs, enriches Go consumers and versioned
+values leaves, and writes a digest-bound private artifact. Shared or
+insufficiently attributable runtime input is unknown; the gate never guesses a
+domain by taking the union of inconsistent evidence.
 
-1. Changed-file evidence identifies the runtime consumers of each changed
-   path. Documentation and proven test-only paths may be non-runtime. Shared
-   Helm helpers, chart metadata/locks, CRDs, workflows, release entrypoints,
-   this planner, and its ownership file are unknown. Runtime Go files require
-   package-to-binary consumer evidence; semantic backup ownership is added to,
-   not substituted for, the actual image consumers. Any out-of-domain consumer
-   is unknown. Versioned values files require changed leaf JSON Pointers.
-2. Rendered-object evidence structurally compares base and target Kubernetes
-   manifests. It expands `List`, rejects duplicate identities, removes only
-   `status` and an empty renderer-created `metadata.creationTimestamp`, and
-   preserves labels, annotations, checksums, and array ordering. Every changed
-   JSON Pointer must have one owner. Helm test hooks are ignored only when the
-   caller explicitly confirms the real upgrade does not execute them; the plan
-   records that ignored evidence.
+The production path freezes one Helm upgrade argv snapshot containing exactly
+one bare `--no-hooks` argument. From that snapshot it produces three private
+canonical manifests in one attempt:
 
-The two known-domain sets must be identical. The planner never takes their
-union to guess an executable result.
+1. the live base manifest at the current Helm revision;
+2. the target manifest at the immediately adjacent revision; and
+3. an independent repeated target render at that same adjacent revision.
 
-## Planner results
+The target renders explicitly exclude hooks, must be byte-identical after
+canonicalization, and must agree with the changed-file classification. The
+base identity must equal the live release identity. Canonicalization expands
+`List`, injects the effective namespace, sorts objects and map keys, preserves
+array order, labels, annotations, Secrets, and numeric values, and removes only
+`status` plus an empty renderer-created `metadata.creationTimestamp`.
 
-| Result | Meaning before integration |
+The real upgrade also runs with `--no-hooks`; hooks are therefore neither
+retained in the canonical evidence nor executed as an unowned side channel.
+
+## Planner outcomes
+
+| Result | Production behavior |
 | --- | --- |
-| `zero` | Both classifiers are empty and every changed file is proven non-runtime. A future dispatcher must perform no Lease, Helm, Kubernetes, host, or transaction write. |
-| `single` | Both classifiers identify the same one domain. A future dispatcher may select only that adapter under the existing global production mutex. |
-| `multiple` | Both classifiers identify the same set of two or more domains. The release is blocked before the first write and is not split automatically. |
-| `unknown` | Parsing, matching, values/dependency evidence, digest stability, or the file/render conjunction failed. No generic release-risk approval may bypass this result. |
+| `zero` | Both classifiers are empty and all changed files are proven non-runtime. The gate performs no Lease, Helm, Kubernetes, operational host, or transaction write. It records public no-write evidence and returns without selecting an adapter. |
+| `single` | Both classifiers identify the same one domain. The gate seals the exact authorization and invokes only that domain's fixed adapter. |
+| `multiple` | Two or more domains are identified. The gate blocks before every operational write, records blocked public evidence, and does not split the release. |
+| `unknown` | Parsing, ownership, changed-file enrichment, render equality, digest, or context validation failed. The gate blocks before every operational write; no generic risk approval can bypass it. |
 
-The plan binds opaque base/target/live identities, base/target/repeated-target
-manifest digests, the ownership digest, changed-file evidence digest, and one
-canonical classification context. That context records the default release
-namespace, ownership bindings sorted by name, the Helm-test-hook ignore policy,
-and its own digest. The same immutable context is used for both base and target;
-the CLI has no separate base/target namespace or binding flags. Base must equal
-live, and two independently produced target renders must have the same digest.
-`planDigest` covers the full canonical JSON payload; transaction phases must
-verify it again when Boundary C is eventually authorized.
+`multiple` and `unknown` are safe blocked results, not adapter choices. A
+blocked or zero result never enters the transaction dispatcher.
 
-## CLI
+The production file-only precheck deliberately stops before rendering when it
+already sees multiple domains. Its public no-write artifact is therefore
+projected conservatively as `unknown`, rather than claiming that an unexecuted
+render independently proved `multiple`. Both outcomes have the same zero-write
+and lane-freeze behavior.
 
-The CLI accepts already rendered manifests and enriched changed-file evidence.
-It deliberately does not run Git, Helm, `kubectl`, or a renderer.
+## Reverse ownership proof and sealed authorization
 
-```sh
-go build -o /tmp/fugue-release-domain-plan ./cmd/fugue-release-domain-plan
+Before a single-domain write is possible, authorization proves ownership in
+both directions:
 
-/tmp/fugue-release-domain-plan \
-  --ownership deploy/release-domains/ownership-v1.yaml \
-  --changed-files /path/to/changed-files.json \
-  --base-manifest /path/to/base.yaml \
-  --target-manifest /path/to/target.yaml \
-  --repeated-target-manifest /path/to/target-repeat.yaml \
-  --base-digest OPAQUE_BASE \
-  --target-digest OPAQUE_TARGET \
-  --live-digest OPAQUE_BASE \
-  --namespace fugue-system \
-  --binding nodeLocalNamespace=kube-system \
-  --binding nodeLocalName=fugue-node-local-dns \
-  --binding nodeLocalUpstreamServiceName=fugue-dns-upstream \
-  --binding nodeLocalActiveName=fugue-node-local-dns-active \
-  --binding dnsName=fugue-dns \
-  --binding apiName=fugue-api \
-  --binding controllerName=fugue-controller \
-  --binding serviceName=fugue \
-  --binding ingressName=fugue \
-  --binding imageCacheName=fugue-image-cache \
-  --binding controlPlanePostgresName=fugue-control-plane-postgres \
-  --binding controlPlanePostgresSecretName=fugue-control-plane-postgres-app \
-  --binding controlPlaneRestoreDrillName=fugue-control-plane-restore-drill \
-  --output release-domain-plan.json
-```
+- base to target permits changes only in the selected domain; and
+- target to base proves that the rendered rollback also restores only that
+  same domain.
 
-All bindings and `--namespace` must come from the one exact render context used
-for both base and target; do not re-derive them from path prefixes or invoke the
-planner with reconstructed per-side contexts. `--ignore-helm-test-hooks` is
-part of that same persisted context. `--changed-files-z` also accepts `git diff
---no-renames --name-status -z`, but runtime Go and versioned values files remain
-unknown until enriched consumer or leaf-pointer evidence is used.
+The proof binds the exact release name and namespace, adjacent Helm revisions,
+ownership and changed-evidence digests, base/target/repeated-target manifests,
+the frozen NUL-delimited Helm argv, the immutable plan, and its execution
+binding. The private authorization bundle is created in a `0700` directory
+from `0600` regular files, rejects symlinks and replacement races, and writes
+its decision last. The dispatcher verifies the complete bundle again directly
+before Apply; Apply reads the sealed argv snapshot rather than reconstructing
+the command from mutable shell state.
 
-Changed-file JSON is an array:
+Only a strict, fully verified bundle can authorize execution. Public evidence
+is a separate secret-free artifact. It records the outcome, selected domain,
+plan digest, run identity, write-boundary state, and rollback state without
+publishing argv, environment, manifests, private paths, or secrets.
 
-```json
-[
-  {
-    "status": "M",
-    "path": "deploy/helm/fugue/values.yaml",
-    "valuePointers": ["/controlPlanePostgres/backup/destinationPath"]
-  },
-  {
-    "status": "M",
-    "path": "internal/api/backup.go",
-    "consumerDomains": ["control-plane"],
-    "semanticDomains": ["backup"]
-  }
-]
-```
+## Literal dispatcher and transaction
 
-Boundary B provides a dormant, refs-only producer for the enriched array:
+`scripts/lib/control_plane_release_domains.sh` contains one literal `case` for
+the five allowed domains:
 
-```sh
-go run ./cmd/fugue-release-domain-evidence \
-  --repo . \
-  --base BASE_COMMIT \
-  --target TARGET_COMMIT \
-  --output /private/path/changed-file-evidence.json
-```
+- `node-local`
+- `authoritative-dns`
+- `control-plane`
+- `image-cache`
+- `backup`
 
-The producer resolves both revisions to commit OIDs and wraps `changes` in a
-revision-bound `ChangedFileEvidence` document. Its `digest` is SHA-256 over the
-compact JSON payload containing `apiVersion`, `kind`, `policy`, `baseCommit`,
-`targetCommit`, and `changes`; the digest field itself is excluded. Go consumer
-graphs are built from exact Git tree blobs for Linux amd64 and arm64 with
-network access disabled, private temporary Go caches, and no local `go.mod`
-replacement. Incomplete enrichment writes no output. File output is an atomic
-0600 replacement and never follows a destination symlink.
+Each branch names its `prepare`, `apply`, `verify`, and `rollback` callbacks
+literally. Domain or phase text is never normalized, concatenated, evaluated,
+or used for dynamic callback lookup. `prepare` is read-only. A durable
+`apply/started` trace is the conservative write boundary; the final sealed
+authorization verification is immediately adjacent to the selected Apply
+callback. After that boundary, every forward failure takes the selected
+adapter's exactly-once rollback path. Rollback failure is recorded and is not
+retried or replaced by a different domain's recovery helper.
 
-The Boundary A planner still consumes the embedded `changes` array. A future
-Boundary C activation must validate the envelope digest and exact base/target
-OIDs in the same immutable context as the rendered manifests before extracting
-that array. The default release path does not invoke this producer or the
-planner yet.
+The fsynced `transaction/succeeded` trace record is the commit linearization
+point. No fallible rollback-eligible domain mutation or verification runs after
+it. Post-commit Lease owner-CAS release, DNS bookkeeping, private cleanup, or
+public-evidence publication may still fail; such a failure freezes the lane and
+must never trigger rollback of the committed business state. The workflow
+retains the existing shared Helm release/global mutation mutex. The backup
+coordination Lease is additionally available only to the literal
+`control-plane` and `backup` branches; `node-local`, `authoritative-dns`, and
+`image-cache` cannot acquire, drain, release, or restore it.
 
-Boundary B also provides a private canonical-manifest subcommand for the
-dormant render seam:
+## Production entrypoint
 
-```sh
-fugue-release-domain-evidence canonicalize-manifest \
-  --ownership deploy/release-domains/ownership-v1.yaml \
-  --input /private/path/helm-release.json \
-  --input-format helm-release-json \
-  --namespace fugue-system \
-  --release-name fugue \
-  --release-version 42 \
-  --output /private/path/target.manifest
-```
+The ordinary workflow supplies these exact production inputs to
+`scripts/upgrade_fugue_control_plane.sh`:
 
-Raw render input must be a regular, non-symlink file with no group or other
-permissions. Helm JSON is parsed strictly, bound to the expected release name,
-namespace, and version, and reduced to the optional main manifest plus every
-hook manifest. Canonicalization then uses the same strict YAML/object semantics as
-the planner: it expands `List`, injects the effective namespace, sorts objects
-and map keys, preserves array order, hooks, Secrets, and exact numeric values,
-and removes only the two normalized renderer fields described above. Output is
-an atomic `0600` file and is never written to stdout.
+- `FUGUE_RELEASE_DOMAIN_BASE_SHA`
+- `FUGUE_RELEASE_DOMAIN_TARGET_SHA`
+- `FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL`
+- `FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL`
+- `FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE`
 
-`scripts/lib/control_plane_release_render.sh` contains a still-dormant executor
-that derives target, pinned-base, and repeated-target commands from the one
-frozen Helm upgrade argv. It captures every raw stream in an isolated `0700`
-temporary tree under a hard 16 MiB callback file limit; canonical inputs are
-then bounded to 8 MiB. It canonicalizes all three, requires the two target
-renders to be byte-identical after canonicalization, lends the files only to a
-synchronous consumer, and removes the tree and any callback process group on
-every return or signal. No default release entrypoint calls this executor
-before the Boundary C atomic activation gate.
+After configuration and read-only Helm/Kubernetes discovery, `main` reads the
+current Helm revision and calls the atomic release-domain gate. It does not run
+the legacy monolithic mutation sequence afterward. Signal and EXIT handling
+remain bound to the selected transaction: an interrupted write rolls back only
+the selected domain, and a committed transaction is not contradicted by a
+later rollback.
 
-Runner, canonicalizer, and consumer callbacks are trusted synchronous release
-functions. Their contract forbids daemonizing, double-forking, reparenting, or
-creating a new session. The executor keeps their process-group leader anchored,
-rejects a successful callback that leaves a same-group descendant, and kills
-the anchored group before it can be reaped or its PGID reused.
+## Dispatch-only workflow and baseline
 
-Boundary B also defines a dormant transaction authorization envelope and
-adapter state machine. The persisted envelope contains its own API identity,
-the complete immutable plan snapshot, a duplicate plan digest, and the expected
-single domain. Decoding requires the caller to supply the trusted plan digest
-and expected domain independently; the envelope digest, nested plan digest,
-caller digest, envelope domain, nested selected domain, every domain evidence
-slice, and caller domain must all agree. The decoder rejects non-canonical
-SHA-256 text, unknown/duplicate/missing JSON fields, null aliases, malformed
-Unicode, trailing values, oversized input, and every result except exactly one
-`single` domain. It also reconstructs the plan from the original file,
-rendered-object, and digest evidence, so recomputing a self-digest over forged
-derived outcome fields does not authorize a transaction.
+`.github/workflows/deploy-control-plane.yml` is dispatch-only. A caller must
+provide `expected_sha`, and the input guard requires an exact lowercase
+40-character SHA equal to `github.sha` on `refs/heads/main`. A push alone does
+not start a production release.
 
-`internal/releaseadapter` accepts only the opaque authorization returned by
-that decoder and one already-selected, complete adapter. It validates all four
-commands before `prepare`, and the interface contract makes `prepare` and
-`verify` read-only. A prepare failure performs no rollback. Immediately before
-the sole `apply` call the runner crosses the write boundary; from then through
-the final success record, any command, context, panic, or trace failure invokes
-`rollback` exactly once under a fresh bounded context. Rollback failure is
-joined with the original failure and is never retried.
+Domain comparison uses the dedicated tag
+`fugue-control-plane-release-baseline`. An ordinary run requires that tag to
+resolve to one exact ancestor commit and advances it only after the complete
+release succeeds, using a force-with-lease bound to the previously observed
+tag object. The live-image baseline used by existing image and release safety
+checks remains independent from this domain-planner baseline.
 
-The runner can persist a secret-free JSONL trace in a freshly created `0700`
-directory and exact `0600` regular file. Each fixed enum event contains only a
-sequence, domain, and plan digest, is fsynced before the call succeeds, and is
-bound to the originally opened file identity. A non-closing pre-commit barrier
-revalidates durability, identity, and permissions while preserving the ability
-to record a rollback. After one final context check, the fsynced
-`transaction/succeeded` event is the linearization point; a later cancellation
-does not create a contradictory rollback. The owner closes the trace after the
-runner returns, with identity/mode errors retained across repeated closes.
-Command argv, stdout/stderr, errors, environment, manifests, and secrets are
-excluded. This package has no registry, `init`, production adapter, dispatcher,
-or production import; its fake commands exercise the transaction matrix only in
-tests. Signal ownership, real adapters, reverse-render rollback ownership proof,
-workflow evidence, and the first pre-write production call remain one Boundary
-C activation change.
+The one-time genesis path is fail closed. It is accepted only when all of the
+following match:
 
-The built binary exits `0` for `zero` or `single`, `2` for the expected blocked
-results `multiple` or `unknown`, and `1` for invalid CLI/input-file framing. A
-blocked plan is written to the requested output (or stdout) before the binary
-exits `2`; do not infer this contract from `go run`, which reports child exit
-statuses through the Go tool itself.
+- the dedicated baseline tag is absent;
+- repository variable `FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA` equals the
+  exact dispatched head;
+- that head has exactly the pinned genesis parent; and
+- changed-file evidence equals the workflow's statically enumerated exact
+  genesis path list (no directory prefix or dynamically derived allowlist).
 
-## NodeLocal-only acceptance invariants
+Genesis writes and uploads public bootstrap evidence but performs no cluster
+deployment. On success it establishes the dedicated baseline tag. Subsequent
+runs cannot re-enter genesis while the tag exists.
 
-Boundary C must not be activated until a NodeLocal-only functional harness
-proves all of the following by command trace and before/after object identity:
+Every successful genesis or ordinary deploy must upload exactly one
+secret-free release-domain evidence artifact with a 90-day retention policy.
+A missing or invalid artifact is itself a deploy failure. A failure in the
+input guard, prerequisites, deploy, evidence upload, or baseline advancement
+enters the freeze job: it uploads lane-freeze evidence, disables the workflow,
+and cancels other non-terminal runs. The lane is not silently re-enabled or
+advanced after a failed release.
 
-- backup coordination Lease create/get-for-update/patch/delete/replace count is
-  zero, and backup acquire/drain/release helpers are never called;
-- API/controller canary, rollout, restart, and patch helpers are never called;
-- authoritative-DNS and image-cache run/restore/finalize helpers are never
-  called;
-- CRD apply, primary recovery, CoreDNS repair, builder labels, route sync,
-  node-janitor, and generic host mutation are never called;
-- only allowlisted NodeLocal objects change, while API/controller, DNS, and
-  image-cache generation/template/controller-revision/Pod identities remain
-  unchanged; and
-- although the shared Helm revision may advance once, the canonical digest of
-  every non-NodeLocal rendered object remains equal to base.
+## Operator interpretation
 
-## Current integration boundary
+- `zero`: verify the public artifact says the write boundary was not crossed;
+  no adapter or rollback should appear in the trace.
+- `single`: verify the selected literal domain, plan digest, successful durable
+  transaction, and unchanged non-owned canonical objects.
+- `multiple` or `unknown`: treat the run as a safe block and frozen release
+  lane, not as permission to split, SSH-patch, or bypass the gate.
+- rollback succeeded: preserve the evidence and keep the lane frozen for
+  investigation.
+- rollback failed: preserve the evidence and keep the lane frozen; do not run a
+  different adapter or a legacy cross-domain recovery path.
 
-Boundary B now defines the unique real Helm argument builder, the private
-three-render executor, the canonicalizer, revision-bound changed-file evidence,
-the strict transaction envelope, and the fake-command adapter state machine.
-These seams remain unreachable from the default upgrade `main`; they acquire
-neither the existing global mutex nor the control-plane backup Lease and perform
-no production write.
-
-There is still no production domain dispatcher, real transaction adapter,
-rollback ownership proof, workflow evidence upload, bootstrap authorization,
-or no-op release integration. Those pieces must enter together behind the
-Boundary C pre-write atomic activation gate and its functional safety harness.
+The Boundary A planner and Boundary B evidence/render/envelope work are
+historical implementation milestones. Boundary B3 is their sole formal
+production activation path.

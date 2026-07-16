@@ -121,6 +121,10 @@ if target[:-3] != source or target[-3:] != [b"--dry-run=server", b"--output", b"
     raise SystemExit("target render is not the exact upgrade argv plus fixed server dry-run flags")
 if target.count(b"--dry-run=server") != 1 or target.count(b"--output") != 1:
     raise SystemExit("target render controls are not unique")
+if source.count(b"--no-hooks") != 1:
+    raise SystemExit("production frozen Helm argv must contain exactly one bare --no-hooks")
+if any(item.startswith(b"--no-hooks=") for item in source):
+    raise SystemExit("production frozen Helm argv contains assigned --no-hooks")
 if b"--hide-secret" in target:
     raise SystemExit("private ownership render must not drop Secret objects")
 expected_base_prefix = [
@@ -130,17 +134,23 @@ expected_base_prefix = [
 if base[:9] != expected_base_prefix or len(base) != 10:
     raise SystemExit("base render is not bound to the exact stored Helm revision")
 template = base[9]
-for required in (b".Release.Manifest", b".Release.Hooks", b".Manifest"):
-    if required not in template:
-        raise SystemExit("base release template omits stored manifest or hooks")
+if b".Release.Manifest" not in template:
+    raise SystemExit("base release template omits stored manifest")
+for forbidden in (b".Release.Hooks", b".Manifest }}{{ end"):
+    if forbidden in template:
+        raise SystemExit("no-hooks base release template retained stored hooks")
 PY
 
-VALID_RENDER_SOURCE=(
+LEGACY_RENDER_SOURCE=(
   helm upgrade release-fixture '/private/target chart'
   -n namespace-fixture
   --reset-then-reuse-values
   --timeout 10m0s
   -f '/private/override values.yaml'
+)
+VALID_RENDER_SOURCE=(
+  "${LEGACY_RENDER_SOURCE[@]}"
+  --no-hooks
 )
 FAIL_PHASE=""
 FAIL_TRACE=()
@@ -154,6 +164,31 @@ failing_render_consumer() {
     repeated-target) [[ "${FAIL_PHASE}" != "repeated-target" ]] || return 83 ;;
   esac
 }
+
+LEGACY_BASE_ARGV_FILE="${TEMP_DIR}/legacy-base.argv"
+capture_legacy_render_argv() {
+  local phase="$1"
+  shift
+  if [[ "${phase}" == "base" ]]; then
+    printf '%s\0' "$@" >"${LEGACY_BASE_ARGV_FILE}"
+  fi
+}
+control_plane_release_with_private_manifest_render_argv \
+  23 capture_legacy_render_argv "${LEGACY_RENDER_SOURCE[@]}"
+python3 - "${LEGACY_BASE_ARGV_FILE}" <<'PY'
+import sys
+
+payload = open(sys.argv[1], "rb").read()
+if not payload.endswith(b"\0"):
+    raise SystemExit("legacy base argv is not NUL terminated")
+argv = payload.split(b"\0")[:-1]
+if len(argv) != 10 or argv[-2] != b"--template":
+    raise SystemExit("legacy base render is not pinned to a Helm template")
+template = argv[-1]
+for required in (b".Release.Manifest", b".Release.Hooks", b".Manifest"):
+    if required not in template:
+        raise SystemExit("legacy base release template no longer includes stored hooks")
+PY
 
 for failure in target base repeated-target; do
   FAIL_PHASE="${failure}"
@@ -228,6 +263,14 @@ assert_invalid_render_source "preexisting debug" \
   "${VALID_RENDER_SOURCE[@]}" --debug
 assert_invalid_render_source "preexisting debug assignment" \
   "${VALID_RENDER_SOURCE[@]}" --debug=true
+assert_invalid_render_source "duplicate no-hooks" \
+  "${VALID_RENDER_SOURCE[@]}" --no-hooks
+assert_invalid_render_source "assigned no-hooks" \
+  "${LEGACY_RENDER_SOURCE[@]}" --no-hooks=true
+assert_invalid_render_source "false no-hooks" \
+  "${LEGACY_RENDER_SOURCE[@]}" --no-hooks=false
+assert_invalid_render_source "split false no-hooks" \
+  "${LEGACY_RENDER_SOURCE[@]}" --no-hooks false
 
 rc=0
 control_plane_release_with_private_manifest_render_argv \
@@ -247,6 +290,7 @@ assert_eq "${rc}" "2" "external render consumer status"
 CANONICALIZER_BINARY="${TEMP_DIR}/fugue-release-domain-evidence"
 CANONICAL_OWNERSHIP="${REPO_ROOT}/deploy/release-domains/ownership-v1.yaml"
 BASE_RAW_FIXTURE="${TEMP_DIR}/base.raw.fixture"
+LEGACY_BASE_RAW_FIXTURE="${TEMP_DIR}/legacy-base.raw.fixture"
 TARGET_JSON_FIXTURE="${TEMP_DIR}/target.json.fixture"
 REPEATED_TARGET_JSON_FIXTURE="${TEMP_DIR}/repeated-target.json.fixture"
 DRIFT_TARGET_JSON_FIXTURE="${TEMP_DIR}/drift-target.json.fixture"
@@ -255,6 +299,7 @@ go build -o "${CANONICALIZER_BINARY}" "${REPO_ROOT}/cmd/fugue-release-domain-evi
 chmod 700 "${CANONICALIZER_BINARY}"
 python3 - \
   "${BASE_RAW_FIXTURE}" \
+  "${LEGACY_BASE_RAW_FIXTURE}" \
   "${TARGET_JSON_FIXTURE}" \
   "${REPEATED_TARGET_JSON_FIXTURE}" \
   "${DRIFT_TARGET_JSON_FIXTURE}" <<'PY'
@@ -262,7 +307,7 @@ import json
 import os
 import sys
 
-base, target, repeated, drift = sys.argv[1:]
+base, legacy_base, target, repeated, drift = sys.argv[1:]
 base_manifest = """apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -271,15 +316,15 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 data:
   value: old
----
-apiVersion: v1
+"""
+hook_manifest = """apiVersion: v1
 kind: Secret
 metadata:
   name: release-fixture-hook
   annotations:
     helm.sh/hook: pre-upgrade
 stringData:
-  token: sentinel-private-render-secret
+  token: sentinel-private-hook-secret
 """
 target_main = """kind: ConfigMap
 metadata: {name: release-fixture-config, labels: {app.kubernetes.io/managed-by: Helm}}
@@ -287,6 +332,11 @@ apiVersion: v1
 data:
   ordered: [first, second]
   value: new
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: release-fixture-main-secret}
+stringData: {token: sentinel-private-main-secret}
 """
 repeated_main = """apiVersion: v1
 data:
@@ -298,6 +348,13 @@ metadata:
   labels: {app.kubernetes.io/managed-by: Helm}
   name: release-fixture-config
 kind: ConfigMap
+---
+kind: Secret
+apiVersion: v1
+stringData:
+  token: sentinel-private-main-secret
+metadata:
+  name: release-fixture-main-secret
 """
 drift_main = repeated_main.replace("    - first\n    - second", "    - second\n    - first")
 target_hook = """apiVersion: v1
@@ -307,7 +364,7 @@ metadata:
   annotations:
     helm.sh/hook: pre-upgrade
 stringData:
-  token: sentinel-private-render-secret
+  token: sentinel-private-hook-secret
 """
 
 def release(manifest, hook, volatile):
@@ -331,13 +388,15 @@ def release(manifest, hook, volatile):
 
 with open(base, "w", encoding="utf-8") as handle:
     handle.write(base_manifest)
+with open(legacy_base, "w", encoding="utf-8") as handle:
+    handle.write(base_manifest + "\n---\n" + hook_manifest)
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(release(target_main, target_hook, "first-volatile-value"), handle, indent=2)
 with open(repeated, "w", encoding="utf-8") as handle:
     json.dump(release(repeated_main, target_hook, "second-volatile-value"), handle, separators=(",", ":"), sort_keys=True)
 with open(drift, "w", encoding="utf-8") as handle:
     json.dump(release(drift_main, target_hook, "third-volatile-value"), handle, sort_keys=True)
-for path in (base, target, repeated, drift):
+for path in (base, legacy_base, target, repeated, drift):
     os.chmod(path, 0o600)
 PY
 
@@ -362,7 +421,12 @@ private_render_fixture_runner() {
       ;;
     base)
       [[ "$1" == "helm" && "$2" == "get" && "$3" == "all" && "$4" == "release-fixture" ]] || return 78
-      /bin/cat "${BASE_RAW_FIXTURE}"
+      if [[ "${argv[argv_count - 1]}" == '{{ .Release.Manifest }}' ]]; then
+        /bin/cat "${BASE_RAW_FIXTURE}"
+      else
+        [[ "${argv[argv_count - 1]}" == *'.Release.Hooks'* ]] || return 78
+        /bin/cat "${LEGACY_BASE_RAW_FIXTURE}"
+      fi
       ;;
     repeated-target)
       (( argv_count >= 3 )) || return 79
@@ -382,11 +446,36 @@ private_render_real_canonicalizer() {
   local expected_version="$2"
   local release_name="$3"
   local release_namespace="$4"
-  local base_raw="$5"
-  local target_raw="$6"
-  local repeated_target_raw="$7"
-  local output_dir="$8"
+  local hook_policy="$5"
+  local base_raw="$6"
+  local target_raw="$7"
+  local repeated_target_raw="$8"
+  local output_dir="$9"
+  local -a target_canonicalizer_args=(
+    --ownership "${CANONICAL_OWNERSHIP}"
+    --input "${target_raw}"
+    --input-format helm-release-json
+    --namespace "${release_namespace}"
+    --release-name "${release_name}"
+    --release-version "${expected_version}"
+  )
+  local -a repeated_target_canonicalizer_args=(
+    --ownership "${CANONICAL_OWNERSHIP}"
+    --input "${repeated_target_raw}"
+    --input-format helm-release-json
+    --namespace "${release_namespace}"
+    --release-name "${release_name}"
+    --release-version "${expected_version}"
+  )
   [[ "${live_revision}" == "23" && "${expected_version}" == "24" ]] || return 90
+  case "${hook_policy}" in
+    exclude-hooks)
+      target_canonicalizer_args+=(--exclude-hooks)
+      repeated_target_canonicalizer_args+=(--exclude-hooks)
+      ;;
+    include-hooks) ;;
+    *) return 90 ;;
+  esac
   python3 - "${base_raw}" "${target_raw}" "${repeated_target_raw}" <<'PY'
 import os
 import stat
@@ -399,23 +488,13 @@ PY
     --ownership "${CANONICAL_OWNERSHIP}" \
     --input "${base_raw}" \
     --namespace "${release_namespace}" \
-    --output "${output_dir}/base.manifest" || return
+    --output "${output_dir}/base.manifest" || return 101
+  target_canonicalizer_args+=(--output "${output_dir}/target.manifest")
   "${CANONICALIZER_BINARY}" canonicalize-manifest \
-    --ownership "${CANONICAL_OWNERSHIP}" \
-    --input "${target_raw}" \
-    --input-format helm-release-json \
-    --namespace "${release_namespace}" \
-    --release-name "${release_name}" \
-    --release-version "${expected_version}" \
-    --output "${output_dir}/target.manifest" || return
+    "${target_canonicalizer_args[@]}" || return 102
+  repeated_target_canonicalizer_args+=(--output "${output_dir}/repeated-target.manifest")
   "${CANONICALIZER_BINARY}" canonicalize-manifest \
-    --ownership "${CANONICAL_OWNERSHIP}" \
-    --input "${repeated_target_raw}" \
-    --input-format helm-release-json \
-    --namespace "${release_namespace}" \
-    --release-name "${release_name}" \
-    --release-version "${expected_version}" \
-    --output "${output_dir}/repeated-target.manifest"
+    "${repeated_target_canonicalizer_args[@]}" || return 103
 }
 
 private_render_capture_consumer() {
@@ -450,7 +529,11 @@ for caller_umask in 000 022 077; do
       "${VALID_RENDER_SOURCE[@]}"
   ) >"${TEMP_DIR}/private-render-${caller_umask}.stdout" \
     2>"${TEMP_DIR}/private-render-${caller_umask}.stderr" ||
-    fail "private canonical render failed under umask ${caller_umask}"
+    {
+      command sed 's/^/[private-render-diagnostic] /' \
+        "${TEMP_DIR}/private-render-${caller_umask}.stderr" >&2
+      fail "private canonical render failed under umask ${caller_umask}"
+    }
   [[ ! -s "${TEMP_DIR}/private-render-${caller_umask}.stdout" &&
     ! -s "${TEMP_DIR}/private-render-${caller_umask}.stderr" ]] ||
     fail "private canonical render emitted output under umask ${caller_umask}"
@@ -460,8 +543,14 @@ for caller_umask in 000 022 077; do
     fail "canonical target drifted under umask ${caller_umask}"
   cmp -s "${PRIVATE_RENDER_CAPTURE_PREFIX}.base" "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" &&
     fail "base and changed target unexpectedly match under umask ${caller_umask}"
-  grep -q 'sentinel-private-render-secret' "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" ||
-    fail "canonical target dropped Secret under umask ${caller_umask}"
+  grep -q 'sentinel-private-main-secret' "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" ||
+    fail "canonical target dropped a non-hook Secret under umask ${caller_umask}"
+  grep -q 'release-fixture-hook\|sentinel-private-hook-secret' \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" &&
+    fail "no-hooks canonical target retained a Helm release hook under umask ${caller_umask}"
+  grep -q 'release-fixture-hook\|sentinel-private-hook-secret' \
+    "${PRIVATE_RENDER_CAPTURE_PREFIX}.base" &&
+    fail "no-hooks canonical base retained a Helm release hook under umask ${caller_umask}"
   assert_eq "$(wc -l <"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}" | tr -d ' ')" "1" \
     "private canonical consumer calls under umask ${caller_umask}"
   python3 - \
@@ -477,6 +566,32 @@ for path in sys.argv[1:]:
         raise SystemExit(f"canonical capture mode is {mode:o}, want 600: {path}")
 PY
 done
+
+PRIVATE_RENDER_TRACE="${TEMP_DIR}/private-render-legacy.trace"
+PRIVATE_RENDER_CAPTURE_PREFIX="${TEMP_DIR}/private-render-legacy"
+: >"${PRIVATE_RENDER_TRACE}"
+: >"${PRIVATE_RENDER_CONSUMER_CALLS_FILE}"
+control_plane_release_run_private_canonical_render_set \
+  23 private_render_fixture_runner private_render_real_canonicalizer private_render_capture_consumer \
+  "${LEGACY_RENDER_SOURCE[@]}" \
+  >"${TEMP_DIR}/private-render-legacy.stdout" \
+  2>"${TEMP_DIR}/private-render-legacy.stderr" ||
+  {
+    command sed 's/^/[private-render-legacy-diagnostic] /' \
+      "${TEMP_DIR}/private-render-legacy.stderr" >&2
+    fail "legacy private canonical render failed"
+  }
+[[ ! -s "${TEMP_DIR}/private-render-legacy.stdout" &&
+  ! -s "${TEMP_DIR}/private-render-legacy.stderr" ]] ||
+  fail "legacy private canonical render emitted output"
+for legacy_manifest in base target repeated; do
+  grep -q 'release-fixture-hook' "${PRIVATE_RENDER_CAPTURE_PREFIX}.${legacy_manifest}" ||
+    fail "legacy canonical ${legacy_manifest} dropped Helm release hooks"
+  grep -q 'sentinel-private-hook-secret' "${PRIVATE_RENDER_CAPTURE_PREFIX}.${legacy_manifest}" ||
+    fail "legacy canonical ${legacy_manifest} dropped hook data"
+done
+cmp -s "${PRIVATE_RENDER_CAPTURE_PREFIX}.target" "${PRIVATE_RENDER_CAPTURE_PREFIX}.repeated" ||
+  fail "legacy canonical target drifted"
 
 PRIVATE_RENDER_CONCURRENT_PIDS=()
 for concurrent_index in 1 2 3 4; do
@@ -816,13 +931,19 @@ PY
 
 python3 - \
   "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
-  "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh" <<'PY'
+  "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh" \
+  "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import sys
 
 upgrade = Path(sys.argv[1]).read_text(encoding="utf-8")
 library = Path(sys.argv[2]).read_text(encoding="utf-8")
-main = upgrade[upgrade.index("\nmain() {"):]
+production = Path(sys.argv[3]).read_text(encoding="utf-8")
+main = upgrade[
+    upgrade.index("\nmain() {") : upgrade.index(
+        "\n# The production activation is source-only"
+    )
+]
 source_line = 'source "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh"'
 if upgrade.count(source_line) != 1:
     raise SystemExit("upgrade entrypoint must source the render library exactly once")
@@ -831,11 +952,24 @@ for forbidden in (
     "control_plane_release_run_private_canonical_render_set",
     "fugue-release-domain-plan",
     "control_plane_release_run_domain_adapter_transaction",
+    "with_frozen_control_plane_helm_upgrade_argv",
 ):
     if forbidden in main:
-        raise SystemExit(f"default release path unexpectedly activates {forbidden}")
-if main.count("with_frozen_control_plane_helm_upgrade_argv") != 1:
-    raise SystemExit("default release path no longer has one real Helm argv consumer")
+        raise SystemExit(f"main bypasses the atomic domain activation with {forbidden}")
+if main.count("run_control_plane_atomic_domain_gate") != 1:
+    raise SystemExit("main must enter the atomic domain activation exactly once")
+frozen_builder = production[
+    production.index("\ncontrol_plane_release_domain_render_and_authorize() {") :
+    production.index("\ncontrol_plane_release_domain_read_exact_result() {")
+]
+if frozen_builder.count("with_frozen_control_plane_helm_upgrade_argv") != 1:
+    raise SystemExit("production domain activation must freeze one Helm argv")
+sealed_consumer = production[
+    production.index("\ncontrol_plane_release_domain_execute_sealed_helm_upgrade() {") :
+    production.index("\ncontrol_plane_release_domain_capture_live_canonical_manifest() {")
+]
+if sealed_consumer.count('"single-domain Helm upgrade" "${sealed_argv[@]}"') != 1:
+    raise SystemExit("production domain activation must execute one verified sealed Helm argv")
 for forbidden in ("eval ", "printf '%q'"):
     if forbidden in library:
         raise SystemExit(f"private render library contains unsafe construct {forbidden!r}")
@@ -851,4 +985,4 @@ PY
 bash -n \
   "${REPO_ROOT}/scripts/lib/control_plane_release_render.sh" \
   "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
-printf '[test_control_plane_release_render] private render argv wrapper remains inactive and deterministic\n'
+printf '[test_control_plane_release_render] private render argv remains deterministic and production execution is sealed\n'

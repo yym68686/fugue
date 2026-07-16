@@ -1,85 +1,45 @@
 name: deploy-control-plane
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/deploy-control-plane.yml'
-      - 'assets/**'
-      - 'cmd/fugue-api/**'
-      - 'cmd/fugue-controller/**'
-      - 'cmd/fugue-drain-agent/**'
-      - 'cmd/fugue-registry-maintenance/**'
-      - 'cmd/fugue-telemetry-agent/**'
-      - 'cmd/fugue-image-cache/**'
-      - 'cmd/fugue-edge/**'
-      - 'cmd/fugue-edge-front/**'
-      - 'cmd/fugue-ssh-front/**'
-      - 'cmd/fugue-dns/**'
-      - 'cmd/fugue-mesh-agent/**'
-      - 'cmd/fugue-mesh-recovery/**'
-      - 'images/app-ssh/**'
-      - 'internal/**'
-      - 'deploy/helm/fugue/charts/**'
-      - 'deploy/helm/fugue/crds/**'
-      - 'deploy/helm/fugue/Chart.yaml'
-      - 'deploy/helm/fugue/values-production-ha.yaml'
-      - 'deploy/helm/fugue/values.yaml'
-      - 'deploy/helm/fugue/templates/**'
-      - 'Dockerfile.api'
-      - 'Dockerfile.controller'
-      - 'Dockerfile.drain-agent'
-      - 'Dockerfile.telemetry-agent'
-      - 'Dockerfile.image-cache'
-      - 'Dockerfile.edge'
-      - 'Dockerfile.app-ssh'
-      - 'Makefile'
-      - 'go.mod'
-      - 'go.sum'
-      - 'scripts/bootstrap_control_plane_automation.sh'
-      - 'scripts/assemble_release_image_lock_input.py'
-      - 'scripts/build_control_plane_images.sh'
-      - 'scripts/build_release_image_lock.py'
-      - 'scripts/compute_control_plane_image_build_plan.sh'
-      - 'scripts/compute_release_changed_files_from_live.sh'
-      - 'scripts/export_cloudflare_zone_static_records.sh'
-      - 'scripts/install_fugue_ha.sh'
-      - 'scripts/issue_fugue_app_wildcard_tls.sh'
-      - 'scripts/lib/control_plane_release_render.sh'
-      - 'scripts/lib/release_image_ref.sh'
-      - 'scripts/prepare_authoritative_dns_dig.sh'
-      - 'scripts/render_fugue_edge_systemd_unit.sh'
-      - 'scripts/render_fugue_dns_systemd_unit.sh'
-      - 'scripts/render_fugue_mesh_agent_systemd_unit.sh'
-      - 'scripts/render_fugue_mesh_recovery_systemd_unit.sh'
-      - 'scripts/resolve_control_plane_live_images.sh'
-      - 'scripts/release_fugue_public_data_plane.sh'
-      - 'scripts/sync_fugue_edge_proxy.sh'
-      - 'scripts/test_release_domain_safety.sh'
-      - 'scripts/test_assemble_release_image_lock_input.py'
-      - 'scripts/test_build_release_image_lock.py'
-      - 'scripts/test_control_plane_release_render.sh'
-      - 'scripts/test_node_local_dns_release.sh'
-      - 'scripts/test_prepare_authoritative_dns_dig.sh'
-      - 'scripts/test_verify_registry_image.py'
-      - 'scripts/test_verify_stale_release_recovery.py'
-      - 'scripts/upgrade_fugue_control_plane.sh'
-      - 'scripts/verify_stale_release_recovery.py'
-      - 'scripts/verify_registry_image.py'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main commit SHA authorized for this release
+        required: true
+        type: string
 
 permissions:
-  actions: read
   contents: read
-  packages: write
 
 concurrency:
   group: fugue-production-cluster-mutation-v1
   cancel-in-progress: false
 
 jobs:
+  release-input-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard exact main commit authorization
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          ACTUAL_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
+          EVENT_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          [[ "${EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${EVENT_REF}" == "refs/heads/main" ]]
+          [[ "${EVENT_REF_NAME}" == "main" ]]
+          [[ "${EVENT_REF_TYPE}" == "branch" ]]
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${ACTUAL_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_SHA}" == "${ACTUAL_SHA}" ]]
+
   release-baseline:
+    needs:
+      - release-input-guard
     runs-on:
       - self-hosted
       - linux
@@ -87,6 +47,10 @@ jobs:
       - fugue
       - control-plane
     outputs:
+      domain_base_sha: ${{ steps.domain_baseline.outputs.domain_base_sha }}
+      baseline_ref_object_sha: ${{ steps.domain_baseline.outputs.baseline_ref_object_sha }}
+      is_genesis: ${{ steps.domain_baseline.outputs.is_genesis }}
+      genesis_parent_sha: ${{ steps.domain_baseline.outputs.genesis_parent_sha }}
       changed_files: ${{ steps.release_changes.outputs.changed_files }}
       baseline_refs: ${{ steps.release_changes.outputs.baseline_refs }}
       source: ${{ steps.release_changes.outputs.source }}
@@ -103,6 +67,66 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Resolve release-domain baseline
+        id: domain_baseline
+        env:
+          FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA: ${{ vars.FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA }}
+        run: |
+          set -euo pipefail
+          readonly baseline_tag='fugue-control-plane-release-baseline'
+          readonly baseline_ref="refs/tags/${baseline_tag}"
+          readonly genesis_parent_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
+          readonly target_sha="${GITHUB_SHA}"
+
+          [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]]
+          remote_tag=''
+          set +e
+          remote_tag="$(git ls-remote --refs --exit-code origin "${baseline_ref}")"
+          remote_status=$?
+          set -e
+
+          case "${remote_status}" in
+            0)
+              [[ "$(printf '%s\n' "${remote_tag}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
+              read -r remote_object remote_ref extra <<<"${remote_tag}"
+              [[ -z "${extra:-}" ]]
+              [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]]
+              [[ "${remote_ref}" == "${baseline_ref}" ]]
+              git fetch --no-tags origin "${baseline_ref}"
+              fetched_ref_object_sha="$(git rev-parse --verify FETCH_HEAD)"
+              domain_base_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+              [[ "${fetched_ref_object_sha}" == "${remote_object}" ]]
+              [[ "${domain_base_sha}" =~ ^[0-9a-f]{40}$ ]]
+              [[ "${remote_object}" == "${domain_base_sha}" ]]
+              git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"
+              baseline_ref_object_sha="${remote_object}"
+              is_genesis='false'
+              ;;
+            2)
+              genesis_sha="${FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA:-}"
+              [[ "${genesis_sha}" =~ ^[0-9a-f]{40}$ ]]
+              [[ "${genesis_sha}" == "${target_sha}" ]]
+              read -r commit actual_parent extra <<<"$(git rev-list --parents -n 1 "${target_sha}")"
+              [[ "${commit}" == "${target_sha}" ]]
+              [[ -z "${extra:-}" ]]
+              [[ "${actual_parent}" == "${genesis_parent_sha}" ]]
+              domain_base_sha="${genesis_parent_sha}"
+              baseline_ref_object_sha=''
+              is_genesis='true'
+              ;;
+            *)
+              echo "failed to read the dedicated release baseline tag" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            printf 'domain_base_sha=%s\n' "${domain_base_sha}"
+            printf 'baseline_ref_object_sha=%s\n' "${baseline_ref_object_sha}"
+            printf 'is_genesis=%s\n' "${is_genesis}"
+            printf 'genesis_parent_sha=%s\n' "${genesis_parent_sha}"
+          } >>"${GITHUB_OUTPUT}"
 
       - name: Resolve live image metadata
         id: live_images
@@ -122,6 +146,8 @@ jobs:
         run: ./scripts/compute_release_changed_files_from_live.sh
 
   release-gate:
+    needs:
+      - release-input-guard
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -145,6 +171,7 @@ jobs:
       - name: Verify release-domain safety contracts
         run: |
           bash scripts/test_prepare_authoritative_dns_dig.sh
+          bash scripts/test_release_domain_workflow.sh
           bash scripts/test_release_domain_safety.sh
           bash scripts/test_node_local_dns_release.sh
           python3 scripts/test_verify_stale_release_recovery.py
@@ -157,6 +184,9 @@ jobs:
       - release-baseline
       - release-gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
       api_image_repository: ${{ steps.meta.outputs.api_image_repository }}
@@ -266,8 +296,12 @@ jobs:
       - fugue
       - control-plane
     environment: production
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Record deploy job budget origin
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         run: echo "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"
 
       - name: Checkout
@@ -276,7 +310,126 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build private release-domain tools
+        run: |
+          set -euo pipefail
+          tools_dir="${RUNNER_TEMP}/fugue-release-tools"
+          [[ ! -e "${tools_dir}" && ! -L "${tools_dir}" ]]
+          install -d -m 0700 "${tools_dir}"
+          [[ -d "${tools_dir}" && ! -L "${tools_dir}" ]]
+          [[ "$(stat -c '%a' "${tools_dir}")" == '700' ]]
+          umask 077
+          go build -trimpath -o "${tools_dir}/fugue-release-domain-evidence" ./cmd/fugue-release-domain-evidence
+          go build -trimpath -o "${tools_dir}/fugue-release-domain-dispatch" ./cmd/fugue-release-domain-dispatch
+          chmod 0700 \
+            "${tools_dir}/fugue-release-domain-evidence" \
+            "${tools_dir}/fugue-release-domain-dispatch"
+          for tool in \
+            "${tools_dir}/fugue-release-domain-evidence" \
+            "${tools_dir}/fugue-release-domain-dispatch"; do
+            [[ -f "${tool}" && ! -L "${tool}" && -x "${tool}" ]]
+            [[ "$(stat -c '%a' "${tool}")" == '700' ]]
+          done
+
+      - name: Write genesis public release evidence
+        if: ${{ needs.release-baseline.outputs.is_genesis == 'true' }}
+        env:
+          DOMAIN_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
+          DOMAIN_TARGET_SHA: ${{ github.sha }}
+          GENESIS_SHA: ${{ vars.FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA }}
+          GENESIS_PARENT_SHA: ${{ needs.release-baseline.outputs.genesis_parent_sha }}
+        run: |
+          set -euo pipefail
+          tools_dir="${RUNNER_TEMP}/fugue-release-tools"
+          private_dir="${RUNNER_TEMP}/fugue-release-domain-private"
+          public_dir="${RUNNER_TEMP}/fugue-release-domain-public"
+          changed_evidence="${private_dir}/changed-file-evidence.json"
+          public_evidence="${public_dir}/release-domain-evidence.json"
+          [[ ! -e "${private_dir}" && ! -L "${private_dir}" ]]
+          [[ ! -e "${public_dir}" && ! -L "${public_dir}" ]]
+          install -d -m 0700 "${private_dir}" "${public_dir}"
+          [[ -d "${private_dir}" && ! -L "${private_dir}" ]]
+          [[ -d "${public_dir}" && ! -L "${public_dir}" ]]
+          [[ "$(stat -c '%a' "${private_dir}")" == '700' ]]
+          [[ "$(stat -c '%a' "${public_dir}")" == '700' ]]
+          umask 077
+          "${tools_dir}/fugue-release-domain-evidence" \
+            --repo "${GITHUB_WORKSPACE}" \
+            --base "${DOMAIN_BASE_SHA}" \
+            --target "${DOMAIN_TARGET_SHA}" \
+            --output "${changed_evidence}"
+          "${tools_dir}/fugue-release-domain-dispatch" write-genesis-public-evidence \
+            --changed-evidence "${changed_evidence}" \
+            --ownership "${GITHUB_WORKSPACE}/deploy/release-domains/ownership-v1.yaml" \
+            --expected-change ".github/workflows/deploy-control-plane.yml" \
+            --expected-change "cmd/fugue-release-domain-dispatch/classify_files.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/main.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/main_test.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/public_evidence.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/public_evidence_test.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/secure_files.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/stat_times_darwin.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/stat_times_linux.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/stat_times_other.go" \
+            --expected-change "cmd/fugue-release-domain-dispatch/strict_json.go" \
+            --expected-change "cmd/fugue-release-domain-evidence/evidence.go" \
+            --expected-change "cmd/fugue-release-domain-evidence/evidence_test.go" \
+            --expected-change "cmd/fugue-release-domain-evidence/main.go" \
+            --expected-change "cmd/fugue-release-domain-evidence/manifest.go" \
+            --expected-change "cmd/fugue-release-domain-evidence/manifest_test.go" \
+            --expected-change "cmd/fugue-release-domain-plan/main.go" \
+            --expected-change "cmd/fugue-release-domain-plan/main_test.go" \
+            --expected-change "cmd/fugue-release-domain-plan/output.go" \
+            --expected-change "cmd/fugue-release-domain-plan/output_test.go" \
+            --expected-change "deploy/release-domains/ownership-v1.yaml" \
+            --expected-change "docs/runbooks/release-domain-planner.md" \
+            --expected-change "internal/api/topology_labeler_test.go" \
+            --expected-change "internal/platformsafety/release_workflow_test.go" \
+            --expected-change "internal/releaseadapter/adapter.go" \
+            --expected-change "internal/releaseadapter/dispatcher.go" \
+            --expected-change "internal/releaseadapter/dispatcher_test.go" \
+            --expected-change "internal/releaseadapter/trace.go" \
+            --expected-change "internal/releaseadapter/transaction.go" \
+            --expected-change "internal/releaseadapter/transaction_test.go" \
+            --expected-change "internal/releasedomain/changed_file_evidence.go" \
+            --expected-change "internal/releasedomain/changed_file_evidence_test.go" \
+            --expected-change "internal/releasedomain/file_classifier_test.go" \
+            --expected-change "internal/releasedomain/ownership_test.go" \
+            --expected-change "internal/releasedomain/plan_artifacts.go" \
+            --expected-change "internal/releasedomain/plan_artifacts_test.go" \
+            --expected-change "internal/releasedomain/rendered_classifier_test.go" \
+            --expected-change "internal/releasedomain/rollback_ownership.go" \
+            --expected-change "internal/releasedomain/rollback_ownership_test.go" \
+            --expected-change "internal/releasedomain/transaction_envelope.go" \
+            --expected-change "internal/releaseevidence/public.go" \
+            --expected-change "internal/releaseevidence/public_test.go" \
+            --expected-change "scripts/lib/control_plane_release_domain_production.sh" \
+            --expected-change "scripts/lib/control_plane_release_domains.sh" \
+            --expected-change "scripts/lib/control_plane_release_render.sh" \
+            --expected-change "scripts/test_control_plane_release_domain_production.sh" \
+            --expected-change "scripts/test_control_plane_release_main_wiring.sh" \
+            --expected-change "scripts/test_control_plane_release_render.sh" \
+            --expected-change "scripts/test_release_domain_safety.sh" \
+            --expected-change "scripts/test_release_domain_workflow.sh" \
+            --expected-change "scripts/test_single_domain_release.sh" \
+            --expected-change "scripts/upgrade_fugue_control_plane.sh" \
+            --output "${public_evidence}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --head-sha "${DOMAIN_TARGET_SHA}" \
+            --expected-head-sha "${GENESIS_SHA}" \
+            --actual-parent-sha "${DOMAIN_BASE_SHA}" \
+            --expected-parent-sha "${GENESIS_PARENT_SHA}"
+          [[ -f "${public_evidence}" && ! -L "${public_evidence}" ]]
+          [[ "$(stat -c '%a' "${public_evidence}")" == '600' ]]
+
       - name: Guard stateful component files
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         env:
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
         run: |
@@ -289,9 +442,11 @@ jobs:
           fi
 
       - name: Prepare authoritative DNS DiG runtime
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         run: ./scripts/prepare_authoritative_dns_dig.sh
 
       - name: Verify local deploy prerequisites
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         run: |
           command -v helm
           command -v curl
@@ -305,6 +460,7 @@ jobs:
           fi
 
       - name: Explain runner and fail closed target
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
@@ -354,6 +510,7 @@ jobs:
 
       - name: Resolve live image metadata
         id: live_images
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         env:
           FUGUE_RELEASE_NAME: ${{ vars.FUGUE_RELEASE_NAME || 'fugue' }}
           FUGUE_NAMESPACE: ${{ vars.FUGUE_NAMESPACE || 'fugue-system' }}
@@ -368,7 +525,7 @@ jobs:
         run: ./scripts/resolve_control_plane_live_images.sh
 
       - name: Prove explicitly authorized stale pre-Helm release recovery
-        if: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE != '' }}
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' && vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE != '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RECOVERY_MODE: ${{ vars.FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_MODE }}
@@ -400,6 +557,7 @@ jobs:
             --output "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"
 
       - name: Upgrade Fugue control plane
+        if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
         # Edge fan-out now happens inside the upgrade script using the
         # control-plane automation secret, so the workflow only needs one
         # deploy entrypoint.
@@ -612,6 +770,11 @@ jobs:
           FUGUE_RELEASE_CHANGED_FILES: ${{ needs.release-baseline.outputs.changed_files }}
           FUGUE_RELEASE_BASE_REFS: ${{ needs.release-baseline.outputs.baseline_refs }}
           FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref }}
+          FUGUE_RELEASE_DOMAIN_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
+          FUGUE_RELEASE_DOMAIN_TARGET_SHA: ${{ github.sha }}
+          FUGUE_RELEASE_DOMAIN_EVIDENCE_TOOL: ${{ runner.temp }}/fugue-release-tools/fugue-release-domain-evidence
+          FUGUE_RELEASE_DOMAIN_DISPATCH_TOOL: ${{ runner.temp }}/fugue-release-tools/fugue-release-domain-dispatch
+          FUGUE_RELEASE_DOMAIN_PUBLIC_EVIDENCE_FILE: ${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json
           FUGUE_RELEASE_ATTRIBUTION_DIR: ${{ runner.temp }}/fugue-release
           FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ steps.live_images.outputs.image_cache_image_baseline_ref }}
           FUGUE_EXPECTED_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ needs.release-baseline.outputs.image_cache_image_baseline_ref }}
@@ -638,24 +801,105 @@ jobs:
         run: ./scripts/upgrade_fugue_control_plane.sh
 
       - name: Remove stale release recovery proof
-        if: always()
+        if: ${{ always() && needs.release-baseline.outputs.is_genesis != 'true' }}
         run: rm -f "${RUNNER_TEMP}/fugue-stale-release-recovery-proof.json"
 
-      - name: Upload release attribution
+      - name: Upload release-domain public evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fugue-control-plane-release-attribution-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/fugue-release
+          name: fugue-control-plane-release-domain-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-release-domain-public/release-domain-evidence.json
           if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+          overwrite: false
 
-  freeze-release-lane-on-failure:
+  record-release-baseline:
     needs:
+      - release-input-guard
       - release-baseline
       - release-gate
       - build
       - deploy
-    if: ${{ always() && (needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success') }}
+    if: ${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Advance dedicated release baseline tag
+        env:
+          EXPECTED_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
+          EXPECTED_BASE_REF_OBJECT: ${{ needs.release-baseline.outputs.baseline_ref_object_sha }}
+          IS_GENESIS: ${{ needs.release-baseline.outputs.is_genesis }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'
+          readonly genesis_parent_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
+          [[ "${EXPECTED_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
+
+          remote_tag=''
+          set +e
+          remote_tag="$(git ls-remote --refs --exit-code origin "${baseline_ref}")"
+          remote_status=$?
+          set -e
+
+          case "${IS_GENESIS}" in
+            true)
+              [[ "${EXPECTED_BASE_SHA}" == "${genesis_parent_sha}" ]]
+              [[ -z "${EXPECTED_BASE_REF_OBJECT}" ]]
+              [[ "${remote_status}" == '2' ]]
+              lease="${baseline_ref}:"
+              ;;
+            false)
+              [[ "${remote_status}" == '0' ]]
+              [[ "$(printf '%s\n' "${remote_tag}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
+              read -r remote_object remote_ref extra <<<"${remote_tag}"
+              [[ -z "${extra:-}" ]]
+              [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]]
+              [[ "${remote_ref}" == "${baseline_ref}" ]]
+              [[ "${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}" ]]
+              git fetch --no-tags origin "${baseline_ref}"
+              fetched_ref_object_sha="$(git rev-parse --verify FETCH_HEAD)"
+              current_base_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+              [[ "${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}" ]]
+              [[ "${current_base_sha}" == "${EXPECTED_BASE_SHA}" ]]
+              [[ "${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}" ]]
+              lease="${baseline_ref}:${EXPECTED_BASE_REF_OBJECT}"
+              ;;
+            *)
+              echo 'release baseline genesis state is invalid' >&2
+              exit 1
+              ;;
+          esac
+
+          git push \
+            --force-with-lease="${lease}" \
+            origin \
+            "${TARGET_SHA}:${baseline_ref}"
+          advanced="$(git ls-remote --refs --exit-code origin "${baseline_ref}")"
+          read -r advanced_object advanced_ref extra <<<"${advanced}"
+          [[ -z "${extra:-}" ]]
+          [[ "${advanced_object}" == "${TARGET_SHA}" ]]
+          [[ "${advanced_ref}" == "${baseline_ref}" ]]
+
+  freeze-release-lane-on-failure:
+    needs:
+      - release-input-guard
+      - release-baseline
+      - release-gate
+      - build
+      - deploy
+      - record-release-baseline
+    if: ${{ always() && (needs.release-input-guard.result != 'success' || needs.release-baseline.result != 'success' || needs.release-gate.result != 'success' || needs.build.result != 'success' || needs.deploy.result != 'success' || needs.record-release-baseline.result != 'success') }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -663,10 +907,12 @@ jobs:
     steps:
       - name: Record release lane freeze evidence
         env:
+          RELEASE_INPUT_GUARD_RESULT: ${{ needs.release-input-guard.result }}
           RELEASE_BASELINE_RESULT: ${{ needs.release-baseline.result }}
           RELEASE_GATE_RESULT: ${{ needs.release-gate.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
+          RECORD_RELEASE_BASELINE_RESULT: ${{ needs.record-release-baseline.result }}
         run: |
           set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/fugue-release-lane-freeze"
@@ -680,10 +926,12 @@ jobs:
           from datetime import datetime, timezone
 
           results = {
+              "release_input_guard": os.environ["RELEASE_INPUT_GUARD_RESULT"],
               "release_baseline": os.environ["RELEASE_BASELINE_RESULT"],
               "release_gate": os.environ["RELEASE_GATE_RESULT"],
               "build": os.environ["BUILD_RESULT"],
               "deploy": os.environ["DEPLOY_RESULT"],
+              "record_release_baseline": os.environ["RECORD_RELEASE_BASELINE_RESULT"],
           }
           payload = {
               "schema_version": 1,
@@ -695,7 +943,7 @@ jobs:
               "head_sha": os.environ["GITHUB_SHA"],
               "ref": os.environ["GITHUB_REF"],
               "job_results": results,
-              "reason": "release prerequisite or deploy job did not succeed",
+              "reason": "release input, prerequisite, deploy, or baseline advancement did not succeed",
               "requested_action": "disable workflow and cancel every other non-terminal run",
               "recorded_at": datetime.now(timezone.utc).isoformat(),
           }

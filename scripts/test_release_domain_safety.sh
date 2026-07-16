@@ -256,12 +256,12 @@ payload = open(sys.argv[1], "rb").read()
 if not payload.endswith(b"\0"):
     raise SystemExit("frozen Helm argv is not NUL terminated")
 items = payload.split(b"\0")[:-1]
-if len(items) != 359:
+if len(items) != 360:
     raise SystemExit(f"frozen Helm argv count drifted: {len(items)}")
 if any(item == b"" for item in items):
     raise SystemExit("frozen non-empty fixture contains a phantom empty argv item")
 digest = hashlib.sha256(payload).hexdigest()
-if digest != "b9c13a777197c739e53e8ae2bafd957979e4e057af97c27a606664d7211efa29":
+if digest != "39c8461e6089eab8bf5bfa5f64585367158f6aa44ea7ae52f52d7b96b05f4a0b":
     raise SystemExit(f"frozen Helm argv byte stream drifted: {digest}")
 PY
   if declare -p CONTROL_PLANE_HELM_UPGRADE_ARGV >/dev/null 2>&1; then
@@ -296,7 +296,7 @@ payload = open(sys.argv[1], "rb").read()
 if not payload.endswith(b"\0"):
     raise SystemExit("empty-array Helm argv is not NUL terminated")
 items = payload.split(b"\0")[:-1]
-if len(items) != 341:
+if len(items) != 342:
     raise SystemExit(f"empty-array Helm argv count drifted: {len(items)}")
 if any(item == b"" for item in items):
     raise SystemExit("empty optional arrays emitted a phantom argv item")
@@ -329,7 +329,7 @@ import sys
 
 payload = open(sys.argv[1], "rb").read()
 items = payload.split(b"\0")[:-1]
-if len(items) != 357:
+if len(items) != 358:
     raise SystemExit(f"hostile Helm argv count drifted: {len(items)}")
 if items.count(b"") != 1:
     raise SystemExit("an intentional empty array member was not preserved exactly once")
@@ -352,15 +352,22 @@ PY
   with_frozen_control_plane_helm_upgrade_argv "" capture_empty_helm_upgrade_argv || status=$?
   [[ "${status}" == "2" ]] || fail "Helm argv builder accepted an empty override values path"
 
-  python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+  python3 - \
+    "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
+    "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text(encoding="utf-8")
+production = Path(sys.argv[2]).read_text(encoding="utf-8")
 function_start = source.index("\nwith_frozen_control_plane_helm_upgrade_argv() {")
 function_end = source.index("\n}\n", function_start) + 3
 builder = source[function_start:function_end]
-main = source[source.index("\nmain() {"):]
+main = source[
+    source.index("\nmain() {") : source.index(
+        "\n# The production activation is source-only"
+    )
+]
 
 arrays = (
     "HELM_POST_RENDERER_ARGS",
@@ -382,15 +389,23 @@ if builder.count('"${consumer}" "$@" "${CONTROL_PLANE_HELM_UPGRADE_ARGV[@]}"') !
     raise SystemExit("Helm argv builder must have exactly one callback consumer")
 if '"Helm upgrade" helm upgrade' in main:
     raise SystemExit("main still assembles a second inline Helm upgrade command")
-if main.count("with_frozen_control_plane_helm_upgrade_argv") != 1:
-    raise SystemExit("main must invoke the unique Helm argv builder exactly once")
+if "with_frozen_control_plane_helm_upgrade_argv" in main:
+    raise SystemExit("main must not consume Helm argv outside the atomic domain gate")
+if main.count("run_control_plane_atomic_domain_gate") != 1:
+    raise SystemExit("main must invoke the atomic domain gate exactly once")
 
-update_strategy = main.index("imageCache.updateStrategy.type=RollingUpdate")
-revision_fence = main.index('CONTROL_PLANE_RELEASE_PHASE="pre-helm-final-revision-fence"')
-mutation_flag = main.index('CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"')
-consume = main.index("with_frozen_control_plane_helm_upgrade_argv")
-if not update_strategy < revision_fence < mutation_flag < consume:
-    raise SystemExit("Helm argv construction moved away from the original final invocation boundary")
+render_start = production.index("\ncontrol_plane_release_domain_render_and_authorize() {")
+render_end = production.index("\ncontrol_plane_release_domain_read_exact_result() {", render_start)
+render = production[render_start:render_end]
+if render.count("with_frozen_control_plane_helm_upgrade_argv") != 1:
+    raise SystemExit("authorized production render must freeze one Helm argv")
+execute_start = production.index("\ncontrol_plane_release_domain_execute_sealed_helm_upgrade() {")
+execute_end = production.index("\ncontrol_plane_release_domain_capture_live_canonical_manifest() {", execute_start)
+execute = production[execute_start:execute_end]
+if execute.count('"single-domain Helm upgrade" "${sealed_argv[@]}"') != 1:
+    raise SystemExit("Apply must execute one verified sealed Helm argv")
+if "with_frozen_control_plane_helm_upgrade_argv" in execute:
+    raise SystemExit("Apply must not rebuild the authorized Helm argv")
 PY
 
   printf '[test_release_domain_safety] Helm argv builder regressions ok\n'
@@ -667,7 +682,8 @@ PY
 script_dir=${0%/*}
 PYTHONDONTWRITEBYTECODE=1
 PYTHONPYCACHEPREFIX="${script_dir}/pycache"
-export PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX
+TMPDIR="${script_dir}"
+export PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX TMPDIR
 exec /usr/bin/python3 -B "${script_dir}/dig.py" "$@"
 SH
   chmod +x "${fixture_dir}/dig"
@@ -2482,16 +2498,18 @@ run_e5b_shared_helper_integration_regressions() {
     "${REPO_ROOT}/scripts/release_fugue_public_data_plane.sh" \
     "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
     "${REPO_ROOT}/scripts/test_release_domain_safety.sh" \
-    "${REPO_ROOT}/scripts/test_node_local_dns_release.sh" <<'PY'
+    "${REPO_ROOT}/scripts/test_node_local_dns_release.sh" \
+    "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-release_path, upgrade_path, release_test_path, nodelocal_test_path = map(Path, sys.argv[1:])
+release_path, upgrade_path, release_test_path, nodelocal_test_path, production_path = map(Path, sys.argv[1:])
 release = release_path.read_text(encoding="utf-8")
 upgrade = upgrade_path.read_text(encoding="utf-8")
 release_test = release_test_path.read_text(encoding="utf-8")
 nodelocal_test = nodelocal_test_path.read_text(encoding="utf-8")
+production = production_path.read_text(encoding="utf-8")
 shared_source = "source " + '"${REPO_ROOT}/scripts/lib/' + 'authoritative_dns_dig.sh"'
 
 for label, source in (
@@ -2549,17 +2567,44 @@ if public_gate_order != sorted(public_gate_order) or any(
 if not public_detect < public_main.index("run_dns_ondelete_release") < public_main.index("run_dns_manifest_ondelete_release"):
     raise SystemExit("public DNS attestation gate must precede Kubernetes discovery and every DNS mutation strategy")
 
-upgrade_main = upgrade[upgrade.index("\nmain()") :]
-order = [
-    upgrade_main.index("validate_node_local_dns_release_budget_pre_mutation"),
-    upgrade_main.index("authoritative_dns_dig_preflight"),
-    upgrade_main.index("acquire_control_plane_backup_coordination_lease"),
-    upgrade_main.index("ensure_host_time_sync"),
-    upgrade_main.index("apply_chart_crds"),
-    upgrade_main.index("with_frozen_control_plane_helm_upgrade_argv"),
+upgrade_main = upgrade[
+    upgrade.index("\nmain()") : upgrade.index(
+        "\n# The production activation is source-only"
+    )
 ]
-if order != sorted(order) or len(order) != len(set(order)):
-    raise SystemExit("control-plane wire attestation must complete after read-only budget validation and before Lease/host/CRD/Helm mutation")
+if upgrade_main.count("run_control_plane_atomic_domain_gate") != 1:
+    raise SystemExit("control-plane main must enter the atomic domain gate once")
+for forbidden in (
+    "authoritative_dns_dig_preflight",
+    "acquire_control_plane_backup_coordination_lease",
+    "ensure_host_time_sync",
+    "apply_chart_crds",
+    "with_frozen_control_plane_helm_upgrade_argv",
+):
+    if forbidden in upgrade_main:
+        raise SystemExit(f"control-plane main bypasses its selected adapter: {forbidden}")
+
+prepare_common = function_body(
+    production,
+    "control_plane_release_domain_prepare_common",
+    "control_plane_release_domain_run_budget_preflight",
+)
+prepare_order = [
+    prepare_common.index("control_plane_release_domain_run_budget_preflight"),
+    prepare_common.index("control_plane_release_domain_run_release_preflight_handoff"),
+    prepare_common.index("authoritative_dns_dig_preflight"),
+]
+if prepare_order != sorted(prepare_order):
+    raise SystemExit("selected Prepare must run read-only platform/budget gates before DNS wire attestation")
+if 'node-local|authoritative-dns)' not in prepare_common:
+    raise SystemExit("only NodeLocal and authoritative DNS adapters may run wire attestation")
+dns_prepare = function_body(
+    production,
+    "control_plane_release_adapter_authoritative_dns_prepare",
+    "control_plane_release_adapter_authoritative_dns_apply",
+)
+if dns_prepare.index("control_plane_release_domain_prepare_common") > dns_prepare.index("prepare_dns_manifest_transaction"):
+    raise SystemExit("authoritative DNS wire attestation must finish before its first manifest transaction write")
 
 manifest_child = function_body(upgrade, "run_dns_manifest_library_action", "prepare_dns_manifest_transaction")
 if manifest_child.index("authoritative_dns_dig_require_attested") > manifest_child.index("case \"${action}\""):
@@ -3426,6 +3471,7 @@ run_e4_public_hostport_regressions
 run_helm_upgrade_argv_builder_regressions
 run_release_command_group_regressions
 bash "${REPO_ROOT}/scripts/test_control_plane_release_render.sh"
+bash "${REPO_ROOT}/scripts/test_control_plane_release_main_wiring.sh"
 if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
       "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e5b-dig" ]]; then
   printf '[test_release_domain_safety] E5B DNS targeted regressions ok\n'
@@ -3661,7 +3707,11 @@ grep -Fq 'FUGUE_RELEASE_AFTER_SHA: ${{ needs.release-baseline.outputs.target_ref
   fail "control-plane deploy must pass the exact release target ref to the release guard"
 grep -Fq 'FUGUE_RELEASE_ATTRIBUTION_DIR: ${{ runner.temp }}/fugue-release' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
-  fail "control-plane deploy must persist release-guard samples in the uploaded attribution artifact"
+  fail "control-plane deploy must persist release-guard samples in a runner-local private directory"
+if grep -Fxq '          path: ${{ runner.temp }}/fugue-release' \
+  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml"; then
+  fail "control-plane deploy must never upload the private release attribution directory"
+fi
 grep -Fq 'FUGUE_IMAGE_CACHE_IMAGE_BASELINE_REF: ${{ steps.live_images.outputs.image_cache_image_baseline_ref }}' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must refresh the exact live image-cache component baseline immediately before upgrade"
@@ -3683,8 +3733,6 @@ grep -Fq "actions: read" "${REPO_ROOT}/.github/workflows/deploy-control-plane.ym
   fail "stale release recovery proof requires read-only Actions evidence access"
 grep -Fq "scripts/verify_stale_release_recovery.py" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must generate the stale release recovery proof before upgrade"
-grep -Fq -- "- 'scripts/bootstrap_control_plane_automation.sh'" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
-  fail "control-plane automation bootstrap changes must trigger the formal control-plane deploy workflow"
 grep -Fq 'FUGUE_CONTROL_PLANE_STALE_RELEASE_RECOVERY_PROOF_FILE: ${{ runner.temp }}/fugue-stale-release-recovery-proof.json' \
   "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must bind the recovery proof to a private runner-local file"
@@ -3741,49 +3789,112 @@ if "run_smoke_urls" in manifest_branch:
     raise SystemExit("DNS manifest final smoke belongs inside the rollback-capable transaction")
 PY
 
-python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+python3 - \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
+  "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text()
-main_start = source.index("\nmain() {")
-main = source[main_start:]
-prepare = main.index("prepare_dns_manifest_transaction")
-helm = main.index("with_frozen_control_plane_helm_upgrade_argv")
-transaction = main.index("run_dns_manifest_transaction_after_helm")
-nodelocal = main.index("node_local_dns_reconcile_after_helm")
-image_cache_prepare = main.index("image_cache_prepare_offline_safe_rollout")
-image_cache_verify = main.index("image_cache_rollout_status")
-public_release = main.index("release_public_data_plane_if_needed")
-finalize = main.index("finalize_dns_manifest_transaction")
-if not prepare < helm < transaction < nodelocal < public_release < finalize:
-    raise SystemExit("DNS manifest snapshot/transaction/finalization ordering is unsafe")
-helm_revision = main.index('current_revision="$(helm_current_revision)"', public_release)
-dns_final = main.index("verify_dns_manifest_transaction_before_commit", helm_revision)
-nodelocal_final = main.index('"final NodeLocal DNSCache target verification"', dns_final)
-dns_handoff = main.index("verify_dns_manifest_transaction_snapshot_before_commit", nodelocal_final)
-nodelocal_handoff = main.index('"final NodeLocal DNSCache exact cohort handoff"', dns_handoff)
-commit = main.index('CONTROL_PLANE_RELEASE_COMMITTED="true"', nodelocal_handoff)
-record = main.index("write_dns_manifest_release_record_after_commit", commit)
-cleanup = main.index("cleanup_finalized_dns_manifest_snapshot", record)
-if not public_release < helm_revision < dns_final < nodelocal_final < dns_handoff < nodelocal_handoff < finalize < commit < record < cleanup:
-    raise SystemExit("final DNS/NodeLocal verification, commit, record, and cleanup handoff ordering is unsafe")
-if not image_cache_prepare < helm < image_cache_verify:
-    raise SystemExit("offline-safe image-cache mutation must finish before Helm and post-Helm must be verification-only")
+production = Path(sys.argv[2]).read_text()
+
+def body(text, name, next_name):
+    start = text.index(f"\n{name}() {{")
+    end = text.index(f"\n{next_name}() {{", start)
+    return text[start:end]
+
+main = source[
+    source.index("\nmain() {") : source.index(
+        "\n# The production activation is source-only"
+    )
+]
+if main.count("run_control_plane_atomic_domain_gate") != 1:
+    raise SystemExit("main must delegate the complete transaction to one atomic domain gate")
+for forbidden in (
+    "prepare_dns_manifest_transaction",
+    "run_dns_manifest_transaction_after_helm",
+    "node_local_dns_reconcile_after_helm",
+    "image_cache_rollout_status",
+    "finalize_dns_manifest_transaction",
+):
+    if forbidden in main:
+        raise SystemExit(f"main bypasses a selected domain adapter: {forbidden}")
+
+dns_prepare = body(
+    production,
+    "control_plane_release_adapter_authoritative_dns_prepare",
+    "control_plane_release_adapter_authoritative_dns_apply",
+)
+if dns_prepare.index("control_plane_release_domain_prepare_common") > dns_prepare.index("prepare_dns_manifest_transaction"):
+    raise SystemExit("authoritative DNS snapshot must follow the common read-only Prepare gates")
+dns_apply = body(
+    production,
+    "control_plane_release_domain_apply_authoritative_dns",
+    "control_plane_release_domain_apply_control_plane",
+)
+dns_apply_order = [
+    dns_apply.index("control_plane_release_domain_execute_sealed_helm_upgrade"),
+    dns_apply.index("run_dns_manifest_transaction_after_helm"),
+    dns_apply.index("verify_dns_manifest_transaction_snapshot_before_commit"),
+]
+if dns_apply_order != sorted(dns_apply_order):
+    raise SystemExit("authoritative DNS Apply ordering is unsafe")
+dns_verify = body(
+    production,
+    "control_plane_release_adapter_authoritative_dns_verify",
+    "control_plane_release_adapter_authoritative_dns_rollback",
+)
+if dns_verify.index("control_plane_release_domain_verify_selected_target") > dns_verify.index("finalize_dns_manifest_transaction"):
+    raise SystemExit("authoritative DNS transaction must finalize only after exact target verification")
+post_commit = body(
+    production,
+    "control_plane_release_domain_post_commit",
+    "control_plane_release_run_atomic_domain_release",
+)
+if post_commit.index("write_dns_manifest_release_record_after_commit") > post_commit.index("cleanup_finalized_dns_manifest_snapshot"):
+    raise SystemExit("DNS release record must precede finalized snapshot cleanup")
+
+node_local_apply = body(
+    production,
+    "control_plane_release_domain_apply_node_local",
+    "control_plane_release_domain_apply_authoritative_dns",
+)
+node_local_order = [
+    node_local_apply.index("node_local_dns_run_deferred_operational_validation"),
+    node_local_apply.index("control_plane_release_domain_execute_sealed_helm_upgrade"),
+    node_local_apply.index("node_local_dns_verify_central_coredns_ready"),
+    node_local_apply.index("node_local_dns_verify_target_before_commit"),
+    node_local_apply.index("node_local_dns_verify_target_snapshot_unchanged"),
+]
+if node_local_order != sorted(node_local_order):
+    raise SystemExit("NodeLocal Apply verification ordering is unsafe")
+
+image_prepare = body(
+    production,
+    "control_plane_release_adapter_image_cache_prepare",
+    "control_plane_release_adapter_image_cache_apply",
+)
+if image_prepare.index("node_local_dns_split_release_enabled") > image_prepare.index("require_daemonset_present"):
+    raise SystemExit("split image-cache release must fail closed before Apply admission")
+image_apply = body(
+    production,
+    "control_plane_release_domain_apply_image_cache",
+    "control_plane_release_domain_apply_backup",
+)
+image_order = [
+    image_apply.index("control_plane_release_domain_execute_sealed_helm_upgrade"),
+    image_apply.index("require_daemonset_present"),
+    image_apply.index("image_cache_rollout_status"),
+]
+if image_order != sorted(image_order):
+    raise SystemExit("image-cache Apply must execute Helm before bounded rollout verification")
 image_guard_start = source.index("\nimage_cache_prepare_offline_safe_rollout() {")
 image_guard_end = source.index("\nimage_cache_rollout_status() {", image_guard_start)
 image_guard = source[image_guard_start:image_guard_end]
 if "delete --raw" in image_guard or "delete pod" in image_guard.lower():
     raise SystemExit("offline image-cache guard must never delete a Pod")
-if "imageCache.updateStrategy.type=OnDelete" not in main or "imageCache.updateStrategy.type=RollingUpdate" not in main:
-    raise SystemExit("image-cache split entry and exit must explicitly persist OnDelete and RollingUpdate")
-split_guard = main.index("if node_local_dns_split_release_enabled; then")
-image_cache_enabled_guard = main.index('[[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]', split_guard)
-image_cache_exists_guard = main.index('daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache"', image_cache_enabled_guard)
-recover_primary = main.index("recover_primary_node_if_needed")
-apply_crds = main.index("apply_chart_crds")
-if not split_guard < image_cache_enabled_guard < image_cache_exists_guard < recover_primary < apply_crds < image_cache_prepare < helm:
-    raise SystemExit("split rollout must require an enabled, live image-cache DaemonSet before recovery, CRD, or Helm mutation")
+if "image_cache_prepare_offline_safe_rollout" in production:
+    raise SystemExit("single-domain image-cache activation must not patch a preserved NodeLocal cohort")
 
 prepare_domains_start = source.index("\nprepare_release_domains() {")
 prepare_domains_end = source.index("\npublic_data_plane_front_daemonsets_ready()", prepare_domains_start)
@@ -6238,10 +6349,7 @@ grep -Fq 'verified_image_artifacts_json: ${{ steps.build_images.outputs.verified
   fail "control-plane build job must expose canonical verified image artifacts"
 grep -Fq 'verified_image_artifacts_digest: ${{ steps.build_images.outputs.verified_image_artifacts_digest }}' "${WORKFLOW_FILE}" ||
   fail "control-plane build job must expose the verified image artifacts digest"
-for workflow_path in scripts/assemble_release_image_lock_input.py scripts/build_release_image_lock.py scripts/test_assemble_release_image_lock_input.py scripts/test_build_release_image_lock.py scripts/lib/release_image_ref.sh; do
-  grep -Fq -- "- '${workflow_path}'" "${WORKFLOW_FILE}" ||
-    fail "${workflow_path} changes must trigger the formal control-plane workflow"
-done
+bash "${REPO_ROOT}/scripts/test_release_domain_workflow.sh"
 
 assert_build_plan() {
   local changed_files="$1"
@@ -7093,15 +7201,19 @@ from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text()
-main = source[source.index("\nmain() {"):]
+main = source[
+    source.index("\nmain() {") : source.index(
+        "\n# The production activation is source-only"
+    )
+]
 builder_start = source.index("\nwith_frozen_control_plane_helm_upgrade_argv() {")
 builder_end = source.index("\n}\n", builder_start) + 3
 builder = source[builder_start:builder_end]
 digest_build = main.index("build_core_image_digest_helm_set_args")
-preflight = main.index("run_release_preflight")
-first_mutation = main.index('CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="true"')
-if not digest_build < preflight < first_mutation:
-    raise SystemExit("core image digest validation must finish during configuration before release mutation")
+revision = main.index('PREVIOUS_REVISION="$(helm_current_revision)"')
+domain_gate = main.index("run_control_plane_atomic_domain_gate")
+if not digest_build < revision < domain_gate:
+    raise SystemExit("core image digest validation must finish before the atomic domain gate")
 if builder.count('"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"') != 1:
     raise SystemExit("Helm upgrade must consume the atomic core image digest argument array exactly once")
 PY
@@ -8995,16 +9107,29 @@ PY
   assert_eq "${verify_calls}" "0" "invalid rollback image preflight mode must fail before probing"
 )
 
-python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+python3 - \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
+  "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text()
-main = source[source.index("\nmain() {"):]
-preflight = main.index("\n  if ! run_control_plane_rollback_image_preflight; then")
-helm_mutation = main.index('\n  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"')
-if preflight > helm_mutation:
-    raise SystemExit("rollback image preflight must run before Helm mutation")
+production = Path(sys.argv[2]).read_text()
+main = source[
+    source.index("\nmain() {") : source.index(
+        "\n# The production activation is source-only"
+    )
+]
+if "run_control_plane_rollback_image_preflight" in main:
+    raise SystemExit("main must not bypass selected-domain Prepare for rollback image proof")
+apply_start = production.index("\ncontrol_plane_release_domain_apply_control_plane() {")
+apply_end = production.index("\ncontrol_plane_release_domain_apply_image_cache() {", apply_start)
+apply = production[apply_start:apply_end]
+image_preflight = apply.index("run_control_plane_rollback_image_preflight")
+lease = apply.index("control_plane_release_domain_acquire_lease_and_fence")
+helm = apply.index("control_plane_release_domain_execute_sealed_helm_upgrade")
+if not lease < image_preflight < helm:
+    raise SystemExit("control-plane rollback images must be proven under the shared Lease before Helm mutation")
 PY
 
 grep -Fq "FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE: \${{ vars.FUGUE_ROLLBACK_IMAGE_PREFLIGHT_MODE || 'shadow' }}" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
@@ -11085,25 +11210,57 @@ rollout_dynamic_edge_daemonsets_if_present
 assert_eq "${DYNAMIC_EDGE_WAITED}" "" "disabled dynamic edge must skip dynamic daemonset waits"
 
 printf '[test_release_domain_safety] backup/release Lease and deploy budget are fail-closed\n'
-python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+python3 - \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
+  "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text()
-main = source[source.index("\nmain() {"):]
-ordered = [
+production = Path(sys.argv[2]).read_text()
+main = source[
+    source.index("\nmain() {") : source.index(
+        "\n# The production activation is source-only"
+    )
+]
+if main.count("run_control_plane_atomic_domain_gate") != 1:
+    raise SystemExit("main must enter one atomic release-domain gate")
+for forbidden in (
     "validate_live_api_backup_coordination_ready",
-    "validate_control_plane_release_job_budget",
-    "validate_node_local_dns_release_budget_pre_mutation",
     "acquire_control_plane_backup_coordination_lease",
     "drain_control_plane_backup_before_schema_rollout",
-    "ensure_host_time_sync",
-    "apply_chart_crds",
     "with_frozen_control_plane_helm_upgrade_argv",
+):
+    if forbidden in main:
+        raise SystemExit(f"main bypasses fixed control-plane/backup adapter: {forbidden}")
+
+lease_start = production.index("\ncontrol_plane_release_domain_acquire_lease_and_fence() {")
+lease_end = production.index("\ncontrol_plane_release_domain_apply_control_plane_probes() {", lease_start)
+lease = production[lease_start:lease_end]
+lease_order = [
+    lease.index("control_plane_release_domain_selected_uses_lease"),
+    lease.index('CONTROL_PLANE_RELEASE_DOMAIN_USES_BACKUP_COORDINATION="true"'),
+    lease.index("acquire_control_plane_backup_coordination_lease"),
+    lease.index("drain_control_plane_backup_before_schema_rollout"),
+    lease.index("arm_control_plane_release_recovery_fence"),
 ]
-positions = [main.index(item) for item in ordered]
-if positions != sorted(positions):
-    raise SystemExit(f"release coordination order is unsafe: {list(zip(ordered, positions))}")
+if lease_order != sorted(lease_order):
+    raise SystemExit("selected Lease acquisition, drain, and recovery fence order is unsafe")
+control_start = production.index("\ncontrol_plane_release_domain_apply_control_plane() {")
+control_end = production.index("\ncontrol_plane_release_domain_apply_image_cache() {", control_start)
+control = production[control_start:control_end]
+if control.index("control_plane_release_domain_acquire_lease_and_fence") > control.index("control_plane_release_domain_execute_sealed_helm_upgrade"):
+    raise SystemExit("control-plane adapter must hold the shared Lease before Helm")
+backup_start = production.index("\ncontrol_plane_release_domain_apply_backup() {")
+backup_end = production.index("\ncontrol_plane_release_domain_verify_selected_target() {", backup_start)
+backup = production[backup_start:backup_end]
+backup_order = [
+    backup.index("control_plane_release_domain_acquire_lease_and_fence"),
+    backup.index("validate_live_api_backup_coordination_ready"),
+    backup.index("control_plane_release_domain_execute_sealed_helm_upgrade"),
+]
+if backup_order != sorted(backup_order):
+    raise SystemExit("backup adapter must acquire/fence, prove live coordination, then execute Helm")
 if "pg_terminate_backend" in source:
     raise SystemExit("release tooling must never terminate backup PostgreSQL backends")
 proof_start = source.index("\ncontrol_plane_terminal_backup_run_allows_stale_takeover() {")
@@ -11183,32 +11340,30 @@ for required in (
 ):
     if required not in budget:
         raise SystemExit(f"absolute forward-work budget guard is missing {required}")
-post_helm = main[main.index('CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"'):]
-transaction_rollback = 'rollback_release_transaction || fail "rollback failed; recovery fence retained"'
-if post_helm.count("rollback_release_transaction") != post_helm.count(transaction_rollback):
-    raise SystemExit("every post-Helm rollback attempt must preserve a failed-rollback recovery fence")
-if "rollback_release || true" in post_helm:
-    raise SystemExit("post-Helm failure handling must not suppress rollback failure")
-for required in (
-    '"singleton deployment patch kubectl" patch_control_plane_singleton_deployments; then',
-    '"split image-cache rollout verification"',
-    '"Route A edge proxy synchronization kubectl" sync_route_a_edge_proxy; then',
-    '"public data-plane release inspection kubectl" release_public_data_plane_if_needed; then',
+for forbidden in (
+    "rollback_release_transaction",
+    "patch_control_plane_singleton_deployments",
+    "sync_route_a_edge_proxy",
+    "release_public_data_plane_if_needed",
+    "ensure_control_plane_observability",
+    "ensure_local_registry_mirror_config",
+    "ensure_host_time_sync",
+    "apply_chart_crds",
 ):
-    if required not in post_helm:
-        raise SystemExit(f"post-Helm release path is not fail-closed: {required}")
-nodelocal_prepare = main.index('"pre-Helm preparation" prepare_node_local_dns_helm_args')
-nodelocal_reserve_recheck = main.index("validate_control_plane_release_rollback_reserve", nodelocal_prepare)
-nodelocal_safe_removal = main.index('"pre-Helm safe removal" node_local_dns_delete_daemonset_safely', nodelocal_prepare)
-if not nodelocal_prepare < nodelocal_reserve_recheck < nodelocal_safe_removal:
-    raise SystemExit("live NodeLocal teardown state must revalidate rollback reserve before mutation")
-for required in (
-    '"control-plane observability host mutation" ensure_control_plane_observability',
-    '"registry mirror host mutation" ensure_local_registry_mirror_config',
-    '"post-node-janitor host time synchronization kubectl" ensure_host_time_sync',
-):
-    if required not in main:
-        raise SystemExit(f"release host/Kubernetes mutation lacks its intended whole-operation guard: {required}")
+    if forbidden in production:
+        raise SystemExit(f"single-domain production activation contains cross-domain mutation: {forbidden}")
+prepare_start = production.index("\ncontrol_plane_release_domain_prepare_common() {")
+prepare_end = production.index("\ncontrol_plane_release_domain_run_budget_preflight() {", prepare_start)
+prepare_common = production[prepare_start:prepare_end]
+if "control_plane_release_domain_run_budget_preflight" not in prepare_common:
+    raise SystemExit("selected Prepare must complete rollback/job admission before Apply")
+nodelocal_start = production.index("\ncontrol_plane_release_domain_apply_node_local() {")
+nodelocal_end = production.index("\ncontrol_plane_release_domain_apply_authoritative_dns() {", nodelocal_start)
+nodelocal_apply = production[nodelocal_start:nodelocal_end]
+safe_removal = nodelocal_apply.index("node_local_dns_delete_daemonset_safely")
+helm = nodelocal_apply.index("control_plane_release_domain_execute_sealed_helm_upgrade")
+if safe_removal > helm:
+    raise SystemExit("NodeLocal safe teardown must finish before its sealed Helm mutation")
 dns_transaction_start = source.index("\nrun_dns_manifest_transaction_after_helm() {")
 dns_transaction_end = source.index("\nfinalize_dns_manifest_transaction() {", dns_transaction_start)
 dns_transaction = source[dns_transaction_start:dns_transaction_end]
@@ -11264,13 +11419,14 @@ for required in (
 ):
     if required not in rollback:
         raise SystemExit(f"rollback completion is not fail-closed: {required}")
-for required in (
-    'required image-cache DaemonSet is unavailable',
-    'required mesh-recovery DaemonSet is unavailable',
-    'required node-janitor DaemonSet is unavailable',
-):
-    if required not in post_helm:
-        raise SystemExit(f"enabled chart DaemonSet may be silently absent after Helm: {required}")
+image_apply_start = production.index("\ncontrol_plane_release_domain_apply_image_cache() {")
+image_apply_end = production.index("\ncontrol_plane_release_domain_apply_backup() {", image_apply_start)
+image_apply = production[image_apply_start:image_apply_end]
+if 'require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-image-cache"' not in image_apply:
+    raise SystemExit("image-cache adapter may silently accept an absent target DaemonSet")
+for forbidden in ("mesh-recovery", "node-janitor"):
+    if forbidden in production:
+        raise SystemExit(f"single-domain activation unexpectedly mutates generic maintenance object: {forbidden}")
 PY
 
 (
@@ -11572,12 +11728,20 @@ PY
   fi
 )
 
-python3 - "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" <<'PY'
+python3 - \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" \
+  "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh" <<'PY'
 from pathlib import Path
 import sys
 
 source = Path(sys.argv[1]).read_text()
-main = source[source.index("\nmain() {"):]
+production = Path(sys.argv[2]).read_text()
+main = source[
+    source.index("\nmain() {") : source.index(
+        "\n# The production activation is source-only"
+    )
+]
+domain_guard = main.index('CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE="true"')
 exit_trap = main.index("trap cleanup_tmp_artifacts EXIT")
 hup_trap = main.index("trap 'handle_control_plane_release_signal HUP' HUP")
 int_trap = main.index("trap 'handle_control_plane_release_signal INT' INT")
@@ -11587,36 +11751,41 @@ forced_lease_abort_trap = main.index("trap 'handle_control_plane_backup_coordina
 evidence_init = main.index("initialize_control_plane_release_evidence", exit_trap)
 first_required_env = main.index("require_env FUGUE_API_IMAGE_REPOSITORY")
 previous = main.index('PREVIOUS_REVISION="$(helm_current_revision)"')
-pre_state = main.index("write_control_plane_release_pre_state_evidence", previous)
-lease_mutation = main.index("acquire_control_plane_backup_coordination_lease", pre_state)
-backup_drain = main.index("drain_control_plane_backup_before_schema_rollout", lease_mutation)
-fenced_state = main.index("CONTROL_PLANE_RELEASE_FENCED_STATE_FILE", backup_drain)
-fenced_compare = main.index("control_plane_release_fenced_checkpoint_matches", fenced_state)
-recovery_fence_arm = main.index("arm_control_plane_release_recovery_fence", fenced_compare)
-host_mutation = main.index('"host time synchronization kubectl" ensure_host_time_sync', fenced_compare)
-helm_mutation = main.index('CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"', host_mutation)
-final_revision_fence = main.index("control_plane_release_pre_helm_revision_unchanged", host_mutation)
-commit_ready = main.index("commit-ready 0 commit-ready", helm_mutation)
-committed = main.index('CONTROL_PLANE_RELEASE_COMMITTED="true"', commit_ready)
-lease_release = main.index("release_control_plane_backup_coordination_lease", committed)
-success_evidence = main.index("success 0 complete", committed)
-if not max(exit_trap, hup_trap, int_trap, term_trap) < evidence_init < first_required_env:
+atomic_gate = main.index("run_control_plane_atomic_domain_gate", previous)
+if not domain_guard < min(exit_trap, hup_trap, int_trap, term_trap) < evidence_init < first_required_env:
     raise SystemExit("release evidence EXIT and signal traps must exist before configuration can fail")
-if not max(lease_abort_trap, forced_lease_abort_trap) < lease_mutation:
-    raise SystemExit("normal and forced Lease-abort traps must exist before Lease acquisition")
-if not previous < pre_state < lease_mutation < backup_drain < fenced_state < fenced_compare < recovery_fence_arm < host_mutation < helm_mutation:
-    raise SystemExit("release-pre-state.json must be durable before every host or workload mutation")
-if not helm_mutation < commit_ready < committed < lease_release < success_evidence:
-    raise SystemExit("success evidence must follow commit-ready, commit, and a proven owner-CAS Lease release")
-if not host_mutation < final_revision_fence < helm_mutation:
-    raise SystemExit("the final Helm revision fence must run after all pre-Helm work and before mutation flags")
-pre_state_guard = main[pre_state:lease_mutation]
-if 'fail "failed to atomically persist release-pre-state.json before the first release mutation"' not in pre_state_guard:
-    raise SystemExit("pre-state evidence write failure must fail closed before Lease mutation")
-fenced_guard = main[fenced_state:host_mutation]
-for unsafe in ('CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"', 'CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"', "rollback_release_transaction"):
-    if unsafe in fenced_guard:
-        raise SystemExit("fenced pre-mutation drift must release the coordination Lease without an unsafe Helm rollback")
+if not max(lease_abort_trap, forced_lease_abort_trap) < atomic_gate:
+    raise SystemExit("normal and forced Lease-abort traps must exist before selected adapter dispatch")
+if not previous < atomic_gate:
+    raise SystemExit("the read-only Helm revision fence must precede atomic authorization")
+for forbidden in (
+    "write_control_plane_release_pre_state_evidence",
+    "acquire_control_plane_backup_coordination_lease",
+    "drain_control_plane_backup_before_schema_rollout",
+    "ensure_host_time_sync",
+    "CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED",
+    "rollback_release_transaction",
+):
+    if forbidden in main:
+        raise SystemExit(f"legacy cross-domain transaction remains reachable from main: {forbidden}")
+
+entry_start = production.index("\ncontrol_plane_release_run_atomic_domain_release() {")
+entry = production[entry_start:]
+authorize_order = [
+    entry.index("control_plane_release_domain_regenerate_changed_evidence"),
+    entry.index("control_plane_release_domain_classify_files"),
+    entry.index("control_plane_release_domain_render_and_authorize"),
+    entry.index("control_plane_release_domain_verify_bundle_command"),
+    entry.index("control_plane_release_dispatch_single_domain_transaction"),
+]
+if authorize_order != sorted(authorize_order):
+    raise SystemExit("planner evidence, rendered authorization, reverify, and dispatch order is unsafe")
+dispatch = entry.index("control_plane_release_dispatch_single_domain_transaction")
+publish = entry.index("control_plane_release_domain_publish_bundle_evidence", dispatch)
+if dispatch > publish:
+    raise SystemExit("single-domain public evidence must be published after terminal dispatch")
+if 'CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"' not in entry[publish:]:
+    raise SystemExit("legacy rollback must remain disabled after selected-domain evidence publication")
 PY
 
 (

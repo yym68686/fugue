@@ -3,9 +3,11 @@ package releaseadapter
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -111,33 +113,88 @@ func (trace *memoryTrace) snapshot() []TraceEvent {
 	return append([]TraceEvent(nil), trace.events...)
 }
 
-func testAuthorization(t *testing.T, domain releasedomain.Domain) releasedomain.TransactionAuthorization {
+func testAuthorization(t *testing.T, domain releasedomain.Domain) releasedomain.ExecutionAuthorization {
 	t.Helper()
+	if _, err := releasedomain.ParseDomain(string(domain)); err != nil {
+		t.Fatalf("fixture domain: %v", err)
+	}
+	objectRules := make([]releasedomain.ObjectRule, 0, len(releasedomain.KnownDomains()))
+	for _, knownDomain := range releasedomain.KnownDomains() {
+		objectRules = append(objectRules, releasedomain.ObjectRule{
+			ID:        "fixture-" + string(knownDomain),
+			Domain:    knownDomain,
+			Version:   "v1",
+			Kind:      "ConfigMap",
+			Scope:     releasedomain.ScopeNamespaced,
+			Namespace: "${releaseNamespace}",
+			Name:      "fixture-" + string(knownDomain),
+			RequiredLabels: map[string]string{
+				"test.fugue.dev/domain": string(knownDomain),
+			},
+		})
+	}
+	spec := &releasedomain.OwnershipSpec{
+		APIVersion:       releasedomain.OwnershipAPIVersion,
+		Kind:             releasedomain.OwnershipKind,
+		Domains:          releasedomain.KnownDomains(),
+		RequiredBindings: []string{"releaseName", "releaseNamespace"},
+		ObjectRules:      objectRules,
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("fixture ownership: %v", err)
+	}
+	ownership, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal fixture ownership: %v", err)
+	}
+	manifestForVersion := func(version string) []byte {
+		raw := []byte(fmt.Sprintf(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fixture-%s
+  namespace: fugue-system
+  labels:
+    test.fugue.dev/domain: %s
+data:
+  version: %s
+`, domain, domain, version))
+		canonical, canonicalErr := releasedomain.CanonicalizeRenderedManifest(raw, spec, "fugue-system")
+		if canonicalErr != nil {
+			t.Fatalf("canonicalize fixture manifest: %v", canonicalErr)
+		}
+		return canonical
+	}
+	baseManifest := manifestForVersion("base")
+	targetManifest := manifestForVersion("target")
 	classificationContext, err := releasedomain.NewClassificationContextEvidence(
 		"fugue-system",
-		map[string]string{"releaseNamespace": "fugue-system"},
+		map[string]string{"releaseName": "fugue", "releaseNamespace": "fugue-system"},
 		false,
 	)
 	if err != nil {
 		t.Fatalf("classification context: %v", err)
 	}
+	rendered := releasedomain.ClassifyRendered(baseManifest, targetManifest, spec, releasedomain.RenderedOptions{
+		DefaultNamespace: "fugue-system",
+		Bindings: map[string]string{
+			"releaseName":      "fugue",
+			"releaseNamespace": "fugue-system",
+		},
+	})
 	plan := releasedomain.BuildPlan(releasedomain.PlanInput{
 		Files: releasedomain.FileClassification{
 			Domains:  []releasedomain.Domain{domain},
 			Evidence: []releasedomain.Evidence{{Source: "changed-file", Subject: "fixture", Domains: []releasedomain.Domain{domain}}},
 		},
-		Rendered: releasedomain.RenderedClassification{
-			Domains:  []releasedomain.Domain{domain},
-			Evidence: []releasedomain.Evidence{{Source: "rendered-object", Subject: "fixture", Domains: []releasedomain.Domain{domain}}},
-		},
+		Rendered: rendered,
 		Digests: releasedomain.DigestEvidence{
-			Base:                   "base-revision",
-			Target:                 "target-revision",
-			Live:                   "base-revision",
-			BaseManifest:           "sha256:base-manifest",
-			TargetManifest:         "sha256:target-manifest",
-			RepeatedTargetManifest: "sha256:target-manifest",
-			Ownership:              "sha256:ownership",
+			Base:                   "41",
+			Target:                 "42",
+			Live:                   "41",
+			BaseManifest:           testDigest(baseManifest),
+			TargetManifest:         testDigest(targetManifest),
+			RepeatedTargetManifest: testDigest(targetManifest),
+			Ownership:              testDigest(ownership),
 			ChangedFiles:           "sha256:changed-files",
 			ClassificationContext:  classificationContext,
 		},
@@ -153,7 +210,7 @@ func testAuthorization(t *testing.T, domain releasedomain.Domain) releasedomain.
 	if err != nil {
 		t.Fatalf("marshal transaction envelope: %v", err)
 	}
-	authorization, err := releasedomain.DecodeAndVerifyTransactionEnvelope(
+	transactionAuthorization, err := releasedomain.DecodeAndVerifyTransactionEnvelope(
 		bytes.NewReader(encoded),
 		plan.PlanDigest,
 		domain,
@@ -161,7 +218,49 @@ func testAuthorization(t *testing.T, domain releasedomain.Domain) releasedomain.
 	if err != nil {
 		t.Fatalf("decode transaction envelope: %v", err)
 	}
+	authorization, err := releasedomain.VerifyRollbackOwnership(releasedomain.RollbackOwnershipInput{
+		Transaction: transactionAuthorization,
+		Binding: releasedomain.ExecutionBinding{
+			ReleaseName:       "fugue",
+			ReleaseNamespace:  "fugue-system",
+			BaseRevision:      plan.Digests.Base,
+			TargetRevision:    plan.Digests.Target,
+			UpgradeArgvDigest: testDigest([]byte("helm\x00upgrade\x00fugue\x00")),
+			HooksPolicy:       releasedomain.HooksPolicyNoHooks,
+		},
+		Ownership:              ownership,
+		BaseManifest:           baseManifest,
+		TargetManifest:         targetManifest,
+		RepeatedTargetManifest: targetManifest,
+	})
+	if err != nil {
+		t.Fatalf("verify rollback ownership: %v", err)
+	}
 	return authorization
+}
+
+func testDigest(data []byte) string {
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", digest)
+}
+
+func TestRunAndCommandsRequireExecutionAuthorizationType(t *testing.T) {
+	executionType := reflect.TypeOf(releasedomain.ExecutionAuthorization{})
+	transactionType := reflect.TypeOf(releasedomain.TransactionAuthorization{})
+	runType := reflect.TypeOf(Run)
+	if got := runType.In(2); got != executionType || got == transactionType {
+		t.Fatalf("Run authorization type = %s, want %s", got, executionType)
+	}
+	commandRun, ok := reflect.TypeOf((*Command)(nil)).Elem().MethodByName("Run")
+	if !ok {
+		t.Fatal("Command.Run method is missing")
+	}
+	if commandRun.Type.NumIn() != 2 {
+		t.Fatalf("Command.Run input count = %d, want 2", commandRun.Type.NumIn())
+	}
+	if got := commandRun.Type.In(1); got != executionType || got == transactionType {
+		t.Fatalf("Command.Run authorization type = %s, want %s", got, executionType)
+	}
 }
 
 func completeFakeAdapter(
@@ -173,7 +272,7 @@ func completeFakeAdapter(
 	commands := make(map[Phase]Command, len(orderedPhases))
 	for _, currentPhase := range orderedPhases {
 		phase := currentPhase
-		commands[phase] = CommandFunc(func(context.Context, releasedomain.TransactionAuthorization) error {
+		commands[phase] = CommandFunc(func(context.Context, releasedomain.ExecutionAuthorization) error {
 			log.append(phase)
 			if panics[phase] {
 				panic("private phase panic")
@@ -284,7 +383,7 @@ func TestRunValidatesCompleteAdapterBeforeTraceOrCommands(t *testing.T) {
 	}
 
 	valid := completeFakeAdapter(domain, &phaseLog{}, nil, nil)
-	if err := Run(context.Background(), time.Second, releasedomain.TransactionAuthorization{}, valid, &memoryTrace{}); err == nil {
+	if err := Run(context.Background(), time.Second, releasedomain.ExecutionAuthorization{}, valid, &memoryTrace{}); err == nil {
 		t.Fatal("zero authorization unexpectedly succeeded")
 	}
 	if err := Run(nil, time.Second, authorization, valid, &memoryTrace{}); err == nil {
@@ -421,12 +520,12 @@ func TestRunPanicsAndCancellationUseExactlyOneRollbackAfterApply(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		log := &phaseLog{}
 		adapter := completeFakeAdapter(domain, log, nil, nil)
-		adapter.commands[PhaseApply] = CommandFunc(func(context.Context, releasedomain.TransactionAuthorization) error {
+		adapter.commands[PhaseApply] = CommandFunc(func(context.Context, releasedomain.ExecutionAuthorization) error {
 			log.append(PhaseApply)
 			cancel()
 			return nil
 		})
-		adapter.commands[PhaseRollback] = CommandFunc(func(ctx context.Context, _ releasedomain.TransactionAuthorization) error {
+		adapter.commands[PhaseRollback] = CommandFunc(func(ctx context.Context, _ releasedomain.ExecutionAuthorization) error {
 			log.append(PhaseRollback)
 			if err := ctx.Err(); err != nil {
 				return fmt.Errorf("rollback inherited canceled context: %w", err)
@@ -446,7 +545,7 @@ func TestRunPanicsAndCancellationUseExactlyOneRollbackAfterApply(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		log := &phaseLog{}
 		adapter := completeFakeAdapter(domain, log, nil, nil)
-		adapter.commands[PhasePrepare] = CommandFunc(func(context.Context, releasedomain.TransactionAuthorization) error {
+		adapter.commands[PhasePrepare] = CommandFunc(func(context.Context, releasedomain.ExecutionAuthorization) error {
 			log.append(PhasePrepare)
 			cancel()
 			return nil
@@ -464,7 +563,7 @@ func TestRunPanicsAndCancellationUseExactlyOneRollbackAfterApply(t *testing.T) {
 		ctx := &adversarialContext{Context: context.Background()}
 		log := &phaseLog{}
 		adapter := completeFakeAdapter(domain, log, nil, nil)
-		adapter.commands[PhaseApply] = CommandFunc(func(context.Context, releasedomain.TransactionAuthorization) error {
+		adapter.commands[PhaseApply] = CommandFunc(func(context.Context, releasedomain.ExecutionAuthorization) error {
 			log.append(PhaseApply)
 			ctx.panicOnErr.Store(true)
 			return nil
@@ -555,7 +654,7 @@ func TestRunRollbackTimeoutIsBoundedAndNotRetried(t *testing.T) {
 	log := &phaseLog{}
 	applyErr := errors.New("apply failure")
 	adapter := completeFakeAdapter(domain, log, map[Phase]error{PhaseApply: applyErr}, nil)
-	adapter.commands[PhaseRollback] = CommandFunc(func(ctx context.Context, _ releasedomain.TransactionAuthorization) error {
+	adapter.commands[PhaseRollback] = CommandFunc(func(ctx context.Context, _ releasedomain.ExecutionAuthorization) error {
 		log.append(PhaseRollback)
 		<-ctx.Done()
 		return ctx.Err()

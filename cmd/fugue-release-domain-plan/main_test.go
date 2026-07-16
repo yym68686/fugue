@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"fugue/internal/releasedomain"
@@ -28,6 +29,7 @@ func baseCLIArgs(changed, base, target, repeated string) []string {
 		"--namespace", "fugue-system",
 	}
 	bindings := []string{
+		"releaseName=fugue",
 		"nodeLocalNamespace=kube-system",
 		"nodeLocalName=fugue-node-local-dns",
 		"nodeLocalUpstreamServiceName=fugue-dns-upstream",
@@ -88,6 +90,9 @@ func TestRunSingleNodeLocalPlan(t *testing.T) {
 	if got := context.BindingMap()["releaseNamespace"]; got != "fugue-system" {
 		t.Fatalf("releaseNamespace binding = %q", got)
 	}
+	if got := context.BindingMap()["releaseName"]; got != "fugue" {
+		t.Fatalf("releaseName binding = %q", got)
+	}
 }
 
 func TestRunMultipleIsBlockedWithExitTwo(t *testing.T) {
@@ -100,6 +105,27 @@ func TestRunMultipleIsBlockedWithExitTwo(t *testing.T) {
 	exitCode, plan, _ := runPlan(t, args)
 	if exitCode != 2 || plan.Result != releasedomain.OutcomeMultiple {
 		t.Fatalf("exit=%d plan=%#v", exitCode, plan)
+	}
+}
+
+func TestRunMissingReleaseNameBindingFailsClosed(t *testing.T) {
+	args := baseCLIArgs(
+		filepath.Join("single-node-local", "changed-files.json"),
+		filepath.Join("single-node-local", "base.yaml"),
+		filepath.Join("single-node-local", "target.yaml"),
+		filepath.Join("single-node-local", "target.yaml"),
+	)
+	filtered := make([]string, 0, len(args)-2)
+	for index := 0; index < len(args); index++ {
+		if args[index] == "--binding" && index+1 < len(args) && args[index+1] == "releaseName=fugue" {
+			index++
+			continue
+		}
+		filtered = append(filtered, args[index])
+	}
+	exitCode, plan, stderr := runPlan(t, filtered)
+	if exitCode != 2 || stderr != "" || plan.Result != releasedomain.OutcomeUnknown || plan.SingleDomainDispatchAllowed() {
+		t.Fatalf("exit=%d stderr=%q plan=%#v", exitCode, stderr, plan)
 	}
 }
 
@@ -121,6 +147,132 @@ func TestRunRejectsIncompleteInvocation(t *testing.T) {
 	if exitCode := run([]string{"--base-digest", "x"}, &stdout, &stderr); exitCode != 1 {
 		t.Fatalf("exit=%d stderr=%q", exitCode, stderr.String())
 	}
+}
+
+func TestRunOutputCannotAliasAnyActualInput(t *testing.T) {
+	for _, inputFlag := range []string{
+		"--ownership",
+		"--changed-files",
+		"--base-manifest",
+		"--target-manifest",
+		"--repeated-target-manifest",
+	} {
+		t.Run(strings.TrimPrefix(inputFlag, "--"), func(t *testing.T) {
+			args, inputs := privatePlannerCLIArgs(t)
+			inputPath := inputs[inputFlag]
+			before, err := os.ReadFile(inputPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			exitCode, plan, stderr := runPlan(t, append(args, "--output", inputPath))
+			if exitCode != 1 || plan.Result != "" || stderr != planPublicationMessage {
+				t.Fatalf("exit=%d plan=%#v stderr=%q", exitCode, plan, stderr)
+			}
+			after, err := os.ReadFile(inputPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("%s input was changed by aliased output", inputFlag)
+			}
+			assertNoAtomicOutputTemps(t, filepath.Dir(inputPath))
+		})
+	}
+}
+
+func TestRunFailuresDoNotEchoPrivateInputSentinels(t *testing.T) {
+	const sentinel = "PRIVATE-PLANNER-SENTINEL-6f29cb"
+	validArgs := baseCLIArgs(
+		filepath.Join("single-node-local", "changed-files.json"),
+		filepath.Join("single-node-local", "base.yaml"),
+		filepath.Join("single-node-local", "target.yaml"),
+		filepath.Join("single-node-local", "target.yaml"),
+	)
+	missingPath := filepath.Join(t.TempDir(), sentinel)
+	unsafeOutput := filepath.Join(t.TempDir(), sentinel)
+	if err := os.WriteFile(unsafeOutput, []byte("existing-output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeOutput, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		args     []string
+		expected string
+	}{
+		{name: "ownership", args: replaceCLIFlagValue(validArgs, "--ownership", missingPath), expected: planConstructionMessage},
+		{name: "changed files", args: replaceCLIFlagValue(validArgs, "--changed-files", missingPath), expected: planConstructionMessage},
+		{name: "base manifest", args: replaceCLIFlagValue(validArgs, "--base-manifest", missingPath), expected: planConstructionMessage},
+		{name: "target manifest", args: replaceCLIFlagValue(validArgs, "--target-manifest", missingPath), expected: planConstructionMessage},
+		{name: "repeated target manifest", args: replaceCLIFlagValue(validArgs, "--repeated-target-manifest", missingPath), expected: planConstructionMessage},
+		{name: "output", args: append(append([]string(nil), validArgs...), "--output", unsafeOutput), expected: planPublicationMessage},
+		{name: "flag value", args: append(append([]string(nil), validArgs...), "--binding", sentinel), expected: invalidInvocationMessage},
+		{name: "flag name", args: []string{"--" + sentinel}, expected: invalidInvocationMessage},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exitCode := run(test.args, &stdout, &stderr)
+			if exitCode != 1 || stdout.Len() != 0 || stderr.String() != test.expected {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+				t.Fatalf("private sentinel crossed CLI boundary: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func replaceCLIFlagValue(args []string, flagName, value string) []string {
+	replaced := append([]string(nil), args...)
+	for index := 0; index+1 < len(replaced); index++ {
+		if replaced[index] == flagName {
+			replaced[index+1] = value
+			return replaced
+		}
+	}
+	return replaced
+}
+
+func privatePlannerCLIArgs(t *testing.T) ([]string, map[string]string) {
+	t.Helper()
+	directory := t.TempDir()
+	sources := map[string]string{
+		"--ownership":                rootPath("deploy", "release-domains", "ownership-v1.yaml"),
+		"--changed-files":            rootPath("internal", "releasedomain", "testdata", "single-node-local", "changed-files.json"),
+		"--base-manifest":            rootPath("internal", "releasedomain", "testdata", "single-node-local", "base.yaml"),
+		"--target-manifest":          rootPath("internal", "releasedomain", "testdata", "single-node-local", "target.yaml"),
+		"--repeated-target-manifest": rootPath("internal", "releasedomain", "testdata", "single-node-local", "target.yaml"),
+	}
+	inputs := make(map[string]string, len(sources))
+	for flagName, source := range sources {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read %s fixture: %v", flagName, err)
+		}
+		destination := filepath.Join(directory, strings.TrimPrefix(flagName, "--"))
+		if err := os.WriteFile(destination, data, 0o600); err != nil {
+			t.Fatalf("write %s fixture: %v", flagName, err)
+		}
+		inputs[flagName] = destination
+	}
+
+	args := baseCLIArgs(
+		filepath.Join("single-node-local", "changed-files.json"),
+		filepath.Join("single-node-local", "base.yaml"),
+		filepath.Join("single-node-local", "target.yaml"),
+		filepath.Join("single-node-local", "target.yaml"),
+	)
+	for index := 0; index+1 < len(args); index++ {
+		if replacement, ok := inputs[args[index]]; ok {
+			args[index+1] = replacement
+			index++
+		}
+	}
+	return args, inputs
 }
 
 func TestBuiltBinaryExitContract(t *testing.T) {

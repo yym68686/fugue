@@ -31,12 +31,46 @@ control_plane_release_decimal_less_than() {
   [[ "${left}" < "${right}" ]]
 }
 
+# Selects the only two supported hook policies from a frozen Helm upgrade
+# argv. Helm 4 can retain release.hooks in JSON even when --no-hooks is set, so
+# callers must carry this fixed policy into canonicalization instead of
+# inferring it from the renderer's output.
+control_plane_release_fixed_hook_policy_from_upgrade_argv() {
+  (( $# > 0 )) || return 2
+  local argument=""
+  local no_hooks_count=0
+  local previous_no_hooks=0
+  for argument in "$@"; do
+    if (( previous_no_hooks != 0 )) &&
+      [[ "${argument}" == "true" || "${argument}" == "false" ]]; then
+      return 2
+    fi
+    previous_no_hooks=0
+    case "${argument}" in
+      --no-hooks)
+        no_hooks_count=$((no_hooks_count + 1))
+        previous_no_hooks=1
+        ;;
+      --no-hooks=*)
+        return 2
+        ;;
+    esac
+  done
+  (( no_hooks_count <= 1 )) || return 2
+  if (( no_hooks_count == 1 )); then
+    printf '%s\n' exclude-hooks
+  else
+    printf '%s\n' include-hooks
+  fi
+}
+
 control_plane_release_with_private_manifest_render_argv() {
   (( $# >= 2 )) || return 2
 
   local live_revision="$1"
   local consumer="$2"
   local argument=""
+  local hook_policy=""
   local reset_then_reuse_count=0
   local -a CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV=()
   local -a CONTROL_PLANE_RELEASE_BASE_RENDER_ARGV=()
@@ -55,6 +89,10 @@ control_plane_release_with_private_manifest_render_argv() {
     "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[4]}" == "-n" &&
     -n "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[5]}" &&
     "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[6]}" == "--reset-then-reuse-values" ]] || return 2
+
+  hook_policy="$(control_plane_release_fixed_hook_policy_from_upgrade_argv \
+    "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[@]}")" || return 2
+  [[ "${hook_policy}" == "include-hooks" || "${hook_policy}" == "exclude-hooks" ]] || return 2
 
   for argument in "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[@]}"; do
     case "${argument}" in
@@ -75,12 +113,21 @@ control_plane_release_with_private_manifest_render_argv() {
     --dry-run=server
     --output json
   )
-  CONTROL_PLANE_RELEASE_BASE_RENDER_ARGV=(
-    helm get all "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[2]}"
-    -n "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[5]}"
-    --revision "${live_revision}"
-    --template '{{ .Release.Manifest }}{{ range .Release.Hooks }}{{ printf "\n---\n%s\n" .Manifest }}{{ end }}'
-  )
+  if [[ "${hook_policy}" == "exclude-hooks" ]]; then
+    CONTROL_PLANE_RELEASE_BASE_RENDER_ARGV=(
+      helm get all "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[2]}"
+      -n "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[5]}"
+      --revision "${live_revision}"
+      --template '{{ .Release.Manifest }}'
+    )
+  else
+    CONTROL_PLANE_RELEASE_BASE_RENDER_ARGV=(
+      helm get all "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[2]}"
+      -n "${CONTROL_PLANE_RELEASE_RENDER_SOURCE_ARGV[5]}"
+      --revision "${live_revision}"
+      --template '{{ .Release.Manifest }}{{ range .Release.Hooks }}{{ printf "\n---\n%s\n" .Manifest }}{{ end }}'
+    )
+  fi
   CONTROL_PLANE_RELEASE_REPEATED_TARGET_RENDER_ARGV=(
     "${CONTROL_PLANE_RELEASE_TARGET_RENDER_ARGV[@]}"
   )
@@ -295,6 +342,7 @@ control_plane_release_run_private_canonical_render_set() {
   local consumer="$4"
   shift 4
   local -a source_argv=("$@")
+  local hook_policy=""
 
   control_plane_release_valid_live_revision "${live_revision}" || return 2
   [[ -n "${runner}" && -n "${canonicalizer}" && -n "${consumer}" ]] || return 2
@@ -302,6 +350,10 @@ control_plane_release_run_private_canonical_render_set() {
   declare -F "${canonicalizer}" >/dev/null 2>&1 || return 2
   declare -F "${consumer}" >/dev/null 2>&1 || return 2
   (( ${#source_argv[@]} >= 7 )) || return 2
+  hook_policy="$(control_plane_release_fixed_hook_policy_from_upgrade_argv \
+    "${source_argv[@]}")" || return 2
+  [[ "${hook_policy}" == "include-hooks" || "${hook_policy}" == "exclude-hooks" ]] || return 2
+  readonly hook_policy
 
   local caller_pid=""
   local caller_probe_pid=""
@@ -394,7 +446,7 @@ control_plane_release_run_private_canonical_render_set() {
     if control_plane_release_run_private_render_callback \
       "${staging_dir}/canonicalizer.stdout" "${staging_dir}/canonicalizer.stderr" \
       "${canonicalizer}" \
-      "${live_revision}" "${expected_version}" "${release_name}" "${release_namespace}" \
+      "${live_revision}" "${expected_version}" "${release_name}" "${release_namespace}" "${hook_policy}" \
       "${raw_dir}/base.raw" "${raw_dir}/target.raw" "${raw_dir}/repeated-target.raw" \
       "${canonical_dir}"; then
       :

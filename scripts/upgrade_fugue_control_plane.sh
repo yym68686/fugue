@@ -363,6 +363,7 @@ NODE_LOCAL_DNS_PRESERVED_MODE=""
 NODE_LOCAL_DNS_PRESERVED_PODS_JSON="[]"
 NODE_LOCAL_DNS_PRESERVED_DAEMONSET_JSON=""
 NODE_LOCAL_DNS_SPLIT_COHORT="false"
+NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION="false"
 NODE_LOCAL_DNS_BUDGET_TARGET_NODES=""
 NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=0
 IMAGE_CACHE_PRE_HELM_TARGET_REVISION=""
@@ -385,6 +386,15 @@ CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
 CONTROL_PLANE_RELEASE_COMMITTED="false"
+CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE="false"
+CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE="false"
+CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_COMMITTED="false"
+CONTROL_PLANE_RELEASE_DOMAIN_APPLY_STARTED="false"
+CONTROL_PLANE_RELEASE_DOMAIN_SELECTED=""
+CONTROL_PLANE_RELEASE_DOMAIN_USES_BACKUP_COORDINATION="false"
+CONTROL_PLANE_RELEASE_DOMAIN_ROLLBACK_ATTEMPTED="false"
+CONTROL_PLANE_RELEASE_DOMAIN_ROLLBACK_COMPLETED="false"
+CONTROL_PLANE_RELEASE_DOMAIN_SIGNAL_HANDLING="false"
 CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="false"
 CONTROL_PLANE_RELEASE_PENDING_SIGNAL=""
 CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS="0"
@@ -9516,6 +9526,23 @@ handle_control_plane_release_signal() {
       CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE:-signal}"
     fi
   fi
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" == "true" &&
+    "${CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_ACTIVE:-false}" == "true" &&
+    "${CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_COMMITTED:-false}" != "true" ]]; then
+    # The fixed domain dispatcher owns the only legal rollback call site once
+    # Apply starts. A signal may stop the active process group, but must return
+    # to the transaction so the selected adapter performs exactly one rollback.
+    # Every subsequent trace/reverify/phase callback fails closed on the
+    # pending signal. Never enter the legacy cross-domain rollback handler.
+    if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_SIGNAL_HANDLING:-false}" != "true" ]]; then
+      CONTROL_PLANE_RELEASE_DOMAIN_SIGNAL_HANDLING="true"
+      log_stderr "received ${signal_name} during the selected release-domain transaction; terminating the active command before selected rollback"
+      if ! terminate_active_control_plane_release_command; then
+        mark_control_plane_release_command_termination_unproven
+      fi
+    fi
+    return 0
+  fi
   if control_plane_release_exit_cleanup_active; then
     # A transition-deferred signal may be dispatched by termination from the
     # EXIT trap. cleanup_tmp_artifacts will honor its status after completing
@@ -9575,7 +9602,22 @@ cleanup_tmp_artifacts() {
     CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
     CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
   fi
-  if [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" &&
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" == "true" ]]; then
+    if [[ "${exit_status}" != "0" &&
+      "${CONTROL_PLANE_RELEASE_DOMAIN_APPLY_STARTED:-false}" == "true" &&
+      "${CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_COMMITTED:-false}" != "true" &&
+      "${CONTROL_PLANE_RELEASE_DOMAIN_ROLLBACK_ATTEMPTED:-false}" != "true" &&
+      "${active_command_stopped}" == "true" ]] &&
+      declare -F control_plane_release_domain_emergency_rollback_once >/dev/null 2>&1; then
+      log_stderr "abnormal exit inside the selected release domain; attempting its reserved rollback exactly once"
+      control_plane_release_domain_emergency_rollback_once || true
+    elif [[ "${exit_status}" != "0" &&
+      "${CONTROL_PLANE_RELEASE_DOMAIN_APPLY_STARTED:-false}" == "true" &&
+      "${CONTROL_PLANE_RELEASE_DOMAIN_TRANSACTION_COMMITTED:-false}" != "true" &&
+      "${CONTROL_PLANE_RELEASE_DOMAIN_ROLLBACK_ATTEMPTED:-false}" != "true" ]]; then
+      log_stderr "deferring selected rollback because the active release command could not be proven stopped"
+    fi
+  elif [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" &&
     "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" != "true" &&
     "${active_command_stopped}" == "true" ]]; then
     log_stderr "abnormal exit after Helm mutation; attempting the reserved synchronous rollback"
@@ -9594,7 +9636,25 @@ cleanup_tmp_artifacts() {
     "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" && "${DNS_MANIFEST_ROLLBACK_RESTORED:-false}" != "true" ]]; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
   fi
-  if [[ "${release_lease}" == "true" ]]; then
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" == "true" ]]; then
+    # NodeLocal, authoritative DNS, and image-cache releases must not even
+    # invoke the backup coordination helpers. Control-plane/backup adapters
+    # opt in before their first Lease write.
+    if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_USES_BACKUP_COORDINATION:-false}" == "true" &&
+      "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]]; then
+      if [[ "${release_lease}" == "true" ]]; then
+        if ! release_control_plane_backup_coordination_lease; then
+          log_stderr "owner-CAS release of the control-plane backup coordination Lease failed; holder was not overwritten"
+        fi
+      else
+        if ! mark_control_plane_backup_coordination_recovery_required; then
+          log_stderr "could not persist the incomplete-release recovery annotation; the owner Lease remains unreleased"
+        fi
+        stop_control_plane_backup_coordination_lease_renewer
+        log_stderr "control-plane release rollback is incomplete; refusing to CAS-release the shared Lease"
+      fi
+    fi
+  elif [[ "${release_lease}" == "true" ]]; then
     if ! release_control_plane_backup_coordination_lease; then
       log_stderr "owner-CAS release of the control-plane backup coordination Lease failed; holder was not overwritten"
     fi
@@ -9880,6 +9940,7 @@ with_frozen_control_plane_helm_upgrade_argv() {
     helm upgrade "${FUGUE_RELEASE_NAME}" "${FUGUE_HELM_CHART_PATH}"
     -n "${FUGUE_NAMESPACE}"
     --reset-then-reuse-values
+    --no-hooks
     --history-max 20
     --timeout "${FUGUE_HELM_TIMEOUT}"
     "${HELM_POST_RENDERER_ARGS[@]+"${HELM_POST_RENDERER_ARGS[@]}"}"
@@ -14294,6 +14355,7 @@ prepare_node_local_dns_helm_args() {
   local split_active_ref=""
   local possible_split_active_name=""
 
+  NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION="false"
   node_local_dns_configure_cohort_names
   if [[ "${NODE_LOCAL_DNS_SPLIT_COHORT}" == "true" ]]; then
     if ! preserved_daemonset_ref="$(${KUBECTL} -n "${FUGUE_NODE_LOCAL_DNS_NAMESPACE}" get daemonset "${NODE_LOCAL_DNS_PRESERVED_DAEMONSET_NAME}" --ignore-not-found -o name)"; then
@@ -14364,14 +14426,21 @@ prepare_node_local_dns_helm_args() {
       fi
       [[ "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "cannot safely disable NodeLocal DNSCache because the live kube-dns ServiceIP is unavailable"
       command_exists python3 || fail "python3 is required for NodeLocal DNSCache disable preflight"
-      if ! node_local_dns_capture_authoritative_hostport_snapshot "${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}"; then
-        fail "cannot pin the authoritative DNS coexistence state before disabling NodeLocal DNSCache"
-      fi
-      if ! node_local_dns_verify_artifact "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
-        fail "live NodeLocal DNSCache artifact differs from its declared mode before disable"
-      fi
-      if ! node_local_dns_verify_running "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
-        fail "live NodeLocal DNSCache cohort is not healthy enough for a reversible disable"
+      if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" == "true" ]]; then
+        # These validations create bounded probe Pods. The B3 render gate must
+        # observe the exact Helm inputs before any Kubernetes write, so defer
+        # them to the selected NodeLocal adapter's Apply phase.
+        NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION="true"
+      else
+        if ! node_local_dns_capture_authoritative_hostport_snapshot "${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}"; then
+          fail "cannot pin the authoritative DNS coexistence state before disabling NodeLocal DNSCache"
+        fi
+        if ! node_local_dns_verify_artifact "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+          fail "live NodeLocal DNSCache artifact differs from its declared mode before disable"
+        fi
+        if ! node_local_dns_verify_running "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+          fail "live NodeLocal DNSCache cohort is not healthy enough for a reversible disable"
+        fi
       fi
     fi
     return 0
@@ -14481,19 +14550,27 @@ print(cluster_ip + "\t" + json.dumps(selector, sort_keys=True, separators=(",", 
     node_unschedulable="$(${KUBECTL} get node "${node_name}" -o jsonpath='{.spec.unschedulable}' 2>/dev/null || true)"
     [[ "${ready}" == "True" && "${node_os}" == "linux" && "${node_arch}" == "amd64" && "${node_unschedulable}" != "true" ]] || fail "NodeLocal DNSCache target ${node_name} must be a Ready, schedulable linux/amd64 node"
   done <<<"${desired_nodes}"
-  if ! node_local_dns_capture_authoritative_hostport_snapshot "${desired_nodes}"; then
-    fail "cannot pin the authoritative DNS hostPort coexistence state for the NodeLocal DNSCache target cohort"
-  fi
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" == "true" ]]; then
+    # HostPort rule attestation and live functional DNS checks use temporary
+    # probe Pods. Keep only the read-only inventory and Helm argument assembly
+    # here; the selected NodeLocal Apply callback performs them after the
+    # execution authorization has been durably reverified.
+    NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION="true"
+  else
+    if ! node_local_dns_capture_authoritative_hostport_snapshot "${desired_nodes}"; then
+      fail "cannot pin the authoritative DNS hostPort coexistence state for the NodeLocal DNSCache target cohort"
+    fi
 
-  if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
-    NODE_LOCAL_DNS_TARGET_NODES="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}"
-    if ! node_local_dns_verify_artifact "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${kube_dns_service_ip}"; then
-      fail "live NodeLocal DNSCache artifact differs from its declared ${NODE_LOCAL_DNS_PREVIOUS_MODE} image, args, selector, or Corefile"
+    if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
+      NODE_LOCAL_DNS_TARGET_NODES="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}"
+      if ! node_local_dns_verify_artifact "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${kube_dns_service_ip}"; then
+        fail "live NodeLocal DNSCache artifact differs from its declared ${NODE_LOCAL_DNS_PREVIOUS_MODE} image, args, selector, or Corefile"
+      fi
+      if ! node_local_dns_verify_running "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${kube_dns_service_ip}"; then
+        fail "live NodeLocal DNSCache cohort failed DNS, metrics, host-network, or rule verification"
+      fi
+      NODE_LOCAL_DNS_TARGET_NODES="${desired_nodes}"
     fi
-    if ! node_local_dns_verify_running "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${kube_dns_service_ip}"; then
-      fail "live NodeLocal DNSCache cohort failed DNS, metrics, host-network, or rule verification"
-    fi
-    NODE_LOCAL_DNS_TARGET_NODES="${desired_nodes}"
   fi
 
   node_selector_json="$(python3 -c '
@@ -14526,6 +14603,42 @@ print(json.dumps({"kubernetes.io/os": "linux"}, sort_keys=True, separators=(",",
     --set-string "nodeLocalDNS.updateStrategy.type=OnDelete"
   )
   log "NodeLocal DNSCache preflight passed: mode=${FUGUE_NODE_LOCAL_DNS_MODE} nodes=${desired_node_count} kube_dns=${kube_dns_service_ip} central_endpoints=${endpoint_count}"
+}
+
+node_local_dns_run_deferred_operational_validation() {
+  local desired_target_nodes="${NODE_LOCAL_DNS_TARGET_NODES:-}"
+  local validation_status=0
+
+  [[ "${NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION:-false}" == "true" ]] || return 0
+  [[ "${CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE:-false}" == "true" ]] || return 2
+
+  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" != "true" ]]; then
+    [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]] || return 2
+    node_local_dns_capture_authoritative_hostport_snapshot \
+      "${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}" || return 1
+    node_local_dns_verify_artifact \
+      "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" || return 1
+    node_local_dns_verify_running \
+      "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}" || return 1
+    NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION="false"
+    return 0
+  fi
+
+  [[ -n "$(trim_field "${desired_target_nodes}")" ]] || return 2
+  node_local_dns_capture_authoritative_hostport_snapshot "${desired_target_nodes}" || return 1
+  if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
+    NODE_LOCAL_DNS_TARGET_NODES="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES}"
+    if ! node_local_dns_verify_artifact \
+      "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      validation_status=1
+    elif ! node_local_dns_verify_running \
+      "${NODE_LOCAL_DNS_PREVIOUS_MODE}" "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
+      validation_status=1
+    fi
+    NODE_LOCAL_DNS_TARGET_NODES="${desired_target_nodes}"
+    (( validation_status == 0 )) || return "${validation_status}"
+  fi
+  NODE_LOCAL_DNS_DEFERRED_OPERATIONAL_VALIDATION="false"
 }
 
 node_local_dns_run_probe_pod() {
@@ -16681,6 +16794,13 @@ run_dns_manifest_transaction_after_helm() {
   }
   DNS_MANIFEST_TRANSACTION_COMPLETED="true"
   PUBLIC_DATA_PLANE_RELEASED="true"
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_DNS_ONLY:-false}" == "true" ]]; then
+    # The authoritative-DNS adapter owns the DNS transaction only. NodeLocal
+    # hostPort coexistence probes create temporary Pods and therefore belong
+    # to a separate NodeLocal transaction, not this DNS write boundary.
+    log "DNS public manifest transaction completed in authoritative-DNS-only mode"
+    return 0
+  fi
   if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
     node_local_dns_snapshot_targets="${NODE_LOCAL_DNS_TARGET_NODES:-}"
   elif [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
@@ -16710,6 +16830,10 @@ verify_dns_manifest_transaction_before_commit() {
     "${DNS_MANIFEST_SNAPSHOT_FILE}" "${DNS_MANIFEST_TARGET_STATE_FILE}"; then
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_DNS_ONLY:-false}" == "true" ]]; then
+    DNS_MANIFEST_FINAL_TARGET_VERIFIED="true"
+    return 0
   fi
   if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED:-false}" == "true" ]]; then
     authoritative_target_nodes="${NODE_LOCAL_DNS_TARGET_NODES:-}"
@@ -16802,13 +16926,15 @@ restore_dns_manifest_transaction_after_helm_rollback() {
     DNS_MANIFEST_SNAPSHOT_KEEP="true"
     return 1
   fi
-  if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
-    node_local_dns_snapshot_targets="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES:-}"
-  fi
-  if ! node_local_dns_refresh_authoritative_hostport_snapshot_bounded \
-    "${node_local_dns_snapshot_targets}" "DNS manifest rollback"; then
-    DNS_MANIFEST_SNAPSHOT_KEEP="true"
-    return 1
+  if [[ "${CONTROL_PLANE_RELEASE_DOMAIN_DNS_ONLY:-false}" != "true" ]]; then
+    if [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED:-false}" == "true" ]]; then
+      node_local_dns_snapshot_targets="${NODE_LOCAL_DNS_PREVIOUS_TARGET_NODES:-}"
+    fi
+    if ! node_local_dns_refresh_authoritative_hostport_snapshot_bounded \
+      "${node_local_dns_snapshot_targets}" "DNS manifest rollback"; then
+      DNS_MANIFEST_SNAPSHOT_KEEP="true"
+      return 1
+    fi
   fi
   DNS_MANIFEST_TRANSACTION_COMPLETED="false"
   DNS_MANIFEST_ROLLBACK_RESTORED="true"
@@ -18502,10 +18628,30 @@ wait_for_post_deploy_robustness() {
   done
 }
 
+run_control_plane_atomic_domain_gate() {
+  local release_status=0
+
+  CONTROL_PLANE_RELEASE_PHASE="atomic-release-domain"
+  if control_plane_release_run_atomic_domain_release; then
+    CONTROL_PLANE_RELEASE_PHASE="complete"
+    log "atomic release-domain transaction complete"
+    return 0
+  else
+    release_status=$?
+  fi
+  log_stderr "atomic release-domain transaction stopped with status=${release_status}"
+  return "${release_status}"
+}
+
 main() {
   FUGUE_RELEASE_NAME="${FUGUE_RELEASE_NAME:-fugue}"
   FUGUE_NAMESPACE="${FUGUE_NAMESPACE:-fugue-system}"
   FUGUE_HELM_CHART_PATH="${FUGUE_HELM_CHART_PATH:-deploy/helm/fugue}"
+  # From this point onward, only the fixed release-domain dispatcher may own
+  # a production mutation or rollback. Set the guard before installing EXIT
+  # and signal handlers so configuration/read-only failures cannot fall back
+  # to the legacy cross-domain recovery path.
+  CONTROL_PLANE_RELEASE_DOMAIN_GATE_ACTIVE="true"
   CONTROL_PLANE_RELEASE_PHASE="initializing-release-evidence"
   trap cleanup_tmp_artifacts EXIT
   trap 'handle_control_plane_release_signal HUP' HUP
@@ -19175,519 +19321,32 @@ PY
     FUGUE_SMOKE_URL="https://${FUGUE_API_PUBLIC_DOMAIN}/healthz"
   fi
   require_env FUGUE_SMOKE_URL
-  run_release_preflight
-
   command_exists helm || fail "helm is not installed"
-  effective_cluster_join_registry_endpoint="${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
-  if [[ -z "${effective_cluster_join_registry_endpoint}" && "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
-    effective_cluster_join_registry_endpoint="http://127.0.0.1:5000"
-  fi
   wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
   helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
-  validate_control_plane_singleton_anchor
-  if ! validate_live_api_backup_coordination_ready; then
-    fail "live API replicas are not yet Lease-aware; complete the coordination bootstrap release before running this release script"
+  if ! PREVIOUS_REVISION="$(helm_current_revision)"; then
+    fail "failed to detect current Helm revision"
   fi
-  prepare_release_domains
-  validate_control_plane_release_job_budget
-  validate_node_local_dns_release_budget_pre_mutation
-  authoritative_dns_dig_preflight || fail "authoritative DNS DiG wire attestation failed before release mutation"
-  CONTROL_PLANE_RELEASE_PHASE="pre-mutation-state-capture"
-  PREVIOUS_REVISION="$(helm_current_revision)"
-  [[ -n "${PREVIOUS_REVISION}" ]] || fail "failed to detect current Helm revision"
-  if ! write_control_plane_release_pre_state_evidence; then
-    fail "failed to atomically persist release-pre-state.json before the first release mutation"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="coordination-acquire"
-  CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="true"
-  if ! acquire_control_plane_backup_coordination_lease; then
-    fail "control-plane backup coordination Lease acquisition failed before release mutation"
-  fi
-  if ! drain_control_plane_backup_before_schema_rollout; then
-    fail "control-plane backup did not reach a complete release point before release mutation"
-  fi
-  require_control_plane_backup_coordination_or_abort "first release mutation"
-  CONTROL_PLANE_RELEASE_PHASE="fenced-pre-mutation-state-checkpoint"
-  if ! capture_control_plane_release_state \
-    "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}" fenced; then
-    CONTROL_PLANE_RELEASE_FAILURE_PHASE="fenced-pre-mutation-state-checkpoint"
-    fail "could not capture the fenced release state before the first host or Kubernetes workload mutation"
-  fi
-  if ! control_plane_release_fenced_checkpoint_matches \
-    "${CONTROL_PLANE_RELEASE_PRE_STATE_FILE}" \
-    "${CONTROL_PLANE_RELEASE_FENCED_STATE_FILE}"; then
-    CONTROL_PLANE_RELEASE_FAILURE_PHASE="fenced-pre-mutation-state-drift"
-    fail "release state drifted between pre-state capture and the fenced pre-mutation checkpoint"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="pre-helm-recovery-fence-arm"
-  if ! arm_control_plane_release_recovery_fence \
-    "pre-helm-non-revertible-mutation"; then
-    CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE}"
-    fail "could not durably arm the recovery fence before the first non-Helm mutation"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="pre-helm-non-revertible-mutation"
+  [[ "${PREVIOUS_REVISION}" =~ ^[1-9][0-9]*$ ]] || fail "current Helm revision is not a positive integer"
 
-  # Everything below may mutate a host, a Kubernetes object, or a release
-  # artifact. The shared backup/release Lease is renewed until EXIT, including
-  # all forward gates, rollback paths, and release safety watch windows.
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "host time synchronization kubectl" ensure_host_time_sync
-  run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "control-plane observability host mutation" ensure_control_plane_observability
-  run_release_long_command "${FUGUE_RELEASE_HOST_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "registry mirror host mutation" ensure_local_registry_mirror_config \
-    "${FUGUE_REGISTRY_PULL_BASE}" "${effective_cluster_join_registry_endpoint}"
-  if node_local_dns_split_release_enabled; then
-    [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] || fail "image-cache cannot be disabled while a preserved offline node exists"
-    daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache" || fail "live image-cache DaemonSet is required while a preserved offline node exists"
+  local release_status=0
+  if run_control_plane_atomic_domain_gate; then
+    return 0
+  else
+    release_status=$?
   fi
-  require_control_plane_backup_coordination_or_abort "pre-deploy robustness baseline"
-  capture_pre_deploy_robustness_baseline
-
-  CONTROL_PLANE_RELEASE_PHASE="pre-helm"
-  if ! run_control_plane_rollback_image_preflight; then
-    fail "rollback image preflight failed"
-  fi
-
-  log "upgrading ${FUGUE_RELEASE_NAME} in namespace ${FUGUE_NAMESPACE}"
-  log "api image: ${FUGUE_API_IMAGE_REPOSITORY}:${FUGUE_API_IMAGE_TAG}"
-  log "controller image: ${FUGUE_CONTROLLER_IMAGE_REPOSITORY}:${FUGUE_CONTROLLER_IMAGE_TAG}"
-  log "strict drain: mode=${FUGUE_STRICT_DRAIN_MODE} timeout=${FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS}s min_ready=${FUGUE_STRICT_DRAIN_MIN_READY_SECONDS}s agent=${FUGUE_DRAIN_AGENT_IMAGE_REPOSITORY}:${FUGUE_DRAIN_AGENT_IMAGE_TAG}"
-  log "telemetry agent image: ${FUGUE_TELEMETRY_AGENT_IMAGE_REPOSITORY}:${FUGUE_TELEMETRY_AGENT_IMAGE_TAG} enabled=${FUGUE_TELEMETRY_AGENT_ENABLED} observability=${FUGUE_OBSERVABILITY_ENABLED} retention=${FUGUE_OBSERVABILITY_RETENTION}"
-  log "telemetry Kubernetes logs: enabled=${FUGUE_OBSERVABILITY_KUBERNETES_LOGS_ENABLED} namespaces=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACES:-${FUGUE_NAMESPACE}} prefixes=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_NAMESPACE_PREFIXES:-<none>} poll=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_POLL_INTERVAL} tail=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_TAIL_LINES} max_lines=${FUGUE_OBSERVABILITY_KUBERNETES_LOG_MAX_LINES_PER_CYCLE} queue=${FUGUE_OBSERVABILITY_QUEUE_SIZE} batch=${FUGUE_OBSERVABILITY_BATCH_SIZE} memory_limit_bytes=${FUGUE_OBSERVABILITY_MEMORY_LIMIT_BYTES}"
-  log "observability metrics plane: enabled=${FUGUE_OBSERVABILITY_METRICS_ENABLED} image=${FUGUE_OBSERVABILITY_METRICS_IMAGE_REPOSITORY}:${FUGUE_OBSERVABILITY_METRICS_IMAGE_TAG} retention=${FUGUE_OBSERVABILITY_METRICS_RETENTION}"
-  log "observability alerts plane: enabled=${FUGUE_OBSERVABILITY_ALERTS_ENABLED} image=${FUGUE_OBSERVABILITY_ALERTS_IMAGE_REPOSITORY}:${FUGUE_OBSERVABILITY_ALERTS_IMAGE_TAG} webhook=$([[ -n "$(trim_field "${FUGUE_OBSERVABILITY_ALERTS_WEBHOOK_URL}")" ]] && printf configured || printf '<none>')"
-  log "observability logs plane: enabled=${FUGUE_OBSERVABILITY_LOGS_ENABLED} image=${FUGUE_OBSERVABILITY_LOGS_IMAGE_REPOSITORY}:${FUGUE_OBSERVABILITY_LOGS_IMAGE_TAG} retention=${FUGUE_OBSERVABILITY_LOGS_RETENTION}"
-  log "observability analytics plane: enabled=${FUGUE_OBSERVABILITY_ANALYTICS_ENABLED} image=${FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_REPOSITORY}:${FUGUE_OBSERVABILITY_ANALYTICS_IMAGE_TAG} retention=${FUGUE_OBSERVABILITY_ANALYTICS_RETENTION}"
-  log "observability exporter secret: $([[ -n "$(trim_field "${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}")" ]] && printf '%s' "${FUGUE_OBSERVABILITY_EXPORTER_SECRET_NAME}" || printf '<none>')"
-  log "image cache image: ${FUGUE_IMAGE_CACHE_IMAGE_REPOSITORY}:${FUGUE_IMAGE_CACHE_IMAGE_TAG} enabled=${FUGUE_IMAGE_CACHE_ENABLED}"
-  log "edge image: ${FUGUE_EDGE_IMAGE_REPOSITORY}:${FUGUE_EDGE_IMAGE_TAG} enabled=${FUGUE_EDGE_ENABLED} edge_group_id=${FUGUE_EDGE_GROUP_ID:-<empty>}"
-  log "edge caddy: enabled=${FUGUE_EDGE_CADDY_ENABLED} listen=${FUGUE_EDGE_CADDY_LISTEN_ADDR} tls_mode=${FUGUE_EDGE_CADDY_TLS_MODE} public_hostports=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORTS_ENABLED} http=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTP} https=${FUGUE_EDGE_CADDY_PUBLIC_HOSTPORT_HTTPS} static_tls=${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED} static_tls_secret=${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME:-<none>}"
-  log "control-plane postgres: legacy_enabled=${FUGUE_POSTGRES_ENABLED} cnpg_enabled=${FUGUE_CONTROL_PLANE_POSTGRES_ENABLED} cnpg_use_for_api=${FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API} cnpg_instances=${FUGUE_CONTROL_PLANE_POSTGRES_INSTANCES}"
-  log "control-plane singletons: enabled=${FUGUE_CONTROL_PLANE_SINGLETONS_ENABLED} selector=${FUGUE_CONTROL_PLANE_SINGLETON_NODE_SELECTOR:-<none>}"
-  log "edge scheduling: primary_country=${FUGUE_EDGE_NODE_SELECTOR_COUNTRY_CODE:-<none>} public_ipv4=${FUGUE_EDGE_PUBLIC_IPV4:-<none>} extra_groups=${FUGUE_EDGE_EXTRA_GROUPS:-<none>}"
-  log "previous Helm revision: ${PREVIOUS_REVISION}"
-  log "registry push base: ${FUGUE_REGISTRY_PUSH_BASE}"
-  log "registry pull base: ${FUGUE_REGISTRY_PULL_BASE}"
-  log "cluster join registry endpoint: ${FUGUE_CLUSTER_JOIN_REGISTRY_ENDPOINT}"
-  log "cluster join server fallbacks: ${FUGUE_CLUSTER_JOIN_SERVER_FALLBACKS:-<none>}"
-  log "cluster join k3s version: ${FUGUE_CLUSTER_JOIN_K3S_VERSION:-<none>}"
-  log "cluster join mesh provider: ${FUGUE_CLUSTER_JOIN_MESH_PROVIDER:-<none>}"
-  log "cluster join mesh login server: ${FUGUE_CLUSTER_JOIN_MESH_LOGIN_SERVER:-<none>}"
-  log "cluster join mesh auth key: $([[ -n "$(trim_field "${FUGUE_CLUSTER_JOIN_MESH_AUTH_KEY:-}")" ]] && printf configured || printf '<none>')"
-  log "app base domain: ${FUGUE_APP_BASE_DOMAIN}"
-  log "custom domain base domain: dns.${FUGUE_APP_BASE_DOMAIN}"
-  log "dns shadow: enabled=${FUGUE_DNS_ENABLED} zone=${FUGUE_DNS_ZONE} extra_zones=${FUGUE_DNS_EXTRA_ZONES:-<none>} answer_ips=${FUGUE_DNS_ANSWER_IPS:-<none>} route_a_answer_ips=${FUGUE_DNS_ROUTE_A_ANSWER_IPS:-<none>} nameservers=${FUGUE_DNS_NAMESERVERS:-<none>} static_records=$([[ -n "$(trim_field "${FUGUE_DNS_STATIC_RECORDS_JSON}")" ]] && printf enabled || printf disabled) platform_routes=$([[ -n "$(trim_field "${FUGUE_PLATFORM_ROUTES_JSON}")" ]] && printf enabled || printf disabled) edge_quality_ranking=${FUGUE_EDGE_QUALITY_RANKING_MODE} public_hostports=${FUGUE_DNS_PUBLIC_HOSTPORTS_ENABLED} container=${FUGUE_DNS_CONTAINER_NAME} udp=${FUGUE_DNS_UDP_ADDR}->${FUGUE_DNS_UDP_CONTAINER_PORT} tcp=${FUGUE_DNS_TCP_ADDR}->${FUGUE_DNS_TCP_CONTAINER_PORT}"
-  log "dns scheduling: primary_country=${FUGUE_DNS_NODE_SELECTOR_COUNTRY_CODE:-<none>} extra_groups=${FUGUE_DNS_EXTRA_GROUPS:-<none>}"
-  log "mesh recovery: enabled=${FUGUE_MESH_RECOVERY_ENABLED} generation=${FUGUE_MESH_RECOVERY_GENERATION} mode=${FUGUE_MESH_RECOVERY_MODE} login_server=${FUGUE_MESH_RECOVERY_LOGIN_SERVER:-<none>}"
-  log "shared workspace storage: enabled=${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED} class=${FUGUE_SHARED_WORKSPACE_STORAGE_CLASS}"
-
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "primary node recovery kubectl" recover_primary_node_if_needed
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "primary disk-pressure recovery kubectl" relieve_primary_disk_pressure
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "primary PostgreSQL recovery kubectl" recover_primary_postgres_if_needed
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "primary mesh recovery kubectl" restore_primary_mesh_network_if_needed
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "CoreDNS scheduling kubectl" ensure_coredns_multinode_scheduling
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "DNS public hostPort validation kubectl" validate_dns_public_host_port_targets
-  if ! run_node_local_dns_phase_with_state_handoff \
-    "pre-Helm preparation" prepare_node_local_dns_helm_args; then
-    fail "NodeLocal DNSCache pre-Helm preparation failed"
-  fi
-  # The initial reserve check runs before the exact live NodeLocal state is
-  # decoded. Revalidate after that read-only handoff and before a teardown can
-  # mutate the previous cohort, including desired-disabled/live-enabled paths.
-  validate_control_plane_release_rollback_reserve
-  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" && "${FUGUE_NODE_LOCAL_DNS_MODE}" == "shadow" ]]; then
-    if ! run_node_local_dns_whole_phase \
-      "shadow host preflight" node_local_dns_shadow_host_preflight "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
-      fail "NodeLocal DNSCache shadow host preflight failed before Helm mutation"
-    fi
-  elif [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" != "true" && "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
-    if ! run_node_local_dns_whole_phase \
-      "pre-Helm safe removal" node_local_dns_delete_daemonset_safely "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
-      fail "NodeLocal DNSCache could not be safely removed before deleting its upstream resources"
-    fi
-  fi
-
-  run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "chart CRD kubectl" apply_chart_crds
-
-  if [[ "${FUGUE_EDGE_CADDY_STATIC_TLS_ENABLED}" == "true" ]]; then
-    log "checking edge static TLS secret ${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME} for the 7-day release safety horizon"
-    if ! run_release_long_command "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-      "edge static TLS preflight" bash ./scripts/issue_fugue_app_wildcard_tls.sh \
-      --namespace "${FUGUE_NAMESPACE}" \
-      --secret-name "${FUGUE_EDGE_CADDY_STATIC_TLS_SECRET_NAME}" \
-      --domain "${FUGUE_APP_BASE_DOMAIN}" \
-      --check-only \
-      --renew-before-days 7; then
-      fail "edge static TLS certificate preflight failed"
-    fi
-  fi
-
-  write_upgrade_override_values
-  build_dns_helm_set_args
-  if ! prepare_helm_post_renderer; then
-    fail "cannot prepare the Helm post-renderer from bounded live deployment state"
-  fi
-  if ! prepare_dns_manifest_transaction; then
-    fail "DNS manifest transaction preflight failed before Helm mutation"
-  fi
-  if node_local_dns_split_release_enabled; then
-    [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]] || fail "image-cache cannot be disabled while a preserved offline node exists"
-    daemonset_exists "${FUGUE_RELEASE_FULLNAME}-image-cache" || fail "live image-cache DaemonSet is required while a preserved offline node exists"
-    if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-      "image-cache offline guard kubectl" image_cache_prepare_offline_safe_rollout "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
-      fail "image-cache offline-node guard failed before Helm mutation"
-    fi
-    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-string imageCache.updateStrategy.type=OnDelete)
-  elif [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
-    # --reset-then-reuse-values retains the last release override. Clear the
-    # split-cohort OnDelete guard explicitly once no preserved node remains.
-    NODE_LOCAL_BUILD_PLANE_HELM_SET_ARGS+=(--set-string imageCache.updateStrategy.type=RollingUpdate)
-  fi
-  log "injecting disk-pressure toleration for primary-pinned hostPath control-plane pods"
-
-  # Do not use Helm's release-wide --wait here. It waits on every resource in
-  # the chart, including DaemonSets scheduled onto stale/NotReady nodes. That
-  # can deadlock control-plane upgrades exactly when the new API needs to clean
-  # up those stale nodes. We gate success on targeted API/controller rollout
-  # checks plus the smoke test below instead.
-  CONTROL_PLANE_RELEASE_PHASE="pre-helm-final-revision-fence"
-  control_plane_release_pre_helm_revision_unchanged ||
-    fail "Helm revision changed or became unreadable immediately before upgrade; no Helm mutation or rollback was attempted and the pre-Helm recovery fence is retained"
-  CONTROL_PLANE_RELEASE_PHASE="helm-upgrade"
-  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="true"
-  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
-  CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="false"
-  CONTROL_PLANE_RELEASE_ROLLBACK_COMPLETED="false"
-  CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="false"
-  CONTROL_PLANE_RELEASE_COMMITTED="false"
-  if ! with_frozen_control_plane_helm_upgrade_argv \
-    "${UPGRADE_OVERRIDE_VALUES_FILE}" \
-    run_release_long_command \
-    "$(( $(duration_to_seconds "${FUGUE_HELM_TIMEOUT}") + 30 ))" \
-    "Helm upgrade"; then
-    log "helm upgrade failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "helm upgrade failed"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="post-helm-validation"
-
-  if ! run_dns_manifest_transaction_after_helm; then
-    log "DNS manifest OnDelete transaction failed; attempting complete rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "DNS manifest OnDelete transaction failed"
-  fi
-
-  if [[ "${FUGUE_NODE_LOCAL_DNS_ENABLED}" == "true" ]]; then
-    if ! run_node_local_dns_phase_with_state_handoff \
-      "post-Helm reconciliation" node_local_dns_reconcile_after_helm; then
-      log "NodeLocal DNSCache rollout verification failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "NodeLocal DNSCache rollout verification failed"
-    fi
-    NODE_LOCAL_DNS_RELEASED="true"
-    if node_local_dns_split_release_enabled; then
-      if ! platform_autonomy_status_summary >/dev/null; then
-        log "NodeLocal DNSCache post-reconcile offline-preserve policy gate failed; attempting rollback"
-        rollback_release_transaction || fail "rollback failed; recovery fence retained"
-        fail "NodeLocal DNSCache post-reconcile offline-preserve policy gate failed"
-      fi
-    fi
-  elif [[ "${NODE_LOCAL_DNS_PREVIOUS_ENABLED}" == "true" ]]; then
-    if ! run_node_local_dns_whole_phase \
-      "post-Helm teardown verification" node_local_dns_verify_teardown "${NODE_LOCAL_DNS_KUBE_DNS_SERVICE_IP}"; then
-      log "NodeLocal DNSCache teardown verification failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "NodeLocal DNSCache teardown verification failed"
-    fi
-  fi
-
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "singleton deployment patch kubectl" patch_control_plane_singleton_deployments; then
-    log "singleton deployment patch failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "singleton deployment patch failed"
-  fi
-
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "unhealthy release pod cleanup kubectl" force_delete_release_pods_on_unhealthy_nodes; then
-    log "unhealthy release pod cleanup failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "unhealthy release pod cleanup failed"
-  fi
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "regional daemonset cleanup kubectl" cleanup_orphaned_regional_daemonsets; then
-    log "regional daemonset cleanup failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "regional daemonset cleanup failed"
-  fi
-
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "control-plane canary kubectl" control_plane_canary_readiness_gate; then
-    log "control-plane canary gate failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "control-plane canary gate failed"
-  fi
-
-  if ! rollout_status "${FUGUE_API_DEPLOYMENT_NAME}"; then
-    log "api rollout check failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "api rollout failed"
-  fi
-
-  if ! rollout_status "${FUGUE_CONTROLLER_DEPLOYMENT_NAME}"; then
-    log "controller rollout check failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "controller rollout failed"
-  fi
-
-  local singleton_spec=""
-  local singleton_name=""
-  local singleton_required="false"
-  for singleton_spec in \
-    "${FUGUE_REGISTRY_DEPLOYMENT_NAME}|${FUGUE_REGISTRY_ENABLED}" \
-    "${FUGUE_HEADSCALE_DEPLOYMENT_NAME}|false" \
-    "${FUGUE_POSTGRES_DEPLOYMENT_NAME}|${FUGUE_POSTGRES_ENABLED}" \
-    "${FUGUE_SHARED_WORKSPACE_NFS_DEPLOYMENT_NAME}|${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}" \
-    "${FUGUE_SHARED_WORKSPACE_PROVISIONER_DEPLOYMENT_NAME}|${FUGUE_SHARED_WORKSPACE_STORAGE_ENABLED}"; do
-    IFS='|' read -r singleton_name singleton_required <<<"${singleton_spec}"
-    if ! rollout_singleton_deployment_if_required_or_present "${singleton_name}" "${singleton_required}"; then
-      log "${singleton_name} singleton rollout check failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "${singleton_name} singleton rollout failed"
-    fi
-  done
-
-  if [[ "${FUGUE_EDGE_ENABLED}" == "true" ]]; then
-    if ! public_data_plane_daemonset_rollout_wait_required; then
-      log "skipping edge daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
-    elif ! rollout_daemonsets_by_component_prefix "edge" "edge"; then
-      log "edge rollout check failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "edge rollout failed"
-    fi
-  fi
-
-  if [[ "${FUGUE_DNS_ENABLED}" == "true" ]]; then
-    if ! public_data_plane_daemonset_rollout_wait_required; then
-      log "skipping dns daemonset rollout wait because public data-plane DaemonSet templates were preserved from live state"
-    elif ! rollout_daemonsets_by_component_prefix "dns" "dns"; then
-      log "dns rollout check failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "dns rollout failed"
-    fi
-  fi
-
-  if [[ "${FUGUE_IMAGE_CACHE_ENABLED}" == "true" ]]; then
-    if ! require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
-      log "required image-cache DaemonSet is absent or unreadable after Helm upgrade; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "required image-cache DaemonSet is unavailable"
-    fi
-    local image_cache_rollout_failed="false"
-    if node_local_dns_split_release_enabled; then
-      if ! run_release_long_command \
-        "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-        "split image-cache rollout verification" \
-        image_cache_rollout_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
-        image_cache_rollout_failed="true"
-      fi
-    elif ! image_cache_rollout_status "${FUGUE_RELEASE_FULLNAME}-image-cache"; then
-      image_cache_rollout_failed="true"
-    fi
-    if [[ "${image_cache_rollout_failed}" == "true" ]]; then
-      log "image cache rollout check failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "image cache rollout failed"
-    fi
-  fi
-
-  if [[ "${FUGUE_MESH_RECOVERY_ENABLED}" == "true" ]]; then
-    if ! require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
-      log "required mesh-recovery DaemonSet is absent or unreadable after Helm upgrade; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "required mesh-recovery DaemonSet is unavailable"
-    fi
-    if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-mesh-recovery"; then
-      log "mesh recovery rollout check failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "mesh recovery rollout failed"
-    fi
-  fi
-
-  if ! require_daemonset_present "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
-    log "required node-janitor DaemonSet is absent or unreadable after Helm upgrade; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "required node-janitor DaemonSet is unavailable"
-  fi
-  if ! rollout_daemonset_status "${FUGUE_RELEASE_FULLNAME}-node-janitor"; then
-    log "node-janitor rollout check failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "node-janitor rollout failed"
-  fi
-  if ! run_release_function_with_guarded_kubectl \
-    "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "post-node-janitor host time synchronization kubectl" ensure_host_time_sync; then
-    log "warning: host time synchronization hardening failed after the node-janitor rollout"
-  fi
-
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "builder node labeling kubectl" label_default_builder_nodes; then
-    log "builder node labeling failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "builder node labeling failed"
-  fi
-
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "Route A edge proxy synchronization kubectl" sync_route_a_edge_proxy; then
-    log "Route A edge proxy synchronization failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "Route A edge proxy synchronization failed"
-  fi
-
-  if ! retry "${FUGUE_SMOKE_RETRIES}" "${FUGUE_SMOKE_DELAY_SECONDS}" smoke_test; then
-    log "smoke test failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "smoke test failed"
-  fi
-
-  if ! wait_for_post_deploy_robustness; then
-    log "post-deploy robustness gate failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "post-deploy robustness gate failed"
-  fi
-
-  if ! wait_for_release_safety_watch_windows; then
-    log "release safety watch window failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "release safety watch window failed"
-  fi
-
-  if ! run_release_function_with_guarded_kubectl "${FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS}" \
-    "public data-plane release inspection kubectl" release_public_data_plane_if_needed; then
-    log "public data-plane release inspection failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "public data-plane release inspection failed"
-  fi
-  if node_local_dns_split_release_enabled && [[ "${PUBLIC_DATA_PLANE_RELEASED:-false}" != "true" ]]; then
-    if ! wait_for_platform_autonomy_after_public_data_plane_release; then
-      log "post-NodeLocal-DNS offline-preserve autonomy gate failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "post-NodeLocal-DNS offline-preserve autonomy gate failed"
-    fi
-  fi
-  if [[ "${PUBLIC_DATA_PLANE_RELEASED:-false}" == "true" ]]; then
-    if ! wait_for_platform_autonomy_after_public_data_plane_release; then
-      log "post-public-data-plane autonomy gate failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "post-public-data-plane autonomy gate failed"
-    fi
-    if ! wait_for_post_deploy_robustness; then
-      log "post-public-data-plane robustness gate failed; attempting rollback"
-      rollback_release_transaction || fail "rollback failed; recovery fence retained"
-      fail "post-public-data-plane robustness gate failed"
-    fi
-  fi
-
-  local current_revision
-  if ! current_revision="$(helm_current_revision)"; then
-    log "final Helm revision read failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final Helm revision read failed"
-  fi
-
-  if ! verify_dns_manifest_transaction_before_commit; then
-    log "final DNS manifest target verification failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final DNS manifest target verification failed"
-  fi
-  if ! run_node_local_dns_whole_phase \
-    "final NodeLocal DNSCache target verification" node_local_dns_verify_target_before_commit; then
-    log "final NodeLocal DNSCache target verification failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final NodeLocal DNSCache target verification failed"
-  fi
-  if ! verify_dns_manifest_transaction_snapshot_before_commit; then
-    log "DNS manifest target changed during final NodeLocal DNSCache verification; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final DNS manifest exact snapshot handoff failed"
-  fi
-  if ! run_node_local_dns_whole_phase \
-    "final NodeLocal DNSCache exact cohort handoff" node_local_dns_verify_target_snapshot_unchanged; then
-    log "NodeLocal DNSCache target changed during the final DNS verification; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final NodeLocal DNSCache exact cohort handoff failed"
-  fi
-
-  if ! finalize_dns_manifest_transaction; then
-    if [[ "${DNS_MANIFEST_TRANSACTION_REQUIRED:-false}" == "true" &&
-      ( -z "${DNS_MANIFEST_SNAPSHOT_FILE:-}" || ! -f "${DNS_MANIFEST_SNAPSHOT_FILE}" ) ]]; then
-      DNS_MANIFEST_SNAPSHOT_KEEP="true"
-      CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED="true"
-      CONTROL_PLANE_RELEASE_ROLLBACK_FAILED="true"
-      fail "DNS manifest rollback snapshot disappeared before commit; no unsafe partial rollback was attempted and the recovery fence is retained"
-    fi
-    log "DNS manifest transaction finalization failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "DNS manifest transaction finalization failed"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="final-state-capture"
-  if ! capture_control_plane_release_state \
-    "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}" final; then
-    log "final release state evidence capture failed; attempting rollback"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final release state evidence capture failed"
-  fi
-  CONTROL_PLANE_RELEASE_FINAL_REVISION="$(control_plane_release_state_revision \
-    "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}")" || {
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "final release revision evidence is invalid"
-  }
-  current_revision="${CONTROL_PLANE_RELEASE_FINAL_REVISION}"
-  CONTROL_PLANE_RELEASE_PHASE="commit-ready-evidence-publication"
-  if ! write_control_plane_release_result_evidence \
-    commit-ready 0 commit-ready "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}"; then
-    CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
-    log "commit-ready release-result.json write failed; attempting rollback before commit"
-    rollback_release_transaction || fail "rollback failed; recovery fence retained"
-    fail "commit-ready release result evidence write failed"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="complete"
-  CONTROL_PLANE_RELEASE_COMMITTED="true"
-  CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
-  CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
-  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-awaiting-lease-release"
-  if ! write_dns_manifest_release_record_after_commit; then
-    log_stderr "warning: committed DNS manifest release record could not be written; business state remains committed and no rollback was attempted" || true
-  fi
-  cleanup_finalized_dns_manifest_snapshot
-  CONTROL_PLANE_RELEASE_PHASE="post-commit-coordination-release"
-  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" != "true" ]] ||
-    ! release_control_plane_backup_coordination_lease; then
-    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
-    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-lease-release-failed"
-    fail "business state committed but the owner-CAS Lease release was not proven; success evidence was not published"
-  fi
-  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="false"
-  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed"
-  CONTROL_PLANE_RELEASE_PHASE="post-commit-success-evidence-publication"
-  if ! write_control_plane_release_result_evidence \
-    success 0 complete "${CONTROL_PLANE_RELEASE_FINAL_STATE_FILE}"; then
-    CONTROL_PLANE_RELEASE_EVIDENCE_WRITE_FAILED="true"
-    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-success-evidence-write-failed"
-    fail "post-commit success evidence write failed after the Lease was safely released; no rollback was attempted"
-  fi
-  CONTROL_PLANE_RELEASE_PHASE="complete"
-  log "upgrade complete; current Helm revision=${current_revision}"
+  return "${release_status}"
 }
+
+# The production activation is source-only and must be loaded after every
+# legacy helper it is allowed to call has been defined. Loading both fixed
+# seams before the LIB_ONLY guard keeps their callbacks available to isolated
+# tests without executing a release on import.
+# shellcheck source=scripts/lib/control_plane_release_domains.sh
+source "${REPO_ROOT}/scripts/lib/control_plane_release_domains.sh"
+# shellcheck source=scripts/lib/control_plane_release_domain_production.sh
+source "${REPO_ROOT}/scripts/lib/control_plane_release_domain_production.sh"
 
 if [[ "${FUGUE_UPGRADE_LIB_ONLY:-false}" == "true" ]]; then
   return 0 2>/dev/null || exit 0

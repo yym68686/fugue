@@ -33,7 +33,7 @@ var ErrContextPanic = errors.New("release transaction context panicked")
 func Run(
 	ctx context.Context,
 	rollbackTimeout time.Duration,
-	authorization releasedomain.TransactionAuthorization,
+	authorization releasedomain.ExecutionAuthorization,
 	adapter DomainAdapter,
 	trace Trace,
 ) error {
@@ -241,7 +241,7 @@ func safeContextErr(ctx context.Context) (resultErr error) {
 func runCommand(
 	ctx context.Context,
 	command Command,
-	authorization releasedomain.TransactionAuthorization,
+	authorization releasedomain.ExecutionAuthorization,
 	phase Phase,
 ) (resultErr error) {
 	defer func() {

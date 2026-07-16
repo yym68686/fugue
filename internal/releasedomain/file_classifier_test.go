@@ -246,12 +246,13 @@ func TestDecodeChangedFilesJSONRejectsUnsupportedStatusBeforeClassification(t *t
 }
 
 func TestInvalidEnrichedStatusMakesCLIExitOne(t *testing.T) {
+	const privateStatusSentinel = "PRIVATE-STATUS-SENTINEL-3d7c91"
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
 	changedFiles := filepath.Join(t.TempDir(), "invalid-changed-files.json")
-	if err := os.WriteFile(changedFiles, []byte(`[{"status":"R100","path":"old"}]`), 0o600); err != nil {
+	if err := os.WriteFile(changedFiles, []byte(`[{"status":"`+privateStatusSentinel+`","path":"old"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command("go", "run", "./cmd/fugue-release-domain-plan",
@@ -273,8 +274,11 @@ func TestInvalidEnrichedStatusMakesCLIExitOne(t *testing.T) {
 	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
 		t.Fatalf("CLI error = %v, output = %s", err, output)
 	}
-	if !strings.Contains(string(output), `unsupported name-status "R100"`) {
+	if !strings.Contains(string(output), "fugue-release-domain-plan: plan construction failed\n") {
 		t.Fatalf("CLI output = %s", output)
+	}
+	if strings.Contains(string(output), privateStatusSentinel) {
+		t.Fatalf("private status sentinel leaked through CLI output: %s", output)
 	}
 }
 

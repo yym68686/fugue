@@ -410,6 +410,7 @@ func currentChartRenderedOptions() RenderedOptions {
 	return RenderedOptions{
 		DefaultNamespace: "fugue-system",
 		Bindings: map[string]string{
+			"releaseName":                    "fugue",
 			"releaseNamespace":               "fugue-system",
 			"nodeLocalNamespace":             "kube-system",
 			"nodeLocalName":                  "fugue-fugue-node-local-dns",

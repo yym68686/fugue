@@ -870,7 +870,7 @@ func buildOfflineGoEnvironment(
 		"GOARM64":      "v8.0",
 		"GOENV":        "off",
 		"GOEXPERIMENT": "",
-		"GOFLAGS":      "",
+		"GOFLAGS":      "-modcacherw",
 		"GONOPROXY":    "none",
 		"GONOSUMDB":    "*",
 		"GOPRIVATE":    "",
