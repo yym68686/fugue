@@ -172,9 +172,17 @@ following match:
 - the dedicated baseline tag is absent;
 - repository variable `FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA` equals the
   exact dispatched head;
-- that head has exactly the pinned genesis parent; and
+- that head has exactly the pinned B3 parent, whose own parent is the pinned
+  genesis base; and
 - changed-file evidence equals the workflow's statically enumerated exact
-  genesis path list (no directory prefix or dynamically derived allowlist).
+  cumulative genesis path list (no directory prefix or dynamically derived
+  allowlist).
+
+The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
+ARM64 command dependency graphs before building the private evidence tools.
+Evidence generation then uses that checksum-verified download cache as an
+offline file proxy; an absent or incomplete cache remains a fail-closed
+evidence error.
 
 Genesis writes and uploads public bootstrap evidence but performs no cluster
 deployment. On success it establishes the dedicated baseline tag. Subsequent

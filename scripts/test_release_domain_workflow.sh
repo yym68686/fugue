@@ -90,13 +90,16 @@ assert_equal(
 )
 for fragment in [
   "readonly baseline_tag='fugue-control-plane-release-baseline'",
-  "readonly genesis_parent_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
+  "readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
+  "readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${fetched_ref_object_sha}" == "${remote_object}"',
   '"${remote_object}" == "${domain_base_sha}"',
   'git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"',
   '"${genesis_sha}" == "${target_sha}"',
   '"${actual_parent}" == "${genesis_parent_sha}"',
+  '"${parent_base}" == "${genesis_base_sha}"',
+  'domain_base_sha="${genesis_base_sha}"',
 ]
   fail_contract("baseline resolver is missing #{fragment.inspect}") unless resolver.fetch("run").include?(fragment)
 end
@@ -123,6 +126,16 @@ assert_equal(setup_go["uses"], "actions/setup-go@924ae3a1cded613372ab5595356fb57
 build_tools = step(deploy, "Build private release-domain tools")
 for fragment in [
   '${RUNNER_TEMP}/fugue-release-tools',
+  'for goarch in amd64 arm64; do',
+  'CGO_ENABLED=0',
+  'GOARCH="${goarch}"',
+  'GOOS=linux',
+  'GOFLAGS=-mod=readonly',
+  'go list -mod=readonly -buildvcs=false -deps ./cmd/...',
+  'go mod verify',
+  'GOPROXY=https://proxy.golang.org',
+  "'GOVCS=*:off'",
+  'git diff --exit-code -- go.mod go.sum',
   './cmd/fugue-release-domain-evidence',
   './cmd/fugue-release-domain-dispatch',
   'chmod 0700',
@@ -130,6 +143,13 @@ for fragment in [
 ]
   fail_contract("release tool build is missing #{fragment.inspect}") unless build_tools.fetch("run").include?(fragment)
 end
+fail_contract("release tool build must not preload unrelated module versions") if build_tools.fetch("run").include?("go mod download all")
+fail_contract("release tool cache validation must not disable the module proxy") if build_tools.fetch("run").include?("GOPROXY=off")
+preload_index = build_tools.fetch("run").index("go list -mod=readonly -buildvcs=false -deps ./cmd/...")
+verify_index = build_tools.fetch("run").index("go mod verify")
+evidence_build_index = build_tools.fetch("run").index("go build -trimpath -o \"${tools_dir}/fugue-release-domain-evidence\"")
+fail_contract("command dependency graphs must be preloaded, verified, then used to build evidence") unless
+  preload_index && verify_index && evidence_build_index && preload_index < verify_index && verify_index < evidence_build_index
 
 genesis = step(deploy, "Write genesis public release evidence")
 assert_equal(genesis["if"], "${{ needs.release-baseline.outputs.is_genesis == 'true' }}", "genesis evidence condition")
@@ -138,7 +158,7 @@ for fragment in [
   "write-genesis-public-evidence",
   '--ownership "${GITHUB_WORKSPACE}/deploy/release-domains/ownership-v1.yaml"',
   '--expected-head-sha "${GENESIS_SHA}"',
-  '--actual-parent-sha "${DOMAIN_BASE_SHA}"',
+  '--actual-parent-sha "${GENESIS_PARENT_SHA}"',
   '${RUNNER_TEMP}/fugue-release-domain-private',
   '${RUNNER_TEMP}/fugue-release-domain-public',
 ]
@@ -279,11 +299,16 @@ assert_equal(
 )
 for fragment in [
   "readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'",
+  "readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
+  "readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"',
   '"${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}"',
   '"${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}"',
   '"${current_base_sha}" == "${EXPECTED_BASE_SHA}"',
+  '"${EXPECTED_BASE_SHA}" == "${genesis_base_sha}"',
+  '"${target_parent}" == "${genesis_parent_sha}"',
+  '"${parent_base}" == "${genesis_base_sha}"',
   '--force-with-lease="${lease}"',
   '"${TARGET_SHA}:${baseline_ref}"',
 ]

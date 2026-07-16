@@ -76,7 +76,8 @@ jobs:
           set -euo pipefail
           readonly baseline_tag='fugue-control-plane-release-baseline'
           readonly baseline_ref="refs/tags/${baseline_tag}"
-          readonly genesis_parent_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
+          readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
+          readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
           readonly target_sha="${GITHUB_SHA}"
 
           [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]]
@@ -111,7 +112,11 @@ jobs:
               [[ "${commit}" == "${target_sha}" ]]
               [[ -z "${extra:-}" ]]
               [[ "${actual_parent}" == "${genesis_parent_sha}" ]]
-              domain_base_sha="${genesis_parent_sha}"
+              read -r parent_commit parent_base extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
+              [[ "${parent_commit}" == "${genesis_parent_sha}" ]]
+              [[ -z "${extra:-}" ]]
+              [[ "${parent_base}" == "${genesis_base_sha}" ]]
+              domain_base_sha="${genesis_base_sha}"
               baseline_ref_object_sha=''
               is_genesis='true'
               ;;
@@ -324,6 +329,36 @@ jobs:
           [[ -d "${tools_dir}" && ! -L "${tools_dir}" ]]
           [[ "$(stat -c '%a' "${tools_dir}")" == '700' ]]
           umask 077
+          for goarch in amd64 arm64; do
+            env \
+              CGO_ENABLED=0 \
+              GOARCH="${goarch}" \
+              GOOS=linux \
+              GOENV=off \
+              GOFLAGS=-mod=readonly \
+              GONOPROXY=none \
+              GONOSUMDB=none \
+              GOPRIVATE= \
+              GOPROXY=https://proxy.golang.org \
+              GOSUMDB=sum.golang.org \
+              GOTOOLCHAIN=local \
+              'GOVCS=*:off' \
+              GOWORK=off \
+              go list -mod=readonly -buildvcs=false -deps ./cmd/... >/dev/null
+          done
+          env \
+            GOENV=off \
+            GOFLAGS=-mod=readonly \
+            GONOPROXY=none \
+            GONOSUMDB=none \
+            GOPRIVATE= \
+            GOPROXY=https://proxy.golang.org \
+            GOSUMDB=sum.golang.org \
+            GOTOOLCHAIN=local \
+            'GOVCS=*:off' \
+            GOWORK=off \
+            go mod verify
+          git diff --exit-code -- go.mod go.sum
           go build -trimpath -o "${tools_dir}/fugue-release-domain-evidence" ./cmd/fugue-release-domain-evidence
           go build -trimpath -o "${tools_dir}/fugue-release-domain-dispatch" ./cmd/fugue-release-domain-dispatch
           chmod 0700 \
@@ -423,7 +458,7 @@ jobs:
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --head-sha "${DOMAIN_TARGET_SHA}" \
             --expected-head-sha "${GENESIS_SHA}" \
-            --actual-parent-sha "${DOMAIN_BASE_SHA}" \
+            --actual-parent-sha "${GENESIS_PARENT_SHA}" \
             --expected-parent-sha "${GENESIS_PARENT_SHA}"
           [[ -f "${public_evidence}" && ! -L "${public_evidence}" ]]
           [[ "$(stat -c '%a' "${public_evidence}")" == '600' ]]
@@ -842,7 +877,8 @@ jobs:
         run: |
           set -euo pipefail
           readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'
-          readonly genesis_parent_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
+          readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
+          readonly genesis_parent_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
           [[ "${EXPECTED_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
 
@@ -854,9 +890,17 @@ jobs:
 
           case "${IS_GENESIS}" in
             true)
-              [[ "${EXPECTED_BASE_SHA}" == "${genesis_parent_sha}" ]]
+              [[ "${EXPECTED_BASE_SHA}" == "${genesis_base_sha}" ]]
               [[ -z "${EXPECTED_BASE_REF_OBJECT}" ]]
               [[ "${remote_status}" == '2' ]]
+              read -r target_commit target_parent extra <<<"$(git rev-list --parents -n 1 "${TARGET_SHA}")"
+              [[ "${target_commit}" == "${TARGET_SHA}" ]]
+              [[ -z "${extra:-}" ]]
+              [[ "${target_parent}" == "${genesis_parent_sha}" ]]
+              read -r parent_commit parent_base extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
+              [[ "${parent_commit}" == "${genesis_parent_sha}" ]]
+              [[ -z "${extra:-}" ]]
+              [[ "${parent_base}" == "${genesis_base_sha}" ]]
               lease="${baseline_ref}:"
               ;;
             false)

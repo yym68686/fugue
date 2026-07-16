@@ -218,8 +218,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	for _, required := range []string{
 		"fugue-control-plane-release-baseline",
 		"723116882214ae9efeaee0877bb378d0db2dcea7",
+		"8b4bdc2a2b443be6d1244f9b4739cd0be1313d71",
 		`"${fetched_ref_object_sha}" == "${remote_object}"`,
 		`"${remote_object}" == "${domain_base_sha}"`,
+		`"${actual_parent}" == "${genesis_parent_sha}"`,
+		`"${parent_base}" == "${genesis_base_sha}"`,
+		`domain_base_sha="${genesis_base_sha}"`,
 		"git merge-base --is-ancestor",
 	} {
 		if !strings.Contains(domainBaseline.Run, required) {
@@ -320,6 +324,16 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	buildTools := workflowStepByName(t, deploy, "Build private release-domain tools")
 	for _, required := range []string{
 		"${RUNNER_TEMP}/fugue-release-tools",
+		"for goarch in amd64 arm64; do",
+		"CGO_ENABLED=0",
+		`GOARCH="${goarch}"`,
+		"GOOS=linux",
+		"GOFLAGS=-mod=readonly",
+		"go list -mod=readonly -buildvcs=false -deps ./cmd/...",
+		"go mod verify",
+		"GOPROXY=https://proxy.golang.org",
+		"'GOVCS=*:off'",
+		"git diff --exit-code -- go.mod go.sum",
 		"./cmd/fugue-release-domain-evidence",
 		"./cmd/fugue-release-domain-dispatch",
 		"chmod 0700",
@@ -327,6 +341,18 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		if !strings.Contains(buildTools.Run, required) {
 			t.Fatalf("deploy release tool build must contain %q", required)
 		}
+	}
+	if strings.Contains(buildTools.Run, "go mod download all") {
+		t.Fatal("deploy release tool build must not preload unrelated module versions")
+	}
+	if strings.Contains(buildTools.Run, "GOPROXY=off") {
+		t.Fatal("deploy release tool cache validation must not disable the module proxy")
+	}
+	preloadIndex := strings.Index(buildTools.Run, "go list -mod=readonly -buildvcs=false -deps ./cmd/...")
+	verifyIndex := strings.Index(buildTools.Run, "go mod verify")
+	evidenceBuildIndex := strings.Index(buildTools.Run, `go build -trimpath -o "${tools_dir}/fugue-release-domain-evidence"`)
+	if preloadIndex < 0 || verifyIndex < 0 || evidenceBuildIndex < 0 || preloadIndex >= verifyIndex || verifyIndex >= evidenceBuildIndex {
+		t.Fatal("deploy must preload and verify both command dependency graphs before building evidence")
 	}
 	genesisEvidence := workflowStepByName(t, deploy, "Write genesis public release evidence")
 	if got, want := genesisEvidence.If, "${{ needs.release-baseline.outputs.is_genesis == 'true' }}"; got != want {
@@ -336,7 +362,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"write-genesis-public-evidence",
 		`--ownership "${GITHUB_WORKSPACE}/deploy/release-domains/ownership-v1.yaml"`,
 		`--expected-head-sha "${GENESIS_SHA}"`,
-		`--actual-parent-sha "${DOMAIN_BASE_SHA}"`,
+		`--actual-parent-sha "${GENESIS_PARENT_SHA}"`,
 	} {
 		if !strings.Contains(genesisEvidence.Run, required) {
 			t.Fatalf("genesis evidence command must contain %q", required)
@@ -553,6 +579,11 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	}
 	for _, required := range []string{
 		"refs/tags/fugue-control-plane-release-baseline",
+		"723116882214ae9efeaee0877bb378d0db2dcea7",
+		"8b4bdc2a2b443be6d1244f9b4739cd0be1313d71",
+		`"${EXPECTED_BASE_SHA}" == "${genesis_base_sha}"`,
+		`"${target_parent}" == "${genesis_parent_sha}"`,
+		`"${parent_base}" == "${genesis_base_sha}"`,
 		`"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"`,
 		`"${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}"`,
 		`"${current_base_sha}" == "${EXPECTED_BASE_SHA}"`,
