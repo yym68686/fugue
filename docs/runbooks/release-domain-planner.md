@@ -197,6 +197,44 @@ creating a new session. The executor keeps their process-group leader anchored,
 rejects a successful callback that leaves a same-group descendant, and kills
 the anchored group before it can be reaped or its PGID reused.
 
+Boundary B also defines a dormant transaction authorization envelope and
+adapter state machine. The persisted envelope contains its own API identity,
+the complete immutable plan snapshot, a duplicate plan digest, and the expected
+single domain. Decoding requires the caller to supply the trusted plan digest
+and expected domain independently; the envelope digest, nested plan digest,
+caller digest, envelope domain, nested selected domain, every domain evidence
+slice, and caller domain must all agree. The decoder rejects non-canonical
+SHA-256 text, unknown/duplicate/missing JSON fields, null aliases, malformed
+Unicode, trailing values, oversized input, and every result except exactly one
+`single` domain. It also reconstructs the plan from the original file,
+rendered-object, and digest evidence, so recomputing a self-digest over forged
+derived outcome fields does not authorize a transaction.
+
+`internal/releaseadapter` accepts only the opaque authorization returned by
+that decoder and one already-selected, complete adapter. It validates all four
+commands before `prepare`, and the interface contract makes `prepare` and
+`verify` read-only. A prepare failure performs no rollback. Immediately before
+the sole `apply` call the runner crosses the write boundary; from then through
+the final success record, any command, context, panic, or trace failure invokes
+`rollback` exactly once under a fresh bounded context. Rollback failure is
+joined with the original failure and is never retried.
+
+The runner can persist a secret-free JSONL trace in a freshly created `0700`
+directory and exact `0600` regular file. Each fixed enum event contains only a
+sequence, domain, and plan digest, is fsynced before the call succeeds, and is
+bound to the originally opened file identity. A non-closing pre-commit barrier
+revalidates durability, identity, and permissions while preserving the ability
+to record a rollback. After one final context check, the fsynced
+`transaction/succeeded` event is the linearization point; a later cancellation
+does not create a contradictory rollback. The owner closes the trace after the
+runner returns, with identity/mode errors retained across repeated closes.
+Command argv, stdout/stderr, errors, environment, manifests, and secrets are
+excluded. This package has no registry, `init`, production adapter, dispatcher,
+or production import; its fake commands exercise the transaction matrix only in
+tests. Signal ownership, real adapters, reverse-render rollback ownership proof,
+workflow evidence, and the first pre-write production call remain one Boundary
+C activation change.
+
 The built binary exits `0` for `zero` or `single`, `2` for the expected blocked
 results `multiple` or `unknown`, and `1` for invalid CLI/input-file framing. A
 blocked plan is written to the requested output (or stdout) before the binary
@@ -224,10 +262,11 @@ proves all of the following by command trace and before/after object identity:
 ## Current integration boundary
 
 Boundary B now defines the unique real Helm argument builder, the private
-three-render executor, the canonicalizer, and revision-bound changed-file
-evidence. These seams remain unreachable from the default upgrade `main`; they
-acquire neither the existing global mutex nor the control-plane backup Lease and
-perform no production write.
+three-render executor, the canonicalizer, revision-bound changed-file evidence,
+the strict transaction envelope, and the fake-command adapter state machine.
+These seams remain unreachable from the default upgrade `main`; they acquire
+neither the existing global mutex nor the control-plane backup Lease and perform
+no production write.
 
 There is still no production domain dispatcher, real transaction adapter,
 rollback ownership proof, workflow evidence upload, bootstrap authorization,
