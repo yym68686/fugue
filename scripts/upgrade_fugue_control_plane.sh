@@ -375,6 +375,7 @@ CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
 CONTROL_PLANE_BACKUP_COORDINATION_WAIT_DEADLINE=0
 CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
 CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
+CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL=""
 CONTROL_PLANE_BACKUP_COORDINATION_ABORTING="false"
 CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
 CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS="false"
@@ -389,6 +390,15 @@ CONTROL_PLANE_RELEASE_PENDING_SIGNAL=""
 CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS="0"
 CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
 CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR=""
+CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE="false"
+CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS="false"
+CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="false"
+CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING="false"
+CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING="false"
+CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING="false"
+CONTROL_PLANE_RELEASE_EXIT_CLEANUP_IN_PROGRESS="false"
 CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0
 CONTROL_PLANE_RELEASE_PHASE="initialization"
 CONTROL_PLANE_RELEASE_FAILURE_PHASE=""
@@ -474,12 +484,160 @@ control_plane_release_recovery_active() {
     "${CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS:-false}" == "true" ]]
 }
 
+control_plane_release_exit_cleanup_active() {
+  local function_name=""
+
+  [[ "${CONTROL_PLANE_RELEASE_EXIT_CLEANUP_IN_PROGRESS:-false}" == "true" ]] && return 0
+  # A signal trap can run after cleanup_tmp_artifacts has been entered but
+  # before its first assignment is executed. The call stack is already stable
+  # in that window, so use it as the non-reentrant boundary as well.
+  for function_name in "${FUNCNAME[@]}"; do
+    [[ "${function_name}" == "cleanup_tmp_artifacts" ]] && return 0
+  done
+  return 1
+}
+
+control_plane_backup_coordination_parent_context() {
+  [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID:-}" &&
+    "${BASHPID:-$$}" == "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID}" &&
+    "${BASH_SUBSHELL:-0}" == "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL:-0}" ]]
+}
+
+clear_active_control_plane_release_command_registration() {
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR=""
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE="false"
+  CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+}
+
+mark_control_plane_release_command_termination_unproven() {
+  local failure_phase="${CONTROL_PLANE_RELEASE_PHASE:-release-command-termination}"
+
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
+  if [[ -z "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE:-}" ]]; then
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE="${failure_phase}"
+  fi
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="command-termination-unproven"
+  if [[ -z "${CONTROL_PLANE_RELEASE_FAILURE_PHASE:-}" ]]; then
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE="${failure_phase}"
+  fi
+  log_stderr "active release command termination was not proven; preserving the recovery fence and refusing concurrent rollback"
+}
+
+mark_control_plane_release_committed_lease_unsafe() {
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED="true"
+  [[ -n "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE:-}" ]] ||
+    CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE="${CONTROL_PLANE_RELEASE_PHASE:-post-commit}"
+  CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION="committed-lease-unsafe"
+  if [[ -z "${CONTROL_PLANE_RELEASE_FAILURE_PHASE:-}" ]]; then
+    CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE:-post-commit}"
+  fi
+}
+
+control_plane_backup_coordination_abort_signal_is_unsafe() {
+  local state=""
+  local renewer_alive="false"
+
+  [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]] || return 1
+  state="$(control_plane_backup_coordination_health_state 2>/dev/null || true)"
+  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] &&
+    kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
+    renewer_alive="true"
+  fi
+  if [[ "${state}" == "healthy" || "${state}" == "degraded" ]] &&
+    [[ "${renewer_alive}" == "true" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+prepare_control_plane_backup_abort_state_for_dispatch() {
+  local forced="${1:-false}"
+
+  if [[ "${forced}" != "true" ]] &&
+    ! control_plane_backup_coordination_abort_signal_is_unsafe; then
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
+    mark_control_plane_release_committed_lease_unsafe
+  elif [[ "${CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED:-false}" == "true" &&
+    -n "${PREVIOUS_REVISION:-}" ]]; then
+    CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="true"
+  fi
+}
+
+dispatch_pending_control_plane_release_command_signal() {
+  local pending_release_signal=""
+  local release_signal_pending="false"
+  local backup_abort_pending="false"
+  local backup_abort_forced_pending="false"
+
+  # Flip both registration transitions before sampling pending flags. Signals
+  # before the final assignment are recorded for the snapshot below; signals
+  # after it execute their normal handler immediately instead of being lost.
+  CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS="false"
+  CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+  CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="false"
+  pending_release_signal="${CONTROL_PLANE_RELEASE_PENDING_SIGNAL:-}"
+  release_signal_pending="${CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING:-false}"
+  backup_abort_pending="${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING:-false}"
+  backup_abort_forced_pending="${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING:-false}"
+  CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING="false"
+  CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING="false"
+  CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING="false"
+  # Persist the non-exiting effects of a pending Lease abort before a pending
+  # TERM/HUP/INT handler can exit nonlocally and skip the USR1 handler.
+  if [[ "${backup_abort_pending}" == "true" ]]; then
+    prepare_control_plane_backup_abort_state_for_dispatch "${backup_abort_forced_pending}"
+  fi
+  if [[ "${release_signal_pending}" == "true" ]]; then
+    handle_control_plane_release_signal "${pending_release_signal}"
+  fi
+  if [[ "${backup_abort_pending}" == "true" ]]; then
+    handle_control_plane_backup_coordination_abort "${backup_abort_forced_pending}"
+  fi
+}
+
+cleanup_control_plane_release_command_gate() {
+  local gate_dir="$1"
+  local cleanup_status=0
+  local cleanup_owns_reap_transition="false"
+
+  [[ -n "${gate_dir}" ]] || return 0
+  # Setup failures can reach cleanup before a launch/reap transition exists.
+  # Own a temporary reap transition so a signal between registration removal
+  # and rm cannot exit with the only private gate pathname already forgotten.
+  if [[ "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS:-false}" != "true" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" != "true" ]]; then
+    CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="true"
+    cleanup_owns_reap_transition="true"
+  fi
+  exec 18>&-
+  exec 19>&-
+  # Revoke every signal-visible PID/PGID before a fallible filesystem cleanup.
+  # REAP_IN_PROGRESS remains set until dispatch, so a trap cannot observe the
+  # registration half-cleared or target a group whose leader was reaped.
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}" == "${gate_dir}" ]]; then
+    clear_active_control_plane_release_command_registration
+  fi
+  if ! rm -rf "${gate_dir}"; then
+    log_stderr "could not remove private release command gate: ${gate_dir}"
+    cleanup_status=126
+  fi
+  if [[ "${cleanup_owns_reap_transition}" == "true" ]]; then
+    dispatch_pending_control_plane_release_command_signal
+  fi
+  return "${cleanup_status}"
+}
+
 prepare_release_command_in_dedicated_group() {
   local output_pid_var="$1"
   local output_pgid_var="$2"
   local output_gate_dir_var="$3"
   local absolute_deadline_millis="$4"
-  shift 4
+  local lease_aware="$5"
+  shift 5
   local started_pid=""
   local started_pgid=""
   local actual_pgid=""
@@ -488,30 +646,70 @@ prepare_release_command_in_dedicated_group() {
   local attempt=0
   local prepared_gate_dir=""
   local gate_fifo=""
+  local finish_fifo=""
   local deadline_file=""
+  local command_status_file=""
+  local command_status_temporary=""
   local gate_value=""
   local now_millis=""
+  local gate_parent=""
+  local gate_template=""
+  local dispatch_status=0
 
   (( $# > 0 )) || return 2
   [[ "${absolute_deadline_millis}" =~ ^[1-9][0-9]*$ ]] || return 2
-  prepared_gate_dir="$(mktemp -d)" || return 126
-  gate_fifo="${prepared_gate_dir}/start"
-  deadline_file="${prepared_gate_dir}/deadline-millis"
-  if ! mkfifo "${gate_fifo}"; then
-    rm -rf "${prepared_gate_dir}"
+  [[ "${lease_aware}" == "true" || "${lease_aware}" == "false" ]] || return 2
+  [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" &&
+    -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID:-}" &&
+    -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}" &&
+    "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE:-false}" == "false" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS:-false}" == "false" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS:-false}" == "false" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" == "false" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING:-false}" == "false" &&
+    "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING:-false}" == "false" ]] || return 126
+  if { true <&18; } 2>/dev/null || { true <&19; } 2>/dev/null; then
     return 126
   fi
-  if { true <&19; } 2>/dev/null; then
-    rm -rf "${prepared_gate_dir}"
+  gate_parent="${TMPDIR:-/tmp}"
+  if [[ "${gate_parent}" == "/" ]]; then
+    gate_template="/fugue-release-command.XXXXXX"
+  else
+    gate_template="${gate_parent%/}/fugue-release-command.XXXXXX"
+  fi
+  if ! CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR="$(
+    umask 077
+    mktemp -d "${gate_template}"
+  )"; then
+    clear_active_control_plane_release_command_registration
+    return 126
+  fi
+  prepared_gate_dir="${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}"
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE="${lease_aware}"
+  gate_fifo="${prepared_gate_dir}/start"
+  finish_fifo="${prepared_gate_dir}/finish"
+  deadline_file="${prepared_gate_dir}/deadline-millis"
+  command_status_file="${prepared_gate_dir}/command-status"
+  command_status_temporary="${prepared_gate_dir}/command-status.tmp"
+  if ! (umask 077; mkfifo "${gate_fifo}" "${finish_fifo}"); then
+    cleanup_control_plane_release_command_gate "${prepared_gate_dir}"
+    return 126
+  fi
+  if ! exec 18<>"${finish_fifo}"; then
+    cleanup_control_plane_release_command_gate "${prepared_gate_dir}"
     return 126
   fi
   if ! exec 19<>"${gate_fifo}"; then
-    rm -rf "${prepared_gate_dir}"
+    cleanup_control_plane_release_command_gate "${prepared_gate_dir}"
     return 126
   fi
-  if ! printf '%s\n' "${absolute_deadline_millis}" >"${deadline_file}"; then
-    exec 19>&-
-    rm -rf "${prepared_gate_dir}"
+  if ! (
+    umask 077
+    set -o noclobber
+    printf '%s\n' "${absolute_deadline_millis}" >"${deadline_file}" &&
+      chmod 600 "${deadline_file}"
+  ); then
+    cleanup_control_plane_release_command_gate "${prepared_gate_dir}"
     return 126
   fi
   if [[ "$-" == *m* ]]; then
@@ -519,24 +717,96 @@ prepare_release_command_in_dedicated_group() {
   else
     set -m
   fi
+  CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS="true"
   # The child blocks before the requested command. The parent can therefore
   # prove the PGID and install Lease-fencing state before any mutation starts.
   (
     IFS= read -r -u 19 gate_value || exit 126
-    exec 19>&-
     local gate_action=""
+    local gate_remainder=""
     local active_pgid=""
     local active_deadline_file=""
-    IFS='|' read -r gate_action active_pgid active_deadline_file <<<"${gate_value}"
+    exec 19>&-
+    [[ "${gate_value}" == *"|"* ]] || exit 126
+    gate_action="${gate_value%%|*}"
+    gate_remainder="${gate_value#*|}"
+    [[ "${gate_remainder}" == *"|"* ]] || exit 126
+    active_pgid="${gate_remainder%%|*}"
+    active_deadline_file="${gate_remainder#*|}"
     [[ "${gate_action}" == "start" && "${active_pgid}" =~ ^[1-9][0-9]*$ && -r "${active_deadline_file}" ]] || exit 126
-    local CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID="${active_pgid}"
-    local CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE="${active_deadline_file}"
-    "$@"
+    CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID="${active_pgid}"
+    CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE="${active_deadline_file}"
+    CONTROL_PLANE_RELEASE_SUPERVISOR_ARGV=("$@")
+    CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_FILE="${command_status_file}"
+    CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_TEMPORARY="${command_status_temporary}"
+
+    run_control_plane_release_command_from_supervisor_exit() {
+      local command_status=0
+      local finish_action=""
+      local status_published="false"
+
+      trap - EXIT
+      # Bash 3.2 suppresses errexit throughout a function invoked from an
+      # if/!/&&/|| condition, and that suppression is inherited by ordinary
+      # subshells. An EXIT trap is a fresh execution context: disable errexit
+      # only in this supervisor, then explicitly re-enable it in the command
+      # child so shell functions retain their original fail-fast semantics.
+      set +e
+      (
+        # Neither the command nor a background descendant may consume the
+        # supervisor's private completion token.
+        exec 18>&-
+        set -e
+        "${CONTROL_PLANE_RELEASE_SUPERVISOR_ARGV[@]}"
+      )
+      command_status=$?
+
+      # Keep this supervisor alive after the command returns. Its PID remains
+      # the proven PGID until the parent has drained every background
+      # descendant, eliminating PID/PGID reuse before status consumption.
+      trap '' TERM
+      if (
+        umask 077
+        set -o noclobber
+        printf '%s\n' "${command_status}" >"${CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_TEMPORARY}" &&
+          chmod 600 "${CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_TEMPORARY}" &&
+          ln "${CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_TEMPORARY}" \
+            "${CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_FILE}" &&
+          rm -f "${CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_TEMPORARY}"
+      ); then
+        status_published="true"
+      else
+        rm -f "${CONTROL_PLANE_RELEASE_SUPERVISOR_STATUS_TEMPORARY}"
+      fi
+      if IFS= read -r -u 18 finish_action &&
+        [[ "${status_published}" == "true" && "${finish_action}" == "finish" ]]; then
+        exec 18>&-
+        trap - TERM
+        exit "${command_status}"
+      fi
+      exec 18>&-
+      trap - TERM
+      exit 126
+    }
+
+    # Dispatching through EXIT prevents a conditional caller of the public
+    # runner from silently disabling errexit inside a requested shell function.
+    trap run_control_plane_release_command_from_supervisor_exit EXIT
+    exit 0
   ) <&0 &
   started_pid=$!
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID="${started_pid}"
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
   started_pgid="${started_pid}"
   if [[ "${monitor_mode_was_enabled}" != "true" ]]; then
     set +m
+  fi
+  if dispatch_pending_control_plane_release_command_signal; then
+    :
+  else
+    dispatch_status=$?
+    abort_prepared_release_command "${started_pid}" "" "${prepared_gate_dir}"
+    return "${dispatch_status}"
   fi
 
   while (( attempt < 100 )); do
@@ -546,18 +816,13 @@ prepare_release_command_in_dedicated_group() {
       break
     fi
     if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
-      wait "${started_pid}" >/dev/null 2>&1 || true
-      exec 19>&-
-      rm -rf "${prepared_gate_dir}"
+      abort_prepared_release_command "${started_pid}" "" "${prepared_gate_dir}"
       return 126
     fi
     now_millis="$(release_monotonic_millis)" || now_millis=""
     if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ ]] ||
       (( now_millis >= absolute_deadline_millis - 500 )); then
-      kill -KILL "${started_pid}" >/dev/null 2>&1 || true
-      wait "${started_pid}" >/dev/null 2>&1 || true
-      exec 19>&-
-      rm -rf "${prepared_gate_dir}"
+      abort_prepared_release_command "${started_pid}" "" "${prepared_gate_dir}"
       return 124
     fi
     attempt=$((attempt + 1))
@@ -565,31 +830,171 @@ prepare_release_command_in_dedicated_group() {
   done
   if [[ -z "${process_state}" || -z "${actual_pgid}" || "${actual_pgid}" != "${started_pgid}" ]]; then
     log_stderr "refusing to start wall-bounded command without a dedicated process group: pid=${started_pid} pgid=${actual_pgid:-missing}"
-    kill -KILL "${started_pid}" >/dev/null 2>&1 || true
-    wait "${started_pid}" >/dev/null 2>&1 || true
-    exec 19>&-
-    rm -rf "${prepared_gate_dir}"
+    abort_prepared_release_command "${started_pid}" "" "${prepared_gate_dir}"
     return 126
   fi
+
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID="${started_pgid}"
 
   printf -v "${output_pid_var}" '%s' "${started_pid}"
   printf -v "${output_pgid_var}" '%s' "${started_pgid}"
   printf -v "${output_gate_dir_var}" '%s' "${prepared_gate_dir}"
 }
 
+release_command_leader_identity_state() {
+  local pid="$1"
+  local pgid="$2"
+  local output_state_var="$3"
+  local identity_mode="${4:-group}"
+  local process_state=""
+  local actual_pgid=""
+  local resolved_state="unknown"
+
+  process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+  actual_pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -n "${process_state}" && "${process_state}" != Z* &&
+    ( "${identity_mode}" == "pid" || "${actual_pgid}" == "${pgid}" ) ]]; then
+    resolved_state="live"
+  elif [[ -n "${process_state}" && -n "${actual_pgid}" ]]; then
+    resolved_state="replaced"
+  elif ! kill -0 "${pid}" >/dev/null 2>&1; then
+    resolved_state="gone"
+  fi
+  printf -v "${output_state_var}" '%s' "${resolved_state}"
+}
+
+control_plane_release_job_is_registered() {
+  local pid="$1"
+  local registered_jobs=""
+
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  registered_jobs="$(jobs -p 2>/dev/null || true)"
+  case $'\n'"${registered_jobs}"$'\n' in
+    *$'\n'"${pid}"$'\n'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_control_plane_release_group_drain() {
+  local leader_pid="$1"
+  local pgid="$2"
+  local live_member_count=""
+  local attempt=0
+
+  while (( attempt < 20 )); do
+    if ! live_member_count="$(release_process_group_live_member_count "${leader_pid}" "${pgid}")" ||
+      [[ ! "${live_member_count}" =~ ^[0-9]+$ ]]; then
+      return 126
+    fi
+    (( live_member_count == 0 )) && return 0
+    attempt=$((attempt + 1))
+    sleep 0.05
+  done
+  return 126
+}
+
+reap_control_plane_release_command_leader() {
+  local pid="$1"
+  local pgid="$2"
+  local output_status_var="$3"
+  local identity_mode="${4:-group}"
+  local identity_state="unknown"
+  local wait_status=0
+  local attempt=0
+
+  [[ "${pid}" =~ ^[1-9][0-9]*$ && "${pgid}" =~ ^[1-9][0-9]*$ ]] || return 126
+
+  # Give a normally completing supervisor a short non-blocking grace period.
+  # This also detects a stopped supervisor before entering wait(1), which has
+  # no portable timeout in Bash 3.2.
+  while (( attempt < 20 )); do
+    release_command_leader_identity_state "${pid}" "${pgid}" identity_state "${identity_mode}"
+    [[ "${identity_state}" == "live" || "${identity_state}" == "unknown" ]] || break
+    attempt=$((attempt + 1))
+    sleep 0.01
+  done
+  if [[ "${identity_state}" == "live" ]]; then
+    if [[ "${identity_mode}" == "group" ]]; then
+      kill -KILL -- "-${pgid}" >/dev/null 2>&1 || return 126
+      wait_for_control_plane_release_group_drain "${pid}" "${pgid}" || return 126
+    else
+      kill -KILL "${pid}" >/dev/null 2>&1 || return 126
+    fi
+  elif [[ "${identity_state}" == "unknown" ]] &&
+    control_plane_release_job_is_registered "${pid}"; then
+    # The Bash job table proves this is still our unreaped child even when ps
+    # cannot provide identity. It is therefore safe to terminate the cached
+    # process group before entering wait.
+    if [[ "${identity_mode}" == "group" ]]; then
+      kill -KILL -- "-${pgid}" >/dev/null 2>&1 || return 126
+      wait_for_control_plane_release_group_drain "${pid}" "${pgid}" || return 126
+    else
+      kill -KILL "${pid}" >/dev/null 2>&1 || return 126
+    fi
+  fi
+
+  attempt=0
+  while (( attempt < 20 )); do
+    if wait "${pid}" >/dev/null 2>&1; then
+      wait_status=0
+    else
+      wait_status=$?
+    fi
+    if ! control_plane_release_job_is_registered "${pid}"; then
+      # wait consumed the job (or its already-cached status). PID/PGID reuse is
+      # now possible, so stop consulting or signaling the cached identity.
+      printf -v "${output_status_var}" '%s' "${wait_status}"
+      return 0
+    fi
+    # A caught signal interrupted wait while Bash still owns the exact job.
+    # The job-table proof makes the cached group safe to terminate even if ps
+    # failed or the supervisor is stopped.
+    if [[ "${identity_mode}" == "group" ]]; then
+      kill -KILL -- "-${pgid}" >/dev/null 2>&1 || return 126
+      wait_for_control_plane_release_group_drain "${pid}" "${pgid}" || return 126
+    else
+      kill -KILL "${pid}" >/dev/null 2>&1 || return 126
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.01
+  done
+  return 126
+}
+
 abort_prepared_release_command() {
   local pid="$1"
   local pgid="$2"
   local gate_dir="$3"
+  local ignored_status=0
+  local cleanup_status=0
+  local identity_mode="group"
 
+  CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="true"
   if [[ "${pgid}" =~ ^[1-9][0-9]*$ ]]; then
     kill -KILL -- "-${pgid}" >/dev/null 2>&1 || true
+    if ! wait_for_control_plane_release_group_drain "${pid}" "${pgid}"; then
+      log_stderr "release command process group ${pgid} did not drain after abort"
+      return 126
+    fi
   elif [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+    pgid="${pid}"
+    identity_mode="pid"
     kill -KILL "${pid}" >/dev/null 2>&1 || true
   fi
-  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && wait "${pid}" >/dev/null 2>&1 || true
-  exec 19>&-
-  [[ -z "${gate_dir}" ]] || rm -rf "${gate_dir}"
+  if [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+    if ! reap_control_plane_release_command_leader \
+      "${pid}" "${pgid}" ignored_status "${identity_mode}"; then
+      log_stderr "could not prove release command supervisor ${pid} was reaped"
+      return 126
+    fi
+  fi
+  if cleanup_control_plane_release_command_gate "${gate_dir}"; then
+    cleanup_status=0
+  else
+    cleanup_status=$?
+  fi
+  dispatch_pending_control_plane_release_command_signal
+  return "${cleanup_status}"
 }
 
 release_prepared_release_command() {
@@ -600,18 +1005,32 @@ release_prepared_release_command() {
   local now_millis=""
   local deadline_file="${gate_dir}/deadline-millis"
 
-  now_millis="$(release_monotonic_millis)" || now_millis=""
-  if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ ]] ||
-    (( now_millis >= absolute_deadline_millis - 500 )); then
-    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
-    return 124
-  fi
-  if ! printf 'start|%s|%s\n' "${pgid}" "${deadline_file}" >&19; then
+  if [[ "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE:-false}" == "true" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS:-false}" != "true" ]]; then
     abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
     return 126
   fi
+  now_millis="$(release_monotonic_millis)" || now_millis=""
+  if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ ]] ||
+    (( now_millis >= absolute_deadline_millis - 500 )); then
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 124
+  fi
+  # Unlink the pathname while both sides still hold the private FIFO open.
+  # Only after that succeeds may the start token release the command child.
+  if ! rm -f "${gate_dir}/start"; then
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 126
+  fi
+  if ! printf 'start|%s|%s\n' "${pgid}" "${deadline_file}" >&19; then
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 126
+  fi
+  CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
   exec 19>&-
-  rm -f "${gate_dir}/start"
 }
 
 write_active_release_deadline_millis() {
@@ -620,7 +1039,12 @@ write_active_release_deadline_millis() {
   local temporary="${deadline_file}.tmp.$$"
 
   [[ "${deadline_millis}" =~ ^[1-9][0-9]*$ ]] || return 1
-  if ! printf '%s\n' "${deadline_millis}" >"${temporary}"; then
+  if ! (
+    umask 077
+    set -o noclobber
+    printf '%s\n' "${deadline_millis}" >"${temporary}" &&
+      chmod 600 "${temporary}"
+  ); then
     rm -f "${temporary}"
     return 1
   fi
@@ -638,7 +1062,14 @@ run_with_active_release_group_timeout() {
   local now_millis=""
   local requested_deadline=0
   local effective_deadline=0
+  local completion_millis=""
+  local errexit_was_enabled="false"
+  local restore_status=0
   local status=0
+
+  # A nested bound shares the already-proven process group and owns only its
+  # temporary deadline. It cannot drain that group without killing its outer
+  # caller; the outermost runner remains the sole descendant-drain boundary.
 
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ && -r "${deadline_file}" ]] || return 2
   previous_deadline="$(tr -d '[:space:]' <"${deadline_file}")" || return 126
@@ -651,13 +1082,154 @@ run_with_active_release_group_timeout() {
   fi
   (( now_millis < effective_deadline - 500 )) || return 124
   write_active_release_deadline_millis "${deadline_file}" "${effective_deadline}" || return 126
-  if "$@"; then
-    status=0
+  # Capture status without placing the requested function in an additional
+  # conditional context. If this nested runner itself is used as an if/!
+  # condition, Bash retains the caller's native errexit semantics; otherwise
+  # the command child explicitly preserves fail-fast behavior.
+  [[ "$-" == *e* ]] && errexit_was_enabled="true"
+  set +e
+  (
+    set -e
+    "$@"
+  )
+  status=$?
+  if [[ "${errexit_was_enabled}" == "true" ]]; then
+    set -e
   else
-    status=$?
+    set +e
   fi
-  write_active_release_deadline_millis "${deadline_file}" "${previous_deadline}" || return 126
+  completion_millis="$(release_monotonic_millis)" || completion_millis=""
+  if write_active_release_deadline_millis "${deadline_file}" "${previous_deadline}"; then
+    restore_status=0
+  else
+    restore_status=126
+  fi
+  (( restore_status == 0 )) || return 126
+  [[ "${completion_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
+  (( completion_millis < effective_deadline - 500 )) || return 124
   return "${status}"
+}
+
+read_completed_release_command_status() {
+  local gate_dir="$1"
+  local output_status_var="$2"
+  local status_file="${gate_dir}/command-status"
+  local status_payload=""
+  local status_bytes=""
+
+  if [[ ! -e "${status_file}" && ! -L "${status_file}" ]]; then
+    return 1
+  fi
+  [[ -f "${status_file}" && ! -L "${status_file}" ]] || return 126
+  status_payload="$(<"${status_file}")" || return 126
+  status_bytes="$(wc -c <"${status_file}" 2>/dev/null | tr -d '[:space:]')" || return 126
+  [[ "${status_payload}" =~ ^([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$ ]] || return 126
+  [[ "${status_bytes}" =~ ^[1-9][0-9]*$ ]] || return 126
+  (( status_bytes == ${#status_payload} + 1 )) || return 126
+  printf -v "${output_status_var}" '%s' "${status_payload}"
+}
+
+release_process_group_live_member_count() {
+  local leader_pid="$1"
+  local pgid="$2"
+
+  [[ "${leader_pid}" =~ ^[1-9][0-9]*$ && "${pgid}" =~ ^[1-9][0-9]*$ ]] || return 2
+  ps -axo pid=,pgid=,stat= 2>/dev/null | awk \
+    -v leader="${leader_pid}" -v group="${pgid}" '
+      $1 != leader && $2 == group && $3 !~ /^Z/ { count += 1 }
+      END { print count + 0 }
+    '
+}
+
+complete_release_command_group() {
+  local pid="$1"
+  local pgid="$2"
+  local gate_dir="$3"
+  local expected_status="$4"
+  local process_state=""
+  local actual_pgid=""
+  local live_member_count=""
+  local actual_status=0
+  local cleanup_status=0
+  local attempt=0
+
+  if [[ ! "${pid}" =~ ^[1-9][0-9]*$ || "${pgid}" != "${pid}" ||
+    ! "${expected_status}" =~ ^([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$ ]]; then
+    abort_prepared_release_command "${pid}" "" "${gate_dir}"
+    return 126
+  fi
+  process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+  actual_pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "${process_state}" || "${process_state}" == Z* || "${actual_pgid}" != "${pgid}" ]]; then
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 126
+  fi
+
+  if ! live_member_count="$(release_process_group_live_member_count "${pid}" "${pgid}")" ||
+    [[ ! "${live_member_count}" =~ ^[0-9]+$ ]]; then
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 126
+  fi
+
+  if (( live_member_count > 0 )); then
+    if ! kill -TERM -- "-${pgid}" >/dev/null 2>&1; then
+      abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+      return 126
+    fi
+    while (( attempt < 4 )); do
+      sleep 0.05
+      if ! live_member_count="$(release_process_group_live_member_count "${pid}" "${pgid}")" ||
+        [[ ! "${live_member_count}" =~ ^[0-9]+$ ]]; then
+        abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+        return 126
+      fi
+      (( live_member_count == 0 )) && break
+      kill -TERM -- "-${pgid}" >/dev/null 2>&1 || true
+      attempt=$((attempt + 1))
+    done
+  fi
+
+  if (( live_member_count > 0 )); then
+    CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="true"
+    if ! kill -KILL -- "-${pgid}" >/dev/null 2>&1; then
+      abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+      return 126
+    fi
+    exec 18>&-
+    wait_for_control_plane_release_group_drain "${pid}" "${pgid}" || return 126
+    if ! reap_control_plane_release_command_leader \
+      "${pid}" "${pgid}" actual_status; then
+      return 126
+    fi
+    if cleanup_control_plane_release_command_gate "${gate_dir}"; then
+      cleanup_status=0
+    else
+      cleanup_status=$?
+    fi
+    dispatch_pending_control_plane_release_command_signal
+    (( cleanup_status == 0 )) || return 126
+    return "${expected_status}"
+  fi
+
+  CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="true"
+  if ! printf 'finish\n' >&18; then
+    abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return 126
+  fi
+  exec 18>&-
+  if ! reap_control_plane_release_command_leader \
+    "${pid}" "${pgid}" actual_status; then
+    return 126
+  fi
+  if cleanup_control_plane_release_command_gate "${gate_dir}"; then
+    cleanup_status=0
+  else
+    cleanup_status=$?
+  fi
+  dispatch_pending_control_plane_release_command_signal
+  (( cleanup_status == 0 )) || return 126
+  (( actual_status == expected_status )) || return 126
+  return "${expected_status}"
 }
 
 run_with_wall_timeout() {
@@ -671,6 +1243,8 @@ run_with_wall_timeout() {
   local now_millis=""
   local status=0
   local process_state=""
+  local command_status=""
+  local status_read_result=0
 
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || {
     log_stderr "invalid wall timeout: ${timeout_seconds:-<empty>}"
@@ -686,25 +1260,39 @@ run_with_wall_timeout() {
   now_millis="$(release_monotonic_millis)" || return 126
   [[ "${now_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
   deadline_millis=$((now_millis + timeout_seconds * 1000))
-  prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" "$@" || return $?
-  release_prepared_release_command "${pid}" "${pgid}" "${gate_dir}" "${deadline_millis}" || return $?
+  prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" false "$@" || return $?
+  if release_prepared_release_command "${pid}" "${pgid}" "${gate_dir}" "${deadline_millis}"; then
+    :
+  else
+    status=$?
+    return "${status}"
+  fi
   while true; do
-    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
-    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
-      rm -rf "${gate_dir}"
-      if wait "${pid}"; then
+    status_read_result=0
+    if read_completed_release_command_status "${gate_dir}" command_status; then
+      if complete_release_command_group "${pid}" "${pgid}" "${gate_dir}" "${command_status}"; then
         return 0
       else
         status=$?
         return "${status}"
       fi
+    else
+      status_read_result=$?
+      if (( status_read_result != 1 )); then
+        abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+        return 126
+      fi
+    fi
+    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+      abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+      return 126
     fi
     now_millis="$(release_monotonic_millis)" || now_millis="${deadline_millis}"
     effective_deadline_millis="$(tr -d '[:space:]' <"${gate_dir}/deadline-millis" 2>/dev/null || true)"
     if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ || ! "${effective_deadline_millis}" =~ ^[1-9][0-9]*$ ]] ||
       (( now_millis >= effective_deadline_millis - 500 )); then
-      terminate_release_command_tree "${pid}" "${pgid}"
-      rm -rf "${gate_dir}"
+      terminate_and_cleanup_release_command "${pid}" "${pgid}" "${gate_dir}" || return 126
       return 124
     fi
     sleep 0.1
@@ -757,6 +1345,7 @@ terminate_release_command_tree() {
   local pgid="${2:-}"
   local shell_pgid=""
   local descendants=""
+  local ignored_status=0
 
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
   shell_pgid="$(ps -o pgid= -p "${BASHPID:-$$}" 2>/dev/null | tr -d '[:space:]' || true)"
@@ -768,7 +1357,9 @@ terminate_release_command_tree() {
     kill -TERM -- "-${pgid}" >/dev/null 2>&1 || true
     sleep 0.2
     kill -KILL -- "-${pgid}" >/dev/null 2>&1 || true
-    wait "${pid}" >/dev/null 2>&1 || true
+    wait_for_control_plane_release_group_drain "${pid}" "${pgid}" || return 126
+    reap_control_plane_release_command_leader \
+      "${pid}" "${pgid}" ignored_status || return 126
     return 0
   fi
 
@@ -805,7 +1396,28 @@ print(" ".join(str(pid) for pid in ordered))
     kill -KILL ${descendants} >/dev/null 2>&1 || true
   fi
   kill -KILL "${pid}" >/dev/null 2>&1 || true
-  wait "${pid}" >/dev/null 2>&1 || true
+  reap_control_plane_release_command_leader \
+    "${pid}" "${pgid:-${pid}}" ignored_status pid || return 126
+}
+
+terminate_and_cleanup_release_command() {
+  local pid="$1"
+  local pgid="$2"
+  local gate_dir="$3"
+  local cleanup_status=0
+
+  # Once termination can reap the proven group leader, defer every external
+  # signal until the cached PID/PGID registration has been removed. Otherwise
+  # a trap in the wait-to-cleanup window could signal a newly reused PGID.
+  CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="true"
+  terminate_release_command_tree "${pid}" "${pgid}" || return 126
+  if cleanup_control_plane_release_command_gate "${gate_dir}"; then
+    cleanup_status=0
+  else
+    cleanup_status=$?
+  fi
+  dispatch_pending_control_plane_release_command_signal
+  return "${cleanup_status}"
 }
 
 run_with_control_plane_backup_coordination_guard() {
@@ -821,6 +1433,8 @@ run_with_control_plane_backup_coordination_guard() {
   local state=""
   local process_state=""
   local status=0
+  local command_status=""
+  local status_read_result=0
 
   [[ "${timeout_seconds}" =~ ^[1-9][0-9]*$ ]] || return 2
   (( $# > 0 )) || return 2
@@ -828,6 +1442,8 @@ run_with_control_plane_backup_coordination_guard() {
     if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
       if ! require_control_plane_backup_coordination_lease "${phase}"; then
         log_stderr "skipping post-commit best-effort mutation because shared backup/release Lease health is unsafe: ${phase}"
+        write_control_plane_backup_coordination_health lost "post-commit-guard:${phase}" || true
+        handle_control_plane_backup_coordination_abort true
         return 125
       fi
     else
@@ -843,50 +1459,65 @@ run_with_control_plane_backup_coordination_guard() {
   now_millis="$(release_monotonic_millis)" || return 126
   [[ "${now_millis}" =~ ^[1-9][0-9]*$ ]] || return 126
   deadline_millis=$((now_millis + timeout_seconds * 1000))
-  prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" "$@" || return $?
+  prepare_release_command_in_dedicated_group pid pgid gate_dir "${deadline_millis}" true "$@" || return $?
   CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID="${pid}"
   CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID="${pgid}"
+  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR="${gate_dir}"
+  # Hold the authorization transition continuously from the final Lease read
+  # through publication of the private start token. An unsafe USR1 in this
+  # interval must terminate the still-blocked supervisor instead of being
+  # delegated to a foreground loop that has not started yet.
+  CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="true"
   if ! control_plane_release_recovery_active &&
     ! require_control_plane_backup_coordination_lease "${phase} gated start"; then
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
     abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
-    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
-    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
     write_control_plane_backup_coordination_health lost "guarded-start:${phase}" || true
-    if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" ]]; then
-      handle_control_plane_backup_coordination_abort true
-    fi
+    handle_control_plane_backup_coordination_abort true
     return 125
   fi
   if release_prepared_release_command "${pid}" "${pgid}" "${gate_dir}" "${deadline_millis}"; then
     :
   else
     status=$?
-    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
-    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
     return "${status}"
   fi
   while true; do
-    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
-    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
-      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
-      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
-      rm -rf "${gate_dir}"
-      if wait "${pid}"; then
-        return 0
+    status_read_result=0
+    if read_completed_release_command_status "${gate_dir}" command_status; then
+      if complete_release_command_group "${pid}" "${pgid}" "${gate_dir}" "${command_status}"; then
+        status=0
       else
         status=$?
-        return "${status}"
       fi
+      if ! control_plane_release_recovery_active &&
+        [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD:-false}" == "true" ]] &&
+        ! require_control_plane_backup_coordination_lease "${phase} completion"; then
+        write_control_plane_backup_coordination_health lost "guarded-completion:${phase}" || true
+        if control_plane_backup_coordination_parent_context; then
+          handle_control_plane_backup_coordination_abort true
+        fi
+        return 125
+      fi
+      return "${status}"
+    else
+      status_read_result=$?
+      if (( status_read_result != 1 )); then
+        abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+        return 126
+      fi
+    fi
+    process_state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+      abort_prepared_release_command "${pid}" "${pgid}" "${gate_dir}"
+      return 126
     fi
     now_millis="$(release_monotonic_millis)" || now_millis="${deadline_millis}"
     effective_deadline_millis="$(tr -d '[:space:]' <"${gate_dir}/deadline-millis" 2>/dev/null || true)"
     if [[ ! "${now_millis}" =~ ^[1-9][0-9]*$ || ! "${effective_deadline_millis}" =~ ^[1-9][0-9]*$ ]] ||
       (( now_millis >= effective_deadline_millis - 500 )); then
       log_stderr "${phase} exceeded its ${timeout_seconds}s outer wall timeout"
-      terminate_release_command_tree "${pid}" "${pgid}"
-      rm -rf "${gate_dir}"
-      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
-      CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+      terminate_and_cleanup_release_command "${pid}" "${pgid}" "${gate_dir}" || return 126
       return 124
     fi
     if ! control_plane_release_recovery_active &&
@@ -897,12 +1528,8 @@ run_with_control_plane_backup_coordination_guard() {
         ! kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
         log_stderr "terminating ${phase} because shared backup/release Lease health is unsafe: state=${state:-missing} renewer=${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-missing}"
         write_control_plane_backup_coordination_health lost "guarded-command:${phase}" || true
-        terminate_release_command_tree "${pid}" "${pgid}"
-        rm -rf "${gate_dir}"
-        CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
-        CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
-        if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" != "true" &&
-          "${BASHPID:-$$}" == "${CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID:-}" ]]; then
+        terminate_and_cleanup_release_command "${pid}" "${pgid}" "${gate_dir}" || return 126
+        if control_plane_backup_coordination_parent_context; then
           handle_control_plane_backup_coordination_abort true
         fi
         return 125
@@ -3667,12 +4294,23 @@ write_control_plane_backup_coordination_health() {
   local temporary=""
 
   [[ -n "${health_file}" ]] || return 1
-  temporary="${health_file}.${BASHPID:-$$}.tmp"
-  if ! (umask 077; printf '%s|%s|%s\n' "${state}" "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER:-unknown}" "${detail}" >"${temporary}"); then
+  # Bash 3.2 keeps $$ unchanged in background subshells and has no BASHPID.
+  # A fresh same-directory pathname per write prevents the renewer and parent
+  # from truncating or moving one another's atomic health publication.
+  temporary="$(mktemp "${health_file}.tmp.XXXXXX")" || return 1
+  if ! (
+    umask 077
+    printf '%s|%s|%s\n' \
+      "${state}" "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER:-unknown}" "${detail}" >"${temporary}" &&
+      chmod 600 "${temporary}"
+  ); then
     rm -f "${temporary}"
     return 1
   fi
-  mv -f "${temporary}" "${health_file}"
+  if ! mv -f "${temporary}" "${health_file}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
 }
 
 control_plane_backup_coordination_health_state() {
@@ -3730,7 +4368,30 @@ handle_control_plane_backup_coordination_abort() {
   local forced="${1:-false}"
   local state=""
   local renewer_alive="false"
+  local guarded_start_abort="false"
+  local recovery_active="false"
 
+  control_plane_release_recovery_active && recovery_active="true"
+
+  if control_plane_release_exit_cleanup_active; then
+    # A launch/reap-deferred USR1 can be dispatched by termination inside the
+    # EXIT trap. Record the state needed by cleanup, but never exit recursively
+    # before evidence, Lease recovery marking, and renewer shutdown complete.
+    prepare_control_plane_backup_abort_state_for_dispatch "${forced}"
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS:-false}" == "true" ||
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" == "true" ]]; then
+    CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING="true"
+    if [[ "${forced}" == "true" ]]; then
+      CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING="true"
+    fi
+    return 0
+  fi
+  if [[ "${forced}" != "true" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS:-false}" == "true" ]]; then
+    guarded_start_abort="true"
+  fi
   state="$(control_plane_backup_coordination_health_state 2>/dev/null || true)"
   if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}" ]] &&
     kill -0 "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" >/dev/null 2>&1; then
@@ -3747,14 +4408,27 @@ handle_control_plane_backup_coordination_abort() {
     fi
     write_control_plane_backup_coordination_health lost "signal-state:${state:-missing}-renewer:${renewer_alive}" || true
   fi
-  if [[ "${forced}" != "true" && -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" ]]; then
+  if [[ "${guarded_start_abort}" == "true" && "${recovery_active}" != "true" ]]; then
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS="false"
+  fi
+  if [[ "${forced}" != "true" &&
+    "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE:-false}" == "true" &&
+    -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" &&
+    ( "${guarded_start_abort}" != "true" || "${recovery_active}" == "true" ) ]]; then
     # The foreground guard owns termination of the protected process tree and
     # will call this handler synchronously after the command is fully stopped.
     return 0
   fi
   if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
     log_stderr "shared backup/release Lease became unsafe after commit; skipping remaining best-effort metadata work without rollback"
-    return 0
+    # Publish the committed failure fence before termination. A concurrent
+    # TERM/HUP/INT deferred behind reap may exit from dispatch immediately
+    # after the group is drained, and must not bypass this Lease-loss state.
+    mark_control_plane_release_committed_lease_unsafe
+    if ! terminate_active_control_plane_release_command; then
+      mark_control_plane_release_command_termination_unproven
+    fi
+    exit 1
   fi
   if control_plane_release_recovery_active; then
     log_stderr "backup coordination Lease was lost during recovery; continuing the already-active bounded evidence and rollback transaction"
@@ -3765,6 +4439,11 @@ handle_control_plane_backup_coordination_abort() {
   fi
   CONTROL_PLANE_BACKUP_COORDINATION_ABORTING="true"
   log_stderr "backup coordination Lease health is unsafe; stopping forward release work: state=${state:-missing} renewer_alive=${renewer_alive}"
+  if ! terminate_active_control_plane_release_command; then
+    mark_control_plane_release_command_termination_unproven
+    log_stderr "skipping synchronous rollback because the active release command may still be running"
+    exit 1
+  fi
   if [[ "${CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED:-false}" == "true" && -n "${PREVIOUS_REVISION:-}" ]]; then
     log_stderr "running the normal synchronous rollback before EXIT cleanup"
     if ! rollback_release_transaction; then
@@ -4062,6 +4741,7 @@ start_control_plane_backup_coordination_lease_renewer() {
   [[ "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD}" == "true" ]] || return 1
   [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID}" ]] || return 0
   CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID="${parent_pid}"
+  CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL="${BASH_SUBSHELL:-0}"
 
   (
     renew_sleep_pid=""
@@ -4075,7 +4755,7 @@ start_control_plane_backup_coordination_lease_renewer() {
         if ! write_control_plane_backup_coordination_health healthy renewed; then
           log_stderr "cannot persist successful backup coordination renewal health; aborting release"
           write_control_plane_backup_coordination_health lost health-write-failure || true
-          kill -USR1 "${parent_pid}" >/dev/null 2>&1 || true
+          kill -USR2 "${parent_pid}" >/dev/null 2>&1 || true
           exit 1
         fi
         continue
@@ -4086,14 +4766,14 @@ start_control_plane_backup_coordination_lease_renewer() {
         if ! write_control_plane_backup_coordination_health healthy immediate-retry-recovered; then
           log_stderr "cannot persist recovered backup coordination renewal health; aborting release"
           write_control_plane_backup_coordination_health lost health-write-failure || true
-          kill -USR1 "${parent_pid}" >/dev/null 2>&1 || true
+          kill -USR2 "${parent_pid}" >/dev/null 2>&1 || true
           exit 1
         fi
         continue
       fi
       write_control_plane_backup_coordination_health lost consecutive-renew-failures || true
       log_stderr "control-plane backup coordination Lease renewal failed twice; signaling the parent release for synchronous rollback"
-      kill -USR1 "${parent_pid}" >/dev/null 2>&1 || true
+      kill -USR2 "${parent_pid}" >/dev/null 2>&1 || true
       exit 1
     done
   ) &
@@ -4103,6 +4783,8 @@ start_control_plane_backup_coordination_lease_renewer() {
 stop_control_plane_backup_coordination_lease_renewer() {
   local pid="${CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID:-}"
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID=""
+  CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL=""
   [[ -n "${pid}" ]] || return 0
   kill -TERM "${pid}" >/dev/null 2>&1 || true
   wait "${pid}" >/dev/null 2>&1 || true
@@ -6048,6 +6730,12 @@ finish_control_plane_release_recovery_transaction() {
       fi
     fi
     CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS="false"
+    if [[ "${CONTROL_PLANE_RELEASE_EXIT_CLEANUP_IN_PROGRESS:-false}" == "true" ]]; then
+      # cleanup_tmp_artifacts owns the original exit status and still has to
+      # persist the Lease recovery marker, stop the renewer, and clean or
+      # preserve temporary evidence. Do not exit from inside its rollback.
+      return "${transaction_status}"
+    fi
     exit "${pending_status}"
   fi
   CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS="false"
@@ -8793,12 +9481,22 @@ cleanup_upgrade_override_values() {
 terminate_active_control_plane_release_command() {
   local pid="${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}"
   local pgid="${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID:-}"
+  local gate_dir="${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}"
+  local cleanup_status=0
 
   if [[ "${pid}" =~ ^[1-9][0-9]*$ ]]; then
-    terminate_release_command_tree "${pid}" "${pgid}"
+    terminate_and_cleanup_release_command "${pid}" "${pgid}" "${gate_dir}"
+    return $?
   fi
-  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID=""
-  CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID=""
+  CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS="true"
+  if cleanup_control_plane_release_command_gate "${gate_dir}"; then
+    cleanup_status=0
+  else
+    cleanup_status=$?
+  fi
+  clear_active_control_plane_release_command_registration
+  dispatch_pending_control_plane_release_command_signal
+  return "${cleanup_status}"
 }
 
 handle_control_plane_release_signal() {
@@ -8818,6 +9516,17 @@ handle_control_plane_release_signal() {
       CONTROL_PLANE_RELEASE_FAILURE_PHASE="${CONTROL_PLANE_RELEASE_PHASE:-signal}"
     fi
   fi
+  if control_plane_release_exit_cleanup_active; then
+    # A transition-deferred signal may be dispatched by termination from the
+    # EXIT trap. cleanup_tmp_artifacts will honor its status after completing
+    # rollback, evidence, Lease disposition, and renewer shutdown.
+    return 0
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS:-false}" == "true" ||
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" == "true" ]]; then
+    CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING="true"
+    return 0
+  fi
   if control_plane_release_recovery_active; then
     # Recovery commands are already wall-bounded and consume only the reserved
     # rollback/artifact budget. Defer the signal exit until failed-state,
@@ -8828,7 +9537,11 @@ handle_control_plane_release_signal() {
   [[ "${CONTROL_PLANE_RELEASE_SIGNAL_HANDLING:-false}" != "true" ]] || return 0
   CONTROL_PLANE_RELEASE_SIGNAL_HANDLING="true"
   log_stderr "received ${signal_name}; terminating the active release process group before rollback"
-  terminate_active_control_plane_release_command
+  if ! terminate_active_control_plane_release_command; then
+    mark_control_plane_release_command_termination_unproven
+    log_stderr "skipping rollback in the signal handler because the active release command may still be running"
+    exit "${CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS:-${exit_status}}"
+  fi
   if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
     CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
     CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
@@ -8841,19 +9554,35 @@ handle_control_plane_release_signal() {
 }
 
 cleanup_tmp_artifacts() {
-  local exit_status=$?
+  local original_exit_status=$?
+  CONTROL_PLANE_RELEASE_EXIT_CLEANUP_IN_PROGRESS="true"
+  trap '' HUP INT TERM USR1 USR2
+  local exit_status="${original_exit_status}"
   local release_lease="true"
+  local active_command_stopped="true"
 
-  trap - HUP INT TERM
-  terminate_active_control_plane_release_command
+  # EXIT cleanup is the final synchronous recovery boundary. A second signal
+  # must not interrupt evidence publication, the durable recovery marker, or
+  # renewer shutdown after the original exit status has already been captured.
+  if ! terminate_active_control_plane_release_command; then
+    active_command_stopped="false"
+    mark_control_plane_release_command_termination_unproven
+  fi
+  if [[ "${CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS:-0}" =~ ^(129|130|143)$ ]]; then
+    exit_status="${CONTROL_PLANE_RELEASE_PENDING_SIGNAL_STATUS}"
+  fi
   if [[ "${CONTROL_PLANE_RELEASE_COMMITTED:-false}" == "true" ]]; then
     CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED="false"
     CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED="false"
   fi
   if [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" &&
-    "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" != "true" ]]; then
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" != "true" &&
+    "${active_command_stopped}" == "true" ]]; then
     log_stderr "abnormal exit after Helm mutation; attempting the reserved synchronous rollback"
     rollback_release_transaction || true
+  elif [[ "${exit_status}" != "0" && "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" &&
+    "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED:-false}" != "true" ]]; then
+    log_stderr "deferring rollback because the active release command could not be proven stopped"
   fi
   write_control_plane_release_result_on_exit "${exit_status}" || true
   if [[ "${CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED:-false}" == "true" ||
@@ -8876,21 +9605,33 @@ cleanup_tmp_artifacts() {
     stop_control_plane_backup_coordination_lease_renewer
     log_stderr "control-plane release rollback is incomplete; refusing to CAS-release the shared Lease"
   fi
-  cleanup_control_plane_automation_tmp
-  cleanup_upgrade_override_values
-  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}" ]]; then
-    rm -f "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".*.tmp
-    CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
-  fi
-  if [[ -n "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR:-}" &&
-    -d "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" ]]; then
-    if cleanup_control_plane_release_evidence_work_dir; then
-      CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR=""
-      CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE=""
-      CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE=""
-    else
-      log_stderr "refusing to clean a replaced release-evidence work directory whose device/inode identity changed"
+  if [[ "${active_command_stopped}" == "true" ]]; then
+    cleanup_control_plane_automation_tmp
+    cleanup_upgrade_override_values
+    if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE:-}" ]]; then
+      rm -f \
+        "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}" \
+        "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".*.tmp \
+        "${CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE}".tmp.*
+      CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE=""
     fi
+    if [[ -n "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR:-}" &&
+      -d "${CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR}" ]]; then
+      if cleanup_control_plane_release_evidence_work_dir; then
+        CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR=""
+        CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_DEVICE=""
+        CONTROL_PLANE_RELEASE_EVIDENCE_WORK_DIR_INODE=""
+      else
+        log_stderr "refusing to clean a replaced release-evidence work directory whose device/inode identity changed"
+      fi
+    fi
+  else
+    log_stderr "preserving release temporary artifacts while active command termination remains unproven"
+  fi
+  CONTROL_PLANE_RELEASE_EXIT_CLEANUP_IN_PROGRESS="false"
+  if [[ "${exit_status}" != "${original_exit_status}" ]]; then
+    trap - EXIT
+    exit "${exit_status}"
   fi
   return "${exit_status}"
 }
@@ -17901,6 +18642,7 @@ main() {
   KUBECTL="$(detect_kubectl)"
   export KUBECTL
   trap handle_control_plane_backup_coordination_abort USR1
+  trap 'handle_control_plane_backup_coordination_abort true' USR2
   apply_discovery_bundle_defaults || log "DiscoveryBundle not configured; release will require explicit runtime values"
   if ! ensure_kube_api_access; then
     log "continuing with the default Kubernetes API endpoint because no fallback server was configured or reachable"

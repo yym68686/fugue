@@ -681,6 +681,1641 @@ clear_e5b_attestation_state() {
   unset AUTHORITATIVE_DNS_DIG_ATTESTATION_SHA256
 }
 
+run_release_command_group_regressions() (
+  set -euo pipefail
+
+  local temp_dir=""
+  local gate_root=""
+  local marker=""
+  local child_pid=""
+  local runner_pid=""
+  local status=0
+  local expected_status=0
+
+  temp_dir="$(mktemp -d)"
+  gate_root="${temp_dir}/gates"
+  mkdir -m 700 "${gate_root}"
+  export TMPDIR="${gate_root}"
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+
+  cleanup_group_regression_processes() {
+    local pid_file=""
+    local pid=""
+    for pid_file in "${temp_dir}"/*.pid "${temp_dir}"/*.pid.spawn; do
+      [[ -f "${pid_file}" ]] || continue
+      pid="$(<"${pid_file}")"
+      [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || continue
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+    done
+    rm -rf "${temp_dir}"
+  }
+  trap cleanup_group_regression_processes EXIT
+
+  assert_runner_state_cleared() {
+    [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" ]] ||
+      fail "release command runner retained its active PID"
+    [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID:-}" ]] ||
+      fail "release command runner retained its active PGID"
+    [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}" ]] ||
+      fail "release command runner retained its active gate directory"
+    [[ "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE:-false}" == "false" ]] ||
+      fail "release command runner retained its Lease-aware marker"
+    [[ "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS:-false}" == "false" ]] ||
+      fail "release command runner retained its launch transition"
+    [[ "${CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS:-false}" == "false" ]] ||
+      fail "release command runner retained its start authorization transition"
+    [[ "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" == "false" ]] ||
+      fail "release command runner retained its reap transition"
+    [[ "${CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING:-false}" == "false" ]] ||
+      fail "release command runner retained a pending release signal"
+    [[ "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING:-false}" == "false" ]] ||
+      fail "release command runner retained a pending Lease abort"
+    [[ "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING:-false}" == "false" ]] ||
+      fail "release command runner retained a pending forced Lease abort"
+    if { true <&18; } 2>/dev/null || { true <&19; } 2>/dev/null; then
+      fail "release command runner retained a private gate descriptor"
+    fi
+  }
+
+  assert_process_stopped() {
+    local pid="$1"
+    local label="$2"
+    local attempt=0
+    local state=""
+    while (( attempt < 20 )); do
+      state="$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+      if [[ -z "${state}" || "${state}" == Z* ]]; then
+        return 0
+      fi
+      attempt=$((attempt + 1))
+      sleep 0.05
+    done
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+    fail "${label} escaped the completed release command process group"
+  }
+
+  record_active_deadline_mode() {
+    local output_file="$1"
+    python3 -c '
+import os
+import stat
+import sys
+
+mode = stat.S_IMODE(os.stat(sys.argv[1]).st_mode)
+with open(sys.argv[2], "a", encoding="utf-8") as stream:
+    stream.write(f"{mode:o}\n")
+' "${CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE}" "${output_file}"
+  }
+
+  record_release_gate_modes() {
+    local output_file="$1"
+    python3 -c '
+import os
+import stat
+import sys
+
+gate_dir, output_file = sys.argv[1:]
+paths = (gate_dir, os.path.join(gate_dir, "finish"), os.path.join(gate_dir, "deadline-millis"))
+modes = [stat.S_IMODE(os.stat(path).st_mode) for path in paths]
+with open(output_file, "a", encoding="utf-8") as stream:
+    stream.write(" ".join(f"{mode:o}" for mode in modes) + "\n")
+' "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}" "${output_file}"
+    run_with_wall_timeout 1 record_active_deadline_mode "${output_file}"
+  }
+
+  fail_fast_release_function() {
+    local output_file="$1"
+    false
+    printf 'reached\n' >"${output_file}"
+  }
+
+  nested_fail_fast_release_function() {
+    run_with_wall_timeout 2 fail_fast_release_function "$1"
+  }
+
+  nested_timeout_release_function() {
+    run_with_wall_timeout 1 command sleep 0.7
+  }
+
+  nested_errexit_disabled_release_function() {
+    local output_file="$1"
+    local nested_status=0
+
+    set +e
+    run_with_wall_timeout 2 bash -c 'exit 42'
+    nested_status=$?
+    printf '%s\n' "${nested_status}" >"${output_file}"
+    return "${nested_status}"
+  }
+
+  (
+    local_start_probe="${temp_dir}/lease-aware-start-assertion.probe"
+    abort_prepared_release_command() { return 0; }
+    release_monotonic_millis() {
+      printf 'clock-read\n' >"${local_start_probe}"
+      printf '1000\n'
+    }
+    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE=true
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS=false
+    status=0
+    if release_prepared_release_command 123 123 "${temp_dir}/missing-start-gate" 10000; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "126" "Lease-aware prepared command requires an active start authorization"
+    [[ ! -e "${local_start_probe}" ]] ||
+      fail "Lease-aware prepared command consulted its clock after missing start authorization"
+  )
+
+  (
+    local_start_gate="${temp_dir}/lease-aware-start-success"
+    local_start_token="${temp_dir}/lease-aware-start-success.token"
+    mkdir -m 700 "${local_start_gate}"
+    : >"${local_start_gate}/start"
+    release_monotonic_millis() { printf '1000\n'; }
+    CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE=true
+    CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS=true
+    exec 19>"${local_start_token}"
+    release_prepared_release_command 123 123 "${local_start_gate}" 10000
+    assert_eq "${CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS}" "false" \
+      "successful start-token publication must close the authorization transition"
+    assert_eq "$(<"${local_start_token}")" \
+      "start|123|${local_start_gate}/deadline-millis" \
+      "prepared command start token"
+    [[ ! -e "${local_start_gate}/start" ]] ||
+      fail "successful prepared command retained its start FIFO pathname"
+    rm -rf "${local_start_gate}" "${local_start_token}"
+  )
+
+  (
+    health_write_root="${temp_dir}/concurrent-health-writes"
+    health_file="${health_write_root}/health"
+    mkdir -m 700 "${health_write_root}"
+    : >"${health_file}"
+    chmod 600 "${health_file}"
+    CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${health_file}"
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=release/test
+    mv() {
+      local source_path="$2"
+      local published_state=""
+      local deadline=$((SECONDS + 3))
+      IFS='|' read -r published_state _ <"${source_path}" || return 126
+      : >"${health_write_root}/ready.${published_state}"
+      while [[ ! -e "${health_write_root}/ready.healthy" ||
+        ! -e "${health_write_root}/ready.lost" ]]; do
+        (( SECONDS < deadline )) || return 126
+        sleep 0.01
+      done
+      command mv "$@"
+    }
+    write_control_plane_backup_coordination_health healthy parent &
+    healthy_writer_pid=$!
+    write_control_plane_backup_coordination_health lost renewer &
+    lost_writer_pid=$!
+    wait "${healthy_writer_pid}" ||
+      fail "concurrent healthy Lease health publication failed"
+    wait "${lost_writer_pid}" ||
+      fail "concurrent lost Lease health publication failed"
+    final_health="$(<"${health_file}")"
+    [[ "${final_health}" == "healthy|release/test|parent" ||
+      "${final_health}" == "lost|release/test|renewer" ]] ||
+      fail "concurrent Lease health publication produced a torn value: ${final_health}"
+    [[ -z "$(find "${health_write_root}" -maxdepth 1 -type f -name 'health.tmp.*' -print -quit)" ]] ||
+      fail "concurrent Lease health publication retained a temporary file"
+    rm -rf "${health_write_root}"
+  )
+
+  forced_health_abort_log="${temp_dir}/forced-health-abort.log"
+  forced_health_file="${temp_dir}/forced-health-abort.health"
+  printf 'healthy|release/test|stale\n' >"${forced_health_file}"
+  status=0
+  if run_with_wall_timeout 5 env FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    FORCED_HEALTH_ABORT_LOG="${forced_health_abort_log}" \
+    FORCED_HEALTH_FILE="${forced_health_file}" /bin/bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_SECONDS=0
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_OWNER=release/test
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${FORCED_HEALTH_FILE}"
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+PREVIOUS_REVISION=7
+renew_control_plane_backup_coordination_lease() { return 0; }
+write_control_plane_backup_coordination_health() { return 1; }
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${FORCED_HEALTH_ABORT_LOG}"
+}
+rollback_release_transaction() {
+  printf "rollback\n" >>"${FORCED_HEALTH_ABORT_LOG}"
+}
+trap '\''printf "unsafe-usr1\n" >>"${FORCED_HEALTH_ABORT_LOG}"'\'' USR1
+trap '\''handle_control_plane_backup_coordination_abort true'\'' USR2
+trap stop_control_plane_backup_coordination_lease_renewer EXIT
+start_control_plane_backup_coordination_lease_renewer
+while :; do :; done
+exit 99
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "fatal Lease health publication failure status"
+  assert_eq "$(<"${forced_health_abort_log}")" $'terminate\nrollback' \
+    "fatal Lease health publication failure must force exactly one synchronous abort"
+  rm -f "${forced_health_abort_log}" "${forced_health_file}"
+  assert_runner_state_cleared
+
+  marker="${temp_dir}/fail-fast.reached"
+  status=0
+  if run_with_wall_timeout 3 fail_fast_release_function "${marker}"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "wall runner must preserve shell-function errexit"
+  [[ ! -e "${marker}" ]] || fail "wall runner disabled shell-function errexit"
+  assert_runner_state_cleared
+
+  status=0
+  if run_with_wall_timeout 4 nested_fail_fast_release_function "${marker}"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "nested runner must preserve shell-function errexit"
+  [[ ! -e "${marker}" ]] || fail "nested runner disabled shell-function errexit"
+  assert_runner_state_cleared
+
+  status=0
+  if run_with_wall_timeout 4 nested_timeout_release_function; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "124" "nested runner must enforce its completion deadline"
+  assert_runner_state_cleared
+
+  (
+    direct_deadline_file="${temp_dir}/nested-direct.deadline"
+    direct_now="$(release_monotonic_millis)"
+    direct_outer_deadline=$((direct_now + 5000))
+    printf '%s\n' "${direct_outer_deadline}" >"${direct_deadline_file}"
+    CONTROL_PLANE_RELEASE_ACTIVE_GROUP_PGID="$$"
+    CONTROL_PLANE_RELEASE_ACTIVE_DEADLINE_FILE="${direct_deadline_file}"
+    status=0
+    if run_with_wall_timeout 1 command sleep 0.7; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "124" "nested completion must enforce its own monotonic deadline"
+    assert_eq "$(<"${direct_deadline_file}")" "${direct_outer_deadline}" \
+      "nested completion must restore the exact outer deadline"
+    rm -f "${direct_deadline_file}"
+  )
+
+  marker="${temp_dir}/nested-errexit-disabled.status"
+  status=0
+  if run_with_wall_timeout 4 nested_errexit_disabled_release_function "${marker}"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "42" "nested runner must preserve a disabled caller errexit option"
+  assert_eq "$(<"${marker}")" "42" "nested disabled-errexit caller must handle the command status"
+  rm -f "${marker}"
+  assert_runner_state_cleared
+
+  for expected_status in 0 42; do
+    marker="${temp_dir}/wall-${expected_status}.pid"
+    status=0
+    if run_with_wall_timeout 3 bash -c \
+      'sleep 30 & printf "%s\n" "$!" >"$1"; exit "$2"' \
+      bash "${marker}" "${expected_status}"; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "${expected_status}" \
+      "wall runner must preserve status ${expected_status} while draining descendants"
+    child_pid="$(<"${marker}")"
+    [[ "${child_pid}" =~ ^[1-9][0-9]*$ ]] || fail "wall runner did not record its descendant"
+    assert_process_stopped "${child_pid}" "wall runner descendant"
+    rm -f "${marker}"
+    assert_runner_state_cleared
+  done
+
+  spawn_term_ignoring_descendant() {
+    local output_file="$1"
+    local requested_status="$2"
+    bash -c 'trap "" TERM; exec sleep 30' &
+    printf '%s\n' "$!" >"${output_file}"
+    return "${requested_status}"
+  }
+  marker="${temp_dir}/term-ignore.pid"
+  status=0
+  if run_with_wall_timeout 3 spawn_term_ignoring_descendant "${marker}" 42; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "42" "KILL fallback must preserve the original command status"
+  child_pid="$(<"${marker}")"
+  assert_process_stopped "${child_pid}" "TERM-ignoring descendant"
+  rm -f "${marker}"
+  assert_runner_state_cleared
+
+  spawn_term_trap_descendant() {
+    local output_file="$1"
+    bash -c '
+marker="$1"
+trap '\''sleep 30 & printf "%s\n" "$!" >"${marker}.spawn"; exit 0'\'' TERM
+while :; do sleep 30; done
+' bash "${output_file}" &
+    printf '%s\n' "$!" >"${output_file}"
+  }
+  marker="${temp_dir}/term-trap.pid"
+  run_with_wall_timeout 3 spawn_term_trap_descendant "${marker}"
+  child_pid="$(<"${marker}")"
+  assert_process_stopped "${child_pid}" "TERM-trap descendant"
+  [[ -s "${marker}.spawn" ]] || fail "TERM-trap descendant did not exercise its spawn path"
+  child_pid="$(<"${marker}.spawn")"
+  assert_process_stopped "${child_pid}" "TERM-trap spawned descendant"
+  rm -f "${marker}" "${marker}.spawn"
+  assert_runner_state_cleared
+
+  FUGUE_CONTROL_PLANE_POSTGRES_ENABLED=false
+  FUGUE_CONTROL_PLANE_POSTGRES_USE_FOR_API=false
+  require_control_plane_backup_coordination_or_abort() { return 0; }
+  require_control_plane_backup_coordination_lease() { return 0; }
+  marker="${temp_dir}/lease-guard.pid"
+  status=0
+  if run_with_control_plane_backup_coordination_guard 3 "completion descendant" \
+    bash -c 'sleep 30 & printf "%s\n" "$!" >"$1"; exit 42' bash "${marker}"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "42" "Lease guard must preserve status while draining descendants"
+  child_pid="$(<"${marker}")"
+  assert_process_stopped "${child_pid}" "Lease-guard descendant"
+  rm -f "${marker}"
+  assert_runner_state_cleared
+
+  (
+    completion_gate_root="${temp_dir}/completion-lease-gates"
+    completion_checks=0
+    mkdir -m 700 "${completion_gate_root}"
+    export TMPDIR="${completion_gate_root}"
+    export FUGUE_UPGRADE_LIB_ONLY=true
+    source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+    require_control_plane_backup_coordination_lease() {
+      case "$1" in
+        *" completion")
+          completion_checks=$((completion_checks + 1))
+          return 1
+          ;;
+        *) return 0 ;;
+      esac
+    }
+    write_control_plane_backup_coordination_health() { return 0; }
+    control_plane_backup_coordination_health_state() { printf 'healthy\n'; }
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+    CONTROL_PLANE_RELEASE_COMMITTED=true
+    status=0
+    if run_with_control_plane_backup_coordination_guard 3 "completion Lease check" \
+      true; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "125" "Lease guard must recheck health after command completion"
+    assert_eq "${completion_checks}" "1" "Lease guard must execute exactly one completion check"
+    assert_runner_state_cleared
+    [[ -z "$(find "${completion_gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+      fail "completion Lease check retained a private command gate"
+  )
+
+  (
+    substitution_gate_root="${temp_dir}/substitution-lease-gates"
+    substitution_handler_log="${temp_dir}/substitution-lease-handler.log"
+    substitution_command_pid="${temp_dir}/substitution-lease-command.pid"
+    mkdir -m 700 "${substitution_gate_root}"
+    export TMPDIR="${substitution_gate_root}"
+    export FUGUE_UPGRADE_LIB_ONLY=true
+    source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+    require_control_plane_backup_coordination_or_abort() { return 0; }
+    require_control_plane_backup_coordination_lease() {
+      case "$1" in
+        *" completion") return 1 ;;
+        *) return 0 ;;
+      esac
+    }
+    write_control_plane_backup_coordination_health() { return 0; }
+    control_plane_backup_coordination_health_state() { printf 'lost\n'; }
+    handle_control_plane_backup_coordination_abort() {
+      if control_plane_backup_coordination_parent_context; then
+        printf 'parent-recovery\n' >>"${substitution_handler_log}"
+      else
+        printf 'subshell-recovery\n' >>"${substitution_handler_log}"
+      fi
+    }
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+    CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+    CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID="${BASHPID:-$$}"
+    CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL="${BASH_SUBSHELL:-0}"
+    set +e
+    substitution_output="$(run_with_control_plane_backup_coordination_guard 3 \
+      "command substitution Lease loss" \
+      bash -c 'printf "%s\n" "$$" >"$1"' bash "${substitution_command_pid}")"
+    status=$?
+    set -e
+    assert_eq "${status}" "125" "command substitution Lease loss status"
+    handle_control_plane_backup_coordination_abort true
+    assert_eq "$(<"${substitution_handler_log}")" "parent-recovery" \
+      "Bash command substitution must leave synchronous recovery to its exact parent context"
+    child_pid="$(<"${substitution_command_pid}")"
+    assert_process_stopped "${child_pid}" "command-substitution guarded command"
+    assert_runner_state_cleared
+    [[ -z "$(find "${substitution_gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+      fail "command substitution Lease loss retained a private command gate"
+    rm -f "${substitution_handler_log}" "${substitution_command_pid}"
+  )
+
+  (
+    real_ps="$(command -v ps)"
+    restore_ps_and_terminate_runner() {
+      ps() { "${real_ps}" "$@"; }
+      terminate_active_control_plane_release_command >/dev/null 2>&1 || true
+    }
+    trap restore_ps_and_terminate_runner EXIT
+    ps() {
+      if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}" &&
+        -e "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}/command-status" ]]; then
+        return 1
+      fi
+      "${real_ps}" "$@"
+    }
+    marker="${temp_dir}/ps-failure.pid"
+    status=0
+    if run_with_wall_timeout 3 bash -c \
+      'sleep 30 & printf "%s\n" "$!" >"$1"; exit 0' bash "${marker}"; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "126" "completion identity read failure must fail closed"
+    [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" ]] ||
+      fail "identity-read failure cleared its active PID without a drain proof"
+    [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID:-}" ]] ||
+      fail "identity-read failure cleared its active PGID without a drain proof"
+    [[ "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" == "true" ]] ||
+      fail "identity-read failure dropped its reap fence without a drain proof"
+    ps() { "${real_ps}" "$@"; }
+    child_pid="$(<"${marker}")"
+    assert_process_stopped "${child_pid}" "identity-read failure descendant"
+    terminate_active_control_plane_release_command
+    trap - EXIT
+    rm -f "${marker}"
+    assert_runner_state_cleared
+  )
+
+  (
+    eval "$(declare -f release_process_group_live_member_count | sed \
+      '1s/release_process_group_live_member_count/original_release_process_group_live_member_count/')"
+    restore_count_and_terminate_runner() {
+      release_process_group_live_member_count() {
+        original_release_process_group_live_member_count "$@"
+      }
+      terminate_active_control_plane_release_command >/dev/null 2>&1 || true
+    }
+    trap restore_count_and_terminate_runner EXIT
+    release_process_group_live_member_count() { printf '1\n'; }
+    status=0
+    if run_with_wall_timeout 3 true; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "126" "undrained post-KILL process group must fail closed"
+    [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:-}" ]] ||
+      fail "undrained post-KILL process group cleared its active PID"
+    [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID:-}" ]] ||
+      fail "undrained post-KILL process group cleared its active PGID"
+    [[ -d "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}" ]] ||
+      fail "undrained post-KILL process group removed its recovery gate"
+    [[ "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" == "true" ]] ||
+      fail "undrained post-KILL process group dropped its reap fence"
+    release_process_group_live_member_count() {
+      original_release_process_group_live_member_count "$@"
+    }
+    terminate_active_control_plane_release_command
+    trap - EXIT
+    assert_runner_state_cleared
+  )
+  [[ -z "$(find "${gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "undrained post-KILL fixture retained a private command gate after explicit recovery"
+
+  (
+    exec 18</dev/null
+    status=0
+    if run_with_wall_timeout 1 true; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "126" "occupied private finish descriptor must fail closed"
+    { true <&18; } 2>/dev/null || fail "runner closed a caller-owned descriptor"
+    exec 18<&-
+  )
+
+  (
+    start_unlink_side_effect="${temp_dir}/start-unlink.side-effect"
+    rm() {
+      if [[ "$#" -eq 2 && "$1" == "-f" && "$2" == */start ]]; then
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+          [[ -e "${start_unlink_side_effect}" ]] && break
+          sleep 0.01
+        done
+        return 1
+      fi
+      command rm "$@"
+    }
+    status=0
+    if run_with_wall_timeout 3 bash -c \
+      'printf reached >"$1"' bash "${start_unlink_side_effect}"; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "126" "start-gate unlink failure must fail closed"
+    [[ ! -e "${start_unlink_side_effect}" ]] ||
+      fail "start-gate unlink failure allowed the protected command to execute"
+    assert_runner_state_cleared
+  )
+  [[ -z "$(find "${gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "start-gate unlink failure retained a private command gate"
+
+  (
+    cleanup_failure_root="${temp_dir}/cleanup-failure-gates"
+    cleanup_failure_injected=false
+    mkdir -m 700 "${cleanup_failure_root}"
+    export TMPDIR="${cleanup_failure_root}"
+    rm() {
+      if [[ "${cleanup_failure_injected}" == "false" && "$#" -eq 2 &&
+        "$1" == "-rf" && "$2" == "${cleanup_failure_root}"/fugue-release-command.* ]]; then
+        cleanup_failure_injected=true
+        return 1
+      fi
+      command rm "$@"
+    }
+    status=0
+    if run_with_wall_timeout 3 true; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "126" "gate cleanup failure must fail closed"
+    assert_runner_state_cleared
+    cleanup_residue="$(find "${cleanup_failure_root}" -mindepth 1 -maxdepth 1 -print)"
+    [[ -n "${cleanup_residue}" ]] || fail "gate cleanup failure fixture did not retain its injected residue"
+    command rm -rf "${cleanup_residue}"
+    [[ -z "$(find "${cleanup_failure_root}" -mindepth 1 -prune -print -quit)" ]] ||
+      fail "gate cleanup failure fixture could not remove its intentional residue"
+  )
+
+  for requested_umask in 000 0777; do
+    mode_gate_root="${temp_dir}/umask-${requested_umask}-gates"
+    mode_marker="${temp_dir}/umask-${requested_umask}.modes"
+    mkdir -m 700 "${mode_gate_root}"
+    : >"${mode_marker}"
+    status=0
+    if (
+      export TMPDIR="${mode_gate_root}"
+      umask "${requested_umask}"
+      run_with_wall_timeout 3 record_release_gate_modes "${mode_marker}"
+      assert_runner_state_cleared
+    ); then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "0" "runner must tolerate caller umask ${requested_umask}"
+    assert_eq "$(sed -n '1p' "${mode_marker}")" "700 600 600" \
+      "runner gate permissions under caller umask ${requested_umask}"
+    assert_eq "$(sed -n '2p' "${mode_marker}")" "600" \
+      "nested deadline permissions under caller umask ${requested_umask}"
+    assert_eq "$(wc -l <"${mode_marker}" | tr -d '[:space:]')" "2" \
+      "runner mode fixture line count under caller umask ${requested_umask}"
+    [[ -z "$(find "${mode_gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+      fail "caller umask ${requested_umask} retained a private command gate"
+    rm -f "${mode_marker}"
+  done
+
+  setup_signal_root="${temp_dir}/setup-signal-gates"
+  mkdir -m 700 "${setup_signal_root}"
+  status=0
+  if TMPDIR="${setup_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+mkfifo() {
+  command mkfifo "$@"
+  kill -TERM "$$"
+}
+run_with_wall_timeout 3 true
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "setup-window TERM handler status"
+  [[ -z "$(find "${setup_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "setup-window signal retained a private command gate"
+
+  setup_cleanup_signal_root="${temp_dir}/setup-cleanup-signal-gates"
+  setup_cleanup_signal_marker="${temp_dir}/setup-cleanup-signal.marker"
+  mkdir -m 700 "${setup_cleanup_signal_root}"
+  status=0
+  if TMPDIR="${setup_cleanup_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    SETUP_CLEANUP_SIGNAL_MARKER="${setup_cleanup_signal_marker}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+mkfifo() {
+  command mkfifo "$@"
+  return 1
+}
+SETUP_CLEANUP_SIGNAL_SENT=false
+trap '\''
+if [[ "${SETUP_CLEANUP_SIGNAL_SENT}" != "true" &&
+  "${BASH_COMMAND}" == rm\ -rf* &&
+  -n "${gate_dir:-}" &&
+  -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR:-}" ]]; then
+  SETUP_CLEANUP_SIGNAL_SENT=true
+  printf "%s|%s\n" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS:-false}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS:-false}" \
+    >"${SETUP_CLEANUP_SIGNAL_MARKER}"
+  kill -TERM "$$"
+fi
+'\'' DEBUG
+run_with_wall_timeout 3 true
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "setup-cleanup-window TERM handler status"
+  assert_eq "$(<"${setup_cleanup_signal_marker}")" "true|false" \
+    "setup cleanup must defer TERM behind a reap transition"
+  [[ -z "$(find "${setup_cleanup_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "setup-cleanup-window signal retained a private command gate"
+  rm -f "${setup_cleanup_signal_marker}"
+
+  signal_termination_failure_log="${temp_dir}/signal-termination-failure.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    SIGNAL_TERMINATION_FAILURE_LOG="${signal_termination_failure_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${SIGNAL_TERMINATION_FAILURE_LOG}"
+  return 126
+}
+rollback_release_transaction() {
+  printf "rollback\n" >>"${SIGNAL_TERMINATION_FAILURE_LOG}"
+}
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+trap '\''printf "state|%s|%s|%s\n" \
+  "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" \
+  "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" \
+  "${CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED}" \
+  >>"${SIGNAL_TERMINATION_FAILURE_LOG}"'\'' EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+kill -TERM "$$"
+exit 99
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "TERM must preserve its signal status when command termination is unproven"
+  assert_eq "$(<"${signal_termination_failure_log}")" \
+    $'terminate\nstate|true|command-termination-unproven|false' \
+    "TERM termination failure must fence without concurrent rollback"
+  rm -f "${signal_termination_failure_log}"
+
+  exit_termination_failure_log="${temp_dir}/exit-termination-failure.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    EXIT_TERMINATION_FAILURE_LOG="${exit_termination_failure_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${EXIT_TERMINATION_FAILURE_LOG}"
+  return 126
+}
+rollback_release_transaction() { printf "rollback\n" >>"${EXIT_TERMINATION_FAILURE_LOG}"; }
+write_control_plane_release_result_on_exit() {
+  printf "evidence|%s|%s\n" \
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" \
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" \
+    >>"${EXIT_TERMINATION_FAILURE_LOG}"
+}
+mark_control_plane_backup_coordination_recovery_required() {
+  printf "recovery-required\n" >>"${EXIT_TERMINATION_FAILURE_LOG}"
+}
+stop_control_plane_backup_coordination_lease_renewer() { :; }
+cleanup_control_plane_automation_tmp() { printf "unsafe-cleanup\n" >>"${EXIT_TERMINATION_FAILURE_LOG}"; }
+cleanup_upgrade_override_values() { printf "unsafe-cleanup\n" >>"${EXIT_TERMINATION_FAILURE_LOG}"; }
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_MUTATION_OCCURRED=true
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+trap cleanup_tmp_artifacts EXIT
+exit 17
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "17" "EXIT cleanup must preserve the original failure status"
+  assert_eq "$(<"${exit_termination_failure_log}")" \
+    $'terminate\nevidence|true|command-termination-unproven\nrecovery-required' \
+    "EXIT termination failure must publish evidence and preserve recovery artifacts"
+  rm -f "${exit_termination_failure_log}"
+
+  exit_retry_log="${temp_dir}/exit-termination-retry.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    EXIT_RETRY_LOG="${exit_retry_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+TERMINATION_ATTEMPTS=0
+terminate_active_control_plane_release_command() {
+  TERMINATION_ATTEMPTS=$((TERMINATION_ATTEMPTS + 1))
+  printf "terminate-%s\n" "${TERMINATION_ATTEMPTS}" >>"${EXIT_RETRY_LOG}"
+  (( TERMINATION_ATTEMPTS > 1 ))
+}
+rollback_release_transaction() {
+  printf "rollback\n" >>"${EXIT_RETRY_LOG}"
+  CONTROL_PLANE_RELEASE_RECOVERY_IN_PROGRESS=true
+  finish_control_plane_release_recovery_transaction 0
+}
+write_control_plane_release_result_evidence() {
+  printf "rollback-evidence\n" >>"${EXIT_RETRY_LOG}"
+}
+write_control_plane_release_result_on_exit() { printf "exit-evidence\n" >>"${EXIT_RETRY_LOG}"; }
+mark_control_plane_backup_coordination_recovery_required() {
+  printf "recovery-required\n" >>"${EXIT_RETRY_LOG}"
+  kill -USR1 "$$"
+  kill -TERM "$$"
+  printf "recursive-signals-ignored\n" >>"${EXIT_RETRY_LOG}"
+}
+stop_control_plane_backup_coordination_lease_renewer() {
+  printf "stop-renewer\n" >>"${EXIT_RETRY_LOG}"
+}
+cleanup_control_plane_automation_tmp() { printf "cleanup\n" >>"${EXIT_RETRY_LOG}"; }
+cleanup_upgrade_override_values() { :; }
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_EVIDENCE_INITIALIZED=true
+CONTROL_PLANE_RELEASE_MUTATION_OCCURRED=true
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+trap cleanup_tmp_artifacts EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+trap '\''printf "unsafe-recursive-USR1\n" >>"${EXIT_RETRY_LOG}"; exit 88'\'' USR1
+kill -TERM "$$"
+exit 99
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "EXIT retry must preserve the pending TERM status"
+  assert_eq "$(<"${exit_retry_log}")" \
+    $'terminate-1\nterminate-2\nrollback\nrollback-evidence\nexit-evidence\nrecovery-required\nrecursive-signals-ignored\nstop-renewer\ncleanup' \
+    "EXIT rollback must return to Lease and evidence cleanup after a successful termination retry"
+  rm -f "${exit_retry_log}"
+
+  exit_entry_signal_log="${temp_dir}/exit-entry-signal.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    EXIT_ENTRY_SIGNAL_LOG="${exit_entry_signal_log}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${EXIT_ENTRY_SIGNAL_LOG}"
+}
+rollback_release_transaction() {
+  printf "rollback\n" >>"${EXIT_ENTRY_SIGNAL_LOG}"
+  CONTROL_PLANE_RELEASE_ROLLBACK_ATTEMPTED=true
+}
+write_control_plane_release_result_on_exit() {
+  printf "exit-evidence-%s\n" "$1" >>"${EXIT_ENTRY_SIGNAL_LOG}"
+}
+mark_control_plane_backup_coordination_recovery_required() {
+  printf "recovery-required\n" >>"${EXIT_ENTRY_SIGNAL_LOG}"
+}
+stop_control_plane_backup_coordination_lease_renewer() {
+  printf "stop-renewer\n" >>"${EXIT_ENTRY_SIGNAL_LOG}"
+}
+cleanup_control_plane_automation_tmp() { printf "cleanup\n" >>"${EXIT_ENTRY_SIGNAL_LOG}"; }
+cleanup_upgrade_override_values() { :; }
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+EXIT_ENTRY_SIGNAL_SENT=false
+trap '\''
+if [[ "${EXIT_ENTRY_SIGNAL_SENT}" != "true" &&
+  "${BASH_COMMAND}" == local\ original_exit_status=* ]]; then
+  EXIT_ENTRY_SIGNAL_SENT=true
+  printf "entry-window\n" >>"${EXIT_ENTRY_SIGNAL_LOG}"
+  kill -TERM "$$"
+fi
+'\'' DEBUG
+return_status_17() { return 17; }
+set +e
+return_status_17
+cleanup_tmp_artifacts
+exit 99
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "EXIT entry-window TERM status"
+  assert_eq "$(<"${exit_entry_signal_log}")" \
+    $'entry-window\nterminate\nrollback\nexit-evidence-143\nrecovery-required\nstop-renewer\ncleanup' \
+    "EXIT entry-window TERM must defer nonlocal exit until cleanup completes"
+  rm -f "${exit_entry_signal_log}"
+
+  pending_term_exit_log="${temp_dir}/pending-term-exit.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    PENDING_TERM_EXIT_LOG="${pending_term_exit_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${PENDING_TERM_EXIT_LOG}"
+  dispatch_pending_control_plane_release_command_signal
+}
+rollback_release_transaction() { printf "rollback\n" >>"${PENDING_TERM_EXIT_LOG}"; }
+write_control_plane_release_result_on_exit() {
+  printf "exit-evidence-%s\n" "$1" >>"${PENDING_TERM_EXIT_LOG}"
+}
+mark_control_plane_backup_coordination_recovery_required() {
+  printf "recovery-required\n" >>"${PENDING_TERM_EXIT_LOG}"
+}
+stop_control_plane_backup_coordination_lease_renewer() {
+  printf "stop-renewer\n" >>"${PENDING_TERM_EXIT_LOG}"
+}
+cleanup_control_plane_automation_tmp() { printf "cleanup\n" >>"${PENDING_TERM_EXIT_LOG}"; }
+cleanup_upgrade_override_values() { :; }
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_ROLLBACK_REQUIRED=true
+CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS=true
+trap cleanup_tmp_artifacts EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+kill -TERM "$$"
+printf "after-caught\n" >>"${PENDING_TERM_EXIT_LOG}"
+exit 17
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "pending TERM must be honored only after EXIT cleanup completes"
+  assert_eq "$(<"${pending_term_exit_log}")" \
+    $'after-caught\nterminate\nrollback\nexit-evidence-143\nrecovery-required\nstop-renewer\ncleanup' \
+    "pending TERM dispatch must not truncate EXIT evidence and Lease cleanup"
+  rm -f "${pending_term_exit_log}"
+
+  pending_usr1_exit_log="${temp_dir}/pending-usr1-exit.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    PENDING_USR1_EXIT_LOG="${pending_usr1_exit_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${PENDING_USR1_EXIT_LOG}"
+  dispatch_pending_control_plane_release_command_signal
+}
+rollback_release_transaction() { printf "rollback\n" >>"${PENDING_USR1_EXIT_LOG}"; }
+write_control_plane_release_result_on_exit() {
+  printf "exit-evidence-%s\n" "$1" >>"${PENDING_USR1_EXIT_LOG}"
+}
+mark_control_plane_backup_coordination_recovery_required() {
+  printf "recovery-required\n" >>"${PENDING_USR1_EXIT_LOG}"
+}
+stop_control_plane_backup_coordination_lease_renewer() {
+  printf "stop-renewer\n" >>"${PENDING_USR1_EXIT_LOG}"
+}
+cleanup_control_plane_automation_tmp() { printf "cleanup\n" >>"${PENDING_USR1_EXIT_LOG}"; }
+cleanup_upgrade_override_values() { :; }
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+PREVIOUS_REVISION=17
+CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS=true
+trap cleanup_tmp_artifacts EXIT
+trap handle_control_plane_backup_coordination_abort USR1
+kill -USR1 "$$"
+printf "after-caught\n" >>"${PENDING_USR1_EXIT_LOG}"
+exit 17
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "17" "pending USR1 EXIT cleanup must preserve the triggering failure status"
+  assert_eq "$(<"${pending_usr1_exit_log}")" \
+    $'after-caught\nterminate\nrollback\nexit-evidence-17\nrecovery-required\nstop-renewer\ncleanup' \
+    "pending USR1 dispatch must not truncate EXIT evidence and Lease cleanup"
+  rm -f "${pending_usr1_exit_log}"
+
+  for healthy_pending_transition in launch reap; do
+    (
+      control_plane_backup_coordination_health_state() { printf 'healthy\n'; }
+      CONTROL_PLANE_RELEASE_COMMITTED=true
+      CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+      CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+      CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED=false
+      CONTROL_PLANE_RELEASE_RECOVERY_FENCE_ARMED_PHASE=""
+      CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION=not-armed
+      CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING=false
+      CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS=false
+      CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS=false
+      case "${healthy_pending_transition}" in
+        launch) CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS=true ;;
+        reap) CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS=true ;;
+      esac
+      handle_control_plane_backup_coordination_abort
+      assert_eq "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING}" "true" \
+        "healthy committed ${healthy_pending_transition} USR1 must first defer"
+      dispatch_pending_control_plane_release_command_signal
+      assert_eq "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING}" "false" \
+        "healthy committed ${healthy_pending_transition} USR1 pending state"
+      assert_eq "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" "false" \
+        "healthy committed ${healthy_pending_transition} USR1 must not arm a recovery fence"
+      assert_eq "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" "not-armed" \
+        "healthy committed ${healthy_pending_transition} USR1 fence disposition"
+    )
+  done
+
+  forced_pending_log="${temp_dir}/forced-pending.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    FORCED_PENDING_LOG="${forced_pending_log}" /bin/bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${FORCED_PENDING_LOG}"
+}
+CONTROL_PLANE_RELEASE_COMMITTED=true
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS=true
+trap '\''printf "state|%s|%s\n" \
+  "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" \
+  "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" \
+  >>"${FORCED_PENDING_LOG}"'\'' EXIT
+handle_control_plane_backup_coordination_abort true
+printf "pending|%s|%s\n" \
+  "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING}" \
+  "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING}" \
+  >>"${FORCED_PENDING_LOG}"
+dispatch_pending_control_plane_release_command_signal
+exit 99
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "forced pending Lease abort status"
+  assert_eq "$(<"${forced_pending_log}")" \
+    $'pending|true|true\nterminate\nstate|true|committed-lease-unsafe' \
+    "forced Lease abort must survive a launch transition and bypass stale health"
+  rm -f "${forced_pending_log}"
+
+  committed_dual_pending_log="${temp_dir}/committed-dual-pending.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    COMMITTED_DUAL_PENDING_LOG="${committed_dual_pending_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${COMMITTED_DUAL_PENDING_LOG}"
+}
+rollback_release_transaction() { printf "unsafe-rollback\n" >>"${COMMITTED_DUAL_PENDING_LOG}"; }
+write_control_plane_release_result_on_exit() {
+  printf "evidence|%s|%s|%s\n" "$1" \
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" \
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" \
+    >>"${COMMITTED_DUAL_PENDING_LOG}"
+}
+release_control_plane_backup_coordination_lease() {
+  printf "unsafe-release\n" >>"${COMMITTED_DUAL_PENDING_LOG}"
+}
+mark_control_plane_backup_coordination_recovery_required() {
+  printf "recovery-required\n" >>"${COMMITTED_DUAL_PENDING_LOG}"
+}
+stop_control_plane_backup_coordination_lease_renewer() {
+  printf "stop-renewer\n" >>"${COMMITTED_DUAL_PENDING_LOG}"
+}
+cleanup_control_plane_automation_tmp() { printf "cleanup\n" >>"${COMMITTED_DUAL_PENDING_LOG}"; }
+cleanup_upgrade_override_values() { :; }
+CONTROL_PLANE_RELEASE_COMMITTED=true
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS=true
+trap cleanup_tmp_artifacts EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+trap handle_control_plane_backup_coordination_abort USR1
+kill -TERM "$$"
+kill -USR1 "$$"
+printf "pending|%s|%s\n" \
+  "${CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING}" \
+  "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING}" \
+  >>"${COMMITTED_DUAL_PENDING_LOG}"
+dispatch_pending_control_plane_release_command_signal
+exit 99
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "committed dual pending signals must preserve TERM status"
+  assert_eq "$(<"${committed_dual_pending_log}")" \
+    $'pending|true|true\nterminate\nterminate\nevidence|143|true|committed-lease-unsafe\nrecovery-required\nstop-renewer\ncleanup' \
+    "pending USR1 must publish the committed fence before pending TERM exits"
+  rm -f "${committed_dual_pending_log}"
+
+  abort_termination_failure_log="${temp_dir}/abort-termination-failure.log"
+  status=0
+  if FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    ABORT_TERMINATION_FAILURE_LOG="${abort_termination_failure_log}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+control_plane_backup_coordination_health_state() { printf "lost\n"; }
+write_control_plane_backup_coordination_health() { :; }
+terminate_active_control_plane_release_command() {
+  printf "terminate\n" >>"${ABORT_TERMINATION_FAILURE_LOG}"
+  return 126
+}
+rollback_release_transaction() { printf "rollback\n" >>"${ABORT_TERMINATION_FAILURE_LOG}"; }
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+PREVIOUS_REVISION=17
+trap '\''printf "state|%s|%s\n" \
+  "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" \
+  "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" \
+  >>"${ABORT_TERMINATION_FAILURE_LOG}"'\'' EXIT
+handle_control_plane_backup_coordination_abort
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "Lease abort termination failure status"
+  assert_eq "$(<"${abort_termination_failure_log}")" \
+    $'terminate\nstate|true|command-termination-unproven' \
+    "Lease abort termination failure must not run rollback concurrently"
+  rm -f "${abort_termination_failure_log}"
+
+  launch_signal_root="${temp_dir}/launch-signal-gates"
+  launch_signal_pending="${temp_dir}/launch-signal.pending"
+  launch_signal_pid="${temp_dir}/launch-signal.pid"
+  mkdir -m 700 "${launch_signal_root}"
+  status=0
+  if TMPDIR="${launch_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    LAUNCH_SIGNAL_PENDING="${launch_signal_pending}" LAUNCH_SIGNAL_PID="${launch_signal_pid}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+LAUNCH_SIGNAL_SENT=false
+trap '\''
+if [[ "${BASH_COMMAND}" == "started_pid=\$!" && "${LAUNCH_SIGNAL_SENT}" != "true" ]]; then
+  LAUNCH_SIGNAL_SENT=true
+  printf "%s\n" "$!" >"${LAUNCH_SIGNAL_PID}"
+  kill -TERM "$$"
+  printf "%s|%s|%s\n" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" >"${LAUNCH_SIGNAL_PENDING}"
+fi
+'\'' DEBUG
+run_with_wall_timeout 3 true
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "launch-window TERM handler status"
+  assert_eq "$(<"${launch_signal_pending}")" "true|true|false" \
+    "launch-window TERM must be pending until registration"
+  child_pid="$(<"${launch_signal_pid}")"
+  assert_process_stopped "${child_pid}" "launch-window TERM supervisor"
+  [[ -z "$(find "${launch_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "launch-window signal retained a private command gate"
+  rm -f "${launch_signal_pending}" "${launch_signal_pid}"
+
+  dispatch_signal_root="${temp_dir}/dispatch-signal-gates"
+  dispatch_signal_pending="${temp_dir}/dispatch-signal.pending"
+  dispatch_signal_pid="${temp_dir}/dispatch-signal.pid"
+  mkdir -m 700 "${dispatch_signal_root}"
+  status=0
+  if TMPDIR="${dispatch_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    DISPATCH_SIGNAL_PENDING="${dispatch_signal_pending}" DISPATCH_SIGNAL_PID="${dispatch_signal_pid}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+DISPATCH_SIGNAL_SENT=false
+trap '\''
+if [[ "${BASH_COMMAND}" == CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS=* &&
+  "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS}" == "true" &&
+  "${DISPATCH_SIGNAL_SENT}" != "true" ]]; then
+  DISPATCH_SIGNAL_SENT=true
+  printf "%s\n" "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" >"${DISPATCH_SIGNAL_PID}"
+  kill -TERM "$$"
+  printf "%s|%s|%s\n" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" >"${DISPATCH_SIGNAL_PENDING}"
+fi
+'\'' DEBUG
+run_with_wall_timeout 3 true
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "dispatch-window TERM handler status"
+  assert_eq "$(<"${dispatch_signal_pending}")" "true|true|false" \
+    "dispatch-window TERM must be pending until registration"
+  child_pid="$(<"${dispatch_signal_pid}")"
+  assert_process_stopped "${child_pid}" "dispatch-window TERM supervisor"
+  [[ -z "$(find "${dispatch_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "dispatch-window signal retained a private command gate"
+  rm -f "${dispatch_signal_pending}" "${dispatch_signal_pid}"
+
+  for usr1_transition in launch dispatch; do
+    usr1_transition_root="${temp_dir}/usr1-${usr1_transition}-gates"
+    usr1_transition_health="${temp_dir}/usr1-${usr1_transition}.health"
+    usr1_transition_pending="${temp_dir}/usr1-${usr1_transition}.pending"
+    usr1_transition_pid="${temp_dir}/usr1-${usr1_transition}.pid"
+    usr1_transition_side_effect="${temp_dir}/usr1-${usr1_transition}.side-effect"
+    mkdir -m 700 "${usr1_transition_root}"
+    printf 'lost|release/test|transition\n' >"${usr1_transition_health}"
+    status=0
+    if TMPDIR="${usr1_transition_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+      USR1_TRANSITION="${usr1_transition}" USR1_TRANSITION_HEALTH="${usr1_transition_health}" \
+      USR1_TRANSITION_PENDING="${usr1_transition_pending}" \
+      USR1_TRANSITION_PID="${usr1_transition_pid}" \
+      USR1_TRANSITION_SIDE_EFFECT="${usr1_transition_side_effect}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${USR1_TRANSITION_HEALTH}"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap handle_control_plane_backup_coordination_abort USR1
+USR1_TRANSITION_SENT=false
+trap '\''
+if [[ "${USR1_TRANSITION_SENT}" != "true" ]] && {
+  [[ "${USR1_TRANSITION}" == "launch" && "${BASH_COMMAND}" == "started_pid=\$!" ]] ||
+  [[ "${USR1_TRANSITION}" == "dispatch" &&
+    "${BASH_COMMAND}" == CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS=* &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS}" == "true" ]]
+}; then
+  USR1_TRANSITION_SENT=true
+  if [[ "${USR1_TRANSITION}" == "launch" ]]; then
+    printf "%s\n" "$!" >"${USR1_TRANSITION_PID}"
+  else
+    printf "%s\n" "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" \
+      >"${USR1_TRANSITION_PID}"
+  fi
+  kill -USR1 "$$"
+  printf "%s|%s|%s\n" \
+    "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_LAUNCH_IN_PROGRESS}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" >"${USR1_TRANSITION_PENDING}"
+fi
+'\'' DEBUG
+run_with_wall_timeout 3 bash -c '\''printf reached >"$1"'\'' bash "${USR1_TRANSITION_SIDE_EFFECT}"
+'; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "1" "${usr1_transition}-window USR1 abort status"
+    assert_eq "$(<"${usr1_transition_pending}")" "true|true|false" \
+      "${usr1_transition}-window USR1 must be pending before dispatch"
+    child_pid="$(<"${usr1_transition_pid}")"
+    assert_process_stopped "${child_pid}" "${usr1_transition}-window USR1 supervisor"
+    [[ ! -e "${usr1_transition_side_effect}" ]] ||
+      fail "${usr1_transition}-window USR1 allowed forward command execution"
+    [[ -z "$(find "${usr1_transition_root}" -mindepth 1 -prune -print -quit)" ]] ||
+      fail "${usr1_transition}-window USR1 retained a private command gate"
+    rm -f "${usr1_transition_health}" "${usr1_transition_pending}" "${usr1_transition_pid}"
+  done
+
+  usr1_reap_root="${temp_dir}/usr1-reap-gates"
+  usr1_reap_health="${temp_dir}/usr1-reap.health"
+  usr1_reap_pending="${temp_dir}/usr1-reap.pending"
+  usr1_reap_pid="${temp_dir}/usr1-reap.pid"
+  usr1_reap_side_effect="${temp_dir}/usr1-reap.side-effect"
+  mkdir -m 700 "${usr1_reap_root}"
+  printf 'lost|release/test|reap\n' >"${usr1_reap_health}"
+  status=0
+  if TMPDIR="${usr1_reap_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    USR1_REAP_HEALTH="${usr1_reap_health}" USR1_REAP_PENDING="${usr1_reap_pending}" \
+    USR1_REAP_PID="${usr1_reap_pid}" \
+    USR1_REAP_SIDE_EFFECT="${usr1_reap_side_effect}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${USR1_REAP_HEALTH}"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap handle_control_plane_backup_coordination_abort USR1
+USR1_REAP_SENT=false
+trap '\''
+if [[ "${BASHPID:-$$}" == "$$" &&
+  "${BASH_COMMAND}" == cleanup_control_plane_release_command_gate* &&
+  "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" == "true" &&
+  "${USR1_REAP_SENT}" != "true" ]]; then
+  USR1_REAP_SENT=true
+  printf "%s\n" "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" >"${USR1_REAP_PID}"
+  kill -USR1 "$$"
+  printf "%s|%s|%s\n" \
+    "${CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING}" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" \
+    "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID:+registered}" >"${USR1_REAP_PENDING}"
+fi
+'\'' DEBUG
+run_with_wall_timeout 3 true
+printf reached >"${USR1_REAP_SIDE_EFFECT}"
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "reap-window USR1 abort status"
+  assert_eq "$(<"${usr1_reap_pending}")" "true|true|registered" \
+    "reap-window USR1 must be pending until deregistration"
+  child_pid="$(<"${usr1_reap_pid}")"
+  assert_process_stopped "${child_pid}" "reap-window USR1 supervisor"
+  [[ ! -e "${usr1_reap_side_effect}" ]] || fail "reap-window USR1 allowed forward work"
+  [[ -z "$(find "${usr1_reap_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "reap-window USR1 retained a private command gate"
+  rm -f "${usr1_reap_health}" "${usr1_reap_pending}" "${usr1_reap_pid}"
+
+  wait_signal_root="${temp_dir}/wait-signal-gates"
+  wait_signal_health="${temp_dir}/wait-signal.health"
+  wait_signal_pid_marker="${temp_dir}/wait-signal.pid"
+  wait_signal_sent_marker="${temp_dir}/wait-signal.sent"
+  wait_signal_outer_root="${temp_dir}/wait-signal-outer-gates"
+  mkdir -m 700 "${wait_signal_root}"
+  mkdir -m 700 "${wait_signal_outer_root}"
+  printf 'healthy|release/test|wait-signal\n' >"${wait_signal_health}"
+  status=0
+  if TMPDIR="${wait_signal_outer_root}" run_with_wall_timeout 15 env \
+    TMPDIR="${wait_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    WAIT_SIGNAL_HEALTH="${wait_signal_health}" WAIT_SIGNAL_PID_MARKER="${wait_signal_pid_marker}" \
+    WAIT_SIGNAL_SENT_MARKER="${wait_signal_sent_marker}" /bin/bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+eval "$(declare -f release_command_leader_identity_state | sed \
+  '\''1s/release_command_leader_identity_state/original_release_command_leader_identity_state/'\'')"
+FORCE_WAIT_ON_LIVE_LEADER=false
+release_command_leader_identity_state() {
+  if [[ "${FORCE_WAIT_ON_LIVE_LEADER}" == "true" &&
+    "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" == "true" ]]; then
+    FORCE_WAIT_ON_LIVE_LEADER=false
+    printf -v "$3" "%s" gone
+    return 0
+  fi
+  original_release_command_leader_identity_state "$@"
+}
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${WAIT_SIGNAL_HEALTH}"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+observe_wait_signal() {
+  printf sent >"${WAIT_SIGNAL_SENT_MARKER}"
+  handle_control_plane_backup_coordination_abort
+}
+trap observe_wait_signal USR1
+WAIT_SIGNAL_ARMED=false
+WAIT_SIGNAL_INTERRUPT_ARMED=false
+wait() {
+  if [[ "${WAIT_SIGNAL_INTERRUPT_ARMED}" == "true" && "$#" == "1" &&
+    "$1" == "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" ]]; then
+    WAIT_SIGNAL_INTERRUPT_ARMED=false
+    kill -USR1 "$$"
+    return 138
+  fi
+  builtin wait "$@"
+}
+trap '\''
+if [[ "${BASHPID:-$$}" == "$$" &&
+  "${BASH_COMMAND}" == complete_release_command_group* &&
+  "${WAIT_SIGNAL_ARMED}" != "true" ]]; then
+  WAIT_SIGNAL_ARMED=true
+  FORCE_WAIT_ON_LIVE_LEADER=true
+  printf "%s\n" "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" >"${WAIT_SIGNAL_PID_MARKER}"
+  kill -STOP "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}"
+  WAIT_SIGNAL_INTERRUPT_ARMED=true
+fi
+'\'' DEBUG
+wait_runner_status=0
+if run_with_wall_timeout 3 true; then
+  wait_runner_status=0
+else
+  wait_runner_status=$?
+fi
+[[ "${wait_runner_status}" == "126" ]] || exit 91
+wait_supervisor_pid="$(<"${WAIT_SIGNAL_PID_MARKER}")"
+wait_supervisor_state="$(ps -o stat= -p "${wait_supervisor_pid}" 2>/dev/null | tr -d "[:space:]" || true)"
+[[ -z "${wait_supervisor_state}" || "${wait_supervisor_state}" == Z* ]] || exit 92
+[[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" ]] || exit 93
+[[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID}" ]] || exit 94
+[[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}" ]] || exit 95
+[[ "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" == "false" ]] || exit 96
+[[ -z "$(find "${TMPDIR}" -mindepth 1 -prune -print -quit)" ]] || exit 97
+exit "${wait_runner_status}"
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "126" "signal-interrupted wait must fail closed after reaping its leader"
+  [[ -s "${wait_signal_sent_marker}" ]] || fail "wait-interruption fixture did not send USR1"
+  child_pid="$(<"${wait_signal_pid_marker}")"
+  assert_process_stopped "${child_pid}" "signal-interrupted wait supervisor"
+  [[ -z "$(find "${wait_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "signal-interrupted wait retained a private command gate"
+  [[ -z "$(find "${wait_signal_outer_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "signal-interrupted wait retained its outer timeout gate"
+  rm -f "${wait_signal_health}" "${wait_signal_pid_marker}" "${wait_signal_sent_marker}"
+
+  for reap_mode in normal kill-fallback timeout; do
+    reap_signal_root="${temp_dir}/reap-${reap_mode}-gates"
+    reap_stale_signal_log="${temp_dir}/reap-${reap_mode}.stale-signals"
+    reap_ready_marker="${temp_dir}/reap-${reap_mode}.ready"
+    mkdir -m 700 "${reap_signal_root}"
+    : >"${reap_stale_signal_log}"
+    status=0
+    if TMPDIR="${reap_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+      REAP_MODE="${reap_mode}" REAP_STALE_SIGNAL_LOG="${reap_stale_signal_log}" \
+      REAP_READY_MARKER="${reap_ready_marker}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+REAP_SIGNAL_SENT=false
+kill() {
+  if [[ "${REAP_SIGNAL_SENT}" == "true" && "$#" -ge 3 && "$1" == "-TERM" &&
+    "$2" == "--" && "$3" == -* ]]; then
+    printf "%s\n" "$*" >>"${REAP_STALE_SIGNAL_LOG}"
+  fi
+  command kill "$@"
+}
+trap '\''
+if [[ "${BASHPID:-$$}" == "$$" &&
+  "${BASH_COMMAND}" == cleanup_control_plane_release_command_gate* &&
+  "${CONTROL_PLANE_RELEASE_COMMAND_REAP_IN_PROGRESS}" == "true" &&
+  "${REAP_SIGNAL_SENT}" != "true" ]]; then
+  REAP_SIGNAL_SENT=true
+  kill -TERM "$$"
+fi
+'\'' DEBUG
+spawn_reap_term_ignoring_descendant() {
+  bash -c '\''trap "" TERM; printf ready >"$1"; exec sleep 30'\'' bash "${REAP_READY_MARKER}" &
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ -s "${REAP_READY_MARKER}" ]] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+case "${REAP_MODE}" in
+  normal) run_with_wall_timeout 3 true ;;
+  kill-fallback) run_with_wall_timeout 3 spawn_reap_term_ignoring_descendant ;;
+  timeout) run_with_wall_timeout 1 sleep 30 ;;
+  *) exit 2 ;;
+esac
+'; then
+      status=0
+    else
+      status=$?
+    fi
+    assert_eq "${status}" "143" "${reap_mode} reap-window TERM handler status"
+    if [[ "${reap_mode}" == "kill-fallback" ]]; then
+      [[ -s "${reap_ready_marker}" ]] ||
+        fail "KILL reap-window fixture never started its TERM-ignoring descendant"
+    fi
+    [[ ! -s "${reap_stale_signal_log}" ]] ||
+      fail "${reap_mode} reap-window TERM targeted a stale process group"
+    [[ -z "$(find "${reap_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+      fail "${reap_mode} reap-window signal retained a private command gate"
+    rm -f "${reap_stale_signal_log}" "${reap_ready_marker}"
+  done
+
+  signal_gate_root="${temp_dir}/signal-gates"
+  mkdir -m 700 "${signal_gate_root}"
+  marker="${temp_dir}/signal-child.pid"
+  TMPDIR="${signal_gate_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    SIGNAL_CHILD_MARKER="${marker}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+trap '\''handle_control_plane_release_signal TERM'\'' TERM
+run_with_wall_timeout 30 bash -c '\''sleep 30 & printf "%s\n" "$!" >"$1"; wait'\'' \
+  bash "${SIGNAL_CHILD_MARKER}"
+' &
+  runner_pid=$!
+  printf '%s\n' "${runner_pid}" >"${temp_dir}/signal-runner.pid"
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ -s "${marker}" ]] && break
+    sleep 0.05
+  done
+  [[ -s "${marker}" ]] || fail "no-Lease signal regression did not start its descendant"
+  kill -TERM "${runner_pid}"
+  status=0
+  if wait "${runner_pid}"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "143" "no-Lease TERM handler status"
+  child_pid="$(<"${marker}")"
+  assert_process_stopped "${child_pid}" "no-Lease signal descendant"
+  rm -f "${marker}" "${temp_dir}/signal-runner.pid"
+  [[ -z "$(find "${signal_gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "no-Lease signal cleanup retained a private command gate"
+
+  lease_signal_root="${temp_dir}/lease-signal-gates"
+  mkdir -m 700 "${lease_signal_root}"
+  lease_health_file="${temp_dir}/lease-health"
+  lease_rollback_marker="${temp_dir}/lease-rollback"
+  lease_side_effect="${temp_dir}/lease-side-effect"
+  printf 'lost|release/test|synthetic-loss\n' >"${lease_health_file}"
+  status=0
+  if TMPDIR="${lease_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    LEASE_HEALTH_FILE="${lease_health_file}" LEASE_ROLLBACK_MARKER="${lease_rollback_marker}" \
+    LEASE_SIDE_EFFECT="${lease_side_effect}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${LEASE_HEALTH_FILE}"
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+PREVIOUS_REVISION=17
+rollback_release_transaction() {
+  [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" &&
+    -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID}" &&
+    -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}" &&
+    ! -e "${LEASE_SIDE_EFFECT}" ]] || return 1
+  printf "stopped-before-rollback\n" >"${LEASE_ROLLBACK_MARKER}"
+}
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap handle_control_plane_backup_coordination_abort USR1
+(sleep 0.2; kill -USR1 "$$") &
+run_with_wall_timeout 3 bash -c '\''sleep 0.5; printf reached >"$1"'\'' \
+  bash "${LEASE_SIDE_EFFECT}"
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "Lease loss must abort a non-Lease-aware wall runner"
+  [[ ! -e "${lease_side_effect}" ]] || fail "Lease loss allowed wall-runner forward work to continue"
+  assert_eq "$(<"${lease_rollback_marker}")" "stopped-before-rollback" \
+    "Lease loss must prove the forward command stopped before rollback"
+  [[ -z "$(find "${lease_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "Lease-loss wall-runner cleanup retained a private command gate"
+  rm -f "${lease_rollback_marker}"
+
+  committed_signal_root="${temp_dir}/committed-signal-gates"
+  committed_health_file="${temp_dir}/committed-health"
+  committed_side_effect="${temp_dir}/committed-side-effect"
+  committed_state_marker="${temp_dir}/committed-state"
+  committed_rollback_marker="${temp_dir}/committed-rollback"
+  mkdir -m 700 "${committed_signal_root}"
+  printf 'lost|release/test|committed-loss\n' >"${committed_health_file}"
+  status=0
+  if TMPDIR="${committed_signal_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    COMMITTED_HEALTH_FILE="${committed_health_file}" \
+    COMMITTED_SIDE_EFFECT="${committed_side_effect}" \
+    COMMITTED_STATE_MARKER="${committed_state_marker}" \
+    COMMITTED_ROLLBACK_MARKER="${committed_rollback_marker}" bash -c '
+set -euo pipefail
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${COMMITTED_HEALTH_FILE}"
+CONTROL_PLANE_RELEASE_COMMITTED=true
+CONTROL_PLANE_RELEASE_HELM_MUTATION_STARTED=true
+PREVIOUS_REVISION=17
+rollback_release_transaction() { printf "unsafe\n" >"${COMMITTED_ROLLBACK_MARKER}"; }
+capture_committed_abort_state() {
+  committed_command_stopped="true"
+  if [[ -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" ||
+    -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID}" ||
+    -n "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}" ]]; then
+    committed_command_stopped="false"
+  fi
+  terminate_active_control_plane_release_command >/dev/null 2>&1 || true
+  printf "%s|%s|%s\n" \
+    "${committed_command_stopped}" \
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_REQUIRED}" \
+    "${CONTROL_PLANE_RELEASE_RECOVERY_FENCE_DISPOSITION}" \
+    >"${COMMITTED_STATE_MARKER}"
+}
+trap capture_committed_abort_state EXIT
+trap handle_control_plane_backup_coordination_abort USR1
+(sleep 0.2; kill -USR1 "$$") &
+run_with_wall_timeout 3 bash -c '\''sleep 0.5; printf reached >"$1"'\'' \
+  bash "${COMMITTED_SIDE_EFFECT}"
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "committed Lease loss must stop remaining non-Lease-aware work"
+  [[ ! -e "${committed_side_effect}" ]] ||
+    fail "committed Lease loss allowed remaining forward work to continue"
+  [[ ! -e "${committed_rollback_marker}" ]] ||
+    fail "committed Lease loss attempted rollback"
+  assert_eq "$(<"${committed_state_marker}")" "true|true|committed-lease-unsafe" \
+    "committed Lease loss must stop its command and retain a recovery fence without rollback"
+  [[ -z "$(find "${committed_signal_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "committed Lease-loss cleanup retained a private command gate"
+  rm -f "${committed_health_file}" "${committed_state_marker}"
+
+  guarded_start_root="${temp_dir}/guarded-start-signal-gates"
+  guarded_start_health="${temp_dir}/guarded-start.health"
+  guarded_start_transition="${temp_dir}/guarded-start.transition"
+  guarded_start_side_effect="${temp_dir}/guarded-start.side-effect"
+  mkdir -m 700 "${guarded_start_root}"
+  printf 'healthy|release/test|guarded-start\n' >"${guarded_start_health}"
+  status=0
+  if TMPDIR="${guarded_start_root}" FUGUE_UPGRADE_LIB_ONLY=true REPO_ROOT="${REPO_ROOT}" \
+    GUARDED_START_HEALTH="${guarded_start_health}" \
+    GUARDED_START_TRANSITION="${guarded_start_transition}" \
+    GUARDED_START_SIDE_EFFECT="${guarded_start_side_effect}" bash -c '
+set -euo pipefail
+set -T
+source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+CONTROL_PLANE_BACKUP_COORDINATION_HEALTH_FILE="${GUARDED_START_HEALTH}"
+FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS=1
+trap '\''terminate_active_control_plane_release_command'\'' EXIT
+trap handle_control_plane_backup_coordination_abort USR1
+GUARDED_START_SIGNAL_SENT=false
+trap '\''
+if [[ "${GUARDED_START_SIGNAL_SENT}" != "true" &&
+  "${BASH_COMMAND}" == release_prepared_release_command* ]]; then
+  GUARDED_START_SIGNAL_SENT=true
+  printf "%s|%s\n" \
+    "${CONTROL_PLANE_RELEASE_COMMAND_START_IN_PROGRESS:-false}" \
+    "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_LEASE_AWARE:-false}" \
+    >"${GUARDED_START_TRANSITION}"
+  printf "lost|release/test|guarded-start-race\n" >"${GUARDED_START_HEALTH}"
+  kill -USR1 "$$"
+fi
+'\'' DEBUG
+run_with_control_plane_backup_coordination_guard 3 "guarded start race" \
+  bash -c '\''printf mutated >"$1"'\'' bash "${GUARDED_START_SIDE_EFFECT}"
+'; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_eq "${status}" "1" "Lease loss in the guarded start transition status"
+  assert_eq "$(<"${guarded_start_transition}")" "true|true" \
+    "guarded start signal fixture must hit the Lease-aware authorization transition"
+  [[ ! -e "${guarded_start_side_effect}" ]] ||
+    fail "Lease loss between the final check and start token allowed the command to execute"
+  [[ -z "$(find "${guarded_start_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "guarded start signal retained a private command gate"
+  rm -f "${guarded_start_health}" "${guarded_start_transition}"
+
+  [[ -z "$(find "${gate_root}" -mindepth 1 -prune -print -quit)" ]] ||
+    fail "release command completion retained a private command gate"
+  printf '[test_release_domain_safety] release command process groups drain on every completion path\n'
+)
+
 run_e5b_fake_case() (
   set -euo pipefail
   local scenario="$1"
@@ -1789,6 +3424,7 @@ run_e5b_query_timeout_regressions
 run_e4_real_dig_smokes
 run_e4_public_hostport_regressions
 run_helm_upgrade_argv_builder_regressions
+run_release_command_group_regressions
 bash "${REPO_ROOT}/scripts/test_control_plane_release_render.sh"
 if [[ "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e4-dns" ||
       "${FUGUE_RELEASE_DOMAIN_TEST_SCOPE:-}" == "e5b-dig" ]]; then
@@ -5618,11 +7254,19 @@ PY
   CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS=false
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
   CONTROL_PLANE_BACKUP_COORDINATION_LEASE_RENEW_PID="$$"
+  CONTROL_PLANE_BACKUP_COORDINATION_PARENT_PID="${BASHPID:-$$}"
+  CONTROL_PLANE_BACKUP_COORDINATION_PARENT_BASH_SUBSHELL="${BASH_SUBSHELL:-0}"
+  postcommit_abort_calls=0
   require_control_plane_backup_coordination_lease() { :; }
   control_plane_backup_coordination_health_state() { printf 'lost'; }
   write_control_plane_backup_coordination_health() { :; }
   handle_control_plane_backup_coordination_abort() {
-    fail "post-commit best-effort guard must never invoke the exiting rollback abort handler"
+    [[ "${1:-}" == "true" ]] || fail "post-commit guard must force the committed abort handler"
+    [[ -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID}" &&
+      -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID}" &&
+      -z "${CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR}" ]] ||
+      fail "post-commit guard dispatched abort before stopping its active command"
+    postcommit_abort_calls=$((postcommit_abort_calls + 1))
   }
   postcommit_guard_status=0
   if run_with_control_plane_backup_coordination_guard 5 "post-commit release record" bash -c 'sleep 10'; then
@@ -5630,8 +7274,41 @@ PY
   else
     postcommit_guard_status=$?
   fi
-  assert_eq "${postcommit_guard_status}" "125" "post-commit Lease loss must return to the warning caller instead of exiting"
+  assert_eq "${postcommit_guard_status}" "125" "stubbed post-commit Lease loss fallback status"
+  assert_eq "${postcommit_abort_calls}" "1" \
+    "post-commit Lease loss must dispatch committed freeze after stopping the guarded command"
   printf 'continued\n' >/dev/null
+)
+
+(
+  CONTROL_PLANE_RELEASE_COMMITTED=true
+  CONTROL_PLANE_RELEASE_ROLLBACK_IN_PROGRESS=false
+  CONTROL_PLANE_BACKUP_COORDINATION_LEASE_HELD=true
+  preflight_abort_calls=0
+  preflight_health_reason=""
+  preflight_command_marker="$(mktemp)"
+  rm -f "${preflight_command_marker}"
+  require_control_plane_backup_coordination_lease() { return 1; }
+  write_control_plane_backup_coordination_health() { preflight_health_reason="${2:-}"; }
+  handle_control_plane_backup_coordination_abort() {
+    [[ "${1:-}" == "true" ]] || fail "post-commit preflight must force the committed abort handler"
+    preflight_abort_calls=$((preflight_abort_calls + 1))
+  }
+  postcommit_preflight_command() { printf 'started\n' >"${preflight_command_marker}"; }
+  postcommit_preflight_status=0
+  if run_with_control_plane_backup_coordination_guard \
+    5 "post-commit preflight" postcommit_preflight_command; then
+    fail "unsafe post-commit preflight must not pass"
+  else
+    postcommit_preflight_status=$?
+  fi
+  assert_eq "${postcommit_preflight_status}" "125" "stubbed post-commit preflight fallback status"
+  assert_eq "${preflight_abort_calls}" "1" "post-commit preflight must dispatch committed freeze"
+  assert_eq "${preflight_health_reason}" "post-commit-guard:post-commit preflight" \
+    "post-commit Lease loss must be rejected by the initial preflight"
+  [[ ! -e "${preflight_command_marker}" ]] ||
+    fail "unsafe post-commit preflight started its command"
+  rm -f "${preflight_command_marker}"
 )
 
 (
@@ -9462,14 +11139,28 @@ guard = source[guard_start:guard_end]
 for required in (
     "CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PID",
     "CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_PGID",
-    "terminate_release_command_tree",
+    "CONTROL_PLANE_BACKUP_COORDINATION_GUARDED_COMMAND_GATE_DIR",
+    "complete_release_command_group",
+    "terminate_and_cleanup_release_command",
     "prepare_release_command_in_dedicated_group",
     "release_prepared_release_command",
     "handle_control_plane_backup_coordination_abort true",
-    'else\n        status=$?\n        return "${status}"',
+    'else\n        status=$?\n      fi',
+    'return "${status}"',
 ):
     if required not in guard:
         raise SystemExit(f"lease-aware long-command guard is missing {required}")
+wall_start = source.index("\nrun_with_wall_timeout() {")
+wall_end = source.index("\nbounded_kubectl() {", wall_start)
+wall = source[wall_start:wall_end]
+for required in (
+    "read_completed_release_command_status",
+    "complete_release_command_group",
+    "abort_prepared_release_command",
+    "terminate_and_cleanup_release_command",
+):
+    if required not in wall:
+        raise SystemExit(f"wall-bounded command runner is missing {required}")
 if 'kill -KILL -- "-${pgid}"' not in source:
     raise SystemExit("guarded process-group cleanup lacks its delayed group KILL")
 for unsafe in (
@@ -9891,6 +11582,8 @@ exit_trap = main.index("trap cleanup_tmp_artifacts EXIT")
 hup_trap = main.index("trap 'handle_control_plane_release_signal HUP' HUP")
 int_trap = main.index("trap 'handle_control_plane_release_signal INT' INT")
 term_trap = main.index("trap 'handle_control_plane_release_signal TERM' TERM")
+lease_abort_trap = main.index("trap handle_control_plane_backup_coordination_abort USR1")
+forced_lease_abort_trap = main.index("trap 'handle_control_plane_backup_coordination_abort true' USR2")
 evidence_init = main.index("initialize_control_plane_release_evidence", exit_trap)
 first_required_env = main.index("require_env FUGUE_API_IMAGE_REPOSITORY")
 previous = main.index('PREVIOUS_REVISION="$(helm_current_revision)"')
@@ -9909,6 +11602,8 @@ lease_release = main.index("release_control_plane_backup_coordination_lease", co
 success_evidence = main.index("success 0 complete", committed)
 if not max(exit_trap, hup_trap, int_trap, term_trap) < evidence_init < first_required_env:
     raise SystemExit("release evidence EXIT and signal traps must exist before configuration can fail")
+if not max(lease_abort_trap, forced_lease_abort_trap) < lease_mutation:
+    raise SystemExit("normal and forced Lease-abort traps must exist before Lease acquisition")
 if not previous < pre_state < lease_mutation < backup_drain < fenced_state < fenced_compare < recovery_fence_arm < host_mutation < helm_mutation:
     raise SystemExit("release-pre-state.json must be durable before every host or workload mutation")
 if not helm_mutation < commit_ready < committed < lease_release < success_evidence:
@@ -11041,7 +12736,7 @@ lease_loss_cleanup() {
   stop_control_plane_backup_coordination_lease_renewer || true
 }
 trap lease_loss_cleanup EXIT
-trap handle_control_plane_backup_coordination_abort USR1
+trap '\''handle_control_plane_backup_coordination_abort true'\'' USR2
 (sleep 0.2; printf "replacement" >"${LEASE_LOSS_TMP}/replacement-owner") &
 start_control_plane_backup_coordination_lease_renewer
 run_with_control_plane_backup_coordination_guard 10 "blocked mutation after Lease replacement" \
