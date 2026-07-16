@@ -433,7 +433,7 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 		if r.URL.Query().Get("database") != "fugue_observability" {
 			t.Errorf("expected database query parameter, got %s", r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_123","request_id":"request_123","path_template":"/v1/items","method":"POST","status_code":503,"duration_ms":1200,"ttfb_ms":240,"summary_json":"{\"provider\":\"example\"}"}` + "\n"))
+		_, _ = w.Write([]byte(`{"ts":"2026-06-05 22:00:00.000","trace_id":"trace_123","request_id":"request_123","path_template":"/v1/items","method":"POST","status_code":503,"duration_ms":1200,"ttfb_ms":240,"summary_json":"{\"provider\":\"example\",\"ttftMs\":360}"}` + "\n"))
 	}))
 	t.Cleanup(clickHouse.Close)
 	server.observabilityConfig = observability.Config{
@@ -471,12 +471,25 @@ func TestAppObservabilityRequestsQueriesClickHouse(t *testing.T) {
 		t.Fatalf("expected one request, got %+v", response.Requests)
 	}
 	request := response.Requests[0]
-	if request["trace_id"] != "trace_123" || request["request_id"] != "request_123" || request["route"] != "/v1/items" || request["ttft_ms"] == nil {
+	if request["trace_id"] != "trace_123" || request["request_id"] != "request_123" || request["route"] != "/v1/items" || request["ttfb_ms"] != float64(240) || request["ttft_ms"] != float64(360) {
 		t.Fatalf("expected request summary fields, got %+v", request)
 	}
 	summary, ok := request["summary"].(map[string]any)
 	if !ok || summary["provider"] != "example" {
 		t.Fatalf("expected parsed request summary, got %+v", request)
+	}
+}
+
+func TestAppObservabilityRequestDoesNotForgeTTFTFromTTFB(t *testing.T) {
+	request := appObservabilityRequestFromClickHouseRow(map[string]any{
+		"ttfb_ms":      float64(240),
+		"summary_json": `{}`,
+	})
+	if request["ttfb_ms"] != float64(240) {
+		t.Fatalf("expected HTTP TTFB to be preserved: %+v", request)
+	}
+	if _, exists := request["ttft_ms"]; exists {
+		t.Fatalf("HTTP TTFB was mislabeled as application TTFT: %+v", request)
 	}
 }
 

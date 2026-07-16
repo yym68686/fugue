@@ -493,8 +493,10 @@ func normalizeAppObservabilityRequestField(raw string) string {
 		return "status_code"
 	case "duration":
 		return "duration_ms"
-	case "ttft", "ttfb":
+	case "ttft":
 		return "ttft_ms"
+	case "ttfb":
+		return "ttfb_ms"
 	default:
 		return field
 	}
@@ -515,7 +517,7 @@ func writeAppObservabilityRequestFieldTable(w io.Writer, rows []map[string]any, 
 
 func appObservabilityRequestFieldHeaders(fields []string) []string {
 	if len(fields) == 0 {
-		fields = []string{"timestamp", "status_code", "duration_ms", "ttft_ms", "route"}
+		fields = []string{"timestamp", "status_code", "duration_ms", "ttfb_ms", "ttft_ms", "route"}
 	}
 	headers := make([]string, 0, len(fields))
 	for _, field := range fields {
@@ -526,7 +528,7 @@ func appObservabilityRequestFieldHeaders(fields []string) []string {
 
 func appObservabilityRequestFieldLine(row map[string]any, fields []string) string {
 	if len(fields) == 0 {
-		fields = []string{"timestamp", "status_code", "duration_ms", "ttft_ms", "route"}
+		fields = []string{"timestamp", "status_code", "duration_ms", "ttfb_ms", "ttft_ms", "route"}
 	}
 	values := make([]string, 0, len(fields))
 	for _, field := range fields {

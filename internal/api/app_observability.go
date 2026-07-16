@@ -1696,7 +1696,8 @@ func clickHouseDateTimeLiteral(value time.Time) string {
 }
 
 func appObservabilityRequestFromClickHouseRow(row map[string]any) map[string]any {
-	return map[string]any{
+	summary := parseJSONMapField(row["summary_json"])
+	request := map[string]any{
 		"timestamp":   stringField(row, "ts"),
 		"trace_id":    stringField(row, "trace_id"),
 		"request_id":  stringField(row, "request_id"),
@@ -1704,9 +1705,24 @@ func appObservabilityRequestFromClickHouseRow(row map[string]any) map[string]any
 		"method":      stringField(row, "method"),
 		"status_code": row["status_code"],
 		"duration_ms": row["duration_ms"],
-		"ttft_ms":     row["ttfb_ms"],
-		"summary":     parseJSONMapField(row["summary_json"]),
+		"ttfb_ms":     row["ttfb_ms"],
+		"summary":     summary,
 	}
+	if ttftMS, ok := appObservabilitySummaryMilliseconds(summary, "ttft_ms", "ttftMs"); ok {
+		request["ttft_ms"] = ttftMS
+	}
+	return request
+}
+
+func appObservabilitySummaryMilliseconds(summary map[string]any, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		value, ok := optionalFloatField(summary, key)
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > float64(1<<53-1) || math.Trunc(value) != value {
+			continue
+		}
+		return int64(value), true
+	}
+	return 0, false
 }
 
 func appObservabilitySpanFromClickHouseRow(row map[string]any) map[string]any {

@@ -331,6 +331,19 @@ func TestAppObservabilityRequestFieldsFallbackToSummary(t *testing.T) {
 	}
 }
 
+func TestAppObservabilityRequestFieldsDistinguishTTFBAndTTFT(t *testing.T) {
+	t.Parallel()
+
+	fields := appObservabilityRequestFields("ttfb,ttft")
+	if len(fields) != 2 || fields[0] != "ttfb_ms" || fields[1] != "ttft_ms" {
+		t.Fatalf("unexpected timing field normalization: %#v", fields)
+	}
+	row := map[string]any{"ttfb_ms": float64(120), "ttft_ms": float64(340)}
+	if line := appObservabilityRequestFieldLine(row, fields); line != "120\t340" {
+		t.Fatalf("unexpected timing field line: %q", line)
+	}
+}
+
 func TestRunAppObservabilityExportBundlesExistingEndpoints(t *testing.T) {
 	t.Parallel()
 

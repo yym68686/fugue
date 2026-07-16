@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -343,6 +344,230 @@ func TestOTLPHTTPReceiverParsesStructuredJSONRequestSummary(t *testing.T) {
 	}
 	if event.Message != "request finished token=[REDACTED]" {
 		t.Fatalf("message was not redacted: %q", event.Message)
+	}
+}
+
+func TestOTLPHTTPReceiverExportsRequestAndAdmissionContractsToClickHouse(t *testing.T) {
+	type capturedInsert struct {
+		method      string
+		query       string
+		contentType string
+		body        []byte
+		err         error
+	}
+	inserts := make(chan capturedInsert, 2)
+	clickHouse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		inserts <- capturedInsert{
+			method:      r.Method,
+			query:       r.URL.Query().Get("query"),
+			contentType: r.Header.Get("Content-Type"),
+			body:        body,
+			err:         err,
+		}
+		if err != nil {
+			http.Error(w, "failed to read insert", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(clickHouse.Close)
+
+	pipeline := NewPipeline(Config{
+		Enabled:          true,
+		ClickHouseDSN:    clickHouse.URL + "?database=fugue_observability",
+		ExportTimeout:    time.Second,
+		QueueSize:        4,
+		BatchSize:        1,
+		MaxPayloadBytes:  32 << 10,
+		MemoryLimitBytes: 1 << 20,
+		RetryMaxAttempts: 1,
+	}, nil)
+	if err := pipeline.Start(context.Background()); err != nil {
+		t.Fatalf("start telemetry pipeline: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := pipeline.Stop(ctx); err != nil {
+			t.Errorf("stop telemetry pipeline: %v", err)
+		}
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/logs", pipeline.HandleOTLPHTTP)
+	receiver := httptest.NewServer(mux)
+	t.Cleanup(receiver.Close)
+
+	summary := map[string]any{
+		"endpoint":    "/v1/responses",
+		"statusCode":  http.StatusServiceUnavailable,
+		"routeSource": "zero_zero",
+		"ttftMs":      240,
+	}
+	summaryJSON, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("marshal request summary: %v", err)
+	}
+	admissionSummary := map[string]any{
+		"decision":                        "reject",
+		"reason":                          "large_body_capacity_exhausted",
+		"request_self_lease_id":           "lease_contract",
+		"request_self_request_id":         "request_rejected_contract",
+		"request_self_trace_id":           "trace_rejected_contract",
+		"runtime_global_large_body_limit": 1,
+		"blocking_holders": []map[string]any{{
+			"claim_id":   "claim_contract",
+			"lease_id":   "lease_holder_contract",
+			"request_id": "request_holder_contract",
+			"trace_id":   "trace_holder_contract",
+		}},
+	}
+	admissionSummaryJSON, err := json.Marshal(admissionSummary)
+	if err != nil {
+		t.Fatalf("marshal admission summary: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"service": "uni-api-web-api",
+		"events": []map[string]any{{
+			"kind":          "log",
+			"event_type":    "request_summary",
+			"source":        "uni-api-web-api",
+			"message":       "request_summary",
+			"timestamp":     "2026-07-16T03:16:02.720Z",
+			"id":            "event_zero_zero_contract",
+			"tenant_id":     "tenant_contract",
+			"project_id":    "project_contract",
+			"app_id":        "app_zero_zero_contract",
+			"runtime_id":    "runtime_contract",
+			"trace_id":      "trace_zero_zero_contract",
+			"span_id":       "span_zero_zero_contract",
+			"request_id":    "request_zero_zero_contract",
+			"path":          "/v1/responses",
+			"path_template": "/v1/responses",
+			"method":        http.MethodPost,
+			"route_id":      "/v1/responses",
+			"status_code":   http.StatusServiceUnavailable,
+			"status_class":  "5xx",
+			"duration_ms":   6627,
+			"ttft_ms":       240,
+			"streaming":     true,
+			"summary":       summary,
+			"summary_json":  string(summaryJSON),
+		}, {
+			"kind":       "log",
+			"event_type": "large_body_admission_decision",
+			"source":     "uni-api-ember",
+			"message":    "large body admission reject",
+			"timestamp":  "2026-07-16T03:16:03.000Z",
+			"tenant_id":  "tenant_contract",
+			"project_id": "project_contract",
+			"app_id":     "app_ember_contract",
+			"runtime_id": "runtime_ember_contract",
+			"trace_id":   "trace_rejected_contract",
+			"request_id": "request_rejected_contract",
+			"attributes": map[string]any{
+				"fugue_table":                     "app_events",
+				"severity":                        "warning",
+				"decision":                        "reject",
+				"reason":                          "large_body_capacity_exhausted",
+				"runtime_global_large_body_limit": 1,
+			},
+			"summary":      admissionSummary,
+			"summary_json": string(admissionSummaryJSON),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal 0-0 request summary envelope: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, receiver.URL+"/v1/logs", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("create telemetry request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := receiver.Client().Do(req)
+	if err != nil {
+		t.Fatalf("post telemetry request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 202, got %d body=%s", resp.StatusCode, body)
+	}
+
+	var requestInsert, appInsert capturedInsert
+	for received := 0; received < 2; received++ {
+		select {
+		case insert := <-inserts:
+			switch insert.query {
+			case "INSERT INTO fugue_observability.request_facts FORMAT JSONEachRow":
+				requestInsert = insert
+			case "INSERT INTO fugue_observability.app_events FORMAT JSONEachRow":
+				appInsert = insert
+			default:
+				t.Fatalf("unexpected ClickHouse query=%q body=%s", insert.query, insert.body)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for ClickHouse inserts")
+		}
+	}
+	insert := requestInsert
+	if insert.err != nil {
+		t.Fatalf("read ClickHouse insert: %v", insert.err)
+	}
+	if insert.method != http.MethodPost || insert.contentType != "application/json" {
+		t.Fatalf("unexpected ClickHouse request method=%q content_type=%q", insert.method, insert.contentType)
+	}
+	const wantQuery = "INSERT INTO fugue_observability.request_facts FORMAT JSONEachRow"
+	if insert.query != wantQuery {
+		t.Fatalf("ClickHouse query=%q, want %q; body=%s", insert.query, wantQuery, insert.body)
+	}
+	if strings.Contains(string(insert.body), "request_fact_incomplete") {
+		t.Fatalf("complete request summary was rerouted as incomplete: %s", insert.body)
+	}
+	var row requestFactRow
+	if err := json.Unmarshal(bytes.TrimSpace(insert.body), &row); err != nil {
+		t.Fatalf("decode request_facts JSONEachRow body: %v\nbody=%s", err, insert.body)
+	}
+	if row.AppID != "app_zero_zero_contract" ||
+		row.PathTemplate != "/v1/responses" ||
+		row.StatusCode != http.StatusServiceUnavailable ||
+		row.StatusClass != "5xx" ||
+		row.Method != http.MethodPost ||
+		row.RouteID != "/v1/responses" ||
+		row.DurationMS != 6627 ||
+		row.TTFBMS != 0 ||
+		!row.Streaming {
+		t.Fatalf("0-0 request summary fields were not preserved in request_facts: %+v", row)
+	}
+	if !strings.Contains(row.SummaryJSON, `"ttftMs":240`) {
+		t.Fatalf("0-0 TTFT was not preserved with its real semantics: %s", row.SummaryJSON)
+	}
+	if appInsert.err != nil {
+		t.Fatalf("read admission app_events insert: %v", appInsert.err)
+	}
+	var appRow appEventRow
+	if err := json.Unmarshal(bytes.TrimSpace(appInsert.body), &appRow); err != nil {
+		t.Fatalf("decode app_events JSONEachRow body: %v\nbody=%s", err, appInsert.body)
+	}
+	if appRow.EventType != "large_body_admission_decision" ||
+		appRow.AppID != "app_ember_contract" ||
+		appRow.Severity != "warning" {
+		t.Fatalf("admission decision was not preserved in app_events: %+v", appRow)
+	}
+	for _, value := range []string{
+		"claim_contract",
+		"lease_contract",
+		"lease_holder_contract",
+		"request_rejected_contract",
+		"trace_rejected_contract",
+		"request_holder_contract",
+		"trace_holder_contract",
+		"large_body_capacity_exhausted",
+	} {
+		if !strings.Contains(appRow.AttributesJSON, value) {
+			t.Fatalf("admission app_events row lost %q: %s", value, appRow.AttributesJSON)
+		}
 	}
 }
 

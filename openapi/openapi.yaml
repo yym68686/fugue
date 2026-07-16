@@ -22606,9 +22606,14 @@ components:
         duration_ms:
           type: integer
           format: int64
+        ttfb_ms:
+          type: integer
+          format: int64
+          description: HTTP time to first response byte recorded by the request fact.
         ttft_ms:
           type: integer
           format: int64
+          description: Application time to first token when explicitly present in the request summary; omitted otherwise.
         summary:
           type: object
           additionalProperties: true
