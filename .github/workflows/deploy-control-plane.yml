@@ -182,8 +182,9 @@ jobs:
         run: |
           bash scripts/test_prepare_authoritative_dns_dig.sh
           bash scripts/test_release_domain_workflow.sh
+          bash scripts/test_release_policy_recovery_workflow.sh
           bash scripts/test_release_domain_safety.sh
-          bash scripts/test_node_local_dns_release.sh
+          FUGUE_REQUIRE_NODE_LOCAL_DNS_TEST_DOCKER=true bash scripts/test_node_local_dns_release.sh
           python3 scripts/test_verify_stale_release_recovery.py
 
       - name: Run Go tests
@@ -312,7 +313,15 @@ jobs:
     steps:
       - name: Record deploy job budget origin
         if: ${{ needs.release-baseline.outputs.is_genesis != 'true' }}
-        run: echo "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"
+        run: |
+          set -euo pipefail
+          readonly budget_seconds=20400
+          started_at="$(date +%s)"
+          [[ "${started_at}" =~ ^[1-9][0-9]*$ ]]
+          {
+            printf 'FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=%s\n' "${started_at}"
+            printf 'CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=%s\n' "$((started_at + budget_seconds))"
+          } >> "${GITHUB_ENV}"
 
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

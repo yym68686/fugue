@@ -24,6 +24,39 @@ assert_eq() {
   fi
 }
 
+run_preinitialized_deadline_regressions() (
+  set -euo pipefail
+
+  export FUGUE_UPGRADE_LIB_ONLY=true
+  export FUGUE_DEPLOY_JOB_BUDGET_SECONDS=20400
+  export FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=10200
+  export FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=600
+  export FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"
+  export CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$((
+    FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH + FUGUE_DEPLOY_JOB_BUDGET_SECONDS
+  ))
+  expected_deadline="${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH}"
+
+  # shellcheck source=scripts/upgrade_fugue_control_plane.sh
+  source "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh"
+  assert_eq "${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH}" "${expected_deadline}" \
+    "upgrade library preserves the workflow deadline"
+  require_release_forward_budget 1 "preinitialized deadline inheritance test" ||
+    fail "the exact workflow deadline must be usable before the domain gate"
+  initialize_control_plane_release_job_deadline ||
+    fail "normal deadline initialization must accept the exact workflow deadline"
+
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$((expected_deadline + 1))
+  if require_release_forward_budget 1 "drifted preinitialized deadline test"; then
+    fail "a drifted preinitialized deadline must fail before a bounded read"
+  fi
+  if initialize_control_plane_release_job_deadline; then
+    fail "normal deadline initialization must reject a drifted preset"
+  fi
+)
+
+run_preinitialized_deadline_regressions
+
 run_helm_upgrade_argv_builder_regressions() (
   set -euo pipefail
 
@@ -3724,9 +3757,20 @@ grep -Fq "FUGUE_DEPLOY_JOB_BUDGET_SECONDS: '20400'" "${REPO_ROOT}/.github/workfl
   fail "control-plane deploy must pass an explicit script wall-clock budget"
 grep -Fq "FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS: '10200'" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must reserve the selected multi-domain rollback upper bound"
-grep -Fq 'echo "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"' \
-  "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+grep -Fq 'readonly budget_seconds=20400' "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must bind the pre-checkout deadline to the exact deploy budget"
+grep -Fq "FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=%s" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must record an absolute budget origin before checkout"
+grep -Fq "CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=%s" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy must initialize the absolute deadline before the first bounded Helm read"
+grep -Fq '$((started_at + budget_seconds))' "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
+  fail "control-plane deploy deadline must derive from the same origin and exact budget"
+grep -Fq 'CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH="${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH:-0}"' \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "control-plane upgrade must preserve the workflow deadline before its first bounded read"
+grep -Fq 'absolute deploy deadline drifted from the exact job origin and budget' \
+  "${REPO_ROOT}/scripts/upgrade_fugue_control_plane.sh" ||
+  fail "every forward budget reservation must reject a drifted preinitialized deadline"
 grep -Fq "FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_LEASE_DURATION_SECONDS:" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
   fail "control-plane deploy must configure the shared backup/release Lease"
 grep -Fq "actions: read" "${REPO_ROOT}/.github/workflows/deploy-control-plane.yml" ||
@@ -7212,7 +7256,10 @@ builder = source[builder_start:builder_end]
 digest_build = main.index("build_core_image_digest_helm_set_args")
 revision = main.index('PREVIOUS_REVISION="$(helm_current_revision)"')
 domain_gate = main.index("run_control_plane_atomic_domain_gate")
-if not digest_build < revision < domain_gate:
+status_read = main.index('"Helm release status read"')
+if '  helm status "${FUGUE_RELEASE_NAME}"' in main:
+    raise SystemExit("main must not execute an unbounded Helm status read")
+if not digest_build < status_read < revision < domain_gate:
     raise SystemExit("core image digest validation must finish before the atomic domain gate")
 if builder.count('"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]+"${CORE_IMAGE_DIGEST_HELM_SET_ARGS[@]}"}"') != 1:
     raise SystemExit("Helm upgrade must consume the atomic core image digest argument array exactly once")
@@ -12999,15 +13046,18 @@ if (
 fi
 if (
   FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(( $(date +%s) - FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH + FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
   validate_control_plane_release_job_budget
 ); then
   fail "an exhausted absolute deploy deadline must fail before release mutation"
 fi
 CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( $(date +%s) + FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS + FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS + 9 ))
+FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH=$(( CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH - FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
 if require_release_forward_budget 10 "deadline boundary test"; then
   fail "forward operation must be rejected when elapsed time leaves less than operation+rollback+artifact"
 fi
 FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"
+CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH + FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
 validate_control_plane_release_job_budget
 if (
   FUGUE_NODE_LOCAL_DNS_MODE=iptables

@@ -1,0 +1,282 @@
+name: Freeze Failed Control Plane Release Policy Recovery
+
+on:
+  workflow_run:
+    workflows:
+      - recover-control-plane-release-policy
+    types:
+      - completed
+
+permissions: {}
+
+concurrency:
+  group: fugue-control-plane-release-policy-failure-watchdog-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  freeze-authorized-failure:
+    if: >-
+      ${{
+        always() &&
+        github.event.workflow_run.conclusion != 'success' &&
+        github.event.workflow_run.event == 'workflow_dispatch' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        github.event.workflow_run.head_sha == vars.FUGUE_CONTROL_PLANE_RELEASE_POLICY_RECOVERY_SHA
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Record watchdog deadline with evidence reserve
+        if: always()
+        run: |
+          set -euo pipefail
+          started_at="$(date +%s)"
+          [[ "${started_at}" =~ ^[1-9][0-9]*$ ]]
+          printf 'RECOVERY_WATCHDOG_DEADLINE_EPOCH=%s\n' "$((started_at + 1500))" >>"${GITHUB_ENV}"
+
+      - name: Freeze both release lanes and cancel non-terminal runs
+        id: freeze_lane
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTHORIZED_SHA: ${{ vars.FUGUE_CONTROL_PLANE_RELEASE_POLICY_RECOVERY_SHA }}
+          TRIGGER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${TRIGGER_CONCLUSION}" != 'success' ]]
+          [[ "${TRIGGER_EVENT}" == 'workflow_dispatch' ]]
+          [[ "${TRIGGER_BRANCH}" == 'main' ]]
+          [[ "${TRIGGER_REPOSITORY}" == "${GITHUB_REPOSITORY}" ]]
+          [[ "${TRIGGER_SHA}" == "${AUTHORIZED_SHA}" ]]
+          [[ "${TRIGGER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${TRIGGER_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          workflows=(deploy-control-plane.yml recover-control-plane-release-policy.yml)
+
+          disable_workflow() {
+            local workflow="$1"
+            local state=""
+            for attempt in 1 2 3 4 5; do
+              timeout --kill-after=2s 10s gh api --method PUT \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/disable" >/dev/null 2>&1 || true
+              state="$(timeout --kill-after=2s 10s gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}" --jq '.state' 2>/dev/null || true)"
+              [[ "${state}" == 'disabled_manually' ]] && return 0
+              sleep 2
+            done
+            echo "workflow disable was not confirmed: ${workflow} state=${state}" >&2
+            return 1
+          }
+          pending_runs() {
+            local workflow="$1"
+            local status=""
+            local inventory=""
+            inventory="$(mktemp)"
+            for status in queued in_progress requested waiting pending; do
+              if ! timeout --kill-after=2s 10s gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?status=${status}&per_page=100" \
+                --jq '.workflow_runs[].id' >>"${inventory}"; then
+                rm -f "${inventory}"
+                return 1
+              fi
+            done
+            awk -v current="${GITHUB_RUN_ID}" '$0 != current' "${inventory}" | sort -u
+            rm -f "${inventory}"
+          }
+          cancel_run_ids() {
+            local run_ids="$1"
+            local run_id=""
+            while IFS= read -r run_id; do
+              [[ -n "${run_id}" ]] || continue
+              timeout --kill-after=2s 10s gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null 2>&1 || true
+            done <<<"${run_ids}"
+          }
+
+          freeze_failed=0
+          for workflow in "${workflows[@]}"; do
+            if ! disable_workflow "${workflow}"; then
+              freeze_failed=1
+            fi
+          done
+          inventory_failed=0
+          if ! deploy_remaining="$(pending_runs deploy-control-plane.yml)"; then
+            echo "could not enumerate non-terminal runs for deploy-control-plane.yml" >&2
+            deploy_remaining='enumeration-failed:deploy-control-plane.yml'
+            inventory_failed=1
+            freeze_failed=1
+          fi
+          if ! recovery_remaining="$(pending_runs recover-control-plane-release-policy.yml)"; then
+            echo "could not enumerate non-terminal runs for recover-control-plane-release-policy.yml" >&2
+            recovery_remaining='enumeration-failed:recover-control-plane-release-policy.yml'
+            inventory_failed=1
+            freeze_failed=1
+          fi
+          for attempt in 1 2 3 4 5; do
+            (( inventory_failed == 0 )) || break
+            [[ -n "${deploy_remaining}" || -n "${recovery_remaining}" ]] || break
+            cancel_run_ids "${deploy_remaining}"
+            cancel_run_ids "${recovery_remaining}"
+            sleep 2
+            if ! deploy_remaining="$(pending_runs deploy-control-plane.yml)"; then
+              echo "could not re-enumerate non-terminal runs for deploy-control-plane.yml" >&2
+              deploy_remaining='enumeration-failed:deploy-control-plane.yml'
+              inventory_failed=1
+              freeze_failed=1
+            fi
+            if ! recovery_remaining="$(pending_runs recover-control-plane-release-policy.yml)"; then
+              echo "could not re-enumerate non-terminal runs for recover-control-plane-release-policy.yml" >&2
+              recovery_remaining='enumeration-failed:recover-control-plane-release-policy.yml'
+              inventory_failed=1
+              freeze_failed=1
+            fi
+          done
+          if [[ -n "${deploy_remaining}" || -n "${recovery_remaining}" ]]; then
+            echo "non-terminal release runs remain after the combined cancellation window:" >&2
+            printf '%s\n%s\n' "${deploy_remaining}" "${recovery_remaining}" | sed '/^$/d' >&2
+            freeze_failed=1
+          fi
+          now="$(date +%s)"
+          if (( RECOVERY_WATCHDOG_DEADLINE_EPOCH - now < 300 )); then
+            echo "watchdog freeze did not retain its evidence reserve" >&2
+            freeze_failed=1
+          fi
+          [[ "${freeze_failed}" == '0' ]]
+
+      - name: Record watchdog freeze evidence
+        id: freeze_evidence
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FREEZE_OUTCOME: ${{ steps.freeze_lane.outcome }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/fugue-release-policy-recovery-watchdog"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          observation_failed=0
+          pending_runs() {
+            local workflow="$1"
+            local status=""
+            local inventory=""
+            inventory="$(mktemp)"
+            for status in queued in_progress requested waiting pending; do
+              if ! timeout --kill-after=2s 10s gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?status=${status}&per_page=100" \
+                --jq '.workflow_runs[].id' >>"${inventory}"; then
+                rm -f "${inventory}"
+                return 1
+              fi
+            done
+            awk -v current="${GITHUB_RUN_ID}" '$0 != current' "${inventory}" | sort -u
+            rm -f "${inventory}"
+          }
+          if ! deploy_state="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml" --jq '.state')"; then
+            deploy_state='unavailable'
+            observation_failed=1
+          fi
+          if ! recovery_state="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/recover-control-plane-release-policy.yml" --jq '.state')"; then
+            recovery_state='unavailable'
+            observation_failed=1
+          fi
+          if ! main_oid="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"; then
+            main_oid='unavailable'
+            observation_failed=1
+          fi
+          if ! baseline_oid="$(timeout --kill-after=2s 10s gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/fugue-control-plane-release-baseline" --jq '.object.sha')"; then
+            baseline_oid='unavailable'
+            observation_failed=1
+          fi
+          if ! deploy_runs="$(pending_runs deploy-control-plane.yml)"; then
+            deploy_runs='enumeration-unavailable:deploy-control-plane.yml'
+            observation_failed=1
+          fi
+          if ! recovery_runs="$(pending_runs recover-control-plane-release-policy.yml)"; then
+            recovery_runs='enumeration-unavailable:recover-control-plane-release-policy.yml'
+            observation_failed=1
+          fi
+          pending_file="${evidence_dir}/pending-runs.txt"
+          printf '%s\n%s\n' "${deploy_runs}" "${recovery_runs}" | sed '/^$/d' | sort -u >"${pending_file}"
+          [[ "${deploy_state}" == 'disabled_manually' ]] || observation_failed=1
+          [[ "${recovery_state}" == 'disabled_manually' ]] || observation_failed=1
+          [[ ! -s "${pending_file}" ]] || observation_failed=1
+          now="$(date +%s)"
+          if ! [[ "${RECOVERY_WATCHDOG_DEADLINE_EPOCH:-0}" =~ ^[1-9][0-9]*$ ]] ||
+            (( now > RECOVERY_WATCHDOG_DEADLINE_EPOCH )); then
+            observation_failed=1
+          fi
+          export BASELINE_OID="${baseline_oid}"
+          export DEPLOY_STATE="${deploy_state}"
+          export MAIN_OID="${main_oid}"
+          export PENDING_RUNS="$(paste -sd, "${pending_file}")"
+          export RECOVERY_STATE="${recovery_state}"
+          python3 - "${evidence_dir}/watchdog-freeze.json" <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+
+          document = {
+              "schema_version": 1,
+              "workflow": "freeze-failed-control-plane-release-policy-recovery",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "trigger_run_id": os.environ["TRIGGER_RUN_ID"],
+              "trigger_run_attempt": int(os.environ["TRIGGER_RUN_ATTEMPT"]),
+              "trigger_sha": os.environ["TRIGGER_SHA"],
+              "trigger_conclusion": os.environ["TRIGGER_CONCLUSION"],
+              "freeze_step_outcome": os.environ["FREEZE_OUTCOME"],
+              "deploy_workflow_state": os.environ["DEPLOY_STATE"],
+              "recovery_workflow_state": os.environ["RECOVERY_STATE"],
+              "observed_main_oid": os.environ["MAIN_OID"],
+              "observed_baseline_oid": os.environ["BASELINE_OID"],
+              "remaining_other_run_ids": [
+                  value for value in os.environ["PENDING_RUNS"].split(",") if value
+              ],
+              "cluster_mutation_attempted": False,
+              "recorded_at": datetime.now(timezone.utc).isoformat(),
+          }
+          temporary = sys.argv[1] + ".tmp"
+          with open(temporary, "x", encoding="utf-8") as handle:
+              json.dump(document, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+              handle.flush()
+              os.fsync(handle.fileno())
+          os.chmod(temporary, 0o600)
+          os.replace(temporary, sys.argv[1])
+          PY
+          [[ "${observation_failed}" == '0' ]]
+
+      - name: Upload watchdog freeze evidence
+        id: freeze_evidence_upload
+        if: always()
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-control-plane-release-policy-watchdog-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/fugue-release-policy-recovery-watchdog
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Require verified watchdog freeze and evidence
+        if: ${{ always() && (steps.freeze_lane.outcome != 'success' || steps.freeze_evidence.outcome != 'success' || steps.freeze_evidence_upload.outcome != 'success') }}
+        run: |
+          echo "failed recovery watchdog could not prove lane freeze and durable evidence" >&2
+          exit 1

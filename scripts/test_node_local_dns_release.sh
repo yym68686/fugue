@@ -896,11 +896,102 @@ assert_mock_dns_query() {
   grep -Fxq -- "${AUTHORITATIVE_DNS_DIG_QUERY_ARGV[*]}" "${MOCK_DIG_LOG}"
 }
 
-if command -v docker >/dev/null 2>&1; then
+run_node_local_dns_test_command() {
+  local timeout_seconds="$1"
+  shift
+  python3 - "${timeout_seconds}" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout = int(sys.argv[1])
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    raise SystemExit(process.wait(timeout=timeout))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=2)
+    raise SystemExit(124)
+PY
+}
+
+bounded_term_marker="${TMP_DIR}/bounded-command-term"
+bounded_term_script="${TMP_DIR}/bounded-command-term.sh"
+cat >"${bounded_term_script}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+marker="$1"
+trap 'printf "terminated\n" >"${marker}"; exit 0' TERM
+while :; do
+  sleep 1
+done
+SH
+chmod +x "${bounded_term_script}"
+if run_node_local_dns_test_command 1 "${bounded_term_script}" "${bounded_term_marker}"; then
+  echo "bounded command unexpectedly succeeded after its deadline" >&2
+  exit 1
+else
+  [[ "$?" == "124" ]] || {
+    echo "bounded command did not report timeout status 124" >&2
+    exit 1
+  }
+fi
+[[ -s "${bounded_term_marker}" ]] || {
+  echo "bounded command did not deliver TERM to its process group" >&2
+  exit 1
+}
+
+bounded_kill_marker="${TMP_DIR}/bounded-command-late-child"
+bounded_kill_script="${TMP_DIR}/bounded-command-kill.sh"
+cat >"${bounded_kill_script}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+marker="$1"
+trap '' TERM
+(
+  trap '' TERM
+  sleep 5
+  printf 'late\n' >"${marker}"
+) &
+wait
+SH
+chmod +x "${bounded_kill_script}"
+if run_node_local_dns_test_command 1 "${bounded_kill_script}" "${bounded_kill_marker}"; then
+  echo "TERM-resistant bounded command unexpectedly succeeded" >&2
+  exit 1
+else
+  [[ "$?" == "124" ]] || {
+    echo "TERM-resistant bounded command did not report timeout status 124" >&2
+    exit 1
+  }
+fi
+sleep 3
+[[ ! -e "${bounded_kill_marker}" ]] || {
+  echo "bounded command left a detached late child after KILL" >&2
+  exit 1
+}
+
+docker_available=false
+if command -v docker >/dev/null 2>&1 &&
+  run_node_local_dns_test_command 15 docker info >/dev/null 2>&1; then
+  docker_available=true
+fi
+if [[ "${docker_available}" == "true" ]]; then
   node_local_dns_test_image='registry.k8s.io/dns/k8s-dns-node-cache@sha256:bc7c80faba5261a740a9f878ab8f7403e72444b0a2fa0a9a42ed26577a48290a'
   pulled=false
   for attempt in 1 2 3; do
-    if docker pull --platform linux/amd64 "${node_local_dns_test_image}"; then
+    if run_node_local_dns_test_command 300 docker pull --platform linux/amd64 "${node_local_dns_test_image}"; then
       pulled=true
       break
     fi
@@ -910,9 +1001,12 @@ if command -v docker >/dev/null 2>&1; then
     echo "failed to pull the pinned NodeLocal DNSCache test image after 3 attempts" >&2
     exit 1
   }
-  docker run --rm --pull=never --platform linux/amd64 --entrypoint /bin/sh \
+  run_node_local_dns_test_command 120 docker run --rm --pull=never --platform linux/amd64 --entrypoint /bin/sh \
     "${node_local_dns_test_image}" \
     -ec 'command -v sh >/dev/null; command -v grep >/dev/null; command -v iptables >/dev/null; command -v iptables-save >/dev/null'
+elif [[ "${FUGUE_REQUIRE_NODE_LOCAL_DNS_TEST_DOCKER:-false}" == "true" ]]; then
+  echo "the required Docker daemon is unavailable for pinned NodeLocal DNSCache image verification" >&2
+  exit 1
 fi
 
 set_common_values() {
@@ -955,7 +1049,8 @@ set_common_values() {
   FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS=10200
   FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS=600
   FUGUE_RELEASE_KUBERNETES_OPERATION_OUTER_TIMEOUT_SECONDS=900
-  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( $(date +%s) + FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
+  FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH="$(date +%s)"
+  CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=$(( FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH + FUGUE_DEPLOY_JOB_BUDGET_SECONDS ))
   NODE_LOCAL_DNS_ROLLBACK_BUDGET_SECONDS=0
   FUGUE_DNS_ZONE=example.test
   FUGUE_DNS_NAMESERVERS=ns1.example.test

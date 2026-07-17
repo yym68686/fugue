@@ -409,7 +409,7 @@ CONTROL_PLANE_RELEASE_COMMAND_SIGNAL_PENDING="false"
 CONTROL_PLANE_BACKUP_COORDINATION_ABORT_PENDING="false"
 CONTROL_PLANE_BACKUP_COORDINATION_ABORT_FORCED_PENDING="false"
 CONTROL_PLANE_RELEASE_EXIT_CLEANUP_IN_PROGRESS="false"
-CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH=0
+CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH="${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH:-0}"
 CONTROL_PLANE_RELEASE_PHASE="initialization"
 CONTROL_PLANE_RELEASE_FAILURE_PHASE=""
 CONTROL_PLANE_RELEASE_MUTATION_OCCURRED="false"
@@ -2462,6 +2462,7 @@ initialize_control_plane_release_job_deadline() {
   local started_at="${FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH:-}"
   local now=""
   local deadline=""
+  local preset_deadline="${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH:-0}"
   local forward_deadline=""
 
   [[ "${started_at}" =~ ^[1-9][0-9]*$ ]] || {
@@ -2475,6 +2476,13 @@ initialize_control_plane_release_job_deadline() {
     return 1
   fi
   deadline=$((started_at + FUGUE_DEPLOY_JOB_BUDGET_SECONDS))
+  if [[ "${preset_deadline}" != "0" ]]; then
+    if ! [[ "${preset_deadline}" =~ ^[1-9][0-9]*$ ]] ||
+      [[ "${preset_deadline}" != "${deadline}" ]]; then
+      log_stderr "preinitialized deploy deadline does not match the exact job origin and budget: preset=${preset_deadline} expected=${deadline}"
+      return 1
+    fi
+  fi
   forward_deadline=$((deadline - FUGUE_DEPLOY_ROLLBACK_RESERVE_SECONDS - FUGUE_DEPLOY_ARTIFACT_RESERVE_SECONDS))
   if (( now >= forward_deadline )); then
     log_stderr "deploy job has already consumed its forward-work window: now=${now} forward_deadline=${forward_deadline} absolute_deadline=${deadline}"
@@ -2505,6 +2513,23 @@ require_release_forward_budget() {
       return 1
     fi
     return 0
+  fi
+  if [[ -n "${FUGUE_DEPLOY_JOB_BUDGET_SECONDS:-}" ]]; then
+    local expected_deadline=""
+    local started_at="${FUGUE_DEPLOY_JOB_STARTED_AT_EPOCH:-}"
+    [[ "${started_at}" =~ ^[1-9][0-9]*$ ]] || {
+      log_stderr "cannot reserve deploy budget for ${phase}: deploy job origin is missing or invalid"
+      return 1
+    }
+    [[ "${FUGUE_DEPLOY_JOB_BUDGET_SECONDS}" =~ ^[1-9][0-9]*$ ]] || {
+      log_stderr "cannot reserve deploy budget for ${phase}: deploy job budget is missing or invalid"
+      return 1
+    }
+    expected_deadline=$((started_at + FUGUE_DEPLOY_JOB_BUDGET_SECONDS))
+    if [[ "${CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH}" != "${expected_deadline}" ]]; then
+      log_stderr "cannot reserve deploy budget for ${phase}: absolute deploy deadline drifted from the exact job origin and budget"
+      return 1
+    fi
   fi
   now="$(date +%s)"
   remaining=$((CONTROL_PLANE_RELEASE_JOB_DEADLINE_EPOCH - now))
@@ -19324,7 +19349,8 @@ PY
   command_exists helm || fail "helm is not installed"
   wait_for_local_kube_api_ready
   ${KUBECTL} version --client >/dev/null
-  helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
+  run_release_long_command "${FUGUE_CONTROL_PLANE_BACKUP_COORDINATION_COMMAND_TIMEOUT_SECONDS}" \
+    "Helm release status read" helm status "${FUGUE_RELEASE_NAME}" -n "${FUGUE_NAMESPACE}" >/dev/null
   if ! PREVIOUS_REVISION="$(helm_current_revision)"; then
     fail "failed to detect current Helm revision"
   fi
