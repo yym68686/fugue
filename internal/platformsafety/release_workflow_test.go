@@ -78,6 +78,145 @@ type releaseWorkflowStep struct {
 	ContinueOnError bool              `yaml:"continue-on-error"`
 }
 
+func TestRP0MigrationLaneRegistrationIsHostedAndZeroWrite(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "migrate-control-plane-release-baseline-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 migration lane registration workflow: %v", err)
+	}
+	const expectedSource = `name: prepare-control-plane-release-baseline-rp0
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main SHA registering the dormant RP0 migration lane
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-policy-rp0-migration-lane-registration-v1
+  cancel-in-progress: false
+
+jobs:
+  prove-hosted-zero-write-registration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment: production
+    permissions: {}
+    steps:
+      - name: Verify exact SHA and observe unchanged production health
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          readonly health_url='https://api.fugue.pro/healthz'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
+          for sample in 1 2 3 4 5; do
+            response="$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 10 "${health_url}")"
+            python3 - "${response}" <<'PY'
+          import json, sys
+          if json.loads(sys.argv[1]) != {"status": "ok"}:
+              raise SystemExit("production health payload drifted")
+          PY
+            [[ "${sample}" == '5' ]] || sleep 15
+          done
+          printf '%s\n' 'hosted RP0 migration lane registration is exact-SHA and zero-write'
+`
+	if got := string(data); got != expectedSource {
+		t.Fatalf("RP0 registration workflow must match the exact reviewed zero-write source\ngot:\n%s", got)
+	}
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn         string                `yaml:"runs-on"`
+			TimeoutMinutes int                   `yaml:"timeout-minutes"`
+			Environment    string                `yaml:"environment"`
+			Permissions    map[string]string     `yaml:"permissions"`
+			Steps          []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 migration lane registration workflow: %v", err)
+	}
+	workflowDispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("RP0 registration must be dispatch-only with one input: %+v", workflow.On)
+	}
+	var workflowDispatch releaseWorkflowDispatchTrigger
+	if err := workflowDispatchNode.Decode(&workflowDispatch); err != nil {
+		t.Fatalf("decode RP0 workflow_dispatch trigger: %v", err)
+	}
+	if len(workflowDispatch.Inputs) != 1 {
+		t.Fatalf("RP0 registration must expose only expected_sha: %+v", workflowDispatch.Inputs)
+	}
+	expectedSHAInput, ok := workflowDispatch.Inputs["expected_sha"]
+	if !ok {
+		t.Fatal("RP0 registration must require expected_sha")
+	}
+	var expectedSHA releaseWorkflowDispatchInput
+	if err := expectedSHAInput.Decode(&expectedSHA); err != nil {
+		t.Fatalf("decode RP0 expected_sha input: %v", err)
+	}
+	if !expectedSHA.Required || expectedSHA.Type != "string" || expectedSHA.Default != nil {
+		t.Fatalf("RP0 expected_sha must be a required string without a default: %+v", expectedSHA)
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("RP0 registration must have empty top-level permissions and one job: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["prove-hosted-zero-write-registration"]
+	if !ok {
+		t.Fatal("RP0 registration job is absent")
+	}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 3 || job.Environment != "production" || len(job.Permissions) != 0 {
+		t.Fatalf("RP0 registration job must be hosted, bounded, production-scoped, and permissions-empty: %+v", job)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Uses != "" || job.Steps[0].Name != "Verify exact SHA and observe unchanged production health" {
+		t.Fatalf("RP0 registration must contain one shell-only verification step: %+v", job.Steps)
+	}
+	step := job.Steps[0]
+	if len(step.Env) != 1 {
+		t.Fatalf("RP0 registration step must expose only EXPECTED_SHA: %+v", step.Env)
+	}
+	if got, want := step.Env["EXPECTED_SHA"], "${{ inputs.expected_sha }}"; got != want {
+		t.Fatalf("RP0 registration expected SHA binding drifted: got %q want %q", got, want)
+	}
+	for _, required := range []string{
+		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
+		`"${GITHUB_REF}" == 'refs/heads/main'`,
+		`"${GITHUB_RUN_ATTEMPT}" == '1'`,
+		`"${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$`,
+		`"${EXPECTED_SHA}" == "${GITHUB_SHA}"`,
+		"for sample in 1 2 3 4 5",
+		"sleep 15",
+		"https://api.fugue.pro/healthz",
+		`{"status": "ok"}`,
+	} {
+		if !strings.Contains(step.Run, required) {
+			t.Fatalf("RP0 registration verification must contain %q", required)
+		}
+	}
+	source := string(data)
+	for _, forbidden := range []string{
+		"self-hosted", "actions/checkout", "contents: write", "actions: write",
+		"kubectl ", "helm ", "ssh ", "docker ", "gh api", "git push",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("RP0 registration contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
 func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	t.Parallel()
 
