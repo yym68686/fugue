@@ -9,6 +9,182 @@ fail() {
   exit 1
 }
 
+if [[ "${FUGUE_VERIFY_GITHUB_GRAPHQL_REF_CAS_SCHEMA:-false}" == "true" ]]; then
+  [[ -n "${GH_TOKEN:-}" ]] || fail "GH_TOKEN is required for GraphQL ref CAS schema verification"
+  graphql_schema_output="$(mktemp "${TMPDIR:-/tmp}/fugue-graphql-ref-schema.XXXXXX")"
+  schema_python_pid=''
+  forward_schema_signal() {
+    local signal_name="$1"
+    local exit_code="$2"
+    if [[ -n "${schema_python_pid}" ]] && kill -0 "${schema_python_pid}" 2>/dev/null; then
+      kill -s "${signal_name}" "${schema_python_pid}" 2>/dev/null || true
+      wait "${schema_python_pid}" 2>/dev/null || true
+    fi
+    rm -f "${graphql_schema_output}"
+    trap - INT TERM
+    exit "${exit_code}"
+  }
+  trap 'forward_schema_signal INT 130' INT
+  trap 'forward_schema_signal TERM 143' TERM
+  python3 - >"${graphql_schema_output}" <<'PY' &
+import json
+import os
+import signal
+import subprocess
+
+process = None
+
+
+def terminate_process_group():
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=2)
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit("GraphQL schema query process group could not be reaped") from exc
+
+
+def forward_termination(signum, _frame):
+    terminate_process_group()
+    raise SystemExit(f"GraphQL schema query received termination signal {signum}")
+
+
+signal.signal(signal.SIGINT, forward_termination)
+signal.signal(signal.SIGTERM, forward_termination)
+termination_signals = {signal.SIGINT, signal.SIGTERM}
+previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, termination_signals)
+try:
+    process = subprocess.Popen(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            'query=query { refUpdate: __type(name:"RefUpdate") { inputFields { name description type { kind name ofType { kind name } } } } mutation: __type(name:"Mutation") { fields { name type { kind name ofType { kind name } } args { name type { kind name ofType { kind name } } } } } updateRefsInput: __type(name:"UpdateRefsInput") { inputFields { name type { kind name ofType { kind name ofType { kind name ofType { kind name } } } } } } updateRefsPayload: __type(name:"UpdateRefsPayload") { fields { name type { kind name ofType { kind name } } } } }',
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+finally:
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+try:
+    stdout, stderr = process.communicate(timeout=10)
+except subprocess.TimeoutExpired as exc:
+    terminate_process_group()
+    raise SystemExit("GraphQL RefUpdate schema query exceeded 10 seconds") from exc
+if process.returncode != 0:
+    raise SystemExit(stderr.strip() or "GraphQL RefUpdate schema query failed")
+document = json.loads(stdout)
+data = document["data"]
+fields = {field["name"]: field for field in data["refUpdate"]["inputFields"]}
+expected_types = {
+    "name": ("NON_NULL", None, "SCALAR", "GitRefname"),
+    "afterOid": ("NON_NULL", None, "SCALAR", "GitObjectID"),
+    "beforeOid": ("SCALAR", "GitObjectID", None, None),
+    "force": ("SCALAR", "Boolean", None, None),
+}
+if not set(expected_types).issubset(fields):
+    raise SystemExit(f"required RefUpdate fields are missing: {sorted(fields)}")
+for name, expected in expected_types.items():
+    field_type = fields[name]["type"]
+    observed = (
+        field_type["kind"],
+        field_type["name"],
+        (field_type.get("ofType") or {}).get("kind"),
+        (field_type.get("ofType") or {}).get("name"),
+    )
+    if observed != expected:
+        raise SystemExit(f"RefUpdate.{name} type drifted: {observed!r}")
+update_refs_matches = [
+    field for field in data["mutation"]["fields"] if field["name"] == "updateRefs"
+]
+if len(update_refs_matches) != 1:
+    raise SystemExit("Mutation.updateRefs field is missing or duplicated")
+update_refs = update_refs_matches[0]
+input_args = [argument for argument in update_refs["args"] if argument["name"] == "input"]
+if len(input_args) != 1:
+    raise SystemExit("Mutation.updateRefs argument shape drifted")
+input_type = input_args[0]["type"]
+if (
+    input_type["kind"],
+    (input_type.get("ofType") or {}).get("kind"),
+    (input_type.get("ofType") or {}).get("name"),
+) != ("NON_NULL", "INPUT_OBJECT", "UpdateRefsInput"):
+    raise SystemExit("Mutation.updateRefs input is not UpdateRefsInput!")
+if (update_refs["type"]["kind"], update_refs["type"]["name"]) != (
+    "OBJECT",
+    "UpdateRefsPayload",
+):
+    raise SystemExit("Mutation.updateRefs does not return UpdateRefsPayload")
+update_input_fields = {
+    field["name"]: field["type"] for field in data["updateRefsInput"]["inputFields"]
+}
+if not {"repositoryId", "refUpdates", "clientMutationId"}.issubset(update_input_fields):
+    raise SystemExit("UpdateRefsInput required fields are missing")
+repository_id = update_input_fields["repositoryId"]
+if (
+    repository_id["kind"],
+    repository_id["ofType"]["kind"],
+    repository_id["ofType"]["name"],
+) != ("NON_NULL", "SCALAR", "ID"):
+    raise SystemExit("UpdateRefsInput.repositoryId is not ID!")
+client_mutation_id = update_input_fields["clientMutationId"]
+if (client_mutation_id["kind"], client_mutation_id["name"]) != ("SCALAR", "String"):
+    raise SystemExit("UpdateRefsInput.clientMutationId is not String")
+ref_updates = update_input_fields["refUpdates"]
+if (
+    ref_updates["kind"],
+    ref_updates["ofType"]["kind"],
+    ref_updates["ofType"]["ofType"]["kind"],
+    ref_updates["ofType"]["ofType"]["ofType"]["name"],
+) != ("NON_NULL", "LIST", "NON_NULL", "RefUpdate"):
+    raise SystemExit("UpdateRefsInput.refUpdates is not [RefUpdate!]!")
+payload_fields = {
+    field["name"]: field["type"] for field in data["updateRefsPayload"]["fields"]
+}
+if "clientMutationId" not in payload_fields or (
+    payload_fields["clientMutationId"]["kind"],
+    payload_fields["clientMutationId"]["name"],
+) != ("SCALAR", "String"):
+    raise SystemExit("UpdateRefsPayload.clientMutationId is not String")
+print("verified")
+PY
+  schema_python_pid=$!
+  if ! wait "${schema_python_pid}"; then
+    schema_python_pid=''
+    trap - INT TERM
+    rm -f "${graphql_schema_output}"
+    fail "GitHub GraphQL exact ref CAS schema query failed"
+  fi
+  schema_python_pid=''
+  trap - INT TERM
+  graphql_ref_update_schema="$(<"${graphql_schema_output}")"
+  rm -f "${graphql_schema_output}"
+  [[ "${graphql_ref_update_schema}" == 'verified' ]] ||
+    fail "GitHub GraphQL exact ref CAS schema verification did not complete"
+fi
+if [[ "${FUGUE_GRAPHQL_REF_CAS_SCHEMA_ONLY:-false}" == "true" ]]; then
+  [[ "${FUGUE_VERIFY_GITHUB_GRAPHQL_REF_CAS_SCHEMA:-false}" == "true" ]] ||
+    fail "schema-only mode requires live GraphQL RefUpdate verification"
+  exit 0
+fi
+
 ruby -ryaml -ropen3 - "${REPO_ROOT}" <<'RUBY'
 repo = ARGV.fetch(0)
 deploy = YAML.load_file(File.join(repo, ".github/workflows/deploy-control-plane.yml"))
@@ -62,6 +238,8 @@ gate_checkout = gate.fetch("steps").first
 fail_contract("gate checkout must not persist credentials") unless gate_checkout.dig("with", "persist-credentials") == false
 gate_run = gate.fetch("steps").find { |step| step["name"] == "Guard external authorization and exact recovery diff" }&.fetch("run", "")
 test_run = gate.fetch("steps").find { |step| step["name"] == "Verify recovery workflow and release safety contracts" }&.fetch("run", "")
+schema_step = gate.fetch("steps").find { |step| step["name"] == "Verify live GraphQL exact ref CAS schema" }
+schema_run = schema_step&.fetch("run", "")
 prewrite_run = advance.fetch("steps").find { |step| step["name"] == "Revalidate authorization and quiesce duplicate recovery runs" }&.fetch("run", "")
 transaction_run = advance.fetch("steps").find { |step| step["name"] == "Advance, rollback, and re-advance dedicated release baseline" }&.fetch("run", "")
 quiesce_run = advance.fetch("steps").find { |step| step["name"] == "Disable recovery lane and prove final quiescence" }&.fetch("run", "")
@@ -91,15 +269,10 @@ end
 end
 expected_changes = gate_run.scan(/^\s+'([^']+)'\s*$/).flatten
 fail_contract("recovery changed-file allowlist drifted") unless expected_changes == [
-  ".github/workflows/deploy-control-plane.yml",
   ".github/workflows/recover-control-plane-release-policy.yml",
-  ".github/workflows/watch-control-plane-release-policy-recovery.yml",
   "docs/runbooks/release-policy-recovery.md",
   "scripts/recover_control_plane_release_baseline.py",
-  "scripts/test_node_local_dns_release.sh",
-  "scripts/test_release_domain_safety.sh",
   "scripts/test_release_policy_recovery_workflow.sh",
-  "scripts/upgrade_fugue_control_plane.sh",
 ]
 
 [
@@ -111,6 +284,27 @@ fail_contract("recovery changed-file allowlist drifted") unless expected_changes
   "go test ./...",
 ].each do |required|
   fail_contract("recovery test gate is missing #{required}") unless test_run.include?(required)
+end
+fail_contract("GraphQL schema gate is missing or not schema-only") unless schema_run&.include?("FUGUE_VERIFY_GITHUB_GRAPHQL_REF_CAS_SCHEMA=true") && schema_run.include?("FUGUE_GRAPHQL_REF_CAS_SCHEMA_ONLY=true")
+fail_contract("GraphQL schema gate does not receive the ephemeral token") unless schema_step.dig("env", "GH_TOKEN") == "${{ github.token }}"
+full_test_step = gate.fetch("steps").find { |step| step["name"] == "Verify recovery workflow and release safety contracts" }
+fail_contract("full recovery test suite inherits a GitHub token") if full_test_step.fetch("env", {}).key?("GH_TOKEN")
+schema_source = File.read(File.join(repo, "scripts/test_release_policy_recovery_workflow.sh"))
+[
+  '"GitRefname"',
+  '"GitObjectID"',
+  '"UpdateRefsInput"',
+  '"UpdateRefsPayload"',
+  '"RefUpdate"',
+  "trap 'forward_schema_signal TERM 143' TERM",
+  'kill -s "${signal_name}" "${schema_python_pid}"',
+  'start_new_session=True',
+  'signal.signal(signal.SIGTERM, forward_termination)',
+  'signal.pthread_sigmask(signal.SIG_BLOCK, termination_signals)',
+  'os.killpg(process.pid, signal.SIGTERM)',
+  'os.killpg(process.pid, signal.SIGKILL)',
+].each do |required|
+  fail_contract("live GraphQL schema gate does not lock #{required}") unless schema_source.include?(required)
 end
 [
   "deploy_state",
@@ -152,6 +346,7 @@ fail_contract("historical failure latch does not retain canonical attempt rows")
 end
 fail_contract("transaction must use the bounded exact-CAS helper") unless transaction_run.include?("recover_control_plane_release_baseline.py transact")
 fail_contract("transaction helper timeout drifted") unless transaction_run.include?("--timeout-seconds 20")
+fail_contract("production transaction does not use the atomic GraphQL beforeOid CAS") unless transaction_run.include?("--cas-backend github-graphql") && transaction_run.include?('--github-repository "${GITHUB_REPOSITORY}"')
 fail_contract("transaction evidence upload must yield immediately to cancellation") unless transaction_upload["if"] == "${{ always() && !cancelled() }}"
 fail_contract("transaction evidence upload is not bounded") unless transaction_upload["timeout-minutes"] == 5 && transaction_upload["continue-on-error"] == true
 [
@@ -166,7 +361,9 @@ fail_contract("compensation condition drifted") unless compensate["if"] == "${{ 
 fail_contract("compensation must continue to evidence") unless compensate_step["continue-on-error"] == true
 fail_contract("independent compensation must survive cancellation") unless compensate.fetch("steps").first["if"] == "always()" && compensate_step["if"] == "always()"
 fail_contract("compensation must use exact helper") unless compensate_step.fetch("run").include?("recover_control_plane_release_baseline.py compensate")
+fail_contract("independent compensation does not use the atomic GraphQL beforeOid CAS") unless compensate_step.fetch("run").include?("--cas-backend github-graphql")
 fail_contract("writer lacks same-runner always compensation") unless same_runner.fetch("if").include?("always()") && same_runner.fetch("run").include?("recover_control_plane_release_baseline.py compensate")
+fail_contract("same-runner compensation does not use the atomic GraphQL beforeOid CAS") unless same_runner.fetch("run").include?("--cas-backend github-graphql")
 fail_contract("writer cancellation is not routed to same-runner compensation") unless same_runner.fetch("if").include?("cancelled()")
 fail_contract("writer job must survive workflow cancellation for same-runner cleanup") unless advance.fetch("if") == "${{ always() && needs.recovery-gate.result == 'success' }}"
 fail_contract("writer lacks same-runner lane freeze") unless same_runner_freeze.fetch("if").include?("always()") && same_runner_freeze.fetch("run").include?("pending_runs")
@@ -205,6 +402,16 @@ end
 success_upload = advance.fetch("steps").find { |step| step["name"] == "Upload release-policy recovery evidence" }
 fail_contract("success evidence upload is not bounded") unless success_upload&.fetch("timeout-minutes", nil) == 5
 fail_contract("writer deadline/reserve gate is missing") unless advance.fetch("steps").first.fetch("run").include?("started_at + 2400") && prewrite_run.include?("< 1500")
+helper_reap_grace = 4 # bounded TERM and KILL process-group reaping
+# Transaction has ten normal commands plus an eleventh failure observation; the
+# conservative ten-timeout bound still exceeds the exact 11T+8 worst case.
+graphql_transact_bound = 10 * (20 + helper_reap_grace)
+# Compensation has four normal commands plus a fifth failure observation.
+graphql_same_runner_compensation_bound = 5 * (10 + helper_reap_grace)
+graphql_independent_compensation_bound = 5 * (20 + helper_reap_grace)
+fail_contract("GraphQL transaction timeout budget drifted") unless transaction_run.include?("--timeout-seconds 20") && graphql_transact_bound == 240 && graphql_transact_bound <= 1500
+fail_contract("same-runner GraphQL compensation exceeds hard-timeout cushion") unless same_runner.fetch("run").include?("--timeout-seconds 10") && graphql_same_runner_compensation_bound == 70 && graphql_same_runner_compensation_bound <= ((advance.fetch("timeout-minutes") * 60) - 2400)
+fail_contract("independent GraphQL compensation exceeds its job timeout") unless compensate_step.fetch("run").include?("--timeout-seconds 20") && graphql_independent_compensation_bound == 120 && graphql_independent_compensation_bound <= (compensate.fetch("timeout-minutes") * 60)
 prewrite_timeouts = prewrite_run.scan(/timeout --kill-after=(\d+)s (\d+)s/).map { |kill, timeout| [kill.to_i, timeout.to_i] }
 fail_contract("pre-write network timeout shape drifted") unless prewrite_timeouts.any? && prewrite_timeouts.all? { |pair| pair == [2, 10] }
 fail_contract("pre-write retry shape drifted") unless prewrite_run.scan("for attempt in 1 2 3 4 5; do").length == 2
@@ -371,6 +578,15 @@ fail_contract("CAS helper must suppress ambient tag following") unless helper.in
 fail_contract("CAS helper must suppress submodule recursion") unless helper.include?('"--recurse-submodules=no"')
 fail_contract("CAS helper must forward termination to the active process group") unless helper.include?("handle_termination_signal") && helper.include?("terminate_process_group")
 fail_contract("CAS helper spawn publication is not signal-masked") unless helper.include?("pthread_sigmask") && helper.include?("SIG_BLOCK")
+[
+  '"updateRefs(input:{repositoryId:$repositoryId,"',
+  '"refUpdates:[{name:$name,beforeOid:$beforeOid,"',
+  '"afterOid:$afterOid,force:$force}]',
+  '"clientMutationId:$clientMutationId})',
+].each do |required|
+  fail_contract("GraphQL CAS helper is missing #{required}") unless helper.include?(required)
+end
+fail_contract("GraphQL CAS backend silently uses the non-CAS REST ref API") if helper.include?("/git/refs/")
 
 puts "release-policy recovery workflow contract passed"
 RUBY
@@ -468,6 +684,199 @@ if run_helper compensate --base-sha "${base_sha}" --target-sha "${target_sha}" -
   fail "compensation must reject an unexpected third-party tag OID"
 fi
 [[ "$(tag_oid)" == "${unexpected_sha}" ]] || fail "unexpected tag OID was overwritten"
+
+git --git-dir="${remote}" update-ref refs/tags/fugue-control-plane-release-baseline "${base_sha}" "${unexpected_sha}"
+graphql_bin="${tmp_dir}/graphql-bin"
+mkdir -p "${graphql_bin}"
+cat >"${graphql_bin}/gh" <<'PY'
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+if sys.argv[1:3] != ["api", "graphql"]:
+    raise SystemExit("unexpected fake gh command")
+fields = {}
+index = 3
+while index < len(sys.argv):
+    if sys.argv[index] in {"-f", "-F"}:
+        key, value = sys.argv[index + 1].split("=", 1)
+        fields[key] = value
+        index += 2
+    else:
+        index += 1
+query = fields.get("query", "")
+if query.startswith("query("):
+    print("R_fugue_recovery_test")
+    raise SystemExit(0)
+if "updateRefs" not in query:
+    raise SystemExit("fake gh expected updateRefs mutation")
+required = {"repositoryId", "name", "beforeOid", "afterOid", "force", "clientMutationId"}
+if not required.issubset(fields) or fields["force"] != "true":
+    raise SystemExit("fake gh mutation variables are incomplete")
+counter_path = Path(os.environ["GRAPHQL_COUNTER"])
+count = int(counter_path.read_text(encoding="utf-8")) if counter_path.exists() else 0
+count += 1
+counter_path.write_text(f"{count}\n", encoding="utf-8")
+if count == int(os.environ.get("GRAPHQL_FAIL_MUTATION", "0")):
+    print("remote: injected GraphQL failure context", file=sys.stderr)
+    print("remote: injected GraphQL CAS failure detail", file=sys.stderr)
+    raise SystemExit(1)
+remote = os.environ["GRAPHQL_REMOTE"]
+if count == int(os.environ.get("GRAPHQL_RACE_MUTATION", "0")):
+    race_oid = os.environ["GRAPHQL_RACE_OID"]
+    subprocess.run(
+        [
+            "git",
+            f"--git-dir={remote}",
+            "update-ref",
+            fields["name"],
+            race_oid,
+            fields["beforeOid"],
+        ],
+        check=True,
+    )
+current = subprocess.check_output(
+    ["git", f"--git-dir={remote}", "rev-parse", fields["name"]], text=True
+).strip()
+if current != fields["beforeOid"]:
+    print(
+        f"beforeOid mismatch expected={fields['beforeOid']} actual={current}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+subprocess.run(
+    [
+        "git",
+        f"--git-dir={remote}",
+        "update-ref",
+        fields["name"],
+        fields["afterOid"],
+        fields["beforeOid"],
+    ],
+    check=True,
+)
+print(fields["clientMutationId"])
+PY
+chmod +x "${graphql_bin}/gh"
+graphql_counter="${tmp_dir}/graphql-counter"
+printf '0\n' >"${graphql_counter}"
+graphql_success="${tmp_dir}/graphql-success.json"
+PATH="${graphql_bin}:${PATH}" GH_TOKEN=test-token GITHUB_REPOSITORY=synthetic/recovery \
+  GRAPHQL_REMOTE="${remote}" GRAPHQL_COUNTER="${graphql_counter}" \
+  run_helper transact --cas-backend github-graphql \
+    --github-repository synthetic/recovery \
+    --base-sha "${base_sha}" --target-sha "${target_sha}" \
+    --evidence "${graphql_success}" --timeout-seconds 10
+[[ "$(tag_oid)" == "${target_sha}" ]] || fail "GraphQL transaction did not finish at target"
+python3 - "${graphql_success}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    evidence = json.load(handle)
+assert evidence["cas_backend"] == "github-graphql"
+assert evidence["github_repository"] == "synthetic/recovery"
+assert evidence["rollback_verification"] == "succeeded"
+PY
+PATH="${graphql_bin}:${PATH}" GH_TOKEN=test-token GITHUB_REPOSITORY=synthetic/recovery \
+  GRAPHQL_REMOTE="${remote}" GRAPHQL_COUNTER="${graphql_counter}" \
+  run_helper compensate --cas-backend github-graphql \
+    --github-repository synthetic/recovery \
+    --base-sha "${base_sha}" --target-sha "${target_sha}" \
+    --evidence "${tmp_dir}/graphql-success-compensation.json" --timeout-seconds 10
+[[ "$(tag_oid)" == "${base_sha}" ]] || fail "GraphQL compensation did not restore base"
+
+printf '0\n' >"${graphql_counter}"
+graphql_failure="${tmp_dir}/graphql-failure.json"
+if PATH="${graphql_bin}:${PATH}" GH_TOKEN=test-token GITHUB_REPOSITORY=synthetic/recovery \
+  GRAPHQL_REMOTE="${remote}" GRAPHQL_COUNTER="${graphql_counter}" GRAPHQL_FAIL_MUTATION=2 \
+  run_helper transact --cas-backend github-graphql \
+    --github-repository synthetic/recovery \
+    --base-sha "${base_sha}" --target-sha "${target_sha}" \
+    --evidence "${graphql_failure}" --timeout-seconds 10; then
+  fail "injected GraphQL rollback failure unexpectedly succeeded"
+fi
+[[ "$(tag_oid)" == "${target_sha}" ]] || fail "GraphQL fault injection did not stop at target"
+python3 - "${graphql_failure}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    evidence = json.load(handle)
+assert evidence["phase"] == "rollback"
+assert "injected GraphQL failure context" in evidence["error"]
+assert "injected GraphQL CAS failure detail" in evidence["error"]
+PY
+PATH="${graphql_bin}:${PATH}" GH_TOKEN=test-token GITHUB_REPOSITORY=synthetic/recovery \
+  GRAPHQL_REMOTE="${remote}" GRAPHQL_COUNTER="${graphql_counter}" \
+  run_helper compensate --cas-backend github-graphql \
+    --github-repository synthetic/recovery \
+    --base-sha "${base_sha}" --target-sha "${target_sha}" \
+    --evidence "${tmp_dir}/graphql-failure-compensation.json" --timeout-seconds 10
+[[ "$(tag_oid)" == "${base_sha}" ]] || fail "GraphQL fault compensation did not restore base"
+
+printf '0\n' >"${graphql_counter}"
+graphql_race="${tmp_dir}/graphql-race.json"
+if PATH="${graphql_bin}:${PATH}" GH_TOKEN=test-token GITHUB_REPOSITORY=synthetic/recovery \
+  GRAPHQL_REMOTE="${remote}" GRAPHQL_COUNTER="${graphql_counter}" \
+  GRAPHQL_RACE_MUTATION=1 GRAPHQL_RACE_OID="${unexpected_sha}" \
+  run_helper transact --cas-backend github-graphql \
+    --github-repository synthetic/recovery \
+    --base-sha "${base_sha}" --target-sha "${target_sha}" \
+    --evidence "${graphql_race}" --timeout-seconds 10; then
+  fail "GraphQL beforeOid race unexpectedly overwrote the competing ref"
+fi
+[[ "$(tag_oid)" == "${unexpected_sha}" ]] || fail "GraphQL beforeOid race overwrote the competing ref"
+python3 - "${graphql_race}" "${unexpected_sha}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    evidence = json.load(handle)
+assert evidence["phase"] == "advance"
+assert evidence["outcome"] == "failed"
+assert evidence["failure_observed_oid"] == sys.argv[2]
+assert "beforeOid mismatch" in evidence["error"]
+PY
+git --git-dir="${remote}" update-ref refs/tags/fugue-control-plane-release-baseline "${base_sha}" "${unexpected_sha}"
+
+schema_signal_dir="${tmp_dir}/schema-signal"
+schema_signal_bin="${schema_signal_dir}/bin"
+mkdir -p "${schema_signal_bin}"
+cat >"${schema_signal_bin}/gh" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import time
+from pathlib import Path
+
+root = Path(os.environ["SCHEMA_SIGNAL_DIR"])
+(root / "started").touch()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(3)
+(root / "late-child").touch()
+PY
+chmod +x "${schema_signal_bin}/gh"
+PATH="${schema_signal_bin}:${PATH}" GH_TOKEN=test-token \
+  SCHEMA_SIGNAL_DIR="${schema_signal_dir}" \
+  FUGUE_VERIFY_GITHUB_GRAPHQL_REF_CAS_SCHEMA=true \
+  FUGUE_GRAPHQL_REF_CAS_SCHEMA_ONLY=true \
+  bash "${REPO_ROOT}/scripts/test_release_policy_recovery_workflow.sh" \
+  >"${schema_signal_dir}/stdout" 2>"${schema_signal_dir}/stderr" &
+schema_shell_pid=$!
+for _ in $(seq 1 100); do
+  [[ ! -e "${schema_signal_dir}/started" ]] || break
+  sleep 0.05
+done
+[[ -e "${schema_signal_dir}/started" ]] || fail "schema cancellation test did not start gh"
+kill -TERM "${schema_shell_pid}"
+if wait "${schema_shell_pid}"; then
+  fail "cancelled GraphQL schema gate unexpectedly succeeded"
+fi
+sleep 4
+[[ ! -e "${schema_signal_dir}/late-child" ]] || fail "cancelled GraphQL schema gate left a late child"
 
 fake_bin="${tmp_dir}/fake-bin"
 mkdir -p "${fake_bin}"

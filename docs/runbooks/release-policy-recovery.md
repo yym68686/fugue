@@ -29,12 +29,22 @@ newly reviewed exact commit.
 
 The workflow performs no Helm, Kubernetes, node, image, or application
 mutation. Its only production write is the dedicated release baseline tag. A
-bounded, testable helper advances that tag with an exact force-with-lease,
+bounded, testable helper advances that tag with an exact expected-OID CAS,
 rolls it back to the exact prior object, and re-advances it with another exact
-lease. The success artifact records the observed pre, forward, rollback, and
+CAS. The success artifact records the observed pre, forward, rollback, and
 final OIDs, patch digest, both authorized SHAs, lane states, zero remaining
 runs, the zero cluster-mutation assertion, and successful rollback
 verification.
+
+The production writer uses GitHub's `updateRefs` GraphQL mutation rather than
+the Git smart-HTTP push path. Each mutation supplies the exact `beforeOid`, the
+exact `afterOid`, and `force: true`; the server therefore performs the
+non-fast-forward rollback as an atomic compare-and-swap. The recovery gate
+introspects the live `RefUpdate` input and fails before any write unless
+`beforeOid`, `afterOid`, `force`, and `name` are all present. REST ref updates
+are not an acceptable fallback because their force update has no expected-OID
+precondition. Local bare-repository tests keep the Git backend only as an
+offline model and fault-inject the GraphQL backend separately.
 
 Guard or test failure occurs before the tag writer and therefore goes directly
 to bounded lane freeze and evidence; no tag-compensation artifact is expected

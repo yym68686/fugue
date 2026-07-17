@@ -72,15 +72,10 @@ jobs:
 
           mapfile -t actual_changes < <(git diff --no-renames --name-only "${AUTHORIZED_BASE_SHA}" "${target_sha}")
           expected_changes=(
-            '.github/workflows/deploy-control-plane.yml'
             '.github/workflows/recover-control-plane-release-policy.yml'
-            '.github/workflows/watch-control-plane-release-policy-recovery.yml'
             'docs/runbooks/release-policy-recovery.md'
             'scripts/recover_control_plane_release_baseline.py'
-            'scripts/test_node_local_dns_release.sh'
-            'scripts/test_release_domain_safety.sh'
             'scripts/test_release_policy_recovery_workflow.sh'
-            'scripts/upgrade_fugue_control_plane.sh'
           )
           [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]]
           for index in "${!expected_changes[@]}"; do
@@ -114,6 +109,14 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
+
+      - name: Verify live GraphQL exact ref CAS schema
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          FUGUE_VERIFY_GITHUB_GRAPHQL_REF_CAS_SCHEMA=true \
+            FUGUE_GRAPHQL_REF_CAS_SCHEMA_ONLY=true \
+            bash scripts/test_release_policy_recovery_workflow.sh
 
       - name: Verify recovery workflow and release safety contracts
         run: |
@@ -327,6 +330,7 @@ jobs:
         env:
           BASE_SHA: ${{ needs.recovery-gate.outputs.authorized_base_sha }}
           TARGET_SHA: ${{ needs.recovery-gate.outputs.authorized_target_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/fugue-release-policy-recovery"
@@ -334,6 +338,8 @@ jobs:
           python3 scripts/recover_control_plane_release_baseline.py transact \
             --base-sha "${BASE_SHA}" \
             --target-sha "${TARGET_SHA}" \
+            --cas-backend github-graphql \
+            --github-repository "${GITHUB_REPOSITORY}" \
             --evidence "${evidence_dir}/baseline-transaction.json" \
             --timeout-seconds 20
 
@@ -583,6 +589,7 @@ jobs:
         env:
           BASE_SHA: ${{ needs.recovery-gate.outputs.authorized_base_sha }}
           TARGET_SHA: ${{ needs.recovery-gate.outputs.authorized_target_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/fugue-release-policy-recovery-same-runner-compensation"
@@ -590,6 +597,8 @@ jobs:
           python3 scripts/recover_control_plane_release_baseline.py compensate \
             --base-sha "${BASE_SHA}" \
             --target-sha "${TARGET_SHA}" \
+            --cas-backend github-graphql \
+            --github-repository "${GITHUB_REPOSITORY}" \
             --evidence "${evidence_dir}/compensation.json" \
             --timeout-seconds 10
 
@@ -746,6 +755,7 @@ jobs:
         env:
           BASE_SHA: ${{ needs.recovery-gate.outputs.authorized_base_sha }}
           TARGET_SHA: ${{ needs.recovery-gate.outputs.authorized_target_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           evidence_dir="${RUNNER_TEMP}/fugue-release-policy-recovery-compensation"
@@ -753,6 +763,8 @@ jobs:
           python3 scripts/recover_control_plane_release_baseline.py compensate \
             --base-sha "${BASE_SHA}" \
             --target-sha "${TARGET_SHA}" \
+            --cas-backend github-graphql \
+            --github-repository "${GITHUB_REPOSITORY}" \
             --evidence "${evidence_dir}/compensation.json" \
             --timeout-seconds 20
 

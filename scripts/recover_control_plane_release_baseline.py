@@ -17,6 +17,7 @@ from pathlib import Path
 
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 class RecoveryError(RuntimeError):
@@ -120,7 +121,8 @@ def run_bounded(argv: list[str], timeout_seconds: int) -> str:
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
     if process.returncode != 0:
-        detail = stderr.strip().splitlines()[-1] if stderr.strip() else "no stderr"
+        detail_lines = stderr.strip().splitlines()[-8:]
+        detail = " | ".join(line[:512] for line in detail_lines) or "no stderr"
         raise RecoveryError(
             f"bounded command failed with exit {process.returncode}: "
             f"{argv[0]} {argv[1]}: {detail}"
@@ -142,13 +144,100 @@ def remote_ref_oid(remote: str, baseline_ref: str, timeout_seconds: int) -> str:
     return validate_sha("release baseline object", fields[0])
 
 
+def resolve_graphql_repository_id(repository: str, timeout_seconds: int) -> str:
+    owner, name = repository.split("/", 1)
+    query = (
+        "query($owner:String!,$name:String!){"
+        "repository(owner:$owner,name:$name){id}}"
+    )
+    output = run_bounded(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "--jq",
+            ".data.repository.id",
+        ],
+        timeout_seconds,
+    )
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) != 1 or not re.fullmatch(r"[A-Za-z0-9_=-]+", lines[0]):
+        raise RecoveryError("GitHub GraphQL repository lookup returned an invalid node ID")
+    return lines[0]
+
+
+def push_exact_ref_graphql(
+    repository: str,
+    baseline_ref: str,
+    expected_oid: str,
+    desired_oid: str,
+    timeout_seconds: int,
+) -> None:
+    repository_id = resolve_graphql_repository_id(repository, timeout_seconds)
+    client_mutation_id = (
+        f"fugue-release-policy-recovery-{expected_oid[:12]}-{desired_oid[:12]}"
+    )
+    mutation = (
+        "mutation($repositoryId:ID!,$name:GitRefname!,"
+        "$beforeOid:GitObjectID!,$afterOid:GitObjectID!,"
+        "$force:Boolean!,$clientMutationId:String!){"
+        "updateRefs(input:{repositoryId:$repositoryId,"
+        "refUpdates:[{name:$name,beforeOid:$beforeOid,"
+        "afterOid:$afterOid,force:$force}],"
+        "clientMutationId:$clientMutationId}){clientMutationId}}"
+    )
+    output = run_bounded(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={mutation}",
+            "-f",
+            f"repositoryId={repository_id}",
+            "-f",
+            f"name={baseline_ref}",
+            "-f",
+            f"beforeOid={expected_oid}",
+            "-f",
+            f"afterOid={desired_oid}",
+            "-F",
+            "force=true",
+            "-f",
+            f"clientMutationId={client_mutation_id}",
+            "--jq",
+            ".data.updateRefs.clientMutationId",
+        ],
+        timeout_seconds,
+    )
+    if output.strip() != client_mutation_id:
+        raise RecoveryError("GitHub GraphQL ref CAS did not echo its mutation ID")
+
+
 def push_exact_ref(
+    cas_backend: str,
+    github_repository: str,
     remote: str,
     baseline_ref: str,
     expected_oid: str,
     desired_oid: str,
     timeout_seconds: int,
 ) -> None:
+    if cas_backend == "github-graphql":
+        push_exact_ref_graphql(
+            github_repository,
+            baseline_ref,
+            expected_oid,
+            desired_oid,
+            timeout_seconds,
+        )
+        return
     run_bounded(
         [
             "git",
@@ -164,7 +253,7 @@ def push_exact_ref(
 
 
 def base_document(args: argparse.Namespace) -> dict[str, object]:
-    return {
+    document: dict[str, object] = {
         "schema_version": 1,
         "operation": args.operation,
         "baseline_ref": args.baseline_ref,
@@ -172,7 +261,11 @@ def base_document(args: argparse.Namespace) -> dict[str, object]:
         "target_sha": args.target_sha,
         "started_at": utc_now(),
         "cluster_mutation_attempted": False,
+        "cas_backend": args.cas_backend,
     }
+    if args.cas_backend == "github-graphql":
+        document["github_repository"] = args.github_repository
+    return document
 
 
 def transact(args: argparse.Namespace, evidence: dict[str, object]) -> None:
@@ -184,6 +277,8 @@ def transact(args: argparse.Namespace, evidence: dict[str, object]) -> None:
 
     evidence["phase"] = "advance"
     push_exact_ref(
+        args.cas_backend,
+        args.github_repository,
         args.remote,
         args.baseline_ref,
         args.base_sha,
@@ -197,6 +292,8 @@ def transact(args: argparse.Namespace, evidence: dict[str, object]) -> None:
 
     evidence["phase"] = "rollback"
     push_exact_ref(
+        args.cas_backend,
+        args.github_repository,
         args.remote,
         args.baseline_ref,
         args.target_sha,
@@ -210,6 +307,8 @@ def transact(args: argparse.Namespace, evidence: dict[str, object]) -> None:
 
     evidence["phase"] = "re-advance"
     push_exact_ref(
+        args.cas_backend,
+        args.github_repository,
         args.remote,
         args.baseline_ref,
         args.base_sha,
@@ -232,6 +331,8 @@ def compensate(args: argparse.Namespace, evidence: dict[str, object]) -> None:
     if observed_oid == args.target_sha:
         evidence["phase"] = "compensate-target-to-base"
         push_exact_ref(
+            args.cas_backend,
+            args.github_repository,
             args.remote,
             args.baseline_ref,
             args.target_sha,
@@ -261,6 +362,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("operation", choices=("transact", "compensate"))
     parser.add_argument("--remote", default="origin")
     parser.add_argument(
+        "--cas-backend", choices=("git", "github-graphql"), default="git"
+    )
+    parser.add_argument(
+        "--github-repository", default=os.environ.get("GITHUB_REPOSITORY", "")
+    )
+    parser.add_argument(
         "--baseline-ref", default="refs/tags/fugue-control-plane-release-baseline"
     )
     parser.add_argument("--base-sha", required=True)
@@ -272,6 +379,13 @@ def parse_args() -> argparse.Namespace:
     validate_sha("target SHA", args.target_sha)
     if args.base_sha == args.target_sha:
         raise RecoveryError("base and target SHA must differ")
+    if args.cas_backend == "github-graphql":
+        if not REPOSITORY_RE.fullmatch(args.github_repository):
+            raise RecoveryError(
+                "github-repository must be an exact owner/name for GraphQL CAS"
+            )
+        if not os.environ.get("GH_TOKEN"):
+            raise RecoveryError("GH_TOKEN is required for GitHub GraphQL CAS")
     if not re.fullmatch(r"refs/tags/[A-Za-z0-9._/-]+", args.baseline_ref):
         raise RecoveryError("baseline ref must be a canonical tag ref")
     if not 1 <= args.timeout_seconds <= 300:
