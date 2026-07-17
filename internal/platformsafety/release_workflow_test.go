@@ -217,6 +217,153 @@ jobs:
 	}
 }
 
+func TestDisabledWorkflowRerunProbeIsHostedPermissionsEmptyAndZeroWrite(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "probe-disabled-workflow-rerun.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read disabled-workflow rerun probe: %v", err)
+	}
+	const expectedSource = `name: probe-disabled-workflow-rerun
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main SHA for the harmless disabled-workflow rerun probe
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-policy-disabled-workflow-rerun-probe-v1
+  cancel-in-progress: false
+
+jobs:
+  prove-hosted-zero-write-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Verify exact SHA and observe unchanged production health
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          readonly health_url='https://api.fugue.pro/healthz'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
+          for sample in 1 2 3 4 5; do
+            response="$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 10 "${health_url}")"
+            python3 - "${response}" <<'PY'
+          import json, sys
+          if json.loads(sys.argv[1]) != {"status": "ok"}:
+              raise SystemExit("production health payload drifted")
+          PY
+            [[ "${sample}" == '5' ]] || sleep 15
+          done
+          printf '%s\n' 'disabled-workflow rerun probe is exact-SHA, hosted, permissions-empty, and zero-write'
+`
+	if got := string(data); got != expectedSource {
+		t.Fatalf("disabled-workflow rerun probe must match the exact reviewed zero-write source\ngot:\n%s", got)
+	}
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string                `yaml:"runs-on"`
+			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+			Environment     string                `yaml:"environment"`
+			Needs           workflowNeeds         `yaml:"needs"`
+			If              string                `yaml:"if"`
+			Outputs         map[string]string     `yaml:"outputs"`
+			Permissions     map[string]string     `yaml:"permissions"`
+			ContinueOnError bool                  `yaml:"continue-on-error"`
+			Steps           []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse disabled-workflow rerun probe: %v", err)
+	}
+	workflowDispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("disabled-workflow rerun probe must be dispatch-only: %+v", workflow.On)
+	}
+	var workflowDispatch releaseWorkflowDispatchTrigger
+	if err := workflowDispatchNode.Decode(&workflowDispatch); err != nil {
+		t.Fatalf("decode disabled-workflow rerun probe trigger: %v", err)
+	}
+	if len(workflowDispatch.Inputs) != 1 {
+		t.Fatalf("disabled-workflow rerun probe must expose only expected_sha: %+v", workflowDispatch.Inputs)
+	}
+	expectedSHAInput, ok := workflowDispatch.Inputs["expected_sha"]
+	if !ok {
+		t.Fatal("disabled-workflow rerun probe must require expected_sha")
+	}
+	var expectedSHA releaseWorkflowDispatchInput
+	if err := expectedSHAInput.Decode(&expectedSHA); err != nil {
+		t.Fatalf("decode disabled-workflow rerun probe expected_sha: %v", err)
+	}
+	if !expectedSHA.Required || expectedSHA.Type != "string" || expectedSHA.Default != nil {
+		t.Fatalf("disabled-workflow rerun probe expected_sha must be required without a default: %+v", expectedSHA)
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("disabled-workflow rerun probe must have empty top-level permissions and one job: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["prove-hosted-zero-write-probe"]
+	if !ok {
+		t.Fatal("disabled-workflow rerun probe job is absent")
+	}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 3 || job.Environment != "" || len(job.Permissions) != 0 {
+		t.Fatalf("disabled-workflow rerun probe must be hosted, bounded, environment-free, and permissions-empty: %+v", job)
+	}
+	if len(job.Needs) != 0 || job.If != "" || len(job.Outputs) != 0 || job.ContinueOnError {
+		t.Fatalf("disabled-workflow rerun probe must not depend on, gate, export, or soften another job: %+v", job)
+	}
+	if len(job.Steps) != 1 {
+		t.Fatalf("disabled-workflow rerun probe must contain exactly one step: %+v", job.Steps)
+	}
+	step := job.Steps[0]
+	if step.Name != "Verify exact SHA and observe unchanged production health" || step.Uses != "" || step.If != "" || len(step.With) != 0 || step.ContinueOnError {
+		t.Fatalf("disabled-workflow rerun probe must contain one strict shell-only step: %+v", step)
+	}
+	if len(step.Env) != 1 || step.Env["EXPECTED_SHA"] != "${{ inputs.expected_sha }}" {
+		t.Fatalf("disabled-workflow rerun probe expected SHA binding drifted: %+v", step.Env)
+	}
+	for _, required := range []string{
+		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
+		`"${GITHUB_REF}" == 'refs/heads/main'`,
+		`"${GITHUB_RUN_ATTEMPT}" == '1'`,
+		`"${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$`,
+		`"${EXPECTED_SHA}" == "${GITHUB_SHA}"`,
+		"for sample in 1 2 3 4 5",
+		"sleep 15",
+		"https://api.fugue.pro/healthz",
+		`{"status": "ok"}`,
+	} {
+		if !strings.Contains(step.Run, required) {
+			t.Fatalf("disabled-workflow rerun probe must contain %q", required)
+		}
+	}
+	source := string(data)
+	for _, forbidden := range []string{
+		"self-hosted", "actions/checkout", "uses:", "environment:",
+		"contents:", "actions:", "id-token:", "GITHUB_TOKEN", "github.token", "secrets.",
+		"kubectl ", "helm ", "ssh ", "scp ", "rsync ", "docker ", "gh ",
+		"git push", "git tag", "git update-ref", "curl -X", "curl --request",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("disabled-workflow rerun probe contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
 func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	t.Parallel()
 

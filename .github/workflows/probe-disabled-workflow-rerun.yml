@@ -1,0 +1,44 @@
+name: probe-disabled-workflow-rerun
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main SHA for the harmless disabled-workflow rerun probe
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-policy-disabled-workflow-rerun-probe-v1
+  cancel-in-progress: false
+
+jobs:
+  prove-hosted-zero-write-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - name: Verify exact SHA and observe unchanged production health
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          readonly health_url='https://api.fugue.pro/healthz'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
+          for sample in 1 2 3 4 5; do
+            response="$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 10 "${health_url}")"
+            python3 - "${response}" <<'PY'
+          import json, sys
+          if json.loads(sys.argv[1]) != {"status": "ok"}:
+              raise SystemExit("production health payload drifted")
+          PY
+            [[ "${sample}" == '5' ]] || sleep 15
+          done
+          printf '%s\n' 'disabled-workflow rerun probe is exact-SHA, hosted, permissions-empty, and zero-write'
