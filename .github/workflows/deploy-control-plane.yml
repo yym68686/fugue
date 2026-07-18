@@ -70,72 +70,35 @@ jobs:
 
       - name: Resolve release-domain baseline
         id: domain_baseline
-        env:
-          FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA: ${{ vars.FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA }}
         run: |
           set -euo pipefail
-          readonly baseline_tag='fugue-control-plane-release-baseline'
-          readonly baseline_ref="refs/tags/${baseline_tag}"
-          readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
-          readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
-          readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
           readonly target_sha="${GITHUB_SHA}"
 
           [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]]
-          remote_tag=''
+          remote_branch=''
           set +e
-          remote_tag="$(git ls-remote --refs --exit-code origin "${baseline_ref}")"
+          remote_branch="$(timeout --kill-after=2s 20s git ls-remote --refs --exit-code origin "${baseline_ref}")"
           remote_status=$?
           set -e
-
-          case "${remote_status}" in
-            0)
-              [[ "$(printf '%s\n' "${remote_tag}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
-              read -r remote_object remote_ref extra <<<"${remote_tag}"
-              [[ -z "${extra:-}" ]]
-              [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]]
-              [[ "${remote_ref}" == "${baseline_ref}" ]]
-              git fetch --no-tags origin "${baseline_ref}"
-              fetched_ref_object_sha="$(git rev-parse --verify FETCH_HEAD)"
-              domain_base_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
-              [[ "${fetched_ref_object_sha}" == "${remote_object}" ]]
-              [[ "${domain_base_sha}" =~ ^[0-9a-f]{40}$ ]]
-              [[ "${remote_object}" == "${domain_base_sha}" ]]
-              git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"
-              baseline_ref_object_sha="${remote_object}"
-              is_genesis='false'
-              ;;
-            2)
-              genesis_sha="${FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA:-}"
-              [[ "${genesis_sha}" =~ ^[0-9a-f]{40}$ ]]
-              [[ "${genesis_sha}" == "${target_sha}" ]]
-              read -r commit actual_parent extra <<<"$(git rev-list --parents -n 1 "${target_sha}")"
-              [[ "${commit}" == "${target_sha}" ]]
-              [[ -z "${extra:-}" ]]
-              [[ "${actual_parent}" == "${genesis_parent_sha}" ]]
-              read -r parent_commit parent_b3 extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
-              [[ "${parent_commit}" == "${genesis_parent_sha}" ]]
-              [[ -z "${extra:-}" ]]
-              [[ "${parent_b3}" == "${genesis_b3_sha}" ]]
-              read -r b3_commit b3_base extra <<<"$(git rev-list --parents -n 1 "${genesis_b3_sha}")"
-              [[ "${b3_commit}" == "${genesis_b3_sha}" ]]
-              [[ -z "${extra:-}" ]]
-              [[ "${b3_base}" == "${genesis_base_sha}" ]]
-              domain_base_sha="${genesis_base_sha}"
-              baseline_ref_object_sha=''
-              is_genesis='true'
-              ;;
-            *)
-              echo "failed to read the dedicated release baseline tag" >&2
-              exit 1
-              ;;
-          esac
+          [[ "${remote_status}" == '0' ]]
+          [[ "$(printf '%s\n' "${remote_branch}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
+          read -r remote_object remote_ref extra <<<"${remote_branch}"
+          [[ -z "${extra:-}" ]]
+          [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${remote_ref}" == "${baseline_ref}" ]]
+          timeout --kill-after=5s 60s git fetch --no-tags origin "${baseline_ref}"
+          fetched_ref_object_sha="$(git rev-parse --verify FETCH_HEAD)"
+          domain_base_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+          [[ "${fetched_ref_object_sha}" == "${remote_object}" ]]
+          [[ "${domain_base_sha}" == "${remote_object}" ]]
+          git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"
 
           {
             printf 'domain_base_sha=%s\n' "${domain_base_sha}"
-            printf 'baseline_ref_object_sha=%s\n' "${baseline_ref_object_sha}"
-            printf 'is_genesis=%s\n' "${is_genesis}"
-            printf 'genesis_parent_sha=%s\n' "${genesis_parent_sha}"
+            printf 'baseline_ref_object_sha=%s\n' "${remote_object}"
+            printf 'is_genesis=false\n'
+            printf 'genesis_parent_sha=\n'
           } >>"${GITHUB_OUTPUT}"
 
       - name: Resolve live image metadata
@@ -882,78 +845,64 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Advance dedicated release baseline tag
+      - name: Advance dedicated forward-only release baseline branch
         env:
           EXPECTED_BASE_SHA: ${{ needs.release-baseline.outputs.domain_base_sha }}
           EXPECTED_BASE_REF_OBJECT: ${{ needs.release-baseline.outputs.baseline_ref_object_sha }}
-          IS_GENESIS: ${{ needs.release-baseline.outputs.is_genesis }}
           TARGET_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'
-          readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'
-          readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'
-          readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
           [[ "${EXPECTED_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}" ]]
           [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]]
 
-          remote_tag=''
+          remote_branch=''
           set +e
-          remote_tag="$(git ls-remote --refs --exit-code origin "${baseline_ref}")"
+          remote_branch="$(timeout --kill-after=2s 20s git ls-remote --refs --exit-code origin "${baseline_ref}")"
           remote_status=$?
           set -e
-
-          case "${IS_GENESIS}" in
-            true)
-              [[ "${EXPECTED_BASE_SHA}" == "${genesis_base_sha}" ]]
-              [[ -z "${EXPECTED_BASE_REF_OBJECT}" ]]
-              [[ "${remote_status}" == '2' ]]
-              read -r target_commit target_parent extra <<<"$(git rev-list --parents -n 1 "${TARGET_SHA}")"
-              [[ "${target_commit}" == "${TARGET_SHA}" ]]
-              [[ -z "${extra:-}" ]]
-              [[ "${target_parent}" == "${genesis_parent_sha}" ]]
-              read -r parent_commit parent_b3 extra <<<"$(git rev-list --parents -n 1 "${genesis_parent_sha}")"
-              [[ "${parent_commit}" == "${genesis_parent_sha}" ]]
-              [[ -z "${extra:-}" ]]
-              [[ "${parent_b3}" == "${genesis_b3_sha}" ]]
-              read -r b3_commit b3_base extra <<<"$(git rev-list --parents -n 1 "${genesis_b3_sha}")"
-              [[ "${b3_commit}" == "${genesis_b3_sha}" ]]
-              [[ -z "${extra:-}" ]]
-              [[ "${b3_base}" == "${genesis_base_sha}" ]]
-              lease="${baseline_ref}:"
-              ;;
-            false)
-              [[ "${remote_status}" == '0' ]]
-              [[ "$(printf '%s\n' "${remote_tag}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
-              read -r remote_object remote_ref extra <<<"${remote_tag}"
-              [[ -z "${extra:-}" ]]
-              [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]]
-              [[ "${remote_ref}" == "${baseline_ref}" ]]
-              [[ "${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}" ]]
-              git fetch --no-tags origin "${baseline_ref}"
-              fetched_ref_object_sha="$(git rev-parse --verify FETCH_HEAD)"
-              current_base_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
-              [[ "${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}" ]]
-              [[ "${current_base_sha}" == "${EXPECTED_BASE_SHA}" ]]
-              [[ "${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}" ]]
-              lease="${baseline_ref}:${EXPECTED_BASE_REF_OBJECT}"
-              ;;
-            *)
-              echo 'release baseline genesis state is invalid' >&2
-              exit 1
-              ;;
-          esac
-
-          git push \
-            --force-with-lease="${lease}" \
-            origin \
-            "${TARGET_SHA}:${baseline_ref}"
-          advanced="$(git ls-remote --refs --exit-code origin "${baseline_ref}")"
-          read -r advanced_object advanced_ref extra <<<"${advanced}"
+          [[ "${remote_status}" == '0' ]]
+          [[ "$(printf '%s\n' "${remote_branch}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
+          read -r remote_object remote_ref extra <<<"${remote_branch}"
           [[ -z "${extra:-}" ]]
-          [[ "${advanced_object}" == "${TARGET_SHA}" ]]
-          [[ "${advanced_ref}" == "${baseline_ref}" ]]
+          [[ "${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}" ]]
+          [[ "${remote_ref}" == "${baseline_ref}" ]]
+          timeout --kill-after=5s 60s git fetch --no-tags origin "${baseline_ref}"
+          [[ "$(git rev-parse --verify FETCH_HEAD)" == "${EXPECTED_BASE_REF_OBJECT}" ]]
+          [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "${EXPECTED_BASE_SHA}" ]]
+          git merge-base --is-ancestor "${EXPECTED_BASE_SHA}" "${TARGET_SHA}"
+
+          repository_id="$(timeout --kill-after=2s 10s gh api graphql \
+            -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}' \
+            -f "owner=${GITHUB_REPOSITORY_OWNER}" -f "name=${GITHUB_REPOSITORY#*/}" \
+            --jq '.data.repository.id')"
+          [[ "${repository_id}" =~ ^[A-Za-z0-9_=-]+$ ]]
+          readonly mutation='mutation($repositoryId:ID!,$name:GitRefname!,$beforeOid:GitObjectID!,$afterOid:GitObjectID!,$force:Boolean!,$clientMutationId:String!){updateRefs(input:{repositoryId:$repositoryId,refUpdates:[{name:$name,beforeOid:$beforeOid,afterOid:$afterOid,force:$force}],clientMutationId:$clientMutationId}){clientMutationId}}'
+          mutation_id="fugue-runtime-baseline-${EXPECTED_BASE_SHA:0:12}-${TARGET_SHA:0:12}"
+          mutation_status=0
+          echoed="$(timeout --kill-after=2s 10s gh api graphql \
+            -f "query=${mutation}" -f "repositoryId=${repository_id}" -f "name=${baseline_ref}" \
+            -f "beforeOid=${EXPECTED_BASE_REF_OBJECT}" -f "afterOid=${TARGET_SHA}" -F 'force=false' \
+            -f "clientMutationId=${mutation_id}" --jq '.data.updateRefs.clientMutationId')" || mutation_status=$?
+          observed='unknown'
+          for attempt in 1 2 3 4 5; do
+            observe_status=0
+            observed="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+              --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" and .[0].object.type == "commit" then .[0].object.sha else "unknown" end')" || observe_status=$?
+            [[ "${observe_status}" == '0' && "${observed}" == "${TARGET_SHA}" ]] && break
+            [[ "${attempt}" == '5' ]] || sleep 2
+          done
+          [[ "${observed}" == "${TARGET_SHA}" ]]
+          if [[ "${mutation_status}" == '0' ]]; then
+            [[ "${echoed}" == "${mutation_id}" ]]
+          else
+            printf '%s\n' 'baseline CAS response was unavailable; exact bounded readback proved success' >&2
+          fi
 
   freeze-release-lane-on-failure:
     needs:

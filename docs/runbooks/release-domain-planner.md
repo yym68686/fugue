@@ -159,24 +159,23 @@ provide `expected_sha`, and the input guard requires an exact lowercase
 40-character SHA equal to `github.sha` on `refs/heads/main`. A push alone does
 not start a production release.
 
-Domain comparison uses the dedicated tag
-`fugue-control-plane-release-baseline`. An ordinary run requires that tag to
-resolve to one exact ancestor commit and advances it only after the complete
-release succeeds, using a force-with-lease bound to the previously observed
-tag object. The live-image baseline used by existing image and release safety
+Domain comparison uses the dedicated forward-only branch
+`refs/heads/fugue-control-plane-release-baseline`. An ordinary run requires
+that ref to resolve to one exact ancestor commit. After the complete runtime
+release succeeds, the hosted recorder advances it with one GraphQL
+`updateRefs` mutation whose `beforeOid` is the exact object observed by the
+resolver, whose `afterOid` is the dispatched SHA, and whose `force` value is
+false. A missing, ambiguous, divergent, or concurrently changed branch fails
+closed. The live-image baseline used by existing image and release safety
 checks remains independent from this domain-planner baseline.
 
-The one-time genesis path is fail closed. It is accepted only when all of the
-following match:
-
-- the dedicated baseline tag is absent;
-- repository variable `FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA` equals the
-  exact dispatched head;
-- that head has exactly the pinned recovery parent, whose parent is the pinned
-  B3 commit, whose own parent is the pinned genesis base; and
-- changed-file evidence equals the workflow's statically enumerated exact
-  cumulative genesis path list (no directory prefix or dynamically derived
-  allowlist).
+There is no runtime genesis fallback in the forward transport. The one-time
+RP0 migration creates the missing branch only after binding a successful
+historical runtime run, its immutable artifact digest, the Helm revision
+transition, the complete observation window, and the exact policy SHA. Branch
+creation uses the all-zero absent-object OID as `beforeOid`, the last verified
+runtime SHA as `afterOid`, and `force: false`. The RP0 policy SHA is not written
+as a runtime baseline.
 
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.
@@ -184,15 +183,7 @@ Evidence generation then uses that checksum-verified download cache as an
 offline file proxy; an absent or incomplete cache remains a fail-closed
 evidence error.
 
-Recovery targets bind cumulative changed-file evidence to the pinned genesis
-base independently from binding the target commit to its pinned direct parent.
-The two revisions may differ, but neither binding is caller-derived.
-
-Genesis writes and uploads public bootstrap evidence but performs no cluster
-deployment. On success it establishes the dedicated baseline tag. Subsequent
-runs cannot re-enter genesis while the tag exists.
-
-Every successful genesis or ordinary deploy must upload exactly one
+Every successful ordinary deploy must upload exactly one
 secret-free release-domain evidence artifact with a 90-day retention policy.
 A missing or invalid artifact is itself a deploy failure. A failure in the
 input guard, prerequisites, deploy, evidence upload, or baseline advancement

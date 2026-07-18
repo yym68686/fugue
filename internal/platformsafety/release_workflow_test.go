@@ -1,10 +1,12 @@
 package platformsafety
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -75,145 +77,376 @@ type releaseWorkflowStep struct {
 	Env             map[string]string `yaml:"env"`
 	With            map[string]string `yaml:"with"`
 	Run             string            `yaml:"run"`
+	Shell           string            `yaml:"shell"`
 	ContinueOnError bool              `yaml:"continue-on-error"`
 }
 
-func TestRP0MigrationLaneRegistrationIsHostedAndZeroWrite(t *testing.T) {
+func workflowDocumentMapping(t *testing.T, data []byte) *yaml.Node {
+	t.Helper()
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatalf("parse workflow YAML node: %v", err)
+	}
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		t.Fatalf("workflow must contain exactly one mapping document: %+v", document)
+	}
+	return document.Content[0]
+}
+
+func assertWorkflowSourceDigest(t *testing.T, data []byte, expected string) {
+	t.Helper()
+	actual := fmt.Sprintf("%x", sha256.Sum256(data))
+	if actual != expected {
+		t.Fatalf("workflow source drifted: got sha256:%s want sha256:%s", actual, expected)
+	}
+}
+
+func workflowMappingValue(t *testing.T, mapping *yaml.Node, key string) *yaml.Node {
+	t.Helper()
+	if mapping == nil || mapping.Kind != yaml.MappingNode || len(mapping.Content)%2 != 0 {
+		t.Fatalf("workflow node for %q is not a mapping", key)
+	}
+	for index := 0; index < len(mapping.Content); index += 2 {
+		candidate := mapping.Content[index]
+		if candidate.Kind == yaml.ScalarNode && candidate.Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	t.Fatalf("workflow mapping key %q is absent", key)
+	return nil
+}
+
+func assertWorkflowMappingKeys(t *testing.T, mapping *yaml.Node, expected ...string) {
+	t.Helper()
+	if mapping == nil || mapping.Kind != yaml.MappingNode || len(mapping.Content)%2 != 0 {
+		t.Fatalf("workflow node is not a mapping: %+v", mapping)
+	}
+	actual := make([]string, 0, len(mapping.Content)/2)
+	for index := 0; index < len(mapping.Content); index += 2 {
+		key := mapping.Content[index]
+		if key.Kind != yaml.ScalarNode {
+			t.Fatalf("workflow mapping key must be scalar: %+v", key)
+		}
+		actual = append(actual, key.Value)
+	}
+	sort.Strings(actual)
+	want := append([]string(nil), expected...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("workflow mapping key inventory drifted: got %v want %v", actual, want)
+	}
+}
+
+type workflowJobNodeContract struct {
+	Keys     []string
+	StepKeys [][]string
+}
+
+func assertWorkflowJobNodeContracts(t *testing.T, jobs *yaml.Node, contracts map[string]workflowJobNodeContract) {
+	t.Helper()
+	jobNames := make([]string, 0, len(contracts))
+	for jobName := range contracts {
+		jobNames = append(jobNames, jobName)
+	}
+	assertWorkflowMappingKeys(t, jobs, jobNames...)
+
+	for jobName, contract := range contracts {
+		job := workflowMappingValue(t, jobs, jobName)
+		assertWorkflowMappingKeys(t, job, contract.Keys...)
+		steps := workflowMappingValue(t, job, "steps")
+		if steps.Kind != yaml.SequenceNode || len(steps.Content) != len(contract.StepKeys) {
+			t.Fatalf("workflow job %s step inventory drifted: got %d steps want %d", jobName, len(steps.Content), len(contract.StepKeys))
+		}
+		for index, step := range steps.Content {
+			assertWorkflowMappingKeys(t, step, contract.StepKeys[index]...)
+		}
+	}
+}
+
+func assertWorkflowRunDigests(t *testing.T, jobs map[string]releaseWorkflowJob, expected map[string]string) {
+	t.Helper()
+	seen := make(map[string]struct{}, len(expected))
+	for jobName, job := range jobs {
+		for _, step := range job.Steps {
+			if step.Run == "" {
+				continue
+			}
+			key := jobName + "/" + step.Name
+			want, ok := expected[key]
+			if !ok {
+				t.Fatalf("workflow contains an unreviewed run body %q", key)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				t.Fatalf("workflow contains duplicate run body %q", key)
+			}
+			seen[key] = struct{}{}
+			got := fmt.Sprintf("%x", sha256.Sum256([]byte(step.Run)))
+			if got != want {
+				t.Fatalf("workflow run body %q drifted: got sha256:%s want sha256:%s", key, got, want)
+			}
+		}
+	}
+	if len(seen) != len(expected) {
+		missing := make([]string, 0, len(expected)-len(seen))
+		for key := range expected {
+			if _, ok := seen[key]; !ok {
+				missing = append(missing, key)
+			}
+		}
+		sort.Strings(missing)
+		t.Fatalf("workflow reviewed run bodies are absent: %v", missing)
+	}
+}
+
+func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join("..", "..", ".github", "workflows", "migrate-control-plane-release-baseline-rp0.yml")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read RP0 migration lane registration workflow: %v", err)
+		t.Fatalf("read RP0 migration workflow: %v", err)
 	}
-	const expectedSource = `name: prepare-control-plane-release-baseline-rp0
+	assertWorkflowSourceDigest(t, data, "3584699c2e3bbab5429440e7b9aae8e961302bf5d2057b17470d3c127cb4407c")
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string                `yaml:"runs-on"`
+			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+			Environment     string                `yaml:"environment"`
+			Permissions     map[string]string     `yaml:"permissions"`
+			ContinueOnError bool                  `yaml:"continue-on-error"`
+			Steps           []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 migration workflow: %v", err)
+	}
+	rootNode := workflowDocumentMapping(t, data)
+	assertWorkflowMappingKeys(t, rootNode, "name", "on", "permissions", "concurrency", "jobs")
+	assertWorkflowMappingKeys(t, workflowMappingValue(t, rootNode, "concurrency"), "group", "cancel-in-progress")
+	jobsNode := workflowMappingValue(t, rootNode, "jobs")
+	assertWorkflowMappingKeys(t, jobsNode, "migrate-forward-baseline")
+	jobNode := workflowMappingValue(t, jobsNode, "migrate-forward-baseline")
+	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
+	stepsNode := workflowMappingValue(t, jobNode, "steps")
+	if stepsNode.Kind != yaml.SequenceNode || len(stepsNode.Content) != 6 {
+		t.Fatalf("RP0 migration step node inventory drifted: %+v", stepsNode)
+	}
+	wantStepKeys := [][]string{
+		{"name", "uses", "with"},
+		{"name", "id", "env", "run"},
+		{"name", "env", "run"},
+		{"name", "uses", "with"},
+		{"name", "env", "run"},
+		{"name", "env", "run"},
+	}
+	for index, stepNode := range stepsNode.Content {
+		assertWorkflowMappingKeys(t, stepNode, wantStepKeys[index]...)
+	}
+	dispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("RP0 migration must be dispatch-only: %+v", workflow.On)
+	}
+	var dispatch releaseWorkflowDispatchTrigger
+	if err := dispatchNode.Decode(&dispatch); err != nil {
+		t.Fatalf("decode RP0 workflow_dispatch trigger: %v", err)
+	}
+	if len(dispatch.Inputs) != 1 {
+		t.Fatalf("RP0 migration must expose only expected_sha: %+v", dispatch.Inputs)
+	}
+	inputNode, ok := dispatch.Inputs["expected_sha"]
+	if !ok {
+		t.Fatal("RP0 migration must require expected_sha")
+	}
+	var input releaseWorkflowDispatchInput
+	if err := inputNode.Decode(&input); err != nil {
+		t.Fatalf("decode RP0 expected_sha input: %v", err)
+	}
+	if !input.Required || input.Type != "string" || input.Default != nil {
+		t.Fatalf("RP0 expected_sha must be a required string without default: %+v", input)
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("RP0 migration must have empty top-level permissions and one job: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["migrate-forward-baseline"]
+	if !ok {
+		t.Fatal("RP0 migration job is absent")
+	}
+	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
+		"migrate-forward-baseline": {Steps: job.Steps},
+	}, map[string]string{
+		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline": "728ba6a8c6554533468e1047b872df57ebc839e17466af0ce53ba84ff01dc24b",
+		"migrate-forward-baseline/Write RP0 migration intent evidence":                            "5017b4b6659ab138ecfedc6b611f45794abf0b7cb8b46b892145f45a5e4eab15",
+		"migrate-forward-baseline/Observe unchanged production health before baseline migration":  "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
+		"migrate-forward-baseline/Create forward-only runtime baseline with exact absent-ref CAS": "0575021c7e061aff7e83c38f42dc6b340c618b9cb2ad172aad834f1d20595138",
+	})
+	wantPermissions := map[string]string{"actions": "read", "contents": "write"}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 20 || job.Environment != "production" ||
+		job.ContinueOnError || !reflect.DeepEqual(job.Permissions, wantPermissions) {
+		t.Fatalf("RP0 migration job boundary drifted: %+v", job)
+	}
+	wantSteps := []string{
+		"Checkout exact RP0 target without persisted credentials",
+		"Verify exact migration authorization and last runtime baseline",
+		"Write RP0 migration intent evidence",
+		"Upload RP0 migration intent evidence",
+		"Observe unchanged production health before baseline migration",
+		"Create forward-only runtime baseline with exact absent-ref CAS",
+	}
+	if len(job.Steps) != len(wantSteps) {
+		t.Fatalf("RP0 migration step inventory drifted: %+v", job.Steps)
+	}
+	for index, want := range wantSteps {
+		step := job.Steps[index]
+		if step.Name != want || step.If != "" || step.ContinueOnError {
+			t.Fatalf("RP0 migration step %d boundary drifted: %+v", index, step)
+		}
+	}
+	checkout := job.Steps[0]
+	if checkout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" {
+		t.Fatalf("RP0 checkout pin drifted: %q", checkout.Uses)
+	}
+	for key, want := range map[string]string{
+		"ref": "${{ github.sha }}", "fetch-depth": "0", "persist-credentials": "false",
+	} {
+		if got := checkout.With[key]; got != want {
+			t.Fatalf("RP0 checkout %s drifted: got %q want %q", key, got, want)
+		}
+	}
+	verify := job.Steps[1]
+	if verify.ID != "verify" || verify.Uses != "" {
+		t.Fatalf("RP0 evidence verifier boundary drifted: %+v", verify)
+	}
+	wantVerifyEnv := map[string]string{
+		"EXPECTED_SHA":                       "${{ inputs.expected_sha }}",
+		"AUTHORIZED_RUNTIME_BASELINE_SHA":    "${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_BASELINE_SHA }}",
+		"AUTHORIZED_RUNTIME_RUN_ID":          "${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_RUN_ID }}",
+		"AUTHORIZED_RUNTIME_ARTIFACT_ID":     "${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_ARTIFACT_ID }}",
+		"AUTHORIZED_RUNTIME_ARTIFACT_DIGEST": "${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_ARTIFACT_DIGEST }}",
+		"HEALTH_URL":                         "${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}",
+		"GH_TOKEN":                           "${{ github.token }}",
+	}
+	if !reflect.DeepEqual(verify.Env, wantVerifyEnv) {
+		t.Fatalf("RP0 evidence verifier environment drifted: got %+v want %+v", verify.Env, wantVerifyEnv)
+	}
+	for _, required := range []string{
+		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
+		`"${GITHUB_REF}" == 'refs/heads/main'`,
+		"git diff --no-renames --name-status",
+		"git merge-base --is-ancestor \"${AUTHORIZED_RUNTIME_BASELINE_SHA}\" \"${GITHUB_SHA}\"",
+		"fugue-control-plane-release-attribution-${AUTHORIZED_RUNTIME_RUN_ID}-${run_attempt}",
+		"sha256:$(sha256sum",
+		"missing or ambiguous successful deploy job",
+		"[fugue-upgrade] previous Helm revision: 717",
+		"[fugue-upgrade] upgrade complete; current Helm revision=718",
+		"def parse_rfc3339_nano(value):",
+		`r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z"`,
+		`.ljust(9, "0")`,
+		"180 * 1_000_000_000",
+		"runtime baseline continuous observation window is incomplete",
+		"central_coredns",
+		"refs/heads/fugue-control-plane-release-baseline",
+		"-F 'force=false'",
+	} {
+		if !strings.Contains(verify.Run, required) {
+			t.Fatalf("RP0 evidence verifier must contain %q", required)
+		}
+	}
+	if strings.Contains(verify.Run, "fromisoformat") {
+		t.Fatal("RP0 evidence verifier must not truncate or reject RFC3339Nano timestamps through fromisoformat")
+	}
+	upload := job.Steps[3]
+	if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" || upload.Run != "" {
+		t.Fatalf("RP0 intent evidence upload drifted: %+v", upload)
+	}
+	observe := job.Steps[4]
+	for _, required := range []string{"for sample in 1 2 3 4 5", "sleep 15", `{"status": "ok"}`} {
+		if !strings.Contains(observe.Run, required) {
+			t.Fatalf("RP0 pre-migration observation must contain %q", required)
+		}
+	}
+	writer := job.Steps[len(job.Steps)-1]
+	if writer.If != "" || writer.Uses != "" || writer.Shell != "" || writer.ContinueOnError || writer.Run == "" {
+		t.Fatalf("RP0 writer execution semantics drifted: %+v", writer)
+	}
+	wantWriterEnv := map[string]string{
+		"EXPECTED_SHA":         "${{ inputs.expected_sha }}",
+		"RUNTIME_BASELINE_SHA": "${{ steps.verify.outputs.runtime_baseline_sha }}",
+		"GH_TOKEN":             "${{ github.token }}",
+	}
+	if !reflect.DeepEqual(writer.Env, wantWriterEnv) {
+		t.Fatalf("RP0 writer environment drifted: got %+v want %+v", writer.Env, wantWriterEnv)
+	}
+	for _, required := range []string{
+		"readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
+		"readonly absent_oid='0000000000000000000000000000000000000000'",
+		"beforeOid:$beforeOid", "afterOid:$afterOid", "-F 'force=false'",
+		`-f "beforeOid=${absent_oid}"`, `-f "afterOid=${RUNTIME_BASELINE_SHA}"`,
+		`"${observed}" == "${RUNTIME_BASELINE_SHA}"`,
+	} {
+		if !strings.Contains(writer.Run, required) {
+			t.Fatalf("RP0 writer must contain %q", required)
+		}
+	}
+	if strings.Count(writer.Run, "gh api") != 5 || strings.Count(writer.Run, "gh api graphql") != 2 ||
+		strings.Count(writer.Run, "updateRefs(") != 1 || strings.Count(writer.Run, "-F 'force=false'") != 1 {
+		t.Fatalf("RP0 writer API inventory drifted:\n%s", writer.Run)
+	}
+	for _, forbidden := range []string{
+		"git push", "git update-ref", "--force-with-lease", "--method", " -X ",
+		"createRef", "deleteRef", "force=true", "curl ", "wget ",
+	} {
+		if strings.Contains(writer.Run, forbidden) {
+			t.Fatalf("RP0 writer contains out-of-scope write capability %q", forbidden)
+		}
+	}
+	source := string(data)
+	for _, forbidden := range []string{
+		"self-hosted", "${{ secrets.", "KUBECONFIG", "--kubeconfig",
+		"refs/tags/fugue-control-plane-release-baseline", "--force-with-lease",
+		"ssh ", "kubectl ", "docker ", "helm ", "--method", " -X ",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("RP0 migration contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
+func TestControlPlaneV2IsExactlyDormantHostedAndPermissionsEmpty(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane-v2.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read dormant control-plane v2 workflow: %v", err)
+	}
+	const expectedSource = `name: deploy-control-plane-v2
 
 on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact lowercase main SHA registering the dormant RP0 migration lane
+        description: Dormant input retained for fail-closed workflow registration
         required: true
         type: string
 
 permissions: {}
 
-concurrency:
-  group: fugue-release-policy-rp0-migration-lane-registration-v1
-  cancel-in-progress: false
-
 jobs:
-  prove-hosted-zero-write-registration:
+  dormant:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
-    environment: production
+    timeout-minutes: 1
     permissions: {}
     steps:
-      - name: Verify exact SHA and observe unchanged production health
-        env:
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
+      - name: Reject runtime release before Fugue settlement is installed
         run: |
-          set -euo pipefail
-          readonly health_url='https://api.fugue.pro/healthz'
-          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]
-          [[ "${GITHUB_REF}" == 'refs/heads/main' ]]
-          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
-          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
-          for sample in 1 2 3 4 5; do
-            response="$(curl --fail --silent --show-error \
-              --connect-timeout 5 --max-time 10 "${health_url}")"
-            python3 - "${response}" <<'PY'
-          import json, sys
-          if json.loads(sys.argv[1]) != {"status": "ok"}:
-              raise SystemExit("production health payload drifted")
-          PY
-            [[ "${sample}" == '5' ]] || sleep 15
-          done
-          printf '%s\n' 'hosted RP0 migration lane registration is exact-SHA and zero-write'
+          printf '%s\n' \
+            'deploy-control-plane-v2 runtime mutation is intentionally dormant until the separately released Fugue settlement and automatic rollback checkpoint is complete.' >&2
+          exit 1
 `
 	if got := string(data); got != expectedSource {
-		t.Fatalf("RP0 registration workflow must match the exact reviewed zero-write source\ngot:\n%s", got)
-	}
-	var workflow struct {
-		On          map[string]yaml.Node `yaml:"on"`
-		Permissions map[string]string    `yaml:"permissions"`
-		Jobs        map[string]struct {
-			RunsOn         string                `yaml:"runs-on"`
-			TimeoutMinutes int                   `yaml:"timeout-minutes"`
-			Environment    string                `yaml:"environment"`
-			Permissions    map[string]string     `yaml:"permissions"`
-			Steps          []releaseWorkflowStep `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(data, &workflow); err != nil {
-		t.Fatalf("parse RP0 migration lane registration workflow: %v", err)
-	}
-	workflowDispatchNode, ok := workflow.On["workflow_dispatch"]
-	if !ok || len(workflow.On) != 1 {
-		t.Fatalf("RP0 registration must be dispatch-only with one input: %+v", workflow.On)
-	}
-	var workflowDispatch releaseWorkflowDispatchTrigger
-	if err := workflowDispatchNode.Decode(&workflowDispatch); err != nil {
-		t.Fatalf("decode RP0 workflow_dispatch trigger: %v", err)
-	}
-	if len(workflowDispatch.Inputs) != 1 {
-		t.Fatalf("RP0 registration must expose only expected_sha: %+v", workflowDispatch.Inputs)
-	}
-	expectedSHAInput, ok := workflowDispatch.Inputs["expected_sha"]
-	if !ok {
-		t.Fatal("RP0 registration must require expected_sha")
-	}
-	var expectedSHA releaseWorkflowDispatchInput
-	if err := expectedSHAInput.Decode(&expectedSHA); err != nil {
-		t.Fatalf("decode RP0 expected_sha input: %v", err)
-	}
-	if !expectedSHA.Required || expectedSHA.Type != "string" || expectedSHA.Default != nil {
-		t.Fatalf("RP0 expected_sha must be a required string without a default: %+v", expectedSHA)
-	}
-	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
-		t.Fatalf("RP0 registration must have empty top-level permissions and one job: %+v", workflow)
-	}
-	job, ok := workflow.Jobs["prove-hosted-zero-write-registration"]
-	if !ok {
-		t.Fatal("RP0 registration job is absent")
-	}
-	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 3 || job.Environment != "production" || len(job.Permissions) != 0 {
-		t.Fatalf("RP0 registration job must be hosted, bounded, production-scoped, and permissions-empty: %+v", job)
-	}
-	if len(job.Steps) != 1 || job.Steps[0].Uses != "" || job.Steps[0].Name != "Verify exact SHA and observe unchanged production health" {
-		t.Fatalf("RP0 registration must contain one shell-only verification step: %+v", job.Steps)
-	}
-	step := job.Steps[0]
-	if len(step.Env) != 1 {
-		t.Fatalf("RP0 registration step must expose only EXPECTED_SHA: %+v", step.Env)
-	}
-	if got, want := step.Env["EXPECTED_SHA"], "${{ inputs.expected_sha }}"; got != want {
-		t.Fatalf("RP0 registration expected SHA binding drifted: got %q want %q", got, want)
-	}
-	for _, required := range []string{
-		`"${GITHUB_EVENT_NAME}" == 'workflow_dispatch'`,
-		`"${GITHUB_REF}" == 'refs/heads/main'`,
-		`"${GITHUB_RUN_ATTEMPT}" == '1'`,
-		`"${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$`,
-		`"${EXPECTED_SHA}" == "${GITHUB_SHA}"`,
-		"for sample in 1 2 3 4 5",
-		"sleep 15",
-		"https://api.fugue.pro/healthz",
-		`{"status": "ok"}`,
-	} {
-		if !strings.Contains(step.Run, required) {
-			t.Fatalf("RP0 registration verification must contain %q", required)
-		}
-	}
-	source := string(data)
-	for _, forbidden := range []string{
-		"self-hosted", "actions/checkout", "contents: write", "actions: write",
-		"kubectl ", "helm ", "ssh ", "docker ", "gh api", "git push",
-	} {
-		if strings.Contains(source, forbidden) {
-			t.Fatalf("RP0 registration contains out-of-scope capability %q", forbidden)
-		}
+		t.Fatalf("control-plane v2 must match the reviewed dormant source\ngot:\n%s", got)
 	}
 }
 
@@ -372,10 +605,116 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
+	assertWorkflowSourceDigest(t, data, "2761cef511519e8cd887ccac90368cc9db6ed0742807a73184a3e385e3e38f95")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
 	}
+	workflowRootNode := workflowDocumentMapping(t, data)
+	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
+	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
+		"release-input-guard/Guard exact main commit authorization":                      "36817d224982821ad3eb81a44fd42dd50bfa479915e48b339010fae5e19ae1a5",
+		"release-baseline/Resolve release-domain baseline":                               "2ee9ad41de7031b7e176a2a6498407a2e966796308ea33083d2653968267fee0",
+		"release-baseline/Resolve live image metadata":                                   "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"release-baseline/Compute live-to-target release changed files":                  "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
+		"release-gate/Verify generated OpenAPI artifacts":                                "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
+		"release-gate/Verify release-domain safety contracts":                            "0a71d9858c02ceb5aa8aa188313276dc4a63db5dae5cc856323c533fd1051144",
+		"release-gate/Run Go tests":                                                      "1bb497e3e13a1105cf24e3359fa3ef75de08b66ff8a2839cd7f9ea97824d9eb3",
+		"build/Compute image metadata":                                                   "12f6dcc38d6f1597416aae34a1c2fa4efda4c6353c5fcbc0eee6c66ee3ccb5b6",
+		"build/Compute image build plan":                                                 "e545c87a2385902616eb8fa652954970e0de7e47ffe4c8fea46eb03cb71e5ea0",
+		"build/Publish verified control-plane image provenance":                          "6561990b64acc7e6ffe4f97b6f8424edf28154444d579610aa60fb545f15cb07",
+		"deploy/Record deploy job budget origin":                                         "752b51a8ce207fa8a0f61a05d9d4deea9990882c5f846f369e916a3be2bfb677",
+		"deploy/Build private release-domain tools":                                      "1017c0bb023803233350b68c1b434ca34c01e82d04bc0ad8a80b03f2c437ead2",
+		"deploy/Write genesis public release evidence":                                   "6b376d82302f8a146582de5125a6de541bd52d93e3f6696b559b58b1f9990cd5",
+		"deploy/Guard stateful component files":                                          "65a7da57e288071328518bc5bd3ee9c0b5726ca97dd9a2b33672fe351eb544c6",
+		"deploy/Prepare authoritative DNS DiG runtime":                                   "90038169ec5ef9b2d60a35fa9271e53ee66bdfb1fbaec61ab035674a7b68f6af",
+		"deploy/Verify local deploy prerequisites":                                       "e94b5f2811734f45c3ff37be7bf5ef1b85321e8e4b4f2e6821e18e23ff8dff01",
+		"deploy/Explain runner and fail closed target":                                   "afab1c1aa3b6305ac3fdf982640fce8d81781c339cea714f11e2bde65a3b4475",
+		"deploy/Resolve live image metadata":                                             "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
+		"deploy/Prove explicitly authorized stale pre-Helm release recovery":             "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
+		"deploy/Upgrade Fugue control plane":                                             "0390f1a108338e637e594e6e64bb82bcccf3a85ad59f668ee6c1160ddee84e76",
+		"deploy/Remove stale release recovery proof":                                     "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch": "9090338e2f90cb9498c42cdf3fb4a3d8da2205ef6b0856760a476a19ee40ea77",
+		"freeze-release-lane-on-failure/Record release lane freeze evidence":             "fcf21e0732d091de6e115386f2d55e88de2c0e49110bb7ebf7674c7c8e76e00a",
+		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":     "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
+		"freeze-release-lane-on-failure/Require release lane freeze evidence":            "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
+	})
+	workflowJobsNode := workflowMappingValue(t, workflowRootNode, "jobs")
+	assertWorkflowJobNodeContracts(t, workflowJobsNode, map[string]workflowJobNodeContract{
+		"release-input-guard": {
+			Keys: []string{"runs-on", "steps"},
+			StepKeys: [][]string{
+				{"name", "env", "run"},
+			},
+		},
+		"release-baseline": {
+			Keys: []string{"needs", "outputs", "runs-on", "steps"},
+			StepKeys: [][]string{
+				{"name", "uses", "with"},
+				{"name", "id", "run"},
+				{"name", "id", "env", "run"},
+				{"name", "id", "env", "run"},
+			},
+		},
+		"release-gate": {
+			Keys: []string{"needs", "runs-on", "steps"},
+			StepKeys: [][]string{
+				{"name", "uses", "with"},
+				{"name", "uses", "with"},
+				{"name", "uses", "with"},
+				{"name", "run"},
+				{"name", "run"},
+				{"name", "run"},
+			},
+		},
+		"build": {
+			Keys: []string{"needs", "outputs", "permissions", "runs-on", "steps"},
+			StepKeys: [][]string{
+				{"name", "uses", "with"},
+				{"name", "uses", "with"},
+				{"name", "id", "run"},
+				{"name", "id", "env", "run"},
+				{"name", "if", "uses"},
+				{"name", "if", "uses", "with"},
+				{"name", "id", "env", "run"},
+			},
+		},
+		"deploy": {
+			Keys: []string{"needs", "if", "runs-on", "timeout-minutes", "environment", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "if", "run"},
+				{"name", "uses", "with"},
+				{"name", "uses", "with"},
+				{"name", "run"},
+				{"name", "if", "env", "run"},
+				{"name", "if", "env", "run"},
+				{"name", "if", "run"},
+				{"name", "if", "run"},
+				{"name", "if", "env", "run"},
+				{"name", "id", "if", "env", "run"},
+				{"name", "if", "env", "run"},
+				{"name", "if", "env", "run"},
+				{"name", "if", "run"},
+				{"name", "if", "uses", "with"},
+			},
+		},
+		"record-release-baseline": {
+			Keys: []string{"needs", "if", "runs-on", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "uses", "with"},
+				{"name", "env", "run"},
+			},
+		},
+		"freeze-release-lane-on-failure": {
+			Keys: []string{"needs", "if", "runs-on", "permissions", "steps"},
+			StepKeys: [][]string{
+				{"name", "env", "run"},
+				{"name", "id", "if", "continue-on-error", "uses", "with"},
+				{"name", "id", "if", "env", "run"},
+				{"name", "if", "run"},
+			},
+		},
+	})
 	if workflow.On.WorkflowDispatch == nil {
 		t.Fatal("control-plane workflow must support workflow_dispatch")
 	}
@@ -501,21 +840,28 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		t.Fatal("release-baseline must wait for the exact input guard")
 	}
 	domainBaseline := workflowStepByName(t, baseline, "Resolve release-domain baseline")
+	if len(domainBaseline.Env) != 0 {
+		t.Fatalf("forward-only baseline resolver must not retain genesis inputs: %+v", domainBaseline.Env)
+	}
 	for _, required := range []string{
-		"fugue-control-plane-release-baseline",
-		"723116882214ae9efeaee0877bb378d0db2dcea7",
-		"8b4bdc2a2b443be6d1244f9b4739cd0be1313d71",
-		"4d74c6f963258f9f5c3925613891db9163327330",
+		"refs/heads/fugue-control-plane-release-baseline",
+		`"${remote_status}" == '0'`,
 		`"${fetched_ref_object_sha}" == "${remote_object}"`,
-		`"${remote_object}" == "${domain_base_sha}"`,
-		`"${actual_parent}" == "${genesis_parent_sha}"`,
-		`"${parent_b3}" == "${genesis_b3_sha}"`,
-		`"${b3_base}" == "${genesis_base_sha}"`,
-		`domain_base_sha="${genesis_base_sha}"`,
+		`"${domain_base_sha}" == "${remote_object}"`,
 		"git merge-base --is-ancestor",
+		"printf 'is_genesis=false",
+		"printf 'genesis_parent_sha=",
 	} {
 		if !strings.Contains(domainBaseline.Run, required) {
 			t.Fatalf("release-domain baseline resolver must contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"refs/tags/", "genesis_base_sha", "force-with-lease", "git push",
+		"gh api", "curl ", "--method", "updateRefs",
+	} {
+		if strings.Contains(domainBaseline.Run, forbidden) {
+			t.Fatalf("forward-only baseline resolver retains legacy transport %q", forbidden)
 		}
 	}
 
@@ -858,32 +1204,76 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if got, want := recordBaseline.Permissions, map[string]string{"contents": "write"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("record-release-baseline permissions drifted: got %v want %v", got, want)
 	}
+	if recordBaseline.ContinueOnError {
+		t.Fatal("record-release-baseline must fail closed")
+	}
+	recordNode := workflowMappingValue(t, workflowJobsNode, "record-release-baseline")
+	assertWorkflowMappingKeys(t, recordNode, "needs", "if", "runs-on", "permissions", "steps")
+	recordStepsNode := workflowMappingValue(t, recordNode, "steps")
+	if recordStepsNode.Kind != yaml.SequenceNode || len(recordStepsNode.Content) != 2 {
+		t.Fatalf("record-release-baseline step node inventory drifted: %+v", recordStepsNode)
+	}
+	assertWorkflowMappingKeys(t, recordStepsNode.Content[0], "name", "uses", "with")
+	assertWorkflowMappingKeys(t, recordStepsNode.Content[1], "name", "env", "run")
 	const recordBaselineCondition = "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' }}"
 	if recordBaseline.If != recordBaselineCondition {
 		t.Fatalf("record-release-baseline success condition drifted: got %q want %q", recordBaseline.If, recordBaselineCondition)
 	}
-	advanceBaseline := workflowStepByName(t, recordBaseline, "Advance dedicated release baseline tag")
+	if len(recordBaseline.Steps) != 2 {
+		t.Fatalf("record-release-baseline must contain exact checkout/writer steps: %+v", recordBaseline.Steps)
+	}
+	checkout := recordBaseline.Steps[0]
+	if checkout.Name != "Checkout" || checkout.With["persist-credentials"] != "false" {
+		t.Fatalf("record-release-baseline checkout must not persist credentials: %+v", checkout)
+	}
+	advanceBaseline := workflowStepByName(t, recordBaseline, "Advance dedicated forward-only release baseline branch")
+	if advanceBaseline.If != "" || advanceBaseline.Uses != "" || advanceBaseline.Shell != "" ||
+		advanceBaseline.ContinueOnError || advanceBaseline.Run == "" {
+		t.Fatalf("release baseline writer execution semantics drifted: %+v", advanceBaseline)
+	}
+	if recordBaseline.Steps[1].Name != advanceBaseline.Name {
+		t.Fatal("release baseline writer must be the final semantic step")
+	}
 	if got, want := advanceBaseline.Env["EXPECTED_BASE_REF_OBJECT"], "${{ needs.release-baseline.outputs.baseline_ref_object_sha }}"; got != want {
 		t.Fatalf("record-release-baseline ref-object binding drifted: got %q want %q", got, want)
 	}
+	wantAdvanceEnv := map[string]string{
+		"EXPECTED_BASE_SHA":        "${{ needs.release-baseline.outputs.domain_base_sha }}",
+		"EXPECTED_BASE_REF_OBJECT": "${{ needs.release-baseline.outputs.baseline_ref_object_sha }}",
+		"TARGET_SHA":               "${{ github.sha }}",
+		"GH_TOKEN":                 "${{ github.token }}",
+	}
+	if !reflect.DeepEqual(advanceBaseline.Env, wantAdvanceEnv) {
+		t.Fatalf("record-release-baseline writer environment drifted: got %+v want %+v", advanceBaseline.Env, wantAdvanceEnv)
+	}
 	for _, required := range []string{
-		"refs/tags/fugue-control-plane-release-baseline",
-		"723116882214ae9efeaee0877bb378d0db2dcea7",
-		"8b4bdc2a2b443be6d1244f9b4739cd0be1313d71",
-		"4d74c6f963258f9f5c3925613891db9163327330",
-		`"${EXPECTED_BASE_SHA}" == "${genesis_base_sha}"`,
-		`"${target_parent}" == "${genesis_parent_sha}"`,
-		`"${parent_b3}" == "${genesis_b3_sha}"`,
-		`"${b3_base}" == "${genesis_base_sha}"`,
+		"refs/heads/fugue-control-plane-release-baseline",
 		`"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"`,
-		`"${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}"`,
-		`"${current_base_sha}" == "${EXPECTED_BASE_SHA}"`,
 		`"${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}"`,
-		`--force-with-lease="${lease}"`,
-		`"${TARGET_SHA}:${baseline_ref}"`,
+		"git merge-base --is-ancestor",
+		"beforeOid:$beforeOid",
+		"afterOid:$afterOid",
+		"-F 'force=false'",
+		`-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}"`,
+		`-f "afterOid=${TARGET_SHA}"`,
+		`"${observed}" == "${TARGET_SHA}"`,
 	} {
 		if !strings.Contains(advanceBaseline.Run, required) {
 			t.Fatalf("release baseline advancement must contain %q", required)
+		}
+	}
+	if strings.Count(advanceBaseline.Run, "gh api") != 3 ||
+		strings.Count(advanceBaseline.Run, "gh api graphql") != 2 ||
+		strings.Count(advanceBaseline.Run, "updateRefs(") != 1 ||
+		strings.Count(advanceBaseline.Run, "-F 'force=false'") != 1 {
+		t.Fatalf("release baseline writer API inventory drifted:\n%s", advanceBaseline.Run)
+	}
+	for _, forbidden := range []string{
+		"refs/tags/", "git push", "git update-ref", "--force-with-lease", "--method",
+		" -X ", "createRef", "deleteRef", "force=true", "curl ", "wget ",
+	} {
+		if strings.Contains(advanceBaseline.Run, forbidden) {
+			t.Fatalf("release baseline writer contains out-of-scope capability %q", forbidden)
 		}
 	}
 

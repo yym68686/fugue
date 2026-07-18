@@ -26,13 +26,47 @@ observation window.
 This establishes the prerequisite used for retirement without attempting to
 rerun either historical privileged workflow.
 
-## Checkpoint boundary
+## Retirement checkpoint boundary
 
-This retirement is policy-only and performs no Fugue, Kubernetes, workload,
-node, DNS, network, image, or runtime-baseline write. It does not migrate the
-legacy mutable baseline tag, create a forward-only baseline branch, register a
-runtime v2 lane, add terminal state, or implement production rollback. Those
-are separate checkpoints and must not be folded into this one.
+The retirement checkpoint was policy-only and performed no Fugue, Kubernetes,
+workload, node, DNS, network, image, or runtime-baseline write. RP0 follows as
+its own independently tested and released checkpoint; terminal state,
+watchdogs, ref protection, runner cutover, lane promotion, Fugue settlement,
+and production rollback remain excluded from RP0.
+
+## RP0 forward-only baseline transport
+
+RP0 replaces every executable use of the mutable baseline tag with
+`refs/heads/fugue-control-plane-release-baseline`. The legacy tag may remain as
+inert historical evidence, but no workflow or executable script reads, writes,
+or rolls it backward. `scripts/test_release_policy_recovery_workflow.sh` fails
+closed if that tag path reappears in executable source.
+
+The last verified runtime baseline is commit
+`92805aab5209348932b2c1db060e5c3c56ce4a2c`, deployed by run `29380409275`.
+Artifact `8329699987` has digest
+`sha256:4ff05d34019da02bc10dd8f465acb9166fb280334717d9f349851ff3bd5001bf`.
+Its attribution, successful Helm revision 717-to-718 transition, central
+CoreDNS gate, and 180-second observation are checked before migration. A later
+failed candidate created revision 719 and the formal release script restored
+revision 718 as revision 720. Read-only production inspection confirmed that
+revisions 718 and 720 have identical manifest and complete-values hashes.
+
+`.github/workflows/migrate-control-plane-release-baseline-rp0.yml` is hosted on
+GitHub and receives no cluster credentials. It binds the exact policy SHA and
+the authorized runtime evidence, observes unchanged API health, then creates
+the missing baseline branch with an all-zero absent `beforeOid`, the verified
+runtime SHA as `afterOid`, and `force: false`. It never records the policy SHA
+as a runtime baseline. Repository variables provide the four evidence values;
+the workflow independently re-reads and verifies the immutable run, artifact,
+deploy log, and observation samples before the single final ref mutation.
+
+The existing deploy workflow remains disabled until its later promotion
+checkpoint. If it is eventually promoted, its resolver requires the branch to
+exist and its hosted recorder advances the branch only with the exact observed
+OID, forward ancestry, and `force: false`. `deploy-control-plane-v2` is
+registered but intentionally fails on a GitHub-hosted runner before checkout,
+self-hosted scheduling, or any cluster command.
 
 GitHub Actions deploys exact code SHAs only. It must never execute or
 orchestrate production rollback. After a future Fugue runtime write, rollback

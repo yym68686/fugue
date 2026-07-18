@@ -83,27 +83,24 @@ assert_equal(
 )
 resolver = step(baseline, "Resolve release-domain baseline")
 assert_equal(resolver["id"], "domain_baseline", "domain baseline step id")
-assert_equal(
-  resolver.fetch("env").fetch("FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA"),
-  "${{ vars.FUGUE_CONTROL_PLANE_RELEASE_GENESIS_SHA }}",
-  "genesis repository variable",
-)
+assert_equal(resolver.fetch("env", {}), {}, "forward baseline resolver environment")
 for fragment in [
-  "readonly baseline_tag='fugue-control-plane-release-baseline'",
-  "readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
-  "readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
-  "readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'",
+  "readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
+  '"${remote_status}" == \'0\'',
   '"${fetched_ref_object_sha}" == "${remote_object}"',
-  '"${remote_object}" == "${domain_base_sha}"',
+  '"${domain_base_sha}" == "${remote_object}"',
   'git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"',
-  '"${genesis_sha}" == "${target_sha}"',
-  '"${actual_parent}" == "${genesis_parent_sha}"',
-  '"${parent_b3}" == "${genesis_b3_sha}"',
-  '"${b3_base}" == "${genesis_base_sha}"',
-  'domain_base_sha="${genesis_base_sha}"',
+  "printf 'is_genesis=false",
+  "printf 'genesis_parent_sha=",
 ]
   fail_contract("baseline resolver is missing #{fragment.inspect}") unless resolver.fetch("run").include?(fragment)
+end
+for forbidden in [
+  "refs/tags/", "genesis_base_sha", "force-with-lease", "git push",
+  "gh api", "curl ", "--method", "updateRefs",
+]
+  fail_contract("baseline resolver retains legacy transport #{forbidden.inspect}") if resolver.fetch("run").include?(forbidden)
 end
 changes = step(baseline, "Compute live-to-target release changed files")
 assert_equal(
@@ -294,33 +291,42 @@ assert_equal(
   "${{ always() && needs.release-input-guard.result == 'success' && needs.release-baseline.result == 'success' && needs.release-gate.result == 'success' && needs.build.result == 'success' && needs.deploy.result == 'success' }}",
   "record-release-baseline success condition",
 )
-advance = step(record, "Advance dedicated release baseline tag")
+assert_equal(record.fetch("steps").length, 2, "record baseline exact step inventory")
+record_checkout = record.fetch("steps").first
+assert_equal(record_checkout.fetch("name"), "Checkout", "record baseline checkout position")
+assert_equal(record_checkout.fetch("with").fetch("persist-credentials"), false, "record baseline checkout credentials")
+advance = step(record, "Advance dedicated forward-only release baseline branch")
+assert_equal(record.fetch("steps").last.fetch("name"), advance.fetch("name"), "record baseline writer position")
 assert_equal(
   advance.fetch("env").fetch("EXPECTED_BASE_REF_OBJECT"),
   "${{ needs.release-baseline.outputs.baseline_ref_object_sha }}",
   "record baseline ref-object input",
 )
 for fragment in [
-  "readonly baseline_ref='refs/tags/fugue-control-plane-release-baseline'",
-  "readonly genesis_base_sha='723116882214ae9efeaee0877bb378d0db2dcea7'",
-  "readonly genesis_b3_sha='8b4bdc2a2b443be6d1244f9b4739cd0be1313d71'",
-  "readonly genesis_parent_sha='4d74c6f963258f9f5c3925613891db9163327330'",
+  "readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"',
-  '"${fetched_ref_object_sha}" == "${EXPECTED_BASE_REF_OBJECT}"',
   '"${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}"',
-  '"${current_base_sha}" == "${EXPECTED_BASE_SHA}"',
-  '"${EXPECTED_BASE_SHA}" == "${genesis_base_sha}"',
-  '"${target_parent}" == "${genesis_parent_sha}"',
-  '"${parent_b3}" == "${genesis_b3_sha}"',
-  '"${b3_base}" == "${genesis_base_sha}"',
-  '--force-with-lease="${lease}"',
-  '"${TARGET_SHA}:${baseline_ref}"',
+  'git merge-base --is-ancestor "${EXPECTED_BASE_SHA}" "${TARGET_SHA}"',
+  'beforeOid:$beforeOid',
+  'afterOid:$afterOid',
+  "-F 'force=false'",
+  '-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}"',
+  '-f "afterOid=${TARGET_SHA}"',
+  '"${observed}" == "${TARGET_SHA}"',
 ]
   fail_contract("baseline advancement is missing #{fragment.inspect}") unless advance.fetch("run").include?(fragment)
 end
-assert_equal(advance.fetch("run").scan(/\bgit push\b/).length, 1, "baseline git push count")
-fail_contract("baseline advancement must not update a branch") if advance.fetch("run").include?("refs/heads/")
+assert_equal(advance.fetch("run").scan("gh api").length, 3, "baseline writer API count")
+assert_equal(advance.fetch("run").scan("gh api graphql").length, 2, "baseline writer GraphQL count")
+assert_equal(advance.fetch("run").scan("updateRefs(").length, 1, "baseline writer mutation count")
+assert_equal(advance.fetch("run").scan("-F 'force=false'").length, 1, "baseline writer force policy count")
+for forbidden in [
+  "refs/tags/", "git push", "git update-ref", "--force-with-lease", "--method",
+  " -X ", "createRef", "deleteRef", "force=true", "curl ", "wget ",
+]
+  fail_contract("baseline writer contains out-of-scope capability #{forbidden.inspect}") if advance.fetch("run").include?(forbidden)
+end
 
 freeze = jobs.fetch("freeze-release-lane-on-failure")
 freeze_needs = [

@@ -1,0 +1,23 @@
+name: deploy-control-plane-v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Dormant input retained for fail-closed workflow registration
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  dormant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Reject runtime release before Fugue settlement is installed
+        run: |
+          printf '%s\n' \
+            'deploy-control-plane-v2 runtime mutation is intentionally dormant until the separately released Fugue settlement and automatic rollback checkpoint is complete.' >&2
+          exit 1

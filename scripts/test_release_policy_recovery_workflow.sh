@@ -58,25 +58,8 @@ while IFS= read -r -d '' candidate; do
   relative_path="${candidate#"${REPO_ROOT}/"}"
   [[ "${relative_path}" != 'scripts/test_release_policy_recovery_workflow.sh' ]] || continue
   source="$(<"${candidate}")"
-  has_tag_ref='false'
-  has_force_write='false'
-  has_graphql_cas='false'
-  has_recovery_transaction='false'
-  [[ "${source}" == *'refs/tags/fugue-control-plane-release-baseline'* ]] && has_tag_ref='true'
-  if [[ "${source}" == *'force=true'* || "${source}" == *'force: true'* ||
-        "${source}" == *'"force": true'* || "${source}" == *'--force-with-lease'* ]]; then
-    has_force_write='true'
-  fi
-  if [[ "${source}" == *'updateRefs'* && "${source}" == *'beforeOid'* &&
-        "${source}" == *'afterOid'* ]]; then
-    has_graphql_cas='true'
-  fi
-  if [[ "${source}" == *'transact'* && "${source}" == *'compensate'* ]]; then
-    has_recovery_transaction='true'
-  fi
-  if [[ "${has_tag_ref}" == 'true' && "${has_force_write}" == 'true' &&
-        ( "${has_graphql_cas}" == 'true' || "${has_recovery_transaction}" == 'true' ) ]]; then
-    fail "renamed Git-ref rollback capability remains executable: ${relative_path}"
+  if [[ "${source}" == *'refs/tags/fugue-control-plane-release-baseline'* ]]; then
+    fail "legacy mutable release baseline tag remains executable: ${relative_path}"
   fi
 done <"${inventory_file}"
 cleanup_inventory

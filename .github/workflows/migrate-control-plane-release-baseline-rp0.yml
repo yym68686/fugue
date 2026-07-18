@@ -1,40 +1,301 @@
-name: prepare-control-plane-release-baseline-rp0
+name: migrate-control-plane-release-baseline-rp0
 
 on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact lowercase main SHA registering the dormant RP0 migration lane
+        description: Exact lowercase main SHA containing the RP0 transport
         required: true
         type: string
 
 permissions: {}
 
 concurrency:
-  group: fugue-release-policy-rp0-migration-lane-registration-v1
+  group: fugue-release-policy-rp0-baseline-migration-v1
   cancel-in-progress: false
 
 jobs:
-  prove-hosted-zero-write-registration:
+  migrate-forward-baseline:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 20
     environment: production
-    permissions: {}
+    permissions:
+      actions: read
+      contents: write
     steps:
-      - name: Verify exact SHA and observe unchanged production health
+      - name: Checkout exact RP0 target without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact migration authorization and last runtime baseline
+        id: verify
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
+          AUTHORIZED_RUNTIME_BASELINE_SHA: ${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_BASELINE_SHA }}
+          AUTHORIZED_RUNTIME_RUN_ID: ${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_RUN_ID }}
+          AUTHORIZED_RUNTIME_ARTIFACT_ID: ${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_ARTIFACT_ID }}
+          AUTHORIZED_RUNTIME_ARTIFACT_DIGEST: ${{ vars.FUGUE_CONTROL_PLANE_RP0_RUNTIME_ARTIFACT_DIGEST }}
+          HEALTH_URL: ${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          readonly health_url='https://api.fugue.pro/healthz'
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
           [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]
           [[ "${GITHUB_REF}" == 'refs/heads/main' ]]
           [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]]
-          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]]
+          [[ "${AUTHORIZED_RUNTIME_BASELINE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${AUTHORIZED_RUNTIME_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${AUTHORIZED_RUNTIME_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${AUTHORIZED_RUNTIME_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${GITHUB_SHA}" ]]
+          read -r target_commit target_parent extra <<<"$(git rev-list --parents -n 1 "${GITHUB_SHA}")"
+          [[ "${target_commit}" == "${GITHUB_SHA}" && -z "${extra:-}" ]]
+          expected_changes=(
+            $'A\t.github/workflows/deploy-control-plane-v2.yml'
+            $'M\t.github/workflows/deploy-control-plane.yml'
+            $'M\t.github/workflows/migrate-control-plane-release-baseline-rp0.yml'
+            $'M\tdocs/runbooks/release-domain-planner.md'
+            $'M\tdocs/runbooks/release-policy-recovery.md'
+            $'M\tinternal/platformsafety/release_workflow_test.go'
+            $'M\tscripts/test_release_domain_workflow.sh'
+            $'M\tscripts/test_release_policy_recovery_workflow.sh'
+          )
+          mapfile -t actual_changes < <(git diff --no-renames --name-status "${target_parent}" "${GITHUB_SHA}")
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]]
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[index]}" == "${expected_changes[index]}" ]]
+          done
+          git diff --check "${target_parent}" "${GITHUB_SHA}"
+          git merge-base --is-ancestor "${AUTHORIZED_RUNTIME_BASELINE_SHA}" "${GITHUB_SHA}"
+
+          read -r main_head main_ref extra <<<"$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '[.object.sha,.ref] | @tsv')"
+          [[ -z "${extra:-}" && "${main_head}" == "${GITHUB_SHA}" && "${main_ref}" == 'refs/heads/main' ]]
+          baseline_count="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')"
+          [[ "${baseline_count}" == '0' ]]
+
+          read -r run_head run_status run_conclusion run_attempt run_event run_path extra <<<"$(
+            timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${AUTHORIZED_RUNTIME_RUN_ID}" \
+              --jq '[.head_sha,.status,.conclusion,.run_attempt,.event,.path] | @tsv'
+          )"
+          [[ -z "${extra:-}" ]]
+          [[ "${run_head}" == "${AUTHORIZED_RUNTIME_BASELINE_SHA}" ]]
+          [[ "${run_status}" == 'completed' && "${run_conclusion}" == 'success' ]]
+          [[ "${run_attempt}" == '1' && "${run_event}" == 'push' ]]
+          [[ "${run_path}" == '.github/workflows/deploy-control-plane.yml' ]]
+          expected_artifact="fugue-control-plane-release-attribution-${AUTHORIZED_RUNTIME_RUN_ID}-${run_attempt}"
+          read -r artifact_id artifact_digest artifact_name artifact_expired extra <<<"$(
+            timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${AUTHORIZED_RUNTIME_RUN_ID}/artifacts" \
+              --jq "[.artifacts[] | select(.id == ${AUTHORIZED_RUNTIME_ARTIFACT_ID} and .name == \"${expected_artifact}\")] | if length == 1 then [.[0].id,.[0].digest,.[0].name,.[0].expired] | @tsv else error(\"missing or ambiguous runtime baseline artifact\") end"
+          )"
+          [[ -z "${extra:-}" && "${artifact_id}" == "${AUTHORIZED_RUNTIME_ARTIFACT_ID}" ]]
+          [[ "${artifact_digest}" == "${AUTHORIZED_RUNTIME_ARTIFACT_DIGEST}" ]]
+          [[ "${artifact_name}" == "${expected_artifact}" && "${artifact_expired}" == 'false' ]]
+
+          evidence_tmp="$(mktemp -d)"
+          trap 'rm -rf "${evidence_tmp}"' EXIT
+          timeout --kill-after=2s 20s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${AUTHORIZED_RUNTIME_ARTIFACT_ID}/zip" \
+            >"${evidence_tmp}/runtime-evidence.zip"
+          [[ "sha256:$(sha256sum "${evidence_tmp}/runtime-evidence.zip" | awk '{print $1}')" == \
+             "${AUTHORIZED_RUNTIME_ARTIFACT_DIGEST}" ]]
+          unzip -q "${evidence_tmp}/runtime-evidence.zip" -d "${evidence_tmp}/content"
+
+          deploy_job="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${AUTHORIZED_RUNTIME_RUN_ID}/jobs?filter=latest&per_page=100" \
+            --jq '[.jobs[] | select(.name == "deploy" and .status == "completed" and .conclusion == "success" and .run_attempt == 1)] | if length == 1 then .[0].id else error("missing or ambiguous successful deploy job") end')"
+          [[ "${deploy_job}" =~ ^[1-9][0-9]*$ ]]
+          timeout --kill-after=2s 20s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/jobs/${deploy_job}/logs" \
+            >"${evidence_tmp}/deploy.log"
+          python3 - "${evidence_tmp}/content" "${evidence_tmp}/deploy.log" \
+            "${AUTHORIZED_RUNTIME_RUN_ID}" "${AUTHORIZED_RUNTIME_BASELINE_SHA}" <<'PY'
+          import datetime
+          import json
+          import pathlib
+          import re
+          import sys
+
+          content = pathlib.Path(sys.argv[1])
+          log_path = pathlib.Path(sys.argv[2])
+          run_id = sys.argv[3]
+          head_sha = sys.argv[4]
+          expected_top_level = {
+              "attribution.env",
+              "changed-files.txt",
+              "kubernetes-readyz.txt",
+              "release-safety-watch-windows.json",
+              "target-cluster.txt",
+          }
+          all_paths = list(content.rglob("*"))
+          actual_top_level = {path.name for path in content.iterdir() if path.is_file()}
+          if actual_top_level != expected_top_level:
+              raise SystemExit("runtime baseline artifact top-level inventory drifted")
+          samples = sorted((content / "release-guard-samples").glob("*.json"))
+          actual_files = [path for path in all_paths if path.is_file()]
+          if len(samples) != 9 or len(actual_files) != len(expected_top_level) + len(samples):
+              raise SystemExit("runtime baseline sample inventory drifted")
+          if any(path.is_symlink() for path in all_paths):
+              raise SystemExit("runtime baseline artifact contains a symbolic link")
+          if set(actual_files) != {content / name for name in expected_top_level} | set(samples):
+              raise SystemExit("runtime baseline artifact contains an unexpected file")
+
+          attribution = {}
+          for line in (content / "attribution.env").read_text(encoding="utf-8").splitlines():
+              key, separator, value = line.partition("=")
+              if not separator or key in attribution:
+                  raise SystemExit("runtime baseline attribution is malformed")
+              attribution[key] = value
+          expected_attribution = {
+              "workflow": "deploy-control-plane.yml",
+              "run_id": run_id,
+              "run_attempt": "1",
+              "repository": "yym68686/fugue",
+              "commit": head_sha,
+              "ref": "refs/heads/main",
+              "release_name": "fugue",
+              "namespace": "fugue-system",
+              "image_tag": head_sha,
+          }
+          for key, value in expected_attribution.items():
+              if attribution.get(key) != value:
+                  raise SystemExit(f"runtime baseline attribution mismatch for {key}")
+
+          windows = json.loads((content / "release-safety-watch-windows.json").read_text(encoding="utf-8"))
+          expected_gates = [
+              "active_slot_smoke", "authoritative_dns", "central_coredns",
+              "dns_answer_audit", "edge_request_error_class", "inactive_worker_smoke",
+              "node_local_dns", "platform_autonomy", "public_synthetic", "release_guard",
+              "rollback_path_smoke", "service_resolution",
+          ]
+          if windows.get("release_id") != head_sha or windows.get("watch_seconds") != 180:
+              raise SystemExit("runtime baseline watch identity drifted")
+          if windows.get("required_gates") != expected_gates or windows.get("unknown_high_risk_files") != []:
+              raise SystemExit("runtime baseline gates drifted")
+          if "readyz check passed" not in (content / "kubernetes-readyz.txt").read_text(encoding="utf-8"):
+              raise SystemExit("runtime baseline Kubernetes readiness evidence is absent")
+
+          def parse_rfc3339_nano(value):
+              match = re.fullmatch(
+                  r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z",
+                  value,
+              )
+              if match is None:
+                  raise SystemExit("runtime baseline generated_at is not canonical RFC3339Nano UTC")
+              seconds = int(datetime.datetime.strptime(
+                  match.group(1), "%Y-%m-%dT%H:%M:%S"
+              ).replace(tzinfo=datetime.timezone.utc).timestamp())
+              nanoseconds = int((match.group(2) or "").ljust(9, "0"))
+              return seconds * 1_000_000_000 + nanoseconds
+
+          generated = []
+          for path in samples:
+              sample = json.loads(path.read_text(encoding="utf-8"))
+              if sample.get("pass") is not True or sample.get("block_rollout") is not False:
+                  raise SystemExit("runtime baseline release guard did not pass")
+              if sample.get("platform_artifact_validation_failures") != 0:
+                  raise SystemExit("runtime baseline artifact validation failed")
+              if sample.get("platform_consumer_drift") != 0 or sample.get("gate_policy_violation_count") != 0:
+                  raise SystemExit("runtime baseline drift or policy violation was recorded")
+              generated.append(parse_rfc3339_nano(sample["generated_at"]))
+          if generated != sorted(generated) or generated[-1] - generated[0] < 180 * 1_000_000_000:
+              raise SystemExit("runtime baseline continuous observation window is incomplete")
+
+          log = log_path.read_text(encoding="utf-8", errors="strict")
+          sequence = [
+              "[fugue-upgrade] previous Helm revision: 717",
+              'Release "fugue" has been upgraded. Happy Helming!',
+              "[fugue-upgrade] release safety watch window completed:",
+              "[fugue-upgrade] upgrade complete; current Helm revision=718",
+          ]
+          positions = []
+          for marker in sequence:
+              if log.count(marker) != 1:
+                  raise SystemExit(f"runtime baseline deploy log marker drifted: {marker}")
+              positions.append(log.index(marker))
+          if positions != sorted(positions):
+              raise SystemExit("runtime baseline deploy log sequence drifted")
+          if "watch_seconds=180" not in log[positions[2]:positions[3]] or "central_coredns" not in log[positions[2]:positions[3]]:
+              raise SystemExit("runtime baseline deploy log lacks the required observation gate")
+          if "[fugue-upgrade] ERROR:" in log or "rolling back release fugue" in log:
+              raise SystemExit("runtime baseline deploy log records failure or rollback")
+          PY
+
+          v2_source="$(git show "${GITHUB_SHA}:.github/workflows/deploy-control-plane-v2.yml")"
+          [[ "${v2_source}" == *'runs-on: ubuntu-latest'* ]]
+          [[ "${v2_source}" == *'intentionally dormant'* && "${v2_source}" == *'exit 1'* ]]
+          deploy_source="$(git show "${GITHUB_SHA}:.github/workflows/deploy-control-plane.yml")"
+          [[ "${deploy_source}" == *"readonly baseline_ref='${baseline_ref}'"* ]]
+          [[ "${deploy_source}" == *'beforeOid:$beforeOid'* ]]
+          [[ "${deploy_source}" == *'afterOid:$afterOid'* ]]
+          [[ "${deploy_source}" == *"-F 'force=false'"* ]]
+          {
+            printf 'runtime_baseline_sha=%s\n' "${AUTHORIZED_RUNTIME_BASELINE_SHA}"
+            printf 'runtime_run_id=%s\n' "${AUTHORIZED_RUNTIME_RUN_ID}"
+            printf 'runtime_artifact_id=%s\n' "${AUTHORIZED_RUNTIME_ARTIFACT_ID}"
+            printf 'runtime_artifact_digest=%s\n' "${AUTHORIZED_RUNTIME_ARTIFACT_DIGEST}"
+            printf 'health_url=%s\n' "${HEALTH_URL}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Write RP0 migration intent evidence
+        env:
+          RUNTIME_BASELINE_SHA: ${{ steps.verify.outputs.runtime_baseline_sha }}
+          RUNTIME_RUN_ID: ${{ steps.verify.outputs.runtime_run_id }}
+          RUNTIME_ARTIFACT_ID: ${{ steps.verify.outputs.runtime_artifact_id }}
+          RUNTIME_ARTIFACT_DIGEST: ${{ steps.verify.outputs.runtime_artifact_digest }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/fugue-rp0-baseline-migration"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          python3 - "${evidence_dir}/rp0-migration.json" <<'PY'
+          import json, os, sys
+          from datetime import datetime, timezone
+          payload = {
+              "schema_version": 1,
+              "workflow": "migrate-control-plane-release-baseline-rp0",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "policy_sha": os.environ["GITHUB_SHA"],
+              "runtime_baseline_ref": "refs/heads/fugue-control-plane-release-baseline",
+              "runtime_baseline_sha": os.environ["RUNTIME_BASELINE_SHA"],
+              "runtime_run_id": os.environ["RUNTIME_RUN_ID"],
+              "runtime_artifact_id": os.environ["RUNTIME_ARTIFACT_ID"],
+              "runtime_artifact_digest": os.environ["RUNTIME_ARTIFACT_DIGEST"],
+              "baseline_transition": "absent-to-last-verified-runtime-exact-cas-pending",
+              "cluster_mutation_attempted": False,
+              "git_history_rewritten": False,
+              "recorded_at": datetime.now(timezone.utc).isoformat(),
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Upload RP0 migration intent evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-control-plane-rp0-baseline-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-rp0-baseline-migration/rp0-migration.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Observe unchanged production health before baseline migration
+        env:
+          HEALTH_URL: ${{ steps.verify.outputs.health_url }}
+        run: |
+          set -euo pipefail
           for sample in 1 2 3 4 5; do
             response="$(curl --fail --silent --show-error \
-              --connect-timeout 5 --max-time 10 "${health_url}")"
+              --connect-timeout 5 --max-time 10 "${HEALTH_URL}")"
             python3 - "${response}" <<'PY'
           import json, sys
           if json.loads(sys.argv[1]) != {"status": "ok"}:
@@ -42,4 +303,51 @@ jobs:
           PY
             [[ "${sample}" == '5' ]] || sleep 15
           done
-          printf '%s\n' 'hosted RP0 migration lane registration is exact-SHA and zero-write'
+
+      # Final semantic step: create the branch at the last verified runtime
+      # SHA. The policy SHA is deliberately not recorded as a runtime baseline.
+      - name: Create forward-only runtime baseline with exact absent-ref CAS
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RUNTIME_BASELINE_SHA: ${{ steps.verify.outputs.runtime_baseline_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
+          readonly absent_oid='0000000000000000000000000000000000000000'
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' && "${GITHUB_SHA}" == "${EXPECTED_SHA}" ]]
+          [[ "${RUNTIME_BASELINE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${RUNTIME_BASELINE_SHA}" != "${GITHUB_SHA}" ]]
+          [[ "$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${GITHUB_SHA}" ]]
+          baseline_count="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')"
+          [[ "${baseline_count}" == '0' ]]
+          repository_id="$(timeout --kill-after=2s 10s gh api graphql \
+            -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}' \
+            -f "owner=${GITHUB_REPOSITORY_OWNER}" -f "name=${GITHUB_REPOSITORY#*/}" \
+            --jq '.data.repository.id')"
+          [[ "${repository_id}" =~ ^[A-Za-z0-9_=-]+$ ]]
+          readonly mutation='mutation($repositoryId:ID!,$name:GitRefname!,$beforeOid:GitObjectID!,$afterOid:GitObjectID!,$force:Boolean!,$clientMutationId:String!){updateRefs(input:{repositoryId:$repositoryId,refUpdates:[{name:$name,beforeOid:$beforeOid,afterOid:$afterOid,force:$force}],clientMutationId:$clientMutationId}){clientMutationId}}'
+          mutation_id="fugue-rp0-baseline-${RUNTIME_BASELINE_SHA:0:12}"
+          mutation_status=0
+          echoed="$(timeout --kill-after=2s 10s gh api graphql \
+            -f "query=${mutation}" -f "repositoryId=${repository_id}" -f "name=${baseline_ref}" \
+            -f "beforeOid=${absent_oid}" -f "afterOid=${RUNTIME_BASELINE_SHA}" -F 'force=false' \
+            -f "clientMutationId=${mutation_id}" --jq '.data.updateRefs.clientMutationId')" || mutation_status=$?
+          observed='unknown'
+          for attempt in 1 2 3 4 5; do
+            observe_status=0
+            observed="$(timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+              --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" and .[0].object.type == "commit" then .[0].object.sha else "unknown" end')" || observe_status=$?
+            [[ "${observe_status}" == '0' && "${observed}" == "${RUNTIME_BASELINE_SHA}" ]] && break
+            [[ "${attempt}" == '5' ]] || sleep 2
+          done
+          [[ "${observed}" == "${RUNTIME_BASELINE_SHA}" ]]
+          if [[ "${mutation_status}" == '0' ]]; then
+            [[ "${echoed}" == "${mutation_id}" ]]
+          else
+            printf '%s\n' 'baseline CAS response was unavailable; exact bounded readback proved success' >&2
+          fi
