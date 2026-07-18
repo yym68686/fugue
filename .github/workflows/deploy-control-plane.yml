@@ -926,20 +926,25 @@ jobs:
             -f "beforeOid=${EXPECTED_BASE_REF_OBJECT}" -f "afterOid=${TARGET_SHA}" -F 'force=false' \
             -f "clientMutationId=${mutation_id}" --jq '.data.updateRefs.clientMutationId')" || mutation_status=$?
           observed='unknown'
+          settled='false'
           for attempt in 1 2 3 4 5; do
             observe_status=0
             observed="$(timeout --kill-after=2s 10s gh api \
               "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
               --jq 'if length == 1 and .[0].ref == "refs/heads/fugue-control-plane-release-baseline" and .[0].object.type == "commit" then .[0].object.sha else "unknown" end')" || observe_status=$?
-            [[ "${observe_status}" == '0' && "${observed}" == "${TARGET_SHA}" ]] && break
+            if [[ "${observe_status}" == '0' && "${observed}" == "${TARGET_SHA}" ]]; then
+              settled='true'
+              break
+            fi
             [[ "${attempt}" == '5' ]] || sleep 2
           done
-          [[ "${observed}" == "${TARGET_SHA}" ]]
-          if [[ "${mutation_status}" == '0' ]]; then
-            [[ "${echoed}" == "${mutation_id}" ]]
-          else
-            printf '%s\n' 'baseline CAS response was unavailable; exact bounded readback proved success' >&2
+          [[ "${settled}" == 'true' ]] || exit 1
+          response_exact='false'
+          if [[ "${mutation_status}" == '0' && "${echoed}" == "${mutation_id}" ]]; then
+            response_exact='true'
           fi
+          printf 'baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)\n' \
+            "${mutation_status}" "${response_exact}" >&2 || true
 
   freeze-release-lane-on-failure:
     needs:

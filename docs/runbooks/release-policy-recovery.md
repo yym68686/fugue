@@ -152,7 +152,11 @@ the metadata commit remains the separately observed ref object. The recorder
 is not changed by that checkpoint. A later independent
 checkpoint must make advancement compatible before promotion; the hosted
 recorder will still require the exact observed OID, forward ancestry, and
-`force: false`. `deploy-control-plane-v2` is
+`force: false`. Its independent ambiguous-response prerequisite permits only
+one `updateRefs` attempt and treats bounded exact readback as the sole
+settlement authority. An exact target ref settles a transport failure or wrong
+response echo; absent, unreadable, or different state fails closed without a
+second mutation. `deploy-control-plane-v2` is
 registered but intentionally fails on a GitHub-hosted runner before checkout,
 self-hosted scheduling, or any cluster command.
 

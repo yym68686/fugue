@@ -321,7 +321,14 @@ for fragment in [
   "-F 'force=false'",
   '-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}"',
   '-f "afterOid=${TARGET_SHA}"',
-  '"${observed}" == "${TARGET_SHA}"',
+  "settled='false'",
+  '"${observe_status}" == \'0\' && "${observed}" == "${TARGET_SHA}"',
+  "settled='true'",
+  '[[ "${settled}" == \'true\' ]] || exit 1',
+  "response_exact='false'",
+  '"${mutation_status}" == \'0\' && "${echoed}" == "${mutation_id}"',
+  'baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)',
+  '"${mutation_status}" "${response_exact}" >&2 || true',
 ]
   fail_contract("baseline advancement is missing #{fragment.inspect}") unless advance.fetch("run").include?(fragment)
 end

@@ -170,9 +170,12 @@ runtime release, the hosted recorder advances the observed object with one
 GraphQL
 `updateRefs` mutation whose `beforeOid` is the exact object observed by the
 resolver, whose `afterOid` is the dispatched SHA, and whose `force` value is
-false. A missing, ambiguous, divergent, or concurrently changed branch fails
-closed. The live-image baseline used by existing image and release safety
-checks remains independent from this domain-planner baseline.
+false. After that single mutation attempt, bounded exact readback is the sole
+settlement authority: an exact target object succeeds even when the mutation
+transport fails or returns an unexpected echo. An absent, unreadable,
+divergent, or concurrently changed branch that never settles at the exact
+target fails closed. The live-image baseline used by existing image and
+release safety checks remains independent from this domain-planner baseline.
 
 There is no runtime genesis fallback in the forward transport. The one-time
 RP0 migration is split into independent prerequisites. The first hosted

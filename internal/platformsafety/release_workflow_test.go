@@ -1627,6 +1627,216 @@ exec "$@"
 	}
 }
 
+func TestControlPlaneBaselineRecorderSettlementMockMatrix(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	writer := workflowStepByName(t, workflow.Jobs["record-release-baseline"], "Advance dedicated forward-only release baseline branch").Run
+
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	seed := filepath.Join(root, "seed")
+	checkout := filepath.Join(root, "checkout")
+	if err := os.Mkdir(seed, 0o700); err != nil {
+		t.Fatalf("create seed repository: %v", err)
+	}
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		command.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Fugue Recorder Test",
+			"GIT_AUTHOR_EMAIL=recorder-test@fugue.invalid",
+			"GIT_AUTHOR_DATE=2026-07-18T00:00:00Z",
+			"GIT_COMMITTER_NAME=Fugue Recorder Test",
+			"GIT_COMMITTER_EMAIL=recorder-test@fugue.invalid",
+			"GIT_COMMITTER_DATE=2026-07-18T00:00:00Z",
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v output=%q", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+
+	runGit(root, "init", "--quiet", "--bare", origin)
+	runGit(root, "--git-dir="+origin, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(seed, "init", "--quiet")
+	runGit(seed, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(seed, "remote", "add", "origin", origin)
+	writeCommit := func(name, contents, message string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(seed, name), []byte(contents), 0o600); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
+		runGit(seed, "add", "--", name)
+		runGit(seed, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
+		return runGit(seed, "rev-parse", "HEAD")
+	}
+	baseSHA := writeCommit("base.txt", "base\n", "base")
+	targetSHA := writeCommit("target.txt", "target\n", "target")
+	runGit(seed, "push", "--quiet", "origin", targetSHA+":refs/heads/main")
+	const baselineRef = "refs/heads/fugue-control-plane-release-baseline"
+	runGit(root, "--git-dir="+origin, "update-ref", baselineRef, baseSHA)
+	runGit(root, "clone", "--quiet", origin, checkout)
+
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create mock bin: %v", err)
+	}
+	ghMock := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${LOG_FILE}"
+arguments="$*"
+if [[ "${arguments}" == *'repository(owner:'* ]]; then
+  printf '%s\n' 'R_fugue_recorder_test'
+  exit 0
+fi
+if [[ "${arguments}" == *'updateRefs('* ]]; then
+  case "${MODE}" in
+    success|committed_exit7|committed_wrong_echo|readback_transient|readback_unavailable|readback_target_exit7)
+      git --git-dir="${ORIGIN_DIR}" update-ref "${BASELINE_REF}" "${TARGET_SHA}" "${BASE_SHA}"
+      ;;
+    failed_no_update|success_no_update) ;;
+    *) exit 96 ;;
+  esac
+  case "${MODE}" in
+    committed_exit7) exit 7 ;;
+    committed_wrong_echo) printf '%s\n' 'wrong-mutation-echo' ;;
+    failed_no_update) exit 7 ;;
+    *) printf '%s\n' "${MUTATION_ID}" ;;
+  esac
+  exit 0
+fi
+if [[ "${arguments}" == *'/git/matching-refs/heads/fugue-control-plane-release-baseline'* ]]; then
+  count=0
+  [[ ! -f "${READBACK_COUNT_FILE}" ]] || count="$(<"${READBACK_COUNT_FILE}")"
+  count=$((count + 1))
+  printf '%s\n' "${count}" >"${READBACK_COUNT_FILE}"
+  if [[ "${MODE}" == 'readback_transient' && "${count}" == '1' ]]; then exit 7; fi
+  if [[ "${MODE}" == 'readback_unavailable' ]]; then exit 7; fi
+  if [[ "${MODE}" == 'readback_target_exit7' ]]; then printf '%s\n' "${TARGET_SHA}"; exit 7; fi
+  git --git-dir="${ORIGIN_DIR}" rev-parse --verify "${BASELINE_REF}"
+  exit 0
+fi
+exit 97
+`
+	timeoutMock := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --kill-after=* ]]; then shift; fi
+[[ "${1:-}" =~ ^[0-9]+s$ ]] || exit 125
+shift
+exec "$@"
+`
+	sleepMock := `#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+`
+	for name, source := range map[string]string{"gh": ghMock, "timeout": timeoutMock, "sleep": sleepMock} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(source), 0o700); err != nil {
+			t.Fatalf("write %s mock: %v", name, err)
+		}
+	}
+
+	mutationID := fmt.Sprintf("fugue-runtime-baseline-%s-%s", baseSHA[:12], targetSHA[:12])
+	type result struct {
+		mutationCalls int
+		readbackCalls string
+		refObject     string
+		output        []byte
+		err           error
+	}
+	runWriter := func(t *testing.T, mode string) result {
+		t.Helper()
+		runGit(root, "--git-dir="+origin, "update-ref", baselineRef, baseSHA)
+		caseDir := t.TempDir()
+		logPath := filepath.Join(caseDir, "gh.log")
+		readbackCountPath := filepath.Join(caseDir, "readback-count")
+		command := exec.Command("bash")
+		command.Dir = checkout
+		command.Stdin = strings.NewReader(writer)
+		command.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"MODE="+mode,
+			"LOG_FILE="+logPath,
+			"READBACK_COUNT_FILE="+readbackCountPath,
+			"ORIGIN_DIR="+origin,
+			"BASELINE_REF="+baselineRef,
+			"BASE_SHA="+baseSHA,
+			"TARGET_SHA="+targetSHA,
+			"MUTATION_ID="+mutationID,
+			"EXPECTED_BASE_SHA="+baseSHA,
+			"EXPECTED_BASE_REF_OBJECT="+baseSHA,
+			"GITHUB_REPOSITORY_OWNER=fugue-test",
+			"GITHUB_REPOSITORY=fugue-test/repository",
+			"GH_TOKEN=test-token",
+		)
+		output, runErr := command.CombinedOutput()
+		log, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read gh mock log: %v", err)
+		}
+		readbackCalls := ""
+		if count, err := os.ReadFile(readbackCountPath); err == nil {
+			readbackCalls = strings.TrimSpace(string(count))
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read recorder settlement count: %v", err)
+		}
+		return result{
+			mutationCalls: strings.Count(string(log), "updateRefs("),
+			readbackCalls: readbackCalls,
+			refObject:     runGit(root, "--git-dir="+origin, "rev-parse", "--verify", baselineRef),
+			output:        output,
+			err:           runErr,
+		}
+	}
+
+	positive := []struct {
+		mode              string
+		wantResponseExact string
+		wantReadbacks     string
+	}{
+		{mode: "success", wantResponseExact: "true", wantReadbacks: "1"},
+		{mode: "committed_exit7", wantResponseExact: "false", wantReadbacks: "1"},
+		{mode: "committed_wrong_echo", wantResponseExact: "false", wantReadbacks: "1"},
+		{mode: "readback_transient", wantResponseExact: "true", wantReadbacks: "2"},
+	}
+	for _, test := range positive {
+		t.Run(test.mode, func(t *testing.T) {
+			got := runWriter(t, test.mode)
+			settled := fmt.Sprintf("response_exact=%s", test.wantResponseExact)
+			if got.err != nil || got.mutationCalls != 1 || got.readbackCalls != test.wantReadbacks || got.refObject != targetSHA || !strings.Contains(string(got.output), settled) {
+				t.Fatalf("recorder failed exact-readback settlement: mode=%s err=%v mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
+			}
+		})
+	}
+	negative := []struct {
+		mode          string
+		wantRefObject string
+	}{
+		{mode: "failed_no_update", wantRefObject: baseSHA},
+		{mode: "success_no_update", wantRefObject: baseSHA},
+		{mode: "readback_unavailable", wantRefObject: targetSHA},
+		{mode: "readback_target_exit7", wantRefObject: targetSHA},
+	}
+	for _, test := range negative {
+		t.Run(test.mode, func(t *testing.T) {
+			got := runWriter(t, test.mode)
+			if got.err == nil || got.mutationCalls != 1 || got.readbackCalls != "5" || got.refObject != test.wantRefObject || strings.Contains(string(got.output), "baseline CAS settled") {
+				t.Fatalf("recorder failed closed incorrectly: mode=%s err=%v mutations=%d readbacks=%q ref=%s output=%q", test.mode, got.err, got.mutationCalls, got.readbackCalls, got.refObject, got.output)
+			}
+		})
+	}
+}
+
 func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	t.Parallel()
 
@@ -1635,7 +1845,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "ac1fcd859e32b1aada58c0eac8b8d21690794e48dfc28f8bbfde00adb6fd0f65")
+	assertWorkflowSourceDigest(t, data, "6199243eb03d05337f862e13a9562b35d71ab138c17d74e5e69138369a828c5d")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -1664,7 +1874,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"deploy/Prove explicitly authorized stale pre-Helm release recovery":             "e4af592e5c1cfc427e3f53fa3b2c835bd134019117fc53ffe9e7981944afe312",
 		"deploy/Upgrade Fugue control plane":                                             "0390f1a108338e637e594e6e64bb82bcccf3a85ad59f668ee6c1160ddee84e76",
 		"deploy/Remove stale release recovery proof":                                     "43203d3cc033dd8ddca207f84eeee8877791c528b99ccae888b7097b2dea077d",
-		"record-release-baseline/Advance dedicated forward-only release baseline branch": "9090338e2f90cb9498c42cdf3fb4a3d8da2205ef6b0856760a476a19ee40ea77",
+		"record-release-baseline/Advance dedicated forward-only release baseline branch": "0b9edc087ac62d420570cd668f75fdfbf3f9466cf904796bbe8f6603fc747326",
 		"freeze-release-lane-on-failure/Record release lane freeze evidence":             "fcf21e0732d091de6e115386f2d55e88de2c0e49110bb7ebf7674c7c8e76e00a",
 		"freeze-release-lane-on-failure/Disable release lane and cancel queued runs":     "1e957fb32c9a8c4864c4e43a1bd5878738957696843f4bcfba62d118f7692869",
 		"freeze-release-lane-on-failure/Require release lane freeze evidence":            "a583f75fce52b2c2e957c16f290af7ab4367ef35a3b4d22adeef76b2446c6cd4",
@@ -2297,7 +2507,14 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"-F 'force=false'",
 		`-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}"`,
 		`-f "afterOid=${TARGET_SHA}"`,
-		`"${observed}" == "${TARGET_SHA}"`,
+		`settled='false'`,
+		`"${observe_status}" == '0' && "${observed}" == "${TARGET_SHA}"`,
+		`settled='true'`,
+		`[[ "${settled}" == 'true' ]] || exit 1`,
+		`response_exact='false'`,
+		`"${mutation_status}" == '0' && "${echoed}" == "${mutation_id}"`,
+		"baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)",
+		`"${mutation_status}" "${response_exact}" >&2 || true`,
 	} {
 		if !strings.Contains(advanceBaseline.Run, required) {
 			t.Fatalf("release baseline advancement must contain %q", required)
