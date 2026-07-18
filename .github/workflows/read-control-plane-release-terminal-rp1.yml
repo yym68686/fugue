@@ -1,0 +1,104 @@
+name: read-control-plane-release-terminal-rp1
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main SHA containing the RP1 read-only terminal reader
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-policy-rp1-terminal-reader-v1
+  cancel-in-progress: false
+
+jobs:
+  read-terminal-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact RP1 reader without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.3.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify exact read-only authorization
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${GITHUB_SHA}" ]] || exit 1
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ -f cmd/fugue-release-terminal-read/main.go ]] || exit 1
+          [[ -f internal/releaseterminal/resolver.go ]] || exit 1
+
+      - name: Read stable terminal ref without mutation
+        id: read
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          result_dir="$(mktemp -d)" || exit 1
+          trap 'rm -rf "${result_dir}"' EXIT
+          result_path="${result_dir}/terminal-state.json"
+          timeout --kill-after=2s 90s go run ./cmd/fugue-release-terminal-read \
+            --repository "${GITHUB_REPOSITORY}" >"${result_path}" || exit 1
+          result_state="$(python3 - "${result_path}" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          raw = path.read_bytes()
+          if not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
+              raise SystemExit("terminal reader output is not one-LF canonical JSON")
+          value = json.loads(raw)
+          common = {"schema_version", "ref", "state"}
+          if value.get("schema_version") != 1:
+              raise SystemExit("terminal reader schema drifted")
+          if value.get("ref") != "refs/heads/fugue-control-plane-release-terminal-state":
+              raise SystemExit("terminal reader ref drifted")
+          state = value.get("state")
+          if state == "absent":
+              if set(value) != common:
+                  raise SystemExit("absent terminal reader output has extra fields")
+          elif state == "present":
+              if set(value) != common | {"object_oid", "document"}:
+                  raise SystemExit("present terminal reader output has an invalid key set")
+              if not re.fullmatch(r"[0-9a-f]{40}", str(value.get("object_oid", ""))):
+                  raise SystemExit("present terminal reader object OID is malformed")
+              if not isinstance(value.get("document"), dict):
+                  raise SystemExit("present terminal reader document is malformed")
+          else:
+              raise SystemExit("terminal reader state is unsupported")
+          print(state)
+          PY
+          )" || exit 1
+          result_digest="sha256:$(sha256sum "${result_path}" | awk '{print $1}')" || exit 1
+          {
+            printf 'state=%s\n' "${result_state}"
+            printf 'digest=%s\n' "${result_digest}"
+          } >>"${GITHUB_OUTPUT}" || exit 1
+          {
+            printf '### RP1 terminal-state reader\n\n'
+            printf -- '- state: `%s`\n' "${result_state}"
+            printf -- '- result digest: `%s`\n' "${result_digest}"
+            printf -- '- policy SHA: `%s`\n' "${GITHUB_SHA}"
+          } >>"${GITHUB_STEP_SUMMARY}" || exit 1
