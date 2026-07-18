@@ -315,37 +315,115 @@ assert_equal(
   "${{ needs.release-baseline.outputs.baseline_ref_object_sha }}",
   "record baseline ref-object input",
 )
-for fragment in [
+advance_run = advance.fetch("run")
+common_advance_fragments = [
   "readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${remote_object}" == "${EXPECTED_BASE_REF_OBJECT}"',
-  '"${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}"',
   'git merge-base --is-ancestor "${EXPECTED_BASE_SHA}" "${TARGET_SHA}"',
   'beforeOid:$beforeOid',
   'afterOid:$afterOid',
   "-F 'force=false'",
   '-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}"',
-  '-f "afterOid=${TARGET_SHA}"',
   "settled='false'",
-  '"${observe_status}" == \'0\' && "${observed}" == "${TARGET_SHA}"',
   "settled='true'",
   '[[ "${settled}" == \'true\' ]] || exit 1',
   "response_exact='false'",
   '"${mutation_status}" == \'0\' && "${echoed}" == "${mutation_id}"',
-  'baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)',
-  '"${mutation_status}" "${response_exact}" >&2 || true',
 ]
-  fail_contract("baseline advancement is missing #{fragment.inspect}") unless advance.fetch("run").include?(fragment)
+common_advance_fragments.each do |fragment|
+  fail_contract("baseline advancement is missing #{fragment.inspect}") unless advance_run.include?(fragment)
 end
-assert_equal(advance.fetch("run").scan("gh api").length, 3, "baseline writer API count")
-assert_equal(advance.fetch("run").scan("gh api graphql").length, 2, "baseline writer GraphQL count")
-assert_equal(advance.fetch("run").scan("updateRefs(").length, 1, "baseline writer mutation count")
-assert_equal(advance.fetch("run").scan("-F 'force=false'").length, 1, "baseline writer force policy count")
+
+carrier_recorder = advance_run.include?("readonly metadata_path='fugue-runtime-baseline.json'")
+if carrier_recorder
+  carrier_fragments = [
+    '"${EXPECTED_BASE_REF_OBJECT}" =~ ^[0-9a-f]{40}$',
+    '"${TARGET_SHA}" == "${GITHUB_SHA}"',
+    '"${EXPECTED_BASE_REF_OBJECT}" != "${EXPECTED_BASE_SHA}"',
+    '"${represented_runtime}" == "${EXPECTED_BASE_SHA}"',
+    '"${represented_parent}" == "${represented_previous}"',
+    'if payload != expected:',
+    'carrier_date="$(git show -s --format=%cI "${TARGET_SHA}"',
+    '"previous_baseline_object_sha": sys.argv[1]',
+    '"runtime_sha": sys.argv[2]',
+    'blob_sha="$(git hash-object -w --stdin',
+    '"repos/${GITHUB_REPOSITORY}/git/blobs"',
+    '--input "${object_tmp}/blob-request.json"',
+    '"repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}"',
+    'response.get("sha") != sys.argv[3]',
+    'tree_sha="$(git mktree',
+    '"repos/${GITHUB_REPOSITORY}/git/trees"',
+    '--input "${object_tmp}/tree-request.json"',
+    '"repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}"',
+    'response.get("truncated") is not False',
+    'carrier_message="fugue runtime baseline carrier ${TARGET_SHA}"',
+    ').encode("utf-8") + message.encode("utf-8")',
+    'carrier_sha="$(git hash-object -t commit --stdin',
+    '"repos/${GITHUB_REPOSITORY}/git/commits"',
+    '--input "${object_tmp}/commit-request.json"',
+    '"repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}"',
+    'response.get("message") != request["message"]',
+    'len(parents) != 1 or parents[0].get("sha") != sys.argv[5]',
+    'for field in ("author", "committer"):',
+    'before_cas_status=0',
+    '"${before_cas_object}" == "${EXPECTED_BASE_REF_OBJECT}" ]] || exit 1',
+    'rm -rf "${object_tmp}" || exit 1',
+    'trap - EXIT',
+    '-f "afterOid=${carrier_sha}"',
+    '"${observe_status}" == \'0\' && "${observed}" == "${carrier_sha}"',
+    'baseline carrier CAS settled by exact bounded readback',
+    '"${response_exact}" "${carrier_sha}" >&2 || true',
+  ]
+  carrier_fragments.each do |fragment|
+    fail_contract("carrier baseline advancement is missing #{fragment.inspect}") unless advance_run.include?(fragment)
+  end
+  carrier_lines = advance_run.lines.map(&:strip)
+  guard_line = "[[ \"${before_cas_status}\" == '0' && \"${before_cas_object}\" == \"${EXPECTED_BASE_REF_OBJECT}\" ]] || exit 1"
+  cleanup_line = 'rm -rf "${object_tmp}" || exit 1'
+  clear_trap_line = "trap - EXIT"
+  mutation_core = '-f "beforeOid=${EXPECTED_BASE_REF_OBJECT}" -f "afterOid=${carrier_sha}" -F \'force=false\''
+  mutation_line = mutation_core + ' \\'
+  ordered_lines = [guard_line, cleanup_line, clear_trap_line, mutation_line]
+  ordered_positions = ordered_lines.map do |expected_line|
+    matches = carrier_lines.each_index.select { |index| carrier_lines.fetch(index) == expected_line }
+    fail_contract("carrier baseline writer exact executable line #{expected_line.inspect} occurs #{matches.length} times") unless matches.length == 1
+    matches.fetch(0)
+  end
+  fail_contract("carrier baseline writer old-OID guard and scratch cleanup are not strictly before its unique mutation") unless ordered_positions.each_cons(2).all? { |left, right| left < right }
+  assert_equal(advance_run.scan("gh api").length, 10, "carrier baseline writer API count")
+  assert_equal(advance_run.scan("gh api graphql").length, 2, "carrier baseline writer GraphQL count")
+  assert_equal(advance_run.scan("--method POST").length, 3, "carrier object POST count")
+  assert_equal(advance_run.scan("updateRefs(").length, 1, "carrier baseline writer mutation count")
+  assert_equal(advance_run.scan("-F 'force=false'").length, 1, "carrier baseline writer force policy count")
+  for forbidden in [
+    '-f "afterOid=${TARGET_SHA}"', "--method PATCH", "--method DELETE",
+  ]
+    fail_contract("carrier baseline writer contains out-of-scope capability #{forbidden.inspect}") if advance_run.include?(forbidden)
+  end
+else
+  legacy_fragments = [
+    '"${EXPECTED_BASE_REF_OBJECT}" == "${EXPECTED_BASE_SHA}"',
+    '-f "afterOid=${TARGET_SHA}"',
+    '"${observe_status}" == \'0\' && "${observed}" == "${TARGET_SHA}"',
+    'baseline CAS settled by exact bounded readback (transport_status=%s response_exact=%s)',
+    '"${mutation_status}" "${response_exact}" >&2 || true',
+  ]
+  legacy_fragments.each do |fragment|
+    fail_contract("legacy baseline advancement is missing #{fragment.inspect}") unless advance_run.include?(fragment)
+  end
+  assert_equal(advance_run.scan("gh api").length, 3, "legacy baseline writer API count")
+  assert_equal(advance_run.scan("gh api graphql").length, 2, "legacy baseline writer GraphQL count")
+  assert_equal(advance_run.scan("updateRefs(").length, 1, "legacy baseline writer mutation count")
+  assert_equal(advance_run.scan("-F 'force=false'").length, 1, "legacy baseline writer force policy count")
+  fail_contract("legacy baseline writer must not expose an object POST path") if advance_run.include?("--method")
+end
+
 for forbidden in [
-  "refs/tags/", "git push", "git update-ref", "--force-with-lease", "--method",
+  "refs/tags/", "git push", "git update-ref", "--force-with-lease",
   " -X ", "createRef", "deleteRef", "force=true", "curl ", "wget ",
 ]
-  fail_contract("baseline writer contains out-of-scope capability #{forbidden.inspect}") if advance.fetch("run").include?(forbidden)
+  fail_contract("baseline writer contains out-of-scope capability #{forbidden.inspect}") if advance_run.include?(forbidden)
 end
 
 freeze = jobs.fetch("freeze-release-lane-on-failure")
