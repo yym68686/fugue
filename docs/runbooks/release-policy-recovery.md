@@ -144,9 +144,15 @@ ref deletion, history rewrite, self-hosted runner, or cluster credential is
 introduced.
 
 The existing deploy workflow remains disabled until its later promotion
-checkpoint. If it is eventually promoted, its resolver requires the branch to
-exist and its hosted recorder advances the branch only with the exact observed
-OID, forward ancestry, and `force: false`. `deploy-control-plane-v2` is
+checkpoint. Its next dormant, read-only compatibility checkpoint teaches the
+resolver to distinguish the canonical parentless metadata bridge from a
+normal code baseline: only an exact one-entry root tree and byte-exact compact
+schema-1 payload with one final newline can supply the runtime ancestor, and
+the metadata commit remains the separately observed ref object. The recorder
+is not changed by that checkpoint. A later independent
+checkpoint must make advancement compatible before promotion; the hosted
+recorder will still require the exact observed OID, forward ancestry, and
+`force: false`. `deploy-control-plane-v2` is
 registered but intentionally fails on a GitHub-hosted runner before checkout,
 self-hosted scheduling, or any cluster command.
 

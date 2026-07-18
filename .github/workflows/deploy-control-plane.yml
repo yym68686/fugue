@@ -75,31 +75,68 @@ jobs:
           readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
           readonly target_sha="${GITHUB_SHA}"
 
-          [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${target_sha}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           remote_branch=''
           set +e
           remote_branch="$(timeout --kill-after=2s 20s git ls-remote --refs --exit-code origin "${baseline_ref}")"
           remote_status=$?
           set -e
-          [[ "${remote_status}" == '0' ]]
-          [[ "$(printf '%s\n' "${remote_branch}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]]
-          read -r remote_object remote_ref extra <<<"${remote_branch}"
-          [[ -z "${extra:-}" ]]
-          [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${remote_ref}" == "${baseline_ref}" ]]
-          timeout --kill-after=5s 60s git fetch --no-tags origin "${baseline_ref}"
-          fetched_ref_object_sha="$(git rev-parse --verify FETCH_HEAD)"
-          domain_base_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
-          [[ "${fetched_ref_object_sha}" == "${remote_object}" ]]
-          [[ "${domain_base_sha}" == "${remote_object}" ]]
-          git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"
+          [[ "${remote_status}" == '0' ]] || exit 1
+          [[ "$(printf '%s\n' "${remote_branch}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]] || exit 1
+          read -r remote_object remote_ref extra <<<"${remote_branch}" || exit 1
+          [[ -z "${extra:-}" ]] || exit 1
+          [[ "${remote_object}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${remote_ref}" == "${baseline_ref}" ]] || exit 1
+          timeout --kill-after=5s 60s git fetch --no-tags origin "${baseline_ref}" || exit 1
+          fetched_ref_object_sha="$(git rev-parse --verify 'FETCH_HEAD^{commit}')" || exit 1
+          [[ "${fetched_ref_object_sha}" == "${remote_object}" ]] || exit 1
+          commit_identity="$(git rev-list --parents -n 1 FETCH_HEAD)" || exit 1
+          read -r observed_commit parent_shas <<<"${commit_identity}" || exit 1
+          [[ "${observed_commit}" == "${remote_object}" ]] || exit 1
+
+          domain_base_sha="${remote_object}"
+          if [[ -z "${parent_shas:-}" ]]; then
+            metadata_tree_entry="$(git ls-tree --full-tree FETCH_HEAD)" || exit 1
+            [[ "$(printf '%s\n' "${metadata_tree_entry}" | sed '/^$/d' | wc -l | tr -d ' ')" == '1' ]] || exit 1
+            read -r metadata_mode metadata_type metadata_blob metadata_path extra <<<"${metadata_tree_entry}" || exit 1
+            [[ -z "${extra:-}" ]] || exit 1
+            [[ "${metadata_mode}" == '100644' && "${metadata_type}" == 'blob' ]] || exit 1
+            [[ "${metadata_blob}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            [[ "${metadata_path}" == 'fugue-runtime-baseline.json' ]] || exit 1
+            domain_base_sha="$(
+              git cat-file blob "${metadata_blob}" |
+                python3 -c '
+          import json, re, sys
+
+          payload = sys.stdin.buffer.read()
+          try:
+              value = json.loads(payload)
+          except (UnicodeDecodeError, json.JSONDecodeError):
+              raise SystemExit("baseline metadata is not exact JSON")
+          runtime_sha = value.get("runtime_sha") if type(value) is dict else None
+          if type(runtime_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", runtime_sha) is None:
+              raise SystemExit("baseline metadata runtime SHA is invalid")
+          expected = json.dumps(
+              {"previous_baseline_object_sha": None, "runtime_sha": runtime_sha, "schema_version": 1},
+              sort_keys=True,
+              separators=(",", ":"),
+          ).encode("utf-8") + b"\n"
+          if payload != expected:
+              raise SystemExit("baseline metadata bytes are not canonical")
+          sys.stdout.write(runtime_sha)
+          '
+            )" || exit 1
+            [[ "${domain_base_sha}" != "${fetched_ref_object_sha}" ]] || exit 1
+          fi
+          git cat-file -e "${domain_base_sha}^{commit}" || exit 1
+          git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}" || exit 1
 
           {
             printf 'domain_base_sha=%s\n' "${domain_base_sha}"
             printf 'baseline_ref_object_sha=%s\n' "${remote_object}"
             printf 'is_genesis=false\n'
             printf 'genesis_parent_sha=\n'
-          } >>"${GITHUB_OUTPUT}"
+          } >>"${GITHUB_OUTPUT}" || exit 1
 
       - name: Resolve live image metadata
         id: live_images

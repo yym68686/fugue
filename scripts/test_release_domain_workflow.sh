@@ -89,7 +89,12 @@ for fragment in [
   'git ls-remote --refs --exit-code origin "${baseline_ref}"',
   '"${remote_status}" == \'0\'',
   '"${fetched_ref_object_sha}" == "${remote_object}"',
-  '"${domain_base_sha}" == "${remote_object}"',
+  'commit_identity="$(git rev-list --parents -n 1 FETCH_HEAD)"',
+  '"${metadata_path}" == \'fugue-runtime-baseline.json\'',
+  'git cat-file blob "${metadata_blob}"',
+  'if payload != expected:',
+  'sys.stdout.write(runtime_sha)',
+  'git cat-file -e "${domain_base_sha}^{commit}"',
   'git merge-base --is-ancestor "${domain_base_sha}" "${target_sha}"',
   "printf 'is_genesis=false",
   "printf 'genesis_parent_sha=",
@@ -101,6 +106,9 @@ for forbidden in [
   "gh api", "curl ", "--method", "updateRefs",
 ]
   fail_contract("baseline resolver retains legacy transport #{forbidden.inspect}") if resolver.fetch("run").include?(forbidden)
+end
+resolver.fetch("run").lines.map(&:strip).select { |line| line.start_with?("[[") }.each do |line|
+  fail_contract("baseline resolver check is not explicitly fail-closed: #{line.inspect}") unless line.end_with?("|| exit 1")
 end
 changes = step(baseline, "Compute live-to-target release changed files")
 assert_equal(

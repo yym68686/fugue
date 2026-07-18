@@ -1456,6 +1456,177 @@ jobs:
 	}
 }
 
+func TestControlPlaneMetadataBaselineResolverMockMatrix(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "deploy-control-plane.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read control-plane workflow: %v", err)
+	}
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse control-plane workflow: %v", err)
+	}
+	resolver := workflowStepByName(t, workflow.Jobs["release-baseline"], "Resolve release-domain baseline").Run
+
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	seed := filepath.Join(root, "seed")
+	checkout := filepath.Join(root, "checkout")
+	if err := os.Mkdir(seed, 0o700); err != nil {
+		t.Fatalf("create seed repository: %v", err)
+	}
+	runGit := func(dir, input string, args ...string) string {
+		t.Helper()
+		command := exec.Command("git", args...)
+		command.Dir = dir
+		command.Stdin = strings.NewReader(input)
+		command.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Fugue Resolver Test",
+			"GIT_AUTHOR_EMAIL=resolver-test@fugue.invalid",
+			"GIT_AUTHOR_DATE=2026-07-18T00:00:00Z",
+			"GIT_COMMITTER_NAME=Fugue Resolver Test",
+			"GIT_COMMITTER_EMAIL=resolver-test@fugue.invalid",
+			"GIT_COMMITTER_DATE=2026-07-18T00:00:00Z",
+		)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v output=%q", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+
+	runGit(root, "", "init", "--quiet", "--bare", origin)
+	runGit(root, "", "--git-dir="+origin, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(seed, "", "init", "--quiet")
+	runGit(seed, "", "symbolic-ref", "HEAD", "refs/heads/main")
+	runGit(seed, "", "remote", "add", "origin", origin)
+	writeCommit := func(name, contents, message string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(seed, name), []byte(contents), 0o600); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
+		runGit(seed, "", "add", "--", name)
+		runGit(seed, "", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", message)
+		return runGit(seed, "", "rev-parse", "HEAD")
+	}
+	rootSHA := writeCommit("root.txt", "root\n", "root")
+	baseSHA := writeCommit("base.txt", "base\n", "base")
+	targetSHA := writeCommit("target.txt", "target\n", "target")
+	rootTree := runGit(seed, "", "rev-parse", rootSHA+"^{tree}")
+	unrelatedSHA := runGit(seed, "", "commit-tree", rootTree, "-m", "unrelated")
+	runGit(seed, "", "push", "--quiet", "origin",
+		targetSHA+":refs/heads/main", unrelatedSHA+":refs/heads/fixture-unrelated")
+
+	makeMetadataRoot := func(blobContents string, extraFile, extraEmptyTree bool) string {
+		t.Helper()
+		blob := runGit(root, blobContents, "--git-dir="+origin, "hash-object", "-w", "--stdin")
+		treeInput := fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", blob)
+		if extraFile {
+			extraBlob := runGit(root, "extra\n", "--git-dir="+origin, "hash-object", "-w", "--stdin")
+			treeInput += fmt.Sprintf("100644 blob %s\textra.txt\n", extraBlob)
+		}
+		if extraEmptyTree {
+			emptyTree := runGit(root, "", "--git-dir="+origin, "mktree")
+			treeInput += fmt.Sprintf("040000 tree %s\textra-dir\n", emptyTree)
+		}
+		tree := runGit(root, treeInput, "--git-dir="+origin, "mktree")
+		return runGit(root, "", "--git-dir="+origin, "commit-tree", tree, "-m", "fugue runtime baseline")
+	}
+	canonicalPayload := fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":1}`, baseSHA)
+	canonicalMetadata := makeMetadataRoot(canonicalPayload+"\n", false, false)
+	badSchemaMetadata := makeMetadataRoot(fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":2}`+"\n", baseSHA), false, false)
+	extraFileMetadata := makeMetadataRoot(canonicalPayload+"\n", true, false)
+	extraEmptyTreeMetadata := makeMetadataRoot(canonicalPayload+"\n", false, true)
+	missingNewlineMetadata := makeMetadataRoot(canonicalPayload, false, false)
+	doubleNewlineMetadata := makeMetadataRoot(canonicalPayload+"\n\n", false, false)
+	nulMetadata := makeMetadataRoot(canonicalPayload+"\x00\n", false, false)
+	unrelatedMetadata := makeMetadataRoot(fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":1}`+"\n", unrelatedSHA), false, false)
+	runGit(root, "", "clone", "--quiet", origin, checkout)
+	if got := runGit(checkout, "", "rev-parse", "HEAD"); got != targetSHA {
+		t.Fatalf("fixture target drifted: got %s want %s", got, targetSHA)
+	}
+
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("create mock bin: %v", err)
+	}
+	timeoutMock := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == --kill-after=* ]]; then shift; fi
+[[ "${1:-}" =~ ^[0-9]+s$ ]] || exit 125
+shift
+exec "$@"
+`
+	if err := os.WriteFile(filepath.Join(bin, "timeout"), []byte(timeoutMock), 0o700); err != nil {
+		t.Fatalf("write timeout mock: %v", err)
+	}
+	const baselineRef = "refs/heads/fugue-control-plane-release-baseline"
+	runResolver := func(t *testing.T, refObject string) (string, []byte, error) {
+		t.Helper()
+		runGit(root, "", "--git-dir="+origin, "update-ref", baselineRef, refObject)
+		outputPath := filepath.Join(t.TempDir(), "github-output")
+		command := exec.Command("bash")
+		command.Dir = checkout
+		command.Stdin = strings.NewReader(resolver)
+		command.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"GITHUB_SHA="+targetSHA,
+			"GITHUB_OUTPUT="+outputPath,
+		)
+		output, runErr := command.CombinedOutput()
+		published, readErr := os.ReadFile(outputPath)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			t.Fatalf("read resolver output: %v", readErr)
+		}
+		return string(published), output, runErr
+	}
+
+	positive := []struct {
+		name       string
+		refObject  string
+		wantDomain string
+	}{
+		{name: "direct code baseline", refObject: baseSHA, wantDomain: baseSHA},
+		{name: "canonical metadata bridge", refObject: canonicalMetadata, wantDomain: baseSHA},
+	}
+	for _, test := range positive {
+		t.Run(test.name, func(t *testing.T) {
+			published, output, err := runResolver(t, test.refObject)
+			if err != nil {
+				t.Fatalf("resolver rejected valid baseline: err=%v output=%q", err, output)
+			}
+			want := fmt.Sprintf("domain_base_sha=%s\nbaseline_ref_object_sha=%s\nis_genesis=false\ngenesis_parent_sha=\n", test.wantDomain, test.refObject)
+			if published != want {
+				t.Fatalf("resolver output drifted: got %q want %q", published, want)
+			}
+		})
+	}
+	negative := []struct {
+		name      string
+		refObject string
+	}{
+		{name: "metadata schema drift", refObject: badSchemaMetadata},
+		{name: "metadata tree has extra file", refObject: extraFileMetadata},
+		{name: "metadata root tree has extra empty tree", refObject: extraEmptyTreeMetadata},
+		{name: "metadata blob is missing final newline", refObject: missingNewlineMetadata},
+		{name: "metadata blob has double final newline", refObject: doubleNewlineMetadata},
+		{name: "metadata blob contains NUL", refObject: nulMetadata},
+		{name: "metadata runtime is not target ancestor", refObject: unrelatedMetadata},
+	}
+	for _, test := range negative {
+		t.Run(test.name, func(t *testing.T) {
+			published, output, err := runResolver(t, test.refObject)
+			if err == nil || published != "" {
+				identity := runGit(root, "", "--git-dir="+origin, "rev-list", "--parents", "-n", "1", test.refObject)
+				tree := runGit(root, "", "--git-dir="+origin, "ls-tree", "--full-tree", test.refObject)
+				t.Fatalf("resolver accepted unsafe baseline: err=%v published=%q output=%q identity=%q tree=%q", err, published, output, identity, tree)
+			}
+		})
+	}
+}
+
 func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	t.Parallel()
 
@@ -1464,7 +1635,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "2761cef511519e8cd887ccac90368cc9db6ed0742807a73184a3e385e3e38f95")
+	assertWorkflowSourceDigest(t, data, "ac1fcd859e32b1aada58c0eac8b8d21690794e48dfc28f8bbfde00adb6fd0f65")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -1473,7 +1644,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
 		"release-input-guard/Guard exact main commit authorization":                      "36817d224982821ad3eb81a44fd42dd50bfa479915e48b339010fae5e19ae1a5",
-		"release-baseline/Resolve release-domain baseline":                               "2ee9ad41de7031b7e176a2a6498407a2e966796308ea33083d2653968267fee0",
+		"release-baseline/Resolve release-domain baseline":                               "23e6f538645bcf8eda3d1ea83c62d4a7e6c140bf477e19d2ef0793d1de804da9",
 		"release-baseline/Resolve live image metadata":                                   "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                  "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
 		"release-gate/Verify generated OpenAPI artifacts":                                "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
@@ -1706,7 +1877,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		"refs/heads/fugue-control-plane-release-baseline",
 		`"${remote_status}" == '0'`,
 		`"${fetched_ref_object_sha}" == "${remote_object}"`,
-		`"${domain_base_sha}" == "${remote_object}"`,
+		`commit_identity="$(git rev-list --parents -n 1 FETCH_HEAD)"`,
+		`"${metadata_path}" == 'fugue-runtime-baseline.json'`,
+		`git cat-file blob "${metadata_blob}"`,
+		`if payload != expected:`,
+		`sys.stdout.write(runtime_sha)`,
+		`git cat-file -e "${domain_base_sha}^{commit}"`,
 		"git merge-base --is-ancestor",
 		"printf 'is_genesis=false",
 		"printf 'genesis_parent_sha=",
@@ -1721,6 +1897,12 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	} {
 		if strings.Contains(domainBaseline.Run, forbidden) {
 			t.Fatalf("forward-only baseline resolver retains legacy transport %q", forbidden)
+		}
+	}
+	for _, line := range strings.Split(domainBaseline.Run, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[[") && !strings.HasSuffix(line, "|| exit 1") {
+			t.Fatalf("release-domain baseline resolver check must fail explicitly across supported Bash versions: %q", line)
 		}
 	}
 
