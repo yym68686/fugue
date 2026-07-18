@@ -181,7 +181,7 @@ the immutable blob, tree, and commit objects are read back. Reader and
 ref-creation checkpoints follow separately. The RP0 policy SHA is not written
 as a runtime baseline, and no external PAT or local OAuth credential is used.
 
-The next checkpoint is a separate GitHub-hosted read-only consumer. It binds
+The second checkpoint is a separate GitHub-hosted read-only consumer. It binds
 the exact successful materialization run and immutable result artifact, reads
 the root commit, one-file tree, and canonical blob through the Git database
 API, rechecks the historical runtime run and attribution artifact named by that
@@ -189,6 +189,19 @@ result, proves runtime ancestry, observes unchanged production health, and
 requires the baseline ref to remain absent throughout. Its output evidence
 retains both provenance layers. It cannot create Git objects or refs and has no
 self-hosted or cluster path.
+
+The following checkpoint creates the still-absent baseline ref exactly once at
+the validated orphan metadata commit. It consumes the successful reader run
+and immutable artifact, revalidates the root object chain, uploads intent
+evidence, completes the unchanged-health window, then performs one REST
+create-reference attempt as its final write. The call has expected-absence
+semantics, accepts no force option, and targets the metadata-only orphan commit
+rather than a code commit containing workflow files. Immediately before that
+attempt, the reader, materializer, and legacy deploy lanes are rechecked as
+disabled. The writer then performs only bounded readback settlement: an exact
+metadata-root ref settles a lost or failed transport response, while an absent,
+unreadable, malformed, or different ref fails closed. No cluster path is
+available.
 
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.

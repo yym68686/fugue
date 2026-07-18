@@ -117,6 +117,32 @@ rebuild captures and checks each command status before parsing fields and adds
 an explicit valid-output-then-failure negative test. `8995cd3575d34c44ae14b8a78452febdb520b37c`
 is evidence only and must not be retried.
 
+Reader candidate `50907bef344ae84df036d5d669f01686f33fab25` completed
+as run `29639478372` after CI run `29639138116` and build run `29639138115`
+passed. Artifact `8428166438` has digest
+`sha256:bb45baccf26cdf5ebaba2b11973825cf0129c6c585069ef3989f2c102273c139`;
+independent download, JSON validation, root-object readback, baseline-absence,
+and production-health checks passed. The one-shot reader lane was then
+disabled, and the runtime baseline was not advanced.
+
+`.github/workflows/create-control-plane-release-baseline-ref-rp0.yml` is the
+next independent hosted checkpoint. It accepts only the exact successful
+reader run, artifact, digest, and validated root commit, repeats the object and
+runtime-provenance checks, uploads pre-write intent evidence, and completes a
+five-sample health window while the ref remains absent. Its final semantic step
+rechecks all three dormant lanes and uses the REST create-reference endpoint
+once, without force, to bind
+`refs/heads/fugue-control-plane-release-baseline` to root commit
+`0aca9c8869d7ac064d22c9b1e5477f30de4813b4`. Earlier HTTP 403 evidence came
+from attempting to point the installation token at a code commit containing
+workflow files; the new target is a one-file metadata root and requires no
+workflow-file update permission. A bounded readback is the sole settlement
+authority after the one write attempt: the exact metadata root succeeds even
+when the transport response is lost, while persistent absence, unreadability,
+malformed state, or any other object fails closed. No PAT, local OAuth write,
+ref deletion, history rewrite, self-hosted runner, or cluster credential is
+introduced.
+
 The existing deploy workflow remains disabled until its later promotion
 checkpoint. If it is eventually promoted, its resolver requires the branch to
 exist and its hosted recorder advances the branch only with the exact observed

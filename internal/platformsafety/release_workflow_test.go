@@ -858,6 +858,420 @@ IFS=$'\t' read -r first second extra <<<"${captured}" || exit 92
 	}
 }
 
+func TestRP0BaselineRefCreatorIsHostedEvidenceBoundAndAtomic(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "create-control-plane-release-baseline-ref-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 baseline ref creator workflow: %v", err)
+	}
+	assertWorkflowSourceDigest(t, data, "1bdba74b763fcd6aa2d3b74e79f5eecca0a8a8f296b994bf75582bbdf9193625")
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string                `yaml:"runs-on"`
+			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+			Environment     string                `yaml:"environment"`
+			Permissions     map[string]string     `yaml:"permissions"`
+			ContinueOnError bool                  `yaml:"continue-on-error"`
+			Steps           []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 baseline ref creator workflow: %v", err)
+	}
+	rootNode := workflowDocumentMapping(t, data)
+	assertWorkflowMappingKeys(t, rootNode, "name", "on", "permissions", "concurrency", "jobs")
+	assertWorkflowMappingKeys(t, workflowMappingValue(t, rootNode, "concurrency"), "group", "cancel-in-progress")
+	jobsNode := workflowMappingValue(t, rootNode, "jobs")
+	assertWorkflowMappingKeys(t, jobsNode, "create-forward-baseline-ref")
+	jobNode := workflowMappingValue(t, jobsNode, "create-forward-baseline-ref")
+	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
+	stepsNode := workflowMappingValue(t, jobNode, "steps")
+	if stepsNode.Kind != yaml.SequenceNode || len(stepsNode.Content) != 7 {
+		t.Fatalf("RP0 baseline ref creator step node inventory drifted: %+v", stepsNode)
+	}
+	wantStepKeys := [][]string{
+		{"name", "uses", "with"},
+		{"name", "id", "env", "run"},
+		{"name", "env", "run"},
+		{"name", "env", "run"},
+		{"name", "uses", "with"},
+		{"name", "env", "run"},
+		{"name", "env", "run"},
+	}
+	for index, stepNode := range stepsNode.Content {
+		assertWorkflowMappingKeys(t, stepNode, wantStepKeys[index]...)
+	}
+	dispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("RP0 baseline ref creator must be dispatch-only: %+v", workflow.On)
+	}
+	var dispatch releaseWorkflowDispatchTrigger
+	if err := dispatchNode.Decode(&dispatch); err != nil {
+		t.Fatalf("decode RP0 baseline ref creator dispatch: %v", err)
+	}
+	wantInputs := []string{
+		"expected_sha", "metadata_commit_sha", "reader_run_id", "reader_artifact_id", "reader_artifact_digest",
+	}
+	if len(dispatch.Inputs) != len(wantInputs) {
+		t.Fatalf("RP0 baseline ref creator input inventory drifted: %+v", dispatch.Inputs)
+	}
+	for _, name := range wantInputs {
+		node, exists := dispatch.Inputs[name]
+		if !exists {
+			t.Fatalf("RP0 baseline ref creator input %s is absent", name)
+		}
+		var input releaseWorkflowDispatchInput
+		if err := node.Decode(&input); err != nil {
+			t.Fatalf("decode RP0 baseline ref creator input %s: %v", name, err)
+		}
+		if !input.Required || input.Type != "string" || input.Default != nil {
+			t.Fatalf("RP0 baseline ref creator input %s must be a required string without default: %+v", name, input)
+		}
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("RP0 baseline ref creator must have empty top permissions and one job: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["create-forward-baseline-ref"]
+	if !ok {
+		t.Fatal("RP0 baseline ref creator job is absent")
+	}
+	wantPermissions := map[string]string{"actions": "read", "contents": "write"}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 20 || job.Environment != "production" ||
+		job.ContinueOnError || !reflect.DeepEqual(job.Permissions, wantPermissions) {
+		t.Fatalf("RP0 baseline ref creator job boundary drifted: %+v", job)
+	}
+	wantSteps := []string{
+		"Checkout exact RP0 ref writer target without persisted credentials",
+		"Verify exact ref writer authorization and hosted reader evidence",
+		"Revalidate canonical metadata object chain before ref creation",
+		"Write RP0 ref creation intent evidence",
+		"Upload RP0 ref creation intent evidence",
+		"Observe unchanged production health before ref creation",
+		"Create absent forward-only baseline ref at validated metadata root",
+	}
+	if len(job.Steps) != len(wantSteps) {
+		t.Fatalf("RP0 baseline ref creator step inventory drifted: %+v", job.Steps)
+	}
+	for index, name := range wantSteps {
+		if job.Steps[index].Name != name || job.Steps[index].If != "" || job.Steps[index].ContinueOnError {
+			t.Fatalf("RP0 baseline ref creator step %d drifted: %+v", index, job.Steps[index])
+		}
+	}
+	checkout := job.Steps[0]
+	if checkout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+		checkout.With["ref"] != "${{ github.sha }}" || checkout.With["fetch-depth"] != "0" ||
+		checkout.With["persist-credentials"] != "false" {
+		t.Fatalf("RP0 baseline ref creator checkout drifted: %+v", checkout)
+	}
+	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
+		"create-forward-baseline-ref": {Steps: job.Steps},
+	}, map[string]string{
+		"create-forward-baseline-ref/Verify exact ref writer authorization and hosted reader evidence":   "b2f0ff29844f4d63d23363eb52e8a2a6b982c4b5fc293795b3af107ca908353a",
+		"create-forward-baseline-ref/Revalidate canonical metadata object chain before ref creation":     "1e0a84fa1ff2c912146c4a7c76849839146fd3bac9a1ff1179352d1f400bd836",
+		"create-forward-baseline-ref/Write RP0 ref creation intent evidence":                             "ffbed03dcf8d3a484c68ea48ee2abbe55c7e70fadf48df5e2a2aea79a7b5c9e1",
+		"create-forward-baseline-ref/Observe unchanged production health before ref creation":            "8f0f923b1be9e85ba8a5887e35dfe0f5638e0239bba896cbdf748fe9fb3689e1",
+		"create-forward-baseline-ref/Create absent forward-only baseline ref at validated metadata root": "540cef0f50e0677cca18ae41b2ddbb91889eeaf9fade80b03de417fced0e589d",
+	})
+	verify := job.Steps[1]
+	wantVerifyEnv := map[string]string{
+		"EXPECTED_SHA":           "${{ inputs.expected_sha }}",
+		"METADATA_COMMIT_SHA":    "${{ inputs.metadata_commit_sha }}",
+		"READER_RUN_ID":          "${{ inputs.reader_run_id }}",
+		"READER_ARTIFACT_ID":     "${{ inputs.reader_artifact_id }}",
+		"READER_ARTIFACT_DIGEST": "${{ inputs.reader_artifact_digest }}",
+		"HEALTH_URL":             "${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}",
+		"GH_TOKEN":               "${{ github.token }}",
+	}
+	if verify.ID != "verify" || !reflect.DeepEqual(verify.Env, wantVerifyEnv) {
+		t.Fatalf("RP0 baseline ref creator verifier drifted: %+v", verify)
+	}
+	for _, required := range []string{
+		`$'A\t.github/workflows/create-control-plane-release-baseline-ref-rp0.yml'`,
+		"missing or ambiguous metadata reader artifact", "metadata reader artifact inventory drifted",
+		"metadata reader policy attribution drifted", "metadata reader commit binding drifted",
+		`"repos/${GITHUB_REPOSITORY}/actions/workflows/validate-control-plane-release-baseline-rp0.yml"`,
+		`"repos/${GITHUB_REPOSITORY}/actions/workflows/migrate-control-plane-release-baseline-rp0.yml"`,
+		`"repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml"`,
+		"runtime_artifact_digest=%s", "metadata_result_artifact_digest=%s", "health_url=%s",
+	} {
+		if !strings.Contains(verify.Run, required) {
+			t.Fatalf("RP0 baseline ref creator verifier must contain %q", required)
+		}
+	}
+	revalidate := job.Steps[2]
+	for _, required := range []string{
+		`"repos/${GITHUB_REPOSITORY}/git/blobs/${METADATA_BLOB_SHA}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/trees/${METADATA_TREE_SHA}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/commits/${METADATA_COMMIT_SHA}"`,
+		`{"previous_baseline_object_sha": None, "runtime_sha": runtime_sha, "schema_version": 1}`,
+		`commit.get("parents") != []`, "git merge-base --is-ancestor", `"${baseline_count}" == '0'`,
+	} {
+		if !strings.Contains(revalidate.Run, required) {
+			t.Fatalf("RP0 baseline ref creator object validator must contain %q", required)
+		}
+	}
+	intent := job.Steps[3]
+	for _, required := range []string{
+		`"baseline_transition": "absent-to-validated-metadata-root-pending"`,
+		`"metadata_ref_created": False`, `"cluster_mutation_attempted": False`,
+		`"reader_artifact_digest": os.environ["READER_ARTIFACT_DIGEST"]`,
+	} {
+		if !strings.Contains(intent.Run, required) {
+			t.Fatalf("RP0 baseline ref creator intent must contain %q", required)
+		}
+	}
+	upload := job.Steps[4]
+	if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		upload.With["name"] != "fugue-control-plane-rp0-baseline-ref-create-${{ github.run_id }}-${{ github.run_attempt }}" ||
+		upload.With["path"] != "${{ runner.temp }}/fugue-rp0-baseline-ref-create/rp0-baseline-ref-create.json" ||
+		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != "90" {
+		t.Fatalf("RP0 baseline ref creator intent upload drifted: %+v", upload)
+	}
+	observe := job.Steps[5]
+	for _, required := range []string{
+		"for sample in 1 2 3 4 5", "sleep 15", `{"status": "ok"}`, `"${baseline_count}" == '0'`,
+		`"${reader_state}" == 'disabled_manually'`, `"${deploy_state}" == 'disabled_manually'`,
+	} {
+		if !strings.Contains(observe.Run, required) {
+			t.Fatalf("RP0 baseline ref creator observation must contain %q", required)
+		}
+	}
+	writer := job.Steps[6]
+	wantWriterEnv := map[string]string{
+		"EXPECTED_SHA":         "${{ inputs.expected_sha }}",
+		"RUNTIME_BASELINE_SHA": "${{ steps.verify.outputs.runtime_baseline_sha }}",
+		"METADATA_COMMIT_SHA":  "${{ steps.verify.outputs.metadata_commit_sha }}",
+		"GH_TOKEN":             "${{ github.token }}",
+	}
+	if !reflect.DeepEqual(writer.Env, wantWriterEnv) {
+		t.Fatalf("RP0 baseline ref creator writer environment drifted: got %+v want %+v", writer.Env, wantWriterEnv)
+	}
+	for _, required := range []string{
+		"readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
+		`"repos/${GITHUB_REPOSITORY}/git/commits/${METADATA_COMMIT_SHA}"`,
+		`"repos/${GITHUB_REPOSITORY}/actions/workflows/validate-control-plane-release-baseline-rp0.yml"`,
+		`"repos/${GITHUB_REPOSITORY}/actions/workflows/migrate-control-plane-release-baseline-rp0.yml"`,
+		`"repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-control-plane.yml"`,
+		"gh api --method POST", `"repos/${GITHUB_REPOSITORY}/git/refs"`,
+		`-f "ref=${baseline_ref}" -f "sha=${METADATA_COMMIT_SHA}"`,
+		"create_status=0", `"${main_before_create}" == "${GITHUB_SHA}"`, "for settlement_attempt in 1 2 3 4 5",
+		`"${observed_ref}" == "${METADATA_COMMIT_SHA}"`, `"${observed_ref}" == 'absent'`,
+		`"${settled_ref}" == "${METADATA_COMMIT_SHA}"`,
+	} {
+		if !strings.Contains(writer.Run, required) {
+			t.Fatalf("RP0 baseline ref creator writer must contain %q", required)
+		}
+	}
+	if strings.Count(writer.Run, "gh api") != 9 || strings.Count(writer.Run, "gh api --method POST") != 1 ||
+		strings.Count(writer.Run, `"repos/${GITHUB_REPOSITORY}/git/refs"`) != 1 {
+		t.Fatalf("RP0 baseline ref creator writer API inventory drifted:\n%s", writer.Run)
+	}
+	source := string(data)
+	if strings.Count(source, "gh api --method POST") != 1 {
+		t.Fatalf("RP0 baseline ref creator must contain exactly one API write")
+	}
+	for _, forbidden := range []string{
+		"self-hosted", "${{ secrets.", "KUBECONFIG", "--kubeconfig", "ssh ", "kubectl ", "docker ", "helm ",
+		"--method PATCH", "--method PUT", "--method DELETE", " -X ", "graphql", "git push", "git update-ref",
+		"--force-with-lease", "force=", "updateRefs", "createRef", "deleteRef", "mapfile", "< <(",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("RP0 baseline ref creator contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
+func TestRP0BaselineRefCreatorWriterMockMatrix(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "create-control-plane-release-baseline-ref-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 baseline ref creator workflow: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 baseline ref creator workflow: %v", err)
+	}
+	steps := workflow.Jobs["create-forward-baseline-ref"].Steps
+	if len(steps) != 7 {
+		t.Fatalf("RP0 baseline ref creator writer step is absent: %+v", steps)
+	}
+	writer := steps[6].Run
+	const policySHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const runtimeSHA = "92805aab5209348932b2c1db060e5c3c56ce4a2c"
+	const metadataSHA = "0aca9c8869d7ac064d22c9b1e5477f30de4813b4"
+
+	runWriter := func(t *testing.T, mode string) (int, bool, string, []byte, error) {
+		t.Helper()
+		root := t.TempDir()
+		bin := filepath.Join(root, "bin")
+		if err := os.Mkdir(bin, 0o700); err != nil {
+			t.Fatalf("create mock bin: %v", err)
+		}
+		statePath := filepath.Join(root, "created")
+		readbackCountPath := filepath.Join(root, "readback-count")
+		logPath := filepath.Join(root, "gh.log")
+		ghMock := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${LOG_FILE}"
+endpoint=''
+settlement='false'
+for argument in "$@"; do
+  case "${argument}" in repos/*) endpoint="${argument}"; break ;; esac
+done
+for argument in "$@"; do
+  if [[ "${argument}" == *'then "absent"'* ]]; then settlement='true'; fi
+done
+case "${endpoint}" in
+  */git/ref/heads/main)
+    printf '%s\n' "${GITHUB_SHA}"
+    ;;
+  */git/matching-refs/heads/fugue-control-plane-release-baseline)
+    if [[ -e "${STATE_FILE}" ]]; then
+      if [[ "${settlement}" == 'true' && "${MODE}" == 'readback_transient' ]]; then
+        readback_count=0
+        if [[ -e "${READBACK_COUNT_FILE}" ]]; then read -r readback_count <"${READBACK_COUNT_FILE}"; fi
+        readback_count=$((readback_count + 1))
+        printf '%s\n' "${readback_count}" >"${READBACK_COUNT_FILE}"
+        if [[ "${readback_count}" == '1' ]]; then exit 28; fi
+      fi
+      if [[ "${MODE}" == 'readback_wrong' ]]; then
+        printf '%040d\n' 0
+      else
+        printf '%s\n' "${METADATA_COMMIT_SHA}"
+      fi
+    elif [[ "${MODE}" == 'baseline_exists' ]]; then
+      printf '1\n'
+    elif [[ "${settlement}" == 'true' ]]; then
+      printf 'absent\n'
+    else
+      printf '0\n'
+    fi
+    ;;
+  */git/commits/*)
+    if [[ "${MODE}" == 'metadata_nonroot' ]]; then
+      printf '%s\t1\n' "${METADATA_COMMIT_SHA}"
+    else
+      printf '%s\t0\n' "${METADATA_COMMIT_SHA}"
+    fi
+    ;;
+  */actions/workflows/*)
+    printf 'disabled_manually\n'
+    ;;
+  */git/refs)
+    if [[ "${MODE}" == 'committed_exit7' ]]; then
+      : >"${STATE_FILE}"
+      printf '%s\t%s\tcommit\n' 'refs/heads/fugue-control-plane-release-baseline' "${METADATA_COMMIT_SHA}"
+      exit 7
+    fi
+    if [[ "${MODE}" == 'post_failed_absent' ]]; then exit 7; fi
+    : >"${STATE_FILE}"
+    if [[ "${MODE}" == 'response_wrong_sha' ]]; then
+      printf '%s\t%040d\tcommit\n' 'refs/heads/fugue-control-plane-release-baseline' 0
+    else
+      printf '%s\t%s\tcommit\n' 'refs/heads/fugue-control-plane-release-baseline' "${METADATA_COMMIT_SHA}"
+    fi
+    ;;
+  *) exit 98 ;;
+esac
+`
+		timeoutMock := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == '--kill-after=2s' ]]; then shift; fi
+[[ "${1:-}" =~ ^[0-9]+s$ ]] || exit 125
+shift
+exec "$@"
+`
+		sleepMock := `#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+`
+		for name, source := range map[string]string{"gh": ghMock, "timeout": timeoutMock, "sleep": sleepMock} {
+			mockPath := filepath.Join(bin, name)
+			if err := os.WriteFile(mockPath, []byte(source), 0o700); err != nil {
+				t.Fatalf("write %s mock: %v", name, err)
+			}
+		}
+		command := exec.Command("bash")
+		command.Stdin = strings.NewReader(writer)
+		command.Env = append(os.Environ(),
+			"PATH="+bin+":"+os.Getenv("PATH"),
+			"MODE="+mode,
+			"STATE_FILE="+statePath,
+			"READBACK_COUNT_FILE="+readbackCountPath,
+			"LOG_FILE="+logPath,
+			"GITHUB_RUN_ATTEMPT=1",
+			"GITHUB_SHA="+policySHA,
+			"EXPECTED_SHA="+policySHA,
+			"GITHUB_REPOSITORY=yym68686/fugue",
+			"RUNTIME_BASELINE_SHA="+runtimeSHA,
+			"METADATA_COMMIT_SHA="+metadataSHA,
+			"GH_TOKEN=test-token",
+		)
+		output, runErr := command.CombinedOutput()
+		log, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read gh mock log: %v", err)
+		}
+		_, stateErr := os.Stat(statePath)
+		created := stateErr == nil
+		if stateErr != nil && !os.IsNotExist(stateErr) {
+			t.Fatalf("inspect mock ref state: %v", stateErr)
+		}
+		readbackCount := ""
+		if count, err := os.ReadFile(readbackCountPath); err == nil {
+			readbackCount = strings.TrimSpace(string(count))
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read settlement retry count: %v", err)
+		}
+		return strings.Count(string(log), "--method POST"), created, readbackCount, output, runErr
+	}
+
+	positive := []struct {
+		mode              string
+		wantReadbackCount string
+	}{
+		{mode: "success"},
+		{mode: "committed_exit7"},
+		{mode: "readback_transient", wantReadbackCount: "2"},
+		{mode: "response_wrong_sha"},
+	}
+	for _, test := range positive {
+		postCount, created, readbackCount, output, err := runWriter(t, test.mode)
+		if err != nil || postCount != 1 || !created || readbackCount != test.wantReadbackCount {
+			t.Fatalf("RP0 baseline ref creator settlement mock failed: mode=%s err=%v posts=%d created=%t readbacks=%q wantReadbacks=%q output=%q", test.mode, err, postCount, created, readbackCount, test.wantReadbackCount, output)
+		}
+	}
+	tests := []struct {
+		name        string
+		mode        string
+		wantPosts   int
+		wantCreated bool
+	}{
+		{name: "baseline already exists", mode: "baseline_exists", wantPosts: 0, wantCreated: false},
+		{name: "metadata commit is not root", mode: "metadata_nonroot", wantPosts: 0, wantCreated: false},
+		{name: "POST fails and ref stays absent", mode: "post_failed_absent", wantPosts: 1, wantCreated: false},
+		{name: "readback persistently has wrong SHA", mode: "readback_wrong", wantPosts: 1, wantCreated: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			posts, created, _, output, err := runWriter(t, test.mode)
+			if err == nil || posts != test.wantPosts || created != test.wantCreated {
+				t.Fatalf("RP0 baseline ref creator negative mock drifted: mode=%s err=%v posts=%d want=%d created=%t wantCreated=%t output=%q", test.mode, err, posts, test.wantPosts, created, test.wantCreated, output)
+			}
+		})
+	}
+}
+
 func TestControlPlaneV2IsExactlyDormantHostedAndPermissionsEmpty(t *testing.T) {
 	t.Parallel()
 
