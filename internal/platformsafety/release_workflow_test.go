@@ -1519,7 +1519,7 @@ func TestControlPlaneMetadataBaselineResolverMockMatrix(t *testing.T) {
 	runGit(seed, "", "push", "--quiet", "origin",
 		targetSHA+":refs/heads/main", unrelatedSHA+":refs/heads/fixture-unrelated")
 
-	makeMetadataRoot := func(blobContents string, extraFile, extraEmptyTree bool) string {
+	makeMetadataCommit := func(blobContents string, extraFile, extraEmptyTree bool, parents ...string) string {
 		t.Helper()
 		blob := runGit(root, blobContents, "--git-dir="+origin, "hash-object", "-w", "--stdin")
 		treeInput := fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", blob)
@@ -1532,17 +1532,41 @@ func TestControlPlaneMetadataBaselineResolverMockMatrix(t *testing.T) {
 			treeInput += fmt.Sprintf("040000 tree %s\textra-dir\n", emptyTree)
 		}
 		tree := runGit(root, treeInput, "--git-dir="+origin, "mktree")
-		return runGit(root, "", "--git-dir="+origin, "commit-tree", tree, "-m", "fugue runtime baseline")
+		args := []string{"--git-dir=" + origin, "commit-tree", tree}
+		for _, parent := range parents {
+			args = append(args, "-p", parent)
+		}
+		args = append(args, "-m", "fugue runtime baseline")
+		return runGit(root, "", args...)
 	}
 	canonicalPayload := fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":1}`, baseSHA)
-	canonicalMetadata := makeMetadataRoot(canonicalPayload+"\n", false, false)
-	badSchemaMetadata := makeMetadataRoot(fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":2}`+"\n", baseSHA), false, false)
-	extraFileMetadata := makeMetadataRoot(canonicalPayload+"\n", true, false)
-	extraEmptyTreeMetadata := makeMetadataRoot(canonicalPayload+"\n", false, true)
-	missingNewlineMetadata := makeMetadataRoot(canonicalPayload, false, false)
-	doubleNewlineMetadata := makeMetadataRoot(canonicalPayload+"\n\n", false, false)
-	nulMetadata := makeMetadataRoot(canonicalPayload+"\x00\n", false, false)
-	unrelatedMetadata := makeMetadataRoot(fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":1}`+"\n", unrelatedSHA), false, false)
+	canonicalMetadata := makeMetadataCommit(canonicalPayload+"\n", false, false)
+	canonicalCarrierPayload := fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`, canonicalMetadata, baseSHA)
+	canonicalCarrier := makeMetadataCommit(canonicalCarrierPayload+"\n", false, false, canonicalMetadata)
+	secondCarrierPayload := fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`, canonicalCarrier, targetSHA)
+	secondCarrier := makeMetadataCommit(secondCarrierPayload+"\n", false, false, canonicalCarrier)
+	badSchemaMetadata := makeMetadataCommit(fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":2}`+"\n", baseSHA), false, false)
+	extraFileMetadata := makeMetadataCommit(canonicalPayload+"\n", true, false)
+	extraEmptyTreeMetadata := makeMetadataCommit(canonicalPayload+"\n", false, true)
+	missingNewlineMetadata := makeMetadataCommit(canonicalPayload, false, false)
+	doubleNewlineMetadata := makeMetadataCommit(canonicalPayload+"\n\n", false, false)
+	nulMetadata := makeMetadataCommit(canonicalPayload+"\x00\n", false, false)
+	unrelatedMetadata := makeMetadataCommit(fmt.Sprintf(`{"previous_baseline_object_sha":null,"runtime_sha":"%s","schema_version":1}`+"\n", unrelatedSHA), false, false)
+	rootWithPrevious := makeMetadataCommit(canonicalCarrierPayload+"\n", false, false)
+	carrierWithNullPrevious := makeMetadataCommit(canonicalPayload+"\n", false, false, canonicalMetadata)
+	carrierWithWrongPrevious := makeMetadataCommit(
+		fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`+"\n", unrelatedSHA, baseSHA),
+		false, false, canonicalMetadata,
+	)
+	carrierWithExtraParent := makeMetadataCommit(canonicalCarrierPayload+"\n", false, false, canonicalMetadata, unrelatedSHA)
+	carrierWithInvalidPrevious := makeMetadataCommit(
+		fmt.Sprintf(`{"previous_baseline_object_sha":"invalid","runtime_sha":"%s","schema_version":1}`+"\n", baseSHA),
+		false, false, canonicalMetadata,
+	)
+	carrierWithUnrelatedRuntime := makeMetadataCommit(
+		fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`+"\n", canonicalMetadata, unrelatedSHA),
+		false, false, canonicalMetadata,
+	)
 	runGit(root, "", "clone", "--quiet", origin, checkout)
 	if got := runGit(checkout, "", "rev-parse", "HEAD"); got != targetSHA {
 		t.Fatalf("fixture target drifted: got %s want %s", got, targetSHA)
@@ -1590,6 +1614,8 @@ exec "$@"
 	}{
 		{name: "direct code baseline", refObject: baseSHA, wantDomain: baseSHA},
 		{name: "canonical metadata bridge", refObject: canonicalMetadata, wantDomain: baseSHA},
+		{name: "canonical forward carrier", refObject: canonicalCarrier, wantDomain: baseSHA},
+		{name: "second canonical forward carrier", refObject: secondCarrier, wantDomain: targetSHA},
 	}
 	for _, test := range positive {
 		t.Run(test.name, func(t *testing.T) {
@@ -1614,6 +1640,12 @@ exec "$@"
 		{name: "metadata blob has double final newline", refObject: doubleNewlineMetadata},
 		{name: "metadata blob contains NUL", refObject: nulMetadata},
 		{name: "metadata runtime is not target ancestor", refObject: unrelatedMetadata},
+		{name: "metadata root has non-null previous object", refObject: rootWithPrevious},
+		{name: "metadata carrier has null previous object", refObject: carrierWithNullPrevious},
+		{name: "metadata carrier previous object mismatches parent", refObject: carrierWithWrongPrevious},
+		{name: "metadata carrier has extra parent", refObject: carrierWithExtraParent},
+		{name: "metadata carrier has invalid previous object", refObject: carrierWithInvalidPrevious},
+		{name: "metadata carrier runtime is not target ancestor", refObject: carrierWithUnrelatedRuntime},
 	}
 	for _, test := range negative {
 		t.Run(test.name, func(t *testing.T) {
@@ -1845,7 +1877,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read control-plane workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "6199243eb03d05337f862e13a9562b35d71ab138c17d74e5e69138369a828c5d")
+	assertWorkflowSourceDigest(t, data, "462af081575503e90a0809840520abdbfe35bf955a0cc01b7fdf5232ac3b1856")
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		t.Fatalf("parse control-plane workflow: %v", err)
@@ -1854,7 +1886,7 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 	assertWorkflowMappingKeys(t, workflowRootNode, "name", "on", "permissions", "concurrency", "jobs")
 	assertWorkflowRunDigests(t, workflow.Jobs, map[string]string{
 		"release-input-guard/Guard exact main commit authorization":                      "36817d224982821ad3eb81a44fd42dd50bfa479915e48b339010fae5e19ae1a5",
-		"release-baseline/Resolve release-domain baseline":                               "23e6f538645bcf8eda3d1ea83c62d4a7e6c140bf477e19d2ef0793d1de804da9",
+		"release-baseline/Resolve release-domain baseline":                               "4a510777f17f06c60e8abb6900cfb15a90b430844ad05effeee84a0c37392151",
 		"release-baseline/Resolve live image metadata":                                   "7c2b32da72eb0a2020df38e40afcf99cf9e778d60e158a36960ac4ff4ac65267",
 		"release-baseline/Compute live-to-target release changed files":                  "3fd4596b94b2bf2cef792ccc89752f72e371fedc51f0953821f341f74d249992",
 		"release-gate/Verify generated OpenAPI artifacts":                                "7b93bd9f923a238d19f6aed52847bc1a10000fa5c6fb85fc269f2bf1101dad08",
@@ -2088,10 +2120,15 @@ func TestControlPlaneDeployRequiresInternalReleaseGate(t *testing.T) {
 		`"${remote_status}" == '0'`,
 		`"${fetched_ref_object_sha}" == "${remote_object}"`,
 		`commit_identity="$(git rev-list --parents -n 1 FETCH_HEAD)"`,
+		`metadata_candidate='false'`,
 		`"${metadata_path}" == 'fugue-runtime-baseline.json'`,
+		`metadata_candidate='true'`,
 		`git cat-file blob "${metadata_blob}"`,
+		`previous_sha = value.get("previous_baseline_object_sha")`,
 		`if payload != expected:`,
-		`sys.stdout.write(runtime_sha)`,
+		`sys.stdout.write(runtime_sha + "\t" + ("null" if previous_sha is None else previous_sha))`,
+		`"${metadata_parent}" == "${previous_baseline_object_sha}"`,
+		`[[ -n "${parent_shas:-}" ]] || exit 1`,
 		`git cat-file -e "${domain_base_sha}^{commit}"`,
 		"git merge-base --is-ancestor",
 		"printf 'is_genesis=false",

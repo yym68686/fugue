@@ -144,13 +144,13 @@ ref deletion, history rewrite, self-hosted runner, or cluster credential is
 introduced.
 
 The existing deploy workflow remains disabled until its later promotion
-checkpoint. Its next dormant, read-only compatibility checkpoint teaches the
-resolver to distinguish the canonical parentless metadata bridge from a
-normal code baseline: only an exact one-entry root tree and byte-exact compact
-schema-1 payload with one final newline can supply the runtime ancestor, and
-the metadata commit remains the separately observed ref object. The recorder
-is not changed by that checkpoint. A later independent
-checkpoint must make advancement compatible before promotion; the hosted
+checkpoint. Its dormant, read-only resolver accepts the canonical parentless
+metadata bridge and a canonical one-parent forward carrier while preserving a
+normal code baseline. Only an exact one-entry root tree and byte-exact compact
+schema-1 payload with one final newline can supply the runtime ancestor. A
+carrier's non-null previous-object field must equal its sole Git parent; the
+metadata commit remains the separately observed ref object. Carrier creation
+and ref advancement are separate later checkpoints. The hosted
 recorder will still require the exact observed OID, forward ancestry, and
 `force: false`. Its independent ambiguous-response prerequisite permits only
 one `updateRefs` attempt and treats bounded exact readback as the sole

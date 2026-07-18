@@ -211,15 +211,17 @@ metadata-root ref settles a lost or failed transport response, while an absent,
 unreadable, malformed, or different ref fails closed. No cluster path is
 available.
 
-The following dormant compatibility checkpoint changes only the deploy
-resolver's read path. A parentless ref object's non-recursive root tree must
-contain exactly one regular blob named `fugue-runtime-baseline.json`; its bytes
-must be the compact, sorted schema-1/null-previous-object JSON followed by
-exactly one newline. The embedded runtime SHA must exist locally and be an
-ancestor of the dispatched target. A ref object with parents remains an
-ordinary direct code baseline. The recorder is intentionally unchanged in
-this checkpoint, and the deploy workflow remains disabled, so no self-hosted
-or cluster path is exercised.
+The dormant resolver read contract accepts both the initial metadata root and
+a canonical forward carrier. A metadata object has a non-recursive root tree
+containing exactly one regular blob named `fugue-runtime-baseline.json`, with
+compact sorted schema-1 JSON followed by exactly one newline. The initial
+object has a null previous-object field and no parents. A forward carrier has
+one parent, and its non-null previous-object field must equal that parent
+exactly. In both forms the embedded runtime SHA must exist locally and be an
+ancestor of the dispatched target. A non-metadata ref object with parents
+remains an ordinary direct code baseline. Carrier creation and ref advancement
+are intentionally excluded, and the deploy workflow remains disabled, so no
+self-hosted or cluster path is exercised.
 
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.
