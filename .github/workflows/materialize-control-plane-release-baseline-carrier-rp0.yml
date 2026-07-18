@@ -59,9 +59,7 @@ jobs:
           read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 1
           [[ "${policy_commit}" == "${GITHUB_SHA}" && -n "${policy_parent:-}" && -z "${extra:-}" ]] || exit 1
           expected_changes=(
-            $'A\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'
-            $'M\tdocs/runbooks/release-domain-planner.md'
-            $'M\tdocs/runbooks/release-policy-recovery.md'
+            $'M\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'
             $'M\tinternal/platformsafety/release_workflow_test.go'
           )
           actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1
@@ -277,15 +275,25 @@ jobs:
           PY
 
           carrier_message="fugue runtime baseline carrier ${RUNTIME_SHA}"
-          carrier_sha="$(
-            GIT_AUTHOR_NAME='Fugue Release Baseline' \
-            GIT_AUTHOR_EMAIL='release-baseline@fugue.invalid' \
-            GIT_AUTHOR_DATE="${CARRIER_DATE}" \
-            GIT_COMMITTER_NAME='Fugue Release Baseline' \
-            GIT_COMMITTER_EMAIL='release-baseline@fugue.invalid' \
-            GIT_COMMITTER_DATE="${CARRIER_DATE}" \
-              git commit-tree "${tree_sha}" -p "${PREVIOUS_OBJECT_SHA}" -m "${carrier_message}"
-          )" || exit 1
+          python3 - "${tree_sha}" "${PREVIOUS_OBJECT_SHA}" "${CARRIER_DATE}" \
+            "${carrier_message}" "${object_tmp}/commit-object" <<'PY'
+          import datetime, pathlib, sys
+          tree_sha, parent_sha, date, message, output_path = sys.argv[1:]
+          instant = datetime.datetime.fromisoformat(date.replace("Z", "+00:00"))
+          if instant.tzinfo != datetime.timezone.utc:
+              raise SystemExit("carrier commit date is not UTC")
+          timestamp = int(instant.timestamp())
+          identity = f"Fugue Release Baseline <release-baseline@fugue.invalid> {timestamp} +0000"
+          content = (
+              f"tree {tree_sha}\n"
+              f"parent {parent_sha}\n"
+              f"author {identity}\n"
+              f"committer {identity}\n"
+              "\n"
+          ).encode("utf-8") + message.encode("utf-8")
+          pathlib.Path(output_path).write_bytes(content)
+          PY
+          carrier_sha="$(git hash-object -t commit --stdin <"${object_tmp}/commit-object")" || exit 1
           [[ "${carrier_sha}" =~ ^[0-9a-f]{40}$ ]] || exit 1
           python3 - "${carrier_message}" "${tree_sha}" "${PREVIOUS_OBJECT_SHA}" "${CARRIER_DATE}" \
             >"${object_tmp}/commit-request.json" <<'PY'

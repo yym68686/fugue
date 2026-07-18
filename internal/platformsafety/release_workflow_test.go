@@ -471,7 +471,7 @@ func TestRP0CarrierMaterializerIsHostedRefFreeAndReadbackSettled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP0 carrier materializer workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "db52bc85e119027535ba0d3fabe4386a1579866e1a8a78c37a4237356b724500")
+	assertWorkflowSourceDigest(t, data, "32bda9af4f36164869ed9718648daca5f4357406de5e00a0e10b0923ac14b849")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -534,10 +534,10 @@ func TestRP0CarrierMaterializerIsHostedRefFreeAndReadbackSettled(t *testing.T) {
 	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
 		"materialize-forward-carrier": {Steps: job.Steps},
 	}, map[string]string{
-		"materialize-forward-carrier/Verify exact carrier materialization authorization":                 "898cf24b96df997884916203b9b1d86350a2ebe6c824dff1f5495589f3917174",
+		"materialize-forward-carrier/Verify exact carrier materialization authorization":                 "29829f3f441e8907d295679f19fa757cefc2d2b28dfa4651a10d4712c105257c",
 		"materialize-forward-carrier/Write carrier materialization intent evidence":                      "686ab0004c352ef4b9840be7f75bbe902db1f80ddb789fb82070931318c0a124",
 		"materialize-forward-carrier/Observe unchanged production health before carrier object write":    "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
-		"materialize-forward-carrier/Materialize canonical forward carrier objects without moving a ref": "6d72f64232586f66b0a8718e4c417c0e17ec742167eab36ec2885bf2c551005e",
+		"materialize-forward-carrier/Materialize canonical forward carrier objects without moving a ref": "1a28dd68acb853ac7ff8bfdbcb49e159736e50f1be8870c54cb902db4117f7fc",
 		"materialize-forward-carrier/Write carrier materialization result evidence":                      "ab548801ade6ea482474ba6a7b1b9c5fff8a6d92e329fb2e4494f9eb7fd22a8f",
 	})
 	wantSteps := []string{
@@ -582,7 +582,8 @@ func TestRP0CarrierMaterializerIsHostedRefFreeAndReadbackSettled(t *testing.T) {
 		`policy_identity="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1`,
 		`actual_changes_text="$(git diff --no-renames --name-status "${policy_parent}" "${GITHUB_SHA}")" || exit 1`,
 		`mapfile -t actual_changes <<<"${actual_changes_text}"`,
-		`A\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml`,
+		`M\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml`,
+		`M\tinternal/platformsafety/release_workflow_test.go`,
 		`"${baseline_object}" == "${EXPECTED_PREVIOUS_OBJECT_SHA}"`,
 		`"${represented_runtime}" == "${RUNTIME_SHA}"`,
 		`"${represented_parent}" == "${represented_previous}"`,
@@ -612,7 +613,8 @@ func TestRP0CarrierMaterializerIsHostedRefFreeAndReadbackSettled(t *testing.T) {
 		`"previous_baseline_object_sha": sys.argv[1]`,
 		`git hash-object -w --stdin`,
 		`git mktree`,
-		`git commit-tree "${tree_sha}" -p "${PREVIOUS_OBJECT_SHA}"`,
+		`).encode("utf-8") + message.encode("utf-8")`,
+		`git hash-object -t commit --stdin`,
 		`"repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}"`,
 		`"repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}"`,
 		`"repos/${GITHUB_REPOSITORY}/git/commits/${carrier_sha}"`,
@@ -634,7 +636,7 @@ func TestRP0CarrierMaterializerIsHostedRefFreeAndReadbackSettled(t *testing.T) {
 	source := string(data)
 	for _, forbidden := range []string{
 		"self-hosted", "${{ secrets.", "KUBECONFIG", "kubectl ", "helm ", "ssh ",
-		"git push", "git update-ref", "--force-with-lease", "--method PATCH", "--method PUT",
+		"git push", "git update-ref", "git commit-tree", "--force-with-lease", "--method PATCH", "--method PUT",
 		"--method DELETE", " -X ", "graphql", "updateRefs", "createRef", "deleteRef",
 		`"repos/${GITHUB_REPOSITORY}/git/refs`, "force=", "docker ",
 	} {
@@ -668,9 +670,7 @@ read -r policy_commit policy_parent extra <<<"${policy_identity}" || exit 92
 			name: "changed files",
 			body: `set -euo pipefail
 mock_diff() {
-  printf '%s\n' $'A\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'
-  printf '%s\n' $'M\tdocs/runbooks/release-domain-planner.md'
-  printf '%s\n' $'M\tdocs/runbooks/release-policy-recovery.md'
+  printf '%s\n' $'M\t.github/workflows/materialize-control-plane-release-baseline-carrier-rp0.yml'
   printf '%s\n' $'M\tinternal/platformsafety/release_workflow_test.go'
   return 7
 }
@@ -761,6 +761,20 @@ func TestRP0CarrierMaterializerObjectReadbackSettlementMock(t *testing.T) {
 	rootBlob := runGit(rootPayload, "hash-object", "-w", "--stdin")
 	rootTree := runGit(fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", rootBlob), "mktree")
 	previousObject := runGit("", "commit-tree", rootTree, "-m", "fugue runtime baseline")
+	carrierPayload := fmt.Sprintf(`{"previous_baseline_object_sha":"%s","runtime_sha":"%s","schema_version":1}`+"\n", previousObject, runtimeSHA)
+	carrierBlob := runGit(carrierPayload, "hash-object", "-w", "--stdin")
+	carrierTree := runGit(fmt.Sprintf("100644 blob %s\tfugue-runtime-baseline.json\n", carrierBlob), "mktree")
+	carrierMessage := "fugue runtime baseline carrier " + runtimeSHA
+	carrierContent := fmt.Sprintf(
+		"tree %s\nparent %s\nauthor Fugue Release Baseline <release-baseline@fugue.invalid> 1784332800 +0000\ncommitter Fugue Release Baseline <release-baseline@fugue.invalid> 1784332800 +0000\n\n%s",
+		carrierTree,
+		previousObject,
+		carrierMessage,
+	)
+	expectedCarrierSHA := runGit(carrierContent, "hash-object", "-t", "commit", "--stdin")
+	if withTrailingLF := runGit(carrierContent+"\n", "hash-object", "-t", "commit", "--stdin"); withTrailingLF == expectedCarrierSHA {
+		t.Fatal("carrier fixture does not distinguish the GitHub REST message bytes from commit-tree's trailing LF")
+	}
 
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
@@ -808,13 +822,12 @@ PY
 fi
 if [[ "${arguments}" == *'/git/commits/'* ]]; then
   sha="${arguments##*/}"
+  [[ "${sha}" == "${EXPECTED_CARRIER_SHA}" ]] || exit 7
   python3 - "${sha}" <<'PY'
-import json, os, subprocess, sys
+import json, os, sys
 sha = sys.argv[1]
-tree = subprocess.check_output(["git", "show", "-s", "--format=%T", sha], text=True).strip()
-parent = subprocess.check_output(["git", "rev-parse", sha + "^"], text=True).strip()
 identity = {"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid", "date": os.environ["CARRIER_DATE"]}
-print(json.dumps({"sha": sha, "message": "fugue runtime baseline carrier " + os.environ["RUNTIME_SHA"], "tree": {"sha": tree}, "parents": [{"sha": parent}], "author": identity, "committer": identity}))
+print(json.dumps({"sha": sha, "message": "fugue runtime baseline carrier " + os.environ["RUNTIME_SHA"], "tree": {"sha": os.environ["EXPECTED_METADATA_TREE_SHA"]}, "parents": [{"sha": os.environ["PREVIOUS_OBJECT_SHA"]}], "author": identity, "committer": identity}))
 PY
   exit 0
 fi
@@ -861,6 +874,8 @@ exec "$@"
 			"PREVIOUS_OBJECT_SHA="+previousObject,
 			"RUNTIME_SHA="+runtimeSHA,
 			"CARRIER_DATE=2026-07-18T00:00:00Z",
+			"EXPECTED_CARRIER_SHA="+expectedCarrierSHA,
+			"EXPECTED_METADATA_TREE_SHA="+carrierTree,
 			"GITHUB_REPOSITORY=fugue-test/repository",
 			"GITHUB_OUTPUT="+outputPath,
 			"GH_TOKEN=test-token",
@@ -894,7 +909,7 @@ exec "$@"
 				outputs[key] = value
 			}
 			carrierSHA := outputs["carrier_commit_sha"]
-			if len(outputs) != 6 || len(carrierSHA) != 40 || runGit("", "rev-parse", carrierSHA+"^") != previousObject {
+			if len(outputs) != 6 || carrierSHA != expectedCarrierSHA {
 				t.Fatalf("carrier output topology drifted: mode=%s output=%q", mode, got.output)
 			}
 			wantStatus := map[string]string{"blob_transport_status": "0", "tree_transport_status": "0", "commit_transport_status": "0"}
