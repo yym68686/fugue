@@ -198,7 +198,7 @@ func assertWorkflowRunDigests(t *testing.T, jobs map[string]releaseWorkflowJob, 
 	}
 }
 
-func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
+func TestRP0MetadataObjectMaterializationIsHostedEvidenceBoundAndRefFree(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join("..", "..", ".github", "workflows", "migrate-control-plane-release-baseline-rp0.yml")
@@ -206,7 +206,7 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP0 migration workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "3dd1437655611671b7a779d8ceb0bdd8925f66fc5ccb13aa1f19a9f7e004d941")
+	assertWorkflowSourceDigest(t, data, "a154d22eeecf2344f37ee4ff36b3462803f911795dcb4333d01d7966cf56d874")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -230,7 +230,7 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	jobNode := workflowMappingValue(t, jobsNode, "migrate-forward-baseline")
 	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
 	stepsNode := workflowMappingValue(t, jobNode, "steps")
-	if stepsNode.Kind != yaml.SequenceNode || len(stepsNode.Content) != 6 {
+	if stepsNode.Kind != yaml.SequenceNode || len(stepsNode.Content) != 8 {
 		t.Fatalf("RP0 migration step node inventory drifted: %+v", stepsNode)
 	}
 	wantStepKeys := [][]string{
@@ -239,7 +239,9 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 		{"name", "env", "run"},
 		{"name", "uses", "with"},
 		{"name", "env", "run"},
+		{"name", "id", "env", "run"},
 		{"name", "env", "run"},
+		{"name", "uses", "with"},
 	}
 	for index, stepNode := range stepsNode.Content {
 		assertWorkflowMappingKeys(t, stepNode, wantStepKeys[index]...)
@@ -276,10 +278,11 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
 		"migrate-forward-baseline": {Steps: job.Steps},
 	}, map[string]string{
-		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline":    "4660e66046b93f5a6d5f40a2b86aca8f39a5388014bc51bdffa9c4c4a68d5a23",
-		"migrate-forward-baseline/Write RP0 migration intent evidence":                               "5017b4b6659ab138ecfedc6b611f45794abf0b7cb8b46b892145f45a5e4eab15",
-		"migrate-forward-baseline/Observe unchanged production health before baseline migration":     "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
-		"migrate-forward-baseline/Create forward-only runtime baseline with atomic absent-ref write": "6912c9d17eca20a7c710303e584a675a1f83448a36300256f48ab978b2ec4dc5",
+		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline":      "5d634b19d90645ba234e335c8601fad69996bd17ee4feadf13cbaca3bb843b03",
+		"migrate-forward-baseline/Write RP0 migration intent evidence":                                 "854da0bb501bd6179d242f9557768848fefc4d62981bc051d889749388108f5c",
+		"migrate-forward-baseline/Observe unchanged production health before baseline migration":       "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
+		"migrate-forward-baseline/Materialize canonical orphan baseline metadata object without a ref": "4fa8d03db5455ccfeb33fae687e46072adf80651745868a106615628829b9ae4",
+		"migrate-forward-baseline/Write RP0 metadata object result evidence":                           "7c0f7f5f14fb8e2dcabdc9b9f3c15230aceeafdfe942be123d23a57a1a79e3d1",
 	})
 	wantPermissions := map[string]string{"actions": "read", "contents": "write"}
 	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 20 || job.Environment != "production" ||
@@ -292,7 +295,9 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 		"Write RP0 migration intent evidence",
 		"Upload RP0 migration intent evidence",
 		"Observe unchanged production health before baseline migration",
-		"Create forward-only runtime baseline with atomic absent-ref write",
+		"Materialize canonical orphan baseline metadata object without a ref",
+		"Write RP0 metadata object result evidence",
+		"Upload RP0 metadata object result evidence",
 	}
 	if len(job.Steps) != len(wantSteps) {
 		t.Fatalf("RP0 migration step inventory drifted: %+v", job.Steps)
@@ -346,6 +351,8 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 		"180 * 1_000_000_000",
 		"runtime baseline continuous observation window is incomplete",
 		"central_coredns",
+		".updated_at",
+		"runtime_completed_at=%s",
 		"refs/heads/fugue-control-plane-release-baseline",
 		"-F 'force=false'",
 	} {
@@ -355,6 +362,17 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	}
 	if strings.Contains(verify.Run, "fromisoformat") {
 		t.Fatal("RP0 evidence verifier must not truncate or reject RFC3339Nano timestamps through fromisoformat")
+	}
+	intent := job.Steps[2]
+	for _, required := range []string{
+		`"baseline_transition": "metadata-object-pending-ref-absent"`,
+		`"metadata_ref_created": False`,
+		`"cluster_mutation_attempted": False`,
+		`"git_history_rewritten": False`,
+	} {
+		if !strings.Contains(intent.Run, required) {
+			t.Fatalf("RP0 intent evidence must contain %q", required)
+		}
 	}
 	upload := job.Steps[3]
 	if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" || upload.Run != "" {
@@ -366,51 +384,76 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 			t.Fatalf("RP0 pre-migration observation must contain %q", required)
 		}
 	}
-	writer := job.Steps[len(job.Steps)-1]
-	if writer.If != "" || writer.Uses != "" || writer.Shell != "" || writer.ContinueOnError || writer.Run == "" {
-		t.Fatalf("RP0 writer execution semantics drifted: %+v", writer)
+	materialize := job.Steps[5]
+	if materialize.ID != "materialize" || materialize.If != "" || materialize.Uses != "" ||
+		materialize.Shell != "" || materialize.ContinueOnError || materialize.Run == "" {
+		t.Fatalf("RP0 metadata materializer execution semantics drifted: %+v", materialize)
 	}
-	wantWriterEnv := map[string]string{
+	wantMaterializeEnv := map[string]string{
 		"EXPECTED_SHA":         "${{ inputs.expected_sha }}",
 		"RUNTIME_BASELINE_SHA": "${{ steps.verify.outputs.runtime_baseline_sha }}",
+		"RUNTIME_COMPLETED_AT": "${{ steps.verify.outputs.runtime_completed_at }}",
 		"GH_TOKEN":             "${{ github.token }}",
 	}
-	if !reflect.DeepEqual(writer.Env, wantWriterEnv) {
-		t.Fatalf("RP0 writer environment drifted: got %+v want %+v", writer.Env, wantWriterEnv)
+	if !reflect.DeepEqual(materialize.Env, wantMaterializeEnv) {
+		t.Fatalf("RP0 metadata materializer environment drifted: got %+v want %+v", materialize.Env, wantMaterializeEnv)
 	}
 	for _, required := range []string{
-		"readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
-		"gh api --method POST",
-		`"repos/${GITHUB_REPOSITORY}/git/refs"`,
-		`-f "ref=${baseline_ref}" -f "sha=${RUNTIME_BASELINE_SHA}"`,
-		"[.ref,.object.sha,.object.type] | @tsv",
-		`"${created_ref}" == "${baseline_ref}"`,
-		`"${created_sha}" == "${RUNTIME_BASELINE_SHA}"`,
-		`"${observed}" == "${RUNTIME_BASELINE_SHA}"`,
+		"readonly metadata_path='fugue-runtime-baseline.json'",
+		`"previous_baseline_object_sha": None`,
+		`"schema_version": 1`,
+		`"parents": []`,
+		`"Fugue Release Baseline"`,
+		`"release-baseline@fugue.invalid"`,
+		`"repos/${GITHUB_REPOSITORY}/git/blobs"`,
+		`"repos/${GITHUB_REPOSITORY}/git/blobs/${blob_sha}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/trees"`,
+		`"repos/${GITHUB_REPOSITORY}/git/trees/${tree_sha}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/commits"`,
+		`"repos/${GITHUB_REPOSITORY}/git/commits/${metadata_commit_sha}"`,
+		`response.get("parents") != []`,
+		`"${after_status}" == '0' && "${after_count}" == '0'`,
+		"metadata_commit_sha=%s",
 	} {
-		if !strings.Contains(writer.Run, required) {
-			t.Fatalf("RP0 writer must contain %q", required)
+		if !strings.Contains(materialize.Run, required) {
+			t.Fatalf("RP0 metadata materializer must contain %q", required)
 		}
 	}
-	if strings.Count(writer.Run, "gh api") != 4 || strings.Count(writer.Run, "gh api --method POST") != 1 ||
-		strings.Count(writer.Run, `"repos/${GITHUB_REPOSITORY}/git/refs"`) != 1 {
-		t.Fatalf("RP0 writer API inventory drifted:\n%s", writer.Run)
+	if strings.Count(materialize.Run, "gh api") != 9 || strings.Count(materialize.Run, "gh api --method POST") != 3 ||
+		strings.Count(materialize.Run, `"repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline"`) != 2 {
+		t.Fatalf("RP0 metadata materializer API inventory drifted:\n%s", materialize.Run)
 	}
 	for _, forbidden := range []string{
 		"git push", "git update-ref", "--force-with-lease", "--method PATCH", "--method PUT",
 		"--method DELETE", " -X ", "graphql", "updateRefs", "createRef", "deleteRef",
-		"force=", "curl ", "wget ",
+		"git/refs", "force=", "curl ", "wget ",
 	} {
-		if strings.Contains(writer.Run, forbidden) {
-			t.Fatalf("RP0 writer contains out-of-scope write capability %q", forbidden)
+		if strings.Contains(materialize.Run, forbidden) {
+			t.Fatalf("RP0 metadata materializer contains out-of-scope write capability %q", forbidden)
 		}
+	}
+	result := job.Steps[6]
+	wantResultEnv := map[string]string{
+		"METADATA_BLOB_SHA":   "${{ steps.materialize.outputs.metadata_blob_sha }}",
+		"METADATA_TREE_SHA":   "${{ steps.materialize.outputs.metadata_tree_sha }}",
+		"METADATA_COMMIT_SHA": "${{ steps.materialize.outputs.metadata_commit_sha }}",
+	}
+	if !reflect.DeepEqual(result.Env, wantResultEnv) ||
+		!strings.Contains(result.Run, `payload["baseline_transition"] = "metadata-object-materialized-ref-absent"`) {
+		t.Fatalf("RP0 metadata result evidence drifted: %+v", result)
+	}
+	resultUpload := job.Steps[7]
+	if resultUpload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		resultUpload.With["name"] != "fugue-control-plane-rp0-metadata-object-${{ github.run_id }}-${{ github.run_attempt }}" ||
+		resultUpload.With["if-no-files-found"] != "error" || resultUpload.With["retention-days"] != "90" {
+		t.Fatalf("RP0 metadata result upload drifted: %+v", resultUpload)
 	}
 	source := string(data)
 	for _, forbidden := range []string{
 		"self-hosted", "${{ secrets.", "KUBECONFIG", "--kubeconfig",
 		"refs/tags/fugue-control-plane-release-baseline", "--force-with-lease",
 		"ssh ", "kubectl ", "docker ", "helm ", "--method PATCH", "--method PUT",
-		"--method DELETE", " -X ",
+		"--method DELETE", " -X ", `"repos/${GITHUB_REPOSITORY}/git/refs"`,
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("RP0 migration contains out-of-scope capability %q", forbidden)

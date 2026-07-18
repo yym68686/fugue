@@ -53,23 +53,29 @@ revision 718 as revision 720. Read-only production inspection confirmed that
 revisions 718 and 720 have identical manifest and complete-values hashes.
 
 `.github/workflows/migrate-control-plane-release-baseline-rp0.yml` is hosted on
-GitHub and receives no cluster credentials. It binds the exact policy SHA and
-the authorized runtime evidence, observes unchanged API health, then creates
-the missing baseline branch with GitHub's atomic create-reference endpoint.
-That endpoint has no force parameter and rejects an existing ref, so its exact
-precondition is the absent (all-zero old OID) state. The response and a bounded
-independent readback must both identify the verified runtime SHA. It never
-records the policy SHA as a runtime baseline. Repository variables provide the
+GitHub and receives no cluster credentials. Repository variables provide the
 four evidence values; the workflow independently re-reads and verifies the
-immutable run, artifact, deploy log, and observation samples before the single
-final ref mutation.
+immutable run, artifact, deploy log, observation samples, and unchanged API
+health before any repository write.
 
 Run `29625628436` proved all evidence and health gates but failed before any ref
 write because the Actions installation token cannot invoke GraphQL
-`updateRefs`; intent artifact `8423746274` preserves that failure. The lane was
-disabled and the absent-ref count remained zero. The forward fix uses the
-create-reference endpoint supported by the same job-scoped `contents: write`
-token; no PAT, local OAuth credential, or additional secret is introduced.
+`updateRefs`; intent artifact `8423746274` preserves that failure. Forward
+candidate `1ce1b814c73b3c6bc823e527684495d7ec741e99` then reached the same
+boundary in run `29626881801`, where GitHub rejected REST create-reference
+with HTTP 403; intent artifact `8424148249` preserves that failure. Both
+candidates are superseded, the lane is disabled, and the absent-ref count
+remains zero.
+
+The next independent prerequisite does not create or update a ref. After the
+same evidence and health gates, it creates a canonical metadata blob, a tree
+containing only `fugue-runtime-baseline.json`, and an orphan commit with stable
+runtime-evidence time and identity. Every object is read back exactly and the
+baseline ref must remain absent. A pre-write intent artifact survives object
+materialization failure; a separate result artifact records all three object
+SHAs on success. Reader validation and absent-only ref creation remain later
+checkpoints. No PAT, local OAuth credential, additional secret, force update,
+or Git history rewrite is introduced.
 
 The existing deploy workflow remains disabled until its later promotion
 checkpoint. If it is eventually promoted, its resolver requires the branch to
