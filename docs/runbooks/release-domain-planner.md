@@ -173,9 +173,11 @@ There is no runtime genesis fallback in the forward transport. The one-time
 RP0 migration creates the missing branch only after binding a successful
 historical runtime run, its immutable artifact digest, the Helm revision
 transition, the complete observation window, and the exact policy SHA. Branch
-creation uses the all-zero absent-object OID as `beforeOid`, the last verified
-runtime SHA as `afterOid`, and `force: false`. The RP0 policy SHA is not written
-as a runtime baseline.
+creation uses GitHub's atomic create-reference endpoint: an existing ref is a
+hard failure, no force parameter exists, and both the response and bounded
+readback must equal the last verified runtime SHA. This is the create operation
+whose protocol old OID is all zero. The RP0 policy SHA is not written as a
+runtime baseline, and no external PAT or local OAuth credential is used.
 
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.

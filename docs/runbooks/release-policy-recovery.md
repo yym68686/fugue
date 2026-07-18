@@ -55,11 +55,21 @@ revisions 718 and 720 have identical manifest and complete-values hashes.
 `.github/workflows/migrate-control-plane-release-baseline-rp0.yml` is hosted on
 GitHub and receives no cluster credentials. It binds the exact policy SHA and
 the authorized runtime evidence, observes unchanged API health, then creates
-the missing baseline branch with an all-zero absent `beforeOid`, the verified
-runtime SHA as `afterOid`, and `force: false`. It never records the policy SHA
-as a runtime baseline. Repository variables provide the four evidence values;
-the workflow independently re-reads and verifies the immutable run, artifact,
-deploy log, and observation samples before the single final ref mutation.
+the missing baseline branch with GitHub's atomic create-reference endpoint.
+That endpoint has no force parameter and rejects an existing ref, so its exact
+precondition is the absent (all-zero old OID) state. The response and a bounded
+independent readback must both identify the verified runtime SHA. It never
+records the policy SHA as a runtime baseline. Repository variables provide the
+four evidence values; the workflow independently re-reads and verifies the
+immutable run, artifact, deploy log, and observation samples before the single
+final ref mutation.
+
+Run `29625628436` proved all evidence and health gates but failed before any ref
+write because the Actions installation token cannot invoke GraphQL
+`updateRefs`; intent artifact `8423746274` preserves that failure. The lane was
+disabled and the absent-ref count remained zero. The forward fix uses the
+create-reference endpoint supported by the same job-scoped `contents: write`
+token; no PAT, local OAuth credential, or additional secret is introduced.
 
 The existing deploy workflow remains disabled until its later promotion
 checkpoint. If it is eventually promoted, its resolver requires the branch to

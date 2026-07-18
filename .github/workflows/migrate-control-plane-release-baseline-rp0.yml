@@ -55,14 +55,10 @@ jobs:
           read -r target_commit target_parent extra <<<"$(git rev-list --parents -n 1 "${GITHUB_SHA}")"
           [[ "${target_commit}" == "${GITHUB_SHA}" && -z "${extra:-}" ]]
           expected_changes=(
-            $'A\t.github/workflows/deploy-control-plane-v2.yml'
-            $'M\t.github/workflows/deploy-control-plane.yml'
             $'M\t.github/workflows/migrate-control-plane-release-baseline-rp0.yml'
             $'M\tdocs/runbooks/release-domain-planner.md'
             $'M\tdocs/runbooks/release-policy-recovery.md'
             $'M\tinternal/platformsafety/release_workflow_test.go'
-            $'M\tscripts/test_release_domain_workflow.sh'
-            $'M\tscripts/test_release_policy_recovery_workflow.sh'
           )
           mapfile -t actual_changes < <(git diff --no-renames --name-status "${target_parent}" "${GITHUB_SHA}")
           [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]]
@@ -304,9 +300,10 @@ jobs:
             [[ "${sample}" == '5' ]] || sleep 15
           done
 
-      # Final semantic step: create the branch at the last verified runtime
-      # SHA. The policy SHA is deliberately not recorded as a runtime baseline.
-      - name: Create forward-only runtime baseline with exact absent-ref CAS
+      # Final semantic step: the Git reference create endpoint is an atomic
+      # absent-ref write. It accepts no force parameter and fails if the branch
+      # already exists. The policy SHA is never recorded as a runtime baseline.
+      - name: Create forward-only runtime baseline with atomic absent-ref write
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           RUNTIME_BASELINE_SHA: ${{ steps.verify.outputs.runtime_baseline_sha }}
@@ -314,28 +311,29 @@ jobs:
         run: |
           set -euo pipefail
           readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
-          readonly absent_oid='0000000000000000000000000000000000000000'
-          [[ "${GITHUB_RUN_ATTEMPT}" == '1' && "${GITHUB_SHA}" == "${EXPECTED_SHA}" ]]
-          [[ "${RUNTIME_BASELINE_SHA}" =~ ^[0-9a-f]{40}$ ]]
-          [[ "${RUNTIME_BASELINE_SHA}" != "${GITHUB_SHA}" ]]
-          [[ "$(timeout --kill-after=2s 10s gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${GITHUB_SHA}" ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' && "${GITHUB_SHA}" == "${EXPECTED_SHA}" ]] || exit 1
+          [[ "${RUNTIME_BASELINE_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${RUNTIME_BASELINE_SHA}" != "${GITHUB_SHA}" ]] || exit 1
+          main_status=0
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || main_status=$?
+          [[ "${main_status}" == '0' && "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          baseline_status=0
           baseline_count="$(timeout --kill-after=2s 10s gh api \
             "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
-            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')"
-          [[ "${baseline_count}" == '0' ]]
-          repository_id="$(timeout --kill-after=2s 10s gh api graphql \
-            -f 'query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id}}' \
-            -f "owner=${GITHUB_REPOSITORY_OWNER}" -f "name=${GITHUB_REPOSITORY#*/}" \
-            --jq '.data.repository.id')"
-          [[ "${repository_id}" =~ ^[A-Za-z0-9_=-]+$ ]]
-          readonly mutation='mutation($repositoryId:ID!,$name:GitRefname!,$beforeOid:GitObjectID!,$afterOid:GitObjectID!,$force:Boolean!,$clientMutationId:String!){updateRefs(input:{repositoryId:$repositoryId,refUpdates:[{name:$name,beforeOid:$beforeOid,afterOid:$afterOid,force:$force}],clientMutationId:$clientMutationId}){clientMutationId}}'
-          mutation_id="fugue-rp0-baseline-${RUNTIME_BASELINE_SHA:0:12}"
-          mutation_status=0
-          echoed="$(timeout --kill-after=2s 10s gh api graphql \
-            -f "query=${mutation}" -f "repositoryId=${repository_id}" -f "name=${baseline_ref}" \
-            -f "beforeOid=${absent_oid}" -f "afterOid=${RUNTIME_BASELINE_SHA}" -F 'force=false' \
-            -f "clientMutationId=${mutation_id}" --jq '.data.updateRefs.clientMutationId')" || mutation_status=$?
+            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')" || baseline_status=$?
+          [[ "${baseline_status}" == '0' && "${baseline_count}" == '0' ]] || exit 1
+          create_status=0
+          created_response="$(
+            timeout --kill-after=2s 10s gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=${baseline_ref}" -f "sha=${RUNTIME_BASELINE_SHA}" \
+              --jq '[.ref,.object.sha,.object.type] | @tsv'
+          )" || create_status=$?
+          [[ "${create_status}" == '0' ]] || exit 1
+          read -r created_ref created_sha created_type extra <<<"${created_response}" || exit 1
+          [[ -z "${extra:-}" && "${created_ref}" == "${baseline_ref}" ]] || exit 1
+          [[ "${created_sha}" == "${RUNTIME_BASELINE_SHA}" && "${created_type}" == 'commit' ]] || exit 1
           observed='unknown'
           for attempt in 1 2 3 4 5; do
             observe_status=0
@@ -345,9 +343,4 @@ jobs:
             [[ "${observe_status}" == '0' && "${observed}" == "${RUNTIME_BASELINE_SHA}" ]] && break
             [[ "${attempt}" == '5' ]] || sleep 2
           done
-          [[ "${observed}" == "${RUNTIME_BASELINE_SHA}" ]]
-          if [[ "${mutation_status}" == '0' ]]; then
-            [[ "${echoed}" == "${mutation_id}" ]]
-          else
-            printf '%s\n' 'baseline CAS response was unavailable; exact bounded readback proved success' >&2
-          fi
+          [[ "${observed}" == "${RUNTIME_BASELINE_SHA}" ]] || exit 1

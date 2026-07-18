@@ -206,7 +206,7 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read RP0 migration workflow: %v", err)
 	}
-	assertWorkflowSourceDigest(t, data, "3584699c2e3bbab5429440e7b9aae8e961302bf5d2057b17470d3c127cb4407c")
+	assertWorkflowSourceDigest(t, data, "3dd1437655611671b7a779d8ceb0bdd8925f66fc5ccb13aa1f19a9f7e004d941")
 	var workflow struct {
 		On          map[string]yaml.Node `yaml:"on"`
 		Permissions map[string]string    `yaml:"permissions"`
@@ -276,10 +276,10 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
 		"migrate-forward-baseline": {Steps: job.Steps},
 	}, map[string]string{
-		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline": "728ba6a8c6554533468e1047b872df57ebc839e17466af0ce53ba84ff01dc24b",
-		"migrate-forward-baseline/Write RP0 migration intent evidence":                            "5017b4b6659ab138ecfedc6b611f45794abf0b7cb8b46b892145f45a5e4eab15",
-		"migrate-forward-baseline/Observe unchanged production health before baseline migration":  "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
-		"migrate-forward-baseline/Create forward-only runtime baseline with exact absent-ref CAS": "0575021c7e061aff7e83c38f42dc6b340c618b9cb2ad172aad834f1d20595138",
+		"migrate-forward-baseline/Verify exact migration authorization and last runtime baseline":    "4660e66046b93f5a6d5f40a2b86aca8f39a5388014bc51bdffa9c4c4a68d5a23",
+		"migrate-forward-baseline/Write RP0 migration intent evidence":                               "5017b4b6659ab138ecfedc6b611f45794abf0b7cb8b46b892145f45a5e4eab15",
+		"migrate-forward-baseline/Observe unchanged production health before baseline migration":     "cebde1718b247d6d5ca0bad326c5b44aa1695d28905a303aab6f42af26c0cfc9",
+		"migrate-forward-baseline/Create forward-only runtime baseline with atomic absent-ref write": "6912c9d17eca20a7c710303e584a675a1f83448a36300256f48ab978b2ec4dc5",
 	})
 	wantPermissions := map[string]string{"actions": "read", "contents": "write"}
 	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 20 || job.Environment != "production" ||
@@ -292,7 +292,7 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 		"Write RP0 migration intent evidence",
 		"Upload RP0 migration intent evidence",
 		"Observe unchanged production health before baseline migration",
-		"Create forward-only runtime baseline with exact absent-ref CAS",
+		"Create forward-only runtime baseline with atomic absent-ref write",
 	}
 	if len(job.Steps) != len(wantSteps) {
 		t.Fatalf("RP0 migration step inventory drifted: %+v", job.Steps)
@@ -380,22 +380,26 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	}
 	for _, required := range []string{
 		"readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'",
-		"readonly absent_oid='0000000000000000000000000000000000000000'",
-		"beforeOid:$beforeOid", "afterOid:$afterOid", "-F 'force=false'",
-		`-f "beforeOid=${absent_oid}"`, `-f "afterOid=${RUNTIME_BASELINE_SHA}"`,
+		"gh api --method POST",
+		`"repos/${GITHUB_REPOSITORY}/git/refs"`,
+		`-f "ref=${baseline_ref}" -f "sha=${RUNTIME_BASELINE_SHA}"`,
+		"[.ref,.object.sha,.object.type] | @tsv",
+		`"${created_ref}" == "${baseline_ref}"`,
+		`"${created_sha}" == "${RUNTIME_BASELINE_SHA}"`,
 		`"${observed}" == "${RUNTIME_BASELINE_SHA}"`,
 	} {
 		if !strings.Contains(writer.Run, required) {
 			t.Fatalf("RP0 writer must contain %q", required)
 		}
 	}
-	if strings.Count(writer.Run, "gh api") != 5 || strings.Count(writer.Run, "gh api graphql") != 2 ||
-		strings.Count(writer.Run, "updateRefs(") != 1 || strings.Count(writer.Run, "-F 'force=false'") != 1 {
+	if strings.Count(writer.Run, "gh api") != 4 || strings.Count(writer.Run, "gh api --method POST") != 1 ||
+		strings.Count(writer.Run, `"repos/${GITHUB_REPOSITORY}/git/refs"`) != 1 {
 		t.Fatalf("RP0 writer API inventory drifted:\n%s", writer.Run)
 	}
 	for _, forbidden := range []string{
-		"git push", "git update-ref", "--force-with-lease", "--method", " -X ",
-		"createRef", "deleteRef", "force=true", "curl ", "wget ",
+		"git push", "git update-ref", "--force-with-lease", "--method PATCH", "--method PUT",
+		"--method DELETE", " -X ", "graphql", "updateRefs", "createRef", "deleteRef",
+		"force=", "curl ", "wget ",
 	} {
 		if strings.Contains(writer.Run, forbidden) {
 			t.Fatalf("RP0 writer contains out-of-scope write capability %q", forbidden)
@@ -405,7 +409,8 @@ func TestRP0MigrationIsHostedEvidenceBoundAndWriterLast(t *testing.T) {
 	for _, forbidden := range []string{
 		"self-hosted", "${{ secrets.", "KUBECONFIG", "--kubeconfig",
 		"refs/tags/fugue-control-plane-release-baseline", "--force-with-lease",
-		"ssh ", "kubectl ", "docker ", "helm ", "--method", " -X ",
+		"ssh ", "kubectl ", "docker ", "helm ", "--method PATCH", "--method PUT",
+		"--method DELETE", " -X ",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("RP0 migration contains out-of-scope capability %q", forbidden)
