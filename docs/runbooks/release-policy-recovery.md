@@ -77,6 +77,46 @@ SHAs on success. Reader validation and absent-only ref creation remain later
 checkpoints. No PAT, local OAuth credential, additional secret, force update,
 or Git history rewrite is introduced.
 
+Materialization run `29630134601` completed successfully at policy SHA
+`7b3bf0507926934f102e8baabbaa376453407958`. Intent artifact `8425179886`
+has digest `sha256:403958307c8ecb8441c112986fc426738b4fe3c9f204af6d179c7a967a237250`;
+result artifact `8425189766` has digest
+`sha256:f929c0c798f8380ed55100bfe86f3667cdc618f6d5b7fcbcce2b27cecb857484`.
+The canonical object chain is blob `1ab84b0dc7783f6fbd5796ed477005ffa0ead963`,
+tree `f5fbfb2758190fbf5fddab701e625ef9046bb812`, and root commit
+`0aca9c8869d7ac064d22c9b1e5477f30de4813b4`; independent readback passed and
+the baseline ref remained absent. The one-shot materialization lane was then
+disabled.
+
+`.github/workflows/validate-control-plane-release-baseline-rp0.yml` is the
+following independent hosted, read-only checkpoint. It accepts the exact
+materialization run, artifact, digest, and root commit, revalidates the entire
+metadata result and object chain, rechecks the historical runtime run and its
+attribution artifact, proves runtime ancestry and unchanged health, and again
+requires the baseline ref to remain absent. Its evidence preserves both the
+materialization-result and historical-runtime run/artifact identifiers and
+digests. It cannot write Git objects or refs and has no cluster credentials.
+
+Unpublished reader candidate `f97c3441d55fda5fe7c80c6b540307ed2ff92b53`
+was invalidated after independent review found that it compared the metadata
+result artifact identity with the distinct historical runtime artifact
+identity. It was never pushed or dispatched. The replacement candidate was
+rebuilt from the last verified parent and treats the two provenance layers
+separately; the invalid candidate remains evidence only and must not be retried.
+Replacement candidate `aee5a8e2b03c1273fd69be3f8435a6fe65f6defd` was
+also invalidated before publication when real-evidence execution exposed a
+remaining `mapfile`/process-substitution dependency in the exact-change check.
+The next rebuild uses command substitution with explicit status propagation
+and a portable read loop; `aee5a8e2b03c1273fd69be3f8435a6fe65f6defd` must
+not be retried.
+Candidate `8995cd3575d34c44ae14b8a78452febdb520b37c` passed the
+complete test suite and real read-only provenance execution, but independent
+review invalidated it before publication: five `read` here-strings could mask
+a nonzero command-substitution status after valid-looking output. The next
+rebuild captures and checks each command status before parsing fields and adds
+an explicit valid-output-then-failure negative test. `8995cd3575d34c44ae14b8a78452febdb520b37c`
+is evidence only and must not be retried.
+
 The existing deploy workflow remains disabled until its later promotion
 checkpoint. If it is eventually promoted, its resolver requires the branch to
 exist and its hosted recorder advances the branch only with the exact observed

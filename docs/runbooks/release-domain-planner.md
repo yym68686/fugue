@@ -181,6 +181,15 @@ the immutable blob, tree, and commit objects are read back. Reader and
 ref-creation checkpoints follow separately. The RP0 policy SHA is not written
 as a runtime baseline, and no external PAT or local OAuth credential is used.
 
+The next checkpoint is a separate GitHub-hosted read-only consumer. It binds
+the exact successful materialization run and immutable result artifact, reads
+the root commit, one-file tree, and canonical blob through the Git database
+API, rechecks the historical runtime run and attribution artifact named by that
+result, proves runtime ancestry, observes unchanged production health, and
+requires the baseline ref to remain absent throughout. Its output evidence
+retains both provenance layers. It cannot create Git objects or refs and has no
+self-hosted or cluster path.
+
 The self-hosted deploy job preloads and verifies the exact Linux AMD64 and
 ARM64 command dependency graphs before building the private evidence tools.
 Evidence generation then uses that checksum-verified download cache as an

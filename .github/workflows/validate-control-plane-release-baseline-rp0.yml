@@ -1,0 +1,361 @@
+name: validate-control-plane-release-baseline-rp0
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact lowercase main SHA containing the hosted RP0 reader
+        required: true
+        type: string
+      metadata_commit_sha:
+        description: Exact orphan metadata commit produced by the prior checkpoint
+        required: true
+        type: string
+      metadata_result_run_id:
+        description: Exact successful metadata materialization run ID
+        required: true
+        type: string
+      metadata_result_artifact_id:
+        description: Exact immutable metadata result artifact ID
+        required: true
+        type: string
+      metadata_result_artifact_digest:
+        description: Exact sha256 digest of the metadata result artifact ZIP
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: fugue-release-policy-rp0-metadata-reader-v1
+  cancel-in-progress: false
+
+jobs:
+  validate-metadata-object:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout exact RP0 reader target without persisted credentials
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact reader authorization and prior metadata result
+        id: verify
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          METADATA_COMMIT_SHA: ${{ inputs.metadata_commit_sha }}
+          METADATA_RESULT_RUN_ID: ${{ inputs.metadata_result_run_id }}
+          METADATA_RESULT_ARTIFACT_ID: ${{ inputs.metadata_result_artifact_id }}
+          METADATA_RESULT_ARTIFACT_DIGEST: ${{ inputs.metadata_result_artifact_digest }}
+          HEALTH_URL: ${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          readonly baseline_ref='refs/heads/fugue-control-plane-release-baseline'
+          [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${GITHUB_REF}" == 'refs/heads/main' ]] || exit 1
+          [[ "${GITHUB_RUN_ATTEMPT}" == '1' ]] || exit 1
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ && "${EXPECTED_SHA}" == "${GITHUB_SHA}" ]] || exit 1
+          [[ "${METADATA_COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "${METADATA_RESULT_RUN_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${METADATA_RESULT_ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "${METADATA_RESULT_ARTIFACT_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$(git rev-parse --verify 'HEAD^{commit}')" == "${GITHUB_SHA}" ]] || exit 1
+          target_parent_fields="$(git rev-list --parents -n 1 "${GITHUB_SHA}")" || exit 1
+          read -r target_commit target_parent extra <<<"${target_parent_fields}" || exit 1
+          [[ "${target_commit}" == "${GITHUB_SHA}" && -z "${extra:-}" ]] || exit 1
+          expected_changes=(
+            $'A\t.github/workflows/validate-control-plane-release-baseline-rp0.yml'
+            $'M\tdocs/runbooks/release-domain-planner.md'
+            $'M\tdocs/runbooks/release-policy-recovery.md'
+            $'M\tinternal/platformsafety/release_workflow_test.go'
+          )
+          actual_changes_output="$(git diff --no-renames --name-status "${target_parent}" "${GITHUB_SHA}")" || exit 1
+          actual_changes=()
+          while IFS= read -r changed_path; do
+            actual_changes+=("${changed_path}")
+          done <<<"${actual_changes_output}"
+          [[ "${#actual_changes[@]}" == "${#expected_changes[@]}" ]] || exit 1
+          for index in "${!expected_changes[@]}"; do
+            [[ "${actual_changes[index]}" == "${expected_changes[index]}" ]] || exit 1
+          done
+          git diff --check "${target_parent}" "${GITHUB_SHA}" || exit 1
+
+          main_head="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" || exit 1
+          [[ "${main_head}" == "${GITHUB_SHA}" ]] || exit 1
+          baseline_count="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')" || exit 1
+          [[ "${baseline_count}" == '0' ]] || exit 1
+
+          result_run_fields="$(
+            timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${METADATA_RESULT_RUN_ID}" \
+              --jq '[.head_sha,.status,.conclusion,.run_attempt,.event,.path] | @tsv'
+          )" || exit 1
+          IFS=$'\t' read -r result_head result_status result_conclusion result_attempt result_event result_path extra \
+            <<<"${result_run_fields}" || exit 1
+          [[ -z "${extra:-}" && "${result_head}" == "${target_parent}" ]] || exit 1
+          [[ "${result_status}" == 'completed' && "${result_conclusion}" == 'success' ]] || exit 1
+          [[ "${result_attempt}" == '1' && "${result_event}" == 'workflow_dispatch' ]] || exit 1
+          [[ "${result_path}" == '.github/workflows/migrate-control-plane-release-baseline-rp0.yml' ]] || exit 1
+          expected_artifact="fugue-control-plane-rp0-metadata-object-${METADATA_RESULT_RUN_ID}-${result_attempt}"
+          metadata_artifact_fields="$(
+            timeout --kill-after=2s 10s gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${METADATA_RESULT_RUN_ID}/artifacts" \
+              --jq "[.artifacts[] | select(.id == ${METADATA_RESULT_ARTIFACT_ID} and .name == \"${expected_artifact}\")] | if length == 1 then [.[0].id,.[0].digest,.[0].name,.[0].expired] | @tsv else error(\"missing or ambiguous metadata result artifact\") end"
+          )" || exit 1
+          IFS=$'\t' read -r artifact_id artifact_digest artifact_name artifact_expired extra \
+            <<<"${metadata_artifact_fields}" || exit 1
+          [[ -z "${extra:-}" && "${artifact_id}" == "${METADATA_RESULT_ARTIFACT_ID}" ]] || exit 1
+          [[ "${artifact_digest}" == "${METADATA_RESULT_ARTIFACT_DIGEST}" ]] || exit 1
+          [[ "${artifact_name}" == "${expected_artifact}" && "${artifact_expired}" == 'false' ]] || exit 1
+
+          evidence_tmp="$(mktemp -d)" || exit 1
+          trap 'rm -rf "${evidence_tmp}"' EXIT
+          timeout --kill-after=2s 20s gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts/${METADATA_RESULT_ARTIFACT_ID}/zip" \
+            >"${evidence_tmp}/metadata-result.zip" || exit 1
+          [[ "sha256:$(sha256sum "${evidence_tmp}/metadata-result.zip" | awk '{print $1}')" == \
+             "${METADATA_RESULT_ARTIFACT_DIGEST}" ]] || exit 1
+          unzip -q "${evidence_tmp}/metadata-result.zip" -d "${evidence_tmp}/content" || exit 1
+          result_fields="$(python3 - "${evidence_tmp}/content" "${target_parent}" \
+            "${METADATA_RESULT_RUN_ID}" "${METADATA_COMMIT_SHA}" <<'PY'
+          import datetime, json, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          paths = list(root.rglob("*"))
+          if set(paths) != {root / "rp0-migration.json"} or any(path.is_symlink() for path in paths):
+              raise SystemExit("metadata result artifact inventory drifted")
+          value = json.loads((root / "rp0-migration.json").read_text(encoding="utf-8"))
+          expected_keys = {
+              "baseline_transition", "cluster_mutation_attempted", "git_history_rewritten",
+              "metadata_blob_sha", "metadata_commit_sha", "metadata_ref_created", "metadata_tree_sha",
+              "policy_sha", "recorded_at", "run_attempt", "run_id", "runtime_artifact_digest",
+              "runtime_artifact_id", "runtime_baseline_ref", "runtime_baseline_sha", "runtime_run_id",
+              "schema_version", "workflow",
+          }
+          if set(value) != expected_keys:
+              raise SystemExit("metadata result evidence key set drifted")
+          if value["baseline_transition"] != "metadata-object-materialized-ref-absent":
+              raise SystemExit("metadata result transition drifted")
+          if value["cluster_mutation_attempted"] is not False or value["git_history_rewritten"] is not False:
+              raise SystemExit("metadata result records an out-of-scope mutation")
+          if value["metadata_ref_created"] is not False or value["runtime_baseline_ref"] != "refs/heads/fugue-control-plane-release-baseline":
+              raise SystemExit("metadata result ref boundary drifted")
+          if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+              raise SystemExit("metadata result schema version drifted")
+          if value["workflow"] != "migrate-control-plane-release-baseline-rp0":
+              raise SystemExit("metadata result identity drifted")
+          if value["policy_sha"] != sys.argv[2] or value["run_id"] != sys.argv[3] or value["run_attempt"] != "1":
+              raise SystemExit("metadata result policy attribution drifted")
+          if value["metadata_commit_sha"] != sys.argv[4]:
+              raise SystemExit("metadata result commit binding drifted")
+          sha = re.compile(r"^[0-9a-f]{40}$")
+          for key in ("metadata_blob_sha", "metadata_tree_sha", "metadata_commit_sha", "runtime_baseline_sha"):
+              if not isinstance(value[key], str) or not sha.fullmatch(value[key]):
+                  raise SystemExit(f"metadata result {key} is malformed")
+          if not isinstance(value["runtime_run_id"], str) or not re.fullmatch(r"[1-9][0-9]*", value["runtime_run_id"]):
+              raise SystemExit("metadata result runtime run ID is malformed")
+          if not isinstance(value["runtime_artifact_id"], str) or not re.fullmatch(r"[1-9][0-9]*", value["runtime_artifact_id"]):
+              raise SystemExit("metadata result runtime artifact ID is malformed")
+          if not isinstance(value["runtime_artifact_digest"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["runtime_artifact_digest"]):
+              raise SystemExit("metadata result runtime artifact digest is malformed")
+          recorded_at_value = value["recorded_at"]
+          if not isinstance(recorded_at_value, str) or not re.fullmatch(
+              r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?\+00:00",
+              recorded_at_value,
+          ):
+              raise SystemExit("metadata result recorded_at is not canonical RFC3339 UTC")
+          try:
+              recorded_at = datetime.datetime.fromisoformat(recorded_at_value)
+          except (TypeError, ValueError):
+              raise SystemExit("metadata result recorded_at is malformed")
+          if recorded_at.utcoffset() != datetime.timedelta(0):
+              raise SystemExit("metadata result recorded_at is not UTC")
+          print("\t".join((
+              value["runtime_baseline_sha"], value["runtime_run_id"],
+              value["runtime_artifact_id"], value["runtime_artifact_digest"],
+              value["metadata_blob_sha"], value["metadata_tree_sha"],
+          )))
+          PY
+          )" || exit 1
+          IFS=$'\t' read -r runtime_baseline_sha runtime_run_id runtime_artifact_id \
+            runtime_artifact_digest metadata_blob_sha metadata_tree_sha extra \
+            <<<"${result_fields}" || exit 1
+          [[ -z "${extra:-}" ]] || exit 1
+          {
+            printf 'runtime_baseline_sha=%s\n' "${runtime_baseline_sha}"
+            printf 'runtime_run_id=%s\n' "${runtime_run_id}"
+            printf 'runtime_artifact_id=%s\n' "${runtime_artifact_id}"
+            printf 'runtime_artifact_digest=%s\n' "${runtime_artifact_digest}"
+            printf 'metadata_blob_sha=%s\n' "${metadata_blob_sha}"
+            printf 'metadata_tree_sha=%s\n' "${metadata_tree_sha}"
+            printf 'metadata_commit_sha=%s\n' "${METADATA_COMMIT_SHA}"
+            printf 'health_url=%s\n' "${HEALTH_URL}"
+          } >>"${GITHUB_OUTPUT}" || exit 1
+
+      - name: Validate canonical metadata object chain
+        env:
+          RUNTIME_BASELINE_SHA: ${{ steps.verify.outputs.runtime_baseline_sha }}
+          RUNTIME_RUN_ID: ${{ steps.verify.outputs.runtime_run_id }}
+          RUNTIME_ARTIFACT_ID: ${{ steps.verify.outputs.runtime_artifact_id }}
+          RUNTIME_ARTIFACT_DIGEST: ${{ steps.verify.outputs.runtime_artifact_digest }}
+          METADATA_BLOB_SHA: ${{ steps.verify.outputs.metadata_blob_sha }}
+          METADATA_TREE_SHA: ${{ steps.verify.outputs.metadata_tree_sha }}
+          METADATA_COMMIT_SHA: ${{ steps.verify.outputs.metadata_commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          object_tmp="$(mktemp -d)" || exit 1
+          trap 'rm -rf "${object_tmp}"' EXIT
+          runtime_run_fields="$(
+              timeout --kill-after=2s 10s gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${RUNTIME_RUN_ID}" \
+                --jq '[.head_sha,.status,.conclusion,.run_attempt,.event,.path,.updated_at] | @tsv'
+          )" || exit 1
+          IFS=$'\t' read -r runtime_head runtime_status runtime_conclusion runtime_attempt runtime_event \
+            runtime_path runtime_completed_at extra <<<"${runtime_run_fields}" || exit 1
+          [[ -z "${extra:-}" && "${runtime_head}" == "${RUNTIME_BASELINE_SHA}" ]] || exit 1
+          [[ "${runtime_status}" == 'completed' && "${runtime_conclusion}" == 'success' ]] || exit 1
+          [[ "${runtime_attempt}" == '1' && "${runtime_event}" == 'push' ]] || exit 1
+          [[ "${runtime_path}" == '.github/workflows/deploy-control-plane.yml' ]] || exit 1
+          [[ "${runtime_completed_at}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || exit 1
+          expected_runtime_artifact="fugue-control-plane-release-attribution-${RUNTIME_RUN_ID}-${runtime_attempt}"
+          runtime_artifact_fields="$(
+              timeout --kill-after=2s 10s gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${RUNTIME_RUN_ID}/artifacts" \
+                --jq "[.artifacts[] | select(.id == ${RUNTIME_ARTIFACT_ID} and .name == \"${expected_runtime_artifact}\")] | if length == 1 then [.[0].id,.[0].digest,.[0].name,.[0].expired] | @tsv else error(\"missing or ambiguous runtime baseline artifact\") end"
+          )" || exit 1
+          IFS=$'\t' read -r observed_runtime_artifact_id observed_runtime_artifact_digest \
+            observed_runtime_artifact_name observed_runtime_artifact_expired extra \
+            <<<"${runtime_artifact_fields}" || exit 1
+          [[ -z "${extra:-}" && "${observed_runtime_artifact_id}" == "${RUNTIME_ARTIFACT_ID}" ]] || exit 1
+          [[ "${observed_runtime_artifact_digest}" == "${RUNTIME_ARTIFACT_DIGEST}" ]] || exit 1
+          [[ "${observed_runtime_artifact_name}" == "${expected_runtime_artifact}" && \
+             "${observed_runtime_artifact_expired}" == 'false' ]] || exit 1
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/blobs/${METADATA_BLOB_SHA}" \
+            >"${object_tmp}/blob.json" || exit 1
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/trees/${METADATA_TREE_SHA}" \
+            >"${object_tmp}/tree.json" || exit 1
+          timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/commits/${METADATA_COMMIT_SHA}" \
+            >"${object_tmp}/commit.json" || exit 1
+          python3 - "${object_tmp}" "${RUNTIME_BASELINE_SHA}" "${runtime_completed_at}" \
+            "${METADATA_BLOB_SHA}" "${METADATA_TREE_SHA}" "${METADATA_COMMIT_SHA}" <<'PY' || exit 1
+          import base64, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          runtime_sha, completed_at, blob_sha, tree_sha, commit_sha = sys.argv[2:]
+          blob = json.loads((root / "blob.json").read_text(encoding="utf-8"))
+          tree = json.loads((root / "tree.json").read_text(encoding="utf-8"))
+          commit = json.loads((root / "commit.json").read_text(encoding="utf-8"))
+          metadata = {"previous_baseline_object_sha": None, "runtime_sha": runtime_sha, "schema_version": 1}
+          canonical = json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n"
+          encoded = blob.get("content")
+          if blob.get("sha") != blob_sha or blob.get("encoding") != "base64" or not isinstance(encoded, str):
+              raise SystemExit("metadata blob identity drifted")
+          if base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8") != canonical:
+              raise SystemExit("metadata blob content drifted")
+          actual_tree = [{key: entry.get(key) for key in ("path", "mode", "type", "sha")} for entry in tree.get("tree", [])]
+          expected_tree = [{"path": "fugue-runtime-baseline.json", "mode": "100644", "type": "blob", "sha": blob_sha}]
+          if tree.get("sha") != tree_sha or tree.get("truncated") is not False or actual_tree != expected_tree:
+              raise SystemExit("metadata tree drifted")
+          identity = {"name": "Fugue Release Baseline", "email": "release-baseline@fugue.invalid", "date": completed_at}
+          if commit.get("sha") != commit_sha or commit.get("message") != f"fugue runtime baseline {runtime_sha}":
+              raise SystemExit("metadata commit identity drifted")
+          if commit.get("tree", {}).get("sha") != tree_sha or commit.get("parents") != []:
+              raise SystemExit("metadata commit is not the exact root topology")
+          for field in ("author", "committer"):
+              if {key: commit.get(field, {}).get(key) for key in identity} != identity:
+                  raise SystemExit(f"metadata commit {field} drifted")
+          PY
+          git cat-file -e "${RUNTIME_BASELINE_SHA}^{commit}" || exit 1
+          git merge-base --is-ancestor "${RUNTIME_BASELINE_SHA}" "${GITHUB_SHA}" || exit 1
+          baseline_count="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')" || exit 1
+          [[ "${baseline_count}" == '0' ]] || exit 1
+
+      - name: Observe unchanged production health after metadata validation
+        env:
+          HEALTH_URL: ${{ steps.verify.outputs.health_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for sample in 1 2 3 4 5; do
+            response="$(curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 10 "${HEALTH_URL}")" || exit 1
+            python3 - "${response}" <<'PY' || exit 1
+          import json, sys
+          if json.loads(sys.argv[1]) != {"status": "ok"}:
+              raise SystemExit("production health payload drifted")
+          PY
+            [[ "${sample}" == '5' ]] || sleep 15
+          done
+          baseline_count="$(timeout --kill-after=2s 10s gh api \
+            "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/fugue-control-plane-release-baseline" \
+            --jq '[.[] | select(.ref == "refs/heads/fugue-control-plane-release-baseline")] | length')" || exit 1
+          [[ "${baseline_count}" == '0' ]] || exit 1
+
+      - name: Write RP0 metadata reader evidence
+        env:
+          RUNTIME_BASELINE_SHA: ${{ steps.verify.outputs.runtime_baseline_sha }}
+          RUNTIME_RUN_ID: ${{ steps.verify.outputs.runtime_run_id }}
+          RUNTIME_ARTIFACT_ID: ${{ steps.verify.outputs.runtime_artifact_id }}
+          RUNTIME_ARTIFACT_DIGEST: ${{ steps.verify.outputs.runtime_artifact_digest }}
+          METADATA_BLOB_SHA: ${{ steps.verify.outputs.metadata_blob_sha }}
+          METADATA_TREE_SHA: ${{ steps.verify.outputs.metadata_tree_sha }}
+          METADATA_COMMIT_SHA: ${{ steps.verify.outputs.metadata_commit_sha }}
+          METADATA_RESULT_RUN_ID: ${{ inputs.metadata_result_run_id }}
+          METADATA_RESULT_ARTIFACT_ID: ${{ inputs.metadata_result_artifact_id }}
+          METADATA_RESULT_ARTIFACT_DIGEST: ${{ inputs.metadata_result_artifact_digest }}
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/fugue-rp0-metadata-reader"
+          install -d -m 0700 "${evidence_dir}"
+          umask 077
+          python3 - "${evidence_dir}/rp0-metadata-reader.json" <<'PY' || exit 1
+          import json, os, sys
+          from datetime import datetime, timezone
+          payload = {
+              "schema_version": 1,
+              "workflow": "validate-control-plane-release-baseline-rp0",
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "policy_sha": os.environ["GITHUB_SHA"],
+              "runtime_baseline_sha": os.environ["RUNTIME_BASELINE_SHA"],
+              "runtime_run_id": os.environ["RUNTIME_RUN_ID"],
+              "runtime_artifact_id": os.environ["RUNTIME_ARTIFACT_ID"],
+              "runtime_artifact_digest": os.environ["RUNTIME_ARTIFACT_DIGEST"],
+              "metadata_blob_sha": os.environ["METADATA_BLOB_SHA"],
+              "metadata_tree_sha": os.environ["METADATA_TREE_SHA"],
+              "metadata_commit_sha": os.environ["METADATA_COMMIT_SHA"],
+              "metadata_result_run_id": os.environ["METADATA_RESULT_RUN_ID"],
+              "metadata_result_artifact_id": os.environ["METADATA_RESULT_ARTIFACT_ID"],
+              "metadata_result_artifact_digest": os.environ["METADATA_RESULT_ARTIFACT_DIGEST"],
+              "metadata_chain_valid": True,
+              "metadata_ref_created": False,
+              "cluster_mutation_attempted": False,
+              "observed_at": datetime.now(timezone.utc).isoformat(),
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Upload RP0 metadata reader evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-control-plane-rp0-metadata-reader-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-rp0-metadata-reader/rp0-metadata-reader.json
+          if-no-files-found: error
+          retention-days: 90

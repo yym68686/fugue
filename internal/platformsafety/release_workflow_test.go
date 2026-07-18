@@ -2,8 +2,10 @@ package platformsafety
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -458,6 +460,401 @@ func TestRP0MetadataObjectMaterializationIsHostedEvidenceBoundAndRefFree(t *test
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("RP0 migration contains out-of-scope capability %q", forbidden)
 		}
+	}
+}
+
+func TestRP0MetadataReaderIsHostedReadOnlyAndEvidenceBound(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "validate-control-plane-release-baseline-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 metadata reader workflow: %v", err)
+	}
+	assertWorkflowSourceDigest(t, data, "343665adfa8a23979958b7f9e28936d6209b6ea0cadafa5b8277f7ed563b2cc3")
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions map[string]string    `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string                `yaml:"runs-on"`
+			TimeoutMinutes  int                   `yaml:"timeout-minutes"`
+			Environment     string                `yaml:"environment"`
+			Permissions     map[string]string     `yaml:"permissions"`
+			ContinueOnError bool                  `yaml:"continue-on-error"`
+			Steps           []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 metadata reader workflow: %v", err)
+	}
+	rootNode := workflowDocumentMapping(t, data)
+	assertWorkflowMappingKeys(t, rootNode, "name", "on", "permissions", "concurrency", "jobs")
+	assertWorkflowMappingKeys(t, workflowMappingValue(t, rootNode, "concurrency"), "group", "cancel-in-progress")
+	jobsNode := workflowMappingValue(t, rootNode, "jobs")
+	assertWorkflowMappingKeys(t, jobsNode, "validate-metadata-object")
+	jobNode := workflowMappingValue(t, jobsNode, "validate-metadata-object")
+	assertWorkflowMappingKeys(t, jobNode, "runs-on", "timeout-minutes", "environment", "permissions", "steps")
+	stepsNode := workflowMappingValue(t, jobNode, "steps")
+	if stepsNode.Kind != yaml.SequenceNode || len(stepsNode.Content) != 6 {
+		t.Fatalf("RP0 metadata reader step node inventory drifted: %+v", stepsNode)
+	}
+	wantStepKeys := [][]string{
+		{"name", "uses", "with"},
+		{"name", "id", "env", "run"},
+		{"name", "env", "run"},
+		{"name", "env", "run"},
+		{"name", "env", "run"},
+		{"name", "uses", "with"},
+	}
+	for index, stepNode := range stepsNode.Content {
+		assertWorkflowMappingKeys(t, stepNode, wantStepKeys[index]...)
+	}
+	dispatchNode, ok := workflow.On["workflow_dispatch"]
+	if !ok || len(workflow.On) != 1 {
+		t.Fatalf("RP0 metadata reader must be dispatch-only: %+v", workflow.On)
+	}
+	var dispatch releaseWorkflowDispatchTrigger
+	if err := dispatchNode.Decode(&dispatch); err != nil {
+		t.Fatalf("decode RP0 metadata reader dispatch: %v", err)
+	}
+	wantInputs := []string{
+		"expected_sha", "metadata_commit_sha", "metadata_result_run_id",
+		"metadata_result_artifact_id", "metadata_result_artifact_digest",
+	}
+	if len(dispatch.Inputs) != len(wantInputs) {
+		t.Fatalf("RP0 metadata reader input inventory drifted: %+v", dispatch.Inputs)
+	}
+	for _, name := range wantInputs {
+		node, exists := dispatch.Inputs[name]
+		if !exists {
+			t.Fatalf("RP0 metadata reader input %s is absent", name)
+		}
+		var input releaseWorkflowDispatchInput
+		if err := node.Decode(&input); err != nil {
+			t.Fatalf("decode RP0 metadata reader input %s: %v", name, err)
+		}
+		if !input.Required || input.Type != "string" || input.Default != nil {
+			t.Fatalf("RP0 metadata reader input %s must be required string without default: %+v", name, input)
+		}
+	}
+	if len(workflow.Permissions) != 0 || len(workflow.Jobs) != 1 {
+		t.Fatalf("RP0 metadata reader must have empty top permissions and one job: %+v", workflow)
+	}
+	job, ok := workflow.Jobs["validate-metadata-object"]
+	if !ok {
+		t.Fatal("RP0 metadata reader job is absent")
+	}
+	wantPermissions := map[string]string{"actions": "read", "contents": "read"}
+	if job.RunsOn != "ubuntu-latest" || job.TimeoutMinutes != 20 || job.Environment != "production" ||
+		job.ContinueOnError || !reflect.DeepEqual(job.Permissions, wantPermissions) {
+		t.Fatalf("RP0 metadata reader job boundary drifted: %+v", job)
+	}
+	wantSteps := []string{
+		"Checkout exact RP0 reader target without persisted credentials",
+		"Verify exact reader authorization and prior metadata result",
+		"Validate canonical metadata object chain",
+		"Observe unchanged production health after metadata validation",
+		"Write RP0 metadata reader evidence",
+		"Upload RP0 metadata reader evidence",
+	}
+	if len(job.Steps) != len(wantSteps) {
+		t.Fatalf("RP0 metadata reader step inventory drifted: %+v", job.Steps)
+	}
+	for index, name := range wantSteps {
+		if job.Steps[index].Name != name || job.Steps[index].If != "" || job.Steps[index].ContinueOnError {
+			t.Fatalf("RP0 metadata reader step %d drifted: %+v", index, job.Steps[index])
+		}
+	}
+	checkout := job.Steps[0]
+	if checkout.Uses != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+		checkout.With["ref"] != "${{ github.sha }}" || checkout.With["fetch-depth"] != "0" ||
+		checkout.With["persist-credentials"] != "false" {
+		t.Fatalf("RP0 metadata reader checkout drifted: %+v", checkout)
+	}
+	assertWorkflowRunDigests(t, map[string]releaseWorkflowJob{
+		"validate-metadata-object": {Steps: job.Steps},
+	}, map[string]string{
+		"validate-metadata-object/Verify exact reader authorization and prior metadata result":   "f4991c89f5042d8117b8d0fc5448920c9402f04821e00ff47db30c943cee705c",
+		"validate-metadata-object/Validate canonical metadata object chain":                      "eb12f66733ac38727f048109710ee4376a7da8500e811f264811e76cfadc1fa8",
+		"validate-metadata-object/Observe unchanged production health after metadata validation": "78d2c64060feeb66255d0004f7c52068a66b305c49527dda984a9752c3a43d7e",
+		"validate-metadata-object/Write RP0 metadata reader evidence":                            "9353540efaf7a4c3ca97f76b2b48db62fd6e4e31676c5a993bb97083489abb53",
+	})
+	verify := job.Steps[1]
+	wantVerifyEnv := map[string]string{
+		"EXPECTED_SHA":                    "${{ inputs.expected_sha }}",
+		"METADATA_COMMIT_SHA":             "${{ inputs.metadata_commit_sha }}",
+		"METADATA_RESULT_RUN_ID":          "${{ inputs.metadata_result_run_id }}",
+		"METADATA_RESULT_ARTIFACT_ID":     "${{ inputs.metadata_result_artifact_id }}",
+		"METADATA_RESULT_ARTIFACT_DIGEST": "${{ inputs.metadata_result_artifact_digest }}",
+		"HEALTH_URL":                      "${{ vars.FUGUE_CONTROL_PLANE_RP0_HEALTH_URL || 'https://api.fugue.pro/healthz' }}",
+		"GH_TOKEN":                        "${{ github.token }}",
+	}
+	if verify.ID != "verify" || !reflect.DeepEqual(verify.Env, wantVerifyEnv) {
+		t.Fatalf("RP0 metadata reader verifier drifted: %+v", verify)
+	}
+	for _, required := range []string{
+		`$'A\t.github/workflows/validate-control-plane-release-baseline-rp0.yml'`,
+		"metadata-object-materialized-ref-absent", "missing or ambiguous metadata result artifact",
+		"metadata result artifact inventory drifted", "metadata result commit binding drifted",
+		"metadata result schema version drifted", "metadata result recorded_at is not canonical RFC3339 UTC",
+		"sha256:$(sha256sum", "runtime_baseline_sha=%s", "runtime_artifact_digest=%s", "metadata_tree_sha=%s",
+	} {
+		if !strings.Contains(verify.Run, required) {
+			t.Fatalf("RP0 metadata reader verifier must contain %q", required)
+		}
+	}
+	validate := job.Steps[2]
+	wantValidateEnv := map[string]string{
+		"RUNTIME_BASELINE_SHA":    "${{ steps.verify.outputs.runtime_baseline_sha }}",
+		"RUNTIME_RUN_ID":          "${{ steps.verify.outputs.runtime_run_id }}",
+		"RUNTIME_ARTIFACT_ID":     "${{ steps.verify.outputs.runtime_artifact_id }}",
+		"RUNTIME_ARTIFACT_DIGEST": "${{ steps.verify.outputs.runtime_artifact_digest }}",
+		"METADATA_BLOB_SHA":       "${{ steps.verify.outputs.metadata_blob_sha }}",
+		"METADATA_TREE_SHA":       "${{ steps.verify.outputs.metadata_tree_sha }}",
+		"METADATA_COMMIT_SHA":     "${{ steps.verify.outputs.metadata_commit_sha }}",
+		"GH_TOKEN":                "${{ github.token }}",
+	}
+	if !reflect.DeepEqual(validate.Env, wantValidateEnv) {
+		t.Fatalf("RP0 metadata reader object validator environment drifted: got %+v want %+v", validate.Env, wantValidateEnv)
+	}
+	for _, required := range []string{
+		`"repos/${GITHUB_REPOSITORY}/actions/runs/${RUNTIME_RUN_ID}"`,
+		`"repos/${GITHUB_REPOSITORY}/actions/runs/${RUNTIME_RUN_ID}/artifacts"`,
+		"missing or ambiguous runtime baseline artifact", "${runtime_head}", "${RUNTIME_ARTIFACT_DIGEST}",
+		`"repos/${GITHUB_REPOSITORY}/git/blobs/${METADATA_BLOB_SHA}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/trees/${METADATA_TREE_SHA}"`,
+		`"repos/${GITHUB_REPOSITORY}/git/commits/${METADATA_COMMIT_SHA}"`,
+		`"previous_baseline_object_sha": None`, `commit.get("parents") != []`,
+		"git merge-base --is-ancestor", `"${baseline_count}" == '0'`,
+	} {
+		if !strings.Contains(validate.Run, required) {
+			t.Fatalf("RP0 metadata reader object validator must contain %q", required)
+		}
+	}
+	observe := job.Steps[3]
+	for _, required := range []string{"for sample in 1 2 3 4 5", "sleep 15", `{"status": "ok"}`, `"${baseline_count}" == '0'`} {
+		if !strings.Contains(observe.Run, required) {
+			t.Fatalf("RP0 metadata reader observation must contain %q", required)
+		}
+	}
+	evidence := job.Steps[4]
+	wantEvidenceEnv := map[string]string{
+		"RUNTIME_BASELINE_SHA":            "${{ steps.verify.outputs.runtime_baseline_sha }}",
+		"RUNTIME_RUN_ID":                  "${{ steps.verify.outputs.runtime_run_id }}",
+		"RUNTIME_ARTIFACT_ID":             "${{ steps.verify.outputs.runtime_artifact_id }}",
+		"RUNTIME_ARTIFACT_DIGEST":         "${{ steps.verify.outputs.runtime_artifact_digest }}",
+		"METADATA_BLOB_SHA":               "${{ steps.verify.outputs.metadata_blob_sha }}",
+		"METADATA_TREE_SHA":               "${{ steps.verify.outputs.metadata_tree_sha }}",
+		"METADATA_COMMIT_SHA":             "${{ steps.verify.outputs.metadata_commit_sha }}",
+		"METADATA_RESULT_RUN_ID":          "${{ inputs.metadata_result_run_id }}",
+		"METADATA_RESULT_ARTIFACT_ID":     "${{ inputs.metadata_result_artifact_id }}",
+		"METADATA_RESULT_ARTIFACT_DIGEST": "${{ inputs.metadata_result_artifact_digest }}",
+	}
+	if !reflect.DeepEqual(evidence.Env, wantEvidenceEnv) {
+		t.Fatalf("RP0 metadata reader evidence environment drifted: got %+v want %+v", evidence.Env, wantEvidenceEnv)
+	}
+	for _, required := range []string{
+		`"runtime_run_id": os.environ["RUNTIME_RUN_ID"]`,
+		`"runtime_artifact_digest": os.environ["RUNTIME_ARTIFACT_DIGEST"]`,
+		`"metadata_result_run_id": os.environ["METADATA_RESULT_RUN_ID"]`,
+		`"metadata_result_artifact_digest": os.environ["METADATA_RESULT_ARTIFACT_DIGEST"]`,
+	} {
+		if !strings.Contains(evidence.Run, required) {
+			t.Fatalf("RP0 metadata reader evidence must contain %q", required)
+		}
+	}
+	upload := job.Steps[5]
+	if upload.Uses != "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" ||
+		upload.With["name"] != "fugue-control-plane-rp0-metadata-reader-${{ github.run_id }}-${{ github.run_attempt }}" ||
+		upload.With["path"] != "${{ runner.temp }}/fugue-rp0-metadata-reader/rp0-metadata-reader.json" ||
+		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != "90" {
+		t.Fatalf("RP0 metadata reader upload drifted: %+v", upload)
+	}
+	source := string(data)
+	for _, forbidden := range []string{
+		"self-hosted", "${{ secrets.", "KUBECONFIG", "--kubeconfig", "ssh ", "kubectl ", "docker ", "helm ",
+		"--method", " -X ", "graphql", "git push", "git update-ref", "git/refs", "force=", "curl --request",
+		"mapfile", "< <(",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("RP0 metadata reader contains out-of-scope capability %q", forbidden)
+		}
+	}
+}
+
+func TestRP0MetadataReaderEvidenceValidatorAcceptsPublishedFixtureAndRejectsDrift(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "validate-control-plane-release-baseline-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 metadata reader workflow: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 metadata reader workflow: %v", err)
+	}
+	steps := workflow.Jobs["validate-metadata-object"].Steps
+	if len(steps) < 2 {
+		t.Fatalf("RP0 metadata reader verifier step is absent: %+v", steps)
+	}
+	const commandMarker = `result_fields="$(python3 - `
+	const heredocMarker = `<<'PY'` + "\n"
+	start := strings.Index(steps[1].Run, commandMarker)
+	if start < 0 {
+		t.Fatal("RP0 metadata reader validator command is absent")
+	}
+	heredocOffset := strings.Index(steps[1].Run[start:], heredocMarker)
+	if heredocOffset < 0 {
+		t.Fatal("RP0 metadata reader validator heredoc is absent")
+	}
+	start += heredocOffset + len(heredocMarker)
+	endOffset := strings.Index(steps[1].Run[start:], "\nPY\n")
+	if endOffset < 0 {
+		t.Fatal("RP0 metadata reader validator heredoc terminator is absent")
+	}
+	validator := steps[1].Run[start : start+endOffset]
+
+	fixture := map[string]any{
+		"baseline_transition":        "metadata-object-materialized-ref-absent",
+		"cluster_mutation_attempted": false,
+		"git_history_rewritten":      false,
+		"metadata_blob_sha":          "1ab84b0dc7783f6fbd5796ed477005ffa0ead963",
+		"metadata_commit_sha":        "0aca9c8869d7ac064d22c9b1e5477f30de4813b4",
+		"metadata_ref_created":       false,
+		"metadata_tree_sha":          "f5fbfb2758190fbf5fddab701e625ef9046bb812",
+		"policy_sha":                 "7b3bf0507926934f102e8baabbaa376453407958",
+		"recorded_at":                "2026-07-18T04:11:34.057929+00:00",
+		"run_attempt":                "1",
+		"run_id":                     "29630134601",
+		"runtime_artifact_digest":    "sha256:4ff05d34019da02bc10dd8f465acb9166fb280334717d9f349851ff3bd5001bf",
+		"runtime_artifact_id":        "8329699987",
+		"runtime_baseline_ref":       "refs/heads/fugue-control-plane-release-baseline",
+		"runtime_baseline_sha":       "92805aab5209348932b2c1db060e5c3c56ce4a2c",
+		"runtime_run_id":             "29380409275",
+		"schema_version":             1,
+		"workflow":                   "migrate-control-plane-release-baseline-rp0",
+	}
+	runValidator := func(t *testing.T, value map[string]any, extraDirectory bool) ([]byte, error) {
+		t.Helper()
+		root := t.TempDir()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal RP0 metadata result fixture: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "rp0-migration.json"), encoded, 0o600); err != nil {
+			t.Fatalf("write RP0 metadata result fixture: %v", err)
+		}
+		if extraDirectory {
+			if err := os.Mkdir(filepath.Join(root, "unexpected-empty-directory"), 0o700); err != nil {
+				t.Fatalf("write RP0 metadata result inventory drift: %v", err)
+			}
+		}
+		command := exec.Command("python3", "-", root, fixture["policy_sha"].(string), fixture["run_id"].(string), fixture["metadata_commit_sha"].(string))
+		command.Stdin = strings.NewReader(validator)
+		return command.CombinedOutput()
+	}
+
+	output, err := runValidator(t, fixture, false)
+	if err != nil {
+		t.Fatalf("published RP0 metadata result fixture must pass: %v\n%s", err, output)
+	}
+	wantOutput := strings.Join([]string{
+		"92805aab5209348932b2c1db060e5c3c56ce4a2c",
+		"29380409275",
+		"8329699987",
+		"sha256:4ff05d34019da02bc10dd8f465acb9166fb280334717d9f349851ff3bd5001bf",
+		"1ab84b0dc7783f6fbd5796ed477005ffa0ead963",
+		"f5fbfb2758190fbf5fddab701e625ef9046bb812",
+	}, "\t") + "\n"
+	if string(output) != wantOutput {
+		t.Fatalf("published RP0 metadata result projection drifted: got %q want %q", output, wantOutput)
+	}
+
+	tests := []struct {
+		name           string
+		mutate         func(map[string]any)
+		extraDirectory bool
+	}{
+		{name: "boolean schema", mutate: func(value map[string]any) { value["schema_version"] = true }},
+		{name: "integer runtime run ID", mutate: func(value map[string]any) { value["runtime_run_id"] = 29380409275 }},
+		{name: "integer runtime artifact ID", mutate: func(value map[string]any) { value["runtime_artifact_id"] = 8329699987 }},
+		{name: "noncanonical recorded at", mutate: func(value map[string]any) { value["recorded_at"] = "2026-07-18 04:11:34Z" }},
+		{name: "extra empty directory", mutate: func(map[string]any) {}, extraDirectory: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mutated := make(map[string]any, len(fixture))
+			for key, value := range fixture {
+				mutated[key] = value
+			}
+			test.mutate(mutated)
+			if output, err := runValidator(t, mutated, test.extraDirectory); err == nil {
+				t.Fatalf("RP0 metadata result drift must fail; output=%q", output)
+			}
+		})
+	}
+}
+
+func TestRP0MetadataReaderCommandCapturesRejectValidOutputFollowedByFailure(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "..", ".github", "workflows", "validate-control-plane-release-baseline-rp0.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read RP0 metadata reader workflow: %v", err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []releaseWorkflowStep `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("parse RP0 metadata reader workflow: %v", err)
+	}
+	steps := workflow.Jobs["validate-metadata-object"].Steps
+	if len(steps) < 3 {
+		t.Fatalf("RP0 metadata reader command-bearing steps are absent: %+v", steps)
+	}
+	captures := steps[1].Run + "\n" + steps[2].Run
+	if strings.Contains(captures, `<<<"$(`) {
+		t.Fatal("RP0 metadata reader must not parse a command substitution directly through a here-string")
+	}
+	for _, required := range []string{
+		`target_parent_fields="$(git rev-list`,
+		`result_run_fields="$(`,
+		`metadata_artifact_fields="$(`,
+		`runtime_run_fields="$(`,
+		`runtime_artifact_fields="$(`,
+		`)" || exit 1`,
+	} {
+		if !strings.Contains(captures, required) {
+			t.Fatalf("RP0 metadata reader fail-closed capture must contain %q", required)
+		}
+	}
+
+	const validOutputThenFailure = `set -euo pipefail
+mock_command() {
+  printf '%s\t%s\n' valid fields
+  return 7
+}
+captured="$(mock_command)" || exit 91
+IFS=$'\t' read -r first second extra <<<"${captured}" || exit 92
+[[ "${first}" == valid && "${second}" == fields && -z "${extra:-}" ]]
+`
+	command := exec.Command("bash")
+	command.Stdin = strings.NewReader(validOutputThenFailure)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("valid-looking command output followed by failure must be rejected: %q", output)
+	}
+	exitError, ok := err.(*exec.ExitError)
+	if !ok || exitError.ExitCode() != 91 {
+		t.Fatalf("fail-closed capture rejected at the wrong boundary: err=%v output=%q", err, output)
 	}
 }
 
